@@ -182,9 +182,24 @@ def mismatches(
             report.append(
                 f"{key}: {got.dtype}{list(got.shape)} vs {want.dtype}{list(want.shape)}",
             )
-        elif not torch.equal(want, got):
-            report.append(f"{key}: {(want != got).sum().item()}/{want.numel()} differ")
+        elif not tensor_bits_equal(want, got):
+            different = (
+                (_tensor_bytes(want) != _tensor_bytes(got))
+                .reshape(
+                    want.numel(),
+                    want.element_size(),
+                )
+                .any(dim=1)
+            )
+            report.append(f"{key}: {different.sum().item()}/{want.numel()} differ")
     return report
+
+
+def tensor_bits_equal(a: Tensor, b: Tensor) -> bool:
+    """Return whether two tensors have identical shapes, dtypes, and stored bits."""
+    if a.shape != b.shape or a.dtype != b.dtype:
+        return False
+    return torch.equal(_tensor_bytes(a), _tensor_bytes(b))
 
 
 @contextmanager
@@ -323,3 +338,12 @@ def joined(tensors: Iterable[Tensor]) -> Tensor:
     """
     parts = [t.detach().reshape(-1) for t in tensors]
     return torch.cat(parts) if parts else torch.zeros(0)
+
+
+def _tensor_bytes(value: Tensor) -> Tensor:
+    # A lazy conjugate or negation bit is not in the stored bytes, and a byte
+    # view of such a tensor is refused.
+    flat = value.detach().cpu().resolve_conj().resolve_neg().contiguous().reshape(-1)
+    # Contiguous singleton and empty tensors may still have stride zero.
+    # A byte view requires stride one when its element size changes.
+    return flat.as_strided(flat.shape, (1,)).view(torch.uint8)

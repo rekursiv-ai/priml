@@ -505,8 +505,8 @@ def _norm_flops(model_cost: Cost) -> tuple[int, int, int, int]:
         (
             LayerNorm.Config(8, elementwise_affine=True),
             16,
-            (3 * 8 + 4 + 16, 7),
-            (5 * 8 + 2 + 16, 7),
+            (3 * 8 + 4 + 16, 14),
+            (5 * 8 + 2 + 16, 14),
         ),
         (
             BatchNorm.Config(8, elementwise_affine=True),
@@ -563,31 +563,31 @@ def test_norm_cost_splits_elementwise_from_row_sums(
     traffic: dict[type[Makeable[nn.Module]], tuple[int, int, int]] = {
         RMSNorm.Config: (4 * 8 + 7 + 3 * params, 10 * 8 + 12 + 6 * params, 9),
         CenteredRMSNorm.Config: (9 * 8 + 7, 16 * 8 + 12, 9),
-        LayerNorm.Config: (6 * 8 + 10 + 3 * params, 12 * 8 + 7 + 3 * params, 9),
+        LayerNorm.Config: (6 * 8 + 10 + 3 * params, 12 * 8 + 7 + 3 * params, 18),
         BatchNorm.Config: (
             6 * 8 + 10 * 8 + 3 * params + 18 * 8,
             12 * 8 + 7 * 8 + 3 * params,
-            16,
+            32,
         ),
         BatchNorm2d.Config: (
             6 * 8 + 10 * 8 + 3 * params + 18 * 8,
             12 * 8 + 7 * 8 + 3 * params,
-            16,
+            32,
         ),
         BatchRenorm.Config: (
             6 * 8 + 10 * 8 + 3 * params + 46 * 8,
             12 * 8 + 7 * 8 + 3 * params + 13 * 8,
-            16,
+            32,
         ),
         GroupNorm.Config: (
             6 * 8 + 10 * 8 + 3 * params,
             12 * 8 + 7 * 8 + 3 * params,
-            16,
+            32,
         ),
         GroupNorm2d.Config: (
             6 * 8 + 10 * 8 + 3 * params,
             12 * 8 + 7 * 8 + 3 * params,
-            16,
+            32,
         ),
     }
     primal_io, adjoint_io, reduction_io = traffic[type(config)]
@@ -651,8 +651,8 @@ def test_norm_cost_is_matmul_free(
         (
             LayerNorm.Config(8, elementwise_affine=True),
             16,
-            (44, 58, 7, 7),
-            (176, 232, 28, 76),
+            (44, 58, 14, 14),
+            (176, 232, 56, 104),
         ),
         (
             GroupNorm.Config(8, elementwise_affine=True),
@@ -677,6 +677,40 @@ def test_affine_norm_costs_are_concrete_row_totals(
     assert one_row.params == four_rows.params == params
     assert _norm_flops(one_row) == one
     assert _norm_flops(four_rows) == four
+
+
+@pytest.mark.parametrize(
+    ("config", "group_sums"),
+    argvalues=[
+        (LayerNorm.Config(4), 36),
+        (BatchNorm.Config(4), 40),
+        (BatchNorm2d.Config(4), 40),
+        (BatchRenorm.Config(channels_in=4), 40),
+        (GroupNorm.Config(4, num_groups=2), 40),
+        (GroupNorm2d.Config(4, num_groups=2), 40),
+    ],
+    ids=_config_id,
+)
+def test_centered_norm_cost_counts_both_group_sums(
+    config: Makeable[nn.Module],
+    group_sums: int,
+) -> None:
+    analytical = cost(
+        config.copy_tree().finalize(),
+        seq_len=3,
+        batch_size=2,
+        dtype=None,
+    )
+    assert analytical["flops", "primal", "reduction"].sum() == group_sums
+    assert analytical["flops", "adjoint", "reduction"].sum() == (
+        group_sums + 5 * analytical.params
+    )
+
+
+def test_layer_norm_total_includes_mean_and_variance_reductions() -> None:
+    analytical = LayerNorm.Config(4).cost(seq_len=1, batch_size=1, dtype=None)
+    assert analytical["flops", "primal"].sum() == 22
+    assert analytical["flops", "adjoint"].sum() == 28
 
 
 def test_affine_norm_pullback_reads_only_scale_not_shift() -> None:

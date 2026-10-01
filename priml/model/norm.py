@@ -977,13 +977,13 @@ def _normalization_cost(
             input_elements=elements,
             output_groups=groups,
             dtype=dtype,
-        )
+        ).tile(2)
         + reduction_cost(
             input_elements=elements,
             output_groups=groups,
             dtype=dtype,
             phase="adjoint",
-        )
+        ).tile(2)
     )
 
 

@@ -252,10 +252,53 @@ def test_mismatches_sees_presence_dtype_shape_and_bits() -> None:
         base["x"].reshape(2, 3),
         base["x"].clone().index_fill_(0, torch.tensor([5]), 6.0),
     ]
-    assert all(mismatches(base, {"x": v}) for v in variants)
+    reports = [
+        "x: torch.float64[6] vs torch.float32[6]",
+        "x: torch.float32[2, 3] vs torch.float32[6]",
+        "x: 1/6 differ",
+    ]
+    assert [mismatches(base, {"x": v}) for v in variants] == [[r] for r in reports]
     assert mismatches(base, {}) == ["missing x"]
     assert mismatches({}, base) == ["unexpected x"]
     assert not mismatches(base, {"x": base["x"].clone()})
+
+
+def test_mismatches_compares_signed_zeros_and_nan_payloads_by_bits() -> None:
+    assert mismatches({"x": torch.tensor([0.0])}, {"x": torch.tensor([-0.0])}) == [
+        "x: 1/1 differ",
+    ]
+    nan = torch.tensor([float("nan")])
+    assert not mismatches({"x": nan}, {"x": nan.clone()})
+
+
+def test_mismatches_counts_elements_with_multiple_different_bytes() -> None:
+    expected = torch.tensor([0.0, 0.5, 1.0, 2.0, 3.0, 4.0])
+    actual = torch.tensor([0.0, 0.5, 1.0, -2.25, 3.0, -4.5])
+    assert mismatches({"values": expected}, {"values": actual}) == [
+        "values: 2/6 differ",
+    ]
+
+
+@pytest.mark.parametrize("size", [0, 1])
+def test_mismatches_accepts_contiguous_zero_stride_views(size: int) -> None:
+    expanded = torch.tensor(1, dtype=torch.int64).expand(size)
+    assert expanded.is_contiguous()
+    assert expanded.stride() == (0,)
+    assert not mismatches({"x": expanded}, {"x": torch.ones(size, dtype=torch.int64)})
+    if size:
+        assert mismatches({"x": expanded}, {"x": torch.tensor([2])}) == [
+            "x: 1/1 differ",
+        ]
+
+
+def test_mismatches_compares_conjugate_and_negative_views_by_value() -> None:
+    values = torch.tensor([1 + 2j, -3 - 4j], dtype=torch.complex64)
+    # Lazy conjugate and negative views refuse a byte view until resolved.
+    assert not mismatches({"z": values.conj()}, {"z": values.conj().resolve_conj()})
+    imaginary = values.conj().imag
+    assert imaginary.is_neg()
+    assert not mismatches({"y": imaginary}, {"y": imaginary.resolve_neg()})
+    assert mismatches({"y": imaginary}, {"y": values.imag}) == ["y: 2/2 differ"]
 
 
 def test_assert_tensor_golden_mints_missing_then_compares(

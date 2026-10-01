@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Final, Protocol, cast, override
 
 import ast
 import os
+import tempfile
 import traceback
 
 from torch import Tensor, nn
@@ -35,9 +36,11 @@ from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import (
     _ENV_REGENERATE,
     _EXACT_F32_OPS,
-    _RANDOM_FACTORIES,
+    _FLOAT_FACTORIES,
     _assert_equal,
     _assert_portable_output_dtype,
+    _assert_portable_state_changes,
+    _assert_same_input,
     _downcast_f64,
     _downcast_result,
     _max_ulp_diff,
@@ -184,9 +187,9 @@ def test_randomize_parameters_is_deterministic_per_seed() -> None:
 
 
 def test_bfb_round_trip(tmp_path: Path) -> None:
-    testdata = tmp_path / "testdata"
+    testdata = tmp_path / "nested" / "testdata"
     # A missing committed golden is regenerated but remains red until reviewed.
-    with pytest.raises(AssertionError, match="Missing golden regenerated"):
+    with pytest.raises(AssertionError, match="Missing golden regenerated") as error:
         assert_bfb_against_golden(
             golden_dir=testdata,
             golden_name="linear_min",
@@ -194,6 +197,10 @@ def test_bfb_round_trip(tmp_path: Path) -> None:
             build_input=_build_min_input,
             seed=0,
         )
+    assert str(error.value) == (
+        f"Missing golden regenerated at {testdata / 'linear_min.pt'}; inspect it, "
+        "then rerun the test."
+    )
     assert (testdata / "linear_min.pt").exists()
 
     # Second call: golden exists -> compares; must pass.
@@ -330,6 +337,26 @@ def test_changed_state_keeps_new_and_bitwise_changed_entries() -> None:
     assert not changed_state({"a": value}, {"a": value.clone()})
 
 
+def test_changed_state_detaches_and_copies_live_values() -> None:
+    live = torch.tensor([1.0, 2.0], requires_grad=True)
+    captured = changed_state({}, {"weight": live})["weight"]
+    assert not captured.requires_grad
+    with torch.no_grad():
+        live.add_(1)
+    assert torch.equal(captured, torch.tensor([1.0, 2.0]))
+
+
+@pytest.mark.gpu_torch_cuda
+def test_changed_state_copies_cuda_values_to_cpu() -> None:
+    live = torch.tensor([1.0, 2.0], device="cuda", requires_grad=True)
+    captured = changed_state({}, {"weight": live})["weight"]
+    assert captured.device.type == "cpu"
+    assert not captured.requires_grad
+    with torch.no_grad():
+        live.add_(1)
+    assert torch.equal(captured, torch.tensor([1.0, 2.0]))
+
+
 def test_missing_golden_always_fails_after_minting(tmp_path: Path) -> None:
     golden_dir = tmp_path / "goldens"
 
@@ -353,20 +380,20 @@ def test_bfb_devices_is_cpu_only() -> None:
 def test_portable_half_precision_disables_onednn_then_restores_it(
     enabled_before: bool,
 ) -> None:
-    (original,) = torch.backends.mkldnn.set_flags(enabled_before)[:1]
+    (original,) = torch.backends.mkldnn.set_flags(enabled_before, _fp32_precision=None)[
+        :1
+    ]
     try:
         with portable_half_precision():
             assert not torch.backends.mkldnn.is_available() or not _onednn_enabled()
         assert _onednn_enabled() == enabled_before
     finally:
-        torch.backends.mkldnn.set_flags(original)
+        torch.backends.mkldnn.set_flags(original, _fp32_precision=None)
 
 
 def _onednn_enabled() -> bool:
     """Read the oneDNN enable bit through the same flags API the harness uses."""
-    (enabled,) = torch.backends.mkldnn.set_flags(True)[:1]
-    torch.backends.mkldnn.set_flags(enabled)
-    return enabled
+    return torch.backends.mkldnn.set_flags(_fp32_precision=None)[0]
 
 
 def test_move_to_device_recurses_into_containers_and_passes_scalars() -> None:
@@ -1201,6 +1228,45 @@ def test_failed_regeneration_preserves_the_last_valid_golden(tmp_path: Path) -> 
         )
 
     assert path.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_mint_keeps_its_candidate_in_the_golden_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    golden_dir = tmp_path / "nested" / "goldens"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(outside))
+    calls = 0
+
+    def runner(module: nn.Module, value: Tensor) -> Tensor:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            # Verification sees the candidate before publication. Keeping it
+            # here gives rename the destination's filesystem and permissions.
+            assert not (golden_dir / "identity.pt").exists()
+            assert any(path.is_file() for path in golden_dir.rglob("*"))
+            # An interrupted mint can be traced to its owning golden.
+            assert all(
+                path.name.startswith("identity.pt") for path in golden_dir.iterdir()
+            )
+        output = cast(object, module(value))
+        assert isinstance(output, Tensor)
+        return output
+
+    regenerate_golden(
+        golden_dir=golden_dir,
+        golden_name="identity",
+        build_module=nn.Identity,
+        build_input=lambda: torch.zeros(2, 3),
+        run=runner,
+    )
+    assert calls == 2
+    assert list(golden_dir.iterdir()) == [golden_dir / "identity.pt"]
+    assert not list(outside.iterdir())
 
 
 def test_regenerate_round_trip_passes_for_clean_module(tmp_path: Path) -> None:
@@ -1488,9 +1554,9 @@ def _f32_leaking_ops(
             name = _op_name(func)
             values = (*args, *(kwargs or {}).values())
             result = func(*args, **(kwargs or {}))
-            if name not in _EXACT_F32_OPS and (
+            if (func.namespace != "aten" or name not in _EXACT_F32_OPS) and (
                 any(has_f32(value) for value in values)
-                or (name in _RANDOM_FACTORIES and has_f32(result))
+                or (name in _FLOAT_FACTORIES and has_f32(result))
             ):
                 leaks.add(name)
             return result
@@ -1646,6 +1712,119 @@ def test_fused_multiply_add_rounds_like_separate_ops(
     with host_agnostic_numerics():
         got = fused(m, x, d)
     assert torch.equal(got, unfused(m.double(), x.double(), d.double()).float())
+
+
+@pytest.mark.parametrize("dimensions", [1, 2, 3])
+@pytest.mark.parametrize("transposed", [False, True])
+@pytest.mark.parametrize("keyword_bias", [False, True])
+def test_convolution_adds_bias_after_accumulating_products(
+    dimensions: int,
+    transposed: bool,
+    keyword_bias: bool,
+) -> None:
+    """Bias survives cancellation in the dot product on ARM and x86."""
+    channels = torch.tensor([2.0**40, 1, -(2.0**40), 1, 2])
+    # Unit axes repeat the same _unfused_convolution cancellation at every position.
+    x = (
+        channels.reshape(1, 5, *((1,) * dimensions))
+        .expand(
+            2,
+            5,
+            *((4,) * dimensions),
+        )
+        .clone()
+    )
+    w = torch.ones((5, 3) if transposed else (3, 5))
+    if transposed:
+        w[[0, 2]] *= 2.0**40
+    else:
+        w[:, [0, 2]] *= 2.0**40
+    w = (
+        w.reshape(*w.shape, *((1,) * dimensions))
+        .expand(
+            *w.shape,
+            *((2,) * dimensions),
+        )
+        .clone()
+    )
+    bias = torch.arange(3, dtype=torch.float32)
+    options: dict[str, object] = {
+        "stride": [1] * dimensions,
+        "padding": [0] * dimensions,
+        "dilation": [1] * dimensions,
+        "transposed": transposed,
+        "output_padding": [0] * dimensions,
+        "groups": 1,
+    }
+    op = cast("OpOverload[..., object]", torch.ops.aten.convolution.default)
+    wide = cast(Tensor, op(x.double(), w.double(), None, **options))
+    # Unit axes keep _unfused_convolution's bias independent of batch and location.
+    expected = (wide + bias.double().reshape(1, 3, *((1,) * dimensions))).float()
+    with host_agnostic_numerics():
+        actual = cast(
+            Tensor,
+            op(x, w, bias=bias, **options)
+            if keyword_bias
+            else op(x, w, bias, **options),
+        )
+    assert actual.dtype == torch.float32
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("name", ["addmm", "addbmm", "baddbmm"])
+@pytest.mark.parametrize("form", ["functional", "inplace", "out"])
+@pytest.mark.parametrize(("alpha", "beta"), [(1, 1), (0.3, 0.7), (1, 0)])
+def test_affine_matmul_adds_bias_after_accumulating_products(
+    name: str,
+    form: str,
+    alpha: float,
+    beta: float,
+) -> None:
+    """Affine GEMMs separate product, scaling, and bias without losing aliases."""
+    a = torch.tensor([2.0**40, 1, -(2.0**40), 1, 2]).repeat(2, 1)
+    b = torch.ones(5, 3)
+    b[[0, 2]] *= 2.0**40
+    bias = torch.arange(3, dtype=torch.float32).expand(2, 3).clone()
+    if name != "addmm":
+        a, b = a.repeat(4, 1, 1), b.repeat(4, 1, 1)
+    if name == "baddbmm":
+        bias = bias.repeat(4, 1, 1)
+    product = a.double() @ b.double()
+    if name == "addbmm":
+        product = product.sum(0)
+    if beta == 0:
+        bias.fill_(float("nan"))
+    expected = (
+        alpha * product if beta == 0 else alpha * product + beta * bias.double()
+    ).float()
+    destination = torch.empty_like(bias)
+    with host_agnostic_numerics():
+        if form == "inplace":
+            actual = cast(
+                Tensor,
+                getattr(bias, name + "_")(a, b, alpha=alpha, beta=beta),
+            )
+            assert actual is bias
+        elif form == "out":
+            actual = cast(
+                Tensor,
+                getattr(torch, name)(
+                    bias,
+                    a,
+                    b,
+                    alpha=alpha,
+                    beta=beta,
+                    out=destination,
+                ),
+            )
+            assert actual is destination
+        else:
+            actual = cast(
+                Tensor,
+                getattr(torch, name)(bias, a, b, alpha=alpha, beta=beta),
+            )
+    assert actual.dtype == torch.float32
+    assert torch.equal(actual, expected)
 
 
 @pytest.mark.parametrize(
@@ -2272,6 +2451,281 @@ def test_bfb_rejects_complex_golden_output() -> None:
 def test_bfb_accepts_an_integer_golden_output() -> None:
     """An integer comparand carries no rounding, so it needs no narrowing."""
     _assert_portable_output_dtype(torch.zeros(2, dtype=torch.int64))
+
+
+@pytest.mark.parametrize("name", ["addmm", "addbmm", "baddbmm", "addmv"])
+def test_host_agnostic_keeps_integer_affine_matmul_native(name: str) -> None:
+    bias = torch.ones(2, 3, dtype=torch.int64)
+    left = torch.ones(2, 5, dtype=torch.int64)
+    right = torch.ones(5, 3, dtype=torch.int64)
+    if name in {"addbmm", "baddbmm"}:
+        left, right = left.expand(4, -1, -1), right.expand(4, -1, -1)
+    if name == "baddbmm":
+        bias = bias.expand(4, -1, -1)
+    if name == "addmv":
+        right, bias = torch.ones(5, dtype=torch.int64), torch.ones(2, dtype=torch.int64)
+    op = cast("Callable[..., Tensor]", getattr(torch, name))
+    expected = op(bias, left, right, alpha=0.5)
+    with host_agnostic_numerics():
+        actual = op(bias, left, right, alpha=0.5)
+    assert actual.dtype == expected.dtype
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("name", ["addmm", "addbmm", "baddbmm", "addmv"])
+@pytest.mark.parametrize("beta", [0, 1])
+@pytest.mark.parametrize("form", ["functional", "inplace", "out"])
+def test_host_agnostic_affine_rejects_bias_that_expands_the_output(
+    name: str,
+    beta: int,
+    form: str,
+) -> None:
+    # A unit row exposes _run_unfused accepting bias that enlarges its product.
+    left, right, bias = torch.ones(1, 4), torch.ones(4, 3), torch.zeros(2, 3)
+    if name in {"addbmm", "baddbmm"}:
+        left, right = left.unsqueeze(0), right.unsqueeze(0)
+    if name == "baddbmm":
+        bias = bias.unsqueeze(0)
+    if name == "addmv":
+        right, bias = torch.ones(4), torch.zeros(2)
+    if form == "inplace":
+        op = partial(
+            cast("Callable[..., Tensor]", getattr(bias, name + "_")),
+            left,
+            right,
+            beta=beta,
+        )
+    else:
+        functional = cast("Callable[..., Tensor]", getattr(torch, name))
+        op = (
+            partial(functional, bias, left, right, beta=beta, out=torch.empty(0))
+            if form == "out"
+            else partial(functional, bias, left, right, beta=beta)
+        )
+    with pytest.raises(RuntimeError):
+        op()
+    with pytest.raises(RuntimeError), host_agnostic_numerics():
+        op()
+
+
+@pytest.mark.parametrize("name", ["addmm", "addbmm", "baddbmm"])
+@pytest.mark.parametrize("integer", ["bias", "matrices"])
+def test_host_agnostic_affine_rejects_mixed_operand_dtypes(
+    name: str,
+    integer: str,
+) -> None:
+    # The unfused path never reaches the native dtype check, so widening the
+    # float operands would silently absorb integer ones torch rejects.
+    bias, left, right = torch.zeros(2, 3), torch.ones(2, 4), torch.ones(4, 3)
+    if integer == "bias":
+        bias = bias.long()
+    else:
+        left, right = left.long(), right.long()
+    if name in {"addbmm", "baddbmm"}:
+        left, right = left.unsqueeze(0), right.unsqueeze(0)
+    if name == "baddbmm":
+        bias = bias.unsqueeze(0)
+    op = partial(cast("Callable[..., Tensor]", getattr(torch, name)), bias, left, right)
+    with pytest.raises(RuntimeError):
+        op()
+    with pytest.raises(RuntimeError), host_agnostic_numerics():
+        op()
+
+
+def _stochastic_runner(module: nn.Module, value: Tensor) -> Tensor:
+    del module
+    return value + torch.rand_like(value)
+
+
+def _input_mutating_runner(module: nn.Module, value: Tensor) -> Tensor:
+    del module
+    return value.add_(1)
+
+
+@pytest.mark.parametrize("runner", [_stochastic_runner, _input_mutating_runner])
+def test_bfb_replays_random_and_mutated_inputs(
+    tmp_path: Path,
+    runner: Callable[[nn.Module, Tensor], Tensor],
+) -> None:
+    for check in (regenerate_golden, assert_bfb_against_golden):
+        check(
+            golden_dir=tmp_path,
+            golden_name="input_lifecycle",
+            build_module=nn.Identity,
+            build_input=lambda: torch.rand(2, 3),
+            run=runner,
+        )
+    torch.manual_seed(0)
+    assert torch.equal(
+        cast(Tensor, load_golden(tmp_path / "input_lifecycle.pt")["input"]),
+        torch.rand(2, 3),
+    )
+
+
+@pytest.mark.parametrize("name", ["linspace", "logspace", "arange"])
+def test_host_agnostic_widens_arithmetic_factories(name: str) -> None:
+    op = cast("Callable[..., Tensor]", getattr(torch, name))
+    args = (0.13, 10.17, 0.27) if name == "arange" else (-0.7, 0.9, 49)
+    expected = op(*args, dtype=torch.float64).float()
+    with host_agnostic_numerics():
+        actual = op(*args)
+    assert actual.dtype == torch.float32
+    assert torch.equal(actual, expected)
+
+
+def test_host_agnostic_preserves_scalar_tensor_promotion() -> None:
+    vector = torch.tensor([0.3, 0.7], dtype=torch.float32)
+    scalar = torch.tensor(0.2, dtype=torch.float64)
+    expected = torch.atan2(vector, scalar)
+    with host_agnostic_numerics():
+        actual = torch.atan2(vector, scalar)
+    assert actual.dtype == expected.dtype
+
+
+def _custom_affine_kernel(value: Tensor) -> Tensor:
+    return value + 1
+
+
+@pytest.mark.parametrize("name", ["addbmm", "add"])
+def test_host_agnostic_keeps_custom_namespace_implementations(name: str) -> None:
+    with torch.library._scoped_library("bfb_contract_probe", "FRAGMENT") as library:
+        library.define(f"{name}(Tensor value) -> Tensor")
+        library.impl(name, _custom_affine_kernel, "CompositeExplicitAutograd")
+        op = cast(
+            "Callable[[Tensor], Tensor]",
+            getattr(torch.ops.bfb_contract_probe, name),
+        )
+        value = torch.tensor([0.5, 1.5])
+        assert torch.equal(op(value), value + 1)
+        assert not _f32_leaking_ops(lambda: op(value))
+    # Only Library._destroy drops the cached torch.ops entry; a leaked entry
+    # points at a freed operator, so mutmut's in-process rerun crashed.
+    assert not hasattr(torch.ops.bfb_contract_probe, name)
+
+
+def test_assert_equal_reports_a_boolean_difference() -> None:
+    with pytest.raises(AssertionError, match="max_abs_diff=1"):
+        _assert_equal(torch.tensor([True]), torch.tensor([False]), label="output")
+
+
+def test_ulp_diff_does_not_overflow_float64_distance() -> None:
+    assert (
+        _max_ulp_diff(
+            torch.tensor([-2.0], dtype=torch.float64),
+            torch.tensor([2.0], dtype=torch.float64),
+        )
+        == 2**63
+    )
+
+
+def test_portable_half_precision_preserves_precision_policy() -> None:
+    original = torch.backends.mkldnn.set_flags(_fp32_precision="ieee")
+    try:
+        before = torch.backends.mkldnn.set_flags(_fp32_precision=None)
+        with portable_half_precision():
+            assert torch.backends.mkldnn.set_flags(_fp32_precision=None)[3] == before[3]
+        assert torch.backends.mkldnn.set_flags(_fp32_precision=None) == before
+    finally:
+        torch.backends.mkldnn.set_flags(_fp32_precision=original[3])
+
+
+@pytest.mark.parametrize("view", [False, True])
+def test_to_cpu_preserves_input_identity_and_shared_storage(view: bool) -> None:
+    base = torch.arange(6.0)
+    first, second = (base[:4], base[2:]) if view else (base, base)
+    snapshot = cast(tuple[Tensor, Tensor], _to_cpu((first, second)))
+    if not view:
+        assert snapshot[0] is snapshot[1]
+    snapshot[0].add_(1)
+    assert torch.equal(
+        snapshot[1],
+        second + (torch.tensor([1, 1, 0, 0]) if view else 1),
+    )
+    assert torch.equal(base, torch.arange(6.0))
+
+
+def test_to_cpu_stores_only_the_span_its_views_share() -> None:
+    # A golden serializes whole storages, so snapshotting a slice of a large
+    # tensor with its base would push the golden past the size gate.
+    base = torch.arange(1000.0)
+    first, second = base[10:14], base[12:16].view(torch.int32)
+    snapshot = cast(tuple[Tensor, Tensor], _to_cpu((first, second)))
+    storage = snapshot[0].untyped_storage()
+    assert storage.nbytes() == 6 * base.element_size()
+    assert snapshot[1].untyped_storage().data_ptr() == storage.data_ptr()
+    assert torch.equal(snapshot[0], first)
+    assert torch.equal(snapshot[1], second)
+
+
+def _deterministic_identity() -> nn.Module:
+    assert torch.are_deterministic_algorithms_enabled()
+    return nn.Identity()
+
+
+def test_bfb_builds_under_deterministic_algorithms(tmp_path: Path) -> None:
+    before = torch.are_deterministic_algorithms_enabled()
+    try:
+        torch.use_deterministic_algorithms(False)
+        for check in (regenerate_golden, assert_bfb_against_golden):
+            check(
+                golden_dir=tmp_path,
+                golden_name="deterministic_build",
+                build_module=_deterministic_identity,
+                build_input=lambda: torch.zeros(2, 3),
+            )
+            assert not torch.are_deterministic_algorithms_enabled()
+    finally:
+        torch.use_deterministic_algorithms(before)
+
+
+def _build_wide_buffer() -> nn.Module:
+    module = nn.Module()
+    module.register_buffer("wide", torch.tensor([0.3], dtype=torch.float64))
+    return module
+
+
+def _mutate_wide_buffer(module: nn.Module, value: Tensor) -> Tensor:
+    module.get_buffer("wide").sigmoid_()
+    return value.clone()
+
+
+def test_bfb_rejects_changed_float64_state(tmp_path: Path) -> None:
+    with pytest.raises(TypeError, match="float64"):
+        regenerate_golden(
+            golden_dir=tmp_path,
+            golden_name="wide_state",
+            build_module=_build_wide_buffer,
+            build_input=lambda: torch.zeros(2),
+            run=_mutate_wide_buffer,
+        )
+
+
+def test_bfb_accepts_float32_precision_in_float64_state() -> None:
+    _assert_portable_state_changes(
+        {"scores": torch.tensor([0.0, -0.0, 0.5, 1.5], dtype=torch.float64)},
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float64, torch.complex64, torch.complex128])
+def test_bfb_rejects_unrounded_or_complex_state(dtype: torch.dtype) -> None:
+    with pytest.raises(TypeError, match=rf"state\[scores\] is {dtype}") as error:
+        _assert_portable_state_changes({"scores": torch.tensor([0.3], dtype=dtype)})
+    assert str(error.value) == (
+        f"bfb golden state[scores] is {dtype}, which is not portable; "
+        "narrow computed state before recording it."
+    )
+
+
+@pytest.mark.parametrize(
+    ("live", "stored"),
+    [((torch.zeros(2),), [torch.zeros(2)]), (1, True), (1, 1.0)],
+)
+def test_input_validation_distinguishes_container_and_scalar_types(
+    live: object,
+    stored: object,
+) -> None:
+    with pytest.raises(AssertionError, match="input"):
+        _assert_same_input(live, stored, label="input")
 
 
 def test_regenerate_golden_preserves_existing_regenerate_env(

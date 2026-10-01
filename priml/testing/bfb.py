@@ -28,8 +28,11 @@ Cross-architecture portability (the whole point):
   hosts disagree there too (measured, torch 2.11: ``sigmoid`` lands 2 float64
   ULP from the exact answer, ``tanh`` and ``rsqrt`` 1). Two float64 ULP is
   ~2**-51, about 2**-28 of ONE float32 ULP, so rounding to float32 absorbs the
-  disagreement and every host lands on the same float32 bit -- measured 0 of
-  4096 wrong for every op probed. It follows that a golden's floating comparand
+  disagreement in the measured probes -- 0 of 4096 wrong for every op probed.
+  This is an empirical portability policy: severe cancellation or a value at
+  a rounding boundary can expose differences even after widening. Biased
+  convolutions and affine matmuls therefore separate the dot product, scaling,
+  and bias addition before rounding. A golden's floating comparand
   must be float32; ``_assert_portable_output_dtype`` also rejects complex
   outputs. A runner returning the float64 scratch keeps that host's own libm
   error (one did, off by 1 ULP between an Intel laptop and an AMD server). Only
@@ -44,7 +47,7 @@ Cross-architecture portability (the whole point):
 
   Because matmul is upcast like everything else, the golden needs no MKL BLAS
   pin and no host-class gating of its own -- x86 (any width), ARM, Apple
-  silicon, and OpenBLAS builds all reproduce, PROVIDED the comparand is float32
+  silicon, and OpenBLAS builds reproduce the exercised float32 comparands
   (measured across Intel and AMD, and across 1/2/4/8/64 math threads: identical
   bits). Float64 GEMM is not itself invariant; it is the rounding that makes
   the result so -- and the rounding absorbs a float64 difference only until the
@@ -127,13 +130,15 @@ import tempfile
 
 from torch import Tensor, nn
 from torch._decomp import decomposition_table
+from torch._prims_common import ELEMENTWISE_TYPE_PROMOTION_KIND, elementwise_dtypes
+from torch._prims_common.wrappers import out_wrapper
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils._python_dispatch import TorchDispatchMode
 
 import torch
 
 from priml.lib.custom_json import DictCodec, ListCodec
-from priml.testing.golden import pack, unpack
+from priml.testing.golden import pack, tensor_bits_equal, unpack
 
 
 if TYPE_CHECKING:
@@ -179,7 +184,7 @@ class _TorchProcessState:
 #
 # Absence from this list upcasts an op only when it HAS a float32 argument. The
 # random factories (``rand``/``randn``/``normal``) have none -- their dtype is a
-# kwarg or the process default -- so they are named in ``_RANDOM_FACTORIES`` and
+# kwarg or the process default -- so they are named in ``_FLOAT_FACTORIES`` and
 # widened by that dtype instead. Sampling is arithmetic: a float32 ``randn`` of
 # 16+ elements runs torch's vectorized Box-Muller, whose ``log``/``cos`` come
 # from SLEEF under AVX2 and from libm elsewhere. Measured, x86 mint vs aarch64
@@ -264,10 +269,11 @@ _EXACT_F32_OPS: Final[dict[str, str]] = {
     "slice_backward": "movement",
 }
 
-# Tensorless aten samplers that produce a float tensor. Matched by overloadpacket
-# name like ``_EXACT_F32_OPS``; a ``normal`` overload with a tensor mean or std
-# already carries a float argument and takes the ordinary upcast path.
-_RANDOM_FACTORIES: Final = frozenset({"randn", "normal"})
+# These arithmetic factories can have no tensor operand to identify their dtype.
+# Integer arange stays native; uniform rand already produces identical bytes.
+_FLOAT_FACTORIES: Final = frozenset(
+    {"randn", "normal", "linspace", "logspace", "arange"},
+)
 
 # Namespaces of distributed collective ops (``dist.broadcast``/``dist.all_reduce``
 # and their functional-collective form); see ``_Float64Compute.__torch_dispatch__``.
@@ -280,9 +286,10 @@ def host_agnostic_numerics() -> Generator[None]:
 
     Every float32 arithmetic op -- transcendental, reduction, matmul, forward or
     backward -- runs in float64 and downcasts to float32, except the
-    ``_EXACT_F32_OPS`` allowlist of already-host-independent ops. A forward,
-    backward, or full optimizer step is then bit-identical under
-    ``torch.equal`` across hosts of any vector width, thread count, or vendor.
+    ``_EXACT_F32_OPS`` allowlist of already-host-independent ops. Known fused
+    operations are decomposed before rounding. Portability is checked against
+    shared goldens on each supported host; widening alone does not prove
+    equivalence for arbitrary cancellation or rounding-boundary inputs.
 
     That guarantee covers the float32 RESULT and nothing wider: the float64
     values inside carry each host's own libm error and are not comparable
@@ -324,11 +331,11 @@ def portable_half_precision() -> Generator[None]:
     # Only the enable bit: ``torch.backends.mkldnn.flags`` also rewrites the
     # oneDNN TF32 setting, which warns on every CPU-only build and the suite
     # runs with warnings as errors.
-    (enabled,) = torch.backends.mkldnn.set_flags(False)[:1]
+    (enabled,) = torch.backends.mkldnn.set_flags(False, _fp32_precision=None)[:1]
     try:
         yield
     finally:
-        torch.backends.mkldnn.set_flags(enabled)
+        torch.backends.mkldnn.set_flags(enabled, _fp32_precision=None)
 
 
 def bfb_devices() -> list[str]:
@@ -471,10 +478,11 @@ def assert_bfb_against_golden[InputT](
       golden_dir: Directory holding ``.pt`` golden files. Created if
         missing.
       golden_name: Base name (no extension) for the golden file.
-      build_module: Callable returning a fresh module. Called once per
-        test invocation.
+      build_module: Callable returning a fresh module. Called once per replay,
+        and once more to capture a new golden.
       build_input: Callable returning the input tensor (or a dict of
-        tensors / tuple of tensors). Called once per test invocation.
+        tensors / tuple of tensors). Called once per replay, and once more
+        to capture a new golden.
       seed: Manual seed for module init randomization and input
         generation.
       run: Optional callable ``(module, input) -> Tensor``. Defaults to
@@ -638,9 +646,9 @@ def changed_state(
 
     """
     return {
-        key: value.detach().to("cpu", copy=True)
+        key: value.detach().cpu().clone()
         for key, value in after.items()
-        if key not in before or not _tensor_bits_equal(before[key], value)
+        if key not in before or not tensor_bits_equal(before[key], value)
     }
 
 
@@ -669,6 +677,7 @@ def _replay_golden[InputT](
     *,
     golden_path: Path,
     build_module: Callable[[], nn.Module],
+    build_input: Callable[[], InputT],
     seed: int,
     run: Callable[[nn.Module, InputT], Tensor],
 ) -> None:
@@ -680,6 +689,9 @@ def _replay_golden[InputT](
     if device != "cpu":
         raise ValueError("The BFB harness is CPU-only.")
     payload = load_golden(golden_path)
+    # Construction consumes RNG in the same order as minting, even though the
+    # runner uses the saved input. Also detect an input builder that has drifted.
+    _assert_same_input(_to_cpu(build_input()), payload["input"], label="input")
     module.load_state_dict(payload["state_dict"])
     inp = cast(InputT, move_to_device(payload["input"], device))
     output = run(module, inp)
@@ -691,7 +703,27 @@ def _replay_golden[InputT](
     # An entry the run did not change is expected to equal its pre-run copy, so a
     # mutation introduced later fails against it.
     expected = {**payload["state_dict"], **payload.get("post_state", {})}
+    _assert_portable_state_changes(
+        changed_state(payload["state_dict"], module.state_dict()),
+    )
     _assert_state_match(module, expected)
+
+
+# A float64 buffer can hold exact float32 values without retaining any extra arithmetic
+# precision. Require a lossless round-trip, including every bit, so existing buffers
+# storing these values need no schema change.
+def _assert_portable_state_changes(state: Mapping[str, Tensor]) -> None:
+    """Reject changed state retaining precision beyond float32 or complex values."""
+    for key, value in state.items():
+        unrounded = value.dtype == torch.float64 and not tensor_bits_equal(
+            value,
+            value.float().double(),
+        )
+        if unrounded or value.dtype.is_complex:
+            raise TypeError(
+                f"bfb golden state[{key}] is {value.dtype}, which is not portable; "
+                "narrow computed state before recording it.",
+            )
 
 
 def _default_runner(module: nn.Module, inp: object) -> Tensor:
@@ -721,21 +753,74 @@ def _assert_state_match(module: nn.Module, expected: Mapping[str, Tensor]) -> No
 
 
 def _to_cpu(value: object) -> object:
+    """Snapshot every tensor on CPU, sharing storage exactly where the input did."""
+    leaves: dict[int, Tensor] = {}
+    _ = _map_tensors(value, lambda leaf: leaves.setdefault(id(leaf), leaf))
+    snapshots = _compact_copies(leaves.values())
+    return _map_tensors(value, lambda leaf: snapshots[id(leaf)])
+
+
+def _map_tensors(value: object, fn: Callable[[Tensor], Tensor]) -> object:
     if torch.is_tensor(value):
-        # ``.cpu()`` on an already-CPU tensor shares storage; clone so a
-        # snapshot of a parameter cannot be corrupted by a later in-place
-        # mutation of the live module (mutating runners, EMA buffers).
-        return value.detach().to("cpu", copy=True)
+        return fn(value)
     if isinstance(value, dict):
         typed_value = cast(dict[str, object], value)
-        return {k: _to_cpu(v) for k, v in typed_value.items()}
+        return {k: _map_tensors(v, fn) for k, v in typed_value.items()}
     if isinstance(value, tuple):
         typed_value = cast(tuple[object, ...], value)
-        return tuple(_to_cpu(v) for v in typed_value)
+        return tuple(_map_tensors(v, fn) for v in typed_value)
     if isinstance(value, list):
         typed_value = cast(list[object], value)
-        return [_to_cpu(v) for v in typed_value]
+        return [_map_tensors(v, fn) for v in typed_value]
     return value
+
+
+# Views of one storage keep sharing it, so a runner that mutates one input sees the
+# change in the others at replay as it did at mint. Only the span they cover is
+# copied: a golden serializes whole storages, so a slice of a large tensor would
+# otherwise carry its base into the file.
+def _compact_copies(tensors: Iterable[Tensor]) -> dict[int, Tensor]:
+    """Copy tensors to CPU, each shared storage cut to the bytes its views use."""
+    groups: dict[tuple[torch.device, int], list[tuple[int, Tensor]]] = {}
+    for tensor in tensors:
+        # A lazy conjugate or negation bit is not in the storage bytes.
+        resolved = tensor.detach().resolve_conj().resolve_neg()
+        key = (resolved.device, resolved.untyped_storage().data_ptr())
+        groups.setdefault(key, []).append((id(tensor), resolved))
+    copies: dict[int, Tensor] = {}
+    for group in groups.values():
+        spans = [_byte_span(member) for _, member in group]
+        # Starting on the widest element keeps every member's offset whole.
+        width = max(member.element_size() for _, member in group)
+        start = min(low for low, _ in spans) // width * width
+        end = max(high for _, high in spans)
+        source = group[0][1]
+        storage = (
+            torch.empty(0, dtype=torch.uint8, device=source.device)
+            .set_(source.untyped_storage(), start, (end - start,), (1,))
+            .to("cpu", copy=True)
+            .untyped_storage()
+        )
+        for (key, member), (low, _) in zip(group, spans, strict=True):
+            copies[key] = torch.empty(0, dtype=member.dtype).set_(
+                storage,
+                (low - start) // member.element_size(),
+                member.shape,
+                member.stride(),
+            )
+    return copies
+
+
+def _byte_span(tensor: Tensor) -> tuple[int, int]:
+    """Return the storage bytes ``[start, end)`` holding a tensor's elements."""
+    start = int(tensor.storage_offset()) * tensor.element_size()
+    if not tensor.numel():
+        return start, start
+    last = sum(
+        (size - 1) * stride
+        for size, stride in zip(tensor.shape, tensor.stride(), strict=True)
+    )
+    return start, start + (last + 1) * tensor.element_size()
 
 
 def _cpu_state_dict(state_dict: Mapping[str, Tensor]) -> dict[str, Tensor]:
@@ -748,6 +833,8 @@ def _assert_same_input(live: object, stored: object, *, label: str) -> None:
     """Assert a rebuilt input equals the recorded one, recursing into containers."""
     live_type: type = type(live)
     stored_type: type = type(stored)
+    if live_type != stored_type:
+        raise AssertionError(f"{label}: type mismatch {live_type} vs {stored_type}")
     both_maps = live_type is dict and stored_type is dict
     both_sequences = live_type in {list, tuple} and stored_type in {list, tuple}
     if both_maps:
@@ -786,9 +873,11 @@ def _assert_equal(a: object, b: object, *, label: str) -> None:
         )
     if a.dtype != b.dtype:
         raise AssertionError(f"{label}: dtype mismatch {a.dtype} vs {b.dtype}")
-    if not _tensor_bits_equal(a, b):
+    if not tensor_bits_equal(a, b):
         if a.dtype.is_floating_point or a.dtype.is_complex:
             max_abs_diff = f"{float((a - b).abs().max().item()):.3e}"
+        elif a.dtype == torch.bool:
+            max_abs_diff = "1"
         else:
             # Python ints: the int64 extremes differ by 2**64 - 1, which a
             # tensor subtraction would overflow.
@@ -804,18 +893,6 @@ def _assert_equal(a: object, b: object, *, label: str) -> None:
             f"{label}: bitwise comparison failed "
             f"(max_abs_diff={max_abs_diff}, max_ulp_diff={_max_ulp_diff(a, b)})",
         )
-
-
-def _tensor_bits_equal(a: Tensor, b: Tensor) -> bool:
-    """Whether two tensors have identical shapes, dtypes, and stored bits."""
-    if a.shape != b.shape or a.dtype != b.dtype:
-        return False
-    if a.device != b.device:
-        a = a.cpu()
-        b = b.cpu()
-    a_bits = a.detach().contiguous().reshape(-1).view(torch.uint8)
-    b_bits = b.detach().contiguous().reshape(-1).view(torch.uint8)
-    return torch.equal(a_bits, b_bits)
 
 
 # The unit a bit-for-bit failure is actually measured in: 1 says the hosts round
@@ -841,6 +918,15 @@ def _max_ulp_diff(a: Tensor, b: Tensor) -> int | str:
     # a pattern subtraction returns a number that reads as real drift.
     if bool(a.isnan().any() or b.isnan().any()):
         return "nan"
+    if kind == torch.int64:
+        # Distances across signs can exceed signed int64, even though each
+        # ordered endpoint fits. Widen the subtraction to Python integers.
+        values_a = ListCodec.coerce(_ordered(a, kind).reshape(-1).tolist(), int)
+        values_b = ListCodec.coerce(_ordered(b, kind).reshape(-1).tolist(), int)
+        return max(
+            (abs(x - y) for x, y in zip(values_a, values_b, strict=True)),
+            default=0,
+        )
     return int((_ordered(a, kind) - _ordered(b, kind)).abs().max())
 
 
@@ -879,16 +965,16 @@ def _is_narrow_float(dtype: torch.dtype) -> bool:
 # ``_foreach_*`` ops (e.g. ``_foreach_norm`` behind ``clip_grad_norm_``) receive a
 # ``list[Tensor]`` rather than a bare tensor, so a direct ``isinstance(a, Tensor)``
 # check misses them and the upcast silently does not apply.
-def _floating_dtypes(value: object) -> set[torch.dtype]:
-    """Return the float dtypes appearing in a tensor / list / tuple."""
+def _floating_tensors(value: object) -> list[Tensor]:
+    """Return the floating tensors appearing in a tensor / list / tuple."""
     if isinstance(value, Tensor):
-        return {value.dtype} if value.dtype.is_floating_point else set()
+        return [value] if value.dtype.is_floating_point else []
     if isinstance(value, (list, tuple)):
-        found: set[torch.dtype] = set()
+        found: list[Tensor] = []
         for item in cast(list[object] | tuple[object, ...], value):
-            found |= _floating_dtypes(item)
+            found.extend(_floating_tensors(item))
         return found
-    return set()
+    return []
 
 
 # Torch promotes mixed inputs, so a bfloat16 tensor meeting a float32 one yields
@@ -896,13 +982,14 @@ def _floating_dtypes(value: object) -> set[torch.dtype]:
 # the width the unwrapped computation would have held -- narrowing everything to float32
 # instead would silently widen a half precision graph and change every value downstream
 # of it.
-def _result_dtype(dtypes: set[torch.dtype]) -> torch.dtype:
+def _result_dtype(tensors: Sequence[Tensor]) -> torch.dtype:
     """Return the dtype the op would have produced natively."""
-    ordered = sorted(dtypes, key=str)
-    result = ordered[0]
-    for dtype in ordered[1:]:
-        result = torch.promote_types(result, dtype)
-    return result
+    # A zero-dimensional float64 tensor does not widen a float32 vector.
+    # Dtype-only promotion loses that distinction.
+    return elementwise_dtypes(
+        *tensors,
+        type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
+    )[1]
 
 
 def _upcast(value: object) -> object:
@@ -936,23 +1023,23 @@ def _downcast_result(
         return _downcast_f64(result, fallback)
     typed_result = cast(list[object], result)
     sequences: list[list[object] | tuple[object, ...]] = []
-    shared_dtypes: set[torch.dtype] = set()
+    shared_tensors: list[Tensor] = []
     for value in (*args, *kwargs.values()):
         if isinstance(value, list):
             sequence = cast(list[object], value)
         elif isinstance(value, tuple):
             sequence = cast(tuple[object, ...], value)
         else:
-            shared_dtypes |= _floating_dtypes(value)
+            shared_tensors.extend(_floating_tensors(value))
             continue
         if len(sequence) == len(typed_result):
             sequences.append(sequence)
     downcast = list[object]()
     for index, value in enumerate(typed_result):
-        dtypes = set(shared_dtypes)
+        tensors = list(shared_tensors)
         for sequence in sequences:
-            dtypes |= _floating_dtypes(sequence[index])
-        target = _result_dtype(dtypes) if dtypes else fallback
+            tensors.extend(_floating_tensors(sequence[index]))
+        target = _result_dtype(tensors) if tensors else fallback
         downcast.append(_downcast_f64(value, target))
     return downcast
 
@@ -1086,6 +1173,10 @@ _UNFUSED_OPS: Final = frozenset(
         "addcmul_",
         "addcdiv",
         "addcdiv_",
+        "addmm",
+        "baddbmm",
+        "addmv",
+        "_addmm_activation",
         "native_layer_norm",
         "native_layer_norm_backward",
         "_log_softmax_backward_data",
@@ -1100,9 +1191,97 @@ def _run_unfused(
     kwargs: dict[str, object],
 ) -> object:
     """Run ``func``, through its decomposition when its kernel may fuse an FMA."""
+    if func.namespace != "aten":
+        return func(*args, **kwargs)
+    name = _op_name(func)
+    if name.rstrip("_") in {"addmm", "baddbmm", "addbmm", "addmv", "_addmm_activation"}:
+        matrix_names = (
+            ("mat", "vec")
+            if name.rstrip("_") == "addmv"
+            else ("batch1", "batch2")
+            if name.rstrip("_") in {"addbmm", "baddbmm"}
+            else ("mat1", "mat2")
+        )
+        operands = [
+            cast(Tensor, args[index] if index < len(args) else kwargs[argument])
+            for index, argument in enumerate(("self", *matrix_names))
+        ]
+        bias, left, right = operands
+        dimensions = 3 if name.rstrip("_") in {"addbmm", "baddbmm"} else 2
+        right_dimensions = 1 if name.rstrip("_") == "addmv" else dimensions
+        # The unfused path skips the native dtype check, so mixed operands -- an
+        # integer matrix under a widened float bias -- go to the kernel that
+        # rejects them, as do integers, whose native arithmetic is exact.
+        if (
+            any(value.dtype != bias.dtype for value in operands)
+            or not bias.dtype.is_floating_point
+            or left.ndim != dimensions
+            or right.ndim != right_dimensions
+        ):
+            return func(*args, **kwargs)
+        shape = (left.shape[-2],)
+        if name.rstrip("_") != "addmv":
+            shape += (right.shape[-1],)
+        if name.rstrip("_") == "baddbmm":
+            shape = (left.shape[0], *shape)
+        # Bias may expand to the product, never expand the product itself.
+        # This validation remains necessary when beta=0 ignores bias values.
+        _ = bias.expand(shape)
+    if name in {"addmm_", "baddbmm_", "addbmm_", "addmv_"}:
+        functional = cast(
+            "OpOverload[..., object]",
+            getattr(torch.ops.aten, name[:-1]).default,
+        )
+        result = _run_unfused(functional, args, kwargs)
+        original = cast(Tensor, args[0] if args else kwargs["self"])
+        return original.copy_(cast(Tensor, result))
+    if name == "addbmm":
+        return cast("Callable[..., Tensor]", _unfused_addbmm)(*args, **kwargs)
+    if name in {"convolution", "_convolution"}:
+        bias = args[2] if len(args) > 2 else kwargs.get("bias")
+        if isinstance(bias, Tensor):
+            return _unfused_convolution(func, args, kwargs, bias=bias)
     if _op_name(func) in _UNFUSED_OPS and _scales_or_fuses(func, args, kwargs):
         return decomposition_table[func](*args, **kwargs)
     return func(*args, **kwargs)
+
+
+def _unfused_convolution(
+    func: OpOverload[..., object],
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+    *,
+    bias: Tensor,
+) -> Tensor:
+    """Add bias after the native float64 dot product, before narrowing."""
+    # Native CPU convolutions initialize GEMM's accumulator with bias. Under
+    # cancellation, x86 can discard that bias while ARM adds it after the dot
+    # product. Upcasting alone cannot restore it. Keep these two steps separate.
+    if len(args) > 2:
+        result = func(*args[:2], None, *args[3:], **kwargs)
+    else:
+        result = func(*args, **{**kwargs, "bias": None})
+    assert isinstance(result, Tensor)
+    # Removing the native bias also removes its shape validation; a singleton
+    # or flattened bias would otherwise be silently accepted by broadcasting.
+    if bias.ndim != 1 or bias.shape[0] != result.shape[1]:
+        raise RuntimeError(
+            "convolution bias must be one-dimensional with one value per output channel",
+        )
+    return result.add_(bias.reshape(1, -1, *((1,) * (result.ndim - 2))))
+
+
+@out_wrapper(exact_dtype=True)
+def _unfused_addbmm(
+    self: Tensor,
+    batch1: Tensor,
+    batch2: Tensor,
+    beta: float = 1,
+    alpha: float = 1,
+) -> Tensor:
+    """Reduce completed batch products before scaling and adding the bias."""
+    result = alpha * torch.bmm(batch1, batch2).sum(dim=0)
+    return result if beta == 0 else result + beta * self
 
 
 def _scales_or_fuses(
@@ -1125,7 +1304,7 @@ class _Float64Compute(TorchDispatchMode):
     in ``_EXACT_F32_OPS``; the float32 args are widened to float64, the op runs,
     and float64 results are narrowed back to float32. Allowlisted ops (exact
     elementwise arithmetic and pure data movement) pass through untouched. A
-    tensorless sampler in ``_RANDOM_FACTORIES`` is widened by its output dtype,
+    tensorless arithmetic factory in ``_FLOAT_FACTORIES`` is widened by its output dtype,
     since it has no argument to read the width from.
 
     Upcast-by-default is the completeness guarantee: a transcendental or
@@ -1152,37 +1331,49 @@ class _Float64Compute(TorchDispatchMode):
         kwargs = kwargs or {}
         if func.namespace in _COLLECTIVE_NAMESPACES:
             return func(*args, **kwargs)
-        exact = _op_name(func) in _EXACT_F32_OPS and not _scales_operand(
-            func,
-            args,
-            kwargs,
+        exact = (
+            func.namespace == "aten"
+            and _op_name(func) in _EXACT_F32_OPS
+            and not _scales_operand(
+                func,
+                args,
+                kwargs,
+            )
         )
-        input_dtypes: set[torch.dtype] = set()
+        if exact:
+            return func(*args, **kwargs)
+        input_tensors: list[Tensor] = []
         for value in (*args, *kwargs.values()):
-            input_dtypes |= _floating_dtypes(value)
+            input_tensors.extend(_floating_tensors(value))
         explicit_dtype = kwargs.get("dtype")
         # A tensorless sampler's width is its dtype kwarg or the process default;
         # see the note above ``_EXACT_F32_OPS``.
-        samples = _op_name(func) in _RANDOM_FACTORIES and not input_dtypes
-        if samples:
-            input_dtypes.add(
-                explicit_dtype
-                if isinstance(explicit_dtype, torch.dtype)
-                else torch.get_default_dtype(),
-            )
-        narrow = {dtype for dtype in input_dtypes if _is_narrow_float(dtype)}
-        if exact:
-            return func(*args, **kwargs)
-        if not narrow:
-            return _run_unfused(func, args, kwargs)
+        factory = (
+            func.namespace == "aten"
+            and _op_name(func) in _FLOAT_FACTORIES
+            and not input_tensors
+        )
+        factory_dtype = (
+            torch.int64
+            if _op_name(func) == "arange"
+            and not any(isinstance(value, float) for value in (*args, *kwargs.values()))
+            else torch.get_default_dtype()
+        )
         target = (
             explicit_dtype
             if isinstance(explicit_dtype, torch.dtype)
-            else _result_dtype(input_dtypes)
+            else _result_dtype(input_tensors)
+            if input_tensors
+            else factory_dtype
         )
+        narrow = any(_is_narrow_float(value.dtype) for value in input_tensors) or (
+            factory and _is_narrow_float(target)
+        )
+        if not narrow:
+            return _run_unfused(func, args, kwargs)
         up_args = tuple(_upcast(a) for a in args)
         up_kwargs = {k: _upcast(v) for k, v in kwargs.items()}
-        if samples or (
+        if factory or (
             isinstance(explicit_dtype, torch.dtype) and _is_narrow_float(explicit_dtype)
         ):
             up_kwargs["dtype"] = torch.float64
@@ -1258,17 +1449,19 @@ def _write_golden[InputT](
     inp = build_input()
     randomize_parameters(module, seed=seed)
     pre_state = _cpu_state_dict(module.state_dict())
+    pre_input = _to_cpu(inp)
     output = run(module, inp)
     _assert_portable_output_dtype(output)
     payload: _Golden = {
         "state_dict": pre_state,
-        "input": _to_cpu(inp),
+        "input": pre_input,
         "output": output.detach().to("cpu", copy=True),
         "seed": seed,
     }
     # Unchanged entries are asserted against the pre-run copy, so storing only
     # the changed ones is not a weaker check.
     if post_state := changed_state(pre_state, module.state_dict()):
+        _assert_portable_state_changes(post_state)
         payload["post_state"] = post_state
     save_golden(golden_path, payload)
 
@@ -1286,15 +1479,14 @@ def _assert_bfb[InputT](
     golden_dir.mkdir(parents=True, exist_ok=True)
     golden_path = golden_dir / f"{golden_name}.pt"
     missing = not golden_path.exists()
-    if missing or os.environ.get(_ENV_REGENERATE, "0") == "1":
-        with tempfile.NamedTemporaryFile(
+    if missing or os.environ.get(_ENV_REGENERATE) == "1":
+        # The candidate belongs to the destination filesystem and is cleaned
+        # up on every exit. Publish only after the complete replay succeeds.
+        with tempfile.TemporaryDirectory(
             dir=golden_dir,
-            prefix=f".{golden_name}.",
-            suffix=".pt",
-            delete=False,
-        ) as candidate_file:
-            candidate_path = Path(candidate_file.name)
-        try:
+            prefix=golden_path.name,
+        ) as candidate_dir:
+            candidate_path = Path(candidate_dir) / golden_path.name
             _write_golden(
                 golden_path=candidate_path,
                 build_module=build_module,
@@ -1305,12 +1497,11 @@ def _assert_bfb[InputT](
             _replay_golden(
                 golden_path=candidate_path,
                 build_module=build_module,
+                build_input=build_input,
                 seed=seed,
                 run=run,
             )
             candidate_path.replace(golden_path)
-        finally:
-            candidate_path.unlink(missing_ok=True)
         if missing:
             raise _MissingGoldenError(
                 f"Missing golden regenerated at {golden_path}; inspect it, "
@@ -1318,18 +1509,10 @@ def _assert_bfb[InputT](
             )
         return
 
-    # Replay runs the stored input, so without this a test whose
-    # ``build_input`` changed would keep passing against the stale record.
-    _seed_bfb(seed)
-    build_module()
-    _assert_same_input(
-        _to_cpu(build_input()),
-        load_golden(golden_path)["input"],
-        label="input",
-    )
     _replay_golden(
         golden_path=golden_path,
         build_module=build_module,
+        build_input=build_input,
         seed=seed,
         run=run,
     )
