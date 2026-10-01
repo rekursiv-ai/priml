@@ -596,9 +596,9 @@ def test_peak_names_a_form_factor_without_moving_the_bare_name() -> None:
     # The table holds TB/s: 2.039 * 1e12 rounds to 2039000000000.0002, not 2.039e12.
     assert peak()["a100", BF, "bytes", "matmul"] == 2.039 * 1e12
     assert peak()["h100", BF, "bytes", "matmul"] == 3.35e12
-    # The PCIe boards move less memory, and compute is identical across forms.
-    assert peak()["a100-40g", BF, "bytes", "matmul"] == 1.555e12
-    assert peak()["a100-80g-pcie", BF, "bytes", "matmul"] == 1.555e12
+    # The other forms move less memory, and compute is identical across forms.
+    assert peak()["a100-40g", BF, "bytes", "matmul"] == 1.555 * 1e12
+    assert peak()["a100-80g-pcie", BF, "bytes", "matmul"] == 1.935 * 1e12
     assert peak()["h100-pcie", BF, "bytes", "matmul"] == 2.0e12
     assert (
         peak()["a100-40g", BF, "flops", "matmul"]
@@ -625,8 +625,10 @@ def test_peak_ridge_moves_with_the_form_factor() -> None:
     assert 272 / sxm - 1 == pytest.approx(-0.07866532, abs=1e-6)
     assert 272 / pcie - 1 < -0.4
     a100_sxm = peak()["a100", BF, "intensity", "matmul"]
-    a100_pcie = peak()["a100-40g", BF, "intensity", "matmul"]
-    assert a100_pcie / a100_sxm == pytest.approx(2.039 / 1.555)
+    a100_40g = peak()["a100-40g", BF, "intensity", "matmul"]
+    assert a100_40g / a100_sxm == pytest.approx(2.039 / 1.555)
+    a100_pcie = peak()["a100-80g-pcie", BF, "intensity", "matmul"]
+    assert a100_pcie / a100_sxm == pytest.approx(2.039 / 1.935)
 
 
 # -- dispatch ----------------------------------------------------------------

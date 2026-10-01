@@ -773,9 +773,11 @@ type Device = Literal[
 # A100 80GB SXM: https://www.nvidia.com/en-us/data-center/a100/ "Specifications";
 #   the starred SXM column is "with sparsity", so each is halved (TF32 312 -> 156,
 #   BF16 624 -> 312, INT8 1248 -> 624). No FP8. FP64 TC 19.5; FP32 CUDA 19.5.
-# A100 40GB and A100 80GB PCIe: same die and the same tensor rates, 1.555 TB/s
-#   HBM2e (the 40GB part is HBM2, the 80GB PCIe part HBM2e, both 1.555 TB/s).
-#   Compute is unaffected by the form factor, so only the bandwidth differs.
+# A100 80GB PCIe and A100 40GB (PCIe or SXM): NVIDIA A100 datasheet --
+#   https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-us-nvidia-1758950-r4-web.pdf
+#   1.935 TB/s HBM2e and 1.555 TB/s HBM2. Both share the die and tensor rates of
+#   the 80GB SXM; compute is unaffected by the form factor, so only the bandwidth
+#   differs.
 # H100 SXM5: NVIDIA H100 Tensor Core GPU datasheet, "no sparsity" column
 #   (FP64 TC 67 is not used; the vector rate is FP32 CUDA 67). Mirrored at
 #   https://www.spheron.network/blog/nvidia-h100-specs/ "Throughput by Precision".
@@ -829,7 +831,7 @@ _DEVICES: Final[Mapping[Device, tuple[float, Mapping[torch.dtype, float], float]
         19.5,
     ),
     "a100-80g-pcie": (
-        1.555,
+        1.935,
         {
             torch.float64: 19.5,
             torch.float32: 156,
