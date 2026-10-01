@@ -488,6 +488,9 @@ def test_cpu_backward_reference_and_empty_sink_clear() -> None:
 def test_ngram_cuda_host_dispatch_accepts_cpu_fixture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The kernels are faked, but the host dispatch still sizes its grid with
+    # ``triton.cdiv``; Triton ships Linux wheels only.
+    pytest.importorskip("triton")
     values = torch.randn(2, 3, 4, 6)
     gate = torch.randn(2, 3, 4)
     # _clear_marked_sinks_cuda needs rows divisible by its 8-row program.

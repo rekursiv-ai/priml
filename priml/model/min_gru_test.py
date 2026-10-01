@@ -943,6 +943,9 @@ def _kernels_only() -> TritonScan:
 def test_triton_scan_uses_fake_host_launches_on_cpu(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The kernels are faked, but the host launch still sizes its grid with
+    # ``triton.cdiv``; Triton ships Linux wheels only.
+    pytest.importorskip("triton")
     monkeypatch.setattr(min_gru, "_require_cuda", _allow_cpu_scan)
     monkeypatch.setattr(min_gru, "_runs_triton", _force_triton)
     monkeypatch.setattr(min_gru, "_kernels", _fake_kernels)
