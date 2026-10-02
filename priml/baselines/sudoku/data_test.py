@@ -255,6 +255,85 @@ def test_nonpositive_batch_size_is_rejected(
         _data(dataset_dir, **{field: value})
 
 
+def test_num_puzzles_keeps_a_prefix_of_whole_puzzles(dataset_dir: Path) -> None:
+    """Two copies per puzzle, so two puzzles are the first four rows."""
+    data = _data(dataset_dir, augment=False, num_eval_puzzles=1, eval_batch_size=4)
+    (only,) = list(data.eval_dataloader())
+    assert only["valid_count"] == 2
+    assert only["media"][:2, 0].tolist() == [2, 3]
+
+
+@pytest.mark.parametrize(
+    ("spec", "match"),
+    [
+        (SudokuSpec(vocab_size=12), "vocabulary"),
+        (SudokuSpec(grid_shape=(4, 4)), "grid"),
+    ],
+)
+def test_prepared_data_must_match_the_spec(
+    dataset_dir: Path,
+    spec: SudokuSpec,
+    match: str,
+) -> None:
+    data = _data(dataset_dir, spec=spec)
+    with pytest.raises(ValueError, match=match):
+        data.train_dataloader()
+
+
+def test_a_negative_epoch_is_rejected(dataset_dir: Path) -> None:
+    data = _data(dataset_dir)
+    live = data.train_dataloader()
+    live.epoch = -1
+    with pytest.raises(ValueError, match="epoch must be non-negative"):
+        data.train_dataloader()
+
+
+def test_unseeded_augmentation_draws_from_the_ambient_stream(
+    dataset_dir: Path,
+) -> None:
+    def first(seed: int) -> Tensor:
+        torch.manual_seed(seed)
+        return next(iter(_data(dataset_dir, seed=0).train_dataloader()))["media"]
+
+    assert torch.equal(first(0), first(0))
+    assert not torch.equal(first(0), first(1))
+
+
+def test_a_new_loader_continues_the_live_loaders_epoch(dataset_dir: Path) -> None:
+    data = _data(dataset_dir, augment=False, seed=2)
+    list(data.train_dataloader())
+    assert data.train_dataloader().epoch == 1
+
+
+def test_restoring_state_into_a_live_loader(dataset_dir: Path) -> None:
+    """A checkpoint loaded after the loader exists must still take effect."""
+    source = _data(dataset_dir, augment=False, seed=6)
+    iterator = iter(source.train_dataloader())
+    next(iterator)
+    mid_epoch = source.state_dict()
+    expected = [batch["media"].clone() for batch in iterator]
+
+    data = _data(dataset_dir, augment=False, seed=6)
+    live = data.train_dataloader()
+    data.load_state_dict(mid_epoch)
+    observed = [batch["media"] for batch in live]
+
+    assert len(observed) == len(expected)
+    assert all(
+        torch.equal(got, wanted) for got, wanted in zip(observed, expected, strict=True)
+    )
+
+
+def test_restoring_no_loader_rewinds_a_live_loader_to_the_epoch_count(
+    dataset_dir: Path,
+) -> None:
+    data = _data(dataset_dir, augment=False, seed=6)
+    live = data.train_dataloader()
+    live.epoch = 9
+    data.load_state_dict({"epoch": 0, "loader": None})
+    assert live.epoch == 0
+
+
 def test_missing_data_names_the_preparer(tmp_path: Path) -> None:
     data = _data(tmp_path)
     with pytest.raises(FileNotFoundError, match="prepare_data"):

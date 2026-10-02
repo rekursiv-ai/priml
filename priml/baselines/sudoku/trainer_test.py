@@ -28,7 +28,7 @@ import torch
 
 from priml.baselines.sudoku import experiments, trm
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
-from priml.baselines.sudoku.trainer import sudoku_group_indices
+from priml.baselines.sudoku.trainer import Trainer, sudoku_group_indices
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import (
@@ -47,7 +47,6 @@ if TYPE_CHECKING:
     from configgle import Makeable
     from torch import nn
 
-    from priml.baselines.sudoku.trainer import Trainer
     from priml.model.transformer.block import TransformerBlock
     from priml.train.checkpointer import Checkpointer
 
@@ -73,14 +72,6 @@ class Subject(Protocol):
 
     model: nn.Module
     dataset: Loader
-    _pool_inputs: Tensor
-    _pool_labels: Tensor
-    _pool_z_slow: Tensor
-    _pool_z_fast: Tensor
-    _pool_h_step: Tensor
-    _pool_halted: Tensor
-    _pool_puzzle_ids: Tensor
-    _pool_feedback: Tensor
 
     @property
     def ema_shadow(self) -> dict[str, Tensor] | None:
@@ -297,28 +288,52 @@ def record(subject: Subject) -> dict[str, Tensor]:
         batch = subject._next_batch()
         data.append(flatten(batch))
         train.append(flatten(subject.train_step(**batch)))
-        steps.append({"steps": subject._pool_h_step.clone()})
+        steps.append({"steps": pool_state(subject)["steps"].clone()})
     put_steps(out, "data", data)
     put_steps(out, "train", train)
     put_steps(out, "pool", steps)
-    _put(
-        out,
-        "pool/final",
-        {
-            "inputs": subject._pool_inputs,
-            "labels": subject._pool_labels,
-            "steps": subject._pool_h_step,
-            "halted": subject._pool_halted,
-            "puzzle_ids": subject._pool_puzzle_ids,
-            "feedback": subject._pool_feedback,
-            "z_slow": subject._pool_z_slow,
-            "z_fast": subject._pool_z_fast,
-        },
-    )
+    _put(out, "pool/final", pool_state(subject))
     _put(out, "post", _state(subject))
     _put(out, "ema", dict(subject.ema_shadow or {}))
     _put(out, "eval_after", flatten(subject.eval_loss(**evaluation)))
     return out
+
+
+def pool_state(subject: object) -> dict[str, Tensor]:
+    """Return the recorded slot state of either port under the golden's names.
+
+    Args:
+      subject: This port's trainer, or the reference one it replaces.
+
+    Returns:
+      state: Inputs, labels, depth, halt mask, task ids, feedback, latents.
+
+    """
+    if isinstance(subject, Trainer):
+        pool = subject.pool
+        return {
+            "inputs": pool.inputs,
+            "labels": pool.labels,
+            "steps": pool.steps,
+            "halted": pool.halted,
+            "puzzle_ids": pool.puzzle_ids,
+            "feedback": pool.feedback,
+            "z_slow": pool.z_slow,
+            "z_fast": pool.z_fast,
+        }
+    return {
+        name: cast(Tensor, getattr(subject, f"_pool_{source}"))
+        for name, source in (
+            ("inputs", "inputs"),
+            ("labels", "labels"),
+            ("steps", "h_step"),
+            ("halted", "halted"),
+            ("puzzle_ids", "puzzle_ids"),
+            ("feedback", "feedback"),
+            ("z_slow", "z_slow"),
+            ("z_fast", "z_fast"),
+        )
+    }
 
 
 def run(config: Makeable[object], scratch: Path) -> dict[str, Tensor]:
@@ -484,6 +499,34 @@ def test_trainer_run_and_resume_guard_branches(tmp_path: Path) -> None:
     subject.config.max_steps = 0
     subject.run("launcher-arg")
     assert subject.global_step == 0
+
+
+def test_dedicated_generators_survive_a_checkpoint_round_trip(tmp_path: Path) -> None:
+    """Resume continues the halt and scramble streams instead of restarting them."""
+    config = port_config("exp010", tmp_path)
+    write_dataset(tmp_path / "data")
+    subject = config.make()
+    subject.train_step(**subject._next_batch())
+    state = subject.state_dict()
+    halting, carry = subject.pool.halting, subject.pool.carry
+    assert halting is not None
+    assert carry is not None
+    step_state = state["step"]
+    assert "halt_rng" in step_state
+    assert "scramble_rng" in step_state
+    assert torch.equal(step_state["halt_rng"], halting.generator.get_state())
+    assert torch.equal(step_state["scramble_rng"], carry.generator.get_state())
+    expected = (
+        torch.rand(4, generator=halting.generator),
+        torch.rand(4, generator=carry.generator),
+    )
+    restored = config.make()
+    restored.load_state_dict(state)
+    restored_halting, restored_carry = restored.pool.halting, restored.pool.carry
+    assert restored_halting is not None
+    assert restored_carry is not None
+    assert torch.equal(torch.rand(4, generator=restored_halting.generator), expected[0])
+    assert torch.equal(torch.rand(4, generator=restored_carry.generator), expected[1])
 
 
 def test_trainer_constructor_rejects_invalid_protocol_configs(tmp_path: Path) -> None:

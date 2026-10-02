@@ -139,19 +139,20 @@ ArcTrainLoop(
                 │       total_train_steps=541_580,
                 │       warmup_steps=2_000,
                 │       lr_min_ratio=1.0,
-                │       act=ActPool.Config(
+                │       pool=AtomicPool.Config(
                 │               batch_size=256,
                 │               max_steps=16,
-                │               halt_weight=0.5,
-                │               halt_exploration_prob=0.1,
-                │               halt_exploration_seed=0,
-                │               min_steps_sampled=True,
-                │               feedback=False,
-                │               given_low=2,
-                │               given_high=10,
+                │               halting=HaltTraining.Config(
+                │                       weight=0.5,
+                │                       exploration=SampledMinimum.Config(prob=0.1),
+                │                       seed=0
+                │               ),
+                │               feedback=None,
+                │               start=LearnedStart.Config(),
                 │               grid_len=900,
                 │               seq_len=916,
-                │               channels_hidden=512
+                │               channels_hidden=512,
+                │               dtype=None
                 │       ),
                 │       label_smoothing=0.0,
                 │       ignore_label_id=-100,

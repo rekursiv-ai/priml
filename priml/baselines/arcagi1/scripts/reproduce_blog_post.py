@@ -43,9 +43,9 @@ import hashlib
 import logging
 import os
 
-from priml.baselines.arcagi1.act import AtomicPool
 from priml.baselines.arcagi1.experiments import TrmTrainLoop, exp008
 from priml.baselines.arcagi1.model import from_reference_name
+from priml.baselines.sudoku.act import AtomicPool
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.runtime import SingleProcess
 from priml.train.checkpointer import Checkpointer

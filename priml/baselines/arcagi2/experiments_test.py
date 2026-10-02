@@ -28,8 +28,8 @@ def test_finalized_reference_recipe() -> None:
     assert config.runtime.mesh_topology == {"dp": -1, "pp": 1, "tp": 1}
     assert isinstance(config.step.parallelism, ArcDataParallel.Config)
     assert config.step.parallelism.gradient_as_bucket_view
-    assert config.step.act is not None
-    assert config.dataset.batch_size == config.step.act.batch_size == 256
+    assert config.step.pool is not None
+    assert config.dataset.batch_size == config.step.pool.batch_size == 256
     assert config.dataset.make().prepared.eval_batch_size == 256
     assert config.dataset.epochs_per_iter == 4
     assert config.max_steps == config.step.total_train_steps == 541_580
@@ -74,8 +74,8 @@ def test_smoke_is_single_process() -> None:
     assert isinstance(config.runtime, SingleProcess.Config)
     assert isinstance(config.step.parallelism, NoParallel.Config)
     assert config.max_steps == 4
-    assert config.step.act is not None
-    assert config.dataset.batch_size == config.step.act.batch_size == 2
+    assert config.step.pool is not None
+    assert config.dataset.batch_size == config.step.pool.batch_size == 2
 
 
 def test_full_recipe_pprint() -> None:

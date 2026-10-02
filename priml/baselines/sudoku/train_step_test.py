@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 import torch
 
-from priml.baselines.sudoku.act import ActPool
+from priml.baselines.sudoku.act import (
+    AtomicPool,
+    FeedbackCarry,
+    ForcedContinue,
+    HaltTraining,
+    StreamingPool,
+)
 from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
 from priml.baselines.sudoku.model import DeepRecurrence
 from priml.baselines.sudoku.train_step import SudokuTrainStep
@@ -25,7 +31,11 @@ def _step(*, act: bool = False) -> SudokuTrainStep:
     config.model.embedding = GridEmbedding.Config(grid_shape=(81,))
     if act:
         config.model.recurrence = DeepRecurrence.Config(slow_cycles=2, fast_cycles=1)
-        config.act = ActPool.Config(batch_size=4, max_steps=3)
+        config.pool = AtomicPool.Config(
+            batch_size=4,
+            max_steps=3,
+            feedback=FeedbackCarry.Config(givens=(2, 10)),
+        )
     torch.manual_seed(0)
     return config.make()
 
@@ -130,6 +140,29 @@ def test_state_round_trips_including_ema() -> None:
         assert torch.equal(restored_shadow[name], value)
 
 
+def test_act_steps_average_only_occupied_slots() -> None:
+    """An empty streaming slot is not a puzzle that took zero steps."""
+    config = SudokuTrainStep.Config()
+    config.parallelism = NoParallel.Config(device="cpu")
+    config.compile = None
+    config.dtype_autocast = None
+    config.model.channels_in = 16
+    config.model.num_layers = 1
+    config.model.vocab_size = 11
+    config.model.embedding = GridEmbedding.Config(grid_shape=(81,))
+    config.model.recurrence = DeepRecurrence.Config(slow_cycles=1, fast_cycles=1)
+    config.pool = StreamingPool.Config(
+        batch_size=4,
+        max_steps=3,
+        halting=HaltTraining.Config(exploration=ForcedContinue.Config(prob=1.0)),
+    )
+    torch.manual_seed(0)
+    step = config.make()
+    step.train_step(**{**_batch(), "valid_count": 2})
+    metrics = step.train_step(**{**_batch(), "valid_count": 0}).get("metrics", {})
+    assert float(metrics["act_steps"]) == 1.0
+
+
 def test_act_pool_is_not_checkpointed() -> None:
     """In-flight puzzles are bound to a batch, so resume starts them fresh.
 
@@ -139,8 +172,8 @@ def test_act_pool_is_not_checkpointed() -> None:
     step = _step(act=True)
     step.train_step(**_batch())
     state = step.state_dict()
-    assert "act" in state
-    assert set(state["act"]) == {"halt_rng"}
+    assert "halt_rng" in state
+    assert "corruption_rng" in state
 
 
 def test_feedback_reaches_the_channel() -> None:
@@ -156,7 +189,11 @@ def test_feedback_reaches_the_channel() -> None:
     embedding.channels = [PredictionFeedback.Config()]
     config.model.embedding = embedding
     config.model.recurrence = DeepRecurrence.Config(slow_cycles=1, fast_cycles=1)
-    config.act = ActPool.Config(batch_size=4, max_steps=2)
+    config.pool = AtomicPool.Config(
+        batch_size=4,
+        max_steps=2,
+        feedback=FeedbackCarry.Config(givens=(2, 10)),
+    )
     torch.manual_seed(0)
     step = config.make()
     step.eval_loss(**_batch())

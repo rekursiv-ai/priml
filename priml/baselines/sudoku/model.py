@@ -49,7 +49,7 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.baselines.sudoku.embedding import GridEmbedding
+from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
 from priml.baselines.sudoku.prefix import PrefixConfig
 from priml.cost import (
     Cost,
@@ -776,6 +776,12 @@ class SudokuNet(nn.Module):
         z_slow = self.slow_init[0].expand(batch_size, s, -1).contiguous()
         z_fast = self.fast_init[0].expand(batch_size, s, -1).contiguous()
         return z_slow, z_fast
+
+    def set_feedback(self, grid: Tensor | None) -> None:
+        """Hand ``grid`` to every feedback channel for the next forward."""
+        for channel in self.embedding.channels:
+            if isinstance(channel, PredictionFeedback):
+                channel.set_feedback(grid)
 
     @contextmanager
     def eager(self, *, enabled: bool = True) -> Generator[None]:

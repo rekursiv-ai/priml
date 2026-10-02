@@ -20,9 +20,9 @@ from configgle.pprinting import pformat
 import pytest
 
 from priml.baselines.arcagi1 import experiments
-from priml.baselines.arcagi1.act import AtomicPool
 from priml.baselines.arcagi1.loss import MeanOverBatch
 from priml.baselines.arcagi1.model import ConvSwiGLU, UrmRecurrence
+from priml.baselines.sudoku.act import AtomicPool, FeedbackCarry, ZeroStart
 from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
 from priml.baselines.sudoku.model import SudokuNet
 from priml.baselines.sudoku.prefix import (
@@ -138,7 +138,7 @@ def test_exp001_changes_only_the_block() -> None:
     assert isinstance(base.step.model.block, TransformerBlock.Config)
     assert isinstance(fork.step.model.block, MLPMixerBlock.Config)
     assert fork.step.model.recurrence is base.step.model.recurrence is None
-    assert fork.step.act is base.step.act is None
+    assert fork.step.pool is base.step.pool is None
     assert fork.max_steps == base.max_steps
 
 
@@ -151,7 +151,7 @@ def test_exp002_adds_recurrence_and_its_feedback_channel() -> None:
     base, fork = experiments.exp000(), experiments.exp002()
     assert base.step.model.recurrence is None
     assert fork.step.model.recurrence is not None
-    assert fork.step.act is not None
+    assert fork.step.pool is not None
     assert type(fork.step.model.block) is type(base.step.model.block)
 
     embedding = fork.step.model.embedding
@@ -165,17 +165,33 @@ def test_the_clue_range_matches_arcs_vocabulary() -> None:
     A clue range copied from sudoku would let the feedback loop overwrite the
     last color, which no error would report.
     """
-    config = experiments.exp002().copy_tree().finalize()
-    assert config.step.act is not None
-    assert config.step.act.given_high == config.dataset.spec.vocab_size - 1
+    config = experiments.exp002()
+    assert config.step.pool is not None
+    config.step.pool.feedback = FeedbackCarry.Config(givens=(2, 10))
+    finalized = config.copy_tree().finalize()
+    assert finalized.step.pool is not None
+    assert finalized.step.pool.feedback is not None
+    vocab = finalized.dataset.spec.vocab_size
+    assert finalized.step.pool.feedback.givens == (2, vocab - 1)
+
+
+@pytest.mark.parametrize("factory", [experiments.exp002, experiments.exp003])
+def test_the_recurrent_rungs_replay_as_trained(
+    factory: Callable[[], ArcTrainLoop],
+) -> None:
+    """They trained with no fed-back grid and zero-seeded slots; keep it so."""
+    pool = factory().step.pool
+    assert pool is not None
+    assert pool.feedback is None
+    assert isinstance(pool.start, ZeroStart.Config)
 
 
 def test_exp003_is_exp002_with_the_other_block() -> None:
     base, fork = experiments.exp002(), experiments.exp003()
     assert isinstance(fork.step.model.block, MLPMixerBlock.Config)
-    assert fork.step.act is not None
-    assert base.step.act is not None
-    assert fork.step.act.max_steps == base.step.act.max_steps
+    assert fork.step.pool is not None
+    assert base.step.pool is not None
+    assert fork.step.pool.max_steps == base.step.pool.max_steps
 
 
 def test_the_mixer_is_built_to_the_full_sequence() -> None:
@@ -192,7 +208,7 @@ def test_the_mixer_is_built_to_the_full_sequence() -> None:
 def test_the_pool_is_built_to_the_models_shape() -> None:
     """A pool sized independently of the model would fail only at runtime."""
     config = experiments.exp002().copy_tree().finalize()
-    act = config.step.act
+    act = config.step.pool
     model = config.step.model
     assert act is not None
     assert act.grid_len == model.grid_len

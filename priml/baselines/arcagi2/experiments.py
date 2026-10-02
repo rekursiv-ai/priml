@@ -26,7 +26,7 @@ from priml.baselines.arcagi2.scripts.build_dataset import (
 )
 from priml.baselines.arcagi2.train_step import ArcDataParallel, ArcTrainStep
 from priml.baselines.arcagi2.warm_start import WarmStart
-from priml.baselines.sudoku.act import ActPool
+from priml.baselines.sudoku.act import AtomicPool
 from priml.baselines.sudoku.embedding import GridEmbedding
 from priml.baselines.sudoku.model import DeepRecurrence
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
@@ -126,9 +126,9 @@ def exp_smoke() -> ArcTrainLoop:
     model.recurrence.slow_cycles = 1
     model.recurrence.fast_cycles = 1
     model.prefix.batch_size = 2
-    assert isinstance(config.step.act, ActPool.Config)
-    config.step.act.batch_size = 2
-    config.step.act.max_steps = 4
+    assert isinstance(config.step.pool, AtomicPool.Config)
+    config.step.pool.batch_size = 2
+    config.step.pool.max_steps = 4
     config.step.total_train_steps = config.max_steps = 4
     config.step.warmup_steps = 0
     config.step.use_ema = False

@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Final, cast
 import pytest
 import torch
 
-from priml.baselines.arcagi1.act import AtomicPool
 from priml.baselines.arcagi1.metric import (
     CanonicalPassK,
     PerOutputPass,
@@ -34,6 +33,7 @@ from priml.baselines.arcagi2.experiments import (
     TOTAL_TRAIN_STEPS,
 )
 from priml.baselines.arcagi2.warm_start import WarmStart
+from priml.baselines.sudoku.act import AtomicPool
 from priml.baselines.sudoku.model import DeepRecurrence
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.testing.bfb import host_agnostic_numerics

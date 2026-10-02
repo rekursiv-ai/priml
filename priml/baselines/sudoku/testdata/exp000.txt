@@ -139,7 +139,7 @@ SudokuTrainLoop(
                 │       total_train_steps=19_500,
                 │       warmup_steps=0,
                 │       lr_min_ratio=0.0,
-                │       act=None,
+                │       pool=None,
                 │       label_smoothing=0.0,
                 │       ignore_label_id=-100,
                 │       use_ema=True,

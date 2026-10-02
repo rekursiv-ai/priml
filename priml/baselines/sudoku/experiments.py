@@ -31,7 +31,14 @@ import math
 
 from configgle import Makes
 
-from priml.baselines.sudoku.act import ActPool
+from priml.baselines.sudoku.act import (
+    AtomicPool,
+    FeedbackCarry,
+    HaltTraining,
+    LearnedStart,
+    SampledMinimum,
+    ZeroStart,
+)
 from priml.baselines.sudoku.data import SudokuData
 from priml.baselines.sudoku.embedding import (
     FactoredPositions,
@@ -86,6 +93,9 @@ class SudokuTrainLoop(
                 channel.box_shape = spec.box_shape
         if isinstance(model.block, MLPMixerBlock.Config):
             model.block.seq_len = model.total_seq_len
+        pool = self.step.pool
+        if pool is not None and pool.feedback is not None:
+            pool.feedback.givens = (2, spec.vocab_size - 1)
         return super().finalize()
 
 
@@ -185,8 +195,8 @@ def exp002() -> SudokuTrainLoop:
       parameters spent in a single forward.
 
     Returns:
-      config: SudokuTrainLoop with deep recurrence and prediction feedback
-        embedding.
+      config: SudokuTrainLoop with deep recurrence; the feedback channel is
+        present but untrained.
 
     References:
       https://arxiv.org/abs/2510.04871
@@ -200,13 +210,19 @@ def exp002() -> SudokuTrainLoop:
     cfg = exp000()
     cfg.experiment_name = "exp002"
     cfg.step.model.recurrence = DeepRecurrence.Config()
-    # The solver refines its own answer, so the previous step's decoded grid is
-    # an input channel: without it each step re-reads the original puzzle and
-    # the recurrence carries belief only in the latent.
+    # As trained: the feedback channel is built, but the pool never fed the
+    # decoded grid back in training, so its zero-initialized table stayed zero
+    # and the recurrence carried belief only in the latent; slots were seated
+    # from zero latents rather than the learned ones evaluation starts from.
     embedding = cfg.step.model.embedding
     assert isinstance(embedding, GridEmbedding.Config)
     embedding.channels = [FactoredPositions.Config(), PredictionFeedback.Config()]
-    cfg.step.act = ActPool.Config(batch_size=cfg.dataset.batch_size)
+    cfg.step.pool = AtomicPool.Config(
+        batch_size=cfg.dataset.batch_size,
+        max_steps=32,
+        halting=HaltTraining.Config(exploration=SampledMinimum.Config()),
+        start=ZeroStart.Config(),
+    )
     return cfg
 
 
@@ -618,6 +634,42 @@ def exp014() -> Reproduction.Config:
     cfg.trigger = "final_only"
     cfg.generator_seeds = (44, 45, 46)
     cfg.generator_names = tuple(f"exp014_s{seed}" for seed in cfg.generator_seeds)
+    return cfg
+
+
+def exp015() -> SudokuTrainLoop:
+    """exp002 with the fed-back grid trained and slots seated from learned latents.
+
+    exp002 builds the feedback channel but trained without feeding the decoded
+    grid back, and seated slots from zero latents while evaluation starts from
+    the learned ones. Both are the pool's settings, changed together: they are
+    the two halves of training the recurrence the way it is evaluated. No run
+    has isolated feedback without the repair curriculum exp008 bundles it with.
+
+    Hypothesis:
+      A recurrence that sees its own decoded answer refines it instead of
+      re-deriving it from the puzzle each step, so exact accuracy rises over
+      exp002 at equal steps.
+
+    References:
+      https://arxiv.org/abs/2510.04871
+        Jolicoeur-Martineau. Less is More: Recursive Reasoning with Tiny
+        Networks.
+
+    Results:
+      TBD. Compare to exp002 at the same seed.
+
+    Returns:
+      config: exp002 with feedback and the learned start.
+
+    """
+    cfg = exp002()
+    cfg.experiment_name = "exp015"
+    pool = cfg.step.pool
+    if not isinstance(pool, AtomicPool.Config):
+        raise TypeError(f"exp002's pool is atomic; got {type(pool)}.")
+    pool.feedback = FeedbackCarry.Config()
+    pool.start = LearnedStart.Config()
     return cfg
 
 

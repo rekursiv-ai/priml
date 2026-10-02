@@ -26,10 +26,10 @@ import pytest
 import torch
 
 from priml.baselines.arcagi1 import experiments
-from priml.baselines.arcagi1.act import AtomicPool
 from priml.baselines.arcagi1.model import REFERENCE_NAMES, ConvSwiGLU
 from priml.baselines.arcagi1.train_step import TrmTrainStep
 from priml.baselines.arcagi2.model import RotaryBlock
+from priml.baselines.sudoku.act import AtomicPool
 from priml.baselines.sudoku.embedding import GridEmbedding
 from priml.baselines.sudoku.model import DeepRecurrence, SudokuNet
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
@@ -366,8 +366,8 @@ def test_golden_bites(recipe: str, perturb: str) -> None:
         torch.manual_seed(0)
         subject = PortSubject(recipe)
         if perturb == "halt_weight":
-            assert subject.step.halting is not None
-            subject.step.halting.weight *= 1.5
+            assert subject.step.pool.halting is not None
+            subject.step.pool.halting.weight *= 1.5
         else:
             # On the integer view: a float nudge is done in float64 here and
             # rounds straight back to the weight's own width.

@@ -93,6 +93,14 @@ from torch import Tensor, nn
 import torch
 import torch._inductor.config
 
+from priml.baselines.sudoku.act import (
+    AtomicPool,
+    FeedbackCarry,
+    ForcedContinue,
+    HaltTraining,
+    SampledMinimum,
+    SlotScramble,
+)
 from priml.baselines.sudoku.puzzle_data import PuzzleDataset
 from priml.baselines.sudoku.trm import TRM
 from priml.math.seed import (
@@ -598,14 +606,6 @@ class Trainer:
         if not config.ephemeral:
             set_seed_local(config.seed)
 
-        # Dedicated RNG streams (never the ambient global RNG): the training
-        # trajectory must not depend on ambient state, so two runs from
-        # identical weights stay bit-for-bit identical.
-        self._halt_gen = torch.Generator(device=self.device)
-        self._halt_gen.manual_seed(config.halt_exploration_seed)
-        self._scramble_gen = torch.Generator(device=self.device)
-        self._scramble_gen.manual_seed(config.feedback_scramble_seed)
-
         # Process-global TorchInductor flag; must be set before TRM.__init__
         # binds torch.compile so the first trace captures it.
         torch._inductor.config.emulate_precision_casts = (  # noqa: SLF001 -- Documented inductor knob, no public alias.
@@ -638,32 +638,12 @@ class Trainer:
             if p.requires_grad and "puzzle_emb" not in n
         ]
 
-        # ACT pool state (atomic mode: one batch per call, halted slots take
-        # fresh data, active slots keep their carry).
-        bs = self._batch_size = config.dataset.batch_size
-        grid_len = config.model.num_puzzle_grid_tokens
-        seq_len = config.model.total_seq_len
-        hidden = config.model.channels_in
-        self._pool_inputs = torch.zeros(
-            bs,
-            grid_len,
-            device=self.device,
-            dtype=torch.long,
-        )
-        self._pool_labels = torch.zeros_like(self._pool_inputs)
-        self._pool_z_slow = torch.zeros(
-            bs,
-            seq_len,
-            hidden,
-            device=self.device,
-            dtype=torch.float32,
-        )
-        self._pool_z_fast = torch.zeros_like(self._pool_z_slow)
-        self._pool_h_step = torch.zeros(bs, device=self.device, dtype=torch.long)
-        # All-halted at init so the first call refills every slot.
-        self._pool_halted = torch.ones(bs, device=self.device, dtype=torch.bool)
-        self._pool_puzzle_ids = torch.zeros(bs, device=self.device, dtype=torch.int32)
-        self._pool_feedback = torch.zeros_like(self._pool_inputs)
+        # Atomic ACT: one batch per call, halted slots take fresh data, active
+        # slots keep their carry. Its halt and scramble generators are
+        # dedicated, never the ambient global RNG, so two runs from identical
+        # weights stay bit-for-bit identical.
+        self.pool: AtomicPool = _pool(config).make()
+        self.pool.to(self.device)
         self._csp_groups = sudoku_group_indices(config.dataset.spec).to(self.device)
 
         self.dataset = config.dataset.make()
@@ -910,7 +890,14 @@ class Trainer:
         valid_count = raw_count
         pid_raw = batch.get("puzzle_identifiers")
         pid = pid_raw if isinstance(pid_raw, Tensor) else None
-        active = self._refill_pool(media, label, valid_count, pid)
+        active = self.pool.refill(
+            self.model.init_z,
+            media=media,
+            labels=label,
+            valid_count=valid_count,
+            puzzle_ids=pid,
+            ignore_label_id=self.config.ignore_label_id,
+        )
         n_active = active.sum()
         fl = self._forward_and_loss(active=active, n_active=n_active)
         train_metrics = fl.train_metrics
@@ -958,10 +945,15 @@ class Trainer:
         self.model.zero_grad(set_to_none=True)
         if self._ema is not None:
             self._ema(self.model)
-        self._update_carry_and_halt(
-            z_slow_out=fl.z_slow_out,
-            z_fast_out=fl.z_fast_out,
-            q_halt=fl.q_halt,
+        self.pool.update_carry(
+            z_slow=fl.z_slow_out,
+            z_fast=fl.z_fast_out,
+            active=active,
+        )
+        self.pool.release(
+            self.model.init_z,
+            halt=self.pool.halt_mask(fl.q_halt),
+            active=active,
         )
 
         # Halted-only train metrics, the reference TRM definition: score only
@@ -971,7 +963,7 @@ class Trainer:
         if fl.correctness is not None:
             is_correct, loss_counts, correct = fl.correctness
             with torch.no_grad():
-                halted_valid = self._pool_halted & active & (loss_counts > 0)
+                halted_valid = self.pool.halted & active & (loss_counts > 0)
                 n_halted = halted_valid.sum().clamp(min=1)
                 train_metrics.update(
                     {
@@ -994,8 +986,8 @@ class Trainer:
                         / n_halted,
                         "act_steps": torch.where(
                             halted_valid,
-                            self._pool_h_step,
-                            torch.zeros_like(self._pool_h_step),
+                            self.pool.steps,
+                            torch.zeros_like(self.pool.steps),
                         )
                         .float()
                         .sum()
@@ -1185,11 +1177,13 @@ class Trainer:
             "model": self.model.state_dict(),
             "optimizers": [opt.state_dict() for opt in self._optimizers],
             "global_step": self.global_step,
-            # Both dedicated RNG streams are persisted so a resumed run
-            # continues the exact exploration/scramble sequences.
-            "halt_rng": self._halt_gen.get_state(),
-            "scramble_rng": self._scramble_gen.get_state(),
         }
+        # Both dedicated RNG streams are persisted so a resumed run continues
+        # the exact exploration/scramble sequences.
+        if self.pool.halting is not None:
+            step_state["halt_rng"] = self.pool.halting.generator.get_state()
+        if self.pool.carry is not None:
+            step_state["scramble_rng"] = self.pool.carry.generator.get_state()
         if self._optimizer_puzzle_emb is not None:
             step_state["optimizer_puzzle_emb"] = self._optimizer_puzzle_emb.state_dict()
         if self.ema_shadow is not None:
@@ -1232,10 +1226,10 @@ class Trainer:
         self.local_step = 0
         # ``Generator.set_state`` requires a CPU ByteTensor; the checkpoint
         # reader maps storages to the compute device, so coerce here.
-        if "halt_rng" in step_state:
-            self._halt_gen.set_state(step_state["halt_rng"].cpu())
-        if "scramble_rng" in step_state:
-            self._scramble_gen.set_state(step_state["scramble_rng"].cpu())
+        if self.pool.halting is not None and "halt_rng" in step_state:
+            self.pool.halting.generator.set_state(step_state["halt_rng"].cpu())
+        if self.pool.carry is not None and "scramble_rng" in step_state:
+            self.pool.carry.generator.set_state(step_state["scramble_rng"].cpu())
         if self._ema is not None and "ema" in step_state:
             self._ema.global_step = self.global_step
             self._ema.load_state_dict(
@@ -1333,72 +1327,6 @@ class Trainer:
 
     # -- Pool refill / forward / halt -------------------------------------------
 
-    # Tail positions past ``valid_count`` get their labels overwritten with the ignore
-    # label so they contribute nothing to the loss. Slots that received fresh data
-    # restart their feedback grid at the input.
-    def _refill_pool(
-        self,
-        media: Tensor,
-        label: Tensor,
-        valid_count: int,
-        puzzle_ids: Tensor | None,
-    ) -> Tensor:
-        """Slot the incoming batch into halted pool positions (atomic mode)."""
-        bs = self._batch_size
-        if media.shape[0] != bs:
-            raise ValueError(
-                f"atomic ACT scheduling requires incoming batch of size {bs}; "
-                f"got {media.shape[0]}.",
-            )
-        # Snapshot the halted mask BEFORE the base refill mutates pool state
-        # (ported ordering contract; the feedback reseed below must key off
-        # the same mask the refill used).
-        halted = self._pool_halted.clone()
-        masked_inputs = media.clone().to(torch.long)
-        masked_labels = label.clone().to(torch.long)
-        if valid_count < bs:
-            masked_labels[valid_count:] = self.config.ignore_label_id
-        halted_seq = self._pool_halted.unsqueeze(-1)
-        self._pool_inputs = torch.where(halted_seq, masked_inputs, self._pool_inputs)
-        self._pool_labels = torch.where(halted_seq, masked_labels, self._pool_labels)
-        if puzzle_ids is not None:
-            ids = puzzle_ids.to(torch.int32)
-            if valid_count < bs:
-                ids = ids.clone()
-                ids[valid_count:] = 0
-            self._pool_puzzle_ids = torch.where(
-                self._pool_halted,
-                ids,
-                self._pool_puzzle_ids,
-            )
-        z_slow_init, z_fast_init = self.model.init_z(bs)
-        halted_z = self._pool_halted.view(-1, 1, 1)
-        self._pool_z_slow = torch.where(
-            halted_z,
-            z_slow_init.to(self._pool_z_slow.dtype),
-            self._pool_z_slow,
-        )
-        self._pool_z_fast = torch.where(
-            halted_z,
-            z_fast_init.to(self._pool_z_fast.dtype),
-            self._pool_z_fast,
-        )
-        self._pool_h_step = torch.where(
-            self._pool_halted,
-            torch.zeros_like(self._pool_h_step),
-            self._pool_h_step,
-        )
-        # Feedback restart AFTER the base refill: fresh slots start the
-        # recurrence from their (new) input grid.
-        self._pool_feedback = torch.where(
-            halted.unsqueeze(-1),
-            self._pool_inputs,
-            self._pool_feedback,
-        )
-        # Every slot is active in atomic mode -- slots that just received
-        # fresh data participate in this step's forward.
-        return torch.ones_like(halted)
-
     # Order: feedback stash -> forward -> lm CE -> ``+ q_halt_weight * q_bce`` -> ``+
     # csp_loss_weight * csp`` -> feedback pool update (argmax + scramble draws). The
     # feedback update runs LAST, matching the internal cooperative-override ordering.
@@ -1406,18 +1334,14 @@ class Trainer:
         """Forward the pool and compose the loss (the fixed-order contract)."""
         config = self.config
         self.model.train()
-        if config.feedback:
-            self.model.set_feedback(self._pool_feedback)
+        pool = self.pool
+        if pool.carry is not None:
+            self.model.set_feedback(pool.feedback)
         forward_kwargs: dict[str, Tensor] = {}
         if self.model.puzzle_emb is not None:
-            forward_kwargs["puzzle_identifiers"] = self._pool_puzzle_ids
+            forward_kwargs["puzzle_identifiers"] = pool.puzzle_ids
         with self._autocast():
-            out = self.model(
-                self._pool_inputs,
-                self._pool_z_slow,
-                self._pool_z_fast,
-                **forward_kwargs,
-            )
+            out = self.model(pool.inputs, pool.z_slow, pool.z_fast, **forward_kwargs)
         logits = out["logits"]
         q_halt = out["q_halt"]
         z_slow_out = out["z_slow"]
@@ -1429,7 +1353,7 @@ class Trainer:
 
         lm_loss = self._compute_loss(
             logits=logits,
-            labels=self._pool_labels,
+            labels=pool.labels,
             active=active,
             n_active=n_active,
         )
@@ -1446,8 +1370,8 @@ class Trainer:
             ignore = config.ignore_label_id
             with torch.no_grad():
                 preds = logits.argmax(dim=-1)
-                valid_mask = self._pool_labels != ignore
-                is_correct = (preds == self._pool_labels) & valid_mask
+                valid_mask = pool.labels != ignore
+                is_correct = (preds == pool.labels) & valid_mask
                 loss_counts = valid_mask.sum(dim=-1)
                 correct = (
                     (is_correct.sum(dim=-1) == loss_counts) & (loss_counts > 0)
@@ -1482,8 +1406,8 @@ class Trainer:
                 / n_active_valid,
                 "act_steps": torch.where(
                     active_valid,
-                    self._pool_h_step + 1,
-                    torch.zeros_like(self._pool_h_step),
+                    pool.steps + 1,
+                    torch.zeros_like(pool.steps),
                 )
                 .float()
                 .sum()
@@ -1513,17 +1437,9 @@ class Trainer:
         # Advance the feedback recurrence AFTER the loss terms: the pool's
         # next feedback is this forward's decoded grid (givens clamped),
         # optionally scrambled for corrupted-state recovery training.
-        if config.feedback:
+        if pool.carry is not None:
             with torch.no_grad():
-                self._pool_feedback = self._clamp_givens(
-                    logits.argmax(dim=-1).detach(),
-                    self._pool_inputs,
-                )
-                if config.feedback_scramble_prob > 0:
-                    self._pool_feedback = self._scramble_feedback(
-                        self._pool_feedback,
-                        self._pool_inputs,
-                    )
+                pool.advance_feedback(logits)
 
         return _ForwardLoss(
             loss=loss,
@@ -1571,7 +1487,7 @@ class Trainer:
         n_active: Tensor,
     ) -> Tensor:
         """Reduce the per-sample cardinality loss exactly like the lm loss."""
-        labels = self._pool_labels
+        labels = self.pool.labels
         per_sample = csp_cardinality_per_sample(
             logits,
             labels,
@@ -1581,105 +1497,6 @@ class Trainer:
         contributes = active & (labels != self.config.ignore_label_id).any(dim=-1)
         per_sample = torch.where(contributes, per_sample, torch.zeros_like(per_sample))
         return per_sample.sum() / n_active.clamp(min=1)
-
-    def _clamp_givens(self, decoded: Tensor, inputs: Tensor) -> Tensor:
-        """Return the decoded grid with every given cell forced back to its input digit."""
-        given = (inputs >= 2) & (inputs < self.config.dataset.spec.vocab_size)
-        return torch.where(given, inputs, decoded)
-
-    # Per-step draw order from the dedicated scramble generator is a contract:
-    # ``rand(bs)`` -> ``rand(bs, grid_len)`` -> ``randint(2, vocab_size, (bs, grid_len))``.
-    def _scramble_feedback(self, feedback: Tensor, inputs: Tensor) -> Tensor:
-        """Corrupt random non-given cells of randomly selected feedback grids."""
-        config = self.config
-        bs, grid_len = feedback.shape
-        slot = (
-            torch.rand(bs, device=self.device, generator=self._scramble_gen)
-            < config.feedback_scramble_prob
-        )
-        cell = (
-            torch.rand(bs, grid_len, device=self.device, generator=self._scramble_gen)
-            < config.feedback_scramble_cells / grid_len
-        )
-        given = (inputs >= 2) & (inputs < self.config.dataset.spec.vocab_size)
-        random_digits = torch.randint(
-            2,
-            config.dataset.spec.vocab_size,
-            (bs, grid_len),
-            device=self.device,
-            generator=self._scramble_gen,
-        )
-        return torch.where(
-            slot.unsqueeze(-1) & cell & ~given,
-            random_digits,
-            feedback,
-        )
-
-    # With probability ``halt_exploration_prob`` a sample is forced to take a random
-    # minimum number of steps in ``[2, max_act]`` before its q-halt head may fire;
-    # otherwise the minimum is 1. Draw order from the dedicated halt generator is a
-    # contract: ``rand(bs)`` then ``randint(bs)``.
-    def _min_halt_steps(self, bs: int, max_act: int) -> Tensor:
-        """Per-sample minimum ACT steps before a sample may halt."""
-        explore = (
-            torch.rand(bs, device=self.device, generator=self._halt_gen)
-            < self.config.halt_exploration_prob
-        )
-        # randint's high is exclusive, so max_act + 1 samples the inclusive
-        # range [2, max_act] -- never above the hard cap.
-        return torch.where(
-            explore,
-            torch.randint(
-                2,
-                max_act + 1,
-                (bs,),
-                device=self.device,
-                generator=self._halt_gen,
-            ),
-            torch.ones(bs, dtype=torch.long, device=self.device),
-        )
-
-    def _force_continue(self, bs: int) -> Tensor:
-        """Per-sample mask forcing another ACT step (plain exploration)."""
-        return (
-            torch.rand(bs, device=self.device, generator=self._halt_gen)
-            < self.config.halt_exploration_prob
-        )
-
-    def _update_carry_and_halt(
-        self,
-        *,
-        z_slow_out: Tensor,
-        z_fast_out: Tensor,
-        q_halt: Tensor,
-    ) -> None:
-        """Persist z_slow/z_fast/h_step and compute the next-step halt mask."""
-        self._pool_z_slow.copy_(z_slow_out.to(self._pool_z_slow.dtype))
-        self._pool_z_fast.copy_(z_fast_out.to(self._pool_z_fast.dtype))
-        self._pool_h_step.add_(1)
-
-        bs = self._batch_size
-        max_act = self.config.max_act_steps
-        at_max = self._pool_h_step >= max_act
-        if self.config.train_q_halt:
-            q_positive = q_halt > 0
-            if self.config.min_halt_steps_enabled:
-                if self.config.halt_exploration_prob > 0:
-                    min_halt_steps = self._min_halt_steps(bs, max_act)
-                else:
-                    min_halt_steps = torch.ones(
-                        bs,
-                        dtype=torch.long,
-                        device=self.device,
-                    )
-                past_min = self._pool_h_step >= min_halt_steps
-                halt = at_max | (q_positive & past_min)
-            else:
-                halt = at_max | (q_positive & ~self._force_continue(bs))
-        else:
-            halt = at_max
-        # Store the halt mask for the next call's refill.
-        self._pool_halted = halt
 
     # -- Eval internals ----------------------------------------------------------
 
@@ -1697,7 +1514,8 @@ class Trainer:
         boards = media
         kwargs = step_kwargs
         z_slow, z_fast = self.model.init_z(batch_size)
-        feedback = boards if config.feedback else None
+        carry = self.pool.carry
+        feedback = boards if carry is not None else None
         final_logits: Tensor | None = None
         final_q_halt = torch.zeros(batch_size, device=self.device)
         act_used = torch.full(
@@ -1716,8 +1534,8 @@ class Trainer:
             )
             z_slow = out["z_slow"]
             z_fast = out["z_fast"]
-            if feedback is not None:
-                feedback = self._clamp_givens(out["logits"].argmax(dim=-1), boards)
+            if carry is not None:
+                feedback = carry.decode(out["logits"], media=boards)
             if final_logits is None:
                 final_logits = torch.empty(
                     (batch_size, *out["logits"].shape[1:]),
@@ -1993,6 +1811,50 @@ class Trainer:
 # ---------------------------------------------------------------------------
 # Private helpers.
 # ---------------------------------------------------------------------------
+
+
+def _pool(config: Trainer.Config) -> AtomicPool.Config:
+    """Return the ACT pool the recipe's scalar fields describe."""
+    vocab = config.dataset.spec.vocab_size
+    exploration = (
+        SampledMinimum.Config(prob=config.halt_exploration_prob)
+        if config.min_halt_steps_enabled
+        else ForcedContinue.Config(prob=config.halt_exploration_prob)
+    )
+    return AtomicPool.Config(
+        batch_size=config.dataset.batch_size,
+        max_steps=config.max_act_steps,
+        halting=(
+            HaltTraining.Config(
+                weight=config.q_halt_weight,
+                exploration=exploration,
+                seed=config.halt_exploration_seed,
+            )
+            if config.train_q_halt
+            else None
+        ),
+        feedback=(
+            FeedbackCarry.Config(
+                givens=(2, vocab - 1),
+                corruption=(
+                    SlotScramble.Config(
+                        prob=config.feedback_scramble_prob,
+                        cells=config.feedback_scramble_cells,
+                        high=vocab,
+                    )
+                    if config.feedback_scramble_prob > 0
+                    else None
+                ),
+                seed=config.feedback_scramble_seed,
+            )
+            if config.feedback
+            else None
+        ),
+        grid_len=config.model.num_puzzle_grid_tokens,
+        seq_len=config.model.total_seq_len,
+        channels_hidden=config.model.channels_in,
+        dtype=torch.float32,
+    )
 
 
 @dataclass(slots=True, kw_only=True)

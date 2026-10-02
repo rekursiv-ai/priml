@@ -14,7 +14,12 @@ import torch
 import torch.distributed as dist
 
 from priml.baselines.arcagi2.model import ArcModelConfig
-from priml.baselines.sudoku.act import ActPool
+from priml.baselines.sudoku.act import (
+    AtomicPool,
+    HaltTraining,
+    PoolConfig,
+    SampledMinimum,
+)
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.baselines.sudoku.train_step import SudokuTrainStep
 from priml.lib.custom_json import DictCodec
@@ -55,7 +60,7 @@ class ArcDataParallel(DataParallel):
 
 
 class ArcTrainStep(SudokuTrainStep):
-    """Retain task identifiers and learned initial latents in atomic ACT slots."""
+    """Atomic ACT with a stablemax loss and a sparsely updated task table."""
 
     class Config(SudokuTrainStep.Config):
         """Source TRM objective and injected dense/sparse optimizers."""
@@ -84,12 +89,14 @@ class ArcTrainStep(SudokuTrainStep):
         )
         """Touched-row optimizer; its rate is constant during body warmup."""
 
-        act: ActPool.Config | None = field(
-            default_factory=lambda: ActPool.Config(
+        pool: PoolConfig | None = field(
+            default_factory=lambda: AtomicPool.Config(
                 batch_size=256,
                 max_steps=16,
-                halt_weight=0.5,
-                feedback=False,
+                halting=HaltTraining.Config(
+                    weight=0.5,
+                    exploration=SampledMinimum.Config(),
+                ),
             ),
         )
         """Atomic ACT without prediction feedback."""
@@ -107,14 +114,9 @@ class ArcTrainStep(SudokuTrainStep):
         """Warmup before seeding the EMA shadow."""
 
     def __init__(self, config: Config) -> None:
-        if config.act is None:
-            raise ValueError("ARC2 training requires an atomic ACT pool.")
+        if not isinstance(config.pool, AtomicPool.Config):
+            raise TypeError("ARC2 training requires an atomic ACT pool.")
         super().__init__(config)
-        self.puzzle_ids = torch.zeros(
-            config.act.batch_size,
-            dtype=torch.int32,
-            device=self.device,
-        )
         self.sparse_optimizer = config.sparse_optimizer.make()(
             [
                 {
@@ -166,24 +168,6 @@ class ArcTrainStep(SudokuTrainStep):
         return prefix
 
     @override
-    def _ingest(self, batch: Mapping[str, object]) -> tuple[Tensor, Tensor, Tensor]:
-        act = self.act
-        assert isinstance(act, ActPool)
-        identifiers = batch["puzzle_identifiers"]
-        assert isinstance(identifiers, Tensor)
-        identifiers = identifiers.to(torch.int32).clone()
-        valid = batch.get("valid_count", len(identifiers))
-        assert isinstance(valid, int)
-        identifiers[valid:] = 0
-        self.puzzle_ids = torch.where(act.halted, identifiers, self.puzzle_ids)
-        result = super()._ingest(batch)
-        initial_slow, initial_fast = self.net.init_latents(act.config.batch_size)
-        halted = act.halted.view(-1, 1, 1)
-        act.z_slow = torch.where(halted, initial_slow, act.z_slow)
-        act.z_fast = torch.where(halted, initial_fast, act.z_fast)
-        return result
-
-    @override
     def _loss(
         self,
         logits: Tensor,
@@ -192,8 +176,9 @@ class ArcTrainStep(SudokuTrainStep):
         halt: Tensor,
         active: Tensor,
     ) -> tuple[Tensor, dict[str, float | Tensor]]:
-        act = self.act
-        assert isinstance(act, ActPool)
+        pool = self.pool
+        if not isinstance(pool, AtomicPool):
+            raise TypeError("ARC2 training requires an atomic ACT pool.")
         ignore = self.config.ignore_label_id
         per_token = stablemax_cross_entropy(
             logits.double(),
@@ -206,13 +191,12 @@ class ArcTrainStep(SudokuTrainStep):
             active,
             per_sample,
             torch.zeros_like(per_sample),
-        ).sum() / float(act.config.batch_size)
-        halt_loss, metrics = act.halt_loss(
+        ).sum() / float(pool.config.batch_size)
+        halt_loss, metrics = self._halt_loss(
             logits,
             labels=labels,
             halt=halt,
             active=active,
-            ignore_label_id=ignore,
         )
         metrics["lm_loss"] = lm_loss.detach()
         return lm_loss + halt_loss, metrics
@@ -227,8 +211,6 @@ class ArcTrainStep(SudokuTrainStep):
         assert isinstance(identifiers, Tensor)
         valid = batch.get("valid_count", len(media))
         assert isinstance(valid, int)
-        act = self.act
-        assert isinstance(act, ActPool)
         if valid == 0:
             return {
                 "loss": media.new_zeros(1, dtype=torch.float32),
@@ -257,12 +239,11 @@ class ArcTrainStep(SudokuTrainStep):
                 lm_loss = (per_token.sum(dim=-1) / counted).sum() / active.sum().clamp(
                     min=1,
                 )
-                halt_loss, metrics = act.halt_loss(
+                halt_loss, metrics = self._halt_loss(
                     logits[:valid],
                     labels=target,
                     halt=halt[:valid],
                     active=active,
-                    ignore_label_id=self.config.ignore_label_id,
                 )
                 loss = lm_loss + halt_loss
         metrics["lm_loss"] = lm_loss.detach()
@@ -281,14 +262,16 @@ class ArcTrainStep(SudokuTrainStep):
         """Advance atomic ACT, then update the body and touched sparse rows."""
         self.model.train()
         media, labels, active = self._ingest(batch)
+        self._stash_feedback()
         with self._autocast():
-            output = self.net(media, *self._carry(), puzzle_identifiers=self.puzzle_ids)
+            output = self.net(media, *self._carry(), **self._prefix_kwargs(batch))
         loss, metrics = self._loss(
             output.logits,
             labels=labels,
             halt=output.halt,
             active=active,
         )
+        self._advance_feedback(output.logits, metrics)
         loss.backward()
         if math.isfinite(self.config.gradient_clip_norm):
             self.last_grad_norm = clip_grad_norm_(
@@ -315,13 +298,11 @@ class ArcTrainStep(SudokuTrainStep):
                 sparse.local_weights.grad = None
             self.model.zero_grad(set_to_none=True)
             self._ema(self.model)
-        assert isinstance(self.act, ActPool)
-        self.act.advance(
+        self._advance_pool(
             output.z_slow,
-            z_fast=output.z_fast,
-            logits=output.logits,
+            output.z_fast,
             halt=output.halt,
-            media=media,
+            active=active,
         )
         return {
             "loss": loss.detach().reshape(1),

@@ -22,7 +22,8 @@ import torch
 from priml.baselines.arcagi2.experiments import exp000
 from priml.baselines.arcagi2.model import RotaryBlock
 from priml.baselines.arcagi2.record_test import assert_matches, load, reduce
-from priml.baselines.sudoku.embedding import GridEmbedding
+from priml.baselines.sudoku.act import FeedbackCarry
+from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.swiglu import SwiGLU
@@ -61,9 +62,9 @@ def training_config(width: int, dtype: torch.dtype | None) -> ArcTrainStep.Confi
     assert isinstance(model.prefix, SparsePuzzleEmbedding.Config)
     model.prefix.num_puzzles = 4
     model.prefix.batch_size = 2
-    assert candidate.act is not None
-    candidate.act.batch_size = 2
-    candidate.act.max_steps = 2
+    assert candidate.pool is not None
+    candidate.pool.batch_size = 2
+    candidate.pool.max_steps = 2
     candidate.dtype_autocast = dtype
     candidate.total_train_steps = 3
     candidate.warmup_steps = 0
@@ -310,10 +311,28 @@ def test_reference_trajectory_bites() -> None:
     assert mismatches(expected, record)
 
 
+def test_training_feeds_the_decoded_grid_back() -> None:
+    config = training_config(4, None)
+    config.gradient_clip_norm = math.inf
+    assert isinstance(config.model.embedding, GridEmbedding.Config)
+    config.model.embedding.channels = [PredictionFeedback.Config()]
+    assert config.pool is not None
+    config.pool.feedback = FeedbackCarry.Config()
+    torch.manual_seed(0)
+    step = config.make()
+    batch = training_batch(0, 0)
+    metrics = step.train_step(**batch).get("metrics", {})
+    assert "feedback_corrupt_frac" in metrics
+    pool = step.pool
+    assert pool is not None
+    # The fed-back grid is now the decoded answer, not the seated puzzle.
+    assert not torch.equal(pool.feedback, pool.inputs)
+
+
 def test_arc_step_requires_atomic_act() -> None:
     config = training_config(4, None)
-    config.act = None
-    with pytest.raises(ValueError, match="requires an atomic ACT"):
+    config.pool = None
+    with pytest.raises(TypeError, match="requires an atomic ACT"):
         config.make()
 
 

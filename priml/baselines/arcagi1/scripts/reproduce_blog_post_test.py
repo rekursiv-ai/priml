@@ -5,10 +5,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from priml.baselines.arcagi1.act import AtomicPool
 from priml.baselines.arcagi1.scripts.reproduce_blog_post import overlay, recipe
 from priml.baselines.arcagi1.train_step import TrmTrainStep
 from priml.baselines.arcagi1.train_step_test import port_config
+from priml.baselines.sudoku.act import AtomicPool
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.lib.custom_json import DictCodec
 

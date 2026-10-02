@@ -18,6 +18,7 @@ from configgle.pprinting import pformat
 import pytest
 
 from priml.baselines.sudoku import experiments
+from priml.baselines.sudoku.act import LearnedStart, ZeroStart
 from priml.baselines.sudoku.embedding import (
     FactoredPositions,
     GridEmbedding,
@@ -52,6 +53,7 @@ LADDER: Final[list[tuple[str, Callable[[], SudokuTrainLoop]]]] = [
     ("exp001", experiments.exp001),
     ("exp002", experiments.exp002),
     ("exp003", experiments.exp003),
+    ("exp015", experiments.exp015),
     ("exp_smoke", experiments.exp_smoke),
 ]
 
@@ -117,7 +119,7 @@ def test_exp001_changes_only_the_block() -> None:
     assert isinstance(base.step.model.block, TransformerBlock.Config)
     assert isinstance(fork.step.model.block, MLPMixerBlock.Config)
     assert fork.step.model.recurrence is base.step.model.recurrence is None
-    assert fork.step.act is base.step.act is None
+    assert fork.step.pool is base.step.pool is None
     assert fork.max_steps == base.max_steps
 
 
@@ -131,7 +133,7 @@ def test_exp002_adds_recurrence_and_its_feedback_channel() -> None:
     base, fork = experiments.exp000(), experiments.exp002()
     assert base.step.model.recurrence is None
     assert fork.step.model.recurrence is not None
-    assert fork.step.act is not None
+    assert fork.step.pool is not None
     assert type(fork.step.model.block) is type(base.step.model.block)
 
     base_embedding = base.step.model.embedding
@@ -145,18 +147,52 @@ def test_exp002_adds_recurrence_and_its_feedback_channel() -> None:
     ]
 
 
+@pytest.mark.parametrize("factory", [experiments.exp002, experiments.exp003])
+def test_the_recurrent_rungs_replay_as_trained(
+    factory: Callable[[], SudokuTrainLoop],
+) -> None:
+    """They trained with no fed-back grid and zero-seeded slots; keep it so."""
+    pool = factory().step.pool
+    assert pool is not None
+    assert pool.feedback is None
+    assert isinstance(pool.start, ZeroStart.Config)
+
+
+def test_exp015_changes_only_the_pool() -> None:
+    """Feedback and the learned start move together; nothing else does."""
+    base, fork = experiments.exp002(), experiments.exp015()
+    assert base.step.pool is not None
+    assert fork.step.pool is not None
+    assert fork.step.pool.feedback is not None
+    assert isinstance(fork.step.pool.start, LearnedStart.Config)
+    fork.step.pool.feedback = base.step.pool.feedback
+    fork.step.pool.start = base.step.pool.start
+    fork.experiment_name = base.experiment_name
+    assert fork.pformat() == base.pformat()
+
+
+def test_the_clue_range_follows_the_vocabulary() -> None:
+    """Clues are every digit token, so a resized vocabulary moves the range."""
+    config = experiments.exp015()
+    config.dataset.spec.vocab_size = 6
+    finalized = config.copy_tree().finalize()
+    assert finalized.step.pool is not None
+    assert finalized.step.pool.feedback is not None
+    assert finalized.step.pool.feedback.givens == (2, 5)
+
+
 def test_exp003_is_exp002_with_the_other_block() -> None:
     base, fork = experiments.exp002(), experiments.exp003()
     assert isinstance(fork.step.model.block, MLPMixerBlock.Config)
-    assert fork.step.act is not None
-    assert base.step.act is not None
-    assert fork.step.act.max_steps == base.step.act.max_steps
+    assert fork.step.pool is not None
+    assert base.step.pool is not None
+    assert fork.step.pool.max_steps == base.step.pool.max_steps
 
 
 def test_the_pool_is_built_to_the_models_shape() -> None:
     """A pool sized independently of the model would fail only at runtime."""
     config = experiments.exp002().copy_tree().finalize()
-    act = config.step.act
+    act = config.step.pool
     model = config.step.model
     assert act is not None
     assert act.grid_len == model.grid_len
