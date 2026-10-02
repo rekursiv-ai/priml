@@ -566,6 +566,7 @@ def matmul_cost(
     dtype: torch.dtype | None = None,
     weight_bytes: int = 0,
     dequant_flops: int = 0,
+    operand_read: bool = True,
 ) -> Cost:
     """Cost one complete ``[M, K] @ [K, N]`` invocation and its adjoint.
 
@@ -576,6 +577,11 @@ def matmul_cost(
       weight: Own the right matrix as parameters; False keeps its activation
         traffic but owns no matrix parameters.
       rows: Concrete rows M processed by this invocation.
+      operand_read: Charge the right ``K x N`` operand's traffic. ``False``
+        leaves it out, for an operand a caller reads at another multiplicity --
+        shared across query heads, say. ``traffic`` rebuilds exactly that
+        traffic, so it can be added back at whichever count is right. FLOPs and
+        parameter ownership never depend on it.
       dtype: Element type of every operand, gradients included; ``None`` is
         torch's default. Tags every cell and sets the bytes per element.
       weight_bytes: Stored bytes of a packed right matrix -- codes, scales,
@@ -606,7 +612,7 @@ def matmul_cost(
     products = channels_in * channels_out
     biases = channels_out if bias else 0
     params = (products if weight else 0) + biases
-    stored = weight_bytes or s * products
+    stored = (weight_bytes or s * products) if operand_read else 0
     moved = s * rows * (channels_in + channels_out) + stored
     return Cost(
         cells={

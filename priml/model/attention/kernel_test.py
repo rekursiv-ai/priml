@@ -457,6 +457,95 @@ def test_kernel_bfb(device: str, name: str, kernel: object) -> None:
     )
 
 
+def test_gqa_kv_traffic_is_charged_once_per_kv_head() -> None:
+    # Grouped-query attention shares K and V across the query heads in a group,
+    # so the operand reads are counted per KV head while the arithmetic stays
+    # per query head. Charged per query head instead, the reads are overstated
+    # by num_heads / num_heads_kv.
+    head, kv_head, channel, context, batch = 4, 2, 5, 7, 3
+    itemsize = torch.bfloat16.itemsize
+
+    grouped = attention_kernel_cost(
+        seq_len=context,
+        batch_size=batch,
+        dtype=torch.bfloat16,
+        num_heads=head,
+        num_heads_kv=kv_head,
+        channels_head=channel,
+        rows=1,
+    )
+    dense = attention_kernel_cost(
+        seq_len=context,
+        batch_size=batch,
+        dtype=torch.bfloat16,
+        num_heads=head,
+        num_heads_kv=head,
+        channels_head=channel,
+        rows=1,
+    )
+
+    # The shared part of the ledger: K and V read once per KV head, per
+    # sequence, over the whole context. Reading them per query head instead is
+    # what this fixes.
+    shared = 2 * batch * kv_head * context * channel * itemsize
+    assert (
+        dense["bytes", "primal", "matmul"].sum()
+        - grouped["bytes", "primal", "matmul"].sum()
+        == shared
+    )
+    # Only the reads move. Every query head still runs its own two products, so
+    # the FLOPs are identical either way.
+    assert grouped["flops", "primal", "matmul"] == dense["flops", "primal", "matmul"]
+
+
+def test_multi_head_attention_is_unchanged_by_the_kv_count() -> None:
+    # -1 mirrors num_heads, and an explicit equal count must agree with it: no
+    # existing caller sees a different number.
+    for head in (2, 4, 8):
+        default = attention_kernel_cost(
+            seq_len=16,
+            dtype=torch.bfloat16,
+            num_heads=head,
+            channels_head=8,
+            rows=1,
+        )
+        explicit = attention_kernel_cost(
+            seq_len=16,
+            dtype=torch.bfloat16,
+            num_heads=head,
+            num_heads_kv=head,
+            channels_head=8,
+            rows=1,
+        )
+        assert default.cells == explicit.cells
+
+
+def test_the_gqa_saving_scales_with_the_grouping_ratio() -> None:
+    # Llama-3-8B shares K/V across 32 query heads in groups of 8, so its KV
+    # reads are a quarter of what a per-query-head count would charge.
+    saved: list[int] = []
+    for kv_head in (8, 16, 32):
+        cost = attention_kernel_cost(
+            seq_len=32,
+            dtype=torch.bfloat16,
+            num_heads=32,
+            num_heads_kv=kv_head,
+            channels_head=16,
+            rows=1,
+        )
+        saved.append(cost["bytes", "primal", "matmul"].sum())
+    assert saved[0] < saved[1] < saved[2]
+    # Bytes fall as the reads are shared further; FLOPs never do.
+    dense = attention_kernel_cost(
+        seq_len=32,
+        dtype=torch.bfloat16,
+        num_heads=32,
+        channels_head=16,
+        rows=1,
+    )
+    assert saved[-1] == dense["bytes", "primal", "matmul"].sum()
+
+
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main
 

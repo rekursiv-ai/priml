@@ -28,6 +28,7 @@ def attention_kernel_cost(
     num_heads: int,
     channels_head: int,
     channels_v_head: int = -1,
+    num_heads_kv: int = -1,
     window: int = -1,
     dropout_p: float = 0.0,
     rows: int = -1,
@@ -46,6 +47,9 @@ def attention_kernel_cost(
       batch_size: Sequences in this invocation.
       dtype: Activation dtype; ``None`` is torch's default.
       num_heads: Query heads.
+      num_heads_kv: Key/value heads; ``-1`` mirrors ``num_heads``. A smaller
+        count is Grouped-Query Attention, where several query heads share one
+        key and value head.
       channels_head: Width of each query/key head.
       channels_v_head: Value width; -1 uses the query/key width.
       window: Previous keys each query reaches, plus itself; negative is unbounded.
@@ -71,6 +75,7 @@ def attention_kernel_cost(
         weight=False,
         rows=sequence_rows,
         dtype=dt,
+        operand_read=False,
     ).tile(batch_size)
     values = matmul_cost(
         channels_in=keys,
@@ -78,6 +83,7 @@ def attention_kernel_cost(
         weight=False,
         rows=sequence_rows,
         dtype=dt,
+        operand_read=False,
     ).tile(batch_size)
     # Logical unfused I/O, including scores, even when execution uses fused SDPA.
     # Scale/subtract/exp/divide read two row scalars; VJP reads one row sum.
@@ -109,7 +115,26 @@ def attention_kernel_cost(
         rows=query_rows,
         dtype=dt,
     )
-    return (scores + values + softmax + dropout).tile(num_heads, copies=num_heads)
+    # Grouped-query attention shares K and V across the query heads in a
+    # group, so those operand reads happen once per KV head rather than once
+    # per query head -- charging them per query head overstates them by
+    # num_heads / num_heads_kv. The two products below therefore leave the
+    # operand read out and the read is added back on its own, at the KV head
+    # count. The arithmetic stays per query head: each one really does run its
+    # own two products over the whole context, so FLOPs never move.
+    #
+    # The same read the per-head products left out, rebuilt as plain operand
+    # traffic. The adjoint moves twice the primal, matching matmul_cost's own
+    # adjoint cell.
+    kv_elements = channels_head * keys + keys * value_width
+    kv_read = (
+        traffic("primal", "matmul", elements=kv_elements, dtype=dt)
+        + traffic("adjoint", "matmul", elements=2 * kv_elements, dtype=dt)
+    ).tile(batch_size)
+    per_head = (scores + values + softmax + dropout).tile(num_heads, copies=num_heads)
+    if num_heads_kv <= 0 or num_heads_kv == num_heads:
+        return per_head + kv_read.tile(num_heads)
+    return per_head + kv_read.tile(num_heads_kv)
 
 
 class SdpaFused(nn.Module):
