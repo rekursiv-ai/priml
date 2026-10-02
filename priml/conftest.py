@@ -55,6 +55,10 @@ class _TorchModule(Protocol):
     def manual_seed(self, value: int) -> object: ...
 
 
+class _NumbaConfig(Protocol):
+    def reload_config(self) -> None: ...
+
+
 # Re-exported, not merely imported: an autouse fixture reaches only the
 # directory of the conftest that names it, so binding it here is what points
 # every priml test's XDG lookups at a tmp dir instead of the developer's own,
@@ -91,6 +95,17 @@ def cap_math_threads() -> None:
     AMD host, where MKL takes a generic path anyway, and broke an Intel one.
     MKL reads it at its first GEMM, so it must be set before any matmul runs.
 
+    Numba's ``prange`` pool is ``NUMBA_NUM_THREADS`` wide, every CPU by
+    default, so an xdist worker keeps two: under ``pytest -n 32`` unit tests of
+    10 ms took up to 2 s. A serial run keeps every CPU (an 8,192-world Craftax
+    pool builds in 0.29 s on 128 threads, 7.4 s on two). Idle pool threads
+    must sleep either way: spinning, they slowed every later test in the
+    process 20-30x. A pytest plugin imports Numba before any conftest, and
+    Numba re-reads its environment only at compile time, so a kernel loaded
+    from cache could launch the pool at the stale width; reloading here, before
+    any test runs, fixes the width before launch, after which Numba refuses to
+    change it.
+
     Every variable uses ``setdefault``, so an explicit
     ``OMP_NUM_THREADS=8 pytest`` always wins.
     """
@@ -104,6 +119,12 @@ def cap_math_threads() -> None:
     ):
         os.environ.setdefault(name, "1")  # noqa: TID251 -- Thread cap the operator may override; not a provisioned cache path.
     os.environ.setdefault("MKL_CBWR", "COMPATIBLE")  # noqa: TID251 -- Kernel pin the operator may override; not a provisioned cache path.
+    os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")  # noqa: TID251 -- Thread policy the operator may override; not a provisioned cache path.
+    if "PYTEST_XDIST_WORKER" in os.environ:
+        os.environ.setdefault("NUMBA_NUM_THREADS", "2")  # noqa: TID251 -- Thread cap the operator may override; not a provisioned cache path.
+    numba_config = cast(_NumbaConfig | None, sys.modules.get("numba.core.config"))
+    if numba_config is not None:
+        numba_config.reload_config()
 
 
 cap_math_threads()
