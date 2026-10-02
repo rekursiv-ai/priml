@@ -1346,9 +1346,10 @@ def test_float2rgb_is_exact_when_compiled_at_reduced_precision() -> None:
     Inductor fuses scale/offset/round and carries the intermediate at
     float32; eager materializes each step at the input's own width. At
     float16 and bfloat16 that makes the compiled kernel EXACT against a
-    correctly-rounded oracle while eager misses hundreds of samples -- which
-    is why the decode pipelines want this compiled, and why a future rewrite
-    that reintroduces a materialized intermediate must fail here.
+    correctly-rounded oracle, where eager misses hundreds of samples
+    (``test_float2rgb_misses_the_oracle_eagerly_at_reduced_precision``) --
+    which is why the decode pipelines want this compiled, and why a future
+    rewrite that reintroduces a materialized intermediate must fail here.
 
     Marked because it is the only test in this package that must run the REAL
     Inductor backend -- the fused kernel's numerics are the subject, so
@@ -1356,23 +1357,28 @@ def test_float2rgb_is_exact_when_compiled_at_reduced_precision() -> None:
     unit tier, and the marker's ``slow`` alias moves it to the pre-push tier
     rather than deleting the coverage.
     """
-    raw = torch.rand(4096, generator=torch.Generator().manual_seed(0)) * 2 - 1
-
     for dtype in (torch.float16, torch.bfloat16):
-        x = raw.to(dtype)
-        # Half-to-even in float64, matching ``round_``; the input is already
-        # at ``dtype`` so no cast intervenes.
-        oracle = (x.double() * 127.5 + 127.5).clamp(0.0, 255.0).round()
+        x, oracle = _reduced_precision_samples(dtype)
         torch._dynamo.reset()
         compiled = torch.compile(float2rgb, fullgraph=True)
 
         compiled_wrong = int((compiled(x).double() != oracle).sum())
-        eager_wrong = int((float2rgb(x).double() != oracle).sum())
         assert compiled_wrong == 0, f"{dtype}: compiled missed {compiled_wrong}"
-        assert eager_wrong > compiled_wrong, (
-            f"{dtype}: eager matched the fused kernel ({eager_wrong}); the "
-            "Notes claim a gap that no longer exists."
-        )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_float2rgb_misses_the_oracle_eagerly_at_reduced_precision(
+    dtype: torch.dtype,
+) -> None:
+    """The other half of the Notes' gap: eager is NOT exact at reduced precision.
+
+    Eager needs no compile, so it is checked here, in the unit tier, rather than
+    beside the compiled half. Were eager exact too, the compiled path would buy
+    nothing and the Notes would describe a gap that no longer exists.
+    """
+    x, oracle = _reduced_precision_samples(dtype)
+    eager_wrong = int((float2rgb(x).double() != oracle).sum())
+    assert eager_wrong > 0, f"{dtype}: eager matched the correctly-rounded oracle"
 
 
 @pytest.mark.compute_torch_compile
@@ -1432,6 +1438,17 @@ def test_float2rgb_accepts_anything_convert_to_tensor_does() -> None:
     _ = float2rgb(donated, inplace=True)
     assert donated.data_ptr() == pointer
     assert donated[0] != 0.0, "inplace=True did not scale the caller's buffer"
+
+
+# Seeded and that many because the eager divergence is input-dependent: 64 samples hit
+# it only sometimes.
+def _reduced_precision_samples(dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return 4096 seeded samples at ``dtype`` and their correctly-rounded RGB."""
+    x = (torch.rand(4096, generator=torch.Generator().manual_seed(0)) * 2 - 1).to(dtype)
+    # Half-to-even in float64, matching ``round_``; the input is already at
+    # ``dtype`` so no cast intervenes.
+    oracle = (x.double() * 127.5 + 127.5).clamp(0.0, 255.0).round()
+    return x, oracle
 
 
 if __name__ == "__main__":

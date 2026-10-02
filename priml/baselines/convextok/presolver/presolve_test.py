@@ -14,6 +14,7 @@ the compiled code asks for it: that every kernel compiles and still matches PSLP
 and that a kernel keeps a single specialization.
 """
 
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Final, cast
@@ -25,7 +26,11 @@ import pytest
 import torch
 
 from priml.baselines.convextok.presolver import core
-from priml.baselines.convextok.presolver.numba_api import Dispatcher
+from priml.baselines.convextok.presolver.numba_api import (
+    Dispatcher,
+    get_num_threads,
+    set_num_threads,
+)
 from priml.baselines.convextok.presolver.presolve import (
     Presolved,
     presolve,
@@ -58,10 +63,33 @@ def test_presolve_and_postsolve_match_pslp_on_fuzz_program(path: Path) -> None:
     _assert_matches_pslp(path)
 
 
+@pytest.fixture
+def two_numba_threads() -> Iterator[None]:
+    """Run the parallel kernels on two threads, leaving torch's thread count alone.
+
+    Numba sizes its pool to every core, and on these few-row programs the
+    parallel kernels then spend their time synchronizing threads: the compiled
+    sweep below took 2.2-4.4 s at 128 threads and 0.13 s at two (measured on a
+    loaded 128-core host). Two still run each ``prange`` concurrently, and the
+    kernels' results do not depend on the count -- the goldens check that.
+    """
+    # Read first: launching Numba's OpenMP pool, which ``get_num_threads`` does,
+    # raises the process's OpenMP thread count to every core, and torch reads
+    # that count as its own. Unrestored, every later test in the worker ran
+    # torch on 128 threads (measured: a 0.6 s CPU rollout test took 42 s).
+    torch_threads = torch.get_num_threads()
+    numba_threads = get_num_threads()
+    set_num_threads(min(2, numba_threads))
+    yield
+    set_num_threads(numba_threads)
+    torch.set_num_threads(torch_threads)
+
+
 # Compiled: the first presolve in a process JIT-compiles every kernel it reaches,
 # about 45 s on x86 with a cold Numba cache, so this is one test, not one per program.
 @pytest.mark.compute_large_fixture
 @pytest.mark.parametrize("kernels", ["compiled"], indirect=True)
+@pytest.mark.usefixtures("two_numba_threads")
 def test_compiled_kernels_match_pslp_on_every_program() -> None:
     """Every kernel compiles, and the compiled presolve still matches PSLP.
 
@@ -76,6 +104,7 @@ def test_compiled_kernels_match_pslp_on_every_program() -> None:
 
 @pytest.mark.compute_large_fixture
 @pytest.mark.parametrize("kernels", ["compiled"], indirect=True)
+@pytest.mark.usefixtures("two_numba_threads")
 def test_index_dtypes_share_one_kernel_specialization() -> None:
     # A second specialization of a cached kernel can segfault a later process.
     program = fixture_program()

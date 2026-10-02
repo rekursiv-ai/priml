@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest import mock
 
 import copy
@@ -12,8 +12,10 @@ from torch import Tensor
 import pytest
 import torch
 
+from priml.baselines.craftax.conftest import generated_world
 from priml.baselines.craftax.env import CraftaxEnv
 from priml.baselines.craftax.game import constants, observation, world_gen
+from priml.baselines.craftax.game.state import EnvState
 from priml.baselines.craftax.restart import (
     RestartFromReserve,
     RestartOnDemand,
@@ -26,7 +28,6 @@ if TYPE_CHECKING:
 
     from configgle import Makeable
 
-    from priml.baselines.craftax.game.state import EnvState
     from priml.baselines.craftax.restart import RestartPolicy
 
 
@@ -457,6 +458,60 @@ def test_cuda_graphs_step_bit_for_bit_like_eager(
         assert torch.equal(a.done, b.done), index
     for name, value in eager.state.state_dict().items():
         assert torch.equal(value, graphed.state.state_dict()[name]), name
+
+
+@pytest.mark.parametrize("restart", [RestartOnDemand.Config, RestartFromReserve.Config])
+def test_a_step_writes_only_into_the_memory_a_graph_replays(
+    restart: Callable[[], Makeable[RestartPolicy]],
+) -> None:
+    """Capture's first rule, checked without a GPU: no step rebinds a buffer.
+
+    A replayed graph addresses the memory it was captured against, so a buffer
+    the step REBINDS -- the world, the pool, a reward or deal scalar -- goes
+    unseen by every replay. ``test_cuda_graphs_step_bit_for_bit_like_eager``
+    sees that only on a GPU; here every tensor the step machinery holds must
+    keep its address across steps that restart, generate, and deal.
+    """
+    config = CraftaxEnv.Config()
+    config.view = (3, 5)
+    config.num_envs = 4
+    config.device = "cpu"
+    config.optimistic_reset_ratio = 2
+    config.restart = restart()
+    env = config.make()
+    # Generated before the patch, which would otherwise answer the cache's own call.
+    generated_world()
+    with mock.patch.object(world_gen, "generate_world", _cached_world):
+        env.reset()
+        stepper = env._live_stepper()
+        addresses = _tensor_addresses(stepper)
+        for index in range(2):
+            env.state.player_health[index] = 0.0
+            assert bool(env.step(_actions(env, 4, index)).done[index])
+    assert _tensor_addresses(stepper) == addresses
+
+
+def _cached_world(
+    *,
+    num_envs: int,
+    generator: torch.Generator | None = None,
+    device: torch.device,
+) -> EnvState:
+    """Stand in for world generation with copies of one world generated once."""
+    del generator, device
+    return generated_world().take(torch.zeros(num_envs, dtype=torch.int64))
+
+
+def _tensor_addresses(holder: object) -> dict[str, int]:
+    """Map every tensor ``holder`` keeps, directly or in a world, to its address."""
+    addresses: dict[str, int] = {}
+    for name, value in cast("dict[str, object]", vars(holder)).items():
+        if isinstance(value, Tensor):
+            addresses[name] = value.data_ptr()
+        elif isinstance(value, EnvState):
+            for field, tensor in value.state_dict().items():
+                addresses[f"{name}.{field}"] = tensor.data_ptr()
+    return addresses
 
 
 def _reserve_env(*, seed: int = 0) -> CraftaxEnv:
