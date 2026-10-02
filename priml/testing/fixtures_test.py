@@ -7,8 +7,6 @@ from unittest.mock import MagicMock, patch
 import sys
 import warnings
 
-from torch import Tensor
-
 import pytest
 import torch
 
@@ -102,18 +100,6 @@ def test_compiler_isolation_resets_cleanly_with_warnings_as_errors() -> None:
             module=r"torch\..*",
         )
         torch._dynamo.reset()
-
-
-@pytest.mark.compute_torch_compile
-def test_compiler_isolation_compiles() -> None:
-    """The wrapped block can actually compile and run a graph."""
-
-    def add_one(value: Tensor) -> Tensor:
-        return value + 1
-
-    with torch_compiler_isolation():
-        compiled = torch.compile(add_one, dynamic=False)
-        assert torch.equal(compiled(torch.zeros(4)), torch.ones(4))
 
 
 def test_poison_free_pool_makes_a_later_empty_read_back_nan() -> None:

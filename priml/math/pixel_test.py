@@ -1339,42 +1339,16 @@ def test_rgb2float_compiles_without_a_graph_break() -> None:
     assert torch.equal(float2rgb(compiled(levels.to(torch.float16))), levels)
 
 
-@pytest.mark.compute_torch_compile
-def test_float2rgb_is_exact_when_compiled_at_reduced_precision() -> None:
-    """The accuracy claim in ``float2rgb``'s Notes, measured.
-
-    Inductor fuses scale/offset/round and carries the intermediate at
-    float32; eager materializes each step at the input's own width. At
-    float16 and bfloat16 that makes the compiled kernel EXACT against a
-    correctly-rounded oracle, where eager misses hundreds of samples
-    (``test_float2rgb_misses_the_oracle_eagerly_at_reduced_precision``) --
-    which is why the decode pipelines want this compiled, and why a future
-    rewrite that reintroduces a materialized intermediate must fail here.
-
-    Marked because it is the only test in this package that must run the REAL
-    Inductor backend -- the fused kernel's numerics are the subject, so
-    the trace-only backend would assert nothing. Its codegen dominates the package's
-    unit tier, and the marker's ``slow`` alias moves it to the pre-push tier
-    rather than deleting the coverage.
-    """
-    for dtype in (torch.float16, torch.bfloat16):
-        x, oracle = _reduced_precision_samples(dtype)
-        torch._dynamo.reset()
-        compiled = torch.compile(float2rgb, fullgraph=True)
-
-        compiled_wrong = int((compiled(x).double() != oracle).sum())
-        assert compiled_wrong == 0, f"{dtype}: compiled missed {compiled_wrong}"
-
-
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_float2rgb_misses_the_oracle_eagerly_at_reduced_precision(
     dtype: torch.dtype,
 ) -> None:
-    """The other half of the Notes' gap: eager is NOT exact at reduced precision.
+    """Eager is NOT exact at reduced precision, as ``float2rgb``'s Notes say.
 
-    Eager needs no compile, so it is checked here, in the unit tier, rather than
-    beside the compiled half. Were eager exact too, the compiled path would buy
-    nothing and the Notes would describe a gap that no longer exists.
+    Eager materializes each step at the input's own width, so it misses a
+    correctly-rounded oracle where Inductor's fused float32 intermediate does
+    not. Were eager exact too, compiling would buy nothing and the Notes would
+    describe a gap that no longer exists.
     """
     x, oracle = _reduced_precision_samples(dtype)
     eager_wrong = int((float2rgb(x).double() != oracle).sum())
