@@ -14,8 +14,6 @@ from priml.compile import (
     trace_compile,
 )
 
-import priml.compile
-
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -92,7 +90,7 @@ class TestLazyAssumeConstantResult:
 def isolated_traces(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
     """Give each test its own recompile ledger and keep dynamo unimported."""
     traces: dict[str, list[str]] = {}
-    monkeypatch.setattr(priml.compile, "_compile_traces", traces)
+    monkeypatch.setattr("priml.compile._compile_traces", traces)
     monkeypatch.setattr(torch.compiler, "assume_constant_result", _identity)
     return traces
 

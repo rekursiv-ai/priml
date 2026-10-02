@@ -7,6 +7,7 @@ from typing import Final, Self, override
 
 from configgle import Makes
 
+from priml.baselines.arcagi1 import experiments
 from priml.baselines.arcagi1.metric import (
     CanonicalPassK,
     PerOutputPass,
@@ -37,8 +38,6 @@ from priml.train.checkpointer import Checkpointer
 from priml.train.parallelism import NoParallel
 from priml.train.tracker import TrackerList
 from priml.train.train_loop import TrainLoop
-
-import priml.baselines.arcagi1.experiments
 
 
 class ArcTrainLoop(
@@ -219,7 +218,7 @@ def exp001() -> Arc2TrmTrainLoop:
       cfg: The reference recipe on ARC-AGI-2.
 
     """
-    return _on_arc2(priml.baselines.arcagi1.experiments.exp004(), "exp001")
+    return _on_arc2(experiments.exp004(), "exp001")
 
 
 def exp002() -> Arc2TrmTrainLoop:
@@ -239,7 +238,7 @@ def exp002() -> Arc2TrmTrainLoop:
       cfg: exp001 with the Muon recipe.
 
     """
-    return _on_arc2(priml.baselines.arcagi1.experiments.exp005(), "exp002")
+    return _on_arc2(experiments.exp005(), "exp002")
 
 
 def exp003() -> Arc2TrmTrainLoop:
@@ -258,7 +257,7 @@ def exp003() -> Arc2TrmTrainLoop:
       cfg: exp002 at Muon rate 0.01.
 
     """
-    return _on_arc2(priml.baselines.arcagi1.experiments.exp006(), "exp003")
+    return _on_arc2(experiments.exp006(), "exp003")
 
 
 def exp004() -> Arc2TrmTrainLoop:
@@ -281,7 +280,7 @@ def exp004() -> Arc2TrmTrainLoop:
       cfg: exp002 with the URM model.
 
     """
-    urm = priml.baselines.arcagi1.experiments.exp007()
+    urm = experiments.exp007()
     cfg = exp002()
     cfg.experiment_name = "exp004"
     cfg.step.model = urm.step.model
@@ -314,7 +313,7 @@ def exp005() -> Arc2TrmTrainLoop:
       cfg: exp004 with the augmentation and evaluation recipe.
 
     """
-    cfg = _on_arc2(priml.baselines.arcagi1.experiments.exp007(), "exp005")
+    cfg = _on_arc2(experiments.exp007(), "exp005")
     cfg.dataset.source_dataset_dir = arc2_aug_policy_template(
         translation_prob=0.2,
         scale_prob=0.2,
@@ -408,7 +407,7 @@ def exp007() -> Arc2TrmTrainLoop:
 # kept. Only what the dataset determines moves: its tree, the task-table size, the
 # sample-scale horizon, and the scoring rules ARC-AGI-2 reports.
 def _on_arc2(
-    source: priml.baselines.arcagi1.experiments.TrmTrainLoop,
+    source: experiments.TrmTrainLoop,
     name: str,
 ) -> Arc2TrmTrainLoop:
     """Return an ``arcagi1`` TRM recipe retargeted to ARC-AGI-2."""
