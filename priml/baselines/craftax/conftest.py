@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from importlib import util
 from typing import TYPE_CHECKING, Final
 
 import copy
 import functools
 import importlib
-import importlib.util
 import os
 
 import numpy as np
@@ -35,9 +35,7 @@ _REFERENCE_PROBES: Final = (
 def _reference_is_installed() -> bool:
     """Whether every reference root used by native tests is importable."""
     try:
-        return all(
-            importlib.util.find_spec(name) is not None for name in _REFERENCE_PROBES
-        )
+        return all(util.find_spec(name) is not None for name in _REFERENCE_PROBES)
     except ModuleNotFoundError:
         return False
 

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Final, cast
 import pytest
 import torch
 
+from priml.baselines.arcagi1.experiments import exp004, exp005, exp006
 from priml.baselines.arcagi1.metric import (
     CanonicalPassK,
     PerOutputPass,
@@ -40,8 +41,6 @@ from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import mismatches, read_tensors
 from priml.train.checkpointer import Checkpointer
 from priml.train.tracker import TrackerList
-
-import priml.baselines.arcagi1.experiments
 
 
 if TYPE_CHECKING:
@@ -151,10 +150,7 @@ def test_every_rung_is_sized_for_arc2(name: str) -> None:
 def test_trm_rungs_keep_the_arcagi1_step(name: str, source: str) -> None:
     """Only the task-table size and the horizon move off the ARC-AGI-1 recipe."""
     ours = rung(name).step
-    theirs = cast(
-        "Callable[[], priml.baselines.arcagi1.experiments.TrmTrainLoop]",
-        getattr(priml.baselines.arcagi1.experiments, source),
-    )().step
+    theirs = {"exp004": exp004, "exp005": exp005, "exp006": exp006}[source]().step
     prefix = theirs.model.prefix
     assert isinstance(prefix, SparsePuzzleEmbedding.Config)
     prefix.num_puzzles = NUM_PUZZLE_IDENTIFIERS

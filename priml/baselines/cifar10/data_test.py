@@ -6,11 +6,11 @@ from pathlib import Path
 from typing import cast
 
 from torch import Tensor
+from torchvision import datasets
 
 import numpy as np
 import pytest
 import torch
-import torchvision.datasets
 
 from priml.baselines.cifar10.data import Cifar10Data, prepare
 from priml.lib.custom_json import ListCodec
@@ -158,7 +158,7 @@ def test_prepare_normalizes_and_writes_both_splits(
     conversion -- channel order, scaling, normalization, and the atomic
     rename -- not torchvision's downloader.
     """
-    monkeypatch.setattr(torchvision.datasets, "CIFAR10", _StubCifar10)
+    monkeypatch.setattr(datasets, "CIFAR10", _StubCifar10)
     prepare(tmp_path, mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
 
     for split, expected in (("train", 1.0), ("test", -1.0)):

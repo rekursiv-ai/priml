@@ -32,10 +32,9 @@ import logging
 import math
 
 from configgle import Fig, Makeable, PartialConfig
-from torch import Tensor, nn
+from torch import Tensor, amp, nn
 
 import torch
-import torch.amp
 import torch.distributed as dist
 
 from priml.loss.custom_types import LossOutput
@@ -508,7 +507,7 @@ class TrainStep:
             self._compiled_model if self._compiled_model is not None else self.model
         )
         autocast_ctx = (
-            torch.amp.autocast(
+            amp.autocast(
                 device_type=self.device.type,
                 dtype=self.config.dtype_autocast,
                 cache_enabled=self.config.autocast_cache_enabled,
@@ -540,7 +539,7 @@ class TrainStep:
         self.model.eval()
 
         autocast_ctx = (
-            torch.amp.autocast(
+            amp.autocast(
                 device_type=self.device.type,
                 dtype=self.config.dtype_autocast,
                 cache_enabled=self.config.autocast_cache_enabled,

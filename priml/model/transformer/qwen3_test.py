@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from importlib import util
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 from unittest.mock import Mock
 
-import importlib.util
 import json
 import os
 import sys
@@ -533,13 +533,13 @@ def test_importing_parity_module_preserves_global_determinism(
             algorithms_enabled,
             warn_only=warn_only_enabled,
         )
-        spec = importlib.util.spec_from_file_location(
+        spec = util.spec_from_file_location(
             "_qwen3_hf_import_probe",
             __file__,
         )
         assert spec is not None
         assert spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
+        module = util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
         assert torch.are_deterministic_algorithms_enabled() == algorithms_enabled

@@ -5,10 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
-from torch import Tensor
+from torch import Tensor, linalg
 
 import torch
-import torch.linalg
 
 from priml.math.distributed import logmeanexp_all_to_all
 from priml.math.numeric import logmeanexp
@@ -239,7 +238,7 @@ def pca_eigh(x_centered: Tensor) -> tuple[Tensor, Tensor]:
 
     """
     sigma = (x_centered.T @ x_centered) / len(x_centered)
-    return torch.linalg.eigh(sigma)
+    return linalg.eigh(sigma)
 
 
 def pca_svd(x_centered: Tensor) -> tuple[Tensor, Tensor]:
@@ -261,7 +260,7 @@ def pca_svd(x_centered: Tensor) -> tuple[Tensor, Tensor]:
     """
     if x_centered.device.type == "mps":
         raise RuntimeError("pca_svd is not supported on MPS; use pca_power instead.")
-    _U, s, vh = torch.linalg.svd(x_centered, full_matrices=False)
+    _U, s, vh = linalg.svd(x_centered, full_matrices=False)
     del _U
     eigenvalues = s * s / len(x_centered)
     eigenvectors = vh.T

@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from functools import partial
+from importlib import metadata
 from types import FunctionType
 from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
-import importlib
-import importlib.metadata
 import inspect
 
 from torch import Tensor, nn
@@ -156,7 +155,7 @@ def torch_reference(reference: nn.Module) -> nn.Module:
       reference: The same module with PyTorch fallback functions bound.
 
     """
-    if importlib.metadata.version("transformers") != "5.17.0":
+    if metadata.version("transformers") != "5.17.0":
         raise ValueError(
             'Expected importlib.metadata.version("transformers") == "5.17.0".',
         )

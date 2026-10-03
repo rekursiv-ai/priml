@@ -29,13 +29,55 @@ from priml.baselines.sudoku import (
     trm,
 )
 from priml.baselines.sudoku.eval import (
+    NINE_VIEWS,
+    AgreementLockEval,
+    Harvest,
+    HpsEval,
+    HpsSearch,
+    LearnedCheckpointRollout,
+    Member,
     Reproduction,
+    SearchResult,
+    SieveEval,
+    SudokuVerifier,
+    VerifierAcceptor,
+    VerifierData,
+    VerifierFit,
+    View,
+    _fill_template,
+    _load_harvest,
+    _modal_tail,
+    _outer_run,
+    _OuterRun,
+    _run_training,
+    _sha256,
+    _validate_views,
+    _violated_group_counts,
+    accepted_grids,
+    escalated_search_config,
+    fixed_hps_node_count,
+    learned_checkpoint_rollout_rows,
+    learned_hps_output_width,
+    learned_persistence_scores,
+    make_random_unstuck_starts,
+    modal_grid_predictions,
+    pack_search_rows,
+    read_member_dump,
+    rows_per_view,
+    run_learned_pin_search_fast,
+    run_pin_search_fast,
+    seed_ensemble_members,
+    segmented_rollout_rows,
+    select_harvest_views,
+    select_pin_candidates,
+    sudoku_groups,
+    summarize_search,
+    validate_grid_permutation,
+    write_member_dump,
 )
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import mismatches, read_tensors, stored
-
-import priml.baselines.sudoku.eval
 
 
 if TYPE_CHECKING:
@@ -44,19 +86,6 @@ if TYPE_CHECKING:
 
     from numpy.lib.npyio import NpzFile
 
-    from priml.baselines.sudoku.eval import (
-        AgreementLockEval,
-        Harvest,
-        HpsEval,
-        HpsSearch,
-        Member,
-        SieveEval,
-        SudokuVerifier,
-        VerifierAcceptor,
-        VerifierData,
-        VerifierFit,
-        View,
-    )
     from priml.baselines.sudoku.puzzle_data import PuzzleDataset
     from priml.model.transformer.block import TransformerBlock
 
@@ -675,22 +704,21 @@ def _tiny_config() -> trm.TRM.Config:
 
 def test_eval_pure_helpers_and_validation(tmp_path: Path) -> None:
     """Exercise label-free helpers, dump schemas, and validation branches."""
-    ev = priml.baselines.sudoku.eval
     grid = torch.arange(2 * 81).reshape(2, 81) % 9 + 2
-    for view in ev.NINE_VIEWS:
+    for view in NINE_VIEWS:
         assert torch.equal(view.invert(view.apply(grid)), grid)
     with pytest.raises(ValueError, match="permutation"):
-        ev.validate_grid_permutation("rows", (0, 0, 1, 2, 3, 4, 5, 6, 7))
+        validate_grid_permutation("rows", (0, 0, 1, 2, 3, 4, 5, 6, 7))
     with pytest.raises(ValueError, match="band"):
-        ev.validate_grid_permutation("rows", (0, 1, 3, 2, 4, 5, 6, 7, 8))
+        validate_grid_permutation("rows", (0, 1, 3, 2, 4, 5, 6, 7, 8))
     with pytest.raises(ValueError, match="at least two"):
-        ev.AgreementLockEval.Config(
+        AgreementLockEval.Config(
             experiment_name="x",
-            members=(ev.Member("x", ev.NINE_VIEWS[0]),),
+            members=(Member("x", NINE_VIEWS[0]),),
         ).make()
-    assert ev.fixed_hps_node_count(depth=2, candidates=3, cell_attempts=2) == 24
+    assert fixed_hps_node_count(depth=2, candidates=3, cell_attempts=2) == 24
     assert (
-        ev.rows_per_view(
+        rows_per_view(
             search_depth=2,
             search_candidates=3,
             search_cell_attempts=2,
@@ -700,16 +728,16 @@ def test_eval_pure_helpers_and_validation(tmp_path: Path) -> None:
         == 29
     )
     with pytest.raises(ValueError, match="positive"):
-        ev.fixed_hps_node_count(depth=0, candidates=2, cell_attempts=2)
+        fixed_hps_node_count(depth=0, candidates=2, cell_attempts=2)
     with pytest.raises(ValueError, match="nonempty"):
-        ev.rows_per_view(
+        rows_per_view(
             search_depth=2,
             search_candidates=2,
             search_cell_attempts=2,
             random_corruption_strengths=(),
             random_starts_per_strength=2,
         )
-    selected = ev.select_harvest_views(
+    selected = select_harvest_views(
         torch.tensor([0, 2, 4, 6]),
         group_count=2,
         views_per_group=2,
@@ -718,7 +746,7 @@ def test_eval_pure_helpers_and_validation(tmp_path: Path) -> None:
     assert selected.flat_view_id.shape == (4,)
     originals = grid[:2].clone()
     originals[:, :4] = 1
-    starts = ev.make_random_unstuck_starts(
+    starts = make_random_unstuck_starts(
         originals,
         grid[:2],
         base_group_ids=torch.tensor([0, 2]),
@@ -733,7 +761,7 @@ def test_eval_pure_helpers_and_validation(tmp_path: Path) -> None:
         grid[:2, 4:].repeat_interleave(2, dim=0),
     )
     with pytest.raises(ValueError, match="no blank"):
-        ev.make_random_unstuck_starts(
+        make_random_unstuck_starts(
             torch.full((2, 81), 2),
             grid[:2],
             base_group_ids=torch.tensor([0, 1]),
@@ -742,12 +770,12 @@ def test_eval_pure_helpers_and_validation(tmp_path: Path) -> None:
             corruption_strengths=(2,),
             starts_per_strength=2,
         )
-    assert ev.modal_grid_predictions(
+    assert modal_grid_predictions(
         torch.stack((grid[:2], grid[:2].flip(0), grid[:2])),
     )[1].tolist() == [0, 0]
-    assert ev.escalated_search_config().search_candidates == 7
+    assert escalated_search_config().search_candidates == 7
     assert (
-        ev._fill_template(
+        _fill_template(
             "/runs/{experiment_name}/x-{index}",
             base_dir=tmp_path,
             experiment_name="e",
@@ -759,18 +787,17 @@ def test_eval_pure_helpers_and_validation(tmp_path: Path) -> None:
 
 def test_eval_search_helpers_and_dump_roundtrip(tmp_path: Path) -> None:
     """Cover search acceptance, persistence, packing, and npz round trips."""
-    ev = priml.baselines.sudoku.eval
     media = torch.full((2, 81), 1, dtype=torch.long)
     media[:, 0] = 2
     logits = torch.zeros(2, 81, 11)
     logits[..., 2] = 4
-    cells, _ = ev.select_pin_candidates(logits, media, n_cells=2, n_digits=3)
+    cells, _ = select_pin_candidates(logits, media, n_cells=2, n_digits=3)
     assert cells.shape == (2, 2)
-    groups = ev.sudoku_groups()
+    groups = sudoku_groups()
     preds = torch.full((2, 81), 2, dtype=torch.long)
-    assert not bool(ev.accepted_grids(preds, media, groups).any())
-    assert torch.equal(ev._violated_group_counts(preds, groups), torch.full((2,), 27.0))
-    result = ev.SearchResult(
+    assert not bool(accepted_grids(preds, media, groups).any())
+    assert torch.equal(_violated_group_counts(preds, groups), torch.full((2,), 27.0))
+    result = SearchResult(
         accepted=torch.tensor([True, False]),
         root_predictions=preds,
         final_predictions=preds,
@@ -782,17 +809,17 @@ def test_eval_search_helpers_and_dump_roundtrip(tmp_path: Path) -> None:
         visited_predictions=[],
         visited_puzzles=[],
     )
-    rows = ev.pack_search_rows(result)
-    assert rows.shape == (2, ev.learned_hps_output_width(81))
+    rows = pack_search_rows(result)
+    assert rows.shape == (2, learned_hps_output_width(81))
     path = tmp_path / "member.npz"
-    ev.write_member_dump(path, rows, media=media, label=preds)
-    loaded = ev.read_member_dump(path)
+    write_member_dump(path, rows, media=media, label=preds)
+    loaded = read_member_dump(path)
     assert torch.equal(loaded.final_predictions, preds.to(torch.uint8))
-    assert ev.summarize_search(rows, preds)["accepted"] == 1.0
+    assert summarize_search(rows, preds)["accepted"] == 1.0
     with pytest.raises(ValueError, match="packed width"):
-        ev.write_member_dump(tmp_path / "bad.npz", rows[:, :-1], media=media)
+        write_member_dump(tmp_path / "bad.npz", rows[:, :-1], media=media)
     with pytest.raises(ValueError, match="at least one"):
-        ev.learned_checkpoint_rollout_rows(
+        learned_checkpoint_rollout_rows(
             _tiny_trm(),
             {},
             2,
@@ -800,34 +827,33 @@ def test_eval_search_helpers_and_dump_roundtrip(tmp_path: Path) -> None:
             torch.arange(2),
             checkpoints=(),
         )
-    rollout = ev.LearnedCheckpointRollout(
+    rollout = LearnedCheckpointRollout(
         logits=logits,
         q_scores=torch.tensor([[2.0, 3.0, 4.0], [2.0, 3.0, 4.0]]),
         predictions=preds.unsqueeze(1).expand(-1, 3, -1),
     )
     assert torch.equal(
-        ev.learned_persistence_scores(rollout, require_prediction_stability=True),
+        learned_persistence_scores(rollout, require_prediction_stability=True),
         torch.tensor([2.0, 2.0]),
     )
-    unstable = ev.LearnedCheckpointRollout(
+    unstable = LearnedCheckpointRollout(
         logits=rollout.logits,
         q_scores=rollout.q_scores,
         predictions=rollout.predictions.clone(),
     )
     unstable.predictions[0, 0, 0] = 3
     assert torch.isneginf(
-        ev.learned_persistence_scores(unstable, require_prediction_stability=True)[0],
+        learned_persistence_scores(unstable, require_prediction_stability=True)[0],
     )
 
 
 def test_eval_rollout_and_pin_search_engines() -> None:
     """Exercise segmented ACT rollouts and candidate-parallel search engines."""
-    ev = priml.baselines.sudoku.eval
     typed_model = _tiny_trm()
     boards = torch.full((2, 81), 1, dtype=torch.long)
     boards[:, 0] = 2
     kwargs: dict[str, Tensor] = {}
-    logits, scores = ev.segmented_rollout_rows(
+    logits, scores = segmented_rollout_rows(
         typed_model,
         kwargs,
         10,
@@ -838,7 +864,7 @@ def test_eval_rollout_and_pin_search_engines() -> None:
     )
     assert logits.shape == (2, 81, 11)
     assert scores.shape == (2,)
-    checkpoint = ev.learned_checkpoint_rollout_rows(
+    checkpoint = learned_checkpoint_rollout_rows(
         typed_model,
         kwargs,
         3,
@@ -847,7 +873,7 @@ def test_eval_rollout_and_pin_search_engines() -> None:
         checkpoints=(2, 3),
     )
     assert checkpoint.q_scores.shape == (2, 2)
-    assert ev.learned_persistence_scores(
+    assert learned_persistence_scores(
         checkpoint,
         require_prediction_stability=False,
     ).shape == (2,)
@@ -861,7 +887,7 @@ def test_eval_rollout_and_pin_search_engines() -> None:
         out[..., 2] = 1
         return out, torch.full((candidate.shape[0],), 3.0)
 
-    learned = ev.run_learned_pin_search_fast(
+    learned = run_learned_pin_search_fast(
         rollout,
         media=boards,
         base_logits=root_logits,
@@ -879,12 +905,12 @@ def test_eval_rollout_and_pin_search_engines() -> None:
         del media
         return torch.zeros(predictions.shape[0], dtype=torch.bool)
 
-    found, grids, nodes, depth = ev.run_pin_search_fast(
+    found, grids, nodes, depth = run_pin_search_fast(
         rollout,
         media=boards,
         base_logits=root_logits,
         active=active,
-        groups=ev.sudoku_groups(),
+        groups=sudoku_groups(),
         depth=2,
         candidates=2,
         cell_attempts=2,
@@ -896,9 +922,8 @@ def test_eval_rollout_and_pin_search_engines() -> None:
 
 
 def test_eval_search_run_branches_and_errors() -> None:
-    ev = priml.baselines.sudoku.eval
     model = _tiny_trm()
-    config = ev.HpsSearch.Config(
+    config = HpsSearch.Config(
         max_act_steps=2,
         acceptance_checkpoints=(1, 2),
         search_depth=1,
@@ -923,36 +948,35 @@ def test_eval_search_run_branches_and_errors() -> None:
 
 def test_eval_config_error_branches() -> None:
     """Exercise constructor guards for search, verifier, and harvest jobs."""
-    ev = priml.baselines.sudoku.eval
     with pytest.raises(ValueError, match="max_act_steps"):
-        ev.HpsSearch.Config(max_act_steps=0).make()
+        HpsSearch.Config(max_act_steps=0).make()
     with pytest.raises(ValueError, match="finite"):
-        ev.HpsSearch.Config(acceptance_threshold=float("inf")).make()
+        HpsSearch.Config(acceptance_threshold=float("inf")).make()
     with pytest.raises(ValueError, match="root_acceptance"):
-        ev.HpsSearch.Config(root_acceptance_threshold=float("inf")).make()
+        HpsSearch.Config(root_acceptance_threshold=float("inf")).make()
     with pytest.raises(ValueError, match="within"):
-        ev.HpsSearch.Config(max_act_steps=2, acceptance_checkpoints=(3,)).make()
+        HpsSearch.Config(max_act_steps=2, acceptance_checkpoints=(3,)).make()
     with pytest.raises(ValueError, match="needs"):
-        ev.HpsSearch.Config(
+        HpsSearch.Config(
             acceptance_checkpoints=(),
             require_prediction_stability=True,
         ).make()
     with pytest.raises(ValueError, match="search_budget"):
-        ev.HpsSearch.Config(search_budget=2, search_candidates=3).make()
+        HpsSearch.Config(search_budget=2, search_candidates=3).make()
     with pytest.raises(ValueError, match="strictly increasing"):
-        ev.HpsSearch.Config(acceptance_checkpoints=(2, 2)).make()
+        HpsSearch.Config(acceptance_checkpoints=(2, 2)).make()
     with pytest.raises(ValueError, match="early_exit"):
-        ev.HpsSearch.Config(early_exit_at_q8=True, acceptance_checkpoints=(2,)).make()
+        HpsSearch.Config(early_exit_at_q8=True, acceptance_checkpoints=(2,)).make()
     with pytest.raises(ValueError, match="width"):
-        ev.SudokuVerifier.Config(width=5, heads=2).make()
+        SudokuVerifier.Config(width=5, heads=2).make()
     with pytest.raises(ValueError, match="max_steps"):
-        ev.VerifierFit.Config(max_steps=0).make()
+        VerifierFit.Config(max_steps=0).make()
     with pytest.raises(ValueError, match="max_rows"):
-        ev.VerifierAcceptor.Config(max_rows=0).make()
+        VerifierAcceptor.Config(max_rows=0).make()
     with pytest.raises(ValueError, match="checkpoint"):
-        ev.Harvest.Config().make()
+        Harvest.Config().make()
     with pytest.raises(ValueError, match="experiment_name"):
-        ev.HpsEval.Config().make()
+        HpsEval.Config().make()
 
 
 def _reproduction_config(tmp_path: Path) -> Reproduction.Config:
@@ -967,7 +991,6 @@ def _reproduction_config(tmp_path: Path) -> Reproduction.Config:
 
 
 def test_reproduction_rejects_an_invalid_config(tmp_path: Path) -> None:
-    ev = priml.baselines.sudoku.eval
     cfg = _reproduction_config(tmp_path)
     cfg.experiment_name = ""
     with pytest.raises(ValueError, match="experiment_name is required"):
@@ -994,11 +1017,11 @@ def test_reproduction_rejects_an_invalid_config(tmp_path: Path) -> None:
         cfg.make()
     cfg = _reproduction_config(tmp_path)
     cfg.trigger = "final_only"
-    cfg.full_eval = ev.SieveEval.Config()
+    cfg.full_eval = SieveEval.Config()
     with pytest.raises(ValueError, match="agreement lock"):
         cfg.make()
     cfg = _reproduction_config(tmp_path)
-    cfg.full_eval = ev.SieveEval.Config()
+    cfg.full_eval = SieveEval.Config()
     with pytest.raises(ValueError, match="nine_view"):
         cfg.make()
     cfg = _reproduction_config(tmp_path)
@@ -1100,9 +1123,8 @@ class _RecordingTracker:
 
 
 def test_outer_run_clamps_steps_and_forwards_segments(tmp_path: Path) -> None:
-    ev = priml.baselines.sudoku.eval
     tracker = _RecordingTracker()
-    outer = ev._OuterRun(tracker)
+    outer = _OuterRun(tracker)
     outer.log({"a": 1}, 5, prefix="x/")
     outer.log({"b": 2}, 3)
     segment = tmp_path / "metrics.json"
@@ -1116,7 +1138,7 @@ def test_outer_run_clamps_steps_and_forwards_segments(tmp_path: Path) -> None:
         ({"eval/loss": 0.5}, 7, "gen/"),
     ]
     assert tracker.closed
-    disabled = ev._outer_run(None, name="n", notes="")
+    disabled = _outer_run(None, name="n", notes="")
     disabled.log({"a": 1}, 2)
     disabled.forward_segment(segment, 2)
     disabled.close()
@@ -1125,7 +1147,6 @@ def test_outer_run_clamps_steps_and_forwards_segments(tmp_path: Path) -> None:
 def test_run_training_skips_or_refuses_existing_segment_checkpoints(
     tmp_path: Path,
 ) -> None:
-    ev = priml.baselines.sudoku.eval
     cfg = trainer.Trainer.Config()
     cfg.experiment_name = "segment"
     cfg.base_dir = tmp_path
@@ -1134,19 +1155,18 @@ def test_run_training_skips_or_refuses_existing_segment_checkpoints(
     checkpoints.mkdir(parents=True)
     (checkpoints / "step_00000006.pt").write_bytes(b"")
     with pytest.raises(RuntimeError, match="cannot safely resume"):
-        ev._run_training(cfg)
+        _run_training(cfg)
     (checkpoints / "step_00000004.pt").write_bytes(b"")
-    assert ev._run_training(cfg) == (0.0, False)
+    assert _run_training(cfg) == (0.0, False)
 
 
 def test_segmented_rollout_continues_confident_rows_past_q8() -> None:
-    ev = priml.baselines.sudoku.eval
     model = _tiny_trm()
     boards = torch.full((3, 81), 1, dtype=torch.long)
     boards[:, 0] = 2
     rows = torch.arange(3)
     with pytest.raises(ValueError, match="max_steps"):
-        ev.segmented_rollout_rows(
+        segmented_rollout_rows(
             model,
             {},
             0,
@@ -1155,7 +1175,7 @@ def test_segmented_rollout_continues_confident_rows_past_q8() -> None:
             continue_threshold=0.0,
             early_exit_at_q8=False,
         )
-    logits, scores = ev.segmented_rollout_rows(
+    logits, scores = segmented_rollout_rows(
         model,
         {},
         10,
@@ -1179,7 +1199,7 @@ def _write_harvest_shard(directory: Path, name: str, *, groups: list[int]) -> st
         candidate=grid,
         flat_view_id=np.arange(rows, dtype=np.int64),
     )
-    return priml.baselines.sudoku.eval._sha256(directory / name)
+    return _sha256(directory / name)
 
 
 def _write_manifest(
@@ -1198,11 +1218,10 @@ def _write_manifest(
 
 
 def test_load_harvest_rejects_a_malformed_manifest(tmp_path: Path) -> None:
-    ev = priml.baselines.sudoku.eval
     cpu = torch.device("cpu")
     manifest = tmp_path / "manifest.json"
     with pytest.raises(FileNotFoundError, match="manifest not found"):
-        ev._load_harvest(tmp_path, device=cpu)
+        _load_harvest(tmp_path, device=cpu)
     cases: tuple[tuple[str, type[Exception], str], ...] = (
         ("{", ValueError, "invalid harvest manifest"),
         ("[]", TypeError, "JSON object"),
@@ -1222,11 +1241,10 @@ def test_load_harvest_rejects_a_malformed_manifest(tmp_path: Path) -> None:
     for text, error, message in cases:
         manifest.write_text(text)
         with pytest.raises(error, match=message):
-            ev._load_harvest(tmp_path, device=cpu)
+            _load_harvest(tmp_path, device=cpu)
 
 
 def test_load_harvest_binds_shards_to_the_manifest(tmp_path: Path) -> None:
-    ev = priml.baselines.sudoku.eval
     cpu = torch.device("cpu")
     manifest = tmp_path / "manifest.json"
     first = _write_harvest_shard(tmp_path, "shard-00000.npz", groups=[0, 1])
@@ -1246,9 +1264,9 @@ def test_load_harvest_binds_shards_to_the_manifest(tmp_path: Path) -> None:
     for shards, overrides, message in broken:
         _write_manifest(manifest, shards, **overrides)
         with pytest.raises(ValueError, match=message):
-            ev._load_harvest(tmp_path, device=cpu)
+            _load_harvest(tmp_path, device=cpu)
     _write_manifest(manifest, good)
-    originals, candidates, views, groups = ev._load_harvest(tmp_path, device=cpu)
+    originals, candidates, views, groups = _load_harvest(tmp_path, device=cpu)
     assert originals.shape == candidates.shape == (5, 81)
     assert views.tolist() == [0, 1, 0, 1, 2]
     assert groups.tolist() == [0, 1, 3, 2, 3]
@@ -1295,7 +1313,7 @@ def _bound_harvest(
         flat_views=flat_views,
         groups=groups,
     )
-    digest = priml.baselines.sudoku.eval._sha256(shard)
+    digest = _sha256(shard)
     entry = {"file": shard.name, "sha256": digest, "rows": len(groups)}
     manifest = {
         "schema_version": 1,
@@ -1309,7 +1327,7 @@ def _bound_harvest(
 
 
 def _verifier_data_config(root: Path, harvest: Path) -> VerifierData.Config:
-    cfg = priml.baselines.sudoku.eval.VerifierData.Config()
+    cfg = VerifierData.Config()
     cfg.working_dir = root / "data"
     cfg.harvest_dir = harvest
     cfg.node_corpus = root / "node_corpus.npz"
@@ -1372,7 +1390,7 @@ def _rebind_digest(harvest: Path) -> None:
         "dict[str, list[dict[str, object]]]",
         json.loads(manifest.read_text()),
     )
-    fields["shards"][0]["sha256"] = priml.baselines.sudoku.eval._sha256(
+    fields["shards"][0]["sha256"] = _sha256(
         harvest / "shard-00000.npz",
     )
     manifest.write_text(json.dumps(fields))
@@ -1442,7 +1460,6 @@ def test_verifier_data_mixes_contradictions_and_node_candidates(tmp_path: Path) 
 
 
 def test_harvest_rejects_an_invalid_plan_before_loading() -> None:
-    ev = priml.baselines.sudoku.eval
     plans: tuple[tuple[dict[str, object], str], ...] = (
         ({"group_count": 0}, "group_count"),
         ({"search_max_rows": 0}, "search_max_rows"),
@@ -1450,7 +1467,7 @@ def test_harvest_rejects_an_invalid_plan_before_loading() -> None:
         ({"search_budget": 1}, "cannot exhaust"),
     )
     for overrides, message in plans:
-        cfg = ev.Harvest.Config()
+        cfg = Harvest.Config()
         cfg.harvest_source_checkpoint = "/runs/source.pt"
         for name, value in overrides.items():
             setattr(cfg, name, value)
@@ -1459,8 +1476,7 @@ def test_harvest_rejects_an_invalid_plan_before_loading() -> None:
 
 
 def test_search_without_checkpoints_rolls_the_family_forward() -> None:
-    ev = priml.baselines.sudoku.eval
-    config = ev.HpsSearch.Config(
+    config = HpsSearch.Config(
         max_act_steps=2,
         acceptance_checkpoints=(),
         require_prediction_stability=False,
@@ -1479,19 +1495,18 @@ def test_search_without_checkpoints_rolls_the_family_forward() -> None:
 
 
 def test_dump_and_summary_guards_reject_misaligned_rows(tmp_path: Path) -> None:
-    ev = priml.baselines.sudoku.eval
-    width = ev.learned_hps_output_width(81)
+    width = learned_hps_output_width(81)
     rows = torch.zeros(2, width)
     media = torch.full((2, 81), 2, dtype=torch.long)
     with pytest.raises(ValueError, match="packed width"):
-        ev.summarize_search(rows[:, :-1], media)
+        summarize_search(rows[:, :-1], media)
     with pytest.raises(ValueError, match="disagree on N"):
-        ev.write_member_dump(tmp_path / "n.npz", rows[:1], media=media)
+        write_member_dump(tmp_path / "n.npz", rows[:1], media=media)
     with pytest.raises(ValueError, match="disagree on shape"):
-        ev.write_member_dump(tmp_path / "s.npz", rows, media=media, label=media[:, :3])
+        write_member_dump(tmp_path / "s.npz", rows, media=media, label=media[:, :3])
     unlabeled = tmp_path / "unlabeled.npz"
-    ev.write_member_dump(unlabeled, rows, media=media)
-    assert ev.read_member_dump(unlabeled).label is None
+    write_member_dump(unlabeled, rows, media=media)
+    assert read_member_dump(unlabeled).label is None
     narrow = tmp_path / "narrow.npz"
     np.savez(
         narrow,
@@ -1499,16 +1514,15 @@ def test_dump_and_summary_guards_reject_misaligned_rows(tmp_path: Path) -> None:
         media=np.zeros((2, 81), np.uint8),
     )
     with pytest.raises(ValueError, match="packed width"):
-        ev.read_member_dump(narrow)
+        read_member_dump(narrow)
 
 
 def test_checkpoint_rollout_rejects_disordered_or_out_of_range_steps() -> None:
-    ev = priml.baselines.sudoku.eval
     model = _tiny_trm()
     boards = torch.full((2, 81), 1, dtype=torch.long)
     for checkpoints, message in (((3, 2), "strictly increasing"), ((2, 5), "within")):
         with pytest.raises(ValueError, match=message):
-            ev.learned_checkpoint_rollout_rows(
+            learned_checkpoint_rollout_rows(
                 model,
                 {},
                 3,
@@ -1516,41 +1530,37 @@ def test_checkpoint_rollout_rejects_disordered_or_out_of_range_steps() -> None:
                 torch.arange(2),
                 checkpoints=checkpoints,
             )
-    rollout = ev.LearnedCheckpointRollout(
+    rollout = LearnedCheckpointRollout(
         logits=torch.zeros(2, 81, 11),
         q_scores=torch.zeros(2, 3),
         predictions=torch.zeros(2, 4, 81),
     )
     with pytest.raises(ValueError, match="align by row and step"):
-        ev.learned_persistence_scores(rollout, require_prediction_stability=False)
-    flat = ev.LearnedCheckpointRollout(
+        learned_persistence_scores(rollout, require_prediction_stability=False)
+    flat = LearnedCheckpointRollout(
         logits=torch.zeros(2, 81, 11),
         q_scores=torch.zeros(2),
         predictions=torch.zeros(2, 4, 81),
     )
     with pytest.raises(ValueError, match="ranks 2 and 3"):
-        ev.learned_persistence_scores(flat, require_prediction_stability=False)
+        learned_persistence_scores(flat, require_prediction_stability=False)
 
 
 def test_committee_and_view_validation_rejects_empty_inputs() -> None:
-    ev = priml.baselines.sudoku.eval
     with pytest.raises(ValueError, match=">= 1 checkpoint"):
-        ev.VerifierAcceptor.Config(checkpoint_paths=()).make()
+        VerifierAcceptor.Config(checkpoint_paths=()).make()
     with pytest.raises(ValueError, match="at least one checkpoint"):
-        ev.seed_ensemble_members(())
+        seed_ensemble_members(())
     with pytest.raises(ValueError, match=r"\[members, puzzles, cells\]"):
-        ev.modal_grid_predictions(torch.zeros(2, 81))
-    bad = ev.View("bad", (1, 1, 2, 3, 4, 5, 6, 7, 8), False)
+        modal_grid_predictions(torch.zeros(2, 81))
+    bad = View("bad", (1, 1, 2, 3, 4, 5, 6, 7, 8), False)
     with pytest.raises(ValueError, match="digit_permutation"):
-        ev._validate_views((bad,))
+        _validate_views((bad,))
     literal = Path("/abs/metrics.json")
-    assert (
-        ev._fill_template(literal, base_dir=None, experiment_name="unused") is literal
-    )
+    assert _fill_template(literal, base_dir=None, experiment_name="unused") is literal
 
 
 def test_modal_tail_votes_over_every_round_a_survivor_reached() -> None:
-    ev = priml.baselines.sudoku.eval
     first = torch.full((3, 81), 2, dtype=torch.long)
     second = torch.full((2, 81), 3, dtype=torch.long)
     third = torch.full((2, 81), 3, dtype=torch.long)
@@ -1559,13 +1569,12 @@ def test_modal_tail_votes_over_every_round_a_survivor_reached() -> None:
         (torch.tensor([1, 2]), second),
         (torch.tensor([2, 1]), third),
     ]
-    tail = ev._modal_tail(collected, torch.tensor([2, 1]))
+    tail = _modal_tail(collected, torch.tensor([2, 1]))
     assert torch.equal(tail, torch.full((2, 81), 3, dtype=torch.long))
 
 
 def test_sieve_tail_search_escalates_the_view_policy(tmp_path: Path) -> None:
-    ev = priml.baselines.sudoku.eval
-    cfg = ev.SieveEval.Config()
+    cfg = SieveEval.Config()
     cfg.experiment_name = "sieve"
     cfg.base_dir = tmp_path
     cfg.runtime.device = "cpu"

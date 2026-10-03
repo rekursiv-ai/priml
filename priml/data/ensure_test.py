@@ -7,12 +7,12 @@ bound to ``127.0.0.1`` for the HTTP-resume path. No real network access.
 
 from __future__ import annotations
 
+from http import server
 from typing import IO, TYPE_CHECKING, Final, override
 
 import fcntl
 import functools
 import hashlib
-import http.server
 import shutil
 import threading
 
@@ -328,7 +328,7 @@ def test_concurrent_ensure_builds_once(
 # --- HTTP resume path (localhost only) -------------------------------------
 
 
-class _RangeHandler(http.server.SimpleHTTPRequestHandler):
+class _RangeHandler(server.SimpleHTTPRequestHandler):
     """Serves a single in-memory blob with HTTP Range support."""
 
     blob: bytes = b""
@@ -361,21 +361,21 @@ def http_blob() -> Iterator[tuple[str, bytes]]:
     blob = bytes(range(256)) * 64  # 16 KiB.
     handler = functools.partial(_RangeHandler)
     _RangeHandler.blob = blob
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    # Poll at 10ms (not the 0.5s default): server.shutdown() blocks until
+    http_server = server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    # Poll at 10ms (not the 0.5s default): http_server.shutdown() blocks until
     # serve_forever notices the stop flag on its next poll, so the default
     # interval added ~0.5s of pure teardown to every test using this fixture.
     thread = threading.Thread(
-        target=functools.partial(server.serve_forever, poll_interval=0.01),
+        target=functools.partial(http_server.serve_forever, poll_interval=0.01),
         daemon=True,
     )
     thread.start()
-    host, port = server.server_address[:2]
+    host, port = http_server.server_address[:2]
     try:
         yield f"http://{host}:{port}/blob", blob
     finally:
-        server.shutdown()
-        server.server_close()
+        http_server.shutdown()
+        http_server.server_close()
 
 
 def test_http_download_full(tmp_path: Path, http_blob: tuple[str, bytes]):

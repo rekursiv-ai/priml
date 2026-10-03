@@ -304,12 +304,12 @@ import zipfile
 
 from configgle import DataclassLike, Fig, Makeable
 from torch import Tensor, nn
+from torch._inductor import config as inductor_config
 from torch.nn import functional
 from tqdm import tqdm
 
 import numpy as np
 import torch
-import torch._inductor.config
 
 from priml.baselines.sudoku.puzzle_data import (
     PuzzleBatch,
@@ -3920,9 +3920,7 @@ class Harvest:
         # Process-global TorchInductor flag; must be set before model
         # construction binds torch.compile (the trainer contract; compiled
         # bf16 rollouts are numerically unsound without it).
-        torch._inductor.config.emulate_precision_casts = (  # noqa: SLF001 -- The benchmark must set this documented inductor option before compilation.
-            config.emulate_precision_casts
-        )
+        inductor_config.emulate_precision_casts = config.emulate_precision_casts
         self.model = config.model.make().to(self.device)
         self.model.load_state_dict(
             load_eval_weights(self.checkpoint_path, device=self.device),
@@ -4690,9 +4688,7 @@ class HpsEval:
         self.device = self.runtime.device
         # Process-global TorchInductor flag; must be set before the model
         # construction binds torch.compile (the trainer contract).
-        torch._inductor.config.emulate_precision_casts = (  # noqa: SLF001 -- The benchmark must set this documented inductor option before compilation.
-            config.emulate_precision_casts
-        )
+        inductor_config.emulate_precision_casts = config.emulate_precision_casts
         self._scratch = (
             config.base_dir if config.base_dir is not None else Path("/opt/scratch")
         )
@@ -4856,9 +4852,7 @@ class AgreementLockEval:
         self.device = self.runtime.device
         # Process-global TorchInductor flag; must be set before any member
         # model construction binds torch.compile (the trainer contract).
-        torch._inductor.config.emulate_precision_casts = (  # noqa: SLF001 -- The benchmark must set this documented inductor option before compilation.
-            config.emulate_precision_casts
-        )
+        inductor_config.emulate_precision_casts = config.emulate_precision_casts
         self._scratch = (
             config.base_dir if config.base_dir is not None else Path("/opt/scratch")
         )
@@ -5137,9 +5131,7 @@ class SieveEval:
         self.device = self.runtime.device
         # Process-global TorchInductor flag; must be set before any model
         # construction binds torch.compile (the trainer contract).
-        torch._inductor.config.emulate_precision_casts = (  # noqa: SLF001 -- The benchmark must set this documented inductor option before compilation.
-            config.emulate_precision_casts
-        )
+        inductor_config.emulate_precision_casts = config.emulate_precision_casts
         self._scratch = (
             config.base_dir if config.base_dir is not None else Path("/opt/scratch")
         )
@@ -5956,7 +5948,7 @@ class Reproduction:
         self.device = self.runtime.device
         # Process-global TorchInductor flag; must be set before any screen
         # model construction binds torch.compile (the trainer contract).
-        torch._inductor.config.emulate_precision_casts = (  # noqa: SLF001 -- The benchmark must set this documented inductor option before compilation.
+        inductor_config.emulate_precision_casts = (
             config.generator.emulate_precision_casts
         )
 

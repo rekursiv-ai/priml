@@ -20,9 +20,9 @@ import dataclasses
 import logging
 
 from configgle import Fig, Makeable
+from torch.utils import data
 
 import torch
-import torch.utils.data
 
 from priml.custom_types import HasNormalizedWorkingDirPattern
 from priml.data.custom_types import Processor, Source
@@ -202,7 +202,7 @@ class DataPipeline:
         self,
         num_workers: int = 0,
         prefetch_factor: int = 2,
-    ) -> torch.utils.data.DataLoader[dict[str, object]]:
+    ) -> data.DataLoader[dict[str, object]]:
         """Create a DataLoader for training with per-worker pipeline instances.
 
         Args:
@@ -226,7 +226,7 @@ class DataPipeline:
             dataset = _MultipleWorkerDataset(self.config)
             effective_num_workers = num_workers
 
-        return torch.utils.data.DataLoader[dict[str, object]](
+        return data.DataLoader[dict[str, object]](
             dataset=dataset,
             batch_size=1,  # Pipeline owns batching.
             num_workers=effective_num_workers,
@@ -327,7 +327,7 @@ def _assign_gpu_to_worker(worker_id: int) -> int:
         raise
 
 
-class _SingleWorkerDataset(torch.utils.data.IterableDataset[dict[str, object]]):
+class _SingleWorkerDataset(data.IterableDataset[dict[str, object]]):
     """Thin wrapper for single-worker mode (num_workers=0)."""
 
     def __init__(self, pipeline: DataPipeline):
@@ -355,7 +355,7 @@ class _SingleWorkerDataset(torch.utils.data.IterableDataset[dict[str, object]]):
         yield from self.pipeline
 
 
-class _MultipleWorkerDataset(torch.utils.data.IterableDataset[dict[str, object]]):
+class _MultipleWorkerDataset(data.IterableDataset[dict[str, object]]):
     """Dataset wrapper that creates per-worker pipeline instances.
 
     This class is used by DataPipeline.create_loader() to create a separate
@@ -382,7 +382,7 @@ class _MultipleWorkerDataset(torch.utils.data.IterableDataset[dict[str, object]]
 
     @override
     def __iter__(self) -> Iterator[dict[str, object]]:
-        worker_info = torch.utils.data.get_worker_info()
+        worker_info = data.get_worker_info()
         if worker_info is None:
             worker_id = 0
             num_workers_inner = 1

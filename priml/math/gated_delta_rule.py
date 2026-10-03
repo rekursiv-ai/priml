@@ -5,9 +5,9 @@ The operation order follows the Transformers 5.17.0 PyTorch reference
 """
 
 from torch import Tensor
+from torch.nn import functional
 
 import torch
-import torch.nn.functional
 
 from priml.math.numeric import l2norm
 
@@ -60,12 +60,9 @@ def chunk_gated_delta_rule(
     query = query * query.shape[-1] ** -0.5
     padding = (chunk_size - sequence % chunk_size) % chunk_size
     query, key, value = (
-        torch.nn.functional.pad(tensor, (0, 0, 0, padding))
-        for tensor in (query, key, value)
+        functional.pad(tensor, (0, 0, 0, padding)) for tensor in (query, key, value)
     )
-    beta, decay = (
-        torch.nn.functional.pad(tensor, (0, padding)) for tensor in (beta, decay)
-    )
+    beta, decay = (functional.pad(tensor, (0, padding)) for tensor in (beta, decay))
     v_beta = value * beta.unsqueeze(-1)
     k_beta = key * beta.unsqueeze(-1)
     query, key, k_beta, v_beta = [

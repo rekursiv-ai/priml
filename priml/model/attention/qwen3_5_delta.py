@@ -7,9 +7,9 @@ import math
 
 from configgle import Fig, Makeable, Makes
 from torch import Tensor, nn
+from torch.nn import functional
 
 import torch
-import torch.nn.functional
 
 from priml.cost import (
     Cost,
@@ -112,13 +112,13 @@ class Qwen35RMSNormGated(nn.Module):
         """
         del kwargs
         dtype = x.dtype
-        x = torch.nn.functional.rms_norm(
+        x = functional.rms_norm(
             x.float(),
             self.weight.shape,
             eps=self.eps,
         )
         x = self.weight * x.to(dtype)
-        return (x * torch.nn.functional.silu(gate.float())).to(dtype)
+        return (x * functional.silu(gate.float())).to(dtype)
 
 
 def _init_decay(weight: Tensor) -> None:
@@ -189,7 +189,7 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
         query = query.reshape(batch, sequence, -1, self.channels_k_head)
         key = key.reshape(batch, sequence, -1, self.channels_k_head)
         value = value.reshape(batch, sequence, -1, self.channels_v_head)
-        g = -self.A_log.float().exp() * torch.nn.functional.softplus(
+        g = -self.A_log.float().exp() * functional.softplus(
             a.float() + self.dt_bias,
         )
         repeats = self.num_heads_v // self.num_heads_k
@@ -318,9 +318,9 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
                 if sequence == 1:
                     padding = 0
             elif sequence < kernel_size:
-                qkv = torch.nn.functional.pad(qkv, (kernel_size - sequence, 0))
+                qkv = functional.pad(qkv, (kernel_size - sequence, 0))
             cache["conv_state"] = qkv[..., -kernel_size:].clone()
-        output = torch.nn.functional.conv1d(
+        output = functional.conv1d(
             qkv.to(self.conv1d.weight.dtype),
             weight=self.conv1d.weight,
             bias=self.conv1d.bias,
@@ -333,7 +333,7 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
             # SiLU selects different CPU vector kernels for the extra context.
             # Decode must slice first to reproduce the reference rounding.
             output = output[..., -sequence:]
-        return torch.nn.functional.silu(output)[..., -sequence:].to(qkv.dtype)
+        return functional.silu(output)[..., -sequence:].to(qkv.dtype)
 
 
 def _validated_cache(value: object) -> dict[str, Tensor] | None:

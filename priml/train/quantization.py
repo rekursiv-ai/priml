@@ -9,9 +9,9 @@ Requires torchao>=0.9.0 and compute capability >= 8.9 (H100, 5090, etc.).
 from __future__ import annotations
 
 from collections.abc import Callable
+from importlib import util
 
 import dataclasses
-import importlib.util
 import logging
 
 from configgle import Fig
@@ -154,7 +154,7 @@ class Float8ModelQuantization:
 
 def _check_float8_available() -> tuple[bool, str]:
     """Check if float8 training is available."""
-    if importlib.util.find_spec("torchao") is None:
+    if util.find_spec("torchao") is None:
         return False, "torchao not installed"
 
     # Check compute capability (SM89+ required for float8)

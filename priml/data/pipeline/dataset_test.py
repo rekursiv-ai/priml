@@ -10,9 +10,9 @@ import multiprocessing as mp
 import tempfile
 
 from configgle import Fig
+from torch.utils import data
 
 import pytest
-import torch.utils.data
 
 from priml.data.pipeline.dataset import (
     DataPipeline,
@@ -586,7 +586,7 @@ def test_worker_dataset_with_worker_info():
     config = DataPipeline.Config(source=source)
 
     # Create a DataLoader with workers to test multi-worker scenario.
-    loader = torch.utils.data.DataLoader(
+    loader = data.DataLoader(
         _MultipleWorkerDataset(config),
         num_workers=1,
         multiprocessing_context=_WORKER_CONTEXT,
@@ -614,7 +614,7 @@ def test_worker_dataset_with_sliceable_source():
         source.data_dir = str(data_dir)
         config = DataPipeline.Config(source=source)
 
-        loader = torch.utils.data.DataLoader(
+        loader = data.DataLoader(
             _MultipleWorkerDataset(config),
             num_workers=1,
             multiprocessing_context=_WORKER_CONTEXT,
@@ -632,7 +632,7 @@ def test_worker_dataset_non_sliceable_source_single_worker_ok():
     source.num_samples = 10
     config = DataPipeline.Config(source=source)
 
-    loader = torch.utils.data.DataLoader(
+    loader = data.DataLoader(
         _MultipleWorkerDataset(config),
         num_workers=1,
         multiprocessing_context=_WORKER_CONTEXT,
@@ -648,7 +648,7 @@ def test_worker_dataset_with_nonexistent_data_dir():
     source = SliceableSourceWithBadPath.Config()
     config = DataPipeline.Config(source=source)
 
-    loader = torch.utils.data.DataLoader(
+    loader = data.DataLoader(
         _MultipleWorkerDataset(config),
         num_workers=1,
         multiprocessing_context=_WORKER_CONTEXT,

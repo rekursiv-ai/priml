@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from importlib import util
 from importlib.machinery import ModuleSpec
 
 import dataclasses
-import importlib.util
 
 from torch import Tensor, nn
 from torchao.float8.float8_linear import Float8Linear
@@ -105,7 +105,7 @@ def test_availability_reports_missing_torchao(monkeypatch: pytest.MonkeyPatch) -
     def find_spec(name: str) -> ModuleSpec | None:
         return None if name == "torchao" else ModuleSpec(name, None)
 
-    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    monkeypatch.setattr(util, "find_spec", find_spec)
     assert _check_float8_available() == (False, "torchao not installed")
 
 

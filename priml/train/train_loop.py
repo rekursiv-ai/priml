@@ -35,7 +35,7 @@ from configgle import Fig, Makeable
 from torch import Tensor
 
 import torch
-import torch.distributed
+import torch.distributed as dist
 
 from priml.data.custom_types import DatasetProtocol
 from priml.data.dummy import DummyDataset
@@ -530,10 +530,7 @@ class TrainLoop:
 
     def _save_after_evaluation_error(self, *, is_final: bool) -> None:
         """Attempt the scheduled save without masking an evaluation error."""
-        if (
-            torch.distributed.is_initialized()
-            and torch.distributed.get_world_size() > 1
-        ):
+        if dist.is_initialized() and dist.get_world_size() > 1:
             return
         if self.checkpointer is None:
             return
@@ -574,7 +571,7 @@ class TrainLoop:
         """Whether the ``max_time`` cap has elapsed, agreed by all ranks."""
         if self.max_time == math.inf:
             return False
-        if not torch.distributed.is_initialized():
+        if not dist.is_initialized():
             return self._max_time_elapsed() >= self.max_time
         if self._time_limit_latched:
             return True
@@ -585,7 +582,7 @@ class TrainLoop:
             1.0 if over else 0.0,
             device="cuda" if torch.cuda.is_available() else "cpu",
         )
-        torch.distributed.broadcast(flag, src=0)
+        dist.broadcast(flag, src=0)
         reached = bool(flag.item() > 0.0)
         if reached:
             self._time_limit_latched = True
@@ -636,7 +633,7 @@ class TrainLoop:
         """Whether eval's wall-clock cap elapsed, agreed by all ranks."""
         if self.max_eval_time == math.inf:
             return False
-        if not torch.distributed.is_initialized():
+        if not dist.is_initialized():
             return time.perf_counter() - eval_start > self.max_eval_time
         over = is_rank_zero() and (
             time.perf_counter() - eval_start > self.max_eval_time
@@ -645,7 +642,7 @@ class TrainLoop:
             1.0 if over else 0.0,
             device="cuda" if torch.cuda.is_available() else "cpu",
         )
-        torch.distributed.broadcast(flag, src=0)
+        dist.broadcast(flag, src=0)
         return bool(flag.item() > 0.0)
 
     def _check_eval_deadline(self, eval_start: float) -> None:
@@ -859,9 +856,9 @@ class TrainLoop:
                 *(value.mean().detach() for _, value in tensor_metrics),
             ],
         )
-        if torch.distributed.is_initialized():
-            torch.distributed.all_reduce(reduced_values)
-            reduced_values = reduced_values / torch.distributed.get_world_size()
+        if dist.is_initialized():
+            dist.all_reduce(reduced_values)
+            reduced_values = reduced_values / dist.get_world_size()
         # Metric computation may itself be collective.
         train_metrics = self._compute_train_metrics()
         if not is_rank_zero():
@@ -926,8 +923,8 @@ class TrainLoop:
             return
         gc_start = time.perf_counter()
         gc.collect()
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier()
+        if dist.is_initialized():
+            dist.barrier()
         gc_time = time.perf_counter() - gc_start
         logger.info("GC at local_step %s (gc_time=%.3fs)", self.local_step, gc_time)
 
@@ -1359,10 +1356,10 @@ def _set_loader_epoch(loader: object, epoch: int) -> None:
 
 def _barrier_if_distributed(stage: str) -> None:
     """Synchronize ranks after a startup stage that can be rank-skewed."""
-    if not torch.distributed.is_initialized():
+    if not dist.is_initialized():
         return
     logger.info("TrainLoop startup: waiting after %s.", stage)
-    torch.distributed.barrier()
+    dist.barrier()
     logger.info("TrainLoop startup: all ranks passed %s.", stage)
 
 
@@ -1395,8 +1392,8 @@ def _compile_heartbeat(label: str, *, interval_sec: float = 30.0) -> Generator[N
 
 def _current_rank() -> int:
     """Global rank, or 0 when distributed is not initialized."""
-    if torch.distributed.is_initialized():
-        return torch.distributed.get_rank()
+    if dist.is_initialized():
+        return dist.get_rank()
     return 0
 
 

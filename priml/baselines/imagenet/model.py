@@ -35,12 +35,12 @@ from priml.model.swiglu import relu
 
 
 if TYPE_CHECKING:
-    import torchvision.models
-    import torchvision.models.resnet
+    from torchvision.models import resnet
 else:
     from wrapt import lazy_import
 
-    torchvision = lazy_import("torchvision")  # ~400 ms; only the builder needs it.
+    # ~400 ms; only the builder needs it.
+    resnet = lazy_import("torchvision.models.resnet")
 
 
 class BlurPoolConv2d(nn.Module):
@@ -91,7 +91,7 @@ class TorchvisionResNet(nn.Module):
 
     class Config(Fig["TorchvisionResNet"]):
         arch: Makeable[Callable[..., nn.Module]] = field(
-            default_factory=lambda: PartialConfig(torchvision.models.resnet50),
+            default_factory=lambda: PartialConfig(resnet.resnet50),
         )
         """torchvision builder, called with ``num_classes``."""
 
@@ -168,8 +168,8 @@ class TorchvisionResNet(nn.Module):
 def _is_costed_layer(module: nn.Module) -> bool:
     """Leaves, plus the containers that do work of their own (blur, residual add)."""
     residual = (
-        torchvision.models.resnet.BasicBlock,
-        torchvision.models.resnet.Bottleneck,
+        resnet.BasicBlock,
+        resnet.Bottleneck,
     )
     return isinstance(module, (BlurPoolConv2d, *residual)) or not any(
         True for _ in module.children()
@@ -259,7 +259,7 @@ def _layer_cost(
         return Cost()
     if isinstance(
         module,
-        (torchvision.models.resnet.BasicBlock, torchvision.models.resnet.Bottleneck),
+        (resnet.BasicBlock, resnet.Bottleneck),
     ):
         # The block's own work is the residual add; its layers hook themselves.
         return elementwise_cost(

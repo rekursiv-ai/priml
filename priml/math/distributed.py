@@ -9,7 +9,7 @@ import math
 from torch import Tensor
 
 import torch
-import torch.distributed
+import torch.distributed as dist
 
 from priml.memory import convert_to_tensor
 
@@ -82,12 +82,12 @@ def _logsumexp_all_to_all(
     if reduced == 0:
         return partial_result
     local_n = x.numel() // reduced
-    if not torch.distributed.is_initialized():
+    if not dist.is_initialized():
         return (partial_result - math.log(local_n)) if mean else partial_result
     if world_size is None:
-        world_size = torch.distributed.get_world_size()
+        world_size = dist.get_world_size()
     gathered = [torch.empty_like(partial_result) for _ in range(world_size)]
-    torch.distributed.all_gather(gathered, partial_result)
+    dist.all_gather(gathered, partial_result)
     global_lse = torch.logsumexp(torch.stack(gathered), dim=0)
     total_n = local_n * world_size
     return (global_lse - math.log(total_n)) if mean else global_lse

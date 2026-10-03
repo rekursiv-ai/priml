@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, Self, cast, runtime_checkable
+from urllib import request
 
 import argparse
 import csv
@@ -43,7 +44,6 @@ import logging
 import os
 import shutil
 import tempfile
-import urllib.request
 
 import numpy as np
 
@@ -237,7 +237,7 @@ def _download(filename: str, *, into: Path) -> Path:
     # Stream rather than read whole: the training CSV is hundreds of MB.
     response = cast(
         _Readable,
-        urllib.request.urlopen(url),  # noqa: S310 -- The URL is a fixed HTTPS dataset endpoint.
+        request.urlopen(url),  # noqa: S310 -- The URL is a fixed HTTPS dataset endpoint.
     )
     with response, path.open("wb") as out:
         shutil.copyfileobj(response, out)

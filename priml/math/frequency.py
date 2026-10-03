@@ -7,10 +7,9 @@ from typing import TYPE_CHECKING
 import functools
 import math
 
-from torch import Tensor
+from torch import Tensor, fft
 
 import torch
-import torch.fft
 
 from priml.memory import convert_to_tensor
 
@@ -47,7 +46,7 @@ def dct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:
     reordered = torch.cat([x[:, ::2], x[:, 1::2].flip([1])], dim=1)
 
     k = -torch.arange(n, dtype=x.dtype, device=x.device)[None, :] * math.pi / (2 * n)
-    y = (torch.fft.fft(reordered, dim=1) * torch.polar(torch.ones_like(k), k)).real
+    y = (fft.fft(reordered, dim=1) * torch.polar(torch.ones_like(k), k)).real
 
     if normalize:
         y[:, 0] /= n**0.5 * 2
@@ -99,7 +98,7 @@ def idct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:
 
     # ``irfft`` needs a contiguous complex input; q.contiguous() is bit-identical
     # to re-wrapping q.real/q.imag and reads more directly.
-    y = torch.fft.irfft(
+    y = fft.irfft(
         q.contiguous(),
         n=q.shape[1],
         dim=1,

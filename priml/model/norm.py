@@ -7,9 +7,9 @@ from typing import Self, override
 
 from configgle import Fig
 from torch import Tensor, nn
+from torch.nn import functional
 
 import torch
-import torch.nn.functional
 
 from priml.cost import (
     Cost,
@@ -148,7 +148,7 @@ class RMSNorm(nn.Module):
     @override
     def forward(self, input: Tensor, **kwargs: object) -> Tensor:
         del kwargs
-        return torch.nn.functional.rms_norm(
+        return functional.rms_norm(
             input,
             self.normalized_shape,
             self.weight,
@@ -258,7 +258,7 @@ class CenteredRMSNorm(nn.Module):
     @override
     def forward(self, input: Tensor, **kwargs: object) -> Tensor:
         del kwargs
-        normed = torch.nn.functional.rms_norm(
+        normed = functional.rms_norm(
             input.float(),
             self.weight.shape,
             eps=self.eps,

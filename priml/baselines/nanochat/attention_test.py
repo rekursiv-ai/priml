@@ -16,6 +16,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
+from priml.baselines.nanochat import attention
 from priml.baselines.nanochat.attention import (
     CausalAttention,
     Flash3Attention,
@@ -36,8 +37,6 @@ from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.special import Identity
 from priml.testing.cost import assert_cost_matches_torch
-
-import priml.baselines.nanochat.attention
 
 
 if TYPE_CHECKING:
@@ -130,9 +129,9 @@ def test_flash_cost_scales_complete_invocations_by_batch(
 
 def test_flash_backends_belong_to_attention() -> None:
     for name in ("Flash3Attention", "Flash4Attention"):
-        backend = cast(object, vars(priml.baselines.nanochat.attention)[name])
+        backend = cast(object, vars(attention)[name])
         assert isinstance(backend, type)
-        assert backend.__module__ == priml.baselines.nanochat.attention.__name__
+        assert backend.__module__ == attention.__name__
 
 
 def test_head_gate_inherits_full_input_width() -> None:
@@ -355,16 +354,16 @@ def test_cuda_qk_forward_and_backward_match_fp32_math() -> None:
 def external_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[_FakeInterface]:
     module = _FakeInterface()
     monkeypatch.setitem(sys.modules, "flash_attn.cute.interface", module)
-    priml.baselines.nanochat.attention._make_flash4_ops.cache_clear()
+    attention._make_flash4_ops.cache_clear()
     torch.compiler.reset()
     yield module
     torch.compiler.reset()
-    priml.baselines.nanochat.attention._make_flash4_ops.cache_clear()
+    attention._make_flash4_ops.cache_clear()
 
 
 def test_optional_dependency_resolves_at_make(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "flash_attn.cute.interface", None)
-    priml.baselines.nanochat.attention._make_flash4_ops.cache_clear()
+    attention._make_flash4_ops.cache_clear()
     config = Flash4Attention.Config()
     assert "Flash4Attention" in config.pformat(hide_default_values=False)
     with pytest.raises(ModuleNotFoundError):
@@ -493,7 +492,7 @@ def test_flash4_host_helpers_validate_backend(monkeypatch: pytest.MonkeyPatch) -
     output, lse = _flash4_forward(backend, q, q, q, 2)
     assert output.shape == q.shape
     assert lse.shape == (2, 4, 3)
-    module = priml.baselines.nanochat.attention
+    module = attention
     module._make_flash4_ops.cache_clear()
     monkeypatch.setattr(module, "import_module", _invalid_flash4_import)
     with pytest.raises(TypeError, match="FA4"):
@@ -515,9 +514,9 @@ def test_cuda_matches_official_autograd() -> None:
     )
     assert isinstance(
         interface,
-        priml.baselines.nanochat.attention._Flash4Interface,
+        attention._Flash4Interface,
     )
-    attention = Flash4Attention.Config().make()
+    flash4 = Flash4Attention.Config().make()
     torch.manual_seed(42)
     tensors = [
         torch.randn(3, 129, 2, 128, device="cuda", dtype=torch.bfloat16)
@@ -533,7 +532,7 @@ def test_cuda_matches_official_autograd() -> None:
     )
     reference.backward(cotangent)
     inputs = [tensor.detach().requires_grad_() for tensor in tensors]
-    output = attention(*inputs, window=64)
+    output = flash4(*inputs, window=64)
     output.backward(cotangent)
     torch.testing.assert_close(output, reference, rtol=0, atol=0)
     for actual, expected in zip(inputs, reference_inputs, strict=True):
@@ -761,7 +760,7 @@ def test_qk_validation_rejects_bad_shapes_and_widths() -> None:
 
 
 def test_receipt_parser_and_runtime_file_errors(tmp_path: Path) -> None:
-    module = priml.baselines.nanochat.attention
+    module = attention
     assert module._parse_receipt("a=1\na=2")[1] == "duplicate receipt field a"
     assert "malformed" in module._parse_receipt("broken")[1]
     assert "empty" in module._parse_receipt("=x")[1]
@@ -776,7 +775,7 @@ def test_receipt_parser_and_runtime_file_errors(tmp_path: Path) -> None:
 
 
 def test_artifact_identity_and_receipt_mismatch_details(tmp_path: Path) -> None:
-    module = priml.baselines.nanochat.attention
+    module = attention
     identity = module.artifact_path(cache_root=tmp_path)
     assert identity.parent == tmp_path
     receipt = module.expected_receipt(
@@ -795,7 +794,7 @@ def test_artifact_identity_and_receipt_mismatch_details(tmp_path: Path) -> None:
 def test_artifact_validation_reports_receipt_and_runtime_failures(
     tmp_path: Path,
 ) -> None:
-    module = priml.baselines.nanochat.attention
+    module = attention
     (tmp_path / "flash_attn_interface.py").write_text("x", encoding="utf-8")
     (tmp_path / "flash_attn_config.py").write_text("x", encoding="utf-8")
     (tmp_path / "flash_attn_3").mkdir()
@@ -827,7 +826,7 @@ def test_flash3_dispatches_through_qualified_fake_backend(
             assert window_size == (2, 0)
             return q + k + v
 
-    module = priml.baselines.nanochat.attention
+    module = attention
 
     def capability() -> tuple[int, int]:
         return (9, 0)
@@ -837,16 +836,16 @@ def test_flash3_dispatches_through_qualified_fake_backend(
 
     monkeypatch.setattr(torch.cuda, "get_device_capability", capability)
     monkeypatch.setattr(module, "load_flash3", load)
-    attention = Flash3Attention(Flash3Attention.Config())
+    flash3 = Flash3Attention(Flash3Attention.Config())
     q = torch.zeros(2, 3, 4, 6)
-    assert torch.equal(attention(q, q, q, window=2), torch.zeros_like(q))
+    assert torch.equal(flash3(q, q, q, window=2), torch.zeros_like(q))
 
 
 def test_artifact_missing_ready_and_load_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    module = priml.baselines.nanochat.attention
+    module = attention
     (tmp_path / "flash_attn_interface.py").write_text("x", encoding="utf-8")
     (tmp_path / "flash_attn_config.py").write_text("x", encoding="utf-8")
     (tmp_path / "flash_attn_3").mkdir()
@@ -883,7 +882,7 @@ def test_flash3_rejects_non_sm90_device(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_flash3_rejects_unqualified_revision() -> None:
     with pytest.raises(ValueError, match="revision identifies"):
-        priml.baselines.nanochat.attention.Flash3Attention(
+        attention.Flash3Attention(
             Flash3Attention.Config(revision="wrong"),
         )
 
@@ -891,7 +890,7 @@ def test_flash3_rejects_unqualified_revision() -> None:
 def test_loaded_module_error_detects_foreign_and_pathless_modules(
     tmp_path: Path,
 ) -> None:
-    module = priml.baselines.nanochat.attention
+    module = attention
     foreign = ModuleType("foreign")
     foreign.__file__ = str(tmp_path.parent / "foreign.py")
     sys.modules["foreign"] = foreign
@@ -909,7 +908,7 @@ def test_loaded_module_error_detects_foreign_and_pathless_modules(
 
 
 def test_receipt_validation_reports_missing_and_unexpected_fields() -> None:
-    error = priml.baselines.nanochat.attention.receipt_validation_error(
+    error = attention.receipt_validation_error(
         {"extra": "x"},
         expected={"source": "y"},
     )

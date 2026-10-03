@@ -89,9 +89,9 @@ import time
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
+from torch._inductor import config as inductor_config
 
 import torch
-import torch._inductor.config
 
 from priml.baselines.sudoku.act import (
     AtomicPool,
@@ -613,9 +613,7 @@ class Trainer:
 
         # Process-global TorchInductor flag; must be set before TRM.__init__
         # binds torch.compile so the first trace captures it.
-        torch._inductor.config.emulate_precision_casts = (  # noqa: SLF001 -- Documented inductor knob, no public alias.
-            config.emulate_precision_casts
-        )
+        inductor_config.emulate_precision_casts = config.emulate_precision_casts
         self.model: TRM = config.model.make()
         if not config.train_q_halt:
             for param in self.model.q_head.parameters():

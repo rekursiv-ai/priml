@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
+from importlib import util
 from typing import cast
-
-import importlib.util
 
 import pytest
 import torch
@@ -121,7 +120,7 @@ def test_native_test_helpers_cover_optional_paths(
         del package
         raise ModuleNotFoundError(name)
 
-    monkeypatch.setattr(importlib.util, "find_spec", missing_spec)
+    monkeypatch.setattr(util, "find_spec", missing_spec)
     assert not conftest._reference_is_installed()
     with pytest.raises(ModuleNotFoundError):
         conftest.reference("missing_module")
