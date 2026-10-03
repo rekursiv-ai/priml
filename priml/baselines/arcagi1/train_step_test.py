@@ -397,6 +397,24 @@ def test_an_all_padding_eval_batch_keeps_the_packed_width(recipe: str) -> None:
     assert empty.get("metrics", {}).keys() == full.get("metrics", {}).keys()
 
 
+@pytest.mark.parametrize("weight", [None, 0.05])
+def test_eval_halt_weight_scores_a_frozen_head(weight: float | None) -> None:
+    """Without halt training the eval loss is the token loss, unless told otherwise."""
+    config = port_config("exp004")
+    config.pool.halting = None
+    config.eval_halt_weight = weight
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        torch.manual_seed(0)
+        out = PortSubject.from_config(config).step.eval_loss(**batches()[0])
+        metrics = out.get("metrics", {})
+        lm_loss = torch.as_tensor(metrics["lm_loss"])
+        halt_loss = torch.as_tensor(metrics["q_halt_loss"])
+        expected = lm_loss if weight is None else lm_loss + weight * halt_loss
+    assert float(halt_loss) > 0
+    loss = out["loss"].reshape(())
+    assert torch.equal(loss, expected.to(loss.dtype))
+
+
 def test_a_whole_model_compile_is_rejected() -> None:
     """The step calls the model directly, so a whole-model compile would be ignored."""
     config = port_config("exp004")

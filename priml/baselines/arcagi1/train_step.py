@@ -164,6 +164,13 @@ class TrmTrainStep(TrainStep):
         ignore_label_id: int = -100
         """Label excluded from the loss and from correctness."""
 
+        eval_halt_weight: float | None = None
+        """Weight of the halt term in the reported evaluation loss.
+
+        ``None`` uses the training halt weight, and 0 when halting is not
+        trained. A recipe that froze its halt head but still reported the
+        halt term at evaluation sets that weight here."""
+
         total_train_steps: int = 36_000
         """Schedule horizon."""
 
@@ -400,7 +407,11 @@ class TrmTrainStep(TrainStep):
                     "act_steps": float(self.pool.config.max_steps),
                     "q_continue_loss": 0.0,
                 }
-        total = lm_loss + self._halt_weight() * halt_loss
+        eval_weight = self.config.eval_halt_weight
+        total = (
+            lm_loss
+            + (self._halt_weight() if eval_weight is None else eval_weight) * halt_loss
+        )
         columns = [halt.reshape(rows, 1).float()]
         if self.signals is not None:
             stability = (rollout.stable_run + 1.0) / self.pool.config.max_steps
