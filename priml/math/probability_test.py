@@ -22,6 +22,7 @@ from priml.math.probability import (
     cdf_normal,
     cdf_truncated_normal,
     cdf_uniform,
+    gumbel_max,
     lbeta,
     log_cdf_truncated_normal,
     log_gamma_correction,
@@ -41,6 +42,7 @@ from priml.math.probability import (
     random_categorical,
     random_chi2,
     random_gamma,
+    random_gumbel,
     random_logit_normal,
     random_student_t,
 )
@@ -619,6 +621,59 @@ def test_discretized_logistic_gradient_is_finite_in_the_tails() -> None:
     assert log_scale.grad is not None
     assert torch.isfinite(loc.grad).all()
     assert torch.isfinite(log_scale.grad).all()
+
+
+def test_random_gumbel_is_minus_log_minus_log_of_the_generators_uniforms() -> None:
+    uniform = torch.rand(2, 3, generator=torch.Generator().manual_seed(7))
+    noise = random_gumbel(2, 3, generator=torch.Generator().manual_seed(7))
+    assert torch.equal(noise, -(-uniform.log()).log())
+
+
+def test_gumbel_max_draws_the_bits_of_subtracting_log_minus_log_uniforms() -> None:
+    logits = torch.randn(3, 5, generator=torch.Generator().manual_seed(0))
+    logits[0, 1] = float("-inf")
+    ours, theirs = torch.Generator().manual_seed(8), torch.Generator().manual_seed(8)
+    # The spelling gumbel_max replaced: one float32 draw of the logits' shape,
+    # whose log(-log U) is subtracted rather than its negation added.
+    uniform = torch.rand(logits.shape, generator=theirs, dtype=torch.float32)
+    scores = logits - (-uniform.log()).log()
+    noise = random_gumbel(3, 5, generator=torch.Generator().manual_seed(8))
+    assert torch.equal(logits + noise, scores)
+    assert torch.equal(gumbel_max(logits, generator=ours), scores.argmax(-1))
+    assert torch.equal(ours.get_state(), theirs.get_state())
+
+
+def test_a_zero_uniform_is_minus_infinite_noise_that_never_makes_nan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uniform = torch.tensor([[0.0, 0.25, 0.0], [0.5, 0.0, 0.75]])
+
+    def fixed(size: tuple[int, ...], **_: object) -> Tensor:
+        return uniform.reshape(size)
+
+    monkeypatch.setattr(torch, "rand", fixed)
+    noise = random_gumbel(2, 3)
+    assert torch.equal(noise.isneginf(), uniform == 0)
+    logits = torch.tensor([[float("-inf"), 1.0, 0.0], [float("-inf"), 2.0, 0.0]])
+    assert not (logits + noise).isnan().any()
+    # Each row's masked entry and its zero-uniform entries lose to the rest.
+    assert gumbel_max(logits).tolist() == [1, 2]
+
+
+def test_gumbel_max_frequencies_match_softmax() -> None:
+    logits = torch.tensor([0.5, -1.0, 2.0, 0.0, float("-inf"), 1.0])
+    draws = 20_000
+    samples = gumbel_max(
+        logits.expand(draws, -1),
+        generator=torch.Generator().manual_seed(4),
+    )
+    counts = torch.bincount(samples, minlength=6).double()
+    assert counts[4] == 0
+    expected = logits.softmax(-1).double() * draws
+    finite = expected > 0
+    chi_square = ((counts - expected)[finite] ** 2 / expected[finite]).sum()
+    # 18.47 is the 0.999 quantile of chi-square with 4 degrees of freedom.
+    assert float(chi_square) < 18.47, float(chi_square)
 
 
 if __name__ == "__main__":

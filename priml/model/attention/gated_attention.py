@@ -38,10 +38,10 @@ from priml.model.linear import Linear
 from priml.model.norm import CenteredRMSNorm
 
 
-class GatedSelfAttention(nn.Module):
+class GatedAttention(nn.Module):
     """Apply sigmoid output gating before the output projection."""
 
-    class Config(Fig["GatedSelfAttention"]):
+    class Config(Fig["GatedAttention"]):
         channels_in: int = -1
         """Input channel width."""
 

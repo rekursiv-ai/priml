@@ -30,11 +30,11 @@ from priml.cost import (
     cost,
     elementwise_cost,
 )
+from priml.model.attention.attention import AttentionProjections
 from priml.model.attention.multi_stream import (
     MultiStreamAttention,
     _validate_native_state,
 )
-from priml.model.attention.self_attention import AttentionProjections
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,

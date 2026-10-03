@@ -24,9 +24,9 @@ import pytest
 import torch
 
 from priml.cost import Cost, cost
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.kvcache import KVCache
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
@@ -45,7 +45,7 @@ _CWD: Final = Path(__file__).resolve().parent
 def _canonical_config() -> TransformerBlock.Config:
     return TransformerBlock.Config(
         channels_in=16,
-        attn=SelfAttention.Config(num_heads=2, channels_head=8),
+        attn=Attention.Config(num_heads=2, channels_head=8),
     )
 
 
@@ -60,7 +60,7 @@ def test_transformer_block_config_pprint() -> None:
 def test_transformer_block_prenorm():
     m = TransformerBlock.Config(
         channels_in=64,
-        attn=SelfAttention.Config(num_heads=4, channels_head=16),
+        attn=Attention.Config(num_heads=4, channels_head=16),
         prenorm=True,
     ).make()
     x = torch.randn(2, 8, 64)
@@ -71,7 +71,7 @@ def test_transformer_block_prenorm():
 def test_transformer_block_postnorm():
     m = TransformerBlock.Config(
         channels_in=64,
-        attn=SelfAttention.Config(num_heads=4, channels_head=16),
+        attn=Attention.Config(num_heads=4, channels_head=16),
         prenorm=False,
     ).make()
     x = torch.randn(2, 8, 64)
@@ -83,14 +83,14 @@ def test_transformer_block_postnorm():
 def test_transformer_block_cached(prenorm: bool) -> None:
     m = TransformerBlock.Config(
         channels_in=64,
-        attn=SelfAttention.Config(
+        attn=Attention.Config(
             num_heads=4,
             channels_head=16,
             causal=True,
         ),
         prenorm=prenorm,
     ).make()
-    assert isinstance(m.attn, SelfAttention)
+    assert isinstance(m.attn, Attention)
     cache = m.attn.alloc_kv_cache(batch=2, max_seq=8)
 
     out, cache = m.forward_cached(torch.randn(2, 8, 64), cache=cache)
@@ -113,7 +113,7 @@ def test_transformer_block_cached_rejects_attention_without_cached_path() -> Non
 def test_transformer_block_reset(monkeypatch: pytest.MonkeyPatch) -> None:
     m = TransformerBlock.Config(
         channels_in=64,
-        attn=SelfAttention.Config(num_heads=4, channels_head=16),
+        attn=Attention.Config(num_heads=4, channels_head=16),
     ).make()
     resetters: list[Mock] = []
     for module in (m.attn, m.ffn, m.norm1, m.norm2):
@@ -130,7 +130,7 @@ def test_transformer_block_reset(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_transformer_block_config_reports_attention_dimensions() -> None:
     config = TransformerBlock.Config(
         channels_in=16,
-        attn=SelfAttention.Config(num_heads=2, channels_head=8),
+        attn=Attention.Config(num_heads=2, channels_head=8),
     )
     assert config.num_heads == 2
     assert config.channels_head == 8
@@ -155,7 +155,7 @@ def test_transformer_block_config_refuses_to_invent_attention_dimensions() -> No
 def test_transformer_block_infers_input_width_from_output() -> None:
     model = TransformerBlock.Config(
         channels_out=16,
-        attn=SelfAttention.Config(num_heads=2, channels_head=8),
+        attn=Attention.Config(num_heads=2, channels_head=8),
     ).make()
 
     assert model(torch.randn(2, 4, 16)).shape == (2, 4, 16)
@@ -165,7 +165,7 @@ def test_transformer_block_rejects_width_changing_config() -> None:
     config = TransformerBlock.Config(
         channels_in=16,
         channels_out=8,
-        attn=SelfAttention.Config(num_heads=2, channels_head=8),
+        attn=Attention.Config(num_heads=2, channels_head=8),
     )
     with pytest.raises(ValueError, match="channels_in=16 must equal channels_out=8"):
         config.make()
@@ -187,7 +187,7 @@ def test_transformer_block_rejects_ffn_output_width(channels_out: int) -> None:
 def test_transformer_block_rejects_attention_output_width() -> None:
     config = TransformerBlock.Config(
         channels_in=8,
-        attn=SelfAttention.Config(
+        attn=Attention.Config(
             num_heads=1,
             channels_in=4,
             channels_head=8,
@@ -201,7 +201,7 @@ def test_transformer_block_rejects_attention_output_width() -> None:
 def test_transformer_block_depth_propagation():
     cfg = TransformerBlock.Config(
         channels_in=64,
-        attn=SelfAttention.Config(num_heads=4, channels_head=16),
+        attn=Attention.Config(num_heads=4, channels_head=16),
         depth_index=((5, 6),),
     ).finalize()
     assert isinstance(cfg.ffn, SwiGLU.Config)
@@ -243,7 +243,7 @@ def test_block_checkpoint_skipped_under_eval():
     """
     m = TransformerBlock.Config(
         channels_in=64,
-        attn=SelfAttention.Config(num_heads=4, channels_head=16),
+        attn=Attention.Config(num_heads=4, channels_head=16),
         checkpoint=True,
     ).make()
     x = torch.randn(2, 8, 64)
@@ -262,7 +262,7 @@ def test_block_checkpoint_wraps_under_grad():
     """With grad enabled, ``checkpoint=True`` does enter ``torch_checkpoint``."""
     m = TransformerBlock.Config(
         channels_in=64,
-        attn=SelfAttention.Config(num_heads=4, channels_head=16),
+        attn=Attention.Config(num_heads=4, channels_head=16),
         checkpoint=True,
     ).make()
     x = torch.randn(2, 8, 64, requires_grad=True)
@@ -281,7 +281,7 @@ def test_block_checkpoint_wraps_under_grad():
 def test_transformer_block_bfb(device: str) -> None:
     config = _canonical_config()
     config.channels_in = 4
-    assert isinstance(config.attn, SelfAttention.Config)
+    assert isinstance(config.attn, Attention.Config)
     config.attn.channels_in = 4
     config.attn.channels_head = 2
     assert isinstance(config.ffn, SwiGLU.Config)
@@ -299,7 +299,7 @@ def test_transformer_block_bfb(device: str) -> None:
 def test_block_cost_sums_its_four_children() -> None:
     config = TransformerBlock.Config(
         channels_in=16,
-        attn=SelfAttention.Config(
+        attn=Attention.Config(
             num_heads=2,
             channels_head=8,
             attn_kernel=SdpaNaive.Config(),

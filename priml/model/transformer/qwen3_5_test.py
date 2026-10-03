@@ -12,8 +12,8 @@ from configgle.testing import assert_pprint_golden
 import pytest
 import torch
 
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.generate import generate
 from priml.model.norm import CenteredRMSNorm
 from priml.model.special import TiedLinear
@@ -208,9 +208,9 @@ def test_layer_types_default_to_a_full_attention_interval() -> None:
     ]
     assert attentions == [
         "Qwen35GatedDeltaNet.Config",
-        "GatedSelfAttention.Config",
+        "GatedAttention.Config",
         "Qwen35GatedDeltaNet.Config",
-        "GatedSelfAttention.Config",
+        "GatedAttention.Config",
     ]
 
 
@@ -345,7 +345,7 @@ def test_prepared_causal_mask_reaches_injected_self_attention_prefill_and_cache(
     assert isinstance(config.block, list)
     block = config.block[1]
     assert isinstance(block, TransformerBlock.Config)
-    attention = SelfAttention.Config()
+    attention = Attention.Config()
     attention.num_heads = 2
     attention.num_heads_kv = 1
     attention.channels_head = 8

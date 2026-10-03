@@ -19,13 +19,13 @@ import torch
 
 from priml import hub
 from priml.lib.custom_json import IntCodec
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.rope import (
     GeometricFrequencies,
     HuggingFaceFrequencies,
     RoPE,
 )
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.embedding import Embedding
 from priml.model.norm import RMSNorm
 from priml.model.sequential import Sequential
@@ -164,12 +164,12 @@ def synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, Tensor]:
 
 # Accepts a template or a finalized per-layer list, so a caller need not know which side
 # of ``finalize`` it is on.
-def attn(cfg: Qwen3.Config, layer: int = 0) -> SelfAttention.Config:
+def attn(cfg: Qwen3.Config, layer: int = 0) -> Attention.Config:
     """One layer's attention -- where the head geometry lives now."""
     block = cfg.block[layer] if isinstance(cfg.block, list) else cfg.block
     assert isinstance(block, TransformerBlock.Config)
     attn = block.attn
-    assert isinstance(attn, SelfAttention.Config)
+    assert isinstance(attn, Attention.Config)
     return attn
 
 
@@ -455,7 +455,7 @@ class TestRemap:
         block = model.blocks[0]
         assert isinstance(block, TransformerBlock)
         attn = block.attn
-        assert isinstance(attn, SelfAttention)
+        assert isinstance(attn, Attention)
         q_norm = attn.norm_q
         k_norm = attn.norm_k
         assert isinstance(q_norm, RMSNorm)
@@ -663,7 +663,7 @@ def _qwen3_parity_outputs(tie_embeddings: bool) -> tuple[Tensor, Tensor]:
     assert isinstance(config.block, list)
     for block in config.block:
         assert isinstance(block, TransformerBlock.Config)
-        assert isinstance(block.attn, SelfAttention.Config)
+        assert isinstance(block.attn, Attention.Config)
         assert isinstance(block.ffn, SwiGLU.Config)
         block.attn.split_qkv_projection = True
         block.ffn.split_gate_projection = True

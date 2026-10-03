@@ -51,7 +51,7 @@ CUDA graphs and the fused attention and n-gram kernels remain enabled.
 Install FlashAttention-4 into the same environment as Priml:
 
 ```bash
-uv add flash-attn-4==4.0.0b29
+uv add flash-attn-4
 ```
 
 Inspect the preparation recipe, then build its inputs in a fresh directory:

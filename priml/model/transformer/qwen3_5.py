@@ -24,7 +24,7 @@ from priml.lib.custom_json import (
     StrCodec,
     loads,
 )
-from priml.model.attention.gated_self_attention import GatedSelfAttention
+from priml.model.attention.gated_attention import GatedAttention
 from priml.model.attention.qwen3_5_delta import Qwen35GatedDeltaNet
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE
 from priml.model.custom_types import (
@@ -427,8 +427,8 @@ def _layer_types(config: Mapping[str, object], *, count: int) -> list[str]:
     return [StrCodec.coerce(layer, default=None) for layer in layers]
 
 
-def _full_attention(config: Mapping[str, object]) -> GatedSelfAttention.Config:
-    attention = GatedSelfAttention.Config()
+def _full_attention(config: Mapping[str, object]) -> GatedAttention.Config:
+    attention = GatedAttention.Config()
     attention.num_heads = _positive(config, name="num_attention_heads")
     attention.num_heads_kv = _positive(config, name="num_key_value_heads")
     if attention.num_heads % attention.num_heads_kv:

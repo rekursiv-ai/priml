@@ -76,8 +76,8 @@ from priml.baselines.sudoku.prefix import (
     SparsePuzzleEmbedding,
 )
 from priml.baselines.sudoku.train_step import SudokuTrainStep
+from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.init import kaiming_uniform
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
@@ -609,7 +609,7 @@ def exp008() -> TrmTrainLoop:
     cfg.experiment_name = "exp008"
     model = cfg.step.model
     assert isinstance(model.block, TransformerBlock.Config)
-    assert isinstance(model.block.attn, SelfAttention.Config)
+    assert isinstance(model.block.attn, Attention.Config)
     model.block.attn.norm_qk = RMSNorm.Config(model.block.attn.channels_head)
     assert isinstance(model.embedding, GridEmbedding.Config)
     model.embedding.channels = [PredictionFeedback.Config()]
@@ -629,7 +629,7 @@ def _reference_model(batch_size: int) -> SudokuNet.Config:
     model.num_layers = 2
     model.embedding = GridEmbedding.Config()
     model.block = RotaryBlock.Config(
-        attn=SelfAttention.Config(
+        attn=Attention.Config(
             num_heads=8,
             channels_head=64,
             init_weight=corrected_fan_in_normal,

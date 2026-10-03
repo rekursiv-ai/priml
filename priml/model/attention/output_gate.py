@@ -16,8 +16,8 @@ from priml.cost import (
     elementwise_cost,
     matmul_cost,
 )
+from priml.model.attention.attention import Attention
 from priml.model.attention.kvcache import KVCache
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import (
     CachedAttention,
     ChannelsIn,
@@ -48,7 +48,7 @@ class OutputGate(nn.Module):
 
         _: KW_ONLY
 
-        inner: Makeable[TensorModule] = field(default_factory=SelfAttention.Config)
+        inner: Makeable[TensorModule] = field(default_factory=Attention.Config)
         """Wrapped attention module config."""
 
         bias: bool = False

@@ -62,7 +62,7 @@ wired the same way — the parent sets the child's `shard` at the inline
 `.Config(...)` call, fixed by the child's role:
 
 ```python
-class SelfAttention:
+class Attention:
     def __init__(self, config: Config) -> None:
         self.proj_qkv = EnsembleLinear.Config(
             ...,
@@ -173,7 +173,7 @@ composes correctly (sharded == dense, err 6e-8).
 
 Because `attn_kernel` is a configgle `Makeable` slot, this needs no
 special-casing: **TP models set `attn_kernel=SdpaNaive`.** The applier raises a
-clear error if it shards a `SelfAttention` still using the fused flash kernel,
+clear error if it shards a `Attention` still using the fused flash kernel,
 rather than letting the cryptic deep-aten `NotImplementedError` surface.
 `tp=1` is unaffected (no DTensor, fused flash runs as normal — goldens green).
 
@@ -216,7 +216,7 @@ Under #298 (TP):
    `TensorParallel` to `lib`; wire into `ParallelStrategyProtocol`.
 2. Custom `ParallelStyle` for `EnsembleLinear` (ensemble-dim shard) + spike
    hardened into a test.
-3. Shard styles on `Linear`/`SwiGLU`/`MoE`/`SelfAttention`/`MLA`/`embedding`
+3. Shard styles on `Linear`/`SwiGLU`/`MoE`/`Attention`/`MLA`/`embedding`
    block Configs via `finalize()`.
 4. Multirank cpu:gloo `tp=2` correctness test (sharded == dense) + `tp=1`
    golden-green regression.

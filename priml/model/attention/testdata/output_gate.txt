@@ -1,7 +1,7 @@
 OutputGate.Config(
                 channels_in=16,
                 channels_out=16,
-                inner=SelfAttention.Config(
+                inner=Attention.Config(
                         channels_in=16,
                         channels_out=16,
                         num_heads=2,

@@ -28,7 +28,6 @@ import tiktoken
 import torch
 
 from priml.baselines.nanochat import experiments
-from priml.baselines.nanochat.attention import Flash3Attention
 from priml.baselines.nanochat.data import token_bytes_fingerprint
 from priml.baselines.nanochat.experiments import NanoChatLoop, NgramTrainLoop
 from priml.baselines.nanochat.model import MemoryNanoChatLM
@@ -38,6 +37,7 @@ from priml.baselines.nanochat.train_step import (
 )
 from priml.cost import cost
 from priml.metrics.bits_per_byte import BitsPerByte
+from priml.model.attention.flash3 import Flash3Attention
 from priml.model.attention.value_gated_attention import ValueGatedAttention
 from priml.model.narrow_embedding import NarrowEmbedding
 from priml.optimizers.composite import CompositeOptimizer

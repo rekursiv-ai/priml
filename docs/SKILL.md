@@ -382,7 +382,7 @@ possible once the child is a slot -- there is otherwise no child to set.
 
 The blessed nouns reserve the names for this (`norm`, `norm_qk`, `norm_out`:
 "normalization slots, named for their position"), and every peer already
-complies -- `TransformerBlock.norm1/norm2`, `SelfAttention.norm_qk/norm_out`,
+complies -- `TransformerBlock.norm1/norm2`, `Attention.norm_qk/norm_out`,
 `MLPMixerBlock.norm_token/norm_channel`, `SwiGLU.norm`. A module that builds a
 child while exposing NO `Makeable` slot has flattened its own subtree.
 
@@ -411,7 +411,7 @@ whether the parent RENAMES one quantity or DERIVES a different one:
 | Forward | Verdict |
 |---|---|
 | `rms_norm_eps` -> `RMSNorm.eps` | Violation: same number, second name. |
-| `num_key_value_heads` -> `SelfAttention.num_heads_kv` | Violation: priml disagreeing with itself. |
+| `num_key_value_heads` -> `Attention.num_heads_kv` | Violation: priml disagreeing with itself. |
 | `vocab_size` -> `Embedding.channels_in`, `Linear.channels_out` | Fine: one value, two ROLES. |
 | `q_lora_rank` -> `Linear.channels_in`, `RMSNorm.channels_in` | Fine: a rank sizes several tensors. |
 

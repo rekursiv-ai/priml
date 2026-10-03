@@ -13,6 +13,10 @@ import pytest
 import torch
 
 from priml.cost import cost, matmul_cost
+from priml.model.attention.attention import (
+    Attention,
+    AttentionProjections,
+)
 from priml.model.attention.kernel import (
     SdpaFused,
     SdpaNaive,
@@ -23,10 +27,6 @@ from priml.model.attention.kvcache import (
 )
 from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.rope import RoPE
-from priml.model.attention.self_attention import (
-    AttentionProjections,
-    SelfAttention,
-)
 from priml.model.attention.window import causal_chunk_mask, window_mask
 from priml.model.custom_types import (
     HasForwardCached,
@@ -70,7 +70,7 @@ class _LearnedRotary(nn.Module):
 
 
 def test_self_attention_config_pprint() -> None:
-    config = SelfAttention.Config(channels_in=16, num_heads=2, channels_head=8)
+    config = Attention.Config(channels_in=16, num_heads=2, channels_head=8)
     assert_pprint_golden(
         test_file=__file__,
         name="self_attention",
@@ -84,7 +84,7 @@ def test_self_attention_registers_a_custom_rope() -> None:
     One left off it is absent from ``state_dict`` and unmoved by
     ``.to(device)``, so a learned variant never trains.
     """
-    module = SelfAttention.Config(
+    module = Attention.Config(
         channels_in=64,
         num_heads=4,
         channels_head=16,
@@ -96,14 +96,14 @@ def test_self_attention_registers_a_custom_rope() -> None:
 
 
 def test_self_attention():
-    m = SelfAttention.Config(channels_in=64, num_heads=4, channels_head=16).make()
+    m = Attention.Config(channels_in=64, num_heads=4, channels_head=16).make()
     x = torch.randn(2, 8, 64)
     out = m(x)
     assert out.shape == (2, 8, 64)
 
 
 def test_self_attention_kv_cache():
-    m = SelfAttention.Config(channels_in=64, num_heads=4, channels_head=16).make()
+    m = Attention.Config(channels_in=64, num_heads=4, channels_head=16).make()
     cache = KVCache.alloc(batch=2, num_heads=4, max_seq=32, channels_head=16)
     x = torch.randn(2, 8, 64)
     _, cache = m.forward_cached(x, cache=cache)
@@ -115,7 +115,7 @@ def test_self_attention_kv_cache():
 
 
 def test_self_attention_preallocated_cache():
-    m = SelfAttention.Config(channels_in=64, num_heads=4, channels_head=16).make()
+    m = Attention.Config(channels_in=64, num_heads=4, channels_head=16).make()
     cache = KVCache.alloc(batch=2, num_heads=4, max_seq=32, channels_head=16)
     assert cache.length == 0
     x = torch.randn(2, 8, 64)
@@ -130,7 +130,7 @@ def test_self_attention_preallocated_cache():
 
 
 def test_self_attention_gqa():
-    m = SelfAttention.Config(
+    m = Attention.Config(
         channels_in=64,
         num_heads=4,
         channels_head=16,
@@ -142,7 +142,7 @@ def test_self_attention_gqa():
 
 
 def test_self_attention_causal():
-    m = SelfAttention.Config(
+    m = Attention.Config(
         channels_in=64,
         num_heads=4,
         channels_head=16,
@@ -154,7 +154,7 @@ def test_self_attention_causal():
 
 
 def test_self_attention_with_rope():
-    m = SelfAttention.Config(
+    m = Attention.Config(
         channels_in=64,
         num_heads=4,
         channels_head=16,
@@ -166,7 +166,7 @@ def test_self_attention_with_rope():
 
 
 def test_self_attention_with_rope_and_cache():
-    m = SelfAttention.Config(
+    m = Attention.Config(
         channels_in=64,
         num_heads=4,
         channels_head=16,
@@ -181,7 +181,7 @@ def test_self_attention_with_rope_and_cache():
 
 
 def test_self_attention_with_norm_qk():
-    m = SelfAttention.Config(
+    m = Attention.Config(
         channels_in=64,
         num_heads=4,
         channels_head=16,
@@ -196,7 +196,7 @@ def test_self_attention_with_norm_qk():
 
 def test_self_attention_norm_qk_channels_inferred_from_channels_head():
     """An unset norm_qk width resolves to channels_head, not channels_in."""
-    config = SelfAttention.Config(
+    config = Attention.Config(
         channels_in=64,
         num_heads=4,
         channels_head=16,
@@ -215,7 +215,7 @@ def test_self_attention_norm_out_channels_inferred_from_inner_width():
     An explicit head_dim makes that differ from channels_in (64 vs 128 here),
     so the residual width would be the wrong answer, not merely unresolved.
     """
-    config = SelfAttention.Config(
+    config = Attention.Config(
         channels_in=64,
         num_heads=4,
         channels_head=32,
@@ -230,7 +230,7 @@ def test_self_attention_norm_out_channels_inferred_from_inner_width():
 
 def test_self_attention_norm_qk_explicit_channels_preserved():
     """An explicit width is the caller's decision; inference must not clobber it."""
-    config = SelfAttention.Config(
+    config = Attention.Config(
         channels_in=64,
         num_heads=4,
         channels_head=16,
@@ -242,7 +242,7 @@ def test_self_attention_norm_qk_explicit_channels_preserved():
 
 
 def test_self_attention_independent_qk_norms():
-    m = SelfAttention.Config(
+    m = Attention.Config(
         channels_in=64,
         num_heads=4,
         channels_head=16,
@@ -268,7 +268,7 @@ def test_self_attention_independent_qk_norms():
 
 
 def test_self_attention_reset():
-    m = SelfAttention.Config(
+    m = Attention.Config(
         channels_in=64,
         num_heads=4,
         channels_head=16,
@@ -278,7 +278,7 @@ def test_self_attention_reset():
 
 
 def test_self_attention_split_qkv_projection() -> None:
-    m = SelfAttention.Config(
+    m = Attention.Config(
         channels_in=16,
         num_heads=2,
         channels_head=8,
@@ -292,24 +292,24 @@ def test_self_attention_split_qkv_projection() -> None:
 @pytest.mark.parametrize(
     ("config", "match"),
     [
-        (SelfAttention.Config(), "Need at least two"),
+        (Attention.Config(), "Need at least two"),
         (
-            SelfAttention.Config(channels_in=15, num_heads=2),
+            Attention.Config(channels_in=15, num_heads=2),
             "not divisible by num_heads",
         ),
         (
-            SelfAttention.Config(channels_in=15, num_heads=-1, channels_head=8),
+            Attention.Config(channels_in=15, num_heads=-1, channels_head=8),
             "not divisible by channels_head",
         ),
     ],
 )
 def test_self_attention_invalid_head_geometry_prints_before_make_rejects(
-    config: SelfAttention.Config,
+    config: Attention.Config,
     match: str,
 ) -> None:
     rendered = config.pformat(hide_default_values=False)
 
-    assert "SelfAttention.Config" in rendered
+    assert "Attention.Config" in rendered
     with pytest.raises(ValueError, match=match):
         config.make()
 
@@ -318,12 +318,12 @@ def test_self_attention_inner_width_differs_from_residual():
     """``channels_in`` (residual) may differ from ``num_heads*channels_head``.
 
     Regression for MODEL-008: Qwen3 sets an explicit ``head_dim`` where
-    ``channels_in != num_heads * head_dim``. SelfAttention must keep the
+    ``channels_in != num_heads * head_dim``. Attention must keep the
     residual width (channels_in) separate from the attention inner
     width (num_heads * channels_head), with ``proj_out`` mapping inner ->
     residual.
     """
-    m = SelfAttention.Config(
+    m = Attention.Config(
         channels_in=1024,
         num_heads=16,
         channels_head=128,
@@ -336,13 +336,13 @@ def test_self_attention_inner_width_differs_from_residual():
 
 
 def test_self_attention_channels_infer():
-    cfg = SelfAttention.Config(num_heads=4, channels_head=16).finalize()
+    cfg = Attention.Config(num_heads=4, channels_head=16).finalize()
     assert cfg.channels_in == 64
     assert cfg.channels_out == 64
 
 
 def test_self_attention_arbitrary_batch():
-    m = SelfAttention.Config(channels_in=64, num_heads=4, channels_head=16).make()
+    m = Attention.Config(channels_in=64, num_heads=4, channels_head=16).make()
     x = torch.randn(3, 2, 8, 64)
     out = m(x)
     assert out.shape == (3, 2, 8, 64)
@@ -351,7 +351,7 @@ def test_self_attention_arbitrary_batch():
 def test_self_attention_cos_sin_kwarg():
     """Supports passing pre-computed cos_sin (sic convention)."""
     rope = RoPE.Config(channels_head=16).make()
-    m = SelfAttention.Config(channels_in=64, num_heads=4, channels_head=16).make()
+    m = Attention.Config(channels_in=64, num_heads=4, channels_head=16).make()
     x = torch.randn(2, 8, 64)
     cos, sin = rope(torch.arange(8))
     out = m(x, cos_sin=(cos, sin))
@@ -367,7 +367,7 @@ def test_self_attention_cached_chunk_is_causal():
     chunk tokens attend to later ones.
     """
     torch.manual_seed(0)
-    m = SelfAttention.Config(
+    m = Attention.Config(
         channels_in=64,
         num_heads=4,
         channels_head=16,
@@ -391,7 +391,7 @@ def test_self_attention_cached_chunk_rope_positions():
     offset so chunked and full forwards agree under RoPE.
     """
     torch.manual_seed(0)
-    m = SelfAttention.Config(
+    m = Attention.Config(
         channels_in=64,
         num_heads=4,
         channels_head=16,
@@ -415,7 +415,7 @@ def test_self_attention_explicit_mask_combines_with_implicit_causal():
     ``causal=True`` and differs from ``causal=False``.
     """
     torch.manual_seed(0)
-    config = SelfAttention.Config(
+    config = Attention.Config(
         channels_in=30,
         num_heads=3,
         channels_head=10,
@@ -425,7 +425,7 @@ def test_self_attention_explicit_mask_combines_with_implicit_causal():
     module = config.make()
     module.eval()
     x = torch.randn(2, 5, 30)
-    # SelfAttention._forward receives one sequence, so query/key lengths are square.
+    # Attention._forward receives one sequence, so query/key lengths are square.
     permissive_mask = torch.zeros(2, 3, 5, 5)
 
     with torch.inference_mode():
@@ -451,7 +451,7 @@ def test_self_attention_decode_matches_explicit_mask_reference() -> None:
         channels_out=32,
         num_layers=2,
         block=TransformerBlock.Config(
-            attn=SelfAttention.Config(
+            attn=Attention.Config(
                 num_heads=4,
                 num_heads_kv=2,
                 channels_head=4,
@@ -480,7 +480,7 @@ def test_self_attention_decode_respects_configured_window() -> None:
     and matches a mask built by hand from ``window_mask``.
     """
     torch.manual_seed(0)
-    config = SelfAttention.Config(
+    config = Attention.Config(
         channels_in=16,
         num_heads=2,
         channels_head=8,
@@ -532,7 +532,7 @@ def test_self_attention_cached_chunk_respects_configured_window() -> None:
     matches a mask built by hand from ``window_mask``.
     """
     torch.manual_seed(0)
-    config = SelfAttention.Config(
+    config = Attention.Config(
         channels_in=16,
         num_heads=2,
         channels_head=8,
@@ -579,7 +579,7 @@ def test_self_attention_cached_chunk_respects_configured_window() -> None:
 
 def test_self_attention_kv_heads_validation():
     with pytest.raises(ValueError, match="must be divisible"):
-        SelfAttention.Config(
+        Attention.Config(
             num_heads=5,
             channels_head=12,
             num_heads_kv=3,
@@ -587,7 +587,7 @@ def test_self_attention_kv_heads_validation():
 
 
 def test_self_attention_with_naive_kernel():
-    m = SelfAttention.Config(
+    m = Attention.Config(
         channels_in=64,
         num_heads=4,
         channels_head=16,
@@ -614,7 +614,7 @@ def test_self_attention_forwards_the_open_message_bus() -> None:
         messages.append(message)
         return q
 
-    attention = SelfAttention.Config(
+    attention = Attention.Config(
         channels_in=16,
         num_heads=2,
         channels_head=8,
@@ -630,13 +630,13 @@ def test_self_attention_forwards_the_open_message_bus() -> None:
 def test_self_attention_kernel_injection():
     """SdpaNaive and SdpaFused produce numerically close results."""
     torch.manual_seed(0)
-    cfg_fused = SelfAttention.Config(
+    cfg_fused = Attention.Config(
         channels_in=64,
         num_heads=4,
         channels_head=16,
         causal=True,
     )
-    cfg_naive = SelfAttention.Config(
+    cfg_naive = Attention.Config(
         channels_in=64,
         num_heads=4,
         channels_head=16,
@@ -658,7 +658,7 @@ def test_self_attention_bfb(device: str) -> None:
         golden_dir=_CWD / "testdata",
         golden_name="self_attention",
         build_module=lambda: (
-            SelfAttention.Config(
+            Attention.Config(
                 channels_in=4,
                 num_heads=2,
                 channels_head=2,
@@ -708,7 +708,7 @@ def test_projection_stage_width_error_names_the_owner() -> None:
 
 def test_self_attention_cost_is_projections_plus_scores() -> None:
     """Projections follow the matrix rule; scores scale with seq_len, not params."""
-    config = SelfAttention.Config(
+    config = Attention.Config(
         channels_in=16,
         num_heads=2,
         channels_head=8,
@@ -772,7 +772,7 @@ def test_attention_projections_cost_is_its_projections_and_slots() -> None:
 
 
 def test_gqa_cost_caches_only_kv_heads() -> None:
-    config = SelfAttention.Config(
+    config = Attention.Config(
         channels_in=16,
         num_heads=4,
         channels_head=4,
@@ -784,7 +784,7 @@ def test_gqa_cost_caches_only_kv_heads() -> None:
 
 
 def test_attention_cost_counts_its_norms_and_rotary() -> None:
-    config = SelfAttention.Config(
+    config = Attention.Config(
         channels_in=16,
         num_heads=2,
         channels_head=8,
@@ -803,7 +803,7 @@ def test_attention_cost_counts_its_norms_and_rotary() -> None:
 
 
 def test_attention_projection_counts_weights_once_and_scales_itemsize() -> None:
-    config = SelfAttention.Config()
+    config = Attention.Config()
     config.channels_in = 8
     config.num_heads = 2
     config.channels_head = 4
@@ -872,6 +872,158 @@ def test_qkv_traffic_reads_input_per_projection_not_per_head(split: bool) -> Non
     assert actual["bytes", "adjoint", "matmul"].sum() == 4 * (qkv + output)
 
 
+def test_attention_to_a_memory_of_x_is_self_attention() -> None:
+    attention = Attention.Config(channels_in=8, num_heads=2).make()
+    x = torch.randn(3, 5, 8)
+    torch.testing.assert_close(attention(x, memory=x), attention(x))
+
+
+def test_attention_to_a_repeated_key_ignores_how_often_it_repeats() -> None:
+    attention = Attention.Config(channels_in=8, num_heads=2).make()
+    x = torch.randn(3, 5, 8)
+    key = torch.randn(8)
+    twice = attention(x, memory=key.expand(3, 2, 8))
+    seven = attention(x, memory=key.expand(3, 7, 8))
+    torch.testing.assert_close(twice, seven)
+
+
+def test_each_query_reads_only_its_own_rows_memory() -> None:
+    attention = Attention.Config(channels_in=8, num_heads=2, num_heads_kv=1).make()
+    x = torch.randn(2, 4, 8)
+    memory = torch.randn(2, 6, 8)
+    out = attention(x, memory=memory)
+    changed = memory.clone()
+    changed[1] += 1.0
+    moved = attention(x, memory=changed)
+    torch.testing.assert_close(moved[0], out[0])
+    assert not torch.allclose(moved[1], out[1])
+
+
+def test_a_mask_leaves_out_the_memory_it_excludes() -> None:
+    attention = Attention.Config(channels_in=8, num_heads=2).make()
+    x, memory = torch.randn(2, 4, 8), torch.randn(2, 6, 8)
+    # Row 0's last two memory positions are padding.
+    valid = torch.tensor([[True] * 4 + [False] * 2, [True] * 6])
+    masked = attention(x, memory=memory, attn_mask=valid[:, None, None, :])
+    torch.testing.assert_close(masked[0], attention(x[:1], memory=memory[:1, :4])[0])
+    torch.testing.assert_close(masked[1], attention(x[1:], memory=memory[1:])[0])
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        Attention.Config(channels_in=8, num_heads=2, causal=True),
+        Attention.Config(channels_in=8, num_heads=2, rope=RoPE.Config(channels_head=4)),
+    ],
+)
+def test_attention_to_a_memory_refuses_causality_and_rotary(
+    config: Attention.Config,
+) -> None:
+    with pytest.raises(ValueError, match="memory"):
+        config.make()(torch.randn(2, 4, 8), memory=torch.randn(2, 6, 8))
+
+
+# A block forwards its keyword messages to every attention, so a window or a causal
+# flag meant for self-attention reaches a cross-attention too. Each would mask the
+# memory silently, or crash when the queries outnumber it.
+@pytest.mark.parametrize(("window", "is_causal"), [(1, False), (0, False), (-1, True)])
+def test_attention_to_a_memory_refuses_a_window_or_a_causal_call(
+    *,
+    window: int,
+    is_causal: bool,
+) -> None:
+    attention = Attention.Config(channels_in=8, num_heads=2).make()
+    with pytest.raises(ValueError, match="memory"):
+        attention(
+            torch.randn(2, 4, 8),
+            memory=torch.randn(2, 6, 8),
+            window=window,
+            is_causal=is_causal,
+        )
+
+
+def test_attention_to_a_memory_accepts_an_unbounded_window() -> None:
+    attention = Attention.Config(channels_in=8, num_heads=2).make()
+    x, memory = torch.randn(2, 4, 8), torch.randn(2, 6, 8)
+    torch.testing.assert_close(
+        attention(x, memory=memory, window=-1, is_causal=False),
+        attention(x, memory=memory),
+    )
+
+
+@pytest.mark.parametrize("bias", [False, True])
+def test_projections_read_the_query_heads_and_the_key_value_heads(
+    *,
+    bias: bool,
+) -> None:
+    attention = Attention.Config(
+        channels_in=7,
+        num_heads=6,
+        num_heads_kv=3,
+        channels_head=8,
+        bias=bias,
+    ).make()
+    weight, shift = attention.proj_qkv.weight, attention.proj_qkv.bias
+    if shift is None:
+        shift = torch.zeros(12, 8)
+    else:
+        nn.init.normal_(shift)
+    x, memory = torch.randn(2, 4, 7), torch.randn(2, 5, 7)
+    on_x = torch.einsum("...c,edc->...ed", x, weight) + shift
+    on_memory = torch.einsum("...c,edc->...ed", memory, weight) + shift
+    k, v = attention.project_memory(memory)
+    torch.testing.assert_close(attention.project_queries(x), on_x[..., :6, :])
+    torch.testing.assert_close(k, on_memory[..., 6:9, :])
+    torch.testing.assert_close(v, on_memory[..., 9:, :])
+
+
+def test_memory_attention_attends_projected_queries_to_projected_memory() -> None:
+    config = Attention.Config(
+        channels_in=7,
+        num_heads=6,
+        num_heads_kv=3,
+        channels_head=8,
+    )
+    config.norm_qk = RMSNorm.Config(elementwise_affine=True)
+    config.share_qk_norm = False
+    attention = config.make()
+    assert attention.norm_q is not None
+    assert attention.norm_k is not None
+    x, memory = torch.randn(2, 4, 7), torch.randn(2, 5, 7)
+    k, v = attention.project_memory(memory)
+    out = nn.functional.scaled_dot_product_attention(
+        attention.norm_q(attention.project_queries(x)).transpose(-3, -2),
+        attention.norm_k(k).transpose(-3, -2),
+        v.transpose(-3, -2),
+        enable_gqa=True,
+    )
+    torch.testing.assert_close(
+        attention(x, memory=memory),
+        attention.proj_out(out.transpose(-3, -2).flatten(-2)),
+    )
+
+
+@pytest.mark.parametrize("share_qk_norm", [False, True])
+def test_cross_attention_cost_matches_torch(*, share_qk_norm: bool) -> None:
+    config = Attention.Config(channels_in=8, num_heads=2, num_heads_kv=1, bias=True)
+    config.norm_qk = RMSNorm.Config(elementwise_affine=True)
+    config.share_qk_norm = share_qk_norm
+    # Torch's FLOP counter sees the naive kernel's matmuls, not fused SDPA's.
+    config.attn_kernel = SdpaNaive.Config()
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: (
+            torch.randn(2, 3, 8, requires_grad=True),
+            torch.randn(2, 5, 8, requires_grad=True),
+        ),
+        run=_attend_to_memory,
+        seq_len=3,
+        batch_size=2,
+        dtype=None,
+        memory_len=5,
+    )
+
+
 # ``reference=True`` forces the same mask the module would build on its own, by
 # explicitly passing ``is_causal=False`` and a ``causal_chunk_mask`` built from each
 # step's shapes on every decode call -- the mask depends only on shape/dtype/device
@@ -923,6 +1075,12 @@ def _greedy_decode(
                 x, caches[i] = block.forward_cached(x, cache=caches[i], **extra)
             logits = model.project_to_logits(x)
     return tokens
+
+
+def _attend_to_memory(module: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:
+    """Attend the first input's queries to the second input as memory."""
+    assert isinstance(module, Attention)
+    return module(inputs[0], memory=inputs[1])
 
 
 if __name__ == "__main__":

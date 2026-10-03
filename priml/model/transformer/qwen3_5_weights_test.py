@@ -12,8 +12,8 @@ from configgle import Fig, Makes
 import pytest
 import torch
 
-from priml.model.attention.gated_self_attention import GatedSelfAttention
-from priml.model.attention.self_attention import SelfAttention
+from priml.model.attention.attention import Attention
+from priml.model.attention.gated_attention import GatedAttention
 from priml.model.custom_types import has_weight
 from priml.model.linear import Linear
 from priml.model.transformer.block import TransformerBlock
@@ -195,7 +195,7 @@ def test_rejects_an_injected_attention_without_an_hf_counterpart() -> None:
     assert isinstance(native_config.block, list)
     block = native_config.block[1]
     assert isinstance(block, TransformerBlock.Config)
-    attention = SelfAttention.Config()
+    attention = Attention.Config()
     attention.num_heads = 2
     attention.num_heads_kv = 1
     attention.channels_head = 8
@@ -215,7 +215,7 @@ def test_an_attention_parameter_outside_the_projections_maps_by_name() -> None:
     assert isinstance(native_config.block, list)
     block = native_config.block[1]
     assert isinstance(block, TransformerBlock.Config)
-    assert isinstance(block.attn, GatedSelfAttention.Config)
+    assert isinstance(block.attn, GatedAttention.Config)
     extra = _ExtraGatedAttention.Config()
     extra.update(block.attn)
     block.attn = extra
@@ -229,10 +229,10 @@ def test_an_attention_parameter_outside_the_projections_maps_by_name() -> None:
     assert torch.equal(mapped["blocks.1.attn.extra"], torch.full((1,), 7.0))
 
 
-class _ExtraGatedAttention(GatedSelfAttention):
+class _ExtraGatedAttention(GatedAttention):
     """Gated attention carrying one parameter outside the projection map."""
 
-    class Config(Makes["_ExtraGatedAttention"], GatedSelfAttention.Config):
+    class Config(Makes["_ExtraGatedAttention"], GatedAttention.Config):
         """Same fields as the parent; only the built module differs."""
 
     def __init__(self, config: Config) -> None:

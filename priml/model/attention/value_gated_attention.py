@@ -1,6 +1,6 @@
 """Windowed causal attention with a per-head value-embedding gate.
 
-Two departures from :class:`~priml.model.attention.self_attention.SelfAttention`, both
+Two departures from :class:`~priml.model.attention.attention.Attention`, both
 from the speedrun recipes rather than from taste:
 
 * **A window.** A layer attends to ``window`` previous positions plus itself.
@@ -171,7 +171,7 @@ class ValueGatedAttention(nn.Module):
     """Windowed causal attention with normalized queries/keys and value gating.
 
     Two departures from priml's
-    :class:`~priml.model.attention.self_attention.SelfAttention`, both load-bearing here:
+    :class:`~priml.model.attention.attention.Attention`, both load-bearing here:
 
     * **A window.** A layer attends to ``window`` previous positions plus itself.
       Restricting most layers and leaving a few global keeps attention

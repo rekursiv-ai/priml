@@ -134,6 +134,28 @@ def entropy_probs(
     )
 
 
+def total_variation(
+    p: Tensorable,
+    q: Tensorable,
+    dim: int | tuple[int, ...] = -1,
+    keepdim: bool = False,
+) -> Tensor:
+    """Total-variation distance between two distributions, ``0.5 sum |p - q|``.
+
+    Args:
+      p: Probability distribution (elements sum to 1 along dim).
+      q: Probability distribution, shaped like ``p``.
+      dim: Dimension(s) over which to sum.
+      keepdim: If True, reduced dimensions are kept with size 1.
+
+    Returns:
+      distance: In ``[0, 1]``, reduced over ``dim``.
+
+    """
+    p, q = convert_to_tensor(p, q)
+    return 0.5 * (p - q).abs().sum(dim, keepdim=keepdim)
+
+
 def jsd(
     logp: Tensorable,
     *,
@@ -378,6 +400,32 @@ def quantile_normalize(x: Tensorable, q: float = 1e-3) -> Tensor:
     # keeps the unused ``where`` branch NaN-free so gradients stay clean.
     safe_span = torch.where(span > 0, span, 1.0)
     return torch.where(span > 0, (x_t - lo) / safe_span, 0.0)
+
+
+def holm(p_values: Tensorable) -> Tensor:
+    """Adjust a family of p-values by Holm's step-down procedure.
+
+    The ``k``-th smallest of ``n`` p-values is multiplied by ``n - k + 1``,
+    clamped at 1, and raised to the largest adjusted value ranked before it.
+    Rejecting each test whose adjusted p-value is at most ``alpha`` holds the
+    family-wise error rate at ``alpha``; the threshold stays the caller's.
+
+    Args:
+      p_values: Raw p-values ``[..., n]``, one family along the last axis;
+        Python floats become float64.
+
+    Returns:
+      adjusted: Adjusted p-values, in the input's order and shape.
+
+    References:
+      Holm 1979, "A simple sequentially rejective multiple test procedure."
+
+    """
+    p = convert_to_tensor(p_values, dtype_hint=torch.float64)
+    ordered, order = p.sort(dim=-1, stable=True)
+    scale = torch.arange(p.shape[-1], 0, -1, dtype=p.dtype, device=p.device)
+    adjusted = (ordered * scale).clamp(max=1).cummax(-1).values
+    return torch.empty_like(adjusted).scatter_(-1, order, adjusted)
 
 
 def ema_update(current: float, new_value: float, alpha: float = 0.3) -> float:

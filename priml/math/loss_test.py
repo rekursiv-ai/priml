@@ -9,10 +9,38 @@ from torch import nn
 import torch
 
 from priml.math.loss import (
+    cross_entropy_logz,
     cross_entropy_with_batched_smoothing,
     log_stablemax,
     stablemax_cross_entropy,
 )
+
+
+def test_cross_entropy_logz_is_cross_entropy_and_its_normalizer() -> None:
+    logits, target = torch.randn(2, 3, 5), torch.randint(0, 5, (2, 3))
+    nll, logz = cross_entropy_logz(logits, target)
+    expected = nn.functional.cross_entropy(logits.flatten(0, 1), target.flatten())
+    torch.testing.assert_close(nll.mean(), expected)
+    torch.testing.assert_close(logz, logits.logsumexp(-1))
+    assert nll.shape == logz.shape == (2, 3)
+
+
+def test_cross_entropy_logz_restricts_the_softmax_to_finite_logits() -> None:
+    logits, target = torch.randn(4, 5), torch.tensor([0, 2, 2, 4])
+    allowed = torch.tensor([True, False, True, False, True])
+    nll, logz = cross_entropy_logz(logits.masked_fill(~allowed, -math.inf), target)
+    kept = logits[:, allowed]
+    torch.testing.assert_close(logz, kept.logsumexp(-1))
+    torch.testing.assert_close(nll, logz - logits.gather(-1, target[:, None])[:, 0])
+
+
+def test_cross_entropy_logz_gradient_is_softmax_minus_onehot() -> None:
+    logits = torch.randn(3, 5, requires_grad=True)
+    target = torch.tensor([1, 0, 4])
+    nll, _ = cross_entropy_logz(logits, target)
+    (gradient,) = torch.autograd.grad(nll.sum(), logits)
+    onehot = nn.functional.one_hot(target, 5).float()
+    torch.testing.assert_close(gradient, logits.softmax(-1).detach() - onehot)
 
 
 def test_batched_smoothing_4d_matches_f_cross_entropy() -> None:

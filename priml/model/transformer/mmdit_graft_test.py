@@ -22,8 +22,8 @@ import torch
 
 from priml.cost import Cost, cost
 from priml.lib.custom_json import DictCodec
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.embedding import Embedding
 from priml.model.linear import Linear
 from priml.model.sequential import Sequential
@@ -55,7 +55,7 @@ def _backbone(*, depth: int = 1, tie: bool = False) -> Qwen3.Config:
         assert isinstance(config.proj_out.elements, list)
         config.proj_out.elements[1] = TiedLinear.Config(tied="proj_in")
     assert isinstance(config.block, TransformerBlock.Config)
-    assert isinstance(config.block.attn, SelfAttention.Config)
+    assert isinstance(config.block.attn, Attention.Config)
     config.block.attn.attn_kernel = SdpaNaive.Config()
     return config
 
@@ -121,7 +121,7 @@ def _golden_config() -> MMDiTGraft.Config:
         ),
     )
     assert isinstance(config.backbone.block, TransformerBlock.Config)
-    assert isinstance(config.backbone.block.attn, SelfAttention.Config)
+    assert isinstance(config.backbone.block.attn, Attention.Config)
     config.backbone.block.attn.attn_kernel = SdpaNaive.Config()
     config.streams[0].attn.num_heads = 2
     config.streams[0].attn.channels_head = 2
@@ -214,7 +214,7 @@ def _frozen_graft() -> MMDiTGraft:
     backbone.proj_in.channels_in = 2
     backbone_block = backbone.block
     assert isinstance(backbone_block, TransformerBlock.Config)
-    assert isinstance(backbone_block.attn, SelfAttention.Config)
+    assert isinstance(backbone_block.attn, Attention.Config)
     backbone_block.attn.num_heads = 2
     backbone_block.attn.channels_head = 2
     assert isinstance(backbone_block.ffn, SwiGLU.Config)
@@ -367,7 +367,7 @@ def test_continuous_backbone_projections(projected: bool) -> None:
     backbone.channels_in = 4 if projected else 16
     backbone.num_layers = 1
     assert isinstance(backbone.block, TransformerBlock.Config)
-    backbone.block.attn = SelfAttention.Config(
+    backbone.block.attn = Attention.Config(
         num_heads=2,
         attn_kernel=SdpaNaive.Config(),
     )
@@ -560,7 +560,7 @@ def test_loading_rejects_a_source_whose_blocks_are_not_native() -> None:
     source = _backbone().make()
     source.blocks[0] = nn.Identity()
     graft = _config().make()
-    with pytest.raises(ValueError, match="native prenorm SelfAttention"):
+    with pytest.raises(ValueError, match="native prenorm Attention"):
         graft.load_backbone(source)
 
 

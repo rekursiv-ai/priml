@@ -29,10 +29,10 @@ import pytest
 import torch
 
 from priml import runtime
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.multi_stream import MultiStreamAttention
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import TensorModule
 from priml.model.embedding import Embedding
 from priml.model.linear import EnsembleLinear, Linear
@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 
 
 def test_self_attention_declares_qkv_colwise_out_rowwise() -> None:
-    attn = SelfAttention.Config(channels_in=32, num_heads=4).make()
+    attn = Attention.Config(channels_in=32, num_heads=4).make()
     assert attn.proj_qkv.shard == "colwise"
     assert attn.proj_out.shard == "rowwise"
 
@@ -244,7 +244,7 @@ def _swiglu() -> tuple[nn.Module, Tensor]:
 
 
 def _self_attention() -> tuple[nn.Module, Tensor]:
-    attn = SelfAttention.Config(
+    attn = Attention.Config(
         channels_in=32,
         num_heads=4,
         num_heads_kv=2,
@@ -264,7 +264,7 @@ def _moe() -> tuple[nn.Module, Tensor]:
 def _transformer_block() -> tuple[nn.Module, Tensor]:
     block = TransformerBlock.Config(
         channels_in=32,
-        attn=SelfAttention.Config(
+        attn=Attention.Config(
             num_heads=4,
             num_heads_kv=2,
             attn_kernel=SdpaNaive.Config(),
@@ -281,7 +281,7 @@ def _transformer() -> tuple[nn.Module, Tensor]:
         channels_out=64,
         num_layers=2,
         block=TransformerBlock.Config(
-            attn=SelfAttention.Config(
+            attn=Attention.Config(
                 num_heads=4,
                 num_heads_kv=2,
                 attn_kernel=SdpaNaive.Config(),
@@ -375,11 +375,11 @@ def _fused_guard_outcome(attn: nn.Module, mesh: DeviceMesh) -> str:
 
 
 def _record_fused_kernel_guard(result_dir: Path, rank: int, mesh: DeviceMesh) -> None:
-    """Return a sharded SelfAttention with the fused flash kernel must raise clearly."""
+    """Return a sharded Attention with the fused flash kernel must raise clearly."""
     target = result_dir / f"fused_guard_rank{rank}"
     try:
         torch.manual_seed(0)
-        attn = SelfAttention.Config(channels_in=32, num_heads=4, num_heads_kv=2).make()
+        attn = Attention.Config(channels_in=32, num_heads=4, num_heads_kv=2).make()
         target.write_text(_fused_guard_outcome(attn, mesh))
     except Exception as e:  # noqa: BLE001 -- Worker failures are serialized so the parent can report them.
         target.write_text(f"FAIL:{e!r}")

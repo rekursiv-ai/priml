@@ -13,16 +13,16 @@ import pytest
 import torch
 
 from priml.cost import Cost, cost
+from priml.model.attention.attention import (
+    Attention,
+    AttentionProjections,
+)
 from priml.model.attention.kernel import SdpaNaive, attention_kernel_cost
 from priml.model.attention.kvcache import (
     KVCache,  # Used in preallocated cache test.
 )
 from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.rope import RoPE
-from priml.model.attention.self_attention import (
-    AttentionProjections,
-    SelfAttention,
-)
 from priml.model.norm import RMSNorm
 from priml.testing.bfb import (
     assert_bfb_against_golden,
@@ -50,7 +50,7 @@ def test_multi_stream_config_pprint() -> None:
 
 
 def test_multi_stream_norm_qk_channels_inferred_from_channels_head():
-    """MultiStreamAttention resolves the norm width like SelfAttention does."""
+    """MultiStreamAttention resolves the norm width like Attention does."""
     config = MultiStreamAttention.Config(
         channels_in=64,
         num_heads=4,
@@ -66,7 +66,7 @@ def test_multi_stream_norm_qk_channels_inferred_from_channels_head():
 
 
 def test_multi_stream_norm_out_channels_inferred_from_inner_width():
-    """MultiStreamAttention resolves norm_out like SelfAttention does."""
+    """MultiStreamAttention resolves norm_out like Attention does."""
     config = MultiStreamAttention.Config(
         channels_in=64,
         num_heads=4,
@@ -305,7 +305,7 @@ def test_multi_stream_bfb(device: str) -> None:
 
 
 def test_explicit_streams_own_norms_and_native_weights() -> None:
-    source = SelfAttention.Config()
+    source = Attention.Config()
     source.channels_in = 8
     source.num_heads = 2
     source.num_heads_kv = 1
@@ -385,8 +385,8 @@ def test_attention_loading_rejects_invalid_indices(index: int) -> None:
     cfg = MultiStreamAttention.Config()
     cfg.channels_in = 8
     cfg.num_heads = 2
-    cfg.streams = [SelfAttention.Config()]
-    source = SelfAttention.Config(channels_in=8, num_heads=2).make()
+    cfg.streams = [Attention.Config()]
+    source = Attention.Config(channels_in=8, num_heads=2).make()
     with pytest.raises(ValueError, match="index"):
         cfg.make().load_stream(index, source=source)
 
@@ -413,7 +413,7 @@ def test_joint_attention_rejects_unresolved_geometry(channels: int) -> None:
 
 
 def test_native_loading_rejects_source_kernel_state_without_partial_copy() -> None:
-    source_cfg = SelfAttention.Config()
+    source_cfg = Attention.Config()
     source_cfg.channels_in = 8
     source_cfg.num_heads = 2
     source = source_cfg.make()

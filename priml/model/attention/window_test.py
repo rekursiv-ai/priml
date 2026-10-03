@@ -17,6 +17,7 @@ from priml.model.attention.kernel import SdpaFused
 from priml.model.attention.window import (
     causal_chunk_mask,
     layer_window,
+    segment_mask,
     window_mask,
     window_sizes,
 )
@@ -175,6 +176,26 @@ def test_window_bfb(device: str) -> None:
         build_input=lambda: torch.randn(2, 3, 4, 5),
         seed=0,
     )
+
+
+def test_a_segment_mask_is_causal_within_segments_only() -> None:
+    # Rows of 3: segments [0, 2) and [2, 3), then an empty one, [3, 5) and [5, 6).
+    cu_seqlens = torch.tensor([0, 2, 3, 3, 5, 6], dtype=torch.int32)
+    mask = segment_mask(cu_seqlens, rows=2, length=3)
+    first = [[True, False, False], [True, True, False], [False, False, True]]
+    assert mask.tolist() == [first, first]
+
+
+def test_a_segment_mask_window_admits_that_many_earlier_keys() -> None:
+    cu_seqlens = torch.tensor([0, 4, 5], dtype=torch.int32)
+    mask = segment_mask(cu_seqlens, rows=1, length=5, window=1)
+    assert mask[0].tolist() == [
+        [True, False, False, False, False],
+        [True, True, False, False, False],
+        [False, True, True, False, False],
+        [False, False, True, True, False],
+        [False, False, False, False, True],
+    ]
 
 
 if __name__ == "__main__":

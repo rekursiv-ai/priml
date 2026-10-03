@@ -10,7 +10,7 @@ from configgle.testing import assert_pprint_golden
 import torch
 
 from priml.cost import Cost, cost
-from priml.model.attention.self_attention import SelfAttention
+from priml.model.attention.attention import Attention
 from priml.model.init import mup_output
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
@@ -110,7 +110,7 @@ def test_repeat_isolates_nested_config_trees() -> None:
     repeated = Sequential.Config(
         elements=TransformerBlock.Config(
             channels_in=64,
-            attn=SelfAttention.Config(num_heads=4, channels_head=16),
+            attn=Attention.Config(num_heads=4, channels_head=16),
         ),
         repeat=2,
     ).make()
@@ -119,8 +119,8 @@ def test_repeat_isolates_nested_config_trees() -> None:
     last = repeated[1]
     assert isinstance(first, TransformerBlock)
     assert isinstance(last, TransformerBlock)
-    assert isinstance(first.attn, SelfAttention)
-    assert isinstance(last.attn, SelfAttention)
+    assert isinstance(first.attn, Attention)
+    assert isinstance(last.attn, Attention)
     assert first.attn.depth_index == ((0, 2),)
     assert last.attn.depth_index == ((1, 2),)
 
@@ -160,7 +160,7 @@ def test_transformer_stack():
     m = Sequential.Config(
         elements=TransformerBlock.Config(
             channels_in=64,
-            attn=SelfAttention.Config(num_heads=4, channels_head=16),
+            attn=Attention.Config(num_heads=4, channels_head=16),
         ),
         repeat=3,
     ).make()

@@ -172,6 +172,44 @@ def causal_chunk_mask(q: Tensor, k: Tensor) -> Tensor | None:
     )
 
 
+def segment_mask(
+    cu_seqlens: Tensor,
+    *,
+    rows: int,
+    length: int,
+    window: int = -1,
+) -> Tensor:
+    """Boolean mask admitting each query's own and earlier keys of its segment.
+
+    ``cu_seqlens`` bounds the segments of ``rows`` rows of ``length`` positions,
+    flattened: segment ``i`` is positions ``cu_seqlens[i]`` up to
+    ``cu_seqlens[i + 1]``, and none crosses a row. Unlike this module's additive
+    masks it is boolean, True admitting, which SDPA takes as a per-row mask.
+
+    Args:
+      cu_seqlens: Int32 segment boundaries of the flattened ``[rows·length]``
+        positions, from 0 to ``rows·length``.
+      rows: Rows of the batch.
+      length: Positions per row.
+      window: Previous keys each query may reach, plus itself; -1 for all.
+
+    Returns:
+      mask: Bool ``[rows, length, length]``; True where a query may attend a key.
+
+    """
+    flat = torch.arange(rows * length, device=cu_seqlens.device, dtype=cu_seqlens.dtype)
+    segment = torch.searchsorted(cu_seqlens, flat, right=True).view(rows, length)
+    index = torch.arange(length, device=cu_seqlens.device)
+    # Keep these ops as they are. Under torch.compile the mask fuses into the
+    # attention's kernels, whose fusion, and so a softmax's summation order,
+    # follows how the mask is spelled: an equal mask spelled another way, such
+    # as ``index[:, None] - index[None, :] >= 0``, trains to other bits.
+    admissible = index[:, None] >= index[None, :]
+    if window >= 0:
+        admissible = admissible & (index[:, None] - index[None, :] <= window)
+    return (segment[:, :, None] == segment[:, None, :]) & admissible
+
+
 def _causal_bias(q: Tensor, k: Tensor, *, window: int) -> Tensor:
     """Full additive causal mask, optionally windowed, bottom-right aligned."""
     s, t = q.shape[-3], k.shape[-3]

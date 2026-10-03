@@ -11,10 +11,10 @@ import pytest
 import torch
 
 from priml.cost import cost
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.output_gate import OutputGate
 from priml.model.attention.rope import RoPE
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.norm import RMSNorm
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.cost import assert_cost_matches_torch
@@ -26,7 +26,7 @@ _CWD: Final = Path(__file__).resolve().parent
 def test_output_gate_config_pprint() -> None:
     config = OutputGate.Config(
         channels_in=16,
-        inner=SelfAttention.Config(num_heads=2, channels_head=8),
+        inner=Attention.Config(num_heads=2, channels_head=8),
     )
     assert_pprint_golden(
         test_file=__file__,
@@ -47,7 +47,7 @@ def test_output_gate_mismatched_widths_reject_at_make() -> None:
 def test_output_gate_basic():
     m = OutputGate.Config(
         channels_in=64,
-        inner=SelfAttention.Config(
+        inner=Attention.Config(
             channels_in=64,
             num_heads=4,
             channels_head=16,
@@ -62,7 +62,7 @@ def test_output_gate_basic():
 def test_output_gate_cached():
     m = OutputGate.Config(
         channels_in=64,
-        inner=SelfAttention.Config(
+        inner=Attention.Config(
             channels_in=64,
             num_heads=4,
             channels_head=16,
@@ -81,7 +81,7 @@ def test_output_gate_passthrough_kwargs():
     rope = RoPE.Config(channels_head=16).make()
     m = OutputGate.Config(
         channels_in=64,
-        inner=SelfAttention.Config(
+        inner=Attention.Config(
             channels_in=64,
             num_heads=4,
             channels_head=16,
@@ -96,7 +96,7 @@ def test_output_gate_passthrough_kwargs():
 def test_output_gate_reset():
     m = OutputGate.Config(
         channels_in=64,
-        inner=SelfAttention.Config(channels_in=64, num_heads=4, channels_head=16),
+        inner=Attention.Config(channels_in=64, num_heads=4, channels_head=16),
     ).make()
     m.reset_parameters()
 
@@ -104,9 +104,9 @@ def test_output_gate_reset():
 def test_output_gate_finalize_propagates():
     cfg = OutputGate.Config(
         channels_in=128,
-        inner=SelfAttention.Config(num_heads=4, channels_head=32),
+        inner=Attention.Config(num_heads=4, channels_head=32),
     ).finalize()
-    assert isinstance(cfg.inner, SelfAttention.Config)
+    assert isinstance(cfg.inner, Attention.Config)
     assert cfg.inner.channels_in == 128
 
 
@@ -129,7 +129,7 @@ def test_output_gate_bfb(device: str) -> None:
         build_module=lambda: (
             OutputGate.Config(
                 channels_in=4,
-                inner=SelfAttention.Config(num_heads=2, channels_head=2),
+                inner=Attention.Config(num_heads=2, channels_head=2),
             )
             .make()
             .to(device)
@@ -142,9 +142,9 @@ def test_output_gate_bfb(device: str) -> None:
 def test_output_gate_cost_is_the_inner_plus_a_square_gate_matmul() -> None:
     config = OutputGate.Config(
         channels_in=16,
-        inner=SelfAttention.Config(num_heads=2, channels_head=8),
+        inner=Attention.Config(num_heads=2, channels_head=8),
     )
-    config.inner = SelfAttention.Config(
+    config.inner = Attention.Config(
         num_heads=2,
         channels_head=8,
         attn_kernel=SdpaNaive.Config(),

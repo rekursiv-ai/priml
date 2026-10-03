@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from priml.math.custom_types import TensorFn
 
 from priml.lib.custom_json import DictCodec
-from priml.model.attention.self_attention import SelfAttention
+from priml.model.attention.attention import Attention
 from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import (
     _ENV_REGENERATE,
@@ -1589,7 +1589,7 @@ def test_no_unvetted_f32_op_in_transformer_forward_backward() -> None:
     torch.manual_seed(0)
     block = TransformerBlock.Config(
         channels_in=16,
-        attn=SelfAttention.Config(num_heads=2, channels_head=8),
+        attn=Attention.Config(num_heads=2, channels_head=8),
     ).make()
     randomize_parameters(block, seed=0)
     inp = torch.randn(2, 4, 16, requires_grad=True)

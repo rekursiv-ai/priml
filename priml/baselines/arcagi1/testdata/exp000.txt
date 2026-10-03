@@ -18,7 +18,7 @@ ArcTrainLoop(
                 │       │       block=TransformerBlock.Config(
                 │       │       │       channels_in=512,
                 │       │       │       channels_out=512,
-                │       │       │       attn=SelfAttention.Config(
+                │       │       │       attn=Attention.Config(
                 │       │       │               channels_in=512,
                 │       │       │               channels_out=512,
                 │       │       │               num_heads=8,

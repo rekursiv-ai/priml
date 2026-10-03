@@ -17,7 +17,7 @@ MMDiTGraft.Config(
                 │       │       TransformerBlock.Config(
                 │       │               channels_in=8,
                 │       │               channels_out=8,
-                │       │               attn=SelfAttention.Config(
+                │       │               attn=Attention.Config(
                 │       │                       channels_in=8,
                 │       │                       channels_out=8,
                 │       │                       num_heads=4,

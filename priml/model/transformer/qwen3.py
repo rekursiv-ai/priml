@@ -10,7 +10,7 @@ HF-shaped arch fields; ``finalize()`` wires them into the inherited
 Qwen3 vs. LLaMA:
   - Explicit ``head_dim`` (not ``hidden_size / num_heads``).
   - Per-head QK-norm -- independent ``q_norm`` and ``k_norm`` RMSNorms
-    (via ``SelfAttention.Config.share_qk_norm=False``).
+    (via ``Attention.Config.share_qk_norm=False``).
   - GQA via ``num_key_value_heads``.
   - No bias on attention or MLP projections.
   - RoPE base ``rope_theta=1_000_000``, HF half-split pairing.
@@ -39,8 +39,8 @@ import torch
 
 from priml import hub
 from priml.lib.custom_json import DictCodec, FloatCodec, IntCodec
+from priml.model.attention.attention import Attention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsInOutConfig,
@@ -65,7 +65,7 @@ if TYPE_CHECKING:
 # Read off the BLOCK rather than a parent mirror of it: the geometry lives where the
 # layer is built, so a per-layer list and a broadcast template both answer here without
 # this function knowing which it was given.
-def _attn_of(config: Qwen3.Config, layer: int = 0) -> SelfAttention.Config:
+def _attn_of(config: Qwen3.Config, layer: int = 0) -> Attention.Config:
     """Return one layer's attention config."""
     blocks = config.block if isinstance(config.block, list) else [config.block]
     # ``len == 1`` is the pre-finalize broadcast template, which answers for
@@ -75,7 +75,7 @@ def _attn_of(config: Qwen3.Config, layer: int = 0) -> SelfAttention.Config:
     if not isinstance(block, TransformerBlock.Config):
         raise TypeError(f"layer {layer} is {type(block).__name__}, not a transformer.")
     attn = block.attn
-    if not isinstance(attn, SelfAttention.Config):
+    if not isinstance(attn, Attention.Config):
         raise TypeError(
             f"layer {layer} attention is {type(attn).__name__}, not self-attention.",
         )
@@ -123,7 +123,7 @@ class Qwen3(Transformer):
 
         block: ChannelsInOutConfig | list[ChannelsInOutConfig] = field(
             default_factory=lambda: TransformerBlock.Config(
-                attn=SelfAttention.Config(
+                attn=Attention.Config(
                     init_weight=partial(nn.init.normal_, std=0.02),
                     num_heads=16,
                     num_heads_kv=8,
@@ -188,7 +188,7 @@ class Qwen3(Transformer):
             rope = RoPE.Config()
             rope.frequencies = frequencies
 
-            attn = SelfAttention.Config(bias=False, causal=True, share_qk_norm=False)
+            attn = Attention.Config(bias=False, causal=True, share_qk_norm=False)
             attn.num_heads = num_heads
             num_heads_kv = IntCodec.coerce(
                 config.get("num_key_value_heads", num_heads),
@@ -275,7 +275,7 @@ class Qwen3(Transformer):
             if not isinstance(block, TransformerBlock.Config):
                 return
             attn = block.attn
-            if isinstance(attn, SelfAttention.Config):
+            if isinstance(attn, Attention.Config):
                 attn.channels_in = self.channels_in
                 rope = attn.rope
                 if isinstance(rope, RoPE.Config):

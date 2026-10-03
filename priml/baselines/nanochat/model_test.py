@@ -26,10 +26,10 @@ from priml.baselines.nanochat.model import (
 from priml.baselines.nanochat.ngram import HashedNgramTables
 from priml.cost import cost
 from priml.custom_types import HasCost
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.output_gate import OutputGate
 from priml.model.attention.rope import RoPE
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.attention.value_gated_attention import ValueGatedAttention
 from priml.model.custom_types import TensorModule
 from priml.model.embedding import Embedding
@@ -281,7 +281,7 @@ def test_a_wrapped_attention_exposes_its_own_head_attributes() -> None:
         channels_in=512,
         attn=OutputGate.Config(
             channels_in=512,
-            inner=SelfAttention.Config(num_heads=4, channels_head=128),
+            inner=Attention.Config(num_heads=4, channels_head=128),
         ),
     )
     assert gated.channels_head == 128
@@ -584,7 +584,7 @@ class ResetlessBlock(nn.Module):
 
     class Config(Fig["ResetlessBlock"]):
         attn: Makeable[TensorModule] = field(
-            default_factory=lambda: SelfAttention.Config(num_heads=2, channels_head=8),
+            default_factory=lambda: Attention.Config(num_heads=2, channels_head=8),
         )
         """Attention metadata consumed by the model config."""
 

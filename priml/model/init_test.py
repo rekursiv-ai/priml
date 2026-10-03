@@ -12,10 +12,10 @@ from torch import nn
 import pytest
 import torch
 
+from priml.model.attention.attention import Attention
 from priml.model.attention.gated_delta_net import GatedDeltaNet
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import RoPE, RoPEMixed
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import DepthIndex, HasResetParameters
 from priml.model.init import (
     call_init,
@@ -372,14 +372,14 @@ def test_reset_parameters_reinitializes_every_param(name: str) -> None:
         "centered_rmsnorm": lambda: CenteredRMSNorm(
             CenteredRMSNorm.Config(channels_in=8),
         ),
-        "self_attention": lambda: SelfAttention.Config(
+        "self_attention": lambda: Attention.Config(
             channels_in=16,
             num_heads=2,
             channels_head=8,
         ).make(),
         "transformer_block": lambda: TransformerBlock.Config(
             channels_in=16,
-            attn=SelfAttention.Config(num_heads=2, channels_head=8),
+            attn=Attention.Config(num_heads=2, channels_head=8),
         ).make(),
         "gated_delta_net": lambda: GatedDeltaNet.Config(
             channels_in=16,

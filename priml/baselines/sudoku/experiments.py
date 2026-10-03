@@ -51,7 +51,7 @@ from priml.baselines.sudoku.model import DeepRecurrence
 from priml.baselines.sudoku.train_step import SudokuTrainStep
 from priml.baselines.sudoku.trainer import Trainer
 from priml.baselines.sudoku.trm import recipe_block
-from priml.model.attention.self_attention import SelfAttention
+from priml.model.attention.attention import Attention
 from priml.model.init import kaiming_uniform
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
@@ -287,7 +287,7 @@ def exp004() -> Trainer.Config:
     cfg.model.pos2d_grid_shape = None
     block = recipe_block()
     attn = block.attn
-    assert isinstance(attn, SelfAttention.Config)
+    assert isinstance(attn, Attention.Config)
     attn.norm_qk = None
     cfg.model.block = block
 
@@ -361,7 +361,7 @@ def exp006() -> Trainer.Config:
     cfg.experiment_name = "exp006"
     assert isinstance(cfg.model.block, TransformerBlock.Config)
     attn = cfg.model.block.attn
-    assert isinstance(attn, SelfAttention.Config)
+    assert isinstance(attn, Attention.Config)
     attn.norm_qk = RMSNorm.Config()
     cfg.max_steps = 12_000
     cfg.total_train_steps = 12_000

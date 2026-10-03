@@ -25,7 +25,7 @@ from priml.baselines.arcagi2.record_test import assert_matches, load, reduce
 from priml.baselines.sudoku.act import FeedbackCarry
 from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
-from priml.model.attention.self_attention import SelfAttention
+from priml.model.attention.attention import Attention
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import joined, mismatches, put_steps
@@ -50,7 +50,7 @@ def training_config(width: int, dtype: torch.dtype | None) -> ArcTrainStep.Confi
     model.embedding.grid_shape = (3,)
     assert isinstance(model.block, RotaryBlock.Config)
     model.block.channels_in = width
-    assert isinstance(model.block.attn, SelfAttention.Config)
+    assert isinstance(model.block.attn, Attention.Config)
     model.block.attn.channels_in = width
     model.block.attn.num_heads = 2
     model.block.attn.channels_head = width // 2

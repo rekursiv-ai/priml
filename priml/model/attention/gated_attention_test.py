@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from priml.cost import cost
-from priml.model.attention.gated_self_attention import GatedSelfAttention
+from priml.model.attention.gated_attention import GatedAttention
 from priml.model.attention.kernel import (
     SdpaFused,
     SdpaNaive,
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 
 def test_gated_attention_cache_continuation() -> None:
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 8
     config.num_heads = 2
     config.num_heads_kv = 1
@@ -45,7 +45,7 @@ def test_gated_attention_cache_continuation() -> None:
 
 
 def test_gated_attention_parameters_receive_gradients() -> None:
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 8
     config.num_heads = 2
     config.num_heads_kv = 1
@@ -59,7 +59,7 @@ def test_gated_attention_parameters_receive_gradients() -> None:
 
 @pytest.mark.parametrize("dropout", [-0.01, float("nan"), 1.01])
 def test_gated_attention_rejects_invalid_dropout(dropout: float) -> None:
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 4
     config.num_heads = config.num_heads_kv = 1
     config.channels_head = 4
@@ -70,7 +70,7 @@ def test_gated_attention_rejects_invalid_dropout(dropout: float) -> None:
 
 
 def test_gated_attention_reset_resets_injected_rope() -> None:
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 4
     config.num_heads = 2
     config.num_heads_kv = 1
@@ -99,7 +99,7 @@ def test_gated_attention_rejects_cache_geometry_before_mutation(
     num_heads: int,
     channels_head: int,
 ) -> None:
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 8
     config.num_heads = 2
     config.num_heads_kv = 1
@@ -123,7 +123,7 @@ def test_gated_attention_rejects_cache_geometry_before_mutation(
 
 
 def test_gated_attention_rejects_rotary_width_larger_than_head() -> None:
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 8
     config.num_heads = config.num_heads_kv = 1
     config.channels_head = 4
@@ -143,7 +143,7 @@ def test_gated_attention_rejects_rotary_width_larger_than_head() -> None:
 def test_gated_attention_rejects_non_text_position_layout(
     positions: torch.Tensor,
 ) -> None:
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 8
     config.num_heads = config.num_heads_kv = 1
     config.channels_head = 4
@@ -157,7 +157,7 @@ def test_gated_attention_rejects_non_text_position_layout(
 
 
 def test_gated_attention_accepts_axis_last_text_positions() -> None:
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 8
     config.num_heads = config.num_heads_kv = 1
     config.channels_head = 4
@@ -196,7 +196,7 @@ def test_gated_attention_window_restricts_attention() -> None:
     Regression for a bug where the kernel's window argument was silently
     discarded by a hand-rolled full-causal mask.
     """
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 8
     config.num_heads = config.num_heads_kv = 1
     config.channels_head = 4
@@ -220,7 +220,7 @@ def test_gated_attention_cached_decode_window_restricts_attention(
     branch always built a rectangular ``causal_chunk_mask``, bypassing the
     kernel's own window construction.
     """
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 8
     config.num_heads = config.num_heads_kv = 1
     config.channels_head = 4
@@ -246,7 +246,7 @@ def test_gated_attention_cached_decode_window_zero_pins_to_value_projection() ->
     tokens precede it in the cache -- the same closed form as the square
     window=0 case, now proven to hold across a cache boundary.
     """
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 8
     config.num_heads = config.num_heads_kv = 1
     config.channels_head = 4
@@ -288,7 +288,7 @@ def test_gated_attention_cached_chunk_keeps_causality_when_window_is_unmasked(
     expected: Tensor,
 ) -> None:
     """A no-op window must retain causal masking across a cached chunk."""
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 1
     config.num_heads = config.num_heads_kv = config.channels_head = 1
     config.attn_kernel = kernel_config
@@ -315,7 +315,7 @@ def test_gated_attention_cached_chunk_keeps_causality_when_window_is_unmasked(
 @pytest.mark.parametrize("is_causal", [False, True])
 def test_gated_attention_consumes_caller_causality_message(is_causal: bool) -> None:
     """Caller causality messages cannot override this causal attention module."""
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 4
     config.num_heads = config.num_heads_kv = 1
     config.channels_head = 4
@@ -340,13 +340,13 @@ def test_gated_attention_window_applies_alongside_an_explicit_mask() -> None:
     the no-mask branch left the explicit-mask branch (e.g. Qwen 3.5's
     padding path) still silently discarding it.
     """
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 8
     config.num_heads = config.num_heads_kv = 1
     config.channels_head = 4
     model = config.make().eval()
     x = torch.randn(2, 5, 8)
-    # GatedSelfAttention.forward broadcasts the singleton head mask dimension.
+    # GatedAttention.forward broadcasts the singleton head mask dimension.
     attn_mask = torch.zeros(2, 1, 5, 5)
 
     with torch.no_grad():
@@ -366,13 +366,13 @@ def test_gated_attention_window_zero_with_a_no_op_mask_pins_to_value_projection(
     alone -- an independent check that the combination is additive, not
     that a caller-supplied mask silently wins again.
     """
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 8
     config.num_heads = config.num_heads_kv = 1
     config.channels_head = 4
     model = config.make().eval()
     x = torch.randn(2, 6, 8)
-    # GatedSelfAttention.forward broadcasts the singleton head mask dimension.
+    # GatedAttention.forward broadcasts the singleton head mask dimension.
     attn_mask = torch.zeros(2, 1, 6, 6)
 
     with torch.no_grad():
@@ -397,7 +397,7 @@ def test_gated_attention_window_zero_pins_to_value_projection() -> None:
     oracle derived independently of the windowing/masking machinery under
     test.
     """
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 8
     config.num_heads = config.num_heads_kv = 1
     config.channels_head = 4
@@ -424,7 +424,7 @@ def test_gated_attention_reaches_causal_fast_path() -> None:
     A hand-rolled additive mask permanently disables SDPA's causal fast path
     (kernel.py gates it on ``is_causal and attn_mask is None``).
     """
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 8
     config.num_heads = config.num_heads_kv = 1
     config.channels_head = 4
@@ -448,7 +448,7 @@ def test_gated_attention_cost_is_projections_norms_rotary_kernel_and_gate() -> N
     rotary factors and rotation, the kernel's softmax, and a sigmoid plus a
     product per inner channel.
     """
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 16
     config.num_heads = 2
     config.num_heads_kv = 1
@@ -492,7 +492,7 @@ def test_gated_attention_cost_is_projections_norms_rotary_kernel_and_gate() -> N
 
 def test_gated_attention_cost_hands_dropout_to_the_kernel() -> None:
     """Attention dropout is a mask and a rescale over each head's key row, both ways."""
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 16
     config.num_heads = 2
     config.num_heads_kv = 1
@@ -521,7 +521,7 @@ def test_gated_attention_cost_hands_dropout_to_the_kernel() -> None:
 
 
 def test_gated_attention_traffic_propagates_itemsize() -> None:
-    config = GatedSelfAttention.Config()
+    config = GatedAttention.Config()
     config.channels_in = 8
     config.num_heads = 2
     config.num_heads_kv = 1

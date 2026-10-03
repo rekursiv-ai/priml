@@ -24,8 +24,8 @@ from priml.baselines.sudoku.model import (
 )
 from priml.baselines.sudoku.prefix import RegisterTokens
 from priml.cost import Cost, cost
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.init import kaiming_uniform
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
@@ -65,7 +65,7 @@ def _config(
     config.embedding = GridEmbedding.Config(grid_shape=grid_shape)
     config.block = TransformerBlock.Config(
         prenorm=False,
-        attn=SelfAttention.Config(num_heads=2, channels_head=2),
+        attn=Attention.Config(num_heads=2, channels_head=2),
         ffn=SwiGLU.Config(
             channels_hidden=4,
             round_to=1,
@@ -373,7 +373,7 @@ def _cost_config(*, prefix: bool) -> SudokuNet.Config:
     config.embedding = GridEmbedding.Config(grid_shape=(2,))
     config.block = TransformerBlock.Config(
         prenorm=False,
-        attn=SelfAttention.Config(
+        attn=Attention.Config(
             num_heads=2,
             channels_head=8,
             attn_kernel=SdpaNaive.Config(),

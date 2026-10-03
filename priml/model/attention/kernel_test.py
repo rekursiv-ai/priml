@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast, override
 
+import itertools
+
 from configgle import Fig
 from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
@@ -17,6 +19,7 @@ from priml.cost import Cost, cost
 from priml.model.attention.kernel import (
     SdpaFused,
     SdpaNaive,
+    SdpaVarlen,
     attention_kernel_cost,
 )
 from priml.model.attention.rope import RoPE, RoPEMixed, rotation_cost
@@ -29,6 +32,9 @@ if TYPE_CHECKING:
 
 
 _CWD: Final = Path(__file__).resolve().parent
+
+CU_SEQLENS: Final = (0, 3, 7, 8, 8, 8, 12, 16)
+"""Two rows of 8: segments of 3, 4 and 1, two empty ones, then 4 and 4."""
 
 
 class _Kernel(nn.Module):
@@ -455,6 +461,107 @@ def test_kernel_bfb(device: str, name: str, kernel: object) -> None:
         build_input=lambda: tuple(torch.randn(2, 3, 4, 5) for _ in range(3)),
         seed=0,
     )
+
+
+@pytest.mark.parametrize("window", [-1, 0, 2])
+def test_sdpa_varlen_attends_within_each_segment_with_grouped_heads(
+    window: int,
+) -> None:
+    cu_seqlens = torch.tensor(CU_SEQLENS, dtype=torch.int32)
+    q = torch.randn(2, 8, 6, 4)
+    k, v = torch.randn(2, 8, 3, 4), torch.randn(2, 8, 3, 4)
+    out = SdpaVarlen.Config().make()(q, k, v, cu_seqlens=cu_seqlens, window=window)
+    torch.testing.assert_close(out, _segment_reference(q, k, v, window=window))
+
+
+def test_sdpa_varlen_flattens_any_leading_axes_into_rows() -> None:
+    cu_seqlens = torch.tensor(CU_SEQLENS, dtype=torch.int32)
+    q, k, v = (torch.randn(2, 8, 3, 4) for _ in range(3))
+    kernel = SdpaVarlen.Config().make()
+    rows = kernel(q, k, v, cu_seqlens=cu_seqlens)
+    nested = kernel(
+        *(t.unflatten(0, (1, 2)) for t in (q, k, v)),
+        cu_seqlens=cu_seqlens,
+    )
+    torch.testing.assert_close(nested, rows.unflatten(0, (1, 2)))
+
+
+def test_sdpa_varlen_records_the_exact_max_logit_of_admitted_pairs() -> None:
+    cu_seqlens = torch.tensor(CU_SEQLENS, dtype=torch.int32)
+    q = torch.randn(2, 8, 6, 4)
+    k = torch.randn(2, 8, 3, 4)
+    # A key aligned with an earlier query scores only through the mask; the one
+    # query that may attend it is zeroed.
+    k[0, 2, 1] = 20 * q[0, 0, 3]
+    q[0, 2] = 0
+    # Query head 1 reads KV head 0 (SDPA's grouping), not KV head 1 (a tiling).
+    k[0, 4, 0] = 5 * q[0, 5, 1]
+    v = torch.randn(2, 8, 3, 4)
+    kernel = SdpaVarlen.Config().make()
+    kernel(q, k, v, cu_seqlens=cu_seqlens)
+    assert kernel.max_logit is None
+    kernel(q, k, v, cu_seqlens=cu_seqlens, record_max_logit=True)
+    expected = _segment_max_logit(q, k)
+    unmasked = torch.einsum("bqhd,bkhd->bhqk", q, k.repeat_interleave(2, dim=-2))
+    assert float(expected) < float(unmasked.amax() * 4**-0.5)
+    assert kernel.max_logit is not None
+    assert kernel.max_logit.dtype == torch.float32
+    torch.testing.assert_close(kernel.max_logit, expected)
+
+
+@pytest.mark.parametrize(
+    ("is_causal", "attn_mask", "dropout_p"),
+    [(False, None, 0.0), (True, torch.zeros(2, 3), 0.0), (True, None, 0.1)],
+)
+def test_sdpa_varlen_refuses_what_its_segments_cannot_express(
+    *,
+    is_causal: bool,
+    attn_mask: Tensor | None,
+    dropout_p: float,
+) -> None:
+    q = torch.randn(2, 8, 3, 4)
+    with pytest.raises(ValueError, match="causal"):
+        SdpaVarlen.Config().make()(
+            q,
+            q,
+            q,
+            cu_seqlens=torch.tensor(CU_SEQLENS, dtype=torch.int32),
+            is_causal=is_causal,
+            attn_mask=attn_mask,
+            dropout_p=dropout_p,
+        )
+
+
+def _segment_reference(q: Tensor, k: Tensor, v: Tensor, *, window: int) -> Tensor:
+    """Attend inside each segment of ``CU_SEQLENS`` alone, through ``SdpaFused``."""
+    flat = [t.flatten(0, 1) for t in (q, k, v)]
+    groups = q.shape[-2] // k.shape[-2]
+    fused = SdpaFused.Config().make()
+    out = torch.zeros_like(flat[0])
+    for start, end in itertools.pairwise(CU_SEQLENS):
+        if end > start:
+            sq, sk, sv = (t[start:end] for t in flat)
+            sk, sv = (t.repeat_interleave(groups, dim=-2) for t in (sk, sv))
+            out[start:end] = fused(sq, sk, sv, is_causal=True, window=window)
+    return out.view_as(q)
+
+
+def _segment_max_logit(q: Tensor, k: Tensor) -> Tensor:
+    """Return the largest scaled ``q·k`` a query gives a key of its own segment."""
+    flat_q, flat_k = q.flatten(0, 1), k.flatten(0, 1)
+    groups = q.shape[-2] // k.shape[-2]
+    best = torch.tensor(float("-inf"))
+    for start, end in itertools.pairwise(CU_SEQLENS):
+        if end > start:
+            sq = flat_q[start:end].movedim(-2, -3)
+            sk = flat_k[start:end].movedim(-2, -3).repeat_interleave(groups, dim=-3)
+            scores = sq @ sk.transpose(-1, -2) * float(q.shape[-1] ** -0.5)
+            causal = torch.ones(end - start, end - start, dtype=torch.bool).tril()
+            best = torch.maximum(
+                best,
+                scores.masked_fill(~causal, float("-inf")).amax(),
+            )
+    return best
 
 
 if __name__ == "__main__":

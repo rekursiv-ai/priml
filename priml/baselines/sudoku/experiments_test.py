@@ -32,7 +32,7 @@ from priml.baselines.sudoku.eval import (
 )
 from priml.baselines.sudoku.trainer import Trainer
 from priml.baselines.sudoku.trm import recipe_block
-from priml.model.attention.self_attention import SelfAttention
+from priml.model.attention.attention import Attention
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.transformer.block import TransformerBlock
 
@@ -412,7 +412,7 @@ def test_exp004_mirrors_the_annealed_baseline() -> None:
     assert (cfg.model.slow_cycles, cfg.model.fast_cycles) == (3, 4)
     assert cfg.model.block is not None
     attn = cfg.model.block.attn
-    assert isinstance(attn, SelfAttention.Config)
+    assert isinstance(attn, Attention.Config)
     assert attn.norm_qk is None
     assert cfg.dataset.augment_digits_only is False
 

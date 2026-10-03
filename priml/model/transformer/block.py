@@ -17,7 +17,7 @@ from priml.cost import (
     cost,
     elementwise_cost,
 )
-from priml.model.attention.self_attention import SelfAttention
+from priml.model.attention.attention import Attention
 from priml.model.custom_types import (
     CachedAttention,
     ChannelsIn,
@@ -50,7 +50,7 @@ class TransformerBlock(nn.Module):
 
         _: KW_ONLY
 
-        attn: Makeable[TensorModule] = field(default_factory=SelfAttention.Config)
+        attn: Makeable[TensorModule] = field(default_factory=Attention.Config)
         """Attention module config."""
 
         ffn: Makeable[TensorModule] = field(default_factory=SwiGLU.Config)

@@ -30,8 +30,8 @@ from priml.baselines.sudoku.act import AtomicPool
 from priml.baselines.sudoku.embedding import GridEmbedding
 from priml.baselines.sudoku.model import DeepRecurrence
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
+from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.swiglu import SwiGLU
 from priml.runtime import MultiProcess, SingleProcess
 from priml.train.checkpointer import Checkpointer
@@ -113,7 +113,7 @@ def exp_smoke() -> ArcTrainLoop:
     config.step.parallelism = NoParallel.Config()
     model = config.step.model
     assert isinstance(model.block, RotaryBlock.Config)
-    assert isinstance(model.block.attn, SelfAttention.Config)
+    assert isinstance(model.block.attn, Attention.Config)
     assert isinstance(model.block.ffn, SwiGLU.Config)
     assert isinstance(model.recurrence, DeepRecurrence.Config)
     assert isinstance(model.prefix, PuzzleEmbedding.Config)

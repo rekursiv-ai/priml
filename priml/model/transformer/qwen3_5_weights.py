@@ -8,7 +8,7 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.attention.gated_self_attention import GatedSelfAttention
+from priml.model.attention.gated_attention import GatedAttention
 from priml.model.attention.qwen3_5_delta import Qwen35GatedDeltaNet
 from priml.model.special import TiedLinear
 from priml.model.transformer.block import TransformerBlock
@@ -175,7 +175,7 @@ def _sources(
                 if name.startswith(native):
                     return [base + "linear_attn." + hf + name.removeprefix(native)]
             return [base + "linear_attn." + name]
-        if isinstance(block.attn, GatedSelfAttention.Config):
+        if isinstance(block.attn, GatedAttention.Config):
             projections = {
                 "proj_q.": "q_proj.",
                 "proj_k.": "k_proj.",

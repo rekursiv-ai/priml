@@ -11,9 +11,9 @@ import torch
 
 from priml.baselines.nanochat.model import NanoChatLM
 from priml.lib.custom_json import DictCodec
+from priml.model.attention.attention import Attention
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.multi_stream import MultiStreamAttention
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.attention.value_gated_attention import ValueGatedAttention
 from priml.model.embedding import Embedding
 from priml.model.init import kaiming_uniform, unit_fan_in_uniform
@@ -205,7 +205,7 @@ def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
     )
     if kind == "transformer":
         cfg = TransformerBlock.Config(channels_in=4, ffn=legacy_ffn)
-        cfg.attn = SelfAttention.Config(num_heads=2, channels_head=2)
+        cfg.attn = Attention.Config(num_heads=2, channels_head=2)
         model = cfg.make()
     elif kind == "mmdit":
         cfg_mmdit = MMDiTBlock.Config(channels_in=4, num_streams=2, ffn=legacy_ffn)
@@ -271,7 +271,7 @@ def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
             attn = block.attn
             assert isinstance(
                 attn,
-                (SelfAttention.Config, MultiHeadLatentAttention.Config),
+                (Attention.Config, MultiHeadLatentAttention.Config),
             )
             attn.init_weight = kaiming_uniform
             if isinstance(attn, MultiHeadLatentAttention.Config):

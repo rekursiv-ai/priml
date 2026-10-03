@@ -19,8 +19,8 @@ from priml.baselines.sudoku.model import (
     corrected_fan_in_normal,
 )
 from priml.baselines.sudoku.prefix import PrefixConfig, SparsePuzzleEmbedding
+from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
@@ -39,7 +39,7 @@ class RotaryBlock(TransformerBlock):
         """Transformer block and the rotary position encoding it consumes."""
 
         attn: Makeable[TensorModule] = field(
-            default_factory=lambda: SelfAttention.Config(
+            default_factory=lambda: Attention.Config(
                 channels_head=64,
                 init_weight=corrected_fan_in_normal,
             ),

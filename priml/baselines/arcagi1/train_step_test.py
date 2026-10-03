@@ -33,7 +33,7 @@ from priml.baselines.sudoku.act import AtomicPool
 from priml.baselines.sudoku.embedding import GridEmbedding
 from priml.baselines.sudoku.model import DeepRecurrence, SudokuNet
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
-from priml.model.attention.self_attention import SelfAttention
+from priml.model.attention.attention import Attention
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import host_agnostic_numerics
@@ -435,7 +435,7 @@ def shrink_model(model: SudokuNet.Config) -> None:
     model.recurrence.fast_cycles = 2
     block = model.block
     if isinstance(block, RotaryBlock.Config):
-        assert isinstance(block.attn, SelfAttention.Config)
+        assert isinstance(block.attn, Attention.Config)
         block.attn.num_heads = 2
         block.attn.channels_head = 4 // 2
         if isinstance(block.attn.norm_qk, RMSNorm.Config):

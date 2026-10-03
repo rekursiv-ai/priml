@@ -663,7 +663,7 @@ def test_sharding_refuses_a_fused_kernel_it_cannot_shard() -> None:
     """A fused inner kernel must be REFUSED, not die deep in the dispatcher.
 
     ``F.scaled_dot_product_attention`` dispatches to a flash kernel with no
-    DTensor sharding strategy. ``SelfAttention`` has always refused it by name
+    DTensor sharding strategy. ``Attention`` has always refused it by name
     (``attention.py:339``); MLA could not, having no kernel to interrogate,
     so the same misconfiguration surfaced as a dispatcher stack trace.
     """

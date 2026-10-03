@@ -66,7 +66,7 @@ Qwen35.Config(
                 │       TransformerBlock.Config(
                 │               channels_in=16,
                 │               channels_out=16,
-                │               attn=GatedSelfAttention.Config(
+                │               attn=GatedAttention.Config(
                 │                       channels_in=16,
                 │                       channels_out=16,
                 │                       num_heads=2,

@@ -3,8 +3,8 @@
 import pytest
 import torch
 
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.embedding import Embedding
 from priml.model.generate import generate
 from priml.model.linear import Linear
@@ -19,7 +19,7 @@ def _config() -> Transformer.Config:
     config.channels_in = 8
     config.num_layers = 1
     assert isinstance(config.block, TransformerBlock.Config)
-    config.block.attn = SelfAttention.Config()
+    config.block.attn = Attention.Config()
     config.block.attn.num_heads = 2
     config.block.attn.attn_kernel = SdpaNaive.Config()
     return config
@@ -127,7 +127,7 @@ def test_layer_count_is_inferred_from_explicit_blocks() -> None:
 def test_attention_owns_causality(causal: bool) -> None:
     config = _config()
     assert isinstance(config.block, TransformerBlock.Config)
-    assert isinstance(config.block.attn, SelfAttention.Config)
+    assert isinstance(config.block.attn, Attention.Config)
     config.block.attn.causal = causal
     model = config.make().eval()
     randomize_parameters(model, seed=7, std=0.2)

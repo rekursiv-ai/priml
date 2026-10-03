@@ -64,8 +64,8 @@ import torch
 from priml.baselines.sudoku import prefix
 from priml.baselines.sudoku.embedding import FactoredPositions, PredictionFeedback
 from priml.cost import Cost, cost, elementwise_cost, traffic
+from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.embedding import Embedding
 from priml.model.init import truncated_normal
 from priml.model.linear import Linear
@@ -98,7 +98,7 @@ def recipe_block() -> TransformerBlock.Config:
     """
     return TransformerBlock.Config(
         prenorm=False,
-        attn=SelfAttention.Config(
+        attn=Attention.Config(
             # -1 means "inherit TRM.Config.num_heads" -- priml defaults heads
             # to 8, which would silently override the model's own width.
             num_heads=-1,
@@ -345,7 +345,7 @@ class TRM(nn.Module):
             # Priml types ``attn`` loosely as Makeable[nn.Module]; narrow to
             # the config whose head dims this model owns.
             attn = self.block.attn
-            assert isinstance(attn, SelfAttention.Config)
+            assert isinstance(attn, Attention.Config)
             if attn.num_heads == -1:
                 attn.num_heads = self.num_heads
             if attn.channels_head == -1:

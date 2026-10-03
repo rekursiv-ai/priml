@@ -16,12 +16,14 @@ from priml.math.stats import (
     entropy_logits,
     entropy_logits_mean_all_to_all,
     entropy_probs,
+    holm,
     jsd,
     pca,
     pca_eigh,
     pca_power,
     pca_svd,
     quantile_normalize,
+    total_variation,
 )
 
 
@@ -331,6 +333,32 @@ def test_sliding_window_insufficient_data():
     assert w.compute_rate(1.0, 5.0) == 0.0
     w.add(0.0, 0.0)
     assert w.compute_rate(1.0, 5.0) == 0.0
+
+
+def test_total_variation_is_half_the_l1_distance() -> None:
+    p = torch.tensor([[0.5, 0.25, 0.25], [1.0, 0.0, 0.0]])
+    q = torch.tensor([[0.25, 0.25, 0.5], [0.0, 0.0, 1.0]])
+    assert torch.equal(total_variation(p, q), torch.tensor([0.25, 1.0]))
+    assert torch.equal(
+        total_variation(p, q, dim=0, keepdim=True),
+        torch.tensor([[(0.25 + 1.0) / 2, 0.0, (0.25 + 1.0) / 2]]),
+    )
+
+
+def test_holm_adjusts_in_input_order_through_ties_and_the_clamp() -> None:
+    p = torch.tensor([0.01, 0.55, 0.03, 0.6, 0.03], dtype=torch.float64)
+    # Ascending, 0.01, 0.03, 0.03, 0.55 and 0.6 are multiplied by 5, 4, 3, 2 and 1.
+    # The second 0.03 and 0.6 rise to the running maximum; 2 * 0.55 clamps at 1.
+    expected = [5 * 0.01, 1.0, 4 * 0.03, 1.0, 4 * 0.03]
+    assert torch.equal(holm(p), torch.tensor(expected, dtype=torch.float64))
+
+
+def test_holm_reads_python_floats_as_float64_and_each_row_as_a_family() -> None:
+    assert holm([0.04, 0.01, 0.03]).tolist() == [2 * 0.03, 3 * 0.01, 2 * 0.03]
+    rows = torch.tensor([[0.04, 0.01, 0.03], [0.2, 0.3, 0.1]], dtype=torch.float64)
+    expected = [[2 * 0.03, 3 * 0.01, 2 * 0.03], [2 * 0.2, 2 * 0.2, 3 * 0.1]]
+    assert holm(rows).tolist() == expected
+    assert holm([]).shape == (0,)
 
 
 if __name__ == "__main__":

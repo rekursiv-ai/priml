@@ -1,4 +1,4 @@
-"""Single-stream multi-head self-attention."""
+"""Single-stream multi-head attention: self-attention, or cross-attention to a memory."""
 
 from __future__ import annotations
 
@@ -132,6 +132,7 @@ class AttentionProjections(nn.Module):
             seq_len: int,
             batch_size: int,
             dtype: torch.dtype | None,
+            memory_len: int = -1,
             **kwargs: object,
         ) -> Cost:
             """Cost the projections, norms, and rotary; no kernel here.
@@ -140,6 +141,8 @@ class AttentionProjections(nn.Module):
               seq_len: Tokens per sequence.
               batch_size: Sequences per step.
               dtype: Activation dtype; ``None`` is torch's default.
+              memory_len: Memory positions per sequence the keys and values
+                are projected from; -1 projects them from the sequence itself.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
@@ -149,11 +152,18 @@ class AttentionProjections(nn.Module):
             rows = seq_len * batch_size
             dt = dtype
             inner = self.num_heads * self.channels_head
-            projection_heads = (
-                (self.num_heads, self.num_heads_kv, self.num_heads_kv)
-                if self.split_qkv_projection
-                else (self.num_heads + 2 * self.num_heads_kv,)
-            )
+            if memory_len < 0:
+                projection_heads = (
+                    (self.num_heads, self.num_heads_kv, self.num_heads_kv)
+                    if self.split_qkv_projection
+                    else (self.num_heads + 2 * self.num_heads_kv,)
+                )
+                projections = [(heads, rows) for heads in projection_heads]
+            else:
+                projections = [
+                    (self.num_heads, rows),
+                    (2 * self.num_heads_kv, memory_len * batch_size),
+                ]
             qkv = sum(
                 (
                     matmul_cost(
@@ -161,9 +171,9 @@ class AttentionProjections(nn.Module):
                         channels_out=heads * self.channels_head,
                         bias=self.bias,
                         dtype=dt,
-                        rows=rows,
+                        rows=projected,
                     )
-                    for heads in projection_heads
+                    for heads, projected in projections
                 ),
                 Cost(),
             )
@@ -175,7 +185,26 @@ class AttentionProjections(nn.Module):
                 rows=rows,
             )
             total = qkv + out
-            if self.norm_qk is not None:
+            if self.norm_qk is not None and memory_len >= 0:
+                queries = cost(
+                    self.norm_qk,
+                    seq_len=seq_len,
+                    batch_size=batch_size * self.num_heads,
+                    dtype=dtype,
+                    **kwargs,
+                )
+                keys = cost(
+                    self.norm_qk,
+                    seq_len=memory_len,
+                    batch_size=batch_size * self.num_heads_kv,
+                    dtype=dtype,
+                    **kwargs,
+                )
+                # A shared norm owns its parameters once.
+                if self.share_qk_norm:
+                    keys = replace(keys, params=0, params_active=0)
+                total += queries + keys
+            elif self.norm_qk is not None:
                 groups = (
                     (self.num_heads + self.num_heads_kv,)
                     if self.share_qk_norm
@@ -376,10 +405,17 @@ def _infer_head_dims(
     return channels_in, num_heads, channels_head
 
 
-class SelfAttention(AttentionProjections):
-    """Multi-head self-attention with fused QKV and optional grouped-query heads."""
+class Attention(AttentionProjections):
+    """Multi-head attention with fused QKV and optional grouped-query heads.
 
-    class Config(Makes["SelfAttention"], AttentionProjections.Config, kw_only=False):
+    Self-attention by default. Given a ``memory``, it is cross-attention: the
+    queries come from ``x`` and the keys and values from the memory, through
+    the same ``proj_qkv`` (its first ``num_heads`` heads read ``x``, the rest
+    the memory), so the memory has ``channels_in`` channels. Cross-attention
+    is bidirectional over the memory and takes no window, rotary embedding or cache.
+    """
+
+    class Config(Makes["Attention"], AttentionProjections.Config, kw_only=False):
         _: KW_ONLY
 
         attn_kernel: Makeable[AttentionKernel] = field(default_factory=SdpaFused.Config)
@@ -392,27 +428,32 @@ class SelfAttention(AttentionProjections):
             seq_len: int,
             batch_size: int,
             dtype: torch.dtype | None,
+            memory_len: int = -1,
             **kwargs: object,
         ) -> Cost:
             """Add the kernel's products and the per-token KV cache.
 
             The kernel is costed at the configured ``dropout`` over the whole
-            sequence: a window is a ``forward`` argument, not a config field,
-            so the analytical reach is ``seq_len``.
+            sequence, or the whole memory: a window is a ``forward`` argument,
+            not a config field, so the analytical reach is every key.
 
             Args:
               seq_len: Tokens per sequence.
               batch_size: Sequences per step.
               dtype: Activation dtype; ``None`` is torch's default.
+              memory_len: Memory positions per sequence the queries attend to;
+                -1 attends to the sequence itself.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             """
+            # Cross-attention prices ``seq_len`` queries against ``memory_len`` keys.
+            reach = {} if memory_len < 0 else {"seq_len": memory_len, "rows": seq_len}
             kernel = cost(
                 self.attn_kernel,
-                seq_len=seq_len,
+                **{"seq_len": seq_len} | reach,
                 batch_size=batch_size,
                 dtype=dtype,
                 num_heads=self.num_heads,
@@ -424,6 +465,7 @@ class SelfAttention(AttentionProjections):
                     seq_len=seq_len,
                     batch_size=batch_size,
                     dtype=dtype,
+                    memory_len=memory_len,
                     **kwargs,
                 )
                 + kernel,
@@ -489,6 +531,7 @@ class SelfAttention(AttentionProjections):
         self,
         x: Tensor,
         *,
+        memory: Tensor | None = None,
         positions: Tensor | list[Tensor] | None = None,
         cos_sin: tuple[Tensor, Tensor] | None = None,
         dropout_p: float | None = None,
@@ -498,6 +541,7 @@ class SelfAttention(AttentionProjections):
     ) -> Tensor:
         out, _ = self._forward(
             x,
+            memory=memory,
             positions=positions,
             cos_sin=cos_sin,
             cache=None,
@@ -539,6 +583,7 @@ class SelfAttention(AttentionProjections):
         """
         out, updated = self._forward(
             x,
+            memory=None,
             positions=positions,
             cos_sin=cos_sin,
             cache=cache,
@@ -551,10 +596,52 @@ class SelfAttention(AttentionProjections):
             raise ValueError("Expected updated is not None.")
         return out, updated
 
+    def project_queries(self, x: Tensor) -> Tensor:
+        """Project queries through the first ``num_heads`` heads of ``proj_qkv``.
+
+        Projection only: ``norm_q`` is the caller's to apply.
+
+        Args:
+          x: Tokens ``[..., S, channels_in]``.
+
+        Returns:
+          q: Queries ``[..., S, num_heads, channels_head]``.
+
+        """
+        w = self.proj_qkv.weight.to(x.dtype)[: self.num_heads]
+        q = torch.matmul(x, w.reshape(-1, w.shape[-1]).T)
+        bias = self.proj_qkv.bias
+        if bias is not None:
+            q = q + bias.to(x.dtype)[: self.num_heads].reshape(-1)
+        return q.reshape(*x.shape[:-1], *w.shape[:-1])
+
+    def project_memory(self, memory: Tensor) -> tuple[Tensor, Tensor]:
+        """Project keys and values through the remaining heads of ``proj_qkv``.
+
+        Projection only: ``norm_k`` is the caller's to apply.
+
+        Args:
+          memory: Memory positions ``[..., M, channels_in]``.
+
+        Returns:
+          k: Keys ``[..., M, num_heads_kv, channels_head]``.
+          v: Values, shaped like ``k``.
+
+        """
+        w = self.proj_qkv.weight.to(memory.dtype)[self.num_heads :]
+        kv = torch.matmul(memory, w.reshape(-1, w.shape[-1]).T)
+        bias = self.proj_qkv.bias
+        if bias is not None:
+            kv = kv + bias.to(memory.dtype)[self.num_heads :].reshape(-1)
+        kv = kv.reshape(*memory.shape[:-1], *w.shape[:-1])
+        k, v = kv.split([self.num_heads_kv, self.num_heads_kv], dim=-2)
+        return k, v
+
     def _forward(
         self,
         x: Tensor,
         *,
+        memory: Tensor | None = None,
         positions: Tensor | list[Tensor] | None,
         cos_sin: tuple[Tensor, Tensor] | None,
         cache: KVCache | None,
@@ -566,7 +653,24 @@ class SelfAttention(AttentionProjections):
         S = x.shape[-2]
 
         # proj_qkv: [..., S, C] -> [..., S, num_ensemble, channels_head].
-        if self.split_qkv_projection:
+        if memory is not None:
+            # A block forwards its messages to every attention, so a window or a
+            # causal call meant for self-attention reaches this one too.
+            if (
+                self.causal
+                or is_causal
+                or kwargs.get("window", -1) != -1
+                or self.rope is not None
+                or cos_sin is not None
+                or cache is not None
+            ):
+                raise ValueError(
+                    "Attention to a memory takes no causal mask, window, rotary "
+                    "embedding or cache.",
+                )
+            q = self.project_queries(x)
+            k, v = self.project_memory(memory)
+        elif self.split_qkv_projection:
             q, k, v = self.split_qkv(x)
         else:
             q, k, v = (

@@ -14,10 +14,42 @@ from priml.math.numeric import log_modulus
 
 
 __all__ = [
+    "cross_entropy_logz",
     "cross_entropy_with_batched_smoothing",
     "log_stablemax",
     "stablemax_cross_entropy",
 ]
+
+
+def cross_entropy_logz(logits: Tensor, target: Tensor) -> tuple[Tensor, Tensor]:
+    """Return each target's cross-entropy and its log-normalizer, from one logsumexp.
+
+    The log-normalizer ``log Z`` is what z-loss penalizes, ``mean(log Z ** 2)``,
+    which keeps the logits from drifting where bf16 cannot resolve them; one
+    ``logsumexp`` serves both. A ``-inf`` logit takes no probability, so masking
+    entries to ``-inf`` restricts the softmax to the rest.
+
+    It computes in the logits' dtype. On bfloat16 logits ``log Z`` rounds at its
+    own magnitude before the subtraction, and the gradient through it with it,
+    several times further from exact than ``F.cross_entropy`` on the same input;
+    pass float32 logits where that matters.
+
+    Args:
+      logits: Scores ``[..., V]``.
+      target: Indices into the last axis, ``[...]``.
+
+    Returns:
+      nll: ``log Z - logits[target]``, ``[...]``, in the dtype of ``logits``.
+      logz: ``logsumexp(logits)``, ``[...]``.
+
+    References:
+      https://arxiv.org/abs/2204.02311
+        Chowdhery et al. 2022. PaLM: z-loss on the softmax normalizer.
+
+    """
+    logz = logits.logsumexp(-1)
+    picked = logits.gather(-1, target.unsqueeze(-1)).squeeze(-1)
+    return logz - picked, logz
 
 
 def cross_entropy_with_batched_smoothing(

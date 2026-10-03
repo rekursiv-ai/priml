@@ -953,7 +953,7 @@ class MultiHeadLatentAttention(nn.Module):
                 f"{self.num_heads} (MLA shards the head dim; an indivisible "
                 f"count yields a ragged per-rank head range).",
             )
-        # Same gap ``SelfAttention.assert_tensor_parallel_compatible`` covers:
+        # Same gap ``Attention.assert_tensor_parallel_compatible`` covers:
         # the fused flash kernel has no DTensor sharding strategy and dies deep
         # in the dispatcher rather than here, naming a stride.
         if isinstance(self.attn_kernel, LatentAttention) and isinstance(

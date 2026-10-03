@@ -66,11 +66,7 @@ else:
 
 from configgle import Makes, PartialConfig
 
-from priml.baselines.nanochat.attention import (
-    CausalAttention,
-    Flash3Attention,
-    Flash4Attention,
-)
+from priml.baselines.nanochat.attention import CausalAttention
 from priml.baselines.nanochat.data import NanoChatData, ReferenceEvaluation
 from priml.baselines.nanochat.model import (
     GatedResidualMix,
@@ -95,6 +91,8 @@ from priml.baselines.nanochat.train_step import (
 from priml.math.schedules import trapezoidal
 from priml.metrics.bits_per_byte import BitsPerByte
 from priml.model import softcap
+from priml.model.attention.flash3 import Flash3Attention
+from priml.model.attention.flash4 import Flash4Attention
 from priml.model.attention.rope import HuggingFaceFrequencies
 from priml.model.attention.value_gated_attention import (
     SdpaCausal,

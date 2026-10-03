@@ -656,6 +656,65 @@ def random_logit_normal(
     return torch.sigmoid(z)
 
 
+def random_gumbel(
+    *samples_size: int,
+    generator: torch.Generator | None = None,
+    dtype: torch.dtype | None = None,
+    device: torch.device | None = None,
+) -> Tensor:
+    """Sample the standard Gumbel distribution as ``-log(-log U)``, ``U ~ U[0, 1)``.
+
+    Args:
+      *samples_size: Shape of the sample batch.
+      generator: Source of the uniform draws; None is torch's default.
+      dtype: Output tensor data type.
+      device: Output tensor device.
+
+    Returns:
+      samples: Tensor of shape ``samples_size``; ``-inf`` wherever ``U`` is 0.
+
+    """
+    # No clamp: a draw of 0 gives -inf, which loses every argmax and keeps a
+    # masked -inf logit at -inf, never NaN. Clamping U would move the bits of
+    # every sample a Gumbel-max caller has pinned.
+    uniform = torch.rand(
+        _unpack_size(*samples_size),
+        generator=generator,
+        dtype=dtype,
+        device=device,
+    )
+    return -(-uniform.log()).log()
+
+
+def gumbel_max(logits: Tensor, *, generator: torch.Generator | None = None) -> Tensor:
+    """Sample one index per row of ``softmax(logits)`` by the Gumbel-max trick.
+
+    Args:
+      logits: Scores ``[..., V]``; ``-inf`` entries are never chosen.
+      generator: Source of the noise, on ``logits``' device; None is torch's
+        default.
+
+    Returns:
+      index: Sampled index into the last axis, long ``[...]``.
+
+    References:
+      https://arxiv.org/abs/1411.0030
+        Maddison, Tarlow and Minka 2014, "A* Sampling."
+
+    """
+    # Float32 noise whatever the logits' dtype: a bfloat16 U stops at 1 - 2**-8,
+    # which caps the noise at 5.5 (16.6 in float32) and biases the samples. Not
+    # the trick's exponential spelling, ``argmax(logits - log E)``: E can be
+    # exactly 0, and -inf - log(0) is NaN, which ``argmax`` picks.
+    noise = random_gumbel(
+        *logits.shape,
+        generator=generator,
+        dtype=torch.float32,
+        device=logits.device,
+    )
+    return (logits + noise).argmax(-1)
+
+
 def ndtr(x: Tensorable) -> Tensor:
     """Evaluate the normal distribution function.
 

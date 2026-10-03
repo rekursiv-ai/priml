@@ -20,7 +20,7 @@ from priml.baselines.arcagi1 import experiments
 from priml.baselines.sudoku.embedding import GridEmbedding
 from priml.baselines.sudoku.prefix import PrefixStack, SparsePuzzleEmbedding
 from priml.baselines.sudoku.train_step import SudokuTrainStep
-from priml.model.attention.self_attention import SelfAttention
+from priml.model.attention.attention import Attention
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import host_agnostic_numerics
@@ -64,7 +64,7 @@ def shrunk() -> ArcTrainLoop:
     model.num_layers = 1
     assert isinstance(model.embedding, GridEmbedding.Config)
     assert isinstance(model.block, TransformerBlock.Config)
-    assert isinstance(model.block.attn, SelfAttention.Config)
+    assert isinstance(model.block.attn, Attention.Config)
     model.block.attn.num_heads = 2
     assert isinstance(model.block.ffn, SwiGLU.Config)
     model.block.ffn.round_to = 4

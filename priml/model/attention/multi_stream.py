@@ -17,14 +17,14 @@ from priml.cost import (
     cost,
     resolve_dtype,
 )
-from priml.model.attention.kernel import SdpaFused
-from priml.model.attention.kvcache import KVCache
-from priml.model.attention.rope import RoPE, rotation_cost
-from priml.model.attention.self_attention import (
+from priml.model.attention.attention import (
     AttentionProjections,
     _infer_head_dims,
     _validate_head_dims,
 )
+from priml.model.attention.kernel import SdpaFused
+from priml.model.attention.kvcache import KVCache
+from priml.model.attention.rope import RoPE, rotation_cost
 from priml.model.attention.window import causal_chunk_mask
 from priml.model.custom_types import (
     AttentionKernel,
@@ -42,7 +42,7 @@ from priml.model.linear import EnsembleLinear, Linear
 class MultiStreamAttention(nn.Module):
     """N-stream joint attention with per-stream QKV and shared K/V.
 
-    List-form of SelfAttention: each config field and forward kwarg
+    List-form of Attention: each config field and forward kwarg
     mirrors SA but accepts one value per stream. K/V from all streams
     are concatenated so each stream's Q attends to the full set.
     """
@@ -196,7 +196,8 @@ class MultiStreamAttention(nn.Module):
                     num_heads_kv=self.num_heads_kv,
                     bias=self.bias,
                 )
-                total = template.cost(
+                total = cost(
+                    template,
                     seq_len=seq_len,
                     batch_size=batch_size,
                     dtype=dtype,
@@ -349,7 +350,7 @@ class MultiStreamAttention(nn.Module):
     def assert_tensor_parallel_compatible(self) -> None:
         """Reject the fused flash kernel when this block is sharded.
 
-        See :meth:`SelfAttention.assert_tensor_parallel_compatible`.
+        See :meth:`Attention.assert_tensor_parallel_compatible`.
         """
         projections = (
             [stream.proj_qkv for stream in self.streams]

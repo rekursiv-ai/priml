@@ -13,7 +13,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
-from priml.model.attention.self_attention import SelfAttention
+from priml.model.attention.attention import Attention
 from priml.model.custom_types import (
     AttentionKernel,
     CachedAttention,
@@ -113,7 +113,7 @@ def test_propagate_settable_field():
 
 
 def test_propagate_width_preserving_field_is_mutable():
-    cfg = SelfAttention.Config(channels_in=64)
+    cfg = Attention.Config(channels_in=64)
     propagate_attr(cfg, "channels_out", 999)
     assert cfg.channels_out == 999
     with pytest.raises(ValueError, match="channels_in=64 must equal channels_out=999"):
