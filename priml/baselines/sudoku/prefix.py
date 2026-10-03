@@ -29,6 +29,7 @@ from torch import Tensor, nn
 
 import torch
 
+from priml.baselines.sudoku.embedding import corrected_scaled_normal
 from priml.cost import (
     Cost,
     cost,
@@ -36,7 +37,7 @@ from priml.cost import (
     traffic,
 )
 from priml.model.custom_types import ChannelsOut
-from priml.model.init import truncated_normal
+from priml.model.init import InitFn, call_init, truncated_normal
 
 
 if TYPE_CHECKING:
@@ -75,8 +76,8 @@ class RegisterTokens(nn.Module):
         channels_out: int = -1
         """Token width; -1 inherits the model's hidden size."""
 
-        init_std: float = 1.0
-        """Realized standard deviation of the learned tokens."""
+        init_weight: InitFn = corrected_scaled_normal
+        """Token initializer, at the scale the runtime multiply expects."""
 
         learnable: bool = True
         """Train the tokens. False freezes them as a fixed random basis."""
@@ -136,12 +137,7 @@ class RegisterTokens(nn.Module):
             config.channels_out**0.5 if config.embed_scale < 0 else config.embed_scale
         )
         tokens = torch.empty(config.num_tokens, config.channels_out)
-        truncated_normal(
-            tokens,
-            std=config.init_std / self.embed_scale,
-            depth_index=(),
-            variance_correction=True,
-        )
+        call_init(config.init_weight, tokens)
         self.register_tokens = (
             nn.Parameter(tokens)
             if config.learnable

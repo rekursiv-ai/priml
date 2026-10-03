@@ -87,7 +87,7 @@ import math
 import re
 import time
 
-from configgle import Fig
+from configgle import Fig, Makeable
 from torch import Tensor, nn
 
 import torch
@@ -95,6 +95,7 @@ import torch._inductor.config
 
 from priml.baselines.sudoku.act import (
     AtomicPool,
+    Corruption,
     FeedbackCarry,
     ForcedContinue,
     HaltTraining,
@@ -493,6 +494,10 @@ class Trainer:
 
         feedback_scramble_seed: int = 0
         """Seed for the dedicated feedback-scramble RNG stream."""
+
+        feedback_corruption: Makeable[Corruption] | None = None
+        """Repair curriculum replacing the ``feedback_scramble_*`` one; None
+        keeps the slot scramble those fields describe."""
 
         # -- EMA.
         use_ema: bool = True
@@ -1837,13 +1842,16 @@ def _pool(config: Trainer.Config) -> AtomicPool.Config:
             FeedbackCarry.Config(
                 givens=(2, vocab - 1),
                 corruption=(
-                    SlotScramble.Config(
-                        prob=config.feedback_scramble_prob,
-                        cells=config.feedback_scramble_cells,
-                        high=vocab,
+                    config.feedback_corruption
+                    or (
+                        SlotScramble.Config(
+                            prob=config.feedback_scramble_prob,
+                            cells=config.feedback_scramble_cells,
+                            high=vocab,
+                        )
+                        if config.feedback_scramble_prob > 0
+                        else None
                     )
-                    if config.feedback_scramble_prob > 0
-                    else None
                 ),
                 seed=config.feedback_scramble_seed,
             )

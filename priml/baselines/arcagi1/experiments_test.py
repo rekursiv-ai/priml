@@ -18,13 +18,14 @@ from configgle import PartialConfig
 from configgle.pprinting import pformat
 
 import pytest
+import torch
 
 from priml.baselines.arcagi1 import experiments
 from priml.baselines.arcagi1.loss import MeanOverBatch
 from priml.baselines.arcagi1.model import ConvSwiGLU, UrmRecurrence
 from priml.baselines.sudoku.act import AtomicPool, FeedbackCarry, ZeroStart
 from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
-from priml.baselines.sudoku.model import SudokuNet
+from priml.baselines.sudoku.model import SudokuNet, lattice_positions
 from priml.baselines.sudoku.prefix import (
     PrefixStack,
     RegisterTokens,
@@ -32,6 +33,7 @@ from priml.baselines.sudoku.prefix import (
 )
 from priml.baselines.sudoku.train_step import SudokuTrainStep
 from priml.lib.custom_json import FloatCodec
+from priml.model.attention.rope import RoPE
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
@@ -265,6 +267,26 @@ def test_reference_recipes_finalize(
     reduction = config.step.reduction
     assert isinstance(reduction, MeanOverBatch.Config)
     assert reduction.batch_size == pool.batch_size
+
+
+def test_a_recipe_may_lay_its_rotary_grid_out_in_two_dimensions() -> None:
+    def recipe() -> TrmTrainLoop:
+        cfg = experiments.exp007()
+        cfg.step.model.rope = RoPE.Config(channels_head=[32, 32])
+        return cfg
+
+    flat = recipe().copy_tree().finalize()
+    assert flat.step.model.rope_grid_shape == (900,)
+    grid = recipe()
+    grid.step.model.rope_grid_shape = (30, 30)
+    finalized = grid.copy_tree().finalize()
+    assert finalized.step.model.rope_grid_shape == (30, 30)
+    positions = {
+        shape: lattice_positions(910, grid_shape=shape, device=torch.device("cpu"))
+        for shape in ((900,), (30, 30))
+    }
+    assert positions[(30, 30)].shape == (910, 2)
+    assert not torch.equal(positions[(30, 30)][:, -1], positions[(900,)])
 
 
 def test_exp005_swaps_the_gate_norm_and_the_body_optimizer() -> None:

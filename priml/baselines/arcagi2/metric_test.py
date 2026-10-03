@@ -107,6 +107,18 @@ def test_reference_metric(tmp_path: Path) -> None:
     assert torch.equal(record["scores/per_output@1"], torch.tensor(1 / 3))
 
 
+def test_reference_metric_golden_bites(tmp_path: Path) -> None:
+    """A vote cast with the wrong transform changes the recorded scores."""
+    write_manifest(tmp_path)
+    record = record_votes(
+        tmp_path,
+        lambda root: PassK.Config(working_dir=root).make(),
+        lambda grid, tid: dihedral_transform(grid, tid=(tid + 1) % 8),
+    )
+    with pytest.raises(AssertionError, match="mismatches"):
+        assert_matches("metric", "votes", record)
+
+
 def test_metric_error_and_canonical_helpers() -> None:
     metric = PassK.Config(working_dir="/opt/scratch/absent").make()
     with pytest.raises(ValueError, match="one halt column"):

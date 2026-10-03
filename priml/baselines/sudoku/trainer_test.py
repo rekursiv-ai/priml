@@ -27,6 +27,7 @@ import pytest
 import torch
 
 from priml.baselines.sudoku import experiments, trm
+from priml.baselines.sudoku.act import CellCorruption
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
 from priml.baselines.sudoku.trainer import Trainer, sudoku_group_indices
 from priml.model.swiglu import SwiGLU
@@ -527,6 +528,17 @@ def test_dedicated_generators_survive_a_checkpoint_round_trip(tmp_path: Path) ->
     assert restored_carry is not None
     assert torch.equal(torch.rand(4, generator=restored_halting.generator), expected[0])
     assert torch.equal(torch.rand(4, generator=restored_carry.generator), expected[1])
+
+
+def test_feedback_corruption_overrides_the_slot_scramble(tmp_path: Path) -> None:
+    config = port_config("exp010", tmp_path)
+    write_dataset(tmp_path / "data")
+    corruption = config.feedback_corruption = CellCorruption.Config()
+    corruption.rate = 0.25
+    carry = config.make().pool.carry
+    assert carry is not None
+    assert isinstance(carry.corruption, CellCorruption)
+    assert carry.corruption.config.rate == 0.25
 
 
 def test_trainer_constructor_rejects_invalid_protocol_configs(tmp_path: Path) -> None:

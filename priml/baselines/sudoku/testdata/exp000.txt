@@ -20,7 +20,8 @@ SudokuTrainLoop(
                 │       │                               init_std=1.0,
                 │       │                               embed_scale=-1.0
                 │       │                       )
-                │       │               ]
+                │       │               ],
+                │       │               init_weight=<function priml.baselines.sudoku.embedding.corrected_scaled_normal at 0xdefacedeface>
                 │       │       ),
                 │       │       block=TransformerBlock.Config(
                 │       │       │       channels_in=512,
@@ -83,13 +84,27 @@ SudokuTrainLoop(
                 │       │       prefix=None,
                 │       │       num_prefix_tokens=0,
                 │       │       vocab_size=11,
+                │       │       head=Linear.Config(
+                │       │               channels_in=512,
+                │       │               channels_out=11,
+                │       │               bias=False,
+                │       │               depth_index=(),
+                │       │               device=None,
+                │       │               dtype=None,
+                │       │               init_weight=<function priml.baselines.sudoku.model.corrected_fan_in_normal at 0xdefacedeface>,
+                │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │               shard=None
+                │       │       ),
+                │       │       init_latent=<function priml.baselines.sudoku.model.corrected_unit_normal at 0xdefacedeface>,
                 │       │       halt_outputs=2,
                 │       │       halt_init_bias=-5.0,
                 │       │       dtype=None,
                 │       │       rope=None,
                 │       │       rope_grid_shape=(),
                 │       │       compile_core=None,
-                │       │       dtype_latent_init=None
+                │       │       dtype_latent_init=None,
+                │       │       checkpoint_core=False,
+                │       │       block_checkpoint_fraction=0.0
                 │       ),
                 │       optimizer=CompositeOptimizer.Config(
                 │               optimizers=[

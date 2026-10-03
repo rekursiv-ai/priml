@@ -479,6 +479,140 @@ def _carried_magnitude(*, prenorm: bool) -> float:
     return float(z_slow.abs().max())
 
 
+@pytest.mark.parametrize(
+    ("checkpoint_core", "fraction"),
+    [(True, 0.0), (False, 0.5), (True, 1.0)],
+)
+def test_activation_checkpointing_is_bit_identical_and_recomputes(
+    *,
+    checkpoint_core: bool,
+    fraction: float,
+) -> None:
+    """Checkpointing changes only what backward keeps, never the numbers."""
+    plain_out, plain_grads, plain_saved = _checkpoint_run(
+        checkpoint_core=False,
+        fraction=0.0,
+    )
+    out, grads, saved = _checkpoint_run(
+        checkpoint_core=checkpoint_core,
+        fraction=fraction,
+    )
+    assert torch.equal(out, plain_out)
+    assert grads.keys() == plain_grads.keys()
+    for name, grad in grads.items():
+        assert torch.equal(grad, plain_grads[name]), name
+    # Recomputation is the mechanism: fewer activations are held for backward.
+    assert saved < plain_saved
+
+
+def test_block_checkpoint_fraction_marks_an_even_subset() -> None:
+    config = _config(recurrent=True, channels_in=4)
+    config.num_layers = 4
+    config.block_checkpoint_fraction = 0.5
+    torch.manual_seed(0)
+    model = config.make()
+    flags = [
+        block.checkpoint
+        for block in model.reasoning
+        if isinstance(block, TransformerBlock)
+    ]
+    assert flags == [False, True, False, True]
+    config.block_checkpoint_fraction = 1.5
+    with pytest.raises(ValueError, match="block_checkpoint_fraction"):
+        config.make()
+    config.block_checkpoint_fraction = 0.5
+    config.block = MLPMixerBlock.Config(seq_len=2)
+    with pytest.raises(ValueError, match="checkpoint field"):
+        config.make()
+
+
+def test_checkpoint_core_recomputes_only_the_grad_bearing_cycle() -> None:
+    """Backward re-runs the wrapped cycle once; ``no_grad`` cycles never rerun."""
+    config = _config(recurrent=True, channels_in=4)
+    assert isinstance(config.recurrence, DeepRecurrence.Config)
+    config.recurrence.slow_cycles = 3
+    config.checkpoint_core = True
+    torch.manual_seed(0)
+    model = config.make()
+    calls: list[int] = []
+
+    def count(module: nn.Module, args: object, output: object) -> None:
+        del module, args, output
+        calls.append(1)
+
+    model.head.register_forward_hook(count)
+    tokens = torch.randint(0, 2, (3, 2))
+    model(tokens).logits.sum().backward()
+    # Three forward core applications, plus one recompute of the last.
+    assert len(calls) == 3 + 1
+    calls.clear()
+    with torch.inference_mode():
+        model(tokens)
+    assert len(calls) == 3
+
+
+def test_checkpoint_core_never_enters_checkpoint_without_grad(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wrapping a compiled core under inference_mode deadlocks multi-rank eval."""
+    entered: list[bool] = []
+
+    def refuse(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        entered.append(torch.is_grad_enabled())
+        raise AssertionError("checkpoint entered")
+
+    monkeypatch.setitem(
+        SudokuNet.core.__globals__,
+        "torch_checkpoint",
+        refuse,
+    )
+    config = _config(recurrent=True, channels_in=4)
+    config.checkpoint_core = True
+    torch.manual_seed(0)
+    model = config.make()
+    with torch.inference_mode():
+        model(torch.randint(0, 2, (3, 2)))
+    assert entered == []
+    with pytest.raises(AssertionError, match="checkpoint entered"):
+        model(torch.randint(0, 2, (3, 2)))
+    assert entered == [True]
+
+
+def _checkpoint_run(
+    *,
+    checkpoint_core: bool,
+    fraction: float,
+) -> tuple[Tensor, dict[str, Tensor], int]:
+    """Forward + backward one recurrent model; count saved activation bytes."""
+    config = _config(recurrent=True, channels_in=8, vocab_size=5, grid_shape=(6,))
+    config.num_layers = 2
+    config.checkpoint_core = checkpoint_core
+    config.block_checkpoint_fraction = fraction
+    torch.manual_seed(0)
+    model = config.make()
+    tokens = torch.randint(0, 5, (3, 6), generator=torch.Generator().manual_seed(1))
+    saved: list[int] = []
+
+    def pack(tensor: Tensor) -> Tensor:
+        saved.append(tensor.numel() * tensor.element_size())
+        return tensor
+
+    def unpack(tensor: Tensor) -> Tensor:
+        return tensor
+
+    with torch.autograd.graph.saved_tensors_hooks(pack, unpack):
+        out = model(tokens)
+        loss = out.logits.square().mean() + out.halt.square().mean()
+    loss.backward()
+    grads = {
+        name: param.grad.clone()
+        for name, param in model.named_parameters()
+        if param.grad is not None
+    }
+    return out.logits.detach(), grads, sum(saved)
+
+
 def test_initialization_and_lattice_degenerate_branch() -> None:
     weight = torch.empty(3, 4)
     fan_in_normal(weight, depth=2)

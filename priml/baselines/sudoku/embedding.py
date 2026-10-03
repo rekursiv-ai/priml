@@ -39,7 +39,39 @@ from priml.cost import (
 )
 from priml.model.custom_types import ChannelsIn, ChannelsOut
 from priml.model.embedding import Embedding
-from priml.model.init import truncated_normal
+from priml.model.init import InitFn, call_init, truncated_normal
+
+
+def corrected_scaled_normal(w: Tensor) -> None:
+    """Initialize truncated normal at realized std ``1/sqrt(C)``, C the last axis.
+
+    The rescale trick's table init: the runtime ``sqrt(C)`` multiply brings
+    the table to unit scale.
+
+    Args:
+      w: ``[N, C]`` table to initialize in place.
+
+    """
+    truncated_normal(
+        w,
+        std=1.0 / w.shape[-1] ** 0.5,
+        depth_index=(),
+        variance_correction=True,
+    )
+
+
+def scaled_normal(w: Tensor) -> None:
+    """Initialize ``nn.init.trunc_normal_`` at std ``1/sqrt(C)``, clipped at +-2.
+
+    The uncorrected sibling of :func:`corrected_scaled_normal`, which the maze
+    recipe trained with. At any real width the absolute bounds lie far in the
+    tails, so it is nearly an untruncated normal.
+
+    Args:
+      w: ``[N, C]`` table to initialize in place.
+
+    """
+    nn.init.trunc_normal_(w, std=1.0 / w.shape[-1] ** 0.5)
 
 
 @runtime_checkable
@@ -384,6 +416,9 @@ class GridEmbedding(nn.Module):
         associative, so reordering changes the trained result. Empty is the
         plain baseline -- token embeddings alone."""
 
+        init_weight: InitFn = corrected_scaled_normal
+        """Token-table initializer; the runtime rescale brings it to unit scale."""
+
         @property
         def grid_len(self) -> int:
             """Number of grid tokens per puzzle."""
@@ -476,12 +511,7 @@ class GridEmbedding(nn.Module):
         self.config = config
         self.embed_scale: float = config.channels_out**0.5
         self.embed_tokens = _token_table(config).make()
-        truncated_normal(
-            self.embed_tokens.weight,
-            std=1.0 / self.embed_scale,
-            depth_index=(),
-            variance_correction=True,
-        )
+        call_init(config.init_weight, self.embed_tokens.weight)
         # The slot is typed by what a channel DOES (``GridChannel``) while
         # ``ModuleList`` holds what it IS, and iterating one yields a bare
         # ``Module`` whose ``__call__`` says nothing. Keep the typed list beside

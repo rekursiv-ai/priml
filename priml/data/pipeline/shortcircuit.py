@@ -6,7 +6,8 @@ Provides wrapper that skips already-filtered samples and tracks statistics.
 from __future__ import annotations
 
 from collections import deque
-from typing import TYPE_CHECKING, cast
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import logging
 import threading
@@ -15,6 +16,7 @@ import time
 from configgle import Fig, Makeable
 
 from priml.data.custom_types import Processor
+from priml.lib.custom_json import ListCodec
 
 
 if TYPE_CHECKING:
@@ -217,7 +219,9 @@ class ShortCircuitProcessor:
         # pass-through as a drop. The fed count minus the emitted count is the
         # net number the processor filtered out (>= 0 for filter/1:1
         # processors; an expanding 1->N processor simply records no drops).
-        fed: list[dict[str, object]] = []
+        # Only the count and the newest sample are kept: holding every fed
+        # sample pins each one's payload (JPEG bytes) for the whole epoch.
+        fed = _FedTally()
         emitted_count = 0
 
         for processed_sample in self.processor(self._feed(samples, bypassed, fed)):
@@ -229,11 +233,11 @@ class ShortCircuitProcessor:
         while bypassed:
             yield bypassed.popleft()
 
-        for _ in range(max(0, len(fed) - emitted_count)):
-            # Attribute each drop to the most recent fed sample's reasons; the
-            # processor mutates filter_reasons in place before declining to
-            # yield, so the last fed sample carries the rejection cause.
-            reasons = cast(list[str], fed[-1].get("filter_reasons", [])) if fed else []
+        # Attribute each drop to the most recent fed sample's reasons; the
+        # processor mutates filter_reasons in place before declining to yield,
+        # so the last fed sample carries the rejection cause.
+        reasons = ListCodec.coerce(fed.last.get("filter_reasons"), str)
+        for _ in range(fed.count - emitted_count):
             self.stats.record_drop(self.processor_name, reasons)
             logger.debug("%s: dropped a sample", self.processor_name)
         self.stats.log_statistics()
@@ -242,7 +246,7 @@ class ShortCircuitProcessor:
         self,
         samples: Iterator[dict[str, object]],
         bypassed: deque[dict[str, object]],
-        fed: list[dict[str, object]],
+        fed: _FedTally,
     ) -> Iterator[dict[str, object]]:
         """Yield non-filtered samples to the processor; queue filtered ones."""
         for sample in samples:
@@ -257,5 +261,14 @@ class ShortCircuitProcessor:
                 )
                 bypassed.append(sample)
                 continue
-            fed.append(sample)
+            fed.count += 1
+            fed.last = sample
             yield sample
+
+
+@dataclass(slots=True, kw_only=True)
+class _FedTally:
+    """How many samples reached the processor, and the newest of them."""
+
+    count: int = 0
+    last: dict[str, object] = field(default_factory=dict[str, object])

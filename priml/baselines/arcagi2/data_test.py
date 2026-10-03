@@ -92,6 +92,16 @@ def test_reference_batches(tmp_path: Path) -> None:
         assert torch.equal(left, right), "mid-pass resume"
 
 
+def test_reference_batches_golden_bites(tmp_path: Path) -> None:
+    """One changed token in the recorded passes is reported, not absorbed."""
+    write_tree(tmp_path)
+    record = record_passes(lambda: port_data(tmp_path))
+    record["0/0/media"] = record["0/0/media"].clone()
+    record["0/0/media"].view(-1)[0] += 1
+    with pytest.raises(AssertionError, match="1 mismatches"):
+        assert_matches("data", "passes", record)
+
+
 def test_arc2_requires_resident_data_and_checkpoint_fields(tmp_path: Path) -> None:
     write_tree(tmp_path)
     config = Arc2Data.Config(working_dir=tmp_path, batch_size=2, device="cpu")

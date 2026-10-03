@@ -3,8 +3,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
+import gc
 import threading
 import time
+import weakref
 
 from configgle import Fig
 
@@ -320,8 +322,24 @@ def test_short_circuit_processor_logging():
 
         list(processor(iter(samples)))
 
-        # Check debug log was called for dropped sample.
-        assert mock_logger.debug.call_count >= 1
+        mock_logger.debug.assert_called_once_with(
+            "%s: dropped a sample",
+            "MockProcessor",
+        )
+
+
+def test_short_circuit_logs_each_skipped_sample():
+    config = ShortCircuitProcessor.Config(processor=MockProcessor.Config())
+    with patch("priml.data.pipeline.shortcircuit.logger") as mock_logger:
+        processor = ShortCircuitProcessor(config)
+        samples: list[dict[str, object]] = [{"key": "k", "filter_reasons": ["old"]}]
+        list(processor(iter(samples)))
+    mock_logger.debug.assert_called_once_with(
+        "%s: skipping filtered sample (key=%s, reasons=%s)",
+        "MockProcessor",
+        "k",
+        ["old"],
+    )
 
 
 def test_short_circuit_processor_custom_stats_config():
@@ -448,6 +466,65 @@ def test_short_circuit_does_not_false_drop_new_dict_passthrough():
         f"new-dict pass-through falsely recorded "
         f"{processor.stats.samples_dropped} drops"
     )
+
+
+class _Sample(dict[str, object]):
+    """A dict that supports weak references, to observe what stays alive."""
+
+
+def test_short_circuit_releases_consumed_samples():
+    """Samples already yielded downstream are not retained by the wrapper.
+
+    Retaining every fed sample held each one's payload (e.g. JPEG bytes) for
+    the whole epoch: ImageNet training grew ~125 KB/image per loader worker.
+    """
+    config = ShortCircuitProcessor.Config(processor=NewDictPassThrough.Config())
+    processor = ShortCircuitProcessor(config)
+    refs: list[weakref.ref[_Sample]] = []
+    outputs = processor(_tracked_samples(4, refs))
+    next(outputs)
+    next(outputs)
+    gc.collect()
+    assert refs[0]() is None
+
+
+def _tracked_samples(
+    count: int,
+    refs: list[weakref.ref[_Sample]],
+) -> Iterator[dict[str, object]]:
+    """Yield fresh samples, recording a weak reference to each."""
+    for index in range(count):
+        sample = _Sample(key=f"s{index}")
+        refs.append(weakref.ref(sample))
+        yield sample
+        del sample
+
+
+class MalformedReasonDropper:
+    """Drop every sample after tagging it with one valid and one invalid reason."""
+
+    class Config(Fig["MalformedReasonDropper"]):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def __call__(
+        self,
+        samples: Iterator[dict[str, object]],
+    ) -> Iterator[dict[str, object]]:
+        for sample in samples:
+            sample["filter_reasons"] = ["blurry", 7]
+        yield from ()
+
+
+def test_short_circuit_records_only_string_drop_reasons():
+    config = ShortCircuitProcessor.Config(processor=MalformedReasonDropper.Config())
+    processor = ShortCircuitProcessor(config)
+    samples: list[dict[str, object]] = [{"key": "a"}, {"key": "b"}]
+    assert list(processor(iter(samples))) == []
+    assert processor.stats.processor_drops == {"MalformedReasonDropper": 2}
+    assert processor.stats.drop_reasons == {"MalformedReasonDropper": {"blurry": 2}}
 
 
 if __name__ == "__main__":

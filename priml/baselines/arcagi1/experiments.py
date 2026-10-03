@@ -364,7 +364,9 @@ class TrmTrainLoop(
         embedding = model.embedding
         assert isinstance(embedding, GridEmbedding.Config)
         embedding.grid_shape = spec.grid_shape
-        if model.rope is not None:
+        # A recipe may lay the grid out in 2D for its rotary (e.g. ``(30, 30)``
+        # for a 900-token grid); only an unset lattice takes the flat default.
+        if model.rope is not None and not model.rope_grid_shape:
             model.rope_grid_shape = spec.grid_shape
         return super().finalize()
 

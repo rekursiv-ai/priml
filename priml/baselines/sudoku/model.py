@@ -43,9 +43,11 @@ from typing import (
 import copy
 import functools
 import logging
+import math
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 import torch
 
@@ -59,7 +61,7 @@ from priml.cost import (
 )
 from priml.model.attention.rope import RoPE
 from priml.model.custom_types import ChannelsIn, ChannelsOut, TensorModule
-from priml.model.init import truncated_normal
+from priml.model.init import InitFn, truncated_normal
 from priml.model.linear import Linear
 from priml.model.sequential import Sequential
 from priml.model.transformer.block import TransformerBlock
@@ -108,6 +110,16 @@ def fan_in_normal(w: Tensor, *, depth: int = -1) -> None:
     """
     del depth
     truncated_normal(w, std=w.shape[-1] ** -0.5, depth_index=())
+
+
+def corrected_unit_normal(w: Tensor) -> None:
+    """Initialize truncated normal at realized std 1, variance-corrected."""
+    truncated_normal(w, std=1.0, depth_index=(), variance_correction=True)
+
+
+def unit_normal(w: Tensor) -> None:
+    """Initialize ``nn.init.trunc_normal_`` at std 1, clipped at 2 std."""
+    nn.init.trunc_normal_(w, std=1.0)
 
 
 class CoreOutput(NamedTuple):
@@ -530,6 +542,14 @@ class SudokuNet(nn.Module):
         vocab_size: int = -1
         """Output vocabulary; must match the embedding's."""
 
+        head: Linear.Config = field(
+            default_factory=lambda: Linear.Config(init_weight=corrected_fan_in_normal),
+        )
+        """Token head; its widths are the model's to push down."""
+
+        init_latent: InitFn = corrected_unit_normal
+        """Initializer of the ``[1, C]`` learned starting latents."""
+
         halt_outputs: int = 2
         """Halt-head width. Only index 0 is read; a second column exists in
         reference checkpoints and is kept for weight-shape compatibility."""
@@ -573,6 +593,23 @@ class SudokuNet(nn.Module):
         bfloat16 truncated normal is not a float32 one rounded, so a recipe
         that drew its latents in half precision must say so to reproduce them."""
 
+        checkpoint_core: bool = False
+        """Activation-checkpoint every grad-bearing core application.
+
+        Wraps the core in ``torch.utils.checkpoint`` (non-reentrant) from
+        OUTSIDE the compiled unit, so its inner fast-cycle activations are
+        recomputed in backward while the compiled core is unchanged. Only
+        applications under gradient are wrapped; a recurrence's ``no_grad``
+        cycles and evaluation run the core directly."""
+
+        block_checkpoint_fraction: float = 0.0
+        """Fraction of the stack's blocks built with ``checkpoint=True``.
+
+        An evenly spaced ``ceil(num_layers * fraction)`` of the copies are
+        checkpointed inside the core; needs a block config with a
+        ``checkpoint`` field. Prefer :attr:`checkpoint_core` for a recurrent
+        model: in-graph recompute regions can blow up compile time."""
+
         @property
         def grid_len(self) -> int:
             """Grid tokens per puzzle, read from the embedding."""
@@ -600,6 +637,10 @@ class SudokuNet(nn.Module):
                 self.embedding.channels_out = self.channels_in
             if self.embedding.channels_in == -1:
                 self.embedding.channels_in = self.vocab_size
+            if self.head.channels_in == -1:
+                self.head.channels_in = self.channels_in
+            if self.head.channels_out == -1:
+                self.head.channels_out = self.vocab_size
             propagate = self.block
             if isinstance(propagate, ChannelsIn) and propagate.channels_in == -1:
                 propagate.channels_in = self.channels_in
@@ -661,7 +702,7 @@ class SudokuNet(nn.Module):
                 rows=rows,
                 dtype=dt,
             )
-            per_row = stack.tile(fast_cycles + 1) + adds + over_rows(_head(self))
+            per_row = stack.tile(fast_cycles + 1) + adds + over_rows(self.head)
             core = per_row + over_puzzles(_halt_head(self))
             # Every slow cycle runs the core forward; only the last runs backward.
             primal_only = core.only("primal")
@@ -697,8 +738,12 @@ class SudokuNet(nn.Module):
             )
         if config.rope is not None and not config.rope_grid_shape:
             raise ValueError("SudokuNet requires rope_grid_shape from the dataset.")
+        if config.block_checkpoint_fraction < 0 or config.block_checkpoint_fraction > 1:
+            raise ValueError(
+                "block_checkpoint_fraction must be in [0, 1], got "
+                f"{config.block_checkpoint_fraction}.",
+            )
         self.config = config
-        c = config.channels_in
         # Registered first, filled after the blocks: parameter ORDER follows
         # registration, and the reference TRM held its prefix parameters directly,
         # so they led. A norm over the body sums in that order, and a compiled float32
@@ -710,14 +755,13 @@ class SudokuNet(nn.Module):
         embedding = config.embedding.make()
         self.embedding = embedding
 
-        self.head = _head(config).make()
+        self.head = config.head.make()
         self.halt_head = _halt_head(config).make()
 
         # ``repeat`` builds independent copies, each finalized separately, so
         # every block draws its own weights in stack order.
         self.reasoning = Sequential.Config(
-            elements=copy.deepcopy(config.block),
-            repeat=config.num_layers,
+            elements=_checkpointed_blocks(config),
         ).make()
 
         self.prefix = config.prefix.make() if config.prefix is not None else None
@@ -725,14 +769,8 @@ class SudokuNet(nn.Module):
         # per-head directions from the global RNG at construction.
         self.rope = None if config.rope is None else config.rope.make()
 
-        self.slow_init = nn.Buffer(
-            _latent_init(c, dtype=config.dtype_latent_init),
-            persistent=True,
-        )
-        self.fast_init = nn.Buffer(
-            _latent_init(c, dtype=config.dtype_latent_init),
-            persistent=True,
-        )
+        self.slow_init = nn.Buffer(_latent_init(config), persistent=True)
+        self.fast_init = nn.Buffer(_latent_init(config), persistent=True)
 
         self.recurrence: Recurrence | None = (
             config.recurrence.make() if config.recurrence is not None else None
@@ -821,9 +859,24 @@ class SudokuNet(nn.Module):
           out: Logits, halt logit, and both updated latents.
 
         """
-        if self.compiled and self._compiled_core is not None:
-            return self._compiled_core(input_emb, z_slow, z_fast, cos_sin)
-        return self._core(input_emb, z_slow, z_fast, cos_sin)
+        run = (
+            self._compiled_core
+            if self.compiled and self._compiled_core is not None
+            else self._core
+        )
+        # Checkpointing saves memory only by recomputing in backward, and
+        # wrapping a compiled core under ``inference_mode`` deadlocks multi-rank
+        # evaluation, so only grad-bearing applications are wrapped.
+        if self.config.checkpoint_core and torch.is_grad_enabled():
+            return torch_checkpoint(
+                run,
+                input_emb,
+                z_slow,
+                z_fast,
+                cos_sin,
+                use_reentrant=False,
+            )
+        return run(input_emb, z_slow, z_fast, cos_sin)
 
     def _core(
         self,
@@ -1017,14 +1070,30 @@ def two_latent_refine(
     return mix(z_slow + z_fast, cos_sin), z_fast
 
 
-def _head(config: SudokuNet.Config) -> Linear.Config:
-    """Configure the token head: one logit row per latent position, no bias."""
-    return Linear.Config(
-        channels_in=config.channels_in,
-        channels_out=config.vocab_size,
-        bias=False,
-        init_weight=corrected_fan_in_normal,
-    )
+def _checkpointed_blocks(config: SudokuNet.Config) -> list[Makeable[TensorModule]]:
+    """Copy the block config per layer, checkpointing an evenly spaced subset."""
+    fraction = config.block_checkpoint_fraction
+    count = math.ceil(config.num_layers * fraction) if fraction > 0 else 0
+    chosen = {math.floor((i + 1) * config.num_layers / count) - 1 for i in range(count)}
+    blocks: list[Makeable[TensorModule]] = []
+    for layer in range(config.num_layers):
+        block = copy.deepcopy(config.block)
+        if layer in chosen:
+            if not isinstance(block, _CheckpointableConfig):
+                raise ValueError(
+                    "block_checkpoint_fraction requires a block config with a "
+                    "checkpoint field.",
+                )
+            block.checkpoint = True
+        blocks.append(block)
+    return blocks
+
+
+@runtime_checkable
+class _CheckpointableConfig(Protocol):
+    """A block config whose built block can activation-checkpoint itself."""
+
+    checkpoint: bool
 
 
 def _halt_head(config: SudokuNet.Config) -> Linear.Config:
@@ -1056,8 +1125,9 @@ def _count_prefix_tokens(prefix: PrefixConfig | None) -> int:
     return 0 if prefix is None else prefix.num_tokens
 
 
-def _latent_init(channels_in: int, *, dtype: torch.dtype | None) -> Tensor:
-    """Return a ``[1, C]`` fixed random starting latent, unit-scaled, drawn in ``dtype``."""
-    w = torch.empty(1, channels_in, dtype=dtype)
-    truncated_normal(w, std=1.0, depth_index=(), variance_correction=True)
+def _latent_init(config: SudokuNet.Config) -> Tensor:
+    """Return a ``[1, C]`` starting latent drawn in ``dtype_latent_init``."""
+    w = torch.empty(1, config.channels_in, dtype=config.dtype_latent_init)
+    # Called directly: ``call_init`` would draw a bfloat16 latent in float32.
+    config.init_latent(w)
     return w

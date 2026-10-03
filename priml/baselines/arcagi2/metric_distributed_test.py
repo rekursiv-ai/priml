@@ -53,6 +53,14 @@ def test_reject_missing_gather(tmp_path: Path, warm_pools: WarmPoolGetter) -> No
     assert "AssertionError: global pass@1" in result
 
 
+def test_frozen_ballot_scores_bite() -> None:
+    """A changed recorded score is reported against the frozen record."""
+    frozen = load("metric_distributed")["majority/rank0"]
+    nudged = {key: value.clone() for key, value in frozen.items()}
+    nudged["pass@1"] = nudged["pass@1"] - 1
+    assert mismatches(frozen, nudged) == ["pass@1: 1/1 differ"]
+
+
 def test_checkpoint_rejects_malformed_ballot() -> None:
     metric = PassK.Config().make()
     with pytest.raises(TypeError):
