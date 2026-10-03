@@ -4,7 +4,10 @@ FA4's ``flash_attn_func`` and ``flash_attn_varlen_func`` are
 ``autograd.Function``s over its CuTe DSL, which Dynamo cannot trace: under
 ``torch.compile(fullgraph=True)`` they raise at the first step. Each direction
 therefore runs as a torch custom op, which compile keeps as one opaque node,
-and FA4's own backward entry point computes the gradients.
+and FA4's own backward entry point computes the gradients. That entry point,
+``_flash_attn_bwd``, is private: the keywords this module passes it are those
+of flash-attn-4 4.0.0b32, and a later release may rename one, which fails at
+the first backward rather than at ``make()``.
 
 Both kernels take the ``AttentionKernel`` layout,
 ``[..., S, num_heads, channels_head]``, and attend causally, optionally within
@@ -13,9 +16,9 @@ queries, a divisor of theirs, which FA4 groups. An additive mask, attention
 dropout and non-causal attention have no path here; each is refused rather
 than dropped.
 
-``flash-attn-4`` is Linux-only and optional. A kernel imports it when built, so
-a missing install fails at ``make()`` rather than mid-step, and importing this
-module needs nothing.
+``flash-attn-4`` installs only on Linux, so a kernel imports it when built: an
+environment without it fails at ``make()`` rather than mid-step, and importing
+this module needs nothing.
 """
 
 # No ``from __future__ import annotations``: ``torch.library.custom_op`` infers
@@ -163,7 +166,11 @@ class Flash4Varlen(nn.Module):
 
     ``cu_seqlens`` bounds the segments of the flattened leading and ``S`` axes,
     none crossing a row, as ``SdpaVarlen``'s does; that kernel is the portable
-    reference this one must match.
+    reference this one must match. Its last boundary must be the positions'
+    count: FA4 never writes the output or any gradient of a position past
+    ``cu_seqlens[-1]``, which keeps whatever its memory held, while
+    ``SdpaVarlen`` attends such positions as one more segment. Nothing checks
+    this, since reading ``cu_seqlens`` would synchronize the device every call.
 
     Attributes:
       max_logit: As ``Flash4Attention.max_logit``, over each query's segment.
@@ -250,7 +257,7 @@ class Flash4Varlen(nn.Module):
           k: Keys ``[..., S, H_kv, D]``; ``H_kv`` divides ``H``.
           v: Values, shaped like ``k``.
           cu_seqlens: Int32 segment boundaries of the flattened leading and
-            ``S`` axes.
+            ``S`` axes, from 0 to their count.
           window: Previous keys each query reaches, plus itself; -1 for all.
           is_causal: Must be True.
           attn_mask: Must be None; the segments are the mask.

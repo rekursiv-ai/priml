@@ -899,12 +899,16 @@ def test_each_query_reads_only_its_own_rows_memory() -> None:
     assert not torch.allclose(moved[1], out[1])
 
 
-def test_a_mask_leaves_out_the_memory_it_excludes() -> None:
-    attention = Attention.Config(channels_in=8, num_heads=2).make()
+@pytest.mark.parametrize("kernel", [SdpaFused.Config(), SdpaNaive.Config()])
+def test_a_mask_leaves_out_the_memory_it_excludes(
+    kernel: SdpaFused.Config | SdpaNaive.Config,
+) -> None:
+    attention = Attention.Config(channels_in=8, num_heads=2, attn_kernel=kernel).make()
     x, memory = torch.randn(2, 4, 8), torch.randn(2, 6, 8)
-    # Row 0's last two memory positions are padding.
-    valid = torch.tensor([[True] * 4 + [False] * 2, [True] * 6])
-    masked = attention(x, memory=memory, attn_mask=valid[:, None, None, :])
+    # Row 0's last two memory positions are padding, excluded additively.
+    mask = torch.zeros(2, 6)
+    mask[0, 4:] = float("-inf")
+    masked = attention(x, memory=memory, attn_mask=mask[:, None, None, :])
     torch.testing.assert_close(masked[0], attention(x[:1], memory=memory[:1, :4])[0])
     torch.testing.assert_close(masked[1], attention(x[1:], memory=memory[1:])[0])
 
@@ -1022,6 +1026,27 @@ def test_cross_attention_cost_matches_torch(*, share_qk_norm: bool) -> None:
         dtype=None,
         memory_len=5,
     )
+
+
+def test_cross_attention_cost_carries_no_cache_and_no_rotary() -> None:
+    """Attention to a memory refuses a cache and a rotary embedding.
+
+    So its cost holds no per-token state, and a ``rope`` slot adds no work.
+    """
+    config = Attention.Config(channels_in=24, num_heads=4, num_heads_kv=2)
+    plain = (
+        config.copy_tree()
+        .finalize()
+        .cost(seq_len=3, batch_size=5, dtype=None, memory_len=7)
+    )
+    config.rope = RoPE.Config(channels_head=6)
+    rotary = (
+        config.copy_tree()
+        .finalize()
+        .cost(seq_len=3, batch_size=5, dtype=None, memory_len=7)
+    )
+    assert plain.bytes_state == 0
+    assert rotary == plain
 
 
 # ``reference=True`` forces the same mask the module would build on its own, by

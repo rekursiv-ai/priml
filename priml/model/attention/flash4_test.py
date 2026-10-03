@@ -6,6 +6,7 @@ from dataclasses import field
 from types import ModuleType
 from typing import TYPE_CHECKING, Final, override
 
+import functools
 import math
 import sys
 
@@ -22,8 +23,9 @@ from priml.model.attention.flash4 import (
     Flash4Varlen,
     _flash4_backward,
     _flash4_backward_fake,
+    _flash4_forward_fake,
 )
-from priml.model.attention.kernel import SdpaNaive, SdpaVarlen
+from priml.model.attention.kernel import SdpaFused, SdpaNaive, SdpaVarlen
 from priml.model.attention.window import segment_mask
 from priml.testing.cost import assert_cost_matches_torch
 
@@ -108,11 +110,46 @@ def test_dense_windows_and_gradients_reach_fa4(
     ]
 
 
+def test_dense_hands_its_scale_to_both_directions(fake_flash4: _FakeInterface) -> None:
+    q, k, v = (torch.randn(2, 5, 3, 8, requires_grad=True) for _ in range(3))
+    Flash4Attention.Config().make()(q, k, v, scale=0.3).sum().backward()
+    assert fake_flash4.scales == [0.3, 0.3]
+
+
 @pytest.mark.usefixtures("fake_flash4")
 def test_dense_flattens_any_leading_axes_into_rows() -> None:
     q, k, v = (torch.randn(2, 3, 5, 4, 8) for _ in range(3))
     out = Flash4Attention.Config().make()(q, k, v)
     torch.testing.assert_close(out, q + 2 * k + 3 * v)
+
+
+@pytest.mark.compute_torch_compile
+def test_dense_compiles_as_one_opaque_op_under_fullgraph(
+    fake_flash4: _FakeInterface,
+) -> None:
+    # The stand-in refuses to run while Dynamo traces, so passing shows that
+    # compile kept each direction as one opaque op and ran it afterwards.
+    compiled = torch.compile(
+        Flash4Attention.Config().make(),
+        fullgraph=True,
+        backend="aot_eager",
+    )
+    q, k, v = (torch.randn(2, 5, 3, 8, requires_grad=True) for _ in range(3))
+    out = compiled(q, k, v, window=2)
+    torch.testing.assert_close(out, q + 2 * k + 3 * v)
+    out.square().sum().backward()
+    for tensor, scale in zip((q, k, v), (1, 2, 3), strict=True):
+        torch.testing.assert_close(tensor.grad, 2 * scale * out.detach())
+    assert fake_flash4.windows == [(2, 0), (2, 0)]
+
+
+def test_the_dense_forward_fake_declares_a_contiguous_output() -> None:
+    # Head-major storage seen through the kernel's [B, S, H, D] layout.
+    q = torch.empty(2, 3, 5, 4).transpose(1, 2)
+    out, lse = _flash4_forward_fake(q, q, q, None, 0, -1, None)
+    assert out.is_contiguous()
+    assert out.shape == q.shape
+    assert lse.shape == (2, 3, 5)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -159,23 +196,30 @@ def test_the_backward_owns_the_contiguous_layout_its_fake_declares(
 
 @pytest.mark.usefixtures("fake_flash4")
 @pytest.mark.parametrize("window", [-1, 0, 2])
-def test_varlen_matches_sdpa_varlen_with_grouped_heads(window: int) -> None:
+@pytest.mark.parametrize("scale", [None, 0.3])
+def test_varlen_matches_sdpa_varlen_with_grouped_heads(
+    *,
+    window: int,
+    scale: float | None,
+) -> None:
     cu_seqlens = torch.tensor(CU_SEQLENS, dtype=torch.int32)
     inputs = [torch.randn(2, 8, heads, 4) for heads in (6, 3, 3)]
     cotangent = torch.randn(2, 8, 6, 4)
     expected = _output_and_grads(
         SdpaVarlen.Config().make(),
         inputs,
-        cu_seqlens,
         cotangent,
+        cu_seqlens=cu_seqlens,
         window=window,
+        scale=scale,
     )
     actual = _output_and_grads(
         Flash4Varlen.Config().make(),
         inputs,
-        cu_seqlens,
         cotangent,
+        cu_seqlens=cu_seqlens,
         window=window,
+        scale=scale,
     )
     for got, want in zip(actual, expected, strict=True):
         torch.testing.assert_close(got, want)
@@ -199,6 +243,7 @@ def test_varlen_bounds_the_max_logit_by_its_log_normalizer() -> None:
     assert exact <= bound <= exact + math.log(4)
 
 
+@pytest.mark.compute_torch_compile
 @pytest.mark.usefixtures("fake_flash4")
 def test_varlen_compiles_as_one_opaque_op_under_fullgraph() -> None:
     # The stand-in's forward is ``torch.compiler.disable``d, as FA4's CuTe DSL is
@@ -208,8 +253,8 @@ def test_varlen_compiles_as_one_opaque_op_under_fullgraph() -> None:
     cotangent = torch.randn(2, 8, 6, 4)
     kernel = Flash4Varlen.Config().make()
     compiled = torch.compile(kernel, fullgraph=True, backend="eager")
-    expected = _output_and_grads(kernel, inputs, cu_seqlens, cotangent)
-    actual = _output_and_grads(compiled, inputs, cu_seqlens, cotangent)
+    expected = _output_and_grads(kernel, inputs, cotangent, cu_seqlens=cu_seqlens)
+    actual = _output_and_grads(compiled, inputs, cotangent, cu_seqlens=cu_seqlens)
     for got, want in zip(actual, expected, strict=True):
         torch.testing.assert_close(got, want)
 
@@ -268,37 +313,114 @@ def test_the_analytical_cost_matches_a_torch_reference(
 @FA4_WARNINGS
 @pytest.mark.gpu_flash_attention
 @pytest.mark.gpu_torch_cuda
-def test_cuda_dense_matches_fa4s_own_autograd() -> None:
-    interface = _cuda_interface()
-    attention = Flash4Attention.Config().make()
+@pytest.mark.compute_torch_compile
+@pytest.mark.parametrize("window", [64, 256])
+@pytest.mark.parametrize("transposed", [False, True])
+def test_cuda_dense_matches_fa4s_own_autograd_eager_and_compiled(
+    *,
+    window: int,
+    transposed: bool,
+) -> None:
+    _cuda_interface()
     torch.manual_seed(42)
+    shape = (3, 2, 129, 128) if transposed else (3, 129, 2, 128)
     tensors = [
-        torch.randn(3, 129, 2, 128, device="cuda", dtype=torch.bfloat16)
-        for _ in range(3)
+        torch.randn(shape, device="cuda", dtype=torch.bfloat16) for _ in range(3)
     ]
+    if transposed:
+        # Head-major storage, which FA4 normalizes before its kernels run.
+        tensors = [tensor.transpose(1, 2) for tensor in tensors]
     cotangent = torch.randn_like(tensors[0])
-    reference_inputs = [tensor.detach().requires_grad_() for tensor in tensors]
-    reference, _ = interface.flash_attn_func(
-        *reference_inputs,
-        softmax_scale=None,
-        causal=True,
-        window_size=(64, 0),
-        return_lse=True,
+    expected = _output_and_grads(_fa4_dense, tensors, cotangent, window=window)
+    attention = Flash4Attention.Config().make()
+    eager = _output_and_grads(attention, tensors, cotangent, window=window)
+    # Inductor trusts the gradients' declared layout; a mismatch shows here.
+    compiled = _output_and_grads(
+        torch.compile(attention, fullgraph=True),
+        tensors,
+        cotangent,
+        window=window,
     )
-    reference.backward(cotangent)
-    inputs = [tensor.detach().requires_grad_() for tensor in tensors]
-    output = attention(*inputs, window=64)
-    output.backward(cotangent)
-    torch.testing.assert_close(output, reference, rtol=0, atol=0)
-    for actual, expected in zip(inputs, reference_inputs, strict=True):
-        assert actual.grad is not None
-        assert expected.grad is not None
-        torch.testing.assert_close(actual.grad, expected.grad, rtol=0, atol=0)
+    for got, eager_got, want in zip(compiled, eager, expected, strict=True):
+        torch.testing.assert_close(eager_got, want, rtol=0, atol=0)
+        torch.testing.assert_close(got, want, rtol=0, atol=0)
 
 
 @FA4_WARNINGS
 @pytest.mark.gpu_flash_attention
 @pytest.mark.gpu_torch_cuda
+@pytest.mark.parametrize("window", [-1, 0, 64])
+def test_cuda_dense_with_grouped_heads_matches_sdpa(window: int) -> None:
+    _cuda_interface()
+    torch.manual_seed(42)
+    q = torch.randn(3, 129, 6, 128, device="cuda", dtype=torch.bfloat16)
+    k, v = (
+        torch.randn(3, 129, 2, 128, device="cuda", dtype=torch.bfloat16)
+        for _ in range(2)
+    )
+    inputs, cotangent = [q, k, v], torch.randn_like(q)
+    _assert_within_flash_attention_error(
+        _output_and_grads(
+            Flash4Attention.Config().make(),
+            inputs,
+            cotangent,
+            window=window,
+        ),
+        exact=_output_and_grads(
+            functools.partial(_in_float32, kernel=_grouped_sdpa),
+            inputs,
+            cotangent,
+            window=window,
+        ),
+        rounded=_output_and_grads(_grouped_sdpa, inputs, cotangent, window=window),
+    )
+
+
+@FA4_WARNINGS
+@pytest.mark.gpu_flash_attention
+@pytest.mark.gpu_torch_cuda
+@pytest.mark.parametrize("window", [0, 64])
+def test_cuda_varlen_window_matches_sdpa_varlen(window: int) -> None:
+    _cuda_interface()
+    torch.manual_seed(42)
+    lengths = torch.tensor([0, 37, 128, 129, 256], device="cuda", dtype=torch.int32)
+    cu_seqlens = torch.cat([lengths, lengths[1:] + 256])
+    q = torch.randn(2, 256, 6, 128, device="cuda", dtype=torch.bfloat16)
+    k, v = (
+        torch.randn(2, 256, 3, 128, device="cuda", dtype=torch.bfloat16)
+        for _ in range(2)
+    )
+    inputs, cotangent = [q, k, v], torch.randn_like(q)
+    reference = SdpaVarlen.Config().make()
+    _assert_within_flash_attention_error(
+        _output_and_grads(
+            Flash4Varlen.Config().make(),
+            inputs,
+            cotangent,
+            cu_seqlens=cu_seqlens,
+            window=window,
+        ),
+        exact=_output_and_grads(
+            functools.partial(_in_float32, kernel=reference),
+            inputs,
+            cotangent,
+            cu_seqlens=cu_seqlens,
+            window=window,
+        ),
+        rounded=_output_and_grads(
+            reference,
+            inputs,
+            cotangent,
+            cu_seqlens=cu_seqlens,
+            window=window,
+        ),
+    )
+
+
+@FA4_WARNINGS
+@pytest.mark.gpu_flash_attention
+@pytest.mark.gpu_torch_cuda
+@pytest.mark.compute_torch_compile
 def test_cuda_varlen_matches_fa4s_own_autograd_eager_and_compiled() -> None:
     interface = _cuda_interface()
     torch.manual_seed(42)
@@ -327,13 +449,13 @@ def test_cuda_varlen_matches_fa4s_own_autograd_eager_and_compiled() -> None:
         t.grad.unflatten(0, (2, 256)) for t in leaves if t.grad is not None
     ]
     kernel = Flash4Varlen.Config().make()
-    eager = _output_and_grads(kernel, [q, k, v], cu_seqlens, cotangent)
+    eager = _output_and_grads(kernel, [q, k, v], cotangent, cu_seqlens=cu_seqlens)
     # Inductor trusts the gradients' declared layout; a mismatch shows here.
     compiled = _output_and_grads(
         torch.compile(kernel),
         [q, k, v],
-        cu_seqlens,
         cotangent,
+        cu_seqlens=cu_seqlens,
     )
     for got, eager_got, want in zip(compiled, eager, expected, strict=True):
         torch.testing.assert_close(eager_got, want, rtol=0, atol=0)
@@ -369,15 +491,67 @@ class _FlashCostReference(nn.Module):
 def _output_and_grads(
     kernel: Callable[..., Tensor],
     inputs: list[Tensor],
-    cu_seqlens: Tensor,
     cotangent: Tensor,
-    *,
-    window: int = -1,
+    **kwargs: object,
 ) -> list[Tensor]:
-    """Return a varlen kernel's output and the gradients of ``q``, ``k``, ``v``."""
+    """Return a kernel's output and the gradients of ``q``, ``k``, ``v``."""
     leaves = [tensor.clone().requires_grad_() for tensor in inputs]
-    out = kernel(*leaves, cu_seqlens=cu_seqlens, window=window)
+    out = kernel(*leaves, **kwargs)
     return [out.detach(), *torch.autograd.grad(out, leaves, cotangent)]
+
+
+def _fa4_dense(q: Tensor, k: Tensor, v: Tensor, *, window: int) -> Tensor:
+    """Attend through FA4's own autograd; a window reaching the whole row is none."""
+    whole = window < 0 or window >= q.shape[1]
+    out, _ = flash4._interface().flash_attn_func(
+        q,
+        k,
+        v,
+        softmax_scale=None,
+        causal=True,
+        window_size=(None, None) if whole else (window, 0),
+        return_lse=True,
+    )
+    return out
+
+
+def _grouped_sdpa(q: Tensor, k: Tensor, v: Tensor, *, window: int) -> Tensor:
+    """Attend causally with each key and value head repeated for the queries it serves."""
+    groups = q.shape[-2] // k.shape[-2]
+    keys, values = (t.repeat_interleave(groups, dim=-2) for t in (k, v))
+    return SdpaFused.Config().make()(q, keys, values, is_causal=True, window=window)
+
+
+def _in_float32(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    *,
+    kernel: Callable[..., Tensor],
+    **kwargs: object,
+) -> Tensor:
+    """Run ``kernel`` in float32 and round its output to the inputs' dtype."""
+    return kernel(q.float(), k.float(), v.float(), **kwargs).to(q.dtype)
+
+
+# Each may stray from the float32 reference, rounded to its dtype, at most twice as far
+# as the same reference computed in that dtype does, plus twice the dtype's rounding
+# near the reference's values: the bound FlashAttention's own forward and backward
+# checks use (flash-attention's tests/cute/test_flash_attn.py).
+def _assert_within_flash_attention_error(
+    actual: list[Tensor],
+    *,
+    exact: list[Tensor],
+    rounded: list[Tensor],
+) -> None:
+    """Hold each FA4 tensor to FlashAttention's own accuracy criterion."""
+    for got, want, baseline in zip(actual, exact, rounded, strict=True):
+        error = float((got - want).abs().max())
+        bound = float(
+            2 * (baseline - want).abs().max()
+            + 2 * (want + 0.3 - 0.3 - want).abs().max(),
+        )
+        assert error <= bound, f"error {error} exceeds {bound}"
 
 
 def _cuda_interface() -> flash4._Flash4Interface:
@@ -388,6 +562,7 @@ def _cuda_interface() -> flash4._Flash4Interface:
         )
     if torch.cuda.get_device_capability() not in {(9, 0), (10, 0)}:
         pytest.skip("Requires an SM90 or SM100 CUDA device.")
+    pytest.importorskip("flash_attn.cute.interface", reason="Requires flash-attn-4.")
     flash4._interface.cache_clear()
     return flash4._interface()
 
@@ -396,14 +571,15 @@ class _FakeInterface(ModuleType):
     """A stand-in FA4: arithmetic over rows, and real attention over segments.
 
     The dense entry points compute ``q + 2k + 3v`` and its gradients, so a test
-    sees the layout and the windows the kernel hands over. The varlen ones
-    compute segment attention densely, with its gradients written out from the
-    saved lse, so the kernel can be held to ``SdpaVarlen``.
+    sees the layout, the windows and the scales the kernel hands over. The varlen
+    ones compute segment attention densely at the given scale, with its gradients
+    written out from the saved lse, so the kernel can be held to ``SdpaVarlen``.
     """
 
     def __init__(self) -> None:
         super().__init__("flash_attn.cute.interface")
         self.windows: list[tuple[int | None, int | None]] = []
+        self.scales: list[float | None] = []
 
     def flash_attn_func(
         self,
@@ -416,10 +592,12 @@ class _FakeInterface(ModuleType):
         window_size: tuple[int | None, int | None],
         return_lse: bool,
     ) -> tuple[Tensor, Tensor]:
+        # FA4's CuTe DSL is opaque to Dynamo; only the custom op may call it.
+        assert not torch.compiler.is_compiling()
         assert causal
         assert return_lse
-        assert softmax_scale is None
         self.windows.append(window_size)
+        self.scales.append(softmax_scale)
         return q + 2 * k + 3 * v, torch.zeros(q.shape[0], q.shape[2], q.shape[1])
 
     def flash_attn_varlen_func(
@@ -439,12 +617,19 @@ class _FakeInterface(ModuleType):
     ) -> tuple[Tensor, Tensor]:
         assert causal
         assert return_lse
-        assert softmax_scale is None
         assert cu_seqlens_k is cu_seqlens_q
         assert max_seqlen_q == max_seqlen_k
         self.windows.append(window_size)
+        self.scales.append(softmax_scale)
         window = -1 if window_size[0] is None else window_size[0]
-        return _opaque_segment_attention(q, k, v, cu_seqlens_q, window=window)
+        return _opaque_segment_attention(
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            window=window,
+            scale=softmax_scale,
+        )
 
     def _flash_attn_bwd(  # noqa: PLR0917 -- FA4's backward takes six positional tensors.
         self,
@@ -465,11 +650,12 @@ class _FakeInterface(ModuleType):
         max_seqlen_q: int | None,
         max_seqlen_k: int | None,
     ) -> tuple[Tensor, Tensor, Tensor]:
+        assert not torch.compiler.is_compiling()
         assert causal
-        assert softmax_scale is None
         assert cu_seqlens_k is cu_seqlens_q
         assert max_seqlen_q == max_seqlen_k
         self.windows.append((window_size_left, window_size_right))
+        self.scales.append(softmax_scale)
         if cu_seqlens_q is None:
             return grad_out.clone(), 2 * grad_out, 3 * grad_out
         # A custom op's body runs below autograd, so the gradient is written out:
@@ -478,7 +664,7 @@ class _FakeInterface(ModuleType):
         mask = segment_mask(cu_seqlens_q, rows=1, length=len(q), window=window)[0]
         groups = q.shape[-2] // k.shape[-2]
         keys, values = (t.repeat_interleave(groups, dim=-2) for t in (k, v))
-        scale = float(q.shape[-1]) ** -0.5
+        scale = float(q.shape[-1]) ** -0.5 if softmax_scale is None else softmax_scale
         scores = torch.einsum("qhd,khd->hqk", q, keys) * scale
         probs = (scores - lse[..., None]).exp().masked_fill(~mask, 0.0)
         d_probs = torch.einsum("qhd,khd->hqk", grad_out, values)
@@ -522,7 +708,8 @@ class _LayoutInterface(ModuleType):
         **kwargs: object,
     ) -> tuple[Tensor, Tensor, Tensor]:
         del out, lse, kwargs
-        # CuTe 4.0.0b29: cute_dsl_utils.py:70-99; interface.py:1980,2108-2119.
+        # flash-attn-4 4.0.0b32: cute_dsl_utils.py:70-99; interface.py:2080-2081,
+        # 2208-2219.
         for scale, value in enumerate((q, k, v), start=1):
             aligned = value.data_ptr() % 16 == 0
             strides_aligned = value.stride(-1) == 1 and all(
@@ -548,13 +735,22 @@ def _opaque_segment_attention(
     cu_seqlens: Tensor,
     *,
     window: int,
+    scale: float | None,
 ) -> tuple[Tensor, Tensor]:
     """Return segment attention of ``[N, H, D]`` inputs and each query's lse ``[H, N]``."""
     reference = SdpaVarlen.Config().make()
-    out = reference(q[None], k[None], v[None], cu_seqlens=cu_seqlens, window=window)
+    out = reference(
+        q[None],
+        k[None],
+        v[None],
+        cu_seqlens=cu_seqlens,
+        window=window,
+        scale=scale,
+    )
     mask = segment_mask(cu_seqlens, rows=1, length=len(q), window=window)[0]
     keys = k.repeat_interleave(q.shape[-2] // k.shape[-2], dim=-2)
-    scores = torch.einsum("qhd,khd->hqk", q, keys) * float(q.shape[-1] ** -0.5)
+    logit_scale = float(q.shape[-1] ** -0.5) if scale is None else scale
+    scores = torch.einsum("qhd,khd->hqk", q, keys) * logit_scale
     lse = scores.masked_fill(~mask, float("-inf")).logsumexp(-1)
     return out[0].detach(), lse.detach()
 

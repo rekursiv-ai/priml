@@ -5,11 +5,35 @@ All notable priml changes are documented here. This project follows
 
 ## Unreleased
 
+### Changed
+
+- `SelfAttention` is renamed `Attention`, and its module
+  `priml.model.attention.self_attention` is now
+  `priml.model.attention.attention`. `GatedSelfAttention` is renamed
+  `GatedAttention`, and its module `priml.model.attention.gated_self_attention`
+  is now `priml.model.attention.gated_attention`.
+- FlashAttention moved out of the nanochat baseline into
+  `priml.model.attention`: `Flash3Attention`, `load_flash3` and the FA3
+  receipt helpers from `priml.baselines.nanochat.attention` to
+  `priml.model.attention.flash3`, `Flash4Attention` to
+  `priml.model.attention.flash4`, and the FA3 build script from
+  `priml.baselines.nanochat.scripts.prepare_flash3` to
+  `priml.model.attention.prepare_flash3`. `is_prepared` is removed; an
+  empty `artifact_validation_error(artifact_path())` means the same.
+
+### Added
+
+- `Attention` attends to a memory when called with `memory=`: the queries
+  come from the input, the keys and values from the memory through the same
+  `proj_qkv`. Its config's `cost` takes the memory's length as `memory_len`.
+
 ### Fixed
 
 - Cropped JPEG decodes find libturbojpeg where `TurboJPEG()` does. The
   region decoder only asked `find_library`, which misses a Homebrew install
   on Apple Silicon, so every crop there decoded to `None`.
+- The nanochat baseline's Torch 2.9 runtime project installs configgle, which
+  every priml module imports, so the FA3 build command runs in it.
 
 ## 0.1.4 - 2026-08-19
 

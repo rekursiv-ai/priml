@@ -188,7 +188,13 @@ def test_the_pinned_build_runtime_passes(monkeypatch: pytest.MonkeyPatch) -> Non
     ("change", "error"),
     [
         ({"system": "Darwin"}, "must be built on x86_64 Linux"),
-        ({"version": "2.9.10"}, r"Torch 2\.9\.1; found 2\.9\.10"),
+        (
+            {"version": "2.9.10"},
+            (
+                r"Torch 2\.9\.1; found 2\.9\.10\. .*--isolated --project "
+                r"priml/baselines/nanochat/runtime"
+            ),
+        ),
         ({"cuda": "12.9"}, r"CUDA 12\.8; found 12\.9"),
         ({"cxx11_abi": False}, r"C\+\+11 ABI"),
         ({"nvcc": "release 12.9"}, "nvcc 12.8"),

@@ -7,6 +7,13 @@ extension, its Python interface and its generated config. :func:`load_flash3`
 checks that receipt against the files and imports the interface; it never builds
 or downloads, so an unprepared node fails at ``make()`` rather than mid-run.
 
+The build is the profile of the baseline that first needed it: SM90, bfloat16
+only, and head widths of at most 128, with sliding windows and the backward.
+``prepare_flash3`` compiles out FP16, FP8, the wider heads, varlen, split-KV,
+paged and appended KV caches, softcapping, PackGQA and clusters. The config
+holds no dtype or head width, so ``make()`` cannot refuse inputs outside the
+profile; FA3 refuses them at the first forward.
+
 The kernel takes the ``AttentionKernel`` layout,
 ``[..., S, num_heads, channels_head]``, and attends causally, optionally within
 ``window`` previous keys. Keys and values may carry fewer heads than the
@@ -68,6 +75,9 @@ class Flash3Interface(Protocol):
 
 class Flash3Attention(nn.Module):
     """Causal FlashAttention 3 over dense rows, optionally within a sliding window.
+
+    Bfloat16 only, at head widths of at most 128: the pinned build compiles
+    nothing else (see the module docstring).
 
     The window is a kernel argument rather than a mask: a mask forces torch's
     dispatcher off every flash backend, so windowed layers would silently run a

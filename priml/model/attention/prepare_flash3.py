@@ -1,5 +1,9 @@
 #!/bin/sh
 # ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
+# Run directly, this file resolves the repository's project, whose Torch is not
+# the 2.9.1 FA3 builds against, so the build stops at its runtime check and names
+# the isolated-runtime command below. The cli-shape lint pins the exec line to the
+# enclosing project; an exec into the runtime would fail that gate.
 # fmt: off
 '''' 2>/dev/null #
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
@@ -239,7 +243,9 @@ def _validate_build_runtime() -> None:
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise RuntimeError("FA3 must be built on x86_64 Linux.")
     if torch.__version__.split("+", maxsplit=1)[0] != "2.9.1":
-        raise RuntimeError(f"FA3 requires Torch 2.9.1; found {torch.__version__}.")
+        raise RuntimeError(
+            f"FA3 requires Torch 2.9.1; found {torch.__version__}. Build it in the isolated runtime: `uv --quiet run --frozen --isolated --project priml/baselines/nanochat/runtime python -m priml.model.attention.prepare_flash3`.",
+        )
     if torch.version.cuda != "12.8":
         raise RuntimeError(f"FA3 requires CUDA 12.8; found {torch.version.cuda}.")
     if not torch.compiled_with_cxx11_abi():

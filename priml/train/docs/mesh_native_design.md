@@ -173,7 +173,7 @@ composes correctly (sharded == dense, err 6e-8).
 
 Because `attn_kernel` is a configgle `Makeable` slot, this needs no
 special-casing: **TP models set `attn_kernel=SdpaNaive`.** The applier raises a
-clear error if it shards a `Attention` still using the fused flash kernel,
+clear error if it shards an `Attention` still using the fused flash kernel,
 rather than letting the cryptic deep-aten `NotImplementedError` surface.
 `tp=1` is unaffected (no DTensor, fused flash runs as normal — goldens green).
 

@@ -110,6 +110,42 @@ def test_transformer_block_cached_rejects_attention_without_cached_path() -> Non
         model.forward_cached(torch.randn(2, 3, 16), cache=cache)
 
 
+@pytest.mark.parametrize("prenorm", [True, False])
+def test_transformer_block_leaves_a_memory_to_the_blocks_that_cross_attend(
+    prenorm: bool,
+) -> None:
+    """A stack hands ``memory`` to every block; this block's attention reads ``x``.
+
+    Handed the memory, its ``Attention`` would attend to it instead, silently.
+    """
+    block = TransformerBlock.Config(
+        channels_in=12,
+        attn=Attention.Config(num_heads=2),
+        prenorm=prenorm,
+    ).make()
+    x, memory = torch.randn(3, 4, 12), torch.randn(3, 5, 12)
+    torch.testing.assert_close(block(x, memory=memory), block(x))
+
+
+def test_transformer_block_cached_leaves_a_memory_alone() -> None:
+    block = TransformerBlock.Config(
+        channels_in=12,
+        attn=Attention.Config(num_heads=2, causal=True),
+    ).make()
+    assert isinstance(block.attn, Attention)
+    x, memory = torch.randn(3, 4, 12), torch.randn(3, 5, 12)
+    with_memory, _ = block.forward_cached(
+        x,
+        cache=block.attn.alloc_kv_cache(batch=3, max_seq=7),
+        memory=memory,
+    )
+    without, _ = block.forward_cached(
+        x,
+        cache=block.attn.alloc_kv_cache(batch=3, max_seq=7),
+    )
+    torch.testing.assert_close(with_memory, without)
+
+
 def test_transformer_block_reset(monkeypatch: pytest.MonkeyPatch) -> None:
     m = TransformerBlock.Config(
         channels_in=64,

@@ -143,6 +143,7 @@ class AttentionProjections(nn.Module):
               dtype: Activation dtype; ``None`` is torch's default.
               memory_len: Memory positions per sequence the keys and values
                 are projected from; -1 projects them from the sequence itself.
+                Projections from a memory are not rotated.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
@@ -226,7 +227,8 @@ class AttentionProjections(nn.Module):
                     dtype=dtype,
                     **kwargs,
                 )
-            if self.rope is not None:
+            # ``Attention`` refuses a rotary embedding on a memory, so none runs.
+            if self.rope is not None and memory_len < 0:
                 total += cost(
                     self.rope,
                     seq_len=seq_len,
@@ -413,6 +415,8 @@ class Attention(AttentionProjections):
     the same ``proj_qkv`` (its first ``num_heads`` heads read ``x``, the rest
     the memory), so the memory has ``channels_in`` channels. Cross-attention
     is bidirectional over the memory and takes no window, rotary embedding or cache.
+    The block that owns a cross-attention hands it the memory; a block whose
+    attention is self-attention, as ``TransformerBlock``'s is, hands it none.
     """
 
     class Config(Makes["Attention"], AttentionProjections.Config, kw_only=False):
@@ -431,7 +435,7 @@ class Attention(AttentionProjections):
             memory_len: int = -1,
             **kwargs: object,
         ) -> Cost:
-            """Add the kernel's products and the per-token KV cache.
+            """Add the kernel's products and, for self-attention, the per-token KV cache.
 
             The kernel is costed at the configured ``dropout`` over the whole
             sequence, or the whole memory: a window is a ``forward`` argument,
@@ -442,7 +446,8 @@ class Attention(AttentionProjections):
               batch_size: Sequences per step.
               dtype: Activation dtype; ``None`` is torch's default.
               memory_len: Memory positions per sequence the queries attend to;
-                -1 attends to the sequence itself.
+                -1 attends to the sequence itself. A memory is attended
+                without a cache, so it carries no state.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
@@ -469,7 +474,9 @@ class Attention(AttentionProjections):
                     **kwargs,
                 )
                 + kernel,
-                bytes_state=resolve_dtype(dtype).itemsize
+                bytes_state=0
+                if memory_len >= 0
+                else resolve_dtype(dtype).itemsize
                 * 2
                 * self.num_heads_kv
                 * self.channels_head,
