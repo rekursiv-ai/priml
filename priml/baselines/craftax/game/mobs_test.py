@@ -422,6 +422,60 @@ def test_a_mob_projectile_hit_clears_resting() -> None:
     assert not bool(state.is_resting[0])
 
 
+def test_an_archer_shoots_along_its_approach_step_from_its_own_tile() -> None:
+    """Upstream launches along the approach step, from the archer (game_logic.py:1497-1512).
+
+    The player is three rows and two columns away, so the approach step and
+    the shot run along rows. The shot starts on the archer's tile, and this
+    step's flight carries it one tile.
+    """
+    state = _state(num_envs=1)
+    state.ranged_mobs.mask[0, 0, 0] = True
+    state.ranged_mobs.health[0, 0, 0] = 3.0
+    state.ranged_mobs.position[0, 0, 0] = torch.tensor([7, 12], dtype=torch.int32)
+    state.mob_map[0, 0, 7, 12] = True
+    state = mobs.update_mobs(state, generator=_seed())
+    assert state.mob_projectiles.mask[0, 0].tolist() == [True, False, False]
+    assert state.mob_projectiles.position[0, 0, 0].tolist() == [8, 12]
+    assert state.mob_projectile_directions[0, 0, 0].tolist() == [1, 0]
+
+
+def test_a_live_projectile_on_the_players_tile_hits_them() -> None:
+    """Upstream also hits a player standing on the shot's tile (game_logic.py:1639-1647).
+
+    The player gets there by stepping onto it, since they move before the
+    creatures do. A dead slot on that tile does nothing.
+    """
+    state = _state(num_envs=2)
+    state.is_sleeping[:] = True
+    state.mob_projectiles.mask[:, 0, 0] = torch.tensor([True, False])
+    state.mob_projectiles.position[:, 0, 0] = torch.tensor([10, 10], dtype=torch.int32)
+    state.mob_projectile_directions[:, 0, 0] = torch.tensor([0, 1], dtype=torch.int32)
+    state = mobs.update_mobs(state, generator=_seed())
+    assert state.player_health.tolist() == [7.0, 9.0]
+    assert state.is_sleeping.tolist() == [False, True]
+    assert state.mob_projectiles.mask[:, 0, 0].tolist() == [False, False]
+
+
+def test_a_live_mob_projectile_breaks_a_table_or_furnace_it_flies_into() -> None:
+    """Upstream turns a struck table or furnace into path (game_logic.py:1662-1676)."""
+    state = _state(num_envs=3)
+    state.mob_projectiles.mask[:, 0, 0] = torch.tensor([True, True, False])
+    state.mob_projectiles.position[:, 0, 0] = torch.tensor([5, 5], dtype=torch.int32)
+    state.mob_projectile_directions[:, 0, 0] = torch.tensor([0, 1], dtype=torch.int32)
+    state.map[:, 0, 5, 6] = torch.tensor(
+        [BlockType.CRAFTING_TABLE, BlockType.FURNACE, BlockType.CRAFTING_TABLE],
+        dtype=torch.int32,
+    )
+    state = mobs.update_mobs(state, generator=_seed())
+    assert state.map[:, 0, 5, 6].tolist() == [
+        BlockType.PATH,
+        BlockType.PATH,
+        BlockType.CRAFTING_TABLE,
+    ]
+    assert state.mob_projectiles.mask[:, 0, 0].tolist() == [False, False, False]
+
+
 def test_a_mob_despawns_from_its_pre_move_distance() -> None:
     """Upstream tests initial distance against despawn range (game_logic.py:1319-1325)."""
     state = _state(num_envs=1)
@@ -1099,7 +1153,8 @@ def test_mob_updates_preserve_generator_and_device_arguments(
     assert ("full", None, device) in factory_calls
 
 
-def test_firing_uses_free_slots_and_axis_aligned_headings() -> None:
+def test_firing_fills_the_first_free_slot_from_the_shooters_tile() -> None:
+    """Upstream spawns at the shooter, along its step (game_logic_utils.py:190-207)."""
     state = _state(num_envs=4)
     state.mob_projectiles.mask[0, 0] = True
     state.mob_projectiles.mask[2, 0, 0] = True
@@ -1108,7 +1163,7 @@ def test_firing_uses_free_slots_and_axis_aligned_headings() -> None:
         dtype=torch.int32,
     )
     source = torch.tensor([[10, 10], [11, 9], [12, 11], [13, 12]], dtype=torch.int32)
-    toward = torch.tensor([[4, 0], [3, 0], [0, -3], [0, 3]], dtype=torch.int32)
+    toward = torch.tensor([[1, 0], [1, 0], [0, -1], [0, 1]], dtype=torch.int32)
 
     state = mobs._fire_projectile(
         state,
@@ -1123,12 +1178,12 @@ def test_firing_uses_free_slots_and_axis_aligned_headings() -> None:
         [5, 5],
         [6, 6],
     ]
-    assert state.mob_projectiles.position[1, 0, 0].tolist() == [12, 9]
+    assert state.mob_projectiles.position[1, 0, 0].tolist() == [11, 9]
     assert state.mob_projectile_directions[1, 0, 0].tolist() == [1, 0]
     assert state.mob_projectiles.type_id[1, 0, 0].item() == int(
         constants.ProjectileType.ARROW,
     )
-    assert state.mob_projectiles.position[2, 0, 1].tolist() == [12, 10]
+    assert state.mob_projectiles.position[2, 0, 1].tolist() == [12, 11]
     assert state.mob_projectile_directions[2, 0, 1].tolist() == [0, -1]
     assert state.mob_projectiles.type_id[2, 0, 1].item() == int(
         constants.ProjectileType.FIREBALL,
@@ -1339,11 +1394,12 @@ def test_archer_firing_boundaries_and_blocked_retreat(
         False,
         False,
     ]
+    # Each shot waits on its archer's tile; the flight phase moves it.
     assert state.mob_projectiles.position[:, 0, 0].tolist()[:4] == [
-        [10, 11],
         [10, 12],
         [10, 13],
         [10, 14],
+        [10, 15],
     ]
     assert state.ranged_mobs.attack_cooldown[:, 0, 0].tolist() == [4, 4, 4, 4, -1, 0]
     assert state.ranged_mobs.position[4, 0, 0].tolist() == [10, 15]

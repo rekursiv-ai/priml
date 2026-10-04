@@ -287,8 +287,7 @@ def _update_ranged(
     for slot in range(mobs.mask.shape[-1]):
         alive = _slot(mobs.mask, state, slot)
         position = _slot(mobs.position, state, slot)
-        offset = state.player_position - position
-        gap = offset.abs().sum(1)
+        gap = (state.player_position - position).abs().sum(1)
 
         toward = _step_toward_player(state, position, generator=generator)
         wander = position + _random_step(
@@ -315,7 +314,7 @@ def _update_ranged(
         state = _fire_projectile(
             state,
             source=position,
-            toward=offset,
+            toward=toward,
             species=_slot(mobs.type_id, state, slot),
             firing=firing,
         )
@@ -362,7 +361,12 @@ def _update_projectiles(state: EnvState) -> EnvState:
             species = _slot(mobs.type_id, state, slot)
 
             if hurts_player:
-                hits = alive & (flown == state.player_position).all(1)
+                # The player moves before the creatures, so a shot can already
+                # be on their tile, and that hits them too.
+                hits = alive & (
+                    (position == state.player_position).all(1)
+                    | (flown == state.player_position).all(1)
+                )
                 damage = constants.on_device(constants.MOB_DAMAGE, state.device)[
                     species.long(),
                     3,
@@ -383,15 +387,28 @@ def _update_projectiles(state: EnvState) -> EnvState:
                 )
 
             # A projectile stops at the first solid thing it meets.
+            block = mechanics.block_at(state, flown)
             blocked = constants.on_device(constants.SOLID_BLOCK, state.device)[
-                mechanics.block_at(state, flown).long()
+                block.long()
             ]
-            if hurts_player:
-                blocked |= mechanics.is_occupied(state, flown)
-            survives = alive & ~hits & ~blocked & mechanics.in_bounds(flown)
-
             rows = batch_rows(state.num_envs, state.device)
             level = state.player_level.long()
+            if hurts_player:
+                blocked |= mechanics.is_occupied(state, flown)
+                # A creature's shot also breaks the table or furnace it stops
+                # at; the player's own shots leave them standing.
+                breaks = alive & (
+                    (block == int(BlockType.CRAFTING_TABLE))
+                    | (block == int(BlockType.FURNACE))
+                )
+                state.map[rows, level] = scatter_tiles_where(
+                    state.map[rows, level],
+                    flown,
+                    torch.full_like(block, int(BlockType.PATH)),
+                    breaks,
+                )
+            survives = alive & ~hits & ~blocked & mechanics.in_bounds(flown)
+
             mobs.position[rows, level, slot] = flown.int()
             mobs.mask[rows, level, slot] = survives
     return state
@@ -571,12 +588,7 @@ def _fire_projectile(
     species: Tensor,
     firing: Tensor,
 ) -> EnvState:
-    """Launch a creature's projectile toward the player."""
-    heading = torch.zeros_like(source)
-    along_rows = toward[:, 1] == 0
-    heading[:, 0] = torch.where(along_rows, toward[:, 0].sign(), 0)
-    heading[:, 1] = torch.where(along_rows, 0, toward[:, 1].sign())
-
+    """Launch a creature's projectile along its step ``toward`` the player."""
     projectiles = state.mob_projectiles
     free = ~_on_level(projectiles.mask, state.player_level)
     slot = free.int().argmax(1)
@@ -584,9 +596,12 @@ def _fire_projectile(
 
     rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
+    # The shot starts on the shooter's own tile: this step's flight carries it
+    # one tile, so starting a tile ahead would land it two out, past anything
+    # standing in between.
     projectiles.position[rows, level, slot] = torch.where(
         firing[:, None],
-        (source + heading).int(),
+        source.int(),
         projectiles.position[rows, level, slot],
     )
     projectiles.mask[rows, level, slot] = projectiles.mask[rows, level, slot] | firing
@@ -599,7 +614,7 @@ def _fire_projectile(
     )
     state.mob_projectile_directions[rows, level, slot] = torch.where(
         firing[:, None],
-        heading.int(),
+        toward.int(),
         state.mob_projectile_directions[rows, level, slot],
     )
     return state
