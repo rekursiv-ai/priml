@@ -147,6 +147,12 @@ All notable priml changes are documented here. This project follows
   and `priml.model.attention.prepare_flash3` to build FA3. `is_prepared` is
   gone; an empty `artifact_validation_error(artifact_path())` means the same.
 
+### Added
+
+- `priml.inference.kv_cache`: `KVCacheGeometry` prices a KV cache's bytes per
+  token and one decode step's FLOPs and traffic against a device ridge from
+  `priml.cost`, including grouped-query attention and the weight read.
+
 ### Fixed
 
 - Cropped JPEG decodes find libturbojpeg where `TurboJPEG()` does. The
