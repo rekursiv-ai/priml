@@ -91,6 +91,16 @@ All notable priml changes are documented here. This project follows
   Ubuntu 24.04 does not ship, and the repository's
   `install-libjpeg-turbo.sh` installs it.
 - The package ships `py.typed`, so type checkers read priml's annotations.
+- `setup_logging` requires its `level`; it defaulted to `"INFO"`.
+- `lazy_torch_compile` forwards only keyword arguments to `torch.compile`.
+  A positional argument other than the decorated function raises
+  `TypeError`.
+- A mesh dimension below -1 raises `ValueError` instead of acting as -1
+  (auto).
+- `q_lambda_targets` no longer rounds the discount to bf16 when its inputs
+  are bf16, and bf16 Q-values beside fp32 rewards stay in bf16 instead of
+  reaching fp32 through the done mask. bf16 targets can move by a rounding
+  step; fp32 targets are unchanged.
 
 ### Added
 
@@ -165,6 +175,12 @@ All notable priml changes are documented here. This project follows
   as CUDA graphs, and its GPU evaluation works.
 - The nanochat baseline's Torch 2.9 runtime project installs configgle, which
   every priml module imports, so the FA3 build command runs in it.
+- The ARC-AGI-1 baseline's `PassK` merges every rank's votes before ranking
+  answers, so a multi-GPU evaluation no longer counts a puzzle whose samples
+  span ranks once per rank.
+- The mean of `cross_entropy_with_batched_smoothing` divides by the exact
+  count of non-ignored targets. In bf16 that count was summed in bf16, which
+  rounds above 256.
 
 ## 0.1.4 - 2026-08-19
 

@@ -1236,6 +1236,14 @@ def test_smoothstep_inverse_is_finite_at_the_boundaries(dtype: torch.dtype) -> N
     assert bool(torch.isfinite(out).all())
 
 
+def test_smoothstep_inverse_stays_in_the_unit_interval() -> None:
+    """A y one rounding step outside [0, 1] diverged to +-inf without the clamp."""
+    zero_down = torch.nextafter(torch.tensor(0.0), torch.tensor(-1.0))
+    one_up = torch.nextafter(torch.tensor(1.0), torch.tensor(2.0))
+    out = smoothstep_inverse(torch.stack([zero_down, one_up]))
+    assert out.tolist() == [0.0, 1.0]
+
+
 def test_safe_sqrt_has_a_finite_gradient_at_zero() -> None:
     """The double-where must guard the BACKWARD pass, not just the forward.
 

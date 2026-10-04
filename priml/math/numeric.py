@@ -613,6 +613,9 @@ def smoothstep_inverse(y: Tensorable) -> Tensor:
         # float16's smallest normal, so it rounded to zero and the boundary
         # division it guards returned NaN at both y=0 and y=1.
         x = x - f / df.clamp(min=torch.finfo(df.dtype).tiny)
+        # Keeps the promised [0, 1]: a y one rounding step outside it otherwise
+        # diverges to +-inf.
+        x = torch.clamp(x, 0.0, 1.0)
     return x
 
 
