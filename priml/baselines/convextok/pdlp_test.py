@@ -124,9 +124,24 @@ def test_restarts_follow_configured_period() -> None:
     assert result.iterations == 20
     assert not result.optimal
     assert result.primal_weight == pytest.approx(0.016997546553600227, rel=1e-12)
-    assert result.primal.tolist() == [2.0, -0.5443797027864222, 0.0]
-    assert result.reduced_cost.tolist() == [-1.250981871785863, 0.0, 2.0]
-    assert result.dual.tolist() == [0.2511950431560914, 0.0]
+    torch.testing.assert_close(
+        result.primal,
+        torch.tensor([2.0, -0.5443797027864222, 0.0], dtype=torch.float64),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    torch.testing.assert_close(
+        result.reduced_cost,
+        torch.tensor([-1.250981871785863, 0.0, 2.0], dtype=torch.float64),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    torch.testing.assert_close(
+        result.dual,
+        torch.tensor([0.2511950431560914, 0.0], dtype=torch.float64),
+        rtol=1e-12,
+        atol=1e-12,
+    )
     assert result.step_size == pytest.approx(0.9980000073060245, rel=1e-12)
     torch.testing.assert_close(
         result.current_primal,
@@ -151,11 +166,15 @@ def test_short_restart_period_updates_controller() -> None:
 
     assert result.iterations == 12
     assert result.primal_weight == pytest.approx(0.36305443549956556, rel=1e-12)
-    assert result.current_primal.tolist() == [
-        0.5419548105551106,
-        -0.1590093757758583,
-        0.0,
-    ]
+    torch.testing.assert_close(
+        result.current_primal,
+        torch.tensor(
+            [0.5419548105551106, -0.1590093757758583, 0.0],
+            dtype=torch.float64,
+        ),
+        rtol=1e-12,
+        atol=1e-12,
+    )
 
 
 def test_artificial_restart_accepts_exact_threshold() -> None:

@@ -604,26 +604,30 @@ def test_cov_cross_centers_large_means_before_multiplication(
 
 
 def test_cov_cross_with_large_feature_means_preserves_precision():
+    # Column sums divisible by six and steps of 8 above 1e16 keep every partial
+    # sum, mean, centered value and product exact, so only the final division
+    # rounds and the result is bit-identical in any accumulation order (x86 and
+    # aarch64 matmuls differ there). Skipping the centering of ``y`` misses by 5.
     x = torch.tensor(
         [
-            [1.0, 0.0, -3.0],
-            [-1.0, -2.0, -1.0],
-            [3.0, 0.0, 1.0],
-            [2.0, -1.0, -3.0],
-            [-2.0, 2.0, -1.0],
-            [1.0, 1.0, -1.0],
+            [10.0, 0.0, -10.0],
+            [-10.0, -20.0, -10.0],
+            [30.0, 0.0, 10.0],
+            [20.0, -10.0, -30.0],
+            [-20.0, 20.0, -10.0],
+            [30.0, 10.0, -10.0],
         ],
         dtype=torch.float64,
     )
     y = (
         torch.tensor(
             [
-                [2.0, -2.0, 20.0],
-                [-16.0, 2.0, -16.0],
-                [2.0, 2.0, -18.0],
-                [14.0, 10.0, 16.0],
-                [-18.0, -20.0, 2.0],
-                [4.0, 0.0, 16.0],
+                [0.0, 0.0, 24.0],
+                [-16.0, 0.0, -16.0],
+                [0.0, 8.0, -16.0],
+                [16.0, 8.0, 16.0],
+                [-16.0, -16.0, 0.0],
+                [16.0, 0.0, 16.0],
             ],
             dtype=torch.float64,
         )
@@ -631,9 +635,9 @@ def test_cov_cross_with_large_feature_means_preserves_precision():
     )
     expected = torch.tensor(
         [
-            [16.666666666666668, 11.222222222222223, 2.1111111111111103],
-            [-2.3333333333333335, -9.0, 6.0],
-            [-5.333333333333333, -2.4444444444444446, -16.88888888888889],
+            [213.33333333333334, 120.0, 80.0],
+            [0.0, -66.66666666666667, 53.333333333333336],
+            [-53.333333333333336, 0.0, -106.66666666666667],
         ],
         dtype=torch.float64,
     )
