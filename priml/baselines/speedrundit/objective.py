@@ -89,9 +89,20 @@ def projection_loss(
     return total / len(predictions)
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class LossTerms:
-    """Unreduced objective and its component losses."""
+    """Unreduced objective and its component losses.
+
+    Attributes:
+      loss: Per-sample weighted sum of the four terms.
+      mean_loss: Batch mean of ``loss``, the scalar the step backpropagates.
+      velocity: Per-sample latent velocity error.
+      cls: Per-sample CLS velocity error.
+      projection: Per-sample REG alignment loss.
+      cfm: Contrastive flow loss over the batch.
+      output: The model output the terms were scored on.
+
+    """
 
     loss: Tensor
     mean_loss: Tensor
@@ -102,9 +113,21 @@ class LossTerms:
     output: ModelOutput
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SpeedrunObjective:
-    """Combine SiT velocity, REG alignment, CLS diffusion, and CFM."""
+    """Combine SiT velocity, REG alignment, CLS diffusion, and CFM.
+
+    Attributes:
+      path: Probability path that corrupts latents and CLS features.
+      weighting: Flow-time distribution: uniform, or lognormal in sigma.
+      cfm_weighting: Contrastive flow term weighted uniformly or by flow time.
+      projection_coeff: REG projection loss weight.
+      cls_coeff: CLS flow loss weight.
+      cfm_coeff: Contrastive flow loss weight.
+      shift_time: Shift sampled times toward noise for larger latents.
+      shift_base: Reference latent dimension for time shifting.
+
+    """
 
     path: Literal["linear", "cosine"] = "linear"
     weighting: Literal["uniform", "lognormal"] = "uniform"
@@ -135,7 +158,11 @@ class SpeedrunObjective:
                 else 2 * sigma.atan() / math.pi
             )
         if self.shift_time:
-            t = time_shift(t, math.prod(latents.shape[1:]), self.shift_base)
+            t = time_shift(
+                t,
+                latent_dimensions=math.prod(latents.shape[1:]),
+                reference_dimensions=self.shift_base,
+            )
         return t
 
     def __call__(
@@ -149,7 +176,26 @@ class SpeedrunObjective:
         noise: Tensor | None = None,
         cls_noise: Tensor | None = None,
     ) -> LossTerms:
-        """Corrupt latents and CLS features, run the model, and score losses."""
+        """Corrupt latents and CLS features, run the model, and score losses.
+
+        Args:
+          model: Called positionally as ``model(noisy, time, labels, cls_noisy)``.
+          latents: ``[B, ...]`` clean diffusion-space latents.
+          labels: ``[B]`` class labels.
+          teacher_features: Teacher token features per projection depth; the
+            last one's first token is the clean CLS feature.
+          time: ``[B]`` flow times; ``None`` draws them with :meth:`sample_time`.
+          noise: Latent noise; ``None`` draws standard normal noise.
+          cls_noise: CLS noise; ``None`` draws standard normal noise.
+
+        Returns:
+          terms: The unreduced objective, its components, and the model output.
+
+        Raises:
+          ValueError: ``labels`` and ``latents`` differ in batch size, or no
+            teacher feature map is given.
+
+        """
         if latents.shape[0] != labels.shape[0]:
             raise ValueError("labels and latents have different batch sizes")
         if not teacher_features:
@@ -158,7 +204,7 @@ class SpeedrunObjective:
         time = self.sample_time(latents) if time is None else time
         noise = torch.randn_like(latents) if noise is None else noise
         cls_noise = torch.randn_like(cls_clean) if cls_noise is None else cls_noise
-        alpha, sigma, d_alpha, d_sigma = interpolant(time, self.path)
+        alpha, sigma, d_alpha, d_sigma = interpolant(time, path=self.path)
         broadcast = (slice(None),) + (None,) * (latents.ndim - 1)
         noisy = alpha[broadcast] * latents + sigma[broadcast] * noise
         target = d_alpha[broadcast] * latents + d_sigma[broadcast] * noise
@@ -167,15 +213,14 @@ class SpeedrunObjective:
         output = model(noisy, time, labels, cls_noisy)
         velocity = (output.velocity - target).square().mean(dim=(1, 2, 3))
         cls = (output.cls_velocity - cls_target).square().mean(dim=1)
-        projection = projection_loss(output.projections, teacher_features)
+        projection = projection_loss(
+            output.projections,
+            teacher_features=teacher_features,
+        )
         cfm = contrastive_flow_loss(
             output.velocity,
-            target,
-            weight=(
-                time.reshape(-1, *([1] * (target.ndim - 1)))
-                if self.cfm_weighting == "linear"
-                else None
-            ),
+            target=target,
+            weight=time[broadcast] if self.cfm_weighting == "linear" else None,
         )
         mean_loss = (
             velocity.mean()

@@ -12,17 +12,6 @@ from priml.baselines.speedrundit.optimizers import speedrundit_optimizer
 from priml.optimizers.muon import Muon
 
 
-class _ParameterGroup(Protocol):
-    """Typed view of the optimizer group field used by this test."""
-
-    def __getitem__(self, key: Literal["params"], /) -> list[Tensor]: ...
-
-
-def _parameter_names(group: _ParameterGroup, names: dict[int, str]) -> set[str]:
-    """Resolve optimizer parameter objects back to their module names."""
-    return {names[id(parameter)] for parameter in group["params"]}
-
-
 def test_speedrundit_optimizer_rates_and_parameter_partition() -> None:
     model = nn.Module()
     for name in (
@@ -55,8 +44,8 @@ def test_speedrundit_optimizer_rates_and_parameter_partition() -> None:
     assert muon.param_groups[0]["reference_numerics"] is True
 
     names = {id(parameter): name for name, parameter in model.named_parameters()}
-    adamw_names = _parameter_names(adam_group, names)
-    muon_names = _parameter_names(muon.param_groups[0], names)
+    adamw_names = _parameter_names(adam_group, names=names)
+    muon_names = _parameter_names(muon.param_groups[0], names=names)
     expected_adamw = {
         f"{name}.{field}"
         for name in (
@@ -71,6 +60,17 @@ def test_speedrundit_optimizer_rates_and_parameter_partition() -> None:
     } | {"blocks.bias"}
     assert adamw_names == expected_adamw
     assert muon_names == {"blocks.weight"}
+
+
+class _ParameterGroup(Protocol):
+    """Typed view of the optimizer group field used by this test."""
+
+    def __getitem__(self, key: Literal["params"], /) -> list[Tensor]: ...
+
+
+def _parameter_names(group: _ParameterGroup, names: dict[int, str]) -> set[str]:
+    """Resolve optimizer parameter objects back to their module names."""
+    return {names[id(parameter)] for parameter in group["params"]}
 
 
 def test_speedrundit_optimizer_can_disable_reference_numerics() -> None:

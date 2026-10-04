@@ -40,11 +40,7 @@ def speedrundit_optimizer(
     adamw.eps = 1e-15
 
     muon = Muon.Config()
-    muon.lr = 1e-3
-    muon.momentum = 0.95
     muon.weight_decay = 0.0
-    muon.nesterov = True
-    muon.ns_steps = 5
     muon.reference_numerics = reference_numerics
 
     config = CompositeOptimizer.Config()

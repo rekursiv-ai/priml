@@ -1,0 +1,35 @@
+VTP.Config(
+                trunk=DinoVisionTransformerWithBottleneck.Config(
+                        patch_size=16,
+                        channels_hidden=768,
+                        num_layers=12,
+                        heads=12,
+                        expansion=4.0,
+                        channels_out=64
+                ),
+                pixel_decoder=DinoV3PixelDecoder.Config(
+                        channels_in=64,
+                        channels_hidden=768,
+                        num_layers=12,
+                        heads=12,
+                        expansion=4.0,
+                        upscale_factor=16
+                ),
+                image_size=256,
+                pixel_mean=(0.485, 0.456, 0.406),
+                pixel_std=(0.229, 0.224, 0.225),
+                dtype_autocast=None,
+                checkpoint=HubFile.Config(
+                        repo_id='MiniMaxAI/VTP-Base-f16d64',
+                        filename='model.safetensors',
+                        revision='21fe3a9cb53f01a2c7f3b622efdc8d2534a7c79d',
+                        sha256='c7fdbb1507cecbcbb35eab4ea9fcbca8dc80b5e0d64cfe0c37b7baacdbb0fa05'
+                ),
+                latent_norm=ChannelLatentStats.Config(
+                        stats=UrlFile.Config(
+                                url='https://raw.githubusercontent.com/MiniMax-AI/VTP/5ce1eb67010fff3c1eed483352483be6a1838556/generation/latent_stats/vtp_b/latents_stats.pt',
+                                sha256='f7c030310f3eeaa38d2d0838f38eeab1d9922fcaf183a0fe8dd1f1287366c4a7'
+                        ),
+                        multiplier=1.0
+                )
+        )

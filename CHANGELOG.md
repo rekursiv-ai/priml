@@ -3,6 +3,75 @@
 All notable priml changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Added
+
+- `priml.model.vision_ae`: pretrained vision autoencoders behind one
+  `Autoencoder` protocol (`encode` uint8 images to raw latents, refusing any
+  other dtype; `decode` back to `[0, 1]` pixels). `VariationalAutoencoder`
+  adds `posterior`; the latent a variational `encode` returns is the config's
+  `latent_fn` (`posterior_sample` or `posterior_mode`). Implementations:
+  `INVAE`, `VTP` (`vtp_small`, `vtp_base`, `vtp_large`), and `RAE`
+  (`rae_dinov2_base`), each config defaulting to its published checkpoint.
+  Checkpoints are config nodes (`HubFile` at a commit revision, `UrlFile`,
+  `LocalFile`), and every published default pins its SHA-256;
+  each config's `latent_norm` holds its published normalizer
+  (`ScaleLatents`, `ElementwiseLatentStats`, `ChannelLatentStats`), which
+  keeps its reference's operation order.
+- `priml/model/vision_ae/scripts/reference_parity.py`: clones each
+  autoencoder's reference at its pinned commit and proves the port
+  bit-identical, from seeded initialization through encode and decode, with
+  pinned randomness, per-module bisection, a checked function inventory, and
+  branch coverage over both sides. It mints `testdata/rae_reference.pt` and
+  `testdata/vtp_reference.pt`.
+- `priml.math.scalar_quantization`: exact Lloyd-Max fitting on sorted
+  samples, the cube-root high-resolution start, standard-normal levels, and
+  batched nearest-level `quantize` / `dequantize`.
+- SpeedrunDiT: storage codecs (`FloatCodec`, `ScalarTableCodec` with injected
+  table fits and channel grouping), a corpus receipt checked at load time,
+  `prepare_data.py --experiment`, `benchmark_codec.py`, and experiments
+  exp002 (VTP), exp003 (RAE, float16 storage), and exp004 (RAE, uint8
+  storage). The loader refuses a corpus whose preparation has not finished.
+  `images/source.json` binds the crops every corpus shares to their ImageNet
+  source, and a rerun resumes only with the same source, producers, seed, and
+  (for a seeded corpus) batch size.
+
+### Changed
+
+- `priml.model.invae` moved to `priml.model.vision_ae.invae`. `AutoencoderKL`,
+  `VAE_F16D32`, `VAE_F8D4`, `vae_models`, `encode_image`, `decode_latents`,
+  and `load_invae` are removed; build `INVAE.Config().make()` and call
+  `encode` / `decode`. The architecture and the published checkpoint's keys
+  are unchanged.
+- SpeedrunDiT: `SpeedrunTrainStep.Config.latent_scale` is replaced by the
+  `latent_norm` slot, filled at loop finalize from the dataset's autoencoder
+  (INVAE's is the same `* 0.3099`). `PairedImageLatentDataset.Config` gains
+  `latent_subdir`, `autoencoder`, `codec`, and `seed`, and requires a
+  `corpus.json` receipt; record one for an existing REG corpus, and bind its
+  crops, with `prepare_data.py --receipt-only --source <imagenet>`.
+  `prepare_data.py` takes `--experiment` in place of `--output`,
+  `--checkpoint`, and `--resolution`.
+- SpeedrunDiT: `SpeedrunTrainStep.Config.ema` keeps parameter shadows
+  (`shadow_kind="param_dict"`); the module-copy default could not deepcopy the
+  composable `replicate` model, so every distributed run failed at its first
+  EMA update. EMA state saved under the old default does not load into it.
+
+### Fixed
+
+- SpeedrunDiT: gradient accumulation weights micro-batches by their sample
+  counts, the step reports `skipped_steps`, refuses a closure-based optimizer
+  its stochastic objective cannot serve, and names a teacher that returns no
+  feature tuple.
+- SpeedrunDiT: the model refuses `encoder_blocks < 1`, whose value-residual
+  blends never trained, and freezes the fusion mask token when no token or path
+  is ever dropped; replicated ranks let such untrained parameters drift apart.
+  It refuses a `drop_ratio` outside `[0, 1)` and a `path_drop_prob` outside
+  `[0, 1]`. A model built on the meta device initializes every tensor, and its
+  cost counts the projector when no depth projects.
+- SpeedrunDiT: the corpus loader refuses two files naming one pair, and an
+  image that is not `[3, H, W]` uint8.
+
 ## 0.1.5 - 2026-10-03
 
 ### Changed

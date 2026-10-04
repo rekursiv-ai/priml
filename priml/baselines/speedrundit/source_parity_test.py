@@ -53,7 +53,6 @@ def test_initial_and_three_updates_golden() -> None:
             SpeedrunDiT.Config(
                 input_size=4,
                 in_channels=2,
-                patch_size=1,
                 hidden_size=8,
                 depth=4,
                 num_heads=2,
@@ -80,9 +79,9 @@ def test_initial_and_three_updates_golden() -> None:
             torch.manual_seed(1234 + step)
             terms = objective(
                 model,
-                inputs["image"],
-                inputs["label"],
-                tuple(inputs["teacher"].unbind()),
+                latents=inputs["image"],
+                labels=inputs["label"],
+                teacher_features=tuple(inputs["teacher"].unbind()),
             )
             losses.append(terms.mean_loss.detach().clone())
             terms.mean_loss.backward()
@@ -94,7 +93,7 @@ def test_initial_and_three_updates_golden() -> None:
         f"post_state/{name}": value.detach().clone()
         for name, value in model.state_dict().items()
     }
-    assert_tensor_golden(_CWD / "testdata" / "reg_source.pt", training)
+    assert_tensor_golden(_CWD / "testdata" / "reg_source.pt", record=training)
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ from priml.math.diffusion.time_shift import time_shift
 def test_linear_path_has_constant_derivatives() -> None:
     t = torch.tensor([0.25, 0.75])
 
-    alpha, sigma, d_alpha, d_sigma = interpolant(t, "linear")
+    alpha, sigma, d_alpha, d_sigma = interpolant(t, path="linear")
 
     assert torch.equal(alpha, 1 - t)
     assert torch.equal(sigma, t)
@@ -35,7 +35,7 @@ def test_linear_path_has_constant_derivatives() -> None:
 
 def test_cosine_path_is_a_quarter_turn_with_its_derivatives() -> None:
     t = torch.tensor([0.0, 0.25, 1.0])
-    alpha, sigma, d_alpha, d_sigma = interpolant(t, "cosine")
+    alpha, sigma, d_alpha, d_sigma = interpolant(t, path="cosine")
     angle = math.pi / 2 * t
     assert torch.allclose(alpha, angle.cos())
     assert torch.allclose(sigma, angle.sin())
@@ -48,35 +48,47 @@ def test_projection_loss_gathers_the_tokens_sparse_routing_kept() -> None:
     teacher = torch.randn(2, 5, 3)
     kept = torch.tensor([[0, 3, 1, 4], [4, 1, 2, 0]])
     student = torch.randn(2, 4, 3)
-    loss = projection_loss((Projection(student, kept),), (teacher,))
+    loss = projection_loss(
+        (Projection(tokens=student, ids_keep=kept),),
+        teacher_features=(teacher,),
+    )
     selected = torch.stack([teacher[0, [0, 3, 1, 4]], teacher[1, [4, 1, 2, 0]]])
     expected = -functional.cosine_similarity(student, selected, dim=-1).mean(dim=1)
     assert torch.allclose(loss, expected)
 
 
 def test_projection_loss_rejects_mismatched_depth_counts() -> None:
-    student = Projection(torch.randn(2, 5, 3), None)
+    student = Projection(tokens=torch.randn(2, 5, 3), ids_keep=None)
     with pytest.raises(
         ValueError,
         match=r"^teacher and student projection depths must match$",
     ):
-        projection_loss((student,), (torch.randn(2, 5, 3), torch.randn(2, 5, 3)))
+        projection_loss(
+            (student,),
+            teacher_features=(torch.randn(2, 5, 3), torch.randn(2, 5, 3)),
+        )
 
 
 def test_projection_loss_averages_across_projection_depths() -> None:
     teacher = torch.eye(4)[:3].expand(2, -1, -1).clone()
-    predictions = (Projection(-teacher, None), Projection(-teacher, None))
+    predictions = (
+        Projection(tokens=-teacher, ids_keep=None),
+        Projection(tokens=-teacher, ids_keep=None),
+    )
 
-    assert torch.equal(projection_loss(predictions, (teacher, teacher)), torch.ones(2))
+    assert torch.equal(
+        projection_loss(predictions, teacher_features=(teacher, teacher)),
+        torch.ones(2),
+    )
 
 
 def test_projection_loss_rejects_mismatched_token_shapes() -> None:
-    student = Projection(torch.randn(2, 4, 3), None)
+    student = Projection(tokens=torch.randn(2, 4, 3), ids_keep=None)
     with pytest.raises(
         ValueError,
         match=r"^teacher tokens do not match the student projection$",
     ):
-        projection_loss((student,), (torch.randn(2, 5, 3),))
+        projection_loss((student,), teacher_features=(torch.randn(2, 5, 3),))
 
 
 @pytest.mark.parametrize("path", ["linear", "cosine"])
@@ -98,7 +110,10 @@ def test_shifted_time_follows_the_latent_dimension() -> None:
     uniform = torch.rand(3)
     torch.manual_seed(0)
     shifted = SpeedrunObjective(shift_base=8).sample_time(latents)
-    assert torch.allclose(shifted, time_shift(uniform, 2 * 4 * 5, 8))
+    assert torch.allclose(
+        shifted,
+        time_shift(uniform, latent_dimensions=2 * 4 * 5, reference_dimensions=8),
+    )
 
 
 @pytest.mark.parametrize("path", ["linear", "cosine"])
@@ -121,8 +136,8 @@ def test_objective_builds_inputs_and_returns_each_loss_term(
         velocity=torch.arange(120, dtype=torch.float32).reshape(2, 3, 4, 5) / 29,
         cls_velocity=torch.arange(6, dtype=torch.float32).reshape(2, 3) / 31,
         projections=(
-            Projection(student_sparse, ids_keep),
-            Projection(student_dense, None),
+            Projection(tokens=student_sparse, ids_keep=ids_keep),
+            Projection(tokens=student_dense, ids_keep=None),
         ),
     )
     model = Mock(return_value=output)
@@ -137,9 +152,9 @@ def test_objective_builds_inputs_and_returns_each_loss_term(
 
     terms = objective(
         model,
-        latents,
-        labels,
-        (teacher_sparse, teacher_cls),
+        latents=latents,
+        labels=labels,
+        teacher_features=(teacher_sparse, teacher_cls),
         time=time,
         noise=noise,
         cls_noise=cls_noise,
@@ -197,7 +212,6 @@ def test_objective_builds_inputs_and_returns_each_loss_term(
     expected_cls = (output.cls_velocity - expected_cls_target).square().mean(dim=1)
     cfm_error = (output.velocity - torch.roll(expected_target, 1, 0)).square()
     if cfm_weighting == "linear":
-        # Per-sample time broadcast over [channels, height, width].
         cfm_error = cfm_error * time.reshape(2, 1, 1, 1)
     expected_cfm = -cfm_error.mean()
     expected_loss = (
@@ -231,7 +245,9 @@ def test_objective_samples_missing_time_and_noise_from_their_inputs() -> None:
     output = ModelOutput(
         velocity=torch.zeros_like(latents),
         cls_velocity=torch.zeros(2, 3),
-        projections=tuple(Projection(features, None) for features in teacher_features),
+        projections=tuple(
+            Projection(tokens=features, ids_keep=None) for features in teacher_features
+        ),
     )
     model = Mock(return_value=output)
     torch.manual_seed(19)
@@ -240,7 +256,12 @@ def test_objective_samples_missing_time_and_noise_from_their_inputs() -> None:
     expected_cls_noise = torch.randn_like(teacher_features[-1][:, 0])
     torch.manual_seed(19)
 
-    SpeedrunObjective(shift_time=False)(model, latents, labels, teacher_features)
+    SpeedrunObjective(shift_time=False)(
+        model,
+        latents=latents,
+        labels=labels,
+        teacher_features=teacher_features,
+    )
 
     model.assert_called_once()
     model_args = model.call_args.args
@@ -283,10 +304,6 @@ def test_sampled_time_uses_the_latent_device(
     unused_sample.assert_not_called()
 
 
-def _unused_model(*args: Tensor) -> ModelOutput:
-    raise AssertionError(f"validation must precede the model; got {len(args)} args")
-
-
 def test_objective_rejects_mismatched_label_count() -> None:
     with pytest.raises(
         ValueError,
@@ -294,10 +311,14 @@ def test_objective_rejects_mismatched_label_count() -> None:
     ):
         SpeedrunObjective()(
             _unused_model,
-            torch.zeros(2, 3, 4, 5),
-            torch.zeros(3, dtype=torch.int64),
-            (torch.zeros(2, 6, 7),),
+            latents=torch.zeros(2, 3, 4, 5),
+            labels=torch.zeros(3, dtype=torch.int64),
+            teacher_features=(torch.zeros(2, 6, 7),),
         )
+
+
+def _unused_model(*args: Tensor) -> ModelOutput:
+    raise AssertionError(f"validation must precede the model; got {len(args)} args")
 
 
 def test_objective_requires_a_teacher_feature_map() -> None:
@@ -307,9 +328,9 @@ def test_objective_requires_a_teacher_feature_map() -> None:
     ):
         SpeedrunObjective()(
             _unused_model,
-            torch.zeros(2, 3, 4, 5),
-            torch.zeros(2, dtype=torch.int64),
-            (),
+            latents=torch.zeros(2, 3, 4, 5),
+            labels=torch.zeros(2, dtype=torch.int64),
+            teacher_features=(),
         )
 
 

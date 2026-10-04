@@ -1,13 +1,13 @@
 SpeedrunTrainLoop(
                 study_name='speedrundit',
-                experiment_name='exp000',
+                experiment_name='exp002',
                 base_dir='/opt/scratch',
-                working_dir=PosixPath('/opt/scratch/runs/speedrundit/exp000'),
+                working_dir=PosixPath('/opt/scratch/runs/speedrundit/exp002'),
                 doc='',
                 step=SpeedrunTrainStep.Config(
                 │       model=SpeedrunDiT.Config(
                 │               input_size=16,
-                │               in_channels=32,
+                │               in_channels=64,
                 │               patch_size=1,
                 │               hidden_size=768,
                 │               depth=12,
@@ -92,7 +92,13 @@ SpeedrunTrainLoop(
                 │               layer_indices=(12, 12, 12),
                 │               image_size=256
                 │       ),
-                │       latent_norm=ScaleLatents.Config(scale=0.3099),
+                │       latent_norm=ChannelLatentStats.Config(
+                │               stats=UrlFile.Config(
+                │                       url='https://raw.githubusercontent.com/MiniMax-AI/VTP/5ce1eb67010fff3c1eed483352483be6a1838556/generation/latent_stats/vtp_l/latents_stats.pt',
+                │                       sha256='0ad1fadbfb8959f3a93147a4db668b6d704ae36ff320bfad53cd3d568de7b0fd'
+                │               ),
+                │               multiplier=1.0
+                │       ),
                 │       projection_coeff=0.5,
                 │       cls_coeff=0.03,
                 │       cfm_coeff=0.05,
@@ -101,41 +107,60 @@ SpeedrunTrainLoop(
                 │       shift_base=4_096
                 ),
                 dataset=SpeedrunImageNetData.Config(
-                        source=PairedImageLatentDataset.Config(
-                                base_dir=PosixPath('/opt/scratch'),
-                                working_dir=PosixPath('/opt/scratch/datasets/speedrundit'),
-                                latent_subdir='vae-in',
-                                autoencoder=INVAE.Config(
-                                        channels_hidden=128,
-                                        channel_multipliers=(1, 1, 2, 2, 4),
-                                        channels_latent=32,
-                                        blocks_per_stage=2,
-                                        num_groups=32,
-                                        image_size=256,
-                                        latent_fn=<function priml.model.vision_ae.custom_types.posterior_sample at 0xdefacedeface>,
-                                        checkpoint=HubFile.Config(
-                                                repo_id='REPA-E/e2e-invae',
-                                                filename='e2e-invae-400k.pt',
-                                                revision='79e3ea77928e1e34bc70e4e71de68fd5b4d4b3e0',
-                                                sha256='4d45ef5452bd6325eaa4b5c74975328cfed5ecf15a877656bed0f3f6de23d718'
-                                        ),
-                                        latent_norm=ScaleLatents.Config(scale=0.3099)
-                                ),
-                                codec=FloatCodec.Config(dtype=torch.float32),
-                                seed=None
-                        ),
-                        batch_size=32,
-                        num_workers=4,
-                        prefetch_factor=2,
-                        pin_memory=True,
-                        base_dir='/opt/scratch',
-                        working_dir=PosixPath('/opt/scratch')
+                │       source=PairedImageLatentDataset.Config(
+                │               base_dir=PosixPath('/opt/scratch'),
+                │               working_dir=PosixPath('/opt/scratch/datasets/speedrundit'),
+                │               latent_subdir='vtp-large',
+                │               autoencoder=VTP.Config(
+                │                       trunk=DinoVisionTransformerWithBottleneck.Config(
+                │                               patch_size=16,
+                │                               channels_hidden=1_024,
+                │                               num_layers=24,
+                │                               heads=16,
+                │                               expansion=4.0,
+                │                               channels_out=64
+                │                       ),
+                │                       pixel_decoder=DinoV3PixelDecoder.Config(
+                │                               channels_in=64,
+                │                               channels_hidden=1_024,
+                │                               num_layers=24,
+                │                               heads=16,
+                │                               expansion=4.0,
+                │                               upscale_factor=16
+                │                       ),
+                │                       image_size=256,
+                │                       pixel_mean=(0.485, 0.456, 0.406),
+                │                       pixel_std=(0.229, 0.224, 0.225),
+                │                       dtype_autocast=None,
+                │                       checkpoint=HubFile.Config(
+                │                               repo_id='MiniMaxAI/VTP-Large-f16d64',
+                │                               filename='model.safetensors',
+                │                               revision='d1726ca9abd5ed0b3ad938c508c635d8b1a51a31',
+                │                               sha256='de5df2006083a9536c4d3ea36c6ae2181ec604e06550f1b2d7cece3b16aac32f'
+                │                       ),
+                │                       latent_norm=ChannelLatentStats.Config(
+                │                               stats=UrlFile.Config(
+                │                                       url='https://raw.githubusercontent.com/MiniMax-AI/VTP/5ce1eb67010fff3c1eed483352483be6a1838556/generation/latent_stats/vtp_l/latents_stats.pt',
+                │                                       sha256='0ad1fadbfb8959f3a93147a4db668b6d704ae36ff320bfad53cd3d568de7b0fd'
+                │                               ),
+                │                               multiplier=1.0
+                │                       )
+                │               ),
+                │               codec=FloatCodec.Config(dtype=torch.float32),
+                │               seed=None
+                │       ),
+                │       batch_size=32,
+                │       num_workers=4,
+                │       prefetch_factor=2,
+                │       pin_memory=True,
+                │       base_dir='/opt/scratch',
+                │       working_dir=PosixPath('/opt/scratch')
                 ),
                 metrics_train={},
                 metrics_eval={},
                 checkpointer=Checkpointer.Config(
-                        base_dir=PosixPath('/opt/scratch/runs/speedrundit/exp000'),
-                        working_dir=PosixPath('/opt/scratch/runs/speedrundit/exp000/checkpoints'),
+                        base_dir=PosixPath('/opt/scratch/runs/speedrundit/exp002'),
+                        working_dir=PosixPath('/opt/scratch/runs/speedrundit/exp002/checkpoints'),
                         filename='step_{step:08d}.pt',
                         save_every=10_000,
                         keep_last_n=-1,
@@ -151,8 +176,8 @@ SpeedrunTrainLoop(
                 phase_timer=PhaseTimer.Config(
                         enabled=False,
                         torch_profile=False,
-                        base_dir=PosixPath('/opt/scratch/runs/speedrundit/exp000'),
-                        working_dir=PosixPath('/opt/scratch/runs/speedrundit/exp000/profiling'),
+                        base_dir=PosixPath('/opt/scratch/runs/speedrundit/exp002'),
+                        working_dir=PosixPath('/opt/scratch/runs/speedrundit/exp002/profiling'),
                         heartbeat_interval_sec=20.0,
                         fault_dump_interval_sec=40.0,
                         cuda_events=False
