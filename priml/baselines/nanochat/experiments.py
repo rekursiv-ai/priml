@@ -558,16 +558,17 @@ def exp007() -> NgramTrainLoop.Config:
     context = cast(PartialConfig[torch.optim.Optimizer], token.copy_tree())
     context.weight_decay = 0.01
     optimizer.select[1] = matching("embed.inner")
-    optimizer.select.append(matching("embed.contexts.bigram.inner"))
     optimizer.optimizers.append(context)
     trigram = embedding.contexts["trigram"] = NgramEmbedding.Config()
     trigram.multipliers = (1, 257, 66_049)
     trigram.scale = 0.125
     trigram.channels_in = 1_048_576
     trigram.inner = Embedding.Config(init_weight=torch.nn.init.zeros_)
-    optimizer.select[6] = matching(
-        "embed.contexts.bigram.inner",
-        "embed.contexts.trigram.inner",
+    optimizer.select.append(
+        matching(
+            "embed.contexts.bigram.inner",
+            "embed.contexts.trigram.inner",
+        ),
     )
     # Uncomment for B200's 300-second budget; leave commented for H-series.
     # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
@@ -821,8 +822,8 @@ def exp013() -> NgramTrainLoop.Config:
         model.embedding,
         skip_missing=True,
     )
-    # Pin both generator and draws to CPU: device contexts must not change hashes.
-    rng = torch.Generator(device="cpu").manual_seed(0)
+    # Pin draws to CPU: device contexts must not change hashes.
+    rng = torch.Generator().manual_seed(0)
     for tables, order, layers in (
         (model.bigrams, 2, (1, 3, 5, 7)),
         (model.trigrams, 3, (1, 5, 7)),
@@ -839,7 +840,6 @@ def exp013() -> NgramTrainLoop.Config:
                             (),
                             generator=rng,
                             device="cpu",
-                            dtype=torch.int64,
                         ),
                     )
                     + 1
@@ -882,14 +882,13 @@ def exp013() -> NgramTrainLoop.Config:
             "embed.inner",
             "value_embeds",
             "mix.running",
-            "mix.original",
             "bigrams",
             "trigrams",
             "pool_weights",
             "blocks",
         )
     ]
-    optimizer.select[4] = matching("mix.original", "mix.gate_scales")
+    optimizer.select.insert(4, matching("mix.original", "mix.gate_scales"))
     for rate, scaled, betas, decay in (
         (0.004, True, (0.8, 0.95), 0.0),
         (0.6, True, (0.8, 0.95), 0.0),
@@ -1226,7 +1225,7 @@ def exp022() -> NgramTrainLoop.Config:
     assert isinstance(model, MemoryNanoChatLM.Config)
     # Widening the coefficient range changes the mapping, even with the same seed.
     hash_capacity = model.vocab_size * 64
-    rng = torch.Generator(device="cpu").manual_seed(0)
+    rng = torch.Generator().manual_seed(0)
     for table in (*model.bigrams.values(), *model.trigrams.values()):
         table.hash_multipliers = tuple(
             tuple(
@@ -1237,7 +1236,6 @@ def exp022() -> NgramTrainLoop.Config:
                         (),
                         generator=rng,
                         device="cpu",
-                        dtype=torch.int64,
                     ),
                 )
                 + 1

@@ -27,7 +27,11 @@ import torch
 
 from priml.baselines.arcagi1 import experiments
 from priml.baselines.arcagi1.model import REFERENCE_NAMES, ConvSwiGLU
-from priml.baselines.arcagi1.train_step import TrmTrainStep
+from priml.baselines.arcagi1.train_step import (
+    EvalSignals,
+    TrmTrainStep,
+    _empty_eval,
+)
 from priml.baselines.arcagi2.model import RotaryBlock
 from priml.baselines.sudoku.act import AtomicPool
 from priml.baselines.sudoku.embedding import GridEmbedding
@@ -413,6 +417,62 @@ def test_eval_halt_weight_scores_a_frozen_head(weight: float | None) -> None:
     assert float(halt_loss) > 0
     loss = out["loss"].reshape(())
     assert torch.equal(loss, expected.to(loss.dtype))
+
+
+def test_eval_signal_header_widths() -> None:
+    assert EvalSignals(EvalSignals.Config()).header_width(4) == 3
+    assert EvalSignals(EvalSignals.Config(per_step=True)).header_width(4) == 13
+
+
+def test_empty_eval_returns_exact_zero_contract() -> None:
+    result = _empty_eval(2, 13, torch.device("cpu"), signals=True)
+
+    assert result["loss"].shape == (1,)
+    assert result["loss"].device == torch.device("cpu")
+    assert torch.equal(result["loss"], torch.zeros(1))
+    assert result["model"].shape == (2, 13)
+    assert torch.equal(result["model"], torch.zeros(2, 13))
+    assert result.get("metrics") == {
+        "lm_loss": 0.0,
+        "q_halt_loss": 0.0,
+        "cell_accuracy": 0.0,
+        "cell_weighted_accuracy": 0.0,
+        "exact_accuracy": 0.0,
+        "q_halt_accuracy": 0.0,
+        "act_steps": 0.0,
+        "q_continue_loss": 0.0,
+        "grid_stable_frac": 0.0,
+    }
+
+
+def test_empty_eval_without_signals_has_exact_zero_contract() -> None:
+    result = _empty_eval(3, 7, torch.device("cpu"), signals=False)
+
+    assert result["loss"].shape == (1,)
+    assert result["loss"].dtype == torch.float32
+    assert result["loss"].device == torch.device("cpu")
+    assert torch.equal(result["loss"], torch.zeros(1))
+    assert result["model"].shape == (3, 7)
+    assert result["model"].dtype == torch.float32
+    assert result["model"].device == torch.device("cpu")
+    assert torch.equal(result["model"], torch.zeros(3, 7))
+    assert result.get("metrics") == {
+        "lm_loss": 0.0,
+        "q_halt_loss": 0.0,
+        "cell_accuracy": 0.0,
+        "cell_weighted_accuracy": 0.0,
+        "exact_accuracy": 0.0,
+        "q_halt_accuracy": 0.0,
+        "act_steps": 0.0,
+        "q_continue_loss": 0.0,
+    }
+
+
+def test_empty_eval_allocates_every_output_on_the_requested_device() -> None:
+    result = _empty_eval(2, 13, torch.device("meta"), signals=True)
+
+    assert result["loss"].device == torch.device("meta")
+    assert result["model"].device == torch.device("meta")
 
 
 def test_a_whole_model_compile_is_rejected() -> None:

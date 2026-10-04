@@ -16,6 +16,7 @@ import torch
 from priml.model.attention.kernel import SdpaFused
 from priml.model.attention.window import (
     causal_chunk_mask,
+    combined_mask,
     layer_window,
     segment_mask,
     window_mask,
@@ -69,8 +70,15 @@ def test_layer_window_flattens_nested_depth_index() -> None:
 
 
 def test_layer_window_rejects_unspecified_depth_index() -> None:
-    with pytest.raises(ValueError, match="depth_index"):
+    with pytest.raises(
+        ValueError,
+        match=r"^depth_index must specify a stack position\.$",
+    ):
         layer_window(depth_index=(), max_seq_len=64, pattern="SSSL")
+
+
+def test_layer_window_uses_floor_for_odd_short_context() -> None:
+    assert layer_window(depth_index=((0, 2),), max_seq_len=9, pattern="SL") == 4
 
 
 def test_window_sizes_rejects_an_unknown_symbol() -> None:
@@ -93,6 +101,106 @@ def test_a_window_admits_its_own_position_and_w_before_it() -> None:
     assert admitted[5].tolist() == [False, False, False, True, True, True, False, False]
 
 
+def test_zero_window_admits_only_current_key() -> None:
+    q = torch.zeros(2, 4, 3, 5)
+    k = torch.zeros(2, 7, 3, 5)
+    mask = window_mask(q, k, window=0)
+    assert mask is not None
+    assert mask.tolist() == [
+        [
+            float("-inf"),
+            float("-inf"),
+            float("-inf"),
+            0.0,
+            float("-inf"),
+            float("-inf"),
+            float("-inf"),
+        ],
+        [
+            float("-inf"),
+            float("-inf"),
+            float("-inf"),
+            float("-inf"),
+            0.0,
+            float("-inf"),
+            float("-inf"),
+        ],
+        [
+            float("-inf"),
+            float("-inf"),
+            float("-inf"),
+            float("-inf"),
+            float("-inf"),
+            0.0,
+            float("-inf"),
+        ],
+        [
+            float("-inf"),
+            float("-inf"),
+            float("-inf"),
+            float("-inf"),
+            float("-inf"),
+            float("-inf"),
+            0.0,
+        ],
+    ]
+
+
+def test_combined_mask_without_window_preserves_causal_flag() -> None:
+    q = torch.zeros(2, 4, 3, 5)
+    mask, is_causal = combined_mask(
+        q,
+        q,
+        is_causal=True,
+        attn_mask=None,
+        window=-1,
+    )
+    assert mask is None
+    assert is_causal is True
+
+
+def test_combined_window_mask_disables_kernel_causal_flag() -> None:
+    q = torch.zeros(2, 4, 3, 5)
+    mask, is_causal = combined_mask(
+        q,
+        q,
+        is_causal=True,
+        attn_mask=None,
+        window=1,
+    )
+    assert mask is not None
+    assert mask.tolist() == [
+        [0.0, float("-inf"), float("-inf"), float("-inf")],
+        [0.0, 0.0, float("-inf"), float("-inf")],
+        [float("-inf"), 0.0, 0.0, float("-inf")],
+        [float("-inf"), float("-inf"), 0.0, 0.0],
+    ]
+    assert is_causal is False
+
+
+def test_combined_mask_folds_causality_into_a_callers_mask() -> None:
+    q = torch.zeros(2, 5, 3, 4)
+    # Attention requires square [sequence, sequence] masks.
+    caller_mask = torch.zeros(5, 5)
+    caller_mask[:, 0] = float("-inf")
+    mask, is_causal = combined_mask(
+        q,
+        q,
+        is_causal=True,
+        attn_mask=caller_mask,
+        window=-1,
+    )
+    assert mask is not None
+    assert not is_causal
+    assert mask.tolist() == [
+        [float("-inf"), float("-inf"), float("-inf"), float("-inf"), float("-inf")],
+        [float("-inf"), 0.0, float("-inf"), float("-inf"), float("-inf")],
+        [float("-inf"), 0.0, 0.0, float("-inf"), float("-inf")],
+        [float("-inf"), 0.0, 0.0, 0.0, float("-inf")],
+        [float("-inf"), 0.0, 0.0, 0.0, 0.0],
+    ]
+
+
 def test_the_package_fill_is_negative_infinity() -> None:
     """Every mask this module builds fills with ``-inf``, never ``finfo.min``.
 
@@ -108,6 +216,12 @@ def test_the_package_fill_is_negative_infinity() -> None:
     assert chunked is not None
     for mask in (windowed, chunked):
         assert set(mask.unique().tolist()) == {0.0, float("-inf")}
+    assert chunked.tolist() == [
+        [0.0, 0.0, 0.0, 0.0, 0.0, float("-inf"), float("-inf"), float("-inf")],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, float("-inf"), float("-inf")],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, float("-inf")],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    ]
 
 
 def test_fully_masked_row_semantics_differ_by_fill() -> None:
@@ -129,6 +243,61 @@ def test_a_window_reaching_the_context_needs_no_mask() -> None:
     q = k = torch.zeros(2, 8, 3, 4)
     assert window_mask(q, k, window=8) is None
     assert window_mask(q, k, window=-1) is None
+
+
+def test_masks_preserve_the_query_device_and_dtype() -> None:
+    q = torch.empty(2, 4, 3, 5, device="meta", dtype=torch.float64)
+    k = torch.empty(2, 7, 3, 5, device="meta", dtype=torch.float64)
+    masks = (
+        window_mask(q, k, window=2),
+        causal_chunk_mask(q, k),
+        combined_mask(
+            q,
+            k,
+            is_causal=True,
+            attn_mask=torch.zeros(4, 7, device="meta", dtype=torch.float64),
+            window=2,
+        )[0],
+    )
+    for mask in masks:
+        assert mask is not None
+        assert mask.device.type == "meta"
+        assert mask.dtype == torch.float64
+
+    default_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(torch.float64)
+        float32 = torch.zeros(4, 3, 2, 6, dtype=torch.float32)
+        mask, _ = combined_mask(
+            float32,
+            torch.zeros(4, 5, 2, 6, dtype=torch.float32),
+            is_causal=True,
+            attn_mask=torch.zeros(3, 5, dtype=torch.float32),
+            window=2,
+        )
+    finally:
+        torch.set_default_dtype(default_dtype)
+    assert mask is not None
+    assert mask.dtype == torch.float32
+
+
+def test_combined_mask_window_is_bottom_right_aligned() -> None:
+    q = torch.zeros(4, 3, 2, 6)
+    k = torch.zeros(4, 5, 2, 6)
+    mask, is_causal = combined_mask(
+        q,
+        k,
+        is_causal=False,
+        attn_mask=torch.zeros(3, 5),
+        window=0,
+    )
+    assert mask is not None
+    assert not is_causal
+    assert mask.tolist() == [
+        [float("-inf"), float("-inf"), 0.0, float("-inf"), float("-inf")],
+        [float("-inf"), float("-inf"), float("-inf"), 0.0, float("-inf")],
+        [float("-inf"), float("-inf"), float("-inf"), float("-inf"), 0.0],
+    ]
 
 
 def test_a_window_and_is_causal_together_are_accepted() -> None:

@@ -100,12 +100,11 @@ def _plan(crow: Tensor, targets: Tensor | None = None) -> _Plan:
     if targets is None:
         targets = rows
     buckets: list[_Bucket] = []
-    lower = -1
-    for width in _WIDTHS:
-        members = rows[(lengths > lower) & (lengths <= width)]
+    for index, width in enumerate(_WIDTHS):
+        lower_bound = lengths >= 0 if index == 0 else lengths > _WIDTHS[index - 1]
+        members = rows[lower_bound & (lengths <= width)]
         if len(members):
             buckets.append(_Bucket(width=width, rows=members, targets=targets[members]))
-        lower = width
     long_rows = rows[lengths > _WIDTHS[-1]]
     if not len(long_rows):
         empty = torch.zeros(0, dtype=torch.int64, device=crow.device)
@@ -231,8 +230,7 @@ def _jit(function: Callable[..., None]) -> "triton.JITFunction[..., None]":
     bound = FunctionType(
         function.__code__,
         function.__globals__ | {"language": import_module("triton.language")},
-        function.__name__,
-        function.__defaults__,
+        argdefs=function.__defaults__,
     )
     bound.__annotations__ = function.__annotations__
     return triton.jit(bound)

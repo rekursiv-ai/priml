@@ -420,15 +420,13 @@ def _validate_cache_geometry(
 ) -> None:
     """Reject cache layouts that would broadcast or fail after mutation."""
     if (
-        cache.k.ndim != x.ndim + 1
-        or cache.v.ndim != x.ndim + 1
-        or cache.k.shape[:-3] != x.shape[:-2]
+        cache.k.shape[:-3] != x.shape[:-2]
         or cache.v.shape[:-3] != x.shape[:-2]
-        or cache.k.shape[-3] != num_heads_kv
-        or cache.v.shape[-3] != num_heads_kv
-        or cache.k.shape[-2] != cache.v.shape[-2]
-        or cache.k.shape[-1] != channels_head
-        or cache.v.shape[-1] != channels_head
+        or cache.k.shape[-3:-2] != (num_heads_kv,)
+        or cache.v.shape[-3:-2] != (num_heads_kv,)
+        or cache.k.shape[-2:-1] != cache.v.shape[-2:-1]
+        or cache.k.shape[-1:] != (channels_head,)
+        or cache.v.shape[-1:] != (channels_head,)
     ):
         raise ValueError(
             "Full-attention cache batch, head, and feature geometry must match "
@@ -479,7 +477,7 @@ def _causal_bias(
     allowed = offset >= 0
     if window >= 0:
         allowed = allowed & (offset <= window)
-    return torch.zeros(s, t, dtype=dtype, device=q.device).masked_fill(
+    return torch.zeros_like(offset, dtype=dtype).masked_fill(
         ~allowed,
         torch.finfo(dtype).min,
     )

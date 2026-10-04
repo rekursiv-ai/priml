@@ -18,12 +18,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
 import functools
+import re
 import tempfile
 
 from configgle import Makeable, PartialConfig
 from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel
 from torch.nn import functional as f
 
 import pytest
@@ -36,6 +38,7 @@ from priml.model.attention.kernel import (
     SdpaNaive,
     attention_kernel_cost,
 )
+from priml.model.attention.kvcache import KVCache
 from priml.model.attention.mla import LatentAttention, MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, RoPEMixed
 from priml.model.linear import Linear
@@ -105,6 +108,19 @@ class _ResettableLatentKernel(nn.Module):
         nn.init.ones_(self.weight)
 
 
+class _ForwardCapture:
+    def __init__(self, output: Tensor, captured: dict[str, object]) -> None:
+        self.output = output
+        self.captured = captured
+
+    def __call__(self, x: Tensor, **kwargs: object) -> tuple[Tensor, KVCache]:
+        del x
+        cache = kwargs["cache"]
+        assert isinstance(cache, KVCache)
+        self.captured.update(kwargs)
+        return self.output, cache
+
+
 def test_mla_reset_parameters_resets_injected_children() -> None:
     module = _tiny()
     module.rope = RoPEMixed.Config(
@@ -165,16 +181,111 @@ def test_mla_cached_forward_requires_an_updated_cache(
         return torch.zeros(2, 3, 128), None
 
     monkeypatch.setattr(module, "_forward", no_cache_update)
-    with pytest.raises(ValueError, match="updated"):
+    expected = "Expected updated is not None."
+    with pytest.raises(ValueError, match=f"^{re.escape(expected)}$") as error:
         module.forward_cached(
             torch.randn(2, 3, 128),
             cache=module.alloc_kv_cache(batch=2, max_seq=4),
         )
+    assert str(error.value) == expected
+
+
+def test_mla_forward_cached_forwards_each_override_and_keyword(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _tiny()
+    cache = module.alloc_kv_cache(batch=2, max_seq=8)
+    x = torch.randn(2, 3, 128)
+    positions = torch.tensor([4, 5, 6])
+    cos_sin = (torch.ones(3, 8), torch.zeros(3, 8))
+    # MultiHeadLatentAttention._attend broadcasts [B, 1, Q, K] masks over heads.
+    mask = torch.ones(2, 1, 3, 8, dtype=torch.bool)
+    message = object()
+    output = torch.randn(2, 3, 128)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(module, "_forward", _ForwardCapture(output, captured))
+
+    result, updated = module.forward_cached(
+        x,
+        cache=cache,
+        positions=positions,
+        cos_sin=cos_sin,
+        scale=0.125,
+        is_causal=False,
+        dropout_p=0.25,
+        attn_mask=mask,
+        message=message,
+    )
+
+    assert result is output
+    assert updated is cache
+    assert captured["positions"] is positions
+    assert captured["cos_sin"] is cos_sin
+    assert captured["cache"] is cache
+    assert captured["scale"] == 0.125
+    assert captured["is_causal"] is False
+    assert captured["dropout_p"] == 0.25
+    assert captured["attn_mask"] is mask
+    assert captured["message"] is message
 
 
 def test_mla_rejects_indivisible_tensor_parallel_heads() -> None:
     with pytest.raises(ValueError, match="divide num_heads"):
         _tiny().assert_shardable_over(3)
+
+
+def test_mla_rejects_fused_kernel_for_tensor_parallelism() -> None:
+    config, kernel = _mla_config()
+    kernel.attn_kernel = SdpaFused.Config()
+
+    expected = (
+        "Tensor parallelism requires a DTensor-compatible attention "
+        "kernel; set the latent kernel's attn_kernel to SdpaNaive "
+        "(the fused flash kernel has no DTensor sharding strategy)."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(expected)}$") as error:
+        config.make().assert_shardable_over(2)
+
+    assert str(error.value) == expected
+
+
+def test_shard_heads_over_records_the_local_head_range() -> None:
+    class Mesh:
+        def size(self) -> int:
+            return 2
+
+        def get_local_rank(self) -> int:
+            return 1
+
+    module = _tiny()
+    mesh = cast("DeviceMesh", Mesh())
+    module.shard_heads_over(mesh)
+
+    assert type(module._heads_local) is int
+    assert module._heads_local == 2
+    assert type(module._head_offset) is int
+    assert module._head_offset == 2
+    assert module._tp_mesh is mesh
+
+
+@pytest.mark.parametrize(
+    ("q_lora_rank", "q_projection"),
+    [(None, "proj_q"), (64, "proj_q_b")],
+)
+def test_tensor_parallel_plan_names_only_the_sharded_projections(
+    q_lora_rank: int | None,
+    q_projection: str,
+) -> None:
+    plan = _tiny(q_lora_rank=q_lora_rank).tensor_parallel_plan()
+
+    assert set(plan) == {q_projection, "proj_out"}
+    q_style = plan[q_projection]
+    out_style = plan["proj_out"]
+    assert isinstance(q_style, ColwiseParallel)
+    assert isinstance(out_style, RowwiseParallel)
+    assert q_style.use_local_output is True
+    assert out_style.input_layouts == (Shard(-1),)
+    assert out_style.output_layouts == (Replicate(),)
 
 
 def test_forward_shape():
@@ -221,6 +332,18 @@ def test_prealloc_cache_decode():
     # Latent cache shapes: [B, 1, max_seq, feat].
     assert cache.k.shape == (2, 1, 16, 32)  # c_kv, kv_lora_rank=32.
     assert cache.v.shape == (2, 1, 16, 8)  # k_pe, qk_rope=8.
+    placed = m.alloc_kv_cache(
+        batch=(2, 3),
+        max_seq=7,
+        device=torch.device("meta"),
+        dtype=torch.float64,
+    )
+    assert placed.k.shape == (2, 3, 1, 7, 32)
+    assert placed.v.shape == (2, 3, 1, 7, 8)
+    assert placed.k.device == torch.device("meta")
+    assert placed.v.device == torch.device("meta")
+    assert placed.k.dtype is torch.float64
+    assert placed.v.dtype is torch.float64
     prompt = torch.randn(2, 5, 128)
     out, cache = m.forward_cached(prompt, cache=cache)
     assert out.shape == (2, 5, 128)

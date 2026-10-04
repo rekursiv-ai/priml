@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Protocol, Self, cast, overload
+from typing import TYPE_CHECKING, Literal, Protocol, Self, cast, overload
 
 import math
 
@@ -78,7 +78,7 @@ def ceil_multiple(x: Tensorable, multiple: float | None) -> Tensorable:
         nearest grid boundary.
 
     """
-    return _to_multiple(x, multiple, up=True)
+    return _to_multiple(x, multiple, rounding="ceil")
 
 
 @overload
@@ -107,7 +107,7 @@ def floor_multiple(x: Tensorable, multiple: float | None) -> Tensorable:
         nearest grid boundary.
 
     """
-    return _to_multiple(x, multiple, up=False)
+    return _to_multiple(x, multiple, rounding="floor")
 
 
 def ceil_div(x: int, y: int) -> int:
@@ -190,15 +190,14 @@ def broadcast_sequences[T](*args: T | Sequence[T]) -> tuple[list[T], ...]:
     return tuple(a * n if len(a) == 1 else a for a in lists)
 
 
-# ``up`` selects ceiling (True) or floor (False). ``None`` leaves ``x`` unchanged. Float
-# division + ceil/floor (rather than the integer ``//`` trick) is correct for fractional
-# and negative ``x`` and idempotent on exact multiples; the final cast makes an integer
-# ``multiple`` yield an integer result. Each branch narrows ``x`` before arithmetic so
-# the result type is concrete (no operations on the bare ``Tensorable`` union).
+# Float division + ceil/floor (rather than the integer ``//`` trick) is correct for
+# fractional and negative ``x`` and idempotent on exact multiples; the final cast makes
+# an integer ``multiple`` yield an integer result. Each branch narrows ``x`` before
+# arithmetic so the result type is concrete (no operations on the bare ``Tensorable`` union).
 def _to_multiple(
     x: Tensorable,
     multiple: float | None,
-    up: bool,
+    rounding: Literal["ceil", "floor"],
 ) -> Tensorable:
     """``multiple * (ceil|floor)(x / multiple)``, cast back to ``multiple``'s type."""
     if multiple is None:
@@ -210,15 +209,15 @@ def _to_multiple(
     # input's width and leaves an integer one to promote, as torch and numpy
     # would unaided.
     if isinstance(x, Tensor):
-        scaled = (x / multiple).ceil() if up else (x / multiple).floor()
+        scaled = {"ceil": torch.ceil, "floor": torch.floor}[rounding](x / multiple)
         snapped = multiple * scaled
         if isinstance(multiple, int):
             return snapped.to(torch.int64)
-        return snapped.to(x.dtype) if x.dtype.is_floating_point else snapped
+        return snapped
     if isinstance(x, np.ndarray):
         array: np.ndarray = cast("np.ndarray", x)
         ratio = array / multiple
-        scaled = np.ceil(ratio) if up else np.floor(ratio)
+        scaled = {"ceil": np.ceil, "floor": np.floor}[rounding](ratio)
         snapped = multiple * scaled
         if isinstance(multiple, int):
             return snapped.astype(np.int64)
@@ -234,7 +233,8 @@ def _to_multiple(
     # Two ints stay in unbounded integer arithmetic: float(x) drops the low
     # bits above 2**53, returning a value below one already on the grid.
     if isinstance(x, int) and isinstance(multiple, int):
-        return multiple * (ceil_div(x, multiple) if up else x // multiple)
+        scale = ceil_div(x, multiple) if rounding == "ceil" else x // multiple
+        return multiple * scale
     value = x / multiple
-    scaled_scalar = math.ceil(value) if up else math.floor(value)
+    scaled_scalar = {"ceil": math.ceil, "floor": math.floor}[rounding](value)
     return type(multiple)(multiple * scaled_scalar)

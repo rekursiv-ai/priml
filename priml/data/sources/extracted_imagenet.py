@@ -105,11 +105,6 @@ class ExtractedImageNetSource:
         with labels_file.open() as f:
             labels = [line.strip() for line in f]
 
-        if len(filenames) != len(labels):
-            raise ValueError(
-                f"Mismatch: {len(filenames)} files but {len(labels)} labels",
-            )
-
         return dict(zip(filenames, labels, strict=True))
 
     def __iter__(self) -> Iterator[Sample]:

@@ -67,6 +67,24 @@ def test_torch_light_map_preserves_reference_reciprocal_multiplication() -> None
     assert float(constants.TORCH_LIGHT_MAP[0, 2]) == 0.10557276010513306
 
 
+def test_import_time_tables_match_their_builders() -> None:
+    default_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        directions = constants._directions()
+        rewards = constants._achievement_reward()
+        light = constants._torch_light_map()
+    finally:
+        torch.set_default_dtype(default_dtype)
+
+    assert directions.dtype == torch.int32
+    assert torch.equal(directions, constants.DIRECTIONS)
+    assert rewards.dtype == torch.float32
+    assert torch.equal(rewards, constants.ACHIEVEMENT_REWARD)
+    assert light.dtype == torch.float32
+    assert torch.equal(light, constants.TORCH_LIGHT_MAP)
+
+
 @requires_craftax
 @pytest.mark.parametrize(
     ("ported", "upstream_name"),

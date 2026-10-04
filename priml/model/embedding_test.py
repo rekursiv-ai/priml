@@ -24,25 +24,42 @@ _CWD: Final = Path(__file__).resolve().parent
 
 
 class _FakeKernel:
+    def __init__(self) -> None:
+        self.grid: tuple[int, ...] | None = None
+        self.args: tuple[object, ...] | None = None
+        self.kwargs: dict[str, object] | None = None
+
     def __getitem__(self, grid: tuple[int, ...]) -> _FakeKernel:
-        del grid
+        self.grid = grid
         return self
 
     def __call__(self, *args: object, **kwargs: object) -> None:
-        del args, kwargs
+        self.args = args
+        self.kwargs = kwargs
 
 
 class _FakeBackwardKernels:
-    accumulate = _FakeKernel()
-    decode = _FakeKernel()
+    def __init__(self) -> None:
+        self.accumulate = _FakeKernel()
+        self.decode = _FakeKernel()
+
+
+class _BackwardDispatch:
+    def __init__(self) -> None:
+        self.triton_calls: list[tuple[Tensor, Tensor]] = []
+        self.torch_calls: list[tuple[Tensor, Tensor]] = []
+
+    def triton(self, rows: Tensor, gradient: Tensor) -> Tensor:
+        self.triton_calls.append((rows, gradient))
+        return gradient
+
+    def torch(self, rows: Tensor, gradient: Tensor) -> Tensor:
+        self.torch_calls.append((rows, gradient))
+        return gradient
 
 
 class _FakeProperties:
     multi_processor_count = 2
-
-
-def _fake_embed_kernel() -> _FakeKernel:
-    return _FakeKernel()
 
 
 def _fake_backward_kernels() -> _FakeBackwardKernels:
@@ -408,24 +425,196 @@ def test_multi_hot_embedding_kernel_host_dispatch_with_fake_launches(
 ) -> None:
     config = _small_layout()
     embedding_module = config.make()
-    rows = _draw_packed(config, batch=2)
-    monkeypatch.setattr(embedding, "_embed_kernel", _fake_embed_kernel)
-    assert embedding_module.forward_triton(rows).shape == (2, config.channels_concat)
+    rows = _draw_packed(config, batch=2, time=3).to("meta")
+    embed_kernel = _FakeKernel()
+    monkeypatch.setattr(embedding, "_embed_kernel", lambda: embed_kernel)
+    features = embedding_module.forward_triton(rows)
+    assert features.shape == (2, 3, config.channels_concat)
+    assert features.dtype == embedding_module.weight.dtype
+    assert features.device == rows.device
+    assert embed_kernel.grid == (6,)
+    assert embed_kernel.args is not None
+    observations, weight, offsets, output = embed_kernel.args[:4]
+    assert isinstance(observations, Tensor)
+    assert isinstance(output, Tensor)
+    assert observations.shape == (6, config.observation_size)
+    assert observations.device == rows.device
+    assert weight is embedding_module.weight
+    assert offsets is embedding_module.offsets
+    assert output.shape == (6, config.channels_concat)
+    assert output.dtype == features.dtype
+    assert output.device == features.device
+    assert embed_kernel.args[4:] == (config.num_cells, config.num_scalars)
+    assert embed_kernel.kwargs == {
+        "num_fields": len(config.offsets),
+        "width": config.channels_out,
+        "width_block": 2,
+        "cell_block": 4,
+        "scalar_block": 2,
+        "num_warps": 4,
+    }
 
     wide = _eight_field_layout()
     wide_embedding = wide.make()
-    wide_rows = _draw_packed(wide, batch=2)
-    monkeypatch.setattr(embedding, "_backward_kernels", _fake_backward_kernels)
+    wide_rows = _draw_packed(wide, batch=2, time=3)
+    kernels = _fake_backward_kernels()
+    monkeypatch.setattr(embedding, "_backward_kernels", lambda: kernels)
     monkeypatch.setattr(
         torch.cuda,
         "get_device_properties",
         _fake_device_properties,
     )
-    gradient = torch.ones(2, wide.channels_concat, dtype=torch.bfloat16)
-    assert wide_embedding.backward_triton(wide_rows, gradient).shape == (
-        wide.channels_in,
-        wide.channels_out,
+    gradient = torch.ones(
+        2,
+        3,
+        wide.channels_concat,
+        dtype=torch.bfloat16,
+        device="meta",
     )
+    result = wide_embedding.backward_triton(wide_rows, gradient)
+    assert result.shape == (wide.channels_in, wide.channels_out)
+    assert result.dtype == wide_embedding.weight.dtype
+    assert result.device == wide_embedding.weight.device
+    accumulate = kernels.accumulate
+    assert accumulate.grid == (4,)
+    assert accumulate.args is not None
+    assert isinstance(accumulate.args[0], tuple)
+    assert isinstance(accumulate.args[0][0], Tensor)
+    assert isinstance(accumulate.args[0][1], Tensor)
+    assert isinstance(accumulate.args[0][2], Tensor)
+    assert isinstance(accumulate.args[0][3], Tensor)
+    observations = accumulate.args[0][0]
+    grad = accumulate.args[0][1]
+    offsets = accumulate.args[0][2]
+    partials = accumulate.args[0][3]
+    assert observations.shape == (6, wide.observation_size)
+    assert observations.device == wide_rows.device
+    assert grad.shape == (6, wide.channels_concat)
+    assert grad.device == torch.device("meta")
+    assert offsets is wide_embedding.offsets
+    assert partials.shape == (4, wide.channels_in * wide.channels_out)
+    assert partials.dtype == torch.int64
+    assert partials.device == torch.device("meta")
+    assert accumulate.args[1:] == (
+        594,
+        5,
+        wide.observation_size,
+        wide.channels_concat,
+        154,
+    )
+    assert accumulate.kwargs == {
+        "num_cells": 99,
+        "width": 16,
+        "tile": 128,
+        "vocab_first": 64,
+        "vocab_rest": 16,
+        "num_warps": 4,
+    }
+    decode = kernels.decode
+    assert decode.grid == ((2464 + 127) // 128,)
+    assert decode.args is not None
+    assert isinstance(decode.args[1], Tensor)
+    assert decode.args[1].shape == (154, 16)
+    assert isinstance(decode.args[0], Tensor)
+    assert decode.args[0].shape == (4, 2464)
+    assert decode.args[2:] == (4, 2464, 2464)
+    assert decode.kwargs == {
+        "program_block": 64,
+        "block": 128,
+        "num_warps": 4,
+    }
+
+
+def test_multi_hot_backward_triton_uses_vocab_bounds_and_exact_program_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = MultiHotEmbedding.Config()
+    config.channels_in = 31
+    config.channels_out = 16
+    config.offsets = (0, 2, 4, 6, 8, 10, 12, 14)
+    config.num_cells = 2
+    config.num_scalars = 1
+    config.dtype = torch.bfloat16
+    module = config.make()
+    kernels = _fake_backward_kernels()
+    property_devices: list[torch.device] = []
+
+    def properties(device: torch.device) -> _FakeProperties:
+        property_devices.append(device)
+        return _FakeProperties()
+
+    monkeypatch.setattr(embedding, "_backward_kernels", lambda: kernels)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", properties)
+    rows = torch.empty(2, 3, config.observation_size, device="meta")
+    gradients = torch.empty(2, 3, config.channels_concat, device="meta")
+
+    result = module.backward_triton(rows, gradients)
+
+    accumulate = kernels.accumulate
+    assert result.shape == module.weight.shape
+    assert result.dtype == module.weight.dtype
+    assert result.device == module.weight.device
+    assert accumulate.grid == (4,)
+    assert accumulate.args is not None
+    assert isinstance(accumulate.args[0], tuple)
+    assert isinstance(accumulate.args[0][0], Tensor)
+    assert isinstance(accumulate.args[0][1], Tensor)
+    assert isinstance(accumulate.args[0][2], Tensor)
+    assert isinstance(accumulate.args[0][3], Tensor)
+    observations = accumulate.args[0][0]
+    grad = accumulate.args[0][1]
+    offsets = accumulate.args[0][2]
+    partials = accumulate.args[0][3]
+    assert observations.shape == (6, config.observation_size)
+    assert observations.device == rows.device
+    assert grad.shape == (6, config.channels_concat)
+    assert grad.device == gradients.device
+    assert offsets is module.offsets
+    assert partials.shape == (4, module.weight.numel())
+    assert partials.dtype == torch.int64
+    assert partials.device == gradients.device
+    assert property_devices == [gradients.device]
+    assert accumulate.args[1:6] == (
+        12,
+        1,
+        config.observation_size,
+        config.channels_concat,
+        31,
+    )
+    assert accumulate.kwargs == {
+        "num_cells": 2,
+        "width": 16,
+        "tile": 128,
+        "vocab_first": 16,
+        "vocab_rest": 32,
+        "num_warps": 4,
+    }
+
+
+@pytest.mark.parametrize(
+    ("pairs", "programs"),
+    [(4 * (2**31 // 128) + 2, 5), (66_600_000, 4)],
+)
+def test_multi_hot_backward_triton_program_count_ceil_division(
+    monkeypatch: pytest.MonkeyPatch,
+    pairs: int,
+    programs: int,
+) -> None:
+    config = _eight_field_layout()
+    config.num_cells = 2
+    module = config.make()
+    kernels = _fake_backward_kernels()
+    monkeypatch.setattr(embedding, "_backward_kernels", lambda: kernels)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", _fake_device_properties)
+    rows = torch.empty(pairs // 2, config.observation_size, device="meta")
+    gradients = torch.empty(pairs // 2, config.channels_concat, device="meta")
+
+    module.backward_triton(rows, gradients)
+
+    assert kernels.accumulate.grid == (programs,)
+    assert kernels.accumulate.args is not None
+    assert kernels.accumulate.args[1] == pairs
+    assert kernels.accumulate.args[2] == (pairs + 127) // 128
 
 
 def test_multi_hot_embedding_cost_counts_cpu_gather_and_scatter() -> None:
@@ -434,6 +623,409 @@ def test_multi_hot_embedding_cost_counts_cpu_gather_and_scatter() -> None:
     assert cost.params == 0
     assert cost.params_active == 0
     assert cost["flops", "adjoint", "selection"].sum() == 3 * 2 * 3 * 4 * 2
+
+
+def test_embedding_keeps_shard_and_requested_meta_device() -> None:
+    model = Embedding.Config(
+        3,
+        2,
+        device="meta",
+        shard="vocab",
+        init_weight=lambda _weight: None,
+    ).make()
+    assert model.shard == "vocab"
+    assert model.weight.device == torch.device("meta")
+
+
+def test_multi_hot_offsets_are_nonpersistent_buffers() -> None:
+    model = _small_layout().make()
+    assert torch.equal(model.offsets, torch.tensor((0, 2, 4, 6)))
+    assert "offsets" not in model.state_dict()
+
+
+def test_multi_hot_backward_dispatch_checks_every_triton_requirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases = (
+        (False, torch.bfloat16, 8, 16),
+        (True, torch.float32, 8, 16),
+        (True, torch.bfloat16, 7, 16),
+        (True, torch.bfloat16, 9, 16),
+        (True, torch.bfloat16, 8, 8),
+        (True, torch.bfloat16, 8, 16),
+        (True, torch.bfloat16, 8, 24),
+    )
+
+    for cuda, dtype, fields, width in cases:
+        config = MultiHotEmbedding.Config()
+        config.channels_in = fields
+        config.channels_out = width
+        config.offsets = tuple(range(fields))
+        config.num_cells = 2
+        config.dtype = dtype
+        model = config.make()
+        input = torch.zeros(2, config.observation_size)
+        if cuda:
+            input = _CudaInput(input)
+        grad = torch.zeros(2, config.channels_concat)
+        dispatch = _BackwardDispatch()
+        monkeypatch.setattr(model, "backward_triton", dispatch.triton)
+        monkeypatch.setattr(model, "backward_torch", dispatch.torch)
+
+        result = model.backward(input, grad)
+
+        should_use_triton = (
+            cuda and dtype == torch.bfloat16 and fields == 8 and width == 16
+        )
+        assert result is grad
+        assert len(dispatch.triton_calls) == should_use_triton
+        assert len(dispatch.torch_calls) == (not should_use_triton)
+        if should_use_triton:
+            assert dispatch.triton_calls == [(input, grad)]
+        else:
+            assert dispatch.torch_calls == [(input, grad)]
+
+
+def test_multi_hot_backward_torch_allocates_on_input_device() -> None:
+    config = _small_layout()
+    model = config.make()
+    input = torch.empty(2, config.observation_size, device="meta")
+    grad = torch.empty(2, config.channels_concat, device="meta")
+    assert model.backward_torch(input, grad).device == input.device
+
+
+def test_multi_hot_backward_triton_uses_second_field_vocab_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = MultiHotEmbedding.Config()
+    config.channels_in = 80
+    config.channels_out = 16
+    config.offsets = (0, 2, 66, 68, 70, 72, 74, 76)
+    config.num_cells = 2
+    config.dtype = torch.bfloat16
+    model = config.make()
+    kernels = _fake_backward_kernels()
+    monkeypatch.setattr(embedding, "_backward_kernels", lambda: kernels)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", _fake_device_properties)
+    rows = torch.empty(2, config.observation_size, device="meta")
+    grad = torch.empty(2, config.channels_concat, device="meta")
+
+    model.backward_triton(rows, grad)
+
+    assert kernels.accumulate.kwargs is not None
+    assert kernels.accumulate.kwargs["vocab_rest"] == 64
+
+
+def test_multi_hot_backward_triton_floors_small_vocab_tiles_at_sixteen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = MultiHotEmbedding.Config()
+    config.channels_in = 46
+    config.channels_out = 16
+    config.offsets = (0, 32, 34, 36, 38, 40, 42, 44)
+    config.num_cells = 2
+    config.dtype = torch.bfloat16
+    model = config.make()
+    kernels = _fake_backward_kernels()
+    monkeypatch.setattr(embedding, "_backward_kernels", lambda: kernels)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", _fake_device_properties)
+    rows = torch.empty(2, config.observation_size, device="meta")
+    grad = torch.empty(2, config.channels_concat, device="meta")
+
+    model.backward_triton(rows, grad)
+
+    assert kernels.accumulate.kwargs is not None
+    assert kernels.accumulate.kwargs["vocab_rest"] == 16
+
+
+def test_multi_hot_forward_torch_sums_all_fields_with_multiple_leading_axes() -> None:
+    config = _small_layout()
+    model = config.make()
+    with torch.no_grad():
+        model.weight.copy_(torch.arange(16).reshape(8, 2).bfloat16())
+    rows = _draw_packed(config, batch=2, time=3)
+    features = model.forward_torch(rows)
+    # MultiHotEmbedding packs three cells and four fields by contract.
+    ids = rows[..., :12].reshape(2, 3, 3, 4).long() + model.offsets
+    embedded = model.weight[ids].float()
+    expected_cells = embedded[..., 0, :] + embedded[..., 1, :]
+    expected_cells = expected_cells + embedded[..., 2, :] + embedded[..., 3, :]
+    expected = torch.cat(
+        (expected_cells.bfloat16().flatten(-2), rows[..., 12:].bfloat16()),
+        dim=-1,
+    )
+    assert torch.equal(features, expected)
+
+
+def test_multi_hot_reset_parameters_passes_empty_depth_index() -> None:
+    seen: list[tuple[tuple[int, ...], ...]] = []
+    config = _small_layout()
+
+    def init_weight(
+        weight: Tensor,
+        *,
+        depth_index: tuple[tuple[int, ...], ...] = ((1,),),
+    ) -> None:
+        del weight
+        seen.append(depth_index)
+
+    config.init_weight = init_weight
+    model = config.make()
+    model.reset_parameters()
+    assert seen == [(), ()]
+
+
+class _CudaInput(Tensor):
+    """CPU storage with the CUDA flag set for dispatch-guard unit tests."""
+
+    is_cuda = True
+
+
+def test_multi_hot_backward_dispatch_uses_triton_for_eight_fields_at_width_sixteen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _mutation_layout(offsets=tuple(range(8)), width=16, rows=16)
+    input = _CudaInput(torch.zeros(2, module.num_cells * 8))
+    grad = torch.zeros(2, module.num_cells * 16)
+    dispatch = _BackwardDispatch()
+    monkeypatch.setattr(module, "backward_triton", dispatch.triton)
+    monkeypatch.setattr(module, "backward_torch", dispatch.torch)
+
+    assert module.backward(input, grad) is grad
+    assert dispatch.triton_calls == [(input, grad)]
+    assert dispatch.torch_calls == []
+
+
+@pytest.mark.parametrize(
+    ("cuda", "dtype", "fields", "width"),
+    [
+        (False, torch.bfloat16, 8, 16),
+        (True, torch.float32, 8, 16),
+        (True, torch.bfloat16, 7, 16),
+        (True, torch.bfloat16, 9, 16),
+        (True, torch.bfloat16, 8, 8),
+        (True, torch.bfloat16, 8, 24),
+    ],
+)
+def test_multi_hot_backward_dispatch_uses_torch_outside_triton_layout(
+    monkeypatch: pytest.MonkeyPatch,
+    cuda: bool,
+    dtype: torch.dtype,
+    fields: int,
+    width: int,
+) -> None:
+    module = _mutation_layout(
+        offsets=tuple(range(fields)),
+        width=width,
+        rows=fields,
+        dtype=dtype,
+    )
+    input = torch.zeros(2, module.num_cells * fields)
+    if cuda:
+        input = _CudaInput(input)
+    grad = torch.zeros(2, module.num_cells * width)
+    dispatch = _BackwardDispatch()
+    monkeypatch.setattr(module, "backward_triton", dispatch.triton)
+    monkeypatch.setattr(module, "backward_torch", dispatch.torch)
+
+    assert module.backward(input, grad) is grad
+    assert dispatch.triton_calls == []
+    assert dispatch.torch_calls == [(input, grad)]
+
+
+def test_multi_hot_offsets_move_with_module_but_stay_out_of_state_dict() -> None:
+    module = _mutation_layout(
+        offsets=tuple(range(8)),
+        width=16,
+        rows=16,
+    ).to(device="meta", dtype=torch.float64)
+    assert module.offsets.device.type == "meta"
+    assert module.offsets.dtype == torch.int64
+    assert module.weight.dtype == torch.float64
+    assert "offsets" not in module.state_dict()
+
+
+def test_multi_hot_backward_torch_allocates_on_meta_input_device() -> None:
+    module = _mutation_layout(offsets=(0, 2), width=2, rows=4).to("meta")
+    # backward_torch accepts arbitrary leading rows; only device is under test.
+    rows = torch.empty(2, 3, device="meta")
+    gradients = torch.empty(2, 3, device="meta")
+    assert module.backward_torch(rows, gradients).device.type == "meta"
+
+
+def test_multi_hot_forward_torch_sums_all_fields_and_preserves_scalars() -> None:
+    config = MultiHotEmbedding.Config()
+    config.channels_in = 8
+    config.channels_out = 2
+    config.offsets = (0, 2, 4, 6)
+    config.num_cells = 2
+    config.num_scalars = 2
+    model = config.make()
+    with torch.no_grad():
+        model.weight.copy_(torch.arange(16).reshape(8, 2).bfloat16())
+    rows = torch.zeros(2, 3, config.observation_size)
+    rows[..., -2] = 0.5
+    rows[..., -1] = 0.25
+    expected_row = torch.tensor([24, 28, 24, 28, 0.5, 0.25], dtype=torch.bfloat16)
+    expected = expected_row.expand(2, 3, config.channels_concat)
+    assert torch.equal(model.forward_torch(rows), expected)
+
+
+def test_multi_hot_forward_triton_preserves_leading_input_dimensions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = MultiHotEmbedding.Config()
+    config.channels_in = 4
+    config.channels_out = 4
+    config.offsets = (0, 2)
+    config.num_cells = 1
+    config.num_scalars = 2
+    config.dtype = torch.bfloat16
+    model = config.make()
+    kernel = _FakeKernel()
+    monkeypatch.setattr(embedding, "_embed_kernel", lambda: kernel)
+    rows = torch.empty(3, 5, config.observation_size, device="meta")
+
+    assert model.forward_triton(rows).shape == (3, 5, config.channels_concat)
+
+
+def test_multi_hot_backward_triton_uses_every_nonfirst_field_vocab_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = MultiHotEmbedding.Config()
+    config.channels_in = 80
+    config.channels_out = 16
+    config.offsets = (0, 2, 66, 68, 70, 72, 74, 76)
+    config.num_cells = 1
+    config.dtype = torch.bfloat16
+    model = config.make()
+    kernels = _FakeBackwardKernels()
+    monkeypatch.setattr(embedding, "_backward_kernels", lambda: kernels)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", _fake_device_properties)
+    rows = torch.empty(2, config.observation_size, device="meta")
+    gradients = torch.empty(2, config.channels_concat, device="meta")
+
+    model.backward_triton(rows, gradients)
+
+    assert kernels.accumulate.kwargs is not None
+    assert kernels.accumulate.kwargs["vocab_rest"] == 64
+
+
+def _mutation_layout(
+    *,
+    offsets: tuple[int, ...],
+    width: int,
+    rows: int,
+    dtype: torch.dtype = torch.bfloat16,
+) -> MultiHotEmbedding:
+    config = MultiHotEmbedding.Config()
+    config.channels_in = rows
+    config.channels_out = width
+    config.offsets = offsets
+    config.num_cells = 2
+    config.dtype = dtype
+    return config.make()
+
+
+def _launch_backward_mutation_case(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    offsets: tuple[int, ...],
+    rows: int,
+) -> tuple[_FakeKernel, Tensor, Tensor]:
+    # The launch reads only metadata; a real 2^25-row table took 4.5s to draw.
+    with torch.device("meta"):
+        module = _mutation_layout(offsets=offsets, width=16, rows=rows)
+    kernels = _FakeBackwardKernels()
+    devices: list[torch.device] = []
+
+    def properties(device: torch.device) -> _FakeProperties:
+        devices.append(device)
+        return _FakeProperties()
+
+    monkeypatch.setattr(embedding, "_backward_kernels", lambda: kernels)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", properties)
+    input = torch.empty(3, rows // 3, module.num_cells * len(offsets), device="meta")
+    grad = torch.empty(
+        3,
+        rows // 3,
+        module.num_cells * module.weight.shape[1],
+        device="meta",
+    )
+    result = module.backward_triton(input, grad)
+
+    assert result.shape == module.weight.shape
+    assert result.dtype == module.weight.dtype
+    assert kernels.accumulate.args is not None
+    assert isinstance(kernels.accumulate.args[0], tuple)
+    assert isinstance(kernels.accumulate.args[0][0], Tensor)
+    assert isinstance(kernels.accumulate.args[0][1], Tensor)
+    assert isinstance(kernels.accumulate.args[0][2], Tensor)
+    assert isinstance(kernels.accumulate.args[0][3], Tensor)
+    observations = kernels.accumulate.args[0][0]
+    gradient = kernels.accumulate.args[0][1]
+    used_offsets = kernels.accumulate.args[0][2]
+    partials = kernels.accumulate.args[0][3]
+    assert observations.shape == (rows, input.shape[-1])
+    assert observations.device == input.device
+    assert gradient.shape == (rows, grad.shape[-1])
+    assert gradient.device == grad.device
+    assert used_offsets is module.offsets
+    assert kernels.accumulate.grid is not None
+    assert partials.shape == (kernels.accumulate.grid[0], module.weight.numel())
+    assert partials.dtype is torch.int64
+    assert partials.device == grad.device
+    assert devices == [grad.device]
+    assert kernels.accumulate.args[1] == rows * module.num_cells
+    assert kernels.accumulate.args[2] == (rows * module.num_cells + 127) // 128
+    assert kernels.accumulate.kwargs is not None
+    assert kernels.accumulate.kwargs["num_cells"] == module.num_cells
+    assert kernels.accumulate.kwargs["width"] == module.weight.shape[1]
+    assert kernels.accumulate.kwargs["tile"] == 128
+    assert kernels.accumulate.kwargs["num_warps"] == 4
+    return kernels.accumulate, input, grad
+
+
+def test_multi_hot_backward_triton_reshapes_rank_three_inputs_and_clamps_vocab_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    small, _, _ = _launch_backward_mutation_case(
+        monkeypatch,
+        offsets=(0, 2, 4, 6, 8, 10, 12, 14),
+        rows=6,
+    )
+    assert small.grid == (4,)
+    assert small.kwargs is not None
+    assert small.kwargs["vocab_first"] == 16
+    assert small.kwargs["vocab_rest"] == 16
+
+    larger_second_field, _, _ = _launch_backward_mutation_case(
+        monkeypatch,
+        offsets=(0, 2, 19, 21, 23, 25, 27, 29),
+        rows=6,
+    )
+    assert larger_second_field.kwargs is not None
+    assert larger_second_field.kwargs["vocab_first"] == 16
+    assert larger_second_field.kwargs["vocab_rest"] == 32
+
+
+@pytest.mark.parametrize(
+    ("pairs", "programs"),
+    [(4 * (2**31 // 128) + 2, 5), (66_600_000, 4)],
+)
+def test_multi_hot_backward_triton_program_count_uses_signed_ceil_division(
+    monkeypatch: pytest.MonkeyPatch,
+    pairs: int,
+    programs: int,
+) -> None:
+    rows = pairs // 2
+    assert rows * 2 == pairs
+    accumulate, _, _ = _launch_backward_mutation_case(
+        monkeypatch,
+        offsets=(0, 2, 4, 6, 8, 10, 12, 14),
+        rows=rows,
+    )
+    assert accumulate.grid == (programs,)
 
 
 if __name__ == "__main__":

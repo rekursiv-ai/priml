@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import itertools
+import math
+
 from torch import Tensor
 
 import pytest
 import torch
 
 from priml.math.basic import ceil_div
-from priml.math.pooling import adaptive_avg_pool2d, adaptive_avg_pool3d
+from priml.math.pooling import (
+    _dim_info,
+    adaptive_avg_pool2d,
+    adaptive_avg_pool3d,
+)
 
 
 def test_adaptive_avg_pool2d_simple() -> None:
@@ -14,6 +21,175 @@ def test_adaptive_avg_pool2d_simple() -> None:
     result = adaptive_avg_pool2d(x, (2, 2))
     expected = torch.nn.functional.adaptive_avg_pool2d(x, (2, 2))
     torch.testing.assert_close(result, expected)
+
+
+def test_dim_info_uniform_nondivisible_windows_are_exact() -> None:
+    dim = _dim_info(6, 4, torch.device("cpu"))
+    assert torch.equal(
+        dim.idx,
+        torch.tensor([[0, 1], [1, 2], [3, 4], [4, 5]], dtype=torch.int64),
+    )
+    assert dim.length == 2
+    assert torch.equal(dim.max_kernel_size_range, torch.tensor([0, 1]))
+    assert not dim.needs_irregular_kernel
+
+
+def test_dim_info_irregular_windows_are_exact() -> None:
+    dim = _dim_info(5, 3, torch.device("cpu"))
+    assert torch.equal(
+        dim.idx,
+        torch.tensor([[0, 1, 2], [1, 2, 3], [3, 4, 4]], dtype=torch.int64),
+    )
+    assert isinstance(dim.length, Tensor)
+    assert torch.equal(dim.length, torch.tensor([2, 3, 2]))
+    assert torch.equal(dim.max_kernel_size_range, torch.tensor([0, 1, 2]))
+    assert dim.needs_irregular_kernel
+
+
+def test_pool_variance_preserving_divisible_3d_exact_scale() -> None:
+    x = torch.arange(1, 1 + 3 * 5 * 2 * 4 * 6, dtype=torch.float64).reshape(
+        3,
+        5,
+        2,
+        4,
+        6,
+    )
+    actual = adaptive_avg_pool3d(x, (1, 2, 3), variance_preserving=True)
+    expected = torch.nn.functional.avg_pool3d(x, (2, 2, 2), (2, 2, 2)) * 8**0.5
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_pool_variance_preserving_3d_mixed_uniform_and_irregular_axes() -> None:
+    """Uniform axes before an irregular one all contribute to each window."""
+    spatial = (6, 4, 5)
+    output_size = (4, 3, 3)
+    x = torch.arange(1, 1 + 2 * 3 * math.prod(spatial), dtype=torch.float64).reshape(
+        2,
+        3,
+        *spatial,
+    )
+    actual = adaptive_avg_pool3d(x, output_size, variance_preserving=True)
+    expected = torch.empty((2, 3, *output_size), dtype=x.dtype)
+    for out_idx in itertools.product(*(range(size) for size in output_size)):
+        limits = [
+            (
+                idx * source // target,
+                ceil_div((idx + 1) * source, target),
+            )
+            for idx, source, target in zip(out_idx, spatial, output_size, strict=True)
+        ]
+        block = x[(..., *(slice(start, stop) for start, stop in limits))]
+        expected[(..., *out_idx)] = (
+            block.sum(dim=(-3, -2, -1)) / math.prod(block.shape[-3:]) ** 0.5
+        )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=1e-12)
+
+
+def test_pool_variance_preserving_matches_window_sums_across_paths() -> None:
+    for spatial, output_size in [
+        ((4, 6), (2, 3)),
+        ((5, 6), (3, 3)),
+        ((3, 5), (5, 3)),
+        ((8, 6), (6, 4)),
+    ]:
+        x = torch.arange(2 * 3 * math.prod(spatial), dtype=torch.float64).reshape(
+            2,
+            3,
+            *spatial,
+        )
+        result = adaptive_avg_pool2d(x, output_size, variance_preserving=True)
+        expected = torch.empty((2, 3, *output_size), dtype=x.dtype)
+        for out_i in range(output_size[0]):
+            lo_i = out_i * spatial[0] // output_size[0]
+            hi_i = (out_i + 1) * spatial[0] // output_size[0]
+            hi_i += int((out_i + 1) * spatial[0] % output_size[0] != 0)
+            for out_j in range(output_size[1]):
+                lo_j = out_j * spatial[1] // output_size[1]
+                hi_j = (out_j + 1) * spatial[1] // output_size[1]
+                hi_j += int((out_j + 1) * spatial[1] % output_size[1] != 0)
+                block = x[..., lo_i:hi_i, lo_j:hi_j]
+                expected[..., out_i, out_j] = (
+                    block.sum(dim=(-2, -1)) / (block.shape[-2] * block.shape[-1]) ** 0.5
+                )
+        torch.testing.assert_close(result, expected, rtol=0, atol=1e-12)
+
+
+def test_adaptive_avg_pool3d_variance_preserving_matches_window_sums() -> None:
+    spatial = (4, 5, 6)
+    output_size = (3, 4, 5)
+    x = torch.arange(2 * 3 * math.prod(spatial), dtype=torch.float64).reshape(
+        2,
+        3,
+        *spatial,
+    )
+    result = adaptive_avg_pool3d(x, output_size, variance_preserving=True)
+    expected = torch.empty((2, 3, *output_size), dtype=x.dtype)
+    for out_idx in itertools.product(*(range(size) for size in output_size)):
+        limits = [
+            (
+                idx * source // target,
+                ((idx + 1) * source + target - 1) // target,
+            )
+            for idx, source, target in zip(out_idx, spatial, output_size, strict=True)
+        ]
+        block = x[
+            ...,
+            *(slice(start, stop) for start, stop in limits),
+        ]
+        expected[(..., *out_idx)] = (
+            block.sum(dim=(-3, -2, -1)) / (math.prod(block.shape[-3:])) ** 0.5
+        )
+    torch.testing.assert_close(result, expected, rtol=0, atol=1e-12)
+
+
+def test_invalid_pooling_shapes_name_the_rejected_dimension() -> None:
+    with pytest.raises(RuntimeError, match=r"Expected 3D or 4D tensor, got 2D"):
+        adaptive_avg_pool2d(torch.ones(2, 3), (2, 2))
+    with pytest.raises(
+        RuntimeError,
+        match=r"Expected non-zero spatial dims, got shape",
+    ):
+        adaptive_avg_pool2d(torch.ones(2, 3, 0, 4), (2, 2), True)
+    with pytest.raises(
+        RuntimeError,
+        match=r"Expected non-zero output_size, got \(0, 2\)",
+    ):
+        adaptive_avg_pool2d(torch.ones(2, 3, 4, 6), (0, 2), True)
+    with pytest.raises(RuntimeError, match=r"Expected 4D or 5D tensor, got 3D"):
+        adaptive_avg_pool3d(torch.ones(2, 3, 4), (2, 2, 2))
+
+
+def test_ragged_index_tables_preserve_device_and_integer_dtype(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_arange = torch.arange
+    original_scalar_tensor = torch.scalar_tensor
+    calls: list[tuple[torch.device, torch.dtype]] = []
+    scalar_calls: list[tuple[torch.device, torch.dtype]] = []
+
+    def recording_arange(
+        end: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        calls.append((device, dtype))
+        return original_arange(end, device=device, dtype=dtype)
+
+    def recording_scalar_tensor(
+        value: int,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> Tensor:
+        scalar_calls.append((device, dtype))
+        return original_scalar_tensor(value, dtype=dtype, device=device)
+
+    monkeypatch.setattr(torch, "arange", recording_arange)
+    monkeypatch.setattr(torch, "scalar_tensor", recording_scalar_tensor)
+    adaptive_avg_pool2d(torch.ones(2, 3, 5, 6), (3, 3), True)
+    assert calls == [(torch.device("cpu"), torch.int64)] * 4
+    assert scalar_calls == [(torch.device("cpu"), torch.int64)]
 
 
 def test_adaptive_avg_pool2d_variance_preserving() -> None:
@@ -431,6 +607,22 @@ def test_variance_preserving_ragged_windows_keep_the_input_precision() -> None:
         rtol=0,
         atol=1e-12,
     )
+
+
+def test_variance_preserving_counts_remain_int64_for_large_half_windows() -> None:
+    x = torch.zeros((4, 5, 6_146, 6), dtype=torch.float16)
+    x[0, 0, 1_000, 0] = 0.004
+    x[0, 0, 3_000, 4] = 0.004
+    x[0, 0, 5_000, 0] = 0.004
+    actual = adaptive_avg_pool2d(x, (3, 2), variance_preserving=True)
+    value = torch.tensor(0.004, dtype=torch.float16)
+    denominators = torch.tensor([6_147, 6_150, 6_147], dtype=torch.int64)
+    values = value / denominators.to(torch.float16).sqrt()
+    expected = torch.zeros((4, 5, 3, 2), dtype=torch.float16)
+    expected[0, 0, 0, 0] = values[0]
+    expected[0, 0, 1, 1] = values[1]
+    expected[0, 0, 2, 0] = values[2]
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float64])

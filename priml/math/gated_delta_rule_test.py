@@ -93,14 +93,18 @@ def test_chunk_reference_forward_backward(
         assert torch.equal(actual_value, expected_value)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("normalize", [False, True])
-def test_recurrent_reference_and_state_ownership(normalize: bool) -> None:
+def test_recurrent_reference_and_state_ownership(
+    normalize: bool,
+    dtype: torch.dtype,
+) -> None:
     inputs = (
-        torch.randn(2, 3, 4, 5),
-        torch.randn(2, 3, 4, 5),
-        torch.randn(2, 3, 4, 6),
-        -torch.rand(2, 3, 4),
-        torch.rand(2, 3, 4),
+        torch.randn(2, 3, 4, 5, dtype=dtype),
+        torch.randn(2, 3, 4, 5, dtype=dtype),
+        torch.randn(2, 3, 4, 6, dtype=dtype),
+        -torch.rand(2, 3, 4, dtype=dtype),
+        torch.rand(2, 3, 4, dtype=dtype),
     )
     state = torch.randn(2, 4, 5, 6)
     original = state.clone()
@@ -126,10 +130,85 @@ def test_recurrent_reference_and_state_ownership(normalize: bool) -> None:
         use_qk_l2norm_in_kernel=normalize,
     )
     assert torch.equal(actual, expected)
+    assert actual.dtype == dtype
     assert actual_state is not None
     assert expected_state is not None
+    assert actual_state.dtype == torch.float32
     assert torch.equal(actual_state, expected_state)
     assert torch.equal(state, original)
+
+
+def test_recurrent_state_uses_input_device() -> None:
+    with torch.device("meta"):
+        query = torch.empty(2, 3, 4, 5)
+        key = torch.empty_like(query)
+        value = torch.empty(2, 3, 4, 6)
+        decay = torch.empty(2, 3, 4)
+        output, state = recurrent_gated_delta_rule(
+            query=query,
+            key=key,
+            value=value,
+            g=decay,
+            beta=decay,
+            output_final_state=True,
+        )
+
+    assert output.device.type == "meta"
+    assert state is not None
+    assert state.device.type == "meta"
+
+
+def test_recurrent_state_uses_fp32_despite_default_dtype() -> None:
+    query = torch.zeros(2, 3, 4, 5)
+    initial_state = torch.arange(2 * 4 * 5 * 6, dtype=torch.float64).reshape(2, 4, 5, 6)
+
+    default_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        _, state = recurrent_gated_delta_rule(
+            query=query,
+            key=query,
+            value=torch.zeros(2, 3, 4, 6),
+            g=torch.zeros(2, 3, 4),
+            beta=torch.zeros(2, 3, 4),
+            initial_state=initial_state,
+            output_final_state=True,
+        )
+        _, zero_state = recurrent_gated_delta_rule(
+            query=query,
+            key=query,
+            value=torch.zeros(2, 3, 4, 6),
+            g=torch.zeros(2, 3, 4),
+            beta=torch.zeros(2, 3, 4),
+            output_final_state=True,
+        )
+    finally:
+        torch.set_default_dtype(default_dtype)
+
+    assert state is not None
+    assert state.dtype == torch.float32
+    assert torch.equal(state, initial_state.float())
+    assert zero_state is not None
+    assert zero_state.dtype == torch.float32
+
+
+def test_recurrent_state_uses_input_device_with_different_default() -> None:
+    query = torch.zeros(2, 3, 4, 5)
+    value = torch.zeros(2, 3, 4, 6)
+    decay = torch.zeros(2, 3, 4)
+
+    with torch.device("meta"):
+        _, state = recurrent_gated_delta_rule(
+            query=query,
+            key=query,
+            value=value,
+            g=decay,
+            beta=decay,
+            output_final_state=True,
+        )
+
+    assert state is not None
+    assert state.device.type == "cpu"
 
 
 def test_closed_decay_tail_and_optional_state() -> None:

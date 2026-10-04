@@ -1291,8 +1291,17 @@ def segmented_rollout_rows(
     z_slow, z_fast = model.init_z(boards.shape[0])
     given = (boards >= 2) & (boards <= 10)
     feedback = boards
-    out: dict[str, Tensor] = {}
-    for _ in range(split):
+    out = model.act_step(
+        boards,
+        z_slow,
+        z_fast,
+        puzzle_identifiers=puzzle_identifiers,
+        feedback_ids=feedback,
+    )
+    z_slow = out["z_slow"]
+    z_fast = out["z_fast"]
+    feedback = torch.where(given, boards, out["logits"].argmax(dim=-1))
+    for _ in range(1, split):
         out = model.act_step(
             boards,
             z_slow,
@@ -1310,7 +1319,9 @@ def segmented_rollout_rows(
         continued = (scores >= continue_threshold).nonzero(as_tuple=True)[0]
     else:
         continued = torch.arange(boards.shape[0], device=boards.device)
-    if split == max_steps or not continued.shape[0]:
+    if split == max_steps:
+        return logits, scores
+    if not continued.shape[0]:
         return logits, scores
 
     boards_live = boards[continued]
@@ -1547,9 +1558,9 @@ def accepted_grids(preds: Tensor, media: Tensor, groups: Tensor) -> Tensor:
       accepted: ``[B]`` acceptance mask.
 
     """
-    complete = ((preds >= 2) & (preds <= 10)).all(dim=-1)
+    complete = ((preds >= 2) & (preds <= 10)).all(dim=1)
     given = (media >= 2) & (media <= 10)
-    consistent = ((preds == media) | ~given).all(dim=-1)
+    consistent = ((preds == media) | ~given).all(dim=1)
     return complete & (_violated_group_counts(preds, groups) == 0) & consistent
 
 
@@ -1646,32 +1657,30 @@ def run_pin_search_fast(
                 # same-puzzle duplicates overwrite with identical content.
                 win_puzzles = frontier_puzzle[win_rows]
                 grids[win_puzzles] = preds[win_rows].to(grids.dtype)
-                fresh = ~found[win_puzzles]
-                depth_used[win_puzzles[fresh]] = level
+                depth_used[win_puzzles] = level
                 found[win_puzzles] = True
-            if level == depth:
-                break
-            # Expand survivors whose puzzle is unresolved and within budget.
-            child_count = candidates ** (level + 1)
-            expandable = ~found[frontier_puzzle] & (
-                nodes[frontier_puzzle] + child_count <= budget
-            )
-            keep = expandable.nonzero(as_tuple=True)[0]
-            if not keep.shape[0]:
-                break
-            parent_boards = boards[keep]
-            cell_d, dig_d = select_pin_candidates(
-                logits[keep],
-                parent_boards,
-                n_cells=1,
-                n_digits=candidates,
-            )
-            boards = parent_boards.repeat_interleave(candidates, dim=0)
-            frontier_puzzle = frontier_puzzle[keep].repeat_interleave(candidates)
-            cell_child = cell_d[:, 0].repeat_interleave(candidates)
-            digit_child = dig_d[:, 0].reshape(-1)
-            rows_local = torch.arange(boards.shape[0], device=device)
-            boards[rows_local, cell_child] = digit_child.to(boards.dtype)
+            if level < depth:
+                # Expand survivors whose puzzle is unresolved and within budget.
+                child_count = candidates ** (level + 1)
+                expandable = ~found[frontier_puzzle] & (
+                    nodes[frontier_puzzle] + child_count <= budget
+                )
+                keep = expandable.nonzero(as_tuple=True)[0]
+                if not keep.shape[0]:
+                    break
+                parent_boards = boards[keep]
+                cell_d, dig_d = select_pin_candidates(
+                    logits[keep],
+                    parent_boards,
+                    n_cells=1,
+                    n_digits=candidates,
+                )
+                boards = parent_boards.repeat_interleave(candidates, dim=0)
+                frontier_puzzle = frontier_puzzle[keep].repeat_interleave(candidates)
+                cell_child = cell_d[:, 0].repeat_interleave(candidates)
+                digit_child = dig_d[:, 0].reshape(-1)
+                rows_local = torch.arange(boards.shape[0], device=device)
+                boards[rows_local, cell_child] = digit_child.to(boards.dtype)
     return found, grids, nodes, depth_used
 
 
@@ -2023,10 +2032,10 @@ def read_member_dump(path: str | Path) -> MemberDump:
             if "label" in archive
             else None
         )
-    grid_len = media.shape[-1]
-    if rows.shape[-1] != learned_hps_output_width(grid_len):
+    grid_len = media.shape[1]
+    if rows.shape[1] != learned_hps_output_width(grid_len):
         raise ValueError(
-            f"packed width {rows.shape[-1]} does not match learned-HPS width "
+            f"packed width {rows.shape[1]} does not match learned-HPS width "
             f"{learned_hps_output_width(grid_len)}.",
         )
     return MemberDump(
@@ -2056,7 +2065,7 @@ def _empty_result(media: Tensor) -> SearchResult:
         scores=torch.zeros(b, dtype=torch.float32, device=device),
         root_scores=torch.zeros(b, dtype=torch.float32, device=device),
         nodes=torch.zeros(b, dtype=torch.int64, device=device),
-        depth=torch.full((b,), -1, dtype=torch.int64, device=device),
+        depth=torch.full((b,), -1, device=device),
         scored=false.clone(),
         visited_predictions=[],
         visited_puzzles=[],
@@ -2073,14 +2082,18 @@ def _exact_rows(preds: Tensor, label: Tensor, valid: Tensor) -> Tensor:
 # token (pad 0 / blank 1) appears at all.
 def _violated_group_counts(preds: Tensor, groups: Tensor) -> Tensor:
     """``[B]`` violated-27-group count at ``preds`` argmax (label-free)."""
-    group_tokens = preds.clamp(min=0, max=10)[:, groups]
-    token_counts = torch.nn.functional.one_hot(group_tokens, num_classes=11).sum(
-        dim=-2,
-    )
-    violated = (token_counts[..., 2:] > 1).any(dim=-1) | (
-        token_counts[..., :2] > 0
-    ).any(dim=-1)
-    return violated.sum(dim=-1).float()
+    group_tokens = preds[:, groups]
+    group_tokens = torch.maximum(
+        group_tokens,
+        torch.zeros_like(group_tokens),
+    ).clamp(max=10)
+    sorted_tokens = group_tokens.sort(dim=2).values
+    duplicate_digits = (
+        (sorted_tokens[..., 1:] == sorted_tokens[..., :-1])
+        & (sorted_tokens[..., 1:] >= 2)
+    ).any(dim=2)
+    invalid_tokens = (group_tokens < 2).any(dim=2)
+    return (duplicate_digits | invalid_tokens).sum(dim=1).float()
 
 
 # ---------------------------------------------------------------------------
@@ -5500,17 +5513,17 @@ def _modal_tail(
     survivors: Tensor,
 ) -> Tensor:
     """Modal grid over every collected candidate for the tail puzzles."""
-    position = {p: i for i, p in enumerate(ListCodec.coerce(survivors.tolist(), int))}
+    position = {p: i for i, p in enumerate(survivors.tolist())}
     per_round: list[Tensor] = []
     for indices, grids in collected:
         rows = torch.full(
-            (survivors.shape[0], grids.shape[-1]),
+            (survivors.shape[0], grids.shape[1]),
             255,
             dtype=grids.dtype,
         )
         keep = [
             (row, position[p])
-            for row, p in enumerate(ListCodec.coerce(indices.tolist(), int))
+            for row, p in enumerate(indices.tolist())
             if p in position
         ]
         for source_row, target_row in keep:

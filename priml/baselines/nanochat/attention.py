@@ -19,7 +19,6 @@ from torch import Tensor, nn
 import torch
 
 from priml.baselines.nanochat.ngram import (
-    HashedNgramTables,
     NgramSource,
     ngram_mix,
 )
@@ -171,12 +170,13 @@ class CausalAttention(ValueGatedAttention):
 
     def __init__(self, config: Config) -> None:
         norm = config.norm_qk
-        if config.fused_qk_rope and (
-            not isinstance(norm, RMSNorm.Config)
-            or type(norm) is not RMSNorm.Config
-            or norm.elementwise_affine
-            or norm.eps not in (None, torch.finfo(torch.float32).eps)
-        ):
+        fused_norm_is_valid = (
+            isinstance(norm, RMSNorm.Config)
+            and type(norm) is RMSNorm.Config
+            and not norm.elementwise_affine
+            and norm.eps in (None, torch.finfo(torch.float32).eps)
+        )
+        if config.fused_qk_rope and not fused_norm_is_valid:
             raise ValueError(
                 "fused_qk_rope requires norm_qk to be parameter-free RMSNorm "
                 "with epsilon None or float32 epsilon.",
@@ -191,7 +191,6 @@ class CausalAttention(ValueGatedAttention):
         gate = Linear.Config(
             channels_in=config.gate_channels,
             channels_out=config.num_heads,
-            bias=False,
             init_weight=nn.init.zeros_,
         )
         self.bigram_gate = gate.make() if config.bigram else None
@@ -280,7 +279,6 @@ class CausalAttention(ValueGatedAttention):
             for source in cast(list[object], fused_tables):
                 assert isinstance(source, NgramSource)
                 gate_index, table, hashed = source
-                assert isinstance(table, HashedNgramTables)
                 gate = self.bigram_gate if gate_index == 1 else self.trigram_gate
                 if gate is None:
                     raise ValueError("Expected gate is not None.")
@@ -293,7 +291,6 @@ class CausalAttention(ValueGatedAttention):
             for source in cast(list[object], fused_tables):
                 assert isinstance(source, NgramSource)
                 (_gate_index, table, _hashed) = source
-                assert isinstance(table, HashedNgramTables)
                 bitmaps.extend(table.gradient_bitmaps)
             v = ngram_mix(v.contiguous(), logits, weights, indices, sinks, bitmaps)
         out = self.norm_out(
@@ -407,13 +404,6 @@ def _qk_setup(
     ctx.save_for_backward(*inputs)
 
 
-def _register_qk_autograd[FunctionT: Callable[..., object]](
-    function: FunctionT,
-) -> FunctionT:
-    fused_qk_norm_rope.register_autograd(function, setup_context=_qk_setup)
-    return function
-
-
 @fused_qk_norm_rope.register_fake
 def _qk_fake(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor) -> "tuple[Tensor, Tensor]":
     del cos, sin
@@ -436,6 +426,13 @@ def _qk_backward_fake(
         torch.empty_like(q, memory_format=torch.contiguous_format),
         torch.empty_like(k, memory_format=torch.contiguous_format),
     )
+
+
+def _register_qk_autograd[FunctionT: Callable[..., object]](
+    function: FunctionT,
+) -> FunctionT:
+    fused_qk_norm_rope.register_autograd(function, setup_context=_qk_setup)
+    return function
 
 
 @_register_qk_autograd

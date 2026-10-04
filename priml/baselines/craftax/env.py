@@ -429,7 +429,7 @@ class _Stepper:
         # offset + n, wrapping at the modulus, which is where two workers
         # finishing together can share one. Unfinished rows index harmlessly,
         # since ``select`` discards them.
-        rank = self._done.to(torch.int64).cumsum(0) - 1
+        rank = self._done.cumsum(0) - 1
         fresh = self.pool.take(
             (self._deal_offset + rank.clamp_min(0)) % self._deal_modulus,
         )

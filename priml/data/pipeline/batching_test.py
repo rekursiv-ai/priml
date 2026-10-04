@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 
 from torch import Tensor
 
@@ -16,6 +16,10 @@ from priml.data.pipeline.batching import (
 from priml.data.pipeline.parallel import (
     PrefetchBuffer,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 # Batcher Tests.
@@ -130,6 +134,27 @@ def test_batcher_filter_reasons():
     # Second result should be the batched samples (flush remainder)
     assert _tensor(results[1], "media_tensor").shape == (2, 2, 4, 5, 3)
     assert len(_raw(results[1])) == 2
+
+
+def test_batcher_passes_filtered_samples_even_with_batch_fields():
+    batcher = Batcher(Batcher.Config(size=3))
+    filtered: dict[str, object] = {
+        "id": 0,
+        "media_tensor": torch.zeros(3, 4),
+        "filter_reasons": ["invalid"],
+    }
+    valid: dict[str, object] = {"id": 1, "media_tensor": torch.ones(3, 4)}
+    valid_again: dict[str, object] = {"id": 2, "media_tensor": torch.ones(3, 4)}
+
+    results = list(batcher(iter([filtered, valid, valid_again])))
+
+    assert results[0] is filtered
+    assert results[1]["_batch_size"] == 2
+    assert _raw(results[1]) == [{"id": 1}, {"id": 2}]
+    assert torch.equal(
+        _tensor(results[1], "media_tensor"),
+        torch.ones(2, 3, 4),
+    )
 
 
 def test_batcher_missing_field_names():
@@ -399,6 +424,7 @@ def test_unbatcher_strips_batch_size_marker():
 
     batch: dict[str, object] = {
         "_batch_size": 2,
+        "_batched_list_fields": ["labels"],
         "embeddings": torch.randn(2, 4),
         "raw": [{"id": 0}, {"id": 1}],
     }
@@ -406,6 +432,8 @@ def test_unbatcher_strips_batch_size_marker():
     results = list(unbatcher(iter([batch])))
 
     assert all("_batch_size" not in r for r in results)
+    assert all("raw" not in r for r in results)
+    assert all("_batched_list_fields" not in r for r in results)
 
 
 def test_unbatcher_does_not_split_batchlevel_list_of_batch_len():
@@ -520,6 +548,30 @@ def test_batcher_moves_the_stacked_tensor_to_the_configured_device():
     assert stacked.shape == (2, 2, 3)
 
 
+def test_batcher_passes_configured_device_to_tensor_to(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    devices: list[object] = []
+
+    def record_to(tensor: Tensor, *args: object, **kwargs: object) -> Tensor:
+        devices.extend(args)
+        devices.extend(kwargs.values())
+        return tensor
+
+    monkeypatch.setattr(Tensor, "to", record_to)
+    batcher = Batcher(Batcher.Config(size=2, device="cpu"))
+    list(
+        batcher(
+            cast(
+                "Iterator[Batcher.Input]",
+                iter([{"media_tensor": torch.zeros(2, 3)}] * 2),
+            ),
+        ),
+    )
+
+    assert devices == [torch.device("cpu")]
+
+
 def test_batcher_omits_raw_when_the_stacked_fields_were_everything():
     batcher = Batcher(Batcher.Config(size=2))
 
@@ -531,20 +583,107 @@ def test_batcher_omits_raw_when_the_stacked_fields_were_everything():
     assert results[0]["_batch_size"] == 2
 
 
-def test_batcher_logs_a_slow_stack(
-    monkeypatch: pytest.MonkeyPatch,
+def test_batcher_reports_exact_batch_and_shape_counts(
     caplog: pytest.LogCaptureFixture,
 ):
-    tick = 0.0
+    batcher = Batcher(Batcher.Config(size=3, field_names=["image"]))
+    caplog.set_level("INFO", logger="priml.data.pipeline.batching")
 
-    def slow_clock() -> float:
-        nonlocal tick
-        tick += 0.2
-        return tick
+    def image_sample(shape: tuple[int, int], value: int) -> Batcher.Input:
+        sample: Batcher.Input = {}
+        sample["image"] = torch.full(shape, value)
+        return sample
 
+    samples: list[Batcher.Input] = (
+        [image_sample((2, 3), value) for value in range(4)]
+        + [image_sample((2, 4), value) for value in range(5)]
+        + [image_sample((2, 5), value) for value in range(3)]
+    )
+
+    batches = list(batcher(iter(samples)))
+
+    assert [batch["_batch_size"] for batch in batches] == [3, 3, 3, 1, 2]
+    assert [record.getMessage() for record in caplog.records] == [
+        "batched 9 samples across 3 batches (= 3 samples/batch)",
+        "flushed 3 samples across 2 batches (≈ 1.5 samples/batch)",
+        "samples by shape ((2, 4),): 5 1.7",
+        "samples by shape ((2, 3),): 4 1.3",
+        "samples by shape ((2, 5),): 3 1.0",
+    ]
+
+
+def test_batcher_logs_exactly_full_and_dropped_batches(
+    caplog: pytest.LogCaptureFixture,
+):
+    logger = "priml.data.pipeline.batching"
+    caplog.set_level("INFO", logger=logger)
+
+    full_batcher = Batcher(Batcher.Config(size=2))
+    full = list(
+        full_batcher(
+            cast(
+                "Iterator[Batcher.Input]",
+                iter([{"media_tensor": torch.zeros(2, 3)}] * 2),
+            ),
+        ),
+    )
+    assert [batch["_batch_size"] for batch in full] == [2]
+    assert "batched 2 samples across 1 batches (= 2 samples/batch)" in caplog.text
+    assert "flushed" not in caplog.text
+
+    caplog.clear()
+    drop_batcher = Batcher(Batcher.Config(size=2, drop_remainder=True))
+    dropped = list(
+        drop_batcher(
+            cast(
+                "Iterator[Batcher.Input]",
+                iter([{"media_tensor": torch.zeros(2, 3)}] * 3),
+            ),
+        ),
+    )
+    assert [batch["_batch_size"] for batch in dropped] == [2]
+    assert "flushed" not in caplog.text
+
+
+def test_batcher_logs_a_single_trailing_sample_batch(
+    caplog: pytest.LogCaptureFixture,
+):
+    batcher = Batcher(Batcher.Config(size=2))
+    caplog.set_level("INFO", logger="priml.data.pipeline.batching")
+
+    batches = list(
+        batcher(
+            cast(
+                "Iterator[Batcher.Input]",
+                iter([{"media_tensor": torch.zeros(2, 3)}] * 3),
+            ),
+        ),
+    )
+
+    assert [batch["_batch_size"] for batch in batches] == [2, 1]
+    assert "flushed 1 samples across 1 batches (≈ 1.0 samples/batch)" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("ticks", "message"),
+    [
+        ((0.5, 0.7, 0.71), "stack=200.0ms, to=10.0ms"),
+        ((0.5, 0.51, 0.71), "stack=10.0ms, to=200.0ms"),
+        ((0.0, 0.1005, 0.1105), "stack=100.5ms, to=10.0ms"),
+        ((0.0, 0.01, 0.1105), "stack=10.0ms, to=100.5ms"),
+    ],
+    ids=["slow_stack", "slow_transfer", "stack_just_slow", "transfer_just_slow"],
+)
+def test_batcher_logs_a_slow_stack_or_transfer(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    ticks: tuple[float, float, float],
+    message: str,
+):
+    clock = iter(ticks)
     monkeypatch.setattr(
         "priml.data.pipeline.batching.time.perf_counter",
-        slow_clock,
+        lambda: next(clock),
     )
     batcher = Batcher(Batcher.Config(size=1))
     caplog.set_level("DEBUG", logger="priml.data.pipeline.batching")
@@ -552,17 +691,55 @@ def test_batcher_logs_a_slow_stack(
     samples: list[dict[str, object]] = [{"media_tensor": torch.zeros(2)}]
     _ = list(batcher(iter(samples)))
 
-    assert "Batcher: batch_size=1" in caplog.text
-    assert "stack=200.0ms" in caplog.text
+    assert [
+        record.getMessage() for record in caplog.records if record.levelname == "DEBUG"
+    ] == ["Batcher: batch_size=1, shape=torch.Size([1, 2]), " + message]
+
+
+@pytest.mark.parametrize(
+    ("ticks", "should_log"),
+    [
+        ((0.0, 0.1, 0.2), False),
+        ((0.0, 0.1005, 0.201), True),
+    ],
+    ids=["exactly_threshold", "above_threshold"],
+)
+def test_batcher_debug_timing_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    ticks: tuple[float, float, float],
+    should_log: bool,
+):
+    clock = iter(ticks)
+    monkeypatch.setattr(
+        "priml.data.pipeline.batching.time.perf_counter",
+        lambda: next(clock),
+    )
+    batcher = Batcher(Batcher.Config(size=1))
+    caplog.set_level("DEBUG", logger="priml.data.pipeline.batching")
+
+    list(
+        batcher(
+            cast("Iterator[Batcher.Input]", iter([{"media_tensor": torch.zeros(2)}])),
+        ),
+    )
+
+    assert ("Batcher: batch_size=1" in caplog.text) is should_log
 
 
 _MALFORMED_BATCHES: Final[list[tuple[dict[str, object], str]]] = [
-    ({"raw": "nope"}, "raw must be a list"),
-    ({"raw": ["nope"]}, "raw must be a list"),
+    ({"raw": "nope"}, "raw must be a list of sample dictionaries"),
+    ({"raw": ["nope"]}, "raw must be a list of sample dictionaries"),
     ({"raw": [{}], "_batch_size": "1"}, "_batch_size must be an integer"),
     ({"raw": [{}], "filter_reasons": 5}, "filter_reasons must be iterable"),
-    ({"raw": [{}], "_batched_list_fields": "x"}, "_batched_list_fields"),
-    ({"raw": [{}], "_batched_list_fields": [1]}, "_batched_list_fields"),
+    (
+        {"raw": [{}], "_batched_list_fields": "x"},
+        "_batched_list_fields must be a list of strings",
+    ),
+    (
+        {"raw": [{}], "_batched_list_fields": [1]},
+        "_batched_list_fields must be a list of strings",
+    ),
 ]
 
 
@@ -581,8 +758,9 @@ _MALFORMED_BATCHES: Final[list[tuple[dict[str, object], str]]] = [
 def test_unbatcher_rejects_a_malformed_batch(batch: dict[str, object], message: str):
     unbatcher = Unbatcher(Unbatcher.Config())
 
-    with pytest.raises(TypeError, match=message):
+    with pytest.raises(TypeError) as error:
         list(unbatcher(iter([batch])))
+    assert error.value.args == (message,)
 
 
 def test_unbatcher_replaces_a_non_list_sample_filter_reasons_field():
@@ -596,6 +774,24 @@ def test_unbatcher_replaces_a_non_list_sample_filter_reasons_field():
     results = list(unbatcher(iter([batch])))
 
     assert results[0]["filter_reasons"] == ["batch_level"]
+
+
+def test_unbatcher_replicates_dict_tensor_without_matching_batch_axis():
+    unbatcher = Unbatcher(Unbatcher.Config())
+    batch: dict[str, object] = {
+        "_batch_size": 2,
+        "scores": {"metadata": torch.arange(6.0).reshape(3, 2)},
+        "raw": [{"id": 0}, {"id": 1}],
+    }
+
+    results = list(unbatcher(iter([batch])))
+
+    first = _dict_field(results[0], "scores")["metadata"]
+    second = _dict_field(results[1], "scores")["metadata"]
+    assert isinstance(first, Tensor)
+    assert isinstance(second, Tensor)
+    assert first.shape == (3, 2)
+    assert second.tolist() == [[0.0, 1.0], [2.0, 3.0], [4.0, 5.0]]
 
 
 def test_unbatcher_replicates_dict_values_that_carry_no_batch_axis():

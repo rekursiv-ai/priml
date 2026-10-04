@@ -143,8 +143,8 @@ class Renderer:
             for column in range(columns):
                 position = (column * self.block_pixels, row * self.block_pixels)
                 map_row, map_column = top + row, left + column
-                if not (
-                    0 <= map_row < blocks.shape[0] and 0 <= map_column < blocks.shape[1]
+                if map_row not in range(len(blocks)) or map_column not in range(
+                    len(blocks[0]),
                 ):
                     surface.fill(
                         sprites.OUT_OF_BOUNDS_COLOR,
@@ -197,12 +197,15 @@ class Renderer:
         rows, columns = constants.OBS_DIM
         top, left = self._corner(state, index)
 
+        valid_rows, valid_columns = range(rows), range(columns)
         for slot in range(int(mask.shape[0])):
             if not bool(mask[slot]):
                 continue
             row = int(positions[slot, 0]) - top
+            if row not in valid_rows:
+                continue
             column = int(positions[slot, 1]) - left
-            if not (0 <= row < rows and 0 <= column < columns):
+            if column not in valid_columns:
                 continue
             name = names[int(species[slot]) % len(names)]
             surface.blit(
@@ -256,33 +259,36 @@ class Renderer:
         for row in range(rows):
             for column in range(columns):
                 map_row, map_column = top + row, left + column
-                if not (
-                    0 <= map_row < light.shape[0] and 0 <= map_column < light.shape[1]
+                if map_row not in range(len(light)) or map_column not in range(
+                    len(light[0]),
                 ):
                     continue
                 lit = float(light[map_row, map_column])
-                if lit >= 1.0:
-                    continue
-                shadow.set_alpha(int((1.0 - lit) * 255))
-                surface.blit(
-                    shadow,
-                    (column * self.block_pixels, row * self.block_pixels),
-                )
+                alpha = max(0, int((1.0 - lit) * 255))
+                if alpha:
+                    shadow.set_alpha(alpha)
+                    surface.blit(
+                        shadow,
+                        (column * self.block_pixels, row * self.block_pixels),
+                    )
 
         # Night only falls on the surface; the caves are lit by their own
         # rules and do not brighten at dawn.
-        daylight = 1.0 if level > 0 else float(state.light_level[index])
-        if daylight < 1.0:
+        night_alpha = max(
+            0,
+            0 if level > 0 else int((1.0 - float(state.light_level[index])) * 255),
+        )
+        if night_alpha:
             night = pygame.Surface(surface.get_size())
             night.fill(sprites.NIGHT_COLOR)
-            night.set_alpha(int((1.0 - daylight) * 255))
-            surface.blit(night, (0, 0))
+            night.set_alpha(night_alpha)
+            surface.blit(night)
 
         if bool(state.is_sleeping[index]):
             closed = pygame.Surface(surface.get_size())
             closed.fill((0, 0, 0))
             closed.set_alpha(128)
-            surface.blit(closed, (0, 0))
+            surface.blit(closed)
 
     def _corner(self, state: EnvState, index: int) -> tuple[int, int]:
         """Return the map coordinate of the view's top-left tile."""

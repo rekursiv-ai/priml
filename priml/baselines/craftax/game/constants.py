@@ -277,10 +277,10 @@ REWARD_CEILING: Final = 226.0
 def _directions() -> Tensor:
     """Map every action to the step it moves the player."""
     steps = torch.zeros((len(Action), 2), dtype=torch.int32)
-    steps[Action.LEFT] = torch.tensor([0, -1], dtype=torch.int32)
-    steps[Action.RIGHT] = torch.tensor([0, 1], dtype=torch.int32)
-    steps[Action.UP] = torch.tensor([-1, 0], dtype=torch.int32)
-    steps[Action.DOWN] = torch.tensor([1, 0], dtype=torch.int32)
+    steps[Action.LEFT] = torch.tensor([0, -1])
+    steps[Action.RIGHT] = torch.tensor([0, 1])
+    steps[Action.UP] = torch.tensor([-1, 0])
+    steps[Action.DOWN] = torch.tensor([1, 0])
     return steps
 
 
@@ -599,12 +599,12 @@ MOB_ACHIEVEMENT: Final = torch.tensor(
 
 def _torch_light_map() -> Tensor:
     """Build the radial falloff a placed torch casts on its 9x9 neighborhood."""
-    offsets = (torch.arange(9, dtype=torch.int32) - 4).abs()
+    offsets = (torch.arange(9) - 4).abs()
     squared = offsets[:, None] ** 2 + offsets[None, :] ** 2
     distance = squared.to(torch.float32).sqrt()
     # Upstream constants.py:593 lowers division by five to reciprocal multiplication.
     scaled = distance * 0.2
-    return (1.0 - scaled).clamp(0.0, 1.0)
+    return (1.0 - scaled).clamp_min(0.0)
 
 
 TORCH_LIGHT_MAP: Final = _torch_light_map()

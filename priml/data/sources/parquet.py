@@ -214,13 +214,10 @@ class ParquetAndTarSource:
 
         # Initialize with num_concurrently_read_shards shards.
         for _ in range(min(self.num_concurrently_read_shards, len(parquet_files))):
-            try:
-                parquet_path = next(shard_iter)
-                active_shards.append(
-                    self._read_parquet_shard_with_tar_handle(parquet_path),
-                )
-            except StopIteration:
-                break
+            parquet_path = next(shard_iter)
+            active_shards.append(
+                self._read_parquet_shard_with_tar_handle(parquet_path),
+            )
 
         # Round-robin through active shards.
         while active_shards:

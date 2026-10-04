@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import logging
 import tempfile
@@ -14,10 +14,17 @@ import time
 import pytest
 
 from priml.train.custom_types import CudaEventProtocol, TrackerProtocol
-from priml.train.profiler import PhaseTimer, ProfilerSchedule, TorchProfiler
+from priml.train.profiler import (
+    PhaseTimer,
+    ProfilerSchedule,
+    TorchProfiler,
+    _PhaseHeartbeat,
+)
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import torch
 
 
@@ -45,6 +52,12 @@ class TestPhaseTimerDisabled:
         timer = config.make()
         assert timer.heartbeat_interval_sec == 17.0
         assert timer.fault_dump_interval_sec == 23.0
+
+    def test_initial_publication_flags_are_false(self) -> None:
+        timer = _phase_timer_config(enabled=True).make()
+
+        assert timer._summary_logged is False
+        assert timer._summary_published is False
 
     def test_noop_phase(self):
         timer = _phase_timer_config(enabled=False).make()
@@ -94,12 +107,32 @@ class TestPhaseTimerEnabled:
         assert "a" in s
         assert "b" in s
 
+    def test_record_accumulates_every_child_elapsed(self) -> None:
+        timer = _phase_timer_config(enabled=True).make()
+        with timer.phase("outer"):
+            timer.record("first", 0.5)
+            timer.record("second", 1.5)
+            assert timer._stack[-1].child_sec == 2.0
+
     def test_record(self):
         timer = _phase_timer_config(enabled=True).make()
         timer.record("ext", 1.5)
         timer.record("ext", 0.5)
         assert timer.summary()["ext"] == 2.0
         assert timer._counts["ext"] == 2
+
+    def test_record_timing_accumulates_all_views(self) -> None:
+        timer = _phase_timer_config(enabled=True).make()
+        timer._record_timing("outer", 4.0, 3.0)
+        timer._record_timing("outer", 2.0, 1.5)
+        timer._record_timing("outer/inner", 1.0, 0.5)
+
+        assert timer._phases == {"outer": 6.0, "outer/inner": 1.0}
+        assert timer._self_phases == {"outer": 4.5, "outer/inner": 0.5}
+        assert timer._counts == {"outer": 2, "outer/inner": 1}
+        assert timer._interval_phases == {"outer": 6.0, "outer/inner": 1.0}
+        assert timer._interval_self_phases == {"outer": 4.5, "outer/inner": 0.5}
+        assert timer._interval_counts == {"outer": 2, "outer/inner": 1}
 
     def test_record_and_phase_combine(self):
         timer = _phase_timer_config(enabled=True).make()
@@ -110,25 +143,99 @@ class TestPhaseTimerEnabled:
         assert s["work"] >= 1.01
         assert timer._counts["work"] == 2
 
-    def test_summary_includes_total(self):
+    def test_summary_subtracts_start_time(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         timer = _phase_timer_config(enabled=True).make()
-        time.sleep(0.01)
-        s = timer.summary()
-        assert s["total"] >= 0.01
+        timer._start_time = 100.0
+        monkeypatch.setattr(
+            "priml.train.profiler.time.perf_counter",
+            lambda: 110.0,
+        )
 
-    def test_publish_interval_owns_reset_and_tracker_hook(self) -> None:
+        assert timer.summary()["total"] == 10.0
+
+    def test_timing_metrics_flatten_paths_without_double_counting(
+        self,
+    ) -> None:
+        timer = _phase_timer_config(enabled=True).make()
+
+        assert timer._timing_metrics(
+            {"outer": 4.0, "outer/inner": 2.0, "other": 1.0},
+            {"outer": 3.0, "outer/inner": 1.5, "other": 0.5},
+            {"outer": 2, "outer/inner": 3, "other": 1},
+            total_sec=10.0,
+            key_prefix="test_",
+            total_key="test_wall_sec",
+        ) == {
+            "test_wall_sec": 10.0,
+            "test_unattributed_sec": 5.0,
+            "test_other_sec": 1.0,
+            "test_other_self_sec": 0.5,
+            "test_other_count": 1.0,
+            "test_outer_sec": 4.0,
+            "test_outer_self_sec": 3.0,
+            "test_outer_count": 2.0,
+            "test_outer.inner_sec": 2.0,
+            "test_outer.inner_self_sec": 1.5,
+            "test_outer.inner_count": 3.0,
+        }
+        assert (
+            timer._timing_metrics(
+                {"alpha": 4.0, "beta": 3.0},
+                {"alpha": 2.0, "beta": 1.0},
+                {"alpha": 1, "beta": 1},
+                total_sec=5.0,
+                key_prefix="",
+                total_key="wall_sec",
+            )["unattributed_sec"]
+            == 0.0
+        )
+
+    def test_publish_metrics_logs_sorted_machine_readable_fields(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        timer = _phase_timer_config(enabled=True).make()
+
+        with caplog.at_level(logging.INFO):
+            timer._publish_metrics(
+                {"z_metric": 2.0, "a_metric": 1.0},
+                None,
+                step=3,
+                event="probe",
+            )
+
+        assert [record.message for record in caplog.records] == [
+            "event=probe step=3 a_metric=1.000000 z_metric=2.000000",
+        ]
+
+    def test_publish_interval_owns_reset_and_tracker_hook(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Interval aggregation belongs to the timer, not its caller."""
         timer = _phase_timer_config(enabled=True).make()
         tracker = MagicMock()
         timer.reset_interval()
+        timer._interval_started_at = 100.0
+        monkeypatch.setattr(
+            "priml.train.profiler.time.perf_counter",
+            lambda: 110.0,
+        )
         timer.record("train_batch_fetch", 1.0)
         timer.record("train_step", 2.0)
         timer.record("train_step", 3.0)
 
-        first = timer.publish_interval(cast(TrackerProtocol, tracker), step=4)
-        timer.record("train_step", 7.0)
-        second = timer.publish_interval(cast(TrackerProtocol, tracker), step=5)
+        with caplog.at_level(logging.INFO):
+            first = timer.publish_interval(cast(TrackerProtocol, tracker), step=4)
+            timer.record("train_step", 7.0)
+            second = timer.publish_interval(cast(TrackerProtocol, tracker), step=5)
 
+        assert first["interval_wall_sec"] == 10.0
+        assert second["interval_wall_sec"] == 0.0
         assert first["interval_train_batch_fetch_sec"] == 1.0
         assert first["interval_train_batch_fetch_count"] == 1.0
         assert first["interval_train_step_sec"] == 5.0
@@ -137,21 +244,46 @@ class TestPhaseTimerEnabled:
         assert second["interval_train_step_count"] == 1.0
         assert "interval_train_batch_fetch_sec" not in second
         assert tracker.log_metrics.call_count == 2
+        assert [record.message.split()[:3] for record in caplog.records] == [
+            [
+                "event=phase_timing_interval",
+                "step=4",
+                "interval_train_batch_fetch_count=1.000000",
+            ],
+            [
+                "event=phase_timing_interval",
+                "step=5",
+                "interval_train_step_count=1.000000",
+            ],
+        ]
         tracker.log_metrics.assert_any_call(first, 4, prefix="timing/")
         tracker.log_metrics.assert_any_call(second, 5, prefix="timing/")
 
-    def test_publish_summary_owns_machine_readable_tracker_hook(self) -> None:
+    def test_publish_summary_owns_machine_readable_tracker_hook(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """The timer publishes its cumulative totals without caller assembly."""
         timer = _phase_timer_config(enabled=True).make()
         tracker = MagicMock()
+        timer._start_time = 100.0
+        monkeypatch.setattr(
+            "priml.train.profiler.time.perf_counter",
+            lambda: 110.0,
+        )
         timer.record("train_step", 3.0)
         timer.record("train_step", 2.0)
 
-        summary = timer.publish_summary(cast(TrackerProtocol, tracker), step=8)
+        with caplog.at_level(logging.INFO):
+            summary = timer.publish_summary(cast(TrackerProtocol, tracker), step=8)
 
+        assert caplog.records[0].message.startswith(
+            "event=phase_timing_summary step=8 ",
+        )
         assert summary["train_step_sec"] == 5.0
         assert summary["train_step_count"] == 2.0
-        assert summary["total_sec"] >= 0.0
+        assert summary["total_sec"] == 10.0
         assert summary["unattributed_sec"] >= 0.0
         tracker.log_metrics.assert_called_once_with(summary, 8, prefix="timing/")
 
@@ -188,6 +320,54 @@ class TestPhaseTimerLogging:
         info_msgs = [r.message for r in caplog.records if r.levelno == logging.INFO]
         assert any("[phase] fwd started" in m for m in info_msgs)
 
+    def test_log_summary_exact_table(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        timer = _phase_timer_config(enabled=True).make()
+        timer._start_time = 109.5
+        timer._phases.update({"alpha": 0.25, "beta": 0.15})
+        timer._counts.update({"alpha": 2, "beta": 1})
+        monkeypatch.setattr(
+            "priml.train.profiler.time.perf_counter",
+            lambda: 110.0,
+        )
+
+        with caplog.at_level(logging.INFO):
+            timer.log_summary()
+
+        assert [record.message.splitlines() for record in caplog.records] == [
+            [
+                "Phase Timing Summary",
+                "  phase                   time      pct  count",
+                "  ──────────────────── ───────  ───────  ─────",
+                "  alpha                 0.250s  (50.0%)  x  2",
+                "  beta                  0.150s  (30.0%)  x  1",
+                "  ──────────────────── ───────  ───────  ─────",
+                "  total                 0.500s",
+            ],
+        ]
+
+    def test_log_summary_zero_wall_time_uses_zero_percent(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        timer = _phase_timer_config(enabled=True).make()
+        timer._start_time = 100.0
+        timer._phases["phase"] = 1.0
+        timer._counts["phase"] = 1
+        monkeypatch.setattr(
+            "priml.train.profiler.time.perf_counter",
+            lambda: 100.0,
+        )
+
+        with caplog.at_level(logging.INFO):
+            timer.log_summary()
+
+        assert "( 0.0%)" in caplog.records[0].message
+
     def test_log_summary_format(self, caplog: pytest.LogCaptureFixture):
         timer = _phase_timer_config(enabled=True).make()
         with timer.phase("work"):
@@ -203,6 +383,22 @@ class TestPhaseTimerLogging:
         with caplog.at_level(logging.DEBUG):
             timer.log_summary()
         assert len(caplog.records) == 0
+
+    def test_enabled_log_summary_is_idempotent(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        timer = _phase_timer_config(enabled=True).make()
+        timer.record("work", 1.0)
+
+        with caplog.at_level(logging.INFO):
+            timer.log_summary()
+            timer.log_summary()
+
+        assert (
+            sum("Phase Timing Summary" in record.message for record in caplog.records)
+            == 1
+        )
 
 
 class TestPhaseTimerHeartbeat:
@@ -279,6 +475,45 @@ class TestPhaseTimerHeartbeat:
             time.sleep(0.07)
         assert any("[phase] still in slow" in r.message for r in caplog.records)
 
+    def test_heartbeat_lifecycle_starts_daemon_and_stops_rearming(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        timer = MagicMock()
+
+        def make_timer(interval: float, callback: Callable[..., object]) -> MagicMock:
+            del interval, callback
+            return timer
+
+        monkeypatch.setattr(
+            "priml.train.profiler.threading.Timer",
+            make_timer,
+        )
+        monkeypatch.setattr(
+            "priml.train.profiler.time.perf_counter",
+            lambda: 102.0,
+        )
+        heartbeat = _PhaseHeartbeat("work", start=100.0, interval_sec=1.0)
+
+        assert heartbeat._stopped is False
+        assert heartbeat._timer is None
+        heartbeat.start()
+        assert timer.daemon is True
+        timer.start.assert_called_once()
+
+        heartbeat.stop()
+        assert heartbeat._stopped is True
+        assert heartbeat._timer is None
+        timer.cancel.assert_called_once()
+        timer.join.assert_called_once()
+
+        with caplog.at_level(logging.INFO):
+            heartbeat._tick()
+
+        assert timer.start.call_count == 1
+        assert caplog.records[-1].message == "[phase] still in work (2s elapsed)"
+
 
 class TestPhaseTimerRankGating:
     """Phase enter/exit narrative is rank-0 only; errors stay all-ranks."""
@@ -328,9 +563,13 @@ class TestPhaseTimerRankGating:
 
 
 class TestPhaseTimerTorchProfile:
-    def test_creates_trace_file(self, monkeypatch: pytest.MonkeyPatch):
+    def test_creates_trace_file(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ):
         with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "nested" / "phase_trace.json.gz"
+            path = Path(tmpdir) / "nested" / "deeper" / "phase_trace.json.gz"
             averages = MagicMock()
             averages.table.return_value = "ops"
             profiler = MagicMock()
@@ -347,12 +586,32 @@ class TestPhaseTimerTorchProfile:
                 torch_profile=True,
                 working_dir=path.parent,
             ).make()
-            with timer.phase("work"):
-                pass
-            timer.log_summary()
+            fake_torch.profiler.profile.assert_called_once_with(
+                activities=["cpu"],
+                with_stack=True,
+                acc_events=True,
+            )
+            with caplog.at_level(logging.INFO):
+                with timer.phase("work"):
+                    pass
+                timer.log_summary()
             profiler.start.assert_called_once()
             profiler.stop.assert_called_once()
             profiler.export_chrome_trace.assert_called_once_with(str(path))
+            averages.table.assert_called_once_with(
+                sort_by="self_cpu_time_total",
+                row_limit=20,
+            )
+            assert [
+                record.message
+                for record in caplog.records
+                if "Saved profiler" in record.message
+            ] == [f"Saved profiler trace to {path}"]
+            assert [
+                record.message
+                for record in caplog.records
+                if "Top ops" in record.message
+            ] == ["Top ops by CPU time:\nops"]
             assert path.parent.is_dir()
 
     def test_log_summary_clears_profiler_and_is_idempotent(
@@ -378,6 +637,11 @@ class TestPhaseTimerTorchProfile:
                 torch_profile=True,
                 working_dir=path.parent,
             ).make()
+            fake_torch.profiler.profile.assert_called_once_with(
+                activities=["cpu"],
+                with_stack=True,
+                acc_events=True,
+            )
             with timer.phase("work"):
                 pass
             timer.log_summary()
@@ -397,6 +661,7 @@ class TestPhaseTimerTorchProfile:
             with timer.phase("work"):
                 pass
             timer.log_summary()
+            assert timer._profiler is None
             assert not Path(path).exists()
 
     def test_no_trace_when_timer_disabled(self):
@@ -474,6 +739,94 @@ class TestPhaseTimerCudaEvents:
         end.synchronize.assert_called_once()
         assert summary["gpu.forward_loss.gpu_sec"] == pytest.approx(0.0125)
         assert summary["gpu.forward_loss.gpu_count"] == 1.0
+
+    def test_cuda_summary_formats_values_and_percentages(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        timer = _phase_timer_config(enabled=True, cuda_events=True).make()
+        first_start = MagicMock()
+        first_end = MagicMock()
+        first_start.elapsed_time.return_value = 750.0
+        second_start = MagicMock()
+        second_end = MagicMock()
+        second_start.elapsed_time.return_value = 250.0
+        timer.record_cuda_events(
+            "forward",
+            cast(CudaEventProtocol, first_start),
+            cast(CudaEventProtocol, first_end),
+        )
+        timer.record_cuda_events(
+            "backward",
+            cast(CudaEventProtocol, second_start),
+            cast(CudaEventProtocol, second_end),
+        )
+
+        with caplog.at_level(logging.INFO):
+            timer.log_summary()
+
+        messages = [record.message for record in caplog.records]
+        summary = next(
+            message for message in messages if "CUDA Event Timing Summary" in message
+        )
+        assert summary.splitlines() == [
+            "CUDA Event Timing Summary",
+            "  phase                          gpu_time      pct  count",
+            "  ──────────────────────────── ──────────  ───────  ─────",
+            "  forward                          0.750s  (75.0%)  x  1",
+            "  backward                         0.250s  (25.0%)  x  1",
+            "  ──────────────────────────── ──────────  ───────  ─────",
+            "  total                            1.000s",
+        ]
+
+    def test_cuda_summary_sub_millisecond_has_full_percentage(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        timer = _phase_timer_config(enabled=True, cuda_events=True).make()
+        start = MagicMock()
+        end = MagicMock()
+        start.elapsed_time.return_value = 0.5
+        timer.record_cuda_events(
+            "short",
+            cast(CudaEventProtocol, start),
+            cast(CudaEventProtocol, end),
+        )
+
+        with caplog.at_level(logging.INFO):
+            timer.log_summary()
+
+        summary = next(
+            record.message
+            for record in caplog.records
+            if "CUDA Event Timing Summary" in record.message
+        )
+        assert "(100.0%)" in summary
+
+    def test_cuda_summary_zero_duration_uses_zero_percent(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        timer = _phase_timer_config(enabled=True, cuda_events=True).make()
+        start = MagicMock()
+        end = MagicMock()
+        start.elapsed_time.return_value = 0.0
+        timer.record_cuda_events(
+            "instant",
+            cast(CudaEventProtocol, start),
+            cast(CudaEventProtocol, end),
+        )
+
+        with caplog.at_level(logging.INFO):
+            timer.log_summary()
+
+        summary = next(
+            record.message
+            for record in caplog.records
+            if "CUDA Event Timing Summary" in record.message
+        )
+        assert "instant                          0.000s  ( 0.0%)  x  1" in summary
+        assert "total                            0.000s" in summary
 
     def test_record_cuda_events_logs_deferred_summary(
         self,
@@ -617,8 +970,12 @@ class TestTorchProfilerWindow:
     ) -> None:
         fake, _, _ = _fake_torch(cuda=False)
         monkeypatch.setattr("priml.train.profiler.torch", fake)
-        with pytest.raises(RuntimeError, match="Memory profiling requires CUDA"):
+        with pytest.raises(RuntimeError) as exc_info:
             TorchProfiler.Config(memory_profile=True).make()
+        assert str(exc_info.value) == (
+            "Memory profiling requires CUDA, but CUDA is not available. "
+            "Set memory_profile=False or run on a CUDA-enabled device."
+        )
 
     def test_window_records_between_start_and_end_then_exports(
         self,
@@ -632,8 +989,11 @@ class TestTorchProfilerWindow:
             torch_profile_start=2,
             torch_profile_end=4,
             profile_cuda=False,
+            with_stack=False,
+            record_shapes=True,
+            profile_memory=True,
             schedule=ProfilerSchedule(wait=1, warmup=1, active=2),
-            working_dir=tmp_path / "prof",
+            working_dir=tmp_path / "root" / "prof",
         ).make()
         fake.profiler.schedule.assert_called_once_with(
             wait=1,
@@ -641,27 +1001,48 @@ class TestTorchProfilerWindow:
             active=2,
             repeat=1,
         )
-        assert fake.profiler.profile.call_args.kwargs["activities"] == ["cpu"]
-        assert fake.profiler.profile.call_args.kwargs["schedule"] == "schedule"
+        assert fake.profiler.profile.call_args.kwargs == {
+            "activities": ["cpu"],
+            "with_stack": False,
+            "record_shapes": True,
+            "profile_memory": True,
+            "schedule": "schedule",
+        }
 
         with caplog.at_level(logging.INFO):
             for step in range(6):
                 profiling.on_step_start(step)
+                if step == 1:
+                    assert profiling._profiler_started is False
+                if step == 2:
+                    assert profiling._profiler_started is True
                 profiling.on_step_end(step)
 
         profiler.start.assert_called_once()
         assert profiler.step.call_count == 2  # Steps 2 and 3.
         profiler.stop.assert_called_once()
         profiler.export_chrome_trace.assert_called_once_with(
-            str(tmp_path / "prof" / "trace_step_4.json.gz"),
+            str(tmp_path / "root" / "prof" / "trace_step_4.json.gz"),
         )
         assert averages.table.call_args.kwargs == {
             "sort_by": "self_cpu_time_total",
             "row_limit": 20,
         }
-        assert (tmp_path / "prof").is_dir()
+        assert (tmp_path / "root" / "prof").is_dir()
         assert profiling.profiler is None
-        assert any("Profiler top ops" in r.message for r in caplog.records)
+        assert profiling._profiler_started is False
+        assert [
+            record.message
+            for record in caplog.records
+            if "Profiler top ops" in record.message
+        ] == ["Profiler top ops:\nops"]
+        assert [
+            record.message
+            for record in caplog.records
+            if "Saved profiler trace" in record.message
+        ] == [
+            f"Saved profiler trace to {tmp_path / 'root' / 'prof' / 'trace_step_4.json.gz'}",
+        ]
 
     def test_cuda_activities_sort_by_cuda_time(
         self,
@@ -690,6 +1071,7 @@ class TestTorchProfilerWindow:
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         fake, _, _ = _fake_torch(cuda=True)
         monkeypatch.setattr("priml.train.profiler.torch", fake)
@@ -698,19 +1080,32 @@ class TestTorchProfilerWindow:
             memory_profile=True,
             memory_profile_start=1,
             memory_profile_end=2,
-            working_dir=tmp_path / "mem",
+            working_dir=tmp_path / "root" / "mem",
         ).make()
 
-        for step in range(3):
-            profiling.on_step_start(step)
-            profiling.on_step_end(step)
+        with caplog.at_level(logging.INFO):
+            for step in range(3):
+                profiling.on_step_start(step)
+                profiling.on_step_end(step)
+            profiling.on_step_end(2)
 
-        fake.cuda.memory._record_memory_history.assert_any_call()
-        fake.cuda.memory._dump_snapshot.assert_called_once_with(
-            str(tmp_path / "mem" / "memory_step_2.pickle"),
+        fake.cuda.memory._record_memory_history.assert_has_calls(
+            [
+                call(),
+                call(enabled=None),
+            ],
+        )
+        assert fake.cuda.memory._record_memory_history.call_count == 3
+        assert fake.cuda.memory._dump_snapshot.call_count == 2
+        fake.cuda.memory._dump_snapshot.assert_called_with(
+            str(tmp_path / "root" / "mem" / "memory_step_2.pickle"),
         )
         fake.cuda.memory._record_memory_history.assert_called_with(enabled=None)
-        assert (tmp_path / "mem").is_dir()
+        assert [record.message for record in caplog.records] == [
+            f"Saved memory snapshot to {tmp_path / 'root' / 'mem' / 'memory_step_2.pickle'}",
+            f"Saved memory snapshot to {tmp_path / 'root' / 'mem' / 'memory_step_2.pickle'}",
+        ]
+        assert (tmp_path / "root" / "mem").is_dir()
 
     def test_unprofiled_rank_builds_no_profiler_and_ignores_steps(
         self,
@@ -723,6 +1118,7 @@ class TestTorchProfilerWindow:
         profiling = TorchProfiler.Config(ranks=[0], torch_profile_start=0).make()
 
         assert profiling.profiler is None
+        assert profiling._profiler_started is False
         fake.profiler.profile.assert_not_called()
         profiling.on_step_start(0)
         profiling.on_step_end(0)
@@ -865,6 +1261,17 @@ class TestTorchProfilerCleanup:
 
         profiler.stop.assert_called_once()
         profiler.export_chrome_trace.assert_called_once()
+        assert profiling._profiler_started is False
+
+    def test_cleanup_ignores_profiler_that_never_started(self) -> None:
+        profiling = TorchProfiler.Config(torch_profile=False).make()
+        profiler = MagicMock()
+        profiling.profiler = cast("torch.profiler.profile", profiler)
+
+        profiling.cleanup()
+
+        profiler.stop.assert_not_called()
+        assert profiling._profiler_started is False
 
     def test_cleanup_stops_running_profiler(self) -> None:
         """T-032: cleanup must stop a profiler still running at training end."""
@@ -884,6 +1291,7 @@ class TestTorchProfilerCleanup:
         profiling.cleanup()
 
         profiler.stop.assert_called_once()
+        assert profiling._profiler_started is False
 
 
 if __name__ == "__main__":

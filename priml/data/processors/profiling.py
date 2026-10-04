@@ -77,19 +77,17 @@ class ProfiledProcessor:
             return
 
         while True:
-            try:
-                start_event = torch.cuda.Event(enable_timing=True)
-                start_event.record()
+            start_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
 
-                sample = next(processed)
+            sample = next(processed, None)
+            if sample is None:
+                return
 
-                end_event = torch.cuda.Event(enable_timing=True)
-                end_event.record()
-                torch.cuda.synchronize()
-                elapsed_ms: float = start_event.elapsed_time(end_event)
-                logger.debug("%s: %.1fms", self.name, elapsed_ms)
+            end_event = torch.cuda.Event(enable_timing=True)
+            end_event.record()
+            torch.cuda.synchronize()
+            elapsed_ms: float = start_event.elapsed_time(end_event)
+            logger.debug("%s: %.1fms", self.name, elapsed_ms)
 
-                yield sample
-
-            except StopIteration:
-                break
+            yield sample

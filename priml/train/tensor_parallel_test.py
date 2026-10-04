@@ -7,6 +7,9 @@ tp=1 must be a structural no-op (forward bit-for-bit). Multirank correctness
 from __future__ import annotations
 
 from typing import cast, override
+from unittest.mock import Mock
+
+import logging
 
 from torch import Tensor, nn
 from torch.distributed.device_mesh import DeviceMesh
@@ -81,7 +84,10 @@ def test_unknown_shard_style_is_refused() -> None:
     """
     config = Linear.Config(channels_in=8, channels_out=8)
     setattr(config, "shard", "colwize")  # noqa: B010 -- Bypasses the static type deliberately; see docstring.
-    with pytest.raises(ValueError, match="Unknown shard style"):
+    with pytest.raises(
+        ValueError,
+        match="Unknown shard style 'colwize' on Linear\\.",
+    ):
         _shard_style(config.make())
 
 
@@ -136,11 +142,15 @@ def test_the_configured_mesh_dim_is_the_one_sharded(
         "global_device_mesh",
         lambda: cast(DeviceMesh, _NamedMesh()),
     )
-    strategy = TensorParallel.Config(mesh_dim="model").make()
+    config = TensorParallel.Config(mesh_dim="model")
+    strategy = config.make()
 
     strategy(Linear.Config(channels_in=8, channels_out=8).finalize().make())
 
     assert asked == ["model"], asked
+    assert strategy.mesh_dim == "model"
+    assert strategy.config == config
+    assert strategy.device == torch.device("cpu")
 
 
 def test_tp1_applier_is_structural_noop() -> None:
@@ -188,8 +198,10 @@ class _Validated(nn.Module):
 
 def test_tp2_applier_plans_every_declared_style_then_validates(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Over a real tp axis the plan names each sharded leaf by its module path."""
+    caplog.set_level(logging.INFO)
     plans: list[dict[str, ParallelStyle]] = []
 
     def record(
@@ -197,7 +209,8 @@ def test_tp2_applier_plans_every_declared_style_then_validates(
         mesh: object,
         plan: dict[str, ParallelStyle],
     ) -> nn.Module:
-        del mesh
+        assert module is model
+        assert isinstance(mesh, _TpTwoSubmesh)
         plans.append(dict(plan))
         return module
 
@@ -216,6 +229,7 @@ def test_tp2_applier_plans_every_declared_style_then_validates(
     validated = model[1]
     assert isinstance(validated, _Validated)
     assert validated.checked == 1
+    assert caplog.messages == ["Applied tensor parallel: 3 sharded submodules."]
 
 
 def test_tp2_applier_leaves_a_model_with_no_shard_declarations_alone(
@@ -238,8 +252,11 @@ def test_strategy_requires_a_distributed_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(tensor_parallel, "global_device_mesh", lambda: None)
-    with pytest.raises(RuntimeError, match="requires distributed mode"):
+    with pytest.raises(RuntimeError) as error:
         TensorParallel.Config().make()
+    assert str(error.value) == (
+        "TensorParallel requires distributed mode. Initialize with MultiProcess runtime."
+    )
 
 
 def test_strategy_rejects_a_mesh_dim_the_mesh_lacks(
@@ -252,6 +269,44 @@ def test_strategy_rejects_a_mesh_dim_the_mesh_lacks(
     )
     with pytest.raises(ValueError, match="'model' not in \\('tp',\\)"):
         TensorParallel.Config(mesh_dim="model").make()
+
+
+def test_cuda_mesh_places_strategy_on_current_cuda_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _CudaMesh(_TpOneMesh):
+        device_type = "cuda"
+
+    device_factory = torch.device
+    device_args: list[tuple[object, ...]] = []
+
+    def record_device(
+        device_type: str,
+        index: int | None = None,
+    ) -> torch.device:
+        args: tuple[object, ...] = (
+            (device_type,) if index is None else (device_type, index)
+        )
+        device_args.append(args)
+        return (
+            device_factory(device_type, index)
+            if index is not None
+            else device_factory(device_type)
+        )
+
+    torch_proxy = Mock(wraps=torch)
+    torch_proxy.device = record_device
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            tensor_parallel,
+            "global_device_mesh",
+            lambda: cast(DeviceMesh, _CudaMesh()),
+        )
+        scoped.setattr(torch.cuda, "current_device", lambda: 3)
+        scoped.setattr(tensor_parallel, "torch", torch_proxy)
+        strategy = TensorParallel.Config().make()
+        assert device_args == [("cuda", 3)]
+        assert strategy.device == device_factory("cuda", 3)
 
 
 def test_builtin_styles_dispatch_on_the_declared_shard() -> None:

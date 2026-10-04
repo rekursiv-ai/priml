@@ -17,7 +17,13 @@ import torch.distributed as dist
 
 from priml.optimizers.parameter_filter import complement, everything, matching
 from priml.testing.fixtures import get_device
-from priml.train.ema import EMA, NoEMA, karras_decay
+from priml.train.ema import (
+    EMA,
+    NoEMA,
+    _clone_module_state,
+    _StateDict,
+    karras_decay,
+)
 
 
 if TYPE_CHECKING:
@@ -328,13 +334,16 @@ def test_ema_state_dict_preserves_metadata() -> None:
 
     state = ema.state_dict()
     assert "shadow_model" in state
-    shadow_sd = state["shadow_model"]
+    shadow_sd = cast(_StateDict, state["shadow_model"])
 
     # nn.Module.state_dict attaches _metadata used by load_state_dict
     # (module-version hooks). Round-tripping through a plain dict drops it.
     assert hasattr(shadow_sd, "_metadata"), (
         "EMA.state_dict() dropped shadow_model _metadata"
     )
+    assert ema.shadow_model is not None
+    source_sd = cast(_StateDict, ema.shadow_model.state_dict())
+    assert shadow_sd._metadata == source_sd._metadata
 
 
 def test_ema_apply_to_raises_on_missing_tracked_param() -> None:
@@ -793,6 +802,7 @@ def test_ema_module_apply_to_after_load_before_init_swaps_shadow() -> None:
     )
 
 
+@pytest.mark.gpu_torch_cuda
 @pytest.mark.usefixtures("warm_device_kernels")
 def test_ema_loaded_shadow_moves_to_live_param_device() -> None:
     """A shadow restored on the wrong device re-devices to the live params.
@@ -854,6 +864,27 @@ def test_ema_clone_path_bit_for_bit_default_config() -> None:
 
 
 # -- NoEMA uniform interface --------------------------------------------------
+
+
+def test_no_ema_state_dict_round_trips_counters() -> None:
+    ema = NoEMA()
+    assert ema.shadow_model is None
+    assert ema.global_step == 0
+    assert ema.local_step == 0
+    assert ema.state_dict() == {"global_step": 0, "local_step": 0}
+
+    ema.load_state_dict({"global_step": 8})
+    assert ema.state_dict() == {"global_step": 8, "local_step": 0}
+    ema.load_state_dict({"global_step": 12, "local_step": 3})
+    assert ema.state_dict() == {"global_step": 12, "local_step": 3}
+
+
+def test_clone_plain_module_state_without_metadata() -> None:
+    source = {"weight": torch.tensor([2.0, 3.0])}
+    cloned = _clone_module_state(source)
+    assert torch.equal(cloned["weight"], source["weight"])
+    assert cloned["weight"].data_ptr() != source["weight"].data_ptr()
+    assert not hasattr(cloned, "_metadata")
 
 
 def test_no_ema_apply_to_is_noop() -> None:

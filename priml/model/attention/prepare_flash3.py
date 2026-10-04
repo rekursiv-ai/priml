@@ -64,8 +64,10 @@ def main() -> int:
       code: Process exit code.
 
     """
+    if __doc__ is None:
+        raise ValueError("Expected __doc__ is not None.")
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -242,7 +244,7 @@ def _build_environment(environment: Mapping[str, str]) -> dict[str, str]:
 def _validate_build_runtime() -> None:
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise RuntimeError("FA3 must be built on x86_64 Linux.")
-    if torch.__version__.split("+", maxsplit=1)[0] != "2.9.1":
+    if torch.__version__.partition("+")[0] != "2.9.1":
         raise RuntimeError(
             f"FA3 requires Torch 2.9.1; found {torch.__version__}. Build it in the isolated runtime: `uv --quiet run --frozen --isolated --project priml/baselines/nanochat/runtime python -m priml.model.attention.prepare_flash3`.",
         )
@@ -271,9 +273,8 @@ def _nvcc_path() -> Path:
 
 def _write_receipt(path: Path) -> None:
     values = runtime_receipt(path)
-    (path / "READY").write_text(
-        "".join(f"{name}={value}\n" for name, value in values.items()),
-        encoding="utf-8",
+    (path / "READY").write_bytes(
+        "".join(f"{name}={value}\n" for name, value in values.items()).encode(),
     )
 
 

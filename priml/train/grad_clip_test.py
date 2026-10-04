@@ -148,6 +148,15 @@ def test_total_param_norm_ignores_gradients() -> None:
     _close(total_param_norm(param), torch.tensor(5.0))
 
 
+def test_total_param_norm_respects_norm_type_across_parameters() -> None:
+    device = _test_device()
+    params = [
+        torch.nn.Parameter(torch.tensor([1.0, 2.0], device=device)),
+        torch.nn.Parameter(torch.tensor([2.0, 2.0, 2.0], device=device)),
+    ]
+    _close(total_param_norm(params, norm_type=3.0), torch.tensor(33.0 ** (1 / 3)))
+
+
 def test_total_param_norm_inf_uses_max_abs_value() -> None:
     """norm_type=inf reports the max absolute parameter component."""
     device = _test_device()
@@ -159,6 +168,32 @@ def test_total_grad_norm_accepts_a_single_tensor() -> None:
     p = torch.nn.Parameter(torch.zeros(2, device=_test_device()))
     p.grad = torch.tensor([3.0, 4.0], device=_test_device())
     _close(total_grad_norm(p, foreach=_FOREACH), torch.tensor(5.0))
+
+
+def test_total_grad_norm_forwards_default_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[Tensor], float, bool, bool | None]] = []
+
+    def get_total_norm(
+        grads: list[Tensor],
+        norm_type: float,
+        error_if_nonfinite: bool,
+        foreach: bool | None,
+    ) -> Tensor:
+        calls.append((grads, norm_type, error_if_nonfinite, foreach))
+        return torch.tensor(5.0)
+
+    monkeypatch.setattr(torch.nn.utils, "get_total_norm", get_total_norm)
+    param = torch.nn.Parameter(torch.zeros(2))
+    param.grad = torch.tensor([3.0, 4.0])
+    assert total_grad_norm(param) == torch.tensor(5.0)
+    assert len(calls) == 1
+    grads, norm_type, error_if_nonfinite, foreach = calls[0]
+    assert len(grads) == 1
+    assert norm_type == 2.0
+    assert error_if_nonfinite is False
+    assert foreach is True
 
 
 @pytest.fixture

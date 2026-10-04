@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from threading import Event, Thread, get_ident
+from threading import Event, Thread, current_thread, get_ident
+from types import ModuleType
 from typing import TYPE_CHECKING, Protocol, cast, override
 
 import json
+import sys
 import tempfile
 
 from configgle import Fig, Makes
@@ -46,6 +48,20 @@ class _FakeWriter:
 
     def close(self) -> None:
         self.close_count += 1
+
+
+class _FakeSummaryWriter(_FakeWriter):
+    def __init__(self, log_dir: str) -> None:
+        super().__init__()
+        self.log_dir = log_dir
+
+
+class _FakeTensorboardModule(ModuleType):
+    SummaryWriter: type[_FakeSummaryWriter]
+
+    def __init__(self) -> None:
+        super().__init__("torch.utils.tensorboard")
+        self.SummaryWriter = _FakeSummaryWriter
 
 
 def _tracker_with_fake_writer() -> tuple[TensorBoardTracker, _FakeWriter]:
@@ -98,13 +114,41 @@ def test_tensorboard_default_working_dir_is_opinionated() -> None:
     assert TensorBoardTracker.Config().working_dir == "/tensorboard"
 
 
+def test_tensorboard_log_metrics_requires_a_writer() -> None:
+    tracker = TensorBoardTracker.__new__(TensorBoardTracker)
+    tracker.writer = None
+
+    with pytest.raises(ValueError, match=r"^Expected self\.writer is not None\.$"):
+        tracker.log_metrics({"loss": 1.0}, step=0)
+
+
+def test_tensorboard_loads_optional_dependency_lazily(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = _FakeTensorboardModule()
+    monkeypatch.setitem(sys.modules, "torch.utils.tensorboard", module)
+    monkeypatch.setattr(tracker, "_summary_writer_cls", None)
+
+    tb_tracker = TensorBoardTracker.Config(working_dir=tmp_path).make()
+    writer = tb_tracker.writer
+    assert isinstance(writer, _FakeSummaryWriter)
+    assert writer.log_dir == str(tmp_path)
+
+    tb_tracker.log_metrics({"loss": 0.5}, step=3)
+    assert writer.scalars == [("loss", 0.5, 3)]
+
+
 def test_tensorboard_requires_the_optional_dependency(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(tracker, "_summary_writer_cls", None)
-    with pytest.raises(ImportError, match="tensorboard is not installed"):
+    with pytest.raises(ImportError) as exc_info:
         TensorBoardTracker.Config(working_dir=tmp_path).make()
+    assert str(exc_info.value) == (
+        "tensorboard is not installed. Install with: pip install tensorboard"
+    )
 
 
 def test_tensorboard_ignores_images_and_notes() -> None:
@@ -364,6 +408,80 @@ def test_wandb_no_run_id_opens_fresh_run(
     assert kwargs["resume"] is None
 
 
+def test_wandb_initialization_retains_active_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run = _FakeRun()
+
+    class _Wandb:
+        class Settings:
+            def __init__(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+
+        @classmethod
+        def init(cls, **kwargs: object) -> _FakeRun:
+            del kwargs
+            return run
+
+    monkeypatch.setattr(tracker, "is_rank_zero", lambda: True)
+    monkeypatch.setattr(tracker, "wandb", _Wandb)
+    wandb_tracker = WandbTracker(
+        WandbTracker.Config(project="trm", working_dir=tmp_path / "wandb"),
+    )
+
+    wandb_tracker.log_metrics({"loss": 0.5}, step=2)
+
+    assert run.logged == [({"loss": 0.5}, 2)]
+
+
+def test_wandb_init_forwards_configured_run_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = WandbTracker.Config(
+        project="priml-tests",
+        name="trial-7",
+        run_id="abc123",
+        group="sweep",
+        mode="offline",
+        working_dir=tmp_path / "wandb",
+        notes="Keep this note.",
+    )
+    config.run_config = {"learning_rate": 0.01, "batch_size": 4}
+
+    with caplog.at_level("INFO"):
+        kwargs, _run = _init_tracker(monkeypatch, config)
+
+    assert [record.message for record in caplog.records] == [
+        (
+            "WandbTracker: initializing run "
+            "(project=priml-tests, name=trial-7, mode=offline, capture_console=True)."
+        ),
+        "WandbTracker: run initialized.",
+    ]
+    assert {key: value for key, value in kwargs.items() if key != "settings"} == {
+        "project": "priml-tests",
+        "name": "trial-7",
+        "id": "abc123",
+        "resume": "allow",
+        "group": "sweep",
+        "mode": "offline",
+        "dir": tmp_path / "wandb",
+        "config": {"learning_rate": 0.01, "batch_size": 4},
+        "notes": "Keep this note.",
+    }
+    settings = kwargs["settings"]
+    assert settings is not None
+    assert cast(_Settings, settings).kwargs == {
+        "init_timeout": 30.0,
+        "x_service_wait": 30.0,
+        "x_file_stream_transmit_interval": 15.0,
+        "x_stats_sampling_interval": 60.0,
+    }
+
+
 def test_wandb_defaults_bound_startup_and_capture_console(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -375,6 +493,32 @@ def test_wandb_defaults_bound_startup_and_capture_console(
     assert "console" not in settings.kwargs
     assert settings.kwargs["init_timeout"] == 30.0
     assert settings.kwargs["x_service_wait"] == 30.0
+
+
+def test_wandb_zero_ingestion_intervals_use_vendor_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kwargs = _init_kwargs(
+        monkeypatch,
+        WandbTracker.Config(
+            project="trm",
+            ingestion=WandbIngestion(
+                init_timeout_sec=1.0,
+                service_wait_sec=1.0,
+                flush_interval_sec=1.0,
+                system_metrics_interval_sec=1.0,
+            ),
+        ),
+    )
+
+    settings = kwargs["settings"]
+    assert settings is not None
+    assert cast(_Settings, settings).kwargs == {
+        "init_timeout": 1.0,
+        "x_service_wait": 1.0,
+        "x_file_stream_transmit_interval": 1.0,
+        "x_stats_sampling_interval": 1.0,
+    }
 
 
 def test_wandb_capture_console_false_disables_console(
@@ -534,6 +678,7 @@ class _FailingWandb:
 
 def test_wandb_startup_failure_becomes_noop_tracker(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A W&B init failure should not strand a distributed training run."""
     monkeypatch.setattr(tracker, "is_rank_zero", lambda: True)
@@ -541,9 +686,13 @@ def test_wandb_startup_failure_becomes_noop_tracker(
 
     config = WandbTracker.Config(project="trm")
     config.working_dir = Path(tempfile.mkdtemp())
-    wandb_tracker = WandbTracker(config)
+    with caplog.at_level("ERROR"):
+        wandb_tracker = WandbTracker(config)
 
     assert wandb_tracker._run is None
+    assert caplog.records[-1].message == (
+        "W&B startup failed; continuing with a no-op tracker."
+    )
 
 
 def test_wandb_startup_failure_propagates_when_not_allowed(
@@ -560,6 +709,7 @@ def test_wandb_startup_failure_propagates_when_not_allowed(
 
 def test_wandb_replays_startup_logs_only_when_console_is_captured(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     replays: list[int] = []
     monkeypatch.setattr(
@@ -572,11 +722,21 @@ def test_wandb_replays_startup_logs_only_when_console_is_captured(
         "replay_buffered_logs",
         lambda: replays.append(1),
     )
-    _init_kwargs(
-        monkeypatch,
-        WandbTracker.Config(project="trm", replay_startup_logs=True),
-    )
+    with caplog.at_level("INFO"):
+        _init_kwargs(
+            monkeypatch,
+            WandbTracker.Config(project="trm", replay_startup_logs=True),
+        )
     assert replays == [1]
+    assert [record.message for record in caplog.records] == [
+        (
+            "WandbTracker: initializing run "
+            "(project=trm, name=None, mode=online, capture_console=True)."
+        ),
+        "WandbTracker: run initialized.",
+        "WandbTracker: replaying buffered startup logs.",
+        "WandbTracker: startup log replay complete.",
+    ]
     _init_kwargs(
         monkeypatch,
         WandbTracker.Config(
@@ -594,6 +754,20 @@ def test_wandb_working_dir_is_scoped_by_owner() -> None:
     assert config.finalize().working_dir == Path("/scratch/runs/study/run-1/wandb")
 
 
+def test_wandb_creates_nested_working_directories(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    working_dir = tmp_path / "nested" / "deeper" / "wandb"
+
+    _init_tracker(
+        monkeypatch,
+        WandbTracker.Config(project="trm", working_dir=working_dir),
+    )
+
+    assert working_dir.is_dir()
+
+
 def test_wandb_logs_the_non_scalar_skip_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -603,7 +777,7 @@ def test_wandb_logs_the_non_scalar_skip_once(
         wandb_tracker.log_metrics({"score": 2.0, "extras": {"a": 2}}, step=1)
     skips = [r for r in caplog.records if "skipping non-scalar" in r.message]
     assert len(skips) == 1
-    assert "extras" in skips[0].message
+    assert skips[0].message == "WandbTracker skipping non-scalar metrics: ['extras']"
     assert len(run.logged) == 2
 
 
@@ -622,7 +796,10 @@ def test_wandb_log_images_is_a_noop_without_a_run() -> None:
 # -- FileTracker -------------------------------------------------------------
 
 
-def test_file_tracker_writes_prefixed_scalar_json(tmp_path: Path) -> None:
+def test_file_tracker_writes_prefixed_scalar_json(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """FileTracker expands explicit context and writes prefixed scalar JSON.
 
     Non-scalar values (an ``extras`` payload) are dropped; the file holds only
@@ -632,17 +809,24 @@ def test_file_tracker_writes_prefixed_scalar_json(tmp_path: Path) -> None:
         working_dir=tmp_path / "metrics.json",
     ).make()
 
-    tracker.log_metrics(
-        {"exact_accuracy": 0.5, "loss": torch.tensor(0.25), "extras": {"x": object()}},
-        7,
-        prefix="eval/",
-    )
+    with caplog.at_level("INFO"):
+        tracker.log_metrics(
+            {
+                "exact_accuracy": 0.5,
+                "loss": torch.tensor(0.25),
+                "extras": {"x": object()},
+            },
+            7,
+            prefix="eval/",
+        )
 
     out = tmp_path / "metrics.json"
+    assert out.read_text() == '{\n  "eval/exact_accuracy": 0.5,\n  "eval/loss": 0.25\n}'
     assert json.loads(out.read_text()) == {
         "eval/exact_accuracy": 0.5,
         "eval/loss": 0.25,
     }
+    assert caplog.records[-1].message == f"Wrote metrics to {out}"
     assert not list(tmp_path.glob("*.tmp.*"))
 
 
@@ -653,6 +837,34 @@ def test_file_tracker_last_write_wins(tmp_path: Path) -> None:
     tracker.log_metrics({"score": 0.1}, 1, prefix="eval/")
     tracker.log_metrics({"score": 0.9}, 2, prefix="eval/")
     assert json.loads(target.read_text()) == {"eval/score": 0.9}
+
+
+def test_file_tracker_creates_nested_parent_directories(tmp_path: Path) -> None:
+    target = tmp_path / "nested" / "deeper" / "metrics.json"
+    tracker = FileTracker.Config(working_dir=target).make()
+
+    tracker.log_metrics({"score": 0.9}, 2, prefix="eval/")
+
+    assert json.loads(target.read_text()) == {"eval/score": 0.9}
+
+
+def test_file_tracker_sorts_metric_keys(tmp_path: Path) -> None:
+    target = tmp_path / "metrics.json"
+    tracker = FileTracker.Config(working_dir=target).make()
+
+    tracker.log_metrics({"zeta": 1.0, "alpha": 2.0}, 2, prefix="eval/")
+
+    assert target.read_text() == '{\n  "eval/alpha": 2.0,\n  "eval/zeta": 1.0\n}'
+
+
+def test_file_tracker_default_prefix_is_empty(tmp_path: Path) -> None:
+    target = tmp_path / "metrics.json"
+    config = FileTracker.Config(working_dir=target, capture_prefix="")
+    tracker = config.make()
+
+    tracker.log_metrics({"score": 1.0}, 2)
+
+    assert json.loads(target.read_text()) == {"score": 1.0}
 
 
 def test_file_tracker_ignores_non_capture_prefix(tmp_path: Path) -> None:
@@ -758,6 +970,15 @@ def test_tracker_list_fans_metrics_to_all_children() -> None:
         assert child.metrics == [({"score": 1.0}, 3, "eval/")]
 
 
+def test_tracker_list_default_prefix_is_empty() -> None:
+    tracker_list, children = _tracker_list_with_children(2)
+
+    tracker_list.log_metrics({"score": 1.0}, 3)
+
+    for child in children:
+        assert child.metrics == [({"score": 1.0}, 3, "")]
+
+
 def test_tracker_list_fans_images_and_close_to_all_children() -> None:
     """log_images and close fan out to every child."""
     tracker_list, children = _tracker_list_with_children(2)
@@ -823,7 +1044,10 @@ class _BlockingAsyncChild:
         self.entered = Event()
         self.release = Event()
         self.metrics: list[dict[str, object]] = []
+        self.prefixes: list[str] = []
+        self.images: list[list[object]] = []
         self.thread_ids: list[int] = []
+        self.thread_names: list[str] = []
         self.closed = False
 
     def log_metrics(
@@ -833,15 +1057,23 @@ class _BlockingAsyncChild:
         *,
         prefix: str = "",
     ) -> None:
-        del step, prefix
+        del step
         self.entered.set()
         if not self.release.wait(timeout=2.0):
             raise TimeoutError("blocking tracker was not released")
         self.metrics.append(dict(metrics))
+        self.prefixes.append(prefix)
         self.thread_ids.append(get_ident())
+        self.thread_names.append(current_thread().name)
 
     def log_images(self, key: str, images: list[object], step: int) -> None:
-        del key, images, step
+        del key, step
+        self.entered.set()
+        if not self.release.wait(timeout=2.0):
+            raise TimeoutError("blocking tracker was not released")
+        self.images.append(list(images))
+        self.thread_ids.append(get_ident())
+        self.thread_names.append(current_thread().name)
 
     def log_notes(self, notes: str) -> None:
         del notes
@@ -854,10 +1086,13 @@ def test_async_tracker_is_enabled_ordered_and_nonblocking_by_default() -> None:
     tracker = AsyncTracker.Config(tracker=_BlockingAsyncChild.Config()).make()
     child = tracker.tracker
     assert isinstance(child, _BlockingAsyncChild)
+    assert tracker._closed is False
+    assert tracker._executor is not None
+    assert tracker._executor._max_workers == 1
     caller_thread = get_ident()
 
     first = {"index": 1}
-    tracker.log_metrics(first, 1)
+    tracker.log_metrics(first, 1, prefix="eval/")
     assert child.entered.wait(timeout=1.0)
     first["index"] = 99
 
@@ -877,8 +1112,91 @@ def test_async_tracker_is_enabled_ordered_and_nonblocking_by_default() -> None:
 
     assert AsyncTracker.Config().enabled is True
     assert child.metrics == [{"index": 1}, {"index": 2}]
+    assert child.prefixes == ["eval/", ""]
     assert child.thread_ids[0] != caller_thread
+    assert child.thread_names[0].startswith("tracker_")
     assert child.closed
+    assert tracker._closed is True
+
+
+def test_async_tracker_shutdown_waits_for_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async_tracker = AsyncTracker.Config(tracker=_RecordingChild.Config()).make()
+    waits: list[bool] = []
+
+    class _Executor:
+        def shutdown(self, *, wait: bool) -> None:
+            waits.append(wait)
+
+    monkeypatch.setattr(async_tracker, "_executor", _Executor())
+
+    async_tracker.close()
+
+    assert waits == [True]
+
+
+def test_async_tracker_close_waits_for_queued_calls() -> None:
+    tracker = AsyncTracker.Config(tracker=_BlockingAsyncChild.Config()).make()
+    child = tracker.tracker
+    assert isinstance(child, _BlockingAsyncChild)
+    tracker.log_metrics({"loss": 1.0}, 1)
+    assert child.entered.wait(timeout=1.0)
+
+    close_returned = Event()
+    closer = Thread(target=lambda: (tracker.close(), close_returned.set()))
+    closer.start()
+    assert not close_returned.wait(timeout=0.05)
+    child.release.set()
+    closer.join(timeout=1.0)
+
+    assert close_returned.is_set()
+    assert child.closed
+
+
+def test_async_tracker_snapshots_images_before_queueing() -> None:
+    tracker = AsyncTracker.Config(tracker=_BlockingAsyncChild.Config()).make()
+    child = tracker.tracker
+    assert isinstance(child, _BlockingAsyncChild)
+
+    images: list[object] = ["first.png"]
+    tracker.log_images("samples", images, 1)
+    assert child.entered.wait(timeout=1.0)
+    images.append("late.png")
+    child.release.set()
+    tracker.close()
+
+    assert child.images == [["first.png"]]
+    assert child.thread_names[0].startswith("tracker_")
+    assert child.closed
+
+
+def test_async_tracker_disabled_preserves_metric_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = AsyncTracker.Config(
+        tracker=_RecordingChild.Config(),
+        enabled=False,
+    ).make()
+    observed: list[Mapping[str, object]] = []
+    child = tracker.tracker
+
+    def record_metrics(
+        metrics: Mapping[str, object],
+        step: int,
+        *,
+        prefix: str = "",
+    ) -> None:
+        del step, prefix
+        observed.append(metrics)
+
+    monkeypatch.setattr(child, "log_metrics", record_metrics)
+    metrics = {"score": 0.5}
+
+    tracker.log_metrics(metrics, 1)
+
+    assert observed == [metrics]
+    assert observed[0] is metrics
 
 
 def test_async_tracker_can_be_disabled() -> None:
@@ -888,23 +1206,30 @@ def test_async_tracker_can_be_disabled() -> None:
     ).make()
     child = tracker.tracker
     assert isinstance(child, _RecordingChild)
+    assert tracker._executor is None
+    images: list[object] = ["before.png"]
 
-    tracker.log_metrics({"loss": 1.0}, 1)
+    tracker.log_images("samples", images, 1)
+    images.append("after.png")
+    tracker.log_metrics({"loss": 1.0}, 1, prefix="train/")
     tracker.flush()
     tracker.close()
 
-    assert child.metrics == [({"loss": 1.0}, 1, "")]
+    assert child.metrics == [({"loss": 1.0}, 1, "train/")]
+    assert child.images == [("samples", ["before.png", "after.png"], 1)]
     assert child.closed == 1
 
 
 def test_async_tracker_requires_a_child() -> None:
-    with pytest.raises(ValueError, match="requires a child tracker config"):
+    with pytest.raises(ValueError, match="requires a child tracker config") as exc_info:
         AsyncTracker.Config().make()
+    assert str(exc_info.value) == "AsyncTracker requires a child tracker config."
 
 
 def test_unwrap_requires_a_child_beneath_the_wrapper() -> None:
-    with pytest.raises(ValueError, match="requires a child tracker config"):
+    with pytest.raises(ValueError, match="requires a child tracker config") as exc_info:
         unwrap_tracker_config(AsyncTracker.Config())
+    assert str(exc_info.value) == "AsyncTracker requires a child tracker config."
 
 
 def test_async_tracker_forwards_images_and_notes_to_the_child() -> None:
@@ -923,10 +1248,12 @@ def test_async_tracker_refuses_calls_after_close() -> None:
     tracker = AsyncTracker.Config(tracker=_RecordingChild.Config()).make()
     tracker.close()
     tracker.close()
-    with pytest.raises(RuntimeError, match="is closed"):
+    with pytest.raises(RuntimeError, match="is closed") as metrics_error:
         tracker.log_metrics({"loss": 1.0}, 1)
-    with pytest.raises(RuntimeError, match="is closed"):
+    assert str(metrics_error.value) == "AsyncTracker is closed."
+    with pytest.raises(RuntimeError, match="is closed") as notes_error:
         tracker.log_notes("late")
+    assert str(notes_error.value) == "AsyncTracker is closed."
 
 
 class _FailingChild(_RecordingChild):

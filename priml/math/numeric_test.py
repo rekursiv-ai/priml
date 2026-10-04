@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from priml.math.numeric import (
+    _kbn_step,
     custom_grad,
     kahan_sum,
     l2norm,
@@ -86,6 +87,12 @@ def test_log_arctan_exp_asymptotics():
     x_pos = torch.tensor([50.0, 100.0])
     expected = torch.full_like(x_pos, math.log(math.pi / 2))
     assert torch.allclose(log_arctan_exp(x_pos), expected, atol=1e-6)
+
+
+def test_log_arctan_exp_signed_zero_uses_continuous_value() -> None:
+    x = torch.tensor([-0.0, 0.0], dtype=torch.float64)
+    expected = torch.full_like(x, math.log(math.pi / 4))
+    torch.testing.assert_close(log_arctan_exp(x), expected)
 
 
 def test_log_tan_exp_no_nan_inf():
@@ -228,6 +235,11 @@ def test_softcap_zero():
     x = torch.tensor([0.0])
     result = softcap(x, 1.0)
     torch.testing.assert_close(result, torch.tensor([0.0]), rtol=1e-5, atol=1e-5)
+
+
+def test_softcap_default_cap():
+    x = torch.tensor([-1.0, 0.5, 2.0])
+    torch.testing.assert_close(softcap(x), torch.tanh(x))
 
 
 def test_softcap_does_not_truncate_integer_input():
@@ -564,6 +576,12 @@ def test_kahan_sum_keepdim_all_dims_preserves_rank():
     torch.testing.assert_close(result, torch.full_like(result, 6.0))
 
 
+def test_kahan_sum_empty_reductions_preserve_keepdim_shape() -> None:
+    assert kahan_sum(torch.empty(0), keepdim=True).shape == (1,)
+    assert kahan_sum(torch.empty((2, 0)), keepdim=True).shape == (1, 1)
+    assert kahan_sum(torch.empty((3, 0)), dim=1, keepdim=True).shape == (3, 1)
+
+
 def test_smootherstep_boundaries():
     x = torch.tensor([0.0, 1.0])
     y = smootherstep(x)
@@ -722,11 +740,18 @@ def test_softmax_centered_roundtrip():
     x = torch.randn(2, 4)
     y = softmax_centered(x)
     x_back = softmax_centered_inverse(y)
-    # Roundtrip should recover x up to a constant shift (softmax is shift-invariant).
-    # So x_back - x should be approximately constant per row.
-    diff = x_back - x
-    spread = diff.max(dim=-1).values - diff.min(dim=-1).values
-    torch.testing.assert_close(spread, torch.zeros(2), atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(x_back, x, atol=1e-5, rtol=1e-5)
+
+
+def test_softmax_centered_accepts_a_singleton_dimension() -> None:
+    x = torch.tensor([[[0.5, -1.0, 2.0]], [[-0.5, 1.0, 0.0]]])
+    probabilities = softmax_centered(x, dim=1)
+
+    assert probabilities.shape == (2, 2, 3)
+    torch.testing.assert_close(
+        probabilities.sum(dim=1),
+        torch.ones((2, 3)),
+    )
 
 
 def test_sinh_arcsinh_identity():
@@ -742,6 +767,12 @@ def test_sinh_arcsinh_roundtrip():
         y = sinh_arcsinh(x, skewness=sk, tailweight=tw)
         x_back = sinh_arcsinh_inverse(y, skewness=sk, tailweight=tw)
         torch.testing.assert_close(x_back, x, rtol=1e-4, atol=1e-4)
+
+
+def test_sinh_arcsinh_defaults_are_the_identity_pair() -> None:
+    x = torch.tensor([-3.0, -0.5, 0.0, 1.0, 4.0])
+    torch.testing.assert_close(sinh_arcsinh(x), x)
+    torch.testing.assert_close(sinh_arcsinh_inverse(x), x)
 
 
 def test_sinh_arcsinh_heavier_tails():
@@ -774,6 +805,11 @@ def test_log1psquare_large_uses_2logabs() -> None:
 def test_logerfc_matches_naive_negative() -> None:
     """For x < 0 logerfc == log(erfc(x)) directly."""
     x = torch.tensor([-3.0, -1.0, -0.1], dtype=torch.float64)
+    torch.testing.assert_close(logerfc(x), torch.erfc(x).log())
+
+
+def test_logerfc_matches_naive_at_zero_and_nearby_positive_inputs() -> None:
+    x = torch.tensor([-0.0, 0.1, 0.5, 1.0], dtype=torch.float64)
     torch.testing.assert_close(logerfc(x), torch.erfc(x).log())
 
 
@@ -1026,6 +1062,20 @@ def test_shifted_geometric_mean_general_shift_closed_form() -> None:
     )
 
 
+def test_shifted_geometric_mean_general_shift_reduces_tuple_dims() -> None:
+    x = torch.tensor([[0.0, 1.0, 3.0], [2.0, 5.0, 7.0]], dtype=torch.float64)
+    expected = torch.exp(torch.log(x + 2.0).mean(dim=(0,))) - 2.0
+
+    torch.testing.assert_close(
+        shifted_geometric_mean(x, dim=(0,), shift=2.0),
+        expected,
+    )
+    torch.testing.assert_close(
+        shifted_geometric_mean(x, dim=(0, 1), keepdim=True, shift=2.0),
+        torch.exp(torch.log(x + 2.0).mean(dim=(0, 1), keepdim=True)) - 2.0,
+    )
+
+
 def test_shifted_geometric_mean_zero_shift_is_the_geometric_mean() -> None:
     x = torch.tensor([1.0, 4.0], dtype=torch.float64)
     torch.testing.assert_close(
@@ -1214,6 +1264,362 @@ def test_ste_clamp_accepts_untensored_bounds() -> None:
     # Straight-through: gradient is identity even where the forward clamped.
     assert x.grad is not None
     torch.testing.assert_close(x.grad, torch.ones(3))
+
+
+def test_ste_clamp_keeps_unbounded_sides_as_none() -> None:
+    x = torch.tensor([-2.0, 0.0, 3.0])
+    torch.testing.assert_close(ste_clamp(x, max=1.0), torch.tensor([-2.0, 0.0, 1.0]))
+    torch.testing.assert_close(ste_clamp(x, min=-1.0), torch.tensor([-1.0, 0.0, 3.0]))
+
+
+def test_kbn_step_matches_neumaier_branch_bit_exactly() -> None:
+    for dtype in (torch.float32, torch.float64):
+        generator = torch.Generator().manual_seed(0)
+        total = torch.randn(128, generator=generator, dtype=dtype)
+        term = torch.randn(128, generator=generator, dtype=dtype)
+        compensation = torch.randn(128, generator=generator, dtype=dtype)
+        total[:4] = torch.tensor([1.0, 1.0, 1e16, 1e16], dtype=dtype)
+        term[:4] = torch.tensor([-1.0, 1.0, -1e16, 1e16], dtype=dtype)
+
+        expected_total = total + term
+        total_dominates = total.abs() >= term.abs()
+        expected_compensation = compensation + torch.where(
+            total_dominates,
+            (total - expected_total) + term,
+            (term - expected_total) + total,
+        )
+
+        actual_total, actual_compensation = _kbn_step(total, compensation, term)
+
+        assert torch.equal(actual_total, expected_total)
+        assert torch.equal(actual_compensation, expected_compensation)
+
+
+def test_kahan_sum_pins_equal_magnitude_terms() -> None:
+    """Equal-magnitude operands recover the compensation bit-exactly."""
+    for pair in ([1.0, -1.0], [1e16, -1e16], [1e16, 1e16]):
+        x = torch.tensor(pair, dtype=torch.float64)
+        expected = torch.tensor(sum(pair), dtype=x.dtype)
+        assert torch.equal(kahan_sum(x), expected)
+
+
+def test_kahan_sum_reduction_preserves_multiple_trailing_dimensions() -> None:
+    x = torch.arange(60, dtype=torch.float64).reshape(4, 3, 5)
+    actual = kahan_sum(x, dim=0)
+    expected = x[0] + x[1] + x[2] + x[3]
+    assert actual.shape == (3, 5)
+    assert torch.equal(actual, expected)
+
+
+def test_kahan_sum_pins_short_and_empty_reductions() -> None:
+    """The blocked reducer handles lengths around its block-count transition."""
+    for values in ([], [3.0], [3.0, -2.0], [3.0, -2.0, 5.0]):
+        x = torch.tensor(values, dtype=torch.float64)
+        assert torch.equal(kahan_sum(x), torch.tensor(sum(values), dtype=x.dtype))
+    matrix = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    torch.testing.assert_close(kahan_sum(matrix, dim=0), matrix.sum(dim=0))
+    assert kahan_sum(matrix, dim=1, keepdim=True).shape == (2, 1)
+
+
+def test_log1mexp_pins_threshold_and_high_precision_values() -> None:
+    threshold = torch.tensor([-math.log(2.0)], dtype=torch.float64)
+    torch.testing.assert_close(
+        log1mexp(threshold),
+        torch.log1p(-torch.exp(threshold)),
+        rtol=0,
+        atol=0,
+    )
+    x = torch.tensor([-0.7, -1.0], dtype=torch.float64)
+    torch.testing.assert_close(
+        log1mexp(x),
+        torch.log(-torch.expm1(x)),
+        rtol=1e-14,
+        atol=0,
+    )
+
+
+def test_log1psquare_pins_dtype_and_threshold() -> None:
+    for dtype in (torch.float32, torch.float64):
+        threshold = torch.finfo(dtype).eps ** -0.5
+        x = torch.tensor([-2.0, 0.5, threshold, 2 * threshold], dtype=dtype)
+        assert log1psquare(x).dtype == dtype
+        torch.testing.assert_close(log1psquare(x), torch.log1p(x * x))
+        assert torch.equal(log1psquare(x[2:3]), torch.log1p(x[2:3] * x[2:3]))
+
+
+def test_logmeanexp_empty_keeps_shape_dtype_and_device() -> None:
+    x = torch.empty((2, 0, 3), dtype=torch.float64, device="meta")
+    reduced = logmeanexp(x, dim=1)
+    assert reduced.shape == (2, 3)
+    assert reduced.dtype == x.dtype
+    assert reduced.device == x.device
+    kept = logmeanexp(x, dim=(0, 1), keepdim=True)
+    assert kept.shape == (1, 1, 3)
+    assert kept.dtype == x.dtype
+    assert kept.device == x.device
+
+
+def test_logmeanexp_matches_log_of_mean_for_nonempty_reductions() -> None:
+    x = torch.tensor([[0.0, 1.0, 2.0], [2.0, -1.0, 0.5]], dtype=torch.float64)
+    expected = torch.log(torch.exp(x).mean(dim=1))
+    torch.testing.assert_close(logmeanexp(x, dim=1), expected)
+    torch.testing.assert_close(logmeanexp(x, dim=1, keepdim=True), expected[:, None])
+    torch.testing.assert_close(
+        logmeanexp(x, dim=(0, 1)),
+        torch.log(torch.exp(x).mean()),
+    )
+
+
+def test_mesh_arange_respects_dtype_device_and_exclusive_bounds() -> None:
+    grid = mesh_arange(
+        [5, 6],
+        start=[1, 2],
+        step=[2, 3],
+        dtype=torch.float32,
+        device="cpu",
+    )
+    expected = torch.tensor([[1, 2], [1, 5], [3, 2], [3, 5]], dtype=torch.float32)
+    assert torch.equal(grid, expected)
+    assert grid.dtype == torch.float32
+    assert grid.device.type == "cpu"
+
+
+def test_matrix_signum_transposes_tall_and_leaves_wide_matrices() -> None:
+    x = torch.arange(24, dtype=torch.float32).reshape(2, 4, 3) / 11 + 0.2
+    actual = matrix_signum_via_newtonschulz(x, steps=2).float()
+    normalized = x.bfloat16()
+    normalized = normalized / normalized.norm(dim=(-2, -1), keepdim=True).clamp(
+        min=1e-7,
+    )
+    normalized = normalized.mT
+    for _ in range(2):
+        gram = normalized @ normalized.mT
+        correction = torch.baddbmm(gram, gram, gram, beta=-4.7750, alpha=2.0315)
+        normalized = torch.baddbmm(
+            normalized,
+            correction,
+            normalized,
+            beta=3.4445,
+            alpha=1,
+        )
+    assert torch.equal(actual, normalized.mT.float())
+    wide = x.mT.contiguous()
+    assert matrix_signum_via_newtonschulz(wide, steps=2).shape == wide.shape
+
+
+def test_safe_log_and_safe_xlogy_pin_nonpositive_fallbacks() -> None:
+    x = torch.tensor([-2.0, 0.0, 2.0], dtype=torch.float64)
+    expected = torch.tensor([-math.inf, -math.inf, math.log(2)], dtype=x.dtype)
+    torch.testing.assert_close(safe_log(x), expected)
+    got = safe_xlogy(torch.tensor([0.0, 2.0]), torch.tensor([0.0, 3.0]))
+    torch.testing.assert_close(got, torch.tensor([0.0, 2.0 * math.log(3.0)]))
+
+
+def test_safe_xlogy_zero_fallback_has_zero_input_gradient() -> None:
+    x = torch.tensor([0.0], requires_grad=True)
+    y = torch.tensor([0.0], requires_grad=True)
+    safe_xlogy(x, y).sum().backward()
+    assert x.grad is not None
+    assert torch.equal(x.grad, torch.zeros_like(x))
+    assert y.grad is not None
+    assert torch.equal(y.grad, torch.zeros_like(y))
+
+
+def test_smoothstep_clamps_both_tails_and_interpolates_distinct_points() -> None:
+    x = torch.tensor([-2.0, 0.25, 0.75, 3.0], dtype=torch.float64)
+    expected = torch.tensor([0.0, 0.15625, 0.84375, 1.0], dtype=x.dtype)
+    assert torch.equal(smoothstep(x), expected)
+
+
+def test_smoothstep_inverse_pins_interior_values() -> None:
+    x = torch.tensor([0.2, 0.4, 0.6, 0.8], dtype=torch.float64)
+    actual = smoothstep_inverse(smoothstep(x))
+    torch.testing.assert_close(actual, x, rtol=0, atol=1e-12)
+    assert torch.equal(
+        smoothstep_inverse(torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64)),
+        torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64),
+    )
+
+
+def test_softcap_integer_input_promotes_and_uses_cap() -> None:
+    actual = softcap(torch.tensor([-2, 1, 3]), 2)
+    expected = torch.tanh(torch.tensor([-1.0, 0.5, 1.5])) * 2
+    assert actual.dtype.is_floating_point
+    torch.testing.assert_close(actual, expected)
+
+
+def test_softplus_inverse_pins_both_asymptotic_transitions() -> None:
+    threshold = math.log(torch.finfo(torch.float64).eps) + 2
+    x = torch.tensor([math.exp(threshold), 0.5, -threshold, 30.0], dtype=torch.float64)
+    torch.testing.assert_close(
+        torch.nn.functional.softplus(softplus_inverse(x)),
+        x,
+        rtol=1e-14,
+        atol=0,
+    )
+
+
+def test_sqrt1pm1_pins_threshold_and_large_negative_input() -> None:
+    threshold = torch.finfo(torch.float64).eps ** 0.25
+    x = torch.tensor([-0.75, -threshold, threshold / 2, 3.0], dtype=torch.float64)
+    expected = torch.sqrt(1 + x) - 1
+    torch.testing.assert_close(sqrt1pm1(x), expected, rtol=1e-14, atol=1e-15)
+    assert torch.equal(sqrt1pm1(x[[1, 3]]), expected[[1, 3]])
+    tiny = torch.tensor([1e-8], dtype=torch.float64)
+    stable = tiny / (torch.sqrt(1 + tiny) + 1)
+    assert torch.equal(sqrt1pm1(tiny), stable)
+
+
+def test_log1mexp_selects_each_formula_on_its_domain() -> None:
+    threshold = torch.tensor(-math.log(2), dtype=torch.float64)
+    x = torch.stack(
+        [
+            torch.nextafter(threshold, torch.tensor(-math.inf)),
+            threshold,
+            torch.nextafter(threshold, torch.tensor(math.inf)),
+        ],
+    )
+    expected = torch.where(
+        x > -math.log(2),
+        torch.log(-torch.expm1(x)),
+        torch.log1p(-torch.exp(x)),
+    )
+    assert torch.equal(log1mexp(x), expected)
+
+
+def test_log1psquare_keeps_overflowing_squares_finite() -> None:
+    x = torch.tensor([-1e30, 1e30], dtype=torch.float32)
+    actual = log1psquare(x)
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, 2 * x.abs().log(), rtol=0, atol=0)
+    half = torch.tensor([256.0, -256.0], dtype=torch.float16)
+    assert torch.isfinite(log1psquare(half)).all()
+
+
+def test_logmeanexp_empty_returns_negative_infinity() -> None:
+    actual = logmeanexp(torch.empty((2, 0, 3)), dim=1, keepdim=True)
+    assert actual.shape == (2, 1, 3)
+    assert bool(torch.isneginf(actual).all())
+
+
+def test_logsubexp_equal_inputs_have_positive_tie_sign() -> None:
+    result, sign = logsubexp(
+        torch.tensor([2.0, -1.0]),
+        torch.tensor([2.0, -1.0]),
+        return_sign=True,
+    )
+    assert bool(torch.isneginf(result).all())
+    assert torch.equal(sign, torch.ones(2, dtype=sign.dtype))
+
+
+def test_mesh_arange_meta_device_is_preserved() -> None:
+    grid = mesh_arange([2, 3], dtype=torch.float64, device="meta")
+    assert grid.shape == (6, 2)
+    assert grid.dtype == torch.float64
+    assert grid.device.type == "meta"
+
+
+def test_safe_log_masks_zero_before_logarithm_backward() -> None:
+    x = torch.tensor([0.0, 2.0], requires_grad=True)
+    safe_log(x).sum().backward()
+    assert x.grad is not None
+    assert bool(torch.isfinite(x.grad).all())
+    assert x.grad[0] == 0
+
+
+def test_smoothstep_inverse_preserves_domain_on_dense_interior() -> None:
+    y = torch.linspace(0.02, 0.98, 17, dtype=torch.float64)
+    actual = smoothstep_inverse(y)
+    assert bool((actual >= 0).all())
+    assert bool((actual <= 1).all())
+    torch.testing.assert_close(smoothstep(actual), y, rtol=0, atol=1e-12)
+
+
+def test_smoothstep_inverse_matches_clamped_reference() -> None:
+    for dtype in (torch.float32, torch.float64):
+        y = torch.linspace(0.0, 1.0, 10_001, dtype=dtype)
+        expected = y.clone()
+        for _ in range(12):
+            f = expected * expected * (3.0 - 2.0 * expected) - y
+            df = 6.0 * expected * (1.0 - expected)
+            expected = expected - f / df.clamp(min=torch.finfo(df.dtype).tiny)
+            expected = torch.clamp(expected, 0.0, 1.0)
+
+        actual = smoothstep_inverse(y)
+
+        assert bool((actual >= 0.0).all())
+        assert bool((actual <= 1.0).all())
+        torch.testing.assert_close(smoothstep(actual), y, rtol=1e-4, atol=1e-4)
+        assert torch.equal(actual, expected)
+
+
+def test_softcap_uses_float32_intermediates_before_restoring_float64() -> None:
+    x = torch.tensor([0.25, 1.5, -3.0], dtype=torch.float64)
+    cap = torch.tensor(1.7, dtype=torch.float64)
+    x32, cap32 = x.float(), cap.float()
+    expected = (torch.tanh(x32 / cap32) * cap32).to(x.dtype)
+    assert torch.equal(softcap(x, cap), expected)
+
+
+def test_softplus_inverse_matches_direct_reference_near_thresholds() -> None:
+    threshold = math.log(torch.finfo(torch.float64).eps) + 2
+    x = torch.tensor([1e-14, math.exp(threshold), 31.0, 33.0], dtype=torch.float64)
+    is_small = x < math.exp(threshold)
+    is_large = x > -threshold
+    safe = torch.where(is_small | is_large, 1.0, x)
+    middle = safe + torch.log(-torch.expm1(-safe))
+    expected = torch.where(is_small, x.log(), torch.where(is_large, x, middle))
+    assert torch.equal(softplus_inverse(x), expected)
+
+
+def test_matrix_signum_square_input_keeps_orientation() -> None:
+    x = torch.tensor([[[1.0, 2.0], [3.0, 5.0]], [[2.0, 1.0], [4.0, 7.0]]])
+    actual = matrix_signum_via_newtonschulz(x, steps=2).float()
+    normalized = x.bfloat16()
+    normalized = normalized / normalized.norm(dim=(-2, -1), keepdim=True).clamp(
+        min=1e-7,
+    )
+    for _ in range(2):
+        gram = normalized @ normalized.mT
+        correction = torch.baddbmm(gram, gram, gram, beta=-4.7750, alpha=2.0315)
+        normalized = torch.baddbmm(
+            normalized,
+            correction,
+            normalized,
+            beta=3.4445,
+            alpha=1,
+        )
+    assert torch.equal(actual, normalized.float())
+
+
+def test_matrix_signum_reference_numerics_pins_default_iteration() -> None:
+    def reference(x: Tensor) -> Tensor:
+        orig_dtype = x.dtype
+        x = x.bfloat16()
+        transpose = x.shape[-2] > x.shape[-1]
+        if transpose:
+            x = x.mT
+        x = x / (x.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+        for _ in range(5):
+            gram = x @ x.mT
+            correction = -4.7750 * gram + 2.0315 * gram @ gram
+            x = 3.4445 * x + correction @ x
+        if transpose:
+            x = x.mT
+        return x.to(orig_dtype)
+
+    # Tall, wide, square, and near-zero: the square case exercises the no-transpose
+    # branch matrix_signum_via_newtonschulz takes when rows == cols.
+    matrices = [
+        torch.arange(24, dtype=torch.float32).reshape(2, 4, 3) + 0.25,
+        torch.arange(24, dtype=torch.float64).reshape(2, 3, 4) + 0.25,
+        torch.arange(18, dtype=torch.float32).reshape(2, 3, 3) + 0.25,
+        torch.arange(24, dtype=torch.float64).reshape(2, 3, 4) * 1e-8,
+    ]
+    for x in matrices:
+        actual = matrix_signum_via_newtonschulz(x, reference_numerics=True)
+        assert actual.dtype == x.dtype
+        assert torch.equal(actual, reference(x))
 
 
 if __name__ == "__main__":

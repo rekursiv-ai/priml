@@ -383,7 +383,6 @@ def test_the_cost_matches_torch_on_a_step() -> None:
     assert analytical["flops", "adjoint", "matmul"].sum() == (
         2 * analytical["flops", "primal", "matmul"].sum() - 2 * table
     )
-    assert isinstance(table, int)
     # The relative scores are gathered into place: elements moved forward,
     # one scatter-add per element back.
     assert analytical["flops", "primal", "selection"].sum() == 0

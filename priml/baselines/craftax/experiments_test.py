@@ -44,6 +44,7 @@ from priml.baselines.craftax.pqn_train_step import CraftaxPQNTrainStep
 from priml.baselines.craftax.rnn_train_step import CraftaxRNNTrainStep
 from priml.baselines.craftax.train_step import CraftaxTrainStep
 from priml.lib.absent import ABSENT
+from priml.runtime import SingleProcess
 from priml.train.parallelism import NoParallel
 from priml.train.train_loop import TrainLoop
 
@@ -297,13 +298,309 @@ def test_exp000_spends_one_million_interactions() -> None:
     # conversion is what makes the run comparable at all.
     cfg = exp000()
     spent = cfg.max_steps * cfg.step.env.num_envs * cfg.step.rollout_steps
-    assert 999_000 <= spent <= 1_000_000
+    assert spent == 999_424
+    assert cfg.step.env.seed == 42
+    assert cfg.step.seed == 42
+
+
+def test_exp000_pins_every_recipe_field() -> None:
+    cfg = exp000()
+    score = cfg.metrics_eval["craftax"]
+    assert isinstance(score, CraftaxScore.Config)
+    assert {
+        "study_name": cfg.study_name,
+        "experiment_name": cfg.experiment_name,
+        "step.env.num_envs": cfg.step.env.num_envs,
+        "step.env.seed": cfg.step.env.seed,
+        "step.env.optimistic_reset_ratio": cfg.step.env.optimistic_reset_ratio,
+        "step.rollout_steps": cfg.step.rollout_steps,
+        "step.num_epochs": cfg.step.num_epochs,
+        "step.num_minibatches": cfg.step.num_minibatches,
+        "step.learning_rate": cfg.step.learning_rate,
+        "step.anneal_learning_rate": cfg.step.anneal_learning_rate,
+        "step.discount": cfg.step.discount,
+        "step.trace_decay": cfg.step.trace_decay,
+        "step.clip_epsilon": cfg.step.clip_epsilon,
+        "step.entropy_coefficient": cfg.step.entropy_coefficient,
+        "step.value_coefficient": cfg.step.value_coefficient,
+        "step.max_grad_norm": cfg.step.max_grad_norm,
+        "step.seed": cfg.step.seed,
+        "step.model.channels_in": cfg.step.model.channels_in,
+        "step.model.num_layers": cfg.step.model.num_layers,
+        "max_steps": cfg.max_steps,
+        "step.total_train_steps": cfg.step.total_train_steps,
+        "dataset.updates_per_epoch": cfg.dataset.updates_per_epoch,
+        "num_steps_eval": cfg.num_steps_eval,
+        "metrics_eval.craftax.num_envs": score.num_envs,
+        "metrics_eval.craftax.steps": score.steps,
+        "metrics_eval.craftax.seed": score.seed,
+    } == {
+        "study_name": "craftax",
+        "experiment_name": "exp000",
+        "step.env.num_envs": 256,
+        "step.env.seed": 42,
+        "step.env.optimistic_reset_ratio": 16,
+        "step.rollout_steps": 16,
+        "step.num_epochs": 4,
+        "step.num_minibatches": 8,
+        "step.learning_rate": 3e-4,
+        "step.anneal_learning_rate": True,
+        "step.discount": 0.99,
+        "step.trace_decay": 0.8,
+        "step.clip_epsilon": 0.2,
+        "step.entropy_coefficient": 0.01,
+        "step.value_coefficient": 0.5,
+        "step.max_grad_norm": 1.0,
+        "step.seed": 42,
+        "step.model.channels_in": 512,
+        "step.model.num_layers": 3,
+        "max_steps": 244,
+        "step.total_train_steps": 244,
+        "dataset.updates_per_epoch": 244,
+        "num_steps_eval": 244,
+        "metrics_eval.craftax.num_envs": 64,
+        "metrics_eval.craftax.steps": 10_000,
+        "metrics_eval.craftax.seed": 42,
+    }
+
+
+def test_exp002_pins_every_recipe_field() -> None:
+    cfg = exp002()
+    assert {
+        "study_name": cfg.study_name,
+        "experiment_name": cfg.experiment_name,
+        "step.env.num_envs": cfg.step.env.num_envs,
+        "step.env.seed": cfg.step.env.seed,
+        "step.env.optimistic_reset_ratio": cfg.step.env.optimistic_reset_ratio,
+        "step.rollout_steps": cfg.step.rollout_steps,
+        "step.num_epochs": cfg.step.num_epochs,
+        "step.num_minibatches": cfg.step.num_minibatches,
+        "step.learning_rate": cfg.step.learning_rate,
+        "step.anneal_learning_rate": cfg.step.anneal_learning_rate,
+        "step.discount": cfg.step.discount,
+        "step.trace_decay": cfg.step.trace_decay,
+        "step.clip_epsilon": cfg.step.clip_epsilon,
+        "step.entropy_coefficient": cfg.step.entropy_coefficient,
+        "step.value_coefficient": cfg.step.value_coefficient,
+        "step.max_grad_norm": cfg.step.max_grad_norm,
+        "step.seed": cfg.step.seed,
+        "step.model.channels_in": cfg.step.model.channels_in,
+        "max_steps": cfg.max_steps,
+        "step.total_train_steps": cfg.step.total_train_steps,
+        "dataset.updates_per_epoch": cfg.dataset.updates_per_epoch,
+        "num_steps_eval": cfg.num_steps_eval,
+        "runtime": cfg.runtime,
+    } == {
+        "study_name": "craftax",
+        "experiment_name": "exp002",
+        "step.env.num_envs": 1_024,
+        "step.env.seed": 42,
+        "step.env.optimistic_reset_ratio": 16,
+        "step.rollout_steps": 64,
+        "step.num_epochs": 4,
+        "step.num_minibatches": 8,
+        "step.learning_rate": 2e-4,
+        "step.anneal_learning_rate": True,
+        "step.discount": 0.99,
+        "step.trace_decay": 0.8,
+        "step.clip_epsilon": 0.2,
+        "step.entropy_coefficient": 0.01,
+        "step.value_coefficient": 0.5,
+        "step.max_grad_norm": 1.0,
+        "step.seed": 42,
+        "step.model.channels_in": 512,
+        "max_steps": 15_258,
+        "step.total_train_steps": 15_258,
+        "dataset.updates_per_epoch": 15_258,
+        "num_steps_eval": 15_258,
+        "runtime": SingleProcess.Config(),
+    }
+
+
+def test_exp003_pins_every_recipe_field() -> None:
+    cfg = exp003()
+    assert {
+        "study_name": cfg.study_name,
+        "experiment_name": cfg.experiment_name,
+        "step.env.num_envs": cfg.step.env.num_envs,
+        "step.env.seed": cfg.step.env.seed,
+        "step.env.optimistic_reset_ratio": cfg.step.env.optimistic_reset_ratio,
+        "step.rollout_steps": cfg.step.rollout_steps,
+        "step.num_epochs": cfg.step.num_epochs,
+        "step.num_minibatches": cfg.step.num_minibatches,
+        "step.learning_rate": cfg.step.learning_rate,
+        "step.anneal_learning_rate": cfg.step.anneal_learning_rate,
+        "step.discount": cfg.step.discount,
+        "step.trace_decay": cfg.step.trace_decay,
+        "step.epsilon_start": cfg.step.epsilon_start,
+        "step.epsilon_finish": cfg.step.epsilon_finish,
+        "step.epsilon_decay_fraction": cfg.step.epsilon_decay_fraction,
+        "step.max_grad_norm": cfg.step.max_grad_norm,
+        "step.seed": cfg.step.seed,
+        "step.model.channels_in": cfg.step.model.channels_in,
+        "max_steps": cfg.max_steps,
+        "step.total_train_steps": cfg.step.total_train_steps,
+        "dataset.updates_per_epoch": cfg.dataset.updates_per_epoch,
+        "num_steps_eval": cfg.num_steps_eval,
+        "runtime": cfg.runtime,
+    } == {
+        "study_name": "craftax",
+        "experiment_name": "exp003",
+        "step.env.num_envs": 1_024,
+        "step.env.seed": 42,
+        "step.env.optimistic_reset_ratio": 16,
+        "step.rollout_steps": 128,
+        "step.num_epochs": 4,
+        "step.num_minibatches": 4,
+        "step.learning_rate": 3e-4,
+        "step.anneal_learning_rate": True,
+        "step.discount": 0.99,
+        "step.trace_decay": 0.5,
+        "step.epsilon_start": 1.0,
+        "step.epsilon_finish": 0.005,
+        "step.epsilon_decay_fraction": 0.1,
+        "step.max_grad_norm": 0.5,
+        "step.seed": 42,
+        "step.model.channels_in": 512,
+        "max_steps": 7_629,
+        "step.total_train_steps": 7_629,
+        "dataset.updates_per_epoch": 7_629,
+        "num_steps_eval": 7_629,
+        "runtime": SingleProcess.Config(),
+    }
+
+
+def test_exp011_pins_every_recipe_field() -> None:
+    cfg = exp011()
+    assert {
+        "experiment_name": cfg.experiment_name,
+        "step.env.num_envs": cfg.step.env.num_envs,
+        "step.rollout_steps": cfg.step.rollout_steps,
+        "step.learning_rate": cfg.step.learning_rate,
+        "max_steps": cfg.max_steps,
+        "step.total_train_steps": cfg.step.total_train_steps,
+        "dataset.updates_per_epoch": cfg.dataset.updates_per_epoch,
+        "num_steps_eval": cfg.num_steps_eval,
+    } == {
+        "experiment_name": "exp011",
+        "step.env.num_envs": 1_024,
+        "step.rollout_steps": 64,
+        "step.learning_rate": 2e-4,
+        "max_steps": 1_525,
+        "step.total_train_steps": 1_525,
+        "dataset.updates_per_epoch": 1_525,
+        "num_steps_eval": 1_525,
+    }
+
+
+def test_exp013_pins_every_recipe_field() -> None:
+    cfg = exp013()
+    assert {
+        "study_name": cfg.study_name,
+        "experiment_name": cfg.experiment_name,
+        "step.env.num_envs": cfg.step.env.num_envs,
+        "step.env.seed": cfg.step.env.seed,
+        "step.env.optimistic_reset_ratio": cfg.step.env.optimistic_reset_ratio,
+        "step.rollout_steps": cfg.step.rollout_steps,
+        "step.gradient_window": cfg.step.gradient_window,
+        "step.num_epochs": cfg.step.num_epochs,
+        "step.num_minibatches": cfg.step.num_minibatches,
+        "step.learning_rate": cfg.step.learning_rate,
+        "step.anneal_learning_rate": cfg.step.anneal_learning_rate,
+        "step.discount": cfg.step.discount,
+        "step.trace_decay": cfg.step.trace_decay,
+        "step.clip_epsilon": cfg.step.clip_epsilon,
+        "step.entropy_coefficient": cfg.step.entropy_coefficient,
+        "step.value_coefficient": cfg.step.value_coefficient,
+        "step.max_grad_norm": cfg.step.max_grad_norm,
+        "step.seed": cfg.step.seed,
+        "step.model.embed_dim": cfg.step.model.embed_dim,
+        "step.model.num_heads": cfg.step.model.num_heads,
+        "step.model.num_layers": cfg.step.model.num_layers,
+        "step.model.qkv_dim": cfg.step.model.qkv_dim,
+        "step.model.channels_in": cfg.step.model.channels_in,
+        "step.model.memory_length": cfg.step.model.memory_length,
+        "step.model.gating_bias": cfg.step.model.gating_bias,
+        "max_steps": cfg.max_steps,
+        "step.total_train_steps": cfg.step.total_train_steps,
+        "dataset.updates_per_epoch": cfg.dataset.updates_per_epoch,
+        "num_steps_eval": cfg.num_steps_eval,
+        "runtime": cfg.runtime,
+    } == {
+        "study_name": "craftax",
+        "experiment_name": "exp013",
+        "step.env.num_envs": 1_024,
+        "step.env.seed": 42,
+        "step.env.optimistic_reset_ratio": 16,
+        "step.rollout_steps": 128,
+        "step.gradient_window": 64,
+        "step.num_epochs": 4,
+        "step.num_minibatches": 8,
+        "step.learning_rate": 2e-4,
+        "step.anneal_learning_rate": True,
+        "step.discount": 0.999,
+        "step.trace_decay": 0.8,
+        "step.clip_epsilon": 0.2,
+        "step.entropy_coefficient": 0.002,
+        "step.value_coefficient": 0.5,
+        "step.max_grad_norm": 1.0,
+        "step.seed": 42,
+        "step.model.embed_dim": 256,
+        "step.model.num_heads": 8,
+        "step.model.num_layers": 2,
+        "step.model.qkv_dim": 256,
+        "step.model.channels_in": 256,
+        "step.model.memory_length": 128,
+        "step.model.gating_bias": 2.0,
+        "max_steps": 7_629,
+        "step.total_train_steps": 7_629,
+        "dataset.updates_per_epoch": 7_629,
+        "num_steps_eval": 7_629,
+        "runtime": SingleProcess.Config(),
+    }
+
+
+def test_exp_smoke_pins_every_recipe_field() -> None:
+    cfg = exp_smoke()
+    score = cfg.metrics_eval["craftax"]
+    assert isinstance(score, CraftaxScore.Config)
+    assert {
+        "experiment_name": cfg.experiment_name,
+        "step.env.num_envs": cfg.step.env.num_envs,
+        "step.rollout_steps": cfg.step.rollout_steps,
+        "step.num_minibatches": cfg.step.num_minibatches,
+        "step.model.channels_in": cfg.step.model.channels_in,
+        "step.model.num_layers": cfg.step.model.num_layers,
+        "max_steps": cfg.max_steps,
+        "step.total_train_steps": cfg.step.total_train_steps,
+        "dataset.updates_per_epoch": cfg.dataset.updates_per_epoch,
+        "num_steps_eval": cfg.num_steps_eval,
+        "metrics_eval.craftax.num_envs": score.num_envs,
+        "metrics_eval.craftax.steps": score.steps,
+    } == {
+        "experiment_name": "exp_smoke",
+        "step.env.num_envs": 8,
+        "step.rollout_steps": 4,
+        "step.num_minibatches": 2,
+        "step.model.channels_in": 32,
+        "step.model.num_layers": 1,
+        "max_steps": 4,
+        "step.total_train_steps": 4,
+        "dataset.updates_per_epoch": 4,
+        "num_steps_eval": 4,
+        "metrics_eval.craftax.num_envs": 4,
+        "metrics_eval.craftax.steps": 64,
+    }
 
 
 def test_exp001_spends_one_billion_interactions() -> None:
     cfg = exp001()
     spent = cfg.max_steps * cfg.step.env.num_envs * cfg.step.rollout_steps
-    assert 999_000_000 <= spent <= 1_000_000_000
+    assert spent == 999_948_288
+    assert (cfg.step.env.num_envs, cfg.step.rollout_steps) == (1_024, 64)
+    assert cfg.step.learning_rate == 2e-4
+    assert cfg.dataset.updates_per_epoch == cfg.max_steps
+    assert cfg.num_steps_eval == cfg.max_steps
 
 
 def test_exp011_spends_one_hundred_million_interactions() -> None:

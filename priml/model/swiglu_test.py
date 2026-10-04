@@ -387,8 +387,15 @@ def test_tensor_parallel_style_refuses_unsupported_gate_paths(
     message: str,
 ) -> None:
     """TP must reject paths whose hidden-axis arithmetic cannot remain aligned."""
-    with pytest.raises(NotImplementedError, match=message):
+    with pytest.raises(NotImplementedError) as error:
         config.make().tensor_parallel_style()
+    assert str(error.value) == (
+        "SwiGLU tensor parallelism does not support "
+        "split_gate_projection (it reads up_proj.weight directly)."
+        if message == "split_gate_projection"
+        else "SwiGLU tensor parallelism does not support a gate norm "
+        "(it normalizes over the sharded hidden dim)."
+    )
 
 
 def test_tensor_parallel_style_preserves_the_logical_gate_split(

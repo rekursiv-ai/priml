@@ -34,6 +34,10 @@ class _FakeDist:
         self.message = message
         self.backend = backend
         self.barrier_calls = 0
+        self.reduce_op: object | None = None
+        self.reduced_tensor: Tensor | None = None
+        self.reduced_input: list[int] | None = None
+        self.broadcasts: list[tuple[list[str | None], int]] = []
 
     def is_available(self) -> bool:
         return True
@@ -48,10 +52,13 @@ class _FakeDist:
         return self.backend
 
     def all_reduce(self, tensor: Tensor, op: object) -> None:
-        del op
+        self.reduce_op = op
+        self.reduced_tensor = tensor
+        self.reduced_input = [int(tensor[0])]
         tensor.fill_(self.status)
 
     def broadcast_object_list(self, objects: list[str | None], *, src: int) -> None:
+        self.broadcasts.append((objects, src))
         if self.rank != src:
             objects[0] = self.message
 
@@ -71,6 +78,8 @@ def test_rank_zero_build_reraises_original_error(
             build=lambda: (_ for _ in ()).throw(ValueError("boom")),
         )
 
+    assert fake_dist.broadcasts == [(["ValueError: boom"], 0)]
+    assert fake_dist.reduced_input == [0]
     assert fake_dist.barrier_calls == 0
 
 
@@ -80,10 +89,29 @@ def test_nonzero_rank_fails_fast_with_rank_zero_error(
     fake_dist = _FakeDist(rank=1, status=0, message="ValueError: boom")
     monkeypatch.setattr("priml.data.distributed_build.dist", fake_dist)
 
-    with pytest.raises(RuntimeError, match="test build failed on rank 0: ValueError"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"^test build failed on rank 0: ValueError: boom$",
+    ):
         run_rank_zero_build(name="test build", build=lambda: None)
 
+    assert fake_dist.broadcasts == [(["ValueError: boom"], 0)]
     assert fake_dist.barrier_calls == 0
+
+
+def test_missing_rank_zero_error_uses_fallback_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_dist = _FakeDist(rank=1, status=0, message=None)
+    monkeypatch.setattr("priml.data.distributed_build.dist", fake_dist)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^test build failed on rank 0: unknown rank-zero error$",
+    ):
+        run_rank_zero_build(name="test build", build=lambda: None)
+
+    assert fake_dist.broadcasts == [([None], 0)]
 
 
 def test_rank_zero_error_survives_broadcast_failure(
@@ -114,6 +142,8 @@ def test_rank_zero_error_survives_broadcast_failure(
 def test_successful_rank_zero_build_runs_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import torch  # noqa: PLC0415 -- import only for asserting the flag dtype.
+
     fake_dist = _FakeDist(rank=0, status=1, message=None)
     monkeypatch.setattr("priml.data.distributed_build.dist", fake_dist)
     calls = 0
@@ -125,6 +155,12 @@ def test_successful_rank_zero_build_runs_once(
     run_rank_zero_build(name="test build", build=build)
 
     assert calls == 1
+    assert fake_dist.reduced_tensor is not None
+    assert fake_dist.reduced_input == [1]
+    assert fake_dist.reduced_tensor.tolist() == [1]
+    assert fake_dist.reduced_tensor.dtype == torch.int32
+    assert fake_dist.reduced_tensor.device.type == "cpu"
+    assert fake_dist.reduce_op is _FakeDist.ReduceOp.MIN
     assert fake_dist.barrier_calls == 0
 
 
@@ -170,7 +206,11 @@ def test_success_flag_device_tracks_backend(
 
     run_rank_zero_build(name="test build", build=lambda: None)
 
-    assert captured["device"].type == expected_device_type
+    assert captured["device"] == (
+        torch.device("cuda", 0)
+        if expected_device_type == "cuda"
+        else torch.device("cpu")
+    )
 
 
 def test_build_runs_locally_when_no_process_group_is_initialized(

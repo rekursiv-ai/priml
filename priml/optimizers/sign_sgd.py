@@ -55,8 +55,8 @@ def _sparse_distributed_step(
         )
     grad_flat = grad.reshape(grad.shape[0], -1)
     p_flat = p.reshape(p.shape[0], -1)
-    touched = grad_flat.any(dim=-1)
-    local_ids = touched.nonzero(as_tuple=False).flatten().to(torch.long)
+    touched = grad_flat.count_nonzero(dim=1) > 0
+    local_ids = touched.nonzero(as_tuple=False).flatten()
     world_size = dist.get_world_size()
     count = torch.tensor([local_ids.numel()], device=p.device, dtype=torch.long)
     counts = torch.empty(world_size, device=p.device, dtype=torch.long)
@@ -65,16 +65,15 @@ def _sparse_distributed_step(
     if max_count == 0:
         return
 
-    ids_padded = torch.zeros(max_count, device=p.device, dtype=torch.long)
-    grads_padded = torch.zeros(
-        max_count,
-        grad_flat.shape[1],
+    ids_padded = torch.full((max_count,), p.shape[0], device=p.device, dtype=torch.long)
+    grads_padded = torch.full(
+        (max_count, grad_flat.shape[1]),
+        1.0,
         device=p.device,
         dtype=grad.dtype,
     )
-    if local_ids.numel() > 0:
-        ids_padded[: local_ids.numel()] = local_ids
-        grads_padded[: local_ids.numel()] = grad_flat[local_ids]
+    ids_padded[: local_ids.numel()] = local_ids
+    grads_padded[: local_ids.numel()] = grad_flat[local_ids]
 
     all_ids = torch.empty(
         world_size * max_count,
@@ -90,8 +89,7 @@ def _sparse_distributed_step(
     dist.all_gather_into_tensor(all_ids, ids_padded)
     dist.all_gather_into_tensor(all_grads, grads_padded)
 
-    valid = torch.arange(max_count, device=p.device).expand(world_size, -1)
-    valid = valid < counts.view(-1, 1)
+    valid = torch.arange(max_count, device=p.device) < counts.view(-1, 1)
     valid = valid.flatten()
     grad_ids, inv = all_ids[valid].unique(return_inverse=True)
     grad_rows = torch.zeros(
@@ -102,14 +100,14 @@ def _sparse_distributed_step(
     )
     grad_rows.scatter_add_(
         0,
-        inv.unsqueeze(-1).expand(-1, grad_flat.shape[1]),
+        inv.reshape(-1, 1).expand(-1, grad_flat.shape[1]),
         all_grads[valid],
     )
 
     rows = p_flat[grad_ids]
     if weight_decay != 0.0:
         rows = rows * (1.0 - lr * weight_decay)
-    rows = rows.add(torch.sign(grad_rows).to(rows.dtype), alpha=-lr)
+    rows = rows.add(torch.sign(grad_rows), alpha=-lr)
     p_flat[grad_ids] = rows
 
 
@@ -163,12 +161,11 @@ def _sparse_embedding_step(
         dtype=all_weights_grad.dtype,
         device=all_weights_grad.device,
     )
-    grad.scatter_add_(0, inv.unsqueeze(-1).expand(-1, d), all_weights_grad)
+    grad.scatter_add_(0, inv.reshape(-1, 1).expand(-1, d), all_weights_grad)
 
-    index_ids = grad_ids.to(torch.long)
-    rows = weights[index_ids]
+    rows = weights[grad_ids]
     rows.mul_(1.0 - lr * weight_decay).add_(torch.sign(grad), alpha=-lr)
-    weights[index_ids] = rows
+    weights[grad_ids] = rows
 
 
 def _sparse_embedding_parts(
@@ -275,7 +272,7 @@ class SignSGD(Optimizer):
         lr = FloatCodec.coerce(group["lr"], None)
         wd = FloatCodec.coerce(group["weight_decay"], None)
         params = cast(list[Tensor], group["params"])
-        if group.get("sparse_embedding", False):
+        if group.get("sparse_embedding"):
             sparse_parts = _sparse_embedding_parts(params)
             if sparse_parts is None:
                 raise ValueError(
@@ -306,7 +303,7 @@ class SignSGD(Optimizer):
                     # any non-zero element. ``reshape(N, -1).any(-1)``
                     # avoids materialising a full ``grad != 0`` mask
                     # (which would allocate a model-sized bool tensor).
-                    touched = grad.reshape(grad.shape[0], -1).any(dim=-1)
+                    touched = grad.reshape(grad.shape[0], -1).count_nonzero(dim=1) > 0
                     # Per-row decay multiplier: (1 - lr*wd) where touched,
                     # 1.0 elsewhere. Allocate only an [N]-shaped tensor.
                     decay = touched.to(p.dtype).mul_(-lr * wd).add_(1.0)

@@ -231,8 +231,7 @@ def prepare(
             inplace=True,
             unit_interval=True,
         )
-        media = (media - torch.tensor(mean).view(1, 3, 1, 1)) / torch.tensor(std).view(
-            1,
+        media = (media - torch.tensor(mean).view(3, 1, 1)) / torch.tensor(std).view(
             3,
             1,
             1,

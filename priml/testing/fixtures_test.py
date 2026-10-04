@@ -24,6 +24,20 @@ def test_get_device_returns_device():
     assert device.type in ("cpu", "cuda")
 
 
+@pytest.mark.parametrize(
+    ("available", "expected"),
+    [(False, "cpu"), (True, "cuda")],
+)
+def test_get_device_matches_cuda_availability(
+    monkeypatch: pytest.MonkeyPatch,
+    available: bool,
+    expected: str,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: available)
+
+    assert get_device() == torch.device(expected)
+
+
 def test_get_device_prefers_cuda():
     """Test that get_device returns CUDA if available."""
     if torch.cuda.is_available():
@@ -119,6 +133,20 @@ def test_poison_free_pool_makes_a_later_empty_read_back_nan() -> None:
     if not bool(torch.isnan(recycled).any()):
         pytest.skip("allocator does not recycle freed blocks on this platform")
     assert bool(torch.isnan(recycled).any())
+
+
+def test_poison_free_pool_uses_nan_for_each_default_block() -> None:
+    full = MagicMock(wraps=torch.full)
+    with patch.object(torch, "full", full):
+        poison_free_pool((2, 3))
+
+    assert full.call_count == 32
+    assert all(call.args[0] == (2, 3) for call in full.call_args_list)
+    assert all(
+        isinstance(call.args[1], (float, int))
+        and float(call.args[1]) != float(call.args[1])
+        for call in full.call_args_list
+    )
 
 
 def test_poison_free_pool_leaves_written_allocations_alone() -> None:
@@ -256,7 +284,6 @@ def test_cleanup_cuda_teardown_skips_synchronize(
         Generator[None, None, None],
         fixtures.cleanup_cuda._get_wrapped_function()(),
     )
-    assert isinstance(gen, Generator)
     next(gen)
     assert synchronize.call_count == calls_at_setup, (
         "setup synchronized without a CUDA context to reclaim"

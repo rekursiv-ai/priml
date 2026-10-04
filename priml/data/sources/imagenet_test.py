@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from functools import partialmethod
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import io
+import logging
 import tarfile
 import tempfile
 
@@ -17,6 +19,11 @@ from priml.data.sources.imagenet import (
     ImageNetSource,
     _read_class_tar,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import IO, Literal
 
 
 def test_default_working_dir_is_opinionated() -> None:
@@ -100,17 +107,56 @@ def create_flat_tar(path: Path, num_images: int = 2):
             tar.addfile(info, io.BytesIO(img_bytes))
 
 
+def _extractfile_skipping(
+    archive: tarfile.TarFile,
+    member: tarfile.TarInfo | str,
+    *,
+    skip_name: str,
+    original: Callable[
+        [tarfile.TarFile, tarfile.TarInfo | str],
+        IO[bytes] | None,
+    ],
+) -> IO[bytes] | None:
+    if isinstance(member, tarfile.TarInfo) and member.name == skip_name:
+        return None
+    return original(archive, member)
+
+
+def _skip_extractfile(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    skip_name: str,
+) -> None:
+    monkeypatch.setattr(
+        tarfile.TarFile,
+        "extractfile",
+        partialmethod(
+            _extractfile_skipping,
+            skip_name=skip_name,
+            original=tarfile.TarFile.extractfile,
+        ),
+    )
+
+
 class TestImageNetSourceInit:
     """Test ImageNetSource initialization."""
 
-    def test_init_train_split(self, temp_dir: Path) -> None:
-        """Test initialization with train split."""
+    def test_init_train_split(
+        self,
+        temp_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Initialization records the selected split and archive."""
+        caplog.set_level(logging.INFO)
         train_tar = temp_dir / "ILSVRC2012_img_train.tar"
         create_nested_tar(train_tar, "n01440764")
 
         config = ImageNetSource.Config(working_dir=temp_dir, split="train")
         source = ImageNetSource(config)
 
+        assert caplog.messages == [
+            "ImageNetSource initialized: split=train, tar=ILSVRC2012_img_train.tar",
+        ]
         assert source.split == "train"
         assert source.tar_path == train_tar
         assert source.shuffle is False
@@ -169,11 +215,21 @@ class TestImageNetSourceInit:
     ) -> None:
         """No labels file at all fails loudly rather than labelling "unknown"."""
         create_flat_tar(temp_dir / "ILSVRC2012_img_val.tar", num_images=2)
+        labels_file = temp_dir / "validation_labels.txt"
 
-        with pytest.raises(ValueError, match="validation_labels"):
+        with pytest.raises(
+            ValueError,
+            match=r"^Validation labels not found at",
+        ) as error:
             ImageNetSource(
                 ImageNetSource.Config(working_dir=temp_dir, split="val"),
             )
+
+        assert str(error.value) == (
+            f"Validation labels not found at {labels_file}. Set "
+            "validation_labels_file, or place validation_labels.txt "
+            "beside the archive."
+        )
 
     def test_init_test_split(self, temp_dir: Path) -> None:
         """Test initialization with test split."""
@@ -312,8 +368,13 @@ class TestImageNetValidationLabels:
             validation_labels_file=labels_file,
         )
 
-        with pytest.raises(ValueError, match="Mismatch"):
+        with pytest.raises(
+            ValueError,
+            match=r"^zip\(\) argument 2 is shorter than argument 1$",
+        ) as error:
             ImageNetSource(config)
+
+        assert str(error.value) == "zip() argument 2 is shorter than argument 1"
 
 
 class TestImageNetIteration:
@@ -469,7 +530,18 @@ class TestImageNetIteration:
         source = ImageNetSource(config)
 
         samples = list(source)
-        assert len(samples) == 6
+        file_names: list[str] = []
+        for sample in samples:
+            assert "file_name" in sample
+            file_names.append(sample["file_name"])
+        assert file_names == [
+            "n01440000_0.JPEG",
+            "n01440001_0.JPEG",
+            "n01440000_1.JPEG",
+            "n01440001_1.JPEG",
+            "n01440002_0.JPEG",
+            "n01440002_1.JPEG",
+        ]
 
     def test_iter_train_parallel_more_shards_than_classes(self, temp_dir: Path) -> None:
         """Test parallel reading with more shards requested than classes."""
@@ -535,6 +607,30 @@ class TestImageNetIteration:
         samples = list(source)
         assert len(samples) == 3
 
+    def test_iter_train_zero_concurrency_uses_sequential_path(
+        self,
+        temp_dir: Path,
+    ) -> None:
+        train_tar = temp_dir / "ILSVRC2012_img_train.tar"
+        create_nested_tar(train_tar, "n01440764", num_images=2)
+        source = ImageNetSource(
+            ImageNetSource.Config(
+                working_dir=temp_dir,
+                split="train",
+                num_concurrently_read_shards=0,
+            ),
+        )
+
+        samples = list(source)
+        file_names: list[str] = []
+        for sample in samples:
+            assert "file_name" in sample
+            file_names.append(sample["file_name"])
+        assert file_names == [
+            "n01440764_0.JPEG",
+            "n01440764_1.JPEG",
+        ]
+
     def test_iter_val_basic(self, temp_dir: Path) -> None:
         """Test basic validation iteration."""
         val_tar = temp_dir / "ILSVRC2012_img_val.tar"
@@ -568,8 +664,17 @@ class TestImageNetIteration:
 
         samples = list(source)
         assert len(samples) == 2
-        assert samples[0].get("label") == "n01440764"
-        assert samples[1].get("label") == "n01443537"
+        assert samples[0].keys() == {"file_name", "image", "label"}
+        assert "file_name" in samples[0]
+        assert "label" in samples[0]
+        assert "image" in samples[0]
+        assert samples[0]["file_name"] == "ILSVRC2012_val_00000000.JPEG"
+        assert samples[0]["label"] == "n01440764"
+        assert samples[0]["image"].size == (10, 12)
+        assert "file_name" in samples[1]
+        assert "label" in samples[1]
+        assert samples[1]["file_name"] == "ILSVRC2012_val_00000001.JPEG"
+        assert samples[1]["label"] == "n01443537"
 
     def test_iter_val_with_slice(self, temp_dir: Path) -> None:
         """Test validation iteration with worker slicing."""
@@ -613,8 +718,13 @@ class TestImageNetIteration:
 
         samples = list(source)
         assert len(samples) == 3
-        assert samples[0].get("label") == -1
+        assert samples[0].keys() == {"file_name", "image", "label"}
+        assert "file_name" in samples[0]
+        assert "label" in samples[0]
         assert "image" in samples[0]
+        assert samples[0]["file_name"] == "ILSVRC2012_val_00000000.JPEG"
+        assert samples[0]["label"] == -1
+        assert samples[0]["image"].size == (10, 12)
 
     def test_iter_test_with_slice(self, temp_dir: Path) -> None:
         """Test test iteration with worker slicing."""
@@ -630,6 +740,38 @@ class TestImageNetIteration:
 
         samples = list(source)
         assert len(samples) == 2
+
+    @pytest.mark.parametrize(
+        ("split", "expected_label"),
+        [("val", "n01443537"), ("test", -1)],
+    )
+    def test_iter_flat_splits_continue_after_extractfile_returns_none(
+        self,
+        temp_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        split: Literal["val", "test"],
+        expected_label: str | int,
+    ) -> None:
+        archive_name = f"ILSVRC2012_img_{split}.tar"
+        create_flat_tar(temp_dir / archive_name, num_images=2)
+        if split == "val":
+            (temp_dir / "validation_labels.txt").write_text(
+                "n01440764\nn01443537\n",
+            )
+        _skip_extractfile(
+            monkeypatch,
+            skip_name="ILSVRC2012_val_00000000.JPEG",
+        )
+        source = ImageNetSource(
+            ImageNetSource.Config(working_dir=temp_dir, split=split),
+        )
+
+        samples = list(source)
+
+        assert [sample.get("file_name") for sample in samples] == [
+            "ILSVRC2012_val_00000001.JPEG",
+        ]
+        assert [sample.get("label") for sample in samples] == [expected_label]
 
     def test_iter_val_extractfile_none(self, temp_dir: Path) -> None:
         """Test val iteration when extractfile returns None."""
@@ -666,7 +808,11 @@ class TestImageNetIteration:
         # Directory should be skipped.
         assert len(samples) == 0
 
-    def test_iter_handles_corrupt_images(self, temp_dir: Path) -> None:
+    def test_iter_handles_corrupt_images(
+        self,
+        temp_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
         """Test that corrupt images are skipped with warning."""
         val_tar = temp_dir / "ILSVRC2012_img_val.tar"
 
@@ -678,13 +824,23 @@ class TestImageNetIteration:
         (temp_dir / "validation_labels.txt").write_text("n01440764\n")
 
         config = ImageNetSource.Config(working_dir=temp_dir, split="val")
+        caplog.set_level(logging.WARNING, logger="priml.data.sources.imagenet")
         source = ImageNetSource(config)
 
         samples = list(source)
         # Corrupt image should be skipped.
         assert len(samples) == 0
+        assert len(caplog.records) == 1
+        assert isinstance(caplog.records[0].args, tuple)
+        assert caplog.records[0].args[0] == "corrupt.JPEG"
+        assert isinstance(caplog.records[0].args[1], OSError)
+        assert caplog.messages[0].startswith("Failed to load corrupt.JPEG: ")
 
-    def test_iter_test_handles_corrupt_images(self, temp_dir: Path) -> None:
+    def test_iter_test_handles_corrupt_images(
+        self,
+        temp_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
         """Test that corrupt images in test split are skipped."""
         test_tar = temp_dir / "ILSVRC2012_img_test.tar"
 
@@ -695,11 +851,17 @@ class TestImageNetIteration:
             tar.addfile(info, io.BytesIO(b"notanimage"))
 
         config = ImageNetSource.Config(working_dir=temp_dir, split="test")
+        caplog.set_level(logging.WARNING, logger="priml.data.sources.imagenet")
         source = ImageNetSource(config)
 
         samples = list(source)
         # Corrupt image should be skipped.
         assert len(samples) == 0
+        assert len(caplog.records) == 1
+        assert isinstance(caplog.records[0].args, tuple)
+        assert caplog.records[0].args[0] == "corrupt.JPEG"
+        assert isinstance(caplog.records[0].args[1], OSError)
+        assert caplog.messages[0].startswith("Failed to load corrupt.JPEG: ")
 
 
 class TestImageNetReshuffle:
@@ -858,7 +1020,57 @@ class TestReadClassTar:
         assert len(samples) == 2
         assert samples[0].get("label") == "n01440764"
 
-    def test_read_class_tar_no_extractfile(self, temp_dir: Path) -> None:
+    def test_read_class_tar_continues_after_extractfile_returns_none(
+        self,
+        temp_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        train_tar = temp_dir / "ILSVRC2012_img_train.tar"
+        create_nested_tar(train_tar, "n01440764", num_images=2)
+        _skip_extractfile(monkeypatch, skip_name="n01440764_0.JPEG")
+
+        with tarfile.open(train_tar) as tar:
+            samples = list(_read_class_tar(tar, tar.getmembers()[0]))
+
+        assert [sample.get("file_name") for sample in samples] == [
+            "n01440764_1.JPEG",
+        ]
+        assert [sample.get("label") for sample in samples] == ["n01440764"]
+
+    def test_read_class_tar_continues_after_directory(self, temp_dir: Path) -> None:
+        """A directory member does not hide later images in the class tar."""
+        train_tar = temp_dir / "ILSVRC2012_img_train.tar"
+        class_tar_buffer = io.BytesIO()
+        image_buffer = io.BytesIO()
+        Image.new("RGB", (2, 3)).save(image_buffer, format="JPEG")
+        image_bytes = image_buffer.getvalue()
+        with tarfile.open(fileobj=class_tar_buffer, mode="w") as class_tar:
+            directory = tarfile.TarInfo(name="subdir")
+            directory.type = tarfile.DIRTYPE
+            class_tar.addfile(directory)
+            image = tarfile.TarInfo(name="later.JPEG")
+            image.size = len(image_bytes)
+            class_tar.addfile(image, io.BytesIO(image_bytes))
+
+        with tarfile.open(train_tar, "w") as tar:
+            member = tarfile.TarInfo(name="n01440764.tar")
+            member.size = len(class_tar_buffer.getvalue())
+            tar.addfile(member, io.BytesIO(class_tar_buffer.getvalue()))
+
+        with tarfile.open(train_tar, "r") as tar:
+            samples = list(_read_class_tar(tar, tar.getmembers()[0]))
+
+        assert len(samples) == 1
+        assert "file_name" in samples[0]
+        assert "label" in samples[0]
+        assert samples[0].get("file_name") == "later.JPEG"
+        assert samples[0].get("label") == "n01440764"
+
+    def test_read_class_tar_no_extractfile(
+        self,
+        temp_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
         """Test handling when extractfile returns None."""
         train_tar = temp_dir / "ILSVRC2012_img_train.tar"
 
@@ -873,8 +1085,13 @@ class TestReadClassTar:
             samples = list(_read_class_tar(tar, member))
 
         assert len(samples) == 0
+        assert caplog.messages == ["Could not extract test.tar"]
 
-    def test_read_class_tar_corrupt_image(self, temp_dir: Path) -> None:
+    def test_read_class_tar_corrupt_image(
+        self,
+        temp_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
         """Test handling corrupt images in class tar."""
         train_tar = temp_dir / "ILSVRC2012_img_train.tar"
 
@@ -896,6 +1113,11 @@ class TestReadClassTar:
 
         # Corrupt image should be skipped.
         assert len(samples) == 0
+        assert len(caplog.records) == 1
+        assert isinstance(caplog.records[0].args, tuple)
+        assert caplog.records[0].args[0] == "corrupt.JPEG"
+        assert isinstance(caplog.records[0].args[1], OSError)
+        assert caplog.messages[0].startswith("Failed to load corrupt.JPEG: ")
 
     def test_read_class_tar_image_extractfile_none(self, temp_dir: Path) -> None:
         """Test handling when image extractfile returns None."""

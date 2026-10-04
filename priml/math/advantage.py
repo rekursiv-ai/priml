@@ -178,10 +178,8 @@ def q_lambda_targets(
     carried = rewards[-1] + discount * not_done[-1] * greedy[-1]
     targets[-1] = carried
     for step in range(rewards.shape[0] - 2, -1, -1):
-        bootstrap = rewards[step] + discount * not_done[step] * greedy[step + 1]
-        carried = bootstrap + discount * trace_decay * not_done[step] * (
-            carried - greedy[step + 1]
-        )
+        bootstrap = rewards[step] + discount * greedy[step + 1]
+        carried = bootstrap + discount * trace_decay * (carried - greedy[step + 1])
         targets[step] = torch.where(dones[step].bool(), rewards[step], carried)
         carried = targets[step]
     return targets

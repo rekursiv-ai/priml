@@ -63,6 +63,12 @@ class PdlpResult:
     primal_weight: float
 
 
+class _RestartState(NamedTuple):
+    fixed_point_error: float
+    initial_error: float
+    last_trial_error: float | None
+
+
 class Pdlp:
     """Solve a linear program with cuOpt's default PDLP."""
 
@@ -127,14 +133,15 @@ class Pdlp:
         x = torch.maximum(torch.minimum(zeros_primal, problem.upper), problem.lower)
         y = zeros_dual
         anchor_x, anchor_y = zeros_primal, zeros_dual
-        next_x, next_y, slack = zeros_primal, zeros_dual, zeros_primal
-        fixed_point_error = initial_error = math.nan
-        last_trial_error = math.inf
+        next_x: Tensor = zeros_primal
+        next_y: Tensor = zeros_dual
+        slack: Tensor = zeros_primal
+        restart_state = _RestartState(math.nan, math.nan, None)
         since_restart = 0
         iteration = 0
         while True:
             major = iteration % config.restart_period == 0
-            restarted = False
+            restarted = major and iteration == config.restart_period
             if major or iteration % _check_interval(iteration) == 0:
                 primal, dual, reduced_cost = scaled_to_original(
                     scaled,
@@ -166,22 +173,25 @@ class Pdlp:
                     dual,
                     reduced_cost,
                 )
-                if major:
-                    after_first = iteration > config.restart_period
-                    restarted = iteration == config.restart_period or (
-                        after_first
-                        and (
-                            fixed_point_error
-                            <= config.sufficient_reduction * initial_error
-                            or (
-                                fixed_point_error
-                                <= config.necessary_reduction * initial_error
-                                and fixed_point_error > last_trial_error
-                            )
-                            or since_restart >= config.artificial_restart * iteration
-                        )
+                if major and iteration > config.restart_period:
+                    rising_error = (
+                        restart_state.last_trial_error is not None
+                        and restart_state.fixed_point_error
+                        > restart_state.last_trial_error
                     )
-                    last_trial_error = fixed_point_error
+                    restarted = (
+                        restart_state.fixed_point_error
+                        <= config.sufficient_reduction * restart_state.initial_error
+                        or (
+                            restart_state.fixed_point_error
+                            <= config.necessary_reduction * restart_state.initial_error
+                            and rising_error
+                        )
+                        or since_restart >= config.artificial_restart * iteration
+                    )
+                    restart_state = restart_state._replace(
+                        last_trial_error=restart_state.fixed_point_error,
+                    )
                 if restarted:
                     weight.update(
                         float(torch.dot(next_x - anchor_x, next_x - anchor_x)),
@@ -192,7 +202,6 @@ class Pdlp:
                     x = anchor_x = next_x
                     y = anchor_y = next_y
                     since_restart = 0
-                    last_trial_error = math.inf
 
             primal_step = step / weight.value
             dual_step = step * weight.value
@@ -235,7 +244,15 @@ class Pdlp:
                 )
                 fixed_point_error = max(0.0, movement + 2.0 * interaction * step) ** 0.5
                 if restarted:
-                    initial_error = fixed_point_error
+                    restart_state = _RestartState(
+                        fixed_point_error,
+                        fixed_point_error,
+                        None,
+                    )
+                else:
+                    restart_state = restart_state._replace(
+                        fixed_point_error=fixed_point_error,
+                    )
             halpern = (since_restart + 1) / (since_restart + 2)
             x = updates.halpern(reflected_x, anchor_x, halpern)
             y = updates.halpern(reflected_y, anchor_y, halpern)

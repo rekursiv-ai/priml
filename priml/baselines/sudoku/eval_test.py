@@ -25,6 +25,8 @@ import pytest
 import torch
 
 from priml.baselines.sudoku import (
+    eval as sudoku_eval,
+    puzzle_data,
     trainer,
     trm,
 )
@@ -46,7 +48,6 @@ from priml.baselines.sudoku.eval import (
     View,
     _fill_template,
     _load_harvest,
-    _modal_tail,
     _outer_run,
     _OuterRun,
     _run_training,
@@ -54,7 +55,6 @@ from priml.baselines.sudoku.eval import (
     _validate_views,
     _violated_group_counts,
     accepted_grids,
-    escalated_search_config,
     fixed_hps_node_count,
     learned_checkpoint_rollout_rows,
     learned_hps_output_width,
@@ -170,6 +170,7 @@ def run_case(stack: Stack, case: str, scratch: Path) -> dict[str, Tensor]:
       trajectory: Flat name-to-tensor record.
 
     """
+    puzzle_data._build_dihedral_indices.cache_clear()
     write_dataset(scratch / "data")
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         torch.manual_seed(0)
@@ -197,8 +198,15 @@ class PrimlStack:
 
 
 @pytest.mark.parametrize("case", CASES)
-def test_golden_replays_bit_for_bit(case: str, tmp_path: Path) -> None:
+def test_golden_replays_bit_for_bit(
+    case: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The runner reproduces the frozen evaluation with zero mismatches."""
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path / "torchinductor"))
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton"))
+    puzzle_data._build_dihedral_indices.cache_clear()
     report = mismatches(load_golden(case), run_case(PrimlStack(), case, tmp_path))
     assert not report, f"{len(report)} mismatches:\n" + "\n".join(report)
 
@@ -524,7 +532,7 @@ def _record_node_corpus(h: _Harness) -> dict[str, Tensor]:
 
 
 def _pipeline(h: _Harness, name: str) -> _PipelineConfig:
-    """Return a 4-step pipeline with 2-step evaluation segments."""
+    """Return a 3-step pipeline with 2-step evaluation segments."""
     cfg = h.eval.Reproduction.Config()
     cfg.study_name = "sudoku"
     cfg.experiment_name = name
@@ -535,8 +543,8 @@ def _pipeline(h: _Harness, name: str) -> _PipelineConfig:
     generator.dataset.working_dir = h.data
     generator.dataset.batch_size = 2
     generator.dataset.augment = True  # The recipe's; draws from the segment seed.
-    generator.max_steps = 4
-    generator.max_act_steps = 3
+    generator.max_steps = 3
+    generator.max_act_steps = 2
     generator.dtype_autocast = None
     generator.eval_warmup_batches = 0
     cfg.generator = generator
@@ -577,7 +585,11 @@ def _run_pipeline(
         state = cast(
             "dict[str, dict[str, dict[str, Tensor]]]",
             torch.load(
-                h.scratch / "runs" / generator / "checkpoints" / "step_00000004.pt",
+                h.scratch
+                / "runs"
+                / generator
+                / "checkpoints"
+                / f"step_{int(config.generator.max_steps):08d}.pt",
                 weights_only=True,
             ),
         )
@@ -652,6 +664,7 @@ def _record_repro_seeds(h: _Harness) -> dict[str, Tensor]:
     cfg = _pipeline(h, "repro_seeds")
     cfg.screen = "single_view"
     cfg.trigger = "final_only"
+    cfg.eval_every_steps = 3  # One training segment per seed.
     cfg.generator_seeds = (44, 45, 46)
     cfg.generator_names = tuple(f"repro_s{seed}" for seed in cfg.generator_seeds)
     lock = h.eval.AgreementLockEval.Config()
@@ -675,9 +688,7 @@ _RECORDERS: Final[dict[str, Callable[[_Harness], dict[str, Tensor]]]] = {
 
 def _tiny_trm() -> trm.TRM:
     """Build a real CPU TRM at the smallest size the eval runners accept."""
-    model = _tiny_config().make()
-    assert isinstance(model, trm.TRM)
-    return model.eval()
+    return _tiny_config().make().eval()
 
 
 def _tiny_config() -> trm.TRM.Config:
@@ -773,7 +784,13 @@ def test_eval_pure_helpers_and_validation(tmp_path: Path) -> None:
     assert modal_grid_predictions(
         torch.stack((grid[:2], grid[:2].flip(0), grid[:2])),
     )[1].tolist() == [0, 0]
-    assert escalated_search_config().search_candidates == 7
+    escalated = sudoku_eval.escalated_search_config()
+    assert (
+        escalated.search_candidates,
+        escalated.search_depth,
+        escalated.search_cell_attempts,
+        escalated.search_budget,
+    ) == (7, 4, 3, 8_400)
     assert (
         _fill_template(
             "/runs/{experiment_name}/x-{index}",
@@ -880,9 +897,12 @@ def test_eval_rollout_and_pin_search_engines() -> None:
     root_logits = torch.zeros(2, 81, 11)
     root_logits[..., 2] = 1
     active = torch.tensor([True, False])
+    rollout_batches: list[tuple[int, tuple[int, ...]]] = []
+    rollout_boards: list[Tensor] = []
 
     def rollout(candidate: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
-        del rows
+        rollout_batches.append((len(candidate), tuple(int(row) for row in rows)))
+        rollout_boards.append(candidate.clone())
         out = torch.zeros(candidate.shape[0], 81, 11)
         out[..., 2] = 1
         return out, torch.full((candidate.shape[0],), 3.0)
@@ -899,10 +919,19 @@ def test_eval_rollout_and_pin_search_engines() -> None:
         budget=8,
         max_rows=3,
     )
-    assert learned.accepted.shape == (2,)
+    assert torch.equal(learned.accepted, torch.tensor([False, False]))
+    assert torch.equal(learned.grids, boards)
+    assert torch.equal(learned.scores, torch.full((2,), float("-inf")))
+    assert torch.equal(learned.nodes, torch.tensor([8, 0]))
+    assert torch.equal(learned.depth, torch.tensor([-1, -1]))
+    assert [len(rows) for rows in learned.visited_predictions] == [2, 4, 2]
+    assert [len(rows) for rows in learned.visited_puzzles] == [2, 4, 2]
+    expected_pins = boards[0].repeat(2, 1)
+    expected_pins[:, 1] = torch.tensor([2, 3])
+    assert torch.equal(rollout_boards[0], expected_pins)
 
     def accepts(predictions: Tensor, media: Tensor) -> Tensor:
-        del media
+        assert media.shape == (predictions.shape[0], 81)
         return torch.zeros(predictions.shape[0], dtype=torch.bool)
 
     found, grids, nodes, depth = run_pin_search_fast(
@@ -910,15 +939,39 @@ def test_eval_rollout_and_pin_search_engines() -> None:
         media=boards,
         base_logits=root_logits,
         active=active,
-        groups=sudoku_groups(),
-        depth=2,
+        groups=sudoku_eval.sudoku_groups(),
+        depth=3,
         candidates=2,
         cell_attempts=2,
-        budget=8,
+        budget=12,
         max_rows=3,
         accept_fn=accepts,
     )
-    assert found.shape == grids.shape[:1] == nodes.shape == depth.shape
+    assert torch.equal(found, torch.tensor([False, False]))
+    assert torch.equal(grids, boards)
+    assert torch.equal(nodes, torch.tensor([12, 0]))
+    assert torch.equal(depth, torch.tensor([-1, -1]))
+    default_found, default_grids, default_nodes, default_depth = (
+        sudoku_eval.run_pin_search_fast(
+            rollout,
+            media=boards,
+            base_logits=root_logits,
+            active=active,
+            groups=sudoku_eval.sudoku_groups(),
+            depth=3,
+            candidates=2,
+            cell_attempts=2,
+            budget=12,
+            max_rows=3,
+        )
+    )
+    assert torch.equal(default_found, torch.tensor([False, False]))
+    assert torch.equal(default_grids, boards)
+    assert torch.equal(default_nodes, torch.tensor([12, 0]))
+    assert torch.equal(default_depth, torch.tensor([-1, -1]))
+    assert rollout_batches
+    assert all(size <= 3 for size, _ in rollout_batches)
+    assert all(set(rows) <= {0} for _, rows in rollout_batches)
 
 
 def test_eval_search_run_branches_and_errors() -> None:
@@ -933,11 +986,43 @@ def test_eval_search_run_branches_and_errors() -> None:
         search_max_rows=4,
         acceptance_threshold=0.0,
     )
-    batch = {"media": torch.full((2, 81), 1, dtype=torch.long), "valid_count": 2}
+    media = torch.full((2, 81), 1, dtype=torch.long)
+    batch = {"media": media, "valid_count": 2}
     learned = config.make().run(model, batch)
     assert learned.accepted.shape == (2,)
-    empty = config.make().run(model, {"media": batch["media"], "valid_count": 0})
-    assert not bool(empty.scored.any())
+    empty = config.make().run(model, {"media": media, "valid_count": 0})
+    assert torch.equal(empty.scored, torch.zeros(2, dtype=torch.bool))
+    assert torch.equal(empty.accepted, torch.zeros(2, dtype=torch.bool))
+    assert torch.equal(empty.root_predictions, media)
+    assert torch.equal(empty.final_predictions, media)
+    assert torch.equal(empty.scores, torch.zeros(2))
+    assert torch.equal(empty.root_scores, torch.zeros(2))
+    assert torch.equal(empty.nodes, torch.zeros(2, dtype=torch.int64))
+    assert torch.equal(empty.depth, torch.full((2,), -1, dtype=torch.int64))
+    assert empty.visited_predictions == []
+    assert empty.visited_puzzles == []
+    meta_empty = sudoku_eval._empty_result(media.to("meta"))
+    assert all(
+        tensor.device.type == "meta"
+        for tensor in (
+            meta_empty.accepted,
+            meta_empty.root_predictions,
+            meta_empty.final_predictions,
+            meta_empty.scores,
+            meta_empty.root_scores,
+            meta_empty.nodes,
+            meta_empty.depth,
+            meta_empty.scored,
+        )
+    )
+    previous_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(torch.float64)
+        typed_empty = sudoku_eval._empty_result(media)
+        assert typed_empty.scores.dtype == torch.float32
+        assert typed_empty.root_scores.dtype == torch.float32
+    finally:
+        torch.set_default_dtype(previous_dtype)
     predicate = config.make().run(
         model,
         batch,
@@ -1175,7 +1260,18 @@ def test_segmented_rollout_continues_confident_rows_past_q8() -> None:
             continue_threshold=0.0,
             early_exit_at_q8=False,
         )
-    logits, scores = segmented_rollout_rows(
+    one_step_logits, one_step_scores = sudoku_eval.segmented_rollout_rows(
+        model,
+        {},
+        1,
+        boards,
+        rows,
+        continue_threshold=0.0,
+        early_exit_at_q8=False,
+    )
+    assert one_step_logits.shape == (3, 81, 11)
+    assert one_step_scores.shape == (3,)
+    logits, scores = sudoku_eval.segmented_rollout_rows(
         model,
         {},
         10,
@@ -1186,6 +1282,66 @@ def test_segmented_rollout_continues_confident_rows_past_q8() -> None:
     )
     assert logits.shape == (3, 81, 11)
     assert scores.shape == (3,)
+
+
+def test_segmented_rollout_without_q8_gate_continues_all_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ev = sudoku_eval
+    boards = torch.tensor([[2, 1], [1, 3]])
+    arange = cast("Callable[..., Tensor]", torch.arange)
+    devices: list[object] = []
+
+    def record_arange(*args: object, **kwargs: object) -> Tensor:
+        devices.append(kwargs.get("device"))
+        return arange(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "arange", record_arange)
+
+    class RecordingModel:
+        device = torch.device("cpu")
+
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        def init_z(self, batch_size: int) -> tuple[Tensor, Tensor]:
+            return torch.zeros(batch_size, 1), torch.zeros(batch_size, 1)
+
+        def act_step(
+            self,
+            input_ids: Tensor,
+            z_slow: Tensor,
+            z_fast: Tensor,
+            *,
+            puzzle_identifiers: Tensor | None = None,
+            feedback_ids: Tensor,
+        ) -> dict[str, Tensor]:
+            del puzzle_identifiers, feedback_ids
+            self.batch_sizes.append(input_ids.shape[0])
+            logits = torch.zeros(len(input_ids), 2, 4)
+            logits[..., 2] = 1
+            return {
+                "logits": logits,
+                "q_halt": torch.tensor([-1.0, -2.0])[: len(input_ids)],
+                "z_slow": z_slow + 1,
+                "z_fast": z_fast + 1,
+            }
+
+    model = RecordingModel()
+    logits, scores = ev.segmented_rollout_rows(
+        cast("trm.TRM", model),
+        {},
+        10,
+        boards,
+        torch.tensor([1, 0]),
+        continue_threshold=0.0,
+        early_exit_at_q8=False,
+    )
+
+    assert model.batch_sizes == [2] * 10
+    assert devices == [boards.device]
+    assert logits.device == scores.device == boards.device
+    assert scores.tolist() == [-1.0, -2.0]
 
 
 def _write_harvest_shard(directory: Path, name: str, *, groups: list[int]) -> str:
@@ -1517,6 +1673,42 @@ def test_dump_and_summary_guards_reject_misaligned_rows(tmp_path: Path) -> None:
         read_member_dump(narrow)
 
 
+def test_read_member_dump_decodes_each_packed_field(tmp_path: Path) -> None:
+    ev = sudoku_eval
+    width = ev.learned_hps_output_width(81)
+    rows = np.zeros((2, width), dtype=np.float64)
+    rows[0, :7] = (0.75, 0.8, 3.9, -1.2, 4.8, 0.9, 7.0)
+    rows[1, :7] = (-0.5, 0.2, 8.1, 2.9, 5.1, 0.1, 9.0)
+    roots = np.arange(2 * 81).reshape(2, 81) + 2
+    finals = roots + 1
+    rows[:, 7 : 7 + 81] = roots
+    rows[:, -81:] = finals
+    media = np.arange(2 * 81).reshape(2, 81).astype(np.int16) + 1
+    label = media + 1
+    path = tmp_path / "member.npz"
+    np.savez(path, rows=rows, media=media, label=label)
+    dump = ev.read_member_dump(path)
+    assert dump.rows.dtype == torch.float32
+    assert dump.media.dtype == torch.uint8
+    assert dump.label is not None
+    assert dump.label.dtype == torch.uint8
+    assert dump.score.tolist() == [0.75, -0.5]
+    assert dump.accepted.tolist() == [True, False]
+    assert dump.nodes.tolist() == [3, 8]
+    assert dump.depth.tolist() == [-1, 2]
+    assert dump.candidate_count.tolist() == [4, 5]
+    assert dump.solution_visited.tolist() == [True, False]
+    assert dump.root_predictions.dtype == torch.uint8
+    assert dump.final_predictions.dtype == torch.uint8
+    assert torch.equal(dump.root_predictions, torch.from_numpy(roots.astype(np.uint8)))
+    assert torch.equal(
+        dump.final_predictions,
+        torch.from_numpy(finals.astype(np.uint8)),
+    )
+    assert torch.equal(dump.media, torch.from_numpy(media.astype(np.uint8)))
+    assert torch.equal(dump.label, torch.from_numpy(label.astype(np.uint8)))
+
+
 def test_checkpoint_rollout_rejects_disordered_or_out_of_range_steps() -> None:
     model = _tiny_trm()
     boards = torch.full((2, 81), 1, dtype=torch.long)
@@ -1560,17 +1752,164 @@ def test_committee_and_view_validation_rejects_empty_inputs() -> None:
     assert _fill_template(literal, base_dir=None, experiment_name="unused") is literal
 
 
+def test_grid_acceptance_and_group_counts_pin_validity_rules() -> None:
+    ev = sudoku_eval
+    solution = torch.tensor(
+        [((row * 3 + row // 3 + col) % 9) + 2 for row in range(9) for col in range(9)],
+    )
+    valid = solution.repeat(4, 1)
+    duplicate = valid[1].clone()
+    duplicate[0] = duplicate[1]
+    negative = valid[2].clone()
+    negative[0] = -1
+    too_large = valid[3].clone()
+    too_large[0] = 11
+    predictions = torch.stack((valid[0], duplicate, negative, too_large))
+    media = torch.zeros_like(predictions)
+    media[:, 0] = valid[:, 0]
+    groups = ev.sudoku_groups()
+    assert ev.accepted_grids(predictions, media, groups).tolist() == [
+        True,
+        False,
+        False,
+        False,
+    ]
+    assert ev._violated_group_counts(predictions, groups).tolist() == [
+        0.0,
+        3.0,
+        3.0,
+        3.0,
+    ]
+
+
 def test_modal_tail_votes_over_every_round_a_survivor_reached() -> None:
-    first = torch.full((3, 81), 2, dtype=torch.long)
-    second = torch.full((2, 81), 3, dtype=torch.long)
-    third = torch.full((2, 81), 3, dtype=torch.long)
+    ev = sudoku_eval
+    first = torch.full((3, 81), 2, dtype=torch.float32)
+    second = torch.full((2, 81), 3, dtype=torch.float32)
+    third = torch.full((2, 81), 3, dtype=torch.float32)
     collected = [
         (torch.tensor([0, 1, 2]), first),
         (torch.tensor([1, 2]), second),
         (torch.tensor([2, 1]), third),
     ]
-    tail = _modal_tail(collected, torch.tensor([2, 1]))
-    assert torch.equal(tail, torch.full((2, 81), 3, dtype=torch.long))
+    tail = ev._modal_tail(collected, torch.tensor([2, 1, 4]))
+    assert tail.dtype == torch.float32
+    assert torch.equal(tail[:2], torch.full((2, 81), 3, dtype=torch.float32))
+    assert torch.equal(tail[2], torch.full((81,), 255, dtype=torch.float32))
+
+
+def test_sieve_hps_round_scopes_search_to_the_survivors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ev = sudoku_eval
+    cfg = ev.SieveEval.Config()
+    cfg.experiment_name = "sieve"
+    cfg.base_dir = tmp_path
+    cfg.runtime.device = "cpu"
+    cfg.dataset.working_dir = write_dataset(tmp_path / "data")
+    cfg.model = _tiny_config()
+    sieve = cfg.make()
+    seen: dict[str, object] = {}
+    model = object()
+    released: list[bool] = []
+
+    def eval_model(
+        model_config: object,
+        checkpoint_path: Path,
+        device: torch.device,
+    ) -> object:
+        seen["eval_model"] = (model_config, checkpoint_path, device)
+        return model
+
+    monkeypatch.setattr(ev, "_eval_model", eval_model)
+    monkeypatch.setattr(ev, "_release", lambda: released.append(True))
+
+    def search_pass(**kwargs: object) -> tuple[Tensor, Tensor, Tensor]:
+        dataset = cast("PuzzleDataset", kwargs["dataset"])
+        seen["indices"] = dataset.config.eval_instance_indices
+        seen["eval_num_instances"] = dataset.config.eval_num_instances
+        # _search_pass returns batch x grid rows x grid columns for this stub.
+        media = torch.ones(2, 2, 3, dtype=torch.int64)
+        labels = torch.full((2, 2, 3), 2, dtype=torch.int64)
+        rows = torch.zeros(len(media), ev.learned_hps_output_width(3))
+        rows[:, -3:] = 7
+        seen["view"] = kwargs["view"]
+        seen["search"] = kwargs["search"]
+        seen["deadline"] = kwargs["deadline_seconds"]
+        seen["label"] = kwargs["label"]
+        seen["model"] = kwargs["model"]
+        seen["device"] = kwargs["device"]
+        return rows, media, labels
+
+    monkeypatch.setattr(ev, "_search_pass", search_pass)
+    view = ev.NINE_VIEWS[0]
+    search = cfg.search.copy_tree()
+    grids, media, labels = sieve._hps_round(view, search, torch.tensor([0, 1]))
+    model_config, checkpoint_path, device = cast(
+        "tuple[object, Path, torch.device]",
+        seen.pop("eval_model"),
+    )
+    assert seen == {
+        "indices": (0, 1),
+        "eval_num_instances": None,
+        "view": view,
+        "search": search,
+        "deadline": cfg.max_round_eval_seconds,
+        "label": f"round {view.name}",
+        "model": model,
+        "device": sieve.device,
+    }
+    assert model_config is sieve.config.model
+    assert checkpoint_path == sieve._path(cfg.checkpoint_path)
+    assert device == sieve.device
+    assert grids.shape == (2, 3)
+    assert media.shape == labels.shape == (2, 2, 3)
+    assert grids.dtype == torch.int64
+    assert torch.equal(grids, torch.full((2, 3), 7, dtype=torch.int64))
+    assert released == [True]
+    sieve._hps_round(view, search, torch.tensor([7.0, 2.0]))
+    assert seen["indices"] == ()
+
+
+def test_sieve_hps_round_releases_model_after_search_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ev = sudoku_eval
+    cfg = ev.SieveEval.Config()
+    cfg.experiment_name = "sieve"
+    cfg.base_dir = tmp_path
+    cfg.runtime.device = "cpu"
+    cfg.dataset.working_dir = write_dataset(tmp_path / "data")
+    cfg.model = _tiny_config()
+    sieve = cfg.make()
+    released: list[bool] = []
+
+    def eval_model(
+        config: object,
+        checkpoint_path: Path,
+        device: torch.device,
+    ) -> object:
+        del config, checkpoint_path, device
+        return object()
+
+    monkeypatch.setattr(ev, "_eval_model", eval_model)
+
+    def fail_search(**_kwargs: object) -> tuple[Tensor, Tensor, Tensor]:
+        raise RuntimeError("search failed")
+
+    monkeypatch.setattr(ev, "_search_pass", fail_search)
+    monkeypatch.setattr(ev, "_release", lambda: released.append(True))
+
+    with pytest.raises(RuntimeError, match="search failed"):
+        sieve._hps_round(
+            ev.NINE_VIEWS[0],
+            cfg.search,
+            torch.tensor([4]),
+        )
+
+    assert released == [True]
 
 
 def test_sieve_tail_search_escalates_the_view_policy(tmp_path: Path) -> None:
@@ -1593,6 +1932,971 @@ def test_sieve_tail_search_escalates_the_view_policy(tmp_path: Path) -> None:
     cfg.evaluation_count = 0
     with pytest.raises(ValueError, match="evaluation_count"):
         cfg.make()
+
+
+def test_gelu_cost_counts_exact_forward_and_backward_work() -> None:
+    ev = sudoku_eval
+    result = ev._gelu_cost(channels=3, rows=5, dtype=torch.float32)
+    assert result["flops", "primal", "elementwise", torch.float32] == 120
+    assert result["flops", "adjoint", "elementwise", torch.float32] == 120
+    assert result["bytes", "primal", "elementwise", torch.float32] == 120
+    assert result["bytes", "adjoint", "elementwise", torch.float32] == 180
+    float64_result = ev._gelu_cost(channels=3, rows=5, dtype=torch.float64)
+    assert float64_result["flops", "primal", "elementwise", torch.float64] == 120
+    assert float64_result["bytes", "primal", "elementwise", torch.float64] == 240
+
+
+def test_verifier_eval_iterator_length_counts_ragged_batches() -> None:
+    ev = sudoku_eval
+    blocks = [
+        {"label": torch.zeros(3), "media": torch.zeros(3, 4)},
+        {"label": torch.zeros(2), "media": torch.zeros(2, 4)},
+    ]
+    batches = ev._VerifierEvalIterator(blocks, batch_size=2)
+    assert len(batches) == 3
+    assert [len(batch["label"]) for batch in batches] == [2, 1, 2]
+
+
+def test_pin_search_acceptance_records_exact_winning_path() -> None:
+    ev = sudoku_eval
+    solution = torch.tensor(
+        [((row * 3 + row // 3 + col) % 9) + 2 for row in range(9) for col in range(9)],
+    )
+    media = torch.full((2, 81), 1, dtype=torch.int64)
+    base_logits = torch.zeros(2, 81, 11)
+    seen_boards: list[Tensor] = []
+    seen_rows: list[Tensor] = []
+
+    def rollout(boards: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
+        seen_boards.append(boards.clone())
+        seen_rows.append(rows.clone())
+        logits = torch.zeros(len(boards), 81, 11)
+        logits.scatter_(2, solution.expand(len(boards), -1).unsqueeze(-1), 1)
+        return logits, torch.full((len(boards),), -99.0)
+
+    found, grids, nodes, depth = ev.run_pin_search_fast(
+        rollout,
+        media=media,
+        base_logits=base_logits,
+        active=torch.tensor([True, False]),
+        groups=ev.sudoku_groups(),
+        depth=2,
+        candidates=2,
+        cell_attempts=2,
+        budget=8,
+        max_rows=3,
+        accept_fn=lambda predictions, _: torch.ones(len(predictions), dtype=torch.bool),
+    )
+    assert found.tolist() == [True, False]
+    assert torch.equal(grids[0], solution)
+    assert torch.equal(grids[1], media[1])
+    assert nodes.tolist() == [2, 0]
+    assert depth.tolist() == [1, -1]
+    assert [batch.shape for batch in seen_boards] == [(2, 81)]
+    assert seen_rows[0].tolist() == [0, 0]
+    assert torch.equal(seen_boards[0][:, 0], torch.tensor([2, 3]))
+    assert torch.equal(seen_boards[0][:, 1:], torch.ones(2, 80, dtype=torch.int64))
+
+
+def test_grid_scoring_and_acceptance_pin_token_boundaries() -> None:
+    ev = sudoku_eval
+    solution = torch.tensor(
+        [((row * 3 + row // 3 + col) % 9) + 2 for row in range(9) for col in range(9)],
+    )
+    predictions = solution.repeat(5, 1)
+    predictions[1, 0] = 0
+    predictions[2, 0] = 1
+    predictions[3] = 0
+    predictions[4] = 1
+    assert ev._violated_group_counts(
+        predictions,
+        ev.sudoku_groups(),
+    ).tolist() == [0.0, 3.0, 3.0, 27.0, 27.0]
+
+    media = torch.zeros(2, 81, dtype=torch.int64)
+    media[0, 0] = media[1, 0] = 2
+    media[0, 8] = media[1, 8] = 10
+    media[1, 1] = 1
+    media[1, 2] = 0
+    assert ev.accepted_grids(
+        solution.expand(2, -1),
+        media,
+        ev.sudoku_groups(),
+    ).tolist() == [True, True]
+    media[1, 8] = 9
+    assert ev.accepted_grids(
+        solution.expand(2, -1),
+        media,
+        ev.sudoku_groups(),
+    ).tolist() == [True, False]
+
+
+def test_segmented_rollout_returns_q8_for_early_rows_and_continues_selected_rows() -> (
+    None
+):
+    ev = sudoku_eval
+    boards = torch.tensor([[2, 1, 1], [1, 1, 3]])
+    rows = torch.tensor([1, 0])
+    puzzle_ids = torch.tensor([17, 29, 41])
+
+    class RecordingModel:
+        device = torch.device("cpu")
+
+        def __init__(self) -> None:
+            self.steps = 0
+            self.calls: list[tuple[Tensor, Tensor, Tensor]] = []
+
+        def init_z(self, batch_size: int) -> tuple[Tensor, Tensor]:
+            return torch.zeros(batch_size, 3), torch.zeros(batch_size, 4)
+
+        def act_step(
+            self,
+            input_ids: Tensor,
+            z_slow: Tensor,
+            z_fast: Tensor,
+            *,
+            puzzle_identifiers: Tensor | None = None,
+            feedback_ids: Tensor,
+        ) -> dict[str, Tensor]:
+            assert puzzle_identifiers is not None
+            self.steps += 1
+            self.calls.append(
+                (input_ids.clone(), feedback_ids.clone(), puzzle_identifiers.clone()),
+            )
+            logits = torch.zeros(len(input_ids), 3, 5)
+            logits[..., self.steps % 5] = 1
+            return {
+                "logits": logits,
+                "q_halt": torch.tensor([0.0, -1.0])[: len(input_ids)],
+                "z_slow": z_slow + 1,
+                "z_fast": z_fast + 1,
+            }
+
+    model = RecordingModel()
+    logits, scores = ev.segmented_rollout_rows(
+        cast("trm.TRM", model),
+        {"puzzle_identifiers": puzzle_ids},
+        10,
+        boards,
+        rows,
+        continue_threshold=0.0,
+        early_exit_at_q8=True,
+    )
+    assert model.steps == 10
+    assert [call[0].shape[0] for call in model.calls] == [2] * 8 + [1] * 2
+    assert model.calls[0][2].tolist() == [29, 17]
+    assert model.calls[8][2].tolist() == [29]
+    assert torch.equal(model.calls[0][1], boards)
+    assert torch.equal(model.calls[8][1], torch.tensor([[2, 3, 3]]))
+    assert logits.argmax(dim=-1).tolist() == [[0, 0, 0], [3, 3, 3]]
+    assert scores.tolist() == [0.0, -1.0]
+
+
+def test_run_pin_search_fast_obeys_budget_and_skips_inactive_rows() -> None:
+    ev = sudoku_eval
+    media = torch.ones(2, 4, dtype=torch.long)
+    logits = torch.zeros(2, 4, 11)
+    logits[..., 2] = 1
+    calls: list[tuple[Tensor, Tensor]] = []
+
+    def rollout(boards: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
+        calls.append((boards.clone(), rows.clone()))
+        out = torch.zeros(len(boards), 4, 11)
+        out[..., 2] = 1
+        return out, torch.zeros(len(boards))
+
+    found, grids, nodes, depth = ev.run_pin_search_fast(
+        rollout,
+        media=media,
+        base_logits=logits,
+        active=torch.tensor([True, False]),
+        groups=torch.empty(0, 9, dtype=torch.long),
+        depth=3,
+        candidates=2,
+        cell_attempts=1,
+        budget=6,
+        max_rows=3,
+        accept_fn=lambda preds, _: torch.zeros(len(preds), dtype=torch.bool),
+    )
+    assert not found.any()
+    assert torch.equal(grids, media)
+    assert nodes.tolist() == [6, 0]
+    assert depth.tolist() == [-1, -1]
+    assert [len(rows) for _, rows in calls] == [2, 3, 1]
+    assert [rows.tolist() for _, rows in calls] == [[0, 0], [0, 0, 0], [0]]
+
+    calls.clear()
+    _, _, depth_limited_nodes, _ = ev.run_pin_search_fast(
+        rollout,
+        media=media,
+        base_logits=logits,
+        active=torch.tensor([True, False]),
+        groups=torch.empty(0, 9, dtype=torch.long),
+        depth=1,
+        candidates=2,
+        cell_attempts=1,
+        budget=100,
+        max_rows=100,
+        accept_fn=lambda preds, _: torch.zeros(len(preds), dtype=torch.bool),
+    )
+    assert depth_limited_nodes.tolist() == [2, 0]
+    assert [len(rows) for _, rows in calls] == [2]
+
+
+def test_member_dump_decodes_fields_for_a_small_grid(tmp_path: Path) -> None:
+    ev = sudoku_eval
+    grid_len = 2
+    rows = np.array(
+        [
+            [0.25, 0.75, 3.9, -1.2, 4.8, 0.9, 42, 2, 3, 4, 5],
+            [-0.5, 0.2, 8.1, 2.9, 5.1, 0.1, 43, 6, 7, 8, 9],
+        ],
+    )
+    assert rows.shape[1] == ev.learned_hps_output_width(grid_len)
+    path = tmp_path / "member.npz"
+    np.savez(
+        path,
+        rows=rows,
+        media=np.array([[7, 8], [10, 11]], dtype=np.int16),
+        label=np.array([[9, 10], [12, 13]], dtype=np.int16),
+    )
+    dump = ev.read_member_dump(path)
+    assert dump.rows.dtype == torch.float32
+    assert dump.score.tolist() == [0.25, -0.5]
+    assert dump.accepted.tolist() == [True, False]
+    assert dump.nodes.tolist() == [3, 8]
+    assert dump.depth.tolist() == [-1, 2]
+    assert dump.candidate_count.tolist() == [4, 5]
+    assert dump.solution_visited.tolist() == [True, False]
+    assert dump.root_predictions.tolist() == [[2, 3], [6, 7]]
+    assert dump.final_predictions.tolist() == [[4, 5], [8, 9]]
+    assert dump.media.tolist() == [[7, 8], [10, 11]]
+    assert dump.label is not None
+    assert dump.label.tolist() == [[9, 10], [12, 13]]
+
+
+def test_sieve_tail_search_preserves_non_escalated_policy() -> None:
+    ev = sudoku_eval
+    config = ev.SieveEval.Config()
+    config.search.max_act_steps = 3
+    config.search.acceptance_threshold = 2.5
+    config.tail_search = (5, 4, 3, 7)
+    sieve = object.__new__(ev.SieveEval)
+    sieve.config = config
+    tail = sieve._tail_search_config()
+    assert (
+        tail.search_candidates,
+        tail.search_depth,
+        tail.search_cell_attempts,
+        tail.search_budget,
+    ) == (5, 4, 3, 7)
+    assert tail.max_act_steps == 3
+    assert tail.acceptance_threshold == 2.5
+    assert tail.search_max_rows == config.search.search_max_rows
+
+
+def test_contradiction_rows_follow_two_seeded_draws_and_align_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ev = sudoku_eval
+    data = object.__new__(ev.VerifierData)
+    data.device = torch.device("meta")
+    data.train_inputs = torch.tensor([[2, 1], [3, 1], [4, 1]])
+    data.train_labels = torch.tensor([[5, 6], [7, 8], [9, 10]])
+    generator = torch.Generator().manual_seed(91)
+    expected_generator = torch.Generator().manual_seed(91)
+    row_indices = torch.randint(3, (4,), generator=expected_generator)
+    sibling_indices = torch.randint(3, (4,), generator=expected_generator)
+    original_randint = torch.randint
+    devices: list[object] = []
+
+    def record_randint(*args: object, **kwargs: object) -> Tensor:
+        devices.append(kwargs.get("device"))
+        return original_randint(
+            cast(int, args[0]),
+            cast(tuple[int, ...], args[1]),
+            device="cpu",
+            generator=cast(torch.Generator, kwargs["generator"]),
+        )
+
+    monkeypatch.setattr(torch, "randint", record_randint)
+    puzzle, candidate, solution = data._contradiction_rows(4, generator=generator)
+    assert devices == [data.device, data.device]
+    assert torch.equal(puzzle, data.train_inputs[row_indices].long())
+    assert torch.equal(candidate, data.train_labels[sibling_indices].long())
+    assert torch.equal(solution, data.train_labels[row_indices].long())
+
+
+def test_verifier_eval_iterator_yields_exact_ragged_chunks() -> None:
+    ev = sudoku_eval
+    blocks = [
+        {"label": torch.arange(5), "media": torch.arange(10).reshape(5, 2)},
+        {
+            "label": torch.arange(2) + 10,
+            "media": torch.arange(6).reshape(2, 3) + 10,
+        },
+    ]
+    batches = list(ev._VerifierEvalIterator(blocks, batch_size=2))
+    assert [batch["label"].tolist() for batch in batches] == [
+        [0, 1],
+        [2, 3],
+        [4],
+        [10, 11],
+    ]
+    assert [batch["media"].shape for batch in batches] == [
+        (2, 2),
+        (2, 2),
+        (1, 2),
+        (2, 3),
+    ]
+    assert [batch["media"].tolist() for batch in batches] == [
+        [[0, 1], [2, 3]],
+        [[4, 5], [6, 7]],
+        [[8, 9]],
+        [[10, 11, 12], [13, 14, 15]],
+    ]
+
+
+def test_unchecked_eval_helpers_have_exact_cost_and_round_contracts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ev = sudoku_eval
+    cost = ev._gelu_cost(channels=2, rows=3, dtype=torch.float32)
+    assert cost["flops", "primal", "elementwise", torch.float32] == 48
+    assert cost["flops", "adjoint", "elementwise", torch.float32] == 48
+
+    blocks = [
+        {"label": torch.arange(5), "media": torch.arange(10).reshape(5, 2)},
+        {"label": torch.arange(2) + 10, "media": torch.arange(6).reshape(2, 3)},
+    ]
+    batches = ev._VerifierEvalIterator(blocks, batch_size=2)
+    assert len(batches) == 4
+    assert [batch["label"].tolist() for batch in batches] == [
+        [0, 1],
+        [2, 3],
+        [4],
+        [10, 11],
+    ]
+
+    config = ev.SieveEval.Config()
+    config.experiment_name = "sieve"
+    config.base_dir = tmp_path
+    config.runtime.device = "cpu"
+    config.tail_search = (3, 2, 4, 30)
+    sieve = config.make()
+    observed: dict[str, object] = {}
+
+    def eval_model(*_: object) -> object:
+        return object()
+
+    def search_pass(**kwargs: object) -> tuple[Tensor, Tensor, Tensor]:
+        dataset = cast("PuzzleDataset", kwargs["dataset"])
+        observed["indices"] = dataset.config.eval_instance_indices
+        observed["search"] = kwargs["search"]
+        return (
+            torch.zeros(2, ev.learned_hps_output_width(4)),
+            torch.ones(2, 4),
+            torch.ones(2, 4),
+        )
+
+    monkeypatch.setattr(ev, "_eval_model", eval_model)
+    monkeypatch.setattr(ev, "_search_pass", search_pass)
+    grids, media, labels = sieve._hps_round(
+        ev.NINE_VIEWS[0],
+        config.search,
+        torch.tensor([1, 3]),
+    )
+    assert observed == {"indices": (1, 3), "search": config.search}
+    assert grids.shape == media.shape == labels.shape == (2, 4)
+    assert grids.dtype == torch.int64
+
+
+def test_accepted_grids_rejects_each_invalid_grid_and_preserves_valid_solution() -> (
+    None
+):
+    solution = _solution()
+    duplicate = solution.clone()
+    duplicate[0] = duplicate[1]
+    blank = solution.clone()
+    blank[0] = 1
+    media = torch.zeros(4, 81, dtype=torch.long)
+    media[:, 0] = solution[0]
+    media[3, 1] = solution[1]
+    media[3, 2] = 1
+    mismatched_given = solution.clone()
+    mismatched_given[0] = 3
+    predictions = torch.stack((solution, duplicate, blank, mismatched_given))
+
+    accepted = sudoku_eval.accepted_grids(
+        predictions,
+        media,
+        sudoku_eval.sudoku_groups(),
+    )
+
+    assert accepted.tolist() == [True, False, False, False]
+
+
+def test_run_pin_search_fast_uses_default_acceptance_and_preserves_outputs() -> None:
+    ev = sudoku_eval
+    solution = _solution()
+    media = torch.ones(2, 81, dtype=torch.long)
+    base_logits = torch.zeros(2, 81, 11)
+    base_logits[..., 2] = 1
+    calls: list[tuple[Tensor, Tensor]] = []
+
+    def rollout(boards: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
+        calls.append((boards.clone(), rows.clone()))
+        logits = torch.zeros(len(boards), 81, 11)
+        logits.scatter_(2, solution.expand(len(boards), -1).unsqueeze(-1), 1)
+        return logits, torch.zeros(len(boards))
+
+    found, grids, nodes, depth = ev.run_pin_search_fast(
+        rollout,
+        media=media,
+        base_logits=base_logits,
+        active=torch.tensor([True, False]),
+        groups=ev.sudoku_groups(),
+        depth=2,
+        candidates=2,
+        cell_attempts=2,
+        budget=6,
+        max_rows=3,
+    )
+
+    assert found.tolist() == [True, False]
+    assert torch.equal(grids[0], solution)
+    assert torch.equal(grids[1], media[1])
+    assert nodes.tolist() == [2, 0]
+    assert depth.tolist() == [1, -1]
+    assert [len(rows) for _, rows in calls] == [2]
+    assert calls[0][1].tolist() == [0, 0]
+
+
+def test_run_pin_search_fast_expands_breadth_first_with_exact_budget_and_chunks() -> (
+    None
+):
+    ev = sudoku_eval
+    media = torch.ones(2, 5, dtype=torch.long)
+    base_logits = torch.zeros(2, 5, 11)
+    base_logits[..., 2] = 1
+    calls: list[tuple[Tensor, Tensor]] = []
+
+    def rollout(boards: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
+        calls.append((boards.clone(), rows.clone()))
+        logits = torch.zeros(len(boards), 5, 11)
+        logits[..., 2] = 1
+        return logits, torch.zeros(len(boards))
+
+    found, grids, nodes, depth = ev.run_pin_search_fast(
+        rollout,
+        media=media,
+        base_logits=base_logits,
+        active=torch.tensor([True, False]),
+        groups=torch.empty(0, 9, dtype=torch.long),
+        depth=3,
+        candidates=2,
+        cell_attempts=1,
+        budget=6,
+        max_rows=3,
+        accept_fn=lambda preds, _: torch.zeros(len(preds), dtype=torch.bool),
+    )
+
+    assert not found.any()
+    assert torch.equal(grids, media)
+    assert nodes.tolist() == [6, 0]
+    assert depth.tolist() == [-1, -1]
+    assert [len(rows) for _, rows in calls] == [2, 3, 1]
+    assert [rows.tolist() for _, rows in calls] == [[0, 0], [0, 0, 0], [0]]
+
+
+def test_run_pin_search_fast_uses_root_and_child_selector_widths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ev = sudoku_eval
+    original = ev.select_pin_candidates
+    widths: list[tuple[int, int]] = []
+
+    def record_widths(
+        logits: Tensor,
+        boards: Tensor,
+        *,
+        n_cells: int,
+        n_digits: int,
+    ) -> tuple[Tensor, Tensor]:
+        widths.append((n_cells, n_digits))
+        return original(logits, boards, n_cells=n_cells, n_digits=n_digits)
+
+    monkeypatch.setattr(ev, "select_pin_candidates", record_widths)
+    # Pin-search inputs use the production batch x token-grid contract.
+    media = torch.ones((1, 5), dtype=torch.int64)
+    base_logits = torch.zeros((1, 5, 11))
+    base_logits[..., 2] = 1
+
+    def rollout(boards: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
+        del rows
+        return (
+            base_logits.expand(len(boards), -1, -1),
+            torch.zeros(len(boards)),
+        )
+
+    ev.run_pin_search_fast(
+        rollout,
+        media=media,
+        base_logits=base_logits,
+        active=torch.ones(1, dtype=torch.bool),
+        groups=torch.empty((0, 9), dtype=torch.int64),
+        depth=2,
+        candidates=2,
+        cell_attempts=2,
+        budget=100,
+        max_rows=100,
+        accept_fn=lambda predictions, _: torch.zeros(
+            len(predictions),
+            dtype=torch.bool,
+        ),
+    )
+
+    assert widths == [(2, 2), (1, 2), (1, 2)]
+
+
+def test_run_pin_search_fast_preserves_device_dtypes_and_conversions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ev = sudoku_eval
+    missing = object()
+    zero = cast("Callable[..., Tensor]", torch.zeros)
+    full = cast("Callable[..., Tensor]", torch.full)
+    arange = cast("Callable[..., Tensor]", torch.arange)
+    tensor_to = cast("Callable[..., Tensor]", Tensor.to)
+    zero_calls: list[tuple[object, object]] = []
+    full_calls: list[tuple[object, object]] = []
+    arange_calls: list[object] = []
+    to_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def record_zeros(*args: object, **kwargs: object) -> Tensor:
+        zero_calls.append((kwargs.get("dtype", missing), kwargs.get("device", missing)))
+        return zero(*args, **kwargs)
+
+    def record_full(*args: object, **kwargs: object) -> Tensor:
+        full_calls.append((kwargs.get("dtype", missing), kwargs.get("device", missing)))
+        return full(*args, **kwargs)
+
+    def record_arange(*args: object, **kwargs: object) -> Tensor:
+        arange_calls.append(kwargs.get("device", missing))
+        return arange(*args, **kwargs)
+
+    def record_to(
+        self: Tensor,
+        *args: object,
+        **kwargs: object,
+    ) -> Tensor:
+        to_calls.append((args, kwargs))
+        return tensor_to(self, *args, **kwargs)
+
+    media = torch.ones((2, 5), dtype=torch.int64)
+    media[0, 0] = 2
+    media[1, 0] = 3
+    base_logits = torch.zeros((2, 5, 11))
+    base_logits[..., 2] = 1
+    monkeypatch.setattr(torch, "zeros", record_zeros)
+    monkeypatch.setattr(torch, "full", record_full)
+    monkeypatch.setattr(torch, "arange", record_arange)
+    monkeypatch.setattr(Tensor, "to", record_to)
+    acceptance_calls = 0
+
+    def accept_one_row(predictions: Tensor, boards: Tensor) -> Tensor:
+        nonlocal acceptance_calls
+        acceptance_calls += 1
+        if acceptance_calls == 1:
+            return boards[:, 0] == 2
+        return torch.ones(predictions.shape[0], dtype=torch.bool)
+
+    def rollout(boards: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
+        del rows
+        return base_logits[:1].expand(len(boards), -1, -1), boards[:, 0]
+
+    found, _, _, depth_used = ev.run_pin_search_fast(
+        rollout,
+        media=media,
+        base_logits=base_logits,
+        active=torch.ones(2, dtype=torch.bool),
+        groups=torch.empty((0, 9), dtype=torch.int64),
+        depth=2,
+        candidates=2,
+        cell_attempts=1,
+        budget=10,
+        max_rows=100,
+        accept_fn=accept_one_row,
+    )
+
+    assert found.tolist() == [True, True]
+    assert depth_used.tolist() == [1, 2]
+    assert zero_calls == [
+        (torch.int64, media.device),
+        (torch.bool, media.device),
+    ]
+    assert full_calls == [(torch.int64, media.device)]
+    assert arange_calls == [media.device, media.device]
+    assert to_calls == [((torch.int64,), {})] * 4
+
+
+def test_run_pin_search_fast_gathers_every_active_puzzle() -> None:
+    ev = sudoku_eval
+    media = torch.ones((2, 5), dtype=torch.int64)
+    base_logits = torch.zeros((2, 5, 11))
+    base_logits[..., 2] = 1
+
+    def rollout(boards: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
+        del rows
+        logits = base_logits[:1].expand(len(boards), -1, -1)
+        return logits, torch.zeros(len(boards))
+
+    _, _, nodes, _ = ev.run_pin_search_fast(
+        rollout,
+        media=media,
+        base_logits=base_logits,
+        active=torch.ones(2, dtype=torch.bool),
+        groups=torch.empty((0, 9), dtype=torch.int64),
+        depth=1,
+        candidates=2,
+        cell_attempts=1,
+        budget=2,
+        max_rows=100,
+        accept_fn=lambda predictions, _: torch.zeros(
+            len(predictions),
+            dtype=torch.bool,
+        ),
+    )
+
+    assert nodes.tolist() == [2, 2]
+
+
+def test_empty_result_preserves_batch_device_and_field_contract() -> None:
+    ev = sudoku_eval
+    media = torch.tensor([[2, 1, 3], [1, 4, 1]])
+
+    class ModelStub:
+        puzzle_emb = None
+
+    result = (
+        ev.HpsSearch.Config()
+        .make()
+        .run(
+            cast("trm.TRM", ModelStub()),
+            {"media": media, "valid_count": 0},
+        )
+    )
+
+    assert result.depth.tolist() == [-1, -1]
+    assert result.accepted.shape == result.scored.shape == (2,)
+    assert result.accepted.dtype == result.scored.dtype == torch.bool
+    assert result.root_predictions.shape == result.final_predictions.shape == (2, 3)
+    assert (
+        result.root_predictions.dtype == result.final_predictions.dtype == torch.int64
+    )
+    assert result.scores.shape == result.root_scores.shape == (2,)
+    assert result.scores.dtype == result.root_scores.dtype == torch.float32
+    assert result.nodes.shape == result.depth.shape == (2,)
+    assert result.nodes.dtype == result.depth.dtype == torch.int64
+    assert result.visited_predictions == []
+    assert result.visited_puzzles == []
+
+    meta_result = (
+        ev.HpsSearch.Config()
+        .make()
+        .run(
+            cast("trm.TRM", ModelStub()),
+            {"media": media.to("meta"), "valid_count": 0},
+        )
+    )
+    assert all(
+        tensor.device.type == "meta"
+        for tensor in (
+            meta_result.accepted,
+            meta_result.root_predictions,
+            meta_result.final_predictions,
+            meta_result.scores,
+            meta_result.root_scores,
+            meta_result.nodes,
+            meta_result.depth,
+            meta_result.scored,
+        )
+    )
+
+
+def test_segmented_rollout_keeps_q8_boundary_and_gathers_live_rows() -> None:
+    ev = sudoku_eval
+    boards = torch.tensor([[10, 1, 1], [11, 1, 3], [1, 4, 1]])
+    puzzle_ids = torch.tensor([10, 20, 30, 40])
+
+    class RecordingModel:
+        device = torch.device("cpu")
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[Tensor, Tensor, Tensor]] = []
+
+        def init_z(self, batch_size: int) -> tuple[Tensor, Tensor]:
+            return torch.zeros(batch_size, 1), torch.zeros(batch_size, 1)
+
+        def act_step(
+            self,
+            input_ids: Tensor,
+            z_slow: Tensor,
+            z_fast: Tensor,
+            *,
+            puzzle_identifiers: Tensor | None = None,
+            feedback_ids: Tensor,
+        ) -> dict[str, Tensor]:
+            assert puzzle_identifiers is not None
+            self.calls.append(
+                (input_ids.clone(), feedback_ids.clone(), puzzle_identifiers.clone()),
+            )
+            step = int(z_slow[0, 0]) + 1
+            logits = torch.zeros(len(input_ids), 3, 5)
+            logits[..., step % 5] = 1
+            q_by_id = {10: -1.0, 20: -1.0, 30: 0.0, 40: 1.0}
+            q_halt = torch.tensor(
+                [q_by_id[int(identifier)] for identifier in puzzle_identifiers],
+            )
+            return {
+                "logits": logits,
+                "q_halt": q_halt,
+                "z_slow": z_slow + 1,
+                "z_fast": z_fast + 1,
+            }
+
+    model = RecordingModel()
+    logits, scores = ev.segmented_rollout_rows(
+        cast("trm.TRM", model),
+        {"puzzle_identifiers": puzzle_ids},
+        10,
+        boards,
+        torch.tensor([2, 3, 0]),
+        continue_threshold=0.0,
+        early_exit_at_q8=True,
+    )
+
+    assert len(model.calls) == 10
+    assert [call[0].shape[0] for call in model.calls] == [3] * 8 + [2] * 2
+    assert model.calls[0][2].tolist() == [30, 40, 10]
+    assert model.calls[8][2].tolist() == [30, 40]
+    assert torch.equal(model.calls[0][1], boards)
+    assert torch.equal(model.calls[8][1], torch.tensor([[10, 3, 3], [3, 3, 3]]))
+    assert logits.argmax(dim=-1).tolist() == [[0, 0, 0], [0, 0, 0], [3, 3, 3]]
+    assert scores.tolist() == [0.0, 1.0, -1.0]
+
+
+def test_segmented_rollout_feedback_uses_per_cell_predictions() -> None:
+    ev = sudoku_eval
+    boards = torch.ones((2, 3), dtype=torch.int64)
+
+    class RecordingModel:
+        device = torch.device("cpu")
+
+        def __init__(self) -> None:
+            self.feedback: list[Tensor] = []
+
+        def init_z(self, batch_size: int) -> tuple[Tensor, Tensor]:
+            return torch.zeros(batch_size, 1), torch.zeros(batch_size, 1)
+
+        def act_step(
+            self,
+            input_ids: Tensor,
+            z_slow: Tensor,
+            z_fast: Tensor,
+            *,
+            puzzle_identifiers: Tensor | None = None,
+            feedback_ids: Tensor,
+        ) -> dict[str, Tensor]:
+            del puzzle_identifiers
+            self.feedback.append(feedback_ids.clone())
+            logits = torch.zeros(len(input_ids), 3, 4)
+            logits[:, 0, 1] = 1
+            logits[:, 1, 2] = 2
+            logits[:, 2, 3] = 3
+            return {
+                "logits": logits,
+                "q_halt": torch.ones(len(input_ids)),
+                "z_slow": z_slow + 1,
+                "z_fast": z_fast + 1,
+            }
+
+    model = RecordingModel()
+    ev.segmented_rollout_rows(
+        cast("trm.TRM", model),
+        {},
+        10,
+        boards,
+        torch.tensor([0, 1]),
+        continue_threshold=0.0,
+        early_exit_at_q8=True,
+    )
+
+    assert len(model.feedback) == 10
+    assert torch.equal(model.feedback[9], torch.tensor([[1, 2, 3], [1, 2, 3]]))
+
+
+def test_read_member_dump_uses_strict_half_threshold_for_flags(
+    tmp_path: Path,
+) -> None:
+    grid_len = 2
+    rows = np.zeros(
+        (3, sudoku_eval.learned_hps_output_width(grid_len)),
+        dtype=np.float32,
+    )
+    rows[:, 1] = (0.49, 0.5, 0.51)
+    rows[:, 2] = (3.1, 4.2, 5.3)
+    rows[:, 5] = (0.49, 0.5, 0.51)
+    path = tmp_path / "member.npz"
+    np.savez(path, rows=rows, media=np.ones((3, grid_len), dtype=np.uint8))
+
+    dump = sudoku_eval.read_member_dump(path)
+
+    assert dump.accepted.tolist() == [False, False, True]
+    assert dump.nodes.tolist() == [3, 4, 5]
+    assert dump.nodes.dtype == torch.int64
+    assert dump.solution_visited.tolist() == [False, False, True]
+
+
+def test_read_member_dump_reports_actual_packed_width(tmp_path: Path) -> None:
+    rows = np.zeros((2, 3), dtype=np.float32)
+    # Packed-member fixtures use two rows and three token columns.
+    media = np.zeros((2, 3), dtype=np.uint8)
+    path = tmp_path / "wrong_width.npz"
+    np.savez(path, rows=rows, media=media)
+
+    with pytest.raises(
+        ValueError,
+        match="packed width 3 does not match learned-HPS width 13\\.",
+    ) as error:
+        sudoku_eval.read_member_dump(path)
+
+    assert str(error.value) == "packed width 3 does not match learned-HPS width 13."
+
+
+def test_modal_tail_preserves_dtype_sentinel_and_survivor_order() -> None:
+    ev = sudoku_eval
+    first = torch.full((3, 5), 2, dtype=torch.float32)
+    second = torch.full((2, 5), 3, dtype=torch.float32)
+    collected = [
+        (torch.tensor([0, 1, 2]), first),
+        (torch.tensor([1, 2]), second),
+    ]
+    result = ev._modal_tail(collected, torch.tensor([2, 1, 3]))
+
+    assert result.dtype == torch.float32
+    assert torch.equal(result[0], torch.full((5,), 2.0))
+    assert torch.equal(result[1], torch.full((5,), 2.0))
+    assert torch.equal(result[2], torch.full((5,), 255.0))
+
+
+def test_group_violations_token_normalization_matches_clamp() -> None:
+    ev = sudoku_eval
+    predictions = torch.tensor([[-3, -1, 0, 1, 2, 10, 11, 12, 13]])
+    # Sudoku group indexing is a single nine-cell row by contract.
+    groups = torch.arange(9).reshape(1, 9)
+    old_tokens = predictions.clamp(min=0, max=10)[:, groups]
+    expected_counts = torch.nn.functional.one_hot(
+        old_tokens,
+        num_classes=len(ev.IDENTITY_DIGITS) + 2,
+    ).sum(dim=2)
+    expected_violations = (
+        (
+            (expected_counts[..., 2:] > 1).any(dim=2)
+            | (expected_counts[..., :2] > 0).any(dim=2)
+        )
+        .sum(dim=1)
+        .float()
+    )
+
+    assert torch.equal(
+        ev._violated_group_counts(predictions, groups),
+        expected_violations,
+    )
+
+
+def test_group_violations_and_acceptance_enforce_sudoku_token_rules() -> None:
+    ev = sudoku_eval
+    solution = _solution()
+    duplicate = solution.clone()
+    duplicate[0] = duplicate[1]
+    blank = solution.clone()
+    blank[0] = 1
+    negative = solution.clone()
+    negative[0] = -1
+    too_large = solution.clone()
+    too_large[0] = 11
+    predictions = torch.stack((solution, duplicate, blank, negative, too_large))
+    groups = ev.sudoku_groups()
+
+    assert ev._violated_group_counts(predictions, groups).tolist() == [
+        0.0,
+        3.0,
+        3.0,
+        3.0,
+        3.0,
+    ]
+    media = torch.zeros_like(predictions)
+    media[:, 0] = solution[0]
+    assert ev.accepted_grids(predictions, media, groups).tolist() == [
+        True,
+        False,
+        False,
+        False,
+        False,
+    ]
+    mismatched_given = media[:1].clone()
+    mismatched_given[0, 0] = 3
+    assert ev.accepted_grids(
+        solution.unsqueeze(0),
+        mismatched_given,
+        groups,
+    ).tolist() == [False]
+    ten_token = torch.where(solution == 10)[0][0]
+    invalid_digit = solution.clone()
+    invalid_digit[ten_token] = 11
+    assert ev.accepted_grids(
+        invalid_digit.unsqueeze(0),
+        torch.zeros_like(solution).unsqueeze(0),
+        groups,
+    ).tolist() == [False]
+    two_token = torch.where(solution == 2)[0][0]
+    alternate_two = torch.where(
+        solution == 2,
+        3,
+        torch.where(solution == 3, 2, solution),
+    )
+    given_two = torch.zeros_like(solution).unsqueeze(0)
+    given_two[0, two_token] = 2
+    assert ev.accepted_grids(
+        alternate_two.unsqueeze(0),
+        given_two,
+        groups,
+    ).tolist() == [
+        False,
+    ]
+    invalid_given = torch.zeros_like(solution).unsqueeze(0)
+    invalid_given[0, two_token] = 11
+    assert ev.accepted_grids(solution.unsqueeze(0), invalid_given, groups).tolist() == [
+        True,
+    ]
+    alternate = torch.where(
+        solution == 10,
+        9,
+        torch.where(solution == 9, 10, solution),
+    )
+    ten_givens = torch.zeros_like(solution).unsqueeze(0)
+    ten_givens[0, solution == 10] = 10
+    assert ev.accepted_grids(alternate.unsqueeze(0), ten_givens, groups).tolist() == [
+        False,
+    ]
+
+
+def _solution() -> Tensor:
+    return torch.tensor(
+        [((row * 3 + row // 3 + col) % 9) + 2 for row in range(9) for col in range(9)],
+    )
 
 
 if __name__ == "__main__":

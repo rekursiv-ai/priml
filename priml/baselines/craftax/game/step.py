@@ -157,7 +157,7 @@ def change_floor(state: EnvState, action: Tensor) -> EnvState:
 
     delta = descending.int() - ascending.int()
     arrival = state.player_level.long() + delta
-    below = state.up_ladders[rows, arrival.clamp(max=constants.NUM_LEVELS - 1)]
+    below = state.up_ladders[rows, arrival]
     above = state.down_ladders[rows, arrival.clamp(min=0)]
     state.player_position = torch.where(
         descending[:, None],
@@ -245,5 +245,5 @@ def _reward(
     newly = (state.achievements.int() - unlocked_before.int()).float()
     earned = (
         newly * constants.on_device(constants.ACHIEVEMENT_REWARD, state.device)
-    ).sum(-1)
+    ).sum(1)
     return earned + (state.player_health - health_before) * 0.1

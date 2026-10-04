@@ -124,14 +124,8 @@ class AdamATan2(Optimizer):
                 # Python int avoids the sync; foreach kernels aren't used
                 # here so the tensor form bought us nothing.
                 state["step"] = 0
-                state["exp_avg"] = torch.zeros_like(
-                    p,
-                    memory_format=torch.preserve_format,
-                )
-                state["exp_avg_sq"] = torch.zeros_like(
-                    p,
-                    memory_format=torch.preserve_format,
-                )
+                state["exp_avg"] = torch.zeros_like(p)
+                state["exp_avg_sq"] = torch.zeros_like(p)
             step = state["step"]
             assert isinstance(step, int)
             step += 1

@@ -51,7 +51,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import NamedTuple, Protocol, Self, cast, override
 
-import copy
 import functools
 import logging
 import math
@@ -387,7 +386,6 @@ class TRM(nn.Module):
         self.head = Linear.Config(
             channels_in=c,
             channels_out=config.vocab_size,
-            bias=False,
             init_weight=trm_truncated_normal_corrected,
         ).make()
 
@@ -417,22 +415,16 @@ class TRM(nn.Module):
         # deepcopy loop. Each copy is finalized separately, so the per-block
         # init draw order (the checkpoint-parity contract) is unchanged.
         self.reasoning = Sequential.Config(
-            elements=copy.deepcopy(block),
+            elements=block,
             repeat=config.num_layers,
         ).make()
 
         self.rope = RoPE.Config(
-            channels_head=c // config.num_heads,
+            channels_head=divmod(c, config.num_heads)[0],
         ).make()
 
-        self.slow_init: Tensor = nn.Buffer(
-            _corrected(torch.empty(1, c), std=1.0),
-            persistent=True,
-        )
-        self.fast_init: Tensor = nn.Buffer(
-            _corrected(torch.empty(1, c), std=1.0),
-            persistent=True,
-        )
+        self.slow_init: Tensor = nn.Buffer(_corrected(torch.empty(1, c), std=1.0))
+        self.fast_init: Tensor = nn.Buffer(_corrected(torch.empty(1, c), std=1.0))
 
         # Bind the compiled reasoning sub-unit eagerly. ``torch.compile``
         # wraps the BOUND METHOD ``self.reasoning.forward`` -- a compiled
@@ -447,7 +439,8 @@ class TRM(nn.Module):
                 torch.compile(self.reasoning.forward, fullgraph=True),
             )
 
-        self._dummy = nn.Buffer(torch.empty(0), persistent=True)
+        self.register_buffer("_dummy", torch.empty(0))
+        self._dummy: Tensor
 
         if config.pos2d_grid_shape is not None:
             rows, cols = config.pos2d_grid_shape
@@ -466,9 +459,12 @@ class TRM(nn.Module):
             row = cell // cols
             col = cell % cols
             box = (row // box_rows) * (cols // box_cols) + col // box_cols
-            self.row_index = nn.Buffer(row, persistent=False)
-            self.col_index = nn.Buffer(col, persistent=False)
-            self.box_index = nn.Buffer(box, persistent=False)
+            self.register_buffer("row_index", row, persistent=False)
+            self.register_buffer("col_index", col, persistent=False)
+            self.register_buffer("box_index", box, persistent=False)
+            self.row_index: Tensor
+            self.col_index: Tensor
+            self.box_index: Tensor
             num_boxes = (rows // box_rows) * (cols // box_cols)
             self.embed_pos_row: nn.Parameter | None = _pos_table(rows, config)
             self.embed_pos_col: nn.Parameter | None = _pos_table(cols, config)
@@ -712,7 +708,7 @@ class TRM(nn.Module):
         # (q_continue) exists only for reference weight-shape parity.
         q_logits = self.q_head(z_slow[:, 0]).to(torch.float32)
         if self.config.q_head_outputs == 1:
-            q_halt = q_logits.squeeze(-1)
+            q_halt = q_logits.squeeze(1)
         else:
             q_halt = q_logits[..., 0]
         return logits, q_halt, z_slow, z_fast
@@ -739,9 +735,8 @@ class TRM(nn.Module):
             # reshape into [B, puzzle_emb_len, channels_in]. Matches reference
             # TRM's prepend behavior.
             total = cfg.puzzle_emb_len * cfg.channels_in
-            if puzzle_vec.shape[-1] < total:
-                pad = total - puzzle_vec.shape[-1]
-                puzzle_vec = nn.functional.pad(puzzle_vec, (0, pad))
+            pad = max(total - puzzle_vec.size(1), 0)
+            puzzle_vec = nn.functional.pad(puzzle_vec, (0, pad))
             puzzle_prefix = puzzle_vec.reshape(B, cfg.puzzle_emb_len, cfg.channels_in)
             # Reference TRM concatenates the raw puzzle embedding with the raw
             # token embedding and scales the whole sequence by embed_scale
@@ -872,7 +867,6 @@ class SparsePuzzleEmbedding(nn.Module):
         self.cast_to = cast_to
         self.weights = nn.Buffer(
             _corrected(torch.empty(num_embeddings, embedding_dim), std=init_std),
-            persistent=True,
         )
         self.local_weights = nn.Buffer(
             torch.zeros(batch_size, embedding_dim, requires_grad=True),

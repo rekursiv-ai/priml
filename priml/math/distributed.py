@@ -38,7 +38,7 @@ def logsumexp_all_to_all(
       result: Global logsumexp over the specified dimensions.
 
     """
-    return _logsumexp_all_to_all(x, dim, keepdim, world_size, mean=False)
+    return _logsumexp_all_to_all(x, dim, keepdim, world_size)
 
 
 def logmeanexp_all_to_all(

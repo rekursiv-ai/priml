@@ -92,8 +92,10 @@ def main() -> int:
       result: Process exit code (0 on success).
 
     """
+    if __doc__ is None:
+        raise ValueError("Expected __doc__ is not None.")
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -185,8 +187,6 @@ def _build_split(
 
     puzzles, solutions = _read_csv(csv_path)
     if num_puzzles is not None and num_puzzles < len(puzzles):
-        # ``choice`` returns an untyped array; naming the index list keeps the
-        # comprehensions' element type from widening to Unknown.
         selected: NDArray[np.int64] = rng.choice(
             len(puzzles),
             size=num_puzzles,
@@ -271,7 +271,7 @@ def _grid(text: str) -> NDArray[np.int64]:
 # padding, so everything shifts up by one: 0 pad, 1 empty, 2-10 digits.
 def _tokenize(grids: list[NDArray[np.int64]]) -> NDArray[np.int64]:
     """Stack digit grids and shift into the token vocabulary."""
-    stacked = np.concatenate(grids).reshape(len(grids), -1)
+    stacked = np.concatenate(grids).reshape(len(grids), GRID * GRID)
     if not np.all((stacked >= 0) & (stacked <= 9)):
         raise ValueError("Expected np.all((stacked >= 0) & (stacked <= 9)).")
     return stacked + 1
@@ -296,7 +296,9 @@ def _transform(
     rng: np.random.Generator,
 ) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
     """Return a different valid puzzle with the correspondingly moved solution."""
-    digits = np.pad(np.arange(1, GRID + 1)[_permutation(rng, GRID)], (1, 0))
+    digits = np.concatenate(
+        ([0], np.fromiter(_permutation(rng, GRID), dtype=np.int64) + 1),
+    )
     transpose = rng.random() < 0.5
     bands = _permutation(rng, BOX)
     rows = np.concatenate([b * BOX + np.array(_permutation(rng, BOX)) for b in bands])
@@ -347,7 +349,6 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     """Register flags on ``parser``."""
     parser.add_argument(
         "--directory",
-        default=None,
         help=f"destination (default: {default_directory()})",
     )
     parser.add_argument(

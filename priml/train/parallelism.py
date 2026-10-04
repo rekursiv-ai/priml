@@ -356,17 +356,11 @@ class RecursiveSharded:
         # override to its statistics even when it is nested inside a matched
         # block running under a reduced-precision policy.
         matched_count = 0
-        for child in reversed(list(model.modules())):
+        for child in reversed(list(model.modules())[1:]):
             if not isinstance(child, (*self.module_types, _BatchNorm)):
                 continue
             if isinstance(child, self.module_types):
                 matched_count += 1
-            # The root is sharded once, below, with its own
-            # ``reshard_after_forward``. It is counted above rather than
-            # skipped outright: a root that is itself a matched type is still
-            # a match, and composable FSDP refuses a second application.
-            if child is model:
-                continue
             _shard(
                 child,
                 mesh=self.mesh,
@@ -374,6 +368,8 @@ class RecursiveSharded:
                 reshard_after_forward=self.reshard_after_forward,
             )
 
+        if isinstance(model, self.module_types):
+            matched_count += 1
         if matched_count == 0:
             raise ValueError(
                 f"RecursiveSharded found 0 modules matching {self.module_types}. "
@@ -483,8 +479,10 @@ def materialize_meta(model: nn.Module, device: torch.device) -> None:
     with torch.no_grad():
         for _, tensor in named_meta_state(model):
             if tensor.is_floating_point():
-                tensor.fill_(float("nan"))
-    getattr(model, "reset_parameters", lambda: None)()
+                tensor.fill_(torch.nan)
+    reset_parameters = getattr(model, "reset_parameters", None)
+    if reset_parameters is not None:
+        reset_parameters()
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.barrier()
     uninitialized = [
@@ -502,7 +500,7 @@ def materialize_meta(model: nn.Module, device: torch.device) -> None:
 def _mesh_device(mesh: DeviceMesh) -> torch.device:
     """Resolve the concrete device this rank occupies in ``mesh``."""
     if mesh.device_type == "cuda":
-        return torch.device("cuda", torch.cuda.current_device())
+        return torch.device("cuda", index=torch.cuda.current_device())
     return torch.device(mesh.device_type)
 
 

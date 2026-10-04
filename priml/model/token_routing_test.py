@@ -22,14 +22,63 @@ def test_select_tokens_keeps_all_or_returns_original_ids() -> None:
 
 @pytest.mark.parametrize("ratio", [-0.1, 1.0])
 def test_select_tokens_rejects_invalid_ratio(ratio: float) -> None:
-    with pytest.raises(ValueError, match="drop_ratio"):
+    with pytest.raises(
+        ValueError,
+        match=r"^drop_ratio must be in \[0, 1\)$",
+    ):
         select_tokens(torch.zeros(2, 3, 4), ratio)
+
+
+def test_select_tokens_can_keep_one_token() -> None:
+    tokens = torch.arange(4 * 5 * 2, dtype=torch.float32).reshape(4, 5, 2)
+
+    kept, ids = select_tokens(tokens, 0.8)
+
+    assert ids is not None
+    assert kept.shape == (4, 1, 2)
+    assert ids.shape == (4, 1)
+    assert torch.equal(kept, tokens.gather(1, ids[..., None].expand(-1, -1, 2)))
+
+
+def test_select_tokens_compares_keep_count_to_sequence_length() -> None:
+    tokens = torch.arange(4 * 5 * 2, dtype=torch.float32).reshape(4, 5, 2)
+
+    kept, ids = select_tokens(tokens, 0.4)
+
+    assert ids is not None
+    assert kept.shape == (4, 3, 2)
+
+
+def test_select_tokens_samples_on_the_input_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    random = torch.rand
+    received: dict[str, torch.device | None] = {}
+
+    def record_rand(
+        size: tuple[int, ...],
+        *,
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        received["device"] = device
+        return random(size, device=device)
+
+    monkeypatch.setattr(torch, "rand", record_rand)
+    tokens = torch.zeros(4, 5, 2)
+
+    select_tokens(tokens, 0.5)
+
+    assert received == {"device": tokens.device}
 
 
 def test_sparse_dense_fusion_scatter_and_drop_path() -> None:
     config = SparseDenseFusion.Config(channels=4)
     assert config.cost(seq_len=2, batch_size=2, dtype=torch.float32).params == 40
     fusion = config.make()
+    assert fusion.mask_token.shape == (1, 1, 4)
+    assert fusion.mask_token.count_nonzero() == 0
+    assert fusion.proj.weight.shape == (4, 8)
+    assert fusion.proj.bias is not None
     dense = torch.randn(3, 5, 4)
     sparse = torch.randn(3, 2, 4)
     ids = torch.tensor([[0, 3], [1, 4], [0, 2]])

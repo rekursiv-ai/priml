@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING, Literal, Self, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
-from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     ParallelStyle,
@@ -990,10 +990,7 @@ class MultiHeadLatentAttention(nn.Module):
         q_name = "proj_q" if self.proj_q is not None else "proj_q_b"
         return {
             q_name: ColwiseParallel(use_local_output=True),
-            "proj_out": RowwiseParallel(
-                input_layouts=Shard(-1),
-                output_layouts=Replicate(),
-            ),
+            "proj_out": RowwiseParallel(),
         }
 
 

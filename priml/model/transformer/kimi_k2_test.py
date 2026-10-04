@@ -294,6 +294,21 @@ class TestConfig:
         assert isinstance(rope.frequencies, HuggingFaceFrequencies.Config)
         assert rope.frequencies.base == 50_000.0
 
+    def test_rope_type_alias_selects_yarn(self):
+        cfg = KimiK2.Config.from_hf(
+            hf_config(
+                rope_scaling={
+                    "rope_type": "yarn",
+                    "factor": 2.0,
+                    "original_max_position_embeddings": 4096,
+                },
+            ),
+        )
+        rope = _attn(cfg).rope
+        assert isinstance(rope, RoPE.Config)
+        assert isinstance(rope.frequencies, YarnScaling.Config)
+        assert rope.frequencies.factor == 2.0
+
     @pytest.mark.parametrize("moe_intermediate_size", [0, -64])
     def test_nonpositive_moe_width_rejected(self, moe_intermediate_size: int):
         """An explicit width names its own field instead of silently defaulting."""
@@ -323,11 +338,11 @@ class TestConfig:
                 rope_scaling={
                     "type": "yarn",
                     "factor": 32.0,
-                    "original_max_position_embeddings": 4096,
+                    "original_max_position_embeddings": 8192,
                     "beta_fast": 1.0,
-                    "beta_slow": 1.0,
-                    "mscale": 1.0,
-                    "mscale_all_dim": 1.0,
+                    "beta_slow": 3.0,
+                    "mscale": 2.5,
+                    "mscale_all_dim": 4.5,
                 },
             ),
         )
@@ -336,11 +351,55 @@ class TestConfig:
         yarn = rope.frequencies
         assert isinstance(yarn, YarnScaling.Config)
         assert yarn.factor == 32.0
-        assert yarn.original_max_position_embeddings == 4096
+        assert yarn.original_max_position_embeddings == 8192
+        assert yarn.beta_fast == 1.0
+        assert yarn.beta_slow == 3.0
+        assert yarn.mscale == 2.5
+        assert yarn.mscale_all_dim == 4.5
+
+    def test_yarn_scaling_defaults(self):
+        cfg = KimiK2.Config.from_hf(
+            hf_config(
+                rope_scaling={
+                    "type": "yarn",
+                    "factor": 2.0,
+                    "original_max_position_embeddings": None,
+                },
+            ),
+        )
+        rope = _attn(cfg).rope
+        assert isinstance(rope, RoPE.Config)
+        yarn = rope.frequencies
+        assert isinstance(yarn, YarnScaling.Config)
+        assert yarn.original_max_position_embeddings == 4_096
+        assert yarn.beta_fast == 32.0
+        assert yarn.beta_slow == 1.0
+        assert yarn.mscale == 1.0
+        assert yarn.mscale_all_dim == 0.0
 
 
 class TestSlots:
     """The parent holds slots, not copies of its children's vocabulary."""
+
+    def test_layer_accessors_broadcast_one_template(self):
+        cfg = KimiK2.Config.from_hf(hf_config())
+        assert isinstance(cfg.block, TransformerBlock.Config)
+        assert kimi_k2._attn_of(cfg, 1) is cfg.block.attn
+        assert kimi_k2._moe_of(cfg, 1) is cfg.block.ffn
+
+    def test_layer_accessors_use_each_layers_config(self):
+        cfg = KimiK2.Config.from_hf(hf_config()).finalize()
+        assert isinstance(cfg.block, list)
+        second = cfg.block[1]
+        assert isinstance(second, TransformerBlock.Config)
+        assert isinstance(second.attn, MultiHeadLatentAttention.Config)
+        assert isinstance(second.ffn, MoE.Config)
+        assert isinstance(second.ffn.router, Router.Config)
+        second.attn.q_lora_rank = 6
+        second.ffn.router.top_k = 2
+
+        assert kimi_k2._attn_of(cfg, 1).q_lora_rank == 6
+        assert kimi_k2._moe_of(cfg, 1).router.top_k == 2
 
     def test_a_router_edit_survives_finalize(self):
         """Editing the router slot must reach the built MoE layers.
@@ -395,8 +454,7 @@ class TestSlots:
             )
 
     def test_make_returns_kimik2_instance(self):
-        model = KimiK2.Config.from_hf(hf_config()).make()
-        assert isinstance(model, KimiK2)
+        KimiK2.Config.from_hf(hf_config()).make()
 
     def test_architecture_specific_sizing_skips_other_blocks(self):
         cfg = KimiK2.Config.from_hf(hf_config())
@@ -415,6 +473,37 @@ class TestSlots:
 
 
 class TestLoad:
+    @pytest.mark.parametrize(
+        ("torch_dtype", "expected_dtype"),
+        [
+            ("float16", torch.float16),
+            ("float32", torch.float32),
+            (None, torch.bfloat16),
+        ],
+    )
+    def test_load_uses_checkpoint_dtype_without_override(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        torch_dtype: str | None,
+        expected_dtype: torch.dtype,
+    ) -> None:
+        config_dict = hf_config(num_hidden_layers=1)
+        if torch_dtype is None:
+            del config_dict["torch_dtype"]
+        else:
+            config_dict["torch_dtype"] = torch_dtype
+        config = KimiK2.Config.from_hf(config_dict).finalize()
+        monkeypatch.setattr(
+            hub,
+            "load_hf_checkpoint",
+            Mock(return_value=(config_dict, _synth_hf(config))),
+        )
+
+        model = KimiK2.load("moonshotai/tiny-kimi", dtype=None)
+
+        assert isinstance(model.proj_in, Embedding)
+        assert model.proj_in.weight.dtype == expected_dtype
+
     def test_remote_load_uses_hf_config_weights_dtype_and_device(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -431,15 +520,15 @@ class TestLoad:
             load_transformers_model,
         )
 
-        model = KimiK2.load("moonshotai/tiny-kimi", device="cpu", dtype=torch.float32)
+        model = KimiK2.load("moonshotai/tiny-kimi", device="meta", dtype=torch.bfloat16)
 
         assert isinstance(model.proj_in, Embedding)
-        assert model.proj_in.weight.dtype == torch.float32
-        assert model.proj_in.weight.device.type == "cpu"
+        assert model.proj_in.weight.dtype == torch.bfloat16
+        assert model.proj_in.weight.device.type == "meta"
         load_transformers_model.assert_called_once_with(
             "moonshotai/tiny-kimi",
             "AutoModelForCausalLM",
-            dtype=torch.float32,
+            dtype=torch.bfloat16,
             trust_remote_code=True,
         )
 
@@ -459,9 +548,15 @@ class TestRemap:
         if isinstance(router, SigmoidRouter.Config):
             router.use_correction_bias = correction_bias
         cfg.finalize()
-        remapped = remap_hf_state_dict(_synth_hf(cfg), cfg)
+        hf_state = _synth_hf(cfg)
+        remapped = remap_hf_state_dict(hf_state, cfg)
         bias_key = "blocks.1.ffn.router.e_score_correction_bias"
         assert (bias_key in remapped) == (scoring_func == "sigmoid" and correction_bias)
+        if bias_key in remapped:
+            assert torch.equal(
+                remapped[bias_key],
+                hf_state["model.layers.1.mlp.gate.e_score_correction_bias"],
+            )
         model = cfg.make()
         model.load_state_dict(remapped, strict=True)
         assert model(torch.tensor([[0, 1]])).shape == (1, 2, cfg.channels_out)
@@ -540,12 +635,24 @@ class TestRemap:
         else:
             block.ffn = SwiGLU.Config()
             match = "not MoE"
-        if bad_part == "ffn":
-            with pytest.raises(TypeError, match=match):
+        if bad_part in ("block", "ffn"):
+            with pytest.raises(TypeError, match=match) as exc_info:
                 kimi_k2._moe_of(cfg, 0)
-        else:
-            with pytest.raises(TypeError, match=match):
+            expected_message = (
+                "layer 0 is RMSNorm.Config, not a transformer."
+                if bad_part == "block"
+                else "layer 0 FFN is SwiGLU.Config, not MoE."
+            )
+            assert str(exc_info.value) == expected_message
+        if bad_part in ("block", "attention"):
+            with pytest.raises(TypeError, match=match) as exc_info:
                 kimi_k2._attn_of(cfg, 0)
+            expected_message = (
+                "layer 0 is RMSNorm.Config, not a transformer."
+                if bad_part == "block"
+                else "layer 0 attention is RMSNorm.Config, not MLA."
+            )
+            assert str(exc_info.value) == expected_message
 
 
 @pytest.mark.network_huggingface

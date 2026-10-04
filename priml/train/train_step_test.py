@@ -19,6 +19,7 @@ import torch.distributed as dist
 from priml import runtime
 from priml.metrics.binary_accuracy import BinaryAccuracy
 from priml.timer import CheckpointableStepTimer
+from priml.train.ema import EMA
 from priml.train.parallelism import NoParallel
 from priml.train.train_step import (
     TrainStep,
@@ -307,6 +308,40 @@ def test_autocast_cache_enabled_is_configurable(
     step(x=torch.randn(4, 2))
 
     assert seen == [True], seen
+
+
+def test_call_eval_configures_autocast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    step = _linear_step(
+        dtype_autocast=torch.bfloat16,
+        autocast_cache_enabled=True,
+    )
+    seen: list[tuple[object, object, object]] = []
+    orig = torch.amp.autocast
+
+    def spy(*args: object, **kwargs: object) -> object:
+        device_type = kwargs.get("device_type")
+        dtype = kwargs.get("dtype")
+        cache_enabled = kwargs.get("cache_enabled")
+        enabled = kwargs.get("enabled", True)
+        assert isinstance(device_type, str)
+        assert dtype is None or isinstance(dtype, torch.dtype)
+        assert cache_enabled is None or isinstance(cache_enabled, bool)
+        assert isinstance(enabled, bool)
+        seen.append((device_type, dtype, cache_enabled))
+        return orig(
+            *args,
+            device_type=device_type,
+            dtype=dtype,
+            enabled=enabled,
+            cache_enabled=cache_enabled,
+        )
+
+    monkeypatch.setattr(torch.amp, "autocast", spy)
+    step.call_eval(torch.randn(4, 2))
+
+    assert seen == [("cpu", torch.bfloat16, True)]
 
 
 def test_train_step_refuses_to_checkpoint_pending_accumulation() -> None:
@@ -705,14 +740,140 @@ def test_bound_epoch_timer_drives_the_epoch_budget() -> None:
     assert step.progress_learning_schedule == pytest.approx(0.75)
 
 
-def test_preprocess_moves_tensors_and_leaves_other_values() -> None:
+def test_progress_uses_the_first_exhausted_budget_and_caps_at_one() -> None:
+    step = _linear_step(
+        train_budget_steps=8.0,
+        train_budget_sec=20.0,
+        train_budget_epochs=4.0,
+    )
+    epochs = CheckpointableStepTimer()
+    step.bind_epoch_timer(epochs)
+
+    step.timer_step.global_count = 2
+    step.timer_step.global_sec = 10.0
+    epochs.global_count = 3
+    assert step.progress_complete == pytest.approx(0.75)
+
+    epochs.global_count = 5
+    assert step.progress_complete == 1.0
+
+
+def test_preprocess_moves_tensors_and_leaves_other_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     step = _linear_step()
-    batch = step.preprocess_batch({"x": torch.zeros(2), "name": "puzzle", "n": 3})
+    tensor = torch.zeros(2)
+    calls: list[tuple[object, dict[str, object]]] = []
+    original_to = Tensor.to
+
+    def record_to(
+        self: Tensor,
+        device: torch.device | str | None = None,
+        *,
+        non_blocking: bool = False,
+    ) -> Tensor:
+        args: tuple[object, ...] = () if device is None else (device,)
+        kwargs: dict[str, object] = {"non_blocking": non_blocking}
+        calls.append((args, kwargs))
+        return original_to(self, device, non_blocking=non_blocking)
+
+    monkeypatch.setattr(Tensor, "to", record_to)
+    batch = step.preprocess_batch({"x": tensor, "name": "puzzle", "n": 3})
     moved = batch["x"]
     assert isinstance(moved, Tensor)
     assert moved.device == torch.device("cpu")
+    assert calls == [((torch.device("cpu"),), {"non_blocking": False})]
     assert batch["name"] == "puzzle"
     assert batch["n"] == 3
+
+
+def test_preprocess_uses_non_blocking_transfer_for_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    step = _linear_step()
+    step.parallelism.device = torch.device("cuda", 1)
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    original_to = Tensor.to
+
+    def record_to(
+        self: Tensor,
+        device: torch.device | str | None = None,
+        *,
+        non_blocking: bool = False,
+    ) -> Tensor:
+        args: tuple[object, ...] = () if device is None else (device,)
+        kwargs: dict[str, object] = {"non_blocking": non_blocking}
+        calls.append((args, kwargs))
+        return original_to(self, torch.device("cpu"), non_blocking=non_blocking)
+
+    monkeypatch.setattr(Tensor, "to", record_to)
+    moved = step.preprocess_batch({"x": torch.zeros(2)})["x"]
+
+    assert isinstance(moved, Tensor)
+    assert moved.device == torch.device("cpu")
+    assert calls == [
+        ((torch.device("cuda", 1),), {"non_blocking": True}),
+    ]
+
+
+def test_train_and_eval_losses_preserve_model_output() -> None:
+    step = _linear_step()
+    x = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+
+    label = torch.tensor([0.0, 1.0])
+    train_result = step.train_loss(x=x, label=label)
+    eval_result = step.eval_loss(x=x, label=label)
+    expected = cast(Tensor, step.model(x))
+
+    assert torch.equal(train_result["model"], expected)
+    assert torch.equal(eval_result["model"], expected)
+    assert train_result["model"].shape == (2,)
+    assert eval_result["model"].shape == (2,)
+
+
+def test_call_eval_passes_positional_arguments_and_applies_ema() -> None:
+    step = _linear_step(ema=EMA.Config(decay=0.5))
+    step.ema(step.model)
+    shadow = [p.detach().clone() for p in step.model.parameters()]
+    with torch.no_grad():
+        for parameter in step.model.parameters():
+            parameter.add_(1)
+    current = [p.detach().clone() for p in step.model.parameters()]
+    seen: list[tuple[object, ...]] = []
+    original_forward = step.model.forward
+
+    def forward(x: Tensor) -> Tensor:
+        args = (x,)
+        seen.append(args)
+        y = cast(object, original_forward(x))
+        assert isinstance(y, Tensor)
+        return y
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(step.model, "forward", forward)
+    x = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    with torch.no_grad():
+        expected = cast(object, original_forward(x))
+        assert isinstance(expected, Tensor)
+    output = step.call_eval(x)
+
+    with torch.no_grad():
+        for parameter, value in zip(step.model.parameters(), shadow, strict=True):
+            parameter.copy_(value)
+        expected = cast(object, original_forward(x))
+        assert isinstance(expected, Tensor)
+        for parameter, value in zip(step.model.parameters(), current, strict=True):
+            parameter.copy_(value)
+
+    assert isinstance(output, Tensor)
+    assert torch.equal(output, expected)
+    assert len(seen) == 1
+    assert seen[0] == (x,)
+    assert not output.requires_grad
+    assert all(
+        torch.equal(p, value)
+        for p, value in zip(step.model.parameters(), current, strict=True)
+    )
 
 
 def test_compile_slot_wraps_the_model_once() -> None:
@@ -870,11 +1031,6 @@ def _gloo_backend(group: object) -> str:
     return "gloo"
 
 
-def _nccl_backend(group: object) -> str:
-    del group
-    return "nccl"
-
-
 def _world_of_two(group: object = None) -> int:
     del group
     return 2
@@ -883,14 +1039,25 @@ def _world_of_two(group: object = None) -> int:
 def test_collective_device_follows_the_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(dist, "get_backend", _gloo_backend)
-    assert _collective_device(None) == torch.device("cpu")
-    monkeypatch.setattr(dist, "get_backend", _nccl_backend)
+    group = cast(dist.ProcessGroup, object())
+
+    def backend_for_group(actual_group: object) -> str:
+        assert actual_group is group
+        return "gloo"
+
+    monkeypatch.setattr(dist, "get_backend", backend_for_group)
+    assert _collective_device(group) == torch.device("cpu")
+
+    def nccl_for_group(actual_group: object) -> str:
+        assert actual_group is group
+        return "nccl"
+
+    monkeypatch.setattr(dist, "get_backend", nccl_for_group)
     # Scoped: the autouse ``cleanup_cuda`` teardown synchronizes the CURRENT
     # device before monkeypatch unwinds, and index 2 is not a real ordinal.
     with monkeypatch.context() as patch:
         patch.setattr(torch.cuda, "current_device", lambda: 2)
-        assert _collective_device(None) == torch.device("cuda", 2)
+        assert _collective_device(group) == torch.device("cuda", 2)
 
 
 def test_uniform_count_guard_is_a_noop_on_a_single_rank_dp_group(

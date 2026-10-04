@@ -34,6 +34,8 @@ from priml.model.init import InitFn, call_init, normal, truncated_normal
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from triton import language
     from triton.language.extra.cuda import libdevice
 
@@ -273,11 +275,18 @@ class MultiHotEmbedding(nn.Module):
         self.num_scalars = config.num_scalars
         self.field_offsets = config.offsets
         """The offsets on the host: reading the device buffer would sync."""
-        # Annotated as well as registered: ``register_buffer`` types its
-        # result as ``Tensor | Module | None``.
-        self.offsets: Tensor
-        self.register_buffer("offsets", torch.tensor(config.offsets), persistent=False)
+        self.offsets = torch.tensor(config.offsets)
         self.reset_parameters()
+
+    @override
+    def _apply(
+        self,
+        fn: Callable[[Tensor], Tensor],
+        recurse: bool = True,
+    ) -> MultiHotEmbedding:
+        super()._apply(fn, recurse=recurse)
+        self.offsets = fn(self.offsets)
+        return self
 
     def reset_parameters(self) -> None:
         """Draw the table with the config's initializer, undivided by any depth."""
@@ -366,7 +375,10 @@ class MultiHotEmbedding(nn.Module):
             scalar_block=_power_of_two(self.num_scalars),
             num_warps=4,
         )
-        return output.reshape(*input.shape[:-1], output.shape[-1])
+        return output.reshape(
+            *input.shape[:-1],
+            self.num_cells * width + self.num_scalars,
+        )
 
     def backward(self, input: Tensor, grad_output: Tensor) -> Tensor:
         """Return the table's gradient, accumulated in 2^-24 fixed point.

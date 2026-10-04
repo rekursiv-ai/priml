@@ -277,6 +277,45 @@ def test_self_attention_reset():
     m.reset_parameters()
 
 
+def test_tensor_parallel_fused_attention_rejects_dtensor_weight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attention = Attention.Config(
+        channels_in=8,
+        num_heads=2,
+        channels_head=4,
+    ).make()
+    monkeypatch.setattr(
+        "priml.model.attention.attention.DTensor",
+        nn.Parameter,
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        attention.assert_tensor_parallel_compatible()
+    assert str(error.value) == (
+        "Tensor parallelism requires a DTensor-compatible attention "
+        "kernel; set attn_kernel=SdpaNaive (the fused flash kernel has "
+        "no DTensor sharding strategy)."
+    )
+
+
+def test_tensor_parallel_naive_attention_accepts_dtensor_weight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attention = Attention.Config(
+        channels_in=8,
+        num_heads=2,
+        channels_head=4,
+        attn_kernel=SdpaNaive.Config(),
+    ).make()
+    monkeypatch.setattr(
+        "priml.model.attention.attention.DTensor",
+        nn.Parameter,
+    )
+
+    attention.assert_tensor_parallel_compatible()
+
+
 def test_self_attention_split_qkv_projection() -> None:
     m = Attention.Config(
         channels_in=16,
@@ -287,6 +326,198 @@ def test_self_attention_split_qkv_projection() -> None:
     ).make()
 
     assert m(torch.randn(2, 4, 16)).shape == (2, 4, 16)
+
+
+@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float64])
+def test_split_qkv_matches_exact_projection_slices(
+    bias: bool,
+    dtype: torch.dtype,
+) -> None:
+    module = Attention.Config(
+        channels_in=5,
+        num_heads=2,
+        num_heads_kv=1,
+        channels_head=3,
+        bias=bias,
+        split_qkv_projection=True,
+    ).make()
+    weight = torch.arange(60, dtype=torch.float32).reshape(4, 3, 5) / 7
+    with torch.no_grad():
+        module.proj_qkv.weight.copy_(weight)
+        if module.proj_qkv.bias is not None:
+            module.proj_qkv.bias.copy_(
+                torch.arange(12, dtype=torch.float32).reshape(4, 3) / 5,
+            )
+    x = torch.arange(20, dtype=dtype).reshape(4, 5) / 3
+    projection_weight = weight.to(dtype)
+
+    q, k, v = module.split_qkv(x)
+
+    expected_q = x @ projection_weight[:2].reshape(6, 5).T
+    expected_k = x @ projection_weight[2:3].reshape(3, 5).T
+    expected_v = x @ projection_weight[3:].reshape(3, 5).T
+    if bias:
+        assert module.proj_qkv.bias is not None
+        projection_bias = module.proj_qkv.bias.to(dtype)
+        expected_q += projection_bias[:2].reshape(6)
+        expected_k += projection_bias[2:3].reshape(3)
+        expected_v += projection_bias[3:].reshape(3)
+    assert q.dtype is dtype
+    assert k.dtype is dtype
+    assert v.dtype is dtype
+    # num_heads_kv=1 is the GQA case under test.
+    assert torch.equal(q, expected_q.reshape(4, 2, 3))
+    assert torch.equal(k, expected_k.reshape(4, 1, 3))
+    assert torch.equal(v, expected_v.reshape(4, 1, 3))
+
+
+def test_reset_parameters_resets_shared_norm_once_and_separate_norms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared = Attention.Config(
+        channels_in=8,
+        num_heads=2,
+        channels_head=4,
+        norm_qk=RMSNorm.Config(elementwise_affine=True),
+        norm_out=RMSNorm.Config(elementwise_affine=True),
+    ).make()
+    assert isinstance(shared.norm_q, RMSNorm)
+    assert isinstance(shared.norm_k, RMSNorm)
+    assert isinstance(shared.norm_out, RMSNorm)
+    calls: list[str] = []
+
+    def reset_qk() -> None:
+        calls.append("qk")
+
+    def reset_out() -> None:
+        calls.append("out")
+
+    monkeypatch.setattr(shared.norm_q, "reset_parameters", reset_qk)
+    monkeypatch.setattr(shared.norm_out, "reset_parameters", reset_out)
+
+    shared.reset_parameters()
+
+    assert calls == ["qk", "out"]
+
+    separate = Attention.Config(
+        channels_in=8,
+        num_heads=2,
+        channels_head=4,
+        norm_qk=RMSNorm.Config(elementwise_affine=True),
+        share_qk_norm=False,
+    ).make()
+    assert isinstance(separate.norm_q, RMSNorm)
+    assert isinstance(separate.norm_k, RMSNorm)
+    separate_calls: list[str] = []
+
+    def reset_q() -> None:
+        separate_calls.append("q")
+
+    def reset_k() -> None:
+        separate_calls.append("k")
+
+    monkeypatch.setattr(separate.norm_q, "reset_parameters", reset_q)
+    monkeypatch.setattr(separate.norm_k, "reset_parameters", reset_k)
+
+    separate.reset_parameters()
+
+    assert separate_calls == ["q", "k"]
+
+
+def test_alloc_kv_cache_preserves_requested_device_dtype_and_gqa_shape() -> None:
+    module = Attention.Config(
+        channels_in=8,
+        num_heads=4,
+        num_heads_kv=2,
+        channels_head=3,
+    ).make()
+
+    cache = module.alloc_kv_cache(
+        batch=(2, 3),
+        max_seq=7,
+        device="meta",
+        dtype=torch.bfloat16,
+    )
+
+    assert cache.k.shape == (2, 3, 2, 7, 3)
+    assert cache.v.shape == (2, 3, 2, 7, 3)
+    assert cache.k.device.type == "meta"
+    assert cache.v.device.type == "meta"
+    assert cache.k.dtype is torch.bfloat16
+    assert cache.v.dtype is torch.bfloat16
+    assert cache.length == 0
+    assert cache.seen == 0
+
+
+def test_forward_cached_forwards_each_attention_argument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = Attention.Config(
+        channels_in=8,
+        num_heads=2,
+        channels_head=4,
+    ).make()
+    x = torch.ones(2, 3, 8)
+    cache = KVCache.alloc(batch=2, num_heads=2, max_seq=5, channels_head=4)
+    positions = torch.tensor([3, 4, 5])
+    cos_sin = (torch.ones(3, 2), torch.zeros(3, 2))
+    mask = torch.zeros(2, 3, 4, 5)
+    marker = object()
+    received: dict[str, object] = {}
+
+    def forward_spy(input: Tensor, **kwargs: object) -> tuple[Tensor, KVCache]:
+        received.update(kwargs)
+        return input, cache
+
+    monkeypatch.setattr(module, "_forward", forward_spy)
+
+    output, updated = module.forward_cached(
+        x,
+        cache=cache,
+        positions=positions,
+        cos_sin=cos_sin,
+        dropout_p=0.25,
+        is_causal=True,
+        attn_mask=mask,
+        marker=marker,
+    )
+
+    assert output is x
+    assert updated is cache
+    assert received["positions"] is positions
+    assert received["cos_sin"] is cos_sin
+    assert received["cache"] is cache
+    assert received["dropout_p"] == 0.25
+    assert received["is_causal"] is True
+    assert received["attn_mask"] is mask
+    assert received["marker"] is marker
+
+
+def test_forward_cached_requires_updated_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = Attention.Config(
+        channels_in=8,
+        num_heads=2,
+        channels_head=4,
+    ).make()
+
+    def no_cache(x_arg: Tensor, **kwargs: object) -> tuple[Tensor, None]:
+        del kwargs
+        return x_arg, None
+
+    monkeypatch.setattr(module, "_forward", no_cache)
+
+    with pytest.raises(ValueError, match=r"^Expected updated is not None\.$") as error:
+        module.forward_cached(
+            torch.ones(2, 3, 8),
+            cache=KVCache.alloc(
+                batch=2,
+                num_heads=2,
+                max_seq=5,
+                channels_head=4,
+            ),
+        )
+    assert str(error.value) == "Expected updated is not None."
 
 
 @pytest.mark.parametrize(

@@ -57,7 +57,6 @@ def _reference() -> nn.Module:
         linear_conv_kernel_dim=4,
     )
     raw_reference: object = Qwen3_5GatedDeltaNet(config, layer_idx=0)
-    assert isinstance(raw_reference, nn.Module)
     return torch_reference(raw_reference)
 
 
@@ -146,6 +145,40 @@ def test_delta_cache_continuation_and_serialization(tmp_path: Path) -> None:
     expected, _ = native.forward_cached(x, cache=cache)
     actual, _ = native.forward_cached(x, cache=tensor_cache)
     assert torch.equal(actual, expected)
+
+
+def test_delta_forward_cached_forwards_additional_keyword_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native = _native()
+    cache = native.alloc_kv_cache(batch=2, max_seq=3)
+    calls: list[tuple[torch.Tensor, dict[str, object]]] = []
+
+    def forward_spy(
+        self: Qwen35GatedDeltaNet,
+        x: torch.Tensor,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        del self
+        calls.append((x, kwargs))
+        return x
+
+    monkeypatch.setattr(Qwen35GatedDeltaNet, "forward", forward_spy)
+    x = torch.randn(2, 3, 8)
+    attention_mask = torch.ones(2, 3)
+    output, returned_cache = native.forward_cached(
+        x,
+        cache=cache,
+        attention_mask=attention_mask,
+    )
+    assert output is x
+    assert returned_cache is cache
+    assert len(calls) == 1
+    observed_x, forwarded = calls[0]
+    assert observed_x is x
+    assert forwarded.keys() == {"cache", "attention_mask"}
+    assert forwarded["cache"] is cache
+    assert forwarded["attention_mask"] is attention_mask
 
 
 def test_delta_masking_and_arbitrary_batch_shape() -> None:

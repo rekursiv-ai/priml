@@ -163,6 +163,8 @@ from priml.train.train_loop import TrainLoop
 
 logger = logging.getLogger(__name__)
 
+TRAINING_PROGRESS_INTERVAL: Final = 20_000
+
 
 class _TokenizerToken(Protocol):
     id: int
@@ -749,10 +751,10 @@ def interleave_rows(
         position = (index + 1) * len(original) // (len(additions) + 1)
         slots.setdefault(position, []).append(row)
     output: list[tuple[str, str]] = []
-    for index in range(len(original) + 1):
+    for index, row in enumerate(original):
         output.extend(slots.get(index, []))
-        if index < len(original):
-            output.append(original[index])
+        output.append(row)
+    output.extend(slots.get(len(original), []))
     return output
 
 
@@ -832,7 +834,7 @@ class RowPreparation:
             self.config.working_dir,
             protected=[self.config.raw_dir, self.config.tokenizer.path],
         )
-        output.mkdir(parents=True, exist_ok=False)
+        output.mkdir(parents=True)
         (output / "train").mkdir()
         (output / "eval").mkdir()
         encoder = self.config.tokenizer.make()
@@ -959,7 +961,7 @@ class RowPreparation:
                     lengths=lengths,
                     position=position,
                 )
-            if index % 20_000 == 0:
+            if index % TRAINING_PROGRESS_INTERVAL == 0:
                 logger.info("Prepared %d/%d training rows", index, len(rows))
         rows.flush()
 
@@ -1008,12 +1010,12 @@ def pack_row(
 
     """
     remaining = len(row) - position
-    best_index = -1
+    best_index: int | None = None
     best_length = 0
     for index, length in enumerate(lengths):
         if best_length < length <= remaining:
             best_index, best_length = index, length
-    if best_index < 0:
+    if best_index is None:
         best_index = min(range(len(lengths)), key=lengths.__getitem__)
         best_length = remaining
     document = buffer.pop(best_index)
@@ -1173,7 +1175,7 @@ class Preparation:
             inputs.append(batch["media"].clone().numpy().astype(uint16))
             targets.append(batch["label"].clone().numpy().astype(uint16))
         reference = self.config.working_dir / "reference-bpe"
-        reference.mkdir(parents=True, exist_ok=False)
+        reference.mkdir(parents=True)
         save(reference / "eval_x.npy", concatenate(inputs))
         save(reference / "eval_y.npy", concatenate(targets))
         pickled = tokenizer_dir / "tokenizer.pkl"
@@ -1347,7 +1349,7 @@ def build_reference_eval(
     )
     unigram = tokenizers.Tokenizer.from_file(str(unigram_path))
     destination = validated_output_path(output, protected=[reference_dir, unigram_path])
-    destination.mkdir(parents=True, exist_ok=False)
+    destination.mkdir(parents=True)
     for name, tokenizer in (("bpe", None), ("unigram", unigram)):
         arrays = prepare_reference_rows(
             inputs,
@@ -1376,19 +1378,19 @@ def encode_fragment(raw: bytes, *, tokenizer: tokenizers.Tokenizer) -> list[int]
       ids: Ordinary tokens reconstructing exactly the selected bytes.
 
     """
-    suffix = b""
+    suffix: bytes | None = None
     try:
-        text = raw.decode("utf-8", errors="strict")
+        text = raw.decode()
     except UnicodeDecodeError as error:
         if error.reason != "unexpected end of data" or error.end != len(raw):
             raise ValueError(
                 "Reference fragment has non-terminal invalid UTF-8.",
             ) from error
-        text = raw[: error.start].decode("utf-8", errors="strict")
+        text = raw[: error.start].decode()
         suffix = raw[error.start :]
     ids: list[int] = tokenizer.encode(text, add_special_tokens=False).ids
     alphabet = byte_alphabet()
-    if suffix:
+    if suffix is not None:
         ids.extend(
             token.id
             for token in cast(_TokenizerModel, tokenizer.model).tokenize(
@@ -1472,7 +1474,6 @@ def prepare_reference_rows(
     for row_index, row in enumerate(cast(Iterator[NDArray[np.int64]], targets)):
         sequence: list[int] = []
         literal_count = 0
-        start = 0
         ends: list[int] = [
             *cast(
                 list[int],
@@ -1483,21 +1484,25 @@ def prepare_reference_rows(
             ),
             len(row),
         ]
-        for end in ends:
+        for fragment_index, end in enumerate(ends):
+            fragment = (
+                row[:end]
+                if fragment_index == 0
+                else row[ends[fragment_index - 1] + 1 : end]
+            )
             raw = b"".join(
-                pieces[int(token)] for token in cast(list[int], row[start:end].tolist())
+                pieces[int(token)] for token in cast(list[int], fragment.tolist())
             )
             fragment_lengths.append(len(raw))
             literal_count += len(raw)
             try:
-                raw.decode("utf-8", errors="strict")
+                raw.decode()
             except UnicodeDecodeError:
                 incomplete_suffixes += 1
             if tokenizer is not None:
                 sequence.extend(
                     [output_bos, *encode_fragment(raw, tokenizer=tokenizer)],
                 )
-            start = int(end) + 1
         if tokenizer is None:
             output.append((inputs[row_index], row, historical[row] > 0))
         else:
@@ -1552,9 +1557,9 @@ def _windows(
     width: int,
 ) -> list[tuple[ndarray, ndarray, ndarray]]:
     """Split a replay into context windows that score each of its targets once."""
-    if len(sequence) <= width + 1:
+    if len(sequence) <= width:
         return [_pad_row(sequence, bos=bos, width=width)]
-    tokens = array(sequence, dtype=int64)
+    tokens = array(sequence)
     windows: list[tuple[ndarray, ndarray, ndarray]] = []
     for scored in range(0, len(sequence) - 1, width):
         end = min(scored + width, len(sequence) - 1)
@@ -1574,14 +1579,14 @@ def _pad_row(
     width: int,
 ) -> tuple[ndarray, ndarray, ndarray]:
     """Pad a complete reference row, excluding padding and document markers."""
-    window = array(sequence, dtype=int64)
-    inputs = full(width, bos, dtype=int64)
+    window = array(sequence)
+    inputs = full(width, bos)
     targets = inputs.copy()
     inputs[: len(window) - 1] = window[:-1]
     targets[: len(window) - 1] = window[1:]
     mask: NDArray[np.bool_] = cast(
         NDArray[np.bool_],
-        (arange(width) < len(window) - 1) & (targets != bos),
+        targets != bos,
     )
     return inputs, targets, mask
 
@@ -2108,7 +2113,7 @@ def launch_training(
         config.checkpointer.save_every = sys.maxsize
         config.checkpointer.resume = False
     directory = validated_output_path(config.working_dir)
-    directory.mkdir(parents=True, exist_ok=False)
+    directory.mkdir(parents=True)
     recipe = directory / "prepared_experiment.py"
     recipe.write_text(
         "from priml.baselines.nanochat.experiments import NgramTrainLoop\n\n"
@@ -2134,8 +2139,10 @@ def main() -> int:
       exit_code: Zero after the selected operation succeeds.
 
     """
+    if __doc__ is None:
+        raise ValueError("Expected __doc__ is not None.")
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -2219,14 +2226,14 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         ),
         default="all",
     )
-    parser.add_argument("--num-train-shards", type=int, default=None)
-    parser.add_argument("--vocab-size", type=int, default=None)
-    parser.add_argument("--tokenizer-train-chars", type=int, default=None)
-    parser.add_argument("--tokenizer-doc-cap", type=int, default=None)
+    parser.add_argument("--num-train-shards", type=int)
+    parser.add_argument("--vocab-size", type=int)
+    parser.add_argument("--tokenizer-train-chars", type=int)
+    parser.add_argument("--tokenizer-doc-cap", type=int)
     parser.add_argument("--print-config", action="store_true")
     parser.add_argument("--experiment", default="exp022")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--train-budget-sec", type=float, default=None)
+    parser.add_argument("--train-budget-sec", type=float)
     parser.add_argument("--save-checkpoint", action="store_true")
     parser.add_argument(
         "--run-directory",

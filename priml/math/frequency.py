@@ -46,7 +46,7 @@ def dct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:
     reordered = torch.cat([x[:, ::2], x[:, 1::2].flip([1])], dim=1)
 
     k = -torch.arange(n, dtype=x.dtype, device=x.device)[None, :] * math.pi / (2 * n)
-    y = (fft.fft(reordered, dim=1) * torch.polar(torch.ones_like(k), k)).real
+    y = (fft.fft(reordered) * torch.polar(torch.ones_like(k), k)).real
 
     if normalize:
         y[:, 0] /= n**0.5 * 2
@@ -98,14 +98,10 @@ def idct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:
 
     # ``irfft`` needs a contiguous complex input; q.contiguous() is bit-identical
     # to re-wrapping q.real/q.imag and reads more directly.
-    y = fft.irfft(
-        q.contiguous(),
-        n=q.shape[1],
-        dim=1,
-    )
+    y = fft.irfft(q.contiguous(), n=q.shape[1])
     z = y.new_zeros(y.shape)
-    z[:, ::2] += y[:, : n - (n // 2)]
-    z[:, 1::2] += y.flip([1])[:, : n // 2]
+    z[:, ::2] = y[:, : n - (n // 2)]
+    z[:, 1::2] = y.flip([1])[:, : n // 2]
 
     return z.view(*shape).to(x.dtype)
 

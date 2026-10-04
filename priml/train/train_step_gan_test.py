@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from priml.loss.custom_types import LossOutput
+    from priml.train.custom_types import TrainStepOutput
 
 
 class SimpleGenerator(nn.Module):
@@ -133,6 +134,92 @@ def test_gan_train_loss():
     assert "model" in result
     assert result["loss"].shape == (2,)  # Per-sample loss.
     assert result["loss"].mean().item() > 0
+
+
+def test_gan_train_loss_exactly_combines_multiple_discriminator_losses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gan = _make_gan(n_discriminator_steps=2)
+    real_media = torch.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5).float()
+    noise = torch.arange(20).reshape(2, 10).float()
+    fake_media = torch.full_like(real_media, 0.25)
+    discriminator_losses = [
+        torch.tensor([1.0, 2.0, 3.0, 4.0]),
+        torch.tensor([5.0, 6.0, 7.0, 8.0]),
+    ]
+    seen_media: list[Tensor] = []
+    seen_labels: list[Tensor] = []
+    seen_target_devices: list[torch.device | str | None] = []
+    generated_media: list[Tensor] = []
+
+    original_ones = torch.ones
+    original_zeros = torch.zeros
+
+    def ones(
+        *size: int,
+        device: torch.device | str | None = None,
+    ) -> Tensor:
+        seen_target_devices.append(device)
+        return original_ones(*size, device=device)
+
+    def zeros(
+        *size: int,
+        device: torch.device | str | None = None,
+    ) -> Tensor:
+        seen_target_devices.append(device)
+        return original_zeros(*size, device=device)
+
+    def generator_call_eval(**_batch: object) -> Tensor:
+        return fake_media
+
+    monkeypatch.setattr(
+        "priml.train.train_step_gan.torch.ones",
+        ones,
+    )
+    monkeypatch.setattr(
+        "priml.train.train_step_gan.torch.zeros",
+        zeros,
+    )
+
+    def discriminator_train_loss(
+        *,
+        media: Tensor,
+        label: Tensor,
+    ) -> TrainStepOutput:
+        seen_media.append(media.detach().clone())
+        seen_labels.append(label.detach().clone())
+        loss = discriminator_losses[len(seen_media) - 1]
+        return {"loss": loss, "model": media}
+
+    def generator_train_loss(**batch: object) -> TrainStepOutput:
+        fake = batch["fake_media"]
+        real = batch["real_media"]
+        assert isinstance(fake, Tensor)
+        assert isinstance(real, Tensor)
+        assert isinstance(batch["fake_logits"], Tensor)
+        assert torch.equal(real, real_media)
+        generated_media.append(fake)
+        return {
+            "loss": torch.tensor([10.0, 20.0]),
+            "model": real,
+            "metrics": {"auxiliary": 7.0},
+        }
+
+    monkeypatch.setattr(gan.discriminator, "train_loss", discriminator_train_loss)
+    monkeypatch.setattr(gan.generator, "call_eval", generator_call_eval)
+    monkeypatch.setattr(gan.generator, "train_loss", generator_train_loss)
+
+    result = gan.train_loss(noise=noise, media=real_media)
+
+    expected_discriminator_media = torch.cat([real_media, fake_media], dim=0)
+    expected_labels = torch.tensor([[1.0], [1.0], [0.0], [0.0]])
+    assert len(seen_media) == 2
+    assert all(torch.equal(media, expected_discriminator_media) for media in seen_media)
+    assert all(torch.equal(labels, expected_labels) for labels in seen_labels)
+    assert seen_target_devices == [real_media.device] * 4
+    assert torch.equal(result["loss"], torch.tensor([14.5, 24.5]))
+    assert result["model"] is generated_media[0]
+    assert result.get("metrics") == {"auxiliary": 7.0}
 
 
 def test_gan_eval_loss():
@@ -275,6 +362,13 @@ def test_gan_train_step_disc_loss_no_per_step_item(
     assert item_calls[0] <= 1, (
         f".item() called {item_calls[0]} times on per-step disc losses (expected <=1)"
     )
+
+
+def test_gan_call_eval_returns_generator_output() -> None:
+    """Evaluation forwards only the generator's output for the input noise."""
+    gan = _make_gan()
+    output = gan.call_eval(noise=torch.randn(2, 10))
+    assert output.shape == (2, 3, 4, 5)
 
 
 def test_gan_preprocess_batch_forwards_to_generator() -> None:

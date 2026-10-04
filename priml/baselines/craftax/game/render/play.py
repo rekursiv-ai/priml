@@ -107,20 +107,18 @@ def play(
     screen = pygame.display.set_mode((width, height))
     pygame.display.set_caption(f"Craftax (seed {seed})")
 
-    running = True
     _show(screen, renderer.render(state))
-    while running:
+    while True:
         # ``wait`` blocks; ``get`` returns immediately and spun a core at 100%
         # redrawing an unchanged world. The docstring promises no clock to lose
         # to, so there is nothing to do between keystrokes.
         event = pygame.event.wait()
         if event.type == pygame.QUIT:
-            running = False
-        elif event.type == pygame.KEYDOWN:
+            break
+        if event.type == pygame.KEYDOWN:
             key = cast(int, event.key)
             if key == pygame.K_ESCAPE:
-                running = False
-                continue
+                break
             action = KEYS.get(key)
             if action is None:
                 continue
@@ -214,10 +212,10 @@ def record(
                 _ = writer.send(renderer.render(env.state).tobytes())
                 logits, _ = policy(observation)
                 action = torch.multinomial(
-                    logits.softmax(-1),
+                    logits.softmax(1),
                     1,
                     generator=generator,
-                ).squeeze(-1)
+                ).squeeze(1)
                 transition = env.step(action)
                 observation = transition.observation
                 steps += 1

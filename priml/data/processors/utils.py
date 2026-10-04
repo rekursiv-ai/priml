@@ -104,28 +104,19 @@ def compute_keyframes_as_progressive_bisection(
 
     # Continue bisecting until we have enough frames.
     while len(indices) < num_keyframes:
-        # Find the largest gap between consecutive indices.
+        # Find the first largest gap between consecutive indices.
         indices_sorted = sorted(indices)
-        max_gap = 0
-        max_gap_idx = 0
-
-        for i in range(len(indices_sorted) - 1):
-            gap = indices_sorted[i + 1] - indices_sorted[i]
-            if gap > max_gap:
-                max_gap = gap
-                max_gap_idx = i
+        max_gap_idx = max(
+            range(len(indices_sorted) - 1),
+            key=lambda i: indices_sorted[i + 1] - indices_sorted[i],
+        )
 
         # Bisect the largest gap.
         left = indices_sorted[max_gap_idx]
         right = indices_sorted[max_gap_idx + 1]
         mid = (left + right) // 2
 
-        # Only add if mid is different from both endpoints (avoid duplicates)
-        if mid not in {left, right}:
-            indices.append(mid)
-        else:
-            # No more unique frames to add.
-            break
+        indices.append(mid)
 
     return sorted(indices)
 
@@ -242,15 +233,14 @@ def preprocess_images(
         raise TypeError(f"Input tensor must be a float type, but got {x.dtype}")
     if x.ndim != 4:
         raise TypeError(f"Input format must be NCHW but {x.shape=}.")
-    if dtype is None:
-        dtype = x.dtype
+    dtype = x.dtype if dtype is None else dtype
 
     # Use input dtype for resize (no conversion overhead)
     resize_dtype = dtype
 
     # Resize (skip if already correct size)
     height, width = size
-    if x.shape[-2:] != (height, width):
+    if x.shape[2:] != (height, width):
         if mode == "lanczos":
             if align_corners is not None:
                 raise ValueError(
@@ -272,7 +262,7 @@ def preprocess_images(
                 x = x.to(resize_dtype)
 
             if mode == "hybrid":
-                source_pixels = x.shape[-2] * x.shape[-1]
+                source_pixels = x.shape[2] * x.shape[3]
                 target_pixels = height * width
                 if target_pixels < source_pixels:
                     interp_mode = "area"  # Downsampling.
@@ -321,10 +311,6 @@ def preprocess_images(
     if std is not None:
         std_tensor = torch.as_tensor(std, device=x.device, dtype=x.dtype).view(-1, 1, 1)
         x = x / std_tensor
-
-    # Convert to final target dtype if different from current dtype.
-    if x.dtype != dtype:
-        x = x.to(dtype)
 
     return x
 

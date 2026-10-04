@@ -107,7 +107,11 @@ def augment_sudoku(
         labels_aug: [B, 81] labels under the same permutation and symmetry.
 
     """
-    n = spec.grid_shape[0]
+    n = math.isqrt(inputs.shape[1])
+    if inputs.shape[1] != n * n:
+        raise ValueError("Expected inputs.shape[1] == n * n.")
+    if spec.grid_shape != (n, n):
+        raise ValueError("Expected spec.grid_shape == (n, n).")
     B = inputs.shape[0]
     device = inputs.device
 
@@ -216,9 +220,12 @@ def load_puzzle_dataset(
     inputs = torch.from_numpy(np.array(inputs_mmap[:n])).to(torch.int32)
     labels = torch.from_numpy(np.array(labels_mmap[:n])).to(torch.int32)
     if n is not None:
-        group_indices = group_indices[group_indices <= n]
-        if len(group_indices) == 0 or group_indices[-1] != n:
-            group_indices = torch.cat([group_indices, torch.tensor([n])])
+        group_indices = torch.cat(
+            [
+                group_indices[group_indices < n],
+                torch.tensor([n], dtype=group_indices.dtype),
+            ],
+        )
     return {
         "inputs": inputs,
         "labels": labels,
@@ -350,7 +357,6 @@ class PuzzleDataset:
             dataset_dir=self.dataset_dir,
             device=self.config.device,
             batch_size=self.batch_size,
-            train=True,
             num_instances=self.config.num_instances,
             max_samples=self.config.max_samples,
             seed=self.config.seed,
@@ -499,11 +505,9 @@ class _PuzzleBatchIterator:
         self.vocab_size = self.spec.vocab_size
         self.seq_len = data["seq_len"]
 
-        if num_instances is not None and num_instances < len(instance_bounds) - 1:
-            max_samples = int(instance_bounds[num_instances])
+        if num_instances is not None:
             instance_bounds = instance_bounds[: num_instances + 1]
-        else:
-            max_samples = len(data["inputs"])
+            max_samples = int(instance_bounds[-1])
 
         self.device = _get_device(device)
         self.inputs = data["inputs"][:max_samples].to(self.device)

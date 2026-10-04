@@ -54,6 +54,11 @@ def test_shuffle_actually_reorders() -> None:
     assert shuffled != items
 
 
+def test_default_seed_has_a_pinned_permutation() -> None:
+    items = list(range(8))
+    assert shard_and_shuffle(items, shuffle=True) == [4, 1, 5, 2, 0, 3, 7, 6]
+
+
 def test_epoch_seed_changes_permutation() -> None:
     """Different epoch seeds yield different permutations."""
     items = list(range(50))

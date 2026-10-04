@@ -6,7 +6,7 @@ Reference: https://github.com/SwayStar123/REG/blob/invae-sprint-rms-rope-valres-
 
 # Preserve the published checkpoint's module names and third-party signatures.
 # pyright: basic
-# ruff: noqa: ANN001, ANN003, ANN201, D101, D102, D103, N802, ARG002, RUF005, B007, RET504, F841, B006
+# ruff: noqa: ANN001, ANN003, ANN201, D101, D102, D103, N802, ARG002, RUF005, B007, RET504, B006
 
 from importlib import import_module
 from pathlib import Path
@@ -29,7 +29,6 @@ def Normalize(in_channels, num_groups=32):
         num_groups=num_groups,
         num_channels=in_channels,
         eps=1e-6,
-        affine=True,
     )
 
 
@@ -42,7 +41,6 @@ class Upsample(nn.Module):
                 in_channels,
                 in_channels,
                 kernel_size=3,
-                stride=1,
                 padding=1,
             )
 
@@ -65,7 +63,6 @@ class Downsample(nn.Module):
                 in_channels,
                 kernel_size=3,
                 stride=2,
-                padding=0,
             )
 
     @override
@@ -100,7 +97,6 @@ class ResnetBlock(nn.Module):
             in_channels,
             out_channels,
             kernel_size=3,
-            stride=1,
             padding=1,
         )
         if temb_channels > 0:
@@ -111,7 +107,6 @@ class ResnetBlock(nn.Module):
             out_channels,
             out_channels,
             kernel_size=3,
-            stride=1,
             padding=1,
         )
         if self.in_channels != self.out_channels:
@@ -120,7 +115,6 @@ class ResnetBlock(nn.Module):
                     in_channels,
                     out_channels,
                     kernel_size=3,
-                    stride=1,
                     padding=1,
                 )
             else:
@@ -128,8 +122,6 @@ class ResnetBlock(nn.Module):
                     in_channels,
                     out_channels,
                     kernel_size=1,
-                    stride=1,
-                    padding=0,
                 )
 
     @override
@@ -166,29 +158,21 @@ class AttnBlock(nn.Module):
             in_channels,
             in_channels,
             kernel_size=1,
-            stride=1,
-            padding=0,
         )
         self.k = torch.nn.Conv2d(
             in_channels,
             in_channels,
             kernel_size=1,
-            stride=1,
-            padding=0,
         )
         self.v = torch.nn.Conv2d(
             in_channels,
             in_channels,
             kernel_size=1,
-            stride=1,
-            padding=0,
         )
         self.proj_out = torch.nn.Conv2d(
             in_channels,
             in_channels,
             kernel_size=1,
-            stride=1,
-            padding=0,
         )
 
     @override
@@ -227,7 +211,6 @@ class Encoder(nn.Module):
         self,
         *,
         ch=128,
-        out_ch=3,
         ch_mult=(1, 1, 2, 2, 4),
         num_res_blocks=2,
         attn_resolutions=(16,),
@@ -252,7 +235,6 @@ class Encoder(nn.Module):
             in_channels,
             self.ch,
             kernel_size=3,
-            stride=1,
             padding=1,
         )
 
@@ -289,14 +271,12 @@ class Encoder(nn.Module):
         self.mid = nn.Module()
         self.mid.block_1 = ResnetBlock(
             in_channels=block_in,
-            out_channels=block_in,
             temb_channels=self.temb_ch,
             dropout=dropout,
         )
         self.mid.attn_1 = AttnBlock(block_in)
         self.mid.block_2 = ResnetBlock(
             in_channels=block_in,
-            out_channels=block_in,
             temb_channels=self.temb_ch,
             dropout=dropout,
         )
@@ -307,7 +287,6 @@ class Encoder(nn.Module):
             block_in,
             2 * z_channels if double_z else z_channels,
             kernel_size=3,
-            stride=1,
             padding=1,
         )
 
@@ -368,8 +347,7 @@ class Decoder(nn.Module):
         self.in_channels = in_channels
         self.give_pre_end = give_pre_end
 
-        # Compute in_ch_mult, block_in and curr_res at lowest res.
-        in_ch_mult = (1,) + tuple(ch_mult)
+        # Compute block_in and curr_res at lowest res.
         block_in = ch * ch_mult[self.num_resolutions - 1]
         curr_res = resolution // 2 ** (self.num_resolutions - 1)
         self.z_shape = (1, z_channels, curr_res, curr_res)
@@ -384,7 +362,6 @@ class Decoder(nn.Module):
             z_channels,
             block_in,
             kernel_size=3,
-            stride=1,
             padding=1,
         )
 
@@ -392,14 +369,12 @@ class Decoder(nn.Module):
         self.mid = nn.Module()
         self.mid.block_1 = ResnetBlock(
             in_channels=block_in,
-            out_channels=block_in,
             temb_channels=self.temb_ch,
             dropout=dropout,
         )
         self.mid.attn_1 = AttnBlock(block_in)
         self.mid.block_2 = ResnetBlock(
             in_channels=block_in,
-            out_channels=block_in,
             temb_channels=self.temb_ch,
             dropout=dropout,
         )
@@ -437,7 +412,6 @@ class Decoder(nn.Module):
             block_in,
             out_ch,
             kernel_size=3,
-            stride=1,
             padding=1,
         )
 
@@ -485,9 +459,7 @@ class DiagonalGaussianDistribution:
         self.std = torch.exp(0.5 * self.logvar)
         self.var = torch.exp(self.logvar)
         if self.deterministic:
-            self.var = self.std = torch.zeros_like(self.mean).to(
-                device=self.parameters.device,
-            )
+            self.var = self.std = torch.zeros_like(self.mean)
 
     def sample(self) -> Tensor:
         x = self.mean + self.std * torch.randn(

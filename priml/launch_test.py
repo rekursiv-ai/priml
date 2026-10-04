@@ -16,6 +16,20 @@ from priml import launch
 from priml.launch import _derive_study_name, _graceful_sigterm, main
 
 
+@pytest.fixture(autouse=True)
+def keep_caplog_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub ``main``'s ``setup_logging``, which replaces the root handlers.
+
+    It drops caplog's, and installs one on this test's captured ``sys.stdout``
+    that outlives the test: every later record in the worker then fails to write.
+    """
+
+    def keep_handlers(level: str = "INFO") -> None:
+        del level
+
+    monkeypatch.setattr(launch, "setup_logging", keep_handlers)
+
+
 class MockJob:
     """Mock job for testing launch functionality."""
 
@@ -317,17 +331,6 @@ def documented_experiment() -> Makeable[_StampedJob]:
     return config
 
 
-@pytest.fixture
-def keep_caplog_handler(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``setup_logging`` clears the root handlers, which would drop caplog's."""
-
-    def keep_handlers(level: str = "INFO") -> None:
-        del level
-
-    monkeypatch.setattr(launch, "setup_logging", keep_handlers)
-
-
-@pytest.mark.usefixtures("keep_caplog_handler")
 def test_main_stamps_identity_and_doc_only_when_unset(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -376,7 +379,6 @@ def inline_experiment() -> Makeable[MockJob]:
     return InlineConfig(MockJob, MockJob.Config())
 
 
-@pytest.mark.usefixtures("keep_caplog_handler")
 def test_main_logs_the_repr_of_a_config_without_pformat(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

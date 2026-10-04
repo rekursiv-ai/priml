@@ -244,7 +244,7 @@ def assert_tensor_golden(path: Path, record: Mapping[str, Tensor]) -> None:
 
     """
     missing = not path.is_file()
-    if missing or os.environ.get("BFB_REGENERATE", "0") == "1":
+    if missing or os.environ.get("BFB_REGENERATE") == "1":
         path.parent.mkdir(parents=True, exist_ok=True)
         write_tensors(path, record)
     if missing:
@@ -317,7 +317,7 @@ def rng_fingerprint() -> Tensor:
     """
     generator = torch.Generator()
     generator.set_state(torch.get_rng_state())
-    return torch.randint(0, 2**31 - 1, (8,), generator=generator)
+    return torch.randint(2**31 - 1, (8,), generator=generator)
 
 
 # Every element, never a sample: a check that keeps the first few, or evenly spaced

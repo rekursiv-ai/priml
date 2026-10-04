@@ -56,23 +56,24 @@ def cov(
         x = convert_to_tensor(x)
     else:
         x, y = convert_to_tensor(x, y)
-    # A 1-D input is a single variable's observations; numpy.cov treats it as
-    # one row and returns the scalar variance.
-    scalar = x.ndim == 1
-    if scalar:
-        x = x.unsqueeze(0)
-        if y is not None:
-            y = y.unsqueeze(0)
-        rowvar = True
-    obs_dim = -1 if rowvar else -2
+    if x.ndim == 1:
+        x_centered = x - x.mean()
+        y_values = x_centered if y is None else y - y.mean()
+        observations = x.shape[0]
+        if observations > 1 and not bias:
+            observations -= 1
+        return (x_centered * y_values).sum() / observations
+    obs_dim = x.ndim - (1 if rowvar else 2)
     x = x - x.mean(dim=obs_dim, keepdim=True)
-    y = x if y is None else (y - y.mean(dim=obs_dim, keepdim=True))
-    eq = "...ij,...kj->...ik" if rowvar else "...ji,...jk->...ik"
-    n = x.shape[obs_dim]
-    if n > 1 and not bias:
-        n = n - 1
-    result = torch.einsum(eq, x, y) / n
-    return result.squeeze() if scalar else result
+    y = x if y is None else y - y.mean(dim=obs_dim, keepdim=True)
+    observations = x.shape[obs_dim]
+    if observations > 1 and not bias:
+        observations -= 1
+    if rowvar:
+        result = x @ y.transpose(-1, -2)
+    else:
+        result = x.transpose(-1, -2) @ y
+    return result / observations
 
 
 def entropy_logits(
@@ -185,7 +186,7 @@ def jsd(
     event_dim = (event_dim,) if isinstance(event_dim, int) else tuple(event_dim)
 
     def _entropy(lp: Tensor) -> Tensor:
-        safe = torch.where(torch.isneginf(lp), 0.0, lp)
+        safe = torch.where(torch.isneginf(lp), torch.zeros_like(lp), lp)
         return -torch.sum(lp.exp() * safe, dim=event_dim, keepdim=True)
 
     # H(mean_p): entropy of the mixture.
@@ -231,12 +232,34 @@ def entropy_logits_mean_all_to_all(
         y = x
     else:
         x, y = convert_to_tensor(x, y)
+    event_axes = (
+        (dim % x.ndim,)
+        if isinstance(dim, int)
+        else tuple(axis % x.ndim for axis in dim)
+    )
     if dim_mean is None:
-        dim_iter = (dim,) if isinstance(dim, int) else dim
-        dim_mean = tuple(set(range(x.ndim)) - {a % x.ndim for a in dim_iter})
-    p = torch.softmax(x, dim=dim)
+        dim_mean = tuple(set(range(x.ndim)) - set(event_axes))
+    elif not isinstance(dim_mean, int):
+        dim_mean = tuple(dim_mean)
+    if isinstance(dim, int):
+        p = torch.softmax(x, dim=dim)
+        log_q = torch.log_softmax(y, dim=dim)
+    else:
+        leading_axes = tuple(axis for axis in range(x.ndim) if axis not in event_axes)
+        permutation = leading_axes + event_axes
+        inverse = tuple(permutation.index(axis) for axis in range(x.ndim))
+        leading_shape = tuple(x.shape[axis] for axis in leading_axes)
+        event_shape = tuple(x.shape[axis] for axis in event_axes)
+        x_flat = x.permute(permutation).reshape(*leading_shape, -1)
+        y_flat = y.permute(permutation).reshape(*leading_shape, -1)
+        p = torch.softmax(x_flat, dim=-1).reshape(*leading_shape, *event_shape)
+        log_q = torch.log_softmax(y_flat, dim=-1).reshape(
+            *leading_shape,
+            *event_shape,
+        )
+        p = p.permute(inverse)
+        log_q = log_q.permute(inverse)
     mean_p = torch.mean(p, dim=dim_mean, keepdim=keepdim_mean)
-    log_q = torch.log_softmax(y, dim=dim)
     log_mean_q = logmeanexp_all_to_all(
         log_q,
         dim=dim_mean,
@@ -272,9 +295,9 @@ def pca_svd(x_centered: Tensor) -> tuple[Tensor, Tensor]:
       x_centered: Mean-centered observations of shape ``(N, D)``.
 
     Returns:
-      eigenvalues: Ascending eigenvalues of shape ``(D,)``, flipped from
+      eigenvalues: Ascending eigenvalues of shape ``(min(N, D),)``, flipped from
         SVD's descending order to match the ``eigh`` convention.
-      eigenvectors: Columns are the corresponding eigenvectors ``(D, D)``.
+      eigenvectors: Right singular vectors as columns, shape ``(D, min(N, D))``.
 
     Raises:
       RuntimeError: If the input lives on an MPS device.
@@ -311,19 +334,17 @@ def pca_power(
 
     """
     sigma = (x_centered.T @ x_centered) / len(x_centered)
-    d = sigma.shape[0]
-    basis = torch.randn(d, d, device=sigma.device, dtype=sigma.dtype)
+    basis = torch.randn(*sigma.shape, device=sigma.device, dtype=sigma.dtype)
     basis, _ = _householder_qr(basis)
-    prev = (basis * (sigma @ basis)).sum(dim=0)
+    prev = _rayleigh(sigma, basis)
     for _ in range(num_iters):
         basis, _ = _householder_qr(sigma @ basis)
         if tol > 0:
-            eigenvalues = (basis * (sigma @ basis)).sum(dim=0)
+            eigenvalues = _rayleigh(sigma, basis)
             if (eigenvalues - prev).abs().max() < tol:
-                prev = eigenvalues
                 break
             prev = eigenvalues
-    eigenvalues = (basis * (sigma @ basis)).sum(dim=0)
+    eigenvalues = _rayleigh(sigma, basis)
     idx = eigenvalues.argsort()
     return eigenvalues[idx], basis[:, idx]
 
@@ -374,7 +395,8 @@ def pca(
 
     """
     x_t = convert_to_tensor(x).float()
-    eigenvalues, eigenvectors = decompose(x_t - x_t.mean(dim=0, keepdim=True))
+    centered = x_t - x_t.mean(dim=0)
+    eigenvalues, eigenvectors = decompose(centered)
     if whiten:
         eigenvectors = eigenvectors * torch.rsqrt(eigenvalues.unsqueeze(0) + eps)
     return eigenvalues, eigenvectors
@@ -513,3 +535,8 @@ def _householder_qr(mat: Tensor) -> tuple[Tensor, Tensor]:
         r[k:, k:] = r[k:, k:] - 2 * v.unsqueeze(0).T @ (v.unsqueeze(0) @ r[k:, k:])
         q[:, k:] = q[:, k:] - 2 * (q[:, k:] @ v.unsqueeze(0).T) @ v.unsqueeze(0)
     return q, r
+
+
+def _rayleigh(sigma: Tensor, basis: Tensor) -> Tensor:
+    """Estimate eigenvalues along the basis columns."""
+    return (basis * (sigma @ basis)).sum(dim=0)

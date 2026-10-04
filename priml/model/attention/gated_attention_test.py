@@ -10,7 +10,12 @@ import pytest
 import torch
 
 from priml.cost import cost
-from priml.model.attention.gated_attention import GatedAttention
+from priml.model.attention.gated_attention import (
+    GatedAttention,
+    _causal_bias,
+    _is_text_positions,
+    _validate_cache_geometry,
+)
 from priml.model.attention.kernel import (
     SdpaFused,
     SdpaNaive,
@@ -347,6 +352,7 @@ def test_gated_attention_window_applies_alongside_an_explicit_mask() -> None:
     model = config.make().eval()
     x = torch.randn(2, 5, 8)
     # GatedAttention.forward broadcasts the singleton head mask dimension.
+    # Attention requires square [sequence, sequence] masks.
     attn_mask = torch.zeros(2, 1, 5, 5)
 
     with torch.no_grad():
@@ -373,6 +379,7 @@ def test_gated_attention_window_zero_with_a_no_op_mask_pins_to_value_projection(
     model = config.make().eval()
     x = torch.randn(2, 6, 8)
     # GatedAttention.forward broadcasts the singleton head mask dimension.
+    # Attention requires square [sequence, sequence] masks.
     attn_mask = torch.zeros(2, 1, 6, 6)
 
     with torch.no_grad():
@@ -534,6 +541,185 @@ def test_gated_attention_traffic_propagates_itemsize() -> None:
         large["bytes", torch.float32].sum() == small["bytes", torch.bfloat16].sum() * 2
     )
     assert small.bytes_state == 2 * 2 * 1 * 4
+
+
+def test_gated_attention_causal_bias_exact_values() -> None:
+    # Attention q/k tensors use two coordinate channels for this kernel.
+    q = torch.zeros(2, 3, 1, 2)
+    k = torch.zeros(2, 5, 1, 2)
+    actual = _causal_bias(q, k, dtype=torch.float64, window=1)
+    minimum = torch.finfo(torch.float64).min
+    expected = torch.tensor(
+        [
+            [minimum, 0, 0, minimum, minimum],
+            [minimum, minimum, 0, 0, minimum],
+            [minimum, minimum, minimum, 0, 0],
+        ],
+        dtype=torch.float64,
+    )
+    assert actual.shape == (3, 5)
+    assert actual.dtype == torch.float64
+    assert actual.device == q.device
+    assert torch.equal(actual, expected)
+
+
+def test_gated_attention_causal_bias_window_zero_keeps_only_matching_positions() -> (
+    None
+):
+    # _causal_bias requires a singleton head axis for full-attention q/k.
+    q = torch.zeros(2, 3, 1, 2)
+    k = torch.zeros(2, 5, 1, 2)
+    minimum = torch.finfo(torch.float32).min
+    expected = torch.tensor(
+        [
+            [minimum, minimum, 0, minimum, minimum],
+            [minimum, minimum, minimum, 0, minimum],
+            [minimum, minimum, minimum, minimum, 0],
+        ],
+    )
+
+    actual = _causal_bias(q, k, dtype=torch.float32, window=0)
+
+    assert actual.shape == (3, 5)
+    assert torch.equal(actual, expected)
+
+
+def test_gated_attention_causal_bias_stays_on_query_device() -> None:
+    # _causal_bias requires a singleton head axis for full-attention q/k.
+    q = torch.empty(2, 3, 1, 2, device="meta")
+    k = torch.empty(2, 5, 1, 2, device="meta")
+
+    actual = _causal_bias(q, k, dtype=torch.float32, window=1)
+
+    assert actual.shape == (3, 5)
+    assert actual.device.type == "meta"
+
+
+def test_gated_attention_position_layout_predicate() -> None:
+    x = torch.zeros(2, 3, 4, 5)
+    assert _is_text_positions(torch.arange(4), x=x)
+    assert _is_text_positions(torch.arange(3), x=torch.zeros(2, 3, 5))
+    # Text positions carry a singleton coordinate axis by contract.
+    assert _is_text_positions(torch.zeros(2, 3, 4, 1), x=x)
+    assert not _is_text_positions(torch.zeros(2, 4, 1), x=x)
+    assert not _is_text_positions(torch.zeros(2, 3, 4, 2), x=x)
+
+
+def test_gated_attention_cache_uses_projection_device_and_dtype() -> None:
+    config = GatedAttention.Config()
+    config.channels_in = 8
+    config.num_heads = 2
+    config.num_heads_kv = 1
+    config.channels_head = 4
+    model = config.make().to(dtype=torch.float64)
+
+    inferred = model.alloc_kv_cache(batch=2, max_seq=3)
+    meta_model = config.make().to(device="meta")
+    meta_cache = meta_model.alloc_kv_cache(batch=2, max_seq=3)
+    explicit = model.alloc_kv_cache(
+        batch=(2, 3),
+        max_seq=4,
+        device="meta",
+        dtype=torch.float32,
+    )
+
+    assert inferred.k.shape == (2, 1, 3, 4)
+    assert inferred.v.shape == inferred.k.shape
+    assert inferred.k.device == model.proj_q.weight.device
+    assert inferred.k.dtype == model.proj_q.weight.dtype
+    assert meta_cache.k.device.type == "meta"
+    assert meta_cache.v.device.type == "meta"
+    assert explicit.k.shape == (2, 3, 1, 4, 4)
+    assert explicit.v.shape == explicit.k.shape
+    assert explicit.k.device.type == "meta"
+    assert explicit.k.dtype == torch.float32
+
+
+def test_gated_attention_forward_cached_forwards_positions_and_mask() -> None:
+    config = GatedAttention.Config()
+    config.channels_in = 8
+    config.num_heads = config.num_heads_kv = 1
+    config.channels_head = 4
+    config.rope = RoPE.Config(2)
+    model = config.make().eval()
+    x = torch.randn(2, 3, 8)
+    positions = torch.tensor([[[4], [5], [6]], [[0], [3], [7]]])
+    # GatedAttention combines a singleton head axis with square masks.
+    mask = torch.zeros(2, 1, 3, 3)
+    mask[:, :, :, 0] = torch.finfo(mask.dtype).min
+    expected = model(x, positions=positions, attn_mask=mask)
+    cache = model.alloc_kv_cache(batch=2, max_seq=3)
+
+    actual, returned_cache = model.forward_cached(
+        x,
+        cache=cache,
+        positions=positions,
+        attn_mask=mask,
+    )
+
+    torch.testing.assert_close(actual, expected)
+    assert returned_cache is cache
+    assert cache.seen == 3
+
+
+def test_gated_attention_accepts_valid_cache_with_multiple_batch_axes() -> None:
+    cache = KVCache(torch.zeros(3, 4, 2, 6, 5), torch.zeros(3, 4, 2, 6, 5), length=0)
+
+    _validate_cache_geometry(
+        cache,
+        x=torch.zeros(3, 4, 2, 10),
+        num_heads_kv=2,
+        channels_head=5,
+    )
+
+
+def test_gated_attention_rejects_cached_sequence_length_mismatch_with_batch_axes() -> (
+    None
+):
+    # _validate_cache_geometry intentionally rejects mismatched cache sequence lengths.
+    caches = [
+        KVCache(torch.zeros(3, 4, 2, 3, 5), torch.zeros(3, 4, 2, 2, 5), length=0),
+        KVCache(torch.zeros(3, 4, 2, 2, 5), torch.zeros(3, 4, 2, 3, 5), length=0),
+    ]
+    for cache in caches:
+        with pytest.raises(ValueError, match="cache batch, head, and feature geometry"):
+            _validate_cache_geometry(
+                cache,
+                x=torch.zeros(3, 4, 2, 10),
+                num_heads_kv=2,
+                channels_head=5,
+            )
+
+
+@pytest.mark.parametrize(
+    ("key_shape", "value_shape"),
+    [
+        ((2, 1, 3, 4), (3, 1, 3, 4)),
+        ((2, 2, 3, 4), (2, 1, 3, 4)),
+        ((2, 1, 2, 4), (2, 1, 3, 4)),
+        ((2, 1, 3, 5), (2, 1, 3, 4)),
+        ((2, 1, 3, 4), (2, 1, 3, 5)),
+        ((2, 1, 3), (2, 1, 3, 4)),
+    ],
+)
+def test_gated_attention_rejects_each_cache_geometry_mismatch(
+    key_shape: tuple[int, ...],
+    value_shape: tuple[int, ...],
+) -> None:
+    cache = KVCache(torch.zeros(key_shape), torch.zeros(value_shape), length=0)
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Full-attention cache batch, head, and feature geometry must match "
+            r"the input and attention configuration\."
+        ),
+    ):
+        _validate_cache_geometry(
+            cache,
+            x=torch.zeros(2, 3, 8),
+            num_heads_kv=1,
+            channels_head=4,
+        )
 
 
 if __name__ == "__main__":

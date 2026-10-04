@@ -29,6 +29,17 @@ def _identity_compile(*_args: object, **_kwargs: object) -> Callable[..., object
 
 
 class TestLazyTorchCompile:
+    @pytest.mark.parametrize("compile_args", [(1,), (1, 2)])
+    def test_invalid_positional_arguments_are_rejected(
+        self,
+        compile_args: tuple[object, ...],
+    ) -> None:
+        with pytest.raises(TypeError) as raised:
+            lazy_torch_compile(*compile_args)
+        assert str(raised.value) == (
+            "lazy_torch_compile accepts only keyword compile arguments."
+        )
+
     def test_bare_decorator(self) -> None:
         # Bare @lazy_torch_compile must decorate the function, not bind it
         # as a torch.compile argument (issue CORE-006).
@@ -40,14 +51,34 @@ class TestLazyTorchCompile:
 
             assert f(1) == 2
 
-    def test_parameterized_decorator(self) -> None:
+    def test_empty_parameterized_decorator(self) -> None:
         with patch("priml.compile.torch.compile", _identity_compile):
+
+            @lazy_torch_compile()
+            def f(x: int) -> int:
+                return x - 1
+
+            assert f(3) == 2
+
+    def test_parameterized_decorator(self) -> None:
+        calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        def _tracking_compile(
+            *args: object,
+            **kwargs: object,
+        ) -> Callable[..., object]:
+            calls.append((args, kwargs))
+            return _identity
+
+        with patch("priml.compile.torch.compile", _tracking_compile):
 
             @lazy_torch_compile(fullgraph=True)
             def f(x: int) -> int:
                 return x * 2
 
             assert f(3) == 6
+
+        assert calls == [((), {"fullgraph": True})]
 
     def test_compile_deferred_to_first_call(self) -> None:
         calls: list[int] = []

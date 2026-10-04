@@ -7,6 +7,8 @@ masks itself: adding ``-inf`` here would change fully masked rows.
 
 from __future__ import annotations
 
+import math
+
 from torch import Tensor
 
 import torch
@@ -139,9 +141,9 @@ def window_mask(q: Tensor, k: Tensor, *, window: int) -> Tensor | None:
     # of history IN ADDITION to the query's own position, so the exclusive form
     # attends to one key fewer per row and is a different model.
     admissible = (offset >= 0) & (offset <= window)
-    return torch.zeros(s, t, dtype=q.dtype, device=q.device).masked_fill(
+    return torch.zeros_like(admissible, dtype=q.dtype).masked_fill(
         ~admissible,
-        float("-inf"),
+        -math.inf,
     )
 
 
@@ -166,10 +168,7 @@ def causal_chunk_mask(q: Tensor, k: Tensor) -> Tensor | None:
     if s == t:
         return None
     allowed = torch.ones(s, t, dtype=torch.bool, device=q.device).tril(diagonal=t - s)
-    return torch.zeros(s, t, dtype=q.dtype, device=q.device).masked_fill(
-        ~allowed,
-        float("-inf"),
-    )
+    return torch.zeros_like(allowed, dtype=q.dtype).masked_fill(~allowed, -math.inf)
 
 
 def segment_mask(
@@ -218,7 +217,7 @@ def _causal_bias(q: Tensor, k: Tensor, *, window: int) -> Tensor:
     allowed = offset >= 0
     if window >= 0:
         allowed = allowed & (offset <= window)
-    return torch.zeros(s, t, dtype=q.dtype, device=q.device).masked_fill(
+    return torch.zeros(t, dtype=q.dtype, device=q.device).masked_fill(
         ~allowed,
-        float("-inf"),
+        -math.inf,
     )

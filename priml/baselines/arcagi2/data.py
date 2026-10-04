@@ -10,17 +10,36 @@ from configgle import Fig
 
 from priml.baselines.arcagi1.augmentation import ArcAugmentation, ArcSpec
 from priml.baselines.arcagi1.data import ArcData
-from priml.lib.custom_json import DictCodec, IntCodec, ListCodec
+from priml.lib.custom_json import DictCodec, IntCodec
 from priml.paths import resolve_working_dir
 from priml.timer import CheckpointableStepTimer
 
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
+    from typing import Protocol
+
+    from numpy.typing import NDArray
 
     import numpy as np
     import torch
     import torch.distributed as dist
+
+    class _PreparedArcSplit(Protocol):
+        inputs: torch.Tensor | NDArray[np.generic]
+        labels: torch.Tensor | NDArray[np.generic]
+        groups: NDArray[np.int64]
+        puzzles: NDArray[np.int64]
+        identifiers: NDArray[np.int64]
+        ignore_label_id: int
+        batch_size: int
+        device: torch.device
+        seed: int
+
+    class _ArcDataSource(Protocol):
+        def train_dataloader(self) -> _PreparedArcSplit: ...
+
+        def eval_dataloader(self) -> _PreparedArcSplit: ...
 else:
     from wrapt import lazy_import
 
@@ -34,7 +53,7 @@ class ArcBatches:
 
     def __init__(
         self,
-        data: ArcData,
+        data: _ArcDataSource,
         *,
         train: bool,
         epochs_per_iter: int,
@@ -48,8 +67,8 @@ class ArcBatches:
             raise TypeError("ARC2 requires device-resident prepared data")
         self.inputs = prepared.inputs
         self.labels = prepared.labels
-        self.groups = ListCodec.coerce(cast(object, prepared.groups.tolist()), int)
-        self.puzzles = ListCodec.coerce(cast(object, prepared.puzzles.tolist()), int)
+        self.groups = cast(list[int], prepared.groups.tolist())
+        self.puzzles = cast(list[int], prepared.puzzles.tolist())
         self.identifiers = torch.from_numpy(prepared.identifiers).to(prepared.device)
         self.ignore = prepared.ignore_label_id
         self.batch_size = prepared.batch_size
@@ -80,14 +99,9 @@ class ArcBatches:
                 rows = list(
                     range(start, min(start + self.global_batch_size, self.puzzles[-1])),
                 )[local]
-                puzzle_ids = ListCodec.coerce(
-                    cast(
-                        object,
-                        (
-                            np.searchsorted(self.puzzles, rows, side="right") - 1
-                        ).tolist(),
-                    ),
-                    int,
+                puzzle_ids = cast(
+                    list[int],
+                    (np.searchsorted(self.puzzles, rows, side="right") - 1).tolist(),
                 )
                 yield self._batch(rows, puzzle_ids)
             return
@@ -111,7 +125,7 @@ class ArcBatches:
                 for _ in range(self.epochs_per_iter)
             ],
         )
-        tasks = ListCodec.coerce(cast(object, order.tolist()), int)
+        tasks = cast(list[int], order.tolist())
         rows: list[int] = []
         puzzles: list[int] = []
         for task in tasks:
@@ -119,14 +133,9 @@ class ArcBatches:
             start, stop = self.puzzles[puzzle : puzzle + 2]
             take = min(stop - start, self.global_batch_size - len(rows))
             rows.extend(
-                ListCodec.coerce(
-                    cast(
-                        object,
-                        (
-                            start + rng.choice(stop - start, take, replace=False)
-                        ).tolist(),
-                    ),
-                    int,
+                cast(
+                    list[int],
+                    (start + rng.choice(stop - start, take, replace=False)).tolist(),
                 ),
             )
             puzzles.extend([puzzle] * take)
@@ -147,8 +156,8 @@ class ArcBatches:
         )
         identifiers = self.identifiers[puzzles].to(torch.int64)
         valid = len(rows)
-        if valid < self.batch_size:
-            pad = self.batch_size - valid
+        pad = self.batch_size - valid
+        if pad:
             media = torch.cat([media, media.new_zeros(pad, media.shape[1])])
             labels = torch.cat([labels, labels.new_full((pad, labels.shape[1]), -100)])
             identifiers = torch.cat([identifiers, identifiers.new_zeros(pad)])

@@ -165,11 +165,7 @@ class Batcher:
         )
 
         if not self.drop_remainder and num_flushed_samples > 0:
-            avg_batch_size = (
-                num_flushed_samples / num_flushed_batches
-                if num_flushed_batches > 0
-                else 0
-            )
+            avg_batch_size = num_flushed_samples / num_flushed_batches
             logger.info(
                 "flushed %s samples across %s batches (≈ %.1f samples/batch)",
                 num_flushed_samples,
@@ -212,23 +208,20 @@ class Batcher:
         for field_name in self.field_names:
             field_values: list[object] = []
             tensor_values: list[Tensor] = []
-            has_non_tensor = False
 
             for sample in samples:
                 field_value = sample.get(field_name)
                 if field_value is not None:
                     if isinstance(field_value, Tensor):
-                        if has_non_tensor:
+                        if field_values and not isinstance(field_values[0], Tensor):
                             raise TypeError(
                                 f"Field '{field_name}' has mixed tensor/non-tensor values",
                             )
                         tensor_values.append(field_value)
-                    else:
-                        has_non_tensor = True
-                        if tensor_values:
-                            raise TypeError(
-                                f"Field '{field_name}' has mixed tensor/non-tensor values",
-                            )
+                    elif tensor_values:
+                        raise TypeError(
+                            f"Field '{field_name}' has mixed tensor/non-tensor values",
+                        )
                     field_values.append(field_value)
 
             if field_values:
@@ -330,7 +323,7 @@ class Unbatcher:
 
     def _unbatch_sample(self, sample: Output) -> Iterator[Output]:
         """Unbatch a single batched sample into individual samples."""
-        raw_samples = sample.get("raw", [])
+        raw_samples = sample["raw"]
         if not isinstance(raw_samples, list):
             raise TypeError("raw must be a list of sample dictionaries")
         raw_items = cast(list[object], raw_samples)
@@ -369,8 +362,6 @@ class Unbatcher:
                     output_sample,
                     cast(Iterable[object], batch_filter_reasons),
                 )
-            elif batch_filter_reasons:
-                raise TypeError("filter_reasons must be iterable")
 
             # Distribute batch fields to this sample.
             reserved = ("raw", "filter_reasons", "_batch_size", "_batched_list_fields")
@@ -392,7 +383,7 @@ class Unbatcher:
         batch_filter_reasons: Iterable[object],
     ) -> None:
         """Merge batch-level filter reasons into output sample."""
-        existing_reasons = output_sample.get("filter_reasons", [])
+        existing_reasons = output_sample.get("filter_reasons")
         if isinstance(existing_reasons, list):
             output_sample["filter_reasons"] = existing_reasons + list(
                 batch_filter_reasons,

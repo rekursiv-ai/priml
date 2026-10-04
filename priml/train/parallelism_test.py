@@ -114,6 +114,76 @@ def test_no_parallel_exposes_device():
     assert strategy.device == torch.device("cpu")
 
 
+def test_no_parallel_forwards_the_configured_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested: list[torch.device | str | None] = []
+
+    def resolve(device: torch.device | str | None) -> torch.device:
+        requested.append(device)
+        return torch.device("cpu")
+
+    monkeypatch.setattr(parallelism, "get_device", resolve)
+    strategy = NoParallel.Config(device="meta").make()
+
+    assert requested == ["meta"]
+    assert strategy.device == torch.device("cpu")
+
+
+def test_data_parallel_forwards_configuration_and_returns_placed_model(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    mesh = _FakeMesh()
+    group = object()
+    groups: list[str] = []
+
+    def get_group(name: str) -> object:
+        groups.append(name)
+        return group
+
+    monkeypatch.setattr(parallelism, "global_device_mesh", lambda: mesh)
+    monkeypatch.setattr(mesh, "get_group", get_group)
+    calls: list[tuple[nn.Module, dict[str, object]]] = []
+
+    def record(model: nn.Module, **kwargs: object) -> None:
+        calls.append((model, kwargs))
+
+    monkeypatch.setattr(parallelism, "replicate", record)
+    model = SimpleModel()
+    strategy = DataParallel.Config(
+        mesh_dim="tp",
+        bucket_cap_mb=7,
+        find_unused_parameters=True,
+        gradient_as_bucket_view=True,
+    ).make()
+
+    with caplog.at_level("INFO"):
+        result = strategy(model)
+
+    assert groups == ["tp"]
+    assert strategy.device == torch.device("cpu")
+    assert strategy.bucket_cap_mb == 7
+    assert strategy.find_unused_parameters is True
+    assert strategy.gradient_as_bucket_view is True
+    assert calls == [
+        (
+            model,
+            {
+                "process_group": group,
+                "bucket_cap_mb": 7,
+                "find_unused_parameters": True,
+                "gradient_as_bucket_view": True,
+            },
+        ),
+    ]
+    assert result is model
+    assert caplog.records[-1].message == (
+        "Applied DataParallel: mesh_dim=tp, bucket_cap_mb=7, "
+        "gradient_as_bucket_view=True"
+    )
+
+
 class _BufferOnly(nn.Module):
     """Module with only a floating-point buffer."""
 
@@ -138,7 +208,6 @@ def test_no_parallel_materializes_meta_buffer_only_model() -> None:
     result = NoParallel.Config(device="cpu").make()(model)
 
     result_stat: object = result._buffers["stat"]
-    assert isinstance(result_stat, Tensor)
     assert isinstance(result_stat, Tensor)
     assert not result_stat.is_meta
     assert result_stat.device.type == "cpu"
@@ -165,29 +234,39 @@ def test_no_parallel_materializes_meta_model():
 
 def test_data_parallel_requires_distributed():
     config = DataParallel.Config()
-    with pytest.raises(RuntimeError, match="DataParallel requires distributed mode"):
+    with pytest.raises(RuntimeError) as exc_info:
         config.make()
+    assert str(exc_info.value) == (
+        "DataParallel requires distributed mode. Initialize with MultiProcess runtime."
+    )
 
 
 def test_fully_sharded_requires_distributed():
     config = FullySharded.Config()
-    with pytest.raises(RuntimeError, match="FullySharded requires distributed mode"):
+    with pytest.raises(RuntimeError) as exc_info:
         config.make()
+    assert str(exc_info.value) == (
+        "FullySharded requires distributed mode. Initialize with MultiProcess runtime."
+    )
 
 
 def test_hybrid_sharded_requires_distributed():
     config = HybridSharded.Config()
-    with pytest.raises(RuntimeError, match="HybridSharded requires distributed mode"):
+    with pytest.raises(RuntimeError) as exc_info:
         config.make()
+    assert str(exc_info.value) == (
+        "HybridSharded requires distributed mode. Initialize with MultiProcess runtime."
+    )
 
 
 def test_recursive_sharded_requires_distributed():
     config = RecursiveSharded.Config()
-    with pytest.raises(
-        RuntimeError,
-        match="RecursiveSharded requires distributed mode",
-    ):
+    with pytest.raises(RuntimeError) as exc_info:
         config.make()
+    assert str(exc_info.value) == (
+        "RecursiveSharded requires distributed mode. "
+        "Initialize with MultiProcess runtime."
+    )
 
 
 class _DpOnlyMesh(_FakeMesh):
@@ -256,6 +335,13 @@ def test_mesh_device_pins_the_current_cuda_index(
 
 def test_mixed_precision_policy_is_built_only_when_a_dtype_is_set() -> None:
     assert _create_mp_policy(None, None, None) is None
+    for dtypes in (
+        (torch.bfloat16, None, None),
+        (None, torch.float16, None),
+        (None, None, torch.float32),
+    ):
+        assert _create_mp_policy(*dtypes) is not None
+
     policy = _create_mp_policy(torch.bfloat16, None, torch.float32)
     assert policy is not None
     assert policy.param_dtype == torch.bfloat16
@@ -282,8 +368,12 @@ def test_shard_passes_a_policy_only_when_one_resolves(
     _shard(norm, mesh=mesh, mp_policy=base, reshard_after_forward=True)
 
     assert calls[0] == {"module": linear, "mesh": mesh, "reshard_after_forward": True}
-    assert calls[1]["mp_policy"] is base
-    assert calls[1]["reshard_after_forward"] is False
+    assert calls[1] == {
+        "module": linear,
+        "mesh": mesh,
+        "mp_policy": base,
+        "reshard_after_forward": False,
+    }
     bn_policy = calls[2]["mp_policy"]
     assert isinstance(bn_policy, MixedPrecisionPolicy)
     assert bn_policy.param_dtype == torch.float32
@@ -323,8 +413,12 @@ def test_recursive_sharded_requires_module_types(
     mesh is all it takes to reach.
     """
     monkeypatch.setattr(parallelism, "global_device_mesh", _FakeMesh)
-    with pytest.raises(ValueError, match="requires module_types"):
+    with pytest.raises(ValueError, match="requires module_types") as exc_info:
         RecursiveSharded.Config().make()
+    assert str(exc_info.value) == (
+        "RecursiveSharded requires module_types to be specified. "
+        "Provide tuple of module classes to shard (e.g., (TransformerBlock,))."
+    )
 
 
 def test_recursive_sharded_shards_the_root_once(
@@ -355,6 +449,152 @@ def test_recursive_sharded_shards_the_root_once(
     strategy(SimpleModel())
 
     assert len(sharded) == len(set(map(id, sharded))), "a module was sharded twice"
+
+
+def test_recursive_sharding_passes_child_and_root_plans(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    mesh = _FakeMesh()
+    monkeypatch.setattr(parallelism, "global_device_mesh", lambda: mesh)
+    calls: list[tuple[nn.Module, dict[str, object]]] = []
+
+    def record_shard(module: nn.Module, **kwargs: object) -> None:
+        calls.append((module, kwargs))
+
+    placed: list[tuple[nn.Module, torch.device]] = []
+
+    def record_place(model: nn.Module, device: torch.device) -> nn.Module:
+        placed.append((model, device))
+        return model
+
+    monkeypatch.setattr(parallelism, "_shard", record_shard)
+    monkeypatch.setattr(parallelism, "place", record_place)
+
+    class NestedLinear(nn.Linear):
+        def __init__(self) -> None:
+            super().__init__(2, 3)
+            self.child = nn.Linear(3, 4)
+            self.second_child = nn.Linear(4, 5)
+            self.unmatched = nn.ReLU()
+
+    model = NestedLinear()
+    strategy = RecursiveSharded.Config(
+        module_types=(nn.Linear,),
+        reshard_after_forward=True,
+        mp_param_dtype=torch.bfloat16,
+        mp_reduce_dtype=torch.float16,
+        mp_output_dtype=torch.float64,
+    ).make()
+
+    with caplog.at_level("INFO"):
+        assert strategy(model) is model
+
+    assert placed == [(model, torch.device("cpu"))]
+    assert [module for module, _kwargs in calls] == [
+        model.second_child,
+        model.child,
+        model,
+    ]
+    assert [kwargs for _module, kwargs in calls[:2]] == [
+        {
+            "mesh": mesh,
+            "mp_policy": strategy.mp_policy,
+            "reshard_after_forward": True,
+        },
+        {
+            "mesh": mesh,
+            "mp_policy": strategy.mp_policy,
+            "reshard_after_forward": True,
+        },
+    ]
+    assert calls[2] == (
+        model,
+        {
+            "mesh": mesh,
+            "mp_policy": strategy.mp_policy,
+            "reshard_after_forward": False,
+        },
+    )
+    assert strategy.mp_policy is not None
+    assert strategy.mp_policy.param_dtype == torch.bfloat16
+    assert strategy.mp_policy.reduce_dtype == torch.float16
+    assert strategy.mp_policy.output_dtype == torch.float64
+    assert caplog.records[-1].message == (
+        "Applied RecursiveSharded: sharded 3 modules matching ['Linear'], mesh_dim=dp"
+    )
+
+
+def test_sharded_strategies_shard_before_placement(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    mesh = _FakeMesh()
+    monkeypatch.setattr(parallelism, "global_device_mesh", lambda: mesh)
+    events: list[str] = []
+    shard_calls: list[tuple[nn.Module, dict[str, object]]] = []
+
+    def record_shard(module: nn.Module, **kwargs: object) -> None:
+        events.append("shard")
+        shard_calls.append((module, kwargs))
+
+    def record_place(model: nn.Module, device: torch.device) -> nn.Module:
+        events.append("place")
+        assert device == torch.device("cpu")
+        return model
+
+    monkeypatch.setattr(parallelism, "_shard", record_shard)
+    monkeypatch.setattr(parallelism, "place", record_place)
+    fully_model = SimpleModel()
+    hybrid_model = SimpleModel()
+    fully = FullySharded.Config(
+        reshard_after_forward=False,
+        mp_param_dtype=torch.bfloat16,
+        mp_reduce_dtype=torch.float16,
+        mp_output_dtype=torch.float64,
+    ).make()
+    hybrid = HybridSharded.Config(
+        replicate_dim="dp",
+        shard_dim="tp",
+        reshard_after_forward=False,
+        mp_param_dtype=torch.bfloat16,
+        mp_reduce_dtype=torch.float16,
+        mp_output_dtype=torch.float64,
+    ).make()
+
+    with caplog.at_level("INFO"):
+        assert fully(fully_model) is fully_model
+        assert hybrid(hybrid_model) is hybrid_model
+
+    assert events == ["shard", "place", "shard", "place"]
+    assert shard_calls[0] == (
+        fully_model,
+        {
+            "mesh": mesh,
+            "mp_policy": fully.mp_policy,
+            "reshard_after_forward": False,
+        },
+    )
+    assert isinstance(fully.mp_policy, MixedPrecisionPolicy)
+    assert fully.mp_policy.param_dtype == torch.bfloat16
+    assert fully.mp_policy.reduce_dtype == torch.float16
+    assert fully.mp_policy.output_dtype == torch.float64
+    assert shard_calls[1] == (
+        hybrid_model,
+        {
+            "mesh": mesh,
+            "mp_policy": hybrid.mp_policy,
+            "reshard_after_forward": False,
+        },
+    )
+    assert isinstance(hybrid.mp_policy, MixedPrecisionPolicy)
+    assert hybrid.mp_policy.param_dtype == torch.bfloat16
+    assert hybrid.mp_policy.reduce_dtype == torch.float16
+    assert hybrid.mp_policy.output_dtype == torch.float64
+    assert [record.message for record in caplog.records] == [
+        "Applied FullySharded: mesh_dim=dp, reshard_after_forward=False",
+        "Applied HybridSharded: replicate_dim=dp, shard_dim=tp, mesh_shape=(1, 1)",
+    ]
 
 
 def test_distributed_strategies_place_an_eager_model(
@@ -590,8 +830,15 @@ def test_materialize_meta_raises_on_uninitialized_param() -> None:
 
     with torch.device("meta"):
         mod = _Uninit()
-    with pytest.raises(RuntimeError, match="not initialized after materialize"):
+    with pytest.raises(
+        RuntimeError,
+        match="not initialized after materialize",
+    ) as exc_info:
         materialize_meta(mod, torch.device("cpu"))
+    assert str(exc_info.value) == (
+        "State not initialized after materialize (a module did not reset a "
+        "parameter or buffer it constructed): ['weight']"
+    )
 
 
 def test_materialize_meta_raises_on_uninitialized_buffer() -> None:

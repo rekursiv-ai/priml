@@ -113,7 +113,7 @@ class CustomFormatter(logging.Formatter):
         """Timestamp format string."""
 
     def __init__(self, config: Config) -> None:
-        super().__init__(config.fmt, config.datefmt)
+        super().__init__(config.fmt)
         self.datefmt = config.datefmt
 
     @override
@@ -147,7 +147,7 @@ class CustomFormatter(logging.Formatter):
         return dt.strftime(datefmt or self.datefmt or "")
 
 
-def setup_logging(level: str = "INFO") -> None:
+def setup_logging(level: str) -> None:
     """Set up logging at the specified level.
 
     Args:

@@ -135,8 +135,7 @@ class DecodeCropResizeBatch:
             keep = [index for index, good in enumerate(ok) if good]
             # NHWC storage viewed as NCHW is channels_last: no copy, and the
             # layout the model consumes.
-            image = out if len(keep) == len(ok) else out[keep]
-            batch["image"] = image.permute(0, 3, 1, 2)
+            batch["image"] = out.permute(0, 3, 1, 2)
             if len(keep) < len(ok):
                 _drop_failed(batch, keep=keep, size=len(ok))
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 from turbojpeg import TJFLAG_FASTDCT, TJPF_RGB, TJSAMP_444, TurboJPEG
 
@@ -11,7 +12,7 @@ import numpy as np
 import pytest
 import torch
 
-from priml.data.processors.decode_batch import DecodeCropResizeBatch
+from priml.data.processors.decode_batch import DecodeCropResizeBatch, _drop_failed
 
 
 if TYPE_CHECKING:
@@ -76,10 +77,66 @@ def test_every_image_is_its_crop_resized_into_one_uint8_tensor() -> None:
 
 def test_the_bytes_and_boxes_are_consumed() -> None:
     """Only the image and the untouched fields leave; the inputs would pin memory."""
-    out = _run(DecodeCropResizeBatch.Config(), _batch([(0, 0, 8, 8)]))
+    allocated: list[torch.Tensor] = []
+    original_empty = torch.empty
+
+    def allocate(size: tuple[int, ...], *, dtype: torch.dtype) -> torch.Tensor:
+        tensor = original_empty(size, dtype=dtype)
+        allocated.append(tensor)
+        return tensor
+
+    with patch(
+        "priml.data.processors.decode_batch.torch.empty",
+        side_effect=allocate,
+    ):
+        out = _run(DecodeCropResizeBatch.Config(), _batch([(0, 0, 8, 8)]))
+
+    image = _tensor(out, "image")
+    assert (
+        image.untyped_storage().data_ptr() == allocated[0].untyped_storage().data_ptr()
+    )
     assert "media" not in out
     assert "crop" not in out
     assert torch.equal(_tensor(out, "label"), torch.arange(1))
+
+
+def test_drop_failed_filters_list_fields_and_aligned_tensors() -> None:
+    reason = "DecodeCropResizeBatch:decode_failed"
+    names = ["failed", "kept"]
+    unlisted = ["untouched", "list"]
+    aligned = torch.tensor([10, 20])
+    unaligned = torch.tensor([30])
+    batch: dict[str, object] = {
+        "_batched_list_fields": ["names"],
+        "names": names,
+        "unlisted": unlisted,
+        "aligned": aligned,
+        "unaligned": unaligned,
+        "_batch_size": 2,
+        "_filter_counts": {reason: 3},
+    }
+
+    _drop_failed(batch, keep=[1], size=2)
+
+    assert batch["names"] == ["kept"]
+    assert batch["unlisted"] is unlisted
+    assert torch.equal(_tensor(batch, "aligned"), torch.tensor([20]))
+    assert batch["unaligned"] is unaligned
+    assert batch["_batch_size"] == 1
+    assert batch["_filter_counts"] == {reason: 4}
+
+
+def test_drop_failed_defaults_to_no_list_fields() -> None:
+    aligned = torch.tensor([10, 20])
+    unlisted = ["failed", "kept"]
+    batch: dict[str, object] = {"unlisted": unlisted, "aligned": aligned}
+
+    _drop_failed(batch, keep=[1], size=2)
+
+    assert batch["unlisted"] is unlisted
+    assert torch.equal(_tensor(batch, "aligned"), torch.tensor([20]))
+    assert batch["_batch_size"] == 1
+    assert batch["_filter_counts"] == {"DecodeCropResizeBatch:decode_failed": 1}
 
 
 def test_flip_mirrors_each_image_with_probability_p() -> None:
@@ -87,8 +144,29 @@ def test_flip_mirrors_each_image_with_probability_p() -> None:
     always = DecodeCropResizeBatch.Config()
     always.flip_p = 1.0
     plain = _tensor(_run(DecodeCropResizeBatch.Config(), _batch(crops)), "image")
-    flipped = _tensor(_run(always, _batch(crops)), "image")
+    with patch(
+        "priml.data.processors.decode_batch.cv2.flip",
+        wraps=cv2.flip,
+    ) as flip:
+        flipped = _tensor(_run(always, _batch(crops)), "image")
+
+    assert flip.call_args is not None
+    assert flip.call_args.args[1] == 1
     assert torch.equal(flipped, plain.flip(-1))
+
+
+def test_zero_random_draw_does_not_flip_at_zero_probability() -> None:
+    crop: Crop = (0, 0, 40, 64)
+    with patch(
+        "priml.data.processors.decode_batch.random.random",
+        return_value=0.0,
+    ):
+        image = _tensor(
+            _run(DecodeCropResizeBatch.Config(flip_p=0.0), _batch([crop])),
+            "image",
+        )
+
+    assert torch.equal(image[0], _expected(_media(1)[0], crop, 8))
 
 
 def test_an_upsampled_crop_is_opencv_area_too() -> None:
@@ -113,6 +191,63 @@ def test_fast_dct_decodes_with_libjpeg_turbos_fast_idct() -> None:
         interpolation=cv2.INTER_AREA,
     )
     assert torch.equal(image[0], torch.from_numpy(resized).permute(2, 0, 1))
+
+
+def test_decode_uses_target_sized_idct_and_resizes_non_square_output() -> None:
+    processor = DecodeCropResizeBatch.Config(scale_to_target=True, fast_dct=True).make()
+    region = np.arange(20 * 30 * 3, dtype=np.uint8).reshape(20, 30, 3)
+    out = np.empty((5, 9, 3), dtype=np.uint8)
+
+    with (
+        patch(
+            "priml.data.processors.decode_batch.decode_jpeg_turbojpeg_region",
+            return_value=region,
+        ) as decode,
+        patch(
+            "priml.data.processors.decode_batch.cv2.resize",
+            wraps=cv2.resize,
+        ) as resize,
+    ):
+        assert processor._decode_one(b"jpeg", (2, 3, 18, 26), out, False)
+
+    decode.assert_called_once_with(
+        b"jpeg",
+        x=3,
+        y=2,
+        w=26,
+        h=18,
+        min_height=5,
+        min_width=9,
+        fast_dct=True,
+    )
+    resize.assert_called_once()
+    assert resize.call_args is not None
+    assert resize.call_args.args[1] == (9, 5)
+    expected = cv2.resize(region, (9, 5), interpolation=cv2.INTER_AREA)
+    assert np.array_equal(out, expected)
+
+
+def test_unscaled_decode_does_not_request_idct_size_floors() -> None:
+    processor = DecodeCropResizeBatch.Config().make()
+    region = np.zeros((10, 14, 3), dtype=np.uint8)
+    out = np.empty((5, 9, 3), dtype=np.uint8)
+
+    with patch(
+        "priml.data.processors.decode_batch.decode_jpeg_turbojpeg_region",
+        return_value=region,
+    ) as decode:
+        assert processor._decode_one(b"jpeg", (1, 2, 8, 12), out, False)
+
+    decode.assert_called_once_with(
+        b"jpeg",
+        x=2,
+        y=1,
+        w=12,
+        h=8,
+        min_height=0,
+        min_width=0,
+        fast_dct=False,
+    )
 
 
 def test_threads_produce_the_same_batch_as_one() -> None:
@@ -141,6 +276,18 @@ def test_an_undecodable_image_is_dropped_and_counted() -> None:
 def test_a_sample_that_is_not_a_batch_passes_through() -> None:
     sample: dict[str, object] = {"key": "k"}
     assert _run(DecodeCropResizeBatch.Config(), sample) is sample
+
+
+def test_a_partial_decode_batch_passes_through() -> None:
+    media_only: dict[str, object] = {"media": [b"jpeg"]}
+    crop_only: dict[str, object] = {"crop": [(0, 0, 8, 8)]}
+
+    processor = DecodeCropResizeBatch.Config().make()
+    results = list(processor(iter([media_only, crop_only])))
+
+    assert results == [media_only, crop_only]
+    assert results[0] is media_only
+    assert results[1] is crop_only
 
 
 def test_batches_decoded_in_flight_leave_in_arrival_order() -> None:
@@ -177,6 +324,13 @@ def test_a_shut_pool_ends_the_stream_instead_of_raising() -> None:
     stage = DecodeCropResizeBatch.Config().make()
     stage.pool.shutdown()
     assert list(stage(iter([_batch([(0, 0, 8, 8)])]))) == []
+
+
+def test_configured_thread_count_sizes_the_decode_pool() -> None:
+    with patch("priml.data.processors.decode_batch.ThreadPoolExecutor") as pool:
+        _ = DecodeCropResizeBatch.Config(num_threads=3).make()
+
+    pool.assert_called_once_with(3)
 
 
 @pytest.mark.parametrize("threads", [0, -1])

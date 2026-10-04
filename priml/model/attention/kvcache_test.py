@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Final, override
+from unittest.mock import Mock
 
 from torch import Tensor, nn
 
@@ -42,6 +43,112 @@ def _cache_contract(x: Tensor) -> Tensor:
     metadata = x.new_tensor([cache.length, cache.seen, frozen.length, frozen.seen])
     return torch.cat(
         [k.flatten(), v.flatten(), frozen_k.flatten(), frozen_v.flatten(), metadata],
+    )
+
+
+def test_kv_cache_allocates_requested_shapes_device_and_dtype(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zeros = Mock(wraps=torch.zeros)
+    monkeypatch.setattr(torch, "zeros", zeros)
+    cache = KVCache.alloc(
+        batch=(2, 3),
+        num_heads=4,
+        max_seq=5,
+        channels_head=6,
+        channels_v_head=7,
+        device="cpu",
+        dtype=torch.float64,
+    )
+
+    assert cache.k.shape == (2, 3, 4, 5, 6)
+    assert cache.v.shape == (2, 3, 4, 5, 7)
+    assert cache.k.device.type == cache.v.device.type == "cpu"
+    assert cache.k.dtype == cache.v.dtype == torch.float64
+    assert [call.args for call in zeros.call_args_list] == [
+        ((2, 3, 4, 5, 6),),
+        ((2, 3, 4, 5, 7),),
+    ]
+    assert [call.kwargs for call in zeros.call_args_list] == [
+        {"device": "cpu", "dtype": torch.float64},
+        {"device": "cpu", "dtype": torch.float64},
+    ]
+    assert torch.count_nonzero(cache.k) == 0
+    assert torch.count_nonzero(cache.v) == 0
+    assert cache.length == cache.seen == 0
+
+
+def test_kv_cache_fifo_overflow_by_one_preserves_exact_suffix() -> None:
+    cache = KVCache.alloc(batch=2, num_heads=3, max_seq=5, channels_head=4)
+    keys, values = cache.update(
+        # KVCache inputs broadcast across batch, heads, and channels.
+        torch.arange(10, 13, dtype=torch.float32)
+        .reshape(1, 1, 3, 1)
+        .expand(2, 3, 3, 4),
+        -torch.arange(10, 13, dtype=torch.float32)
+        .reshape(1, 1, 3, 1)
+        .expand(2, 3, 3, 4),
+    )
+    assert cache.length == 3
+    assert cache.seen == 3
+    assert keys.shape == values.shape == (2, 3, 3, 4)
+    torch.testing.assert_close(keys[0, 0, :, 0], torch.tensor([10.0, 11.0, 12.0]))
+    torch.testing.assert_close(values[0, 0, :, 0], torch.tensor([-10.0, -11.0, -12.0]))
+    # KVCache inputs broadcast across batch, heads, and channels.
+    keys, values = cache.update(
+        torch.arange(13, 16, dtype=torch.float32)
+        .reshape(1, 1, 3, 1)
+        .expand(2, 3, 3, 4),
+        -torch.arange(13, 16, dtype=torch.float32)
+        .reshape(1, 1, 3, 1)
+        .expand(2, 3, 3, 4),
+    )
+
+    assert cache.length == 5
+    assert cache.seen == 6
+    assert keys.shape == values.shape == (2, 3, 5, 4)
+    torch.testing.assert_close(
+        keys[0, 0, :, 0],
+        torch.tensor([11.0, 12.0, 13.0, 14.0, 15.0]),
+    )
+    torch.testing.assert_close(
+        values[0, 0, :, 0],
+        torch.tensor([-11.0, -12.0, -13.0, -14.0, -15.0]),
+    )
+
+
+def test_kv_cache_exact_fill_does_not_clone_retained_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = KVCache.alloc(batch=2, num_heads=3, max_seq=5, channels_head=4)
+    # KVCache's contract uses equal head and sequence widths here.
+    cache.update(torch.ones(2, 3, 3, 4), torch.ones(2, 3, 3, 4))
+    original_clone = Tensor.clone
+    clones: list[Tensor] = []
+
+    def clone(
+        tensor: Tensor,
+        memory_format: torch.memory_format = torch.preserve_format,
+    ) -> Tensor:
+        clones.append(tensor)
+        return original_clone(tensor, memory_format=memory_format)
+
+    monkeypatch.setattr(Tensor, "clone", clone)
+    # KVCache's contract uses equal batch and update-sequence widths here.
+    keys = torch.full((2, 3, 2, 4), 2.0)
+    values = torch.full((2, 3, 2, 4), -2.0)
+
+    cache.update(keys, values)
+
+    assert clones == []
+    assert cache.length == cache.seen == 5
+    torch.testing.assert_close(
+        cache.k[0, 0, :, 0],
+        torch.tensor([1.0, 1.0, 1.0, 2.0, 2.0]),
+    )
+    torch.testing.assert_close(
+        cache.v[0, 0, :, 0],
+        torch.tensor([1.0, 1.0, 1.0, -2.0, -2.0]),
     )
 
 
@@ -133,11 +240,40 @@ def test_kv_cache_update_larger_than_capacity_raises():
         cache.update(k, k)
 
 
-def test_kv_cache_from_tensors():
-    k = torch.randn(2, 4, 8, 16)
-    v = torch.randn(2, 4, 8, 16)
+def test_kv_cache_from_tensors_uses_sequence_axis_with_leading_dims() -> None:
+    k = torch.randn(2, 3, 4, 5, 6)
+    v = torch.randn(2, 3, 4, 5, 7)
+
     cache = KVCache(k, v)
-    assert cache.length == 8
+
+    assert cache.k is k
+    assert cache.v is v
+    assert cache.length == 5
+    assert cache.seen == 5
+
+
+def test_kv_cache_update_uses_sequence_axis_with_multiple_leading_dims() -> None:
+    cache = KVCache.alloc(
+        batch=(2, 3),
+        num_heads=4,
+        max_seq=7,
+        channels_head=6,
+    )
+    keys = torch.arange(2 * 3 * 4 * 5 * 6, dtype=torch.float32).reshape(
+        2,
+        3,
+        4,
+        5,
+        6,
+    )
+    values = -keys
+
+    result_keys, result_values = cache.update(keys, values)
+
+    assert cache.length == cache.seen == 5
+    assert result_keys.shape == result_values.shape == (2, 3, 4, 5, 6)
+    torch.testing.assert_close(result_keys, keys, rtol=0, atol=0)
+    torch.testing.assert_close(result_values, values, rtol=0, atol=0)
 
 
 def test_kv_cache_text(request: pytest.FixtureRequest) -> None:

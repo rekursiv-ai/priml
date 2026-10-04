@@ -81,6 +81,7 @@ class _NanoChatConfig(Protocol):
 
 class _ReferenceModule(Protocol):
     __file__: str
+    __name__: str
     fa3: _AttentionKernel
     model: nn.Module
     optimizer: torch.optim.Optimizer
@@ -108,6 +109,11 @@ class _PrepareModule(Protocol):
     MAX_SEQ_LEN: int
     Tokenizer: _TokenizerClass
     make_dataloader: Callable[..., Iterator[tuple[Tensor, Tensor, object]]]
+
+
+class _EvaluationPrepare(Protocol):
+    EVAL_TOKENS: int
+    MAX_SEQ_LEN: int
 
 
 def their_attention(
@@ -251,12 +257,15 @@ def their_schedules(root: Path, module: types.ModuleType) -> _ReferenceModule:
     source = (root / "train.py").read_text().splitlines()
     tree = ast.parse("\n".join(source))
     wanted = {"get_lr_multiplier", "get_muon_momentum", "get_weight_decay"}
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name in wanted:
-            exec(  # noqa: S102 -- The parity harness executes function definitions from the pinned reference clone.
-                compile(ast.Module([node], []), str(root / "train.py"), "exec"),
-                module.__dict__,
-            )
+    tree.body = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    exec(  # noqa: S102 -- The parity harness executes function definitions from the pinned reference clone.
+        compile(tree, str(root / "train.py"), "exec"),
+        module.__dict__,
+    )
     missing = wanted - set(module.__dict__)
     if missing:
         raise RuntimeError(f"train.py defines no {sorted(missing)}")
@@ -443,7 +452,7 @@ def copy_weights(theirs: nn.Module, ours: nn.Module, mapping: dict[str, str]) ->
         raise RuntimeError(f"name map incomplete: {unmapped=} {absent=}")
     with torch.no_grad():
         for our_name, their_name in mapping.items():
-            dst[our_name].copy_(src[their_name].to(dst[our_name].dtype))
+            dst[our_name].copy_(src[their_name])
 
 
 def compare(label: str, a: Tensor, b: Tensor) -> str | None:
@@ -568,8 +577,10 @@ def main() -> int:
       result: Exit code (0 on success).
 
     """
+    if __doc__ is None:
+        raise ValueError("Expected __doc__ is not None.")
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -741,7 +752,7 @@ def compare_eval(
     theirs: nn.Module,
     ours: NanoChatTrainStep,
     upstream: _ReferenceModule,
-    prepare: _PrepareModule,
+    prepare: _EvaluationPrepare,
     *,
     batches: int,
 ) -> int:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Protocol, TypeGuard, cast, runtime_checkable
 
 from configgle import PartialConfig
 from torch import Tensor, nn
@@ -33,6 +33,23 @@ def split_optimizer(model: nn.Module) -> CompositeOptimizer:
     return CompositeOptimizer(
         [torch.optim.SGD(vector, lr=0.1), Muon(matrix, lr=0.1)],
     )
+
+
+@runtime_checkable
+class _ParameterGroup(Protocol):
+    def __getitem__(self, key: str, /) -> object: ...
+
+
+def _is_object_list(value: object) -> TypeGuard[list[object]]:
+    return isinstance(value, list)
+
+
+def parameter_group_size(group: object) -> int:
+    """Read one torch optimizer group's parameter count without trusting its stub."""
+    assert isinstance(group, _ParameterGroup)
+    params = group["params"]
+    assert _is_object_list(params)
+    return len(params)
 
 
 def backward(model: nn.Module) -> None:
@@ -262,7 +279,10 @@ def test_config_rejects_an_unclaimed_parameter() -> None:
     config = CompositeOptimizer.Config()
     config.optimizers = [Muon.Config()]
     config.select = [Muon.eligible_tensor]
-    with pytest.raises(ValueError, match="No filter claims"):
+    with pytest.raises(
+        ValueError,
+        match=r"No filter claims 2 trainable parameter\(s\), e.g. '1.weight'; they would never be updated\.",
+    ):
         _ = config.make()(split_model())
 
 
@@ -270,7 +290,10 @@ def test_config_rejects_two_filters_claiming_one_parameter() -> None:
     config = CompositeOptimizer.Config()
     config.optimizers = [Muon.Config(), Muon.Config()]
     config.select = [everything, everything]
-    with pytest.raises(ValueError, match="claimed by filter"):
+    with pytest.raises(
+        ValueError,
+        match=r"Parameter '0.weight' is claimed by filter 0 and 1; it would be updated twice per step\.",
+    ):
         _ = config.make()(split_model())
 
 
@@ -290,6 +313,25 @@ def test_drop_empty_removes_a_member_whose_filter_claims_nothing() -> None:
     config.drop_empty = True
     optimizer = config.make()(split_model())
     assert [type(o).__name__ for o in optimizer.optimizers] == ["SGD"]
+
+
+def test_drop_empty_keeps_members_after_an_empty_filter() -> None:
+    config = CompositeOptimizer.Config()
+    config.optimizers = [
+        PartialConfig(torch.optim.SGD, lr=0.1),
+        PartialConfig(torch.optim.AdamW, lr=0.1),
+        PartialConfig(torch.optim.AdamW, lr=0.1),
+    ]
+    config.select = [matching("0."), matching("ghost"), complement(matching("0."))]
+    config.drop_empty = True
+
+    optimizer = config.make()(split_model())
+
+    assert [type(member).__name__ for member in optimizer.optimizers] == [
+        "SGD",
+        "AdamW",
+    ]
+    assert [parameter_group_size(group) for group in optimizer.param_groups] == [1, 2]
 
 
 def test_a_filter_receives_the_parameter_name() -> None:

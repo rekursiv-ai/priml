@@ -48,8 +48,48 @@ def test_value_residual_attention_forward_variants_and_cost() -> None:
 
 
 def test_value_residual_rejects_nondivisible_heads() -> None:
-    with pytest.raises(ValueError, match="divisible"):
+    with pytest.raises(
+        ValueError,
+        match=r"^channels must be divisible by heads$",
+    ):
         ValueResidualAttention.Config(channels=8, heads=3).make()
+
+
+def test_init_builds_both_query_and_key_norms_when_enabled() -> None:
+    attention = ValueResidualAttention.Config(channels=12, heads=3).make()
+
+    assert isinstance(attention.q_norm, torch.nn.RMSNorm)
+    assert isinstance(attention.k_norm, torch.nn.RMSNorm)
+
+
+def test_init_uses_identity_for_both_norms_when_disabled() -> None:
+    attention = ValueResidualAttention.Config(
+        channels=12,
+        heads=3,
+        qk_norm=False,
+    ).make()
+
+    assert isinstance(attention.q_norm, torch.nn.Identity)
+    assert isinstance(attention.k_norm, torch.nn.Identity)
+
+
+def test_init_configures_reference_rope_and_value_residual_parameter() -> None:
+    enabled = ValueResidualAttention.Config(
+        channels=12,
+        heads=3,
+        reference_rope=True,
+    ).make()
+    disabled = ValueResidualAttention.Config(
+        channels=12,
+        heads=3,
+        value_residual=False,
+    ).make()
+
+    assert enabled.reference_rope is True
+    assert enabled.v1_lambda is not None
+    assert torch.equal(enabled.v1_lambda.detach(), torch.tensor(0.5))
+    assert disabled.reference_rope is False
+    assert disabled.v1_lambda is None
 
 
 if __name__ == "__main__":

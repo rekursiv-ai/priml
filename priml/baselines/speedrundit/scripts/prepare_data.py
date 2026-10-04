@@ -51,7 +51,6 @@ def center_crop(image: Image.Image, size: int) -> Image.Image:
     scale = size / min(image.size)
     image = image.resize(
         (round(image.width * scale), round(image.height * scale)),
-        Image.Resampling.BICUBIC,
     )
     left = (image.width - size) // 2
     top = (image.height - size) // 2
@@ -87,10 +86,7 @@ def prepare(
     """
     if resolution not in (256, 512):
         raise ValueError("resolution must be 256 or 512")
-    image_source = ExtractedImageNetSource.Config(
-        working_dir=source,
-        split="train",
-    ).make()
+    image_source = ExtractedImageNetSource.Config(working_dir=source).make()
     labels = ImagenetSynsetToIndex.Config().make()
     vae = load_invae(checkpoint, device=device)
     metadata: list[list[str | int]] = []
@@ -123,7 +119,7 @@ def prepare(
         )
     manifest = output / "vae-in" / "dataset.json"
     manifest.parent.mkdir(parents=True, exist_ok=True)
-    manifest.write_text(json.dumps({"labels": metadata}), encoding="utf-8")
+    manifest.write_bytes(json.dumps({"labels": metadata}).encode())
     return len(metadata)
 
 
@@ -134,8 +130,10 @@ def main() -> int:
       exit_code: Zero after successful preparation.
 
     """
+    if __doc__ is None:
+        raise ValueError("Expected __doc__ is not None.")
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n")[2],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)

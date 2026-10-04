@@ -22,7 +22,7 @@ import hashlib
 import shutil
 import tempfile
 
-from priml.lib.custom_json import DictCodec, ListCodec, StrCodec, loads
+from priml.lib.custom_json import DictCodec, StrCodec, loads
 from priml.paths import validated_output_path
 
 
@@ -40,7 +40,7 @@ def prepare(source: Path, *, destination: Path) -> None:
     names = _files(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
-        prefix="arc2-prepared-",
+        prefix="prepare-data-",
         dir=destination.parent,
     ) as temporary:
         staging = Path(temporary)
@@ -66,7 +66,9 @@ def main() -> int:
       exit_code: Zero after successful staging.
 
     """
-    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n", 2)[2])
+    if __doc__ is None:
+        raise ValueError("Expected __doc__ is not None.")
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 2)[2])
     _add_arguments(parser)
     flags = cast(_Flags, parser.parse_args())
     prepare(flags.source, destination=flags.destination)
@@ -76,9 +78,8 @@ def main() -> int:
 def _files(source: Path) -> list[Path]:
     """Admit the source subset identity and complete prepared-file boundary."""
     params = DictCodec.coerce(loads((source / "_build_params.json").read_text()))
-    subsets = ListCodec.coerce(params.get("subsets"), str)
     if (
-        subsets != ["training2", "evaluation2", "concept"]
+        params.get("subsets") != ["training2", "evaluation2", "concept"]
         or StrCodec.coerce(params.get("test_set_name")) != "evaluation2"
     ):
         raise ValueError("Expected an ARC2 training2/evaluation2/concept build")
@@ -106,7 +107,7 @@ def _files(source: Path) -> list[Path]:
 def _digest(path: Path) -> bytes:
     """Hash a payload without loading the dataset into memory."""
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").digest()
+        return hashlib.file_digest(stream, hashlib.sha256().name).digest()
 
 
 class _Flags(Protocol):

@@ -18,7 +18,10 @@ from priml.model.custom_types import has_weight
 from priml.model.linear import Linear
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.qwen3_5 import Qwen35
-from priml.model.transformer.qwen3_5_weights import remap_hf_state_dict
+from priml.model.transformer.qwen3_5_weights import (
+    _sources,
+    remap_hf_state_dict,
+)
 from priml.testing.qwen3_5 import hf_config
 
 
@@ -100,6 +103,9 @@ def test_conditional_namespace_and_explicit_nontext_policy() -> None:
         for name, tensor in reference.state_dict().items()
     }
     state["model.visual.patch_embed.proj.weight"] = torch.zeros(2, 3)
+    state["visual.patch_embed.proj.weight"] = torch.zeros(2, 3)
+    state["mtp.extra.weight"] = torch.zeros(2, 3)
+    state["model.mtp.extra.weight"] = torch.zeros(2, 3)
     native_config = Qwen35.Config.from_hf(config)
     with pytest.raises(ValueError, match="Unexpected"):
         remap_hf_state_dict(state, native_config)
@@ -133,12 +139,13 @@ def test_local_text_loading_preserves_parameters_and_logits(tmp_path: Path) -> N
 def test_rejects_an_unknown_non_text_policy() -> None:
     config = hf_config()
     reference = Qwen3_5ForCausalLM(Qwen3_5TextConfig(**config))
-    with pytest.raises(ValueError, match="Unsupported non_text policy"):
+    with pytest.raises(ValueError, match="Unsupported non_text policy") as error:
         remap_hf_state_dict(
             reference.state_dict(),
             Qwen35.Config.from_hf(config),
             non_text="keep",
         )
+    assert str(error.value) == "Unsupported non_text policy: 'keep'."
 
 
 @pytest.mark.parametrize("mutation", ["none", "both"])
@@ -149,8 +156,12 @@ def test_rejects_zero_or_two_text_embedding_namespaces(mutation: str) -> None:
         del state["model.embed_tokens.weight"]
     else:
         state["embed_tokens.weight"] = state["model.embed_tokens.weight"]
-    with pytest.raises(ValueError, match="exactly one text embedding namespace"):
+    with pytest.raises(
+        ValueError,
+        match="exactly one text embedding namespace",
+    ) as error:
         remap_hf_state_dict(state, Qwen35.Config.from_hf(config))
+    assert str(error.value) == "Expected exactly one text embedding namespace."
 
 
 def test_rejects_a_config_that_builds_no_module() -> None:
@@ -159,9 +170,10 @@ def test_rejects_a_config_that_builds_no_module() -> None:
     native_config = Qwen35.Config.from_hf(config)
     with (
         patch.object(Qwen35.Config, "make", return_value=object()),
-        pytest.raises(TypeError, match=r"must build an nn\.Module"),
+        pytest.raises(TypeError, match=r"must build an nn\.Module") as error,
     ):
         remap_hf_state_dict(state, native_config)
+    assert str(error.value) == "A deep model config must build an nn.Module."
 
 
 def test_rejects_an_injected_block_that_is_not_a_transformer_block() -> None:
@@ -170,8 +182,35 @@ def test_rejects_an_injected_block_that_is_not_a_transformer_block() -> None:
     native_config = Qwen35.Config.from_hf(config)
     assert isinstance(native_config.block, list)
     native_config.block[0] = _CustomBlock.Config()
-    with pytest.raises(TypeError, match="native TransformerBlock"):
+    with pytest.raises(TypeError, match="native TransformerBlock") as error:
         remap_hf_state_dict(state, native_config)
+    assert (
+        str(error.value)
+        == "HF mapping requires native TransformerBlock configurations."
+    )
+
+
+def test_sources_rejects_an_unknown_namespace_even_for_a_known_weight() -> None:
+    native_config = Qwen35.Config.from_hf(hf_config())
+    assert isinstance(native_config.block, list)
+    blocks: list[TransformerBlock.Config] = []
+    for block in native_config.block:
+        assert isinstance(block, TransformerBlock.Config)
+        blocks.append(block)
+
+    with pytest.raises(
+        ValueError,
+        match="Unsupported native checkpoint parameter",
+    ) as error:
+        _sources(
+            "other.0.ffn.up_proj.weight",
+            prefix="model.",
+            blocks=blocks,
+        )
+    assert (
+        str(error.value)
+        == "Unsupported native checkpoint parameter: other.0.ffn.up_proj.weight."
+    )
 
 
 def test_rejects_a_top_level_parameter_without_an_hf_counterpart() -> None:
@@ -184,8 +223,9 @@ def test_rejects_a_top_level_parameter_without_an_hf_counterpart() -> None:
     with pytest.raises(
         ValueError,
         match=r"Unsupported native checkpoint parameter: proj_out\.bias",
-    ):
+    ) as error:
         remap_hf_state_dict(state, native_config)
+    assert str(error.value) == "Unsupported native checkpoint parameter: proj_out.bias."
 
 
 def test_rejects_an_injected_attention_without_an_hf_counterpart() -> None:
@@ -248,8 +288,11 @@ def test_tied_head_on_a_different_device_is_rejected() -> None:
     with patch("torch.equal", side_effect=AssertionError("compared across devices")):
         head = state["lm_head.weight"]
         state["lm_head.weight"] = _OtherDevice(head)
-        with pytest.raises(ValueError, match="device"):
+        with pytest.raises(ValueError, match="device") as error:
             remap_hf_state_dict(state, native_config)
+        assert (
+            str(error.value) == "Tied lm_head.weight must match the embedding device."
+        )
 
 
 class _OtherDevice(torch.Tensor):
@@ -292,11 +335,13 @@ def test_tied_head_alias_must_match_the_embedding() -> None:
     native_config.make().load_state_dict(mapped, strict=True)
     assert "proj_out.weight" not in mapped
     state["lm_head.weight"] = state["lm_head.weight"] + 1
-    with pytest.raises(ValueError, match="Tied"):
+    with pytest.raises(ValueError, match="Tied") as error:
         remap_hf_state_dict(state, native_config)
+    assert str(error.value) == "Tied lm_head.weight differs from the embedding weight."
     state["lm_head.weight"] = state["model.embed_tokens.weight"].double()
-    with pytest.raises(ValueError, match="dtype"):
+    with pytest.raises(ValueError, match="dtype") as error:
         remap_hf_state_dict(state, native_config)
+    assert str(error.value) == "Tied lm_head.weight must match the embedding dtype."
     del state["lm_head.weight"]
     native_config.make().load_state_dict(remap_hf_state_dict(state, native_config))
 

@@ -177,8 +177,9 @@ def test_a_saved_state_is_a_copy() -> None:
 
 
 def test_a_batch_without_an_actor_is_refused() -> None:
-    with pytest.raises(TypeError, match="EvaluationActor"):
+    with pytest.raises(TypeError) as error:
         _score().update(torch.zeros(2, 43))
+    assert str(error.value) == "CraftaxScore requires an EvaluationActor batch entry."
 
 
 @pytest.mark.compute_large_fixture
@@ -294,8 +295,78 @@ def test_two_plays_accumulate(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.parametrize("field", ["num_envs", "steps"])
 def test_an_empty_evaluation_is_refused(field: str) -> None:
-    with pytest.raises(ValueError, match="positive"):
+    with pytest.raises(
+        ValueError,
+        match="Evaluation geometry must be positive",
+    ) as error:
         _score(**{field: 0})
+    assert str(error.value) == "Evaluation geometry must be positive"
+
+
+def test_one_environment_and_one_step_are_valid() -> None:
+    score = _score(num_envs=1, steps=1)
+    assert score.compute() == {"episodes": 0.0}
+
+
+def test_compute_reports_each_field_from_all_episodes() -> None:
+    rates = [0.0] * len(constants.Achievement)
+    rates[0] = 25.0
+    rates[1] = 75.0
+    score = _score()
+    score.load_state_dict(
+        {
+            "returns": [10.0, 20.0],
+            "lengths": [4, 8],
+            "unlocked": [rates, [0.0] * len(rates)],
+            "rollout_index": 3,
+        },
+    )
+
+    computed = score.compute()
+
+    assert computed.keys() == {
+        "normalized_return_pct",
+        "score_pct",
+        "mean_return",
+        "achievements_pct",
+        "episodes",
+        "episode_length",
+    }
+    assert computed["mean_return"] == 15.0
+    assert computed["normalized_return_pct"] == 15.0 / constants.REWARD_CEILING * 100
+    assert computed["achievements_pct"] == 50.0 / len(rates)
+    assert computed["episode_length"] == 6.0
+    assert computed["episodes"] == 2.0
+    assert computed["score_pct"] == pytest.approx(
+        crafter_score_pct(torch.tensor(rates, dtype=torch.float64).numpy() / 2),
+    )
+
+
+def test_load_state_dict_restores_rollout_index_and_coerces_rates() -> None:
+    score = _score()
+    score.load_state_dict(
+        {
+            "returns": [12],
+            "lengths": [3],
+            "unlocked": [[1, 0] + [0] * (len(constants.Achievement) - 2)],
+            "rollout_index": 7,
+        },
+    )
+    saved = score.state_dict()
+    saved["unlocked"][0][0] = 99.0
+    assert score.state_dict() == {
+        "returns": [12],
+        "lengths": [3],
+        "unlocked": [[1.0, 0.0] + [0.0] * (len(constants.Achievement) - 2)],
+        "rollout_index": 7,
+    }
+    score.reset()
+    assert score.state_dict() == {
+        "returns": [],
+        "lengths": [],
+        "unlocked": [],
+        "rollout_index": 0,
+    }
 
 
 if __name__ == "__main__":

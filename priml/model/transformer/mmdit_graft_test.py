@@ -591,6 +591,16 @@ def test_load_backbone_state_accepts_transformer_named_weights() -> None:
     assert torch.equal(loaded["proj_in.weight"], expected["proj_in.weight"])
 
 
+def test_load_backbone_state_rejects_missing_weights() -> None:
+    source = _backbone().make()
+    graft = _config().make()
+    state = DictCodec.coerce(source.state_dict(), Tensor)
+    state.pop("proj_in.weight")
+
+    with pytest.raises(RuntimeError, match=r"Missing key.*proj_in\.weight"):
+        graft.load_backbone_state(state)
+
+
 def test_head_is_tied_reads_through_a_sequential_head() -> None:
     assert head_is_tied(_backbone(tie=True))
     assert not head_is_tied(_backbone(tie=False))

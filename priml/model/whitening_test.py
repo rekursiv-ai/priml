@@ -5,14 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
-import functools
-
 from torch import Tensor, nn
 
 import pytest
 import torch
 
-from priml.math.stats import pca_eigh, pca_power
+from priml.math.stats import pca_eigh
 from priml.model.whitening import PCAWhiteningConv2d
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.golden import assert_text_golden
@@ -81,12 +79,60 @@ def test_rank_doubling():
     assert torch.allclose(first_half, -second_half)
 
 
-def test_init_whiten_accepts_injected_decompose():
-    """The layer forwards an arbitrary decomposer, e.g. the MPS-native one."""
-    layer = PCAWhiteningConv2d(3, 54, kernel_size=3, padding=1, bias=False)
-    images = torch.randn(100, 3, 8, 9)
-    layer.init_whiten(images, decompose=functools.partial(pca_power, num_iters=20))
-    assert layer.weight.shape == (54, 3, 3, 3)
+def test_init_whiten_uses_the_injected_decomposer_and_preserves_orientation() -> None:
+    observed_shapes: list[tuple[int, int]] = []
+    eigenvalues = torch.arange(1, 9, dtype=torch.float32)
+    eigenvectors = torch.eye(8)
+    eigenvectors[:, 0] = 0
+
+    def decompose(x: Tensor) -> tuple[Tensor, Tensor]:
+        observed_shapes.append((x.shape[0], x.shape[1]))
+        return eigenvalues, eigenvectors
+
+    layer = PCAWhiteningConv2d(
+        2,
+        16,
+        kernel_size=2,
+        bias=False,
+        dtype=torch.float64,
+    )
+    images = torch.randn(3, 2, 4, 5)
+    eps = 0.25
+
+    layer.init_whiten(images, eps=eps, decompose=decompose)
+
+    expected_vectors = eigenvectors * torch.rsqrt(eigenvalues.unsqueeze(0) + eps)
+    # PCAWhiteningConv2d reshapes kernels with its fixed 2x2 kernel.
+    expected_kernel = expected_vectors.T.reshape(-1, 2, 2, 2).to(torch.float64)
+    expected = torch.cat([expected_kernel, -expected_kernel])
+    assert observed_shapes == [(36, 8)]
+    assert torch.equal(layer.weight, expected)
+    assert not torch.signbit(layer.weight[0, 0, 0, 0])
+
+
+def test_constructor_preserves_conv2d_default_bias() -> None:
+    layer = PCAWhiteningConv2d(2, 16, kernel_size=2)
+    assert layer.bias is not None
+    assert layer.bias.shape == (16,)
+
+
+def test_constructor_forwards_device_dtype_and_bias() -> None:
+    layer = PCAWhiteningConv2d(
+        2,
+        16,
+        kernel_size=2,
+        bias=True,
+        device="meta",
+        dtype=torch.float64,
+    )
+
+    assert layer.weight.shape == (16, 2, 2, 2)
+    assert layer.weight.device.type == "meta"
+    assert layer.weight.dtype == torch.float64
+    assert layer.bias is not None
+    assert layer.bias.device.type == "meta"
+    assert layer.bias.dtype == torch.float64
+    assert not layer.weight.requires_grad
 
 
 def test_weights_frozen():

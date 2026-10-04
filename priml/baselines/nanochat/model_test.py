@@ -6,6 +6,8 @@ from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, override
 
+import re
+
 from configgle import Fig, Makeable
 from torch import Tensor, nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -263,7 +265,12 @@ def test_layers_disagreeing_on_head_shape_are_rejected() -> None:
     config.block = blocks
     config.num_layers = len(blocks)
 
-    with pytest.raises(ValueError, match="same attention head geometry"):
+    message = (
+        "every block must declare the same attention head geometry, since "
+        "the value embeddings and rotary factors are shared across layers; "
+        "got (channels_head, num_heads * channels_head) of [(2, 4), (2, 8)]."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         config.copy_tree().finalize()
 
 
@@ -565,6 +572,21 @@ def test_the_cached_rotation_table_is_the_one_a_fresh_build_produces() -> None:
     assert torch.equal(cached_sin, fresh_sin[:length])
 
 
+def test_rotation_materialization_and_rebuild_use_the_requested_device() -> None:
+    meta = torch.device("meta")
+    memory = _memory_config().make()
+    memory.rope.to(meta)
+    memory.materialize_rotation_table(device=meta)
+    assert memory._rotation is not None
+    assert all(factor.device == meta for factor in memory._rotation)
+
+    model = _model()
+    model.rope.to(meta)
+    model._rotation_table(SEQ, device=meta)
+    assert model._rotation is not None
+    assert all(factor.device == meta for factor in model._rotation)
+
+
 def test_the_rotation_table_is_rebuilt_when_the_frequencies_are() -> None:
     """``reset_parameters`` re-derives the rope, so a stale table cannot survive.
 
@@ -797,12 +819,38 @@ def test_memory_model_direct_fused_make_supports_forward_and_backward() -> None:
     assert all(part.weight.grad is None for part in table.tables)
 
 
+def test_memory_model_preserves_runtime_configuration() -> None:
+    config = _memory_config()
+    config.num_layers = 3
+    config.num_pool_layers = 2
+    config.attention_source_layers = (2,)
+    config.attention_source_after_layer = 0
+    config.ngram_dirty_clear = True
+    config.fused_ngram = True
+    config.trigrams["0"] = HashedNgramTables.Config(
+        num_embeddings=16,
+        hash_multipliers=((1, 3, 5), (5, 7, 9)),
+    )
+
+    model = config.make()
+
+    assert model.pool_start == 1
+    assert model.attention_source_after_layer == 0
+    assert model.ngram_dirty_clear
+    trigram = model.trigrams["0"]
+    assert isinstance(trigram, HashedNgramTables)
+    assert len(trigram.gradient_bitmaps) == len(trigram.tables) == 2
+    sources = model._fused_sources("0", torch.tensor([[1, 2, 3, 4]]))
+    assert [source.gate_index for source in sources] == [1, 2]
+
+
 def test_memory_model_meta_materialization_preserves_dtype_and_fused_sinks() -> None:
     config = _memory_config()
     config.dtype = torch.bfloat16
     config.fused_ngram = True
     with torch.device("meta"):
         model = config.make()
+    assert model._materialized_device() is None
     table = model.bigrams["0"]
     assert isinstance(table, HashedNgramTables)
     assert all(parameter.is_meta for parameter in model.parameters())
@@ -813,6 +861,7 @@ def test_memory_model_meta_materialization_preserves_dtype_and_fused_sinks() -> 
     materialize_meta(model, torch.device("cpu"))
 
     assert all(not parameter.is_meta for parameter in model.parameters())
+    assert model._materialized_device() == torch.device("cpu")
     assert all(parameter.dtype == torch.bfloat16 for parameter in model.parameters())
     assert all(
         not sink.is_meta and sink.dtype == torch.float32

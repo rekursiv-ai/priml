@@ -343,11 +343,10 @@ class AttentionProjections(nn.Module):
         """Initialize every parameter in place."""
         self.proj_qkv.reset_parameters()
         self.proj_out.reset_parameters()
-        seen: TensorModule | None = None
-        for norm in (self.norm_q, self.norm_k):
-            if norm is not None and norm is not seen:
-                norm.reset_parameters()
-                seen = norm
+        if self.norm_q is not None:
+            self.norm_q.reset_parameters()
+        if self.norm_k is not None and self.norm_k is not self.norm_q:
+            self.norm_k.reset_parameters()
         if self.norm_out is not None:
             self.norm_out.reset_parameters()
         if isinstance(self.rope, HasResetParameters):

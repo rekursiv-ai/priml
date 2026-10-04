@@ -24,16 +24,22 @@ def test_topk_k_exceeds_num_classes() -> None:
 
 def test_topk_empty_k_values_raises_at_construction() -> None:
     """LOSSOPT-007: empty k_values must raise a clear ValueError early."""
-    with pytest.raises(ValueError, match="k_values"):
+    with pytest.raises(
+        ValueError,
+        match=r"^k_values must contain at least one positive integer\.$",
+    ):
         TopK(TopK.Config(k_values=[]))
 
 
 def test_topk_update_requires_a_tensor_label() -> None:
     metric = TopK(TopK.Config(k_values=[1]))
     logits = torch.zeros(2, 3)
-    with pytest.raises(ValueError, match="label must be provided"):
+    with pytest.raises(ValueError, match=r"^label must be provided$"):
         metric.update(logits)
-    with pytest.raises(TypeError, match="label must be a Tensor"):
+    with pytest.raises(
+        TypeError,
+        match=r"^label must be a Tensor, got <class 'list'>\.$",
+    ):
         metric.update(logits, label=[0, 1])
 
 

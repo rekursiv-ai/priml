@@ -27,7 +27,7 @@ from priml.model.sequential import Sequential
 from priml.model.special import TiedLinear
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
-from priml.model.transformer.transformer import Transformer
+from priml.model.transformer.transformer import Transformer, head_is_tied
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
 
@@ -178,6 +178,30 @@ def test_forward_shape():
     toks = torch.randint(0, 128, (2, 6))
     out = m(toks)
     assert out.shape == (2, 6, 128)
+
+
+def test_head_is_tied_recognizes_bare_and_composed_tied_heads() -> None:
+    direct = Transformer.Config(proj_out=TiedLinear.Config(tied="proj_in"))
+    composed_list = Transformer.Config(
+        proj_out=Sequential.Config(
+            elements=[
+                RMSNorm.Config(),
+                Linear.Config(),
+                TiedLinear.Config(tied="proj_in"),
+            ],
+        ),
+    )
+    composed_single = Transformer.Config(
+        proj_out=Sequential.Config(elements=TiedLinear.Config(tied="proj_in")),
+    )
+    untied = Transformer.Config(proj_out=_head(tie=False))
+    absent = Transformer.Config(proj_out=None)
+
+    assert head_is_tied(direct)
+    assert head_is_tied(composed_list)
+    assert head_is_tied(composed_single)
+    assert not head_is_tied(untied)
+    assert not head_is_tied(absent)
 
 
 def test_tied_embeddings():

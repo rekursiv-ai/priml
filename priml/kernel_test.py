@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from importlib import import_module
+from types import FunctionType
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import pytest
@@ -25,14 +27,37 @@ class _Hashed(Protocol):
     @property
     def cache_key(self) -> str: ...
 
+    @property
+    def fn(self) -> FunctionType: ...
+
 
 def test_a_bound_kernel_hashes_its_helper_and_the_modules() -> None:
     # The hash walks the kernel's globals, which cannot copy a lazy proxy; the
     # binding is what puts the real modules there.
     pytest.importorskip("triton")
-    kernel = jit_kernel(_double_triton, _twice_triton=jit_kernel(_twice_triton))
+    helper = jit_kernel(_twice_triton)
+    kernel = jit_kernel(_double_triton, _twice_triton=helper)
     assert isinstance(kernel, _Hashed)
     assert isinstance(kernel.cache_key, str)
+    assert kernel.fn.__name__ == "_double_triton"
+    assert kernel.fn.__defaults__ == (8,)
+    assert kernel.fn.__annotations__ == _double_triton.__annotations__
+    assert kernel.fn.__globals__["language"] is import_module("triton.language")
+    assert kernel.fn.__globals__["libdevice"] is import_module(
+        "triton.language.extra.cuda.libdevice",
+    )
+    assert kernel.fn.__globals__["_twice_triton"] is helper
+
+    renamed = FunctionType(
+        _double_triton.__code__,
+        _double_triton.__globals__,
+        "renamed_kernel",
+        _double_triton.__defaults__,
+    )
+    renamed.__annotations__ = _double_triton.__annotations__
+    renamed_kernel = jit_kernel(renamed)
+    assert isinstance(renamed_kernel, _Hashed)
+    assert renamed_kernel.fn.__name__ == "renamed_kernel"
 
 
 @pytest.mark.gpu_triton
@@ -58,7 +83,7 @@ def _twice_triton(x: language.tensor) -> language.tensor:
     return x + x
 
 
-def _double_triton(values_ptr: language.tensor, block: language.constexpr) -> None:
+def _double_triton(values_ptr: language.tensor, block: language.constexpr = 8) -> None:
     index = language.arange(0, block)
     doubled = _twice_triton(language.load(values_ptr + index))
     language.store(values_ptr + index, doubled)

@@ -38,6 +38,7 @@ from priml.data.processors.bytes import (
     GetDimensionsFromBytes,
 )
 from priml.data.sources.tarhandle import TarFileHandle
+from priml.math.pixel import rgb2float
 
 
 if TYPE_CHECKING:
@@ -560,9 +561,10 @@ def test_an_unreadable_sample_records_why_but_a_rerouted_one_does_not(
 
     assert all("media" not in sample for sample in out)
     unreadable, rerouted = out[:2], out[2]
-    for sample in unreadable:
-        reasons = cast(dict[str, object], sample).get("filter_reasons")
-        assert reasons, f"unreadable sample recorded no reason: {sample}"
+    assert [sample.get("filter_reasons") for sample in unreadable] == [
+        ["GetBytesFromTarHandle:missing: key"],
+        ["GetBytesFromTarHandle:missing: _tar_handle"],
+    ]
     assert not cast(dict[str, object], rerouted).get("filter_reasons")
     assert "_tar_handle" in rerouted
 
@@ -687,6 +689,8 @@ def test_stale_tar_offsets_never_substitute_for_reading_the_member(
         out = list(processor(_as_stream_bytes([sample])))
 
     assert out[0].get("media") == payloads["k0"]
+    assert out[0].get("tar_offset") == offset
+    assert out[0].get("tar_size") == size
 
 
 def test_image_decode_uses_the_jpeg_and_webp_fast_paths() -> None:
@@ -828,6 +832,44 @@ def test_video_decode_returns_none_on_a_clip_it_cannot_read() -> None:
 
     assert "media_tensor" in out[0]
     assert out[0]["media_tensor"] is existing
+    assert out[0].get("filter_reasons") is None
+
+
+def test_tar_reader_tries_extensions_and_records_exact_member_metadata(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "media.tar"
+    with tarfile.open(archive, "w") as tar:
+        info = tarfile.TarInfo("clip.mp4")
+        info.size = 4
+        tar.addfile(info, io.BytesIO(b"data"))
+
+    processor = GetBytesFromTarHandle(
+        GetBytesFromTarHandle.Config(known_formats=["jpg", "mp4"]),
+    )
+    with TarFileHandle(archive, use_mmap=False) as handle:
+        sample = cast(
+            GetBytesFromTarHandle.Input,
+            {"_tar_handle": handle, "key": "clip"},
+        )
+        result = next(processor(_as_stream_bytes([sample])))
+
+    with tarfile.open(archive) as tar:
+        member = tar.getmember("clip.mp4")
+    assert result.get("media") == b"data"
+    assert result.get("tar_offset") == member.offset_data
+    assert result.get("tar_size") == member.size
+
+    with TarFileHandle(archive, use_mmap=False) as handle:
+        named_jpg = cast(
+            GetBytesFromTarHandle.Input,
+            {"_tar_handle": handle, "key": "clip", "format": "jpg"},
+        )
+        rejected = next(processor(_as_stream_bytes([named_jpg])))
+    assert "media" not in rejected
+    assert rejected["filter_reasons"] == [
+        "GetBytesFromTarHandle:member_not_found: clip",
+    ]
 
 
 def test_tar_reader_skips_what_it_cannot_or_need_not_read(tmp_path: Path) -> None:
@@ -1001,21 +1043,42 @@ def test_get_dimensions_remeasures_a_non_positive_cached_value() -> None:
                 [
                     cast(
                         GetDimensionsFromBytes.Input,
-                        {"media": media, "height": 0, "width": 0},
+                        {"media": media, "height": 999, "width": 999},
                     ),
                     cast(
                         GetDimensionsFromBytes.Input,
-                        {"media": media, "height": 999, "width": 999},
+                        {"media": media, "height": 0, "width": 12},
+                    ),
+                    cast(
+                        GetDimensionsFromBytes.Input,
+                        {"media": media, "height": 7, "width": 0},
+                    ),
+                    cast(
+                        GetDimensionsFromBytes.Input,
+                        {"media": media, "height": 0, "width": 0},
                     ),
                 ],
             ),
         ),
     )
 
-    # The unusable pair is re-measured from the bytes...
-    assert (out[0].get("height"), out[0].get("width")) == (7, 12)
-    # ...while a positive pair is taken as given, decode never being run.
-    assert (out[1].get("height"), out[1].get("width")) == (999, 999)
+    assert [sample.get("height") for sample in out] == [999, 7, 7, 7]
+    assert [sample.get("width") for sample in out] == [999, 12, 12, 12]
+
+
+def test_get_dimensions_trusts_positive_unit_dimensions() -> None:
+    buffer = io.BytesIO()
+    Image.new("RGB", (12, 7), (255, 0, 0)).save(buffer, format="PNG")
+    media = buffer.getvalue()
+    processor = GetDimensionsFromBytes(GetDimensionsFromBytes.Config())
+    sample = cast(
+        GetDimensionsFromBytes.Input,
+        {"media": media, "height": 1, "width": 2},
+    )
+
+    result = next(processor(iter([sample])))
+
+    assert result == {"media": media, "height": 1, "width": 2}
 
 
 def test_get_dimensions_passes_through_what_it_cannot_measure() -> None:
@@ -1088,30 +1151,37 @@ def test_get_bytes_from_file_reports_an_unreadable_path(tmp_path: Path) -> None:
     processor = GetBytesFromFile(GetBytesFromFile.Config())
 
     present = tmp_path / "present.bin"
+    absent = tmp_path / "absent.bin"
     _ = present.write_bytes(b"payload")
 
     out = list(
         processor(
             iter(
                 [
-                    cast(GetBytesFromFile.Input, {"file_path": str(present)}),
                     cast(
                         GetBytesFromFile.Input,
-                        {"file_path": str(tmp_path / "absent.bin")},
+                        {"file_path": str(present), "media": b"preserved"},
                     ),
+                    cast(GetBytesFromFile.Input, {}),
+                    cast(GetBytesFromFile.Input, {"file_path": str(present)}),
+                    cast(GetBytesFromFile.Input, {"file_path": str(absent)}),
                     cast(GetBytesFromFile.Input, {}),
                 ],
             ),
         ),
     )
 
-    assert len(out) == 3, "no sample may be dropped"
-    assert out[0].get("media") == b"payload"
-    assert "media" not in out[1]
-    reasons = cast(list[str], cast(dict[str, object], out[1])["filter_reasons"])
-    assert "GetBytesFromFile" in reasons[0]
-    # A sample with no path at all is a routing outcome, not a failure.
-    assert not cast(dict[str, object], out[2]).get("filter_reasons")
+    assert len(out) == 5, "no sample may be dropped"
+    assert out[0].get("media") == b"preserved"
+    assert not cast(dict[str, object], out[0]).get("filter_reasons")
+    assert not cast(dict[str, object], out[1]).get("filter_reasons")
+    assert out[2].get("media") == b"payload"
+    assert "media" not in out[3]
+    reasons = cast(list[str], cast(dict[str, object], out[3])["filter_reasons"])
+    assert len(reasons) == 1
+    assert reasons[0].startswith("GetBytesFromFile:unreadable: ")
+    assert str(absent) in reasons[0]
+    assert not cast(dict[str, object], out[4]).get("filter_reasons")
 
 
 def test_decode_video_field_validation_and_handle_cleanup() -> None:
@@ -1232,6 +1302,24 @@ def test_decode_video_read_media_and_decode_oserror() -> None:
         assert processor._decode(b"x", height=1, width=1, keep_frames=1) is None
 
 
+def test_decode_video_requires_process_stdout() -> None:
+    class Process:
+        stdout = None
+
+    processor = DecodeVideo(DecodeVideo.Config())
+    with (
+        patch(
+            "priml.data.processors.bytes.subprocess.Popen",
+            return_value=Process(),
+        ),
+        pytest.raises(
+            ValueError,
+            match=r"^Expected process\.stdout is not None\.$",
+        ),
+    ):
+        processor._decode(b"x", height=1, width=1, keep_frames=1)
+
+
 def test_decode_video_reads_tar_and_handles_decode_stream_failures() -> None:
     class Tar:
         name: str | None = None
@@ -1291,6 +1379,946 @@ def test_crop_image_integer_dtype_and_unknown_format() -> None:
     tensor = out.get("media_tensor")
     assert tensor is not None
     assert tensor.dtype == torch.int16
+
+
+def test_image_decode_sets_frames_and_honors_device() -> None:
+    buffer = io.BytesIO()
+    Image.new("RGB", (6, 4), (255, 0, 0)).save(buffer, format="JPEG")
+    processor = CropDuringDecodeImage(CropDuringDecodeImage.Config(device="meta"))
+    sample = cast(
+        CropDuringDecodeImage.Input,
+        {"media": buffer.getvalue(), "format": "jpg", "height": 4, "width": 6},
+    )
+
+    result = next(processor(iter([sample])))
+
+    tensor = result.get("media_tensor")
+    assert tensor is not None
+    assert tensor.device.type == "meta"
+    assert tensor.shape == (3, 1, 4, 6)
+    assert result.get("frames") == 1
+    assert result.get("filter_reasons") is None
+
+
+def test_image_decode_reports_corrupt_jpeg_with_filter_identity() -> None:
+    processor = CropDuringDecodeImage(CropDuringDecodeImage.Config())
+    sample = cast(
+        CropDuringDecodeImage.Input,
+        {"media": b"not a jpeg", "format": "jpg", "height": 4, "width": 6},
+    )
+
+    result = next(processor(iter([sample])))
+
+    reasons = cast(list[str], cast(dict[str, object], result)["filter_reasons"])
+    assert reasons == [
+        "CropDuringDecodeImage:decode_failed: jpg_decode_failed",
+    ]
+
+
+def test_image_decode_routes_partial_dimensions_and_non_image_frames() -> None:
+    processor = CropDuringDecodeImage(CropDuringDecodeImage.Config())
+    samples = [
+        cast(CropDuringDecodeImage.Input, {"media": b"x", "width": 6}),
+        cast(CropDuringDecodeImage.Input, {"media": b"x", "height": 4}),
+        cast(
+            CropDuringDecodeImage.Input,
+            {"media": b"x", "height": 4, "width": 6, "target_frames": 2},
+        ),
+    ]
+
+    results = list(processor(iter(samples)))
+
+    assert [result.get("filter_reasons") for result in results] == [
+        ["CropDuringDecodeImage:missing_dimensions"],
+        ["CropDuringDecodeImage:missing_dimensions"],
+        None,
+    ]
+    assert all("media_tensor" not in result for result in results)
+
+
+def test_image_decode_target_floor_uses_distinct_height_and_width() -> None:
+    buffer = io.BytesIO()
+    Image.new("RGB", (64, 48), (255, 0, 0)).save(buffer, format="JPEG")
+    processor = CropDuringDecodeImage(
+        CropDuringDecodeImage.Config(scale_to_target=True),
+    )
+    sample = cast(
+        CropDuringDecodeImage.Input,
+        {
+            "media": buffer.getvalue(),
+            "format": "jpg",
+            "height": 48,
+            "width": 64,
+            "target_height": 24,
+            "target_width": 12,
+            "crop": (0, 0, 48, 64),
+        },
+    )
+
+    tensor = next(processor(iter([sample]))).get("media_tensor")
+
+    assert tensor is not None
+    assert tensor.shape == (3, 1, 24, 32)
+
+
+def test_decode_video_routes_fields_and_continues_after_cached_samples() -> None:
+    processor = DecodeVideo(DecodeVideo.Config())
+    cached_handle = object()
+    cached_tensor = torch.zeros(3, 2, 4, 6, dtype=torch.float16)
+    cached = cast(
+        DecodeVideo.Input,
+        {"media_tensor": cached_tensor, "_tar_handle": cached_handle},
+    )
+    decode_handle = object()
+    sample = cast(
+        DecodeVideo.Input,
+        {
+            "_tar_handle": decode_handle,
+            "key": "clip",
+            "format": "mp4",
+            "media": b"clip-bytes",
+            "frames": 3,
+            "height": 4,
+            "width": 6,
+            "target_frames": 5,
+            "target_height": 8,
+            "target_width": 12,
+        },
+    )
+    with patch.object(processor, "_process_video", return_value=None) as process_video:
+        output = list(processor(iter([cached, sample])))
+
+    assert len(output) == 2
+    assert output[0].get("media_tensor") is cached_tensor
+    assert output[0].get("_tar_handle") is cached_handle
+    assert "_tar_handle" not in output[1]
+    process_video.assert_called_once_with(
+        decode_handle,
+        "clip",
+        "mp4",
+        frames=3,
+        height=4,
+        width=6,
+        target_frames=5,
+        target_height=8,
+        target_width=12,
+        media=b"clip-bytes",
+    )
+
+
+def test_decode_video_requires_each_input_and_keeps_empty_keys_empty() -> None:
+    processor = DecodeVideo(DecodeVideo.Config())
+    complete: DecodeVideo.Input = {
+        "media": b"clip",
+        "key": "",
+        "format": "mp4",
+        "frames": 2,
+        "height": 4,
+        "width": 6,
+    }
+    fields = processor._extract_fields(complete)
+
+    assert fields is not None
+    assert fields[1:3] == ("", "mp4")
+    incomplete_samples = [
+        cast(DecodeVideo.Input, {"media": b"clip", "height": 4, "width": 6}),
+        cast(DecodeVideo.Input, {"media": b"clip", "frames": 2, "width": 6}),
+        cast(DecodeVideo.Input, {"media": b"clip", "frames": 2, "height": 4}),
+    ]
+    for incomplete in incomplete_samples:
+        assert processor._extract_fields(incomplete) is None
+
+    for address in (
+        {"key": "clip"},
+        {"_tar_handle": object()},
+        {},
+    ):
+        missing_address = cast(
+            DecodeVideo.Input,
+            {**address, "frames": 2, "height": 4, "width": 6},
+        )
+        assert processor._extract_fields(missing_address) is None
+
+
+def test_video_processor_uses_tar_fallback_and_source_geometry(
+    tmp_path: Path,
+) -> None:
+    height, width, frames = 4, 6, 2
+    stdout_bytes = bytearray(bytes([255, 0, 0]) * height * width * frames)
+    captured_payload = b""
+    captured_args: list[str] = []
+
+    class Stdout:
+        def read(self, size: int) -> bytes:
+            chunk = bytes(stdout_bytes[:size])
+            del stdout_bytes[:size]
+            return chunk
+
+        def close(self) -> None:
+            pass
+
+    class Process:
+        stdout = Stdout()
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout: int = 0) -> None:
+            del timeout
+
+    def launch(args: list[str], *, stdout: int, stderr: int) -> Process:
+        del stdout, stderr
+        nonlocal captured_payload
+        captured_args.extend(args)
+        captured_payload = Path(args[4]).read_bytes()
+        return Process()
+
+    archive = tmp_path / "clip.tar"
+    with tarfile.open(archive, "w") as tar:
+        info = tarfile.TarInfo("clip.mp4")
+        info.size = 10
+        tar.addfile(info, io.BytesIO(b"clip-bytes"))
+
+    processor = DecodeVideo(
+        DecodeVideo.Config(known_formats=["webm", "mp4"], ffmpeg_exe="fake-ffmpeg"),
+    )
+    with (
+        TarFileHandle(archive, use_mmap=False) as handle,
+        patch(
+            "priml.data.processors.bytes.subprocess.Popen",
+            side_effect=launch,
+        ),
+    ):
+        tensor = processor._process_video(
+            handle,
+            "clip",
+            None,
+            frames=frames,
+            height=height,
+            width=width,
+            target_frames=None,
+            target_height=None,
+            target_width=None,
+        )
+
+    assert tensor is not None
+    assert tensor.shape == (3, frames, height, width)
+    assert captured_payload == b"clip-bytes"
+    assert any(arg.startswith("scale=6:4:") for arg in captured_args)
+
+
+@pytest.mark.parametrize(
+    ("fmt", "encoding"),
+    [("jpg", "JPEG"), ("webp", "WEBP"), ("png", "PNG")],
+)
+def test_image_decode_passes_the_requested_crop_to_each_backend(
+    fmt: str,
+    encoding: str,
+) -> None:
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 24), (255, 0, 0)).save(
+        buffer,
+        format=encoding,
+        **({"quality": 100} if encoding == "JPEG" else {}),
+    )
+    processor = CropDuringDecodeImage(
+        CropDuringDecodeImage.Config(known_formats=[fmt]),
+    )
+    sample = cast(
+        CropDuringDecodeImage.Input,
+        {
+            "media": buffer.getvalue(),
+            "format": fmt,
+            "height": 24,
+            "width": 32,
+            "crop": (8, 0, 8, 16),
+        },
+    )
+
+    tensor = next(processor(iter([sample]))).get("media_tensor")
+
+    assert tensor is not None
+    assert tensor.shape == (3, 1, 8, 16)
+
+
+def test_image_decode_tries_the_next_format_after_a_backend_rejects_bytes() -> None:
+    buffer = io.BytesIO()
+    Image.new("RGB", (16, 12), (0, 255, 0)).save(
+        buffer,
+        format="WEBP",
+        lossless=True,
+    )
+    processor = CropDuringDecodeImage(
+        CropDuringDecodeImage.Config(known_formats=["jpg", "webp"]),
+    )
+    sample = cast(
+        CropDuringDecodeImage.Input,
+        {"media": buffer.getvalue(), "height": 12, "width": 16},
+    )
+
+    result = next(processor(iter([sample])))
+
+    tensor = result.get("media_tensor")
+    assert tensor is not None
+    assert tensor.shape == (3, 1, 12, 16)
+    assert int(tensor[1].min()) > 200
+    assert result.get("filter_reasons") is None
+
+
+def test_image_decode_reports_full_backend_exception_detail() -> None:
+    processor = CropDuringDecodeImage(
+        CropDuringDecodeImage.Config(known_formats=["jpg"]),
+    )
+    error = "x" * 60
+    with patch(
+        "priml.data.processors.bytes.decode_jpeg_turbojpeg",
+        side_effect=ValueError(error),
+    ):
+        result = processor._process_image(b"jpeg", "jpg", 4, 6, None)
+
+    assert result == (None, f"jpg_ValueError:{error[:50]}")
+
+
+def test_image_decode_names_an_empty_backend_cascade() -> None:
+    processor = CropDuringDecodeImage(
+        CropDuringDecodeImage.Config(known_formats=[]),
+    )
+
+    assert processor._process_image(b"payload", None, 4, 6, None) == (
+        None,
+        "all_formats_failed",
+    )
+
+
+def test_rgba_image_uses_a_four_channel_decode() -> None:
+    buffer = io.BytesIO()
+    Image.new("RGBA", (8, 6), (255, 0, 0, 64)).save(
+        buffer,
+        format="WEBP",
+        lossless=True,
+    )
+    processor = CropDuringDecodeImage(
+        CropDuringDecodeImage.Config(channels_format="rgba", known_formats=["webp"]),
+    )
+    sample = cast(
+        CropDuringDecodeImage.Input,
+        {"media": buffer.getvalue(), "format": "webp", "height": 6, "width": 8},
+    )
+
+    tensor = next(processor(iter([sample]))).get("media_tensor")
+
+    assert tensor is not None
+    assert tensor.shape == (4, 1, 6, 8)
+    assert int(tensor[3].min()) == 64
+
+
+def test_decode_video_routes_tar_media_and_requested_geometry(
+    tmp_path: Path,
+) -> None:
+    height, width, frames = 4, 6, 3
+    stdout_bytes = bytearray(bytes([255, 0, 0]) * height * width * frames)
+
+    class Stdout:
+        def read(self, size: int) -> bytes:
+            chunk = bytes(stdout_bytes[:size])
+            del stdout_bytes[:size]
+            return chunk
+
+        def close(self) -> None:
+            pass
+
+    class Process:
+        stdout = Stdout()
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout: int = 0) -> None:
+            del timeout
+
+    archive = tmp_path / "clip.tar"
+    with tarfile.open(archive, "w") as tar:
+        info = tarfile.TarInfo("clip.mp4")
+        info.size = 4
+        tar.addfile(info, io.BytesIO(b"video"))
+
+    processor = DecodeVideo(DecodeVideo.Config(ffmpeg_exe="fake-ffmpeg"))
+    with TarFileHandle(archive, use_mmap=False) as handle:
+        sample = cast(
+            DecodeVideo.Input,
+            {
+                "_tar_handle": handle,
+                "key": "clip",
+                "format": "mp4",
+                "frames": 2,
+                "height": 6,
+                "width": 8,
+                "target_frames": frames,
+                "target_height": height,
+                "target_width": width,
+            },
+        )
+        with patch(
+            "priml.data.processors.bytes.subprocess.Popen",
+            return_value=Process(),
+        ):
+            result = next(processor(iter([sample])))
+
+    tensor = result.get("media_tensor")
+    assert tensor is not None
+    assert tensor.shape == (3, frames, height, width)
+    assert tensor.dtype == torch.float16
+    torch.testing.assert_close(
+        tensor[:, 0, 0, 0],
+        torch.tensor([1.0, -1.0, -1.0], dtype=torch.float16),
+    )
+    assert "_tar_handle" not in result
+
+
+@pytest.mark.parametrize("field", ["target_frames", "target_height", "target_width"])
+def test_video_target_dimensions_accept_one_and_reject_zero(field: str) -> None:
+    processor = DecodeVideo(DecodeVideo.Config())
+    target = {"target_frames": 2, "target_height": 4, "target_width": 6}
+    # Each target dimension is valid down to 1; zero is the rejected boundary.
+    target[field] = 1
+    sample = cast(
+        DecodeVideo.Input,
+        {"media": b"video", "frames": 2, "height": 4, "width": 6, **target},
+    )
+
+    fields = processor._extract_fields(sample)
+
+    assert fields is not None
+    assert fields[-3:] == (
+        target["target_frames"],
+        target["target_height"],
+        target["target_width"],
+    )
+
+    target[field] = 0
+    invalid = cast(
+        DecodeVideo.Input,
+        {"media": b"video", "frames": 2, "height": 4, "width": 6, **target},
+    )
+    assert processor._extract_fields(invalid) is None
+    assert invalid.get("filter_reasons") == [
+        f"DecodeVideo:invalid_target:f={target['target_frames']}_h={target['target_height']}_w={target['target_width']}",
+    ]
+
+
+def test_image_processor_passes_exact_floors_and_default_decode_failure() -> None:
+    processor = CropDuringDecodeImage(
+        CropDuringDecodeImage.Config(scale_to_target=True),
+    )
+    sample = cast(
+        CropDuringDecodeImage.Input,
+        {"media": b"image", "format": "jpg", "height": 16, "width": 24},
+    )
+    with patch.object(
+        processor,
+        "_process_image",
+        return_value=(None, None),
+    ) as process_image:
+        result = next(processor(iter([sample])))
+
+    process_image.assert_called_once_with(
+        b"image",
+        "jpg",
+        16,
+        24,
+        None,
+        floor=(0, 0),
+    )
+    assert result.get("filter_reasons") == [
+        "CropDuringDecodeImage:decode_failed",
+    ]
+
+    sample = cast(
+        CropDuringDecodeImage.Input,
+        {
+            "media": b"image",
+            "format": "jpg",
+            "height": 16,
+            "width": 24,
+            "target_height": 6,
+            "target_width": 10,
+        },
+    )
+    with patch.object(
+        processor,
+        "_process_image",
+        return_value=None,
+    ) as process_image:
+        result = next(processor(iter([sample])))
+
+    process_image.assert_called_once_with(
+        b"image",
+        "jpg",
+        16,
+        24,
+        None,
+        floor=(6, 10),
+    )
+    assert result.get("filter_reasons") is None
+
+    unscaled = CropDuringDecodeImage(
+        CropDuringDecodeImage.Config(scale_to_target=False),
+    )
+    sample = cast(
+        CropDuringDecodeImage.Input,
+        {
+            "media": b"image",
+            "format": "jpg",
+            "height": 16,
+            "width": 24,
+            "target_height": 6,
+            "target_width": 10,
+        },
+    )
+    with patch.object(
+        unscaled,
+        "_process_image",
+        return_value=None,
+    ) as process_image:
+        _ = next(unscaled(iter([sample])))
+
+    process_image.assert_called_once_with(
+        b"image",
+        "jpg",
+        16,
+        24,
+        None,
+        floor=(0, 0),
+    )
+
+
+def test_image_decoder_continues_after_a_cached_sample() -> None:
+    processor = CropDuringDecodeImage(CropDuringDecodeImage.Config())
+    cached_tensor = torch.zeros(3, 2, 4, 6, dtype=torch.uint8)
+    cached = cast(
+        CropDuringDecodeImage.Input,
+        {"media_tensor": cached_tensor, "media": b"ignored"},
+    )
+    decoded = torch.ones(3, 4, 6, dtype=torch.uint8)
+    sample = cast(
+        CropDuringDecodeImage.Input,
+        {"media": b"image", "format": "jpg", "height": 4, "width": 6},
+    )
+    with patch.object(
+        processor,
+        "_process_image",
+        return_value=(decoded, None),
+    ) as call:
+        results = list(processor(iter([cached, sample])))
+
+    assert len(results) == 2
+    assert results[0].get("media_tensor") is cached_tensor
+    decoded_tensor = results[1].get("media_tensor")
+    assert isinstance(decoded_tensor, torch.Tensor)
+    assert decoded_tensor.shape == (3, 1, 4, 6)
+    call.assert_called_once()
+
+
+def test_image_backend_calls_receive_exact_decode_options() -> None:
+    processor = CropDuringDecodeImage(
+        CropDuringDecodeImage.Config(scale_to_target=True),
+    )
+    expected = torch.zeros(3, 8, 12, dtype=torch.uint8)
+    crop = (2, 4, 8, 12)
+    with patch(
+        "priml.data.processors.bytes.decode_jpeg_turbojpeg",
+        return_value=expected,
+    ) as decode_jpeg:
+        decoded = processor._process_image(
+            b"jpeg",
+            "jpg",
+            16,
+            24,
+            crop,
+            floor=(6, 10),
+        )
+
+    assert decoded is not None
+    assert decoded[0] is expected
+    assert decoded[1] is None
+    decode_jpeg.assert_called_once_with(
+        b"jpeg",
+        processor.turbo_jpeg,
+        16,
+        24,
+        crop=crop,
+        channels_first=True,
+        min_height=6,
+        min_width=10,
+    )
+
+    with patch(
+        "priml.data.processors.bytes.decode_webp_libwebp",
+        return_value=expected,
+    ) as decode_webp:
+        decoded = processor._process_image(b"webp", "webp", 16, 24, crop)
+
+    assert decoded is not None
+    assert decoded[0] is expected
+    assert decoded[1] is None
+    decode_webp.assert_called_once_with(
+        b"webp",
+        16,
+        24,
+        crop=crop,
+        channels_first=True,
+    )
+
+
+def test_image_cascade_keeps_trying_after_none_and_exceptions() -> None:
+    processor = CropDuringDecodeImage(
+        CropDuringDecodeImage.Config(known_formats=["jpg", "png"]),
+    )
+    decoded = torch.ones(3, 4, 6, dtype=torch.uint8)
+    with (
+        patch(
+            "priml.data.processors.bytes.decode_jpeg_turbojpeg",
+            side_effect=ValueError("bad jpeg"),
+        ) as decode_jpeg,
+        patch(
+            "priml.data.processors.bytes.decode_image_pil",
+            return_value=decoded,
+        ) as decode_pil,
+    ):
+        result = processor._process_image(b"image", None, 4, 6, None)
+
+    assert result is not None
+    assert result[0] is decoded
+    assert result[1] is None
+    decode_jpeg.assert_called_once()
+    decode_pil.assert_called_once()
+
+    processor.known_formats = ["webp", "png"]
+    with (
+        patch(
+            "priml.data.processors.bytes.decode_webp_libwebp",
+            return_value=None,
+        ),
+        patch(
+            "priml.data.processors.bytes.decode_image_pil",
+            return_value=None,
+        ),
+    ):
+        assert processor._process_image(b"image", None, 4, 6, None) == (
+            None,
+            "png_decode_failed",
+        )
+
+
+def test_image_decode_normalizes_in_place_and_initializes_only_enabled_backends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor = CropDuringDecodeImage(
+        CropDuringDecodeImage.Config(
+            dtype=torch.float16,
+            known_formats=["png"],
+            use_turbojpeg=False,
+        ),
+    )
+    assert processor.turbo_jpeg is None
+    assert processor.use_libwebp is True
+    decoded = torch.zeros(3, 4, 6, dtype=torch.uint8)
+    normalized = torch.ones(
+        3,
+        1,
+        4,
+        6,
+        dtype=torch.float16,
+    )  # CropDuringDecodeImage uses [channels, frames, height, width].
+    conversions: list[tuple[torch.Tensor, bool]] = []
+
+    def normalize(
+        x: torch.Tensor,
+        *,
+        inplace: bool = False,
+        unit_interval: bool = False,
+    ) -> torch.Tensor:
+        assert not unit_interval
+        conversions.append((x, inplace))
+        return normalized
+
+    monkeypatch.setattr(
+        "priml.data.processors.bytes.rgb2float",
+        normalize,
+    )
+    with patch(
+        "priml.data.processors.bytes.decode_image_pil",
+        return_value=decoded,
+    ):
+        result = next(
+            processor(
+                iter(
+                    [
+                        cast(
+                            CropDuringDecodeImage.Input,
+                            {
+                                "media": b"image",
+                                "format": "png",
+                                "height": 4,
+                                "width": 6,
+                            },
+                        ),
+                    ],
+                ),
+            ),
+        )
+
+    assert len(conversions) == 1
+    source, inplace = conversions[0]
+    torch.testing.assert_close(
+        source,
+        decoded.unsqueeze(-3).to(dtype=torch.float16),
+    )
+    assert inplace
+    assert result.get("media_tensor") is normalized
+
+    monkeypatch.setattr(
+        "priml.data.processors.bytes.TurboJPEG",
+        lambda: None,
+    )
+    broken = CropDuringDecodeImage(CropDuringDecodeImage.Config())
+    with pytest.raises(ValueError, match=r"^Expected self\.turbo_jpeg is not None\.$"):
+        broken._process_image(b"jpeg", "jpg", 4, 6, None)
+
+
+def test_image_cascade_continues_after_backend_failures() -> None:
+    processor = CropDuringDecodeImage(
+        CropDuringDecodeImage.Config(known_formats=["webp", "png"]),
+    )
+    decoded = torch.ones(3, 4, 6, dtype=torch.uint8)
+    with (
+        patch(
+            "priml.data.processors.bytes.decode_webp_libwebp",
+            return_value=None,
+        ) as decode_webp,
+        patch(
+            "priml.data.processors.bytes.decode_image_pil",
+            return_value=decoded,
+        ) as decode_pil,
+    ):
+        result = processor._process_image(b"image", None, 4, 6, None)
+
+    assert result is not None
+    assert result[0] is decoded
+    assert result[1] is None
+    decode_webp.assert_called_once()
+    decode_pil.assert_called_once()
+
+    processor.known_formats = ["png", "jpg"]
+    with (
+        patch(
+            "priml.data.processors.bytes.decode_image_pil",
+            return_value=None,
+        ) as decode_pil,
+        patch(
+            "priml.data.processors.bytes.decode_jpeg_turbojpeg",
+            return_value=decoded,
+        ) as decode_jpeg,
+    ):
+        result = processor._process_image(b"image", None, 4, 6, None)
+
+    assert result is not None
+    assert result[0] is decoded
+    decode_pil.assert_called_once()
+    decode_jpeg.assert_called_once()
+
+
+def test_video_processor_reads_tar_bytes_and_repeats_the_last_distinct_frame(
+    tmp_path: Path,
+) -> None:
+    height, width, frames = 2, 3, 3
+    frame_bytes = bytes([255, 0, 0]) * height * width
+    frame_bytes += bytes([0, 255, 0]) * height * width
+    frame_bytes += bytes([0, 0, 255]) * height * width
+    remaining = bytearray(frame_bytes)
+    captured_payload = b""
+    terminated: list[bool] = []
+    waited: list[int | None] = []
+
+    class Stdout:
+        def read(self, size: int) -> bytes:
+            chunk = bytes(remaining[:size])
+            del remaining[:size]
+            return chunk
+
+        def close(self) -> None:
+            pass
+
+    class Process:
+        stdout = Stdout()
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            terminated.append(True)
+
+        def wait(self, timeout: int = 0) -> None:
+            waited.append(timeout)
+
+    def launch(args: list[str], *, stdout: int, stderr: int) -> Process:
+        del stdout, stderr
+        nonlocal captured_payload
+        captured_payload = Path(args[4]).read_bytes()
+        return Process()
+
+    archive = tmp_path / "video.tar"
+    with tarfile.open(archive, "w") as tar:
+        webm_payload = b"wrong-payload"
+        webm = tarfile.TarInfo("clip.webm")
+        webm.size = len(webm_payload)
+        tar.addfile(webm, io.BytesIO(webm_payload))
+        mp4_payload = b"clip-payload"
+        mp4 = tarfile.TarInfo("clip.mp4")
+        mp4.size = len(mp4_payload)
+        tar.addfile(mp4, io.BytesIO(mp4_payload))
+
+    processor = DecodeVideo(
+        DecodeVideo.Config(
+            ffmpeg_exe="fake-ffmpeg",
+            known_formats=["webm", "mp4"],
+        ),
+    )
+    with (
+        TarFileHandle(archive, use_mmap=False) as handle,
+        patch(
+            "priml.data.processors.bytes.subprocess.Popen",
+            side_effect=launch,
+        ),
+        patch(
+            "priml.data.processors.bytes.rgb2float",
+            wraps=rgb2float,
+        ) as normalize,
+    ):
+        sample = cast(
+            DecodeVideo.Input,
+            {
+                "_tar_handle": handle,
+                "key": "clip",
+                "format": "mp4",
+                "frames": frames,
+                "height": height,
+                "width": width,
+                "target_frames": 4,
+                "target_height": height,
+                "target_width": width,
+            },
+        )
+        result = next(processor(_as_stream([sample])))
+
+    tensor = result.get("media_tensor")
+    assert tensor is not None
+    assert tensor.shape == (3, 4, height, width)
+    torch.testing.assert_close(
+        tensor[:, 0, 0, 0],
+        torch.tensor([1.0, -1.0, -1.0], dtype=torch.float16),
+    )
+    torch.testing.assert_close(
+        tensor[:, 1, 0, 0],
+        torch.tensor([-1.0, 1.0, -1.0], dtype=torch.float16),
+    )
+    torch.testing.assert_close(
+        tensor[:, 2:, 0, 0],
+        torch.tensor([[-1.0, -1.0], [-1.0, -1.0], [1.0, 1.0]], dtype=torch.float16),
+    )
+    normalize.assert_called_once()
+    assert normalize.call_args.kwargs == {"inplace": True}
+    assert captured_payload == b"clip-payload"
+    assert terminated == [True]
+    assert waited == [5]
+    assert "_tar_handle" not in result
+
+
+def test_video_decoder_invokes_ffmpeg_with_the_output_contract() -> None:
+    height, width = 4, 6
+    stdout_bytes = bytearray(bytes([255, 0, 0]) * height * width * 2)
+    captured_args: list[str] = []
+    captured_payload = b""
+    captured_options: dict[str, object] = {}
+
+    class Stdout:
+        def read(self, size: int) -> bytes:
+            chunk = bytes(stdout_bytes[:size])
+            del stdout_bytes[:size]
+            return chunk
+
+        def close(self) -> None:
+            pass
+
+    class Process:
+        stdout = Stdout()
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout: int = 0) -> None:
+            del timeout
+
+    def launch(
+        args: list[str],
+        *,
+        stdout: int,
+        stderr: int,
+    ) -> Process:
+        nonlocal captured_payload
+        captured_args.extend(args)
+        captured_payload = Path(args[4]).read_bytes()
+        captured_options.update(stdout=stdout, stderr=stderr)
+        return Process()
+
+    processor = DecodeVideo(DecodeVideo.Config(ffmpeg_exe="chosen-ffmpeg"))
+    with patch(
+        "priml.data.processors.bytes.subprocess.Popen",
+        side_effect=launch,
+    ):
+        result = processor._decode(
+            b"video-payload",
+            height=height,
+            width=width,
+            keep_frames=2,
+        )
+
+    assert result is not None
+    assert result.shape == (3, 2, height, width)
+    assert captured_args == [
+        "chosen-ffmpeg",
+        "-v",
+        "error",
+        "-i",
+        captured_args[4],
+        "-pix_fmt",
+        "rgb24",
+        "-vcodec",
+        "rawvideo",
+        "-f",
+        "image2pipe",
+        "-vf",
+        "scale=6:4:in_color_matrix=bt709:out_color_matrix=bt709:in_range=tv:out_range=full",
+        "-threads",
+        "1",
+        "-",
+    ]
+    assert Path(captured_args[4]).name.startswith("bytes-")
+    assert Path(captured_args[4]).suffix == ".mp4"
+    assert captured_payload == b"video-payload"
+    assert captured_options == {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.DEVNULL,
+    }
 
 
 if __name__ == "__main__":

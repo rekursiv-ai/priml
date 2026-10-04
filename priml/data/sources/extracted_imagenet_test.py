@@ -28,12 +28,21 @@ def _write_extracted_imagenet(root: Path) -> None:
     (root / "validation_labels.txt").write_text("n01440764\nn01443537\nn01484850\n")
 
 
-def test_extracted_imagenet_train_walks_sorted_synsets(tmp_path: Path) -> None:
+def test_extracted_imagenet_train_walks_sorted_synsets(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     _write_extracted_imagenet(tmp_path)
 
-    source = ExtractedImageNetSource.Config(working_dir=tmp_path).make()
+    with caplog.at_level("INFO"):
+        source = ExtractedImageNetSource.Config(working_dir=tmp_path).make()
     samples = list(source)
 
+    assert len(caplog.records) == 1
+    assert caplog.records[0].msg == (
+        "ExtractedImageNetSource initialized: split=%s, dir=%s"
+    )
+    assert caplog.records[0].args == ("train", tmp_path / "train")
     assert [s.get("key") for s in samples] == [
         "n01440764_0",
         "n01440764_1",
@@ -102,14 +111,23 @@ def test_extracted_imagenet_val_without_labels_reports_unknown(tmp_path: Path) -
     config.split = "val"
     config.worker_slice = (1, 2)
 
-    samples = list(config.make())
+    source = config.make()
+    assert source.validation_labels is None
+    samples = list(source)
 
     # Val is never shuffled: worker 1 of 2 takes the sorted tail.
     assert [s.get("key") for s in samples] == [
         "ILSVRC2012_val_00000001",
         "ILSVRC2012_val_00000002",
     ]
-    assert {s.get("label") for s in samples} == {"unknown"}
+    assert samples[0] == {
+        "key": "ILSVRC2012_val_00000001",
+        "file_path": str(tmp_path / "val" / "ILSVRC2012_val_00000001.JPEG"),
+        "format": "jpg",
+        "label": "unknown",
+        "frames": 1,
+    }
+    assert samples[1].get("frames") == 1
 
 
 def test_extracted_imagenet_val_labels_absent_for_a_file_fall_back_to_unknown(
@@ -135,7 +153,7 @@ def test_extracted_imagenet_rejects_a_label_count_mismatch(tmp_path: Path) -> No
     config.split = "val"
     config.validation_labels_file = labels
 
-    with pytest.raises(ValueError, match="Mismatch: 3 files but 1 labels"):
+    with pytest.raises(ValueError, match=r"zip\(\) argument"):
         _ = config.make()
 
 
@@ -152,7 +170,7 @@ def test_extracted_imagenet_rejects_missing_directories_and_unknown_splits(
         _ = val_only.make()
 
     bogus = ExtractedImageNetSource.Config(working_dir=tmp_path)
-    bogus.split = "test"  # ty: ignore[invalid-assignment] -- The runtime guard exists for unchecked config text.  # pyright: ignore[reportAttributeAccessIssue] -- Same.
+    object.__setattr__(bogus, "split", "test")
     with pytest.raises(ValueError, match="Unknown split: test"):
         _ = bogus.make()
 

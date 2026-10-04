@@ -12,7 +12,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Final, cast
+from typing import Final, cast, override
+from unittest import mock
 
 from configgle.testing import assert_pprint_golden
 from torch import Tensor
@@ -33,6 +34,12 @@ from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
+
+
+class _ScaleExpert(torch.nn.Module):
+    @override
+    def forward(self, x: Tensor, *, scale: int = 1) -> Tensor:
+        return x * scale
 
 
 def test_router_rejects_top_k_above_num_experts():
@@ -91,7 +98,13 @@ def test_router_jitter():
 
 def test_router_reset():
     m = SoftmaxRouter.Config(channels_in=64, num_experts=4).make()
-    m.reset_parameters()
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        expected = torch.empty_like(m.gate.weight)
+        torch.nn.init.kaiming_uniform_(expected, a=5**0.5)
+        torch.manual_seed(0)
+        m.reset_parameters()
+    assert torch.equal(m.gate.weight, expected)
 
 
 def test_router_forward_accepts_messages_and_rejects_positional_extras():
@@ -117,6 +130,44 @@ def test_moe():
     assert m(x).shape == (2, 8, 64)
 
 
+def test_moe_initializes_depth_and_aux_loss():
+    model = MoE.Config(
+        channels_in=3,
+        depth_index=((2, 3),),
+        router=SoftmaxRouter.Config(num_experts=4, top_k=2),
+    ).make()
+
+    assert model.depth_index == ((2, 3),)
+    assert model._aux_loss.shape == ()
+    assert model._aux_loss.dtype == torch.float32
+    assert model._aux_loss.item() == 0.0
+    assert "_aux_loss" not in model.state_dict()
+    model.to(device=torch.device("meta"))
+    assert model._aux_loss.device.type == "meta"
+
+
+def test_moe_dispatch_forwards_expert_kwargs():
+    model = MoE.Config(
+        channels_in=2,
+        router=SoftmaxRouter.Config(num_experts=2, top_k=2),
+    ).make()
+    model.experts[0] = _ScaleExpert()
+    model.experts[1] = _ScaleExpert()
+    x = torch.ones((3, 2))
+    weights = torch.tensor([[0.25, 0.75], [0.5, 0.5], [0.75, 0.25]])
+    indices = torch.tensor([[0, 1], [1, 0], [0, 1]])
+
+    with mock.patch.object(
+        torch,
+        "arange",
+        wraps=torch.arange,
+    ) as arange:
+        result = model._dispatch_routed(x, weights, indices, 3, scale=3)
+
+    assert torch.equal(result, torch.full((3, 2), 3.0))
+    arange.assert_called_once_with(3, device=x.device)
+
+
 def test_moe_aux_loss():
     m = MoE.Config(
         channels_in=64,
@@ -126,6 +177,46 @@ def test_moe_aux_loss():
     x = torch.randn(2, 8, 64)
     m(x)
     assert m._aux_loss.item() > 0
+
+
+def test_load_balance_loss_allocates_on_logits_device_and_dtype():
+    model = MoE.Config(
+        channels_in=3,
+        router=SoftmaxRouter.Config(num_experts=4, top_k=2),
+    ).make()
+    logits = torch.tensor([[0.0, 1.0, 2.0, 3.0], [3.0, 2.0, 1.0, 0.0]])
+    indices = torch.tensor([[0, 2], [1, 3]])
+    default_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(torch.float64)
+        with (
+            mock.patch.object(torch, "zeros", wraps=torch.zeros) as zeros,
+            mock.patch.object(torch, "ones", wraps=torch.ones) as ones,
+        ):
+            loss = model._load_balance_loss(logits, indices)
+    finally:
+        torch.set_default_dtype(default_dtype)
+
+    assert loss.dtype == torch.float32
+    zeros.assert_called_once_with(4, device=logits.device, dtype=logits.dtype)
+    ones.assert_any_call(2, device=logits.device, dtype=logits.dtype)
+
+
+def test_load_balance_loss_uses_expert_frequency_and_mean_probability():
+    config = MoE.Config(
+        channels_in=3,
+        aux_loss_weight=0.25,
+        router=SoftmaxRouter.Config(num_experts=4, top_k=2),
+    )
+    model = config.make()
+    logits = torch.tensor(
+        [[3.0, 0.0, -1.0, 2.0], [0.0, 2.0, 1.0, -2.0], [1.0, 0.0, 3.0, -1.0]],
+    )
+    indices = torch.tensor([[0, 2], [1, 2], [0, 3]])
+    probabilities = logits.softmax(dim=-1)
+    frequency = torch.tensor([2.0, 1.0, 2.0, 1.0]) / 6
+    expected = 4 * (frequency * probabilities.mean(dim=0)).sum() * 0.25
+    assert torch.equal(model._load_balance_loss(logits, indices), expected)
 
 
 def test_moe_reset():
@@ -262,28 +353,19 @@ def test_router_softmax_defaults_leave_weights_unnormalized():
     assert "e_score_correction_bias" not in dict(r.named_buffers())
 
 
-def test_moe_aux_loss_is_registered_buffer():
-    """``_aux_loss`` must be a buffer so ``.to(device)`` moves it.
-
-    Regression for MOE-AUX (Issue#336): a plain attribute tensor is not
-    tracked by ``nn.Module``, so it stays on the original device after
-    ``.to(...)`` and is invisible to ``state_dict``.
-    """
+def test_moe_aux_loss_is_plain_and_moves_with_module():
     m = MoE.Config(
         channels_in=8,
         router=SoftmaxRouter.Config(num_experts=4, top_k=2),
     ).make()
-    assert "_aux_loss" in dict(m.named_buffers())
+    assert "_aux_loss" not in dict(m.named_buffers())
+    assert "_aux_loss" not in m.state_dict()
+    m.to(device=torch.device("meta"))
+    assert m._aux_loss.device.type == "meta"
 
 
 def test_moe_reset_parameters_reinitializes_aux_loss():
-    """``reset_parameters`` must reinitialize the ``_aux_loss`` buffer.
-
-    Regression for MOE-AUX (Issue#336): the meta-init audit poisons every
-    float buffer with NaN and requires ``reset_parameters`` to be the sole
-    source of init. As a registered buffer, ``_aux_loss`` is in that audit
-    set, so ``reset_parameters`` must restore it to a finite value.
-    """
+    """``reset_parameters`` must restore the non-persistent scratch tensor."""
     m = MoE.Config(
         channels_in=8,
         router=SoftmaxRouter.Config(num_experts=4, top_k=2),
@@ -314,6 +396,31 @@ def test_group_topk_masks_inactive_groups():
     x = torch.randn(8, 32)
     _, indices, _ = m.router(x)
     assert ((indices >= 0) & (indices < 4)).all()
+
+
+def test_group_topk_uses_the_two_largest_scores_per_group():
+    router = SigmoidRouter.Config(
+        channels_in=3,
+        num_experts=6,
+        top_k=1,
+        n_group=2,
+        topk_group=1,
+    ).make()
+    selection = torch.tensor(
+        [[9.0, 8.0, 0.0, 7.0, 6.0, 5.0], [9.0, 0.0, 0.0, 8.0, 7.0, 6.0]],
+    )
+
+    masked = router._mask_inactive_groups(selection)
+
+    assert torch.equal(
+        masked,
+        torch.tensor(
+            [
+                [9.0, 8.0, 0.0, -float("inf"), -float("inf"), -float("inf")],
+                [-float("inf"), -float("inf"), -float("inf"), 8.0, 7.0, 6.0],
+            ],
+        ),
+    )
 
 
 def test_router_config_pprint() -> None:

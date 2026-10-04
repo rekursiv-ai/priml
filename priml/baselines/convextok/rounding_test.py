@@ -66,6 +66,12 @@ def test_deterministic_ties_keep_candidate_order() -> None:
     assert chosen.tolist() == [0, 1]
 
 
+def test_many_ties_keep_candidate_order_at_budget_boundary() -> None:
+    indicators = torch.ones(32, dtype=torch.float64)
+    chosen = deterministic_rounding(indicators, [str(i) for i in range(32)], budget=16)
+    assert chosen.tolist() == list(range(16))
+
+
 def test_only_positive_indicators_are_ranked() -> None:
     indicators = torch.tensor([0.0, 0.0, 1.0], dtype=torch.float64)
     assert deterministic_rounding(indicators, ["a", "b", "c"], budget=2).tolist() == [2]

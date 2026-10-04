@@ -199,14 +199,13 @@ def _sample(
 
     if top_k > 0:
         top_k = min(top_k, logits.size(-1))
-        kth_val = logits.topk(top_k, dim=-1).values[..., -1:]
+        kth_val = logits.topk(top_k).values[..., -1:]
         logits = logits.where(
             logits >= kth_val,
-            torch.full_like(logits, float("-inf")),
+            torch.full_like(logits, -math.inf),
         )
 
-    if top_p < 1.0:
-        logits = _topp_filter(logits, top_p=top_p)
+    logits = _topp_filter(logits, top_p=top_p)
 
     probs = logits.softmax(dim=-1)
     return torch.multinomial(probs, num_samples=1)
@@ -217,10 +216,13 @@ def _sample(
 # cumulative mass equals ``top_p`` (the Hugging Face convention).
 def _topp_filter(logits: Tensor, top_p: float) -> Tensor:
     """Mask logits outside the top-p nucleus, in original vocab order."""
-    sorted_logits, sorted_idx = logits.sort(dim=-1, descending=True)
+    if top_p == 1.0:
+        return logits
+
+    sorted_logits, sorted_idx = logits.sort(descending=True)
     probs = sorted_logits.softmax(dim=-1)
     mask = probs.cumsum(dim=-1) - probs > top_p
-    mask_value = float("-inf")
+    mask_value = -math.inf
     sorted_logits[mask] = mask_value
     # Scatter back to original vocab order over a fully-masked base so filtered
     # positions stay filtered regardless of scatter coverage.

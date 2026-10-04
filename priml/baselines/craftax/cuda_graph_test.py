@@ -51,47 +51,73 @@ def test_python_runs_only_for_the_eager_call_and_the_capture() -> None:
 
 
 class _CpuStream:
+    def __init__(self) -> None:
+        self.waited_on: list[object] = []
+
     def wait_stream(self, stream: object) -> None:
-        del stream
+        self.waited_on.append(stream)
 
 
 class _CpuGraph:
+    def __init__(self) -> None:
+        self.generators: list[torch.Generator] = []
+        self.replays = 0
+
     def register_generator_state(self, generator: torch.Generator) -> None:
-        del generator
+        self.generators.append(generator)
 
     def replay(self) -> None:
-        pass
+        self.replays += 1
+
+
+def test_constructor_starts_not_warmed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "Stream", _CpuStream)
+
+    replay = CudaGraphed(lambda: None)
+
+    assert replay._warm is False
 
 
 def test_capture_runs_the_procedure_and_replay_reruns_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = 0
+    capture_stream = _CpuStream()
+    caller_stream = _CpuStream()
+    graph = _CpuGraph()
+    graph_context_args: list[tuple[_CpuGraph, _CpuStream]] = []
 
     def procedure() -> None:
         nonlocal calls
         calls += 1
 
     def current_stream() -> _CpuStream:
-        return _CpuStream()
+        return caller_stream
 
     def stream_context(stream: _CpuStream) -> object:
+        assert stream is capture_stream
         return nullcontext(stream)
 
-    def graph_context(graph: _CpuGraph, stream: _CpuStream) -> object:
-        del stream
-        return nullcontext(graph)
+    def graph_context(captured_graph: _CpuGraph, stream: _CpuStream) -> object:
+        graph_context_args.append((captured_graph, stream))
+        return nullcontext(captured_graph)
 
-    monkeypatch.setattr(torch.cuda, "Stream", _CpuStream)
-    monkeypatch.setattr(torch.cuda, "CUDAGraph", _CpuGraph)
+    monkeypatch.setattr(torch.cuda, "Stream", lambda: capture_stream)
+    monkeypatch.setattr(torch.cuda, "CUDAGraph", lambda: graph)
     monkeypatch.setattr(torch.cuda, "current_stream", current_stream)
     monkeypatch.setattr(torch.cuda, "stream", stream_context)
     monkeypatch.setattr(torch.cuda, "graph", graph_context)
-    replay = CudaGraphed(procedure)
+    generator = torch.Generator().manual_seed(0)
+    replay = CudaGraphed(procedure, generators=(generator,))
     replay()
     replay()
     replay()
     assert calls == 2
+    assert graph.generators == [generator]
+    assert capture_stream.waited_on == [caller_stream]
+    assert caller_stream.waited_on == [capture_stream]
+    assert graph_context_args == [(graph, capture_stream)]
+    assert graph.replays == 2
 
 
 if __name__ == "__main__":

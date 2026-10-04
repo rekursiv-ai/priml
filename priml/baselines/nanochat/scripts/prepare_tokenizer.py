@@ -19,6 +19,7 @@ from tokenizers import decoders, models, pre_tokenizers
 import rustbpe
 import tokenizers
 
+from priml.baselines.nanochat.data import DEFAULT_ENCODE_THREADS
 from priml.lib.custom_json import DictCodec
 from priml.paths import validated_output_path
 
@@ -44,6 +45,18 @@ else:
 logger = logging.getLogger(__name__)
 
 
+type JsonValue = (
+    float
+    | int
+    | str
+    | bool
+    | list[JsonValue]
+    | tuple[JsonValue, ...]
+    | dict[str, JsonValue]
+    | None
+)
+
+
 def read_mapping(path: Path) -> dict[str, object]:
     """Read a JSON object without interpreting its nested schema.
 
@@ -59,7 +72,7 @@ def read_mapping(path: Path) -> dict[str, object]:
     )
 
 
-def write_mapping(path: Path, *, value: object) -> None:
+def write_mapping(path: Path, *, value: JsonValue) -> None:
     """Publish deterministic JSON after its complete contents have been written.
 
     Args:
@@ -67,6 +80,7 @@ def write_mapping(path: Path, *, value: object) -> None:
       value: JSON-compatible preparation metadata.
 
     """
+    _require_finite_json_numbers(value)
     destination = validated_output_path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -76,7 +90,7 @@ def write_mapping(path: Path, *, value: object) -> None:
         prefix="nanochat-json-",
     ) as output:
         output.write(
-            json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n",
+            json.dumps(value, indent=2, sort_keys=True) + "\n",
         )
         staged = Path(output.name)
     staged.replace(destination)
@@ -93,14 +107,8 @@ def document_rows(path: Path, *, shard: int) -> Iterator[tuple[str, str]]:
       row: Original identity and unmodified text.
 
     """
-    offset = 0
-    for batch in parquet.ParquetFile(path).iter_batches(
-        batch_size=1_024,
-        columns=["text"],
-    ):
-        for text in cast(list[str], batch.column(0).to_pylist()):
-            yield f"{shard}:{offset}", text
-            offset += 1
+    for offset, text in enumerate(_document_texts(path)):
+        yield f"{shard}:{offset}", text
 
 
 def usage_scores(pieces: list[bytes], counts: list[int]) -> list[float]:
@@ -158,7 +166,7 @@ class SamplePreparation:
             self.config.working_dir,
             protected=[self.config.raw_dir],
         )
-        output.mkdir(parents=True, exist_ok=False)
+        output.mkdir(parents=True)
         texts: list[str] = []
         for shard in self.config.train_shard_indices:
             path = self.config.raw_dir / f"shard_{shard:05d}.parquet"
@@ -167,7 +175,7 @@ class SamplePreparation:
             selected = {
                 (2 * index + 1) * total // (2 * count) for index in range(count)
             }
-            for index, (_, text) in enumerate(document_rows(path, shard=shard)):
+            for index, text in enumerate(_document_texts(path)):
                 if index not in selected:
                     continue
                 raw = text.encode()
@@ -229,7 +237,7 @@ class UnigramPreparation:
             self.config.working_dir,
             protected=[self.config.sample_dir],
         )
-        output.mkdir(parents=True, exist_ok=False)
+        output.mkdir(parents=True)
         ordinary = self.config.vocab_size - self.config.reserved_count
         trainer = rustbpe.Tokenizer()
         trainer.train_from_iterator(
@@ -269,15 +277,7 @@ class UnigramPreparation:
             counts = [frequencies[index] for index in range(len(pieces))]
             logger.info("Hard-EM pass %d: %d tokens", iteration + 1, sum(counts))
         scores = self.config.pruning(pieces, counts)
-        keep = sorted(
-            [
-                *range(256),
-                *sorted(
-                    range(256, len(pieces)),
-                    key=lambda index: (-scores[index], index),
-                )[: ordinary - 256],
-            ],
-        )
+        keep = _pruned_piece_indices(scores, ordinary=ordinary)
         model = frequency_model(
             [pieces[index] for index in keep],
             counts=[counts[index] for index in keep],
@@ -352,7 +352,7 @@ def frequency_model(
         for piece, count in zip(pieces, counts, strict=True)
     ]
     model = tokenizers.Tokenizer(
-        models.Unigram(vocab, unk_id=None, byte_fallback=False),
+        models.Unigram(vocab),
     )
     model.pre_tokenizer = pre_tokenizers.Sequence(
         [
@@ -378,7 +378,7 @@ def byte_alphabet() -> dict[int, str]:
 
     """
     values = [*range(33, 127), *range(161, 173), *range(174, 256)]
-    mapping = dict(zip(values, map(chr, values), strict=True))
+    mapping = {value: chr(value) for value in values}
     for value in range(256):
         if value not in mapping:
             mapping[value] = chr(256 + len(mapping) - len(values))
@@ -425,7 +425,7 @@ class ByteLevelTokenizer:
         self,
         texts: list[str],
         *,
-        num_threads: int = 8,
+        num_threads: int = DEFAULT_ENCODE_THREADS,
     ) -> list[list[int]]:
         """Encode unmodified documents and prepend exactly one BOS.
 
@@ -453,3 +453,45 @@ class ByteLevelTokenizer:
                 raise ValueError("Token pieces do not conserve literal UTF-8 bytes.")
             output.append([self.bos_token_id, *ids])
         return output
+
+
+def _require_finite_json_numbers(
+    value: JsonValue,
+    *,
+    visited: set[int] | None = None,
+) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("JSON numbers must be finite.")
+    if not isinstance(value, (list, tuple, dict)):
+        return
+    if visited is None:
+        visited = set()
+    if id(value) in visited:
+        return
+    visited.add(id(value))
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _require_finite_json_numbers(item, visited=visited)
+    if isinstance(value, dict):
+        for item in value.values():
+            _require_finite_json_numbers(item, visited=visited)
+
+
+def _document_texts(path: Path) -> Iterator[str]:
+    for batch in parquet.ParquetFile(path).iter_batches(
+        batch_size=1_024,
+        columns=["text"],
+    ):
+        yield from cast(list[str], batch.column(0).to_pylist())
+
+
+def _pruned_piece_indices(scores: list[float], *, ordinary: int) -> list[int]:
+    return sorted(
+        [
+            *range(256),
+            *sorted(
+                range(256, len(scores)),
+                key=lambda index: (-scores[index], index),
+            )[: ordinary - 256],
+        ],
+    )

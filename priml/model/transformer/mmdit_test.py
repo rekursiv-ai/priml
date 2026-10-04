@@ -262,6 +262,10 @@ def test_reset_parameters():
     m.reset_parameters()
 
 
+def test_reset_parameters_without_adaln():
+    _cfg().make().reset_parameters()
+
+
 def test_attention_inner_width_decoupled_from_residual():
     """Attention inner width (num_heads*channels_head) may differ from residual.
 

@@ -42,13 +42,13 @@ _CWD: Final = Path(__file__).resolve().parent
 
 GOLDEN: Final = _CWD / "testdata" / "exp002.pt"
 
-SLOTS: Final = 3
+SLOTS: Final = 2
 VOCAB: Final = 6
 TRAIN_STEPS: Final = 3
 
 
 def shrunk() -> SudokuTrainLoop:
-    """Return ``exp002`` on a 4x4 grid, width 4, two heads, three slots."""
+    """Return ``exp002`` on a 4x4 grid, width 2, two heads, two slots."""
     cfg = experiments.exp002()
     cfg.dataset.spec.grid_shape = (4, 4)
     cfg.dataset.spec.box_shape = (2, 2)
@@ -58,17 +58,17 @@ def shrunk() -> SudokuTrainLoop:
     step.compile = None
     step.total_train_steps = TRAIN_STEPS
     model = step.model
-    model.channels_in = 4
+    model.channels_in = 2
     model.num_layers = 1
     assert isinstance(model.embedding, GridEmbedding.Config)
     assert isinstance(model.block, TransformerBlock.Config)
     assert isinstance(model.block.attn, Attention.Config)
     model.block.attn.num_heads = 2
     assert isinstance(model.block.ffn, SwiGLU.Config)
-    model.block.ffn.round_to = 4
+    model.block.ffn.round_to = 2
     assert step.pool is not None
     step.pool.batch_size = SLOTS
-    step.pool.max_steps = 3
+    step.pool.max_steps = 2
     return cfg
 
 

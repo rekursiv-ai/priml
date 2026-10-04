@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
+import math
 import sys
 
 import pytest
@@ -126,7 +127,7 @@ def poison_free_pool(*shapes: tuple[int, ...], blocks: int = 32) -> None:
         # Built and dropped one at a time rather than held in a list: each block
         # has to be freed before the next same-size allocation can receive it.
         for _ in range(blocks):
-            block = torch.full(shape, float("nan"))
+            block = torch.full(shape, math.nan)
             del block
 
 

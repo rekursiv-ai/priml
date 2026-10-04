@@ -92,6 +92,14 @@ def test_config_builds_a_constructor_awaiting_parameters() -> None:
     assert group["weight_decay"] == 0.0
 
 
+def test_optimizer_default_rates_are_applied() -> None:
+    optimizer = AdamATan2([torch.zeros(2)])
+    group = optimizer.param_groups[0]
+    assert group["lr"] == 1e-3
+    assert group["betas"] == (0.9, 0.999)
+    assert group["weight_decay"] == 1e-2
+
+
 def test_finalized_config_is_not_finalized_twice() -> None:
     optimizer = AdamATan2.Config(lr=0.5).finalize().make()([torch.zeros(2)])
     assert optimizer.param_groups[0]["lr"] == 0.5
@@ -105,6 +113,17 @@ def test_invalid_hyperparameters_are_rejected() -> None:
         AdamATan2([p], betas=(0.9, 1.0))
     with pytest.raises(ValueError, match="Invalid weight_decay"):
         AdamATan2([p], weight_decay=-1.0)
+
+
+@pytest.mark.parametrize("name", ["lr", "weight_decay"])
+def test_invalid_parameter_group_rates_are_rejected(name: str) -> None:
+    parameter = torch.nn.Parameter(torch.ones(2))
+    parameter.grad = torch.ones_like(parameter)
+    optimizer = AdamATan2([parameter])
+    optimizer.param_groups[0][name] = "invalid"
+
+    with pytest.raises(TypeError, match="cannot coerce 'invalid' to float"):
+        optimizer.step()
 
 
 def test_step_evaluates_and_returns_the_closure() -> None:
@@ -126,6 +145,45 @@ def test_params_without_gradient_are_skipped() -> None:
     optimizer.step()
     torch.testing.assert_close(p, torch.ones(2))
     assert len(optimizer.state) == 0
+
+
+def test_a_missing_gradient_does_not_skip_later_parameters() -> None:
+    first = torch.nn.Parameter(torch.ones(2))
+    second = torch.nn.Parameter(torch.ones(2))
+    second.grad = torch.ones_like(second)
+    optimizer = AdamATan2([first, second], lr=0.1)
+
+    optimizer.step()
+
+    torch.testing.assert_close(first, torch.ones(2))
+    assert not torch.equal(second, torch.ones_like(second))
+
+
+def test_zero_learning_rate_and_zero_moment_decays_are_valid() -> None:
+    parameter = torch.nn.Parameter(torch.tensor([0.5, -0.25]))
+    grad = torch.tensor([0.2, -0.4])
+    parameter.grad = grad
+    optimizer = AdamATan2([parameter], lr=0.0, betas=(0.0, 0.0))
+
+    optimizer.step()
+
+    torch.testing.assert_close(parameter, torch.tensor([0.5, -0.25]))
+    state = cast(dict[str, object], optimizer.state[parameter])
+    torch.testing.assert_close(cast(Tensor, state["exp_avg"]), grad)
+    torch.testing.assert_close(
+        cast(Tensor, state["exp_avg_sq"]),
+        grad.square(),
+    )
+
+
+def test_full_weight_decay_scales_parameters_without_gradient_update() -> None:
+    parameter = torch.nn.Parameter(torch.tensor([0.5, -0.25]))
+    parameter.grad = torch.zeros_like(parameter)
+    optimizer = AdamATan2([parameter], lr=0.2, weight_decay=1.0)
+
+    optimizer.step()
+
+    torch.testing.assert_close(parameter, torch.tensor([0.4, -0.2]))
 
 
 def _reference_step(

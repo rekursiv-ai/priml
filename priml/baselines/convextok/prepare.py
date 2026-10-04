@@ -90,7 +90,7 @@ class ConvexTokPreparation:
         """Fit the vocabulary from the shards and save ``tokenizer.json``."""
         config = self.config
         output = validated_output_path(config.working_dir, protected=[config.raw_dir])
-        output.mkdir(parents=True, exist_ok=False)
+        output.mkdir(parents=True)
         texts = [
             text
             for shard in config.shard_indices

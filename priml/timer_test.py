@@ -7,6 +7,7 @@ what a block charges, what survives a resume, and what deliberately does not.
 
 from __future__ import annotations
 
+import re
 import time
 
 import pytest
@@ -33,6 +34,22 @@ def test_blocks_accumulate() -> None:
     assert timer.local_count == 3
 
 
+def test_each_block_accumulates_its_elapsed_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readings = iter((10.0, 12.0, 20.0, 23.0))
+    monkeypatch.setattr("priml.timer.time.perf_counter", lambda: next(readings))
+    timer = CheckpointableStepTimer()
+
+    with timer:
+        pass
+    with timer:
+        pass
+
+    assert timer.global_sec == 5.0
+    assert timer.local_sec == 5.0
+
+
 def test_a_call_that_raised_is_still_counted() -> None:
     """It happened, and hiding it would misreport the very step being debugged."""
     timer = CheckpointableStepTimer()
@@ -48,8 +65,30 @@ def test_a_nested_block_is_refused_rather_than_double_counted() -> None:
     twice -- and the number that misreports is the budget the run stops on.
     """
     timer = CheckpointableStepTimer()
-    with timer, pytest.raises(RuntimeError, match="already running"), timer:
+    with (
+        timer,
+        pytest.raises(
+            RuntimeError,
+            match=re.escape(
+                "this timer is already running; a nested block would be counted "
+                "twice. Use a separate timer for the inner work.",
+            ),
+        ),
+        timer,
+    ):
         pass
+
+
+def test_exiting_a_closed_timer_reports_its_invalid_state() -> None:
+    timer = CheckpointableStepTimer()
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape("Expected self._started is not None."),
+    ) as error:
+        timer.__exit__(None, None, None)
+
+    assert str(error.value) == "Expected self._started is not None."
 
 
 def test_a_timer_is_saved_closed() -> None:
@@ -92,6 +131,18 @@ def test_a_restored_timer_keeps_counting_from_the_lifetime_total() -> None:
         pass
     assert target.global_count == 6
     assert target.local_count == 1
+
+
+@pytest.mark.parametrize(
+    ("key", "invalid"),
+    [("global_count", "bad"), ("global_sec", "bad")],
+)
+def test_resume_rejects_invalid_persisted_totals(key: str, invalid: str) -> None:
+    state: dict[str, int | float | str] = {"global_count": 1, "global_sec": 2.0}
+    state[key] = invalid
+
+    with pytest.raises(TypeError):
+        CheckpointableStepTimer().load_state_dict(state)
 
 
 if __name__ == "__main__":

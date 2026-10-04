@@ -916,9 +916,9 @@ class NgramTrainStep(NanoChatTrainStep):
             for part, sink in zip(table.tables, table.gradient_sinks, strict=True)
         }
         marks = {
-            part.weight: bitmap
+            table.tables[index].weight: bitmap
             for table in (*tables.values(), *trigram_tables.values())
-            for part, bitmap in zip(table.tables, table.gradient_bitmaps, strict=False)
+            for index, bitmap in enumerate(table.gradient_bitmaps)
         }
         assert isinstance(self.optimizer, CompositeOptimizer)
         bound: set[Tensor] = set()

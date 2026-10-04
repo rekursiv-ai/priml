@@ -12,7 +12,7 @@ math threads before torch imports. Minting from bare Python skips that setup.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final
+from typing import Final, override
 from unittest.mock import Mock, patch
 
 import warnings
@@ -92,11 +92,13 @@ def test_transformer_block_cached(prenorm: bool) -> None:
     ).make()
     assert isinstance(m.attn, Attention)
     cache = m.attn.alloc_kv_cache(batch=2, max_seq=8)
+    x = torch.randn(2, 8, 64)
 
-    out, cache = m.forward_cached(torch.randn(2, 8, 64), cache=cache)
+    out, cache = m.forward_cached(x, cache=cache, window=3)
 
     assert out.shape == (2, 8, 64)
     assert cache.length == 8
+    assert torch.equal(out, m(x, window=3))
 
 
 def test_transformer_block_cached_rejects_attention_without_cached_path() -> None:
@@ -106,8 +108,68 @@ def test_transformer_block_cached_rejects_attention_without_cached_path() -> Non
     ).make()
     cache = KVCache.alloc(batch=2, num_heads=4, max_seq=3, channels_head=5)
 
-    with pytest.raises(TypeError, match="cached attention"):
+    with pytest.raises(TypeError) as error:
         model.forward_cached(torch.randn(2, 3, 16), cache=cache)
+    assert str(error.value) == "The attention module must implement cached attention."
+
+
+class _CachedAttention(torch.nn.Module):
+    def reset_parameters(self) -> None:
+        pass
+
+    def alloc_kv_cache(self, **kwargs: object) -> str:
+        del kwargs
+        return "cache"
+
+    def forward_cached(
+        self,
+        x: torch.Tensor,
+        *,
+        cache: object,
+        marker: str,
+    ) -> tuple[torch.Tensor, object]:
+        assert marker == "forwarded"
+        assert cache == "cache"
+        return torch.full_like(x, 2), "updated"
+
+
+class _MarkerModule(torch.nn.Module):
+    def __init__(self, value: float) -> None:
+        super().__init__()
+        self.value = value
+
+    def reset_parameters(self) -> None:
+        pass
+
+    @override
+    def forward(self, x: torch.Tensor, *, marker: str) -> torch.Tensor:
+        assert marker == "forwarded"
+        return x + self.value
+
+
+@pytest.mark.parametrize("prenorm", [True, False])
+def test_transformer_block_cached_forwards_kwargs_and_residuals(
+    prenorm: bool,
+) -> None:
+    model = TransformerBlock.Config(
+        channels_in=4,
+        attn=Attention.Config(num_heads=2, channels_head=2),
+        prenorm=prenorm,
+    ).make()
+    model.attn = _CachedAttention()
+    model.norm1 = _MarkerModule(5)
+    model.norm2 = _MarkerModule(7)
+    model.ffn = _MarkerModule(3)
+    x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+
+    output, cache = model.forward_cached(x, cache="cache", marker="forwarded")
+
+    assert cache == "updated"
+    if prenorm:
+        expected = 2 * x + 14
+    else:
+        expected = 2 * x + 24
+    assert torch.equal(output, expected)
 
 
 @pytest.mark.parametrize("prenorm", [True, False])

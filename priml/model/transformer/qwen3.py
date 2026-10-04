@@ -308,7 +308,7 @@ class Qwen3(Transformer):
         hf_config, hf_sd = hub.load_hf_checkpoint(path_or_repo, dtype=dtype)
         config = cls.Config.from_hf(hf_config).finalize()
         model = config.make()
-        model.load_state_dict(remap_hf_state_dict(hf_sd, config), strict=True)
+        model.load_state_dict(remap_hf_state_dict(hf_sd, config))
         model = model.to(
             dtype=dtype
             or hub.resolve_hf_dtype(str(hf_config.get("torch_dtype", "bfloat16"))),
@@ -354,7 +354,7 @@ def remap_hf_state_dict(
         q = hf_sd[f"{p}.self_attn.q_proj.weight"].view(n_q, d, h)
         k = hf_sd[f"{p}.self_attn.k_proj.weight"].view(n_kv, d, h)
         v = hf_sd[f"{p}.self_attn.v_proj.weight"].view(n_kv, d, h)
-        out[f"{b}.attn.proj_qkv.weight"] = torch.cat([q, k, v], dim=0)
+        out[f"{b}.attn.proj_qkv.weight"] = torch.cat([q, k, v])
         out[f"{b}.attn.proj_out.weight"] = hf_sd[f"{p}.self_attn.o_proj.weight"]
         out[f"{b}.attn.norm_q.weight"] = hf_sd[f"{p}.self_attn.q_norm.weight"]
         out[f"{b}.attn.norm_k.weight"] = hf_sd[f"{p}.self_attn.k_norm.weight"]
@@ -362,6 +362,6 @@ def remap_hf_state_dict(
         # ``x.chunk(2, dim=-1)`` inside loop.SwiGLU yields (gate, x).
         gate = hf_sd[f"{p}.mlp.gate_proj.weight"]
         up = hf_sd[f"{p}.mlp.up_proj.weight"]
-        out[f"{b}.ffn.up_proj.weight"] = torch.cat([gate, up], dim=0)
+        out[f"{b}.ffn.up_proj.weight"] = torch.cat([gate, up])
         out[f"{b}.ffn.down_proj.weight"] = hf_sd[f"{p}.mlp.down_proj.weight"]
     return out

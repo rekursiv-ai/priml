@@ -710,7 +710,6 @@ def _final_checkpoint(parent: Trainer.Config) -> str:
 def _mixer_block() -> MLPMixerBlock.Config:
     """Return an MLP-mixer block shaped for the sudoku grid."""
     return MLPMixerBlock.Config(
-        seq_len=-1,
         prenorm=False,
         token_mixer=SwiGLU.Config(
             norm=RMSNorm.Config(),

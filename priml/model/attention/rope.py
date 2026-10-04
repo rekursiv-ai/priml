@@ -32,7 +32,7 @@ from priml.cost import (
     resolve_dtype,
     traffic,
 )
-from priml.math.basic import broadcast_sequences, floor_multiple
+from priml.math.basic import broadcast_sequences
 
 
 if TYPE_CHECKING:
@@ -189,7 +189,7 @@ class HuggingFaceFrequencies:
 
     def __call__(self, *, channels: int, device: torch.device) -> tuple[Tensor, float]:
         """Build the table; mscale is 1 because nothing is rescaled."""
-        index = torch.arange(0, channels, 2, dtype=torch.int64, device=device).float()
+        index = torch.arange(0, channels, 2, device=device).float()
         return 1.0 / (self.base ** (index / channels)), 1.0
 
 
@@ -764,7 +764,8 @@ class RoPE(nn.Module):
         """
         dims, maxpos = broadcast_sequences(dim, max_positions)
         bases: list[float] = []
-        for c, m in zip(dims, maxpos, strict=True):
+        for index, c in enumerate(dims):
+            m = maxpos[index]
             if c == 0:
                 bases.append(0.0)
                 continue
@@ -838,13 +839,11 @@ class RoPE(nn.Module):
         """Build the inverse frequencies on ``device``."""
         self._inv_freqs = [torch.empty(0, device=device) for _ in self.channels_head]
         mscales: set[float] = set()
-        for i, (table, c) in enumerate(
-            zip(self._frequencies, self.channels_head, strict=True),
-        ):
+        for i, c in enumerate(self.channels_head):
             if c == 0:
                 continue
             self._validate_c(c)
-            inv_freq, mscale = table(channels=c, device=device)
+            inv_freq, mscale = self._frequencies[i](channels=c, device=device)
             mscales.add(mscale)
             self._inv_freqs[i] = inv_freq.unsqueeze(-2)
         # ONE scalar multiplies the whole concatenated embedding, so it cannot
@@ -856,7 +855,7 @@ class RoPE(nn.Module):
                 f"frequency tables disagree on mscale ({sorted(mscales)}); one "
                 "scalar scales every axis, so they must agree.",
             )
-        self._mscale = mscales.pop() if mscales else 1.0
+        self._mscale = next(iter(mscales), 1.0)
 
     @classmethod
     def _validate_c(cls, c: int) -> None:
@@ -877,7 +876,7 @@ class RoPE(nn.Module):
                 f"Cannot split dim={total} across {naxes} axes"
                 f" (need at least {2 * naxes}).",
             )
-        per = int(floor_multiple(total // naxes, 2))
+        per = (total // (2 * naxes)) * 2
         remainder = total - per * naxes
         dims = [per] * naxes
         for i in range(remainder // 2):
@@ -939,7 +938,7 @@ def _axis_channels(
     if isinstance(tables, list):
         if reduction_mode == "cat" and isinstance(c, int):
             channels = RoPE._split_dim(c, len(tables))  # noqa: SLF001 -- This module helper shares RoPE's private axis allocator with its config.
-        if len(channels) == 1 and len(tables) > 1:
+        if len(channels) == 1 and tables:
             channels = channels * len(tables)
     return channels
 
@@ -1086,7 +1085,9 @@ class RoPEMixed(RoPE):
         self.num_heads = config.num_heads
         self.learnable = config.learnable
         if config.reduction_mode == "sum":
-            active_dims = {f.shape[-1] for f in self._inv_freqs if f.numel()}
+            active_dims = {
+                f.numel() // self.num_heads for f in self._inv_freqs if f.numel()
+            }
             if len(active_dims) > 1:
                 raise ValueError(f"Sum mode requires uniform dims, got {active_dims}.")
         # Capture the base (deterministic) per-axis frequencies; reset_parameters
@@ -1097,14 +1098,14 @@ class RoPEMixed(RoPE):
         self._base_inv_freqs: list[Tensor] = [
             f.detach().clone() for f in self._inv_freqs
         ]
-        head_col = torch.empty(self.num_heads, 1) if self.num_heads > 1 else None
+        head_col = torch.empty(self.num_heads, 1)
         self._inv_freqs = nn.ParameterList(
             nn.Parameter(
-                torch.empty_like(f * head_col if head_col is not None else f),
-                requires_grad=self.learnable and f.numel() > 0,
+                torch.empty_like(f * head_col),
+                requires_grad=self.learnable,
             )
             if f.numel()
-            else nn.Parameter(torch.empty(0), requires_grad=False)
+            else nn.Parameter(torch.empty_like(f), requires_grad=False)
             for f in self._base_inv_freqs
         )
         self.reset_parameters()
@@ -1117,18 +1118,15 @@ class RoPEMixed(RoPE):
         active_count = sum(1 for f in self._base_inv_freqs if f.numel())
         if self.num_heads > 1:
             directions = nn.functional.normalize(
-                nn.init.trunc_normal_(
-                    torch.empty(active_count, self.num_heads, 1),
-                    std=1.0,
-                ),
+                nn.init.trunc_normal_(torch.empty(active_count, self.num_heads, 1)),
                 dim=0,
             )
         with torch.no_grad():
             j = 0
-            for param, base in zip(self._inv_freqs, self._base_inv_freqs, strict=True):
+            for i, base in enumerate(self._base_inv_freqs):
                 if base.numel():
                     scaled = base * directions[j] if directions is not None else base
-                    param.copy_(scaled.to(param))
+                    self._inv_freqs[i].copy_(scaled)
                     j += 1
 
     # Reaches past ``RoPE._apply`` to the grandparent deliberately. The parent rebuilds
@@ -1153,9 +1151,7 @@ class RoPEMixed(RoPE):
 
 def _yarn_mscale(scale: float, mscale: float) -> float:
     """YaRN attention scale: m = 0.1 * ln(factor) * mscale + 1 (for factor > 1)."""
-    if scale <= 1.0:
-        return 1.0
-    return 0.1 * math.log(scale) * mscale + 1.0
+    return 0.1 * math.log(max(scale, 1.0)) * mscale + 1.0
 
 
 def _yarn_correction_dim(
@@ -1204,7 +1200,11 @@ def _yarn_apply(
     if high_f == low_f:
         # beta_fast == beta_slow collapses the ramp to a step function.
         high_f = low_f + 1e-3
-    ramp = torch.arange(dim // 2, dtype=torch.float32, device=inv_freq.device)
+    ramp = torch.arange(
+        inv_freq.shape[0],
+        dtype=torch.float32,
+        device=inv_freq.device,
+    )
     ramp = ((ramp - low_f) / (high_f - low_f)).clamp(0.0, 1.0)
     # HF's ``inv_freq_mask = 1 - ramp``; so at low index (high freq,
     # ramp=0, mask=1) we use original (extrapolation), and at high

@@ -239,7 +239,7 @@ def build_spatial_eval(
             new_puzzle_indices.append(example_count)
             new_puzzle_ids.append(pid)
             new_spatial_tags.append((scale, pad_r, pad_c))
-        if group_ptr < len(group_indices) and p + 1 == group_indices[group_ptr]:
+        if p + 1 == group_indices[group_ptr]:
             new_group_indices.append(len(new_puzzle_ids))
             group_ptr += 1
 
@@ -263,7 +263,7 @@ def build_spatial_eval(
     src_train = source_dir / "train"
     if src_train.is_dir():
         dst_train = target_dir / "train"
-        dst_train.mkdir(parents=True, exist_ok=True)
+        dst_train.mkdir(exist_ok=True)
         for name in SPLIT_FILES:
             shutil.copy(src_train / name, dst_train / name)
         _copy_dataset_json(src_train, dst_train, num_ids=len(identifiers))
@@ -321,7 +321,7 @@ def _rows(array: NDArray[np.int64]) -> list[NDArray[np.int64]]:
 
 
 def _int_list(array: NDArray[np.int64]) -> list[int]:
-    return ListCodec.coerce(cast(object, array.tolist()), int)
+    return cast(list[int], array.tolist())
 
 
 def _content_shape(flat: NDArray[np.int64], *, spec: ArcSpec) -> tuple[int, int]:
@@ -365,19 +365,21 @@ def _sample_spatial(
 ) -> tuple[int, int, int] | None:
     """Sample ``(scale, pad_r, pad_c)`` fitting every grid; None for identity."""
     shapes = [_content_shape(grid, spec=spec) for grid in grids]
-    max_r = max((r for r, _ in shapes), default=0)
-    max_c = max((c for _, c in shapes), default=0)
-    if max_r == 0 or max_c == 0:
+    if not shapes:
+        return None
+    max_r = max(r for r, _ in shapes)
+    max_c = max(c for _, c in shapes)
+    if max_r == 0:
         return None
     factors = [
         s
         for s in scale_weights
         if s * max_r <= spec.max_grid and s * max_c <= spec.max_grid
     ]
-    weights = np.array([scale_weights[s] for s in factors], dtype=np.float64)
+    weights: NDArray[np.float64] = np.array([scale_weights[s] for s in factors])
     scale = int(rng.choice(factors, p=weights / weights.sum())) if factors else 1
-    pad_r = int(rng.integers(0, spec.max_grid - scale * max_r + 1))
-    pad_c = int(rng.integers(0, spec.max_grid - scale * max_c + 1))
+    pad_r = int(rng.integers(spec.max_grid - scale * max_r + 1))
+    pad_c = int(rng.integers(spec.max_grid - scale * max_c + 1))
     if scale == 1 and pad_r == 0 and pad_c == 0:
         return None
     return scale, pad_r, pad_c

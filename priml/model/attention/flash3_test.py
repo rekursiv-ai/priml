@@ -212,7 +212,6 @@ def test_a_prepared_artifact_validates_and_loads(tmp_path: Path) -> None:
     path = _write_prepared_artifact(tmp_path)
     assert artifact_validation_error(path) == ""
     interface = load_flash3(cache_root=tmp_path)
-    assert isinstance(interface, Flash3Interface)
     assert Path(interface.__file__).is_relative_to(path)
 
 

@@ -54,17 +54,35 @@ def test_invalid_horizon_and_cpu_tensor_are_refused_without_cuda() -> None:
         rule.check_horizon(0)
     with pytest.raises(ValueError, match="positive multiple"):
         rule.check_horizon(TritonPPO.Config.ADVANTAGE_WIDTH + 1)
-    with pytest.raises(ValueError, match="runs on a CUDA device"):
+    with pytest.raises(
+        ValueError,
+        match=r"^TritonPPO runs on a CUDA device, not cpu; select TorchPPO to run the rule elsewhere$",
+    ):
         _require_cuda(torch.zeros(2))
+
+
+def test_loss_sums_are_added_across_program_blocks() -> None:
+    rule = TritonPPO.Config().make()
+    partials = torch.tensor(
+        [[1, 2, 3, 4, 5, 6, 7, 8], [10, 20, 30, 40, 50, 60, 70, 80]],
+        dtype=torch.float32,
+    )
+    assert torch.equal(
+        rule.sum_blocks(partials),
+        torch.tensor([11, 22, 33, 44, 55, 66, 77, 88], dtype=torch.float32),
+    )
 
 
 def test_the_kernels_take_the_reference_rules_coefficients() -> None:
     config = TritonPPO.Config()
     assert isinstance(config, TorchPPO.Config)
     config.entropy_coefficient = 0.25
+    config.block = 128
+    config.num_warps = 4
     rule = config.make()
-    assert isinstance(rule, TritonPPO)
     assert rule.entropy_coefficient == 0.25
+    assert rule.block == 128
+    assert rule.num_warps == 4
 
 
 @pytest.mark.parametrize(("block", "num_warps"), [(100, 8), (256, 3)])

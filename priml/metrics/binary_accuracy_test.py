@@ -38,6 +38,15 @@ def test_binary_accuracy_flat_logits() -> None:
     assert metric.total == 3
 
 
+def test_binary_accuracy_threshold_is_strict_and_updates_accumulate() -> None:
+    metric = BinaryAccuracy(BinaryAccuracy.Config())
+    metric.update(torch.tensor([0.0, 10.0]), label=torch.tensor([1.0, 1.0]))
+    metric.update(torch.tensor([-10.0, 10.0]), label=torch.tensor([0.0, 1.0]))
+
+    assert metric.state_dict() == {"correct": 3, "total": 4}
+    assert metric.compute() == {"accuracy": 3 / 4}
+
+
 def test_binary_accuracy_compute_is_zero_before_any_update() -> None:
     assert BinaryAccuracy(BinaryAccuracy.Config()).compute() == {"accuracy": 0.0}
 

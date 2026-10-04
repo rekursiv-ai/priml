@@ -479,7 +479,7 @@ def _write_split(
         puzzle_count = example_count = 0
         for group in subset:
             for puzzle in group:
-                no_aug_idx = int(rng.integers(0, len(puzzle.examples)))
+                no_aug_idx = int(rng.integers(len(puzzle.examples)))
                 for index, (inp, out) in enumerate(puzzle.examples):
                     inp_seq, out_seq = augmentation.spatial.pack(
                         inp,
@@ -557,9 +557,7 @@ def _write_split(
                 "seq_len": augmentation.spec.grid_shape[0],
                 "num_puzzle_identifiers": len(id_map) + 1,
                 "total_groups": total_groups,
-                "mean_puzzle_examples": total_examples / total_puzzles
-                if total_puzzles
-                else 0.0,
+                "mean_puzzle_examples": total_examples / total_puzzles,
                 "total_puzzles": total_puzzles,
                 "sets": subset_names,
             },
@@ -588,8 +586,8 @@ def _spatial_eval_tag(
         if scale * max_rows <= side and scale * max_cols <= side
         else 1
     )
-    pad_r = int(rng.integers(0, side - scale * max_rows + 1))
-    pad_c = int(rng.integers(0, side - scale * max_cols + 1))
+    pad_r = int(rng.integers(side - scale * max_rows + 1))
+    pad_c = int(rng.integers(side - scale * max_cols + 1))
     tag = (scale, pad_r, pad_c)
     return None if tag == (1, 0, 0) else tag
 
@@ -629,7 +627,7 @@ def _convert_puzzle(
             ],
         )
     group = [converted]
-    if augmentation.config.num_aug > 0:
+    if augmentation.config.num_aug:
         hashes = {_puzzle_group_hash(converted)}
         for _ in range(
             augmentation.config.retries_factor * augmentation.config.num_aug,

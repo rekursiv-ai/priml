@@ -106,7 +106,7 @@ def player_damage(state: EnvState) -> Tensor:
     ice = physical * (state.sword_enchantment == 2) * 0.5
     physical = physical * (1 + 0.25 * (state.player_strength - 1))
     scale = 1 + 0.05 * (state.player_intelligence - 1)
-    return torch.stack((physical, fire * scale, ice * scale), dim=-1)
+    return torch.stack((physical, fire * scale, ice * scale), dim=1)
 
 
 def damage_to_player(state: EnvState, damage: Tensor) -> Tensor:
@@ -149,7 +149,7 @@ def apply_defense(damage: Tensor, defense: Tensor) -> Tensor:
       total: Damage that lands, ``[envs]``.
 
     """
-    return ((1.0 - defense) * damage).sum(-1)
+    return ((1.0 - defense) * damage).sum(1)
 
 
 def is_fighting_boss(state: EnvState) -> Tensor:
@@ -179,8 +179,8 @@ def is_boss_vulnerable(state: EnvState) -> Tensor:
 
     """
     return (
-        (_on_level(state.melee_mobs.mask, state.player_level).sum(-1) == 0)
-        & (_on_level(state.ranged_mobs.mask, state.player_level).sum(-1) == 0)
+        (_on_level(state.melee_mobs.mask, state.player_level).sum(1) == 0)
+        & (_on_level(state.ranged_mobs.mask, state.player_level).sum(1) == 0)
         & (state.boss_timesteps_to_spawn_this_round <= 0)
     )
 
@@ -246,7 +246,7 @@ def in_bounds(position: Tensor) -> Tensor:
 
     """
     extent = constants.on_device(constants.MAP_EXTENT, position.device)
-    return ((position >= 0) & (position < extent)).all(-1)
+    return ((position >= 0) & (position < extent)).all(1)
 
 
 def is_occupied(state: EnvState, position: Tensor) -> Tensor:
@@ -262,7 +262,7 @@ def is_occupied(state: EnvState, position: Tensor) -> Tensor:
     """
     return gather_tiles(current_mobs(state), position) | (
         state.player_position == position
-    ).all(-1)
+    ).all(1)
 
 
 def can_walk_on(
@@ -311,9 +311,9 @@ def is_near_block(state: EnvState, block: int) -> Tensor:
       near: Whether it is adjacent, ``[envs]``.
 
     """
-    neighbours = state.player_position[:, None, :] + constants.on_device(
-        constants.CLOSE_BLOCKS,
-        state.device,
+    neighbours = torch.add(
+        state.player_position[:, None, :],
+        constants.on_device(constants.CLOSE_BLOCKS, state.device),
     )
     grid = current_map(state)
     found = torch.zeros(state.num_envs, dtype=torch.bool, device=state.device)
@@ -420,8 +420,8 @@ def attack_mob_class(
     positions = _on_level(mobs.position, state.player_level)
     alive = _on_level(mobs.mask, state.player_level)
     present = (positions == position[:, None, :]).all(-1) & alive
-    struck = present.any(-1)
-    target = present.int().argmax(-1)
+    struck = present.any(1)
+    target = present.int().argmax(1)
 
     species = _on_level(mobs.type_id, state.player_level)[rows, target]
     defense = constants.on_device(constants.MOB_DEFENSE, state.device)[

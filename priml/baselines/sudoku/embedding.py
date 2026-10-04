@@ -71,7 +71,7 @@ def scaled_normal(w: Tensor) -> None:
       w: ``[N, C]`` table to initialize in place.
 
     """
-    nn.init.trunc_normal_(w, std=1.0 / w.shape[-1] ** 0.5)
+    nn.init.trunc_normal_(w, std=1.0 / w.shape[1] ** 0.5)
 
 
 @runtime_checkable

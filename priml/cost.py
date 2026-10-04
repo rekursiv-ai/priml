@@ -74,6 +74,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Final, Literal, cast, overload, override
 
+import contextlib
 import functools
 import math
 
@@ -260,7 +261,7 @@ class Cost:
 
     def sum(self) -> int:
         """Total over every cell."""
-        return sum(self.cells.values(), 0)
+        return sum(self.cells.values())
 
     def __add__(self, other: Cost) -> Cost:
         merged = dict(self.cells)
@@ -448,10 +449,8 @@ def cost(config: object, **kwargs: object) -> Cost:
     method = getattr(original, "cost", None)
     name_target: object = original
     if not callable(method):
-        try:
+        with contextlib.suppress(TypeError):
             method = _FUNCTION_COSTS.get(original)
-        except TypeError:
-            method = None
     if not callable(method) and isinstance(original, functools.partial):
         method = _FUNCTION_COSTS.get(cast(object, original.func))
     if not callable(method):
@@ -477,8 +476,6 @@ def intensity(execution: Cost) -> Report:
     """
     flops = execution["flops"]
     moved = execution["bytes"]
-    assert isinstance(flops, Cost)
-    assert isinstance(moved, Cost)
     return Report(
         cells={
             key: _div(float(value), float(moved.cells.get(key, 0)))
@@ -1015,12 +1012,12 @@ def utilization(
     for key, flops in cost["flops"].cells.items():
         _, kernel, dtype = key
         compute = ceiling.get((dtype, "flops", kernel), 0.0)
-        bandwidth = ceiling.get((dtype, "bytes", kernel), 0.0)
         if math.isinf(duration_sec):
             ridge = ceiling.get((dtype, "intensity", kernel), 0.0)
-            cells[key] = _div(ratios.get(key, math.inf), ridge)
+            cells[key] = _div(ratios[key], ridge)
             continue
-        memory = ratios.get(key, math.inf) * bandwidth
+        bandwidth = ceiling.get((dtype, "bytes", kernel), 0.0)
+        memory = ratios[key] * bandwidth
         achieved = flops / duration_sec
         cells[key] = _div(achieved, min(compute, memory))
     return Report(cells=cells)
@@ -1096,7 +1093,7 @@ def _grid(
     measures: list[object] = (
         [m for m in _REPORT_MEASURES if any(k[axis] == m for k in cells)]
         if axis is not None
-        else [""]
+        else [None]
     )
     derive_intensity = derive_intensity and axis is not None
     if derive_intensity:
@@ -1113,7 +1110,9 @@ def _grid(
     order = (*PHASES, *KERNELS)
     labels = sorted(
         {tuple(str(k[i]) for i in row_axes) for k in cells},
-        key=lambda label: tuple(order.index(x) if x in order else -1 for x in label),
+        key=lambda label: tuple(
+            (x in order, order.index(x) if x in order else x) for x in label
+        ),
     )
     depth = max(1, *(len(label) for label in labels))
     # The measure and the column axis stack as two header lines rather than
@@ -1135,13 +1134,13 @@ def _grid(
     totals: list[int | float] = [0] * (len(measures) * len(columns_axis))
     values_by_row: list[tuple[tuple[str, ...], list[int | float]]] = []
     for label in labels:
-        fixed = dict(zip(row_axes, label, strict=True))
+        fixed = {axis: label[i] for i, axis in enumerate(row_axes)}
         values = [
             lookup.get(_key(width, fixed, (axis, m), (column_axis, d)), 0)
             for m in measures
             for d in columns_axis
         ]
-        totals = [t + v for t, v in zip(totals, values, strict=True)]
+        totals = [total + values[i] for i, total in enumerate(totals)]
         values_by_row.append((label, values))
     if len(labels) > 1 and (derive_intensity or "intensity" not in measures):
         values_by_row.append((("total",), totals))
@@ -1223,4 +1222,6 @@ def _div(numerator: float, denominator: float) -> float:
         return numerator / denominator
     if numerator == 0 or math.isnan(numerator):
         return math.nan
-    return math.copysign(math.inf, numerator) * math.copysign(1, denominator)
+    if math.copysign(1, denominator) == -1:
+        return -math.copysign(math.inf, numerator)
+    return math.copysign(math.inf, numerator)

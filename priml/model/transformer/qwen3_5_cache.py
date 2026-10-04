@@ -127,7 +127,6 @@ def _validate_kv_cache(
         raise TypeError("Full-attention cache progress metadata must be integers.")
     if (
         k.ndim < 3
-        or v.ndim < 3
         or k.shape[:-1] != v.shape[:-1]
         or k.dtype != v.dtype
         or k.device != v.device
@@ -142,21 +141,20 @@ def _validate_kv_cache(
 
 def _delta_cache(value: object) -> dict[str, Tensor] | None:
     """Return one validated native delta-attention cache, when present."""
-    if not isinstance(value, dict):
+    if not _is_object_dict(value):
         return None
-    match value:
-        case {} if not value:
-            return {}
-        case {
-            "conv_state": Tensor() as conv_state,
-            "recurrent_state": Tensor() as recurrent_state,
-        } if value.keys() == {"conv_state", "recurrent_state"}:
-            return {
-                "conv_state": conv_state,
-                "recurrent_state": recurrent_state,
-            }
-        case dict():
-            return None
+    if not value:
+        return {}
+    if value.keys() != {"conv_state", "recurrent_state"}:
+        return None
+    conv_state = value["conv_state"]
+    recurrent_state = value["recurrent_state"]
+    if not isinstance(conv_state, Tensor) or not isinstance(recurrent_state, Tensor):
+        return None
+    return {
+        "conv_state": conv_state,
+        "recurrent_state": recurrent_state,
+    }
 
 
 def _tensor_dict(state: dict[str, Tensor]) -> dict[str, Tensor]:

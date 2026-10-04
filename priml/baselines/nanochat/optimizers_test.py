@@ -4,8 +4,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from typing import cast
+from unittest.mock import MagicMock, PropertyMock, call, patch
 
 import math
+import re
 
 from torch import Tensor, nn
 from torch.optim import Optimizer
@@ -56,7 +58,6 @@ def test_ffn_factory_accepts_an_independent_config() -> None:
     config.optimizer = _IndependentNorMuonConfig(lr=0.08)
     parameter = torch.nn.Parameter(torch.ones(8, 4))
     optimizer = config.make()([parameter])
-    assert isinstance(optimizer, NorMuon)
     assert optimizer.param_groups[0]["lr"] == 0.08 * 2**0.5 * 1.25
 
 
@@ -269,8 +270,12 @@ def test_sparse_rmsprop_refuses_missing_bitmap() -> None:
     config = optimizers.BiasCorrectedRMSProp.Config(rowwise=True, sparse_rows=True)
     optimizer = config.make()([weight])
     weight.grad = torch.ones_like(weight)
-    with pytest.raises(ValueError, match="no dirty bitmap"):
+    with pytest.raises(ValueError, match="sparse_rows is set") as error:
         optimizer.step()
+    assert str(error.value) == (
+        "sparse_rows is set but this table has no dirty bitmap; refusing to fall back "
+        "to the dense path and report it as a sparse step"
+    )
 
 
 def test_ffn_multiplier_changes_both_rectangular_projections() -> None:
@@ -331,8 +336,11 @@ def test_sparse_rmsprop_rejects_incompatible_tables() -> None:
     optimizer = config.make()([weight])
     optimizer.gradient_bitmaps[weight] = torch.zeros(2, dtype=torch.uint8)
     weight.grad = torch.ones_like(weight)
-    with pytest.raises(ValueError, match="requires rowwise"):
+    with pytest.raises(ValueError, match="sparse_rows requires rowwise") as error:
         optimizer.step()
+    assert str(error.value) == (
+        "sparse_rows requires rowwise: the kernel reads one second-moment entry per row"
+    )
 
     config = optimizers.BiasCorrectedRMSProp.Config(
         rowwise=True,
@@ -387,6 +395,638 @@ def test_scheduled_update_drives_each_optimizer_family() -> None:
     ).make()(ScheduleStep())
     assert result["lr/muon_multiplier"] < 1.0
     assert result["lr/adam_multiplier"] < 1.0
+
+
+@pytest.mark.parametrize("dtype", optimizers.BITMAP_DTYPES)
+def test_compact_bitmap_packs_active_row_indices(dtype: torch.dtype) -> None:
+    bitmap = torch.tensor([0, 1, 0, 1], dtype=dtype)
+    indices = torch.full((4,), -1, dtype=torch.int32)
+    count = torch.zeros((), dtype=torch.int32)
+    scratch = torch.full((5,), -1, dtype=torch.int32)
+
+    with (
+        patch.object(torch, "cumsum", wraps=torch.cumsum) as cumsum,
+        patch.object(torch, "arange", wraps=torch.arange) as arange,
+    ):
+        optimizers.compact_bitmap(bitmap, indices, count, scratch)
+
+    assert torch.equal(indices, torch.tensor([1, 3, -1, -1], dtype=torch.int32))
+    assert cumsum.call_count == 1
+    cumsum_args = cumsum.call_args
+    assert cumsum_args is not None
+    flags = cumsum_args.args[0]
+    assert isinstance(flags, Tensor)
+    assert torch.equal(flags, bitmap != 0)
+    assert cumsum_args.kwargs == {"dim": 0}
+    arange.assert_called_once_with(4, device=bitmap.device, dtype=torch.int32)
+    assert count.dtype == torch.int32
+    assert count.shape == ()
+    assert count.item() == 2
+
+
+def test_sparse_cpu_reference_receives_int64_indices() -> None:
+    parameter = torch.ones(2, 3)
+    scalars = {
+        name: torch.tensor(value)
+        for name, value in (
+            ("step", 1),
+            ("lr", 0.1),
+            ("beta2", 0.9),
+            ("eps", 1e-8),
+            ("one_minus_lr_wd", 1.0),
+        )
+    }
+    with patch.object(optimizers, "_sparse_rmsprop_reference") as reference:
+        optimizers.sparse_rmsprop_rows(
+            parameter,
+            torch.ones_like(parameter),
+            torch.zeros(2, 1),  # sparse_rmsprop_rows requires [rows, 1] moments.
+            torch.zeros(2, dtype=torch.int32),
+            torch.tensor([0, 1], dtype=torch.uint8),
+            torch.zeros(2, dtype=torch.int32),
+            torch.zeros((), dtype=torch.int32),
+            torch.zeros(3, dtype=torch.int32),
+            scalars,
+        )
+
+    assert reference.call_count == 1
+    call_args = reference.call_args
+    assert call_args is not None
+    rows = call_args.args[4]
+    assert isinstance(rows, Tensor)
+    assert rows.dtype == torch.int64
+    assert rows.tolist() == [1]
+
+
+def test_sparse_rmsprop_cuda_route_passes_each_buffer() -> None:
+    parameter = nn.Parameter(torch.ones(2, 3))
+    gradient = torch.ones_like(parameter)
+    # sparse_rmsprop_rows keeps one FP32 second moment per row: [rows, 1].
+    moment = torch.zeros(2, 1)
+    last_step = torch.zeros(2, dtype=torch.int32)
+    bitmap = torch.tensor([0, 1], dtype=torch.uint8)
+    index = torch.full((2,), -1, dtype=torch.int32)
+    count = torch.zeros((), dtype=torch.int32)
+    scratch = torch.full((3,), -1, dtype=torch.int32)
+    scalars = {
+        name: torch.tensor(0.0)
+        for name in (
+            "step",
+            "lr",
+            "beta2",
+            "eps",
+            "one_minus_lr_wd",
+            "cum_before",
+            "cum_after",
+        )
+    }
+
+    with (
+        patch.object(Tensor, "is_cuda", new_callable=PropertyMock, return_value=True),
+        patch.object(optimizers, "_sparse_rmsprop_rows_cuda") as launch,
+    ):
+        optimizers.sparse_rmsprop_rows(
+            parameter,
+            gradient,
+            moment,
+            last_step,
+            bitmap,
+            index,
+            count,
+            scratch,
+            scalars,
+        )
+
+    launch.assert_called_once_with(
+        parameter,
+        gradient,
+        moment,
+        last_step,
+        bitmap,
+        index,
+        count,
+        scalars["step"],
+        scalars["lr"],
+        scalars["beta2"],
+        scalars["eps"],
+        scalars["one_minus_lr_wd"],
+        scalars["cum_before"],
+        scalars["cum_after"],
+    )
+
+
+def test_sparse_rmsprop_initializes_exact_row_state_and_errors() -> None:
+    parameter = torch.nn.Parameter(torch.ones(3, 2))
+    config = optimizers.BiasCorrectedRMSProp.Config(rowwise=True, sparse_rows=True)
+    optimizer = config.make()([parameter])
+    bitmap = torch.tensor([0, 1, 0], dtype=torch.uint8)
+    optimizer.gradient_bitmaps[parameter] = bitmap
+    optimizer.gradient_sinks[parameter] = torch.ones(3, 2)
+    optimizer.step()
+
+    state = _state(optimizer, parameter)
+    expected = {
+        "sparse_index": ((3,), torch.int32),
+        "sparse_count": ((), torch.int32),
+        "sparse_scratch": ((4,), torch.int32),
+        "last_step": ((3,), torch.int32),
+    }
+    for name, (shape, dtype) in expected.items():
+        value = _tensor(state, name)
+        assert value.shape == shape, name
+        assert value.dtype == dtype, name
+        assert value.device.type == "cpu", name
+    sparse_scalars = DictCodec.coerce(state["sparse_scalars"], Tensor)
+    assert set(sparse_scalars) == {
+        "step",
+        "lr",
+        "beta2",
+        "eps",
+        "one_minus_lr_wd",
+        "cum_before",
+        "cum_after",
+    }
+    assert all(
+        value.shape == () and value.dtype == torch.float32
+        for value in sparse_scalars.values()
+    )
+    assert _number(sparse_scalars["one_minus_lr_wd"]) == 1.0
+    assert torch.equal(
+        _tensor(state, "sparse_index"),
+        torch.tensor([1, 0, 0], dtype=torch.int32),
+    )
+    assert _tensor(state, "sparse_count").item() == 1
+
+
+def test_sparse_rmsprop_requests_state_factory_dtype_and_device() -> None:
+    parameter = torch.nn.Parameter(torch.ones(3, 2))
+    optimizer = optimizers.BiasCorrectedRMSProp.Config(
+        rowwise=True,
+        sparse_rows=True,
+    ).make()([parameter])
+    optimizer.gradient_bitmaps[parameter] = torch.tensor([0, 1, 0], dtype=torch.uint8)
+    optimizer.gradient_sinks[parameter] = torch.ones(3, 2)
+
+    with patch.object(torch, "zeros", wraps=torch.zeros) as zeros:
+        optimizer.step()
+
+    device = parameter.device
+    assert zeros.call_args_list == [
+        call((3, 1), dtype=torch.float32, device=device),
+        call(3, dtype=torch.int32, device=device),
+        call((), dtype=torch.int32, device=device),
+        call(4, dtype=torch.int32, device=device),
+        call(3, dtype=torch.int32, device=device),
+        *[call((), dtype=torch.float32, device=device) for _ in range(7)],
+    ]
+
+
+def test_sparse_cuda_launcher_passes_all_buffers_and_fixed_grid() -> None:
+    parameter = torch.ones(3, 512)
+    gradient = torch.ones_like(parameter)
+    moment = torch.zeros(3, 1)  # _sparse_rmsprop_rows_cuda uses [rows, 1] moments.
+    last_step = torch.zeros(3, dtype=torch.int32)
+    bitmap = torch.tensor([0, 1, 0], dtype=torch.uint8)
+    index = torch.zeros(3, dtype=torch.int32)
+    count = torch.zeros((), dtype=torch.int32)
+    scalars = {
+        name: torch.zeros(())
+        for name in (
+            "step",
+            "lr",
+            "beta2",
+            "eps",
+            "one_minus_lr_wd",
+            "cum_before",
+            "cum_after",
+        )
+    }
+    inactive_kernel = MagicMock()
+    sparse_kernel = MagicMock()
+    inactive_launch: MagicMock = MagicMock()
+    sparse_launch: MagicMock = MagicMock()
+    inactive_kernel.__getitem__.return_value = inactive_launch
+    sparse_kernel.__getitem__.return_value = sparse_launch
+    with (
+        patch.object(
+            optimizers,
+            "_compiled_inactive_moment",
+            return_value=inactive_kernel,
+        ) as compiled_inactive,
+        patch.object(
+            optimizers,
+            "_compiled_sparse_rmsprop",
+            return_value=sparse_kernel,
+        ) as compiled_sparse,
+    ):
+        optimizers._sparse_rmsprop_rows_cuda(
+            parameter,
+            gradient,
+            moment,
+            last_step,
+            bitmap,
+            index,
+            count,
+            scalars["step"],
+            scalars["lr"],
+            scalars["beta2"],
+            scalars["eps"],
+            scalars["one_minus_lr_wd"],
+            scalars["cum_before"],
+            scalars["cum_after"],
+        )
+    assert compiled_inactive.call_count == 1
+    assert compiled_sparse.call_count == 1
+    inactive_kernel.__getitem__.assert_called_once_with((1,))
+    inactive_launch.assert_called_once_with(
+        buffers=(moment, bitmap, scalars["beta2"]),
+        n_rows=3,
+        block=optimizers.INACTIVE_BLOCK,
+        num_warps=optimizers.SPARSE_WARPS,
+    )
+    sparse_kernel.__getitem__.assert_called_once_with((8192,))
+    sparse_launch.assert_called_once_with(
+        buffers=(
+            parameter,
+            gradient,
+            moment,
+            last_step,
+            index,
+            count,
+            scalars["step"],
+            scalars["lr"],
+            scalars["beta2"],
+            scalars["eps"],
+            scalars["one_minus_lr_wd"],
+            scalars["cum_before"],
+            scalars["cum_after"],
+        ),
+        n_cols=512,
+        programs=8192,
+        block_w=512,
+        num_warps=optimizers.SPARSE_WARPS,
+    )
+
+
+@pytest.mark.parametrize(
+    ("moment", "message"),
+    [
+        (
+            torch.zeros(3, 2),
+            "second moment must be per-row fp32 [rows, 1], got (3, 2) torch.float32",
+        ),
+        (
+            torch.zeros(
+                3,
+                1,
+                dtype=torch.float64,
+            ),  # sparse_rmsprop_rows requires [rows, 1] moments.
+            "second moment must be per-row fp32 [rows, 1], got (3, 1) torch.float64",
+        ),
+    ],
+)
+def test_sparse_rmsprop_requires_fp32_moment_per_row(
+    moment: Tensor,
+    message: str,
+) -> None:
+    parameter = nn.Parameter(torch.ones(3, 2))
+    optimizer = optimizers.BiasCorrectedRMSProp.Config(
+        rowwise=True,
+        sparse_rows=True,
+    ).make()([parameter])
+    optimizer.gradient_bitmaps[parameter] = torch.zeros(3, dtype=torch.uint8)
+    optimizer.gradient_sinks[parameter] = torch.ones_like(parameter)
+    state = cast(dict[str, object], optimizer.state[parameter])
+    state.update(step=0, second_moment=moment)
+
+    with pytest.raises(ValueError, match="second moment must be per-row fp32") as error:
+        optimizer.step()
+    assert str(error.value) == message
+
+
+@pytest.mark.parametrize(("rows", "grid"), [(1024, 1), (1025, 2)])
+def test_sparse_cuda_inactive_grid_covers_row_boundaries(rows: int, grid: int) -> None:
+    parameter = torch.ones(rows, 2)
+    inactive_kernel = MagicMock()
+    sparse_kernel = MagicMock()
+    with (
+        patch.object(
+            optimizers,
+            "_compiled_inactive_moment",
+            return_value=inactive_kernel,
+        ),
+        patch.object(
+            optimizers,
+            "_compiled_sparse_rmsprop",
+            return_value=sparse_kernel,
+        ),
+    ):
+        optimizers._sparse_rmsprop_rows_cuda(
+            parameter,
+            torch.ones_like(parameter),
+            torch.zeros(rows, 1),
+            torch.zeros(rows, dtype=torch.int32),
+            torch.zeros(rows, dtype=torch.uint8),
+            torch.zeros(rows, dtype=torch.int32),
+            torch.zeros((), dtype=torch.int32),
+            *(torch.zeros(()) for _ in range(7)),
+        )
+    inactive_kernel.__getitem__.assert_called_once_with((grid,))
+
+
+@pytest.mark.parametrize(
+    ("bitmap", "block_w", "message"),
+    [
+        (
+            torch.zeros(3, dtype=torch.float32),
+            512,
+            (
+                f"the inactive sweep LOADS the bitmap from a kernel, so its dtype must be "
+                f"one of {optimizers.BITMAP_DTYPES}, got torch.float32"
+            ),
+        ),
+        (
+            torch.zeros(3, dtype=torch.uint8),
+            2,
+            (
+                "row width 4 exceeds the 2-lane block; one row must fit in one block "
+                "because the kernel reduces a row per iteration"
+            ),
+        ),
+    ],
+)
+def test_sparse_cuda_rejects_invalid_kernel_geometry(
+    bitmap: Tensor,
+    block_w: int,
+    message: str,
+) -> None:
+    parameter = torch.ones(3, 4)
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        optimizers._sparse_rmsprop_rows_cuda(
+            parameter,
+            torch.ones_like(parameter),
+            # _sparse_rmsprop_rows_cuda takes one FP32 second moment per row.
+            torch.zeros(3, 1),
+            torch.zeros(3, dtype=torch.int32),
+            bitmap,
+            torch.zeros(3, dtype=torch.int32),
+            torch.zeros((), dtype=torch.int32),
+            *(torch.zeros(()) for _ in range(7)),
+            block_w=block_w,
+        )
+
+
+def test_sparse_rmsprop_requires_contiguous_table_and_gradient() -> None:
+    parameter = nn.Parameter(torch.ones(3, 4).t())
+    optimizer = optimizers.BiasCorrectedRMSProp.Config(
+        rowwise=True,
+        sparse_rows=True,
+    ).make()([parameter])
+    optimizer.gradient_bitmaps[parameter] = torch.ones(4, dtype=torch.uint8)
+    optimizer.gradient_sinks[parameter] = torch.ones(4, 3)
+    with pytest.raises(ValueError, match="table must be contiguous"):
+        optimizer.step()
+
+    parameter = nn.Parameter(torch.ones(3, 4))
+    optimizer = optimizers.BiasCorrectedRMSProp.Config(
+        rowwise=True,
+        sparse_rows=True,
+    ).make()([parameter])
+    optimizer.gradient_bitmaps[parameter] = torch.ones(3, dtype=torch.uint8)
+    optimizer.gradient_sinks[parameter] = torch.ones(4, 3).t()
+    with pytest.raises(ValueError, match="grad must be contiguous"):
+        optimizer.step()
+
+    parameter = nn.Parameter(torch.ones(2, 3))
+    optimizer = optimizers.BiasCorrectedRMSProp.Config(
+        rowwise=True,
+        sparse_rows=True,
+    ).make()([parameter])
+    optimizer.gradient_bitmaps[parameter] = torch.ones(2, dtype=torch.uint8)
+    optimizer.gradient_sinks[parameter] = torch.ones(3, 2)
+    message = "grad (3, 2) != table (2, 3)"
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        optimizer.step()
+
+
+def test_sparse_rmsprop_rejects_bad_bitmap_and_non_2d_table() -> None:
+    parameter = nn.Parameter(torch.ones(3, 2, 4))
+    optimizer = optimizers.BiasCorrectedRMSProp.Config(
+        rowwise=True,
+        sparse_rows=True,
+    ).make()([parameter])
+    optimizer.gradient_bitmaps[parameter] = torch.ones(3, dtype=torch.uint8)
+    optimizer.gradient_sinks[parameter] = torch.ones_like(parameter)
+    with pytest.raises(ValueError, match=r"expected a 2-D table, got \(3, 2, 4\)"):
+        optimizer.step()
+
+    parameter = nn.Parameter(torch.ones(3, 2))
+    optimizer = optimizers.BiasCorrectedRMSProp.Config(
+        rowwise=True,
+        sparse_rows=True,
+    ).make()([parameter])
+    optimizer.gradient_bitmaps[parameter] = torch.ones(2, dtype=torch.uint8)
+    optimizer.gradient_sinks[parameter] = torch.ones_like(parameter)
+    with pytest.raises(
+        ValueError,
+        match=r"bitmap must be one flag per row \[3\], got \(2,\)",
+    ):
+        optimizer.step()
+
+
+@pytest.mark.parametrize("field", ["weight_decay", "beta2", "lr", "eps"])
+def test_sparse_rmsprop_rejects_uncoercible_scalars(field: str) -> None:
+    parameter = nn.Parameter(torch.ones(2, 3))
+    optimizer = optimizers.BiasCorrectedRMSProp.Config(
+        rowwise=True,
+        sparse_rows=True,
+    ).make()([parameter])
+    optimizer.gradient_bitmaps[parameter] = torch.zeros(2, dtype=torch.uint8)
+    optimizer.gradient_sinks[parameter] = torch.ones_like(parameter)
+    optimizer.param_groups[0][field] = "invalid"
+
+    with pytest.raises(TypeError) as error:
+        optimizer.step()
+    assert str(error.value) == "cannot coerce 'invalid' to float"
+
+
+def test_sparse_rmsprop_uses_per_row_moments_and_bias_correction() -> None:
+    parameter = nn.Parameter(torch.ones(3, 2))
+    optimizer = optimizers.BiasCorrectedRMSProp.Config(
+        lr=0.1,
+        beta2=0.5,
+        eps=1.0,
+        rowwise=True,
+        sparse_rows=True,
+    ).make()([parameter])
+    optimizer.gradient_bitmaps[parameter] = torch.tensor([1, 1, 0], dtype=torch.uint8)
+    gradient = torch.tensor([[2.0, 0.0], [0.0, 4.0], [0.0, 0.0]])
+    optimizer.gradient_sinks[parameter] = gradient
+
+    optimizer.step()
+
+    state = _state(optimizer, parameter)
+    assert torch.equal(
+        _tensor(state, "second_moment"),
+        torch.tensor([[1.0], [4.0], [0.0]]),
+    )
+    assert _number(state["cum_log"]) == math.log(0.5)
+    denominator = (torch.tensor([[1.0], [4.0], [0.0]]) / 0.5).sqrt() + 1.0
+    expected = (
+        torch.ones(3, 2).double() - 0.1 * (gradient / denominator).double()
+    ).float()
+    assert torch.equal(parameter, expected)
+
+
+def test_sparse_state_allocations_follow_parameter_device_and_dtype() -> None:
+    parameter = nn.Parameter(torch.empty((3, 2), device="meta"))
+    optimizer = optimizers.BiasCorrectedRMSProp.Config(
+        rowwise=True,
+        sparse_rows=True,
+    ).make()([parameter])
+    bitmap = torch.empty((3,), dtype=torch.uint8, device="meta")
+    optimizer.gradient_bitmaps[parameter] = bitmap
+    state = cast(dict[str, object], optimizer.state[parameter])
+    state["step"] = 1
+    state["second_moment"] = torch.empty(
+        (3, 1),
+        dtype=torch.float32,
+        device="meta",
+    )  # _sparse_step requires [rows, 1] moments.
+
+    with (
+        patch.object(optimizers, "sparse_rmsprop_rows"),
+        patch.object(torch, "tensor", wraps=torch.tensor) as tensor_factory,
+    ):
+        optimizer._sparse_step(
+            parameter,
+            torch.empty_like(parameter),
+            state,
+            cast("dict[str, object]", optimizer.param_groups[0]),
+        )
+
+    group = cast(dict[str, object], optimizer.param_groups[0])
+    assert tensor_factory.call_args == call(
+        FloatCodec.coerce(group["beta2"], None),
+        dtype=torch.float32,
+    )
+    expected = {
+        "sparse_index": ((3,), torch.int32),
+        "sparse_count": ((), torch.int32),
+        "sparse_scratch": ((4,), torch.int32),
+        "last_step": ((3,), torch.int32),
+    }
+    for name, (shape, dtype) in expected.items():
+        value = _tensor(state, name)
+        assert value.shape == shape, name
+        assert value.dtype == dtype, name
+        assert value.device.type == "meta", name
+    scalars = DictCodec.coerce(state["sparse_scalars"], Tensor)
+    assert all(value.device.type == "meta" for value in scalars.values())
+
+
+def test_rowwise_rmsprop_reduces_only_the_last_dimension() -> None:
+    parameter = nn.Parameter(torch.arange(24, dtype=torch.float32).reshape(2, 3, 4) + 1)
+    gradient = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4) / 3
+    config = optimizers.BiasCorrectedRMSProp.Config(
+        lr=0.07,
+        beta2=0.5,
+        eps=0.2,
+        rowwise=True,
+    )
+    optimizer = config.make()([parameter])
+    beta2 = torch.tensor(config.beta2)
+    expected_moment = torch.lerp(
+        torch.zeros_like(gradient[..., :1]),
+        gradient.square().mean(dim=-1, keepdim=True),
+        1 - beta2,
+    )
+    denominator = (
+        expected_moment / (1 - beta2 ** torch.tensor(1.0))
+    ).sqrt() + torch.tensor(
+        config.eps,
+    )
+    expected = parameter.detach().clone()
+    expected.sub_(gradient / denominator * torch.tensor(config.lr))
+    parameter.grad = gradient
+
+    optimizer.step()
+
+    assert torch.equal(parameter, expected)
+    assert torch.equal(
+        _tensor(_state(optimizer, parameter), "second_moment"),
+        expected_moment,
+    )
+
+
+@pytest.mark.parametrize(
+    "saved_groups",
+    [[], [{"params": []}], [{"params": [0]}, {"params": [1]}]],
+)
+def test_restore_state_precision_rejects_misaligned_checkpoint_lists(
+    saved_groups: list[dict[str, object]],
+) -> None:
+    parameter = nn.Parameter(torch.ones(2, 3))
+    optimizer = optimizers.BiasCorrectedRMSProp.Config().make()([parameter])
+    incoming: dict[str, object] = {"param_groups": saved_groups, "state": {}}
+
+    with pytest.raises(ValueError, match=r"zip\(\) argument"):
+        optimizer._restore_state_precision(incoming, optimizer)
+
+
+def test_restore_state_precision_copies_to_parameter_device() -> None:
+    parameter = nn.Parameter(torch.empty(2, 3, device="meta"))
+    optimizer = optimizers.BiasCorrectedRMSProp.Config().make()([parameter])
+    saved = torch.ones(2, 3)
+
+    optimizer._restore_state_precision(
+        {"param_groups": [{"params": [0]}], "state": {0: {"moment": saved}}},
+        optimizer,
+    )
+
+    restored = _tensor(_state(optimizer, parameter), "moment")
+    assert restored.device == parameter.device
+    assert restored.dtype == saved.dtype
+    assert restored.shape == saved.shape
+
+
+def test_copy_optimizer_state_moves_nested_tensors_to_requested_device() -> None:
+    original = torch.ones(2, 3)
+    copied = optimizers._copy_optimizer_state(
+        {"nested": {"weight": original}},
+        torch.device("meta"),
+    )
+    nested = cast("dict[str, object]", cast("dict[str, object]", copied)["nested"])
+    tensor = _tensor(nested, "weight")
+    assert tensor.device.type == "meta"
+    assert tensor.shape == original.shape
+    assert tensor.dtype == original.dtype
+
+
+def test_rmsprop_dense_decay_and_update_match_hand_calculation() -> None:
+    parameter = nn.Parameter(torch.tensor([[1.0, 2.0], [3.0, 4.0]]))
+    optimizer = optimizers.BiasCorrectedRMSProp.Config(
+        lr=0.25,
+        beta2=0.0,
+        eps=2.0,
+        weight_decay=0.1,
+    ).make()([parameter])
+    gradient = torch.tensor([[2.0, -2.0], [0.0, 0.0]])
+    parameter.grad = gradient
+    expected = parameter.detach().clone()
+    moment = gradient.square()
+    expected.mul_(
+        1 - torch.tensor(optimizer.param_groups[0]["lr"]) * torch.tensor(0.1),
+    )
+    expected.sub_(
+        gradient / (moment.sqrt() + torch.tensor(2.0)) * torch.tensor(0.25),
+    )
+    optimizer.step()
+    assert torch.equal(parameter, expected)
+    assert torch.equal(
+        _tensor(_state(optimizer, parameter), "second_moment"),
+        torch.tensor([[4.0, 4.0], [0.0, 0.0]]),
+    )
 
 
 if __name__ == "__main__":

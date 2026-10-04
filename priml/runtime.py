@@ -272,12 +272,12 @@ class MultiProcess:
             config.float32_matmul_precision
         )
         if (
-            any(s == 0 for s in config.mesh_topology.values())
-            or sum(s < 0 for s in config.mesh_topology.values()) > 1
+            any(s == 0 or s < -1 for s in config.mesh_topology.values())
+            or sum(s == -1 for s in config.mesh_topology.values()) > 1
         ):
             raise ValueError(
-                f"Mesh shapes {config.mesh_topology} must be positive "
-                "except for at most one negative.",
+                "Mesh topology dimensions must be positive except for at most "
+                f"one -1 (auto); got {config.mesh_topology}.",
             )
         self.mesh_topology = dict(config.mesh_topology)
 
@@ -371,9 +371,13 @@ def initialize_global_device_mesh(
             "mesh_topology cannot be empty. "
             "Specify dimensions, e.g., {'dp': -1, 'pp': 1, 'tp': 1}",
         )
-    if sum(size < 0 for size in mesh_topology.values()) > 1:
+    if (
+        any(size == 0 or size < -1 for size in mesh_topology.values())
+        or sum(size == -1 for size in mesh_topology.values()) > 1
+    ):
         raise ValueError(
-            f"At most one mesh dimension can be -1 (auto), got {mesh_topology}",
+            "Mesh topology dimensions must be positive except for at most "
+            f"one -1 (auto); got {mesh_topology}.",
         )
 
     device = get_device(device)
@@ -393,7 +397,7 @@ def initialize_global_device_mesh(
     # and falls back to 0 for single-process / non-torchrun launches.
     if device.type == "cuda":
         local_rank = torch.distributed.get_node_local_rank(fallback_rank=0)
-        device = torch.device("cuda", local_rank)
+        device = torch.device(f"cuda:{local_rank}")
         torch.cuda.set_device(device)
 
     process_group_preexisting = torch.distributed.is_initialized()
@@ -462,13 +466,19 @@ def _resolve_mesh_topology(
     world_size_actual: int,
 ) -> dict[str, int]:
     """Resolve an automatic dimension and validate the distributed world size."""
-    if any(size < 0 for size in mesh_topology.values()):
+    automatic_key = next(
+        (key for key, size in mesh_topology.items() if size == -1),
+        None,
+    )
+    if automatic_key is not None:
         world_size_fixed = math.prod(
-            size for size in mesh_topology.values() if size > 0
+            size
+            for key, size in mesh_topology.items()
+            if key != automatic_key and size != 0
         )
         automatic_size = world_size_actual // world_size_fixed
         mesh_topology = {
-            key: automatic_size if size < 0 else size
+            key: automatic_size if key == automatic_key else size
             for key, size in mesh_topology.items()
         }
     world_size_expected = math.prod(mesh_topology.values())

@@ -238,8 +238,10 @@ def main() -> int:
       code: Process exit code (0 on success).
 
     """
+    if __doc__ is None:
+        raise ValueError("Expected __doc__ is not None.")
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -262,7 +264,7 @@ def main() -> int:
             scale_prob=args.scale_prob,
             num_aug=args.num_aug,
             seed=args.seed,
-        ).rsplit("/", 1)[-1]
+        ).removeprefix("/datasets/")
         target = Path(f"/opt/scratch/datasets/{slug}")
     else:
         parser.error(
@@ -340,7 +342,7 @@ def _build_arc2_tree(
     augmentation.spatial.train_scale_weights = dict(train_scale_weights)
     augmentation.spatial.translation_prob = translation_prob
     augmentation.spatial.scale_prob = scale_prob
-    root.mkdir(parents=True, exist_ok=True)
+    root.mkdir(exist_ok=True)
     _build_arc_dataset(
         input_file_prefix=prefix,
         output_dir=root,

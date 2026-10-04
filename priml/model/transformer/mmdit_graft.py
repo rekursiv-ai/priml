@@ -181,7 +181,7 @@ class MMDiTGraft(nn.Module):
           state_dict: State dict.
 
         """
-        self._backbone_view().load_state_dict(state_dict, strict=True)
+        self._backbone_view().load_state_dict(state_dict)
 
     def freeze_backbone(self, freeze: bool = True) -> None:
         """Freeze or unfreeze only the language stream, embedding, and head.

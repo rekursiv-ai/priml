@@ -15,6 +15,7 @@ from priml.math.diffusion.schedule import (
 )
 from priml.math.diffusion.target import (
     TargetFn,
+    target_cost,
     target_eps,
     target_rectified_flow,
     target_v,
@@ -158,6 +159,27 @@ def test_target_cost_counts_elements_and_samples(
     assert one["flops", "adjoint", "elementwise"].sum() == adjoint * 6
     assert all(isinstance(value, int) for value in one.cells.values())
     assert cost(target_fn, dtype=None, elements=12, samples=4) == one.tile(2)
+
+
+def test_target_cost_closure_counts_vector_and_sample_work() -> None:
+    estimate = target_cost(
+        primal=2,
+        adjoint=3,
+        vector_elements=4,
+        scalar_flops=5,
+        scalar_elements=6,
+    )
+
+    result = estimate(dtype=None, elements=2, samples=3)
+
+    assert result["flops", "primal", "elementwise"].sum() == 19
+    assert result["flops", "adjoint", "elementwise"].sum() == 6
+    assert result["bytes", "primal", "elementwise"].sum() == 26 * 4
+    assert result["bytes", "adjoint", "elementwise"].sum() == 21 * 4
+
+    double = estimate(dtype=torch.float64, elements=2, samples=3)
+    assert double["bytes", "primal", "elementwise", torch.float64] == 208
+    assert double["bytes", "adjoint", "elementwise", torch.float64] == 168
 
 
 if __name__ == "__main__":

@@ -103,7 +103,7 @@ def _parse_yarn(rope_scaling: object) -> YarnScaling.Config | None:
     config.beta_fast = FloatCodec.coerce(scaling.get("beta_fast"), 32.0)
     config.beta_slow = FloatCodec.coerce(scaling.get("beta_slow"), 1.0)
     config.mscale = FloatCodec.coerce(scaling.get("mscale"), 1.0)
-    config.mscale_all_dim = FloatCodec.coerce(scaling.get("mscale_all_dim"), 0.0)
+    config.mscale_all_dim = FloatCodec.coerce(scaling.get("mscale_all_dim"))
     return config
 
 
@@ -115,7 +115,7 @@ def _remap_shared(
 ) -> None:
     gate = hf_sd[f"{sp}.gate_proj.weight"]
     up = hf_sd[f"{sp}.up_proj.weight"]
-    out[f"{bs}.up_proj.weight"] = torch.cat([gate, up], dim=0)
+    out[f"{bs}.up_proj.weight"] = torch.cat([gate, up])
     out[f"{bs}.down_proj.weight"] = hf_sd[f"{sp}.down_proj.weight"]
 
 
@@ -455,7 +455,7 @@ class KimiK2(Transformer):
         )
         config = cls.Config.from_hf(hf_config).finalize()
         model = config.make()
-        model.load_state_dict(remap_hf_state_dict(hf_sd, config), strict=True)
+        model.load_state_dict(remap_hf_state_dict(hf_sd, config))
         model = model.to(
             dtype=dtype
             or hub.resolve_hf_dtype(str(hf_config.get("torch_dtype", "bfloat16"))),
@@ -522,7 +522,7 @@ def remap_hf_state_dict(
         if i < config.first_k_dense_replace:
             gate = hf_sd[f"{p}.mlp.gate_proj.weight"]
             up = hf_sd[f"{p}.mlp.up_proj.weight"]
-            out[f"{bf}.up_proj.weight"] = torch.cat([gate, up], dim=0)
+            out[f"{bf}.up_proj.weight"] = torch.cat([gate, up])
             out[f"{bf}.down_proj.weight"] = hf_sd[f"{p}.mlp.down_proj.weight"]
         else:
             # MoE router lives at ``ffn.router`` (gate + optional
@@ -539,7 +539,7 @@ def remap_hf_state_dict(
                 ep, be = f"{p}.mlp.experts.{e}", f"{bf}.experts.{e}"
                 gate = hf_sd[f"{ep}.gate_proj.weight"]
                 up = hf_sd[f"{ep}.up_proj.weight"]
-                out[f"{be}.up_proj.weight"] = torch.cat([gate, up], dim=0)
+                out[f"{be}.up_proj.weight"] = torch.cat([gate, up])
                 out[f"{be}.down_proj.weight"] = hf_sd[f"{ep}.down_proj.weight"]
             # Shared experts: HF collapses ``n_shared_experts=1`` into
             # a single module; loop stores a ModuleList indexed from 0.

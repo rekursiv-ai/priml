@@ -99,15 +99,14 @@ def _strike_whatever_stands_there(
 ) -> tuple[EnvState, Tensor]:
     """Hit any creature on the faced tile, across all three classes."""
     damage = mechanics.player_damage(state) * doing[:, None]
-    yes = torch.ones(state.num_envs, dtype=torch.bool, device=state.device)
     struck = torch.zeros(state.num_envs, dtype=torch.bool, device=state.device)
     killed_monster = struck.clone()
     killed_any = struck.clone()
 
-    for field, input_mobs, mob_class, can_unlock in (
-        ("melee_mobs", state.melee_mobs, 1, yes),
-        ("passive_mobs", state.passive_mobs, 0, yes),
-        ("ranged_mobs", state.ranged_mobs, 2, yes),
+    for field, input_mobs, mob_class in (
+        ("melee_mobs", state.melee_mobs, 1),
+        ("passive_mobs", state.passive_mobs, 0),
+        ("ranged_mobs", state.ranged_mobs, 2),
     ):
         mobs, killed, hit, achievements = mechanics.attack_mob_class(
             state,
@@ -115,7 +114,7 @@ def _strike_whatever_stands_there(
             position=target,
             damage=damage,
             mob_class=mob_class,
-            can_unlock=can_unlock & doing,
+            can_unlock=doing,
         )
         setattr(state, field, mobs)
         state.achievements = torch.where(
@@ -380,23 +379,13 @@ def _add_chest_loot(
         + 1
     )
 
-    inventory.torches += (torch_found & opening).to(torch.int32) * torch_amount
-    inventory.coal += (ore_found & (ore_types == 0) & opening).to(
-        torch.int32,
-    ) * coal_amount
-    inventory.iron += (ore_found & (ore_types == 1) & opening).to(
-        torch.int32,
-    ) * iron_amount
-    inventory.diamond += (ore_found & (ore_types == 2) & opening).to(
-        torch.int32,
-    ) * gem_amount
-    inventory.sapphire += (ore_found & (ore_types == 3) & opening).to(
-        torch.int32,
-    ) * gem_amount
-    inventory.ruby += (ore_found & (ore_types == 4) & opening).to(
-        torch.int32,
-    ) * gem_amount
-    inventory.arrows += (arrows_found & opening).to(torch.int32) * arrows_amount
+    inventory.torches += (torch_found & opening) * torch_amount
+    inventory.coal += (ore_found & (ore_types == 0) & opening) * coal_amount
+    inventory.iron += (ore_found & (ore_types == 1) & opening) * iron_amount
+    inventory.diamond += (ore_found & (ore_types == 2) & opening) * gem_amount
+    inventory.sapphire += (ore_found & (ore_types == 3) & opening) * gem_amount
+    inventory.ruby += (ore_found & (ore_types == 4) & opening) * gem_amount
+    inventory.arrows += (arrows_found & opening) * arrows_amount
 
     pickaxe_found = tool_found & (tool_ids == 0) & opening
     inventory.pickaxe = torch.where(
@@ -411,7 +400,7 @@ def _add_chest_loot(
         inventory.sword,
     )
 
-    potion_loot = (potion_found & opening).to(torch.int32) * potion_amount
+    potion_loot = (potion_found & opening) * potion_amount
     inventory.potions[rows, potion_indices] += potion_loot
 
     first_chest = opening & ~state.chests_opened[rows, levels]
@@ -422,7 +411,7 @@ def _add_chest_loot(
         inventory.bow,
     )
     book_reward = first_chest & ((levels == 3) | (levels == 4))
-    inventory.books += book_reward.to(torch.int32)
+    inventory.books += book_reward
     return state
 
 

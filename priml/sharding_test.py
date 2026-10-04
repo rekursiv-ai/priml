@@ -81,6 +81,7 @@ def test_parse_shard_spec_whitespace() -> None:
     """Test that whitespace is handled correctly."""
     assert parse_shard_spec(" 1 , 3 , 5 ", 10) == {1, 3, 5}
     assert parse_shard_spec(" 1 : 5 ", 10) == {1, 2, 3, 4}
+    assert parse_shard_spec("1, ,3", 10) == {1, 3}
 
 
 def test_parse_shard_spec_edge_cases() -> None:
@@ -89,9 +90,10 @@ def test_parse_shard_spec_edge_cases() -> None:
     assert parse_shard_spec("0", 1) == {0}
     assert parse_shard_spec(":", 1) == {0}
 
-    # Empty range.
+    # Empty range and empty shard collections.
     assert parse_shard_spec("5:5", 10) == set()
     assert parse_shard_spec("5:3", 10) == set()
+    assert parse_shard_spec("0,-1,:", 0) == set()
 
 
 if __name__ == "__main__":

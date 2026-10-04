@@ -46,17 +46,21 @@ def test_output_gate_mismatched_widths_reject_at_make() -> None:
 
 def test_output_gate_basic():
     m = OutputGate.Config(
-        channels_in=64,
+        channels_in=4,
         inner=Attention.Config(
-            channels_in=64,
-            num_heads=4,
-            channels_head=16,
+            channels_in=4,
+            num_heads=2,
+            channels_head=2,
             causal=True,
         ),
     ).make()
-    x = torch.randn(2, 8, 64)
+    with torch.no_grad():
+        m.gate_proj.weight.copy_(torch.tensor([[1.0, 0, 0, 0]] * 4))
+    x = torch.tensor([[[0.0, 1.0, 2.0, 3.0], [1.0, 2.0, 3.0, 4.0]]])
     out = m(x)
-    assert out.shape == (2, 8, 64)
+    expected = m.inner(x) * torch.sigmoid(m.gate_proj(x))
+    assert torch.equal(out, expected)
+    assert out.shape == (1, 2, 4)
 
 
 def test_output_gate_cached():
@@ -207,6 +211,59 @@ def test_output_gate_traffic_prices_projection_and_scalar_operands() -> None:
     assert (
         wide["bytes", torch.float32].sum() == actual["bytes", torch.bfloat16].sum() * 2
     )
+
+
+def test_output_gate_allocates_cache_with_requested_placement() -> None:
+    model = OutputGate.Config(
+        channels_in=12,
+        inner=Attention.Config(num_heads=3, channels_head=4),
+    ).make()
+    cache = model.alloc_kv_cache(
+        batch=2,
+        max_seq=5,
+        device="meta",
+        dtype=torch.bfloat16,
+    )
+    assert cache.k.shape == (2, 3, 5, 4)
+    assert cache.v.shape == (2, 3, 5, 4)
+    assert cache.k.device == cache.v.device == torch.device("meta")
+    assert cache.k.dtype == cache.v.dtype == torch.bfloat16
+
+
+def test_output_gate_cached_forwards_kwargs_and_multiplies_by_gate() -> None:
+    model = OutputGate.Config(
+        channels_in=12,
+        inner=Attention.Config(
+            num_heads=3,
+            channels_head=4,
+            attn_kernel=SdpaNaive.Config(),
+        ),
+    ).make()
+    with torch.no_grad():
+        model.gate_proj.weight.zero_()
+    x = torch.arange(2 * 5 * 12, dtype=torch.float32).reshape(2, 5, 12) / 100
+    # Attention masks are [batch, heads, sequence, sequence].
+    mask = torch.full((2, 3, 5, 5), -float("inf"))
+    mask[..., 0] = 0
+    actual_cache = model.alloc_kv_cache(batch=2, max_seq=5)
+    reference_cache = model.alloc_kv_cache(batch=2, max_seq=5)
+
+    actual, updated = model.forward_cached(
+        x,
+        cache=actual_cache,
+        attn_mask=mask,
+    )
+    assert isinstance(model.inner, Attention)
+    inner, reference_updated = model.inner.forward_cached(
+        x,
+        cache=reference_cache,
+        attn_mask=mask,
+    )
+    torch.testing.assert_close(actual, inner * torch.sigmoid(model.gate_proj(x)))
+    assert not torch.equal(actual, inner / torch.sigmoid(model.gate_proj(x)))
+    assert torch.equal(updated.k, reference_updated.k)
+    assert torch.equal(updated.v, reference_updated.v)
+    assert updated.length == reference_updated.length == 5
 
 
 if __name__ == "__main__":

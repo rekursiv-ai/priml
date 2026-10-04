@@ -109,7 +109,7 @@ def shoot_arrow(state: EnvState, action: Tensor) -> EnvState:
     has_projectile_slot = ~state.player_projectiles.mask[
         batch_rows(state.num_envs, state.device),
         state.player_level.long(),
-    ].all(-1)
+    ].all(1)
     firing = (
         (action == int(Action.SHOOT_ARROW))
         & (state.inventory.bow >= 1)
@@ -151,7 +151,7 @@ def cast_spell(state: EnvState, action: Tensor) -> EnvState:
     rows = batch_rows(state.num_envs, state.device)
     has_projectile_slot = (
         ~state.player_projectiles.mask[rows, state.player_level.long()]
-    ).any(-1)
+    ).any(1)
     fire = (
         (action == int(Action.CAST_FIREBALL))
         & (state.player_mana >= 2)
@@ -209,8 +209,8 @@ def read_book(
     # it would mean reading the batch on the host, a stall that also keeps the
     # step out of a CUDA graph.
     first_slot = torch.arange(2, device=state.device) == 0
-    weights = torch.where(unknown.any(-1, keepdim=True), unknown, first_slot)
-    spell = torch.multinomial(weights.float(), 1, generator=generator).squeeze(-1)
+    weights = torch.where(unknown.any(1, keepdim=True), unknown, first_slot)
+    spell = torch.multinomial(weights.float(), 1, generator=generator).squeeze(1)
 
     rows = batch_rows(state.num_envs, state.device)
     state.learned_spells[rows, spell] = state.learned_spells[rows, spell] | reading
@@ -266,9 +266,7 @@ def enchant(
     )
     on_bow = ready & (action == int(Action.ENCHANT_BOW)) & (state.inventory.bow > 0)
     on_armour = (
-        ready
-        & (action == int(Action.ENCHANT_ARMOUR))
-        & (state.inventory.armour.sum(-1) > 0)
+        ready & (action == int(Action.ENCHANT_ARMOUR)) & state.inventory.armour.any(1)
     )
     enchanting = on_sword | on_bow | on_armour
 
@@ -282,16 +280,14 @@ def enchant(
     # Prefer a bare piece; failing that, overwrite one carrying the other
     # element, so a second enchantment is never wasted.
     bare = state.armour_enchantments == 0
-    opposite = (state.armour_enchantments != 0) & (
-        state.armour_enchantments != element[:, None]
-    )
-    candidates = torch.where(bare.any(-1, keepdim=True), bare, opposite).float()
+    opposite = state.armour_enchantments != element[:, None]
+    candidates = torch.where(bare.any(1, keepdim=True), bare, opposite).float()
     candidates = torch.where(
-        candidates.sum(-1, keepdim=True) > 0,
+        candidates.sum(1, keepdim=True) > 0,
         candidates,
         torch.ones_like(candidates),
     )
-    piece = torch.multinomial(candidates, 1, generator=generator).squeeze(-1)
+    piece = torch.multinomial(candidates, 1, generator=generator).squeeze(1)
     rows = batch_rows(state.num_envs, state.device)
     state.armour_enchantments[rows, piece] = torch.where(
         on_armour,
@@ -362,7 +358,7 @@ def grow_plants(state: EnvState) -> EnvState:
     rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
     grid = state.map[rows, level]
-    for slot in range(state.growing_plants_mask.shape[-1]):
+    for slot in range(state.growing_plants_mask.shape[1]):
         grid = scatter_tiles_where(
             grid,
             state.growing_plants_positions[:, slot],
@@ -383,8 +379,7 @@ def _launch(state: EnvState, *, firing: Tensor, kind: Tensor) -> EnvState:
     rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
     free = projectiles.mask[rows, level]
-    slot = (~free).int().argmax(-1)
-    firing = firing & (~free).any(-1)
+    slot = (~free).int().argmax(1)
 
     heading = constants.on_device(constants.DIRECTIONS, state.device)[
         state.player_direction.long()

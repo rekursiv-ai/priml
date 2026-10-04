@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from PIL import Image as PILImage
+
 import pytest
 import torch
+import torchvision.transforms.functional as tvf
 
+from priml.data.processors import utils
 from priml.data.processors.utils import (
     as_image_batch_tensor,
     compute_keyframes_as_progressive_bisection,
@@ -199,6 +203,30 @@ def test_as_image_batch_tensor_with_device():
     assert result.shape == (2, 3, 4, 5)
 
 
+def test_as_image_batch_tensor_passes_dtype_and_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = torch.zeros(3, 2, 4, 5)
+    calls: list[tuple[torch.dtype | None, torch.device | str | None]] = []
+    as_tensor = torch.as_tensor
+
+    def spy(
+        value: object,
+        *,
+        dtype: torch.dtype | None = None,
+        device: torch.device | str | None = None,
+    ) -> torch.Tensor:
+        calls.append((dtype, device))
+        return as_tensor(value, dtype=dtype, device=device)
+
+    monkeypatch.setattr(torch, "as_tensor", spy)
+    result = as_image_batch_tensor(source, dtype=torch.float64, device="cpu")
+
+    assert result.dtype == torch.float64
+    assert result.device.type == "cpu"
+    assert calls == [(torch.float64, "cpu")]
+
+
 def test_as_image_batch_tensor_too_few_dims_raises():
     """Test as_image_batch_tensor raises on tensors with < 4 dimensions."""
     x = torch.zeros(3, 4, 5)  # Only 3D.
@@ -256,6 +284,11 @@ def test_progressive_bisection_adds_endpoints_then_splits_the_widest_gap(
     assert compute_keyframes_as_progressive_bisection(total, wanted) == expected
 
 
+def test_progressive_bisection_splits_first_of_equal_gaps() -> None:
+    assert compute_keyframes_as_progressive_bisection(9, 4) == [0, 2, 4, 8]
+    assert compute_keyframes_as_progressive_bisection(6, 6) == [0, 1, 2, 3, 4, 5]
+
+
 def test_preprocess_images_rejects_integer_and_non_nchw_inputs() -> None:
     with pytest.raises(TypeError, match="float type"):
         preprocess_images(torch.zeros(2, 3, 4, 5, dtype=torch.uint8), size=(2, 3))
@@ -271,7 +304,10 @@ def test_preprocess_images_lanczos_resizes_through_pil_and_rejects_align_corners
     assert out.dtype == torch.float64
     assert out.min() >= -1
     assert out.max() <= 1
-    with pytest.raises(ValueError, match="align_corners is not supported"):
+    with pytest.raises(
+        ValueError,
+        match=r"^align_corners is not supported with Lanczos interpolation \(PIL resize does not have this parameter\)$",
+    ):
         preprocess_images(x, size=(2, 3), mode="lanczos", align_corners=False)
 
 
@@ -301,6 +337,182 @@ def test_image_batch_to_pil_list_rejects_bad_inputs_and_maps_the_range() -> None
     assert len(images) == 2
     assert images[0].getpixel((0, 0)) == (0, 0, 0)
     assert images[0].getpixel((4, 0)) == (255, 255, 255)
+
+
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        (("hybrid", (4, 5), True, True), ("area", False, None)),
+        (("hybrid", (4, 8), True, True), ("area", False, None)),
+        (("hybrid", (6, 9), False, False), ("bicubic", False, False)),
+        (("hybrid", (4, 12), False, True), ("bicubic", False, True)),
+        (("bilinear", (4, 5), True, True), ("bilinear", True, True)),
+        (("bicubic", (4, 5), True, True), ("bicubic", True, True)),
+        (("bilinear", (4, 5), False, True), ("bilinear", False, True)),
+        (("linear", (4, 5), True, True), ("linear", False, True)),
+        (("trilinear", (4, 5), True, True), ("trilinear", False, True)),
+        (("nearest", (4, 5), True, True), ("nearest", False, None)),
+    ],
+)
+def test_preprocess_images_forwards_exact_interpolation_options(
+    monkeypatch: pytest.MonkeyPatch,
+    options: tuple[utils.InterpolationMode, tuple[int, int], bool, bool],
+    expected: tuple[utils.InterpolationMode, bool, bool | None],
+) -> None:
+    mode, size, antialias, align_corners = options
+    expected_mode, expected_antialias, expected_align = expected
+    source = torch.arange(5 * 2 * 6 * 8, dtype=torch.float32).reshape(5, 2, 6, 8)
+    calls: list[tuple[object, ...]] = []
+
+    def fake_interpolate(
+        input_: torch.Tensor,
+        *,
+        size: tuple[int, int],
+        mode: str,
+        antialias: bool,
+        align_corners: bool | None,
+    ) -> torch.Tensor:
+        assert input_ is source
+        calls.append((size, mode, antialias, align_corners))
+        return input_
+
+    monkeypatch.setattr(torch.nn.functional, "interpolate", fake_interpolate)
+
+    result = preprocess_images(
+        source,
+        size=size,
+        mode=mode,
+        antialias=antialias,
+        align_corners=align_corners,
+    )
+
+    assert result is source
+    assert len(calls) == 1
+    assert calls[0] == (size, expected_mode, expected_antialias, expected_align)
+
+
+def test_preprocess_images_defaults_antialias_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = torch.zeros(5, 2, 6, 8)
+    calls: list[bool] = []
+
+    def fake_interpolate(
+        input_: torch.Tensor,
+        *,
+        size: tuple[int, int],
+        mode: str,
+        antialias: bool,
+        align_corners: bool | None,
+    ) -> torch.Tensor:
+        del size, mode, align_corners
+        assert input_ is source
+        calls.append(antialias)
+        return input_
+
+    monkeypatch.setattr(torch.nn.functional, "interpolate", fake_interpolate)
+    result = preprocess_images(source, size=(4, 5), mode="bilinear")
+
+    assert result is source
+    assert calls == [False]
+
+
+def test_preprocess_images_no_resize_normalizes_at_requested_dtype(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = torch.arange(5 * 2 * 6 * 8, dtype=torch.float32).reshape(5, 2, 6, 8) / 100
+    mean = [0.25, 0.5]
+    std = [0.5, 0.25]
+
+    def unexpected_resize(
+        input_: torch.Tensor,
+        *,
+        size: tuple[int, int],
+        mode: str,
+        antialias: bool,
+        align_corners: bool | None,
+    ) -> torch.Tensor:
+        del input_, size, mode, antialias, align_corners
+        raise AssertionError("resize should be skipped when dimensions already match")
+
+    monkeypatch.setattr(torch.nn.functional, "interpolate", unexpected_resize)
+    result = preprocess_images(
+        source,
+        size=(6, 8),
+        mean=mean,
+        std=std,
+        dtype=torch.float64,
+    )
+
+    # Per-channel statistics broadcast over [batch, height, width].
+    expected = (
+        source.to(torch.float64) - torch.tensor(mean).to(torch.float64).view(1, 2, 1, 1)
+    ) / torch.tensor(std).to(torch.float64).view(1, 2, 1, 1)
+    assert result.dtype == torch.float64
+    assert torch.equal(result, expected)
+
+
+def test_preprocess_images_materializes_normalization_on_input_device_and_dtype(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = torch.zeros(5, 2, 6, 8, dtype=torch.float64)
+    original_as_tensor = torch.as_tensor
+    calls: list[dict[str, object]] = []
+
+    def spy_as_tensor(
+        value: object,
+        *,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        calls.append({"device": device, "dtype": dtype})
+        return original_as_tensor(value, device=device, dtype=dtype)
+
+    monkeypatch.setattr(torch, "as_tensor", spy_as_tensor)
+    preprocess_images(source, size=(6, 8), mean=[0.1, 0.2], std=[0.3, 0.4])
+
+    assert calls == [
+        {"device": source.device, "dtype": source.dtype},
+        {"device": source.device, "dtype": source.dtype},
+    ]
+
+
+def test_preprocess_images_lanczos_uses_pil_resampling_and_rgb_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = PILImage.frombytes(
+        "RGB",
+        (5, 4),
+        bytes(
+            component
+            for i in range(20)
+            for component in (i * 11 % 256, i * 37 % 256, i * 71 % 256)
+        ),
+    )
+
+    def image_list(_: torch.Tensor) -> list[PILImage.Image]:
+        return [image, image.copy()]
+
+    monkeypatch.setattr(utils, "image_batch_to_pil_list", image_list)
+    result = preprocess_images(
+        torch.zeros(2, 3, 4, 5, dtype=torch.float16),
+        size=(2, 3),
+        mode="lanczos",
+    )
+
+    pixels = tvf.to_tensor(image.resize((3, 2), PILImage.Resampling.LANCZOS))
+    expected = (
+        torch.stack(
+            (
+                pixels,
+                tvf.to_tensor(image.copy().resize((3, 2), PILImage.Resampling.LANCZOS)),
+            ),
+        )
+        * 2
+    ) - 1
+    assert result.shape == (2, 3, 2, 3)
+    assert result.dtype == torch.float16
+    assert torch.equal(result, expected.to(torch.float16))
 
 
 if __name__ == "__main__":

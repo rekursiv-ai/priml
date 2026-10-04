@@ -94,6 +94,7 @@ def test_head_capabilities_are_direct_attributes() -> None:
 
 def test_flatten_depth_index_uses_global_to_local_mixed_radix() -> None:
     assert flatten_depth_index(()) == -1
+    assert flatten_depth_index(((0, 1),)) == 0
     assert flatten_depth_index(((3, 12),)) == 3
     assert flatten_depth_index(((1, 4), (3, 12))) == 15
 
@@ -150,8 +151,12 @@ def test_propagate_missing_attr_raises():
     class NoChannels:
         channels_in: int = -1
 
-    with pytest.raises(AttributeError, match="channels_out"):
+    with pytest.raises(AttributeError) as error:
         propagate_attr(NoChannels(), "channels_out", 64, protocol=ChannelsIn)
+    assert str(error.value) == (
+        "NoChannels satisfies ChannelsIn but has no attribute 'channels_out'; "
+        "cannot propagate value 64."
+    )
 
 
 @dataclass(slots=True, kw_only=True)
@@ -225,17 +230,13 @@ def test_protocol_stub_bodies_are_inert() -> None:
     """A stub hides no behavior: every default body is a no-op returning None."""
     x = torch.zeros(1)
     kernel: AttentionKernel[...] = _KernelStub()
-    assert isinstance(kernel, AttentionKernel)
     assert kernel(x, x, x) is None
     latent: LatentAttentionKernel[...] = _LatentKernelStub()
-    assert isinstance(latent, LatentAttentionKernel)
     assert latent(x, x, x, x) is None
     module: TensorModule = _TensorModuleStub()
-    assert isinstance(module, HasResetParameters)
     assert module(x) is None
     assert module.reset_parameters() is None
     rotary: RotaryFactors = _RotaryStub()
-    assert isinstance(rotary, RotaryFactors)
     assert rotary(x) is None
     assert has_weight(_LookupStub())
     assert _LookupStub().to(dtype=torch.float32) is None

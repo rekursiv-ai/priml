@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
 
 import zlib
 
@@ -24,9 +25,14 @@ from priml.testing.golden import (
 )
 
 
-if TYPE_CHECKING:
-    from pathlib import Path
+class _Load(Protocol):
+    def __call__(self, f: Path, *, weights_only: bool) -> object: ...
 
+
+_torch_load: _Load = torch.load
+
+
+if TYPE_CHECKING:
     from torch import Tensor
 
 
@@ -64,6 +70,21 @@ def test_assert_text_golden_regenerates_missing_then_fails(
     assert (tmp_path / "testdata" / "example.txt").read_text() == "value\n"
 
 
+def test_assert_text_golden_creates_missing_ancestor_directories(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+) -> None:
+    test_file = tmp_path / "absent" / "owner_test.py"
+    with pytest.raises(AssertionError, match="Missing golden regenerated"):
+        assert_text_golden(
+            request,
+            test_file=str(test_file),
+            name="example",
+            rendered="value",
+        )
+    assert (tmp_path / "absent" / "testdata" / "example.txt").read_text() == "value\n"
+
+
 def test_assert_text_golden_fails_a_changed_render_as_an_assertion(
     request: pytest.FixtureRequest,
     tmp_path: Path,
@@ -73,13 +94,17 @@ def test_assert_text_golden_fails_a_changed_render_as_an_assertion(
     testdata.mkdir()
     (testdata / "example.txt").write_text("value\n", encoding="utf-8")
 
-    with pytest.raises(AssertionError, match="example changed"):
+    with pytest.raises(AssertionError) as error:
         assert_text_golden(
             request,
             test_file=str(test_file),
             name="example",
             rendered="other",
         )
+    assert str(error.value) == (
+        "example changed; read the diff, then rerun with --golden-overwrite "
+        "if the change is intended."
+    )
 
 
 def _record() -> dict[str, Tensor]:
@@ -354,6 +379,232 @@ def test_expect_golden_mismatch_requires_the_message_to_match(
         expect_golden_mismatch(match=r"1 mismatches"),
     ):
         raise AssertionError("different failure")
+
+
+def test_assert_text_golden_overwrites_only_when_requested(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_file = tmp_path / "nested" / "owner_test.py"
+    golden = tmp_path / "nested" / "testdata" / "named.txt"
+    golden.parent.mkdir(parents=True)
+    golden.write_text("old\n", encoding="utf-8")
+    options: list[tuple[str, dict[str, object]]] = []
+
+    def getoption(name: str, *args: object, **kwargs: object) -> bool:
+        options.append((name, {"args": args, **kwargs}))
+        return True
+
+    monkeypatch.setattr(request.config, "getoption", getoption)
+    assert_text_golden(
+        request,
+        test_file=str(test_file),
+        name="named",
+        rendered="new",
+    )
+    assert options == [("--golden-overwrite", {"args": (), "default": False})]
+    assert golden.read_text(encoding="utf-8") == "new\n"
+
+
+def test_assert_tensor_golden_creates_nested_parent_and_reports_every_diff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BFB_REGENERATE", raising=False)
+    path = tmp_path / "deep" / "nested" / "g.pt"
+    original = {"a": torch.tensor([1.0]), "b": torch.tensor([2.0])}
+    with pytest.raises(AssertionError, match="Missing golden minted"):
+        assert_tensor_golden(path, original)
+
+    changed = {"a": torch.tensor([3.0]), "b": torch.tensor([4.0])}
+    with pytest.raises(AssertionError) as error:
+        assert_tensor_golden(path, changed)
+    assert str(error.value) == "2 mismatches:\na: 1/1 differ\nb: 1/1 differ"
+
+
+def test_assert_tensor_golden_regeneration_uses_only_exact_one_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "g.pt"
+    record = {"x": torch.tensor([1.0, 2.0])}
+    with pytest.raises(AssertionError, match="Missing golden minted"):
+        assert_tensor_golden(path, record)
+    before = path.read_bytes()
+    monkeypatch.setenv("BFB_REGENERATE", "true")
+    with pytest.raises(AssertionError, match="mismatches"):
+        assert_tensor_golden(path, {"x": torch.tensor([3.0, 4.0])})
+    assert path.read_bytes() == before
+    monkeypatch.setenv("BFB_REGENERATE", "1")
+    assert_tensor_golden(path, {"x": torch.tensor([3.0, 4.0])})
+    assert torch.equal(read_tensors(path)["x"], torch.tensor([3.0, 4.0]))
+
+
+def test_pack_records_dtype_prefix_shape_and_compression_level() -> None:
+    record = {
+        "matrix": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+        "scalar": torch.tensor(5, dtype=torch.int64),
+    }
+    packed = golden.pack(record)
+    index = zlib.decompress(packed["index"].numpy().tobytes()).decode()
+    assert index == "matrix\tfloat32\t2,2\nscalar\tint64\t"
+    assert list(packed) == ["float32", "int64", "index"]
+
+
+def test_pack_rejects_newline_and_tab_in_keys() -> None:
+    for key in ("line\nbreak", "tab\tkey"):
+        with pytest.raises(ValueError, match="Golden key"):
+            golden.pack({key: torch.ones(2)})
+
+
+def test_put_steps_stores_uniform_and_ragged_values_without_skipping() -> None:
+    records = [
+        {"a": torch.tensor([1, 2]), "b": torch.tensor([3])},
+        {"a": torch.tensor([4, 5]), "b": torch.tensor([6, 7])},
+    ]
+    output: dict[str, Tensor] = {}
+    put_steps(output, "step", records)
+    assert list(output) == ["step/a", "step/1/b", "step/2/b"]
+    assert torch.equal(output["step/a"], torch.tensor([[1, 2], [4, 5]]))
+    assert torch.equal(output["step/1/b"], torch.tensor([3]))
+    assert torch.equal(output["step/2/b"], torch.tensor([6, 7]))
+
+
+def test_read_tensors_requests_weights_only_loading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "golden.pt"
+    torch.save(golden.pack({"x": torch.tensor([1, 2])}), path)
+
+    kwargs_seen: list[dict[str, object]] = []
+
+    def load(actual_path: Path, **kwargs: object) -> object:
+        kwargs_seen.append(kwargs)
+        weights_only = kwargs.get("weights_only")
+        assert isinstance(weights_only, bool)
+        return _torch_load(actual_path, weights_only=weights_only)
+
+    monkeypatch.setattr(torch, "load", load)
+    assert torch.equal(read_tensors(path)["x"], torch.tensor([1, 2]))
+    assert kwargs_seen == [{"weights_only": True}]
+
+
+def test_rng_fingerprint_is_exact_next_eight_draws_without_advancing() -> None:
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(314)
+        state = torch.get_rng_state()
+        expected = torch.randint(
+            0,
+            2**31 - 1,
+            (8,),
+            generator=torch.Generator().set_state(state),
+        )
+        before = torch.get_rng_state()
+        actual = rng_fingerprint()
+        assert actual.dtype == torch.int64
+        assert actual.shape == (8,)
+        assert torch.equal(actual, expected)
+        assert torch.equal(torch.get_rng_state(), before)
+
+
+def test_stored_narrows_two_exact_whole_numbers() -> None:
+    value = torch.tensor([0, 255], dtype=torch.int64)
+    result = stored(value)
+    assert result.dtype == torch.uint8
+    assert torch.equal(result.to(torch.int64), value)
+
+
+def test_tensor_bits_equal_rejects_shape_or_dtype_independently() -> None:
+    value = torch.arange(6, dtype=torch.float32)
+    assert not golden.tensor_bits_equal(value, value.reshape(2, 3))
+    assert not golden.tensor_bits_equal(value, value.to(torch.float64))
+
+
+def test_unpack_rejects_payload_without_index() -> None:
+    with pytest.raises(TypeError, match=r"^Not a record written by pack\.$"):
+        golden.unpack({"float32": torch.ones(2)})
+
+
+def test_unpack_rejects_a_non_mapping() -> None:
+    with pytest.raises(TypeError, match="cannot coerce"):
+        golden.unpack("not a record")
+
+
+def test_unpack_empty_index_returns_empty_record() -> None:
+    assert golden.unpack(golden.pack({})) == {}
+
+
+def test_text_golden_uses_utf8_for_disk_io(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_file = tmp_path / "owner_test.py"
+    golden_path = tmp_path / "testdata" / "disk.txt"
+    golden_path.parent.mkdir()
+    golden_path.write_text("value\n", encoding="utf-8")
+    writes: list[dict[str, object]] = []
+    reads: list[dict[str, object]] = []
+    write_text = Path.write_text
+    read_text = Path.read_text
+
+    def track_write(path: Path, data: str, **kwargs: object) -> int:
+        writes.append(kwargs)
+        encoding = kwargs.get("encoding")
+        assert encoding is None or isinstance(encoding, str)
+        return write_text(path, data, encoding=encoding)
+
+    def track_read(path: Path, **kwargs: object) -> str:
+        reads.append(kwargs)
+        encoding = kwargs.get("encoding")
+        assert encoding is None or isinstance(encoding, str)
+        return read_text(path, encoding=encoding)
+
+    monkeypatch.setattr(Path, "write_text", track_write)
+    monkeypatch.setattr(Path, "read_text", track_read)
+
+    def getoption(name: str, *args: object, **kwargs: object) -> bool:
+        del args, kwargs
+        return name == "--golden-overwrite"
+
+    monkeypatch.setattr(request.config, "getoption", getoption)
+    assert_text_golden(
+        request,
+        test_file=str(test_file),
+        name="disk",
+        rendered="value",
+    )
+    assert writes == [{"encoding": "utf-8"}]
+    assert reads == [{"encoding": "utf-8"}]
+
+
+def test_pack_requests_maximum_index_compression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compress = zlib.compress
+    levels: list[int] = []
+
+    def track_compress(data: bytes, *, level: int) -> bytes:
+        levels.append(level)
+        return compress(data, level=level)
+
+    monkeypatch.setattr(zlib, "compress", track_compress)
+    golden.pack({"x": torch.ones(2)})
+    assert levels == [9]
+
+
+def test_read_tensors_wraps_invalid_pack_error_with_path(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "foreign.pt"
+    torch.save({"float32": torch.ones(2)}, path)
+    with pytest.raises(
+        TypeError,
+        match=r"^.*foreign\.pt is not a tensor golden written by write_tensors\.$",
+    ):
+        read_tensors(path)
 
 
 if __name__ == "__main__":

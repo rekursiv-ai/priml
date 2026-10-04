@@ -33,6 +33,12 @@ def test_resolve_working_dir_accepts_relative_working_dir() -> None:
     assert resolve_working_dir("/base", "runs/exp1") == Path("/base/runs/exp1")
 
 
+def test_resolve_working_dir_strips_only_the_leading_slash() -> None:
+    assert resolve_working_dir("/base", "XX/checkpoints") == Path(
+        "/base/XX/checkpoints",
+    )
+
+
 def test_composing_a_path_does_not_load_torch() -> None:
     """Config-time resolution must stay usable in torch-free processes.
 
@@ -97,6 +103,14 @@ def test_validated_output_path_rejects_filesystem_root() -> None:
 def test_validated_output_path_rejects_non_normalized_path() -> None:
     with pytest.raises(ValueError, match="must be normalized"):
         validated_output_path("/opt/scratch/../repo/output.json")
+
+
+def test_validated_output_path_allows_missing_symlink_target(tmp_path: Path) -> None:
+    target = tmp_path / "missing.json"
+    link = tmp_path / "output.json"
+    link.symlink_to(target)
+
+    assert validated_output_path(link) == link
 
 
 def test_validated_output_path_rejects_symlink_resolving_to_root(
@@ -178,6 +192,17 @@ def test_validated_output_path_allows_a_fresh_destination(tmp_path: Path) -> Non
     output = tmp_path / "report.json"
 
     assert validated_output_path(output, protected=[protected]) == output
+
+
+def test_validated_output_path_ignores_missing_protected_entries(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "report.json"
+    output.write_bytes(b"output")
+    missing = tmp_path / "missing.json"
+
+    assert validated_output_path(output, protected=[missing]) == output
+    assert not missing.exists()
 
 
 def test_callable_protected_is_evaluated_after_destination_validation(

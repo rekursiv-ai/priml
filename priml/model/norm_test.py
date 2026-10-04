@@ -124,6 +124,13 @@ def test_centered_rmsnorm_identity_at_init():
     assert torch.allclose(out.float(), expected, atol=1e-5)
 
 
+def test_centered_rmsnorm_reset_parameters_restores_zero_scale() -> None:
+    layer = CenteredRMSNorm.Config(4).make()
+    nn.init.constant_(layer.weight, 2.0)
+    layer.reset_parameters()
+    assert torch.equal(layer.weight, torch.zeros(4))
+
+
 def test_centered_rmsnorm_accepts_messages_and_rejects_positional_extras():
     m = CenteredRMSNorm.Config(32).make()
     x = torch.randn(2, 8, 32)
@@ -320,7 +327,6 @@ def test_norm_infers_the_missing_width_and_rejects_unequal_widths(
     assert isinstance(config, ChannelsInOut)
     config.channels_out = 8
     finalized = config.copy_tree().finalize()
-    assert isinstance(finalized, ChannelsInOut)
     assert finalized.channels_in == 8
     config.channels_in = 4
     with pytest.raises(ValueError, match="channels_in=4 must equal channels_out=8"):

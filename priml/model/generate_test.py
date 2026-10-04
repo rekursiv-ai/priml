@@ -85,6 +85,12 @@ def test_sample_top_p_restores_vocab_order():
     assert probs.argmax(dim=-1).item() == 2
 
 
+def test_topp_filter_disabled_returns_original_logits() -> None:
+    logits = torch.tensor([[1.0, 0.0, 9.0], [0.0, 2.0, 1.0]])
+
+    assert _topp_filter(logits, top_p=1.0) is logits
+
+
 def test_sample_greedy_is_argmax():
     """Temperature 0 returns the argmax token id."""
     logits = torch.tensor([[1.0, 9.0, 0.5]])
@@ -96,6 +102,174 @@ def test_sample_applies_temperature_top_k_and_top_p() -> None:
     logits = torch.tensor([[1.0, 2.0, 9.0]])
     token = _sample(logits, temperature=2.0, top_k=1, top_p=0.5)
     assert token.item() == 2
+
+
+def test_sample_greedy_uses_vocabulary_axis() -> None:
+    logits = torch.tensor(
+        [
+            [
+                [0.0, 1.0, 2.0, 3.0, 9.0],
+                [8.0, 0.0, 1.0, 2.0, 3.0],
+                [0.0, 8.0, 1.0, 2.0, 3.0],
+            ],
+            [
+                [0.0, 1.0, 8.0, 2.0, 3.0],
+                [0.0, 1.0, 2.0, 8.0, 3.0],
+                [0.0, 1.0, 2.0, 3.0, 8.0],
+            ],
+        ],
+    )
+
+    tokens = _sample(logits, temperature=0.0, top_k=0, top_p=1.0)
+
+    assert torch.equal(tokens, torch.tensor([[[4], [0], [1]], [[2], [3], [4]]]))
+
+
+def test_sample_top_k_filters_vocab_and_caps_k(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logits = torch.tensor(
+        [
+            [
+                [0.0, 1.0, 2.0, 3.0, 9.0],
+                [8.0, 0.0, 1.0, 2.0, 3.0],
+                [0.0, 8.0, 1.0, 2.0, 3.0],
+            ],
+            [
+                [0.0, 1.0, 8.0, 2.0, 3.0],
+                [0.0, 1.0, 2.0, 8.0, 3.0],
+                [0.0, 1.0, 2.0, 3.0, 8.0],
+            ],
+        ],
+    )
+    probabilities: list[Tensor] = []
+
+    def capture(probs: Tensor, num_samples: int) -> Tensor:
+        assert num_samples == 1
+        probabilities.append(probs)
+        return probs.argmax(dim=-1, keepdim=True)
+
+    monkeypatch.setattr(torch, "multinomial", capture)
+    tokens = _sample(logits, temperature=1.0, top_k=4, top_p=1.0)
+    assert tokens.shape == (2, 3, 1)
+    assert torch.equal(
+        (probabilities[-1] > 0).sum(dim=-1),
+        torch.full((2, 3), 4),
+    )
+
+    _sample(logits, temperature=1.0, top_k=0, top_p=1.0)
+    assert torch.equal(
+        (probabilities[-1] > 0).sum(dim=-1),
+        torch.full((2, 3), 5),
+    )
+
+    tokens = _sample(logits, temperature=1.0, top_k=1, top_p=1.0)
+    assert torch.equal(tokens, torch.tensor([[[4], [0], [1]], [[2], [3], [4]]]))
+    assert torch.equal(
+        probabilities[-1].sum(dim=-1),
+        torch.ones((2, 3)),
+    )
+
+
+def test_sample_applies_top_p_before_sampling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logits = torch.tensor(
+        [
+            [
+                [5.0, 4.0, 3.0, 2.0, 1.0],
+                [1.0, 5.0, 4.0, 3.0, 2.0],
+                [2.0, 1.0, 5.0, 4.0, 3.0],
+            ],
+            [
+                [3.0, 2.0, 1.0, 5.0, 4.0],
+                [4.0, 3.0, 2.0, 1.0, 5.0],
+                [5.0, 4.0, 3.0, 2.0, 1.0],
+            ],
+        ],
+    )
+    probabilities: list[Tensor] = []
+
+    def capture(probs: Tensor, num_samples: int) -> Tensor:
+        del num_samples
+        probabilities.append(probs)
+        return probs.argmax(dim=-1, keepdim=True)
+
+    monkeypatch.setattr(torch, "multinomial", capture)
+    _sample(logits, temperature=1.0, top_k=0, top_p=0.7)
+
+    assert torch.equal(
+        (probabilities[0] > 0).sum(dim=-1),
+        torch.full((2, 3), 2),
+    )
+
+
+def test_sample_temperature_scales_rank_three_logits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logits = torch.tensor(
+        [[[0.0, 1.0, 3.0], [2.0, 0.0, 1.0]], [[3.0, 2.0, 0.0], [1.0, 4.0, 2.0]]],
+    )
+    probabilities: list[Tensor] = []
+
+    def capture(probs: Tensor, num_samples: int) -> Tensor:
+        del num_samples
+        probabilities.append(probs)
+        return probs.argmax(dim=-1, keepdim=True)
+
+    monkeypatch.setattr(torch, "multinomial", capture)
+    _sample(logits, temperature=2.0, top_k=0, top_p=1.0)
+
+    torch.testing.assert_close(probabilities[0], (logits / 2.0).softmax(dim=-1))
+
+
+def test_topp_filter_uses_rank_three_vocabulary_axis() -> None:
+    logits = torch.tensor(
+        [
+            [
+                [5.0, 4.0, 3.0, 2.0, 1.0],
+                [1.0, 5.0, 4.0, 3.0, 2.0],
+                [2.0, 1.0, 5.0, 4.0, 3.0],
+            ],
+            [
+                [3.0, 2.0, 1.0, 5.0, 4.0],
+                [4.0, 3.0, 2.0, 1.0, 5.0],
+                [5.0, 4.0, 3.0, 2.0, 1.0],
+            ],
+        ],
+    )
+
+    filtered = _topp_filter(logits, top_p=0.7)
+    probs = filtered.softmax(dim=-1)
+
+    assert probs.shape == logits.shape
+    assert torch.equal(probs.argmax(dim=-1), logits.argmax(dim=-1))
+    assert torch.equal((probs > 0).sum(dim=-1), torch.full((2, 3), 2))
+
+
+def test_topp_filter_restores_rank_three_vocabulary_order() -> None:
+    logits = torch.tensor(
+        [
+            [
+                [0.0, 0.1, 0.2, 0.3, 9.0],
+                [8.0, 0.0, 0.1, 0.2, 0.3],
+                [0.0, 8.0, 0.1, 0.2, 0.3],
+            ],
+            [
+                [0.0, 0.1, 8.0, 0.2, 0.3],
+                [0.0, 0.1, 0.2, 8.0, 0.3],
+                [0.0, 0.1, 0.2, 0.3, 8.0],
+            ],
+        ],
+    )
+
+    filtered = _topp_filter(logits, top_p=0.5)
+
+    assert torch.equal(filtered.argmax(dim=-1), logits.argmax(dim=-1))
+    assert torch.equal(
+        torch.isfinite(filtered).sum(dim=-1),
+        torch.ones((2, 3), dtype=torch.long),
+    )
 
 
 def test_sample_float16_filters_excluded_tokens() -> None:

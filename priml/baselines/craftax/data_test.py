@@ -37,13 +37,15 @@ def test_an_evaluation_runs_the_configured_passes() -> None:
     assert len(list(rollouts.eval_dataloader())) == 2
 
 
-def test_each_tick_carries_a_unit_weight() -> None:
-    # The loop weights an evaluation by ``valid_count``; one per pass makes
-    # the score an average over passes rather than over environments.
+def test_each_evaluation_tick_has_the_metric_only_batch_contract() -> None:
     rollouts = _rollouts()
-    rollouts.bind_step(cast(TrainStepProtocol, _Step()))
-    for batch in rollouts.eval_dataloader():
-        assert batch["valid_count"] == 1
+    step = _Step()
+    rollouts.bind_step(cast(TrainStepProtocol, step))
+    batch = next(iter(rollouts.eval_dataloader()))
+    assert batch.keys() == {"valid_count", "metric_only", "actor"}
+    assert batch["valid_count"] == 1
+    assert batch["metric_only"] is True
+    assert batch["actor"] is step.actors[0]
 
 
 def test_the_step_can_be_bound() -> None:
@@ -65,8 +67,13 @@ def test_an_evaluation_batch_carries_a_fresh_actor() -> None:
 
 
 def test_an_unbound_dataset_refuses_evaluation() -> None:
-    with pytest.raises(TypeError, match="bound training step"):
-        list(_rollouts().eval_dataloader())
+    rollouts = _rollouts()
+    assert rollouts._step is None
+    with pytest.raises(TypeError) as error:
+        list(rollouts.eval_dataloader())
+    assert error.value.args == (
+        "Evaluation requires a bound training step with an actor.",
+    )
 
 
 def test_training_batches_carry_no_actor() -> None:
@@ -113,6 +120,24 @@ def test_loading_into_an_active_iterator_updates_its_cursor() -> None:
     assert list(iterator) == [{"valid_count": 1}]
 
 
+def test_loading_an_empty_state_restarts_an_active_iterator() -> None:
+    rollouts = _rollouts()
+    iterator = rollouts.train_dataloader()
+    next(iter(iterator))
+
+    rollouts.load_state_dict({})
+
+    assert list(iterator) == [{"valid_count": 1}] * 3
+
+
+def test_exhausting_an_active_iterator_resets_its_cursor() -> None:
+    rollouts = _rollouts()
+    iterator = rollouts.train_dataloader()
+    assert len(list(iterator)) == 3
+    assert rollouts._live_train is iterator
+    assert iterator.position == 0
+
+
 def test_native_test_helpers_cover_optional_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -151,8 +176,22 @@ def test_a_fresh_iterator_is_returned_each_epoch() -> None:
 
 @pytest.mark.parametrize("field", ["updates_per_epoch", "eval_batches"])
 def test_an_empty_cadence_is_refused(field: str) -> None:
-    with pytest.raises(ValueError, match="positive"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Rollout cadence must be positive$",
+    ) as error:
         _rollouts(**{field: 0})
+    assert error.value.args == ("Rollout cadence must be positive",)
+
+
+@pytest.mark.parametrize("field", ["updates_per_epoch", "eval_batches"])
+def test_a_single_item_cadence_is_valid(field: str) -> None:
+    rollouts = _rollouts(**{field: 1})
+    if field == "updates_per_epoch":
+        assert len(list(rollouts.train_dataloader())) == 1
+    else:
+        rollouts.bind_step(cast(TrainStepProtocol, _Step()))
+        assert len(list(rollouts.eval_dataloader())) == 1
 
 
 if __name__ == "__main__":

@@ -9,7 +9,9 @@ torch reference at torch's bf16 tolerance.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final, override
+from types import SimpleNamespace
+from typing import ClassVar, Final, cast, override
+from unittest.mock import Mock, call
 
 from configgle.testing import assert_pprint_golden
 from torch import Tensor
@@ -40,29 +42,44 @@ def _allow_cpu_scan(combined: Tensor) -> None:
     del combined
 
 
-def _force_triton(*tensors: Tensor) -> bool:
-    del tensors
-    return True
+def _cdiv(value: int, divisor: int) -> int:
+    return (value + divisor - 1) // divisor
 
 
 class _FakeKernel:
+    def __init__(self) -> None:
+        self.grid: tuple[int, ...] | None = None
+        self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
     def __getitem__(self, grid: tuple[int, ...]) -> _FakeKernel:
-        del grid
+        self.grid = grid
         return self
 
     def __call__(self, *args: object, **kwargs: object) -> None:
-        del args, kwargs
+        self.calls.append((args, kwargs))
 
 
 class _FakeScanKernels:
-    forward = _FakeKernel()
-    backward = _FakeKernel()
-    step = _FakeKernel()
+    def __init__(self) -> None:
+        self.forward = _FakeKernel()
+        self.backward = _FakeKernel()
+        self.step = _FakeKernel()
 
 
-def _fake_kernels(**helpers: object) -> _FakeScanKernels:
-    del helpers
-    return _FakeScanKernels()
+class _LinearSpy(torch.nn.Linear):
+    bias_arguments: ClassVar[list[bool | None]] = []
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool | None = True,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        self.bias_arguments.append(bias)
+        assert bias is False
+        super().__init__(in_features, out_features, bias, device, dtype)
 
 
 def test_min_gru_matches_hand_forward_and_returns_layer_state() -> None:
@@ -105,6 +122,34 @@ def test_min_gru_matches_hand_forward_and_returns_layer_state() -> None:
     assert final.shape == expected_final.shape
     torch.testing.assert_close(outputs, expected)
     torch.testing.assert_close(final, expected_final)
+
+
+def test_min_gru_passes_false_for_each_projection_bias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _LinearSpy.bias_arguments.clear()
+    monkeypatch.setattr(torch.nn, "Linear", _LinearSpy)
+
+    MinGRU(input_channels=3, channels=4, layers=2)
+
+    assert _LinearSpy.bias_arguments == [False, False, False]
+
+
+def test_min_gru_zero_hidden_uses_shifted_identity_gradient() -> None:
+    model = MinGRU(input_channels=4, channels=4)
+    with torch.no_grad():
+        model.layers[0].weight.zero_()
+    inputs = torch.ones(3, 2, 4)
+
+    outputs, _ = model(inputs)
+    outputs.sum().backward()
+
+    assert model.layers[0].weight.grad is not None
+    # The gradient is the square input-to-hidden weight matrix.
+    torch.testing.assert_close(
+        model.layers[0].weight.grad[:4],
+        torch.full((4, 4), 1.875),
+    )
 
 
 def test_min_gru_repeated_step_equals_sequence() -> None:
@@ -151,8 +196,19 @@ def test_min_gru_rejects_an_empty_time_dimension() -> None:
 
 def test_min_gru_validates_constructor_and_call_shapes() -> None:
     for values in ((0, 2, 1), (2, 0, 1), (2, 2, 0)):
-        with pytest.raises(ValueError, match="positive"):
+        with pytest.raises(
+            ValueError,
+            match=r"\AMinGRU widths and layer count must be positive\.\Z",
+        ):
             MinGRU(values[0], values[1], values[2])
+    single_width = MinGRU(1, 1)
+    assert len(single_width.layers) == 1
+    assert isinstance(single_width.input_projection, torch.nn.Identity)
+    default_model = MinGRU(2, 3)
+    assert len(default_model.layers) == 1
+    assert isinstance(default_model.input_projection, torch.nn.Linear)
+    assert default_model.input_projection.bias is None
+    assert default_model.layers[0].bias is None
     model = MinGRU(2, 4, layers=2)
     inputs = torch.randn(3, 5, 2)
     with pytest.raises(ValueError, match="shape"):
@@ -163,8 +219,32 @@ def test_min_gru_validates_constructor_and_call_shapes() -> None:
         model(inputs, reset=torch.zeros(3, 4))
     with pytest.raises(ValueError, match="state"):
         model(inputs, state=torch.zeros(2, 3, 5))
-    with pytest.raises(ValueError, match="Batch"):
+    with pytest.raises(
+        ValueError,
+        match=r"\ABatch size must be positive\.\Z",
+    ):
         model.initial_state(0)
+    assert model.initial_state(1).shape == (2, 1, 4)
+
+
+def test_min_gru_initial_state_preserves_device_and_fp32_dtype() -> None:
+    model = MinGRU(2, 3)
+    initial = model.initial_state(2)
+    assert initial.shape == (1, 2, 3)
+    assert initial.dtype == torch.float32
+    assert initial.device == next(model.parameters()).device
+    assert torch.equal(initial, torch.zeros_like(initial))
+
+    meta_model = MinGRU(2, 3).to("meta")
+    assert meta_model.initial_state(2).device == torch.device("meta")
+    assert model.initial_state(2, device="meta").device == torch.device("meta")
+
+    default_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(torch.float64)
+        assert model.initial_state(2).dtype == torch.float32
+    finally:
+        torch.set_default_dtype(default_dtype)
 
 
 def test_scan_config_cost_and_triton_cpu_dispatch() -> None:
@@ -177,13 +257,38 @@ def test_scan_config_cost_and_triton_cpu_dispatch() -> None:
     inputs = torch.randn(2, 3, 4)
     state = torch.zeros(2, 4)
     terminals = torch.zeros(2, 3)
-    with pytest.raises(ValueError, match="CUDA"):
+    with pytest.raises(
+        ValueError,
+        match=r"\ATritonScan runs on a CUDA device, not cpu; select TorchScan to run the scan elsewhere\Z",
+    ):
         TritonScan.Config().make()(torch.randn(2, 3, 12), inputs, state, terminals)
-    with pytest.raises(ValueError, match="CUDA"):
+    with pytest.raises(
+        ValueError,
+        match=r"\ATritonScan runs on a CUDA device, not cpu; select TorchScan to run the scan elsewhere\Z",
+    ):
         TritonScan.Config().make().step(torch.randn(2, 12), inputs[:, 0], state)
     output, final = block(inputs, state, terminals)
     assert output.shape == inputs.shape
     assert final.shape == state.shape
+
+
+def _cuda_tensor_metadata(dtype: torch.dtype) -> Tensor:
+    return cast(Tensor, SimpleNamespace(is_cuda=True, dtype=dtype))
+
+
+def test_runs_triton_checks_cuda_and_every_tensor_dtype() -> None:
+    assert _runs_triton(
+        _cuda_tensor_metadata(torch.bfloat16),
+        _cuda_tensor_metadata(torch.float32),
+    )
+    assert not _runs_triton(
+        cast(Tensor, SimpleNamespace(is_cuda=False, dtype=torch.float32)),
+    )
+    assert not _runs_triton(_cuda_tensor_metadata(torch.float64))
+    assert not _runs_triton(
+        _cuda_tensor_metadata(torch.float32),
+        _cuda_tensor_metadata(torch.float64),
+    )
 
 
 def test_scan_private_metadata_paths() -> None:
@@ -191,9 +296,17 @@ def test_scan_private_metadata_paths() -> None:
     result = _scan_affine(decay, innovation=decay, initial=torch.zeros(2, 4))
     assert result.shape == decay.shape
     assert not _runs_triton(decay)
-    assert _terminals_view(torch.ones(2, 3, dtype=torch.bool)).dtype == torch.uint8
+    boolean_terminals = torch.ones(2, 3, dtype=torch.bool)
+    assert _terminals_view(boolean_terminals).dtype == torch.uint8
+    numeric_terminals = torch.ones(2, 3)
+    assert _terminals_view(numeric_terminals) is numeric_terminals
     with pytest.raises(ValueError, match="contiguous"):
         _check_layout(torch.zeros(2, 3), torch.zeros(3, 2).t())
+    with pytest.raises(
+        ValueError,
+        match=r"\ATritonScan needs contiguous tensors on one device\.\Z",
+    ):
+        _check_layout(torch.zeros(2, 3), torch.empty(2, 3, device="meta"))
 
 
 def test_min_gru_has_gradient_through_inputs_and_parameters() -> None:
@@ -372,6 +485,43 @@ def test_backward_agrees_with_autograd_in_fp32() -> None:
             rtol=1e-4,
             atol=1e-5,
         )
+
+
+def test_zero_hidden_uses_the_shifted_identity_derivative_in_step_and_backward() -> (
+    None
+):
+    width = 2
+    # TorchScan.step uses two batch rows and a single hidden width.
+    # TorchScan.step uses two batch rows and a hidden width of two.
+    combined = torch.zeros(2, 3 * width, requires_grad=True)
+    inputs = torch.zeros(2, width)
+    state = torch.zeros(2, width)
+    outputs, next_state = TorchScan.Config().make().step(combined, inputs, state)
+    (outputs.sum() + next_state.sum()).backward()
+    assert combined.grad is not None
+    assert torch.equal(combined.grad[:, :width], torch.full((2, width), 0.75))
+
+    # This backward check intentionally uses one sequence step.
+    # TorchScan receives one timestep for this backward recurrence check.
+    combined_sequence = torch.zeros(2, 1, 3 * width)
+    sequence_inputs = torch.zeros(2, 1, width)
+    initial = torch.zeros(2, width)
+    # TorchScan terminals are one flag per batch for one sequence step.
+    terminals = torch.zeros(2, 1)
+    scan = TorchScan.Config().make()
+    forward = scan(combined_sequence, sequence_inputs, initial, terminals)
+    backward = scan.backward(
+        combined_sequence,
+        sequence_inputs,
+        forward.states,
+        terminals,
+        torch.ones_like(forward.outputs),
+    )
+    # TorchScan.backward preserves the one-step sequence shape.
+    assert torch.equal(
+        backward.grad_combined[..., :width],
+        torch.full((2, 1, width), 0.25),
+    )
 
 
 def test_the_gradient_is_cut_at_a_reset() -> None:
@@ -756,8 +906,13 @@ def test_a_blocks_step_is_its_forward_at_one_time_step() -> None:
     with torch.no_grad():
         whole, final = block(inputs, initial, torch.zeros(inputs.shape[:2]))
         outputs, state = block.step(inputs[:, 0], initial)
+        carry = initial.clone()
+        carried_outputs, carried_state = block.step(inputs[:, 0], initial, carry=carry)
     assert torch.equal(outputs, whole[:, 0])
     assert torch.equal(state, final)
+    assert carried_state is carry
+    assert torch.equal(carried_outputs, outputs)
+    assert torch.equal(carry, state)
 
 
 def test_min_gru_block_config_pprint() -> None:
@@ -943,31 +1098,163 @@ def _kernels_only() -> TritonScan:
 def test_triton_scan_uses_fake_host_launches_on_cpu(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The kernels are faked, but the host launch still sizes its grid with
-    # ``triton.cdiv``; Triton ships Linux wheels only.
-    pytest.importorskip("triton")
     monkeypatch.setattr(min_gru, "_require_cuda", _allow_cpu_scan)
-    monkeypatch.setattr(min_gru, "_runs_triton", _force_triton)
-    monkeypatch.setattr(min_gru, "_kernels", _fake_kernels)
+    runs_triton = Mock(return_value=True)
+    layout = Mock()
+    monkeypatch.setattr(min_gru, "_runs_triton", runs_triton)
+    monkeypatch.setattr(min_gru, "_check_layout", layout)
+    monkeypatch.setattr(
+        min_gru,
+        "triton",
+        SimpleNamespace(cdiv=_cdiv),
+    )
+    kernels = _FakeScanKernels()
+    monkeypatch.setattr(min_gru, "_kernels", Mock(return_value=kernels))
+    monkeypatch.setattr(TritonScan, "launch_options", {"enable_fp_fusion": False})
     scan = TritonScan.Config(block=4, num_warps=2).make()
     combined, inputs, initial, terminals = _inputs(batch=2, time=3, width=4)
+    terminals = terminals.bool()
     result = scan(combined, inputs, initial, terminals)
     assert result.outputs.shape == inputs.shape
-    output, state = scan.step(
-        combined[:, 0].contiguous(),
-        inputs[:, 0].contiguous(),
-        initial,
+    runs_triton.assert_called_once_with(combined, inputs, initial)
+    layout.assert_called_once_with(combined, inputs, initial, terminals)
+    assert kernels.forward.grid == (2,)
+    forward_args, forward_options = kernels.forward.calls[0]
+    assert len(forward_args) == 10
+    assert all(
+        actual is expected
+        for actual, expected in zip(
+            forward_args[:3],
+            (combined, inputs, initial),
+            strict=True,
+        )
     )
-    assert output.shape == inputs[:, 0].shape
+    assert isinstance(forward_args[3], Tensor)
+    assert forward_args[3].dtype == torch.uint8
+    assert torch.equal(forward_args[3], terminals.view(torch.uint8))
+    assert forward_args[3].data_ptr() == terminals.data_ptr()
+    assert forward_args[4] is result.outputs
+    assert forward_args[5] is result.final
+    assert forward_args[6] is result.states
+    assert forward_args[7:] == (8, 3, 4)
+    assert forward_options == {
+        "block": 4,
+        "num_warps": 2,
+        "enable_fp_fusion": False,
+    }
+    combined_step = combined[:, 0].contiguous()
+    inputs_step = inputs[:, 0].contiguous()
+    initial_step = initial.float()
+    output, state = scan.step(combined_step, inputs_step, initial_step)
+    assert output.shape == inputs_step.shape
+    assert output.dtype == inputs.dtype
     assert state.shape == initial.shape
+    assert state.dtype == torch.float32
+    assert kernels.step.grid == (2,)
+    step_args, step_options = kernels.step.calls[0]
+    assert len(step_args) == 7
+    assert all(
+        actual is expected
+        for actual, expected in zip(
+            step_args[:5],
+            (combined_step, inputs_step, initial_step, output, state),
+            strict=True,
+        )
+    )
+    assert step_args[5:] == (8, 4)
+    assert step_options == {
+        "block": 4,
+        "num_warps": 2,
+        "enable_fp_fusion": False,
+    }
+    carry = torch.full_like(initial_step, 9)
+    carried_output, carried_state = scan.step(
+        combined_step,
+        inputs_step,
+        initial_step,
+        carry=carry,
+    )
+    assert carried_state is carry
+    carried_args, carried_options = kernels.step.calls[1]
+    assert all(
+        actual is expected
+        for actual, expected in zip(
+            carried_args[:5],
+            (combined_step, inputs_step, initial_step, carried_output, carry),
+            strict=True,
+        )
+    )
+    assert carried_args[5:] == (8, 4)
+    assert carried_options == step_options
+    assert runs_triton.call_args_list == [
+        call(combined, inputs, initial),
+        call(combined_step, inputs_step, initial_step),
+        call(combined_step, inputs_step, initial_step, carry),
+    ]
+    assert layout.call_args_list == [
+        call(combined, inputs, initial, terminals),
+        call(combined_step, inputs_step, initial_step),
+        call(combined_step, inputs_step, initial_step, carry),
+    ]
+    states = result.states.to("meta")
+    grad_outputs = torch.ones(
+        result.outputs.shape,
+        dtype=result.outputs.dtype,
+        device="meta",
+    )
     backward = scan.backward(
         combined,
         inputs,
-        result.states,
+        states,
         terminals,
-        torch.ones_like(result.outputs),
+        grad_outputs,
     )
     assert backward.grad_combined.shape == combined.shape
+    assert backward.grad_combined.dtype == combined.dtype
+    assert backward.grad_combined.device == combined.device
+    assert backward.grad_inputs.shape == inputs.shape
+    assert backward.grad_inputs.dtype == inputs.dtype
+    assert backward.grad_inputs.device == inputs.device
+    assert backward.grad_initial.shape == initial.shape
+    assert backward.grad_initial.dtype == states.dtype
+    assert backward.grad_initial.device == states.device
+    assert runs_triton.call_args_list == [
+        call(combined, inputs, initial),
+        call(combined_step, inputs_step, initial_step),
+        call(combined_step, inputs_step, initial_step, carry),
+        call(combined, inputs, states, grad_outputs),
+    ]
+    assert layout.call_args_list == [
+        call(combined, inputs, initial, terminals),
+        call(combined_step, inputs_step, initial_step),
+        call(combined_step, inputs_step, initial_step, carry),
+        call(combined, inputs, states, terminals, grad_outputs),
+    ]
+    assert kernels.backward.grid == (2,)
+    backward_args, backward_options = kernels.backward.calls[0]
+    assert len(backward_args) == 11
+    assert all(
+        actual is expected
+        for actual, expected in zip(
+            backward_args[:3],
+            (combined, inputs, states),
+            strict=True,
+        )
+    )
+    assert isinstance(backward_args[3], Tensor)
+    assert backward_args[3].dtype == torch.uint8
+    assert torch.equal(backward_args[3], terminals.view(torch.uint8))
+    assert backward_args[3].data_ptr() == terminals.data_ptr()
+    assert backward_args[4] is grad_outputs
+    assert backward_args[5] is backward.grad_combined
+    assert backward_args[6] is backward.grad_inputs
+    assert backward_args[7] is backward.grad_initial
+    assert backward_args[8:] == (8, 3, 4)
+    assert backward_options == {
+        "block": 4,
+        "num_warps": 2,
+        "enable_fp_fusion": False,
+    }
 
 
 def test_triton_scan_uses_torch_reference_on_cpu(
@@ -993,6 +1280,153 @@ def test_triton_scan_uses_torch_reference_on_cpu(
         torch.ones_like(result.outputs),
     )
     assert backward.grad_combined.shape == combined.shape
+
+
+def test_check_layout_accepts_a_single_contiguous_tensor() -> None:
+    _check_layout(torch.zeros(2, 3))
+
+
+def test_check_layout_rejects_a_strided_tensor_with_exact_text() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"\ATritonScan needs contiguous tensors on one device\.\Z",
+    ):
+        _check_layout(torch.zeros(2, 3), torch.zeros(3, 2).t())
+
+
+def test_check_layout_rejects_different_devices_with_exact_text() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"\ATritonScan needs contiguous tensors on one device\.\Z",
+    ):
+        _check_layout(torch.zeros(2, 3), torch.empty(2, 3, device="meta"))
+
+
+def test_torch_scan_step_matches_the_explicit_three_gate_recurrence() -> None:
+    hidden = torch.tensor([[0.25, -0.5, 1.0], [-1.0, 0.75, -0.25]])
+    gate = torch.tensor([[-0.75, 0.5, 1.25], [0.25, -1.5, 0.75]])
+    highway = torch.tensor([[1.5, -0.25, 0.75], [-1.0, 1.25, 0.5]])
+    combined = torch.cat((hidden, gate, highway), dim=-1).to(torch.bfloat16)
+    inputs = torch.tensor([[0.5, -1.0, 1.5], [-0.25, 0.75, -1.25]]).bfloat16()
+    state = torch.tensor([[-1.5, 0.25, 1.0], [1.25, -0.75, 0.5]]).bfloat16()
+
+    outputs, next_state = TorchScan.Config().make().step(combined, inputs, state)
+
+    hidden32, gate32, highway32 = combined.float().chunk(3, dim=-1)
+    candidate = torch.where(
+        hidden32 >= 0,
+        hidden32 + 0.5,
+        torch.sigmoid(hidden32),
+    )
+    updated = torch.lerp(state.float(), candidate, torch.sigmoid(gate32))
+    strength = torch.sigmoid(highway32)
+    expected_outputs = strength * updated + (1 - strength) * inputs.float()
+    assert torch.equal(outputs, expected_outputs.to(inputs.dtype))
+    assert torch.equal(next_state, updated.to(state.dtype))
+    assert outputs.dtype == inputs.dtype
+    assert next_state.dtype == state.dtype
+
+
+def test_triton_scan_call_checks_and_forwards_every_forward_operand(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(min_gru, "_require_cuda", _allow_cpu_scan)
+    runs_triton = Mock(return_value=True)
+    layout = Mock()
+    kernels = _FakeScanKernels()
+    monkeypatch.setattr(min_gru, "_runs_triton", runs_triton)
+    monkeypatch.setattr(min_gru, "_check_layout", layout)
+    monkeypatch.setattr(
+        min_gru,
+        "triton",
+        SimpleNamespace(cdiv=_cdiv),
+    )
+    monkeypatch.setattr(min_gru, "_kernels", Mock(return_value=kernels))
+    scan = TritonScan.Config(block=4, num_warps=2).make()
+    combined, inputs, initial, terminals = _inputs(batch=2, time=3, width=4)
+    initial = initial.float()
+    terminals = terminals.bool()
+
+    result = scan(combined, inputs, initial, terminals)
+
+    runs_triton.assert_called_once_with(combined, inputs, initial)
+    layout.assert_called_once_with(combined, inputs, initial, terminals)
+    assert result.outputs.shape == inputs.shape
+    assert result.outputs.dtype == inputs.dtype
+    assert result.final.shape == initial.shape
+    assert result.final.dtype == initial.dtype
+    assert result.states.shape == inputs.shape
+    assert result.states.dtype == initial.dtype
+    assert kernels.forward.grid == (2,)
+    args, options = kernels.forward.calls[0]
+    assert all(
+        actual is expected
+        for actual, expected in zip(
+            args[:3],
+            (combined, inputs, initial),
+            strict=True,
+        )
+    )
+    assert isinstance(args[3], Tensor)
+    assert args[3].dtype == torch.uint8
+    assert torch.equal(args[3], terminals.view(torch.uint8))
+    assert args[3].data_ptr() == terminals.data_ptr()
+    assert args[4] is result.outputs
+    assert args[5] is result.final
+    assert args[6] is result.states
+    assert args[7:] == (8, 3, 4)
+    assert options == {"block": 4, "num_warps": 2}
+
+
+def test_triton_scan_step_fallback_reuses_requested_carry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(min_gru, "_require_cuda", _allow_cpu_scan)
+    runs_triton = Mock(return_value=False)
+    kernels = _FakeScanKernels()
+    monkeypatch.setattr(min_gru, "_runs_triton", runs_triton)
+    monkeypatch.setattr(min_gru, "_kernels", Mock(return_value=kernels))
+    scan = TritonScan.Config(block=4, num_warps=2).make()
+    combined, inputs, state, _ = _inputs(batch=2, time=3, width=4)
+    combined_step = combined[:, 0].contiguous()
+    inputs_step = inputs[:, 0].contiguous()
+    carry = torch.full_like(state, 9)
+    expected = (
+        TorchScan.Config()
+        .make()
+        .step(
+            combined_step,
+            inputs_step,
+            state.clone(),
+            carry=carry.clone(),
+        )
+    )
+
+    outputs, next_state = scan.step(combined_step, inputs_step, state, carry=carry)
+
+    runs_triton.assert_called_once_with(combined_step, inputs_step, state, carry)
+    assert next_state is carry
+    assert torch.equal(outputs, expected[0])
+    assert torch.equal(carry, expected[1])
+    assert kernels.step.calls == []
+
+
+def test_triton_scan_constructor_installs_torch_reference() -> None:
+    scan = TritonScan.Config(block=4, num_warps=2).make()
+    combined, inputs, initial, terminals = _inputs()
+    result = scan.reference(
+        combined.double(),
+        inputs.double(),
+        initial.double(),
+        terminals,
+    )
+    assert isinstance(scan.reference, TorchScan)
+    assert result.outputs.shape == inputs.shape
+    assert result.outputs.dtype == torch.float64
+    assert result.final.shape == initial.shape
+    assert result.final.dtype == torch.float64
+    assert result.states.shape == inputs.shape
+    assert result.states.dtype == torch.float64
 
 
 if __name__ == "__main__":

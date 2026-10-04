@@ -96,7 +96,10 @@ class FilterStats:
           force: Override the throttle and log regardless of timing.
 
         """
-        if not self._should_log(force):
+        if (
+            not force
+            and time.time() - self.last_log_time < self._config.log_interval_sec
+        ):
             return
 
         self._log_summary()
@@ -104,13 +107,6 @@ class FilterStats:
         self._log_drop_reasons()
 
         self.last_log_time = time.time()
-
-    def _should_log(self, force: bool) -> bool:
-        """Check if enough time has passed to log statistics."""
-        if force:
-            return True
-        current_time = time.time()
-        return current_time - self.last_log_time >= self._config.log_interval_sec
 
     def _log_summary(self) -> None:
         """Log summary statistics."""

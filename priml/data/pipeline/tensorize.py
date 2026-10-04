@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from configgle import Fig
 from torch import Tensor
@@ -157,17 +157,13 @@ class AsTensor:
             if isinstance(value, (dict, torch.cuda.Stream)):
                 continue
 
-            # Navigate to parent container.
-            parent: dict[str, object] | list[object] = sample
+            # Navigate to the nested mapping that owns this field.
+            parent: _StringKeyedMutableMapping = sample
             for step in path[:-1]:
-                if isinstance(parent, dict):
-                    assert isinstance(step, str)
-                    child = parent[step]
-                else:
-                    assert isinstance(step, int)
-                    child = parent[step]
-                assert isinstance(child, (dict, list))
-                parent = cast(dict[str, object] | list[object], child)
+                assert isinstance(step, str)
+                child: object = parent[step]
+                assert isinstance(child, _StringKeyedMutableMapping)
+                parent = child
             final_key = path[-1]
 
             # Tensorize and transfer
@@ -192,11 +188,7 @@ class AsTensor:
                 )
             else:
                 transferred = tensor
-            if isinstance(parent, dict):
-                parent[final_key] = transferred
-            else:
-                assert isinstance(final_key, int)
-                parent[final_key] = transferred
+            parent[final_key] = transferred
 
 
 class StreamSync:
@@ -265,3 +257,12 @@ class StreamSync:
                     stream.synchronize()
                     del sample[field_name]
             yield sample
+
+
+@runtime_checkable
+class _StringKeyedMutableMapping(Protocol):
+    """Mutable mapping interface used to follow a nested sample path."""
+
+    def __getitem__(self, key: str, /) -> object: ...
+
+    def __setitem__(self, key: str, value: object, /) -> None: ...

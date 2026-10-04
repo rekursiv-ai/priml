@@ -52,7 +52,8 @@ def lazy_torch_compile(
     call, so processes that import but never invoke pay zero cost.
 
     Args:
-      *compile_args: Positional arguments forwarded to torch.compile().
+      *compile_args: The function to decorate when applied bare; any other
+        positional raises ``TypeError``.
       **compile_kwargs: Keyword arguments forwarded to torch.compile().
 
     Returns:
@@ -62,11 +63,13 @@ def lazy_torch_compile(
     """
     # Bare ``@lazy_torch_compile``: the lone positional is the decorated
     # function, not a ``torch.compile`` argument -- decorate it directly.
-    if len(compile_args) == 1 and not compile_kwargs and callable(compile_args[0]):
-        return _make_lazy_compiled(compile_args[0])
+    if compile_args:
+        if len(compile_args) == 1 and callable(compile_args[0]) and not compile_kwargs:
+            return _make_lazy_compiled(compile_args[0])
+        raise TypeError("lazy_torch_compile accepts only keyword compile arguments.")
 
     def decorator(fn: Callable[..., object]) -> Callable[..., object]:
-        return _make_lazy_compiled(fn, *compile_args, **compile_kwargs)
+        return _make_lazy_compiled(fn, **compile_kwargs)
 
     return decorator
 
@@ -140,7 +143,6 @@ def trace_compile(
 
 def _make_lazy_compiled[**P, R](
     fn: Callable[P, R],
-    *compile_args: object,
     **compile_kwargs: object,
 ) -> Callable[P, R]:
     """Wrap ``fn`` so ``torch.compile`` runs on first call, not at decoration."""
@@ -158,7 +160,7 @@ def _make_lazy_compiled[**P, R](
                 Callable[..., Callable[[Callable[P, R]], Callable[P, R]]],
                 torch.compile,
             )
-            target = compile_fn(*compile_args, **compile_kwargs)(fn)
+            target = compile_fn(**compile_kwargs)(fn)
             compiled = target
         return target(*args, **kwargs)
 

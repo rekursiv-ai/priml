@@ -164,11 +164,11 @@ def _opencv_area(x: Tensor, height: int, width: int) -> Tensor:
         (len(frames_hwc), height, width, channels),
         dtype=torch.uint8,
     )
-    for source, destination in zip(frames_hwc, out, strict=True):
+    for index, source in enumerate(frames_hwc):
         _ = cv2.resize(
             source.numpy(),
             (width, height),
-            dst=destination.numpy(),
+            dst=out[index].numpy(),
             interpolation=cv2.INTER_AREA,
         )
     return (

@@ -286,8 +286,36 @@ class TestConfig:
 
     def test_make_returns_qwen3_instance(self):
         """Makes[Qwen3] re-narrows .make() to Qwen3, not Transformer."""
-        model = Qwen3.Config.from_hf(hf_config()).make()
-        assert isinstance(model, Qwen3)
+        Qwen3.Config.from_hf(hf_config()).make()
+
+    def test_attn_of_defaults_to_layer_zero(self):
+        cfg = Qwen3.Config.from_hf(hf_config()).finalize()
+        assert isinstance(cfg.block, list)
+        second = cfg.block[1]
+        assert isinstance(second, TransformerBlock.Config)
+        assert isinstance(second.attn, Attention.Config)
+        second.attn.channels_head = 12
+
+        assert qwen3._attn_of(cfg).channels_head == 16
+
+    def test_attn_of_broadcasts_a_single_block_to_any_layer(self):
+        cfg = Qwen3.Config.from_hf(hf_config())
+        block = cfg.block
+        assert isinstance(block, TransformerBlock.Config)
+        cfg.block = [block]
+
+        assert qwen3._attn_of(cfg, layer=1) is block.attn
+
+    def test_attn_of_selects_the_requested_layer(self):
+        cfg = Qwen3.Config.from_hf(hf_config()).finalize()
+        assert isinstance(cfg.block, list)
+        second = cfg.block[1]
+        assert isinstance(second, TransformerBlock.Config)
+        assert isinstance(second.attn, Attention.Config)
+        second.attn.channels_head = 12
+
+        assert qwen3._attn_of(cfg, layer=1) is second.attn
+        assert qwen3._attn_of(cfg, layer=1).channels_head == 12
 
 
 class TestSlots:
@@ -341,6 +369,47 @@ class TestSlots:
 
 
 class TestLoad:
+    def test_load_defaults_missing_checkpoint_dtype_to_bfloat16(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config_dict = hf_config(num_hidden_layers=1)
+        config_dict.pop("torch_dtype")
+        cfg = Qwen3.Config.from_hf(config_dict).finalize()
+        monkeypatch.setattr(
+            hub,
+            "load_hf_checkpoint",
+            Mock(return_value=(config_dict, synth_hf_state_dict(cfg))),
+        )
+        resolve_dtype = Mock(return_value=torch.bfloat16)
+        monkeypatch.setattr(hub, "resolve_hf_dtype", resolve_dtype)
+
+        model = Qwen3.load("Qwen/tiny-qwen")
+
+        resolve_dtype.assert_called_once_with("bfloat16")
+        assert isinstance(model.proj_in, Embedding)
+        assert model.proj_in.weight.dtype == torch.bfloat16
+
+    def test_load_uses_checkpoint_dtype_when_no_override(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config_dict = hf_config(num_hidden_layers=1, torch_dtype="float32")
+        cfg = Qwen3.Config.from_hf(config_dict).finalize()
+        monkeypatch.setattr(
+            hub,
+            "load_hf_checkpoint",
+            Mock(return_value=(config_dict, synth_hf_state_dict(cfg))),
+        )
+        resolve_dtype = Mock(return_value=torch.float64)
+        monkeypatch.setattr(hub, "resolve_hf_dtype", resolve_dtype)
+
+        model = Qwen3.load("Qwen/tiny-qwen")
+
+        resolve_dtype.assert_called_once_with("float32")
+        assert isinstance(model.proj_in, Embedding)
+        assert model.proj_in.weight.dtype == torch.float64
+
     def test_local_load_reads_config_and_local_weights(
         self,
         tmp_path: Path,
@@ -355,10 +424,52 @@ class TestLoad:
         model = Qwen3.load(tmp_path, device="cpu", dtype=torch.float32)
 
         assert isinstance(model.proj_in, Embedding)
+        assert isinstance(model.proj_in, Embedding)
         assert model.proj_in.weight.dtype == torch.float32
         assert model.num_layers == 1
         assert model.proj_in.weight.shape == (cfg.channels_out, cfg.channels_in)
         load_local_state_dict.assert_called_once_with(tmp_path)
+
+    def test_explicit_load_dtype_and_device_are_applied(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config_dict = hf_config(num_hidden_layers=1)
+        cfg = Qwen3.Config.from_hf(config_dict).finalize()
+        monkeypatch.setattr(
+            hub,
+            "load_hf_checkpoint",
+            Mock(return_value=(config_dict, synth_hf_state_dict(cfg))),
+        )
+
+        model = Qwen3.load("Qwen/tiny-qwen", dtype=torch.float64, device="meta")
+
+        assert isinstance(model.proj_in, Embedding)
+        assert model.proj_in.weight.dtype == torch.float64
+        assert model.proj_in.weight.device.type == "meta"
+
+    def test_load_requires_complete_state_dict(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config_dict = hf_config(num_hidden_layers=1)
+        cfg = Qwen3.Config.from_hf(config_dict).finalize()
+        state_dict = synth_hf_state_dict(cfg)
+        loop_state_dict = remap_hf_state_dict(state_dict, cfg)
+        loop_state_dict["unexpected.weight"] = torch.empty(2, 3)
+        monkeypatch.setattr(
+            hub,
+            "load_hf_checkpoint",
+            Mock(return_value=(config_dict, state_dict)),
+        )
+        monkeypatch.setattr(
+            qwen3,
+            "remap_hf_state_dict",
+            Mock(return_value=loop_state_dict),
+        )
+
+        with pytest.raises(RuntimeError, match=r"unexpected\.weight"):
+            Qwen3.load("Qwen/tiny-qwen")
 
     def test_remote_load_uses_hf_model_config_and_weights(
         self,
@@ -475,12 +586,13 @@ class TestRemap:
         assert isinstance(block, TransformerBlock.Config)
         if bad_part == "block":
             cfg.block = RMSNorm.Config()
-            match = "not a transformer"
+            match = "layer 0 is RMSNorm.Config, not a transformer."
         else:
             block.attn = RMSNorm.Config()
-            match = "not self-attention"
-        with pytest.raises(TypeError, match=match):
+            match = "layer 0 attention is RMSNorm.Config, not self-attention."
+        with pytest.raises(TypeError) as error:
             qwen3.remap_hf_state_dict({}, cfg)
+        assert str(error.value) == match
 
 
 @pytest.mark.compute_torch_compile

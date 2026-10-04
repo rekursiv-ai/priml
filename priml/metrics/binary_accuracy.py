@@ -55,9 +55,7 @@ class BinaryAccuracy:
         batch_size = targets.size(0)
         # Drop a trailing singleton channel so [B, 1] logits compare elementwise
         # against [B] targets instead of broadcasting to [B, B].
-        predictions = (torch.sigmoid(logits.squeeze(-1)) > self.threshold).to(
-            targets.dtype,
-        )
+        predictions = torch.sigmoid(logits.squeeze(-1)) > self.threshold
         self.correct += int((predictions == targets).sum().item())
         self.total += int(batch_size)
 

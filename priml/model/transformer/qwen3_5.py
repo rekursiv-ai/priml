@@ -21,7 +21,6 @@ from priml.lib.custom_json import (
     FloatCodec,
     IntCodec,
     ListCodec,
-    StrCodec,
     loads,
 )
 from priml.model.attention.gated_attention import GatedAttention
@@ -201,7 +200,7 @@ class Qwen35(Transformer):
         )
         target_dtype = weights["proj_in.weight"].dtype if dtype is None else dtype
         model = config.make().to(device=device, dtype=target_dtype)
-        model.load_state_dict(weights, strict=True)
+        model.load_state_dict(weights)
         return model
 
     @override
@@ -417,14 +416,16 @@ def _layer_types(config: Mapping[str, object], *, count: int) -> list[str]:
             "full_attention" if (i + 1) % interval == 0 else "linear_attention"
             for i in range(count)
         ]
-    layers = ListCodec.coerce(raw, default=None)
+    layers = [
+        layer for layer in ListCodec.coerce(raw, default=None) if isinstance(layer, str)
+    ]
     if len(layers) != count or any(
         layer not in ("full_attention", "linear_attention") for layer in layers
     ):
         raise ValueError(
             "layer_types must name one supported attention type per layer.",
         )
-    return [StrCodec.coerce(layer, default=None) for layer in layers]
+    return layers
 
 
 def _full_attention(config: Mapping[str, object]) -> GatedAttention.Config:
@@ -496,10 +497,10 @@ def _full_attention_mask(attention_mask: Tensor | None, *, x: Tensor) -> Tensor 
         return attention_mask
     if attention_mask.ndim != 2:
         raise ValueError("attention_mask must be a 2-D padding mask or 4-D mask.")
-    keys = attention_mask.shape[-1]
+    keys = attention_mask.shape[1]
     queries = x.shape[-2]
     causal = torch.arange(keys, device=x.device) <= (
-        torch.arange(queries, device=x.device).unsqueeze(-1) + keys - queries
+        torch.arange(queries, device=x.device)[:, None] + keys - queries
     )
     padding = ~attention_mask.to(device=x.device, dtype=torch.bool)
     fill = torch.full(

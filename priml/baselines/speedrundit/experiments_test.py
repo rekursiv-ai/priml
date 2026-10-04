@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import math
+
 from configgle.testing import assert_pprint_golden
 
 import pytest
@@ -17,6 +19,8 @@ from priml.baselines.speedrundit.experiments import (
 )
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.muon import Muon
+from priml.runtime import SingleProcess
+from priml.train.parallelism import NoParallel
 
 
 if TYPE_CHECKING:
@@ -37,7 +41,19 @@ def test_experiment_config_goldens(
 def test_smoke_keeps_the_training_recipe() -> None:
     """The smoke run only reduces cost and the number of updates."""
     base, smoke = exp000(), exp_smoke()
+    assert math.isinf(base.num_steps_eval)
+    assert smoke.experiment_name == "exp_smoke"
+    assert isinstance(smoke.runtime, SingleProcess.Config)
+    assert isinstance(smoke.step.parallelism, NoParallel.Config)
     assert smoke.max_steps == smoke.step.train_budget_steps == 5
+    assert smoke.step.model.hidden_size == 32
+    assert smoke.step.model.num_heads == 4
+    assert smoke.step.model.depth == 6
+    assert smoke.step.model.projector_hidden == 64
+    assert smoke.step.model.projection_depths == (2, 3, 6)
+    assert smoke.dataset.batch_size == 2
+    assert smoke.checkpointer is None
+    assert smoke.dataset.num_workers == 0
     assert smoke.max_steps < base.max_steps
     assert smoke.step.model.hidden_size < base.step.model.hidden_size
     assert smoke.step.model.depth < base.step.model.depth

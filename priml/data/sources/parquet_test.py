@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import io
+import logging
 import tarfile
 import tempfile
 import weakref
@@ -152,20 +153,32 @@ class TestTarFileHandle:
 class TestParquetAndTarSourceInit:
     """Test ParquetAndTarSource initialization."""
 
-    def test_init_basic(self, temp_dir: Path) -> None:
-        """Test basic initialization."""
+    @pytest.mark.parametrize("use_mmap", [False, True])
+    def test_init_basic(
+        self,
+        temp_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+        use_mmap: bool,
+    ) -> None:
+        """Initialization preserves mmap configuration and reports its mode."""
         parquet_path = temp_dir / "00000000.parquet"
         tar_path = temp_dir / "00000000.tar"
         create_test_parquet(parquet_path, num_rows=2)
         create_test_tar(tar_path, num_images=2)
 
-        config = ParquetAndTarSource.Config(working_dir=temp_dir)
+        caplog.set_level(logging.INFO, logger="priml.data.sources.parquet")
+        config = ParquetAndTarSource.Config(working_dir=temp_dir, use_mmap=use_mmap)
         source = ParquetAndTarSource(config)
 
         assert source.dataset_dir == temp_dir
         assert len(source.parquet_files) == 1
         assert source.shuffle is False
         assert source.num_concurrently_read_shards == 4
+        assert source.use_mmap is use_mmap
+        assert caplog.records[-1].getMessage() == (
+            "ParquetAndTarSource initialized: 1 shards, "
+            f"num_concurrently_read_shards=4, tar_mode={'mmap' if use_mmap else 'standard'}"
+        )
 
     def test_init_missing_dataset_dir(self) -> None:
         """Test error when dataset directory doesn't exist."""
@@ -219,8 +232,30 @@ class TestParquetAndTarSourceInit:
             working_dir=temp_dir,
             num_concurrently_read_shards=shards,
         )
-        with pytest.raises(ValueError, match="num_concurrently_read_shards"):
+        with pytest.raises(ValueError, match="num_concurrently_read_shards") as error:
             ParquetAndTarSource(config)
+        assert str(error.value) == (
+            f"num_concurrently_read_shards must be >= 1, got {shards}."
+        )
+
+    def test_custom_tar_path_fn_selects_tar_for_shard(self, temp_dir: Path) -> None:
+        parquet_path = temp_dir / "00000003.parquet"
+        tar_path = temp_dir / "custom" / "shard-0.tar"
+        create_test_parquet(parquet_path, num_rows=1)
+        tar_path.parent.mkdir()
+        create_test_tar(tar_path, num_images=1)
+
+        source = ParquetAndTarSource(
+            ParquetAndTarSource.Config(
+                working_dir=temp_dir,
+                tar_path_fn=lambda directory, shard_index: (
+                    directory / "custom" / f"shard-{shard_index - 3}.tar"
+                ),
+            ),
+        )
+
+        (sample,) = list(source)
+        assert _tar_handle(sample).path == tar_path
 
     def test_init_with_shuffle(self, temp_dir: Path) -> None:
         """Test initialization with shuffle enabled."""
@@ -266,14 +301,15 @@ class TestParquetAndTarSourceInit:
 class TestParquetAndTarSourceIteration:
     """Test ParquetAndTarSource iteration."""
 
-    def test_iter_basic(self, temp_dir: Path) -> None:
-        """Test basic iteration over samples."""
+    @pytest.mark.parametrize("use_mmap", [False, True])
+    def test_iter_basic(self, temp_dir: Path, use_mmap: bool) -> None:
+        """Iteration preserves metadata, mmap configuration, and cached handles."""
         parquet_path = temp_dir / "00000000.parquet"
         tar_path = temp_dir / "00000000.tar"
         create_test_parquet(parquet_path, num_rows=2)
         create_test_tar(tar_path, num_images=2)
 
-        config = ParquetAndTarSource.Config(working_dir=temp_dir)
+        config = ParquetAndTarSource.Config(working_dir=temp_dir, use_mmap=use_mmap)
         source = ParquetAndTarSource(config)
 
         samples = list(source)
@@ -281,7 +317,9 @@ class TestParquetAndTarSourceIteration:
         assert samples[0]["key"] == "sample_00000000"
         assert samples[0]["caption"] == "A test caption 0"
         assert "_tar_handle" in samples[0]
-        assert isinstance(samples[0]["_tar_handle"], TarFileHandle)
+        handle = _tar_handle(samples[0])
+        assert handle.use_mmap is use_mmap
+        assert next(iter(source))["_tar_handle"] is handle
 
     def test_iter_filters_failed_status(self, temp_dir: Path) -> None:
         """Test that samples with status != 'success' are filtered."""
@@ -476,6 +514,25 @@ class TestParquetAndTarSourceGarbageCollection:
 class TestParquetAndTarSourceShardErrors:
     """Test shard-error handling and shard-index parsing."""
 
+    def test_empty_successful_rows_log_exact_warning(
+        self,
+        temp_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        parquet_path = temp_dir / "00000000.parquet"
+        create_test_parquet(parquet_path, num_rows=2, status="failed")
+        with caplog.at_level(logging.WARNING, logger="priml.data.sources.parquet"):
+            source = ParquetAndTarSource(
+                ParquetAndTarSource.Config(working_dir=temp_dir),
+            )
+            assert list(source) == []
+
+        assert len(caplog.records) == 1
+        assert caplog.records[0].getMessage() == (
+            "No successful samples in 00000000.parquet, skipping"
+        )
+        assert caplog.records[0].args == (parquet_path.name,)
+
     def test_non_integer_stem_raises(self, temp_dir: Path) -> None:
         """A non-integer parquet stem raises instead of colliding on index 0 (M23)."""
         parquet_path = temp_dir / "train-shard.parquet"
@@ -499,7 +556,11 @@ class TestParquetAndTarSourceShardErrors:
         with pytest.raises((OSError, ValueError)):
             list(source)
 
-    def test_shard_error_skipped_by_default(self, temp_dir: Path) -> None:
+    def test_shard_error_skipped_by_default(
+        self,
+        temp_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
         """Without fail_on_shard_error an unreadable shard is skipped (default)."""
         bad = temp_dir / "00000000.parquet"
         bad.write_bytes(b"not a parquet file")
@@ -507,9 +568,14 @@ class TestParquetAndTarSourceShardErrors:
         create_test_parquet(temp_dir / "00000001.parquet", num_rows=2)
         create_test_tar(temp_dir / "00000001.tar", num_images=2)
 
+        caplog.set_level(logging.WARNING, logger="priml.data.sources.parquet")
         source = ParquetAndTarSource(ParquetAndTarSource.Config(working_dir=temp_dir))
         samples = list(source)
         assert len(samples) == 2  # Only the good shard.
+        assert caplog.records[0].getMessage() == (
+            "Failed to read 00000000.parquet, skipping shard"
+        )
+        assert caplog.records[0].exc_info is not None
 
 
 class TestParquetAndTarSourceReshuffle:

@@ -262,16 +262,16 @@ class ImageShapeStatistics:
             (2 / 3, "2:3"),
             (3 / 4, "3:4"),
             (4 / 5, "4:5"),
-            (1 / 1, "1:1 (square)"),
+            (1.0, "1:1 (square)"),
             (5 / 4, "5:4"),
             (4 / 3, "4:3"),
             (3 / 2, "3:2"),
             (8 / 5, "8:5"),
             (5 / 3, "5:3"),
             (16 / 9, "16:9"),
-            (2 / 1, "2:1"),
+            (2.0, "2:1"),
             (2.6, "2.6:1"),
-            (3 / 1, "3:1"),
+            (3.0, "3:1"),
         ]
 
         # Filter to relevant range and find bucket boundaries.
@@ -369,9 +369,9 @@ class CalcResizeDimensions:
     class Input(TypedDict, total=False):
         """Input required by CalcResizeDimensions."""
 
-        frames: int
-        height: int
-        width: int
+        frames: int | float
+        height: int | float
+        width: int | float
 
     class Output(Input):
         """Output produced by CalcResizeDimensions."""
@@ -489,9 +489,7 @@ class CalcResizeDimensions:
             )
             return None
 
-        # NaN and inf are checked before the int conversion below, which would
-        # otherwise raise rather than filter. Both reach here despite the int
-        # annotation: a sample is parsed data, not a constructed TypedDict.
+        # NaN and inf are checked before int conversion, which cannot handle them.
         if math.isnan(frames) or math.isnan(height) or math.isnan(width):
             add_filter_reason_typed(
                 sample,

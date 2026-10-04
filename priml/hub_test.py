@@ -15,6 +15,8 @@ import logging
 import os
 import sys
 
+from torch import nn
+
 import pytest
 import torch
 
@@ -83,7 +85,9 @@ def test_get_cache_dir_creates_directory():
         mock_mkdir.assert_called_once_with(parents=True, exist_ok=True)
 
 
-def test_load_transformers_model_with_class():
+def test_load_transformers_model_with_class(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Test load_transformers_model with string class name."""
     mock_model = MagicMock()
     mock_model.to = MagicMock(return_value=mock_model)
@@ -93,6 +97,7 @@ def test_load_transformers_model_with_class():
     with (
         patch("pathlib.Path.mkdir"),
         _mock_transformers(mock_auto_model),
+        caplog.at_level(logging.DEBUG, logger="priml.hub"),
     ):
         model = load_transformers_model(
             "test/model",
@@ -101,6 +106,11 @@ def test_load_transformers_model_with_class():
         )
 
         assert model == mock_model
+        assert [record.getMessage() for record in caplog.records] == [
+            "Attempting to load test/model from cache (offline)",
+            "Loaded test/model from cache",
+        ]
+        assert {record.name for record in caplog.records} == {"priml.hub"}
         mock_auto_model.from_pretrained.assert_called_once()
         call_kwargs = mock_auto_model.from_pretrained.call_args.kwargs
         # No cache_dir kwarg: passing one overrides HF_HOME, which is how a
@@ -244,7 +254,9 @@ def test_load_transformers_model_no_global_env_mutation() -> None:
     assert call_kwargs["local_files_only"] is True
 
 
-def test_load_transformers_model_cache_miss_falls_back_online() -> None:
+def test_load_transformers_model_cache_miss_falls_back_online(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """On cache miss, retries with local_files_only=False (no env toggling)."""
     mock_model = MagicMock()
     mock_auto_model = MagicMock()
@@ -255,31 +267,55 @@ def test_load_transformers_model_cache_miss_falls_back_online() -> None:
 
     with (
         _mock_transformers(mock_auto_model),
+        caplog.at_level(logging.DEBUG, logger="priml.hub"),
     ):
         model = load_transformers_model("test/model", "AutoModel")
 
+    assert [record.getMessage() for record in caplog.records] == [
+        "Attempting to load test/model from cache (offline)",
+        "Cache miss for test/model, downloading from HuggingFace",
+        "Cache miss reason: cache miss",
+    ]
     assert model == mock_model
     assert mock_auto_model.from_pretrained.call_count == 2
+    assert [call.args for call in mock_auto_model.from_pretrained.call_args_list] == [
+        ("test/model",),
+        ("test/model",),
+    ]
     first_kwargs = mock_auto_model.from_pretrained.call_args_list[0].kwargs
     second_kwargs = mock_auto_model.from_pretrained.call_args_list[1].kwargs
     assert first_kwargs["local_files_only"] is True
     assert second_kwargs["local_files_only"] is False
 
 
-def test_load_transformers_model_force_redownload_skips_the_cache() -> None:
+def test_load_transformers_model_force_redownload_skips_the_cache(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     mock_model = MagicMock()
     mock_auto_model = MagicMock()
     mock_auto_model.from_pretrained.return_value = mock_model
 
-    with _mock_transformers(mock_auto_model):
+    with (
+        _mock_transformers(mock_auto_model),
+        caplog.at_level(logging.DEBUG, logger="priml.hub"),
+    ):
         model = load_transformers_model(
             "test/model",
             "AutoModel",
             force_redownload=True,
         )
 
+    assert [record.getMessage() for record in caplog.records] == [
+        "Force redownloading test/model",
+    ]
     assert model == mock_model
-    mock_auto_model.from_pretrained.assert_called_once()
+    mock_auto_model.from_pretrained.assert_called_once_with(
+        "test/model",
+        revision=None,
+        trust_remote_code=False,
+        local_files_only=False,
+        force_download=True,
+    )
     call_kwargs = mock_auto_model.from_pretrained.call_args.kwargs
     assert call_kwargs["local_files_only"] is False
     assert call_kwargs["force_download"] is True
@@ -309,6 +345,24 @@ def test_load_local_state_dict_merges_pytorch_shards(tmp_path: Path) -> None:
 
     assert set(state_dict) == {"a", "b"}
     torch.testing.assert_close(state_dict["b"], torch.zeros(2))
+
+
+def test_load_local_state_dict_loads_single_pytorch_file_on_cpu(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "pytorch_model.bin"
+    checkpoint.touch()
+    expected = {"weight": torch.tensor([2.0, 3.0])}
+
+    with patch("torch.load", return_value=expected) as load:
+        result = load_local_state_dict(tmp_path)
+
+    assert result == expected
+    load.assert_called_once_with(
+        str(checkpoint),
+        map_location="cpu",
+        weights_only=True,
+    )
 
 
 def test_load_local_state_dict_rejects_a_directory_without_weights(
@@ -348,6 +402,31 @@ def test_load_hf_checkpoint_reads_a_local_pytorch_bin(tmp_path: Path) -> None:
     torch.testing.assert_close(hf_sd["w"], torch.ones(3))
 
 
+def test_load_hf_checkpoint_does_not_treat_config_file_as_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.write_text("not a directory")
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "tiny"}))
+    hf_model = MagicMock()
+    hf_model.config.to_dict.return_value = {"model_type": "remote"}
+    hf_model.state_dict.return_value = {}
+    load = Mock(return_value=hf_model)
+    monkeypatch.setattr(hub, "load_transformers_model", load)
+
+    config, state_dict = load_hf_checkpoint(checkpoint, dtype=None)
+
+    load.assert_called_once_with(
+        str(checkpoint),
+        "AutoModelForCausalLM",
+        dtype=None,
+        trust_remote_code=False,
+    )
+    assert config == {"model_type": "remote"}
+    assert state_dict == {}
+
+
 def test_load_hf_checkpoint_rejects_a_non_object_config(tmp_path: Path) -> None:
     """A ``config.json`` that is not a JSON object is caller input, not a KeyError."""
     (tmp_path / "config.json").write_text(json.dumps([1, 2]))
@@ -384,6 +463,17 @@ def test_load_hf_checkpoint_downloads_a_repo_id(
     assert hf_sd["w"].device.type == "cpu"
 
 
+def test_load_hf_checkpoint_rejects_a_non_object_remote_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hf_model = MagicMock()
+    hf_model.config.to_dict.return_value = ["not", "an", "object"]
+    monkeypatch.setattr(hub, "load_transformers_model", Mock(return_value=hf_model))
+
+    with pytest.raises(TypeError, match="cannot coerce"):
+        load_hf_checkpoint("org/tiny", dtype=None)
+
+
 def test_load_hf_checkpoint_defaults_to_no_remote_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -396,6 +486,219 @@ def test_load_hf_checkpoint_defaults_to_no_remote_code(
     load_hf_checkpoint("org/tiny", dtype=None)
 
     assert load.call_args.kwargs["trust_remote_code"] is False
+
+
+def test_load_local_state_dict_merges_safetensors_shards(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = tmp_path / "a.safetensors"
+    second = tmp_path / "b.safetensors"
+    first.touch()
+    second.touch()
+    seen: list[str] = []
+
+    def load_file(path: str) -> dict[str, torch.Tensor]:
+        seen.append(path)
+        if path == str(first):
+            return {"shared": torch.tensor([2.0]), "first": torch.tensor([3.0])}
+        return {"shared": torch.tensor([5.0]), "second": torch.tensor([7.0])}
+
+    monkeypatch.setattr(hub, "load_file", load_file)
+
+    state_dict = load_local_state_dict(tmp_path)
+
+    assert seen == [str(first), str(second)]
+    assert state_dict == {
+        "shared": torch.tensor([5.0]),
+        "first": torch.tensor([3.0]),
+        "second": torch.tensor([7.0]),
+    }
+
+
+def test_load_local_state_dict_reads_pytorch_shards_with_safe_loading(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "pytorch_model-00001-of-00002.bin"
+    second = tmp_path / "pytorch_model-00002-of-00002.bin"
+    first.touch()
+    second.touch()
+
+    with patch(
+        "torch.load",
+        side_effect=[{"a": torch.tensor([2.0])}, {"b": torch.tensor([3.0])}],
+    ) as load:
+        state_dict = load_local_state_dict(tmp_path)
+
+    assert state_dict == {"a": torch.tensor([2.0]), "b": torch.tensor([3.0])}
+    assert [call.args[0] for call in load.call_args_list] == [str(first), str(second)]
+    assert all(
+        call.kwargs == {"map_location": "cpu", "weights_only": True}
+        for call in load.call_args_list
+    )
+
+
+def test_load_torch_hub_distributed_rank_zero_broadcasts_success() -> None:
+    model = nn.Linear(2, 3)
+
+    with (
+        patch("torch.distributed.is_available", return_value=True),
+        patch("torch.distributed.is_initialized", return_value=True),
+        patch("torch.distributed.get_rank", return_value=0),
+        patch("torch.distributed.broadcast_object_list") as broadcast,
+        patch("torch.hub.load", return_value=model) as load,
+    ):
+        result = hub.load_torch_hub_distributed("owner/repo", "entry")
+
+    assert result is model
+    load.assert_called_once_with("owner/repo", "entry")
+    broadcast.assert_called_once_with([None], src=0)
+
+
+def test_load_torch_hub_distributed_nonzero_rank_loads_after_broadcast() -> None:
+    model = nn.Linear(2, 3)
+
+    with (
+        patch("torch.distributed.is_available", return_value=True),
+        patch("torch.distributed.is_initialized", return_value=True),
+        patch("torch.distributed.get_rank", return_value=1),
+        patch("torch.distributed.broadcast_object_list") as broadcast,
+        patch("torch.hub.load", return_value=model) as load,
+    ):
+        result = hub.load_torch_hub_distributed("owner/repo", "entry")
+
+    assert result is model
+    load.assert_called_once_with("owner/repo", "entry")
+    broadcast.assert_called_once_with([None], src=0)
+
+
+@pytest.mark.parametrize(
+    ("available", "initialized"),
+    [(False, True), (True, False)],
+)
+def test_torch_hub_distributed_loads_directly_without_process_group(
+    available: bool,
+    initialized: bool,
+) -> None:
+    model = nn.Linear(2, 3)
+    with (
+        patch("torch.distributed.is_available", return_value=available),
+        patch("torch.distributed.is_initialized", return_value=initialized),
+        patch("torch.hub.load", return_value=model) as load,
+        patch("torch.distributed.broadcast_object_list") as broadcast,
+    ):
+        result = hub.load_torch_hub_distributed("owner/repo", "entry")
+
+    assert result is model
+    load.assert_called_once_with("owner/repo", "entry")
+    broadcast.assert_not_called()
+
+
+def test_load_torch_hub_distributed_broadcasts_remote_failure() -> None:
+    def broadcast_failure(status: list[object], *, src: int) -> None:
+        del src
+        status[0] = "download failed"
+
+    with (
+        patch("torch.distributed.is_available", return_value=True),
+        patch("torch.distributed.is_initialized", return_value=True),
+        patch("torch.distributed.get_rank", return_value=1),
+        patch(
+            "torch.distributed.broadcast_object_list",
+            side_effect=broadcast_failure,
+        ) as broadcast,
+        patch("torch.hub.load") as load,
+        pytest.raises(
+            RuntimeError,
+            match=r"^rank 0 could not load owner/repo/entry: download failed$",
+        ) as error,
+    ):
+        hub.load_torch_hub_distributed("owner/repo", "entry")
+
+    assert str(error.value) == "rank 0 could not load owner/repo/entry: download failed"
+    broadcast.assert_called_once_with(["download failed"], src=0)
+    load.assert_not_called()
+
+
+def test_load_torch_hub_distributed_broadcasts_rank_zero_failure() -> None:
+    with (
+        patch("torch.distributed.is_available", return_value=True),
+        patch("torch.distributed.is_initialized", return_value=True),
+        patch("torch.distributed.get_rank", return_value=0),
+        patch("torch.distributed.broadcast_object_list") as broadcast,
+        patch("torch.hub.load", side_effect=OSError("download failed")),
+        pytest.raises(OSError, match="download failed"),
+    ):
+        hub.load_torch_hub_distributed("owner/repo", "entry")
+
+    broadcast.assert_called_once_with(["download failed"], src=0)
+
+
+def test_load_transformers_model_forwards_options_on_forced_download() -> None:
+    mock_model = MagicMock()
+    mock_model.to.return_value = mock_model
+    mock_auto_model = MagicMock()
+    mock_auto_model.from_pretrained.return_value = mock_model
+
+    with _mock_transformers(mock_auto_model):
+        result = load_transformers_model(
+            "org/model",
+            "AutoModel",
+            device="cpu",
+            dtype=torch.float16,
+            revision="rev-7",
+            trust_remote_code=True,
+            force_redownload=True,
+            low_cpu_mem_usage=True,
+        )
+
+    assert result == mock_model
+    mock_auto_model.from_pretrained.assert_called_once_with(
+        "org/model",
+        revision="rev-7",
+        trust_remote_code=True,
+        local_files_only=False,
+        force_download=True,
+        dtype=torch.float16,
+        low_cpu_mem_usage=True,
+    )
+    mock_model.to.assert_called_once_with("cpu")
+
+
+def test_load_transformers_model_fallback_keeps_caller_options() -> None:
+    mock_model = MagicMock()
+    mock_auto_model = MagicMock()
+    mock_auto_model.from_pretrained.side_effect = [OSError("offline miss"), mock_model]
+
+    with _mock_transformers(mock_auto_model):
+        result = load_transformers_model(
+            "org/model",
+            "AutoModel",
+            revision="rev-3",
+            trust_remote_code=True,
+            dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+        )
+
+    assert result == mock_model
+    assert [call.kwargs for call in mock_auto_model.from_pretrained.call_args_list] == [
+        {
+            "revision": "rev-3",
+            "trust_remote_code": True,
+            "local_files_only": True,
+            "force_download": False,
+            "dtype": torch.bfloat16,
+            "low_cpu_mem_usage": True,
+        },
+        {
+            "revision": "rev-3",
+            "trust_remote_code": True,
+            "local_files_only": False,
+            "force_download": False,
+            "dtype": torch.bfloat16,
+            "low_cpu_mem_usage": True,
+        },
+    ]
 
 
 if __name__ == "__main__":

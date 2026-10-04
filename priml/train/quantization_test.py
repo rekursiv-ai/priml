@@ -6,6 +6,7 @@ from importlib import util
 from importlib.machinery import ModuleSpec
 
 import dataclasses
+import logging
 
 from torch import Tensor, nn
 from torchao.float8.float8_linear import Float8Linear
@@ -130,6 +131,44 @@ def test_availability_accepts_hopper_class_devices(
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (9, 0))
     assert _check_float8_available() == (True, "")
+
+
+def test_float8_conversion_receives_filter_and_logs_exact_count(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(quantization, "_check_float8_available", lambda: (True, ""))
+    calls: list[tuple[nn.Module, object, object]] = []
+
+    def convert(
+        model: nn.Module,
+        *,
+        config: object,
+        module_filter_fn: object,
+    ) -> nn.Module:
+        calls.append((model, config, module_filter_fn))
+        return model
+
+    monkeypatch.setattr(quantization, "convert_to_float8_training", convert)
+    caplog.set_level(logging.INFO, logger=quantization.__name__)
+    filter_names: list[str] = []
+
+    def select_first(module: nn.Module, name: str) -> bool:
+        filter_names.append(name)
+        return isinstance(module, nn.Linear) and name == "0"
+
+    quant = Float8ModelQuantization.Config(module_filter=select_first).make()
+    model = nn.Sequential(nn.Linear(16, 16), nn.Linear(8, 16))
+
+    assert quant(model) is model
+    assert filter_names == ["", "0", "1"]
+    assert quant.converted_count == 1
+    assert len(calls) == 1
+    called_model, config, module_filter_fn = calls[0]
+    assert called_model is model
+    assert config == quant.float8_config
+    assert callable(module_filter_fn)
+    assert caplog.records[-1].getMessage() == ("Converted 1 nn.Linear → Float8Linear")
 
 
 def test_float8_linear_forward_keeps_autocast_enabled(

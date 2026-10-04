@@ -92,17 +92,9 @@ class GetRandomResizedCropBoxFromDimensions:
                     yield sample
                     break
             else:
-                # Fallback to center crop.
-                in_ratio = width / height
-                if in_ratio < min(self.ratio):
-                    w = width
-                    h = round(w / min(self.ratio))
-                elif in_ratio > max(self.ratio):
-                    h = height
-                    w = round(h * max(self.ratio))
-                else:
-                    w = width
-                    h = height
+                min_ratio, max_ratio = self.ratio
+                w = round(min(width, height * max_ratio))
+                h = round(min(height, width / min_ratio))
                 x = (width - w) // 2
                 y = (height - h) // 2
                 sample["crop"] = (y, x, h, w)
@@ -383,7 +375,7 @@ class Normalize:
         # Precompute for fused addcmul: (x - mean*255) / (std*255)
         # = x * (1/(std*255)) + (-mean/std)
         # = torch.addcmul(-mean/std, x, 1/(std*255))
-        bias = tuple(-m / s for m, s in zip(config.mean, config.std, strict=False))
+        bias = tuple(-config.mean[i] / config.std[i] for i in range(3))
         scale = tuple(1.0 / (s * 255.0) for s in config.std)
         self.bias = torch.tensor(bias, device=config.device, dtype=config.dtype).view(
             -1,
@@ -580,10 +572,7 @@ def _one_hot_with_smoothing(
     )
     one_hot.scatter_(1, labels.unsqueeze(1), 1.0)
 
-    if smoothing > 0:
-        one_hot = one_hot * (1 - smoothing) + smoothing / num_classes
-
-    return one_hot
+    return one_hot * (1 - smoothing) + smoothing / num_classes
 
 
 # RandAugment operations.

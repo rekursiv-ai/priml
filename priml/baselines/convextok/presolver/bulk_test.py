@@ -5,7 +5,7 @@ transpose (radix_sort.c, Matrix.c) line for line on small inputs.
 """
 
 from itertools import accumulate
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 
 from numpy.typing import NDArray
 
@@ -13,22 +13,32 @@ import numpy as np
 import pytest
 import torch
 
+from priml.lib.custom_json import ListCodec
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
 from priml.baselines.convextok.presolver.bulk import (
     sort_rows,
     transpose_slots,
 )
-from priml.lib.custom_json import ListCodec
 
 
 _CPU: Final = torch.device("cpu")
 
 
-@pytest.mark.parametrize("n_rows", [40, 300], ids=["insertion", "radix"])
+@pytest.mark.parametrize(
+    "n_rows",
+    [40, 256, 300],
+    ids=["insertion", "boundary", "radix"],
+)
 def test_sort_rows_matches_pslp(n_rows: int) -> None:
     rng = np.random.default_rng(n_rows)
     # Few distinct keys, some negative as int32, so ties and signedness matter.
-    sp_keys = np.array([-5, -1, 0, 3, 2**30], np.int32)
-    ch_keys = np.array([-7, 0, 9], np.int32)
+    sp_keys = np.array([-(2**31), -5, -3, -2, -1, 0, 3, 2**31 - 1], np.int32)
+    ch_keys = np.array([-(2**31), -7, 0, 9, 2**31 - 1], np.int32)
     sparsity = sp_keys[rng.integers(0, sp_keys.size, size=n_rows + 10)]
     coeff = ch_keys[rng.integers(0, ch_keys.size, size=n_rows + 10)]
     active = np.sort(rng.permutation(n_rows + 10)[:n_rows]).astype(np.int32)
@@ -37,7 +47,169 @@ def test_sort_rows_matches_pslp(n_rows: int) -> None:
     assert _ints(sort_rows(active, sparsity, coeff, _CPU)) == expected
 
 
-def test_transpose_slots_match_pslp_layout() -> None:
+def test_sort_rows_passes_device_and_dtype_to_tensor_to(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_to: Callable[..., torch.Tensor] = torch.Tensor.to
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def spy_to(
+        tensor: torch.Tensor,
+        *args: object,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        calls.append((args, kwargs))
+        assert not kwargs
+        assert len(args) == 1
+        target = args[0]
+        if isinstance(target, torch.device):
+            return original_to(tensor, target)
+        assert isinstance(target, torch.dtype)
+        return original_to(tensor, target)
+
+    monkeypatch.setattr(torch.Tensor, "to", spy_to)
+    sort_rows(
+        np.array([0, 1], dtype=np.int32),
+        np.array([1, 0], dtype=np.int32),
+        np.array([0, 1], dtype=np.int32),
+        _CPU,
+    )
+
+    assert calls == [
+        ((_CPU,), {}),
+        ((_CPU,), {}),
+        ((torch.int64,), {}),
+        ((_CPU,), {}),
+        ((torch.int64,), {}),
+        ((torch.int32,), {}),
+    ]
+
+
+def test_transpose_slots_pins_slots_for_empty_and_repeated_columns() -> None:
+    dest, at_start, at_end, n_alloc = transpose_slots(
+        np.array([2, 0, 2, 3, 2], dtype=np.int32),
+        np.array([0, 2, 2, 5], dtype=np.int32),
+        np.array([2, 2, 5, 5], dtype=np.int32),
+        5,
+        _CPU,
+    )
+    assert dest.tolist() == [10, 0, 11, 20, 12]
+    assert at_start.tolist() == [0, 6, 10, 20, 26, 30]
+    assert at_end.tolist() == [1, 6, 13, 21, 26, 30]
+    assert n_alloc == 30
+    assert dest.dtype == at_start.dtype == at_end.dtype == np.int32
+
+
+def test_transpose_slots_pins_tensor_devices_and_dtypes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_to: Callable[..., torch.Tensor] = torch.Tensor.to
+    original_from_numpy: Callable[..., torch.Tensor] = torch.from_numpy
+    original_arange: Callable[..., torch.Tensor] = torch.arange
+    original_zeros: Callable[..., torch.Tensor] = torch.zeros
+    original_empty: Callable[..., torch.Tensor] = torch.empty
+    original_sort: Callable[..., torch.return_types.sort] = torch.sort
+    original_bincount: Callable[..., torch.Tensor] = torch.bincount
+    sort_stability: list[bool | None] = []
+    bincount_minlengths: list[int] = []
+    to_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    source_dtypes: list[str] = []
+    arange_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    zeros_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    empty_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def spy_to(
+        tensor: torch.Tensor,
+        *args: object,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        to_calls.append((args, kwargs))
+        assert not kwargs
+        assert len(args) == 1
+        target = args[0]
+        if isinstance(target, torch.device):
+            return original_to(tensor, target)
+        assert isinstance(target, torch.dtype)
+        return original_to(tensor, target)
+
+    def spy_from_numpy(array: NDArray[np.int32] | NDArray[np.int64]) -> torch.Tensor:
+        source_dtypes.append(str(array.dtype))
+        return original_from_numpy(array)
+
+    def spy_arange(end: int, *, device: torch.device | None = None) -> torch.Tensor:
+        arange_calls.append(((end,), {"device": device}))
+        return original_arange(end, device=device)
+
+    def spy_zeros(
+        size: int,
+        *,
+        dtype: torch.dtype | None = None,
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        zeros_calls.append(((size,), {"dtype": dtype, "device": device}))
+        return original_zeros(size, dtype=dtype, device=device)
+
+    def spy_empty(
+        size: int,
+        *,
+        dtype: torch.dtype | None = None,
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        empty_calls.append(((size,), {"dtype": dtype, "device": device}))
+        return original_empty(size, dtype=dtype, device=device)
+
+    def spy_sort(
+        input: torch.Tensor,
+        *,
+        stable: bool | None = None,
+    ) -> torch.return_types.sort:
+        sort_stability.append(stable)
+        return original_sort(input, stable=stable)
+
+    def spy_bincount(
+        input: torch.Tensor,
+        *,
+        weights: torch.Tensor | None = None,
+        minlength: int = 0,
+    ) -> torch.Tensor:
+        bincount_minlengths.append(minlength)
+        return original_bincount(input, weights=weights, minlength=minlength)
+
+    monkeypatch.setattr(torch.Tensor, "to", spy_to)
+    monkeypatch.setattr(torch, "from_numpy", spy_from_numpy)
+    monkeypatch.setattr(torch, "arange", spy_arange)
+    monkeypatch.setattr(torch, "zeros", spy_zeros)
+    monkeypatch.setattr(torch, "empty", spy_empty)
+    monkeypatch.setattr(torch, "sort", spy_sort)
+    monkeypatch.setattr(torch, "bincount", spy_bincount)
+    transpose_slots(
+        np.array([2, 0, 2, 3, 2], dtype=np.int32),
+        np.array([0, 2, 2, 5], dtype=np.int32),
+        np.array([2, 2, 5, 5], dtype=np.int32),
+        5,
+        _CPU,
+    )
+
+    assert source_dtypes == ["int64", "int64", "int32"]
+    assert to_calls == [
+        ((_CPU,), {}),
+        ((_CPU,), {}),
+        ((_CPU,), {}),
+        ((torch.int64,), {}),
+        ((torch.float64,), {}),
+        ((torch.int64,), {}),
+        ((torch.int32,), {}),
+        ((torch.int32,), {}),
+        ((torch.int32,), {}),
+    ]
+    assert arange_calls == [((5,), {"device": _CPU}), ((5,), {"device": _CPU})]
+    assert zeros_calls == [((6,), {"dtype": torch.int64, "device": _CPU})]
+    assert empty_calls == [((6,), {"dtype": torch.int64, "device": _CPU})]
+    assert sort_stability == [True]
+    assert bincount_minlengths == [5]
+
+
+def test_transpose_slots_matches_pslp_layout() -> None:
     rng = np.random.default_rng(0)
     n_rows, n_cols = 7, 5
     rows = [

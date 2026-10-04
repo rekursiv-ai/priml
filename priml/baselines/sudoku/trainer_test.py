@@ -438,6 +438,18 @@ def _put(out: dict[str, Tensor], prefix: str, values: Mapping[str, Tensor]) -> N
         out[f"{prefix}/{key}"] = stored(value)
 
 
+def test_do_train_step_advances_training(tmp_path: Path) -> None:
+    config = port_config("exp004", tmp_path)
+    config.num_steps_log = 1
+    write_dataset(tmp_path / "data")
+    subject = config.make()
+
+    subject._do_train_step(subject._next_batch())
+
+    assert subject.global_step == 1
+    assert subject.local_step == 1
+
+
 def test_trainer_execution_variants(tmp_path: Path) -> None:
     config = port_config("exp004", tmp_path)
     config.dataset.working_dir = tmp_path / "data"

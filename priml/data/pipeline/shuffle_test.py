@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import random
+
 from priml.data.pipeline.shuffle import ShuffleBuffer
 from priml.lib.custom_json import IntCodec
 
@@ -64,6 +66,30 @@ def test_shuffle_buffer_different_seeds_differ():
     ]
 
     assert a != b
+
+
+def test_shuffle_buffer_fills_exactly_its_capacity() -> None:
+    """The first replacement is drawn only from the initial capacity."""
+    samples = [{"index": index} for index in range(4)]
+    results = list(ShuffleBuffer.Config(size=3, seed=0).make()(iter(samples)))
+
+    assert results[0]["index"] == 1
+    indices: list[int] = []
+    for sample in results:
+        index = sample["index"]
+        assert isinstance(index, int)
+        indices.append(index)
+    assert sorted(indices) == [0, 1, 2, 3]
+
+
+def test_shuffle_buffer_without_seed_uses_global_random_state() -> None:
+    """Unseeded shuffling consumes the shared RNG stream."""
+    random.seed(42)
+    before = random.getstate()
+
+    list(ShuffleBuffer.Config(size=2).make()(iter([{"index": 0}, {"index": 1}])))
+
+    assert random.getstate() != before
 
 
 if __name__ == "__main__":

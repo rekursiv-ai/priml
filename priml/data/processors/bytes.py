@@ -361,6 +361,7 @@ class CropDuringDecodeImage:
         """Output produced by CropDuringDecodeImage."""
 
         media_tensor: NotRequired[Tensor]
+        filter_reasons: NotRequired[list[str]]
         """``(C, F, H, W)``: uint8 in ``[0, 255]``, or the configured
         floating-point ``dtype`` in ``[-1, 1]``. An image has ``F=1``, but
         ``F=1`` is not necessarily an image.
@@ -537,8 +538,10 @@ class CropDuringDecodeImage:
         # alpha channel has to fall through to PIL rather than silently
         # yielding three channels under a four-channel request.
         wants_alpha = self.channels_format == "rgba"
+        if not extensions:
+            return (None, "all_formats_failed")
 
-        last_error: str | None = None
+        errors: list[str] = []
         if self.use_turbojpeg and self.turbo_jpeg is None:
             raise ValueError("Expected self.turbo_jpeg is not None.")
         for ext in extensions:
@@ -562,7 +565,7 @@ class CropDuringDecodeImage:
                     )
                     if tensor is not None:
                         return (tensor, None)
-                    last_error = f"{ext}_decode_failed"
+                    errors.append(f"{ext}_decode_failed")
                     continue
 
                 # Use libwebp for WebP files.
@@ -576,7 +579,7 @@ class CropDuringDecodeImage:
                     )
                     if tensor is not None:
                         return (tensor, None)
-                    last_error = f"{ext}_decode_failed"
+                    errors.append(f"{ext}_decode_failed")
                     continue
 
                 # Fall back to PIL (auto-detects format from bytes)
@@ -586,11 +589,10 @@ class CropDuringDecodeImage:
                     width,
                     crop=crop,
                     channels_format=self.channels_format,
-                    channels_first=True,
                 )
                 if tensor is not None:
                     return (tensor, None)
-                last_error = f"{ext}_decode_failed"
+                errors.append(f"{ext}_decode_failed")
                 continue
 
             except (
@@ -598,11 +600,11 @@ class CropDuringDecodeImage:
                 ValueError,
                 RuntimeError,
             ) as e:
-                last_error = f"{ext}_{type(e).__name__}:{str(e)[:50]}"
+                errors.append(f"{ext}_{type(e).__name__}:{str(e)[:50]}")
                 continue
 
         # All formats failed - return error message.
-        return (None, last_error or "all_formats_failed")
+        return (None, errors[-1])
 
 
 class DecodeVideo:
@@ -671,6 +673,7 @@ class DecodeVideo:
 
         _tar_handle: TarFileProtocol
         media: bytes
+        filter_reasons: list[str]
         key: str
         format: str
         """Extension such as ``mp4``; empty tries every known one."""
@@ -759,7 +762,7 @@ class DecodeVideo:
                 target_frames=target_frames,
                 target_height=target_height,
                 target_width=target_width,
-                media=sample.get("media", b""),
+                media=sample.get("media"),
             )
 
             if media_tensor is not None:
@@ -862,7 +865,7 @@ class DecodeVideo:
         target_frames: int | None,
         target_height: int | None,
         target_width: int | None,
-        media: bytes = b"",
+        media: bytes | None = None,
     ) -> Tensor | None:
         """Decode a video, resizing DURING decode, to the output contract."""
         # The allowlist is checked before the payload is chosen, not inside

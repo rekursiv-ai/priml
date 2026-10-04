@@ -156,7 +156,9 @@ class GANTrainStep:
             d_loss_total = (
                 step_loss if d_loss_total is None else d_loss_total + step_loss
             )
-        d_loss_sum = d_loss_total.item() if d_loss_total is not None else 0.0
+        if d_loss_total is None:
+            raise ValueError("Expected d_loss_total is not None.")
+        d_loss_sum = d_loss_total.item()
 
         # Train generator. The generator backward scores ``D(G(z))`` and so
         # flows THROUGH the discriminator's activations -- which is required --
@@ -221,20 +223,21 @@ class GANTrainStep:
                 fake_media_d = self.generator.call_eval(**batch)
             assert isinstance(fake_media_d, Tensor)
 
-            media = torch.cat([real_media, fake_media_d.detach()], dim=0)
+            media = torch.cat([real_media, fake_media_d.detach()])
             targets = torch.cat(
                 [
                     torch.ones(batch_size, 1, device=media.device),
                     torch.zeros(batch_size, 1, device=media.device),
                 ],
-                dim=0,
             )
             d_loss_result = self.discriminator.train_loss(media=media, label=targets)
             step_loss = d_loss_result["loss"].detach().sum()
             d_loss_total = (
                 step_loss if d_loss_total is None else d_loss_total + step_loss
             )
-        d_loss_sum = d_loss_total.item() if d_loss_total is not None else 0.0
+        if d_loss_total is None:
+            raise ValueError("Expected d_loss_total is not None.")
+        d_loss_sum = d_loss_total.item()
 
         # Compute generator loss.
         fake_media = cast(object, self.generator.model(**batch))
@@ -289,7 +292,9 @@ class GANTrainStep:
             d_loss_total = (
                 step_loss if d_loss_total is None else d_loss_total + step_loss
             )
-        d_loss_sum = d_loss_total.item() if d_loss_total is not None else 0.0
+        if d_loss_total is None:
+            raise ValueError("Expected d_loss_total is not None.")
+        d_loss_sum = d_loss_total.item()
 
         # Compute generator loss.
         fake_media = self.generator.call_eval(**batch)

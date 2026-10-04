@@ -15,7 +15,7 @@ from priml.data.custom_types import Processor
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator, Iterator
 
 
 logger = logging.getLogger(__name__)
@@ -106,7 +106,7 @@ class ParMap:
     def __call__(
         self,
         samples: Iterator[dict[str, object]],
-    ) -> Iterator[dict[str, object]]:
+    ) -> Generator[dict[str, object], None, None]:
         """Process samples in parallel using thread pool.
 
         Main thread pulls samples from upstream and submits to work queue.
@@ -166,7 +166,7 @@ class ParMap:
             try:
                 for sample in samples:
                     if stop_event.is_set():
-                        break
+                        return
                     _put_until_stopped(input_queue, sample, stop_event)
                     peak_input_queue_size[0] = max(
                         peak_input_queue_size[0],
@@ -273,7 +273,7 @@ class PrefetchBuffer:
 
         # Optimization: if fill_first=True and size<0, no thread needed
         # Just eagerly load everything into memory.
-        if self.fill_first and self.size < 0:
+        if self.fill_first and self.size <= -1:
             buffer = list(samples)
             logger.info(
                 "PrefetchBuffer eagerly loaded %s items (no thread)",
@@ -295,7 +295,7 @@ class PrefetchBuffer:
                 for sample in samples:
                     q.put(sample)
                     peak_queue_size[0] = max(peak_queue_size[0], q.qsize())
-                    if self.fill_first and self.size >= 0 and q.qsize() >= self.size:
+                    if self.fill_first and q.qsize() >= self.size:
                         buffer_ready.set()
             finally:
                 buffer_ready.set()
@@ -306,7 +306,7 @@ class PrefetchBuffer:
 
         if self.fill_first:
             buffer_ready.wait()
-            size_str = "∞" if self.size < 0 else str(self.size)
+            size_str = str(self.size)
             logger.info(
                 "PrefetchBuffer filled: %s/%s items buffered before yielding",
                 q.qsize(),
@@ -320,7 +320,7 @@ class PrefetchBuffer:
             peak_queue_size[0] = max(peak_queue_size[0], q.qsize() + 1)
             yield item
 
-        size_str = "∞" if self.size < 0 else str(self.size)
+        size_str = "∞" if self.size <= -1 else str(self.size)
         logger.info(
             "PrefetchBuffer peak queue usage: %s/%s",
             peak_queue_size[0],

@@ -57,7 +57,7 @@ def add_filter_reason(
       reason: Specific condition causing rejection (appended to stage name).
 
     """
-    filter_reasons_value = sample.get("filter_reasons", [])
+    filter_reasons_value = sample.get("filter_reasons")
     if not isinstance(filter_reasons_value, list):
         filter_reasons_value = []
     filter_reasons = [
@@ -228,7 +228,6 @@ class DataPipeline:
 
         return data.DataLoader[dict[str, object]](
             dataset=dataset,
-            batch_size=1,  # Pipeline owns batching.
             num_workers=effective_num_workers,
             prefetch_factor=None if effective_num_workers == 0 else prefetch_factor,
             collate_fn=_passthrough_collate,

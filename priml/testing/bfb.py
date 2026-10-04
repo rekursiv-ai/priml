@@ -436,7 +436,7 @@ def randomize_parameters(
     with torch.no_grad():
         for p in module.parameters():
             sample = torch.randn(p.shape, generator=gen, dtype=torch.float32) * std
-            p.data.copy_(sample.to(p.dtype))
+            p.data.copy_(sample)
 
 
 def assert_bfb_against_golden[InputT](
@@ -549,7 +549,7 @@ def regenerate_golden[InputT](
         # clearing it, so calling this inside a process launched with
         # BFB_REGENERATE=1 does not silently disable regeneration afterward.
         if prior is None:
-            os.environ.pop(_ENV_REGENERATE, None)
+            del os.environ[_ENV_REGENERATE]
         else:
             os.environ[_ENV_REGENERATE] = prior
 
@@ -596,7 +596,7 @@ def load_golden(path: Path) -> _Golden:
       payload: The golden, records as plain name-to-tensor mappings.
 
     """
-    payload = cast(_Golden, torch.load(path, weights_only=False, map_location="cpu"))
+    payload = cast(_Golden, torch.load(path, weights_only=False))
     payload["state_dict"] = unpack(payload["state_dict"])
     if "post_state" in payload:
         payload["post_state"] = unpack(payload["post_state"])
@@ -619,13 +619,14 @@ def stale_post_states(paths: Iterable[Path]) -> list[Path]:
     stale: list[Path] = []
     for path in paths:
         raw = DictCodec.coerce(
-            cast(object, torch.load(path, map_location="cpu", weights_only=False)),
-            default=None,
+            cast(object, torch.load(path, weights_only=False)),
         )
         if "post_state" not in raw or "state_dict" not in raw:
             continue
         payload = load_golden(path)
-        post = payload.get("post_state", {})
+        if "post_state" not in payload:
+            raise ValueError('Expected "post_state" in payload.')
+        post = payload["post_state"]
         if len(changed_state(payload["state_dict"], post)) < len(post):
             stale.append(path)
     return stale
@@ -801,7 +802,8 @@ def _compact_copies(tensors: Iterable[Tensor]) -> dict[int, Tensor]:
             .to("cpu", copy=True)
             .untyped_storage()
         )
-        for (key, member), (low, _) in zip(group, spans, strict=True):
+        for index, (key, member) in enumerate(group):
+            low, _ = spans[index]
             copies[key] = torch.empty(0, dtype=member.dtype).set_(
                 storage,
                 (low - start) // member.element_size(),
@@ -817,16 +819,14 @@ def _byte_span(tensor: Tensor) -> tuple[int, int]:
     if not tensor.numel():
         return start, start
     last = sum(
-        (size - 1) * stride
-        for size, stride in zip(tensor.shape, tensor.stride(), strict=True)
+        (tensor.shape[index] - 1) * tensor.stride()[index]
+        for index in range(tensor.ndim)
     )
     return start, start + (last + 1) * tensor.element_size()
 
 
 def _cpu_state_dict(state_dict: Mapping[str, Tensor]) -> dict[str, Tensor]:
-    return {
-        key: value.detach().to("cpu", copy=True) for key, value in state_dict.items()
-    }
+    return {key: value.detach().cpu().clone() for key, value in state_dict.items()}
 
 
 def _assert_same_input(live: object, stored: object, *, label: str) -> None:
@@ -835,9 +835,7 @@ def _assert_same_input(live: object, stored: object, *, label: str) -> None:
     stored_type: type = type(stored)
     if live_type != stored_type:
         raise AssertionError(f"{label}: type mismatch {live_type} vs {stored_type}")
-    both_maps = live_type is dict and stored_type is dict
-    both_sequences = live_type in {list, tuple} and stored_type in {list, tuple}
-    if both_maps:
+    if live_type is dict:
         live_map = cast(dict[str, object], live)
         stored_map = cast(dict[str, object], stored)
         if live_map.keys() != stored_map.keys():
@@ -846,17 +844,25 @@ def _assert_same_input(live: object, stored: object, *, label: str) -> None:
             )
         for key, value in live_map.items():
             _assert_same_input(value, stored_map[key], label=f"{label}[{key!r}]")
-    elif both_sequences:
+    elif live_type in {list, tuple}:
         live_seq = cast("Sequence[object]", live)
         stored_seq = cast("Sequence[object]", stored)
         if len(live_seq) != len(stored_seq):
             raise AssertionError(
                 f"{label}: length {len(live_seq)} vs {len(stored_seq)}",
             )
-        for index, (a, b) in enumerate(zip(live_seq, stored_seq, strict=True)):
-            _assert_same_input(a, b, label=f"{label}[{index}]")
+        for index in range(len(live_seq)):
+            _assert_same_input(
+                live_seq[index],
+                stored_seq[index],
+                label=f"{label}[{index}]",
+            )
     else:
         _assert_equal(live, stored, label=label)
+
+
+def _ints(values: object) -> list[int]:
+    return ListCodec.coerce(values, int)
 
 
 def _assert_equal(a: object, b: object, *, label: str) -> None:
@@ -881,12 +887,12 @@ def _assert_equal(a: object, b: object, *, label: str) -> None:
         else:
             # Python ints: the int64 extremes differ by 2**64 - 1, which a
             # tensor subtraction would overflow.
-            values_a = ListCodec.coerce(a.detach().cpu().reshape(-1).tolist(), int)
-            values_b = ListCodec.coerce(b.detach().cpu().reshape(-1).tolist(), int)
+            values_a = _ints(a.detach().cpu().reshape(-1).tolist())
+            values_b = _ints(b.detach().cpu().reshape(-1).tolist())
             max_abs_diff = str(
                 max(
-                    abs(value_a - value_b)
-                    for value_a, value_b in zip(values_a, values_b, strict=True)
+                    abs(values_a[index] - values_b[index])
+                    for index in range(len(values_a))
                 ),
             )
         raise AssertionError(
@@ -914,6 +920,8 @@ def _max_ulp_diff(a: Tensor, b: Tensor) -> int | str:
     }.get(a.dtype)
     if kind is None:
         return "n/a"
+    if a.shape != b.shape:
+        raise ValueError(f"shape mismatch {tuple(a.shape)} vs {tuple(b.shape)}")
     # NaN has no distance to anything: every comparison against it is false, so
     # a pattern subtraction returns a number that reads as real drift.
     if bool(a.isnan().any() or b.isnan().any()):
@@ -921,10 +929,10 @@ def _max_ulp_diff(a: Tensor, b: Tensor) -> int | str:
     if kind == torch.int64:
         # Distances across signs can exceed signed int64, even though each
         # ordered endpoint fits. Widen the subtraction to Python integers.
-        values_a = ListCodec.coerce(_ordered(a, kind).reshape(-1).tolist(), int)
-        values_b = ListCodec.coerce(_ordered(b, kind).reshape(-1).tolist(), int)
+        values_a = _ints(_ordered(a, kind).reshape(-1).tolist())
+        values_b = _ints(_ordered(b, kind).reshape(-1).tolist())
         return max(
-            (abs(x - y) for x, y in zip(values_a, values_b, strict=True)),
+            (abs(values_a[index] - values_b[index]) for index in range(len(values_a))),
             default=0,
         )
     return int((_ordered(a, kind) - _ordered(b, kind)).abs().max())
@@ -1194,12 +1202,13 @@ def _run_unfused(
     if func.namespace != "aten":
         return func(*args, **kwargs)
     name = _op_name(func)
-    if name.rstrip("_") in {"addmm", "baddbmm", "addbmm", "addmv", "_addmm_activation"}:
+    base = name.removesuffix("_")
+    if base in {"addmm", "baddbmm", "addbmm", "addmv", "_addmm_activation"}:
         matrix_names = (
             ("mat", "vec")
-            if name.rstrip("_") == "addmv"
+            if base == "addmv"
             else ("batch1", "batch2")
-            if name.rstrip("_") in {"addbmm", "baddbmm"}
+            if base in {"addbmm", "baddbmm"}
             else ("mat1", "mat2")
         )
         operands = [
@@ -1207,8 +1216,8 @@ def _run_unfused(
             for index, argument in enumerate(("self", *matrix_names))
         ]
         bias, left, right = operands
-        dimensions = 3 if name.rstrip("_") in {"addbmm", "baddbmm"} else 2
-        right_dimensions = 1 if name.rstrip("_") == "addmv" else dimensions
+        dimensions = 3 if base in {"addbmm", "baddbmm"} else 2
+        right_dimensions = 1 if base == "addmv" else dimensions
         # The unfused path skips the native dtype check, so mixed operands -- an
         # integer matrix under a widened float bias -- go to the kernel that
         # rejects them, as do integers, whose native arithmetic is exact.
@@ -1220,24 +1229,24 @@ def _run_unfused(
         ):
             return func(*args, **kwargs)
         shape = (left.shape[-2],)
-        if name.rstrip("_") != "addmv":
+        if base != "addmv":
             shape += (right.shape[-1],)
-        if name.rstrip("_") == "baddbmm":
+        if base == "baddbmm":
             shape = (left.shape[0], *shape)
         # Bias may expand to the product, never expand the product itself.
         # This validation remains necessary when beta=0 ignores bias values.
         _ = bias.expand(shape)
-    if name in {"addmm_", "baddbmm_", "addbmm_", "addmv_"}:
+    if name != base and base in {"addmm", "baddbmm", "addbmm", "addmv"}:
         functional = cast(
             "OpOverload[..., object]",
-            getattr(torch.ops.aten, name[:-1]).default,
+            getattr(torch.ops.aten, base).default,
         )
         result = _run_unfused(functional, args, kwargs)
         original = cast(Tensor, args[0] if args else kwargs["self"])
         return original.copy_(cast(Tensor, result))
-    if name == "addbmm":
+    if base == "addbmm":
         return cast("Callable[..., Tensor]", _unfused_addbmm)(*args, **kwargs)
-    if name in {"convolution", "_convolution"}:
+    if base in {"convolution", "_convolution"}:
         bias = args[2] if len(args) > 2 else kwargs.get("bias")
         if isinstance(bias, Tensor):
             return _unfused_convolution(func, args, kwargs, bias=bias)
@@ -1268,7 +1277,7 @@ def _unfused_convolution(
         raise RuntimeError(
             "convolution bias must be one-dimensional with one value per output channel",
         )
-    return result.add_(bias.reshape(1, -1, *((1,) * (result.ndim - 2))))
+    return result.add_(bias.reshape(-1, *((1,) * (result.ndim - 2))))
 
 
 @out_wrapper(exact_dtype=True)
@@ -1426,7 +1435,7 @@ def _restore_torch_process_state(state: _TorchProcessState) -> None:
 
 def _seed_bfb(seed: int) -> None:
     """Seed the CPU default generator without queuing a lazy CUDA seed."""
-    generator = torch.Generator(device="cpu")
+    generator = torch.Generator()
     generator.manual_seed(seed)
     torch.set_rng_state(generator.get_state())
 

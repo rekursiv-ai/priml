@@ -162,11 +162,7 @@ def exp000() -> CraftaxTrainLoop:
 
     # The budget is stated in INTERACTIONS, which is what the benchmark
     # compares, and converted here because the loop counts updates.
-    cfg.max_steps = cfg.step.total_train_steps = _updates(
-        interactions=1_000_000,
-        num_envs=cfg.step.env.num_envs,
-        rollout_steps=cfg.step.rollout_steps,
-    )
+    cfg.max_steps = cfg.step.total_train_steps = 244
     # One epoch spans the run: nothing here is epoch-driven, and an epoch
     # boundary would only interrupt it.
     cfg.dataset.updates_per_epoch = int(cfg.max_steps)
@@ -217,11 +213,7 @@ def exp001() -> CraftaxTrainLoop:
     cfg.step.env.num_envs = 1_024
     cfg.step.rollout_steps = 64
     cfg.step.learning_rate = 2e-4
-    cfg.max_steps = cfg.step.total_train_steps = _updates(
-        interactions=1_000_000_000,
-        num_envs=cfg.step.env.num_envs,
-        rollout_steps=cfg.step.rollout_steps,
-    )
+    cfg.max_steps = cfg.step.total_train_steps = 15_258
     cfg.dataset.updates_per_epoch = int(cfg.max_steps)
     cfg.num_steps_eval = cfg.max_steps
     return cfg
@@ -279,11 +271,7 @@ def exp002() -> CraftaxRNNTrainLoop:
     cfg.step.seed = 42
     cfg.step.model.channels_in = 512
 
-    cfg.max_steps = cfg.step.total_train_steps = _updates(
-        interactions=1_000_000_000,
-        num_envs=cfg.step.env.num_envs,
-        rollout_steps=cfg.step.rollout_steps,
-    )
+    cfg.max_steps = cfg.step.total_train_steps = 15_258
     cfg.dataset.updates_per_epoch = int(cfg.max_steps)
     cfg.num_steps_eval = cfg.max_steps
     cfg.metrics_eval = dict(parent.metrics_eval)
@@ -345,11 +333,7 @@ def exp003() -> CraftaxPQNTrainLoop:
     cfg.step.seed = 42
     cfg.step.model.channels_in = 512
 
-    cfg.max_steps = cfg.step.total_train_steps = _updates(
-        interactions=1_000_000_000,
-        num_envs=cfg.step.env.num_envs,
-        rollout_steps=cfg.step.rollout_steps,
-    )
+    cfg.max_steps = cfg.step.total_train_steps = 7_629
     cfg.dataset.updates_per_epoch = int(cfg.max_steps)
     cfg.num_steps_eval = cfg.max_steps
     cfg.metrics_eval = dict(parent.metrics_eval)
@@ -392,11 +376,7 @@ def exp011() -> CraftaxTrainLoop:
     """
     cfg = exp001()
     cfg.experiment_name = "exp011"
-    cfg.max_steps = cfg.step.total_train_steps = _updates(
-        interactions=100_000_000,
-        num_envs=cfg.step.env.num_envs,
-        rollout_steps=cfg.step.rollout_steps,
-    )
+    cfg.max_steps = cfg.step.total_train_steps = 1_525
     cfg.dataset.updates_per_epoch = int(cfg.max_steps)
     cfg.num_steps_eval = cfg.max_steps
     return cfg
@@ -467,11 +447,7 @@ def exp013() -> CraftaxGTrXLTrainLoop:
     cfg.step.model.memory_length = 128
     cfg.step.model.gating_bias = 2.0
 
-    cfg.max_steps = cfg.step.total_train_steps = _updates(
-        interactions=1_000_000_000,
-        num_envs=cfg.step.env.num_envs,
-        rollout_steps=cfg.step.rollout_steps,
-    )
+    cfg.max_steps = cfg.step.total_train_steps = 7_629
     cfg.dataset.updates_per_epoch = int(cfg.max_steps)
     cfg.num_steps_eval = cfg.max_steps
     cfg.metrics_eval = dict(parent.metrics_eval)
@@ -505,10 +481,3 @@ def exp_smoke() -> CraftaxTrainLoop:
     score.num_envs = 4
     score.steps = 64
     return cfg
-
-
-# Floors, because a partial update is not an update: the run stops one rollout short of
-# the budget rather than overshooting it.
-def _updates(*, interactions: int, num_envs: int, rollout_steps: int) -> int:
-    """Convert an interaction budget into the update count that spends it."""
-    return interactions // (num_envs * rollout_steps)

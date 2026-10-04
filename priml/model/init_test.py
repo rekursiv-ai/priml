@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, override
 
 import inspect
+import math
 
 from torch import nn
 
@@ -107,6 +108,44 @@ def test_call_init_with_depth():
     assert w.std() > 0
 
 
+@pytest.mark.parametrize(("shape", "expected_std"), [((5,), 1 / 5), ((5, 7), 1 / 7)])
+def test_mup_output_uses_the_last_input_axis(
+    monkeypatch: pytest.MonkeyPatch,
+    shape: tuple[int, ...],
+    expected_std: float,
+) -> None:
+    calls: list[tuple[torch.Tensor, float]] = []
+
+    def normal_(tensor: torch.Tensor, *, std: float) -> torch.Tensor:
+        calls.append((tensor, std))
+        return tensor
+
+    monkeypatch.setattr(nn.init, "normal_", normal_)
+    weight = torch.empty(shape)
+
+    mup_output(weight)
+
+    assert calls == [(weight, expected_std)]
+
+
+def test_unit_fan_in_uniform_uses_both_bounds_and_last_axis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[torch.Tensor, float, float]] = []
+
+    def uniform_(tensor: torch.Tensor, low: float, high: float) -> torch.Tensor:
+        calls.append((tensor, low, high))
+        return tensor
+
+    monkeypatch.setattr(nn.init, "uniform_", uniform_)
+    weight = torch.empty(2, 3, 4)
+
+    unit_fan_in_uniform(weight)
+
+    bound = 3**0.5 * 4**-0.5
+    assert calls == [(weight, -bound, bound)]
+
+
 def test_call_init_passes_a_positional_or_keyword_depth_index() -> None:
     seen: list[DepthIndex] = []
 
@@ -199,6 +238,67 @@ def test_depth_zero_no_scaling():
     kaiming_uniform(w_zero, depth_index=((0, 1),))
 
     assert torch.allclose(w_neg, w_zero)
+
+
+def test_depth_one_scales_by_the_square_root_of_two(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fill_ones(tensor: torch.Tensor, **kwargs: object) -> torch.Tensor:
+        del kwargs
+        return tensor.fill_(1.0)
+
+    monkeypatch.setattr(nn.init, "kaiming_uniform_", fill_ones)
+    weight = torch.empty(2, 3)
+
+    kaiming_uniform(weight, depth_index=((1, 2),))
+
+    torch.testing.assert_close(weight, torch.full_like(weight, 2**-0.5))
+
+
+def test_truncated_normal_variance_correction_passes_closed_form_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[torch.Tensor, float, float, float]] = []
+
+    def trunc_normal_(
+        tensor: torch.Tensor,
+        *,
+        std: float,
+        a: float,
+        b: float,
+    ) -> torch.Tensor:
+        calls.append((tensor, std, a, b))
+        return tensor
+
+    monkeypatch.setattr(nn.init, "trunc_normal_", trunc_normal_)
+    weight = torch.empty(2, 3)
+    requested_std = 0.75
+    lower, upper = -1.25, 2.0
+    sqrt2 = 2.0**0.5
+    z = (math.erf(upper / sqrt2) - math.erf(lower / sqrt2)) / 2.0
+    inv_sqrt_2pi = 1.0 / (2.0 * math.pi) ** 0.5
+    pdf_u = inv_sqrt_2pi * math.exp(-0.5 * upper * upper)
+    pdf_l = inv_sqrt_2pi * math.exp(-0.5 * lower * lower)
+    ratio = (pdf_u - pdf_l) / z
+    corrected_std = (
+        requested_std
+        / (1.0 - (upper * pdf_u - lower * pdf_l) / z - ratio * ratio) ** 0.5
+    )
+
+    truncated_normal(
+        weight,
+        std=requested_std,
+        lower=lower,
+        upper=upper,
+        variance_correction=True,
+    )
+
+    assert len(calls) == 1
+    tensor, std, a, b = calls[0]
+    assert tensor is weight
+    assert std == pytest.approx(corrected_std)
+    assert a == pytest.approx(lower * corrected_std)
+    assert b == pytest.approx(upper * corrected_std)
 
 
 def test_truncated_normal_variance_correction_realizes_requested_std():

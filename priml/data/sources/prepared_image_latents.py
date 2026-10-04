@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
+import math
+
 import numpy as np
 
 from priml.lib.custom_json import DictCodec, IntCodec, ListCodec, StrCodec, loads
@@ -30,7 +32,7 @@ def read_labels(manifest: Path) -> dict[str, int]:
       labels: Class labels keyed by normalized latent names.
 
     """
-    payload = DictCodec.coerce(loads(manifest.read_text(encoding="utf-8")))
+    payload = DictCodec.coerce(loads(manifest.read_bytes().decode()))
     entries = [ListCodec.coerce(entry) for entry in ListCodec.coerce(payload["labels"])]
     return {
         StrCodec.coerce(entry[0]).replace("\\", "/"): IntCodec.coerce(
@@ -54,7 +56,7 @@ def read_image(path: Path) -> NDArray[np.uint8]:
     if path.suffix.lower() == ".npy":
         array = cast("NDArray[np.uint8]", np.load(path))
         shape = cast("tuple[int, ...]", array.shape)
-        return array.reshape(-1, *shape[-2:])
+        return array.reshape(math.prod(shape[:-2]), *shape[-2:])
     with Image.open(path) as handle:
         array = np.asarray(handle.convert("RGB"))
     return array.transpose(2, 0, 1)

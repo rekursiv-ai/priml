@@ -7,11 +7,21 @@ from pyarrow import Array, Table
 class _RecordBatch(Protocol):
     def column(self, i: int | str) -> Array: ...
 
+class ColumnChunkMetaData:
+    compression: str
+
+class RowGroupMetaData:
+    def column(self, i: int) -> ColumnChunkMetaData: ...
+
 class FileMetaData:
     num_rows: int
+    num_row_groups: int
     created_by: str
 
+    def row_group(self, i: int) -> RowGroupMetaData: ...
+
 class ParquetFile:
+    metadata: FileMetaData
     num_row_groups: int
 
     def __init__(self, source: str | PathLike[str]) -> None: ...

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Final, Protocol, cast, override
 
 import ast
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
 from priml.lib.custom_json import DictCodec
 from priml.model.attention.attention import Attention
 from priml.model.transformer.block import TransformerBlock
+from priml.testing import bfb
 from priml.testing.bfb import (
     _ENV_REGENERATE,
     _EXACT_F32_OPS,
@@ -41,14 +43,28 @@ from priml.testing.bfb import (
     _assert_portable_output_dtype,
     _assert_portable_state_changes,
     _assert_same_input,
+    _byte_span,
+    _compact_copies,
+    _copy_back,
+    _cpu_state_dict,
     _downcast_f64,
     _downcast_result,
+    _floating_tensors,
     _max_ulp_diff,
     _module_device,
     _op_name,
+    _ordered,
+    _replay_golden,
+    _resolve_output,
+    _run_unfused,
+    _scales_operand,
+    _scales_or_fuses,
+    _seed_bfb,
     _to_cpu,
+    _unfused_convolution,
     _upcast,
     _write_back,
+    _write_golden,
     assert_bfb_against_golden,
     bfb_devices,
     changed_state,
@@ -62,11 +78,37 @@ from priml.testing.bfb import (
     save_golden,
     stale_post_states,
 )
-from priml.testing.golden import expect_golden_mismatch
+from priml.testing.golden import expect_golden_mismatch, pack, tensor_bits_equal
 
 
 _THIS: Final = Path(__file__).resolve()
 _CWD: Final = _THIS.parent
+
+
+class _Load(Protocol):
+    def __call__(
+        self,
+        f: str | Path,
+        *,
+        map_location: str | torch.device | None = None,
+        weights_only: bool,
+    ) -> object: ...
+
+
+_torch_load: _Load = torch.load
+
+
+def _scale_tensor(value: Tensor, factor: float) -> Tensor:
+    return value * factor
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class _FixedResult:
+    result: Tensor
+
+    def __call__(self, /, *args: object, **kwargs: object) -> Tensor:
+        del args, kwargs
+        return self.result
 
 
 @pytest.fixture(autouse=True)
@@ -399,12 +441,10 @@ def _onednn_enabled() -> bool:
 def test_move_to_device_recurses_into_containers_and_passes_scalars() -> None:
     tensor = torch.zeros(1)
     moved = move_to_device({"a": (tensor, 3), "b": [tensor, "x"]}, "cpu")
-    assert isinstance(moved, dict)
     inner = moved["a"]
     assert isinstance(inner, tuple)
     assert inner[1] == 3
     first = inner[0]
-    assert isinstance(first, Tensor)
     assert torch.equal(first, tensor)
     items = moved["b"]
     assert isinstance(items, list)
@@ -586,13 +626,14 @@ def test_bfb_rejects_non_cpu_module(
         _fake_cuda_module_device,
     )
 
-    with pytest.raises(ValueError, match="CPU-only"):
+    with pytest.raises(ValueError, match="CPU-only") as error:
         assert_bfb_against_golden(
             golden_dir=tmp_path,
             golden_name="cuda_is_not_hermetic",
             build_module=_build_min_linear,
             build_input=_build_min_input,
         )
+    assert str(error.value) == "The BFB harness is CPU-only."
 
 
 def test_bfb_rejects_non_cpu_module_on_replay(
@@ -611,13 +652,14 @@ def test_bfb_rejects_non_cpu_module_on_replay(
         _fake_cuda_module_device,
     )
 
-    with pytest.raises(ValueError, match="CPU-only"):
+    with pytest.raises(ValueError, match="CPU-only") as error:
         assert_bfb_against_golden(
             golden_dir=tmp_path,
             golden_name="linear_min",
             build_module=_build_min_linear,
             build_input=_build_min_input,
         )
+    assert str(error.value) == "The BFB harness is CPU-only."
 
 
 def test_explicit_regeneration_of_an_existing_golden_returns_normally(
@@ -816,7 +858,7 @@ def test_bfb_detects_a_changed_input(tmp_path: Path) -> None:
         seed=0,
     )
 
-    with pytest.raises(AssertionError, match="input"):
+    with pytest.raises(AssertionError, match="input") as error:
         assert_bfb_against_golden(
             golden_dir=tmp_path,
             golden_name="linear_input",
@@ -824,6 +866,7 @@ def test_bfb_detects_a_changed_input(tmp_path: Path) -> None:
             build_input=lambda: torch.randn(3, 4),
             seed=0,
         )
+    assert str(error.value) == "input: shape mismatch (3, 4) vs (2, 4)"
 
 
 def test_expect_golden_mismatch_blocks_bfb_regeneration(
@@ -1035,7 +1078,7 @@ def test_stale_post_states_reports_then_clears_a_synthetic_golden(
 def _loaded_golden(path: Path) -> dict[str, dict[str, Tensor]]:
     """Read a golden's two state dicts; a file with none (not a bfb golden) is empty."""
     raw = DictCodec.coerce(
-        cast(object, torch.load(path, map_location="cpu", weights_only=False)),
+        _torch_load(path, map_location="cpu", weights_only=False),
         default=None,
     )
     if "state_dict" not in raw:
@@ -2028,7 +2071,7 @@ def test_host_agnostic_numerics_loads_float32_checkpoints(tmp_path: Path) -> Non
     torch.save({"weight": saved}, path)
     with host_agnostic_numerics():
         loaded = DictCodec.coerce(
-            cast(object, torch.load(path, weights_only=True)),
+            _torch_load(path, weights_only=True),
             Tensor,
         )
     assert torch.equal(loaded["weight"], saved)
@@ -2167,7 +2210,7 @@ def test_host_agnostic_numerics_preserves_collectives(
         assert not failure.is_file(), failure.read_text()
         record = cast(
             "dict[str, Tensor]",
-            torch.load(tmp_path / f"record_{rank}.pt", weights_only=True),
+            _torch_load(tmp_path / f"record_{rank}.pt", weights_only=True),
         )
         assert record["broadcast"].item() == 1.0, f"rank{rank} broadcast"
         assert record["allreduce"].item() == 3.0, f"rank{rank} allreduce"
@@ -2342,6 +2385,9 @@ def test_ulp_diff_counts_steps_across_zero() -> None:
     negative = torch.tensor([-1.4012984643248171e-45], dtype=torch.float32)
     positive = torch.tensor([1.4012984643248171e-45], dtype=torch.float32)
     assert _max_ulp_diff(negative, positive) == 2
+    ordered = _ordered(torch.tensor([-1.0, 0.0, 1.0]), torch.int32)
+    assert ordered[0] < ordered[1] == 0
+    assert ordered[1] < ordered[2]
 
 
 def test_ulp_diff_counts_steps_within_the_negative_half() -> None:
@@ -2629,6 +2675,303 @@ def test_portable_half_precision_preserves_precision_policy() -> None:
         torch.backends.mkldnn.set_flags(_fp32_precision=original[3])
 
 
+def test_ordered_preserves_signed_zero_and_neighbors() -> None:
+    values = torch.tensor([-torch.finfo(torch.float32).tiny, -0.0, 0.0, 1.0])
+    ordered = _ordered(values, torch.int32)
+    assert ordered[0] < ordered[1]
+    assert ordered[1] == ordered[2]
+    assert ordered[2] < ordered[3]
+
+
+@pytest.mark.parametrize(
+    ("dtype", "kind"),
+    [
+        (torch.float16, torch.int16),
+        (torch.bfloat16, torch.int16),
+        (torch.float32, torch.int32),
+    ],
+)
+def test_ordered_widens_bit_patterns_before_reflecting(
+    dtype: torch.dtype,
+    kind: torch.dtype,
+) -> None:
+    values = torch.tensor([-1.0, -0.0, 0.0, 1.0], dtype=dtype)
+    ordered = _ordered(values, kind)
+    assert ordered.dtype == torch.int64
+    assert ordered[0] < ordered[1] == ordered[2] < ordered[3]
+
+
+def test_move_to_device_recurses_through_distinct_container_shapes() -> None:
+    source = torch.arange(6).reshape(2, 3)
+    moved = move_to_device(
+        {"tuple": (source, 7), "list": [source + 1, "metadata"]},
+        "meta",
+    )
+    nested = moved["tuple"]
+    assert isinstance(nested, tuple)
+    assert isinstance(nested[0], Tensor)
+    assert nested[0].device.type == "meta"
+    assert nested[1] == 7
+    sequence = moved["list"]
+    assert isinstance(sequence, list)
+    assert isinstance(sequence[0], Tensor)
+    assert sequence[0].device.type == "meta"
+    assert sequence[1] == "metadata"
+
+
+class _CustomGoldenInput:
+    """A pickled input value that the safe tensor-only loader cannot decode."""
+
+    def __init__(self, value: int) -> None:
+        self.value = value
+
+
+def test_load_golden_unpacks_state_and_post_state(tmp_path: Path) -> None:
+    path = tmp_path / "packed.pt"
+    state = {"weight": torch.arange(6.0).reshape(2, 3)}
+    post = {"weight": torch.full((2, 3), 4.0)}
+    torch.save(
+        {
+            "state_dict": pack(state),
+            "input": torch.zeros(2, 3),
+            "output": torch.ones(2, 3),
+            "seed": 17,
+            "post_state": pack(post),
+        },
+        path,
+    )
+    payload = load_golden(path)
+    assert "post_state" in payload
+    assert torch.equal(payload["state_dict"]["weight"], state["weight"])
+    assert torch.equal(payload["post_state"]["weight"], post["weight"])
+    assert payload["seed"] == 17
+
+
+def test_load_golden_accepts_custom_input_objects(tmp_path: Path) -> None:
+    path = tmp_path / "custom.pt"
+    value = _CustomGoldenInput(23)
+    torch.save(
+        {
+            "state_dict": pack({}),
+            "input": value,
+            "output": torch.ones(2),
+            "seed": 0,
+        },
+        path,
+    )
+    payload = load_golden(path)
+    stored = payload["input"]
+    assert isinstance(stored, _CustomGoldenInput)
+    assert stored.value == 23
+
+
+def test_regenerate_failure_keeps_existing_golden(tmp_path: Path) -> None:
+    class SmallModule(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(2, 3))
+
+        @override
+        def forward(self, value: Tensor) -> Tensor:
+            return value * self.weight
+
+    regenerate_golden(
+        golden_dir=tmp_path,
+        golden_name="stable",
+        build_module=SmallModule,
+        build_input=lambda: torch.ones(2, 3),
+    )
+    path = tmp_path / "stable.pt"
+    original = path.read_bytes()
+    calls = 0
+
+    def unstable(module: nn.Module, value: Tensor) -> Tensor:
+        nonlocal calls
+        calls += 1
+        output = cast(object, module(value))
+        assert isinstance(output, Tensor)
+        return output if calls == 1 else output + 1
+
+    with pytest.raises(AssertionError):
+        regenerate_golden(
+            golden_dir=tmp_path,
+            golden_name="stable",
+            build_module=SmallModule,
+            build_input=lambda: torch.ones(2, 3),
+            run=unstable,
+        )
+    assert path.read_bytes() == original
+    assert sorted(item.name for item in tmp_path.iterdir()) == ["stable.pt"]
+
+
+def test_seed_bfb_sets_reproducible_cpu_generator_state() -> None:
+    _seed_bfb(29)
+    first = torch.rand(2, 3)
+    _seed_bfb(29)
+    second = torch.rand(2, 3)
+    assert torch.equal(first, second)
+
+
+def test_write_golden_copies_output_to_cpu_with_explicit_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = torch.tensor([1.0, 2.0])
+    original_to = Tensor.to
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    prior = torch.are_deterministic_algorithms_enabled()
+
+    def to_spy(
+        tensor: Tensor,
+        device: str | torch.device | None = None,
+        *,
+        copy: bool = False,
+    ) -> Tensor:
+        if tensor.untyped_storage().data_ptr() == output.untyped_storage().data_ptr():
+            calls.append(((device,), {"copy": copy}))
+        return original_to(tensor, device=device, copy=copy)
+
+    def run(module: nn.Module, inp: Tensor) -> Tensor:
+        del module, inp
+        return output
+
+    monkeypatch.setattr(Tensor, "to", to_spy)
+    try:
+        _write_golden(
+            golden_path=tmp_path / "write-policy.pt",
+            build_module=nn.Identity,
+            build_input=lambda: torch.zeros(2),
+            seed=7,
+            run=run,
+        )
+    finally:
+        torch.use_deterministic_algorithms(prior)
+
+    assert calls == [(("cpu",), {"copy": True})]
+
+
+def test_load_golden_passes_explicit_weights_only_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "load-policy.pt"
+    save_golden(
+        path,
+        {
+            "state_dict": {},
+            "input": torch.zeros(2),
+            "output": torch.ones(2),
+            "seed": 0,
+        },
+    )
+    original_load = _torch_load
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def load_spy(
+        file: Path,
+        *,
+        map_location: str | torch.device | None = None,
+        weights_only: bool,
+    ) -> object:
+        calls.append(((), {"weights_only": weights_only}))
+        return original_load(
+            file,
+            map_location=map_location,
+            weights_only=weights_only,
+        )
+
+    monkeypatch.setattr(torch, "load", load_spy)
+
+    load_golden(path)
+
+    assert calls == [((), {"weights_only": False})]
+
+
+def test_stale_post_states_uses_explicit_weights_only_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "custom-input.pt"
+    save_golden(
+        path,
+        {
+            "state_dict": {},
+            "input": _CustomGoldenInput(23),
+            "output": torch.ones(2),
+            "seed": 0,
+            "post_state": {},
+        },
+    )
+    original_load = _torch_load
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def load_spy(
+        file: Path,
+        *,
+        map_location: str | torch.device | None = None,
+        weights_only: bool,
+    ) -> object:
+        calls.append(((), {"weights_only": weights_only}))
+        return original_load(
+            file,
+            map_location=map_location,
+            weights_only=weights_only,
+        )
+
+    monkeypatch.setattr(torch, "load", load_spy)
+
+    assert stale_post_states([path]) == []
+    assert calls == [((), {"weights_only": False})] * 2
+
+
+def test_seed_bfb_constructs_default_generator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator_type = torch.Generator
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def generator_spy(device: str | torch.device | None = None) -> torch.Generator:
+        calls.append(((device,), {}))
+        return generator_type(device=device)
+
+    monkeypatch.setattr(torch, "Generator", generator_spy)
+    _seed_bfb(41)
+    assert calls == [((None,), {})]
+
+
+def test_ordered_converts_integer_patterns_to_int64(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = torch.tensor([-1.0, 0.0, 1.0], dtype=torch.float32)
+    original_to = Tensor.to
+    calls: list[tuple[object, ...]] = []
+
+    def to_spy(
+        tensor: Tensor,
+        dtype: torch.dtype | None = None,
+    ) -> Tensor:
+        if tensor.dtype is torch.int32:
+            calls.append((dtype,))
+        return original_to(tensor, dtype=dtype)
+
+    monkeypatch.setattr(Tensor, "to", to_spy)
+    ordered = _ordered(values, torch.int32)
+
+    assert calls == [(torch.int64,)]
+    assert ordered.dtype is torch.int64
+
+
+def test_regenerate_golden_persists_requested_seed(tmp_path: Path) -> None:
+    regenerate_golden(
+        golden_dir=tmp_path,
+        golden_name="seeded",
+        build_module=_build_min_linear,
+        build_input=_build_min_input,
+        seed=29,
+    )
+    assert load_golden(tmp_path / "seeded.pt")["seed"] == 29
+
+
 @pytest.mark.parametrize("view", [False, True])
 def test_to_cpu_preserves_input_identity_and_shared_storage(view: bool) -> None:
     base = torch.arange(6.0)
@@ -2746,6 +3089,1306 @@ def test_regenerate_golden_preserves_existing_regenerate_env(
         seed=0,
     )
     assert os.environ[_ENV_REGENERATE] == "1"
+
+
+def test_input_comparison_reports_nested_paths_and_container_lengths() -> None:
+    with pytest.raises(AssertionError, match=r"batch\['media'\]\[1\]:"):
+        _assert_same_input(
+            {"media": (torch.zeros(2), torch.ones(2))},
+            {"media": (torch.zeros(2), torch.zeros(2))},
+            label="batch",
+        )
+    with pytest.raises(AssertionError, match=r"batch: length 2 vs 1"):
+        _assert_same_input([1, 2], [1], label="batch")
+    with pytest.raises(AssertionError, match=r"batch: keys differ"):
+        _assert_same_input({"left": 1}, {"right": 1}, label="batch")
+
+
+def test_assert_equal_handles_tensor_and_non_tensor_mismatches() -> None:
+    with pytest.raises(AssertionError, match="non-tensor mismatch"):
+        _assert_equal(torch.tensor(1.0), 0, label="output")
+    with pytest.raises(AssertionError, match=r"output: .*max_abs_diff=2.000e\+00"):
+        _assert_equal(
+            torch.tensor([0.0, 1.0]),
+            torch.tensor([2.0, 1.0]),
+            label="output",
+        )
+    with pytest.raises(AssertionError, match=r"max_abs_diff=3.000e\+00"):
+        _assert_equal(torch.tensor([-1.0]), torch.tensor([2.0]), label="output")
+    with pytest.raises(AssertionError, match=r"output: .*max_abs_diff=2"):
+        _assert_equal(torch.tensor([0, 1]), torch.tensor([2, 1]), label="output")
+
+
+def test_first_tensor_uses_exact_type_errors() -> None:
+    with pytest.raises(TypeError, match=r"^module result must be a Tensor$"):
+        first_tensor(object())
+    with pytest.raises(TypeError, match=r"^module result must start with a Tensor$"):
+        first_tensor([None])
+
+
+def test_byte_span_tracks_strides_offsets_and_empty_tensors() -> None:
+    base = torch.arange(20.0).reshape(4, 5)
+    assert _byte_span(base[1:3, 1:4]) == (24, 56)
+    assert _byte_span(torch.empty((0, 3), dtype=torch.float32)) == (0, 0)
+    assert _byte_span(torch.empty_strided((2, 3), (5, 1))) == (0, 32)
+
+
+def test_compact_copies_preserves_shared_views_and_offsets() -> None:
+    base = torch.arange(12.0)
+    left, right = base[2:8:2], base[4:10:2]
+    copied = _to_cpu((left, right))
+    assert isinstance(copied, tuple)
+    copied_left, copied_right = cast(tuple[Tensor, Tensor], copied)
+    assert (
+        copied_left.untyped_storage().data_ptr()
+        == copied_right.untyped_storage().data_ptr()
+    )
+    assert copied_right.storage_offset() - copied_left.storage_offset() == 2
+    assert copied_left.stride() == left.stride()
+    assert copied_right.stride() == right.stride()
+    assert torch.equal(copied_left, left)
+    assert torch.equal(copied_right, right)
+    copied_left[1] = -1
+    assert copied_right[0] == -1
+    assert base[5] == 5
+
+
+def test_cpu_state_dict_is_an_independent_detached_snapshot() -> None:
+    value = torch.tensor([1.0, 2.0], requires_grad=True)
+    snapshot = _cpu_state_dict({"weight": value})["weight"]
+    assert snapshot.device.type == "cpu"
+    assert not snapshot.requires_grad
+    assert snapshot.data_ptr() != value.data_ptr()
+    with torch.no_grad():
+        value.add_(1)
+    assert torch.equal(snapshot, torch.tensor([1.0, 2.0]))
+
+
+def test_copy_back_recurses_and_ignores_non_narrow_targets() -> None:
+    original = [torch.zeros(2, dtype=torch.float32), torch.zeros(2, dtype=torch.int64)]
+    computed = [torch.tensor([1.0, 2.0], dtype=torch.float64), torch.ones(2)]
+    _copy_back(original, computed)
+    assert torch.equal(original[0], torch.tensor([1.0, 2.0]))
+    assert torch.equal(original[1], torch.zeros(2, dtype=torch.int64))
+
+
+def test_stale_post_states_skips_non_golden_and_scans_later_entries(
+    tmp_path: Path,
+) -> None:
+    not_golden = tmp_path / "not-golden.pt"
+    torch.save({"unrelated": torch.ones(2)}, not_golden)
+    incomplete = tmp_path / "incomplete.pt"
+    torch.save({"state_dict": {}}, incomplete)
+    non_mapping = tmp_path / "non-mapping.pt"
+    torch.save([torch.ones(2)], non_mapping)
+    custom_input = tmp_path / "custom-input.pt"
+    save_golden(
+        custom_input,
+        {
+            "state_dict": {},
+            "input": _CustomGoldenInput(5),
+            "output": torch.zeros(2),
+            "seed": 0,
+            "post_state": {},
+        },
+    )
+    stale = tmp_path / "stale.pt"
+    save_golden(
+        stale,
+        {
+            "state_dict": {"weight": torch.zeros(2)},
+            "input": torch.zeros(2),
+            "output": torch.zeros(2),
+            "seed": 0,
+            "post_state": {"weight": torch.zeros(2)},
+        },
+    )
+    assert stale_post_states(
+        [not_golden, incomplete, non_mapping, custom_input, stale],
+    ) == [stale]
+
+
+def test_assert_equal_reports_exact_mismatch_messages() -> None:
+    with pytest.raises(AssertionError, match=r"^output: dtype mismatch") as error:
+        _assert_equal(
+            torch.zeros(2),
+            torch.zeros(2, dtype=torch.float64),
+            label="output",
+        )
+    assert str(error.value) == "output: dtype mismatch torch.float32 vs torch.float64"
+    with pytest.raises(AssertionError, match=r"^output: shape mismatch"):
+        _assert_equal(torch.zeros(2), torch.zeros(3), label="output")
+
+
+def test_max_ulp_diff_handles_empty_int64_and_unsupported_dtype() -> None:
+    empty = torch.empty(0, dtype=torch.float64)
+    assert _max_ulp_diff(empty, empty.clone()) == 0
+    assert (
+        _max_ulp_diff(
+            torch.ones(2, dtype=torch.int32),
+            torch.zeros(2, dtype=torch.int32),
+        )
+        == "n/a"
+    )
+    with pytest.raises(ValueError, match=r"shape mismatch \(2,\) vs \(1,\)"):
+        _max_ulp_diff(
+            torch.zeros(2, dtype=torch.float64),
+            torch.zeros(1, dtype=torch.float64),
+        )
+
+
+def test_module_device_prefers_parameter_then_buffer() -> None:
+    module = nn.Module()
+    module.register_buffer("buffer", torch.empty(1, device="meta"))
+    assert _module_device(module) == "meta"
+    module.register_parameter("parameter", nn.Parameter(torch.empty(1)))
+    assert _module_device(module) == "cpu"
+
+
+def test_move_to_device_applies_destination_at_every_nesting_level() -> None:
+    moved = move_to_device(
+        {"tuple": (torch.ones(2),), "list": [torch.zeros(2)]},
+        "meta",
+    )
+    assert moved["tuple"][0].device.type == "meta"
+    assert moved["list"][0].device.type == "meta"
+
+
+def test_default_runner_reports_exact_non_tensor_error(tmp_path: Path) -> None:
+    class NoTensor(nn.Module):
+        @override
+        def forward(self, value: Tensor) -> object:
+            return [value]
+
+    with pytest.raises(
+        TypeError,
+        match=r"^The default runner requires a module that returns a Tensor\.$",
+    ):
+        regenerate_golden(
+            golden_dir=tmp_path,
+            golden_name="non_tensor",
+            build_module=NoTensor,
+            build_input=_build_min_input,
+        )
+
+
+@pytest.mark.parametrize(
+    ("dtype", "message"),
+    [
+        (
+            torch.complex64,
+            "".join(
+                (
+                    "bfb golden output is torch.complex64, which is not supported; ",
+                    "return a float32 or integer tensor.",
+                ),
+            ),
+        ),
+        (
+            torch.float16,
+            "".join(
+                (
+                    "bfb golden output is torch.float16, which is not portable across ",
+                    "hosts; it must be float32. host_agnostic_numerics computes in ",
+                    "float64 and the ROUND BACK to float32 is what makes the result ",
+                    "host-independent; returning the unrounded value stores this ",
+                    "host's libm error. Narrow in the runner: `return value.float()`.",
+                ),
+            ),
+        ),
+        (
+            torch.bfloat16,
+            "".join(
+                (
+                    "bfb golden output is torch.bfloat16, which is not portable across ",
+                    "hosts; it must be float32. host_agnostic_numerics computes in ",
+                    "float64 and the ROUND BACK to float32 is what makes the result ",
+                    "host-independent; returning the unrounded value stores this ",
+                    "host's libm error. Narrow in the runner: `return value.float()`.",
+                ),
+            ),
+        ),
+        (
+            torch.float64,
+            "".join(
+                (
+                    "bfb golden output is torch.float64, which is not portable across ",
+                    "hosts; it must be float32. host_agnostic_numerics computes in ",
+                    "float64 and the ROUND BACK to float32 is what makes the result ",
+                    "host-independent; returning the unrounded value stores this ",
+                    "host's libm error. Narrow in the runner: `return value.float()`.",
+                ),
+            ),
+        ),
+    ],
+)
+def test_output_dtype_diagnostic(
+    dtype: torch.dtype,
+    message: str,
+) -> None:
+    with pytest.raises(TypeError) as error:
+        _assert_portable_output_dtype(torch.zeros(2, dtype=dtype))
+    assert str(error.value) == message
+
+
+def test_compact_copies_preserves_shared_mixed_dtype_views_and_contents() -> None:
+    base = torch.arange(12, dtype=torch.int32)
+    first = base[2:8]
+    second = base[4:10].view(torch.int16)
+    copied = _compact_copies([first, second])
+    got_first, got_second = copied[id(first)], copied[id(second)]
+
+    assert got_first.device.type == got_second.device.type == "cpu"
+    assert got_first.dtype == first.dtype
+    assert got_second.dtype == second.dtype
+    assert got_first.shape == first.shape
+    assert got_second.shape == second.shape
+    assert got_first.stride() == first.stride()
+    assert got_second.stride() == second.stride()
+    assert torch.equal(got_first, first)
+    assert torch.equal(got_second, second)
+    assert (
+        got_first.untyped_storage().data_ptr()
+        == got_second.untyped_storage().data_ptr()
+    )
+    assert got_second.storage_offset() - 2 * got_first.storage_offset() == 4
+
+
+def test_compact_copies_resolves_lazy_conjugation() -> None:
+    base = torch.tensor([1 + 2j, 3 + 4j, 5 + 6j])
+    conjugate = base.conj()
+    copied = _compact_copies([conjugate])[id(conjugate)]
+
+    assert torch.equal(copied, conjugate)
+    assert not copied.is_conj()
+    assert copied.untyped_storage().data_ptr() != base.untyped_storage().data_ptr()
+
+
+def test_randomize_parameters_pins_seeded_draw_order_and_std() -> None:
+    module = nn.Module()
+    module.register_parameter("first", nn.Parameter(torch.zeros(2, 3)))
+    module.register_parameter("second", nn.Parameter(torch.zeros(3)))
+    module.register_buffer("cache", torch.tensor([7.0, 8.0]))
+    generator = torch.Generator(device="cpu").manual_seed(41)
+    expected_first = torch.randn((2, 3), generator=generator) * 0.25
+    expected_second = torch.randn((3,), generator=generator) * 0.25
+
+    randomize_parameters(module, seed=41, std=0.25)
+
+    first = cast(Tensor, module.first)
+    second = cast(Tensor, module.second)
+    cache = cast(Tensor, module.cache)
+    assert torch.equal(first, expected_first)
+    assert torch.equal(second, expected_second)
+    assert torch.equal(cache, torch.tensor([7.0, 8.0]))
+
+
+def test_randomize_parameters_uses_explicit_float32_sampling_dtype() -> None:
+    module = nn.Linear(3, 2)
+    generator = torch.Generator(device="cpu").manual_seed(53)
+    expected_weight = torch.randn((2, 3), generator=generator, dtype=torch.float32)
+    expected_bias = torch.randn((2,), generator=generator, dtype=torch.float32)
+    prior = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(torch.bfloat16)
+        randomize_parameters(module, seed=53)
+    finally:
+        torch.set_default_dtype(prior)
+
+    assert torch.equal(module.weight, expected_weight)
+    assert module.bias is not None
+    assert torch.equal(module.bias, expected_bias)
+
+
+def test_resolve_output_keeps_alias_and_downcasts_fresh_results() -> None:
+    original = torch.tensor([1.0, 2.0], dtype=torch.float32)
+    computed = original.double()
+    fresh = torch.tensor([3.0, 4.0], dtype=torch.float64)
+    writes: list[tuple[object, object]] = [(computed, original)]
+
+    restored = _resolve_output(computed, writes, torch.bfloat16)
+    narrowed = _resolve_output(fresh, writes, torch.bfloat16)
+    unchanged = _resolve_output("metadata", writes, torch.float16)
+
+    assert restored is original
+    assert isinstance(narrowed, Tensor)
+    assert narrowed.dtype == torch.bfloat16
+    assert torch.equal(narrowed, fresh.to(torch.bfloat16))
+    assert unchanged == "metadata"
+
+
+def test_scales_operand_reads_default_and_alpha_forms() -> None:
+    add = torch.ops.aten.add.Tensor
+    left, right = torch.ones(2), torch.ones(2)
+    assert not _scales_operand(add, (left, right), {})
+    assert not _scales_operand(add, (left, right, 1), {})
+    assert _scales_operand(add, (left, right, 0.25), {})
+    assert _scales_operand(add, (left, right), {"alpha": 0.25})
+
+
+def test_scales_or_fuses_distinguishes_add_sub_and_decomposed_ops() -> None:
+    left, right = torch.ones(2), torch.ones(2)
+    assert not _scales_or_fuses(torch.ops.aten.add.Tensor, (left, right), {})
+    assert _scales_or_fuses(torch.ops.aten.add_.Tensor, (left, right, 0.25), {})
+    assert not _scales_or_fuses(torch.ops.aten.sub.Tensor, (left, right), {"alpha": 1})
+    assert _scales_or_fuses(torch.ops.aten.sub.Tensor, (left, right), {"alpha": 0.25})
+    assert _scales_or_fuses(torch.ops.aten.lerp.Tensor, (left, right, 0.25), {})
+
+
+def test_scales_or_fuses_only_strips_trailing_underscores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_name(func: OpOverload[..., object]) -> str:
+        del func
+        return "addX"
+
+    op = torch.ops.aten.add.Tensor
+    monkeypatch.setattr("priml.testing.bfb._op_name", fake_name)
+    monkeypatch.delitem(decomposition_table, op)
+    operands = (torch.ones(2), torch.ones(2), 0.25)
+    assert not _scales_or_fuses(op, operands, {})
+
+
+def test_scales_or_fuses_does_not_strip_non_underscore_suffixes() -> None:
+    class NamedOp:
+        _schema = SimpleNamespace(arguments=[SimpleNamespace(name="alpha")])
+
+        def name(self) -> str:
+            return "custom::addX"
+
+    op = cast("OpOverload[..., object]", NamedOp())
+    assert not _scales_or_fuses(op, (), {"alpha": 0.25})
+
+
+def test_assert_equal_moves_cross_device_values_before_comparing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    other = _OtherDevice(torch.tensor([1.0, 2.0]))
+    local = torch.tensor([1.0, 3.0])
+    original_cpu = Tensor.cpu
+    original_equal = tensor_bits_equal
+    compared_devices: list[tuple[torch.device, torch.device]] = []
+
+    def cpu_spy(tensor: Tensor) -> Tensor:
+        if tensor is other:
+            tensor = tensor.as_subclass(Tensor)
+        return original_cpu(tensor)
+
+    def compare_spy(left: Tensor, right: Tensor) -> bool:
+        compared_devices.append((left.device, right.device))
+        return original_equal(left, right)
+
+    monkeypatch.setattr(Tensor, "cpu", cpu_spy)
+    monkeypatch.setattr(bfb, "tensor_bits_equal", compare_spy)
+    with pytest.raises(AssertionError, match=r"max_abs_diff=1.000e\+00"):
+        _assert_equal(other, local, label="output")
+    assert compared_devices == [(torch.device("cpu"), torch.device("cpu"))]
+
+
+def test_downcast_result_scans_sequences_after_non_tensor_input() -> None:
+    wide = torch.ones(2, dtype=torch.float64)
+    half = torch.ones(2, dtype=torch.float16)
+    integer = torch.ones(2, dtype=torch.int64)
+    result = _downcast_result([wide], (integer, [half]), {}, torch.float32)
+    assert isinstance(result, list)
+    assert isinstance(result[0], Tensor)
+    assert result[0].dtype == torch.float16
+
+
+def test_scales_or_fuses_strips_whitespace_from_names() -> None:
+    class NamedOp:
+        _schema = SimpleNamespace(arguments=[SimpleNamespace(name="alpha")])
+
+        def name(self) -> str:
+            return "custom::add "
+
+    op = cast("OpOverload[..., object]", NamedOp())
+    assert not _scales_or_fuses(op, (), {"alpha": 0.25})
+
+
+def test_scales_or_fuses_does_not_strip_prefix_underscores() -> None:
+    class NamedOp:
+        _schema = SimpleNamespace(arguments=[SimpleNamespace(name="alpha")])
+
+        def name(self) -> str:
+            return "custom::_add"
+
+    op = cast("OpOverload[..., object]", NamedOp())
+    assert not _scales_or_fuses(op, (), {"alpha": 0.25})
+
+
+def test_unfused_convolution_broadcasts_bias_without_batch_axis() -> None:
+    conv = torch.ops.aten.convolution.default
+    # convolution's 1-D image/weight contract fixes these channel axes.
+    image = torch.arange(18.0).reshape(3, 2, 3)
+    weight = torch.ones(3, 2, 2)
+    bias = torch.arange(3.0)
+    options: dict[str, object] = {
+        "stride": (1,),
+        "padding": (0,),
+        "dilation": (1,),
+        "transposed": False,
+        "output_padding": (0,),
+        "groups": 1,
+    }
+    result = _unfused_convolution(
+        conv,
+        (image, weight),
+        {**options, "bias": bias},
+        bias=bias,
+    )
+    # conv1d bias broadcasts over the production batch and sequence axes.
+    expected = torch.nn.functional.conv1d(image, weight, None) + bias.reshape(1, 3, 1)
+    assert torch.equal(result, expected)
+
+
+def test_write_back_returns_scalar_result_after_copying_write_target() -> None:
+    original = torch.zeros(2)
+    computed = torch.ones(2, dtype=torch.float64)
+    result = _write_back(
+        torch.ops.aten.add_.Tensor,
+        (original, torch.ones(2)),
+        {},
+        (computed, torch.ones(2, dtype=torch.float64)),
+        {},
+        result=computed,
+        target=torch.float32,
+    )
+    assert result is original
+    assert torch.equal(original, torch.ones(2))
+
+
+def test_write_back_uses_target_for_fresh_scalar_result() -> None:
+    original = torch.zeros(2)
+    computed = torch.ones(2, dtype=torch.float64)
+    fresh = torch.tensor([3.0, 4.0], dtype=torch.float64)
+    result = _write_back(
+        torch.ops.aten.add_.Tensor,
+        (original, torch.ones(2)),
+        {},
+        (computed, torch.ones(2, dtype=torch.float64)),
+        {},
+        result=fresh,
+        target=torch.bfloat16,
+    )
+    assert isinstance(result, Tensor)
+    assert result.dtype == torch.bfloat16
+    assert torch.equal(result, torch.tensor([3.0, 4.0], dtype=torch.bfloat16))
+
+
+def test_copy_back_checks_lengths_and_ignores_mismatched_types() -> None:
+    original = torch.zeros(2)
+    computed = torch.ones(2, dtype=torch.float64)
+    with pytest.raises(
+        ValueError,
+        match=r"^zip\(\) argument 2 is longer than argument 1$",
+    ) as error:
+        _copy_back([original], [computed, computed])
+    assert str(error.value) == "zip() argument 2 is longer than argument 1"
+
+    unchanged = torch.zeros(2)
+    _copy_back([unchanged], computed)
+    assert torch.equal(unchanged, torch.zeros(2))
+
+
+def test_downcast_f64_propagates_target_through_nested_sequences() -> None:
+    wide = torch.ones(2, dtype=torch.float64)
+    got = _downcast_f64([wide, (wide,)], torch.bfloat16)
+    assert isinstance(got, list)
+    assert isinstance(got[0], Tensor)
+    assert isinstance(got[1], tuple)
+    assert isinstance(got[1][0], Tensor)
+    assert got[0].dtype == torch.bfloat16
+    assert got[1][0].dtype == torch.bfloat16
+
+
+def test_downcast_result_uses_matching_and_shared_dtype_sources() -> None:
+    wide = torch.ones(2, dtype=torch.float64)
+    half = torch.ones(2, dtype=torch.float16)
+    bfloat = torch.ones(2, dtype=torch.bfloat16)
+    got = _downcast_result([wide], ([half, half], [bfloat]), {}, torch.float32)
+    assert isinstance(got, list)
+    assert isinstance(got[0], Tensor)
+    assert got[0].dtype == torch.bfloat16
+
+    shared = _downcast_result([wide], (half,), {}, torch.float32)
+    assert isinstance(shared, list)
+    assert isinstance(shared[0], Tensor)
+    assert shared[0].dtype == torch.float16
+    fallback = _downcast_result([wide], (), {}, torch.float16)
+    assert isinstance(fallback, list)
+    assert isinstance(fallback[0], Tensor)
+    assert fallback[0].dtype == torch.float16
+
+
+def test_run_unfused_addmm_reads_keyword_and_partial_operands() -> None:
+    bias = torch.arange(6.0).reshape(2, 3)
+    left = torch.arange(8.0).reshape(2, 4)
+    right = torch.arange(12.0).reshape(4, 3)
+    addmm = torch.ops.aten.addmm.default
+    expected = (bias.double() + left.double() @ right.double()).float()
+
+    keyword_result = _run_unfused(
+        addmm,
+        (),
+        {"self": bias, "mat1": left, "mat2": right},
+    )
+    partial_result = _run_unfused(
+        addmm,
+        (bias,),
+        {"mat1": left, "mat2": right},
+    )
+    assert isinstance(keyword_result, Tensor)
+    assert isinstance(partial_result, Tensor)
+    assert torch.equal(keyword_result, expected)
+    assert torch.equal(partial_result, expected)
+
+
+def test_run_unfused_addbmm_sums_completed_products_before_bias() -> None:
+    generator = torch.Generator().manual_seed(814)
+    # addbmm's square bias and batch matrices are the production stress shape.
+    bias = torch.randn(64, 64, generator=generator, dtype=torch.float64)
+    left = torch.randn(3, 64, 64, generator=generator, dtype=torch.float64)
+    right = torch.randn(3, 64, 64, generator=generator, dtype=torch.float64)
+    alpha, beta = 0.7, 0.3
+    expected = alpha * torch.bmm(left, right).sum(dim=0) + beta * bias
+    got = _run_unfused(
+        torch.ops.aten.addbmm.default,
+        (bias, left, right),
+        {"alpha": alpha, "beta": beta},
+    )
+
+    assert isinstance(got, Tensor)
+    assert torch.equal(got, expected)
+    assert not torch.equal(
+        torch.addbmm(bias, left, right, alpha=alpha, beta=beta),
+        expected,
+    )
+
+
+def test_unfused_convolution_validates_and_adds_bias_after_convolution() -> None:
+    conv = torch.ops.aten.convolution.default
+    # convolution's 1-D image/weight contract fixes these channel axes.
+    image = torch.arange(16.0).reshape(2, 2, 4)
+    weight = torch.ones(3, 2, 2)
+    bias = torch.arange(3.0)
+    options: dict[str, object] = {
+        "stride": (1,),
+        "padding": (0,),
+        "dilation": (1,),
+        "transposed": False,
+        "output_padding": (0,),
+        "groups": 1,
+    }
+    # conv1d bias broadcasts over the production batch and sequence axes.
+    expected = torch.nn.functional.conv1d(image, weight, None) + bias.reshape(
+        1,
+        3,
+        1,
+    )
+    keyword = _unfused_convolution(
+        conv,
+        (image, weight),
+        {**options, "bias": bias},
+        bias=bias,
+    )
+    positional = _unfused_convolution(
+        conv,
+        (image, weight, bias),
+        options,
+        bias=bias,
+    )
+    assert torch.equal(keyword, expected)
+    assert torch.equal(positional, expected)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^convolution bias must be one-dimensional",
+    ):
+        _unfused_convolution(
+            conv,
+            (image, weight),
+            {**options, "bias": bias},
+            # `convolution` requires a one-dimensional output-channel bias.
+            bias=torch.ones(3, 1),
+        )
+
+
+def test_write_back_restores_write_identity_and_downcasts_other_outputs() -> None:
+    original = torch.zeros(2)
+    other = torch.ones(2)
+    up_original, up_other = original.double(), other.double()
+    computed = up_original.add_(up_other)
+    fresh = torch.tensor([3.0, 4.0], dtype=torch.float64)
+    result = _write_back(
+        torch.ops.aten.add_.Tensor,
+        (original, other),
+        {},
+        (up_original, up_other),
+        {},
+        result=[computed, fresh],
+        target=torch.bfloat16,
+    )
+
+    assert isinstance(result, list)
+    assert result[0] is original
+    assert torch.equal(original, torch.ones(2))
+    assert isinstance(result[1], Tensor)
+    assert result[1].dtype == torch.bfloat16
+    assert torch.equal(result[1], torch.tensor([3.0, 4.0], dtype=torch.bfloat16))
+
+
+def test_ints_filters_non_integer_values() -> None:
+    assert hasattr(bfb, "_ints")
+    assert bfb._ints([1, "a", 3, True]) == [1, 3]
+    assert bfb._ints("not a list") == []
+
+
+def test_floating_tensors_ignores_integer_leaves_in_nested_inputs() -> None:
+    floating = torch.ones(2)
+    integer = torch.ones(2, dtype=torch.int64)
+    found = _floating_tensors([integer, (floating, [integer])])
+
+    assert found == [floating]
+    assert found[0] is floating
+
+
+def test_op_name_uses_final_namespace_component_before_overload() -> None:
+    class NamedOp:
+        def name(self) -> str:
+            return "aten::nested::add.Tensor"
+
+    assert _op_name(cast("OpOverload[..., object]", NamedOp())) == "add"
+
+
+def test_replay_golden_moves_saved_input_to_module_device(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SmallModule(nn.Module):
+        @override
+        def forward(self, value: Tensor) -> Tensor:
+            return value + 1
+
+    path = tmp_path / "golden.pt"
+    save_golden(
+        path,
+        {
+            "state_dict": {},
+            "input": torch.arange(6.0).reshape(2, 3),
+            "output": torch.arange(6.0).reshape(2, 3) + 1,
+            "seed": 17,
+        },
+    )
+    original_move = move_to_device
+    devices: list[str] = []
+
+    def move_spy(value: object, device: str) -> object:
+        devices.append(device)
+        return original_move(value, device)
+
+    monkeypatch.setattr("priml.testing.bfb.move_to_device", move_spy)
+
+    def run(module: nn.Module, value: Tensor) -> Tensor:
+        return cast(Tensor, module(value))
+
+    _replay_golden(
+        golden_path=path,
+        build_module=SmallModule,
+        build_input=lambda: torch.arange(6.0).reshape(2, 3),
+        seed=17,
+        run=run,
+    )
+    assert devices == ["cpu"]
+
+
+def test_compact_copies_pins_empty_allocations_and_storage_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = torch.arange(12, dtype=torch.int32)
+    first, second = base[2:8:2], base[4:10].view(torch.int16)
+    original_empty = torch.empty
+    original_set = Tensor.set_
+    original_to = Tensor.to
+    allocations: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    storage_sets: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    transfers: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def empty_spy(
+        size: int | tuple[int, ...],
+        *,
+        dtype: torch.dtype | None = None,
+        device: str | torch.device | None = None,
+    ) -> Tensor:
+        if dtype in {torch.uint8, first.dtype, second.dtype}:
+            call_kwargs: dict[str, object] = {"dtype": dtype}
+            if device is not None:
+                call_kwargs["device"] = device
+            allocations.append(((size,), call_kwargs))
+        return original_empty(size, dtype=dtype, device=device)
+
+    def set_spy(
+        tensor: Tensor,
+        storage: torch.UntypedStorage,
+        storage_offset: int,
+        size: tuple[int, ...],
+        stride: tuple[int, ...],
+    ) -> Tensor:
+        if tensor.dtype in {torch.uint8, first.dtype, second.dtype}:
+            storage_sets.append(((storage, storage_offset, size, stride), {}))
+        return original_set(tensor, storage, storage_offset, size, stride)
+
+    def to_spy(
+        tensor: Tensor,
+        device: str | torch.device | None = None,
+        *,
+        copy: bool = False,
+    ) -> Tensor:
+        if tensor.dtype is torch.uint8:
+            transfers.append(((device,), {"copy": copy}))
+        return original_to(tensor, device=device, copy=copy)
+
+    monkeypatch.setattr(torch, "empty", empty_spy)
+    monkeypatch.setattr(Tensor, "set_", set_spy)
+    monkeypatch.setattr(Tensor, "to", to_spy)
+
+    copied = _compact_copies([first, second])
+
+    assert allocations[0] == (
+        (0,),
+        {"dtype": torch.uint8, "device": torch.device("cpu")},
+    )
+    assert allocations[1:] == [
+        ((0,), {"dtype": first.dtype}),
+        ((0,), {"dtype": second.dtype}),
+    ]
+    assert [call[0][1:] for call in storage_sets] == [
+        (8, (32,), (1,)),
+        (0, first.shape, first.stride()),
+        (4, second.shape, second.stride()),
+    ]
+    assert transfers == [(("cpu",), {"copy": True})]
+    first_copy = copied[id(first)]
+    second_copy = copied[id(second)]
+    assert (
+        first_copy.untyped_storage().data_ptr()
+        == second_copy.untyped_storage().data_ptr()
+    )
+    assert torch.equal(first_copy, first)
+    assert torch.equal(second_copy, second)
+
+
+def test_compact_copies_preserves_independent_tensor_contents() -> None:
+    first = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    second = torch.arange(8, dtype=torch.float64).reshape(2, 4)
+
+    copied = _compact_copies([first, second])
+
+    assert torch.equal(copied[id(first)], first)
+    assert torch.equal(copied[id(second)], second)
+    assert (
+        copied[id(first)].untyped_storage().data_ptr()
+        != copied[id(second)].untyped_storage().data_ptr()
+    )
+
+
+def test_randomize_parameters_requests_cpu_generator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    constructor = torch.Generator
+    observed: list[object] = []
+
+    def generator_factory(*, device: str) -> torch.Generator:
+        observed.append(device)
+        return constructor(device=device)
+
+    monkeypatch.setattr(torch, "Generator", generator_factory)
+    randomize_parameters(nn.Linear(3, 2), seed=53)
+    assert observed == ["cpu"]
+
+
+# iter11: _run_unfused second-half survivor probes.
+def test_run_unfused_addmv_rejects_wrong_matrix_rank() -> None:
+    bias = torch.zeros(2, dtype=torch.float64)
+    matrix = torch.zeros(2, 3, dtype=torch.float64)
+    vector = torch.zeros(3, dtype=torch.float64)
+    with pytest.raises(RuntimeError):
+        _run_unfused(
+            torch.ops.aten.addmv.default,
+            (bias, matrix.unsqueeze(0), vector),
+            {},
+        )
+
+
+def test_run_unfused_addmv_rejects_wrong_vector_rank() -> None:
+    bias = torch.zeros(2, dtype=torch.float64)
+    matrix = torch.zeros(2, 3, dtype=torch.float64)
+    # `addmv` requires rank-1 vectors; this singleton-axis case is intentional.
+    vector = torch.zeros(3, 1, dtype=torch.float64)
+    with pytest.raises(RuntimeError):
+        _run_unfused(torch.ops.aten.addmv.default, (bias, matrix, vector), {})
+
+
+@pytest.mark.parametrize("name", ["addmm", "baddbmm", "addbmm", "addmv"])
+def test_run_unfused_inplace_affine_op_returns_and_updates_bias(name: str) -> None:
+    bias = torch.zeros(
+        (1,)
+        if name == "addmv"
+        else (1, 1)
+        if name in {"addmm", "addbmm"}
+        else (1, 1, 1),
+        dtype=torch.float64,
+    )
+    left = torch.tensor([[2.0**54, 1, -(2.0**54), 1, 2]], dtype=torch.float64)
+    # Affine operators intentionally exercise their singleton output width.
+    right = torch.ones((5, 1), dtype=torch.float64)
+    if name in {"baddbmm", "addbmm"}:
+        left, right = left.unsqueeze(0), right.unsqueeze(0)
+    if name == "addmv":
+        right = torch.ones(5, dtype=torch.float64)
+    original = bias.clone()
+    alpha, beta = 0.7, 0.3
+    product = left @ right if name in {"addmm", "addmv"} else torch.bmm(left, right)
+    if name == "addbmm":
+        product = product.sum(dim=0)
+    expected = alpha * product + beta * original
+    func = cast("OpOverload[..., object]", getattr(torch.ops.aten, name + "_").default)
+    result = _run_unfused(
+        func,
+        (bias, left, right),
+        {"alpha": alpha, "beta": beta},
+    )
+    assert result is bias
+    assert torch.equal(bias, expected)
+
+
+def test_run_unfused_inplace_addmv_reads_keyword_self(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bias = torch.zeros(2, dtype=torch.float64)
+    matrix = torch.ones((2, 4), dtype=torch.float64)
+    vector = torch.arange(4.0, dtype=torch.float64)
+    functional = torch.ops.aten.addmv.default
+
+    def decomposed(*args: object, **kwargs: object) -> torch.Tensor:
+        del args
+        original, left, right = kwargs["self"], kwargs["mat"], kwargs["vec"]
+        assert isinstance(original, torch.Tensor)
+        assert isinstance(left, torch.Tensor)
+        assert isinstance(right, torch.Tensor)
+        return original + left @ right
+
+    monkeypatch.setitem(decomposition_table, functional, decomposed)
+    result = _run_unfused(
+        torch.ops.aten.addmv_.default,
+        (),
+        {"self": bias, "mat": matrix, "vec": vector},
+    )
+    assert result is bias
+    assert torch.equal(bias, torch.tensor([6.0, 6.0], dtype=torch.float64))
+
+
+def test_run_unfused_baddbmm_unfuses_scaled_batch_products() -> None:
+    # baddbmm's cancellation witness intentionally uses a repeated width.
+    values = torch.tensor([2.0**40, 1, -(2.0**40), 1, 2], dtype=torch.float64)
+    left = values.repeat(2, 1).unsqueeze(0)
+    # baddbmm's production contract uses a singleton batch of matrices here.
+    right = torch.ones((1, 5, 3), dtype=torch.float64)
+    right[:, [0, 2]] *= 2.0**40
+    # `baddbmm` broadcasts a singleton batch bias by its production contract.
+    bias = torch.arange(6.0, dtype=torch.float64).reshape(1, 2, 3)
+    alpha, beta = 0.3, 0.7
+    expected = alpha * torch.bmm(left, right) + beta * bias
+    with host_agnostic_numerics():
+        result = torch.baddbmm(
+            bias.float(),
+            left.float(),
+            right.float(),
+            alpha=alpha,
+            beta=beta,
+        )
+    assert result.dtype == torch.float32
+    assert torch.equal(result, expected.float())
+
+
+@pytest.mark.parametrize(
+    "func",
+    [torch.ops.aten.convolution.default, torch.ops.aten._convolution.default],
+)
+@pytest.mark.parametrize("positional_bias", [False, True])
+def test_run_unfused_convolution_uses_positional_or_keyword_bias(
+    func: OpOverload[..., object],
+    positional_bias: bool,
+) -> None:
+    # convolution's 1-D image/weight contract fixes these channel axes.
+    image = torch.arange(16.0, dtype=torch.float64).reshape(2, 2, 4)
+    weight = torch.ones(3, 2, 2, dtype=torch.float64)
+    bias = torch.arange(3.0, dtype=torch.float64)
+    options: dict[str, object] = {
+        "stride": (1,),
+        "padding": (0,),
+        "dilation": (1,),
+        "transposed": False,
+        "output_padding": (0,),
+        "groups": 1,
+    }
+    args: tuple[object, ...] = (
+        (image, weight, bias) if positional_bias else (image, weight)
+    )
+    kwargs: dict[str, object] = {} if positional_bias else {"bias": bias}
+    if func is torch.ops.aten._convolution.default:
+        kwargs.update(
+            benchmark=False,
+            deterministic=False,
+            cudnn_enabled=False,
+            allow_tf32=False,
+        )
+    # conv1d bias broadcasts over the production batch and sequence axes.
+    expected = torch.nn.functional.conv1d(image, weight, None) + bias.reshape(1, 3, 1)
+    result = _run_unfused(func, args, {**options, **kwargs})
+    assert isinstance(result, torch.Tensor)
+    assert torch.equal(result, expected)
+
+
+def test_run_unfused_addmv_reads_positional_matrix_vector_operands() -> None:
+    bias = torch.arange(2.0, dtype=torch.float64)
+    matrix = torch.arange(8.0, dtype=torch.float64).reshape(2, 4)
+    vector = torch.arange(4.0, dtype=torch.float64)
+    alpha, beta = 0.25, 0.5
+    result = _run_unfused(
+        torch.ops.aten.addmv.default,
+        (bias, matrix, vector),
+        {"alpha": alpha, "beta": beta},
+    )
+    assert isinstance(result, torch.Tensor)
+    assert result.shape == (2,)
+    assert torch.equal(result, alpha * (matrix @ vector) + beta * bias)
+
+
+def test_run_unfused_addmv_keyword_operands_reach_decomposition() -> None:
+    bias = torch.arange(2.0, dtype=torch.float64)
+    matrix = torch.arange(8.0, dtype=torch.float64).reshape(2, 4)
+    vector = torch.arange(4.0, dtype=torch.float64)
+    with pytest.raises(TypeError, match="unexpected keyword argument 'mat'"):
+        _run_unfused(
+            torch.ops.aten.addmv.default,
+            (),
+            {"self": bias, "mat": matrix, "vec": vector, "alpha": 0.25, "beta": 0.5},
+        )
+
+
+def test_run_unfused_addmv_rejects_wrong_vector_rank_via_native_op() -> None:
+    bias = torch.zeros(2, dtype=torch.float64)
+    matrix = torch.zeros(2, 4, dtype=torch.float64)
+    vector = torch.zeros(2, 4, dtype=torch.float64)
+    with pytest.raises(RuntimeError):
+        _run_unfused(torch.ops.aten.addmv.default, (bias, matrix, vector), {})
+
+
+def test_run_unfused_baddbmm_reads_positional_batch_operands() -> None:
+    # `baddbmm` bias follows its fixed batch-matrix output contract.
+    bias = torch.arange(16.0, dtype=torch.float64).reshape(2, 2, 4)
+    # baddbmm's batch and inner dimensions are fixed by the operator contract.
+    left = torch.arange(12.0, dtype=torch.float64).reshape(2, 2, 3)
+    # baddbmm's batch and inner dimensions are fixed by the operator contract.
+    right = torch.arange(24.0, dtype=torch.float64).reshape(2, 3, 4)
+    result = _run_unfused(
+        torch.ops.aten.baddbmm.default,
+        (bias, left, right),
+        {"alpha": 0.25, "beta": 0.5},
+    )
+    assert isinstance(result, torch.Tensor)
+    assert result.shape == (2, 2, 4)
+    assert torch.equal(result, 0.25 * torch.bmm(left, right) + 0.5 * bias)
+
+
+def test_run_unfused_baddbmm_reads_keyword_batch_operands() -> None:
+    # `baddbmm` bias follows its fixed batch-matrix output contract.
+    bias = torch.arange(16.0, dtype=torch.float64).reshape(2, 2, 4)
+    # baddbmm's batch and inner dimensions are fixed by the operator contract.
+    left = torch.arange(12.0, dtype=torch.float64).reshape(2, 2, 3)
+    # baddbmm's batch and inner dimensions are fixed by the operator contract.
+    right = torch.arange(24.0, dtype=torch.float64).reshape(2, 3, 4)
+    alpha, beta = 0.25, 0.5
+    result = _run_unfused(
+        torch.ops.aten.baddbmm.default,
+        (),
+        {"self": bias, "batch1": left, "batch2": right, "alpha": alpha, "beta": beta},
+    )
+    assert isinstance(result, torch.Tensor)
+    assert torch.equal(result, alpha * torch.bmm(left, right) + beta * bias)
+
+
+def test_run_unfused_baddbmm_rejects_wrong_batch_matrix_rank() -> None:
+    # `baddbmm` requires a batch matrix, while this case intentionally supplies rank 2.
+    bias = torch.zeros(2, 2, 4, dtype=torch.float64)
+    left = torch.zeros(2, 3, dtype=torch.float64)
+    right = torch.zeros(2, 3, 4, dtype=torch.float64)
+    with pytest.raises(RuntimeError):
+        _run_unfused(
+            torch.ops.aten.baddbmm.default,
+            (),
+            {"self": bias, "batch1": left, "batch2": right},
+        )
+
+
+def test_run_unfused_addmm_activation_uses_named_operands() -> None:
+    bias = torch.arange(6.0, dtype=torch.float64).reshape(2, 3)
+    left = torch.arange(8.0, dtype=torch.float64).reshape(2, 4)
+    right = torch.arange(12.0, dtype=torch.float64).reshape(4, 3)
+    op = torch.ops.aten._addmm_activation.default
+    result = _run_unfused(
+        op,
+        (bias, left, right),
+        {"beta": 0.5, "alpha": 0.25, "use_gelu": True},
+    )
+    assert isinstance(result, torch.Tensor)
+    assert result.shape == (2, 3)
+    expected = cast(
+        Tensor,
+        op(bias, left, right, beta=0.5, alpha=0.25, use_gelu=True),
+    )
+    assert torch.equal(result, expected)
+
+
+def test_run_unfused_addbmm_reads_keyword_batch_operands() -> None:
+    # `addbmm` reduces its batch matrices into this fixed bias geometry.
+    bias = torch.arange(8.0, dtype=torch.float64).reshape(2, 4)
+    # baddbmm's batch and inner dimensions are fixed by the operator contract.
+    left = torch.arange(12.0, dtype=torch.float64).reshape(2, 2, 3)
+    # baddbmm's batch and inner dimensions are fixed by the operator contract.
+    right = torch.arange(24.0, dtype=torch.float64).reshape(2, 3, 4)
+    alpha, beta = 0.25, 0.5
+    result = _run_unfused(
+        torch.ops.aten.addbmm.default,
+        (),
+        {"self": bias, "batch1": left, "batch2": right, "alpha": alpha, "beta": beta},
+    )
+    expected = alpha * torch.bmm(left, right).sum(dim=0) + beta * bias
+    assert isinstance(result, torch.Tensor)
+    assert result.shape == (2, 4)
+    assert torch.equal(result, expected)
+
+
+def test_run_unfused_addbmm_keeps_batched_product_sum_unfused() -> None:
+    generator = torch.Generator().manual_seed(814)
+    # addbmm's square bias and batch matrices are the production stress shape.
+    bias = torch.randn(64, 64, generator=generator, dtype=torch.float64)
+    left = torch.randn(3, 64, 64, generator=generator, dtype=torch.float64)
+    right = torch.randn(3, 64, 64, generator=generator, dtype=torch.float64)
+    alpha, beta = 0.7, 0.3
+    expected = alpha * torch.bmm(left, right).sum(dim=0) + beta * bias
+    result = _run_unfused(
+        torch.ops.aten.addbmm.default,
+        (bias, left, right),
+        {"alpha": alpha, "beta": beta},
+    )
+    assert isinstance(result, torch.Tensor)
+    assert torch.equal(result, expected)
+    assert not torch.equal(
+        torch.addbmm(bias, left, right, alpha=alpha, beta=beta),
+        expected,
+    )
+
+
+def _run_unfused_op(name: str) -> OpOverload[..., object]:
+    return cast("OpOverload[..., object]", getattr(torch.ops.aten, name).default)
+
+
+def test_non_aten_run_forwards_keyword_arguments() -> None:
+    with torch.library._scoped_library("bfb_run_unfused_probe", "FRAGMENT") as library:
+        library.define("scale(Tensor value, float factor) -> Tensor")
+        library.impl("scale", _scale_tensor, "CompositeExplicitAutograd")
+        op = cast(
+            "OpOverload[..., object]",
+            torch.ops.bfb_run_unfused_probe.scale.default,
+        )
+        value = torch.tensor([2.0, 3.0])
+        result = _run_unfused(op, (value,), {"factor": 4.0})
+    assert isinstance(result, Tensor)
+    assert torch.equal(result, torch.tensor([8.0, 12.0]))
+
+
+def test_run_unfused_validates_addmm_bias_before_decomposition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bias = torch.zeros((3, 5), dtype=torch.float64)
+    left = torch.ones((2, 3, 4), dtype=torch.float64)
+    right = torch.ones((4, 5), dtype=torch.float64)
+    monkeypatch.setitem(
+        decomposition_table,
+        torch.ops.aten.addmm.default,
+        _FixedResult(result=torch.full((2, 3, 5), 17.0)),
+    )
+    with pytest.raises(RuntimeError):
+        _run_unfused(torch.ops.aten.addmm.default, (bias, left, right), {})
+
+
+@pytest.mark.parametrize("name", ["addmm", "addbmm", "baddbmm", "_addmm_activation"])
+def test_run_unfused_affine_dispatch_accepts_keyword_operands(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    bias = torch.zeros((2, 3), dtype=torch.float64)
+    left = torch.arange(8.0, dtype=torch.float64).reshape(2, 4)
+    right = torch.arange(12.0, dtype=torch.float64).reshape(4, 3)
+    if name in {"addbmm", "baddbmm"}:
+        left = left.unsqueeze(0).expand(2, -1, -1).contiguous()
+        right = right.unsqueeze(0).expand(2, -1, -1).contiguous()
+    if name == "baddbmm":
+        bias = bias.unsqueeze(0).expand(2, -1, -1).contiguous()
+    operands: dict[str, object] = {"self": bias, "alpha": 0.25, "beta": 0.5}
+    if name in {"addbmm", "baddbmm"}:
+        operands["batch1"] = left
+        operands["batch2"] = right
+    else:
+        operands["mat1"] = left
+        operands["mat2"] = right
+    if name == "_addmm_activation":
+        operands["use_gelu"] = True
+    op = _run_unfused_op(name)
+    if name == "addbmm":
+        result = _run_unfused(op, (), operands)
+        assert isinstance(result, Tensor)
+        assert torch.equal(
+            result,
+            0.25 * torch.bmm(left, right).sum(dim=0) + 0.5 * bias,
+        )
+    else:
+        sentinel = torch.full_like(bias, 37.0)
+        monkeypatch.setitem(decomposition_table, op, _FixedResult(result=sentinel))
+        assert _run_unfused(op, (), operands) is sentinel
+
+
+def test_inplace_addmv_preserves_alias_and_scaled_result() -> None:
+    bias = torch.zeros(2, dtype=torch.float64)
+    matrix = torch.arange(8.0, dtype=torch.float64).reshape(2, 4)
+    vector = torch.arange(4.0, dtype=torch.float64)
+    result = _run_unfused(
+        torch.ops.aten.addmv_.default,
+        (bias, matrix, vector),
+        {"alpha": 0.5, "beta": 1.0},
+    )
+    assert result is bias
+    assert torch.equal(bias, 0.5 * (matrix @ vector))
+
+
+@pytest.mark.parametrize("name", ["addmm", "baddbmm", "addmv"])
+def test_inplace_affine_alias_uses_functional_decomposition(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    bias = torch.zeros((2, 3), dtype=torch.float64)
+    left = torch.ones((2, 4), dtype=torch.float64)
+    right = torch.ones((4, 3), dtype=torch.float64)
+    if name == "baddbmm":
+        bias = bias.unsqueeze(0).expand(2, -1, -1).clone()
+        left = left.unsqueeze(0).expand(2, -1, -1).contiguous()
+        right = right.unsqueeze(0).expand(2, -1, -1).contiguous()
+    elif name == "addmv":
+        bias = torch.zeros(2, dtype=torch.float64)
+        right = torch.ones(4, dtype=torch.float64)
+    sentinel = torch.full_like(bias, 23.0)
+    functional = _run_unfused_op(name)
+    monkeypatch.setitem(decomposition_table, functional, _FixedResult(result=sentinel))
+    result = _run_unfused(
+        _run_unfused_op(name + "_"),
+        (bias, left, right),
+        {"alpha": 0.5, "beta": 1.0},
+    )
+    assert result is bias
+    assert torch.equal(bias, sentinel)
+
+
+def test_addmm_activation_rejects_bias_that_expands_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    op = torch.ops.aten._addmm_activation.default
+    # _addmm_activation intentionally tests a bias that expands output.
+    bias = torch.zeros((2, 2, 3), dtype=torch.float64)
+    left = torch.ones((2, 4), dtype=torch.float64)
+    right = torch.ones((4, 3), dtype=torch.float64)
+    # _addmm_activation intentionally tests a bias that expands output.
+    sentinel = torch.full((2, 2, 3), 29.0)
+    monkeypatch.setitem(decomposition_table, op, _FixedResult(result=sentinel))
+    with pytest.raises(RuntimeError):
+        _run_unfused(
+            op,
+            (bias, left, right),
+            {"alpha": 0.5, "beta": 1.0, "use_gelu": True},
+        )
+
+
+def test_inplace_baddbmm_keyword_dispatch_validates_and_writes_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # baddbmm's batch matrix contract fixes the two leading dimensions.
+    # _addmm_activation intentionally tests a bias that expands output.
+    bias = torch.zeros((2, 2, 3), dtype=torch.float64)
+    left = torch.ones((2, 2, 4), dtype=torch.float64)
+    right = torch.ones((2, 4, 3), dtype=torch.float64)
+    sentinel = torch.full_like(bias, 31.0)
+    monkeypatch.setitem(
+        decomposition_table,
+        torch.ops.aten.baddbmm.default,
+        _FixedResult(result=sentinel),
+    )
+    result = _run_unfused(
+        torch.ops.aten.baddbmm_.default,
+        (),
+        {
+            "self": bias,
+            "batch1": left,
+            "batch2": right,
+            "alpha": 0.5,
+            "beta": 1.0,
+        },
+    )
+    assert result is bias
+    assert torch.equal(bias, sentinel)
+
+
+@pytest.mark.parametrize("name", ["convolution", "_convolution"])
+@pytest.mark.parametrize("positional", [False, True])
+def test_run_unfused_routes_convolution_bias_forms(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    positional: bool,
+) -> None:
+    # convolution's 1-D image/weight contract fixes these channel axes.
+    image = torch.ones((2, 2, 4), dtype=torch.float64)
+    weight = torch.ones((3, 2, 2), dtype=torch.float64)
+    bias = torch.arange(3.0, dtype=torch.float64)
+    # `convolution` output preserves the batch/channel/sequence contract.
+    result = torch.full((2, 3, 3), 19.0)
+    seen: list[Tensor] = []
+
+    def unfused(
+        func: OpOverload[..., object],
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+        *,
+        bias: Tensor,
+    ) -> Tensor:
+        del func, args, kwargs
+        seen.append(bias)
+        return result
+
+    monkeypatch.setattr("priml.testing.bfb._unfused_convolution", unfused)
+    arguments: tuple[object, ...] = (
+        (image, weight, bias) if positional else (image, weight)
+    )
+    options: dict[str, object] = {} if positional else {"bias": bias}
+    if name == "_convolution":
+        options.update(
+            benchmark=False,
+            deterministic=False,
+            cudnn_enabled=False,
+            allow_tf32=False,
+        )
+    actual = _run_unfused(_run_unfused_op(name), arguments, options)
+    assert actual is result
+    assert seen == [bias]
 
 
 if __name__ == "__main__":

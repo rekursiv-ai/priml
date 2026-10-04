@@ -2,18 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from torch import Tensor
 
+import pytest
 import torch
 import torch.distributed as dist
 
 from priml.baselines.sudoku.metric import GridAccuracy
-
-
-if TYPE_CHECKING:
-    import pytest
 
 
 def _packed(predictions: Tensor, prefix: int = 1) -> Tensor:
@@ -69,20 +64,62 @@ def test_valid_count_truncates_before_scoring() -> None:
     assert metric.compute()["exact"] == 1.0
 
 
+def test_missing_valid_count_uses_batch_dimension() -> None:
+    metric = GridAccuracy.Config().make()
+    labels = torch.full((3, 2), 3, dtype=torch.int64)
+    metric.update(_packed(labels), label=labels)
+    assert metric.puzzles == 3
+    assert metric.cells == 6
+
+
 def test_counts_accumulate_across_batches() -> None:
     """Ratios are computed once at the end, not averaged per batch."""
     metric = GridAccuracy.Config().make()
     labels = torch.full((2, 9), 3, dtype=torch.int64)
     metric.update(_packed(labels.clone()), label=labels)  # Solved.
     wrong = labels.clone()
-    wrong[0, 0] = 5
+    wrong[0, -1] = 5
     metric.update(_packed(wrong), label=labels)  # Not solved.
     metric.update(_packed(wrong), label=labels)  # Not solved.
-    assert metric.compute()["exact"] == 2 / 3
+    assert metric.state_dict() == {
+        "solved": 4,
+        "puzzles": 6,
+        "cells_correct": 52,
+        "cells": 54,
+    }
+    assert metric.compute() == {"exact": 2 / 3, "cell": 26 / 27}
+
+
+def test_update_casts_predictions_and_labels_to_integer() -> None:
+    metric = GridAccuracy.Config().make()
+    labels = torch.full((2, 3), 3.9)
+    logits = _packed(torch.full((2, 3), 3.1))
+    metric.update(logits, label=labels)
+    assert metric.compute() == {"exact": 1.0, "cell": 1.0}
+
+
+def test_update_moves_labels_to_prediction_device() -> None:
+    metric = GridAccuracy.Config().make()
+    labels = torch.full((2, 3), 3, dtype=torch.int64)
+    with pytest.raises(RuntimeError, match=r"item.*meta"):
+        metric.update(_packed(labels).to("meta"), label=labels)
 
 
 def test_empty_metric_reports_zero_not_a_division_error() -> None:
     assert GridAccuracy.Config().make().compute() == {"exact": 0.0, "cell": 0.0}
+
+
+def test_single_counted_cell_can_solve_a_puzzle() -> None:
+    metric = GridAccuracy.Config().make()
+    labels = torch.tensor([[4, -100, -100], [-100, -100, -100]])
+    metric.update(_packed(labels.clone(), prefix=0), label=labels)
+    assert metric.state_dict() == {
+        "solved": 1,
+        "puzzles": 1,
+        "cells_correct": 1,
+        "cells": 1,
+    }
+    assert metric.compute() == {"exact": 1.0, "cell": 1.0}
 
 
 def test_state_round_trips() -> None:
@@ -90,10 +127,35 @@ def test_state_round_trips() -> None:
     labels = torch.full((2, 9), 3, dtype=torch.int64)
     metric.update(_packed(labels.clone()), label=labels)
     state = metric.state_dict()
+    assert state == {
+        "solved": 2,
+        "puzzles": 2,
+        "cells_correct": 18,
+        "cells": 18,
+    }
 
     restored = GridAccuracy.Config().make()
     restored.load_state_dict(state)
     assert restored.compute() == metric.compute()
+
+
+def test_state_defaults_and_numeric_coercion() -> None:
+    metric = GridAccuracy.Config().make()
+    metric.load_state_dict({})
+    assert metric.state_dict() == {
+        "solved": 0,
+        "puzzles": 0,
+        "cells_correct": 0,
+        "cells": 0,
+    }
+
+    metric.load_state_dict({"solved": "2", "puzzles": 4.0})
+    assert metric.state_dict() == {
+        "solved": 2,
+        "puzzles": 4,
+        "cells_correct": 0,
+        "cells": 0,
+    }
 
 
 def test_compute_reduces_initialized_gloo_counts(
@@ -103,8 +165,9 @@ def test_compute_reduces_initialized_gloo_counts(
     labels = torch.full((2, 9), 3, dtype=torch.int64)
     metric.update(_packed(labels), label=labels)
 
-    def fake_all_reduce(counts: Tensor, **_kwargs: object) -> None:
-        del counts
+    def fake_all_reduce(counts: Tensor, **kwargs: object) -> None:
+        assert counts.dtype == torch.float64
+        assert kwargs == {"op": dist.ReduceOp.SUM}
 
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
     monkeypatch.setattr(dist, "get_backend", lambda: "gloo")
@@ -118,6 +181,47 @@ def test_reset_clears_every_count() -> None:
     metric.update(_packed(labels.clone()), label=labels)
     metric.reset()
     assert metric.compute() == {"exact": 0.0, "cell": 0.0}
+
+
+def test_compute_moves_counts_to_the_current_cuda_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metric = GridAccuracy.Config().make()
+    labels = torch.full((2, 9), 3, dtype=torch.int64)
+    metric.update(_packed(labels), label=labels)
+    device_calls: list[tuple[object, ...]] = []
+    original_device = torch.device
+
+    def device(*args: object) -> torch.device:
+        device_calls.append(args)
+        assert args == ("cuda", 2)
+        return original_device("cpu")
+
+    def fake_all_reduce(counts: Tensor, *, op: dist.ReduceOp) -> None:
+        assert counts.device == original_device("cpu")
+        assert op == dist.ReduceOp.SUM
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            "priml.baselines.sudoku.metric.dist.is_initialized",
+            lambda: True,
+        )
+        scoped.setattr(
+            "priml.baselines.sudoku.metric.dist.get_backend",
+            lambda: "nccl",
+        )
+        scoped.setattr(
+            "priml.baselines.sudoku.metric.dist.all_reduce",
+            fake_all_reduce,
+        )
+        scoped.setattr(
+            "priml.baselines.sudoku.metric.torch.cuda.current_device",
+            lambda: 2,
+        )
+        scoped.setattr("priml.baselines.sudoku.metric.torch.device", device)
+        assert metric.compute() == {"exact": 1.0, "cell": 1.0}
+
+    assert device_calls == [("cuda", 2)]
 
 
 if __name__ == "__main__":

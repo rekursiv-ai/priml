@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 from torch import Tensor
 
@@ -12,8 +13,10 @@ import torch.distributed as dist
 
 from priml.optimizers.sign_sgd import (
     SignSGD,
+    _is_distributed,
     _sparse_distributed_step,
     _sparse_embedding_parts,
+    _sparse_embedding_step,
 )
 
 
@@ -263,6 +266,15 @@ def test_dense_weight_decay_touches_only_rows_with_gradient() -> None:
     torch.testing.assert_close(p[2], torch.tensor([decayed, decayed - 0.1]))
 
 
+def test_dense_weight_decay_of_one_still_applies() -> None:
+    parameter = torch.nn.Parameter(torch.tensor([[2.0, -3.0], [4.0, 5.0]]))
+    parameter.grad = torch.tensor([[1.0, -1.0], [0.0, 0.0]])
+
+    SignSGD([parameter], lr=0.25, weight_decay=1.0).step()
+
+    torch.testing.assert_close(parameter, torch.tensor([[1.25, -2.0], [4.0, 5.0]]))
+
+
 def test_dense_weight_decay_on_a_vector_is_plain_decoupled_decay() -> None:
     p = torch.nn.Parameter(torch.ones(3))
     p.grad = torch.tensor([1.0, 0.0, -1.0])
@@ -276,6 +288,17 @@ def test_params_without_gradient_are_skipped() -> None:
     p = torch.nn.Parameter(torch.ones(2))
     SignSGD([p], lr=0.1, weight_decay=0.5).step()
     torch.testing.assert_close(p, torch.ones(2))
+
+
+def test_parameter_without_gradient_does_not_stop_later_parameters() -> None:
+    skipped = torch.nn.Parameter(torch.ones(2))
+    updated = torch.nn.Parameter(torch.ones(2))
+    updated.grad = torch.tensor([1.0, -1.0])
+
+    SignSGD([skipped, updated], lr=0.25).step()
+
+    torch.testing.assert_close(skipped, torch.ones(2))
+    torch.testing.assert_close(updated, torch.tensor([0.75, 1.25]))
 
 
 def test_step_evaluates_and_returns_the_closure() -> None:
@@ -296,6 +319,32 @@ def test_negative_hyperparameters_are_rejected() -> None:
         SignSGD([p], lr=-1.0)
     with pytest.raises(ValueError, match="Invalid weight_decay"):
         SignSGD([p], weight_decay=-1.0)
+    assert SignSGD([p], lr=0.0).param_groups[0]["lr"] == 0.0
+
+
+def test_default_learning_rate_is_point_zero_one() -> None:
+    assert SignSGD([torch.zeros(2)]).param_groups[0]["lr"] == 1e-2
+
+
+def test_optimizer_rejects_boolean_group_hyperparameters() -> None:
+    for key in ("lr", "weight_decay"):
+        parameter = torch.nn.Parameter(torch.ones(2))
+        parameter.grad = torch.ones(2)
+        optimizer = SignSGD([parameter])
+        optimizer.param_groups[0][key] = True
+        with pytest.raises(TypeError, match="cannot coerce"):
+            optimizer.step()
+
+
+def test_sparse_optimizer_rejects_boolean_group_hyperparameters() -> None:
+    for key in ("lr", "weight_decay"):
+        weights = torch.zeros(2, 3)
+        local_weights = torch.zeros(2, 3, requires_grad=True)
+        local_ids = torch.zeros(2, dtype=torch.int32)
+        optimizer = SignSGD([weights, local_weights, local_ids])
+        optimizer.param_groups[0][key] = True
+        with pytest.raises(TypeError, match="cannot coerce"):
+            optimizer.step_sparse_embedding(torch.ones(2, 3), local_ids)
 
 
 def test_config_builds_a_constructor_awaiting_parameters() -> None:
@@ -322,7 +371,13 @@ def test_sparse_embedding_flag_rejects_a_group_without_the_buffers() -> None:
         [{"params": [weights, local_weights], "sparse_embedding": True}],
         lr=0.1,
     )
-    with pytest.raises(ValueError, match="sparse_embedding=True requires"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "sparse_embedding=True requires params=\\[weights \\(2D\\), "
+            "local_weights \\(2D, requires_grad\\), local_ids \\(1D\\)\\]\\."
+        ),
+    ):
         opt.step()
 
 
@@ -336,6 +391,17 @@ def test_sparse_parts_need_both_ids_and_weights() -> None:
         _sparse_embedding_parts([grad_bearing, torch.zeros(2, 3), torch.zeros(2, 3)])
         is None
     )
+
+
+def test_sparse_parts_preserve_missing_gradient_as_none() -> None:
+    weights = torch.zeros(2, 3)
+    ids = torch.zeros(2)
+    parts = _sparse_embedding_parts([weights, ids, torch.zeros(2, 3)])
+    assert parts is not None
+    gradient, actual_ids, actual_weights = parts
+    assert gradient is None
+    assert actual_ids is ids
+    assert actual_weights.shape == weights.shape
 
 
 def test_step_sparse_embedding_ignores_a_plain_dense_group() -> None:
@@ -389,6 +455,97 @@ def test_aggregated_sparse_step_matches_the_local_rule(
     torch.testing.assert_close(weights, expected)
 
 
+def test_optimizer_routes_sparse_groups_without_collectives_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("priml.optimizers.sign_sgd._is_distributed", lambda: True)
+    monkeypatch.setattr(
+        dist,
+        "all_gather_into_tensor",
+        Mock(side_effect=AssertionError("unexpected distributed gather")),
+    )
+    weights = torch.ones(4, 3)
+    local_weights = torch.zeros(2, 3, requires_grad=True)
+    local_ids = torch.tensor([0, 2], dtype=torch.int32)
+    optimizer = SignSGD(
+        [weights, local_weights, local_ids],
+        lr=0.25,
+        aggregate_distributed=False,
+    )
+    optimizer.param_groups[0]["sparse_embedding"] = True
+    gradients = torch.tensor([[1.0, -1.0, 0.0], [-1.0, 1.0, 0.0]])
+    local_weights.grad = gradients
+
+    optimizer.step()
+    optimizer.step_sparse_embedding(gradients, local_ids)
+
+    torch.testing.assert_close(
+        weights,
+        torch.tensor(
+            [
+                [0.5, 1.5, 1.0],
+                [1.0, 1.0, 1.0],
+                [1.5, 0.5, 1.0],
+                [1.0, 1.0, 1.0],
+            ],
+        ),
+    )
+
+
+def test_sparse_group_routes_remote_updates_through_collective(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("priml.optimizers.sign_sgd._is_distributed", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    remote_ids = torch.tensor([1, 2], dtype=torch.int32)
+    remote_grads = torch.tensor([[-1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]])
+
+    class Work:
+        def wait(self) -> None:
+            return None
+
+    def gather(
+        output: Tensor,
+        values: Tensor,
+        *,
+        async_op: bool = False,
+    ) -> Work | None:
+        if output.numel() == 2:
+            output.copy_(torch.tensor([1, 2]))
+        elif output.ndim == 1:
+            output[:2].copy_(values)
+            output[2:].copy_(remote_ids)
+        else:
+            output[:2].copy_(values)
+            output[2:].copy_(remote_grads)
+        return Work() if async_op else None
+
+    monkeypatch.setattr(dist, "all_gather_into_tensor", gather)
+    weights = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    local_weights = torch.zeros(2, 3, requires_grad=True)
+    local_weights.grad = torch.tensor([[1.0, -1.0, 0.0], [0.0, 0.0, 0.0]])
+    local_ids = torch.tensor([0, 1], dtype=torch.int32)
+    optimizer = SignSGD(
+        [
+            {
+                "params": [weights, local_weights, local_ids],
+                "lr": 0.1,
+                "weight_decay": 1.0,
+                "sparse_embedding": True,
+            },
+        ],
+    )
+
+    optimizer.step()
+
+    torch.testing.assert_close(
+        weights,
+        torch.tensor(
+            [[-0.1, 1.0, 1.8], [2.8, 3.5, 4.5], [5.5, 6.2, 7.2], [9.0, 10.0, 11.0]],
+        ),
+    )
+
+
 def test_distributed_dense_step_decays_and_signs_touched_rows_only(
     single_rank_group: None,
     monkeypatch: pytest.MonkeyPatch,
@@ -430,6 +587,26 @@ def test_distributed_dense_step_with_no_touched_rows_is_a_noop(
     torch.testing.assert_close(p, torch.ones(2, 3))
 
 
+def test_distributed_parameter_update_does_not_stop_later_parameters(
+    single_rank_group: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del single_rank_group
+    _world_of_two(monkeypatch)
+    distributed = torch.nn.Parameter(torch.ones(2, 3))
+    distributed.grad = torch.tensor([[1.0, -1.0, 0.0], [0.0, 0.0, 0.0]])
+    vector = torch.nn.Parameter(torch.ones(2))
+    vector.grad = torch.tensor([1.0, -1.0])
+
+    SignSGD([distributed, vector], lr=0.25).step()
+
+    torch.testing.assert_close(
+        distributed,
+        torch.tensor([[0.75, 1.25, 1.0], [1.0, 1.0, 1.0]]),
+    )
+    torch.testing.assert_close(vector, torch.tensor([0.75, 1.25]))
+
+
 def test_sparse_distributed_step_rejects_noncontiguous_params() -> None:
     """A non-contiguous master weights tensor must raise, not silently no-op.
 
@@ -444,8 +621,12 @@ def test_sparse_distributed_step_rejects_noncontiguous_params() -> None:
     local_weights.grad = torch.randn(2, 6)
 
     with pytest.raises(
-        (AssertionError, RuntimeError),
-        match="contig",
+        RuntimeError,
+        match=(
+            "SignSGD distributed sparse step requires a contiguous params "
+            "tensor; reshape on non-contiguous storage returns a copy and "
+            "the index-write below would be silently discarded\\."
+        ),
     ):
         _sparse_distributed_step(
             weights,
@@ -453,6 +634,229 @@ def test_sparse_distributed_step_rejects_noncontiguous_params() -> None:
             lr=0.1,
             weight_decay=0.0,
         )
+
+
+def test_is_distributed_requires_an_initialized_multi_rank_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dist, "is_available", lambda: True)
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    assert _is_distributed()
+
+    monkeypatch.setattr(dist, "get_world_size", lambda: 1)
+    assert not _is_distributed()
+
+    monkeypatch.setattr(dist, "is_initialized", lambda: False)
+    assert not _is_distributed()
+
+    monkeypatch.setattr(dist, "is_available", lambda: False)
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    assert not _is_distributed()
+
+
+def test_distributed_dense_update_combines_rows_from_each_rank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("priml.optimizers.sign_sgd._is_distributed", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    gathered_counts = torch.tensor([1, 2], dtype=torch.long)
+    gathered_ids = torch.tensor([1, 2], dtype=torch.long)
+    gathered_grads = torch.tensor([[-1.0, 1.0], [-1.0, 1.0]])
+    padded_ids = torch.tensor([0, 5], dtype=torch.long)
+    padded_grads = torch.tensor([[1.0, -1.0], [1.0, 1.0]])
+
+    def gather(output: Tensor, values: Tensor) -> None:
+        if output.numel() == 2:
+            output.copy_(gathered_counts)
+        elif output.ndim == 1:
+            assert torch.equal(values, padded_ids)
+            output[:2].copy_(values)
+            output[2:].copy_(gathered_ids)
+        else:
+            assert torch.equal(values, padded_grads)
+            output[:2].copy_(values)
+            output[2:].copy_(gathered_grads)
+
+    monkeypatch.setattr(dist, "all_gather_into_tensor", gather)
+    parameter = torch.nn.Parameter(torch.arange(10, dtype=torch.float32).reshape(5, 2))
+    parameter.grad = torch.tensor(
+        [[1.0, -1.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+    )
+    spies = {
+        "arange": Mock(wraps=torch.arange),
+        "empty": Mock(wraps=torch.empty),
+        "full": Mock(wraps=torch.full),
+        "tensor": Mock(wraps=torch.tensor),
+        "zeros": Mock(wraps=torch.zeros),
+    }
+
+    with monkeypatch.context() as context:
+        context.setattr(torch, "arange", spies["arange"])
+        context.setattr(torch, "empty", spies["empty"])
+        context.setattr(torch, "full", spies["full"])
+        context.setattr(torch, "tensor", spies["tensor"])
+        context.setattr(torch, "zeros", spies["zeros"])
+        SignSGD([parameter], lr=0.1, weight_decay=1.0).step()
+
+    assert all(spy.called for spy in spies.values())
+    assert all(
+        call.kwargs.get("device") == parameter.device
+        for spy in spies.values()
+        for call in spy.call_args_list
+    )
+    assert all(
+        call.kwargs.get("dtype") is not None
+        for name, spy in spies.items()
+        if name != "arange"
+        for call in spy.call_args_list
+    )
+    torch.testing.assert_close(
+        parameter,
+        torch.tensor(
+            [[-0.1, 1.0], [1.9, 2.6], [3.7, 4.4], [6.0, 7.0], [8.0, 9.0]],
+        ),
+    )
+
+
+def test_sparse_embedding_step_aggregates_remote_duplicate_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("priml.optimizers.sign_sgd._is_distributed", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+
+    class Work:
+        def wait(self) -> None:
+            return None
+
+    def gather(output: Tensor, values: Tensor, *, async_op: bool) -> Work:
+        assert async_op
+        output[:2].copy_(values)
+        output[2:].copy_(
+            torch.tensor([1, 2])
+            if output.ndim == 1
+            else torch.tensor([[-1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]]),
+        )
+        return Work()
+
+    monkeypatch.setattr(dist, "all_gather_into_tensor", gather)
+    weights = torch.arange(15, dtype=torch.float32).reshape(5, 3)
+    local_weights = torch.zeros(2, 3, requires_grad=True)
+    local_ids = torch.zeros(2, dtype=torch.int32)
+    optimizer = SignSGD([weights, local_weights, local_ids], lr=0.1, weight_decay=0.5)
+    factories = {"empty": Mock(wraps=torch.empty), "zeros": Mock(wraps=torch.zeros)}
+
+    with monkeypatch.context() as context:
+        context.setattr(torch, "empty", factories["empty"])
+        context.setattr(torch, "zeros", factories["zeros"])
+        optimizer.step_sparse_embedding(
+            torch.tensor([[1.0, -1.0, 0.0], [2.0, -3.0, 0.0]]),
+            torch.tensor([0, 2]),
+        )
+
+    assert all(spy.called for spy in factories.values())
+    assert all(
+        call.kwargs.get("device") == weights.device
+        for spy in factories.values()
+        for call in spy.call_args_list
+    )
+    assert all(
+        call.kwargs.get("dtype") is not None
+        for spy in factories.values()
+        for call in spy.call_args_list
+    )
+    torch.testing.assert_close(
+        weights,
+        torch.tensor(
+            [
+                [-0.1, 1.05, 1.9],
+                [2.95, 3.7, 4.75],
+                [5.6, 6.75, 7.6],
+                [9.0, 10.0, 11.0],
+                [12.0, 13.0, 14.0],
+            ],
+        ),
+    )
+
+
+def test_sparse_embedding_step_requires_gradient_gather_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("priml.optimizers.sign_sgd._is_distributed", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(dist, "all_gather_into_tensor", Mock(side_effect=[None, None]))
+
+    with pytest.raises(ValueError, match=r"^Expected grad_work is not None\.$"):
+        _sparse_embedding_step(
+            torch.ones(2, 3),
+            torch.tensor([0, 1]),
+            torch.zeros(4, 3),
+            lr=0.1,
+            weight_decay=0.0,
+        )
+
+
+def test_sparse_embedding_step_requires_ids_gather_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("priml.optimizers.sign_sgd._is_distributed", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(
+        dist,
+        "all_gather_into_tensor",
+        Mock(side_effect=[Mock(), None]),
+    )
+
+    with pytest.raises(ValueError, match=r"^Expected ids_work is not None\.$"):
+        _sparse_embedding_step(
+            torch.ones(2, 3),
+            torch.tensor([0, 1]),
+            torch.zeros(4, 3),
+            lr=0.1,
+            weight_decay=0.0,
+        )
+
+
+def test_sparse_embedding_step_defaults_to_distributed_aggregation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("priml.optimizers.sign_sgd._is_distributed", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+
+    class Work:
+        def wait(self) -> None:
+            return None
+
+    def gather(output: Tensor, values: Tensor, *, async_op: bool) -> Work:
+        assert async_op
+        output[:2].copy_(values)
+        output[2:].copy_(
+            torch.tensor([1, 1])
+            if output.ndim == 1
+            else torch.tensor([[-1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]]),
+        )
+        return Work()
+
+    monkeypatch.setattr(dist, "all_gather_into_tensor", gather)
+    weights = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    _sparse_embedding_step(
+        torch.tensor([[1.0, -1.0, 0.0], [1.0, -1.0, 0.0]]),
+        torch.tensor([0, 1]),
+        weights,
+        lr=0.1,
+        weight_decay=0.5,
+    )
+    torch.testing.assert_close(
+        weights,
+        torch.tensor(
+            [
+                [-0.1, 1.05, 1.9],
+                [2.95, 3.7, 4.75],
+                [6.0, 7.0, 8.0],
+                [9.0, 10.0, 11.0],
+            ],
+        ),
+    )
 
 
 if __name__ == "__main__":

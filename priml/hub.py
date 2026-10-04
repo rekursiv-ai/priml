@@ -225,7 +225,6 @@ def resolve_hf_dtype(name: str) -> torch.dtype:
     return {
         "bfloat16": torch.bfloat16,
         "float16": torch.float16,
-        "float32": torch.float32,
     }.get(name, torch.float32)
 
 
@@ -298,7 +297,7 @@ def load_hf_checkpoint(
 
     """
     path = Path(path_or_repo)
-    if path.is_dir() and (path / "config.json").exists():
+    if (path / "config.json").exists():
         hf_config = DictCodec.coerce(
             loads((path / "config.json").read_text()),
             default=None,

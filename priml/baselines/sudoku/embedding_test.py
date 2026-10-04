@@ -14,6 +14,7 @@ from priml.baselines.sudoku.embedding import (
     GridChannel,
     GridEmbedding,
     PredictionFeedback,
+    scaled_normal,
 )
 from priml.testing.cost import assert_cost_matches_torch
 
@@ -37,6 +38,16 @@ def test_plain_embedding_is_token_lookup_only() -> None:
     embedding = _embedding()
     tokens = torch.randint(0, 11, (2, 81))
     assert embedding(tokens).shape == (2, 81, 8)
+
+
+def test_scaled_normal_matches_truncated_normal_at_inverse_sqrt_width() -> None:
+    expected = torch.empty(2, 3)
+    actual = torch.empty_like(expected)
+    torch.manual_seed(0)
+    torch.nn.init.trunc_normal_(expected, std=1.0 / 3**0.5)
+    torch.manual_seed(0)
+    scaled_normal(actual)
+    assert torch.equal(actual, expected)
 
 
 def test_channels_inherit_the_models_width() -> None:
@@ -248,9 +259,7 @@ def _run_feedback(module: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:
     assert isinstance(module, PredictionFeedback)
     tokens, embeddings = inputs
     module.set_feedback(tokens)
-    out = module(tokens, embeddings)
-    assert isinstance(out, Tensor)
-    return out
+    return module(tokens, embeddings)
 
 
 def _run_with_feedback(module: nn.Module, tokens: Tensor) -> Tensor:
@@ -259,9 +268,7 @@ def _run_with_feedback(module: nn.Module, tokens: Tensor) -> Tensor:
     for channel in module.channels:
         if isinstance(channel, PredictionFeedback):
             channel.set_feedback(tokens)
-    out = module(tokens)
-    assert isinstance(out, Tensor)
-    return out
+    return module(tokens)
 
 
 def _ordered(tokens: Tensor, *, swap: bool) -> Tensor:

@@ -64,6 +64,16 @@ def test_fewest_pieces_win() -> None:
     assert tokenizer.encode("abc", add_special_tokens=False).tokens == ["abc"]
 
 
+def test_model_scores_and_byte_fallback_are_exact() -> None:
+    tokenizer = export_tokenizer(["ab"], split_pattern=r"\S+")
+    serialized = tokenizer.to_str()
+    assert '"unk_id":null' in serialized
+    assert '"byte_fallback":false' in serialized
+    assert '"use_regex":false' in serialized
+    assert '["ab",-1.0]' in serialized
+    assert '["A",-1.0]' in serialized
+
+
 def test_text_round_trips() -> None:
     tokenizer = export_tokenizer(["ab"], split_pattern=r"\s+|\S+")
     text = "naïve ab\tcafé 🦙"
@@ -73,7 +83,10 @@ def test_text_round_trips() -> None:
 
 
 def test_single_bytes_are_rejected() -> None:
-    with pytest.raises(ValueError, match="byte"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Learned pieces span two or more bytes; single bytes are built in\.$",
+    ):
         export_tokenizer(["a"], split_pattern=r"\S+")
 
 

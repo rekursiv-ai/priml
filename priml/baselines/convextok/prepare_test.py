@@ -5,6 +5,7 @@ upstream's ``det`` vocabulary, and held-out text must segment into upstream's to
 strings.
 """
 
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, cast
@@ -20,13 +21,19 @@ import pyarrow as pa
 import pytest
 import torch
 
+from priml.baselines.convextok import prepare
+from priml.baselines.convextok.candidates import count_candidates
 from priml.baselines.convextok.prepare import (
     ConvexTokPreparation,
     donor_convextok16k,
 )
+from priml.baselines.convextok.presolver.presolve import Presolved, presolve
+from priml.baselines.convextok.pretokens import count_pretokens
 from priml.baselines.convextok.program import LinearProgram
 from priml.baselines.nanochat.scripts.prepare_data import donor_unigram16k
+from priml.baselines.nanochat.scripts.prepare_tokenizer import document_rows
 from priml.lib.custom_json import DictCodec, IntCodec, ListCodec
+from priml.paths import validated_output_path
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -62,12 +69,78 @@ def test_fixture_corpus_yields_upstream_tokenizer(tmp_path: Path) -> None:
 
 
 # The same pipeline as above, with a stand-in solver instead of PDLP and presolve.
-@pytest.mark.compute_large_fixture
-def test_any_solver_fills_the_solver_slot(tmp_path: Path) -> None:
+def test_any_solver_fills_the_solver_slot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Every variable at 1 ties every indicator, so rounding keeps candidate order."""
+
+    def patched_count_pretokens(
+        texts: Sequence[str],
+        *,
+        split_pattern: str,
+        num_workers: int,
+    ) -> dict[str, int]:
+        if num_workers != 1:
+            pytest.fail(f"count_pretokens num_workers={num_workers}")
+        return count_pretokens(
+            texts,
+            split_pattern=split_pattern,
+            num_workers=num_workers,
+        )
+
+    def patched_count_candidates(
+        pretokens: dict[str, int],
+        *,
+        num_workers: int,
+    ) -> dict[str, int]:
+        if num_workers != 1:
+            pytest.fail(f"count_candidates num_workers={num_workers}")
+        return count_candidates(pretokens, num_workers=num_workers)
+
+    monkeypatch.setattr(prepare, "count_pretokens", patched_count_pretokens)
+    monkeypatch.setattr(prepare, "count_candidates", patched_count_candidates)
     config = _fixture_config(tmp_path)
+    config.working_dir = tmp_path / "new-parent" / "nested" / "convextok"
+    config.device = "meta"
     config.presolve = None
     config.solver = _AllOnes.Config()
+    original_solver = _AllOnes.__call__
+    solver_devices: list[torch.device] = []
+
+    def inspect_solver(self: _AllOnes, program: LinearProgram, /) -> _Solution:
+        solver_devices.append(program.objective.device)
+        return original_solver(self, program)
+
+    monkeypatch.setattr(_AllOnes, "__call__", inspect_solver)
+
+    def check_protected_output(path: Path, *, protected: Sequence[Path] = ()) -> Path:
+        assert list(protected) == [config.raw_dir]
+        return validated_output_path(path, protected=protected)
+
+    monkeypatch.setattr(prepare, "validated_output_path", check_protected_output)
+    shards: list[tuple[Path, int]] = []
+
+    def record_shard(path: Path, *, shard: int) -> Iterator[tuple[str, str]]:
+        shards.append((path, shard))
+        return document_rows(path, shard=shard)
+
+    monkeypatch.setattr(prepare, "document_rows", record_shard)
+    rounding_calls: list[tuple[Tensor, Sequence[str], int]] = []
+
+    def record_rounding(
+        indicators: Tensor,
+        candidates: Sequence[str],
+        /,
+        *,
+        budget: int,
+    ) -> Tensor:
+        assert indicators.dtype == torch.float64
+        assert indicators.shape == (len(candidates),)
+        rounding_calls.append((indicators, candidates, budget))
+        return torch.arange(min(budget, len(candidates)))
+
+    config.rounding = record_rounding
     config.make().build()
 
     tokenizer = Tokenizer.from_file(str(config.working_dir / "tokenizer.json"))
@@ -78,13 +151,75 @@ def test_any_solver_fills_the_solver_slot(tmp_path: Path) -> None:
     )
     budget = IntCodec.coerce(_read_json("corpus.json").get("budget"), default=None)
     assert _learned_pieces(tokenizer) == set(candidates[:budget])
+    assert shards == [(config.raw_dir / "shard_00000.parquet", 0)]
+    assert solver_devices == [torch.device("meta")]
+    assert len(rounding_calls) == 1
+    assert rounding_calls[0][1] == candidates
+    assert rounding_calls[0][2] == budget
+    assert (tmp_path / "new-parent").is_dir()
+    with pytest.raises(FileExistsError) as error:
+        config.make().build()
+    assert str(error.value) == f"[Errno 17] File exists: '{config.working_dir}'"
+
+
+def test_build_forwards_the_presolved_program_and_solution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _fixture_config(tmp_path)
+    config.working_dir = tmp_path / "presolved" / "convextok"
+    config.device = "meta"
+    config.solver = _AllOnes.Config()
+    original_presolve = presolve
+    presolve_calls: list[tuple[LinearProgram, torch.device]] = []
+
+    def record_presolve(program: LinearProgram, device: torch.device) -> Presolved:
+        presolve_calls.append((program, device))
+        return original_presolve(program, torch.device("cpu"))
+
+    config.presolve = record_presolve
+    original_solver = _AllOnes.__call__
+    solver_devices: list[torch.device] = []
+
+    def inspect_solver(self: _AllOnes, program: LinearProgram, /) -> _Solution:
+        solver_devices.append(program.objective.device)
+        return original_solver(self, program)
+
+    monkeypatch.setattr(_AllOnes, "__call__", inspect_solver)
+    rounding_dtypes: list[torch.dtype] = []
+
+    def record_rounding(
+        indicators: Tensor,
+        candidates: Sequence[str],
+        /,
+        *,
+        budget: int,
+    ) -> Tensor:
+        assert indicators.shape == (len(candidates),)
+        rounding_dtypes.append(indicators.dtype)
+        return torch.arange(min(budget, len(candidates)))
+
+    config.rounding = record_rounding
+    config.make().build()
+
+    assert len(presolve_calls) == 1
+    assert presolve_calls[0][1] == torch.device("meta")
+    assert solver_devices == [torch.device("meta")]
+    assert rounding_dtypes == [torch.float64]
 
 
 def test_vocabulary_must_leave_room_for_every_byte() -> None:
     config = ConvexTokPreparation.Config()
     config.vocab_size = 256
-    with pytest.raises(ValueError, match="byte"):
+    with pytest.raises(
+        ValueError,
+        match=r"\AThe ordinary vocabulary must contain every byte\.\Z",
+    ):
         config.make()
+
+    config.vocab_size = 266
+    preparation = config.make()
+    assert preparation.config.vocab_size == 266
 
 
 def test_donor_recipe_fits_convextok_on_its_raw_shards(tmp_path: Path) -> None:
@@ -151,7 +286,7 @@ class _AllOnes:
         del config
 
     def __call__(self, program: LinearProgram, /) -> _Solution:
-        return _Solution(primal=torch.ones(program.num_columns, dtype=torch.float64))
+        return _Solution(primal=torch.ones(program.num_columns, dtype=torch.float32))
 
 
 if __name__ == "__main__":

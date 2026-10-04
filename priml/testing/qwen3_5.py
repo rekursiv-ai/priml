@@ -159,8 +159,9 @@ def torch_reference(reference: nn.Module) -> nn.Module:
         raise ValueError(
             'Expected importlib.metadata.version("transformers") == "5.17.0".',
         )
-    original = cast(FunctionType, inspect.unwrap(reference.forward))
-    assert isinstance(original, FunctionType)
+    original = inspect.unwrap(reference.forward)
+    if not isinstance(original, FunctionType):
+        raise TypeError("Expected the reference forward to be a plain function.")
     globals_ref = original.__globals__.copy()
     for name in (
         "torch_chunk_gated_delta_rule",
@@ -182,9 +183,8 @@ def torch_reference(reference: nn.Module) -> nn.Module:
     forward = FunctionType(
         original.__code__,
         globals_ref,
-        original.__name__,
-        original.__defaults__,
-        original.__closure__,
+        argdefs=original.__defaults__,
+        closure=original.__closure__,
     )
     forward.__kwdefaults__ = original.__kwdefaults__
     reference.forward = partial(forward, reference)

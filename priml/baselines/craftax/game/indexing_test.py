@@ -13,6 +13,8 @@ import pytest
 import torch
 
 from priml.baselines.craftax.game.indexing import (
+    _bounds,
+    batch_rows,
     gather_tiles,
     local_view,
     scatter_tiles,
@@ -86,6 +88,34 @@ def test_scatter_wraps_a_negative_index_rather_than_dropping_it() -> None:
     assert int(updated[1, 0, 1]) == 88
 
 
+def test_scatter_casts_int64_values_to_grid_dtype() -> None:
+    grid = _grid()
+    updated = scatter_tiles(
+        grid,
+        torch.tensor([[1, 2], [2, 3]]),
+        torch.tensor([101, 202], dtype=torch.int64),
+    )
+    expected = grid.clone()
+    expected[0, 1, 2] = 101
+    expected[1, 2, 3] = 202
+    assert updated.dtype == torch.int32
+    assert torch.equal(updated, expected)
+
+
+def test_scatter_where_casts_int64_values_to_grid_dtype() -> None:
+    grid = _grid()
+    updated = scatter_tiles_where(
+        grid,
+        torch.tensor([[1, 2], [2, 3]]),
+        torch.tensor([101, 202], dtype=torch.int64),
+        torch.tensor([True, False]),
+    )
+    expected = grid.clone()
+    expected[0, 1, 2] = 101
+    assert updated.dtype == torch.int32
+    assert torch.equal(updated, expected)
+
+
 def test_scatter_leaves_its_input_untouched() -> None:
     grid = _grid()
     original = grid.clone()
@@ -157,6 +187,104 @@ def test_local_view_matches_a_manual_slice_away_from_the_edges() -> None:
     grid = torch.arange(2 * 7 * 8, dtype=torch.int32).reshape(2, 7, 8)
     view = local_view(grid, torch.tensor([[4, 4], [4, 4]]), (3, 3))
     assert torch.equal(view[0], grid[0, 3:6, 3:6])
+
+
+def test_writes_wrap_the_most_negative_valid_index() -> None:
+    grid = _grid()
+    updated = scatter_tiles(
+        grid,
+        torch.tensor([[-3, -4], [3, 4]]),
+        torch.tensor([91, 92], dtype=torch.int32),
+    )
+    assert int(updated[0, 0, 0]) == 91
+    assert int(updated[1, 2, 3]) == 23
+
+
+def test_indexing_preserves_meta_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    arange = torch.arange
+    tensor = torch.tensor
+    requested_devices: list[object] = []
+
+    def arange_on_requested_device(
+        end: int,
+        *,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> Tensor:
+        requested_devices.append(device)
+        return arange(end, device=device, dtype=dtype)
+
+    def tensor_on_requested_device(
+        data: object,
+        *,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+        requires_grad: bool = False,
+    ) -> Tensor:
+        requested_devices.append(device)
+        return tensor(
+            data,
+            device=device,
+            dtype=dtype,
+            requires_grad=requires_grad,
+        )
+
+    batch_rows.cache_clear()
+    _bounds.cache_clear()
+    monkeypatch.setattr(torch, "arange", arange_on_requested_device)
+    monkeypatch.setattr(torch, "tensor", tensor_on_requested_device)
+    grid = torch.empty((3, 4, 5), device="meta")
+    positions = torch.empty((3, 2), dtype=torch.int64, device="meta")
+    values = torch.empty((3,), device="meta")
+    assert gather_tiles(grid, positions).device.type == "meta"
+    assert scatter_tiles(grid, positions, values).device.type == "meta"
+    assert (
+        scatter_tiles_where(
+            grid,
+            positions,
+            values,
+            torch.empty((3,), dtype=torch.bool, device="meta"),
+        ).device.type
+        == "meta"
+    )
+    assert local_view(grid, positions, (3, 5)).device.type == "meta"
+    assert requested_devices
+    assert all(device == torch.device("meta") for device in requested_devices)
+
+
+def test_scatter_where_uses_both_spatial_extents() -> None:
+    grid = torch.arange(3 * 4 * 5, dtype=torch.int32).reshape(3, 4, 5)
+    positions = torch.tensor([[3, 4], [1, 2], [2, 3]])
+    updated = scatter_tiles_where(
+        grid,
+        positions,
+        torch.tensor([91, 92, 93], dtype=torch.int32),
+        torch.tensor([True, True, True]),
+    )
+    assert int(updated[0, 3, 4]) == 91
+    assert int(updated[1, 1, 2]) == 92
+    assert int(updated[2, 2, 3]) == 93
+
+
+def test_scatter_wraps_and_drops_at_both_axis_boundaries() -> None:
+    grid = torch.zeros((5, 4, 6), dtype=torch.int32)
+    updated = scatter_tiles(
+        grid,
+        torch.tensor([[0, 0], [-4, -6], [4, 2], [2, 6], [-5, 1]]),
+        torch.tensor([11, 12, 13, 14, 15], dtype=torch.int32),
+    )
+    assert int(updated[0, 0, 0]) == 11
+    assert int(updated[1, 0, 0]) == 12
+    assert int(updated[2].sum()) == 0
+    assert int(updated[3].sum()) == 0
+    assert int(updated[4].sum()) == 0
+
+
+def test_local_view_five_by_five_is_centered() -> None:
+    grid = torch.arange(2 * 7 * 8, dtype=torch.int32).reshape(2, 7, 8)
+    view = local_view(grid, torch.tensor([[3, 3], [4, 5]]), (5, 5))
+    assert torch.equal(view[0], grid[0, 1:6, 1:6])
+    assert torch.equal(view[1], grid[1, 2:7, 3:8])
 
 
 if __name__ == "__main__":

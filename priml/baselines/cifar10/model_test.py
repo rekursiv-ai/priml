@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final, cast
 
+from configgle import InlineConfig
 from torch import Tensor
 
 import pytest
@@ -16,6 +17,7 @@ from priml.baselines.cifar10.model import (
     ResNet,
     ScaledLinear,
     SpeedNet,
+    _activation,
 )
 from priml.model.init import dirac
 from priml.model.norm import BatchNorm2d
@@ -42,6 +44,15 @@ def tiny_speednet() -> SpeedNet.Config:
     block = config.block = ConvBlock.Config()
     block.num_convs = 1
     return config
+
+
+def test_activation_builds_makeable_config() -> None:
+    activation = _activation(InlineConfig(torch.nn.PReLU))
+    assert isinstance(activation, torch.nn.PReLU)
+
+
+def test_activation_returns_plain_callable_by_identity() -> None:
+    assert _activation(torch.relu) is torch.relu
 
 
 def test_resnet_forward_shape() -> None:
@@ -91,6 +102,24 @@ def test_speednet_forward_shape() -> None:
 def test_speednet_whitening_weights_are_frozen() -> None:
     model = tiny_speednet().make()
     assert not model.whiten.weight.requires_grad
+
+
+def test_speednet_forwards_the_injected_pca_decomposition() -> None:
+    model = tiny_speednet().make()
+    decomposed: list[Tensor] = []
+
+    def decompose(centered: Tensor) -> tuple[Tensor, Tensor]:
+        decomposed.append(centered)
+        width = centered.shape[1]
+        return torch.ones(width), torch.eye(width)
+
+    model.init_whiten(torch.randn(2, 3, 7, 8), decompose=decompose)
+
+    assert [matrix.shape for matrix in decomposed] == [(2 * 6 * 7, 12)]
+    scale = torch.rsqrt(torch.tensor(1.0 + 5e-4))
+    # SpeedNet's whitening kernel is the production 2x2 image kernel.
+    expected = scale * torch.eye(12).reshape(12, 3, 2, 2)
+    assert torch.equal(model.whiten.weight[:12], expected)
 
 
 def test_speednet_whitening_is_rank_doubled() -> None:

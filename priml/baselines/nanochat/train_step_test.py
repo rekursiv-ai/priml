@@ -12,6 +12,7 @@ from torch import Tensor, nn
 
 import pytest
 import torch
+import torch.distributed as dist
 
 from priml.baselines.nanochat import experiments, train_step
 from priml.baselines.nanochat.attention import CausalAttention
@@ -50,6 +51,35 @@ VOCAB: Final = 32
 SEQ: Final = 8
 
 
+def test_reference_metric_preserves_its_config_and_single_byte_denominators(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The metric retains its config and accepts a positive one-byte count."""
+    config = train_step.ReferenceBitsPerByte.Config()
+    metric = config.make()
+    assert metric.config == config
+    metric.update(
+        torch.ones(2, 3),
+        score_mask=torch.ones(2, 3, dtype=torch.bool),
+        evaluation_batch=0,
+        evaluation_batches=1,
+        reference_bytes=1,
+        literal_bytes=1,
+    )
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 1)
+    assert metric.compute() == {
+        "bpb": 6 / math.log(2),
+        "literal_bpb": 6 / math.log(2),
+    }
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    with pytest.raises(
+        ValueError,
+        match=r"^Exact reference evaluation requires one process\.$",
+    ):
+        metric.compute()
+
+
 def test_reference_metric_preserves_native_reduction_and_two_denominators() -> None:
     """Reference accounting must not silently replace FP32 sums with FP64."""
     assert "ReferenceBitsPerByte" in vars(train_step)
@@ -84,11 +114,91 @@ def test_reference_metric_requires_complete_ordered_batches() -> None:
         "reference_bytes": 2,
         "literal_bytes": 2,
     }
+    with pytest.raises(
+        ValueError,
+        match=r"^Reference evaluation batch order or extent changed\.$",
+    ):
+        metric.update(losses, **(batch | {"evaluation_batches": 0}))
     metric.update(losses, **batch)
-    with pytest.raises(ValueError, match="incomplete"):
+    with pytest.raises(ValueError, match=r"^Reference evaluation is incomplete\.$"):
         metric.compute()
-    with pytest.raises(ValueError, match="order or extent"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Reference evaluation batch order or extent changed\.$",
+    ):
         metric.update(losses, **batch)
+
+
+def test_reference_metric_accumulates_batches_and_round_trips_state() -> None:
+    """Every batch contributes, and reset discards the complete snapshot."""
+    metric = train_step.ReferenceBitsPerByte.Config().make()
+    losses = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    mask = torch.tensor([[True, False], [True, True]])
+    for index, (reference_bytes, literal_bytes) in enumerate(((2, 1), (3, 2))):
+        metric.update(
+            losses + index,
+            score_mask=mask,
+            evaluation_batch=index,
+            evaluation_batches=2,
+            reference_bytes=reference_bytes,
+            literal_bytes=literal_bytes,
+        )
+    expected = {
+        "nats": 19.0,
+        "bytes": 5,
+        "literal_bytes": 3,
+        "batches": 2,
+        "expected_batches": 2,
+    }
+    assert metric.state_dict() == expected
+    restored = train_step.ReferenceBitsPerByte.Config().make()
+    restored.load_state_dict(expected)
+    assert restored.state_dict() == expected
+    assert restored.compute() == {
+        "bpb": 19.0 / (math.log(2) * 5),
+        "literal_bpb": 19.0 / (math.log(2) * 3),
+    }
+    restored.reset()
+    assert restored.state_dict() == {
+        "nats": 0.0,
+        "bytes": 0,
+        "literal_bytes": 0,
+        "batches": 0,
+        "expected_batches": 0,
+    }
+    with pytest.raises(ValueError, match=r"^Reference evaluation is incomplete\.$"):
+        restored.compute()
+
+
+def test_reference_metric_rejects_zero_denominators_and_bad_mask_metadata() -> None:
+    """The metric rejects empty byte counts and either mask-contract violation."""
+    metric = train_step.ReferenceBitsPerByte.Config().make()
+    with pytest.raises(ValueError, match=r"^Reference evaluation is incomplete\.$"):
+        metric.compute()
+    metric.update(
+        torch.ones(2, 3),
+        score_mask=torch.ones(2, 3, dtype=torch.bool),
+        evaluation_batch=0,
+        evaluation_batches=1,
+        reference_bytes=0,
+        literal_bytes=1,
+    )
+    with pytest.raises(ValueError, match=r"^Reference evaluation is incomplete\.$"):
+        metric.compute()
+    for bad_mask in (torch.ones(2, 4, dtype=torch.bool), torch.ones(2, 3)):
+        metric.reset()
+        with pytest.raises(
+            ValueError,
+            match=r"^Reference scoring mask differs from loss geometry\.$",
+        ):
+            metric.update(
+                torch.ones(2, 3),
+                score_mask=bad_mask,
+                evaluation_batch=0,
+                evaluation_batches=1,
+                reference_bytes=2,
+                literal_bytes=1,
+            )
 
 
 def test_bounded_loss_preserves_saved_precision_and_ignored_gradient() -> None:
@@ -124,6 +234,22 @@ def test_bounded_loss_requires_a_matching_symmetric_readout(capped: bool) -> Non
     config.model.lm_head = SoftCap.Config(cap=1000) if capped else Linear.Config()
     with pytest.raises(ValueError, match=r"symmetric.*bound"):
         config.finalize()
+
+
+def test_train_step_charges_budget_only_after_the_warmup_boundary() -> None:
+    """The step counter must cross the strict warmup boundary before charging."""
+    step = NanoChatTrainStep.__new__(NanoChatTrainStep)
+    step.config = NanoChatTrainStep.Config(budget_warmup_steps=1)
+    step.elapsed_sec = 0.0
+    for completed_steps in (0, 1):
+        step._steps_this_process = completed_steps
+        step.charge_budget(5.0)
+        assert step.elapsed_sec == 0.0
+    step._steps_this_process = 2
+    step.charge_budget(5.0)
+    assert step.elapsed_sec == 5.0
+    step.charge_budget(5.0)
+    assert step.elapsed_sec == 10.0
 
 
 def test_ngram_step_charges_the_receiving_update_after_warmup() -> None:
@@ -866,18 +992,56 @@ def test_fused_ngram_binding_routes_every_table_to_rmsprop() -> None:
     rmsprop = [member for member in members if isinstance(member, BiasCorrectedRMSProp)]
     assert rmsprop
     expected: set[Tensor] = set()
+    expected_sinks: dict[Tensor, Tensor] = {}
+    expected_bitmaps: dict[Tensor, Tensor] = {}
     for table in tables:
-        for part in table.tables:
+        for part, sink, bitmap in zip(
+            table.tables,
+            table.gradient_sinks,
+            table.gradient_bitmaps,
+            strict=True,
+        ):
             assert isinstance(part, nn.Embedding)
             expected.add(part.weight)
-    actual = {parameter for member in rmsprop for parameter in member.gradient_sinks}
-    assert actual == expected
-    for member in rmsprop:
-        assert set(member.gradient_sinks) <= expected
+            expected_sinks[part.weight] = sink
+            expected_bitmaps[part.weight] = bitmap
+    actual_sinks = {
+        parameter: sink
+        for member in rmsprop
+        for parameter, sink in member.gradient_sinks.items()
+    }
+    actual_bitmaps = {
+        parameter: bitmap
+        for member in rmsprop
+        for parameter, bitmap in member.gradient_bitmaps.items()
+    }
+    assert set(actual_sinks) == expected
+    assert all(
+        actual_sinks[parameter] is sink for parameter, sink in expected_sinks.items()
+    )
+    assert actual_bitmaps.keys() == expected_bitmaps.keys()
+    assert all(
+        actual_bitmaps[parameter] is bitmap
+        for parameter, bitmap in expected_bitmaps.items()
+    )
 
+    for table in tables:
+        table.gradient_bitmaps = []
+    step._bind_ngram_gradients(step.model)
+    assert all(not member.gradient_bitmaps for member in rmsprop)
+
+    tables[0].gradient_sinks.pop()
+    with pytest.raises(ValueError, match="zip\\(\\) argument"):
+        step._bind_ngram_gradients(step.model)
+
+    tables[0].prepare_gradient_sinks(dirty_bitmaps=True)
+    step._bind_ngram_gradients(step.model)
     first = rmsprop[0]
     first.param_groups[0]["params"] = []
-    with pytest.raises(ValueError, match="must route to RMSProp"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Every fused n-gram table must route to RMSProp\.$",
+    ):
         step._bind_ngram_gradients(step.model)
 
 
@@ -892,6 +1056,9 @@ def test_a_two_pass_update_charges_the_budget_and_guards_the_worst_pass() -> Non
     step = _step(tokens_per_optimizer_step=4 * SEQ)
     step.config.budget_warmup_steps = 0
     batch = _batch()
+    # The update-boundary assertions need a short, valid sequence.
+    batch["media"] = batch["media"][:, :2]
+    batch["label"] = batch["label"][:, :2]
     first = step.train_step(**batch)
     assert step.global_step == 0
     assert not step.accumulation_complete

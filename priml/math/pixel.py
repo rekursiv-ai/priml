@@ -340,10 +340,6 @@ def compute_video_shapes(
         # for a 90-frame clip. ``pixel_train`` is the stride-aligned answer.
         pixel_full=VideoShape(f, h, w),
     )
-    if any(s <= 0 for s in result.latent):
-        raise ValueError(f"Invalid latent shape {result.latent}.")
-    if any(s <= 0 for s in result.pixel_train):
-        raise ValueError(f"Invalid training pixel shape {result.pixel_train}.")
     if any(s <= 0 for s in result.pixel_full):
         raise ValueError(f"Invalid inference pixel shape {result.pixel_full}.")
 
@@ -363,7 +359,7 @@ def reconstruction_diffs(x: Tensor, y: Tensor, amplification: float = 3) -> Tens
 
     """
     x, y = convert_to_tensor(x, y, dtype=torch.float32)
-    return torch.clamp(amplification * abs(x - y), 0, 255).type(torch.uint8)
+    return torch.clamp(amplification * abs(x - y), max=255).type(torch.uint8)
 
 
 def patchify(x: Tensorable, patch_size: Iterable[int]) -> Tensor:
@@ -399,13 +395,13 @@ def patchify(x: Tensorable, patch_size: Iterable[int]) -> Tensor:
     # Checked here rather than left to the reshape below: `d // p` discards the
     # remainder, so a ragged dimension fails inside torch with a message naming
     # neither the axis nor the patch size.
-    if any(d % p for d, p in zip(spatial, patch_size, strict=True)):
+    if any(spatial[i] % patch_size[i] for i in range(rank)):
         raise ValueError(
             f"spatial dims {spatial} must each be divisible by {patch_size=}.",
         )
     batch = x.shape[: -rank - 1]
     interleaved = (
-        (d // p, p) for d, p in zip(x.shape[-rank:], patch_size, strict=True)
+        (x.shape[-rank + i] // patch_size[i], patch_size[i]) for i in range(rank)
     )
     interleaved = (v for pair in interleaved for v in pair)
     out = x.reshape(*batch, -1, *interleaved)
@@ -463,12 +459,8 @@ def unpatchify(x: Tensorable, patch_size: Iterable[int]) -> Tensor:
     ]
     out = torch.permute(out, dims=tuple(axis_order))
     restored_dims = (
-        a * b
-        for a, b in zip(
-            out.shape[-2 * rank :: 2],
-            out.shape[-2 * rank + 1 :: 2],
-            strict=True,
-        )
+        out.shape[-2 * rank + 2 * i] * out.shape[-2 * rank + 2 * i + 1]
+        for i in range(rank)
     )
     return out.reshape(*out.shape[: -2 * rank], *restored_dims)
 
@@ -548,14 +540,11 @@ def interpolate(
     if channels_last:
         x = x.moveaxis(-1, -rank_ - 1)
 
-    if rank_ < output_rank:
-        # Fewer input spatial dims than requested: insert unit axes to lift rank.
-        x = x.reshape(
-            *x.shape[:-rank_],
-            *(1,) * (output_rank - rank_),
-            *x.shape[-rank_:],
-        )
-    elif rank_ > output_rank:
+    # Fewer input spatial dims than requested: insert unit axes to lift rank.
+    insertion_axis = -rank_ - 1 if rank_ else 0
+    for _ in range(max(output_rank - rank_, 0)):
+        x = x.unsqueeze(insertion_axis)
+    if rank_ > output_rank:
         # More input spatial dims than requested: fold the extras via axis reorder.
         x = torch.permute(
             x,
@@ -582,10 +571,10 @@ def interpolate(
         if not size_:
             # Reachable only with a scale factor: the check above already
             # raised when neither was given.
-            if sf_ is None:
-                raise ValueError("Expected sf_ is not None.")
             shape_slice: Sequence[int] = list(x.shape[-rank_:])
-            size_ = tuple(int(o * s) for o, s in zip(shape_slice, sf_, strict=True))
+            size_ = tuple(
+                int(o * s) for o, s in zip(shape_slice, sf_ or (), strict=True)
+            )
         # Dispatched on the LENGTH of the size tuple, which is what each
         # callee's signature names. Selecting the function by ``rank_`` and
         # passing ``size_`` separately let the two disagree, which the
@@ -736,7 +725,7 @@ def decode_image_pil(
 
 
 def _process_interpolate_args(
-    mode: InterpolateMode = "nearest",
+    mode: InterpolateMode | None = None,
     size: int | Sequence[int] = (),
     scale_factor: float | Sequence[int | float] = (),
     align_corners: bool = False,
@@ -749,6 +738,9 @@ def _process_interpolate_args(
     bool | None,
     int,
 ]:
+    if mode is None:
+        raise ValueError("Unable to infer the output rank.")
+
     # Determine output spatial rank from size/scale_factor.
     #
     # ``cubic`` sits with the ``bi`` prefix because it is an alias for

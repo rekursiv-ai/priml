@@ -35,13 +35,21 @@ def test_exp000_matches_the_ffcv_16_epoch_budget() -> None:
 
 def test_exp_smoke_shrinks_only_the_budget_and_batch() -> None:
     smoke, base = exp_smoke(), exp000()
+    assert smoke.experiment_name == "exp_smoke"
     assert smoke.max_steps == smoke.step.train_budget_steps == 4
+    assert smoke.num_steps_eval == 4
+    assert smoke.max_eval_time == 60.0
+    assert smoke.eval_stop_on_time_limit is True
+    assert smoke.checkpointer is None
     smoke.step.train_budget_steps = base.step.train_budget_steps
     assert pformat(smoke.step) == pformat(base.step)
-    train = smoke.dataset.train_data_pipeline
-    assert isinstance(train, DataPipeline.Config)
-    (batcher,) = (p for p in train.processors if isinstance(p, Batcher.Config))
-    assert batcher.size == 16
+    for pipeline in (
+        smoke.dataset.train_data_pipeline,
+        smoke.dataset.eval_data_pipeline,
+    ):
+        assert isinstance(pipeline, DataPipeline.Config)
+        (batcher,) = (p for p in pipeline.processors if isinstance(p, Batcher.Config))
+        assert batcher.size == 16
 
 
 if __name__ == "__main__":

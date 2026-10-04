@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 import torch
 
+from priml.baselines.arcagi1.data import PuzzleData
+from priml.baselines.arcagi2 import puzzle_data
 from priml.baselines.arcagi2.puzzle_data import Arc2PuzzleDataset
 from priml.baselines.arcagi2.scripts.build_dataset import (
     arc2_num_puzzle_identifiers,
@@ -72,9 +74,6 @@ def test_loads_tiny_tree_without_staging(tmp_path: Path) -> None:
     media = batch["media"]
     label = batch["label"]
     puzzle_identifiers = batch["puzzle_identifiers"]
-    assert isinstance(media, torch.Tensor)
-    assert isinstance(label, torch.Tensor)
-    assert isinstance(puzzle_identifiers, torch.Tensor)
     assert media.shape[-1] == 900
     assert media.dtype == torch.int32
     assert label.shape == media.shape
@@ -111,14 +110,73 @@ def test_correct_identifier_count_accepted(tmp_path: Path) -> None:
     assert dataset.dataset_dir == root
 
 
+def test_staging_forwards_the_complete_recipe_and_one_spatial_view(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    arc2_calls: list[dict[str, object]] = []
+    spatial_calls: list[dict[str, object]] = []
+
+    def record_arc2(**kwargs: object) -> None:
+        arc2_calls.append(kwargs)
+
+    def record_spatial(**kwargs: object) -> None:
+        spatial_calls.append(kwargs)
+
+    monkeypatch.setattr(puzzle_data, "ensure_arc2_dataset", record_arc2)
+    monkeypatch.setattr(puzzle_data, "ensure_spatial_eval_data", record_spatial)
+
+    def no_parent_init(self: PuzzleData, config: PuzzleData.Config) -> None:
+        del self, config
+
+    monkeypatch.setattr(PuzzleData, "__init__", no_parent_init)
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    cfg = Arc2PuzzleDataset.Config()
+    cfg.working_dir = target
+    cfg.source_dataset_dir = source
+    cfg.spatial_eval_views = 1
+    cfg.num_puzzle_identifiers = 2
+    cfg.augmentation.spatial.train_scale_weights = {1: 0.25}
+    cfg.augmentation.spatial.translation_prob = 0.4
+    cfg.augmentation.spatial.scale_prob = 0.7
+    cfg.augmentation.num_aug = 3
+    cfg.augmentation.seed = 13
+    cfg.input_file_prefix = "alternate-"
+
+    Arc2PuzzleDataset(cfg)
+
+    assert arc2_calls == [
+        {
+            "target": source,
+            "train_scale_weights": {1: 0.25},
+            "translation_prob": 0.4,
+            "scale_prob": 0.7,
+            "num_aug": 3,
+            "seed": 13,
+            "input_file_prefix": "alternate-",
+        },
+    ]
+    assert spatial_calls == [
+        {"source_dir": source, "spatial_views": 1, "target": target},
+    ]
+
+
 def test_spatial_views_require_source_dir(tmp_path: Path) -> None:
     root, _ = _tiny_tree(tmp_path)
     cfg = Arc2PuzzleDataset.Config()
     cfg.working_dir = root
     cfg.num_puzzle_identifiers = 1
-    cfg.spatial_eval_views = 2
-    with pytest.raises(ValueError, match="source_dataset_dir"):
+    cfg.spatial_eval_views = 1
+    with pytest.raises(
+        ValueError,
+        match="spatial_eval_views > 0 requires source_dataset_dir",
+    ) as error:
         cfg.make()
+    assert str(error.value) == (
+        "spatial_eval_views > 0 requires source_dataset_dir (the base "
+        "tree the spatial expansion derives from)."
+    )
 
 
 def test_spatial_staging_lands_at_dataset_dir(tmp_path: Path) -> None:

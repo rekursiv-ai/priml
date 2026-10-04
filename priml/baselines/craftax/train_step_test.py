@@ -390,6 +390,40 @@ def test_a_capturable_rate_is_annealed_in_the_memory_a_graph_replays() -> None:
     assert float(rate) == 0.25
 
 
+def test_cpu_procedure_runs_eagerly() -> None:
+    step = _step()
+    called: list[bool] = []
+
+    def procedure() -> None:
+        called.append(True)
+
+    wrapped = step._procedure(procedure)
+
+    assert wrapped is procedure
+    wrapped()
+    assert called == [True]
+
+
+def test_capturable_state_moves_to_the_requested_device() -> None:
+    parameter = nn.Parameter(torch.zeros(2, 3))
+    optimizer = torch.optim.Adam([parameter], lr=0.5)
+    optimizer.state[parameter]["step"] = torch.tensor(3.0, dtype=torch.float64)
+
+    train_step._make_capturable(
+        optimizer.param_groups,
+        optimizer.state,
+        torch.device("meta"),
+    )
+
+    rate = cast("object", optimizer.param_groups[0]["lr"])
+    assert isinstance(rate, Tensor)
+    assert rate.device.type == "meta"
+    step = cast("object", optimizer.state[parameter]["step"])
+    assert isinstance(step, Tensor)
+    assert step.device.type == "meta"
+    assert step.dtype == torch.float32
+
+
 def test_a_load_recaptures_the_update_it_replaced_the_optimizer_of() -> None:
     """A load replaces the optimizer state a captured update addresses.
 

@@ -65,9 +65,9 @@ def fractal_noise(
 
     """
     noise = torch.zeros((num_envs, *shape), device=device)
-    frequency, amplitude = 1, 1.0
-    for _ in range(octaves):
-        noise += amplitude * perlin_noise(
+    frequency = 1
+    for octave in range(octaves):
+        noise += persistence**octave * perlin_noise(
             num_envs=num_envs,
             shape=shape,
             resolution=(frequency * resolution[0], frequency * resolution[1]),
@@ -75,7 +75,6 @@ def fractal_noise(
             device=device,
         )
         frequency *= lacunarity
-        amplitude *= persistence
     lowest = noise.amin(dim=(-2, -1), keepdim=True)
     highest = noise.amax(dim=(-2, -1), keepdim=True)
     return (noise - lowest) / (highest - lowest)

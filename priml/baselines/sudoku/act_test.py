@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Final, NamedTuple
+from unittest.mock import Mock
 
 from torch import Tensor
 
@@ -314,8 +315,19 @@ def test_decode_restores_clues_only_when_given() -> None:
     logits = torch.nn.functional.one_hot(torch.full((2, 3), 3), VOCAB).float()
     plain = FeedbackCarry.Config().make()
     clamped = FeedbackCarry.Config(givens=(2, 5)).make()
+    assert plain.given(media).dtype == torch.bool
+    assert plain.given(media).tolist() == [[False, False, False], [False, False, False]]
+    assert clamped.given(media).tolist() == [[False, True, False], [True, False, False]]
     assert plain.decode(logits, media=media).tolist() == [[3, 3, 3], [3, 3, 3]]
     assert clamped.decode(logits, media=media).tolist() == [[3, 4, 3], [5, 3, 3]]
+
+
+def test_decode_converts_restored_clues_to_prediction_dtype() -> None:
+    media = torch.tensor([[2.5, 0.0, 4.5]])
+    logits = torch.nn.functional.one_hot(torch.tensor([[1, 2, 3]]), VOCAB).float()
+    decoded = FeedbackCarry.Config(givens=(2, 5)).make().decode(logits, media=media)
+    assert decoded.dtype == torch.long
+    assert decoded.tolist() == [[2, 2, 4]]
 
 
 def test_cell_corruption_validates_and_is_a_noop_at_zero() -> None:
@@ -323,8 +335,39 @@ def test_cell_corruption_validates_and_is_a_noop_at_zero() -> None:
     corrupt = CellCorruption.Config(rate=0.0).make()
     generator = torch.Generator().manual_seed(0)
     assert torch.equal(corrupt(grid, given=grid > 0, generator=generator), grid)
-    with pytest.raises(ValueError, match="rate"):
-        CellCorruption.Config(rate=2.0).make()
+    for rate in (float("nan"), -0.1, 1.1):
+        with pytest.raises(ValueError, match=f"got {rate}"):
+            CellCorruption.Config(rate=rate).make()
+
+
+def test_slot_scramble_excludes_slots_equal_to_probability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    grid = torch.full((3, 2), 4)
+    draws = [torch.full((3,), 0.5), torch.zeros((3, 2))]
+    monkeypatch.setattr(torch, "rand", Mock(side_effect=draws))
+    monkeypatch.setattr(torch, "randint", Mock(return_value=torch.full((3, 2), 5)))
+    out = SlotScramble.Config(prob=0.5, cells=1, low=5, high=6).make()(
+        grid,
+        given=torch.zeros_like(grid, dtype=torch.bool),
+        generator=torch.Generator(),
+    )
+    assert torch.equal(out, grid)
+
+
+def test_slot_scramble_uses_fraction_of_grid_length_for_cell_rate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    grid = torch.full((3, 2), 4)
+    draws = [torch.zeros(3), torch.tensor([[0.1, 0.5], [0.9, 0.2], [0.3, 0.7]])]
+    monkeypatch.setattr(torch, "rand", Mock(side_effect=draws))
+    monkeypatch.setattr(torch, "randint", Mock(return_value=torch.full((3, 2), 5)))
+    out = SlotScramble.Config(prob=1.0, cells=1, low=5, high=6).make()(
+        grid,
+        given=torch.zeros_like(grid, dtype=torch.bool),
+        generator=torch.Generator(),
+    )
+    assert out.tolist() == [[5, 4], [4, 5], [5, 4]]
 
 
 def test_slot_scramble_spares_clue_cells() -> None:
@@ -366,6 +409,63 @@ def test_exploration_policies() -> None:
     ).tolist() == [False, False]
 
 
+def test_halt_training_to_passes_requested_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subject = HaltTraining.Config().make()
+    generator = Mock(wraps=torch.Generator)
+    monkeypatch.setattr(torch, "Generator", generator)
+    subject.to(torch.device("cpu"))
+    assert generator.call_args.kwargs == {"device": torch.device("cpu")}
+
+
+def test_feedback_carry_to_passes_requested_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subject = FeedbackCarry.Config().make()
+    generator = Mock(wraps=torch.Generator)
+    monkeypatch.setattr(torch, "Generator", generator)
+    subject.to(torch.device("cpu"))
+    assert generator.call_args.kwargs == {"device": torch.device("cpu")}
+
+
+def test_halt_training_to_resets_seeded_generator() -> None:
+    config = HaltTraining.Config(seed=23)
+    subject = config.make()
+    torch.rand(4, generator=subject.generator)
+    subject.to(torch.device("cpu"))
+    actual = torch.rand(4, generator=subject.generator)
+    expected = torch.rand(4, generator=torch.Generator().manual_seed(23))
+    assert torch.equal(actual, expected)
+
+
+def test_feedback_carry_to_resets_seeded_generator() -> None:
+    config = FeedbackCarry.Config(seed=29)
+    subject = config.make()
+    torch.rand(4, generator=subject.generator)
+    subject.to(torch.device("cpu"))
+    actual = torch.rand(4, generator=subject.generator)
+    expected = torch.rand(4, generator=torch.Generator().manual_seed(29))
+    assert torch.equal(actual, expected)
+
+
+def test_halt_training_keeps_config_weight_exploration_and_seed() -> None:
+    config = HaltTraining.Config(
+        weight=0.25,
+        exploration=SampledMinimum.Config(prob=0.75),
+        seed=17,
+    )
+    subject = config.make()
+    assert subject.config == config
+    assert subject.weight == 0.25
+    assert isinstance(subject.exploration, SampledMinimum)
+    expected = torch.Generator().manual_seed(17)
+    assert torch.equal(
+        torch.rand(5, generator=subject.generator),
+        torch.rand(5, generator=expected),
+    )
+
+
 def test_halting_is_independent_of_the_ambient_stream() -> None:
     torch.manual_seed(0)
     undisturbed = _halt_sequence(disturb=False)
@@ -374,14 +474,321 @@ def test_halting_is_independent_of_the_ambient_stream() -> None:
 
 
 def test_geometry_must_be_inherited() -> None:
-    with pytest.raises(ValueError, match="must be positive"):
-        AtomicPool.Config(batch_size=SLOTS).make()
+    for field_name in ("grid_len", "seq_len", "channels_hidden"):
+        config = AtomicPool.Config(
+            batch_size=SLOTS,
+            grid_len=GRID,
+            seq_len=SEQ,
+            channels_hidden=WIDTH,
+        )
+        setattr(config, field_name, 0)
+        with pytest.raises(
+            ValueError,
+            match=(
+                rf"grid_len, seq_len, and channels_hidden must be positive; "
+                rf"they are normally inherited from the model during finalize\. "
+                rf"Got {config.grid_len}, {config.seq_len}, {config.channels_hidden}\."
+            ),
+        ):
+            config.make()
+        setattr(config, field_name, 1)
+        config.make()
+
+
+def test_cell_corruption_draws_on_grid_device_with_generator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rand = Mock(wraps=torch.rand)
+    randint = Mock(wraps=torch.randint)
+    monkeypatch.setattr(torch, "rand", rand)
+    monkeypatch.setattr(torch, "randint", randint)
+    grid = torch.full((2, 3), 4)
+    generator = torch.Generator().manual_seed(4)
+    CellCorruption.Config(rate=0.5, low=2, high=5).make()(
+        grid,
+        given=torch.zeros_like(grid, dtype=torch.bool),
+        generator=generator,
+    )
+    assert rand.call_args.args == (grid.shape,)
+    assert rand.call_args.kwargs == {"device": grid.device, "generator": generator}
+    assert randint.call_args.args == (2, 5, grid.shape)
+    assert randint.call_args.kwargs == {"device": grid.device, "generator": generator}
+
+
+def test_slot_scramble_draw_order_device_and_generator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rand = Mock(wraps=torch.rand)
+    randint = Mock(wraps=torch.randint)
+    monkeypatch.setattr(torch, "rand", rand)
+    monkeypatch.setattr(torch, "randint", randint)
+    grid = torch.full((2, 3), 4)
+    generator = torch.Generator().manual_seed(4)
+    SlotScramble.Config(prob=0.5, cells=2, low=2, high=5).make()(
+        grid,
+        given=torch.zeros_like(grid, dtype=torch.bool),
+        generator=generator,
+    )
+    assert [call.args for call in rand.call_args_list] == [(2,), (2, 3)]
+    assert all(
+        call.kwargs == {"device": grid.device, "generator": generator}
+        for call in rand.call_args_list
+    )
+    assert randint.call_args.args == (2, 5, (2, 3))
+    assert randint.call_args.kwargs == {"device": grid.device, "generator": generator}
+
+
+def test_cell_corruption_does_not_replace_a_draw_equal_to_rate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    grid = torch.full((2, 3), 4)
+    monkeypatch.setattr(torch, "rand", Mock(return_value=torch.full((2, 3), 0.5)))
+    monkeypatch.setattr(torch, "randint", Mock(return_value=torch.full((2, 3), 5)))
+    out = CellCorruption.Config(rate=0.5, low=5, high=6).make()(
+        grid,
+        given=torch.zeros_like(grid, dtype=torch.bool),
+        generator=torch.Generator(),
+    )
+    assert torch.equal(out, grid)
+
+
+def test_forced_continue_keeps_a_draw_equal_to_probability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch, "rand", Mock(return_value=torch.full((3,), 0.5)))
+    fired = torch.tensor([True, False, True])
+    out = ForcedContinue.Config(prob=0.5).make()(
+        fired,
+        steps=torch.zeros(3, dtype=torch.long),
+        max_steps=3,
+        generator=torch.Generator(),
+    )
+    assert torch.equal(out, fired)
+
+
+def test_exploration_draws_use_fired_device_and_dedicated_generator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rand = Mock(wraps=torch.rand)
+    randint = Mock(wraps=torch.randint)
+    ones = Mock(wraps=torch.ones)
+    monkeypatch.setattr(torch, "rand", rand)
+    monkeypatch.setattr(torch, "randint", randint)
+    monkeypatch.setattr(torch, "ones", ones)
+    fired = torch.tensor([True, False, True])
+    generator = torch.Generator().manual_seed(4)
+    SampledMinimum.Config(prob=0.5).make()(
+        fired,
+        steps=torch.tensor([1, 2, 3]),
+        max_steps=3,
+        generator=generator,
+    )
+    assert rand.call_args.args == (3,)
+    assert rand.call_args.kwargs == {"device": fired.device, "generator": generator}
+    assert randint.call_args.args == (2, 4, (3,))
+    assert randint.call_args.kwargs == {"device": fired.device, "generator": generator}
+    assert ones.call_count == 1
+    assert ones.call_args.args == (3,)
+    assert ones.call_args.kwargs == {"dtype": torch.long, "device": fired.device}
+    rand.reset_mock()
+    ForcedContinue.Config(prob=0.5).make()(
+        fired,
+        steps=torch.zeros(3, dtype=torch.long),
+        max_steps=3,
+        generator=generator,
+    )
+    assert rand.call_args.args == (3,)
+    assert rand.call_args.kwargs == {"device": fired.device, "generator": generator}
+
+
+def test_sampled_minimum_excludes_draw_equal_to_probability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch, "rand", Mock(return_value=torch.full((3,), 0.5)))
+    monkeypatch.setattr(torch, "randint", Mock(return_value=torch.full((3,), 2)))
+    fired = torch.tensor([True, True, True])
+    result = SampledMinimum.Config(prob=0.5).make()(
+        fired,
+        steps=torch.ones(3, dtype=torch.long),
+        max_steps=3,
+        generator=torch.Generator(),
+    )
+    assert result.tolist() == [True, True, True]
+
+
+def test_sampled_minimum_zero_probability_skips_random_draws(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rand = Mock(wraps=torch.rand)
+    randint = Mock(wraps=torch.randint)
+    ones = Mock(wraps=torch.ones)
+    monkeypatch.setattr(torch, "rand", rand)
+    monkeypatch.setattr(torch, "randint", randint)
+    monkeypatch.setattr(torch, "ones", ones)
+    fired = torch.tensor([True, False, True])
+    steps = torch.tensor([0, 1, 2])
+    result = SampledMinimum.Config(prob=0.0).make()(
+        fired,
+        steps=steps,
+        max_steps=3,
+        generator=torch.Generator(),
+    )
+    rand.assert_not_called()
+    randint.assert_not_called()
+    assert ones.call_count == 1
+    assert ones.call_args.args == (3,)
+    assert ones.call_args.kwargs == {"dtype": torch.long, "device": fired.device}
+    assert result.tolist() == [False, False, True]
+
+
+def test_pool_initializes_every_state_tensor_with_contract_dtype() -> None:
+    subject = pool(AtomicPool.Config(dtype=torch.float64))
+    assert subject.inputs.shape == (SLOTS, GRID)
+    assert subject.inputs.dtype == torch.long
+    assert subject.labels.dtype == torch.long
+    assert subject.z_slow.shape == (SLOTS, SEQ, WIDTH)
+    assert subject.z_slow.dtype == torch.float64
+    assert subject.z_fast.dtype == torch.float64
+    assert subject.steps.dtype == torch.long
+    assert subject.active.dtype == torch.bool
+    assert subject.halted.tolist() == [True, True, True]
+    assert subject.puzzle_ids.dtype == torch.int32
+    assert subject.feedback.shape == (SLOTS, GRID)
+    assert subject.halting is not None
+
+
+def test_streaming_casts_both_seated_latents_to_storage_dtype() -> None:
+    subject = streaming(StreamingPool.Config(halting=None, dtype=torch.float64))
+    media, labels = batch(2)
+    subject.refill(
+        init,
+        media=media,
+        labels=labels,
+        valid_count=2,
+        puzzle_ids=None,
+        ignore_label_id=-100,
+    )
+    assert subject.z_slow.dtype == torch.float64
+    assert subject.z_fast.dtype == torch.float64
+    assert subject.z_slow[0].tolist() == [[7.0] * WIDTH] * SEQ
+    assert subject.z_fast[1].tolist() == [[9.0] * WIDTH] * SEQ
+
+
+def test_streaming_empty_queue_has_grid_dimension() -> None:
+    subject = streaming(StreamingPool.Config())
+    assert subject.pending_inputs.shape == (0, GRID)
+    assert subject.pending_labels.shape == (0, GRID)
+
+
+def test_advance_feedback_is_clean_without_corruption() -> None:
+    subject = pool(AtomicPool.Config(feedback=FeedbackCarry.Config()))
+    logits = torch.nn.functional.one_hot(torch.full((SLOTS, GRID), 3), VOCAB).float()
+    changed = subject.advance_feedback(logits)
+    assert changed == 0.0
+    assert subject.feedback.tolist() == [[3] * GRID] * SLOTS
+
+
+def test_advance_feedback_corrupts_only_nonclue_cells_and_reports_fraction() -> None:
+    subject = pool(
+        AtomicPool.Config(
+            feedback=FeedbackCarry.Config(
+                givens=(2, 2),
+                corruption=SlotScramble.Config(
+                    prob=1.0,
+                    cells=GRID,
+                    low=6,
+                    high=7,
+                ),
+            ),
+        ),
+    )
+    subject.inputs[:] = torch.tensor([[2, 3, 2, 3, 3]] * SLOTS)
+    logits = torch.nn.functional.one_hot(torch.full((SLOTS, GRID), 3), VOCAB).float()
+    changed = subject.advance_feedback(logits)
+    assert isinstance(changed, Tensor)
+    assert torch.equal(changed, torch.tensor(3 / 5))
+    assert subject.feedback.tolist() == [[2, 6, 2, 6, 6]] * SLOTS
+
+
+def test_halt_mask_uses_strictly_positive_logits_and_cap() -> None:
+    subject = pool(AtomicPool.Config())
+    subject.steps = torch.tensor([0, 0, 3])
+    assert subject.halt_mask(torch.tensor([0.0, 1.0, -1.0])).tolist() == [
+        False,
+        True,
+        True,
+    ]
+
+
+def test_pool_to_moves_state_tensors() -> None:
+    subject = pool(AtomicPool.Config(halting=None))
+    subject.to(torch.device("meta"))
+    for tensor in (
+        subject.inputs,
+        subject.labels,
+        subject.z_slow,
+        subject.z_fast,
+        subject.steps,
+        subject.active,
+        subject.halted,
+        subject.puzzle_ids,
+        subject.feedback,
+    ):
+        assert tensor.device.type == "meta"
+    assert subject.halting is None
+    assert subject.carry is None
+
+
+def test_pool_to_forwards_device_to_halting_and_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subject = pool(
+        AtomicPool.Config(
+            feedback=FeedbackCarry.Config(),
+        ),
+    )
+    assert subject.halting is not None
+    assert subject.carry is not None
+    halting_to = Mock()
+    carry_to = Mock()
+    monkeypatch.setattr(subject.halting, "to", halting_to)
+    monkeypatch.setattr(subject.carry, "to", carry_to)
+    device = torch.device("meta")
+
+    subject.to(device)
+
+    assert halting_to.call_args.args == (device,)
+    assert carry_to.call_args.args == (device,)
+
+
+def test_advance_feedback_passes_dedicated_corruption_generator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rand = Mock(wraps=torch.rand)
+    monkeypatch.setattr(torch, "rand", rand)
+    subject = pool(
+        AtomicPool.Config(
+            feedback=FeedbackCarry.Config(
+                corruption=CellCorruption.Config(rate=1.0, low=6, high=7),
+            ),
+        ),
+    )
+    logits = torch.nn.functional.one_hot(torch.full((SLOTS, GRID), 2), VOCAB).float()
+    subject.advance_feedback(logits)
+    assert subject.carry is not None
+    assert rand.call_args.kwargs == {
+        "device": subject.inputs.device,
+        "generator": subject.carry.generator,
+    }
 
 
 def test_advance_feedback_requires_a_carry() -> None:
     subject = pool(AtomicPool.Config())
     logits = torch.zeros(SLOTS, GRID, VOCAB)
-    with pytest.raises(ValueError, match="feedback carry"):
+    with pytest.raises(
+        ValueError,
+        match=r"^advance_feedback needs a pool with a feedback carry\.$",
+    ):
         subject.advance_feedback(logits)
 
 

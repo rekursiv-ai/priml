@@ -40,17 +40,13 @@ def interpolant(
     """
     if path == "linear":
         return 1 - t, t, -torch.ones_like(t), torch.ones_like(t)
-    if path == "cosine":
-        angle = math.pi * t / 2
-        return (
-            angle.cos(),
-            angle.sin(),
-            -(math.pi / 2) * angle.sin(),
-            (math.pi / 2) * angle.cos(),
-        )
-    raise ValueError(
-        f"unsupported flow path: {path}",
-    )  # pyright: ignore[reportUnreachable] -- Runtime guard protects untyped callers.
+    angle = math.pi * t / 2
+    return (
+        angle.cos(),
+        angle.sin(),
+        -(math.pi / 2) * angle.sin(),
+        (math.pi / 2) * angle.cos(),
+    )
 
 
 def projection_loss(
@@ -73,7 +69,8 @@ def projection_loss(
     if len(predictions) != len(teacher_features) or not predictions:
         raise ValueError("teacher and student projection depths must match")
     total: Tensor | float = 0.0
-    for prediction, teacher_target in zip(predictions, teacher_features, strict=True):
+    for index, prediction in enumerate(predictions):
+        teacher_target = teacher_features[index]
         selected = teacher_target
         if prediction.ids_keep is not None:
             selected = teacher_target.gather(
@@ -130,17 +127,15 @@ class SpeedrunObjective:
         """
         if self.weighting == "uniform":
             t = torch.rand(latents.shape[0], device=latents.device)
-        elif self.weighting == "lognormal":
+        else:
             sigma = torch.randn(latents.shape[0], device=latents.device).exp()
             t = (
                 sigma / (1 + sigma)
                 if self.path == "linear"
                 else 2 * sigma.atan() / math.pi
             )
-        else:
-            raise ValueError(f"unsupported timestep weighting: {self.weighting}")
         if self.shift_time:
-            t = time_shift(t, latents[0].numel(), self.shift_base)
+            t = time_shift(t, math.prod(latents.shape[1:]), self.shift_base)
         return t
 
     def __call__(

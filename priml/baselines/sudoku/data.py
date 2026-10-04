@@ -134,15 +134,19 @@ class _SudokuBatches:
             raise ValueError(f"epoch must be non-negative; got {epoch}.")
         data = _load_split(dataset_dir, split)
         bounds = data["group_indices"]
-        if num_puzzles is not None and num_puzzles < len(bounds) - 1:
+        if num_puzzles is not None:
+            num_puzzles = min(num_puzzles, len(bounds) - 1)
             rows = int(bounds[num_puzzles])
             bounds = bounds[: num_puzzles + 1]
+            inputs = data["inputs"][:rows]
+            labels = data["labels"][:rows]
         else:
-            rows = len(data["inputs"])
+            inputs = data["inputs"]
+            labels = data["labels"]
 
         self.device = get_device(device)
-        self.inputs: Tensor = data["inputs"][:rows].to(self.device)
-        self.labels: Tensor = data["labels"][:rows].to(self.device)
+        self.inputs = inputs.to(self.device)
+        self.labels = labels.to(self.device)
         self.bounds: Tensor = bounds.to(self.device)
         if data["vocab_size"] != spec.vocab_size:
             raise ValueError("Prepared vocabulary does not match dataset spec.")
@@ -194,8 +198,8 @@ class _SudokuBatches:
             valid = len(rows)
             inputs = self.inputs[rows]
             labels = self.labels[rows]
-            if valid < self.batch_size:
-                pad = self.batch_size - valid
+            pad = self.batch_size - valid
+            if pad:
                 inputs = torch.cat([inputs, inputs.new_zeros(pad, inputs.shape[1])])
                 labels = torch.cat([labels, labels.new_zeros(pad, labels.shape[1])])
             if self.augment:

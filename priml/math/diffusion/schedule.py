@@ -150,12 +150,12 @@ def log_snr_from_log_sigma_per_variance_preserving(
     """
     if (sigma is None) == (log_sigma is None):
         raise ValueError("Exactly one of sigma, log_sigma must be provided.")
-    if log_sigma is None:
-        if sigma is None:
-            raise ValueError("Expected sigma is not None.")
+    if sigma is not None:
         sigma = convert_to_tensor(sigma)
         log_sigma = safe_log(sigma)
     else:
+        if log_sigma is None:
+            raise ValueError("Expected log_sigma is not None.")
         log_sigma = convert_to_tensor(log_sigma)
     return -2 * log_sigma + log1mexp(2 * log_sigma)
 
@@ -243,12 +243,12 @@ def log_snr_from_log_sigma_per_rectified_flow(
     """
     if (sigma is None) == (log_sigma is None):
         raise ValueError("Exactly one of sigma, log_sigma must be provided.")
-    if log_sigma is None:
-        if sigma is None:
-            raise ValueError("Expected sigma is not None.")
+    if sigma is not None:
         sigma = convert_to_tensor(sigma)
         logit = torch.logit(sigma)
     else:
+        if log_sigma is None:
+            raise ValueError("Expected log_sigma is not None.")
         log_sigma = convert_to_tensor(log_sigma)
         logit = log_sigma - log1mexp(log_sigma)
     return -2 * logit

@@ -66,10 +66,13 @@ def test_multiple_handles_negatives() -> None:
 def test_factors_prime() -> None:
     assert factors(7) == (1, 7)
     assert factors(13) == (1, 13)
+    assert all(type(factor) is int for factor in factors(13))
 
 
 def test_factors_large() -> None:
-    assert factors(100) == (1, 2, 4, 5, 10, 20, 25, 50, 100)
+    result = factors(100)
+    assert result == (1, 2, 4, 5, 10, 20, 25, 50, 100)
+    assert all(type(factor) is int for factor in result)
 
 
 def test_ceil_multiple_none() -> None:
@@ -116,6 +119,7 @@ def test_floor_multiple_float() -> None:
     result = floor_multiple(5.5, 2.0)
     assert result == 4.0
     assert isinstance(result, float)
+    assert floor_multiple(1, 0.1) == 1.0
 
 
 def test_floor_multiple_numpy() -> None:
@@ -166,7 +170,10 @@ def test_broadcast_sequences_pairs_scalars_against_sequences() -> None:
 
 def test_broadcast_sequences_rejects_incompatible_lengths() -> None:
     """Mismatched lengths are a caller error, not a truncation."""
-    with pytest.raises(ValueError, match="Incompatible lengths"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Incompatible lengths: \[2, 3\]\.$",
+    ):
         _ = broadcast_sequences([1, 2], [10, 20, 30])
 
 
@@ -188,6 +195,13 @@ def test_multiple_keeps_the_tensor_dtype_it_was_given() -> None:
         scaled = ceil_multiple(torch.ones(3, dtype=dtype), 2.0)
         assert isinstance(scaled, Tensor)
         assert scaled.dtype == dtype
+    half = ceil_multiple(
+        torch.tensor([1.1, 2.1], dtype=torch.float16),
+        np.float64(2.5),
+    )
+    assert isinstance(half, Tensor)
+    assert half.dtype == torch.float16
+    torch.testing.assert_close(half, torch.tensor([2.5, 2.5], dtype=torch.float16))
     # An integer multiple still yields an integer result.
     as_int = ceil_multiple(torch.ones(3, dtype=torch.float64), 2)
     assert isinstance(as_int, Tensor)
@@ -212,6 +226,11 @@ def test_multiple_keeps_the_numpy_dtype_it_was_given() -> None:
     as_int = ceil_multiple(np.ones(3, dtype=np.float32), 2)
     assert isinstance(as_int, np.ndarray)
     assert as_int.dtype == np.int64
+    float32 = np.array([1.1, 2.1, 3.1], dtype=np.float32)
+    snapped = ceil_multiple(float32, np.float64(2.5))
+    assert isinstance(snapped, np.ndarray)
+    assert snapped.dtype == np.float32
+    np.testing.assert_array_equal(snapped, np.array([2.5, 2.5, 5.0], dtype=np.float32))
 
 
 def test_a_float_grid_promotes_an_integer_input() -> None:
@@ -237,8 +256,9 @@ def test_a_float_grid_promotes_an_integer_input() -> None:
 
 def test_multiple_rejects_a_type_it_cannot_scale() -> None:
     """A Sequence is ``Tensorable``, so this is caller input and must raise."""
-    with pytest.raises(TypeError, match="Unsupported scalar type"):
+    with pytest.raises(TypeError) as error:
         _ = ceil_multiple("nope", 2)  # pyright: ignore[reportCallIssue, reportArgumentType, reportUnknownVariableType] -- The negative test verifies rejection of an unsupported scalar type.
+    assert str(error.value) == "Unsupported scalar type str."
 
 
 def test_multiple_is_exact_beyond_float53() -> None:

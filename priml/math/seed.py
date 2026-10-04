@@ -260,7 +260,7 @@ def set_seed_distributed(
                 "NCCL backend declared but no CUDA devices are available; "
                 "use gloo for CPU-only distributed training.",
             )
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = torch.device(f"cuda:{torch.cuda.current_device()}")
     else:
         device = torch.device("cpu")
     if global_rank == 0:

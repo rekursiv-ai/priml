@@ -7,17 +7,23 @@ bound to ``127.0.0.1`` for the HTTP-resume path. No real network access.
 
 from __future__ import annotations
 
-from http import server
+from http import client, server
+from pathlib import Path
 from typing import IO, TYPE_CHECKING, Final, override
+from urllib import request
 
+import datetime
 import fcntl
 import functools
 import hashlib
+import io
 import shutil
+import sys
 import threading
 
 import pytest
 
+from priml.data import ensure
 from priml.data.ensure import (
     DataSpec,
     EnsureResult,
@@ -30,10 +36,18 @@ from priml.data.ensure import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
 
 _MARKER: Final = ".ensure_complete"
+
+
+class _Response(client.HTTPResponse):
+    """Minimal typed response carrying only headers for content-length tests."""
+
+    def __init__(self, headers: dict[str, str]) -> None:
+        self.headers = client.HTTPMessage()
+        for name, value in headers.items():
+            self.headers[name] = value
 
 
 def _write(path: Path, data: bytes) -> None:
@@ -100,10 +114,15 @@ def test_present_skips_fetch(tmp_path: Path, source: Path):
     assert calls == []
 
 
-def test_missing_file_downloads(tmp_path: Path, source: Path):
+def test_missing_file_downloads(
+    tmp_path: Path,
+    source: Path,
+    caplog: pytest.LogCaptureFixture,
+):
     """A missing manifest file is fetched; result is DOWNLOADED."""
     target = tmp_path / "target"
     calls: list[str] = []
+    caplog.set_level("INFO", logger=ensure.__name__)
 
     result = ensure_data(_spec(target, source, calls))
 
@@ -111,6 +130,16 @@ def test_missing_file_downloads(tmp_path: Path, source: Path):
     assert sorted(calls) == sorted(_FILES)
     for rel, data in _FILES.items():
         assert (target / rel).read_bytes() == data
+    assert [record.getMessage() for record in caplog.records] == [
+        f"ensure_data: fetching 2/2 files into {target}",
+        "ensure_data: fetch a.json",
+        "ensure_data: fetch sub/b.bin",
+        f"ensure_data: {target} complete",
+    ]
+    assert caplog.records[0].args == (2, 2, target)
+    assert caplog.records[1].args == ("a.json",)
+    assert caplog.records[2].args == ("sub/b.bin",)
+    assert caplog.records[3].args == (target,)
 
 
 def test_partial_wrong_size_recovers(tmp_path: Path, source: Path):
@@ -400,6 +429,305 @@ def test_http_download_resumes_from_part(tmp_path: Path, http_blob: tuple[str, b
 
     assert dest.read_bytes() == blob
     assert not part.exists()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        (206, b"x", b"yz", 3, 1),
+        (200, b"old", b"abc", 3, 0),
+        (200, b"", b"abc", 3, 0),
+    ],
+)
+def test_http_download_protocol_and_progress_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: tuple[int, bytes, bytes, int, int],
+):
+    status, prefix, body, expected_total, expected_initial = case
+    dest = tmp_path / "nested" / "deeper" / "output.bin"
+    part = dest.with_suffix(".bin.part")
+    if prefix:
+        part.parent.mkdir(parents=True)
+        part.write_bytes(prefix)
+    urlopen_requests: list[request.Request] = []
+    added_headers: list[tuple[str, str]] = []
+    progress_kwargs: list[dict[str, object]] = []
+    read_sizes: list[int | None] = []
+    updates: list[int] = []
+
+    class Response(io.BytesIO):
+        def __init__(self):
+            super().__init__(body)
+            self.status = status
+            self.headers = {"Content-Length": str(len(body))}
+
+        @override
+        def read(self, size: int | None = -1) -> bytes:
+            read_sizes.append(size)
+            return super().read(size)
+
+    response = Response()
+
+    def urlopen(sent: request.Request) -> Response:
+        urlopen_requests.append(sent)
+        return response
+
+    class Progress:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def update(self, amount: int) -> None:
+            updates.append(amount)
+
+    def make_progress(**kwargs: object) -> Progress:
+        progress_kwargs.append(kwargs)
+        return Progress()
+
+    real_add_header = request.Request.add_header
+
+    def add_header_spy(
+        sent: request.Request,
+        name: str,
+        value: str,
+    ) -> None:
+        added_headers.append((name, value))
+        real_add_header(sent, name, value)
+
+    monkeypatch.setattr(request.Request, "add_header", add_header_spy)
+    monkeypatch.setattr(request, "urlopen", urlopen)
+    monkeypatch.setattr(ensure, "tqdm", make_progress)
+
+    resumable_http_download(url="https://example.test/data", dest=dest)
+
+    if prefix:
+        assert added_headers == [("Range", f"bytes={len(prefix)}-")]
+        assert urlopen_requests[0].headers == {"Range": f"bytes={len(prefix)}-"}
+    else:
+        assert added_headers == []
+        assert urlopen_requests[0].headers == {}
+    assert dest.read_bytes() == (prefix + body if status == 206 else body)
+    assert not part.exists()
+    assert progress_kwargs == [
+        {
+            "total": expected_total,
+            "initial": expected_initial,
+            "desc": dest.name,
+            "unit": "B",
+            "unit_scale": True,
+            "disable": not sys.stdout.isatty(),
+        },
+    ]
+    assert read_sizes == [ensure._SETTINGS.chunk_bytes] * 2
+    assert updates == [len(body)]
+
+
+def test_internal_manifest_and_content_length_contracts(tmp_path: Path):
+    """Pin manifest corruption filtering and progress-size accounting."""
+    target = tmp_path / "target"
+    files = [
+        FileSpec(rel_path="no-digest", size=4),
+        FileSpec(
+            rel_path="partial",
+            size=4,
+            sha256=hashlib.sha256(b"good").hexdigest(),
+        ),
+        FileSpec(
+            rel_path="corrupt",
+            size=4,
+            sha256=hashlib.sha256(b"good").hexdigest(),
+        ),
+    ]
+    _write(target / "partial", b"bad")
+    _write(target / "corrupt", b"evil")
+    _write(target / "no-digest", b"evil")
+    spec = DataSpec(
+        target_dir=target,
+        manifest=files,
+        fetch=_copy_fetch(tmp_path, []),
+    )
+
+    assert ensure._corrupt_files(spec) == [files[2]]
+    assert (
+        ensure._content_length(
+            _Response({"Content-Length": "17"}),
+            already=5,
+            resumed=True,
+        )
+        == 22
+    )
+    assert (
+        ensure._content_length(
+            _Response({"Content-Length": "17"}),
+            already=5,
+            resumed=False,
+        )
+        == 17
+    )
+    assert ensure._content_length(_Response({}), already=5, resumed=True) is None
+    assert ensure._is_complete(spec) is False
+
+
+def test_sha256_reads_configured_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    path = tmp_path / "payload"
+    contents = b"x" * (ensure._SETTINGS.chunk_bytes + 3)
+    path.write_bytes(contents)
+    read_sizes: list[int | None] = []
+
+    class ReadSpy(io.BytesIO):
+        @override
+        def read(self, size: int | None = -1) -> bytes:
+            read_sizes.append(size)
+            return super().read(size)
+
+    def open_spy(
+        path: Path,
+        mode: str = "r",
+        *_args: object,
+        **_kwargs: object,
+    ) -> ReadSpy:
+        del path, mode
+        return ReadSpy(contents)
+
+    monkeypatch.setattr(Path, "open", open_spy)
+
+    assert ensure._sha256(path) == hashlib.sha256(contents).hexdigest()
+    assert read_sizes == [ensure._SETTINGS.chunk_bytes] * 3
+
+
+def test_archive_name_and_corrupt_archive_log(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    target = tmp_path / "dataset"
+    _write(target / "payload", b"bad")
+    real_datetime = datetime.datetime
+    zones: list[datetime.tzinfo | None] = []
+
+    class DateTimeSpy:
+        @classmethod
+        def now(cls, tz: datetime.tzinfo | None = None) -> datetime.datetime:
+            zones.append(tz)
+            return real_datetime.now(tz)
+
+    monkeypatch.setattr(
+        "priml.data.ensure.datetime.datetime",
+        DateTimeSpy,
+    )
+    ensure._archive_dir(target)
+
+    archives = list(tmp_path.glob("dataset.corrupt.*"))
+    assert zones == [datetime.UTC]
+    assert len(archives) == 1
+    assert archives[0].name.startswith("dataset.corrupt.20")
+    assert archives[0].name.endswith("Z")
+    assert (archives[0] / "payload").read_bytes() == b"bad"
+    assert caplog.records[-1].getMessage() == (
+        f"ensure_data: archiving corrupt {target} -> {archives[0]}"
+    )
+
+
+def test_marker_has_utc_timestamp_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    marker_dir = tmp_path / "nested" / "dataset"
+    real_datetime = datetime.datetime
+    zones: list[datetime.tzinfo | None] = []
+
+    class DateTimeSpy:
+        @classmethod
+        def now(cls, tz: datetime.tzinfo | None = None) -> datetime.datetime:
+            zones.append(tz)
+            return real_datetime.now(tz)
+
+    monkeypatch.setattr(
+        "priml.data.ensure.datetime.datetime",
+        DateTimeSpy,
+    )
+    ensure._write_marker(marker_dir)
+
+    marker = marker_dir / _MARKER
+    assert zones == [datetime.UTC]
+    assert marker.read_text().count("\n") == 1
+    assert len(marker.read_text().strip()) == 22
+    assert marker.read_text().endswith("Z\n")
+
+
+def test_ensure_logs_fast_path_and_adoption(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+):
+    target = tmp_path / "target"
+    _write(target / "a.json", _FILES["a.json"])
+    calls: list[str] = []
+    spec = DataSpec(
+        target_dir=target,
+        manifest=[FileSpec(rel_path="a.json", size=len(_FILES["a.json"]))],
+        fetch=_copy_fetch(tmp_path, calls),
+    )
+
+    caplog.set_level("INFO", logger=ensure.__name__)
+    assert ensure_data(spec) is EnsureResult.PRESENT
+    assert caplog.records[
+        -1
+    ].getMessage() == "ensure_data: adopting present tree (1 files)".replace(
+        "adopting present tree",
+        f"{target} adopting present tree",
+    )
+    assert caplog.records[-1].args == (target, 1)
+    caplog.clear()
+    assert ensure_data(spec) is EnsureResult.PRESENT
+    assert caplog.records[-1].getMessage() == f"ensure_data: {target} present (1 files)"
+    assert calls == []
+
+
+def test_locked_complete_tree_logs_manifest_count(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+):
+    target = tmp_path / "target"
+    _source_tree(target, {"payload": b"abc"})
+    _write(target / _MARKER, b"complete\n")
+    spec = DataSpec(
+        target_dir=target,
+        manifest=[FileSpec(rel_path="payload", size=3)],
+        fetch=_copy_fetch(tmp_path, []),
+    )
+    caplog.set_level("INFO", logger=ensure.__name__)
+
+    assert ensure._ensure_locked(spec) is EnsureResult.PRESENT
+
+    assert caplog.records[-1].getMessage() == f"ensure_data: {target} present (1 files)"
+    assert caplog.records[-1].args == (target, 1)
+
+
+def test_failed_fetch_reports_exact_unsatisfied_paths(tmp_path: Path):
+    target = tmp_path / "target"
+
+    def wrong_fetch(*, rel_path: str, dest: Path) -> None:
+        del rel_path
+        _write(dest, b"no")
+
+    spec = DataSpec(
+        target_dir=target,
+        manifest=[FileSpec(rel_path="nested/missing.bin", size=3)],
+        fetch=wrong_fetch,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"ensure_data: manifest still unsatisfied after fetch: \['nested/missing.bin'\]",
+    ):
+        ensure_data(spec)
+    assert not (target / _MARKER).exists()
 
 
 if __name__ == "__main__":

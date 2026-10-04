@@ -18,7 +18,13 @@ from configgle.pprinting import pformat
 import pytest
 
 from priml.baselines.sudoku import experiments
-from priml.baselines.sudoku.act import LearnedStart, ZeroStart
+from priml.baselines.sudoku.act import (
+    HaltTraining,
+    LearnedStart,
+    SampledMinimum,
+    StreamingPool,
+    ZeroStart,
+)
 from priml.baselines.sudoku.embedding import (
     FactoredPositions,
     GridEmbedding,
@@ -33,7 +39,10 @@ from priml.baselines.sudoku.eval import (
 from priml.baselines.sudoku.trainer import Trainer
 from priml.baselines.sudoku.trm import recipe_block
 from priml.model.attention.attention import Attention
+from priml.model.init import kaiming_uniform
 from priml.model.mlpmixer import MLPMixerBlock
+from priml.model.norm import RMSNorm
+from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 
 
@@ -158,6 +167,15 @@ def test_the_recurrent_rungs_replay_as_trained(
     assert isinstance(pool.start, ZeroStart.Config)
 
 
+def test_exp002_pool_uses_its_trained_halting_and_batch_settings() -> None:
+    pool = experiments.exp002().step.pool
+    assert pool is not None
+    assert pool.batch_size == experiments.exp002().dataset.batch_size
+    assert pool.max_steps == 32
+    assert isinstance(pool.halting, HaltTraining.Config)
+    assert isinstance(pool.halting.exploration, SampledMinimum.Config)
+
+
 def test_exp015_changes_only_the_pool() -> None:
     """Feedback and the learned start move together; nothing else does."""
     base, fork = experiments.exp002(), experiments.exp015()
@@ -169,6 +187,21 @@ def test_exp015_changes_only_the_pool() -> None:
     fork.step.pool.start = base.step.pool.start
     fork.experiment_name = base.experiment_name
     assert fork.pformat() == base.pformat()
+
+
+def test_exp015_rejects_a_parent_without_an_atomic_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = experiments.exp002()
+    non_atomic_pool = StreamingPool.Config()
+    config.step.pool = non_atomic_pool
+    monkeypatch.setattr(experiments, "exp002", lambda: config)
+
+    with pytest.raises(TypeError) as error:
+        experiments.exp015()
+    assert str(error.value) == (
+        f"exp002's pool is atomic; got {type(non_atomic_pool)}."
+    )
 
 
 def test_the_clue_range_follows_the_vocabulary() -> None:
@@ -187,6 +220,18 @@ def test_exp003_is_exp002_with_the_other_block() -> None:
     assert fork.step.pool is not None
     assert base.step.pool is not None
     assert fork.step.pool.max_steps == base.step.pool.max_steps
+
+
+def test_mixer_block_pins_both_mixing_paths() -> None:
+    block = experiments._mixer_block()
+    assert block.seq_len == -1
+    assert block.prenorm is False
+    assert isinstance(block.token_mixer, SwiGLU.Config)
+    assert isinstance(block.channel_mixer, SwiGLU.Config)
+    for mixer in (block.token_mixer, block.channel_mixer):
+        assert isinstance(mixer.norm, RMSNorm.Config)
+        assert mixer.init_weight is kaiming_uniform
+        assert mixer.init_weight_out is kaiming_uniform
 
 
 def test_the_pool_is_built_to_the_models_shape() -> None:
@@ -215,6 +260,16 @@ def test_smoke_is_small_on_every_costly_axis() -> None:
     assert smoke.step.model.num_layers <= base.step.model.num_layers
     assert smoke.dataset.batch_size < base.dataset.batch_size
     assert smoke.dataset.num_train_puzzles is not None
+    assert (
+        smoke.step.model.channels_in,
+        smoke.step.model.num_layers,
+        smoke.dataset.batch_size,
+        smoke.dataset.num_train_puzzles,
+        smoke.dataset.num_eval_puzzles,
+        smoke.max_steps,
+        smoke.step.total_train_steps,
+        smoke.num_steps_eval,
+    ) == (32, 1, 8, 4, 4, 4, 4, 2)
 
 
 def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> None:
@@ -341,6 +396,15 @@ def test_exp006_adds_only_qk_norm_and_the_convergence_horizon() -> None:
             "total_train_steps",
             "num_steps_eval",
         },
+    )
+
+
+def test_exp006_pins_its_convergence_horizon() -> None:
+    config = experiments.exp006()
+    assert (config.max_steps, config.total_train_steps, config.num_steps_eval) == (
+        12_000,
+        12_000,
+        500,
     )
 
 
@@ -471,6 +535,25 @@ def test_exp013_full_evaluation_locks_with_its_own_committee() -> None:
     assert acceptor.checkpoint_paths == tuple(
         f"/runs/exp013_verifier_s{seed}/checkpoints/step_00004000.pt"
         for seed in range(3)
+    )
+
+
+def test_evaluation_forks_pin_their_run_identity_and_seeds() -> None:
+    exp012 = experiments.exp012()
+    exp013 = experiments.exp013()
+    exp014 = experiments.exp014()
+    assert (exp012.study_name, exp012.generator_names) == (
+        "sudoku",
+        ("exp012_generator",),
+    )
+    assert (exp013.study_name, exp013.generator_names) == (
+        "sudoku",
+        ("exp013_generator",),
+    )
+    assert (exp014.screen, exp014.trigger, exp014.generator_seeds) == (
+        "single_view",
+        "final_only",
+        (44, 45, 46),
     )
 
 

@@ -74,7 +74,7 @@ class EvaluationActor(Protocol):
 class _Cadence:
     """A finite update cadence with a checkpointable cursor."""
 
-    def __init__(self, *, count: int, position: int = 0) -> None:
+    def __init__(self, *, count: int, position: int) -> None:
         self.count = count
         self.position = position
 
@@ -204,7 +204,6 @@ class CraftaxRollouts:
         self._pending_train_position = position
         if self._live_train is not None:
             self._live_train.position = position
-            self._pending_train_position = 0
 
 
 @runtime_checkable

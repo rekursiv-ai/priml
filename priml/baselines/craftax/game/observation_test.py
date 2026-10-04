@@ -16,6 +16,7 @@ from priml.baselines.craftax.conftest import (
 )
 from priml.baselines.craftax.game import constants, observation
 from priml.baselines.craftax.game.constants import Action, BlockType, ItemType
+from priml.baselines.craftax.game.indexing import batch_rows, local_view
 from priml.baselines.craftax.game.state import EnvState, Mobs, empty_state
 
 
@@ -60,6 +61,19 @@ def test_the_view_follows_the_player() -> None:
     assert not torch.equal(observation.render(near), observation.render(far))
 
 
+def test_light_threshold_is_strictly_greater_than_point_zero_five() -> None:
+    state = _state(num_envs=2)
+    state.light_map[:, 0, 20, 20] = 0.05
+    state.light_map[:, 0, 20, 21] = 0.0501
+
+    rendered = observation.render(state)
+    center_tile = (4 * constants.OBS_DIM[1] + 5) * observation.CHANNELS_PER_TILE
+    adjacent_tile = center_tile + observation.CHANNELS_PER_TILE
+    light_channel = observation.CHANNELS_PER_TILE - 1
+    assert torch.equal(rendered[:, center_tile + light_channel], torch.zeros(2))
+    assert torch.equal(rendered[:, adjacent_tile + light_channel], torch.ones(2))
+
+
 def test_darkness_hides_the_world() -> None:
     # An unlit tile shows nothing at all, which is what makes a torch matter.
     lit = _state()
@@ -73,6 +87,40 @@ def test_darkness_hides_the_world() -> None:
     # scalars carry information.
     view_width = observation.observation_size() - constants.INVENTORY_OBS_SIZE
     assert float(observation.render(dark)[:, :view_width].sum()) == 0.0
+
+
+def test_view_padding_uses_out_of_bounds_block_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _state(num_envs=2)
+    state.player_position[:] = 0
+    original = local_view
+    calls = 0
+
+    def force_light(
+        grid: Tensor,
+        centers: Tensor,
+        size: tuple[int, int],
+        *,
+        outside: float = 0.0,
+    ) -> Tensor:
+        nonlocal calls
+        result = original(grid, centers, size, outside=outside)
+        calls += 1
+        return torch.ones_like(result) if calls == 3 else result
+
+    monkeypatch.setattr(
+        "priml.baselines.craftax.game.observation.local_view",
+        force_light,
+    )
+    rendered = observation.render(state)
+    tile_channels = observation.CHANNELS_PER_TILE
+
+    assert torch.equal(rendered[:, tile_channels - 1], torch.ones(2))
+    assert torch.equal(
+        rendered[:, int(BlockType.OUT_OF_BOUNDS)],
+        torch.ones(2),
+    )
 
 
 def test_the_world_edge_is_visible_as_out_of_bounds() -> None:
@@ -129,6 +177,105 @@ def test_a_distant_creature_is_not_visible() -> None:
     )
 
 
+def test_every_creature_class_and_species_uses_its_exact_plane() -> None:
+    classes = (
+        "melee_mobs",
+        "passive_mobs",
+        "ranged_mobs",
+        "mob_projectiles",
+        "player_projectiles",
+    )
+    tile = (4 * constants.OBS_DIM[1] + 5 + 2) * observation.CHANNELS_PER_TILE
+    first_mob_channel = len(BlockType) + len(ItemType)
+    for class_index, name in enumerate(classes):
+        state = _state(num_envs=2)
+        mobs = cast(Mobs, getattr(state, name))
+        mobs.mask[:, 0, 0] = True
+        mobs.position[:, 0, 0] = torch.tensor([20, 22], dtype=torch.int32)
+        mobs.type_id[:, 0, 0] = 7
+
+        rendered = observation.render(state)
+        expected = tile + first_mob_channel + class_index * 8 + 7
+        assert torch.equal(rendered[:, expected], torch.ones(2))
+        assert int(rendered[0, expected - 1]) == 0
+
+
+def test_creatures_on_each_view_edge_are_visible() -> None:
+    for position in ([16, 15], [24, 25]):
+        state = _state(num_envs=2)
+        state.player_projectiles.mask[:, 0, 0] = True
+        state.player_projectiles.position[:, 0, 0] = torch.tensor(position)
+        rendered = observation.render(state)
+        row, column = position[0] - 16, position[1] - 15
+        tile = (row * constants.OBS_DIM[1] + column) * observation.CHANNELS_PER_TILE
+        channel = tile + len(BlockType) + len(ItemType) + 4 * 8
+        assert torch.equal(rendered[:, channel], torch.ones(2))
+
+
+def test_render_mob_tensors_use_the_state_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_device = torch.device("cpu")
+    state = _state()
+    factory_devices: list[object] = []
+    factories: dict[str, Callable[..., Tensor]] = {
+        "zeros": torch.zeros,
+        "tensor": torch.tensor,
+        "arange": torch.arange,
+    }
+    for name in ("zeros", "tensor", "arange"):
+        factory = factories[name]
+
+        def record_device(
+            *args: object,
+            factory: Callable[..., Tensor] = factory,
+            **kwargs: object,
+        ) -> Tensor:
+            device = kwargs.get("device")
+            factory_devices.append(device)
+            captured_factory = factory
+            del factory
+            return captured_factory(*args, **kwargs)
+
+        monkeypatch.setattr(torch, name, record_device)
+
+    observation._render_mobs(state, view=(3, 5))
+
+    assert factory_devices
+    assert all(device == expected_device for device in factory_devices)
+
+
+def test_player_rows_use_the_state_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = _state()
+    devices: list[object] = []
+
+    def record_device(envs: int, device: torch.device) -> Tensor:
+        devices.append(device)
+        return batch_rows(envs, device)
+
+    monkeypatch.setattr(
+        "priml.baselines.craftax.game.observation.batch_rows",
+        record_device,
+    )
+
+    observation._render_player(state)
+
+    assert devices == [state.device]
+
+
+def test_creatures_outside_each_view_edge_are_hidden() -> None:
+    view_width = observation.observation_size() - constants.INVENTORY_OBS_SIZE
+    for position in ([15, 20], [25, 20], [20, 14], [20, 26]):
+        state = _state(num_envs=2)
+        state.player_projectiles.mask[:, 0, 0] = True
+        state.player_projectiles.position[:, 0, 0] = torch.tensor(position)
+        rendered = observation.render(state)
+        assert torch.equal(
+            rendered[:, :view_width],
+            observation.render(_state(num_envs=2))[:, :view_width],
+        )
+
+
 def test_creature_classes_are_distinguishable() -> None:
     def creature(field: str) -> Tensor:
         state = _state()
@@ -160,6 +307,151 @@ def test_melee_and_passive_use_their_reference_channels() -> None:
     assert melee_render[passive_channel] == 0
     assert passive_render[melee_channel] == 0
     assert passive_render[passive_channel] == 1
+
+
+def test_player_scalars_are_encoded_at_their_exact_values() -> None:
+    state = _state(num_envs=2)
+    inventory_fields = (
+        "wood",
+        "stone",
+        "coal",
+        "iron",
+        "diamond",
+        "sapphire",
+        "ruby",
+        "sapling",
+        "torches",
+        "arrows",
+    )
+    for field_index, field in enumerate(inventory_fields, start=1):
+        getattr(state.inventory, field)[:] = torch.tensor(
+            [field_index, field_index + 1],
+        )
+    state.inventory.books[:] = torch.tensor([2, 4])
+    state.inventory.pickaxe[:] = torch.tensor([4, 8])
+    state.inventory.sword[:] = torch.tensor([8, 12])
+    state.sword_enchantment[:] = torch.tensor([1, 2])
+    state.bow_enchantment[:] = torch.tensor([2, 1])
+    state.inventory.bow[:] = torch.tensor([1, 2])
+    state.inventory.potions[:] = torch.tensor([[4] * 6, [9] * 6])
+    state.player_health[:] = torch.tensor([3.0, 6.0])
+    state.player_food[:] = torch.tensor([4, 7])
+    state.player_drink[:] = torch.tensor([5, 8])
+    state.player_energy[:] = torch.tensor([6, 9])
+    state.player_mana[:] = torch.tensor([7, 10])
+    state.player_xp[:] = torch.tensor([8, 11])
+    state.player_dexterity[:] = torch.tensor([2, 3])
+    state.player_strength[:] = torch.tensor([3, 4])
+    state.player_intelligence[:] = torch.tensor([4, 5])
+    state.player_direction[:] = torch.tensor([int(Action.UP), int(Action.LEFT)])
+    state.inventory.armour[:] = torch.tensor([[1, 2, 3, 4], [2, 3, 4, 5]])
+    state.armour_enchantments[:] = torch.tensor([[1, 2, 3, 0], [2, 1, 0, 3]])
+    state.light_level[:] = torch.tensor([0.25, 0.75])
+    state.is_sleeping[:] = torch.tensor([False, True])
+    state.is_resting[:] = torch.tensor([True, False])
+    state.learned_spells[:] = torch.tensor([[1, 0], [0, 1]])
+    state.player_level[:] = torch.tensor([1, 2])
+    state.monsters_killed[0, 1] = constants.MONSTERS_KILLED_TO_CLEAR_LEVEL
+    state.monsters_killed[1, 2] = constants.MONSTERS_KILLED_TO_CLEAR_LEVEL - 1
+    state.boss_timesteps_to_spawn_this_round[:] = 1
+
+    rendered = observation.render(state)
+    view_width = observation.observation_size() - constants.INVENTORY_OBS_SIZE
+    expected = torch.tensor(
+        [
+            [
+                *([value**0.5 / 10 for value in range(1, 11)]),
+                1.0,
+                1.0,
+                2.0,
+                1.0,
+                2.0,
+                1.0,
+                *([0.2] * 6),
+                0.3,
+                0.4,
+                0.5,
+                0.6,
+                0.7,
+                0.8,
+                0.2,
+                0.3,
+                0.4,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.5,
+                1.0,
+                1.5,
+                2.0,
+                1.0,
+                2.0,
+                3.0,
+                0.0,
+                0.25,
+                0.0,
+                1.0,
+                1.0,
+                0.0,
+                0.1,
+                1.0,
+                0.0,
+            ],
+            [
+                *([value**0.5 / 10 for value in range(2, 12)]),
+                2.0,
+                2.0,
+                3.0,
+                2.0,
+                1.0,
+                2.0,
+                *([0.3] * 6),
+                0.6,
+                0.7,
+                0.8,
+                0.9,
+                1.0,
+                1.1,
+                0.3,
+                0.4,
+                0.5,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                1.5,
+                2.0,
+                2.5,
+                2.0,
+                1.0,
+                0.0,
+                3.0,
+                0.75,
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                0.2,
+                0.0,
+                0.0,
+            ],
+        ],
+    )
+    expected[:, :10] = (
+        torch.tensor(
+            [list(range(1, 11)), list(range(2, 12))],
+            dtype=torch.float32,
+        ).sqrt()
+        / 10
+    )
+    torch.testing.assert_close(
+        rendered[:, view_width:],
+        expected,
+        rtol=1e-6,
+        atol=1e-7,
+    )
 
 
 def test_the_facing_direction_is_reported() -> None:

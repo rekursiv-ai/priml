@@ -11,6 +11,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Final
 
 import itertools
+import math
 
 import pytest
 
@@ -175,6 +176,7 @@ def test_cosine_is_flat_at_both_ends() -> None:
     assert cosine(0.01) > 0.999
     assert cosine(0.99) < 0.001
     assert cosine(0.5) == pytest.approx(0.5)
+    assert cosine(0.5, final=0.2) == pytest.approx(0.6)
 
 
 def test_exponential_reaches_its_stated_decay() -> None:
@@ -208,6 +210,9 @@ def test_staircase_drops_the_stated_number_of_times() -> None:
 
 def test_staircase_without_drops_is_flat() -> None:
     assert staircase(0.9, drops=0) == 1.0
+    assert staircase(0.2) == pytest.approx(1.0)
+    assert staircase(0.9, drops=1) == pytest.approx(0.1)
+    assert staircase(1.0, drops=2, gamma=0.2) == pytest.approx(0.04)
 
 
 def test_staircase_rejects_a_negative_count() -> None:
@@ -235,8 +240,19 @@ def test_warmup_disabled_is_the_identity() -> None:
 def test_trapezoidal_holds_then_decays() -> None:
     assert trapezoidal(0.0, flat=0.5) == 1.0
     assert trapezoidal(0.49, flat=0.5) == 1.0
+    assert trapezoidal(0.5, flat=0.5) == 1.0
     assert trapezoidal(0.75, flat=0.5) == pytest.approx(0.5)
+    assert trapezoidal(0.625, flat=0.5, final=0.2) == pytest.approx(0.8)
     assert trapezoidal(1.0, flat=0.5) == pytest.approx(0.0)
+    assert trapezoidal(0.75, flat=0.5, cooldown_cosine=True) == pytest.approx(0.5)
+    assert trapezoidal(
+        0.625,
+        flat=0.5,
+        final=0.2,
+        cooldown_cosine=True,
+    ) == pytest.approx(
+        0.2 + 0.8 * 0.5 * (1.0 + math.cos(math.pi / 4)),
+    )
 
 
 def test_trapezoidal_cosine_cooldown_shares_its_endpoints() -> None:
@@ -244,6 +260,8 @@ def test_trapezoidal_cosine_cooldown_shares_its_endpoints() -> None:
     for flat in (0.0, 0.5, 0.9):
         linear_tail = partial(trapezoidal, flat=flat)
         cosine_tail = partial(trapezoidal, flat=flat, cooldown_cosine=True)
+        early_tail = flat + (1.0 - flat) / 4
+        assert cosine_tail(early_tail) != pytest.approx(linear_tail(early_tail))
         assert cosine_tail(flat) == pytest.approx(linear_tail(flat))
         assert cosine_tail(1.0) == pytest.approx(linear_tail(1.0), abs=1e-9)
 
@@ -256,6 +274,14 @@ def test_trapezoidal_rejects_a_run_with_no_tail() -> None:
 
 def test_one_cycle_peaks_where_its_ramp_ends() -> None:
     """Both legs meet at exactly the full rate, so the peak is continuous."""
+    assert one_cycle(0.0) == pytest.approx(0.04)
+    assert one_cycle(0.1) == pytest.approx(
+        0.04 + 0.96 * (1.0 - 0.5 * (1.0 + math.cos(math.pi / 3))),
+    )
+    assert one_cycle(0.3, warmup_fraction=0.3) == pytest.approx(1.0)
+    assert one_cycle(0.5, warmup_fraction=0.3, final=0.2) == pytest.approx(
+        0.5 * (1.0 + math.cos(math.pi * (0.5 - 0.3) / 0.7)) * 0.8 + 0.2,
+    )
     assert one_cycle(0.0, warmup_fraction=0.3) == pytest.approx(0.04)
     assert one_cycle(0.3, warmup_fraction=0.3) == pytest.approx(1.0)
     assert one_cycle(1.0, warmup_fraction=0.3) == pytest.approx(0.0)
@@ -269,6 +295,8 @@ def test_one_cycle_rises_then_falls() -> None:
 
 
 def test_one_cycle_rejects_an_all_ramp_run() -> None:
+    assert one_cycle(0.5, warmup_fraction=0.0) == pytest.approx(0.5)
+    assert one_cycle(0.5, warmup_fraction=0.0, final=0.2) == pytest.approx(0.6)
     with pytest.raises(ValueError, match=r"warmup_fraction must lie in \[0, 1\)"):
         one_cycle(0.5, warmup_fraction=1.0)
 
@@ -295,6 +323,14 @@ def test_cyclic_all_ramp_ends_at_the_full_rate() -> None:
 
 def test_cosine_restarts_returns_to_the_full_rate() -> None:
     """The sawtooth IS the mechanism: each restart re-heats the basin."""
+    assert cosine_restarts(0.1) == pytest.approx(
+        0.5 * (1 + math.cos(math.pi * 0.3)),
+    )
+    assert cosine_restarts(0.1, cycles=3, final=0.2) == pytest.approx(
+        0.2 + 0.8 * 0.5 * (1 + math.cos(math.pi * 0.3)),
+    )
+    assert cosine_restarts(0.0) == pytest.approx(1.0)
+    assert cosine_restarts(0.5, cycles=2) == pytest.approx(1.0)
     assert cosine_restarts(0.0, cycles=3) == pytest.approx(1.0)
     assert cosine_restarts(1 / 3, cycles=3) == pytest.approx(1.0)
     assert cosine_restarts(2 / 3, cycles=3) == pytest.approx(1.0)
@@ -311,6 +347,7 @@ def test_cosine_restarts_ends_annealed_not_restarted() -> None:
 
 
 def test_cosine_restarts_rejects_a_run_with_no_cycle() -> None:
+    assert cosine_restarts(0.5, cycles=1) == pytest.approx(0.5)
     with pytest.raises(ValueError, match="cycles must be positive"):
         cosine_restarts(0.5, cycles=0)
 

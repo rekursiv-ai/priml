@@ -96,7 +96,7 @@ def cross_entropy_with_batched_smoothing(
 
     # ``ignore_index`` may exceed ``num_classes``; clamp the index used for
     # gathering and zero those positions out via ``mask`` afterwards.
-    mask = (target != ignore_index).to(input.dtype)
+    mask = target != ignore_index
     safe_target = target.clamp(0, num_classes - 1)
     gathered = log_probs.gather(1, safe_target.unsqueeze(1)).squeeze(1)
 
@@ -185,13 +185,14 @@ def stablemax_cross_entropy(
         bf16's own rounding.
 
     """
-    logprobs = log_stablemax(logits, dim=-1)
+    class_dim = logits.ndim - 1
+    logprobs = log_stablemax(logits)
     if valid_mask is None:
         valid_mask = labels != ignore_index
-    transformed_labels = torch.where(valid_mask, labels, 0)
+    transformed_labels = torch.where(valid_mask, labels, torch.zeros_like(labels))
     prediction_logprobs = torch.gather(
         logprobs,
-        index=transformed_labels.to(torch.long).unsqueeze(-1),
-        dim=-1,
-    ).squeeze(-1)
+        index=transformed_labels.unsqueeze(class_dim),
+        dim=class_dim,
+    ).squeeze(class_dim)
     return -torch.where(valid_mask, prediction_logprobs, 0.0)

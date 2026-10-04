@@ -99,15 +99,64 @@ def test_mixed_cache_weights_only_roundtrip_resumes_exactly(
         assert not torch.equal(corrupted_actual, continuous)
 
 
+def test_cache_restore_accepts_three_dimensional_full_attention_caches() -> None:
+    """Three dimensions are valid when batch, head, and sequence axes exist."""
+    k = torch.zeros(2, 3, 5)
+    v = torch.ones_like(k)
+
+    restored = cache_from_state_dict(
+        [{"kind": "full_attention", "k": k, "v": v, "length": 3, "seen": 3}],
+    )
+
+    assert isinstance(restored[0], KVCache)
+    assert torch.equal(restored[0].k, k)
+    assert torch.equal(restored[0].v, v)
+    assert restored[0].length == 3
+    assert restored[0].seen == 3
+
+
+@pytest.mark.parametrize(("length", "seen"), [(-1, 0), (4, 4)])
+def test_cache_restore_rejects_invalid_full_attention_progress(
+    length: int,
+    seen: int,
+) -> None:
+    k = torch.zeros(2, 3, 5)
+    v = torch.ones_like(k)
+
+    with pytest.raises(ValueError, match="progress metadata") as error:
+        cache_from_state_dict(
+            [
+                {
+                    "kind": "full_attention",
+                    "k": k,
+                    "v": v,
+                    "length": length,
+                    "seen": seen,
+                },
+            ],
+        )
+
+    assert str(error.value) == "Full-attention cache progress metadata is invalid."
+
+
 def test_cache_state_rejects_invalid_native_metadata() -> None:
     """Reject incomplete delta state and impossible full-cache progress."""
-    with pytest.raises(TypeError, match="KV or delta"):
+    with pytest.raises(TypeError) as error:
         cache_state_dict([{"conv_state": torch.zeros(1)}])
-    with pytest.raises(TypeError, match="KV or delta"):
+    assert (
+        str(error.value) == "A Qwen3.5 cache layer must be KV or delta attention state."
+    )
+    with pytest.raises(TypeError) as error:
         cache_state_dict([object()])
-    with pytest.raises(TypeError, match="KV or delta"):
+    assert (
+        str(error.value) == "A Qwen3.5 cache layer must be KV or delta attention state."
+    )
+    with pytest.raises(TypeError) as error:
         cache_state_dict([{"conv_state": 1, "recurrent_state": torch.zeros(1)}])
-    with pytest.raises(ValueError, match="progress metadata"):
+    assert (
+        str(error.value) == "A Qwen3.5 cache layer must be KV or delta attention state."
+    )
+    with pytest.raises(ValueError, match="progress metadata") as error:
         cache_from_state_dict(
             [
                 {
@@ -119,6 +168,7 @@ def test_cache_state_rejects_invalid_native_metadata() -> None:
                 },
             ],
         )
+    assert str(error.value) == "Full-attention cache progress metadata is invalid."
 
 
 def test_full_attention_restores_own_independent_snapshot_tensors() -> None:
@@ -207,17 +257,17 @@ def test_frozen_view_serializes_as_independent_mutable_cache() -> None:
 @pytest.mark.parametrize(
     ("state", "message"),
     [
-        (None, "Qwen3.5 cache state must be a list"),
-        ([object()], "Qwen3.5 cache layer must be a dictionary"),
-        ([{1: "full_attention"}], "Qwen3.5 cache layer keys must be strings"),
-        ([{"kind": 1}], "kind must be a str"),
+        (None, "Qwen3.5 cache state must be a list."),
+        ([object()], "Qwen3.5 cache layer must be a dictionary."),
+        ([{1: "full_attention"}], "Qwen3.5 cache layer keys must be strings."),
+        ([{"kind": 1}], "kind must be a str."),
         (
             [{"kind": "full_attention", "k": 1, "v": 1, "length": 0, "seen": 0}],
-            "k must be a Tensor",
+            "k must be a Tensor.",
         ),
         (
             [{"kind": "linear_attention", "conv_state": 1}],
-            "delta-attention cache must map strings to tensors",
+            "A delta-attention cache must map strings to tensors.",
         ),
     ],
 )
@@ -226,27 +276,32 @@ def test_cache_restore_rejects_invalid_state_containers_and_metadata_types(
     message: str,
 ) -> None:
     """Reject malformed persistence containers before interpreting their fields."""
-    with pytest.raises(TypeError, match=message):
+    with pytest.raises(TypeError, match=message) as error:
         cache_from_state_dict(state)
+    assert str(error.value) == message
 
 
 @pytest.mark.parametrize(
     ("state", "message"),
     [
-        ([{"kind": "full_attention", "k": torch.zeros(1)}], "invalid field set"),
+        (
+            [{"kind": "full_attention", "k": torch.zeros(1)}],
+            "A full-attention cache has an invalid field set.",
+        ),
         (
             [{"kind": "linear_attention", "conv_state": torch.zeros(1)}],
-            "invalid field set",
+            "A delta-attention cache has an invalid field set.",
         ),
-        ([{"kind": "sliding_attention"}], "unknown kind"),
+        ([{"kind": "sliding_attention"}], "A Qwen3.5 cache layer has an unknown kind."),
     ],
 )
 def test_cache_restore_rejects_invalid_layer_kinds_and_field_sets(
     state: object,
     message: str,
 ) -> None:
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match=message) as error:
         cache_from_state_dict(state)
+    assert str(error.value) == message
 
 
 def test_an_empty_delta_cache_round_trips() -> None:
@@ -270,8 +325,9 @@ def test_cache_restore_rejects_bool_full_attention_metadata(name: str) -> None:
     ]
     state[0][name] = True
 
-    with pytest.raises(TypeError, match=f"{name} must be an int"):
+    with pytest.raises(TypeError, match=f"{name} must be an int") as error:
         cache_from_state_dict(state)
+    assert str(error.value) == f"{name} must be an int."
 
 
 @pytest.mark.parametrize("name", ["length", "seen"])
@@ -283,8 +339,14 @@ def test_cache_state_rejects_bool_full_attention_metadata(name: str) -> None:
     else:
         cache.seen = True
 
-    with pytest.raises(TypeError, match="progress metadata must be integers"):
+    with pytest.raises(
+        TypeError,
+        match="Full-attention cache progress metadata must be integers",
+    ) as error:
         cache_state_dict([cache])
+    assert (
+        str(error.value) == "Full-attention cache progress metadata must be integers."
+    )
 
 
 @pytest.mark.parametrize(
@@ -296,6 +358,10 @@ def test_cache_state_rejects_bool_full_attention_metadata(name: str) -> None:
             torch.zeros(2, 3, 4, 5, dtype=torch.float32),
             torch.zeros(2, 3, 4, 5, dtype=torch.float64),
         ),
+        (
+            torch.zeros(2, 3, 4, 5),
+            torch.zeros(2, 3, 4, 5, device="meta"),
+        ),
     ],
 )
 def test_cache_restore_rejects_invalid_kv_layout_or_dtype(
@@ -303,10 +369,17 @@ def test_cache_restore_rejects_invalid_kv_layout_or_dtype(
     v: torch.Tensor,
 ) -> None:
     """Reject serialized full-attention tensors with invalid layout or dtype."""
-    with pytest.raises(ValueError, match="incompatible shapes, dtypes, or devices"):
+    with pytest.raises(
+        ValueError,
+        match="Full-attention key and value caches have incompatible shapes",
+    ) as error:
         cache_from_state_dict(
             [{"kind": "full_attention", "k": k, "v": v, "length": 0, "seen": 0}],
         )
+    assert (
+        str(error.value)
+        == "Full-attention key and value caches have incompatible shapes, dtypes, or devices."
+    )
 
 
 def _models(

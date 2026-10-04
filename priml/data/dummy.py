@@ -65,7 +65,6 @@ class DummyDataset:
         generator = torch.Generator().manual_seed(config.seed)
         data = torch.randn(config.num_samples, *config.input_shape, generator=generator)
         labels = torch.randint(
-            0,
             config.num_classes,
             (config.num_samples,),
             generator=generator,
@@ -99,7 +98,6 @@ class DummyDataset:
         loader = DataLoader(
             self.dataset,
             batch_size=self.config.batch_size,
-            shuffle=False,
             num_workers=self.config.num_workers,
             collate_fn=self._collate_fn,
         )
@@ -132,7 +130,8 @@ class DummyDataset:
 
     def _collate_fn(self, batch: list[tuple[Tensor, Tensor]]) -> dict[str, Tensor]:
         """Collate batch into dict format."""
-        data_list, label_list = zip(*batch, strict=True)
+        data_list = [sample[0] for sample in batch]
+        label_list = [sample[1] for sample in batch]
         device = get_device(self.config.device)
         return {
             "media": torch.stack(data_list).to(device),

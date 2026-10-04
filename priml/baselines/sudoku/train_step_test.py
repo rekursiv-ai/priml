@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, TypedDict
+
 import pytest
 import torch
 
+from priml.baselines.sudoku import train_step
 from priml.baselines.sudoku.act import (
     AtomicPool,
     FeedbackCarry,
@@ -14,12 +17,52 @@ from priml.baselines.sudoku.act import (
 )
 from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
 from priml.baselines.sudoku.model import DeepRecurrence
+from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.baselines.sudoku.train_step import SudokuTrainStep
 from priml.lib.custom_json import ListCodec
 from priml.train.parallelism import NoParallel
 
 
-def _step(*, act: bool = False) -> SudokuTrainStep:
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+
+class _TestPrefixKwargs(TypedDict, total=False):
+    puzzle_identifiers: object
+
+
+class _RolloutSpy:
+    def __init__(self, logits: torch.Tensor, halt: torch.Tensor) -> None:
+        self.logits = logits
+        self.halt = halt
+        self.call_count = 0
+        self.received: (
+            tuple[
+                object,
+                torch.Tensor,
+                int,
+                FeedbackCarry | None,
+                Mapping[str, object],
+            ]
+            | None
+        ) = None
+
+    def __call__(
+        self,
+        model: object,
+        *,
+        media: torch.Tensor,
+        max_steps: int,
+        carry: FeedbackCarry | None,
+        prefix_kwargs: Mapping[str, object] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert prefix_kwargs is not None
+        self.call_count += 1
+        self.received = (model, media, max_steps, carry, prefix_kwargs)
+        return self.logits, self.halt
+
+
+def _step(*, act: bool = False, prefix: bool = False) -> SudokuTrainStep:
     config = SudokuTrainStep.Config()
     config.parallelism = NoParallel.Config(device="cpu")
     config.compile = None
@@ -29,6 +72,12 @@ def _step(*, act: bool = False) -> SudokuTrainStep:
     config.model.num_layers = 1
     config.model.vocab_size = 11
     config.model.embedding = GridEmbedding.Config(grid_shape=(81,))
+    if prefix:
+        config.model.prefix = SparsePuzzleEmbedding.Config(
+            num_puzzles=11,
+            num_tokens=1,
+            batch_size=4,
+        )
     if act:
         config.model.recurrence = DeepRecurrence.Config(slow_cycles=2, fast_cycles=1)
         config.pool = AtomicPool.Config(
@@ -107,6 +156,52 @@ def test_eval_packs_halt_then_grid() -> None:
     assert out["model"].shape == (4, 1 + 81)
     predictions = out["model"][:, 1:]
     assert torch.equal(predictions, predictions.round())
+
+
+def test_eval_rollout_passes_the_pool_carry_and_prefix_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    step = _step(act=True)
+    pool = step.pool
+    assert pool is not None
+    assert pool.carry is not None
+    media = torch.randint(2, 11, (4, 81))
+    prefix_kwargs: _TestPrefixKwargs = {
+        "puzzle_identifiers": torch.arange(4),
+    }
+    logits = torch.zeros(4, 81, 11)
+    halt = torch.zeros(4)
+    spy = _RolloutSpy(logits, halt)
+    monkeypatch.setattr(train_step, "rollout", spy)
+
+    actual_logits, actual_halt = step._eval_rollout(media, prefix_kwargs)
+
+    assert actual_logits is logits
+    assert actual_halt is halt
+    assert spy.call_count == 1
+    assert spy.received is not None
+    model, received_media, max_steps, carry, received_prefix_kwargs = spy.received
+    assert model is step.net
+    assert received_media is media
+    assert max_steps == pool.config.max_steps
+    assert carry is pool.carry
+    assert received_prefix_kwargs is prefix_kwargs
+
+
+def test_eval_rollout_passes_prefix_kwargs_without_an_act_pool() -> None:
+    step = _step(prefix=True)
+    step.net.eval()
+    media = torch.randint(2, 11, (4, 81))
+    puzzle_identifiers = torch.arange(1, 5, dtype=torch.int32)
+    prefix_kwargs: _TestPrefixKwargs = {
+        "puzzle_identifiers": puzzle_identifiers,
+    }
+    expected = step.net(media, **prefix_kwargs)
+
+    logits, halt = step._eval_rollout(media, prefix_kwargs)
+
+    assert torch.equal(logits, expected.logits)
+    assert torch.equal(halt, expected.halt)
 
 
 def test_act_metrics_appear_only_with_act() -> None:

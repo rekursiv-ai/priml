@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from unittest.mock import Mock
+
 from torch import Tensor
 
 import pytest
 import torch
 
+from priml.baselines.craftax.game import constants
 from priml.baselines.craftax.game.noise import (
     _smoothstep,
     fractal_noise,
@@ -118,6 +121,130 @@ def test_smoothstep_is_flat_at_both_ends() -> None:
     assert float(at_zero[1] - at_zero[0]) < 1e-8
     assert float(at_one[1] - at_one[0]) < 1e-8
     assert float(_smoothstep(torch.tensor(0.5))) == pytest.approx(0.5)
+
+
+def test_perlin_noise_matches_seeded_non_square_reference() -> None:
+    noise = perlin_noise(
+        num_envs=2,
+        shape=(6, 12),
+        resolution=(3, 4),
+        generator=torch.Generator().manual_seed(31),
+        device=torch.device("cpu"),
+    )
+
+    expected = torch.tensor(
+        [
+            [
+                [0.2762, -0.0198, 0.3893, -0.2286],
+                [0.0873, -0.3045, -0.1550, 0.1724],
+                [-0.0068, 0.2863, -0.1336, 0.1472],
+            ],
+            [
+                [-0.0471, -0.2471, -0.1052, -0.4008],
+                [-0.1379, -0.1361, -0.4608, 0.5279],
+                [-0.3521, -0.1999, 0.4341, -0.2602],
+            ],
+        ],
+    )
+    torch.testing.assert_close(noise[:, ::2, 1::3], expected, atol=5e-5, rtol=0)
+
+
+def test_noise_passes_device_to_torch_factories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factories = {
+        "arange": Mock(wraps=torch.arange),
+        "rand": Mock(wraps=torch.rand),
+        "zeros": Mock(wraps=torch.zeros),
+    }
+    for name, factory in factories.items():
+        monkeypatch.setattr(torch, name, factory)
+    on_device = Mock(wraps=constants.on_device)
+    monkeypatch.setattr(constants, "on_device", on_device)
+
+    fractal_noise(
+        num_envs=2,
+        shape=(4, 6),
+        resolution=(2, 3),
+        generator=torch.Generator().manual_seed(0),
+        device=torch.device("cpu"),
+    )
+
+    for factory in factories.values():
+        assert factory.call_args_list
+        assert all(
+            call.kwargs["device"] == torch.device("cpu")
+            for call in factory.call_args_list
+        )
+    assert on_device.call_args.args[1] == torch.device("cpu")
+
+
+def test_fractal_noise_defaults_to_one_octave() -> None:
+    default = fractal_noise(
+        num_envs=2,
+        shape=(12, 18),
+        resolution=(2, 3),
+        generator=torch.Generator().manual_seed(9),
+        device=torch.device("cpu"),
+    )
+    explicit = fractal_noise(
+        num_envs=2,
+        shape=(12, 18),
+        resolution=(2, 3),
+        octaves=1,
+        generator=torch.Generator().manual_seed(9),
+        device=torch.device("cpu"),
+    )
+
+    torch.testing.assert_close(default, explicit, atol=0, rtol=0)
+
+
+def test_fractal_noise_defaults_to_half_persistence() -> None:
+    default = fractal_noise(
+        num_envs=2,
+        shape=(12, 18),
+        resolution=(2, 3),
+        octaves=2,
+        generator=torch.Generator().manual_seed(9),
+        device=torch.device("cpu"),
+    )
+    explicit = fractal_noise(
+        num_envs=2,
+        shape=(12, 18),
+        resolution=(2, 3),
+        octaves=2,
+        persistence=0.5,
+        generator=torch.Generator().manual_seed(9),
+        device=torch.device("cpu"),
+    )
+
+    torch.testing.assert_close(default, explicit, atol=0, rtol=0)
+
+
+def test_fractal_noise_uses_each_octave_and_rescales_per_environment() -> None:
+    noise = fractal_noise(
+        num_envs=2,
+        shape=(24, 48),
+        resolution=(3, 4),
+        octaves=3,
+        persistence=0.25,
+        generator=torch.Generator().manual_seed(31),
+        device=torch.device("cpu"),
+    )
+
+    expected = torch.tensor(
+        [
+            [0.5316, 0.4943, 0.4699, 0.5316, 0.6687, 0.3893],
+            [0.8371, 0.6231, 0.3936, 0.7621, 0.3590, 0.3577],
+            [0.5316, 0.8372, 0.2412, 0.5316, 0.1708, 0.6462],
+            [0.0000, 0.4482, 0.5873, 0.5227, 0.0513, 0.4462],
+            [0.5316, 0.4545, 0.7913, 0.5316, 0.3549, 0.7763],
+            [0.9382, 0.2274, 0.4543, 0.0917, 0.4459, 0.8348],
+        ],
+    )
+    torch.testing.assert_close(noise[0, ::4, ::8], expected, atol=5e-5, rtol=0)
+    torch.testing.assert_close(noise.amin(dim=(-2, -1)), torch.zeros(2))
+    torch.testing.assert_close(noise.amax(dim=(-2, -1)), torch.ones(2))
 
 
 if __name__ == "__main__":

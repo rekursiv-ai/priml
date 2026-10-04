@@ -638,10 +638,10 @@ def _mix_forward_cuda(
 ) -> Tensor:
     """Gather and mix up to two factored n-gram sources in one launch."""
     (b, t, h, d) = v.shape
-    half = weights[0].shape[1]
+    half = h * d // 2
     tile = math.gcd(d, half)
     (g, w, i) = (
-        _pad_ngram_sources(gates, 2),
+        gates if len(gates) == 2 else [gates[0], gates[0]],
         _pad_ngram_sources(weights, 4),
         _pad_ngram_sources(indices, 4),
     )
@@ -669,22 +669,18 @@ def _mix_backward_cuda(
 ) -> list[Tensor]:
     """Compute gate gradients, scatter table gradients, and optionally mark rows."""
     (b, t, h, d) = dv.shape
-    half = weights[0].shape[1]
+    half = h * d // 2
     tile = math.gcd(d, half)
     grads = [torch.empty_like(g) for g in gates]
     (g, w, i, s, dg) = (
-        _pad_ngram_sources(gates, 2),
+        gates if len(gates) == 2 else [gates[0], gates[0]],
         _pad_ngram_sources(weights, 4),
         _pad_ngram_sources(indices, 4),
         _pad_ngram_sources(sinks, 4),
-        _pad_ngram_sources(grads, 2),
+        grads if len(grads) == 2 else [grads[0], grads[0]],
     )
     mark = bitmaps is not None
-    bm = (
-        _pad_ngram_sources(list(bitmaps), 4)
-        if bitmaps is not None
-        else _pad_ngram_sources(list(sinks), 4)
-    )
+    bm = _pad_ngram_sources(list(bitmaps), 4) if bitmaps is not None else s
     _compiled_ngram_backward()[triton.cdiv(b * t, 16),](
         buffers=(dv.contiguous(), g[0], g[1], *w, *i, dg[0], dg[1], *s, *bm),
         mark=mark,

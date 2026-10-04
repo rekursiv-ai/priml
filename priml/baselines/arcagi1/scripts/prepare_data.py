@@ -44,8 +44,10 @@ def main() -> int:
       result: Process exit code.
 
     """
+    if __doc__ is None:
+        raise ValueError("Expected __doc__ is not None.")
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -128,15 +130,15 @@ def num_puzzle_identifiers(directory: Path | str) -> int:
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:
     """Register flags on ``parser``."""
-    parser.add_argument("--directory", type=Path, default=None)
+    parser.add_argument("--directory", type=Path)
     parser.add_argument(
         "--experiment",
         default="exp000",
         help="experiment whose dataset recipe to build",
     )
-    parser.add_argument("--input-prefix", type=Path, default=None)
-    parser.add_argument("--num-aug", type=int, default=None)
-    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--input-prefix", type=Path)
+    parser.add_argument("--num-aug", type=int)
+    parser.add_argument("--seed", type=int)
 
 
 class _Flags(Protocol):

@@ -13,6 +13,8 @@ distance and fire.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from torch import Tensor
 
 import torch
@@ -27,7 +29,10 @@ from priml.baselines.craftax.game.indexing import (
     batch_rows,
     scatter_tiles_where,
 )
-from priml.baselines.craftax.game.state import EnvState, Mobs
+
+
+if TYPE_CHECKING:
+    from priml.baselines.craftax.game.state import EnvState, Mobs
 
 
 def update_mobs(
@@ -110,13 +115,11 @@ def spawn_mobs(
         state.boss_progress.long()
     ]
     species = torch.where(fighting_boss[:, None], boss_species, floor_species)
-    for field, column, mob_class in (
-        ("passive_mobs", 0, 0),
-        ("melee_mobs", 1, 1),
-        ("ranged_mobs", 2, 2),
+    for mobs, column, mob_class in (
+        (state.passive_mobs, 0, 0),
+        (state.melee_mobs, 1, 1),
+        (state.ranged_mobs, 2, 2),
     ):
-        mobs: object = getattr(state, field)  # pyright: ignore[reportAny] -- Dynamic state fields are narrowed below.
-        assert isinstance(mobs, Mobs)
         alive = _on_level(mobs.mask, state.player_level)
         chance = chances[:, column]
         if column == 1:
@@ -138,12 +141,12 @@ def spawn_mobs(
             )
         rate = torch.ones_like(chance) if column == 0 else monster_rate
         spawning = (
-            (alive.sum(-1) < alive.shape[-1])
+            (alive.sum(1) < alive.shape[1])
             & (
                 torch.rand(state.num_envs, generator=generator, device=state.device)
                 < chance * rate
             )
-            & room.flatten(1).any(-1)
+            & room.flatten(1).any(1)
         )
         if column == 0:
             spawning &= ~fighting_boss
@@ -160,17 +163,17 @@ def spawn_mobs(
                 & monster_distance
                 & (distance < constants.MOB_DESPAWN_DISTANCE)
             )
-            spawning &= room.flatten(1).any(-1)
+            spawning &= room.flatten(1).any(1)
 
         place = _sample_position(room, generator=generator)
-        slot = (~alive).int().argmax(-1)
+        slot = (~alive).int().argmax(1)
         health = constants.on_device(constants.MOB_HEALTH, state.device)[
             species[:, column].long(),
             mob_class,
         ]
         state = _place_mob(
             state,
-            field=field,
+            mobs=mobs,
             slot=slot,
             position=place,
             species=species[:, column],
@@ -193,7 +196,7 @@ def _update_melee(
         toward = _step_toward_player(state, position, generator=generator)
         wander = _random_step(state.num_envs, state.device, generator, moves=4)
 
-        gap = (position - state.player_position).abs().sum(-1)
+        gap = (position - state.player_position).abs().sum(1)
         hunting = ((gap < 10) | mechanics.is_fighting_boss(state)) & (
             torch.rand(state.num_envs, generator=generator, device=state.device) < 0.75
         )
@@ -224,7 +227,7 @@ def _update_melee(
         )
         state = _relocate(
             state,
-            field="melee_mobs",
+            mobs=mobs,
             slot=slot,
             old=position,
             new=moved,
@@ -263,7 +266,7 @@ def _update_passive(
         )
         state = _relocate(
             state,
-            field="passive_mobs",
+            mobs=mobs,
             slot=slot,
             old=position,
             new=moved,
@@ -285,7 +288,7 @@ def _update_ranged(
         alive = _slot(mobs.mask, state, slot)
         position = _slot(mobs.position, state, slot)
         offset = state.player_position - position
-        gap = offset.abs().sum(-1)
+        gap = offset.abs().sum(1)
 
         toward = _step_toward_player(state, position, generator=generator)
         wander = position + _random_step(
@@ -306,7 +309,8 @@ def _update_ranged(
             2,
         ]
         can_retreat = mechanics.can_walk_on(state, proposed, collides)
-        firing = ((gap >= 4) & (gap <= 5)) | ((gap <= 3) & ~can_retreat)
+        close = gap < 4
+        firing = torch.where(close, ~can_retreat, (gap >= 4) & (gap <= 5))
         firing &= alive & (_slot(mobs.attack_cooldown, state, slot) <= 0)
         state = _fire_projectile(
             state,
@@ -333,7 +337,7 @@ def _update_ranged(
         )
         state = _relocate(
             state,
-            field="ranged_mobs",
+            mobs=mobs,
             slot=slot,
             old=position,
             new=moved,
@@ -346,14 +350,10 @@ def _update_ranged(
 
 def _update_projectiles(state: EnvState) -> EnvState:
     """Fly every projectile one tile and resolve what it hits."""
-    for field, directions_field, hurts_player in (
-        ("mob_projectiles", "mob_projectile_directions", True),
-        ("player_projectiles", "player_projectile_directions", False),
+    for mobs, directions, hurts_player in (
+        (state.mob_projectiles, state.mob_projectile_directions, True),
+        (state.player_projectiles, state.player_projectile_directions, False),
     ):
-        mobs: object = getattr(state, field)  # pyright: ignore[reportAny] -- Dynamic state fields are narrowed below.
-        assert isinstance(mobs, Mobs)
-        directions: object = getattr(state, directions_field)  # pyright: ignore[reportAny] -- Dynamic state fields are narrowed below.
-        assert isinstance(directions, Tensor)
         for slot in range(mobs.mask.shape[-1]):
             alive = _slot(mobs.mask, state, slot)
             position = _slot(mobs.position, state, slot)
@@ -362,7 +362,7 @@ def _update_projectiles(state: EnvState) -> EnvState:
             species = _slot(mobs.type_id, state, slot)
 
             if hurts_player:
-                hits = alive & (flown == state.player_position).all(-1)
+                hits = alive & (flown == state.player_position).all(1)
                 damage = constants.on_device(constants.MOB_DAMAGE, state.device)[
                     species.long(),
                     3,
@@ -419,9 +419,9 @@ def _strike_with_projectile(
         species == int(ProjectileType.ICEBALL)
     )
     element = torch.zeros_like(damage).scatter_(
-        -1,
+        1,
         state.bow_enchantment.long()[:, None],
-        damage[:, :1] / 2,
+        damage[:, 0, None] / 2,
     )
     element[:, 0] = 0.0
     damage = damage + element * arrow[:, None]
@@ -454,28 +454,30 @@ def _projectile_hits_tile(
     killed_any = struck.clone()
     # A projectile kill unlocks the monster achievement, but shooting a cow
     # is not eating it: passive kills neither feed nor unlock.
-    for field, mob_class, can_unlock in (
-        ("melee_mobs", 1, True),
-        ("passive_mobs", 0, False),
-        ("ranged_mobs", 2, True),
+    updated_groups = [state.passive_mobs, state.melee_mobs, state.ranged_mobs]
+    for mob_group, mob_class, can_unlock in (
+        (state.melee_mobs, 1, True),
+        (state.passive_mobs, 0, False),
+        (state.ranged_mobs, 2, True),
     ):
-        mobs: object = getattr(state, field)  # pyright: ignore[reportAny] -- Dynamic state fields are narrowed below.
-        assert isinstance(mobs, Mobs)
-        mobs, killed, hit, achievements = mechanics.attack_mob_class(
+        updated_mobs, killed, hit, achievements = mechanics.attack_mob_class(
             state,
-            mobs,
+            mob_group,
             position=target,
             damage=damage,
             mob_class=mob_class,
             can_unlock=torch.full_like(struck, can_unlock),
         )
-        setattr(state, field, mobs)
+        updated_groups[mob_class] = updated_mobs
         state.achievements = achievements
         struck = struck | hit
         killed_any = killed_any | killed
         if mob_class:
             killed_monster = killed_monster | killed
 
+    state.passive_mobs = updated_groups[0]
+    state.melee_mobs = updated_groups[1]
+    state.ranged_mobs = updated_groups[2]
     rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
     state.monsters_killed[rows, level] += killed_monster.int()
@@ -499,19 +501,18 @@ def _step_toward_player(
     magnitude = offset.abs()
     # Move along whichever axis is further away; ties break at random, which
     # keeps a diagonal approach from locking into a staircase.
-    prefer_rows = magnitude[:, 0] > magnitude[:, 1]
     tied = magnitude[:, 0] == magnitude[:, 1]
     coin = torch.rand(state.num_envs, generator=generator, device=state.device) >= 0.5
-    use_rows = torch.where(tied, coin, prefer_rows)
+    use_rows = torch.where(tied, coin, magnitude.argmax(1) == 0)
     step = torch.zeros_like(position)
     step[:, 0] = torch.where(
         use_rows,
         offset[:, 0].sign(),
-        torch.zeros_like(step[:, 0]),
+        0,
     )
     step[:, 1] = torch.where(
         use_rows,
-        torch.zeros_like(step[:, 1]),
+        0,
         offset[:, 1].sign(),
     )
     return step
@@ -526,9 +527,7 @@ def _random_step(
 ) -> Tensor:
     """Draw one step from the first ``moves`` neighbour offsets."""
     choice = torch.randint(0, moves, (num_envs,), generator=generator, device=device)
-    if moves == 4:
-        return constants.on_device(constants.CLOSE_BLOCKS, device)[:4][choice]
-    return constants.on_device(constants.DIRECTIONS, device)[1:9][choice]
+    return constants.on_device(constants.DIRECTIONS, device)[1:][choice]
 
 
 def _strike_player(
@@ -575,21 +574,13 @@ def _fire_projectile(
     """Launch a creature's projectile toward the player."""
     heading = torch.zeros_like(source)
     along_rows = toward[:, 1] == 0
-    heading[:, 0] = torch.where(
-        along_rows,
-        toward[:, 0].sign(),
-        torch.zeros_like(heading[:, 0]),
-    )
-    heading[:, 1] = torch.where(
-        along_rows,
-        torch.zeros_like(heading[:, 1]),
-        toward[:, 1].sign(),
-    )
+    heading[:, 0] = torch.where(along_rows, toward[:, 0].sign(), 0)
+    heading[:, 1] = torch.where(along_rows, 0, toward[:, 1].sign())
 
     projectiles = state.mob_projectiles
     free = ~_on_level(projectiles.mask, state.player_level)
-    slot = free.int().argmax(-1)
-    firing = firing & free.any(-1)
+    slot = free.int().argmax(1)
+    firing = firing & free.any(1)
 
     rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
@@ -617,7 +608,7 @@ def _fire_projectile(
 def _relocate(
     state: EnvState,
     *,
-    field: str,
+    mobs: Mobs,
     slot: int,
     old: Tensor,
     new: Tensor,
@@ -625,8 +616,6 @@ def _relocate(
     despawns: Tensor,
 ) -> EnvState:
     """Move one creature slot and keep the occupancy grid in step with it."""
-    mobs: object = getattr(state, field)  # pyright: ignore[reportAny] -- Dynamic state fields are narrowed below.
-    assert isinstance(mobs, Mobs)
     rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
     alive = mobs.mask[rows, level, slot]
@@ -634,7 +623,7 @@ def _relocate(
     # A creature that has wandered too far is forgotten, which is what keeps
     # the fixed slots available for creatures near the player.
     stays = (
-        (old - state.player_position).abs().sum(-1) < constants.MOB_DESPAWN_DISTANCE
+        (old - state.player_position).abs().sum(1) < constants.MOB_DESPAWN_DISTANCE
     ) | ~despawns
     remains = alive & stays
 
@@ -662,7 +651,7 @@ def _relocate(
 def _place_mob(
     state: EnvState,
     *,
-    field: str,
+    mobs: Mobs,
     slot: Tensor,
     position: Tensor,
     species: Tensor,
@@ -670,8 +659,6 @@ def _place_mob(
     spawning: Tensor,
 ) -> EnvState:
     """Fill one free slot with a new creature."""
-    mobs: object = getattr(state, field)  # pyright: ignore[reportAny] -- Dynamic state fields are narrowed below.
-    assert isinstance(mobs, Mobs)
     rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
     mobs.position[rows, level, slot] = torch.where(
@@ -703,13 +690,15 @@ def _sample_position(
     """Draw one eligible tile per environment from a boolean map."""
     weights = room.flatten(1).float()
     safe = torch.where(
-        weights.sum(-1, keepdim=True) > 0,
+        weights.sum(1, keepdim=True) > 0,
         weights,
         torch.ones_like(weights),
     )
-    flat = torch.multinomial(safe, 1, generator=generator).squeeze(-1)
+    flat = torch.multinomial(safe, 1, generator=generator).squeeze(1)
+    # Not ``torch.unravel_index``: it builds its divisors with ``torch.tensor``, a
+    # host-to-device copy that CUDA graph capture of the step rejects.
     columns = room.shape[-1]
-    return torch.stack((flat // columns, flat % columns), dim=-1).int()
+    return torch.stack((flat // columns, flat % columns), dim=1).int()
 
 
 def _distance_to_player(state: EnvState) -> Tensor:

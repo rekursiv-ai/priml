@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import functools
 import math
@@ -17,6 +16,8 @@ from priml.memory import convert_to_tensor
 
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from priml.math.custom_types import Tensorable, TensorableFn
 
 
@@ -104,7 +105,7 @@ def pdf_uniform(
     span = high - low
     # Guard the degenerate interval (high == low) so the unused density branch
     # never produces inf; the support condition already excludes that case.
-    safe_span = torch.where(span > 0, span, 1.0)
+    safe_span = torch.where(span > 0, span, torch.ones_like(span))
     return torch.where((x >= low) & (x < high), 1.0 / safe_span, 0.0)
 
 
@@ -129,8 +130,8 @@ def cdf_uniform(
     y = x.max(low).min(high)
     # Degenerate interval (high == low) is a point mass at ``low``: the CDF is
     # the unit step there. Guard the zero denominator to avoid 0/0 == nan.
-    safe_span = torch.where(span > 0, span, 1.0)
-    return torch.where(span > 0, (y - low) / safe_span, (x >= low).to(x.dtype))
+    safe_span = torch.where(span > 0, span, torch.ones_like(span))
+    return torch.where(span > 0, (y - low) / safe_span, x >= low)
 
 
 def quantile_uniform(
@@ -197,9 +198,9 @@ def log_prob_discretized_logistic(
     inverse = torch.exp(-log_scale)
     upper = (centre - loc + half) * inverse
     lower = (centre - loc - half) * inverse
-    above = upper + lower > 0
-    a = torch.where(above, -lower, upper)
-    b = torch.where(above, -upper, lower)
+    below_location = torch.signbit(upper + lower)
+    a = torch.where(below_location, upper, -lower)
+    b = torch.where(below_location, lower, -upper)
     log_a = nn.functional.logsigmoid(a)
     # Clamped only where both edges round to one tail value in float32.
     gap = (nn.functional.logsigmoid(b) - log_a).clamp_max(-1e-30)
@@ -308,11 +309,11 @@ def cdf_truncated_normal(
     # also admits the deliberately reversed low > high direction) to avoid
     # 0/0 == nan, matching cdf_uniform's degenerate-interval convention.
     nondegenerate = span != 0
-    safe_span = torch.where(nondegenerate, span, 1.0)
+    safe_span = torch.where(nondegenerate, span, torch.ones_like(span))
     return torch.where(
         nondegenerate,
         (ndtr(std_x) - ndtr(std_low)) / safe_span,
-        (x >= low).to(x.dtype),
+        x >= low,
     )
 
 
@@ -347,7 +348,11 @@ def log_cdf_truncated_normal(
     # deliberately reversed low > high direction still flows through logsubexp
     # (which orders its operands internally). Mirror cdf_truncated_normal.
     nondegenerate = std_high != std_low
-    safe_high = torch.where(nondegenerate, std_high, std_low + 1.0)
+    safe_high = torch.where(
+        nondegenerate,
+        std_high,
+        torch.add(std_low, torch.ones_like(std_low)),
+    )
     log_cdf = logsubexp(
         torch.special.log_ndtr(std_x),
         torch.special.log_ndtr(std_low),
@@ -443,7 +448,7 @@ def cdf_logit_distribution(
     # convention, and feed base_cdf a finite logit it can validate.
     inside = (x > 0) & (x < 1)
     cdf = base_cdf(torch.logit(torch.where(inside, x, 0.5)))
-    return torch.where(inside, cdf, (x >= 1).to(cdf.dtype))
+    return torch.where(inside, cdf, x >= 1)
 
 
 def quantile_logit_distribution(
@@ -743,7 +748,7 @@ def ndtr(x: Tensorable) -> Tensor:
     return 0.5 * torch.where(
         z < 0.5**0.5,
         1 + torch.erf(t),
-        torch.where(t > 0.0, 2 - torch.erfc(z), torch.erfc(z)),
+        torch.where(torch.signbit(t), torch.erfc(z), 2 - torch.erfc(z)),
     )
 
 
@@ -859,11 +864,9 @@ def lbeta(x: Tensorable, y: Tensorable) -> Tensor:
     x, y = convert_to_tensor(x, y)
     x, y = torch.minimum(x, y), torch.maximum(x, y)
     log2pi = math.log(2 * math.pi)
-    # Double-where: the two_large branch is only selected for x >= 8, but
-    # torch.where evaluates it everywhere. At x == 0, ``(x / (x + y)).log()``
-    # is log(0) = -inf and leaks a NaN gradient into the selected branch, so
-    # feed this branch an x pinned into its own (x >= 8) domain.
-    safe_x = torch.where(x >= 8, x, 8.0)
+    # Two-large is evaluated for every input. Clamp its logarithm into its
+    # domain so the unselected branch cannot leak a NaN gradient at x == 0.
+    safe_x = x.clamp_min(8.0)
     two_large = (
         0.5 * log2pi
         - 0.5 * y.log()
@@ -884,10 +887,19 @@ def lbeta(x: Tensorable, y: Tensorable) -> Tensor:
     )
 
 
-def _unpack_size(*samples_size: int) -> tuple[int, ...]:
-    if len(samples_size) == 1 and isinstance(samples_size[0], Sequence):
-        return tuple(cast(Sequence[int], samples_size[0]))
-    return samples_size
+def _unpack_size(*samples_size: int | Sequence[int]) -> tuple[int, ...]:
+    if len(samples_size) == 1:
+        size = samples_size[0]
+        if isinstance(size, int):
+            return (size,)
+        return tuple(int(dimension) for dimension in size)
+
+    dimensions: list[int] = []
+    for size in samples_size:
+        if not isinstance(size, int):
+            raise TypeError("sample dimensions must be integers")
+        dimensions.append(size)
+    return tuple(dimensions)
 
 
 # Adapted from tensorflow_probability: tensorflow_probability/python/distributions/trunc

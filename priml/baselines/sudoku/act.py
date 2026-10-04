@@ -280,7 +280,7 @@ class SlotScramble:
             device=grid.device,
             generator=generator,
         )
-        return torch.where(slot.unsqueeze(-1) & cell & ~given, tokens, grid)
+        return torch.where(slot[:, None] & cell & ~given, tokens, grid)
 
 
 class FeedbackCarry:

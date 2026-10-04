@@ -75,7 +75,6 @@ class BufferProcessor:
         self.group_by_key = config.group_by_key
         self.key_field = config.key_field
         self._buffer: dict[str, dict[str, object]] = {}
-        self._current_group_value: object = None
 
     def __call__(self, samples: Iterator[Input]) -> Iterator[Output]:
         """Yield samples unchanged while buffering them.
@@ -89,7 +88,6 @@ class BufferProcessor:
 
         """
         self._buffer = {}
-        self._current_group_value = None
 
         for sample in samples:
             sample_key = sample.get(self.key_field)
@@ -99,12 +97,10 @@ class BufferProcessor:
 
             if self.group_by_key is not None:
                 group_value = sample.get(self.group_by_key)
-                if (
-                    self._current_group_value is not None
-                    and group_value != self._current_group_value
-                ):
-                    self._buffer = {}
-                self._current_group_value = group_value
+                if self._buffer:
+                    first_sample = next(iter(self._buffer.values()))
+                    if group_value != first_sample.get(self.group_by_key):
+                        self._buffer = {}
 
             assert isinstance(sample_key, str)
             self._buffer[sample_key] = dict(sample)
@@ -211,7 +207,7 @@ class ParquetMergeWriter:
 
         # Harvest field names from all buffered results, excluding
         # non-serializable fields.
-        skip_fields = {"_tar_handle", "image", "media_tensor", "caption_tokens"}
+        skip_fields = {"image", "media_tensor", "caption_tokens"}
         all_fields_set: set[str] = set()
         for sample in buffered_results.values():
             all_fields_set.update(sample.keys())

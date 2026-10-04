@@ -94,7 +94,7 @@ def _route(
     filters: Sequence[ParameterFilter],
     *,
     require_total: bool,
-    drop_empty: bool = False,
+    drop_empty: bool,
 ) -> list[Optimizer]:
     """Build each member over the trainable parameters its filter claims."""
     named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
@@ -128,7 +128,7 @@ def _route(
                 f"No filter claims {len(unclaimed)} trainable parameter(s), "
                 f"e.g. {unclaimed[0]!r}; they would never be updated.",
             )
-    return [member(group) for member, group in zip(members, groups, strict=True)]
+    return [member(groups[index]) for index, member in enumerate(members)]
 
 
 class CompositeOptimizer(Optimizer):

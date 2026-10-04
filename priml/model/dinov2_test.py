@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from torch import nn
+from torch import Tensor, nn
+from torch.nn import functional
 
 import pytest
 import torch
@@ -59,6 +60,17 @@ def test_dino_cost_rejects_unknown_variant() -> None:
         config.cost(batch_size=2, dtype=torch.float32)
 
 
+def test_dino_teacher_requires_patch_aligned_image_size() -> None:
+    config = DinoV2Teacher.Config()
+    config.image_size = 255
+    with pytest.raises(
+        ValueError,
+        match="image_size must be divisible by 16",
+    ) as error:
+        DinoV2Teacher(config)
+    assert str(error.value) == "image_size must be divisible by 16"
+
+
 def test_dino_teacher_resizes_position_and_clamps_layers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -66,7 +78,11 @@ def test_dino_teacher_resizes_position_and_clamps_layers(
         def __init__(self) -> None:
             super().__init__()
             # DINO's learned position table is batch-one by production contract.
-            self.pos_embed = nn.Parameter(torch.randn(1, 5, 3))
+            # DINO's learned position table is [batch=1, tokens, channels].
+            self.pos_embed = nn.Parameter(
+                torch.arange(30, dtype=torch.float32).reshape(1, 10, 3),
+            )
+            self.probe = nn.Parameter(torch.ones(2))
             self.blocks = nn.ModuleList([nn.Identity(), nn.Identity()])
 
         def get_intermediate_layers(
@@ -87,19 +103,83 @@ def test_dino_teacher_resizes_position_and_clamps_layers(
                 for index in n
             )
 
+    hub_loads: list[tuple[str, str]] = []
+
     def load(repository: str, variant: str) -> TinyEncoder:
-        del repository, variant
+        hub_loads.append((repository, variant))
         return TinyEncoder()
+
+    interpolation_kwargs: list[
+        tuple[tuple[int, int], str, bool | None, bool | None]
+    ] = []
+    original_interpolate = functional.interpolate
+
+    def record_interpolate(
+        input: Tensor,
+        *,
+        size: tuple[int, int],
+        mode: str,
+        align_corners: bool | None = None,
+        antialias: bool | None = False,
+    ) -> Tensor:
+        interpolation_kwargs.append((size, mode, align_corners, antialias))
+        if align_corners is None:
+            if antialias is None:
+                return original_interpolate(input, size=size, mode=mode)
+            return original_interpolate(
+                input,
+                size=size,
+                mode=mode,
+                antialias=antialias,
+            )
+        if antialias is None:
+            return original_interpolate(
+                input,
+                size=size,
+                mode=mode,
+                align_corners=align_corners,
+            )
+        return original_interpolate(
+            input,
+            size=size,
+            mode=mode,
+            align_corners=align_corners,
+            antialias=antialias,
+        )
 
     monkeypatch.setattr(
         "priml.model.dinov2.load_torch_hub_distributed",
         load,
     )
+    monkeypatch.setattr(functional, "interpolate", record_interpolate)
     config = DinoV2Teacher.Config()
+    config.variant = "tiny-test"
     config.image_size = 256
     config.layer_indices = (-3, 0, 9)
     teacher = DinoV2Teacher(config)
+    assert hub_loads == [("facebookresearch/dinov2", "tiny-test")]
     assert teacher.encoder.pos_embed.shape == (1, 257, 3)
+    assert not teacher.encoder.pos_embed.requires_grad
+    assert isinstance(teacher.encoder, nn.Module)
+    assert all(
+        not parameter.requires_grad for parameter in teacher.encoder.parameters()
+    )
+    assert interpolation_kwargs == [((16, 16), "bicubic", False, True)]
+    # DINO position tables use a batch-one token-by-channel contract.
+    source = torch.arange(30, dtype=torch.float32).reshape(1, 10, 3)
+    # DINO position interpolation reshapes the patch tokens to a square grid.
+    patch = original_interpolate(
+        source[:, 1:].reshape(1, 3, 3, 3).permute(0, 3, 1, 2),
+        size=(16, 16),
+        mode="bicubic",
+        align_corners=False,
+        antialias=True,
+    )
+    expected_position = torch.cat(
+        (source[:, :1], patch.flatten(2).transpose(1, 2)),
+        dim=1,
+    )
+    assert torch.equal(teacher.encoder.pos_embed, expected_position)
     # The teacher explicitly requires square image_size x image_size inputs.
     output = teacher(torch.zeros(2, 3, 256, 256, dtype=torch.uint8))
     assert len(output) == 3

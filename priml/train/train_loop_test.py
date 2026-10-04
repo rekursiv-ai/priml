@@ -978,12 +978,61 @@ def test_a_resume_with_nothing_left_to_do_says_so(
             loop.train()
         assert loop.step.global_step == 20  # Exited cleanly, trained nothing.
         warnings = [
-            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+            record for record in caplog.records if record.levelno >= logging.WARNING
         ]
-        assert any("already completed at step 20" in message for message in warnings), (
-            warnings
+        assert [record.getMessage() for record in warnings] == [
+            (
+                "No training step ran: this experiment already completed at step "
+                f"20 (max_steps=20) in {loop.working_dir}. To train further, raise "
+                "the stop condition; to train again from scratch, fork it with a "
+                "new experiment_name or point working_dir elsewhere."
+            ),
+        ]
+        assert warnings[0].args == (20, 20, loop.working_dir)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [(True, 0, False), (True, 1, True), (False, 1, False)],
+)
+def test_nothing_to_train_warning_requires_rank_zero_and_completed_step(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    case: tuple[bool, int, bool],
+) -> None:
+    rank_zero, global_step, warns = case
+    config = TrainLoop.Config(
+        step=_WeightedEvalStep.Config(),
+        dataset=_WeightedEvalDataset.Config(),
+    )
+    config.checkpointer = None
+    config.max_steps = 9
+    config.base_dir = tmp_path
+    config.working_dir = "/run"
+    loop = config.make()
+    step = loop.step
+    assert isinstance(step, _WeightedEvalStep)
+    step.global_step = global_step
+    monkeypatch.setattr(train_loop, "is_rank_zero", lambda: rank_zero)
+
+    with caplog.at_level(logging.WARNING, logger=train_loop.__name__):
+        loop._warn_nothing_to_train()
+
+    warnings = [
+        record for record in caplog.records if record.levelno >= logging.WARNING
+    ]
+    if warns:
+        assert len(warnings) == 1
+        assert warnings[0].msg == (
+            "No training step ran: this experiment already completed at step "
+            "%d (max_steps=%s) in %s. To train further, raise the stop "
+            "condition; to train again from scratch, fork it with a new "
+            "experiment_name or point working_dir elsewhere."
         )
-        assert any("experiment_name" in message for message in warnings), warnings
+        assert warnings[0].args == (1, 9, tmp_path / "run")
+    else:
+        assert warnings == []
 
 
 def test_fresh_run_refuses_to_overwrite_existing_checkpoints(seeded_checkpoints: Path):
@@ -3763,6 +3812,24 @@ def test_eval_extras_every_eval_forwards_payload_on_cadence_evals() -> None:
     assert cadence["eval/extras"] == {"payload": ("opaque",)}
 
 
+def test_eval_only_forces_one_final_eval_with_extras() -> None:
+    config = _make_extras_publish_config()
+    config.eval_only = True
+    loop = config.make()
+    tracker = loop.tracker
+    assert isinstance(tracker, _RecordingTracker)
+
+    loop.train()
+
+    assert len(tracker.metrics_by_step) == 1
+    payload, step = tracker.metrics_by_step[0]
+    assert step == 0
+    assert payload["eval/metric_score"] == 2.0
+    assert payload["eval/extras"] == {"payload": ("opaque",)}
+    assert {"eval/metric_score", "eval/extras", "eval/time"} <= payload.keys()
+    assert isinstance(payload["eval/time"], float)
+
+
 def test_load_state_dict_can_skip_rng_restore(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4390,7 +4457,17 @@ def test_eval_only_without_a_checkpoint_warns_and_scores_fresh_weights(
     with caplog.at_level(logging.WARNING, logger="priml.train.train_loop"):
         loop.train()
 
-    assert any("eval_only at global_step=0" in r.message for r in caplog.records)
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+    ]
+    assert warnings == [
+        (
+            "eval_only at global_step=0: no checkpoint was loaded "
+            "(resume found none). Evaluating the freshly-initialized model."
+        ),
+    ]
     assert tracker.metrics_by_step[0][0]["eval/score"] == 0.8
 
 

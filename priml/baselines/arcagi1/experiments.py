@@ -77,7 +77,6 @@ from priml.baselines.sudoku.prefix import (
 )
 from priml.baselines.sudoku.train_step import SudokuTrainStep
 from priml.model.attention.attention import Attention
-from priml.model.attention.rope import RoPE
 from priml.model.init import kaiming_uniform
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
@@ -183,7 +182,6 @@ def exp000() -> ArcTrainLoop:
     prefix.parts = [
         SparsePuzzleEmbedding.Config(
             num_puzzles=NUM_PUZZLE_IDENTIFIERS,
-            num_tokens=16,
             batch_size=batch_size,
         ),
         RegisterTokens.Config(num_tokens=1),
@@ -550,7 +548,6 @@ def exp007() -> TrmTrainLoop:
         source_name=Path(
             aug_policy_template(translation_prob=0.2, scale_prob=0.2),
         ).name,
-        working_dir="/datasets",
     )
     cfg.dataset.augmentation.spatial.translation_prob = 0.2
     cfg.dataset.augmentation.spatial.scale_prob = 0.2
@@ -628,14 +625,7 @@ def _reference_model(batch_size: int) -> SudokuNet.Config:
     model.channels_in = 512
     model.num_layers = 2
     model.embedding = GridEmbedding.Config()
-    model.block = RotaryBlock.Config(
-        attn=Attention.Config(
-            num_heads=8,
-            channels_head=64,
-            init_weight=corrected_fan_in_normal,
-        ),
-        rope=RoPE.Config(channels_head=64),
-    )
+    model.block = RotaryBlock.Config()
     model.recurrence = DeepRecurrence.Config(slow_cycles=3, fast_cycles=4)
     model.prefix = PuzzleEmbedding.Config(
         num_puzzles=NUM_PUZZLE_IDENTIFIERS,

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import pytest
 
 from priml.lib.custom_json import DictCodec, loads
+from priml.train import progress
 from priml.train.progress import write_progress
 
 
@@ -32,8 +35,32 @@ def test_write_progress_lands_step_total_metrics(tmp_path: Path) -> None:
 
 
 def test_write_progress_rejects_empty_working_dir() -> None:
-    with pytest.raises(ValueError, match="working_dir must not be empty"):
+    with pytest.raises(ValueError, match=r"^working_dir must not be empty$"):
         write_progress(1, 2, working_dir="")
+
+
+def test_write_progress_creates_nested_working_dir(tmp_path: Path) -> None:
+    working_dir = tmp_path / "nested" / "job"
+
+    path = write_progress(3, 7, working_dir=working_dir)
+
+    assert path == working_dir / "progress.json"
+    assert path.is_file()
+
+
+def test_write_progress_uses_utc_iso_timestamp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Mock(wraps=datetime)
+    clock.now.return_value = datetime(2025, 2, 3, 4, 5, 6, tzinfo=UTC)
+    monkeypatch.setattr(progress, "datetime", clock)
+
+    path = write_progress(1, 2, working_dir=tmp_path)
+
+    data = DictCodec.coerce(loads(path.read_text()))
+    assert data["updated_at"] == "2025-02-03T04:05:06Z"
+    clock.now.assert_called_once_with(tz=UTC)
 
 
 def test_write_progress_overwrites_atomically(tmp_path: Path) -> None:

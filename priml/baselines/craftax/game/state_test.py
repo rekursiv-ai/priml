@@ -23,15 +23,122 @@ def test_shapes_follow_the_declared_world_size() -> None:
     state = _state()
     levels, (rows, columns) = constants.NUM_LEVELS, constants.MAP_SIZE
     assert state.map.shape == (4, levels, rows, columns)
+    assert state.item_map.shape == (4, levels, rows, columns)
+    assert state.light_map.shape == (4, levels, rows, columns)
+    assert state.mob_map.shape == (4, levels, rows, columns)
+    assert state.down_ladders.shape == (4, levels, 2)
+    assert state.up_ladders.shape == (4, levels, 2)
+    assert state.chests_opened.shape == (4, levels)
+    assert state.monsters_killed.shape == (4, levels)
+    assert state.player_position.shape == (4, 2)
+    assert state.inventory.armour.shape == (4, 4)
+    assert state.inventory.potions.shape == (4, 6)
     assert state.melee_mobs.position.shape == (
         4,
         levels,
         constants.MAX_MELEE_MOBS,
         2,
     )
+    assert state.passive_mobs.position.shape == (
+        4,
+        levels,
+        constants.MAX_PASSIVE_MOBS,
+        2,
+    )
+    assert state.ranged_mobs.position.shape == (
+        4,
+        levels,
+        constants.MAX_RANGED_MOBS,
+        2,
+    )
+    assert state.mob_projectiles.position.shape == (
+        4,
+        levels,
+        constants.MAX_MOB_PROJECTILES,
+        2,
+    )
+    assert state.player_projectiles.position.shape == (
+        4,
+        levels,
+        constants.MAX_PLAYER_PROJECTILES,
+        2,
+    )
+    assert state.mob_projectile_directions.shape == (
+        4,
+        levels,
+        constants.MAX_MOB_PROJECTILES,
+        2,
+    )
+    assert state.player_projectile_directions.shape == (
+        4,
+        levels,
+        constants.MAX_PLAYER_PROJECTILES,
+        2,
+    )
+    assert state.growing_plants_positions.shape == (
+        4,
+        constants.MAX_GROWING_PLANTS,
+        2,
+    )
+    assert state.growing_plants_age.shape == (4, constants.MAX_GROWING_PLANTS)
+    assert state.growing_plants_mask.shape == (4, constants.MAX_GROWING_PLANTS)
+    assert state.potion_mapping.shape == (4, 6)
+    assert state.learned_spells.shape == (4, 2)
+    assert state.armour_enchantments.shape == (4, 4)
     assert state.achievements.shape == (4, len(constants.Achievement))
-    assert state.inventory.potions.shape == (4, 6)
     assert state.num_envs == 4
+
+
+def test_empty_state_allocates_every_field_with_its_dtype_and_device() -> None:
+    state = empty_state(num_envs=2, device=torch.device("meta"))
+    names = state.state_dict()
+    bool_fields = {
+        "mob_map",
+        "chests_opened",
+        "is_sleeping",
+        "is_resting",
+        "growing_plants_mask",
+        "learned_spells",
+        "achievements",
+    }
+    float_fields = {
+        "light_map",
+        "player_health",
+        "player_recover",
+        "player_hunger",
+        "player_thirst",
+        "player_fatigue",
+        "player_recover_mana",
+        "light_level",
+        "melee_mobs.health",
+        "passive_mobs.health",
+        "ranged_mobs.health",
+        "mob_projectiles.health",
+        "player_projectiles.health",
+    }
+    for name, value in names.items():
+        assert value.device.type == "meta", name
+        expected_dtype = (
+            torch.bool
+            if name in bool_fields or name.endswith(".mask")
+            else torch.float32
+            if name in float_fields
+            else torch.int32
+        )
+        assert value.dtype == expected_dtype, name
+
+
+def test_float_fields_ignore_the_default_dtype() -> None:
+    original_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(torch.float64)
+        state = empty_state(num_envs=2, device=torch.device("cpu"))
+    finally:
+        torch.set_default_dtype(original_dtype)
+
+    assert state.light_map.dtype == torch.float32
+    assert state.player_health.dtype == torch.float32
+    assert state.melee_mobs.health.dtype == torch.float32
 
 
 def test_select_takes_rows_from_the_replacement_only_where_asked() -> None:

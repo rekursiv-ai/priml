@@ -67,13 +67,12 @@ def remap_hf_state_dict(
         sources = _sources(target, prefix=prefix, blocks=blocks)
         shape = tuple(template.shape)
         if len(sources) == 2:
-            part_shape = (shape[0] // 2, *shape[1:])
+            part_shape = (divmod(shape[0], 2)[0], *shape[1:])
             mapped[target] = torch.cat(
                 [
                     _take(state, remaining=remaining, name=name, shape=part_shape)
                     for name in sources
                 ],
-                dim=0,
             )
         else:
             mapped[target] = _take(

@@ -213,5 +213,6 @@ def dirac(w: Tensor) -> None:
 
 def _depth_index_scale(w: Tensor, depth_index: DepthIndex) -> None:
     flattened = flatten_depth_index(depth_index)
-    if flattened > 0:
-        w.data /= (flattened + 1) ** 0.5
+    if flattened == -1:
+        return
+    w.data /= (flattened + 1) ** 0.5

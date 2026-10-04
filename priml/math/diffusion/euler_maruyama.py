@@ -88,10 +88,10 @@ def integrate_two_streams(
         if index == last:
             latent = latent + dt * drift_latent
             cls = cls + dt * drift_cls
-            break
-        noise = torch.randn_like(latent) * torch.sqrt(torch.abs(dt))
-        noise_cls = torch.randn_like(cls) * torch.sqrt(torch.abs(dt))
-        scale = torch.sqrt(diffusion(t_curr))
-        latent = latent + drift_latent * dt + scale * noise
-        cls = cls + drift_cls * dt + scale * noise_cls
+        else:
+            noise = torch.randn_like(latent) * torch.sqrt(torch.abs(dt))
+            noise_cls = torch.randn_like(cls) * torch.sqrt(torch.abs(dt))
+            scale = torch.sqrt(diffusion(t_curr))
+            latent = latent + drift_latent * dt + scale * noise
+            cls = cls + drift_cls * dt + scale * noise_cls
     return latent, cls

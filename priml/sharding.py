@@ -37,7 +37,7 @@ def parse_shard_spec(spec: str, total_shards: int) -> set[int]:
         {1, 3, 4, 5, 6, 7, 8}
 
     """
-    if not spec.strip():
+    if not spec.strip() or total_shards <= 0:
         return set()
 
     shard_ids: set[int] = set()
@@ -53,7 +53,7 @@ def parse_shard_spec(spec: str, total_shards: int) -> set[int]:
             # a list of shard IDs would -- including clamping to bounds.
             parts = part_stripped.split(":")
             start_str = parts[0].strip()
-            end_str = parts[1].strip() if len(parts) > 1 else ""
+            end_str = parts[1].strip()
             step_str = parts[2].strip() if len(parts) > 2 else ""
 
             sl = slice(
@@ -68,7 +68,6 @@ def parse_shard_spec(spec: str, total_shards: int) -> set[int]:
                 idx = max(0, total_shards + idx)
             else:
                 idx = min(idx, total_shards - 1)
-            if 0 <= idx < total_shards:
-                shard_ids.add(idx)
+            shard_ids.add(idx)
 
     return shard_ids

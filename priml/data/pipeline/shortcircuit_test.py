@@ -5,10 +5,11 @@ from unittest.mock import patch
 
 import gc
 import threading
-import time
 import weakref
 
 from configgle import Fig
+
+import pytest
 
 from priml.data.pipeline.shortcircuit import (
     FilterStats,
@@ -49,6 +50,11 @@ class MockProcessor:
             filter_reasons.append(self.add_reason)
             sample["filter_reasons"] = filter_reasons
             yield sample
+
+
+def test_short_circuit_requires_processor_with_exact_error() -> None:
+    with pytest.raises(ValueError, match=r"^Must specify `processor`\.$"):
+        ShortCircuitProcessor(ShortCircuitProcessor.Config(processor=None))
 
 
 class EverySecondProcessor:
@@ -132,21 +138,22 @@ def test_filter_stats_initialization():
     assert stats.drop_reasons == {}
 
 
-def test_filter_stats_should_log():
-    """Test FilterStats._should_log method."""
-    config = FilterStats.Config(log_interval_sec=1.0)
-    stats = FilterStats(config)
+def test_filter_stats_throttle_and_force_logging():
+    stats = FilterStats(FilterStats.Config(log_interval_sec=1.0))
+    with patch("priml.data.pipeline.shortcircuit.time.time", return_value=10.0):
+        stats.last_log_time = 10.0
+        with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+            stats.log_statistics()
+        assert logger_mock.info.call_count == 0
 
-    # Force should log.
-    assert stats._should_log(force=True) is True
+        with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+            stats.log_statistics(force=True)
+        assert logger_mock.info.call_count == 1
 
-    # Before interval.
-    stats.last_log_time = time.time()
-    assert stats._should_log(force=False) is False
-
-    # After interval.
-    stats.last_log_time = time.time() - 2.0
-    assert stats._should_log(force=False) is True
+        stats.last_log_time = 8.0
+        with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+            stats.log_statistics()
+        assert logger_mock.info.call_count == 1
 
 
 def test_filter_stats_public_mutators():
@@ -525,6 +532,135 @@ def test_short_circuit_records_only_string_drop_reasons():
     assert list(processor(iter(samples))) == []
     assert processor.stats.processor_drops == {"MalformedReasonDropper": 2}
     assert processor.stats.drop_reasons == {"MalformedReasonDropper": {"blurry": 2}}
+
+
+def test_filter_stats_logs_exact_summary_and_throughput() -> None:
+    stats = FilterStats.Config(log_interval_sec=2.0).make()
+    stats.samples_processed = 7
+    stats.samples_skipped = 2
+    stats.samples_dropped = 1
+    stats.last_processed_count = 3
+
+    with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+        stats._log_summary()
+
+    assert logger_mock.info.call_args.args == (
+        (
+            "Pipeline stats: Total=7, Processed=5, Skipped=2 (already filtered), "
+            "Dropped=1 (filtered by any processor), Rate=2.0 samples/sec"
+        ),
+    )
+    assert stats.last_processed_count == 7
+
+    stats.last_processed_count = 3
+    stats._config.log_interval_sec = 0.0
+    with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+        stats._log_summary()
+    assert logger_mock.info.call_args.args == (
+        (
+            "Pipeline stats: Total=7, Processed=5, Skipped=2 (already filtered), "
+            "Dropped=1 (filtered by any processor), Rate=0.0 samples/sec"
+        ),
+    )
+
+    stats.last_processed_count = 3
+    stats._config.log_interval_sec = 1.0
+    with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+        stats._log_summary()
+    assert logger_mock.info.call_args.args == (
+        (
+            "Pipeline stats: Total=7, Processed=5, Skipped=2 (already filtered), "
+            "Dropped=1 (filtered by any processor), Rate=4.0 samples/sec"
+        ),
+    )
+
+
+def test_filter_stats_logs_sorted_top_drop_reasons() -> None:
+    stats = FilterStats(FilterStats.Config(top_n_processors=2))
+    stats.drop_reasons = {
+        "Alpha": {"z": 1, "a": 2},
+        "Beta": {"only": 2},
+        "Gamma": {"ignored": 1},
+    }
+
+    with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+        stats._log_drop_reasons()
+
+    assert [call.args for call in logger_mock.info.call_args_list] == [
+        ("%s drop reasons: %s", "Alpha", "a=2, z=1"),
+        ("%s drop reasons: %s", "Beta", "only=2"),
+    ]
+
+
+def test_filter_stats_logs_sorted_processor_drop_counts() -> None:
+    stats = FilterStats(FilterStats.Config())
+    stats.processor_drops = {"Zeta": 1, "Alpha": 2}
+
+    with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+        stats._log_processor_drops()
+
+    assert logger_mock.info.call_args.args == (
+        "Drops by processor: %s",
+        "Alpha=2, Zeta=1",
+    )
+
+
+def test_filter_stats_throttle_boundary_and_repeated_counts() -> None:
+    stats = FilterStats(FilterStats.Config(log_interval_sec=2.0))
+    stats.record_skipped()
+    stats.record_skipped()
+    with patch("priml.data.pipeline.shortcircuit.time.time", return_value=10.0):
+        stats.last_log_time = 8.0
+        with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+            stats.log_statistics()
+        assert logger_mock.info.call_count == 1
+        assert stats.last_log_time == 10.0
+        assert stats.samples_skipped == 2
+
+        stats.last_log_time = 10.0
+        with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+            stats.log_statistics(force=True)
+        assert logger_mock.info.call_count == 1
+
+
+def test_short_circuit_logs_filtered_sample_and_drop_details() -> None:
+    processor = ShortCircuitProcessor(
+        ShortCircuitProcessor.Config(
+            processor=MockProcessor.Config(drop_keys=["drop"]),
+        ),
+    )
+    samples: list[dict[str, object]] = [
+        {"key": "filtered", "filter_reasons": ["old"]},
+        {"key": "drop"},
+    ]
+
+    with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+        result = list(processor(iter(samples)))
+
+    assert result == [samples[0]]
+    assert [call.args for call in logger_mock.debug.call_args_list] == [
+        (
+            "%s: skipping filtered sample (key=%s, reasons=%s)",
+            "MockProcessor",
+            "filtered",
+            ["old"],
+        ),
+        ("%s: dropped a sample", "MockProcessor"),
+    ]
+    assert processor.stats.samples_processed == 2
+    assert processor.stats.samples_skipped == 1
+    assert processor.stats.samples_dropped == 1
+    assert processor.stats.processor_drops == {"MockProcessor": 1}
+    assert processor.stats.drop_reasons == {}
+
+
+def test_filter_stats_initial_time_fields_are_initialized() -> None:
+    with patch("priml.data.pipeline.shortcircuit.time.time", return_value=12.5):
+        stats = FilterStats(FilterStats.Config())
+
+    assert stats.last_log_time == 0.0
+    assert stats.start_time == 12.5
+    assert stats.last_processed_count == 0
 
 
 if __name__ == "__main__":

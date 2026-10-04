@@ -113,8 +113,8 @@ class CraftaxScore:
         """
         if not self._returns:
             return {"episodes": 0.0}
-        returns = np.asarray(self._returns, dtype=np.float64)
-        rates = np.asarray(self._unlocked, dtype=np.float64).mean(axis=0)
+        returns = np.asarray(self._returns)
+        rates = np.asarray(self._unlocked).mean(axis=0)
         return {
             "normalized_return_pct": float(
                 returns.mean() / constants.REWARD_CEILING * 100.0,

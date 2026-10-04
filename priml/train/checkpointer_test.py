@@ -11,10 +11,11 @@ import functools
 import math
 import shutil
 import tempfile
+import time
 
 from configgle import Makes
 from torch import Tensor, nn
-from torch.distributed.checkpoint import state_dict_saver
+from torch.distributed.checkpoint import state_dict_loader, state_dict_saver
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor
@@ -141,16 +142,30 @@ def _load(
 def test_save_logs_size_and_duration(
     temp_checkpoint_dir: Path,
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A successful save reports path, on-disk size, and duration (telemetry)."""
+    perf_counter_values = iter((10.0, 12.0))
+    monkeypatch.setattr(
+        time,
+        "perf_counter",
+        lambda: next(perf_counter_values),
+    )
     ckpt = Checkpointer(
         Checkpointer.Config(working_dir=temp_checkpoint_dir, save_every=1),
     )
     with caplog.at_level("INFO"):
         ckpt.save(_DictTarget({"x": torch.zeros(256)}), 1)
-    assert any(
-        "Saved checkpoint" in r.message and "MB" in r.message for r in caplog.records
-    ), "save telemetry (size/duration) missing"
+    records = [r for r in caplog.records if r.message.startswith("Saved checkpoint")]
+    assert len(records) == 1
+    record = records[0]
+    assert record.message.startswith(f"Saved checkpoint -> {temp_checkpoint_dir}/")
+    assert isinstance(record.args, tuple)
+    assert record.args[0] == temp_checkpoint_dir / "step_00000001.pt"
+    assert record.args[1] == pytest.approx(
+        (temp_checkpoint_dir / "step_00000001.pt").stat().st_size / 1024**2,
+    )
+    assert record.args[2] == 2.0
 
 
 def test_init_validates_and_sets_fields(temp_checkpoint_dir: Path) -> None:
@@ -228,8 +243,14 @@ def test_startup_guards_every_reachable_save(tmp_path: Path, step: int) -> None:
     config.save_every = 10_000
     config.resume = False
     config.make().save(_DictTarget({"value": "old"}), step)
-    with pytest.raises(RuntimeError, match="overwrite"):
+    with pytest.raises(RuntimeError) as exc_info:
         config.make().load(_DictTarget({}), max_steps=5)
+    assert str(exc_info.value) == (
+        f"a future save would overwrite existing checkpoints at steps [{step}] "
+        f"in {tmp_path} (start_step=None, max_steps=5). "
+        "Resume to continue the run, change the run name / checkpoint location, "
+        "or set allow_checkpoint_overwrite=True to deliberately re-mint over them."
+    )
 
 
 def test_final_save_refreshes_own_cadence_prefix(tmp_path: Path) -> None:
@@ -281,6 +302,76 @@ def test_overwrite_rejects_file_to_distributed_format_transition(
 
     with pytest.raises(FileExistsError):
         ckpt.save(_DictTarget({"value": "distributed"}), 1)
+
+
+def test_sync_storer_creates_nested_parent_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "nested" / "deeper" / "step_00000001.pt"
+    state: StateDict = {"value": torch.tensor([3, 4])}
+    callback: list[bool] = []
+    save = torch.save
+    save_paths: list[Path] = []
+
+    def record_save(state_dict: StateDict, path: Path) -> None:
+        save_paths.append(path)
+        save(state_dict, path)
+
+    monkeypatch.setattr(torch, "save", record_save)
+
+    SyncLocalStateDictStorer().write(
+        path,
+        state,
+        after_write=lambda: callback.append(path.is_file()),
+    )
+
+    loaded = cast(StateDict, torch.load(path, weights_only=True))
+    assert torch.equal(_tensor(loaded["value"]), _tensor(state["value"]))
+    assert save_paths == [path.with_suffix(".pt.tmp")]
+    assert callback == [True]
+    assert not path.with_suffix(".pt.tmp").exists()
+
+
+def test_sync_storer_distributed_write_forwards_state_and_callback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    path = tmp_path / "nested" / "deeper" / "step_00000001.pt"
+    state: StateDict = {"value": torch.tensor([3, 4])}
+    events: list[str] = []
+    observed: list[tuple[StateDict, str]] = []
+
+    def has_dtensor(state_dict: object) -> bool:
+        del state_dict
+        return True
+
+    def save(state_dict: StateDict, *, checkpoint_id: str) -> None:
+        observed.append((state_dict, checkpoint_id))
+        events.append("save")
+
+    perf_counter_values = iter((20.0, 22.0))
+    monkeypatch.setattr(
+        time,
+        "perf_counter",
+        lambda: next(perf_counter_values),
+    )
+    monkeypatch.setattr(checkpointer, "_has_dtensor", has_dtensor)
+    monkeypatch.setattr(state_dict_saver, "save", save)
+    with caplog.at_level("INFO"):
+        SyncLocalStateDictStorer().write(
+            path,
+            state,
+            after_write=lambda: events.append("callback"),
+        )
+
+    assert observed == [(state, str(path))]
+    assert events == ["save", "callback"]
+    assert isinstance(caplog.records[-1].args, tuple)
+    assert caplog.records[-1].args[0] == path
+    assert caplog.records[-1].args[1] == 2.0
+    assert caplog.records[-1].message.startswith("Saved distributed checkpoint ->")
 
 
 def test_sync_storer_rejects_directory_to_file_transition(
@@ -431,6 +522,26 @@ def test_available_steps_ignores_malformed_names(temp_checkpoint_dir: Path) -> N
     (temp_checkpoint_dir / "step_100.pt").write_bytes(b"x")
     (temp_checkpoint_dir / "step_latest.pt").write_bytes(b"x")  # Malformed.
     assert ckpt.available_steps() == [100]
+
+
+def test_sync_storer_distributed_read_fills_and_returns_template(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "step_00000001.pt"
+    path.mkdir()
+    into: StateDict = {"value": torch.zeros(2)}
+    calls: list[tuple[StateDict, str]] = []
+
+    def load(state_dict: StateDict, *, checkpoint_id: str) -> None:
+        calls.append((state_dict, checkpoint_id))
+
+    monkeypatch.setattr(state_dict_loader, "load", load)
+
+    restored = SyncLocalStateDictStorer().read(path, into)
+
+    assert restored is into
+    assert calls == [(into, str(path))]
 
 
 def test_load_uses_weights_only(
@@ -609,6 +720,32 @@ def test_prune_logs_and_continues_when_a_delete_fails(
     assert ckpt.available_steps() == [10, 20]
 
 
+def test_best_record_creates_nested_directory_and_uses_temp_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint_dir = tmp_path / "nested" / "deeper" / "checkpoints"
+    ckpt = _best_checkpointer(checkpoint_dir)
+    ckpt.best_step = 3
+    ckpt.best_value = 0.75
+    replaced_from: list[str] = []
+    replace = Path.replace
+
+    def record_replace(self: Path, target: str | Path) -> Path:
+        replaced_from.append(self.name)
+        return replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", record_replace)
+
+    ckpt._write_best_record()
+
+    assert (checkpoint_dir / "best.json").read_text() == (
+        '{"metric": "accuracy", "mode": "max", "step": 3, "value": 0.75}'
+    )
+    assert replaced_from == ["best.json.tmp"]
+    assert not (checkpoint_dir / "best.json.tmp").exists()
+
+
 def test_best_record_is_written_by_rank_zero_only(
     temp_checkpoint_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -782,6 +919,14 @@ def test_space_padded_filename_roundtrips(tmp_path: Path, filename: str) -> None
     assert target.loaded == {"value": 1}
 
 
+def test_on_eval_accepts_step_zero(temp_checkpoint_dir: Path) -> None:
+    ckpt = _best_checkpointer(temp_checkpoint_dir)
+
+    assert ckpt.on_eval(_DictTarget({}), 0, {"accuracy": 0.5})
+    assert ckpt.best_step == 0
+    assert ckpt.available_steps() == [0]
+
+
 def test_on_eval_saves_on_improvement_only(temp_checkpoint_dir: Path) -> None:
     ckpt = _best_checkpointer(temp_checkpoint_dir)
     t = _DictTarget({"step": 0})
@@ -796,9 +941,10 @@ def test_on_eval_min_mode_saves_on_decrease(temp_checkpoint_dir: Path) -> None:
     ckpt = _best_checkpointer(temp_checkpoint_dir, best_mode="min")
     t = _DictTarget({"step": 0})
     assert ckpt.on_eval(t, 7, {"accuracy": 0.5})
-    assert not ckpt.on_eval(t, 14, {"accuracy": 0.6})
-    assert ckpt.on_eval(t, 21, {"accuracy": 0.4})
-    assert ckpt.available_steps() == [7, 21]
+    assert not ckpt.on_eval(t, 14, {"accuracy": 0.5})
+    assert not ckpt.on_eval(t, 21, {"accuracy": 0.6})
+    assert ckpt.on_eval(t, 28, {"accuracy": 0.4})
+    assert ckpt.available_steps() == [7, 28]
 
 
 def test_on_eval_missing_metric_names_available_keys(
@@ -1023,6 +1169,29 @@ def test_load_falls_back_past_incomplete_latest(temp_checkpoint_dir: Path) -> No
 
     assert ckpt.available_steps() == [10, 20]  # 30 is incomplete.
     assert _load(temp_checkpoint_dir, save_every=10)["step"] == 20
+
+
+def test_load_guard_detects_checkpoint_at_max_steps(temp_checkpoint_dir: Path) -> None:
+    _save(
+        Checkpointer(
+            Checkpointer.Config(working_dir=temp_checkpoint_dir, save_every=10),
+        ),
+        1,
+        {"step": 1},
+    )
+    _save(
+        Checkpointer(
+            Checkpointer.Config(working_dir=temp_checkpoint_dir, save_every=10),
+        ),
+        5,
+        {"step": 5},
+    )
+    resumed = Checkpointer(
+        Checkpointer.Config(working_dir=temp_checkpoint_dir, resume_step=1),
+    )
+
+    with pytest.raises(RuntimeError, match="overwrite"):
+        resumed.load(_DictTarget({}), max_steps=5, guard=True)
 
 
 def test_load_guard_detects_overlap(temp_checkpoint_dir: Path) -> None:
@@ -1643,6 +1812,21 @@ def test_marker_invalidation_error_reaches_every_rank_before_payloads(
     assert unlinks == ([marker] if rank == 0 else [])
     assert broadcasts == (["injected invalidation failure"] if rank == 0 else [None])
     assert marker.read_bytes() == b"prior snapshot"
+
+
+def test_async_storer_reports_pending_future_until_flush() -> None:
+    storage = AsyncLocalStateDictStorer()
+    future: Future[object] = Future()
+
+    assert not storage.has_pending_write()
+    storage._pending = future
+    assert storage.has_pending_write()
+    future.set_result(None)
+    assert storage.has_pending_write()
+
+    storage.flush()
+
+    assert not storage.has_pending_write()
 
 
 def test_async_pending_overwrite_is_incomplete_without_join(tmp_path: Path) -> None:

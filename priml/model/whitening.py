@@ -92,7 +92,7 @@ class PCAWhiteningConv2d(nn.Conv2d):
             0,
             eigenvectors.abs().argmax(dim=0, keepdim=True),
         ).squeeze(0)
-        signs = torch.where(peak < 0, -1.0, 1.0)
-        eigenvectors = eigenvectors * signs.unsqueeze(0)
-        kernel = eigenvectors.T.reshape(-1, C, kH, kW).to(self.weight.dtype)
+        negative = peak < 0
+        eigenvectors = torch.where(negative.unsqueeze(0), -eigenvectors, eigenvectors)
+        kernel = eigenvectors.T.reshape(-1, C, kH, kW)
         self.weight.data[:] = torch.cat([kernel, -kernel])

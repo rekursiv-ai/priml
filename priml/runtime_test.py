@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import TypedDict
 
 import pytest
 import torch
@@ -39,6 +39,7 @@ def test_get_device_auto_prefers_cuda_then_mps_then_cpu(
     monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: mps)
     assert get_device("auto") == torch.device(expected)
+    assert get_device() == torch.device(expected)
 
 
 class _StubRuntime:
@@ -78,20 +79,51 @@ def test_is_rank_zero_reflects_get_rank_when_distributed(
     assert is_rank_zero() is False
 
 
-def test_single_process_resolves_device() -> None:
-    runtime = SingleProcess.Config(device="cpu").make()
-    assert runtime.device == torch.device("cpu")
+@pytest.mark.parametrize("device", ["cpu", "meta"])
+def test_single_process_resolves_device(device: str) -> None:
+    process = SingleProcess.Config(device=device).make()
+    assert process.device == torch.device(device)
 
 
-def test_multiprocess_backend_defaults_to_gloo_on_cpu() -> None:
-    """T-055: backend resolution must yield gloo for a CPU device."""
-    runtime = MultiProcess.Config(device="cpu").make()
-    assert runtime.backend == "gloo"
+@pytest.mark.parametrize(("device", "backend"), [("cpu", "gloo"), ("cuda", "nccl")])
+def test_multiprocess_backend_defaults_from_device(device: str, backend: str) -> None:
+    runtime = MultiProcess.Config(device=device).make()
+    assert runtime.device == torch.device(device)
+    assert runtime.backend == backend
 
 
 def test_multiprocess_backend_respects_explicit() -> None:
     runtime = MultiProcess.Config(device="cpu", backend="gloo").make()
     assert runtime.backend == "gloo"
+
+
+def _fallback_local_rank(*, fallback_rank: int | None) -> int:
+    return fallback_rank if fallback_rank is not None else 0
+
+
+def test_multiprocess_initialize_passes_configured_device_and_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _patch_distributed(monkeypatch, world_size=1)
+    monkeypatch.setattr(
+        torch.distributed,
+        "get_node_local_rank",
+        _fallback_local_rank,
+    )
+    process = MultiProcess.Config(
+        device="cuda",
+        backend="custom",
+        mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+    ).make()
+
+    process.initialize()
+
+    assert "mesh_device_type" in record
+    assert record["mesh_device_type"] == "cuda"
+    assert "init_kwargs" in record
+    init_kwargs = record["init_kwargs"]
+    assert init_kwargs["backend"] == "custom"
+    assert init_kwargs["device_id"] == torch.device("cuda", 0)
 
 
 def test_single_process_initialize_sets_float32_matmul_precision(
@@ -152,7 +184,10 @@ def test_single_process_initialize_rejects_conflicting_settings(
         float32_matmul_precision="high",
     ).make().initialize()
 
-    with pytest.raises(RuntimeError, match="different settings"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"^Runtime already initialized with different settings ",
+    ):
         SingleProcess.Config(
             device="cpu",
             float32_matmul_precision="highest",
@@ -177,7 +212,10 @@ def test_single_process_destroy_rejects_a_live_device_mesh(
 ) -> None:
     """A mesh means a multi-process runtime owns the process; do not clobber it."""
     monkeypatch.setattr(runtime, "_device_mesh", object())
-    with pytest.raises(RuntimeError, match="Device mesh initialized"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"^Device mesh initialized but single process\.$",
+    ):
         SingleProcess.Config(device="cpu").make().destroy()
 
 
@@ -188,7 +226,10 @@ def test_single_process_initialize_rejects_multiprocess_runtime(
     monkeypatch.setattr(runtime, "_runtime_initialized", True)
     monkeypatch.setattr(runtime, "_single_process_settings", None)
 
-    with pytest.raises(RuntimeError, match="multi-process strategy"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"^Runtime already initialized by a multi-process strategy\.$",
+    ):
         SingleProcess.Config(device="cpu").make().initialize()
 
 
@@ -205,20 +246,54 @@ def test_single_process_destroy_clears_settings(
     process.initialize()
     process.destroy()
 
-    assert not runtime.runtime_initialized()
+    assert runtime._runtime_initialized is False
+    assert runtime._single_process_settings is None
     # A conflicting config now initializes cleanly rather than raising.
     SingleProcess.Config(device="cpu", deterministic=True).make().initialize()
 
 
 @pytest.mark.parametrize(
     "mesh_topology",
-    [{"dp": 0, "pp": 1, "tp": 1}, {"dp": -1, "pp": -1, "tp": 1}],
+    [
+        {"dp": 0, "pp": 1, "tp": 1},
+        {"dp": -1, "pp": -1, "tp": 1},
+        {"dp": -2, "pp": 1, "tp": 2},
+    ],
 )
-def test_multiprocess_rejects_a_zero_or_doubly_automatic_mesh(
+def test_multiprocess_rejects_invalid_mesh_dimensions(
     mesh_topology: dict[str, int],
 ) -> None:
-    with pytest.raises(ValueError, match="at most one negative"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Mesh topology dimensions must be positive except for at most one "
+        r"-1 \(auto\); got .+\.$",
+    ) as raised:
         MultiProcess.Config(device="cpu", mesh_topology=mesh_topology).make()
+
+    assert str(raised.value) == (
+        "Mesh topology dimensions must be positive except for at most one "
+        f"-1 (auto); got {mesh_topology}."
+    )
+
+
+def test_resolve_mesh_topology_uses_exact_integer_auto_dimension() -> None:
+    topology = {"dp": -1, "pp": 1, "tp": 2}
+
+    resolved = runtime._resolve_mesh_topology(topology, 12)
+
+    assert resolved == {"dp": 6, "pp": 1, "tp": 2}
+    assert type(resolved["dp"]) is int
+
+
+def test_resolve_mesh_topology_preserves_zero_dimension_in_auto_topology() -> None:
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"^World size 4 does not match mesh topology "
+            r"\{'pp': 0, 'dp': 2, 'tp': 2\} \(expected 0\)$"
+        ),
+    ):
+        runtime._resolve_mesh_topology({"pp": 0, "dp": -1, "tp": 2}, 4)
 
 
 def test_multiprocess_finalize_leaves_device_unresolved() -> None:
@@ -234,22 +309,45 @@ def test_multiprocess_initialize_and_destroy_drive_the_global_mesh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     record = _patch_distributed(monkeypatch, world_size=2)
+    precision_calls: list[str] = []
+    determinism_calls: list[str] = []
+    monkeypatch.setattr(torch, "set_float32_matmul_precision", precision_calls.append)
+    monkeypatch.setattr(
+        runtime,
+        "enable_determinism",
+        lambda: determinism_calls.append("enabled"),
+    )
     process = MultiProcess.Config(
         device="cpu",
         backend="gloo",
+        deterministic=True,
+        float32_matmul_precision="high",
         mesh_topology={"dp": -1, "pp": 1, "tp": 1},
     ).make()
 
     process.initialize()
     assert runtime.runtime_initialized()
     assert runtime.global_device_mesh() is not None
+    assert "mesh_device_type" in record
     assert record["mesh_device_type"] == "cpu"
-    with pytest.raises(RuntimeError, match="already initialized"):
+    assert "mesh_shape" in record
+    assert record["mesh_shape"] == (2, 1, 1)
+    assert "mesh_dim_names" in record
+    assert record["mesh_dim_names"] == ("dp", "pp", "tp")
+    assert "init_kwargs" in record
+    init_kwargs = record["init_kwargs"]
+    assert init_kwargs["backend"] == "gloo"
+    assert init_kwargs["device_id"] is None
+    assert init_kwargs["timeout"] is torch.distributed.default_pg_timeout
+    assert precision_calls == ["high"]
+    assert determinism_calls == ["enabled"]
+    with pytest.raises(RuntimeError, match=r"^Runtime already initialized\.$"):
         process.initialize()
 
     process.destroy()
     assert not runtime.runtime_initialized()
     assert runtime.global_device_mesh() is None
+    assert "destroy_calls" in record
     assert record["destroy_calls"] == 1
     assert not torch.distributed.is_initialized()
 
@@ -264,7 +362,27 @@ def test_destroy_without_an_initialized_runtime_is_a_no_op(
 
     assert "destroy_calls" not in record
     assert torch.distributed.is_initialized()
-    assert not runtime._process_group_owned
+    assert runtime._process_group_owned is False
+
+
+def test_destroy_clears_all_owned_global_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _patch_distributed(monkeypatch, world_size=1)
+    initialize_global_device_mesh(
+        device=torch.device("cpu"),
+        backend="gloo",
+        mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+    )
+
+    runtime.destroy_global_device_mesh()
+
+    assert "destroy_calls" in record
+    assert record["destroy_calls"] == 1
+    assert runtime._runtime_initialized is False
+    assert runtime._device_mesh is None
+    assert runtime._single_process_settings is None
+    assert runtime._process_group_owned is False
 
 
 def test_multiprocess_initialize_enables_determinism(
@@ -284,18 +402,46 @@ def test_multiprocess_initialize_enables_determinism(
     assert calls == ["on"]
 
 
-def test_initialize_defaults_the_backend_from_the_device(
+def test_multiprocess_initialize_preserves_default_nondeterminism(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    record = _patch_distributed(monkeypatch, world_size=1)
+    calls: list[str] = []
+    monkeypatch.setattr(runtime, "enable_determinism", lambda: calls.append("on"))
+    _patch_distributed(monkeypatch, world_size=1)
 
     initialize_global_device_mesh(
         device=torch.device("cpu"),
+        backend="gloo",
         mesh_topology={"dp": 1, "pp": 1, "tp": 1},
     )
 
-    init_kwargs = cast(dict[str, object], record["init_kwargs"])
-    assert init_kwargs["backend"] == "gloo"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("device", "backend"),
+    [(torch.device("cpu"), "gloo"), (torch.device("cuda"), "nccl")],
+)
+def test_initialize_defaults_the_backend_from_the_device(
+    monkeypatch: pytest.MonkeyPatch,
+    device: torch.device,
+    backend: str,
+) -> None:
+    record = _patch_distributed(monkeypatch, world_size=1)
+    monkeypatch.setattr(
+        torch.distributed,
+        "get_node_local_rank",
+        _fallback_local_rank,
+    )
+
+    initialize_global_device_mesh(
+        device=device,
+        mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+    )
+
+    assert "init_kwargs" in record
+    init_kwargs = record["init_kwargs"]
+    assert init_kwargs["backend"] == backend
 
 
 def test_multiprocess_backend_resolved_once_by_init() -> None:
@@ -321,7 +467,11 @@ def test_initialize_validates_topology_before_acquiring(
     """
     record = _patch_distributed(monkeypatch, world_size=1)
 
-    with pytest.raises(ValueError, match="mesh_topology cannot be empty"):
+    with pytest.raises(
+        ValueError,
+        match=r"^mesh_topology cannot be empty\. Specify dimensions, "
+        r"e\.g\., \{'dp': -1, 'pp': 1, 'tp': 1\}$",
+    ):
         initialize_global_device_mesh(
             device=torch.device("cpu"),
             backend="gloo",
@@ -329,34 +479,85 @@ def test_initialize_validates_topology_before_acquiring(
         )
 
     assert "init_kwargs" not in record
+    assert runtime._process_group_owned is False
 
 
-def test_initialize_validates_negative_dims_before_acquiring(
+@pytest.mark.parametrize(
+    "mesh_topology",
+    [
+        {"dp": -1, "pp": -1, "tp": 1},
+        {"dp": -2, "pp": 1, "tp": 2},
+    ],
+)
+def test_initialize_rejects_invalid_auto_dimensions_before_acquiring(
     monkeypatch: pytest.MonkeyPatch,
+    mesh_topology: dict[str, int],
 ) -> None:
-    """Two auto dimensions are unresolvable; reject before acquiring."""
     record = _patch_distributed(monkeypatch, world_size=4)
 
-    with pytest.raises(ValueError, match="At most one mesh dimension"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Mesh topology dimensions must be positive except for at most one "
+        r"-1 \(auto\); got .+\.$",
+    ) as raised:
         initialize_global_device_mesh(
             device=torch.device("cpu"),
             backend="gloo",
-            mesh_topology={"dp": -1, "pp": -1, "tp": 1},
+            mesh_topology=mesh_topology,
         )
 
+    assert str(raised.value) == (
+        "Mesh topology dimensions must be positive except for at most one "
+        f"-1 (auto); got {mesh_topology}."
+    )
     assert "init_kwargs" not in record
+    assert runtime._process_group_owned is False
+
+
+def test_initialize_rejects_zero_dimension_before_acquiring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _patch_distributed(monkeypatch, world_size=1)
+    topology = {"dp": -1, "pp": 0, "tp": 1}
+
+    with pytest.raises(
+        ValueError,
+        match=r"^Mesh topology dimensions must be positive except for at most one "
+        r"-1 \(auto\); got .+\.$",
+    ) as raised:
+        initialize_global_device_mesh(
+            device=torch.device("cpu"),
+            backend="gloo",
+            mesh_topology=topology,
+        )
+
+    assert str(raised.value) == (
+        "Mesh topology dimensions must be positive except for at most one "
+        f"-1 (auto); got {topology}."
+    )
+    assert "init_kwargs" not in record
+    assert runtime._process_group_owned is False
 
 
 # Records ``set_device`` and ``init_process_group`` arguments for assertion.
+class _DistributedRecord(TypedDict, total=False):
+    set_device: torch.device
+    init_kwargs: dict[str, object]
+    mesh_device_type: str
+    mesh_shape: tuple[int, ...]
+    mesh_dim_names: tuple[str, ...]
+    destroy_calls: int
+
+
 def _patch_distributed(
     monkeypatch: pytest.MonkeyPatch,
     *,
     world_size: int,
     preinitialized: bool = False,
     destroy_failure: BaseException | None = None,
-) -> dict[str, object]:
+) -> _DistributedRecord:
     """Stub the distributed/CUDA surface so the cuda branch runs off-GPU."""
-    record: dict[str, object] = {}
+    record: _DistributedRecord = {}
     initialized = preinitialized
     destroy_calls = 0
 
@@ -383,7 +584,8 @@ def _patch_distributed(
         mesh_dim_names: tuple[str, ...],
     ) -> object:
         record["mesh_device_type"] = device_type
-        del mesh_shape, mesh_dim_names
+        record["mesh_shape"] = mesh_shape
+        record["mesh_dim_names"] = mesh_dim_names
         return object()
 
     monkeypatch.setattr(torch.cuda, "set_device", fake_set_device)
@@ -418,10 +620,13 @@ def test_world_size_failure_rolls_back_acquired_process_group(
             mesh_topology={"dp": 1, "pp": 1, "tp": 1},
         )
 
+    assert "destroy_calls" in record
     assert record["destroy_calls"] == 1
     assert not torch.distributed.is_initialized()
-    assert not runtime.runtime_initialized()
-    assert runtime.global_device_mesh() is None
+    assert runtime._runtime_initialized is False
+    assert runtime._device_mesh is None
+    assert runtime._single_process_settings is None
+    assert runtime._process_group_owned is False
 
 
 def test_mesh_construction_failure_rolls_back_acquired_process_group(
@@ -447,6 +652,7 @@ def test_mesh_construction_failure_rolls_back_acquired_process_group(
             mesh_topology={"dp": 1, "pp": 1, "tp": 1},
         )
 
+    assert "destroy_calls" in record
     assert record["destroy_calls"] == 1
     assert not torch.distributed.is_initialized()
     assert not runtime.runtime_initialized()
@@ -480,6 +686,7 @@ def test_mesh_baseexception_rolls_back_acquired_process_group(
         )
 
     assert raised.value is primary
+    assert "destroy_calls" in record
     assert record["destroy_calls"] == 1
     assert not torch.distributed.is_initialized()
     assert not runtime.runtime_initialized()
@@ -548,7 +755,10 @@ def test_mesh_baseexception_and_rollback_failure_preserve_identity_order(
 
     monkeypatch.setattr(runtime, "init_device_mesh", fail_mesh_construction)
 
-    with pytest.raises(BaseExceptionGroup) as raised:
+    with pytest.raises(
+        BaseExceptionGroup,
+        match=r"^Distributed runtime initialization and rollback failed$",
+    ) as raised:
         initialize_global_device_mesh(
             device=torch.device("cpu"),
             backend="gloo",
@@ -556,6 +766,7 @@ def test_mesh_baseexception_and_rollback_failure_preserve_identity_order(
         )
 
     assert raised.value.exceptions == (primary, cleanup)
+    assert "destroy_calls" in record
     assert record["destroy_calls"] == 1
     assert not runtime.runtime_initialized()
     assert runtime.global_device_mesh() is None
@@ -630,6 +841,7 @@ def test_rollback_failure_is_preserved_with_world_size_failure(
         ),
         "process group cleanup failed",
     }
+    assert "destroy_calls" in record
     assert record["destroy_calls"] == 1
     assert not runtime.runtime_initialized()
     assert runtime.global_device_mesh() is None
@@ -651,6 +863,7 @@ def test_multiprocess_initialize_sets_float32_matmul_precision(
     )
 
     assert calls == ["high"]
+    assert "mesh_device_type" in record
     assert record["mesh_device_type"] == "cpu"
 
 
@@ -671,10 +884,13 @@ def test_cuda_branch_binds_local_rank_before_init(
         mesh_topology={"dp": 1, "pp": 1, "tp": 1},
     )
 
+    assert "set_device" in record
     assert record["set_device"] == torch.device("cuda", 3)
-    init_kwargs = cast(dict[str, object], record["init_kwargs"])
+    assert "init_kwargs" in record
+    init_kwargs = record["init_kwargs"]
     assert init_kwargs["device_id"] == torch.device("cuda", 3)
     # init_device_mesh forbids a device index; the type alone is passed.
+    assert "mesh_device_type" in record
     assert record["mesh_device_type"] == "cuda"
 
 
@@ -691,8 +907,10 @@ def test_cuda_branch_falls_back_when_local_rank_unset(
         mesh_topology={"dp": 1, "pp": 1, "tp": 1},
     )
 
+    assert "set_device" in record
     assert record["set_device"] == torch.device("cuda", 0)
-    init_kwargs = cast(dict[str, object], record["init_kwargs"])
+    assert "init_kwargs" in record
+    init_kwargs = record["init_kwargs"]
     assert init_kwargs["device_id"] == torch.device("cuda", 0)
 
 
@@ -710,8 +928,10 @@ def test_cpu_branch_does_not_bind_or_pass_device_id(
     )
 
     assert "set_device" not in record
-    init_kwargs = cast(dict[str, object], record["init_kwargs"])
+    assert "init_kwargs" in record
+    init_kwargs = record["init_kwargs"]
     assert init_kwargs["device_id"] is None
+    assert "mesh_device_type" in record
     assert record["mesh_device_type"] == "cpu"
 
 

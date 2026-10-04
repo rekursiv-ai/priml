@@ -913,7 +913,7 @@ def _collective_device(group: dist.ProcessGroup | None) -> torch.device:
     if dist.get_backend(group) == "nccl":
         # The CURRENT device, not index 0: a shared index would put every
         # rank's reduction on one GPU.
-        return torch.device("cuda", torch.cuda.current_device())
+        return torch.device(torch.cuda.current_device())
     return torch.device("cpu")
 
 

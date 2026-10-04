@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 import argparse
 import hashlib
 import logging
+import math
 import os
 
 from priml.baselines.arcagi1.experiments import TrmTrainLoop, exp008
@@ -68,8 +69,10 @@ def main() -> int:
       status: Process exit code.
 
     """
+    if __doc__ is None:
+        raise ValueError("Expected __doc__ is not None.")
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -115,7 +118,7 @@ def recipe(
     cfg = exp008()
     cfg.experiment_name = "exp008_blog_gx10" if single_gpu else "exp008_blog_8gpu"
     cfg.max_steps = steps
-    cfg.max_time = float("inf")
+    cfg.max_time = math.inf
     cfg.num_steps_eval = -1  # Final scoring uses the trained EMA in memory.
     cfg.eval_warmup_batches = 0
     cfg.tracker = FileTracker.Config()

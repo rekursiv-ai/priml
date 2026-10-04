@@ -109,7 +109,7 @@ def fan_in_normal(w: Tensor, *, depth: int = -1) -> None:
 
     """
     del depth
-    truncated_normal(w, std=w.shape[-1] ** -0.5, depth_index=())
+    truncated_normal(w, std=w.shape[-1] ** -0.5)
 
 
 def corrected_unit_normal(w: Tensor) -> None:
@@ -905,11 +905,7 @@ class SudokuNet(nn.Module):
             )
         logits = self.head(z_slow)
         halt_logits = self.halt_head(z_slow[:, 0]).to(torch.float32)
-        halt = (
-            halt_logits.squeeze(-1)
-            if self.config.halt_outputs == 1
-            else halt_logits[..., 0]
-        )
+        halt = halt_logits[..., 0]
         return CoreOutput(logits, halt, z_slow, z_fast)
 
     @override

@@ -34,7 +34,16 @@ from __future__ import annotations
 
 from dataclasses import field
 from pathlib import Path
-from typing import TYPE_CHECKING, NotRequired, Self, TypedDict, cast, override
+from typing import (
+    TYPE_CHECKING,
+    NotRequired,
+    Protocol,
+    Self,
+    SupportsInt,
+    TypedDict,
+    cast,
+    override,
+)
 
 import itertools
 import logging
@@ -62,6 +71,18 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+class _SamplingRng(Protocol):
+    def integers(self, low: int, high: int) -> SupportsInt: ...
+
+    def choice(
+        self,
+        a: int,
+        size: int,
+        *,
+        replace: bool,
+    ) -> NDArray[np.int64]: ...
 
 
 class _Split(TypedDict):
@@ -122,6 +143,8 @@ class _ArcBatches:
         ).to(self.device)
         self.groups: NDArray[np.int64] = groups
         self.puzzles: NDArray[np.int64] = puzzles
+        self._group_bounds = _int_list(groups)
+        self._puzzle_bounds = _int_list(puzzles)
         self.identifiers: NDArray[np.int64] = data["puzzle_identifiers"][
             : len(puzzles) - 1
         ]
@@ -226,37 +249,28 @@ class _ArcBatches:
         rng = np.random.Generator(
             np.random.Philox(seed=salt("arcagi1_task_sampling", self.seed, pass_index)),
         )
-        order = np.concatenate(
-            [rng.permutation(self.num_tasks) for _ in range(self.epochs_per_iter)],
+        order = _int_list(
+            np.concatenate(
+                [rng.permutation(self.num_tasks) for _ in range(self.epochs_per_iter)],
+            ),
         )
+        groups = self._group_bounds
+        puzzles = self._puzzle_bounds
         cursor = 0
-        while cursor < order.size:
+        while True:
             rows: list[np.ndarray] = []
             puzzle_ids: list[np.ndarray] = []
             filled = 0
-            while cursor < order.size and filled < self.global_batch_size:
-                task = int(
-                    order[cursor],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
-                )
+            while cursor < len(order) and filled < self.global_batch_size:
+                task = order[cursor]
                 cursor += 1
-                lo = int(
-                    self.groups[task],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
-                )
-                hi = int(
-                    self.groups[task + 1],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
-                )
+                lo = groups[task]
+                hi = groups[task + 1]
                 if hi <= lo:
                     continue
                 puzzle = int(rng.integers(lo, hi))
-                start = int(
-                    self.puzzles[puzzle],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
-                )
-                size = (
-                    int(
-                        self.puzzles[puzzle + 1],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
-                    )
-                    - start
-                )
+                start = puzzles[puzzle]
+                size = puzzles[puzzle + 1] - start
                 take = min(size, self.global_batch_size - filled)
                 rows.append(start + rng.choice(size, take, replace=False))
                 puzzle_ids.append(np.full(take, puzzle, dtype=np.int64))
@@ -380,7 +394,7 @@ def _load_split(dataset_dir: Path, *, split: str, mmap: bool = False) -> _Split:
         "group_indices": groups,
         "puzzle_identifiers": identifiers,
         "spatial_tags": spatial_tags,
-        "ignore_label_id": IntCodec.coerce(metadata.get("ignore_label_id", 0)),
+        "ignore_label_id": IntCodec.coerce(metadata.get("ignore_label_id")),
     }
 
 
@@ -662,7 +676,9 @@ def load_puzzle_dataset(
         max_samples = min(max_samples, len(inputs))
         inputs = np.array(inputs[:max_samples])
         labels = np.array(labels[:max_samples])
-        puzzle_indices = puzzle_indices[puzzle_indices <= max_samples]
+        puzzle_indices = puzzle_indices[
+            : np.searchsorted(puzzle_indices, max_samples, side="right")
+        ]
         if _last(puzzle_indices) != max_samples:
             puzzle_indices = np.append(
                 puzzle_indices,
@@ -686,10 +702,10 @@ def load_puzzle_dataset(
     return {
         "inputs": inputs,
         "labels": labels,
-        "puzzle_indices": puzzle_indices.astype(np.int64, copy=False),
-        "group_indices": group_indices.astype(np.int64, copy=False),
-        "puzzle_identifiers": puzzle_identifiers.astype(np.int32, copy=False),
-        "spatial_tags": spatial_tags.astype(np.int32, copy=False),
+        "puzzle_indices": np.asarray(puzzle_indices, dtype=np.int64),
+        "group_indices": np.asarray(group_indices, dtype=np.int64),
+        "puzzle_identifiers": np.asarray(puzzle_identifiers, dtype=np.int32),
+        "spatial_tags": np.asarray(spatial_tags, dtype=np.int32),
         "metadata": metadata,
     }
 
@@ -795,8 +811,6 @@ class PuzzleBatches:
         kept: list[NDArray[np.int64]] = []
         for lo, hi in itertools.pairwise(bounds):
             size = hi - lo
-            if size <= 0:
-                continue
             if size <= max_augs_per_puzzle:
                 kept.append(np.arange(lo, hi, dtype=np.int64))
             else:
@@ -824,18 +838,13 @@ class PuzzleBatches:
         for first, last in itertools.pairwise(_int_list(self.group_indices)):
             lo, hi = puzzles[first], puzzles[last]
             size = hi - lo
-            if size <= 0:
-                continue
-            if size <= max_examples_per_group:
-                kept.append(np.arange(lo, hi, dtype=np.int64))
-            else:
-                offsets = np.linspace(
-                    0,
-                    size - 1,
-                    num=max_examples_per_group,
-                    dtype=np.int64,
-                )
-                kept.append(lo + np.unique(offsets))
+            offsets = np.linspace(
+                0,
+                size - 1,
+                num=min(max(0, size), max_examples_per_group),
+                dtype=np.int64,
+            )
+            kept.append(lo + offsets)
         if not kept:
             return np.empty(0, dtype=np.int64)
         return np.concatenate(kept)
@@ -849,13 +858,16 @@ class PuzzleBatches:
         start = 0
         while start < group_order.size:
             start, ex_idx, puz_idx = self._sample_batch(rng, group_order, start)
-            if ex_idx.size < self.global_batch_size:
-                break
-            local = slice(
-                self.rank * self.batch_size,
-                (self.rank + 1) * self.batch_size,
-            )
-            yield self._collate(ex_idx[local], puz_idx[local], valid=self.batch_size)
+            if ex_idx.size == self.global_batch_size:
+                local = slice(
+                    self.rank * self.batch_size,
+                    (self.rank + 1) * self.batch_size,
+                )
+                yield self._collate(
+                    ex_idx[local],
+                    puz_idx[local],
+                    valid=self.batch_size,
+                )
 
     def _iter_test(self) -> Iterator[PuzzleData.Batch]:
         order = (
@@ -873,7 +885,7 @@ class PuzzleBatches:
 
     def _sample_batch(
         self,
-        rng: np.random.Generator,
+        rng: _SamplingRng,
         group_order: NDArray[np.int64],
         start_index: int,
     ) -> tuple[int, NDArray[np.int64], NDArray[np.int64]]:
@@ -920,14 +932,14 @@ class PuzzleBatches:
             torch.full_like(labels, -100),
             labels,
         )
-        source_ids = np.take(self.puzzle_identifiers, puz_idx).astype(
-            np.int64,
-            copy=False,
+        source_ids = np.asarray(
+            np.take(self.puzzle_identifiers, puz_idx),
+            dtype=np.int64,
         )
         if self.puzzle_identifier_remap is not None:
-            puz_ids = np.take(self.puzzle_identifier_remap, source_ids).astype(
-                np.int64,
-                copy=False,
+            puz_ids = np.asarray(
+                np.take(self.puzzle_identifier_remap, source_ids),
+                dtype=np.int64,
             )
         elif self.puzzle_identifier_offset:
             blank = np.equal(source_ids, self.blank_identifier_id)

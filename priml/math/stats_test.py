@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from unittest.mock import Mock
+
 import functools
 import math
 
 from torch import Tensor
+from torch._subclasses.fake_tensor import FakeTensorMode
 
 import pytest
 import torch
@@ -25,6 +28,21 @@ from priml.math.stats import (
     quantile_normalize,
     total_variation,
 )
+
+
+def _power_input() -> Tensor:
+    return torch.tensor(
+        [
+            [1.0, 2.0],
+            [1.0, -2.0],
+            [-1.0, 2.0],
+            [-1.0, -2.0],
+            [1.0, 2.0],
+            [1.0, -2.0],
+            [-1.0, 2.0],
+            [-1.0, -2.0],
+        ],
+    )
 
 
 def test_cov_matches_torch():
@@ -68,6 +86,13 @@ def test_cov_unbiased():
     )
 
 
+def test_cov_two_observations_use_unbiased_denominator_one():
+    x = torch.tensor([[0.0, 2.0, 4.0], [2.0, 6.0, 8.0]])
+    biased = cov(x, bias=True)
+    unbiased = cov(x, bias=False)
+    torch.testing.assert_close(unbiased, biased * 2)
+
+
 def test_cov_1d_matches_numpy():
     """A 1-D input is a single variable; cov returns its scalar variance."""
     x = torch.tensor([1.0, 2.0, 3.0, 4.0])
@@ -86,6 +111,13 @@ def test_cov_1d_cross_is_the_scalar_cross_covariance():
     torch.testing.assert_close(result, torch.tensor(2.5))
 
 
+def test_cov_1d_unbiased_singleton_and_two_observations():
+    one = cov(torch.tensor([2.0]), bias=False)
+    two = cov(torch.tensor([1.0, 3.0]), bias=False)
+    torch.testing.assert_close(one, torch.tensor(0.0))
+    torch.testing.assert_close(two, torch.tensor(2.0))
+
+
 def test_jsd_is_zero_for_identical_members_and_log2_for_disjoint_ones():
     torch.manual_seed(2)
     base = torch.log_softmax(torch.randn(3, 5), dim=-1)
@@ -94,6 +126,20 @@ def test_jsd_is_zero_for_identical_members_and_log2_for_disjoint_ones():
 
     disjoint = torch.tensor([[1.0, 0.0], [0.0, 1.0]]).log()
     torch.testing.assert_close(jsd(disjoint), torch.tensor(math.log(2.0)))
+
+
+def test_jsd_with_negative_infinity_matches_exact_safe_log_entropy():
+    logits = torch.tensor(
+        [
+            [-0.0809429288, 0.0512638986, -0.8687565327, -math.inf],
+            [-1.2717219591, 0.8816379309, -0.6639689207, -math.inf],
+            [0.1610462517, 1.1758316755, -0.3615134060, -math.inf],
+        ],
+        dtype=torch.float32,
+    )
+    result = jsd(torch.log_softmax(logits, dim=-1))
+    assert torch.isfinite(result)
+    assert torch.equal(result, torch.tensor(0.04872685670852661))
 
 
 def test_jsd_squeezes_the_ensemble_and_event_dims():
@@ -193,6 +239,24 @@ def test_pca_whiten_unit_variance():
     torch.testing.assert_close(projected.var(0), torch.ones(5), atol=0.15, rtol=0.15)
 
 
+def test_pca_whitening_defaults_to_unregularized_unit_energy():
+    x = torch.tensor(
+        [
+            [1.0, 0.0],
+            [-1.0, 0.0],
+            [1.0, 0.0],
+            [-1.0, 0.0],
+            [0.0, 2.0],
+            [0.0, -2.0],
+            [0.0, 2.0],
+            [0.0, -2.0],
+        ],
+    )
+    eigenvalues, eigenvectors = pca(x, whiten=True)
+    component_energy = eigenvalues * eigenvectors.square().sum(dim=0)
+    torch.testing.assert_close(component_energy, torch.ones_like(eigenvalues))
+
+
 def test_pca_power_matches_eigh():
     """Power iteration and eigh paths should produce equivalent results."""
     torch.manual_seed(7)
@@ -229,6 +293,101 @@ def test_pca_power_stops_iterating_once_within_tol():
     assert not torch.equal(early, full)
 
 
+def test_pca_power_default_is_two_hundred_sweeps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    qr = Mock(wraps=_householder_qr)
+    monkeypatch.setattr("priml.math.stats._householder_qr", qr)
+    pca_power(torch.eye(2, 3))
+    assert qr.call_count == 201
+
+
+def test_pca_power_zero_tolerance_runs_every_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    qr = Mock(wraps=_householder_qr)
+    monkeypatch.setattr("priml.math.stats._householder_qr", qr)
+    pca_power(_power_input(), num_iters=4, tol=0.0)
+    assert qr.call_count == 5
+
+
+def test_pca_power_zero_tol_uses_only_endpoint_rayleigh_estimates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def rayleigh(sigma: Tensor, basis: Tensor) -> Tensor:
+        return (basis * (sigma @ basis)).sum(dim=0)
+
+    estimates = Mock(side_effect=rayleigh)
+    monkeypatch.setattr(
+        "priml.math.stats._rayleigh",
+        estimates,
+        raising=False,
+    )
+    pca_power(_power_input(), num_iters=4, tol=0.0)
+    assert estimates.call_count == 2
+
+
+def test_pca_power_convergence_uses_each_component_estimate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bases = (
+        torch.tensor([[1.0, 0.2], [0.4, 0.9]]),
+        torch.tensor([[1.0, 0.3], [0.1, 1.0]]),
+    )
+    calls = 0
+
+    def qr(matrix: Tensor) -> tuple[Tensor, Tensor]:
+        nonlocal calls
+        basis = bases[min(calls, len(bases) - 1)]
+        calls += 1
+        return basis, torch.zeros_like(matrix)
+
+    monkeypatch.setattr("priml.math.stats._householder_qr", qr)
+    # A covariance and its basis are square by definition.
+    pca_power(_power_input(), num_iters=2, tol=0.9)
+    assert calls == 2
+
+
+def test_pca_power_convergence_keeps_column_reductions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bases = (
+        torch.tensor([[1.0, 0.2], [0.4, 0.9]]),
+        torch.tensor([[1.0, 0.3], [0.1, 1.0]]),
+    )
+    calls = 0
+
+    def qr(matrix: Tensor) -> tuple[Tensor, Tensor]:
+        nonlocal calls
+        basis = bases[min(calls, len(bases) - 1)]
+        calls += 1
+        return basis, torch.zeros_like(matrix)
+
+    monkeypatch.setattr("priml.math.stats._householder_qr", qr)
+    pca_power(_power_input(), num_iters=2, tol=0.5)
+    assert calls == 3
+
+
+def test_pca_power_convergence_uses_a_strict_tolerance_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bases = (
+        torch.eye(2),
+        torch.tensor([[1.0, 0.0], [1.0, 0.0]]),
+    )
+    calls = 0
+
+    def qr(matrix: Tensor) -> tuple[Tensor, Tensor]:
+        nonlocal calls
+        basis = bases[min(calls, len(bases) - 1)]
+        calls += 1
+        return basis, torch.zeros_like(matrix)
+
+    monkeypatch.setattr("priml.math.stats._householder_qr", qr)
+    pca_power(_power_input(), num_iters=2, tol=4.0)
+    assert calls == 3
+
+
 def test_householder_qr_leaves_a_zero_column_unreflected():
     """An all-zero column has no reflection to apply; Q stays identity there."""
     mat = torch.tensor([[0.0, 1.0], [0.0, 0.0]])
@@ -257,6 +416,37 @@ def test_pca_svd_matches_eigh():
     vals_svd, vecs_svd = pca(x, decompose=pca_svd)
     torch.testing.assert_close(vals_svd, vals_eigh, atol=1e-4, rtol=1e-4)
     torch.testing.assert_close(vecs_svd.abs(), vecs_eigh.abs(), atol=1e-4, rtol=1e-4)
+
+
+def test_pca_svd_keeps_thin_shapes_when_observations_are_fewer_than_features():
+    x = torch.tensor([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]])
+    eigenvalues, eigenvectors = pca_svd(x)
+    assert eigenvalues.shape == (2,)
+    assert eigenvectors.shape == (3, 2)
+    covariance = x.T @ x / len(x)
+    torch.testing.assert_close(
+        eigenvectors @ torch.diag(eigenvalues) @ eigenvectors.T,
+        covariance,
+    )
+
+
+def test_pca_svd_uses_thin_factorization_for_tall_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    svd = Mock(wraps=torch.linalg.svd)
+    monkeypatch.setattr(torch.linalg, "svd", svd)
+    pca_svd(torch.randn(20, 3))
+    assert svd.call_args.kwargs["full_matrices"] is False
+
+
+def test_pca_svd_device_guard_message() -> None:
+    with FakeTensorMode():
+        mps_input = torch.empty((2, 3), device="mps")
+        with pytest.raises(RuntimeError) as error:
+            pca_svd(mps_input)
+    assert str(error.value) == (
+        "pca_svd is not supported on MPS; use pca_power instead."
+    )
 
 
 def test_pca_third_party_decompose_needs_no_library_change():
@@ -359,6 +549,378 @@ def test_holm_reads_python_floats_as_float64_and_each_row_as_a_family() -> None:
     expected = [[2 * 0.03, 3 * 0.01, 2 * 0.03], [2 * 0.2, 2 * 0.2, 3 * 0.1]]
     assert holm(rows).tolist() == expected
     assert holm([]).shape == (0,)
+
+
+def test_sliding_window_default_span_prunes_after_thirty_seconds():
+    window = SlidingWindow()
+    window.add(0.0, 0.0)
+    window.add(30.5, 10.0)
+    assert window.samples == [(30.5, 10.0)]
+
+
+def test_cov_cross_centers_each_input_and_uses_observation_count():
+    x = torch.tensor([[0.0, 2.0], [2.0, 0.0], [4.0, 4.0]])
+    y = torch.tensor([[1.0, 3.0], [5.0, 1.0], [3.0, 8.0]])
+    expected = (x - x.mean(0)).T @ (y - y.mean(0)) / 3
+    torch.testing.assert_close(cov(x, y), expected)
+    torch.testing.assert_close(cov(x, y, bias=False), expected * 1.5)
+
+
+def test_cov_rowvar_cross_and_single_observation():
+    x = torch.tensor([[0.0, 2.0, 4.0], [1.0, 3.0, 8.0]])
+    y = torch.tensor([[1.0, 4.0, 7.0], [2.0, 2.0, 6.0]])
+    expected = (x - x.mean(-1, keepdim=True)) @ (y - y.mean(-1, keepdim=True)).T / 3
+    torch.testing.assert_close(cov(x, y, rowvar=True), expected)
+    one = cov(torch.tensor([[2.0, 8.0]]), bias=False)
+    # `cov` returns a square variable-by-variable covariance matrix.
+    torch.testing.assert_close(one, torch.zeros((2, 2)))
+
+
+def test_cov_batched_rowvar_cross_centers_and_preserves_batch_axis():
+    x = torch.tensor(
+        [[[1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 5.0, 7.0], [5.0, 4.0, 3.0, 2.0]]],
+    )
+    y = torch.tensor([[[3.0, 1.0, 2.0, 4.0], [5.0, 2.0, 1.0, 0.0]]])
+    x_centered = x - x.mean(dim=-1, keepdim=True)
+    y_centered = y - y.mean(dim=-1, keepdim=True)
+    expected = x_centered @ y_centered.transpose(-1, -2) / x.shape[-1]
+    # A singleton batch axis distinguishes batched output from scalar output.
+    result = cov(x, y, rowvar=True)
+    assert result.shape == (1, 3, 2)
+    torch.testing.assert_close(result, expected)
+
+
+@pytest.mark.parametrize("add_feature_axis", [False, True])
+def test_cov_cross_centers_large_means_before_multiplication(
+    add_feature_axis: bool,
+) -> None:
+    x = torch.tensor([1.0, 1.0, 1.0, -3.0], dtype=torch.float64)
+    y = torch.tensor([0.0, 2.0, 4.0, 8.0], dtype=torch.float64) + 1e16
+    if add_feature_axis:
+        x = x[:, None]
+        y = y[:, None]
+    result = cov(x, y, bias=True)
+    assert torch.equal(result.reshape(()), torch.tensor(-4.5, dtype=torch.float64))
+
+
+def test_cov_cross_with_large_feature_means_preserves_precision():
+    x = torch.tensor(
+        [
+            [1.0, 0.0, -3.0],
+            [-1.0, -2.0, -1.0],
+            [3.0, 0.0, 1.0],
+            [2.0, -1.0, -3.0],
+            [-2.0, 2.0, -1.0],
+            [1.0, 1.0, -1.0],
+        ],
+        dtype=torch.float64,
+    )
+    y = (
+        torch.tensor(
+            [
+                [2.0, -2.0, 20.0],
+                [-16.0, 2.0, -16.0],
+                [2.0, 2.0, -18.0],
+                [14.0, 10.0, 16.0],
+                [-18.0, -20.0, 2.0],
+                [4.0, 0.0, 16.0],
+            ],
+            dtype=torch.float64,
+        )
+        + 1e16
+    )
+    expected = torch.tensor(
+        [
+            [16.666666666666668, 11.222222222222223, 2.1111111111111103],
+            [-2.3333333333333335, -9.0, 6.0],
+            [-5.333333333333333, -2.4444444444444446, -16.88888888888889],
+        ],
+        dtype=torch.float64,
+    )
+    assert torch.equal(cov(x, y), expected)
+
+
+def test_entropy_probs_respects_zero_mass_and_keepdim():
+    p = torch.tensor([[0.0, 0.25, 0.75], [0.5, 0.5, 0.0]])
+    q = torch.tensor([[0.2, 0.3, 0.5], [0.1, 0.8, 0.1]])
+    expected = -(p * q.log()).sum(-1, keepdim=True)
+    torch.testing.assert_close(entropy_probs(p, q, keepdim=True), expected)
+
+
+def test_entropy_probs_zero_mass_has_zero_probability_gradient():
+    p = torch.tensor([0.0, 1.0], requires_grad=True)
+    q = torch.tensor([0.25, 0.75])
+    entropy_probs(p, q).backward()
+    assert p.grad is not None
+    assert p.grad[0] == 0.0
+
+
+def test_entropy_logits_mean_all_to_all_exact_mean_distribution():
+    x = torch.tensor([[[0.0, 2.0], [1.0, -1.0]], [[2.0, 0.0], [-1.0, 1.0]]])
+    y = torch.tensor([[[1.0, 0.0], [-2.0, 1.0]], [[0.0, 2.0], [1.0, -1.0]]])
+    mean_p = torch.softmax(x, -1).mean(0)
+    mean_q = torch.softmax(y, -1).mean(0)
+    expected = -(mean_p * mean_q.log()).sum(-1)
+    torch.testing.assert_close(
+        entropy_logits_mean_all_to_all(x, y, dim=-1, dim_mean=0),
+        expected,
+    )
+    kept = entropy_logits_mean_all_to_all(
+        x,
+        y,
+        dim=-1,
+        dim_mean=0,
+        keepdim=True,
+        keepdim_mean=True,
+    )
+    assert kept.shape == (1, 2, 1)
+    torch.testing.assert_close(kept.squeeze(0), expected.unsqueeze(-1))
+
+
+def test_entropy_logits_mean_all_to_all_matches_torch_softmax_bits():
+    torch.manual_seed(0)
+    x = torch.randn(2, 3, 4)
+    y = torch.randn(2, 3, 4)
+    mean_p = torch.softmax(x, dim=-1).mean(dim=0)
+    log_q = torch.log_softmax(y, dim=-1)
+    log_mean_q = torch.logsumexp(log_q, dim=0) - math.log(2)
+    expected = -(mean_p * log_mean_q).sum(dim=-1)
+    actual = entropy_logits_mean_all_to_all(x, y, dim=-1, dim_mean=0)
+    assert torch.equal(actual, expected)
+
+
+def test_entropy_logits_mean_all_to_all_infers_non_event_axes():
+    x = torch.arange(120, dtype=torch.float64).reshape(2, 3, 4, 5) / 13
+    y = torch.flip(x, dims=(0, 2))
+    dim_mean = (0, 1, 2)
+    mean_p = torch.softmax(x, dim=-1).mean(dim=dim_mean)
+    log_q = torch.log_softmax(y, dim=-1)
+    log_mean_q = torch.logsumexp(log_q, dim=dim_mean) - math.log(24)
+    expected = -(mean_p * log_mean_q).sum(dim=-1)
+    actual = entropy_logits_mean_all_to_all(x, y, dim=-1, dim_mean=None)
+    explicit = entropy_logits_mean_all_to_all(x, y, dim=-1, dim_mean=dim_mean)
+    assert torch.equal(actual, expected)
+    assert torch.equal(explicit, expected)
+
+
+def test_entropy_logits_mean_all_to_all_normalizes_multi_axis_events():
+    x = torch.arange(120, dtype=torch.float64).reshape(2, 3, 4, 5) / 13
+    y = torch.flip(x, dims=(0, 2))
+    event_dims = (-2, -1)
+    p = torch.softmax(x.reshape(2, 3, 20), dim=-1).reshape_as(x)
+    mean_p = p.mean(dim=(0, 1))
+    log_q = torch.log_softmax(y.reshape(2, 3, 20), dim=-1).reshape_as(y)
+    log_mean_q = torch.logsumexp(log_q, dim=(0, 1)) - math.log(6)
+    expected = -(mean_p * log_mean_q).sum(dim=event_dims)
+    actual = entropy_logits_mean_all_to_all(
+        x,
+        y,
+        dim=event_dims,
+        dim_mean=None,
+    )
+    assert torch.equal(actual, expected)
+
+
+def test_entropy_logits_mean_all_to_all_forwards_world_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    x = torch.arange(24, dtype=torch.float64).reshape(2, 3, 4) / 7
+    y = torch.flip(x, dims=(0, 1))
+
+    def gather(outputs: list[Tensor], partial: Tensor) -> None:
+        assert len(outputs) == 2
+        outputs[0].copy_(partial)
+        outputs[1].copy_(partial + 0.5)
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
+    monkeypatch.setattr(torch.distributed, "all_gather", gather)
+    actual = entropy_logits_mean_all_to_all(
+        x,
+        y,
+        dim=-1,
+        dim_mean=1,
+        keepdim=True,
+        keepdim_mean=True,
+        world_size=2,
+    )
+    mean_p = torch.softmax(x, dim=-1).mean(dim=1, keepdim=True)
+    log_q = torch.log_softmax(y, dim=-1)
+    partial = torch.logsumexp(log_q, dim=1, keepdim=True)
+    log_mean_q = torch.logsumexp(torch.stack((partial, partial + 0.5)), dim=0)
+    log_mean_q -= math.log(6)
+    torch.testing.assert_close(
+        actual,
+        -(mean_p * log_mean_q).sum(dim=-1, keepdim=True),
+    )
+
+
+def test_entropy_logits_mean_all_to_all_preserves_middle_mean_axis():
+    x = torch.arange(24, dtype=torch.float64).reshape(2, 3, 4) / 11
+    y = torch.flip(x, dims=(0, 2))
+    mean_p = torch.softmax(x, dim=-1).mean(dim=1, keepdim=True)
+    mean_q = torch.softmax(y, dim=-1).mean(dim=1, keepdim=True)
+    expected = -(mean_p * mean_q.log()).sum(dim=-1, keepdim=True)
+    actual = entropy_logits_mean_all_to_all(
+        x,
+        y,
+        dim=-1,
+        dim_mean=1,
+        keepdim=True,
+        keepdim_mean=True,
+    )
+    torch.testing.assert_close(actual, expected)
+
+
+def test_jsd_nonleading_ensemble_and_event_dims():
+    logits = torch.tensor(
+        [
+            [[0.0, 1.0], [2.0, 0.0]],
+            [[1.0, 0.0], [0.0, 2.0]],
+            [[2.0, 1.0], [1.0, 0.0]],
+        ],
+    )
+    logp = torch.log_softmax(logits, dim=2)
+    probs = logp.exp()
+    mixture = probs.mean(0)
+    expected = -(mixture * mixture.log()).sum(-1) - (-(probs * logp).sum(-1)).mean(0)
+    torch.testing.assert_close(jsd(logp, ensemble_dim=0, event_dim=2), expected)
+
+
+def test_jsd_reduces_tuple_ensemble_and_event_axes():
+    logits = torch.arange(24, dtype=torch.float64).reshape(2, 3, 4) / 7
+    logp = torch.log_softmax(logits, dim=-1)
+    probs = logp.exp()
+    ensemble_dims = (0, 1)
+    event_dims = (2,)
+    mixture = probs.mean(dim=ensemble_dims)
+    expected = -(mixture * mixture.log()).sum(dim=-1) - (
+        -(probs * logp).sum(dim=event_dims)
+    ).mean(dim=ensemble_dims)
+    torch.testing.assert_close(
+        jsd(logp, ensemble_dim=ensemble_dims, event_dim=event_dims),
+        expected,
+    )
+
+
+def test_pca_centers_float_input_and_whitening_regularizer():
+    seen: list[Tensor] = []
+
+    def decompose(centered: Tensor) -> tuple[Tensor, Tensor]:
+        seen.append(centered)
+        return torch.tensor([1.0, 4.0]), torch.eye(2)
+
+    x = torch.tensor([[0, 1], [2, 5], [4, 3]], dtype=torch.float64)
+    values, vectors = pca(x, whiten=True, eps=3.0, decompose=decompose)
+    assert seen[0].dtype == torch.float32
+    torch.testing.assert_close(seen[0], (x.float() - x.float().mean(0)))
+    torch.testing.assert_close(values, torch.tensor([1.0, 4.0]))
+    torch.testing.assert_close(vectors, torch.diag(torch.tensor([0.5, 1 / 7**0.5])))
+
+
+def test_pca_power_uses_input_device_and_dtype(monkeypatch: pytest.MonkeyPatch):
+    randn = Mock(wraps=torch.randn)
+    monkeypatch.setattr(torch, "randn", randn)
+    pca_power(
+        torch.tensor([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]], dtype=torch.float64),
+        num_iters=0,
+    )
+    assert randn.call_args.args == (3, 3)
+    assert randn.call_args.kwargs == {
+        "device": torch.device("cpu"),
+        "dtype": torch.float64,
+    }
+
+
+def test_householder_qr_reconstructs_rectangular_matrix_and_preserves_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    eye = Mock(wraps=torch.eye)
+    monkeypatch.setattr(torch, "eye", eye)
+    mat = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 7.0]], dtype=torch.float64)
+    q, r = _householder_qr(mat)
+    torch.testing.assert_close(q @ r, mat)
+    torch.testing.assert_close(q.T @ q, torch.eye(3, dtype=torch.float64))
+    assert q.dtype == mat.dtype
+    assert q.device == mat.device
+    assert eye.call_args_list[0].kwargs == {
+        "device": mat.device,
+        "dtype": mat.dtype,
+    }
+
+
+def test_householder_qr_sign_choice_avoids_cancellation():
+    epsilon = torch.finfo(torch.float32).eps
+    for sign in (-1.0, 1.0):
+        matrix = torch.tensor(
+            [[sign, 0.0], [epsilon, 1.0], [0.0, 0.0]],
+            dtype=torch.float32,
+        )
+        q, r = _householder_qr(matrix)
+        torch.testing.assert_close(q @ r, matrix, atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(torch.tril(r, diagonal=-1), torch.zeros_like(r))
+
+
+def test_householder_qr_uses_strict_scaled_zero_threshold():
+    epsilon = torch.finfo(torch.float32).eps
+    matrix = torch.tensor(
+        [[epsilon, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        dtype=torch.float32,
+    )
+    _, r = _householder_qr(matrix)
+    expected = torch.tensor(
+        [[-epsilon, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        dtype=torch.float32,
+    )
+    assert torch.equal(r, expected)
+
+
+def test_householder_qr_scales_zero_threshold_by_rows_not_columns():
+    epsilon = torch.finfo(torch.float32).eps
+    matrix = torch.tensor(
+        [[1.25 * epsilon, 0.0], [0.0, 0.0], [0.0, 0.0]],
+        dtype=torch.float32,
+    )
+    q, r = _householder_qr(matrix)
+    assert torch.equal(q, torch.eye(3))
+    assert torch.equal(r, matrix)
+
+
+def test_householder_qr_continues_after_a_zero_column():
+    matrix = torch.tensor([[0.0, 0.0], [0.0, 1.0], [0.0, 2.0]])
+    q, r = _householder_qr(matrix)
+    torch.testing.assert_close(q @ r, matrix)
+    torch.testing.assert_close(torch.tril(r, diagonal=-1), torch.zeros_like(r))
+
+
+def test_quantile_normalize_pins_quantile_endpoints():
+    x = torch.tensor([[0.0, 1.0, 2.0], [3.0, 4.0, 100.0]])
+    torch.testing.assert_close(quantile_normalize(x, q=0.1), (x - 0.5) / 51.5)
+    torch.testing.assert_close(quantile_normalize(x, q=0.2), (x - 1.0) / 3.0)
+    narrow = torch.tensor([0.0, 0.25, 0.5, 0.75])
+    torch.testing.assert_close(
+        quantile_normalize(narrow, q=0.25),
+        (narrow - 0.1875) / 0.375,
+    )
+
+
+def test_ema_update_default_weights_the_new_observation():
+    assert ema_update(10.0, 20.0) == pytest.approx(13.0)
+
+
+def test_quantile_normalize_constant_input_has_finite_zero_gradient():
+    x = torch.full((4,), 5.0, requires_grad=True)
+    quantile_normalize(x).sum().backward()
+    assert x.grad is not None
+    assert torch.isfinite(x.grad).all()
+    torch.testing.assert_close(x.grad, torch.zeros_like(x))
+
+
+def test_sliding_window_uses_elapsed_time_and_cumulative_count_deltas():
+    window = SlidingWindow(window_sec=20.0)
+    window.add(3.0, 10.0)
+    window.add(8.0, 20.0)
+    assert window.compute_rate(9.0, 30.0) == pytest.approx(22.0 / 6.1)
 
 
 if __name__ == "__main__":

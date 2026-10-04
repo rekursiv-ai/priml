@@ -71,7 +71,7 @@ class GridAccuracy:
         label_raw = batch["label"]
         assert isinstance(label_raw, Tensor)
         labels = label_raw.detach().to(torch.int64)
-        grid_len = labels.shape[-1]
+        grid_len = labels.shape[1]
         predictions = logits.detach()[:, -grid_len:].to(torch.int64)
         labels = labels.to(predictions.device)
         raw_count = batch.get("valid_count", labels.shape[0])
@@ -82,10 +82,10 @@ class GridAccuracy:
 
         counted = labels != self.config.ignore_label_id
         correct = (predictions == labels) & counted
-        per_puzzle = counted.sum(dim=-1)
+        per_puzzle = counted.sum(dim=1)
         # A puzzle counts as solved only if every counted cell is right, and
         # only if it had cells to begin with -- an all-ignored row is padding.
-        solved = (correct.sum(dim=-1) == per_puzzle) & (per_puzzle > 0)
+        solved = (correct.sum(dim=1) == per_puzzle) & (per_puzzle > 0)
         self.solved += int(solved.sum().item())
         self.puzzles += int((per_puzzle > 0).sum().item())
         self.cells_correct += int(correct.sum().item())
@@ -149,7 +149,7 @@ class GridAccuracy:
         state = cast(GridAccuracy.StateDict, state_dict)
         # A checkpoint reader may hand a count back as a float or a numeric
         # string; anything else is corruption, so the coercion raises.
-        self.solved = IntCodec.coerce(state.get("solved", 0), None)
-        self.puzzles = IntCodec.coerce(state.get("puzzles", 0), None)
-        self.cells_correct = IntCodec.coerce(state.get("cells_correct", 0), None)
-        self.cells = IntCodec.coerce(state.get("cells", 0), None)
+        self.solved = IntCodec.coerce(state.get("solved"))
+        self.puzzles = IntCodec.coerce(state.get("puzzles"))
+        self.cells_correct = IntCodec.coerce(state.get("cells_correct"))
+        self.cells = IntCodec.coerce(state.get("cells"))

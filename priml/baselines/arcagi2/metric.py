@@ -95,7 +95,10 @@ class PassK:
         header = output.shape[1] - inputs.shape[1]
         if header != 1:
             raise ValueError("Expected one halt column followed by the grid")
-        confidence = ListCodec.coerce(output[:, 0].double().sigmoid().tolist(), float)
+        confidence: list[float] = []
+        for value in output[:, 0].double().sigmoid().tolist():
+            assert isinstance(value, float)
+            confidence.append(value)
         predictions = output[:, 1:].to(torch.uint8)
         for index, identifier in enumerate(identifiers.detach().cpu().tolist()):
             ident = IntCodec.coerce(identifier)
@@ -146,10 +149,13 @@ class PassK:
                 )
                 stats: dict[str, list[float]] = {}
                 for digest, confidence in records:
-                    tally = stats.setdefault(digest, [0.0, 0.0, 0.0])
-                    tally[0] += 1.0
-                    tally[1] += confidence
-                    tally[2] = max(tally[2], confidence)
+                    tally = stats.get(digest)
+                    if tally is None:
+                        stats[digest] = [1.0, confidence, confidence]
+                    else:
+                        tally[0] += 1.0
+                        tally[1] += confidence
+                        tally[2] = max(tally[2], confidence)
                 for tally in stats.values():
                     tally[1] /= max(1.0, tally[0])
                 ranked = {
@@ -293,7 +299,7 @@ def _canonical(name: str, grid: Tensor) -> tuple[str, Tensor]:
         raise ValueError(f"Invalid ARC color permutation: {permutation!r}")
     tid = int(transform[1:])
     if 0 <= tid <= 3:
-        grid = torch.rot90(grid, -tid, (0, 1))
+        grid = torch.rot90(grid, -tid)
     elif tid == 4:
         grid = grid.flip(1)
     elif tid == 5:
@@ -301,7 +307,7 @@ def _canonical(name: str, grid: Tensor) -> tuple[str, Tensor]:
     elif tid == 6:
         grid = grid.T
     elif tid == 7:
-        grid = torch.rot90(grid, 1, (0, 1)).flip(1)
+        grid = torch.rot90(grid).flip(1)
     else:
         raise ValueError(f"Invalid ARC dihedral transform: {tid}")
     inverse = torch.tensor([int(color) for color in permutation]).argsort()

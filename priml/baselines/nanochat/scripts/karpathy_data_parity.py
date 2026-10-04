@@ -31,7 +31,7 @@ Examples:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 import argparse
 import importlib
@@ -63,8 +63,11 @@ class _TokenizerFactory(Protocol):
     def from_directory(self, path: str) -> _Tokenizer: ...
 
 
+@runtime_checkable
 class _PrepareModule(Protocol):
     __file__: str
+    DATA_DIR: str
+    TOKENIZER_DIR: str
     EVAL_TOKENS: int
     Tokenizer: _TokenizerFactory
     make_dataloader: Callable[..., Iterator[tuple[Tensor, Tensor, int]]]
@@ -134,9 +137,11 @@ def load_upstream(root: Path, *, corpus: Path) -> _PrepareModule:
     """
     sys.path.insert(0, str(root))
     module = importlib.import_module("prepare")
-    module.DATA_DIR = str(corpus)  # ty: ignore[unresolved-attribute] -- The module is dynamically imported and exposes these integration attributes at runtime.  # pyright: ignore[reportAttributeAccessIssue] -- The module is dynamically imported and exposes these integration attributes at runtime.
-    module.TOKENIZER_DIR = str(corpus / "tokenizer")  # ty: ignore[unresolved-attribute] -- The module is dynamically imported and exposes these integration attributes at runtime.  # pyright: ignore[reportAttributeAccessIssue] -- The module is dynamically imported and exposes these integration attributes at runtime.
-    return cast(_PrepareModule, module)
+    if not isinstance(module, _PrepareModule):
+        raise TypeError("prepare module does not satisfy the parity contract")
+    module.DATA_DIR = str(corpus)
+    module.TOKENIZER_DIR = str(corpus / "tokenizer")
+    return module
 
 
 def build_ours(
@@ -331,8 +336,10 @@ def _git(root: Path, *arguments: str) -> str:
 
 def _parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
+    if __doc__ is None:
+        raise ValueError("Expected __doc__ is not None.")
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(

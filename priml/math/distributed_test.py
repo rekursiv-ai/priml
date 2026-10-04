@@ -11,6 +11,7 @@ from torch import Tensor
 import torch
 
 from priml.math.distributed import (
+    _logsumexp_all_to_all,
     logmeanexp_all_to_all,
     logsumexp_all_to_all,
 )
@@ -133,6 +134,15 @@ def test_logmeanexp_all_to_all_keepdim_false():
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
 
 
+def test_internal_logsumexp_defaults_to_keepdim_false():
+    x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+    result = _logsumexp_all_to_all(x)
+    expected = torch.logsumexp(x, dim=-1, keepdim=False)
+
+    assert result.shape == (2, 3)
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+
+
 def test_logsumexp_all_to_all_distributed():
     """Test logsumexp_all_to_all with mocked distributed (all_gather path)."""
     x = torch.randn(2, 3, 4)
@@ -152,8 +162,9 @@ def test_logsumexp_all_to_all_distributed():
 
         mock_all_gather.side_effect = mock_all_gather_impl
         result = logsumexp_all_to_all(x, dim=-1)
-        assert mock_all_gather.called
-        assert result.shape == (2, 3)
+        expected = torch.logsumexp(x, dim=-1) + math.log(2)
+        mock_all_gather.assert_called_once()
+        assert torch.equal(result, expected)
 
 
 def test_logmeanexp_all_to_all_distributed():
@@ -175,8 +186,39 @@ def test_logmeanexp_all_to_all_distributed():
 
         mock_all_gather.side_effect = mock_all_gather_impl
         result = logmeanexp_all_to_all(x, dim=-1)
-        assert mock_all_gather.called
-        assert result.shape == (2, 3)
+        expected = torch.logsumexp(x, dim=-1) - math.log(4)
+        mock_all_gather.assert_called_once()
+        torch.testing.assert_close(result, expected, rtol=1e-6, atol=1e-7)
+
+
+def test_explicit_world_size_controls_gather_and_mean():
+    """Explicit world size determines both gathered ranks and averaging."""
+    x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+
+    with (
+        patch("torch.distributed.is_initialized", return_value=True),
+        patch("torch.distributed.get_world_size", return_value=2),
+        patch("torch.distributed.all_gather") as mock_all_gather,
+    ):
+
+        def mock_all_gather_impl(
+            gathered: list[Tensor],
+            tensor: Tensor,
+        ) -> None:
+            for rank, output in enumerate(gathered):
+                output.copy_(tensor + rank)
+
+        mock_all_gather.side_effect = mock_all_gather_impl
+        summed = logsumexp_all_to_all(x, dim=-1, world_size=3)
+        expected_sum = torch.logsumexp(
+            torch.stack([torch.logsumexp(x, dim=-1) + rank for rank in range(3)]),
+            dim=0,
+        )
+        torch.testing.assert_close(summed, expected_sum)
+
+        averaged = logmeanexp_all_to_all(x, dim=-1, world_size=3)
+        expected_mean = expected_sum - math.log(x.shape[-1] * 3)
+        torch.testing.assert_close(averaged, expected_mean)
 
 
 if __name__ == "__main__":

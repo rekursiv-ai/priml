@@ -123,17 +123,12 @@ class ImageNetSource:
     def _load_validation_labels(self, labels_file: Path) -> dict[str, str]:
         """Load validation labels file."""
         # Get sorted list of filenames from tar.
-        with tarfile.open(self.tar_path, "r") as tar:
+        with tarfile.open(self.tar_path) as tar:
             filenames = sorted(tar.getnames())
 
         # Load labels (one per line)
         with labels_file.open() as f:
             labels = [line.strip() for line in f]
-
-        if len(filenames) != len(labels):
-            raise ValueError(
-                f"Mismatch: {len(filenames)} files but {len(labels)} labels",
-            )
 
         return dict(zip(filenames, labels, strict=True))
 
@@ -150,7 +145,7 @@ class ImageNetSource:
     # first access pays a full sequential pass over the tar.
     def _iter_train(self) -> Iterator[Sample]:
         """Iterate training split (nested tars) with parallel interleaved reading."""
-        with tarfile.open(self.tar_path, "r") as tar:
+        with tarfile.open(self.tar_path) as tar:
             # Get class tar members. Fold the loader-injected epoch seed into the
             # shuffle so each epoch reshuffles while all workers share the
             # permutation.
@@ -162,17 +157,16 @@ class ImageNetSource:
             )
 
             # Parallel interleaved reading.
-            if self.num_concurrently_read_shards > 1:
-                active_shards: deque[Generator[Sample, None, None]] = deque()
-                class_tar_iter = iter(class_tars)
-
-                # Initialize with num_concurrently_read_shards class tars.
-                for _ in range(min(self.num_concurrently_read_shards, len(class_tars))):
-                    try:
-                        class_tar_member = next(class_tar_iter)
-                        active_shards.append(_read_class_tar(tar, class_tar_member))
-                    except StopIteration:
-                        break
+            if self.num_concurrently_read_shards >= 2:
+                num_initial_shards = min(
+                    self.num_concurrently_read_shards,
+                    len(class_tars),
+                )
+                active_shards: deque[Generator[Sample, None, None]] = deque(
+                    _read_class_tar(tar, member)
+                    for member in class_tars[:num_initial_shards]
+                )
+                class_tar_iter = iter(class_tars[num_initial_shards:])
 
                 # Round-robin through active shards.
                 while active_shards:
@@ -194,7 +188,7 @@ class ImageNetSource:
 
     def _iter_val(self) -> Iterator[Sample]:
         """Iterate validation split (flat tar with labels file)."""
-        with tarfile.open(self.tar_path, "r") as tar:
+        with tarfile.open(self.tar_path) as tar:
             # Val is never shuffled; slice deterministically over members so the
             # same sample always maps to the same worker for stable evaluation.
             members = shard_and_shuffle(
@@ -224,7 +218,7 @@ class ImageNetSource:
 
     def _iter_test(self) -> Iterator[Sample]:
         """Iterate test split (flat tar, no labels)."""
-        with tarfile.open(self.tar_path, "r") as tar:
+        with tarfile.open(self.tar_path) as tar:
             # Test is never shuffled, mirroring val: deterministic slice only.
             members = shard_and_shuffle(
                 [m for m in tar.getmembers() if m.isfile()],
@@ -278,10 +272,7 @@ def _read_class_tar(
     # tarfile.open(fileobj=...) does not take ownership of it.
     with (
         closing(class_tar_file),
-        tarfile.open(
-            fileobj=class_tar_file,
-            mode="r",
-        ) as class_tar,
+        tarfile.open(fileobj=class_tar_file) as class_tar,
     ):
         for image_member in class_tar.getmembers():
             if not image_member.isfile():

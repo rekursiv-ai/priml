@@ -12,6 +12,7 @@ from priml.baselines.arcagi1.model import (
     UrmRecurrence,
     depthwise_conv,
     depthwise_shift,
+    from_reference_name,
 )
 from priml.baselines.sudoku.embedding import GridEmbedding
 from priml.baselines.sudoku.model import SudokuNet
@@ -19,6 +20,17 @@ from priml.cost import cost
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.testing.cost import assert_cost_matches_torch
+
+
+def test_reference_parameter_names_are_remapped() -> None:
+    assert from_reference_name("embed_tokens.weight") == "embedding.embed_tokens.weight"
+    assert (
+        from_reference_name("embed_feedback") == "embedding.channels.0.embed_feedback"
+    )
+    assert from_reference_name("q_head.weight") == "halt_head.weight"
+    assert from_reference_name("register_tokens") == "prefix.register_tokens"
+    assert from_reference_name("puzzle_emb.weights") == "prefix.weights"
+    assert from_reference_name("blocks.0.weight") == "blocks.0.weight"
 
 
 def test_conv_swiglu_reset_initializes_its_convolution() -> None:

@@ -32,6 +32,13 @@ def test_on_demand_generates_nothing_when_nobody_finished() -> None:
     assert plan == RestartPlan(generate=0, offset=0, modulus=1)
 
 
+def test_on_demand_has_no_checkpoint_state() -> None:
+    policy = _on_demand()
+    assert policy.state_dict() == {"cursor": None}
+    policy.load_state_dict({"cursor": 4})
+    assert policy.state_dict() == {"cursor": None}
+
+
 def test_reserve_fills_the_pool_once_and_deals_unused_worlds_in_order() -> None:
     policy = _reserve()
     assert policy.plan(finished=3, pool_size=8) == RestartPlan(8, 0, 8)

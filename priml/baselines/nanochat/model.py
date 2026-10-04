@@ -351,7 +351,6 @@ class NanoChatLM(nn.Module):
         blocks: list[nn.Module] = []
         for block in config.block:
             built = block.make()
-            assert isinstance(built, nn.Module)
             blocks.append(built)
         self.blocks = nn.ModuleList(blocks)
         self.value_embeds = nn.ModuleDict(
@@ -372,6 +371,7 @@ class NanoChatLM(nn.Module):
         # Built lazily rather than here: the module is constructed on meta and
         # materialized later, and a table built on meta holds no values.
         self._rotation: tuple[Tensor, Tensor] | None = None
+        self._rotation_device: torch.device | None = None
 
     # Sized and built here rather than injected: there is one per PARTICIPATING layer,
     # and which layers those are is derived from the stride, so the count is not
@@ -380,9 +380,7 @@ class NanoChatLM(nn.Module):
     @classmethod
     def _value_table(cls, config: Config, *, width: int) -> nn.Module:
         """One value-embedding table, narrowed like the token table."""
-        built = _value_table_config(config, width=width).make()
-        assert isinstance(built, nn.Module)
-        return built
+        return _value_table_config(config, width=width).make()
 
     def reset_parameters(self) -> None:
         """Re-initialize everything this model constructed.
@@ -458,13 +456,15 @@ class NanoChatLM(nn.Module):
         device: torch.device,
     ) -> tuple[Tensor, Tensor]:
         """Return the rotation factors for ``length`` positions, built once."""
-        if self._rotation is None or self._rotation[0].device != device:
+        if self._rotation is None or self._rotation_device != device:
             # REBUILT on a device change, never moved there: the factors come
             # from a transcendental whose last bit differs between CPU and CUDA
             # (rope.py:395-401), so a moved table is not the table that device
             # would have produced.
-            positions = torch.arange(self.config.max_seq_len, device=device)
-            self._rotation = self.rope(positions)
+            self._rotation = self.rope(
+                _positions(self.config.max_seq_len, device=device),
+            )
+            self._rotation_device = device
         cos, sin = self._rotation
         return cos[:length], sin[:length]
 
@@ -513,6 +513,11 @@ class _BlockCallable(Protocol):
         cos_sin: tuple[Tensor, Tensor],
         value_embedding: Tensor | None,
     ) -> Tensor: ...
+
+
+def _positions(length: int, *, device: torch.device) -> Tensor:
+    """Build integer positions on the requested device."""
+    return torch.arange(length, device="cpu").to(device=device)
 
 
 def _inner_width(block: HasAttention) -> int:
@@ -752,7 +757,6 @@ class SourceReuseTransformerBlock(TransformerBlock):
             raise ValueError("Expected self.prenorm.")
         assert isinstance(source, Tensor)
         attention = self.attn(self.norm1(source, **kwargs), **kwargs)
-        assert isinstance(attention, Tensor)
         x = x + attention
         return x + self.ffn(self.norm2(x, **kwargs), **kwargs)
 
@@ -1021,8 +1025,10 @@ class MemoryNanoChatLM(NanoChatLM):
           device: Materialized model device.
 
         """
-        positions = torch.arange(self.config.max_seq_len, device=device)
-        self._rotation = self.rope(positions)
+        self._rotation = self.rope(
+            _positions(self.config.max_seq_len, device=device),
+        )
+        self._rotation_device = device
 
     @override
     def _rotation_table(
@@ -1034,7 +1040,7 @@ class MemoryNanoChatLM(NanoChatLM):
         """Slice rotary factors, rebuilding outside compilation on device changes."""
         if (
             self._rotation is None
-            or self._rotation[0].device != device
+            or self._rotation_device != device
             or self._rotation[0].dtype != self.rope.dtype
         ):
             if torch.compiler.is_compiling():

@@ -377,11 +377,10 @@ class MultiStreamAttention(nn.Module):
         for r in self.ropes.values():
             if isinstance(r, HasResetParameters):
                 r.reset_parameters()
-        seen: TensorModule | None = None
-        for norm in (self.norm_q, self.norm_k):
-            if norm is not None and norm is not seen:
-                norm.reset_parameters()
-                seen = norm
+        for norm in {
+            id(norm): norm for norm in (self.norm_q, self.norm_k) if norm is not None
+        }.values():
+            norm.reset_parameters()
         if isinstance(self.norm_out, HasResetParameters):
             self.norm_out.reset_parameters()
 
@@ -403,7 +402,7 @@ class MultiStreamAttention(nn.Module):
             raise ValueError(f"Invalid stream index {index}.")
         target = self.streams[index]
         _validate_native_state(target, source=source)
-        target.load_state_dict(source.state_dict(), strict=True)
+        target.load_state_dict(source.state_dict())
 
     @override
     def forward(
@@ -590,7 +589,7 @@ class MultiStreamAttention(nn.Module):
         k_cat = torch.cat(all_k, dim=-2)
         v_cat = torch.cat(all_v, dim=-2)
 
-        if self.kv_groups > 1:
+        if self.kv_groups != 1:
             k_cat = k_cat.repeat_interleave(self.kv_groups, dim=-3)
             v_cat = v_cat.repeat_interleave(self.kv_groups, dim=-3)
 

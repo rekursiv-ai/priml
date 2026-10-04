@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import cast
+from collections.abc import Callable
+from types import SimpleNamespace
+from typing import cast, override
 
 from configgle import PartialConfig
 from torch import Tensor, nn
@@ -10,6 +12,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
+from priml.baselines.nanochat import attention
 from priml.baselines.nanochat.attention import (
     CausalAttention,
     _qk_backward,
@@ -19,12 +22,29 @@ from priml.baselines.nanochat.attention import (
     _qk_reference,
     fused_qk_norm_rope,
 )
-from priml.cost import cost
+from priml.cost import Cost, cost
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.special import Identity
 from priml.testing.cost import assert_cost_matches_torch
+
+
+def test_memory_gates_start_at_zero_without_bias() -> None:
+    config = CausalAttention.Config()
+    config.channels_in = 12
+    config.channels_head = 4
+    config.num_heads = 3
+    config.gate_channels = 4
+    config.bigram = True
+    config.trigram = True
+
+    attention = config.make()
+
+    for gate in (attention.bigram_gate, attention.trigram_gate):
+        assert gate is not None
+        assert torch.equal(gate.weight, torch.zeros_like(gate.weight))
+        assert gate.bias is None
 
 
 def test_head_gate_inherits_full_input_width() -> None:
@@ -60,7 +80,7 @@ def test_causal_attention_reset_initializes_affine_output_norm() -> None:
     assert torch.equal(attention.norm_out.weight, torch.ones(8))
 
 
-@pytest.mark.parametrize("normalization", ["affine", "epsilon", "custom"])
+@pytest.mark.parametrize("normalization", ["affine", "epsilon", "custom", "subclass"])
 def test_fused_attention_rejects_unsupported_normalization(normalization: str) -> None:
     config = CausalAttention.Config()
     config.channels_in = 16
@@ -73,9 +93,21 @@ def test_fused_attention_rejects_unsupported_normalization(normalization: str) -
         norm.elementwise_affine = True
     elif normalization == "epsilon":
         norm.eps = 0.01
+    elif normalization == "subclass":
+
+        class SpecializedRMSNormConfig(RMSNorm.Config):
+            pass
+
+        norm = SpecializedRMSNormConfig()
     config.norm_qk = Identity.Config() if normalization == "custom" else norm
 
-    with pytest.raises(ValueError, match=r"fused_qk_rope.*norm_qk"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^fused_qk_rope requires norm_qk to be parameter-free RMSNorm "
+            r"with epsilon None or float32 epsilon\.$"
+        ),
+    ):
         config.make()
 
 
@@ -143,7 +175,12 @@ def test_qk_forward_and_backward_match_fp32_math() -> None:
     q = torch.randn(3, 4, 2, 8, requires_grad=True)
     k = torch.randn_like(q, requires_grad=True)
     # fused_qk_norm_rope broadcasts phase across batch and head axes.
-    phase = torch.randn(1, 4, 1, 4)
+    phase = torch.randn(
+        1,
+        4,
+        1,
+        4,
+    )  # fused_qk_norm_rope broadcasts batch and head axes.
     cos, sin = phase.cos(), phase.sin()
     outputs = fused_qk_norm_rope(q, k, cos, sin)
     references: list[torch.Tensor] = []
@@ -162,6 +199,16 @@ def test_qk_forward_and_backward_match_fp32_math() -> None:
     actual_grads = torch.autograd.grad(outputs, (q, k), gradients)
     for actual, expected in zip(actual_grads, expected_grads, strict=True):
         torch.testing.assert_close(actual, expected)
+
+
+def test_qk_reference_uses_positive_epsilon_for_zero_inputs() -> None:
+    q = torch.zeros(2, 3, 4, 8)
+    cos, sin = torch.ones(3, 4), torch.zeros(3, 4)
+
+    q_out, k_out = fused_qk_norm_rope(q, q, cos, sin)
+
+    assert torch.equal(q_out, q)
+    assert torch.equal(k_out, q)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -201,6 +248,7 @@ def test_qk_forward_preserves_reference_bits_and_declared_layout(
     declared = _qk_fake(q, k, cos, sin)
     for result, fake, value in zip(actual, declared, (q, k), strict=True):
         assert torch.equal(result, _qk_reference(value, cos, sin))
+        assert result.dtype == value.dtype
         assert result.is_contiguous()
         assert result.stride() == fake.stride()
 
@@ -311,6 +359,39 @@ def test_cost_prices_each_causal_attention_extension(feature: str) -> None:
         ].sum() == rows * (5 * heads + (12 if feature == "head_gate" else 24))
 
 
+@pytest.mark.parametrize(
+    ("add", "primal_elements", "primal_flops"),
+    [(False, 165, 105), (True, 225, 135)],
+)
+def test_value_mix_cost_matches_each_elementwise_and_reduction_cell(
+    add: bool,
+    primal_elements: int,
+    primal_flops: int,
+) -> None:
+    dtype = torch.float16
+    rows, heads, channels_head, channels_in = 5, 3, 2, 11
+    result = attention._value_mix_cost(
+        heads=heads,
+        channels_head=channels_head,
+        channels_in=channels_in,
+        rows=rows,
+        dtype=dtype,
+        add=add,
+    )
+    expected = Cost(
+        cells={
+            ("bytes", "primal", "elementwise", dtype): 2 * primal_elements,
+            ("flops", "primal", "elementwise", dtype): primal_flops,
+            ("bytes", "adjoint", "elementwise", dtype): 810,
+            ("flops", "adjoint", "elementwise", dtype): 190,
+            ("bytes", "adjoint", "reduction", dtype): 90,
+            ("flops", "adjoint", "reduction", dtype): 15,
+        },
+    )
+
+    assert result == expected
+
+
 def test_cost_extension_dtype_and_fusion_preserve_the_analytical_algorithm() -> None:
     config = CausalAttention.Config()
     config.channels_in = 12
@@ -361,7 +442,24 @@ def _run_all_attention_gates(module: nn.Module, x: Tensor) -> Tensor:
     )
 
 
-def test_causal_attention_rejects_non_tensor_memories_and_supports_fused_rope() -> None:
+def test_causal_attention_rejects_non_tensor_memories_and_supports_fused_rope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = attention
+    original_fused = module.fused_qk_norm_rope
+    fused_calls = 0
+
+    def track_fused(
+        q: Tensor,
+        k: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        nonlocal fused_calls
+        fused_calls += 1
+        return original_fused(q, k, cos, sin)
+
+    monkeypatch.setattr(module, "fused_qk_norm_rope", track_fused)
     config = CausalAttention.Config()
     config.channels_in = 8
     config.channels_head = 4
@@ -370,16 +468,17 @@ def test_causal_attention_rejects_non_tensor_memories_and_supports_fused_rope() 
     config.kernel = SdpaNaive.Config()
     config.fused_qk_rope = True
     config.norm_qk = RMSNorm.Config(elementwise_affine=False, eps=None)
-    attention = config.make()
+    causal = config.make()
     x = torch.randn(2, 3, 8)
     # Rotary factors use a singleton head axis for production broadcasting.
     cos_sin = (torch.ones(3, 1, 2), torch.zeros(3, 1, 2))
     with pytest.raises(ValueError, match="bigram_value"):
-        attention(x, cos_sin=cos_sin, bigram_value=3)
+        causal(x, cos_sin=cos_sin, bigram_value=3)
     with pytest.raises(ValueError, match="trigram_value"):
-        attention(x, cos_sin=cos_sin, trigram_value=3)
-    output = attention(x, cos_sin=cos_sin)
+        causal(x, cos_sin=cos_sin, trigram_value=3)
+    output = causal(x, cos_sin=cos_sin)
     assert output.shape == x.shape
+    assert fused_calls == 1
 
     gated = CausalAttention.Config()
     gated.channels_in = 16
@@ -421,6 +520,193 @@ def test_qk_validation_rejects_bad_shapes_and_widths() -> None:
         bad = torch.zeros(2, 3, 4, width)
         with pytest.raises(ValueError, match=message):
             fused_qk_norm_rope(bad, bad, torch.ones(3, 2), torch.zeros(3, 2))
+
+
+def test_qk_cuda_adapters_launch_with_expected_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = attention
+
+    class Launcher:
+        def __init__(self) -> None:
+            self.arguments: dict[str, object] = {}
+
+        def __getitem__(
+            self,
+            grid: Callable[[dict[str, int]], tuple[int, ...]],
+        ) -> Callable[..., None]:
+            def launch(**arguments: object) -> None:
+                assert grid({"block": 4}) == (16,)
+                self.arguments = arguments
+
+            return launch
+
+    forward, backward = Launcher(), Launcher()
+
+    def cdiv(n: int, b: int) -> int:
+        return (n + b - 1) // b
+
+    monkeypatch.setattr(module, "triton", SimpleNamespace(cdiv=cdiv))
+    monkeypatch.setattr(module, "_compiled_qk_forward", lambda: forward)
+    monkeypatch.setattr(module, "_compiled_qk_backward", lambda: backward)
+    q = torch.randn(2, 4, 8, 32)[..., ::2]
+    k = torch.randn(2, 4, 8, 16)
+    dq, dk = torch.randn_like(q), torch.randn_like(k)
+    # _qk_forward_cuda consumes phase with a singleton head axis.
+    cos, sin = torch.randn(4, 1, 8), torch.randn(4, 1, 8)
+
+    q_out, k_out = module._qk_forward_cuda(q, k, cos, sin)
+    assert q_out.shape == q.shape
+    assert q_out.is_contiguous()
+    assert k_out.shape == k.shape
+    assert k_out.is_contiguous()
+    assert forward.arguments["n_rows"] == 64
+    assert forward.arguments["geometry"] == (8, 4)
+    forward_constants = cast(tuple[float, int, bool], forward.arguments["constants"])
+    assert forward_constants == (1.1920928955078125e-07, 8, True)
+    assert type(forward_constants[1]) is int
+    forward_buffers = cast(tuple[Tensor, ...], forward.arguments["buffers"])
+    assert forward_buffers[0].is_contiguous()
+    assert forward_buffers[1].is_contiguous()
+
+    q_grad, k_grad = module._qk_backward_cuda(dq, dk, q, k, cos=cos, sin=sin)
+    assert q_grad.shape == q.shape
+    assert q_grad.is_contiguous()
+    assert k_grad.shape == k.shape
+    assert k_grad.is_contiguous()
+    assert backward.arguments["n_rows"] == 64
+    assert backward.arguments["geometry"] == (8, 4)
+    backward_constants = cast(
+        tuple[float, int, bool],
+        backward.arguments["constants"],
+    )
+    assert backward_constants == (1.1920928955078125e-07, 8, True)
+    assert type(backward_constants[1]) is int
+    backward_buffers = cast(tuple[Tensor, ...], backward.arguments["buffers"])
+    assert all(value.is_contiguous() for value in backward_buffers)
+
+
+def test_qk_triton_kernels_load_masked_rows_and_store_all_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = attention
+
+    class Symbol:
+        def __init__(self, expression: str) -> None:
+            self.expression = expression
+
+        @override
+        def __repr__(self) -> str:
+            return self.expression
+
+        def __getitem__(self, key: object) -> Symbol:
+            return Symbol(f"{self.expression}[{key!r}]")
+
+        def to(self, dtype: object) -> Symbol:
+            return Symbol(f"{self.expression}.to({dtype!r})")
+
+        def __add__(self, other: object) -> Symbol:
+            return Symbol(f"({self.expression}+{other!r})")
+
+        def __radd__(self, other: object) -> Symbol:
+            return Symbol(f"({other!r}+{self.expression})")
+
+        def __sub__(self, other: object) -> Symbol:
+            return Symbol(f"({self.expression}-{other!r})")
+
+        def __mul__(self, other: object) -> Symbol:
+            return Symbol(f"({self.expression}*{other!r})")
+
+        def __rmul__(self, other: object) -> Symbol:
+            return Symbol(f"({other!r}*{self.expression})")
+
+        def __truediv__(self, other: object) -> Symbol:
+            return Symbol(f"({self.expression}/{other!r})")
+
+        def __floordiv__(self, other: object) -> Symbol:
+            return Symbol(f"({self.expression}//{other!r})")
+
+        def __mod__(self, other: object) -> Symbol:
+            return Symbol(f"({self.expression}%{other!r})")
+
+        def __lt__(self, other: object) -> Symbol:
+            return Symbol(f"({self.expression}<{other!r})")
+
+    loads: list[tuple[Tensor, dict[str, object]]] = []
+    stores: list[tuple[Tensor, Symbol, dict[str, object]]] = []
+
+    def load(pointer: Tensor, **kwargs: object) -> Symbol:
+        loads.append((pointer, kwargs))
+        return Symbol(f"load{len(loads)}")
+
+    def store(pointer: Tensor, value: Symbol, **kwargs: object) -> None:
+        stores.append((pointer, value, kwargs))
+
+    def program_id(axis: int) -> Symbol:
+        del axis
+        return Symbol("pid")
+
+    def arange(start: int, stop: int) -> Symbol:
+        return Symbol(f"arange({start},{stop})")
+
+    def sum_symbols(value: Symbol, axis: int) -> Symbol:
+        return Symbol(f"sum({value!r},{axis})")
+
+    language = SimpleNamespace(
+        float32=object(),
+        program_id=program_id,
+        arange=arange,
+        load=load,
+        store=store,
+        sum=sum_symbols,
+    )
+    monkeypatch.setattr(module, "language", language)
+
+    def rsqrt(value: Symbol) -> Symbol:
+        return Symbol(f"rsqrt({value!r})")
+
+    monkeypatch.setattr(module, "libdevice", SimpleNamespace(rsqrt=rsqrt))
+    pointers = tuple(torch.full((1,), float(index)) for index in range(12))
+
+    forward_kernel = cast(
+        Callable[..., object],
+        module.__dict__["_qk_norm_rope_fwd_triton"],
+    )
+    forward_kernel(
+        buffers=pointers[:6],
+        n_rows=5,
+        geometry=(2, 4),
+        constants=(1.1920928955078125e-07, 4, False),
+        block=4,
+    )
+    assert len(loads) == 6
+    assert all("mask" in kwargs and kwargs["other"] == 0.0 for _, kwargs in loads)
+    assert len(stores) == 4
+    assert all("mask" in kwargs for _, _, kwargs in stores)
+    assert "tensor([0.])" in repr(loads[0][0])
+    assert "tensor([1.])" in repr(loads[2][0])
+    assert "tensor([2.])" in repr(loads[4][0])
+
+    loads.clear()
+    stores.clear()
+    backward_kernel = cast(
+        Callable[..., object],
+        module.__dict__["_qk_norm_rope_bwd_triton"],
+    )
+    backward_kernel(
+        buffers=pointers[:8],
+        n_rows=5,
+        geometry=(2, 4),
+        constants=(1.1920928955078125e-07, 4, False),
+        block=4,
+    )
+    assert len(loads) == 10
+    assert all("mask" in kwargs and kwargs["other"] == 0.0 for _, kwargs in loads)
+    assert len(stores) == 4
+    assert all("mask" in kwargs for _, _, kwargs in stores)
+    assert "tensor([2.])" in repr(loads[0][0])
+    assert "tensor([0.])" in repr(loads[4][0])
+    assert "tensor([4.])" in repr(loads[8][0])
 
 
 if __name__ == "__main__":
