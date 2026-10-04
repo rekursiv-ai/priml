@@ -133,7 +133,8 @@ def sample_latents(
       guidance_high: Latest flow time receiving guidance.
 
     Returns:
-      latents: Sampled INVAE latents; divide by 0.3099 before decoding.
+      latents: Sampled diffusion-space latents; the step's ``latent_norm``
+        denormalizes them before the autoencoder decodes.
       cls_latents: Sampled REG CLS latents.
 
     Raises:

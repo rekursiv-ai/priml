@@ -15,6 +15,7 @@ from priml.baselines.speedrundit.model import ModelOutput, SpeedrunDiT
 from priml.baselines.speedrundit.objective import LossTerms, SpeedrunObjective
 from priml.baselines.speedrundit.optimizers import speedrundit_optimizer
 from priml.model.dinov2 import DinoV2Teacher
+from priml.model.vision_ae.custom_types import LatentNormalizer
 from priml.train.custom_types import EMAProtocol
 from priml.train.ema import EMA
 from priml.train.train_step import TrainStep, _assert_uniform_microbatch_count
@@ -62,8 +63,11 @@ class SpeedrunTrainStep(TrainStep):
         gradient_clip_norm: float = 1.0
         """Global gradient norm clipping threshold."""
 
-        latent_scale: float = 0.3099
-        """Scale applied to sampled INVAE latents."""
+        latent_norm: Makeable[LatentNormalizer] | None = None
+        """Maps decoded raw latents into diffusion space.
+
+        ``None`` is filled at loop finalize with the normalizer published for
+        the dataset's autoencoder; set it to train on another."""
 
         projection_coeff: float = 0.5
         """REG projection loss weight."""
@@ -84,8 +88,14 @@ class SpeedrunTrainStep(TrainStep):
         """Reference latent dimension for time shifting."""
 
     def __init__(self, config: Config) -> None:
+        if config.latent_norm is None:
+            raise ValueError(
+                "latent_norm is unset; SpeedrunTrainLoop.finalize fills it from the "
+                "dataset's autoencoder, or set it on the step directly.",
+            )
         super().__init__(config)
         self.config: SpeedrunTrainStep.Config = config
+        self.latent_norm: LatentNormalizer = config.latent_norm.make()
         self.teacher = (
             config.teacher.make().to(self.device).eval().requires_grad_(False)
         )
@@ -103,7 +113,7 @@ class SpeedrunTrainStep(TrainStep):
         moved = super().preprocess_batch(batch)
         latent = moved["latent"]
         assert isinstance(latent, Tensor)
-        moved["latent"] = latent.float() * self.config.latent_scale
+        moved["latent"] = self.latent_norm.normalize(latent.float())
         return moved
 
     def _terms(self, batch: dict[str, object], *, evaluate: bool) -> LossTerms:

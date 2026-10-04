@@ -166,6 +166,50 @@ All notable priml changes are documented here. This project follows
 - The nanochat baseline's Torch 2.9 runtime project installs configgle, which
   every priml module imports, so the FA3 build command runs in it.
 
+### Added
+
+- `priml.model.vision_ae`: pretrained vision autoencoders behind one
+  `Autoencoder` protocol (`encode` uint8 images to raw latents, refusing any
+  other dtype; `decode` back to `[0, 1]` pixels). `VariationalAutoencoder`
+  adds `posterior`; the latent a variational `encode` returns is the config's
+  `latent_fn` (`posterior_sample` or `posterior_mode`). Implementations:
+  `INVAE`, `VTP` (`vtp_small`, `vtp_base`, `vtp_large`), and `RAE`
+  (`rae_dinov2_base`),
+  each config defaulting to its published checkpoint. Checkpoints are config
+  nodes (`HubFile`, `UrlFile`, `LocalFile`) pinned to a revision and SHA-256;
+  each config's `latent_norm` holds its published normalizer
+  (`ScaleLatents`, `ElementwiseLatentStats`, `ChannelLatentStats`), which
+  keeps its reference's operation order.
+- `priml/model/vision_ae/scripts/reference_parity.py`: clones each
+  autoencoder's reference at its pinned commit and proves the port
+  bit-identical, from seeded initialization through encode and decode, with
+  pinned randomness, per-module bisection, a checked function inventory, and
+  branch coverage over both sides. It mints `testdata/rae_reference.pt` and
+  `testdata/vtp_reference.pt`.
+- `priml.math.scalar_quantization`: exact Lloyd-Max fitting on sorted
+  samples, the cube-root high-resolution start, standard-normal levels, and
+  batched nearest-level `quantize` / `dequantize`.
+- SpeedrunDiT: storage codecs (`FloatCodec`, `ScalarTableCodec` with injected
+  table fits and channel grouping), a corpus receipt checked at load time,
+  `prepare_data.py --experiment`, `benchmark_codec.py`, and experiments
+  exp002 (VTP), exp003 (RAE, float16 storage), and exp004 (RAE, uint8
+  storage).
+
+### Changed
+
+- `priml.model.invae` moved to `priml.model.vision_ae.invae`. `AutoencoderKL`,
+  `VAE_F16D32`, `VAE_F8D4`, `vae_models`, `encode_image`, `decode_latents`,
+  and `load_invae` are removed; build `INVAE.Config().make()` and call
+  `encode` / `decode`. The architecture and the published checkpoint's keys
+  are unchanged.
+- SpeedrunDiT: `SpeedrunTrainStep.Config.latent_scale` is replaced by the
+  `latent_norm` slot, filled at loop finalize from the dataset's autoencoder
+  (INVAE's is the same `* 0.3099`). `PairedImageLatentDataset.Config` gains
+  `latent_subdir`, `autoencoder`, `codec`, and `seed`, and requires a
+  `corpus.json` receipt; record one for an existing REG corpus with
+  `prepare_data.py --receipt-only`. `prepare_data.py` takes `--experiment`
+  in place of `--output`, `--checkpoint`, and `--resolution`.
+
 ## 0.1.4 - 2026-08-19
 
 ### Changed

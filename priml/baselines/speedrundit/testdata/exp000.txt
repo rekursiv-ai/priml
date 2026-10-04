@@ -92,7 +92,7 @@ SpeedrunTrainLoop(
                 │               layer_indices=(12, 12, 12),
                 │               image_size=256
                 │       ),
-                │       latent_scale=0.3099,
+                │       latent_norm=ScaleLatents.Config(scale=0.3099),
                 │       projection_coeff=0.5,
                 │       cls_coeff=0.03,
                 │       cfm_coeff=0.05,
@@ -103,7 +103,26 @@ SpeedrunTrainLoop(
                 dataset=SpeedrunImageNetData.Config(
                         source=PairedImageLatentDataset.Config(
                                 base_dir=PosixPath('/opt/scratch'),
-                                working_dir=PosixPath('/opt/scratch/datasets/speedrundit')
+                                working_dir=PosixPath('/opt/scratch/datasets/speedrundit'),
+                                latent_subdir='vae-in',
+                                autoencoder=INVAE.Config(
+                                        channels_hidden=128,
+                                        channel_multipliers=(1, 1, 2, 2, 4),
+                                        channels_latent=32,
+                                        blocks_per_stage=2,
+                                        num_groups=32,
+                                        image_size=256,
+                                        latent_fn=<function priml.model.vision_ae.custom_types.posterior_sample at 0xdefacedeface>,
+                                        checkpoint=HubFile.Config(
+                                                repo_id='REPA-E/e2e-invae',
+                                                filename='e2e-invae-400k.pt',
+                                                revision='79e3ea77928e1e34bc70e4e71de68fd5b4d4b3e0',
+                                                sha256='4d45ef5452bd6325eaa4b5c74975328cfed5ecf15a877656bed0f3f6de23d718'
+                                        ),
+                                        latent_norm=ScaleLatents.Config(scale=0.3099)
+                                ),
+                                codec=FloatCodec.Config(dtype=torch.float32),
+                                seed=None
                         ),
                         batch_size=32,
                         num_workers=4,

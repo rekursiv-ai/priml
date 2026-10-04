@@ -1,4 +1,12 @@
-"""Map-style paired ImageNet and INVAE data for the reference sampler order."""
+"""Map-style paired ImageNet and autoencoder latents for the reference sampler order.
+
+The experiment owns the corpus's producers: :class:`PairedImageLatentDataset`
+declares the autoencoder that encoded the latents and the codec that stored
+them, the preparer builds both from that declaration, and the loader checks the
+corpus receipt against it -- so a corpus made by one autoencoder or codec is
+never read as another's. Images live in one shared ``images/`` directory; each
+corpus's latents live in their own subdirectory beside it.
+"""
 
 # NumPy's load return type is imprecise in its stubs.
 # pyright: reportAny=false
@@ -18,7 +26,20 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler
 import numpy as np
 import torch
 
+from priml.baselines.speedrundit.corpus import (
+    LABELS,
+    load_stored,
+    load_table,
+    verify_receipt,
+)
+from priml.baselines.speedrundit.latent_codec import (
+    FittedCodec,
+    FloatCodec,
+    LatentCodec,
+)
 from priml.data.sources.prepared_image_latents import read_image, read_labels
+from priml.model.vision_ae.custom_types import VisionAutoencoderConfig
+from priml.model.vision_ae.invae import INVAE
 from priml.paths import resolve_working_dir
 from priml.timer import CheckpointableStepTimer
 
@@ -35,14 +56,28 @@ def _pair_key(relative: Path) -> str:
 
 
 class PairedImageLatentDataset(Dataset[dict[str, Tensor]]):
-    """Index processed RGB images and sampled INVAE arrays by shared ID."""
+    """Index processed RGB images and stored latents by shared ID."""
 
     class Config(Fig["PairedImageLatentDataset"]):
+        """Where the corpus lives, and what produced its latents."""
+
         base_dir: Path | str | None = None
         """Optional resource root supplied by the train loop."""
 
         working_dir: Path | str = "/datasets/speedrundit"
-        """Directory containing ``images/`` and ``vae-in/``."""
+        """Directory containing ``images/`` and the latent subdirectory."""
+
+        latent_subdir: str = "vae-in"
+        """This corpus's latents beside the shared images; REG's name for INVAE."""
+
+        autoencoder: VisionAutoencoderConfig = field(default_factory=INVAE.Config)
+        """Encoded the latents. Built by the preparer; the loader only checks it."""
+
+        codec: Makeable[LatentCodec] = field(default_factory=FloatCodec.Config)
+        """Stored the latents; the loader decodes each one with it."""
+
+        seed: int | None = None
+        """Seeds the preparer's encoding; ``None`` keeps the process's own state."""
 
         @override
         def finalize(self) -> Self:
@@ -52,8 +87,22 @@ class PairedImageLatentDataset(Dataset[dict[str, Tensor]]):
     def __init__(self, config: Config) -> None:
         root = Path(config.working_dir)
         image_root = root / "images"
-        latent_root = root / "vae-in"
-        labels = read_labels(latent_root / "dataset.json")
+        latent_root = root / config.latent_subdir
+        self.codec = config.codec.make()
+        table_sha256 = (
+            load_table(latent_root, self.codec)
+            if isinstance(self.codec, FittedCodec)
+            else None
+        )
+        verify_receipt(
+            latent_root,
+            autoencoder=config.autoencoder,
+            codec_config=config.codec,
+            codec=self.codec,
+            table_sha256=table_sha256,
+        )
+        self.latent_shape = config.autoencoder.latent_shape()
+        labels = read_labels(latent_root / LABELS)
         images = {
             _pair_key(path.relative_to(image_root)): path
             for path in image_root.rglob("*")
@@ -63,8 +112,10 @@ class PairedImageLatentDataset(Dataset[dict[str, Tensor]]):
             _pair_key(path.relative_to(latent_root)): path
             for path in latent_root.rglob("*.npy")
         }
-        if not images or images.keys() != latents.keys():
-            raise ValueError("images/ and vae-in/ need matching nonempty IDs")
+        if not latents or not latents.keys() <= images.keys():
+            raise ValueError(
+                f"{latent_root} needs latents, each with an image in {image_root}",
+            )
         self.records: list[tuple[Path, Path, int]] = []
         for key in sorted(latents):
             latent_path = latents[key]
@@ -81,14 +132,17 @@ class PairedImageLatentDataset(Dataset[dict[str, Tensor]]):
     def __getitem__(self, index: int) -> dict[str, Tensor]:
         image_path, latent_path, label = self.records[index]
         image = read_image(image_path)
-        latent = np.load(latent_path)
-        if latent.ndim == 4 and latent.shape[0] == 1:
-            latent = latent[0]
-        if latent.ndim != 3 or latent.shape[0] != 32:
-            raise ValueError(f"expected 32-channel INVAE latent, got {latent.shape}")
+        stored = load_stored(latent_path, self.codec.stored_dtype)
+        if stored.ndim == 4 and stored.shape[0] == 1:
+            stored = stored[0]
+        if tuple(stored.shape) != self.latent_shape:
+            raise ValueError(
+                f"{latent_path} holds a {tuple(stored.shape)} latent; the "
+                f"autoencoder produces {self.latent_shape}.",
+            )
         return {
             "image": torch.from_numpy(np.ascontiguousarray(image)),
-            "latent": torch.from_numpy(np.ascontiguousarray(latent)),
+            "latent": self.codec.decode(stored),
             "label": torch.tensor(label, dtype=torch.int64),
         }
 
@@ -102,10 +156,10 @@ class SpeedrunImageNetData:
     """Reference-style map DataLoader with priml's epoch and resume interface."""
 
     class Config(Fig["SpeedrunImageNetData"]):
-        source: Makeable[PairedImageLatentDataset] = field(
+        source: PairedImageLatentDataset.Config = field(
             default_factory=PairedImageLatentDataset.Config,
         )
-        """Indexed processed ImageNet/INVAE pairs."""
+        """Indexed image/latent pairs; narrowed so the loop reads its autoencoder."""
 
         batch_size: int = 32
         """Samples per device and optimizer step."""
@@ -128,10 +182,7 @@ class SpeedrunImageNetData:
         @override
         def finalize(self) -> Self:
             self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
-            if (
-                isinstance(self.source, PairedImageLatentDataset.Config)
-                and self.source.base_dir is None
-            ):
+            if self.source.base_dir is None:
                 self.source.base_dir = self.working_dir
             return super().finalize()
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from configgle.pprinting import pformat
 from configgle.testing import assert_pprint_golden
 
 import pytest
@@ -13,8 +14,15 @@ from priml.baselines.speedrundit.experiments import (
     SpeedrunTrainLoop,
     exp000,
     exp001,
+    exp002,
+    exp003,
+    exp004,
     exp_smoke,
 )
+from priml.baselines.speedrundit.latent_codec import FloatCodec, ScalarTableCodec
+from priml.model.vision_ae.latent_norm import ChannelLatentStats
+from priml.model.vision_ae.rae import RAE
+from priml.model.vision_ae.vtp import VTP
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.muon import Muon
 
@@ -25,7 +33,13 @@ if TYPE_CHECKING:
 
 @pytest.mark.parametrize(
     ("name", "recipe"),
-    [("exp000", exp000), ("exp001", exp001)],
+    [
+        ("exp000", exp000),
+        ("exp001", exp001),
+        ("exp002", exp002),
+        ("exp003", exp003),
+        ("exp004", exp004),
+    ],
 )
 def test_experiment_config_goldens(
     name: str,
@@ -45,7 +59,8 @@ def test_smoke_keeps_the_training_recipe() -> None:
     assert smoke.step.model.patch_size == base.step.model.patch_size
     assert smoke.step.model.drop_ratio == base.step.model.drop_ratio
     assert smoke.step.model.qk_norm == base.step.model.qk_norm
-    assert smoke.step.latent_scale == base.step.latent_scale
+    assert smoke.step.latent_norm == base.step.latent_norm
+    assert smoke.dataset.source.autoencoder == base.dataset.source.autoencoder
     assert smoke.step.projection_coeff == base.step.projection_coeff
     assert smoke.step.cfm_coeff == base.step.cfm_coeff
 
@@ -69,6 +84,59 @@ def test_exp001_changes_only_numerical_implementations() -> None:
     assert source.step.projection_coeff == simpler.step.projection_coeff
     assert source.step.cls_coeff == simpler.step.cls_coeff
     assert source.step.cfm_coeff == simpler.step.cfm_coeff
+
+
+def test_exp002_changes_only_the_latent_space() -> None:
+    """The autoencoder, its corpus directory, and the input width it implies."""
+    fork, parent = exp002(), exp000()
+    assert isinstance(fork.dataset.source.autoencoder, VTP.Config)
+    assert fork.step.model.in_channels == 64
+    fork.experiment_name = parent.experiment_name
+    fork.dataset.source.autoencoder = parent.dataset.source.autoencoder
+    fork.dataset.source.latent_subdir = parent.dataset.source.latent_subdir
+    fork.step.model.in_channels = parent.step.model.in_channels
+    assert pformat(fork) == pformat(parent)
+
+
+def test_exp002_normalizes_with_vtps_published_statistics() -> None:
+    config = exp002().copy_tree().finalize()
+    assert isinstance(config.step.latent_norm, ChannelLatentStats.Config)
+
+
+def test_loop_rejects_a_model_that_cannot_read_the_latents() -> None:
+    config = exp002()
+    config.step.model.in_channels = 32
+    with pytest.raises(ValueError, match="autoencoder produces 64x16x16"):
+        _ = config.copy_tree().finalize()
+
+
+def test_exp003_changes_the_latent_space_and_its_storage() -> None:
+    """RAE, the input width it implies, and float16 storage for its 1 TB corpus."""
+    fork, parent = exp003(), exp000()
+    assert isinstance(fork.dataset.source.autoencoder, RAE.Config)
+    assert fork.step.model.in_channels == 768
+    assert fork.dataset.source.codec == FloatCodec.Config(dtype=torch.float16)
+    fork.experiment_name = parent.experiment_name
+    fork.dataset.source.autoencoder = parent.dataset.source.autoencoder
+    fork.dataset.source.latent_subdir = parent.dataset.source.latent_subdir
+    fork.dataset.source.codec = parent.dataset.source.codec
+    fork.step.model.in_channels = parent.step.model.in_channels
+    assert pformat(fork) == pformat(parent)
+
+
+def test_exp004_changes_only_the_storage_codec() -> None:
+    """The one delta: uint8 Lloyd-Max indices in their own directory."""
+    fork, parent = exp004(), exp003()
+    assert isinstance(fork.dataset.source.codec, ScalarTableCodec.Config)
+    fork.experiment_name = parent.experiment_name
+    fork.dataset.source.codec = parent.dataset.source.codec
+    fork.dataset.source.latent_subdir = parent.dataset.source.latent_subdir
+    assert pformat(fork) == pformat(parent)
+
+
+def test_every_experiment_finalizes_without_reading_files() -> None:
+    for recipe in (exp000, exp001, exp002, exp003, exp004, exp_smoke):
+        assert recipe().copy_tree().finalize() is not None
 
 
 if __name__ == "__main__":

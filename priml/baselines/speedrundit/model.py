@@ -128,10 +128,10 @@ class SpeedrunDiT(nn.Module):
 
     class Config(Fig["SpeedrunDiT"]):
         input_size: int = 16
-        """Spatial side of the INVAE latent grid."""
+        """Spatial side of the latent grid; the dataset's autoencoder must produce it."""
 
         in_channels: int = 32
-        """INVAE latent channels."""
+        """Latent channels (INVAE's 32 by default); the dataset's autoencoder must produce them."""
 
         patch_size: int = 1
         """Latent cells in each patch side."""

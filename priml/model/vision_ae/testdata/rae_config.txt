@@ -1,0 +1,51 @@
+RAE.Config(
+                image_size=256,
+                encoder_image_size=224,
+                encoder=Dinov2WithRegisters.Config(
+                        channels_hidden=768,
+                        num_layers=12,
+                        heads=12,
+                        expansion=4,
+                        patch_size=14,
+                        image_size=518,
+                        num_register_tokens=4,
+                        layerscale_value=1.0,
+                        eps=1e-06,
+                        activation=<built-in function gelu>,
+                        qkv_bias=True,
+                        pixel_mean=(0.485, 0.456, 0.406),
+                        pixel_std=(0.229, 0.224, 0.225),
+                        checkpoint=HubFile.Config(
+                                repo_id='facebook/dinov2-with-registers-base',
+                                filename='model.safetensors',
+                                revision='a1d738ccfa7ae170945f210395d99dde8adb1805',
+                                sha256='7a6f7b3b9fa4b8732e707476a03cd6cdce210048582f21aafb7991c17d98e362'
+                        )
+                ),
+                decoder=GeneralDecoder.Config(
+                        channels_in=768,
+                        num_patches=256,
+                        channels_hidden=1_152,
+                        channels_hidden_mlp=4_096,
+                        num_layers=28,
+                        heads=16,
+                        patch_size=16,
+                        eps=1e-12,
+                        activation=<built-in function gelu>,
+                        checkpoint=HubFile.Config(
+                                repo_id='nyu-visionx/RAE-collections',
+                                filename='decoders/dinov2/wReg_base/ViTXL_n08/model.pt',
+                                revision='1be4f03273523431f099a934da4cf1940dc6039f',
+                                sha256='5fedf7c9660476a709e122cef18385c917532914a23f034388e1c1a52bde2be6'
+                        )
+                ),
+                latent_norm=ElementwiseLatentStats.Config(
+                        stats=HubFile.Config(
+                                repo_id='nyu-visionx/RAE-collections',
+                                filename='stats/dinov2/wReg_base/imagenet1k/stat.pt',
+                                revision='1be4f03273523431f099a934da4cf1940dc6039f',
+                                sha256='84ede66def5e6e3f25679334dc89cf63b12aacb99cbf0f5ae7ed4ad3187f7e59'
+                        ),
+                        eps=1e-05
+                )
+        )
