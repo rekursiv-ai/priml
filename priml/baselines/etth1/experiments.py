@@ -80,7 +80,7 @@ def exp_smoke() -> Etth1TrainLoop.Config:
 
     Returns:
       cfg: Minimal forecasting run that exercises model, data, loss,
-      optimization, and evaluation.
+        optimization, and evaluation.
 
     Hypothesis:
       A short, narrow run exercises the canonical data and training wiring.

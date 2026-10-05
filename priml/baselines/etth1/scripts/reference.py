@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
 
+_CWD: Final = Path(__file__).resolve().parent
 SOURCE_COMMIT: Final = "da9e67442b95af76488b8e4e1806cc3185723dd9"
 _SOURCE_FILES: Final = (
     "models/DLinear.py",
@@ -58,27 +59,6 @@ class _Recipe(Protocol):
 
     def _select_optimizer(self) -> torch.optim.Optimizer: ...
     def _select_criterion(self) -> nn.Module: ...
-
-
-class _Experiments(Protocol):
-    def Exp_Main(self, args: SimpleNamespace) -> _Recipe: ...  # noqa: N802
-
-
-class _Data(Protocol):
-    def data_provider(
-        self,
-        args: SimpleNamespace,
-        flag: str,
-    ) -> tuple[object, Iterable[tuple[Tensor, Tensor, Tensor, Tensor]]]: ...
-
-
-class _Tools(Protocol):
-    def adjust_learning_rate(
-        self,
-        optimizer: torch.optim.Optimizer,
-        epoch: int,
-        args: SimpleNamespace,
-    ) -> None: ...
 
 
 def reference_args(directory: Path, *, tiny: bool) -> SimpleNamespace:
@@ -139,7 +119,21 @@ def capture_reference(
     reference: Path,
     directory: Path,
 ) -> tuple[dict[str, object], dict[str, Tensor], dict[str, Tensor]]:
-    """Compare both implementations and return records captured from the source."""
+    """Compare both implementations and return records captured from the source.
+
+    Args:
+      reference: DLinear checkout at SOURCE_COMMIT.
+      directory: Prepared canonical ETTh1 dataset.
+
+    Returns:
+      report: Source identity and exact-comparison evidence.
+      model: Portable tiny-model record captured from the source.
+      training: Portable three-update training record captured from the source.
+
+    Raises:
+      ValueError: The dataset, checkout revision, or source files are not pinned.
+
+    """
     dataset_hash = hashlib.sha256((directory / "ETTh1.csv").read_bytes()).hexdigest()
     if dataset_hash != DATASET_SHA256:
         raise ValueError("Canonical source verification requires the pinned ETTh1 CSV.")
@@ -179,7 +173,7 @@ def capture_reference(
             args = reference_args(directory, tiny=True)
             recipe = experiments.Exp_Main(args)
             optimizer = recipe._select_optimizer()  # noqa: SLF001 -- Exercise the reference's own recipe.
-            criterion = recipe._select_criterion()  # noqa: SLF001
+            criterion = recipe._select_criterion()  # noqa: SLF001 -- Exercise the reference's own recipe.
             source_model = _canonical_names(model_record(recipe.model))
             source_training = dict(source_model)
             for index, batch in enumerate(tiny_batches()):
@@ -226,8 +220,8 @@ def capture_reference(
         x, y, _, _ = next(source_iterator)
         source_batches.append({"media": x.float(), "label": y[:, -96:, :].float()})
     source_data_rng = torch.get_rng_state()
-    optimizer = recipe._select_optimizer()  # noqa: SLF001
-    criterion = recipe._select_criterion()  # noqa: SLF001
+    optimizer = recipe._select_optimizer()  # noqa: SLF001 -- Exercise the reference's own recipe.
+    criterion = recipe._select_criterion()  # noqa: SLF001 -- Exercise the reference's own recipe.
     cfg = exp000()
     cfg.dataset.working_dir = directory.resolve()
     cfg.dataset.base_dir = "/"
@@ -286,15 +280,14 @@ def capture_reference(
     return report, portable_model, portable_training
 
 
-class _Flags(Protocol):
-    reference: Path
-    directory: Path
-    mint: bool
-
-
 def main() -> int:
-    """Verify a pinned reference checkout and optionally mint portable goldens."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    """Verify a pinned reference checkout and optionally mint portable goldens.
+
+    Returns:
+      code: 0 on success, or the minting pytest run's exit code.
+
+    """
+    parser = argparse.ArgumentParser(description=(__doc__ or "").strip())
     _add_arguments(parser)
     flags = cast(_Flags, parser.parse_args())
     if flags.mint:
@@ -303,7 +296,7 @@ def main() -> int:
                 sys.executable,
                 "-m",
                 "pytest",
-                str(Path(__file__).parent / "mint_reference_test.py"),
+                str(_CWD / "mint_reference_test.py"),
                 "-o",
                 "addopts=",
                 "-p",
@@ -355,3 +348,30 @@ def _require_equal(
     differences = mismatches(expected, actual=actual)
     if differences:
         raise AssertionError("\n".join(differences))
+
+
+class _Experiments(Protocol):
+    def Exp_Main(self, args: SimpleNamespace) -> _Recipe: ...  # noqa: N802 -- Upstream's class name.
+
+
+class _Data(Protocol):
+    def data_provider(
+        self,
+        args: SimpleNamespace,
+        flag: str,
+    ) -> tuple[object, Iterable[tuple[Tensor, Tensor, Tensor, Tensor]]]: ...
+
+
+class _Tools(Protocol):
+    def adjust_learning_rate(
+        self,
+        optimizer: torch.optim.Optimizer,
+        epoch: int,
+        args: SimpleNamespace,
+    ) -> None: ...
+
+
+class _Flags(Protocol):
+    reference: Path
+    directory: Path
+    mint: bool

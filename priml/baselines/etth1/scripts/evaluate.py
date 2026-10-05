@@ -2,8 +2,7 @@
 # ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
 # fmt: off
 '''' 2>/dev/null #
-exec env PYTHONPATH="$(cd "$(dirname "$0")/../../../.." && pwd)${PYTHONPATH:+:$PYTHONPATH}" \
-    uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
 Score the best checkpoint on the ETTh1 test split.
 '''
 # fmt: on

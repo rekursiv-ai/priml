@@ -9,7 +9,7 @@ import torch
 
 from priml.baselines.etth1.data_test import fixture_config
 from priml.baselines.etth1.experiments import exp_smoke
-from priml.baselines.etth1.scripts import evaluation as evaluate
+from priml.baselines.etth1.scripts import evaluation
 
 
 @pytest.mark.parametrize("alias", ["direct", "hardlink", "symlink"])
@@ -44,7 +44,7 @@ def test_output_cannot_replace_best_selector(
             output.hardlink_to(selector)
         else:
             output.symlink_to(selector)
-    monkeypatch.setattr(evaluate, "exp000", lambda: cfg)
+    monkeypatch.setattr(evaluation, "exp000", lambda: cfg)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -59,7 +59,7 @@ def test_output_cannot_replace_best_selector(
         ],
     )
     with pytest.raises(ValueError, match="protected input artifact"):
-        evaluate.main()
+        evaluation.main()
     assert selector.read_bytes() == before
 
 

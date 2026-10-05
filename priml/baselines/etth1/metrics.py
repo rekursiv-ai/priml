@@ -26,7 +26,13 @@ class ForecastMSE:
         self.losses: list[float] = []
 
     def update(self, logits: Tensor, **batch: object) -> None:
-        """Record a batch's mean squared error without building a graph."""
+        """Record a batch's mean squared error without building a graph.
+
+        Args:
+          logits: Forecasts for the batch.
+          **batch: The batch; ``label`` holds the target windows.
+
+        """
         target = batch["label"]
         assert isinstance(target, Tensor)
         with torch.no_grad():

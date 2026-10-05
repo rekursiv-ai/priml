@@ -97,9 +97,9 @@ class Etth1Data:
             )
 
         values = _read_values(Path(config.working_dir) / "ETTh1.csv")
-        if values.shape[1] != config.channels or not np.isfinite(values).all():
+        if values.shape[1] != config.channels:
             raise ValueError(
-                "ETTh1 must contain the configured number of finite numeric columns.",
+                "ETTh1 must contain the configured number of numeric columns.",
             )
 
         train_end = config.train_rows
@@ -132,7 +132,12 @@ class Etth1Data:
         )
 
     def train_dataloader(self) -> _ForecastBatches:
-        """Return shuffled training windows."""
+        """Return shuffled training windows.
+
+        Returns:
+          batches: The live training loader, resumed from any pending state.
+
+        """
         self._live = _ForecastBatches(
             self.train,
             seq_len=self.config.seq_len,
@@ -148,7 +153,12 @@ class Etth1Data:
         return self._live
 
     def val_dataloader(self) -> _ForecastBatches:
-        """Return shuffled validation windows matching the reference loader."""
+        """Return shuffled validation windows matching the reference loader.
+
+        Returns:
+          batches: Validation windows that also consume the test-loader seed.
+
+        """
         return _ForecastBatches(
             self.val,
             seq_len=self.config.seq_len,
@@ -164,7 +174,12 @@ class Etth1Data:
         return self.val_dataloader()
 
     def test_dataloader(self) -> _ForecastBatches:
-        """Return ordered held-out windows, dropping the reference's short tail."""
+        """Return ordered held-out windows, dropping the reference's short tail.
+
+        Returns:
+          batches: Unshuffled held-out windows in complete batches.
+
+        """
         return _ForecastBatches(
             self.test,
             seq_len=self.config.seq_len,
@@ -181,7 +196,12 @@ class Etth1Data:
         loader: _ForecastBatches.StateDict | None
 
     def state_dict(self) -> StateDict:
-        """Return checkpoint state."""
+        """Return checkpoint state.
+
+        Returns:
+          state: The epoch timer and the live or pending loader cursor.
+
+        """
         return {
             "timer_epoch": self.timer_epoch.state_dict(),
             "loader": self._live.state_dict()

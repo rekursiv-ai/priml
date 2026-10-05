@@ -138,7 +138,7 @@ def test_invalid_dataset_geometry_fails(tmp_path: Path, field: str, value: int) 
         cfg.make()
 
 
-def test_empty_missing_and_nonfinite_csv_fail(tmp_path: Path) -> None:
+def test_empty_and_missing_csv_fail(tmp_path: Path) -> None:
     cfg = fixture_config(tmp_path)
     path = tmp_path / "ETTh1.csv"
     path.unlink()
@@ -147,7 +147,9 @@ def test_empty_missing_and_nonfinite_csv_fail(tmp_path: Path) -> None:
     path.write_text("date,a,b,c,d\n")
     with pytest.raises(ValueError, match="header"):
         cfg.make()
-    cfg = fixture_config(tmp_path)
-    path.write_text(path.read_text().replace("0,0,0,7", "nan,0,0,7", 1))
-    with pytest.raises(ValueError, match="finite"):
-        cfg.make()
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

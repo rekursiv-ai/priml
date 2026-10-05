@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import cast
 
 import copy
-import json
 
 from configgle.testing import assert_pprint_golden
 from torch import Tensor
@@ -16,7 +15,7 @@ from priml.baselines.etth1.checkpointer import Etth1Checkpointer
 from priml.baselines.etth1.data_test import fixture_config
 from priml.baselines.etth1.experiments import dlinear_type1, exp000, exp_smoke
 from priml.baselines.etth1.train_step import Etth1TrainLoop, Etth1TrainStep
-from priml.lib.custom_json import DictCodec
+from priml.lib.custom_json import convert, parse
 from priml.testing.golden import mismatches
 
 
@@ -39,7 +38,7 @@ def test_geometry_and_seed_propagation_without_data(tmp_path: Path) -> None:
     assert resolved.step.seed == 37
     assert cfg.step.seed is None
     assert not (tmp_path / "datasets").exists()
-    assert cfg.max_steps == 10260
+    assert cfg.max_steps == 10_260
 
 
 def test_schedule_matches_source_epoch_boundaries() -> None:
@@ -136,12 +135,15 @@ def test_mid_epoch_resume_replays_exact_next_update(tmp_path: Path) -> None:
     resumed = cfg.make()
     try:
         resumed.load_state_dict(
-            DictCodec.coerce(cast(object, torch.load(checkpoint, weights_only=True))),
+            convert(
+                cast(object, torch.load(checkpoint, weights_only=True)),
+                dict[str, object],
+            ),
         )
         actual_batch = resumed._get_next_batch()
         assert not mismatches(
-            DictCodec.coerce(batch, Tensor),
-            DictCodec.coerce(actual_batch, Tensor),
+            convert(batch, dict[str, Tensor]),
+            convert(actual_batch, dict[str, Tensor]),
         )
         resumed._do_train_step(actual_batch)
         assert isinstance(resumed.step, Etth1TrainStep)
@@ -222,8 +224,8 @@ def test_restore_into_running_loop_rewinds_iterator(tmp_path: Path) -> None:
         loop.load_state_dict(state)
         actual = loop._get_next_batch()
         assert not mismatches(
-            DictCodec.coerce(expected, Tensor),
-            DictCodec.coerce(actual, Tensor),
+            convert(expected, dict[str, Tensor]),
+            convert(actual, dict[str, Tensor]),
         )
         loop._do_train_step(actual)
         assert not mismatches(expected_weights, loop.step.model.state_dict())
@@ -253,11 +255,12 @@ def test_terminal_step_saves_validated_checkpoint(tmp_path: Path, resume: bool) 
     assert len(loop.validation_losses) == 1
     assert loop.step.global_step == 5
     assert loop.current_epoch == 1
-    selector = DictCodec.coerce(
-        cast(object, json.loads((tmp_path / "checkpoints" / "best.json").read_text())),
+    selector = parse(
+        (tmp_path / "checkpoints" / "best.json").read_text(),
+        dict[str, object],
     )
     assert selector["step"] == 5
-    saved = DictCodec.coerce(
+    saved = convert(
         cast(
             object,
             torch.load(
@@ -265,6 +268,7 @@ def test_terminal_step_saves_validated_checkpoint(tmp_path: Path, resume: bool) 
                 weights_only=True,
             ),
         ),
+        dict[str, object],
     )
     assert saved["validation_losses"] == loop.validation_losses
     assert saved["pending_epoch_completion"] is False
@@ -279,3 +283,9 @@ def test_partial_epoch_does_not_force_epoch_validation(tmp_path: Path) -> None:
     assert loop.current_epoch == 0
     assert loop.validation_losses == []
     assert loop.step.global_step == 4
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

@@ -20,7 +20,9 @@ from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.golden import mismatches, read_tensors
 
 
-_GOLDEN: Final = Path(__file__).parent / "testdata" / "dlinear_model.pt"
+_CWD: Final = Path(__file__).resolve().parent
+
+_GOLDEN: Final = _CWD / "testdata" / "dlinear_model.pt"
 
 
 def test_model_matches_source_golden() -> None:
@@ -161,3 +163,9 @@ def test_model_uses_injected_children_and_their_costs() -> None:
         model.trend(trend.permute(0, 2, 1)),
     )
     assert torch.equal(model(media), expected.permute(0, 2, 1))
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

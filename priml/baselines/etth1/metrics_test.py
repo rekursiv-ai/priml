@@ -23,3 +23,9 @@ def test_source_float32_reduction_and_restore() -> None:
     assert metric.compute()["total_loss"] == float(
         np.average(np.asarray(expected, dtype=np.float32)),
     )
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

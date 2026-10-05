@@ -15,7 +15,7 @@ import numpy as np
 import torch
 
 from priml.baselines.etth1.experiments import exp000
-from priml.lib.custom_json import DictCodec, IntCodec, StrCodec
+from priml.lib.custom_json import convert, parse
 from priml.paths import validated_output_path
 
 
@@ -65,16 +65,15 @@ def evaluate(
     }
 
 
-class _Flags(Protocol):
-    checkpoint: Path
-    directory: Path
-    output: Path | None
-
-
 def main() -> int:
-    """Load the explicitly selected checkpoint and print a reproducible report."""
+    """Load the explicitly selected checkpoint and print a reproducible report.
+
+    Returns:
+      code: 0 on success.
+
+    """
     cfg = exp000()
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=(__doc__ or "").strip())
     _add_arguments(parser)
     flags = cast(_Flags, parser.parse_args())
     checkpoint = flags.checkpoint
@@ -82,12 +81,10 @@ def main() -> int:
     if checkpoint.is_dir():
         selector = checkpoint / "best.json"
         protected.append(selector)
-        best = DictCodec.coerce(
-            cast(object, json.loads(selector.read_text())),
-        )
-        if StrCodec.coerce(best["metric"]) != "total_loss":
+        best = parse(selector.read_text(), dict[str, object])
+        if convert(best["metric"], str) != "total_loss":
             raise ValueError("Expected a validation total_loss best-checkpoint record.")
-        checkpoint = checkpoint / f"step_{IntCodec.coerce(best['step']):08d}.pt"
+        checkpoint = checkpoint / f"step_{convert(best['step'], int):08d}.pt"
     protected.append(checkpoint)
     output_path = (
         validated_output_path(
@@ -97,15 +94,16 @@ def main() -> int:
         if flags.output is not None
         else None
     )
-    state = DictCodec.coerce(
+    state = convert(
         cast(object, torch.load(checkpoint, map_location="cpu", weights_only=True)),
+        dict[str, object],
     )
-    step = DictCodec.coerce(state["step"])
+    step = convert(state["step"], dict[str, object])
     cfg.dataset.base_dir = None
     cfg.dataset.working_dir = flags.directory
     dataset = cfg.dataset.make()
     model = cfg.step.model.make()
-    model.load_state_dict(DictCodec.coerce(step["model"], Tensor))
+    model.load_state_dict(convert(step["model"], dict[str, Tensor]))
     torch.set_num_threads(1)
     result: dict[str, object] = {
         "checkpoint": str(checkpoint),
@@ -115,7 +113,7 @@ def main() -> int:
         ).hexdigest(),
         "torch": torch.__version__,
         "numpy": np.__version__,
-        "step": DictCodec.coerce(step["timer_step"])["global_count"],
+        "step": convert(step["timer_step"], dict[str, object])["global_count"],
         **evaluate(model, batches=dataset.test_dataloader()),
     }
     rendered = json.dumps(result, indent=2) + "\n"
@@ -139,3 +137,9 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         default=Path(exp000().copy_tree().finalize().dataset.working_dir),
     )
     parser.add_argument("--output", type=Path)
+
+
+class _Flags(Protocol):
+    checkpoint: Path
+    directory: Path
+    output: Path | None

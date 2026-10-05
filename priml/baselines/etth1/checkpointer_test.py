@@ -3,8 +3,6 @@
 from pathlib import Path
 from typing import cast
 
-import json
-
 import pytest
 import torch
 
@@ -12,7 +10,7 @@ from priml.baselines.etth1.checkpointer import Etth1Checkpointer
 from priml.baselines.etth1.data_test import fixture_config
 from priml.baselines.etth1.experiments import exp_smoke
 from priml.baselines.etth1.train_step import Etth1TrainStep
-from priml.lib.custom_json import DictCodec
+from priml.lib.custom_json import convert, parse
 from priml.testing.golden import mismatches
 from priml.train.checkpointer import AsyncLocalStateDictStorer
 
@@ -47,8 +45,9 @@ def test_tied_score_selects_latest_checkpoint(
         assert checker.on_eval(loop, step=1, metrics={"total_loss": 0.7})
         assert checker.on_eval(loop, step=2, metrics={"total_loss": 0.7})
         checker.close()
-        record = DictCodec.coerce(
-            cast(object, json.loads((tmp_path / "checkpoints/best.json").read_text())),
+        record = parse(
+            (tmp_path / "checkpoints/best.json").read_text(),
+            dict[str, object],
         )
         assert record["step"] == 2
         assert record["value"] == 0.7
@@ -83,15 +82,12 @@ def test_epoch_checkpoint_resumes_after_validation(tmp_path: Path) -> None:
         assert loop.current_epoch == 1
         assert len(loop.validation_losses) == 1
         checkpoint = tmp_path / "runs/etth1/exp_smoke/checkpoints/step_00000005.pt"
-        state = DictCodec.coerce(
+        state = convert(
             cast(object, torch.load(checkpoint, weights_only=True)),
+            dict[str, object],
         )
-        assert (
-            DictCodec.coerce(DictCodec.coerce(state["dataset"])["timer_epoch"])[
-                "global_count"
-            ]
-            == 1
-        )
+        dataset = convert(state["dataset"], dict[str, object])
+        assert convert(dataset["timer_epoch"], dict[str, object])["global_count"] == 1
         assert len(cast(list[float], state["validation_losses"])) == 1
         loop._do_train_step(next_batch)
         assert isinstance(loop.step, Etth1TrainStep)
@@ -108,8 +104,8 @@ def test_epoch_checkpoint_resumes_after_validation(tmp_path: Path) -> None:
         assert len(resumed.validation_losses) == 1
         actual_batch = resumed._get_next_batch()
         assert not mismatches(
-            DictCodec.coerce(next_batch, torch.Tensor),
-            DictCodec.coerce(actual_batch, torch.Tensor),
+            convert(next_batch, dict[str, torch.Tensor]),
+            convert(actual_batch, dict[str, torch.Tensor]),
         )
         resumed._do_train_step(actual_batch)
         assert isinstance(resumed.step, Etth1TrainStep)
@@ -117,3 +113,9 @@ def test_epoch_checkpoint_resumes_after_validation(tmp_path: Path) -> None:
         assert torch.equal(rng, torch.get_rng_state())
     finally:
         resumed.close()
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

@@ -38,6 +38,17 @@ class MovingAverage(nn.Module):
             Each output averages kernel_size values. The adjoint first spreads
             those scaled gradients, then accumulates S*K contributions into S
             original positions, including repeated endpoint padding.
+
+            Args:
+              seq_len: Timesteps per sequence.
+              batch_size: Sequences per step.
+              channels: Variables per timestep.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, unread here.
+
+            Returns:
+              cost: Forward and adjoint operations of one invocation.
+
             """
             del kwargs
             elements = batch_size * channels * seq_len
@@ -106,7 +117,19 @@ class SeriesDecomposition(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost the average, residual subtraction, and two adjoint joins."""
+            """Cost the average, residual subtraction, and two adjoint joins.
+
+            Args:
+              seq_len: Timesteps per sequence.
+              batch_size: Sequences per step.
+              channels: Variables per timestep.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: Forwarded to the moving-average cost.
+
+            Returns:
+              cost: Forward and adjoint operations of one invocation.
+
+            """
             elements = batch_size * seq_len * channels
             return cost(
                 self.moving_average,
@@ -148,6 +171,7 @@ class ReferenceLinear(nn.Linear):
     class Config(Fig["ReferenceLinear"], kw_only=False):
         channels_in: int = -1
         """Input width, supplied by DLinear."""
+
         channels_out: int = -1
         """Output width, supplied by DLinear."""
 
@@ -164,7 +188,18 @@ class ReferenceLinear(nn.Linear):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Count this projection's operations and parameters."""
+            """Count this projection's operations and parameters.
+
+            Args:
+              seq_len: Rows projected per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, unread here.
+
+            Returns:
+              cost: Operations and parameters of one invocation.
+
+            """
             del kwargs
             return matmul_cost(
                 channels_in=self.channels_in,
@@ -214,10 +249,13 @@ class DLinear(nn.Module):
             default_factory=SeriesDecomposition.Config,
         )
         """Split the input into seasonal and trend values."""
+
         seasonal: Makeable[nn.Module] = field(default_factory=MeanLinear.Config)
         """Project the seasonal values into the forecast."""
+
         trend: Makeable[nn.Module] = field(default_factory=MeanLinear.Config)
         """Project the trend values into the forecast."""
+
         decoder: Makeable[nn.Module] = field(default_factory=ReferenceLinear.Config)
         """Unused layer retained for reference initialization."""
 
@@ -246,7 +284,22 @@ class DLinear(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost both active projections and own the unused reference decoder."""
+            """Cost both active projections and own the unused reference decoder.
+
+            Args:
+              seq_len: Input history; must equal the configured ``seq_len``.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: Forwarded to every submodule cost.
+
+            Returns:
+              cost: Operations of one forward and backward pass, plus the
+                decoder's parameters.
+
+            Raises:
+              ValueError: ``seq_len`` differs from the configured history.
+
+            """
             if seq_len != self.seq_len:
                 raise ValueError(
                     "Cost sequence length must match the model's configured history.",

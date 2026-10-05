@@ -20,7 +20,9 @@ from priml.testing.golden import mismatches, read_tensors
 from priml.train.ema import EMA
 
 
-_GOLDEN: Final = Path(__file__).parent / "testdata" / "dlinear_training.pt"
+_CWD: Final = Path(__file__).resolve().parent
+
+_GOLDEN: Final = _CWD / "testdata" / "dlinear_training.pt"
 
 
 @pytest.mark.compute_training
@@ -93,3 +95,9 @@ def test_forward_and_eval_timers_count_calls() -> None:
     assert step.timer_forward.global_count == 2
     assert step.timer_eval.global_count == 1
     assert step.timer_step.global_count == 1
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)
