@@ -63,12 +63,14 @@ from priml.baselines.sudoku.act import (
     SampledMinimum,
     ZeroStart,
 )
-from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
+from priml.baselines.sudoku.embedding import (
+    GridEmbedding,
+    PredictionFeedback,
+)
 from priml.baselines.sudoku.model import (
     CoreCompile,
     DeepRecurrence,
     SudokuNet,
-    corrected_fan_in_normal,
 )
 from priml.baselines.sudoku.prefix import (
     PrefixStack,
@@ -77,7 +79,10 @@ from priml.baselines.sudoku.prefix import (
 )
 from priml.baselines.sudoku.train_step import SudokuTrainStep
 from priml.model.attention.attention import Attention
-from priml.model.init import kaiming_uniform
+from priml.model.init import (
+    corrected_fan_in_normal,
+    kaiming_uniform,
+)
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU

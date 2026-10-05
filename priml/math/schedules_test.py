@@ -287,6 +287,11 @@ def test_one_cycle_peaks_where_its_ramp_ends() -> None:
     assert one_cycle(1.0, warmup_fraction=0.3) == pytest.approx(0.0)
 
 
+def test_one_cycle_starts_exactly_at_its_initial_fraction() -> None:
+    # Summing both legs and subtracting 1.0 rounds the start off ``initial``.
+    assert one_cycle(0.0, warmup_fraction=0.1) == 0.04
+
+
 def test_one_cycle_rises_then_falls() -> None:
     values = [one_cycle(index / 100, warmup_fraction=0.3) for index in range(101)]
     peak = values.index(max(values))

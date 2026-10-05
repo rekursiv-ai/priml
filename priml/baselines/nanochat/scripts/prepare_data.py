@@ -154,7 +154,7 @@ from priml.baselines.nanochat.scripts.prepare_tokenizer import (
     read_mapping,
     write_mapping,
 )
-from priml.lib.custom_json import DictCodec, IntCodec
+from priml.lib.custom_json import convert
 from priml.paths import validated_output_path
 from priml.train.checkpointer import Checkpointer
 from priml.train.tracker import FileTracker, TrackerList
@@ -367,9 +367,9 @@ def _fit_vocabulary(
     # downloaded shards beside it are never touched.
     recorded = (
         dict(
-            DictCodec.coerce(
+            convert(
                 cast(object, json.loads(recipe_path.read_text())),
-                default=None,
+                dict[str, object],
             ),
         )
         if pickled.is_file() and recipe_path.is_file()
@@ -1356,7 +1356,7 @@ def build_reference_eval(
             targets=targets,
             reference=reference,
             tokenizer=tokenizer,
-            batch_size=IntCodec.coerce(manifest["eval_batch_size"], default=None),
+            batch_size=convert(manifest["eval_batch_size"], int),
             reserved_count=reserved_count,
         )
         with (destination / f"{name}.npz").open("xb") as stream:

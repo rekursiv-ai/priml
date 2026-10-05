@@ -32,7 +32,7 @@ from priml.baselines.convextok.pretokens import count_pretokens
 from priml.baselines.convextok.program import LinearProgram
 from priml.baselines.nanochat.scripts.prepare_data import donor_unigram16k
 from priml.baselines.nanochat.scripts.prepare_tokenizer import document_rows
-from priml.lib.custom_json import DictCodec, IntCodec, ListCodec
+from priml.lib.custom_json import convert
 from priml.paths import validated_output_path
 
 
@@ -51,19 +51,18 @@ def test_fixture_corpus_yields_upstream_tokenizer(tmp_path: Path) -> None:
     learned = _learned_pieces(tokenizer)
     alphabet = set(pre_tokenizers.ByteLevel.alphabet())
     golden = set(
-        ListCodec.coerce(_read_json("vocab.json").get("det"), str, default=None),
+        convert(_read_json("vocab.json").get("det"), list[str]),
     )
     assert learned == golden - alphabet
     held_out = [
         tokenizer.encode(text, add_special_tokens=False).tokens
-        for text in ListCodec.coerce(corpus.get("heldout"), str, default=None)
+        for text in convert(corpus.get("heldout"), list[str])
     ]
     assert held_out == [
-        ListCodec.coerce(row, str, default=None)
-        for row in ListCodec.coerce(
+        convert(row, list[str])
+        for row in convert(
             _read_json("heldout_tokens.json").get("tokens"),
-            object,
-            default=None,
+            list[object],
         )
     ]
 
@@ -144,12 +143,11 @@ def test_any_solver_fills_the_solver_slot(
     config.make().build()
 
     tokenizer = Tokenizer.from_file(str(config.working_dir / "tokenizer.json"))
-    candidates = ListCodec.coerce(
+    candidates = convert(
         _read_json("candidates.json").get("tokens"),
-        str,
-        default=None,
+        list[str],
     )
-    budget = IntCodec.coerce(_read_json("corpus.json").get("budget"), default=None)
+    budget = convert(_read_json("corpus.json").get("budget"), int)
     assert _learned_pieces(tokenizer) == set(candidates[:budget])
     assert shards == [(config.raw_dir / "shard_00000.parquet", 0)]
     assert solver_devices == [torch.device("meta")]
@@ -245,7 +243,7 @@ def _fixture_config(tmp_path: Path) -> ConvexTokPreparation.Config:
     raw.mkdir()
     parquet.write_table(
         pa.table(
-            {"text": ListCodec.coerce(corpus.get("texts"), str, default=None)},
+            {"text": convert(corpus.get("texts"), list[str])},
         ),
         raw / "shard_00000.parquet",
     )
@@ -253,7 +251,7 @@ def _fixture_config(tmp_path: Path) -> ConvexTokPreparation.Config:
     config.raw_dir = raw
     config.shard_indices = [0]
     config.working_dir = tmp_path / "convextok"
-    config.vocab_size = IntCodec.coerce(corpus.get("vocab_size"), default=None)
+    config.vocab_size = convert(corpus.get("vocab_size"), int)
     config.num_workers = 1
     config.device = "cpu"
     return config
@@ -268,7 +266,7 @@ def _learned_pieces(tokenizer: Tokenizer) -> set[str | None]:
 
 def _read_json(name: str) -> dict[str, object]:
     raw = cast(object, json.loads((_CWD / "testdata" / name).read_text()))
-    return dict(DictCodec.coerce(raw, default=None))
+    return dict(convert(raw, dict[str, object]))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

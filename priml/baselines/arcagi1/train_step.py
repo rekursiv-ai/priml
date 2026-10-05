@@ -293,6 +293,7 @@ class TrmTrainStep(TrainStep):
             puzzle_ids=ids,
             ignore_label_id=self.config.ignore_label_id,
         )
+        self._before_forward(active)
         self.model.train()
         if pool.carry is not None:
             self.net.set_feedback(pool.feedback)
@@ -508,6 +509,12 @@ class TrmTrainStep(TrainStep):
         if not isinstance(identifiers, Tensor):
             raise TypeError("A model with a task table needs puzzle_identifiers.")
         return {"puzzle_identifiers": identifiers}
+
+    # Anything built here enters autograd before the forward's graph, so its gradients
+    # accumulate first -- part of the numerics, not just the order of side effects.
+    def _before_forward(self, active: Tensor) -> None:
+        """Run work between seating and the forward; a no-op here."""
+        del active
 
     def _halt_weight(self) -> float:
         halting = self.pool.halting

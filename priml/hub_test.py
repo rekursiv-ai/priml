@@ -28,6 +28,7 @@ from priml.hub import (
     load_transformers_model,
     resolve_hf_dtype,
 )
+from priml.lib.custom_json import ReadError
 from priml.lib.userdirs import cache_dir
 
 
@@ -432,7 +433,7 @@ def test_load_hf_checkpoint_rejects_a_non_object_config(tmp_path: Path) -> None:
     (tmp_path / "config.json").write_text(json.dumps([1, 2]))
     torch.save({}, tmp_path / "pytorch_model.bin")
 
-    with pytest.raises(TypeError, match="dict"):
+    with pytest.raises(ReadError):
         load_hf_checkpoint(tmp_path, dtype=None)
 
 
@@ -470,7 +471,7 @@ def test_load_hf_checkpoint_rejects_a_non_object_remote_config(
     hf_model.config.to_dict.return_value = ["not", "an", "object"]
     monkeypatch.setattr(hub, "load_transformers_model", Mock(return_value=hf_model))
 
-    with pytest.raises(TypeError, match="cannot coerce"):
+    with pytest.raises(ReadError):
         load_hf_checkpoint("org/tiny", dtype=None)
 
 

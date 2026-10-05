@@ -53,7 +53,6 @@ from priml.baselines.sudoku.model import (
     CoreCompile,
     DeepRecurrence,
     SudokuNet,
-    corrected_fan_in_normal,
     lattice_positions,
 )
 from priml.baselines.sudoku.prefix import (
@@ -62,10 +61,10 @@ from priml.baselines.sudoku.prefix import (
     SparsePuzzleEmbedding,
 )
 from priml.baselines.sudoku.train_step import SudokuTrainStep
-from priml.lib.custom_json import FloatCodec
+from priml.lib.custom_json import convert
 from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE
-from priml.model.init import kaiming_uniform
+from priml.model.init import corrected_fan_in_normal, kaiming_uniform
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
@@ -430,7 +429,7 @@ def test_exp006_raises_only_the_muon_rate() -> None:
         assert isinstance(adamw, PartialConfig)
         assert isinstance(muon2, Muon.Config)
         assert isinstance(muon3, Muon.Config)
-        adamw_lr = FloatCodec.coerce(cast(object, adamw.lr), None)
+        adamw_lr = convert(cast(object, adamw.lr), float)
         rates.append([adamw_lr, muon2.lr, muon3.lr])
     assert rates == [[1e-4, 5e-3, 5e-3], [1e-4, 0.01, 0.01]]
 
@@ -494,9 +493,9 @@ def test_exp007_moves_to_the_urm_recipe() -> None:
     assert isinstance(optimizer, CompositeOptimizer.Config)
     adamw, muon2, muon3 = optimizer.optimizers
     assert isinstance(adamw, PartialConfig)
-    assert FloatCodec.coerce(cast(object, adamw.lr), None) == 1e-4
+    assert convert(cast(object, adamw.lr), float) == 1e-4
     assert cast(tuple[float, float], adamw.betas) == (0.9, 0.95)
-    assert FloatCodec.coerce(cast(object, adamw.weight_decay), None) == 1.0
+    assert convert(cast(object, adamw.weight_decay), float) == 1.0
     assert isinstance(muon2, Muon.Config)
     assert isinstance(muon3, Muon.Config)
     for muon in (muon2, muon3):

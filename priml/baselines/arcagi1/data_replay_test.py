@@ -52,7 +52,7 @@ from priml.baselines.arcagi1.metric import (
     write_signal_dump,
 )
 from priml.baselines.arcagi1.scripts import build_dataset, build_spatial_eval
-from priml.lib.custom_json import DictCodec, ListCodec, loads
+from priml.lib.custom_json import convert, parse
 from priml.testing.golden import read_tensors, stored, write_tensors
 
 
@@ -716,8 +716,8 @@ def capture_grid_ops(b: Backend, tmp: Path) -> Capture:
             put(out, f"scale/{i}/{k}", b.scale_grid(grid, k))
         out[f"hash/{i}"] = b.grid_hash(grid)
         rows = [
-            ListCodec.coerce(row, int)
-            for row in ListCodec.coerce(cast(object, grid.tolist()))
+            convert(row, list[int])
+            for row in convert(cast(object, grid.tolist()), list[object])
         ]
         put(out, f"to_np/{i}", b.to_np(rows))
     rng = np.random.default_rng(3)
@@ -1275,7 +1275,7 @@ def capture_verify(b: Backend, tmp: Path) -> Capture:
     """Identifier-count verification over an existing tree, match and mismatch."""
     out: Capture = {}
     root = base_tree(b, tmp)
-    count = len(ListCodec.coerce(loads((root / "identifiers.json").read_text())))
+    count = len(parse((root / "identifiers.json").read_text(), list[object]))
     for name, expected in (("match", count), ("mismatch", count + 1)):
         target = tmp / f"verify-{name}"
         if not target.exists():
@@ -1349,10 +1349,10 @@ def put_results(out: Capture, prefix: str, results: Mapping[str, object]) -> Non
         if name != "extras":
             out[f"{prefix}/{name}"] = repr(value)
             continue
-        raw = DictCodec.coerce(value)["signal_dump"]
+        raw = convert(value, dict[str, object])["signal_dump"]
         assert isinstance(raw, tuple)
-        payload = ListCodec.coerce(list(cast("tuple[object, ...]", raw)))
-        grid_map = DictCodec.coerce(payload[1])
+        payload = convert(list(cast("tuple[object, ...]", raw)), list[object])
+        grid_map = convert(payload[1], dict[str, object])
         put(
             out,
             f"{prefix}/payload",
@@ -1386,22 +1386,19 @@ def assert_payload_implied(payload: object, path: Path) -> None:
     )
     pass_ks = cast("tuple[int, ...]", payload[3])
     with cast("NpzFile", np.load(path)) as npz:
-        groups = ListCodec.coerce(
+        groups = convert(
             cast(object, npz_array(npz, "group_table").tolist()),
-            str,
+            list[str],
         )
-        predictions = ListCodec.coerce(
+        predictions = convert(
             cast(object, npz_array(npz, "pred_table").tolist()),
-            str,
+            list[str],
         )
-        group_ids = ListCodec.coerce(
+        group_ids = convert(
             cast(object, npz_array(npz, "group_id").tolist()),
-            int,
+            list[int],
         )
-        pred_ids = ListCodec.coerce(
-            cast(object, npz_array(npz, "pred_id").tolist()),
-            int,
-        )
+        pred_ids = convert(cast(object, npz_array(npz, "pred_id").tolist()), list[int])
         assert [f"{row[0]}\t{row[1]}" for row in rows] == [
             groups[idx] for idx in group_ids
         ]
@@ -1419,13 +1416,13 @@ def assert_payload_implied(payload: object, path: Path) -> None:
                 equal_nan=True,
             )
         assert set(grids) == set(predictions)
-        pred_rows = ListCodec.coerce(
+        pred_rows = convert(
             cast(object, npz_array(npz, "pred_n_rows").tolist()),
-            int,
+            list[int],
         )
-        pred_cols = ListCodec.coerce(
+        pred_cols = convert(
             cast(object, npz_array(npz, "pred_n_cols").tolist()),
-            int,
+            list[int],
         )
         for index, name in enumerate(predictions):
             assert np.array_equal(
@@ -1438,7 +1435,7 @@ def assert_payload_implied(payload: object, path: Path) -> None:
             )
         assert (
             tuple(
-                ListCodec.coerce(cast(object, npz_array(npz, "pass_ks").tolist()), int),
+                convert(cast(object, npz_array(npz, "pass_ks").tolist()), list[int]),
             )
             == pass_ks
         )
@@ -1499,7 +1496,7 @@ def capture_metric(b: Backend, tmp: Path) -> Capture:
             put_results(out, key, results)
             restored = b.metric({**fields})
             restored.load_state_dict(
-                DictCodec.coerce(loads(json.dumps(metric.state_dict()))),
+                parse(json.dumps(metric.state_dict()), dict[str, object]),
             )
             put(
                 out,
@@ -1509,7 +1506,7 @@ def capture_metric(b: Backend, tmp: Path) -> Capture:
             extras = results.get("extras")
             if extras is not None:
                 path = tmp / f"dump-{key.replace('/', '_')}.npz"
-                payload = DictCodec.coerce(extras)["signal_dump"]
+                payload = convert(extras, dict[str, object])["signal_dump"]
                 b.write_dump(payload, path, 3)
                 put_npz(out, f"{key}/npz", path)
                 assert_payload_implied(payload, path)
@@ -1564,9 +1561,12 @@ def capture_metric(b: Backend, tmp: Path) -> Capture:
     put_results(out, "partial", partial.compute())
     no_tests = tmp / "no-tests-metric"
     shutil.copytree(root, no_tests, ignore=shutil.ignore_patterns("train", "test"))
-    puzzles = DictCodec.coerce(loads((no_tests / "test_puzzles.json").read_text()))
+    puzzles = parse(
+        (no_tests / "test_puzzles.json").read_text(),
+        dict[str, object],
+    )
     first = next(iter(puzzles))
-    puzzles[first] = {**DictCodec.coerce(puzzles[first]), "test": []}
+    puzzles[first] = {**convert(puzzles[first], dict[str, object]), "test": []}
     (no_tests / "test_puzzles.json").write_text(json.dumps(puzzles))
     put_results(out, "no_tests", b.metric({"working_dir": no_tests}).compute())
     out["error/codec_hash"] = outcome(lambda: b.encode({"t": {"short": []}}))
@@ -1661,7 +1661,7 @@ def load_golden() -> dict[str, Capture]:
     rows = record.pop("rows")
     text = record.pop("text")
     text_lengths = record.pop("text_lengths")
-    chunks = text.split(ListCodec.coerce(text_lengths.tolist(), int))
+    chunks = text.split(convert(text_lengths.tolist(), list[int]))
     table: dict[str, Capture] = {}
     for stored_key, value in record.items():
         key, _, dtype = stored_key.partition("@rows.")

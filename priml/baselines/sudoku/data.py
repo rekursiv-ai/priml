@@ -42,7 +42,7 @@ import torch
 
 from priml.baselines.arcagi1.augmentation import ColorDihedral
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
-from priml.lib.custom_json import DictCodec, IntCodec, loads
+from priml.lib.custom_json import convert, parse
 from priml.math.basic import ceil_div
 from priml.math.seed import salt
 from priml.paths import resolve_working_dir
@@ -286,7 +286,7 @@ def _load_split(dataset_dir: Path, split: str) -> _SudokuSplit:
             "`uv --quiet run --frozen python -m "
             "priml.baselines.sudoku.scripts.prepare_data`.",
         )
-    metadata = DictCodec.coerce(loads(metadata_path.read_text()))
+    metadata = parse(metadata_path.read_text(), dict[str, object])
     logger.info("loading sudoku split %r from %s", split, path)
     inputs_array = cast(NDArray[np.int64], np.load(path / "all__inputs.npy"))
     labels_array = cast(NDArray[np.int64], np.load(path / "all__labels.npy"))
@@ -304,7 +304,7 @@ def _load_split(dataset_dir: Path, split: str) -> _SudokuSplit:
         "inputs": inputs,
         "labels": labels,
         "group_indices": bounds,
-        "vocab_size": IntCodec.coerce(metadata["vocab_size"]),
+        "vocab_size": convert(metadata["vocab_size"], int),
     }
 
 

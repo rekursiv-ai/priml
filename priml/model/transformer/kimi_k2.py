@@ -51,7 +51,7 @@ from torch import Tensor, nn
 import torch
 
 from priml import hub
-from priml.lib.custom_json import DictCodec, FloatCodec, IntCodec
+from priml.lib.custom_json import convert
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.custom_types import (
@@ -86,7 +86,7 @@ def _parse_yarn(rope_scaling: object) -> YarnScaling.Config | None:
     # Validated rather than cast: this is an HF ``config.json``, so a
     # malformed field is caller input, and casting surfaced it as an
     # ``AttributeError`` from inside ``.get``.
-    scaling = DictCodec.coerce(rope_scaling)
+    scaling = convert(rope_scaling, dict[str, object])
     stype = scaling.get("type") or scaling.get("rope_type")
     if stype is None:
         return None
@@ -95,15 +95,16 @@ def _parse_yarn(rope_scaling: object) -> YarnScaling.Config | None:
             f"Unsupported rope_scaling type={stype!r}; only yarn is implemented.",
         )
     config = YarnScaling.Config()
-    config.factor = FloatCodec.coerce(scaling["factor"])
-    config.original_max_position_embeddings = IntCodec.coerce(
-        scaling["original_max_position_embeddings"],
+    config.factor = convert(scaling["factor"], float)
+    config.original_max_position_embeddings = convert(
+        scaling.get("original_max_position_embeddings"),
+        int,
         default=4_096,
     )
-    config.beta_fast = FloatCodec.coerce(scaling.get("beta_fast"), 32.0)
-    config.beta_slow = FloatCodec.coerce(scaling.get("beta_slow"), 1.0)
-    config.mscale = FloatCodec.coerce(scaling.get("mscale"), 1.0)
-    config.mscale_all_dim = FloatCodec.coerce(scaling.get("mscale_all_dim"))
+    config.beta_fast = convert(scaling.get("beta_fast"), float, default=32.0)
+    config.beta_slow = convert(scaling.get("beta_slow"), float, default=1.0)
+    config.mscale = convert(scaling.get("mscale"), float, default=1.0)
+    config.mscale_all_dim = convert(scaling.get("mscale_all_dim"), float, default=0.0)
     return config
 
 
@@ -261,43 +262,46 @@ class KimiK2(Transformer):
             # HF's schema is parsed into the CHILD configs; the parent does
             # not mirror foreign names onto itself. Everything below hangs off
             # the ONE block template, which is where each value lives.
-            eps = FloatCodec.coerce(config.get("rms_norm_eps"), 1e-6)
+            eps = convert(config.get("rms_norm_eps"), float, default=1e-6)
             norm = RMSNorm.Config(elementwise_affine=True)
             norm.eps = eps
 
             frequencies = HuggingFaceFrequencies.Config()
-            frequencies.base = FloatCodec.coerce(config.get("rope_theta"), 10_000.0)
+            frequencies.base = convert(
+                config.get("rope_theta"),
+                float,
+                default=10_000.0,
+            )
             rope = RoPE.Config()
             rope.frequencies = _parse_yarn(config.get("rope_scaling")) or frequencies
 
             init_weight = partial(
                 nn.init.normal_,
-                std=FloatCodec.coerce(
-                    config.get("initializer_range", 0.02),
-                    default=None,
-                ),
+                std=convert(config.get("initializer_range"), float, default=0.02),
             )
             attn = MultiHeadLatentAttention.Config(
                 bias=False,
                 causal=True,
                 init_weight=init_weight,
             )
-            attn.num_heads = IntCodec.coerce(config["num_attention_heads"])
-            attn.channels_qk_nope_head = IntCodec.coerce(
+            attn.num_heads = convert(config["num_attention_heads"], int)
+            attn.channels_qk_nope_head = convert(
                 config.get("qk_nope_head_dim"),
-                128,
+                int,
+                default=128,
             )
-            attn.channels_qk_rope_head = IntCodec.coerce(
+            attn.channels_qk_rope_head = convert(
                 config.get("qk_rope_head_dim"),
-                64,
+                int,
+                default=64,
             )
-            attn.channels_v_head = IntCodec.coerce(config.get("v_head_dim"), 128)
+            attn.channels_v_head = convert(config.get("v_head_dim"), int, default=128)
             attn.q_lora_rank = (
-                IntCodec.coerce(config["q_lora_rank"])
+                convert(config["q_lora_rank"], int)
                 if config.get("q_lora_rank") is not None
                 else None
             )
-            attn.kv_lora_rank = IntCodec.coerce(config.get("kv_lora_rank"), 512)
+            attn.kv_lora_rank = convert(config.get("kv_lora_rank"), int, default=512)
             attn.rope = rope
             attn.norm_q_lora = norm.copy_tree()
             attn.norm_kv_lora = norm.copy_tree()
@@ -307,21 +311,15 @@ class KimiK2(Transformer):
                 if scoring_func == "sigmoid"
                 else SoftmaxRouter.Config()
             )
-            router.top_k = IntCodec.coerce(
-                config.get("num_experts_per_tok", 1),
-                default=None,
-            )
+            router.top_k = convert(config.get("num_experts_per_tok"), int, default=1)
             router.norm_topk_prob = bool(config.get("norm_topk_prob", True))
             if isinstance(router, SigmoidRouter.Config):
-                router.routed_scaling_factor = FloatCodec.coerce(
+                router.routed_scaling_factor = convert(
                     config.get("routed_scaling_factor", 1.0),
-                    default=None,
+                    float,
                 )
-                router.n_group = IntCodec.coerce(config.get("n_group", 1), default=None)
-                router.topk_group = IntCodec.coerce(
-                    config.get("topk_group", 1),
-                    default=None,
-                )
+                router.n_group = convert(config.get("n_group"), int, default=1)
+                router.topk_group = convert(config.get("topk_group"), int, default=1)
 
             moe = MoE.Config(
                 expert=SwiGLU.Config(
@@ -334,8 +332,12 @@ class KimiK2(Transformer):
                 ),
             )
             moe.router = router
-            moe.num_shared_experts = IntCodec.coerce(config.get("n_shared_experts"), 0)
-            router.num_experts = IntCodec.coerce(config.get("n_routed_experts"), 0)
+            moe.num_shared_experts = convert(
+                config.get("n_shared_experts"),
+                int,
+                default=0,
+            )
+            router.num_experts = convert(config.get("n_routed_experts"), int, default=0)
 
             block = TransformerBlock.Config(prenorm=True)
             block.attn = attn
@@ -348,8 +350,9 @@ class KimiK2(Transformer):
             # ``moe_intermediate_size: 0``, which then built every expert at the
             # 18432-wide dense size and only surfaced as a shape mismatch when
             # the checkpoint failed to load.
-            channels_hidden_expert = IntCodec.coerce(
+            channels_hidden_expert = convert(
                 config.get("moe_intermediate_size", config["intermediate_size"]),
+                int,
             )
             if channels_hidden_expert < 1:
                 raise ValueError(
@@ -362,16 +365,17 @@ class KimiK2(Transformer):
                 else Linear.Config(init_weight=init_weight, shard="vocab")
             )
             return cls(
-                channels_in=IntCodec.coerce(config["hidden_size"]),
-                channels_out=IntCodec.coerce(config["vocab_size"]),
-                num_layers=IntCodec.coerce(config["num_hidden_layers"]),
+                channels_in=convert(config["hidden_size"], int),
+                channels_out=convert(config["vocab_size"], int),
+                num_layers=convert(config["num_hidden_layers"], int),
                 proj_in=Embedding.Config(init_weight=init_weight, shard="vocab"),
                 proj_out=Sequential.Config(elements=[norm.copy_tree(), head]),
-                channels_hidden_dense=IntCodec.coerce(config["intermediate_size"]),
+                channels_hidden_dense=convert(config["intermediate_size"], int),
                 channels_hidden_expert=channels_hidden_expert,
-                first_k_dense_replace=IntCodec.coerce(
+                first_k_dense_replace=convert(
                     config.get("first_k_dense_replace"),
-                    0,
+                    int,
+                    default=0,
                 ),
                 block=block,
             )

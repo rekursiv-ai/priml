@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
+import json
 import math
 
 import numpy as np
 
-from priml.lib.custom_json import DictCodec, IntCodec, ListCodec, StrCodec, loads
+from priml.lib.custom_json import convert
 
 
 if TYPE_CHECKING:
@@ -32,13 +33,14 @@ def read_labels(manifest: Path) -> dict[str, int]:
       labels: Class labels keyed by normalized latent names.
 
     """
-    payload = DictCodec.coerce(loads(manifest.read_bytes().decode()))
-    entries = [ListCodec.coerce(entry) for entry in ListCodec.coerce(payload["labels"])]
+    decoded = cast(object, json.loads(manifest.read_bytes().decode()))
+    payload = convert(decoded, dict[str, object])
+    entries = [
+        convert(entry, list[object])
+        for entry in convert(payload["labels"], list[object])
+    ]
     return {
-        StrCodec.coerce(entry[0]).replace("\\", "/"): IntCodec.coerce(
-            entry[1],
-            default=None,
-        )
+        convert(entry[0], str).replace("\\", "/"): convert(entry[1], int)
         for entry in entries
     }
 

@@ -16,7 +16,7 @@ import pytest
 import torch
 
 from priml.baselines.nanochat import optimizers
-from priml.lib.custom_json import DictCodec, FloatCodec
+from priml.lib.custom_json import ReadError, convert
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.normuon import NorMuon
 
@@ -34,7 +34,7 @@ def _tensor(state: dict[str, object], name: str) -> Tensor:
 def _number(value: object) -> float:
     if isinstance(value, Tensor):
         return float(value)
-    return FloatCodec.coerce(value, None)
+    return convert(value, float)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -106,7 +106,7 @@ def test_zero_beta_rmsprop_survives_checkpoint_and_positive_beta_update(
     )
     if sparse:
         state = _state(optimizer, weight)
-        sparse_scalars = DictCodec.coerce(state["sparse_scalars"])
+        sparse_scalars = convert(state["sparse_scalars"], dict[str, object])
         assert _number(state["cum_log"]) == -math.inf
         assert _number(sparse_scalars["cum_before"]) == 0.0
         assert _number(sparse_scalars["cum_after"]) == -math.inf
@@ -128,7 +128,7 @@ def test_zero_beta_rmsprop_survives_checkpoint_and_positive_beta_update(
     )
     if sparse:
         for state in (_state(optimizer, weight), _state(restored, restored_weight)):
-            sparse_scalars = DictCodec.coerce(state["sparse_scalars"])
+            sparse_scalars = convert(state["sparse_scalars"], dict[str, object])
             assert _number(state["cum_log"]) == -math.inf
             assert _number(sparse_scalars["cum_before"]) == -math.inf
             assert _number(sparse_scalars["cum_after"]) == -math.inf
@@ -195,7 +195,7 @@ def test_rowwise_checkpoint_preserves_state_precision_and_next_update(
         elif isinstance(value, dict):
             for key, scalar in cast(dict[str, object], value).items():
                 assert isinstance(scalar, torch.Tensor)
-                after_scalars = DictCodec.coerce(after[name], Tensor)
+                after_scalars = convert(after[name], dict[str, Tensor])
                 assert after_scalars[key].dtype == scalar.dtype, key
                 assert torch.equal(after_scalars[key], scalar), key
     sink.mul_(0.37)
@@ -289,9 +289,9 @@ def test_ffn_multiplier_changes_both_rectangular_projections() -> None:
     config.optimizer.compile = False
     optimizer = config.make()(parameters)
     rates = {
-        tuple(cast("list[Tensor]", group["params"])[0].shape): FloatCodec.coerce(
+        tuple(cast("list[Tensor]", group["params"])[0].shape): convert(
             cast(object, group["lr"]),
-            None,
+            float,
         )
         for group in optimizer.param_groups
     }
@@ -536,7 +536,7 @@ def test_sparse_rmsprop_initializes_exact_row_state_and_errors() -> None:
         assert value.shape == shape, name
         assert value.dtype == dtype, name
         assert value.device.type == "cpu", name
-    sparse_scalars = DictCodec.coerce(state["sparse_scalars"], Tensor)
+    sparse_scalars = convert(state["sparse_scalars"], dict[str, Tensor])
     assert set(sparse_scalars) == {
         "step",
         "lr",
@@ -845,9 +845,8 @@ def test_sparse_rmsprop_rejects_uncoercible_scalars(field: str) -> None:
     optimizer.gradient_sinks[parameter] = torch.ones_like(parameter)
     optimizer.param_groups[0][field] = "invalid"
 
-    with pytest.raises(TypeError) as error:
+    with pytest.raises(ReadError):
         optimizer.step()
-    assert str(error.value) == "cannot coerce 'invalid' to float"
 
 
 def test_sparse_rmsprop_uses_per_row_moments_and_bias_correction() -> None:
@@ -907,7 +906,7 @@ def test_sparse_state_allocations_follow_parameter_device_and_dtype() -> None:
 
     group = cast(dict[str, object], optimizer.param_groups[0])
     assert tensor_factory.call_args == call(
-        FloatCodec.coerce(group["beta2"], None),
+        convert(group["beta2"], float),
         dtype=torch.float32,
     )
     expected = {
@@ -921,7 +920,7 @@ def test_sparse_state_allocations_follow_parameter_device_and_dtype() -> None:
         assert value.shape == shape, name
         assert value.dtype == dtype, name
         assert value.device.type == "meta", name
-    scalars = DictCodec.coerce(state["sparse_scalars"], Tensor)
+    scalars = convert(state["sparse_scalars"], dict[str, Tensor])
     assert all(value.device.type == "meta" for value in scalars.values())
 
 

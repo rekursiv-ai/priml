@@ -9,6 +9,7 @@ import torch
 import torch.distributed as dist
 
 from priml.baselines.sudoku.metric import GridAccuracy
+from priml.lib.custom_json import ReadError
 
 
 def _packed(predictions: Tensor, prefix: int = 1) -> Tensor:
@@ -156,6 +157,13 @@ def test_state_defaults_and_numeric_coercion() -> None:
         "cells_correct": 0,
         "cells": 0,
     }
+
+
+@pytest.mark.parametrize("corrupt", ["two", None, [2]])
+def test_corrupt_state_counts_raise(corrupt: object) -> None:
+    metric = GridAccuracy.Config().make()
+    with pytest.raises(ReadError):
+        metric.load_state_dict({"solved": corrupt})
 
 
 def test_compute_reduces_initialized_gloo_counts(

@@ -408,7 +408,11 @@ MOB_COLLIDES_WITH: Final = torch.tensor(
     ],
     dtype=torch.bool,
 )
-"""Per floor and mob class, whether ``(path, water, lava)`` blocks movement."""
+"""Per species and mob class, whether ``(path, water, lava)`` blocks movement.
+
+Upstream labels these rows by floor but indexes them by species, and the two
+differ: a floor-1 cow is species 2, so lava stops it.
+"""
 
 PLAYER_COLLIDES_WITH: Final = torch.tensor(_LAND)
 """Whether ``(path, water, lava)`` blocks the player, who walks like the land mobs."""
@@ -442,7 +446,7 @@ MOB_HEALTH: Final = torch.tensor(
     ],
     dtype=torch.float32,
 )
-"""Per floor and mob class, the health a freshly spawned creature has."""
+"""Per species and mob class, the health a freshly spawned creature has."""
 
 MOB_DEFENSE: Final = torch.tensor(
     [
@@ -458,7 +462,11 @@ MOB_DEFENSE: Final = torch.tensor(
     ],
     dtype=torch.float32,
 )
-"""Per floor and mob class, the fraction of ``(physical, fire, ice)`` resisted."""
+"""Per species and mob class, the fraction of ``(physical, fire, ice)`` resisted.
+
+Indexed by the struck creature's species, never the floor: the boss floor's
+own row resists nothing, but the creatures it summons keep their armour.
+"""
 
 RANGED_MOB_PROJECTILE: Final = torch.tensor(
     [

@@ -19,7 +19,7 @@ import torch
 
 from priml import hub
 from priml.lib.absent import ABSENT
-from priml.lib.custom_json import DictCodec
+from priml.lib.custom_json import convert
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.embedding import Embedding
@@ -842,7 +842,7 @@ def _our_config_from_hf(
     q_lora_rank: int | None,
 ) -> KimiK2.Config:
     """Mirror an HF model's config into a ``KimiK2.Config``."""
-    hf_cfg = DictCodec.coerce(hf_model.config.to_dict())
+    hf_cfg = convert(hf_model.config.to_dict(), dict[str, object])
     hf_cfg.setdefault("model_type", "deepseek_v3")
     hf_cfg["q_lora_rank"] = q_lora_rank
     hf_cfg["rope_scaling"] = None

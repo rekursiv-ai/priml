@@ -1841,7 +1841,8 @@ def _pool(config: Trainer.Config) -> AtomicPool.Config:
                 givens=(2, vocab - 1),
                 corruption=(
                     config.feedback_corruption
-                    or (
+                    if config.feedback_corruption is not None
+                    else (
                         SlotScramble.Config(
                             prob=config.feedback_scramble_prob,
                             cells=config.feedback_scramble_cells,

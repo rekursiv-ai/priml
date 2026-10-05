@@ -42,6 +42,40 @@ def test_bare_hands_do_less_damage_than_a_sword() -> None:
     assert armed.tolist() == [8.0, 8.0]
 
 
+@pytest.mark.parametrize(
+    "device",
+    ["cpu", pytest.param("cuda", marks=pytest.mark.gpu_torch_cuda)],
+)
+def test_damage_sums_in_xlas_order(device: str) -> None:
+    """XLA pairs the four armour pieces, then adds the elements left to right.
+
+    Values from upstream ``get_damage_done_to_player`` jitted on CUDA with
+    ``--xla_gpu_deterministic_ops=true``; with autotuning on, XLA may round this
+    last bit either way from one process to the next. Torch's own reductions
+    miss it on about 1.5% of hits: the first two rows catch CPU's armour order,
+    the last two CUDA's element order.
+    """
+    state = empty_state(num_envs=4, device=torch.device(device))
+    state.player_level[:] = torch.tensor([0, 8, 2, 4])
+    state.inventory.armour[:] = torch.tensor(
+        [[1, 2, 2, 2], [1, 2, 2, 2], [1, 1, 0, 1], [0, 0, 2, 0]],
+    )
+    state.armour_enchantments[:] = torch.tensor(
+        [[0, 0, 2, 2], [2, 1, 2, 0], [2, 2, 0, 0], [1, 1, 1, 0]],
+    )
+    damage = torch.tensor(
+        [[6.0, 1.0, 1.0], [17.5, 0.0, 0.0], [21.0, 3.5, 3.5], [14.0, 10.5, 10.5]],
+        device=device,
+    )
+    landed = mechanics.damage_to_player(state, damage)
+    assert landed.tolist() == [
+        3.3999996185302734,
+        7.874998569488525,
+        20.30000114440918,
+        25.899999618530273,
+    ]
+
+
 def test_strength_doubles_physical_damage_at_the_cap() -> None:
     state = _state()
     state.inventory.sword[:] = 2
@@ -301,6 +335,32 @@ def test_attacking_reduces_health_and_kills_at_zero() -> None:
     assert torch.equal(mobs.position, state.melee_mobs.position)
     assert torch.equal(mobs.attack_cooldown, state.melee_mobs.attack_cooldown)
     assert torch.equal(mobs.type_id, state.melee_mobs.type_id)
+
+
+def test_a_summon_resists_as_its_type_not_the_boss_floor() -> None:
+    """Upstream reads defense by the target's type (game_logic_utils.py:50-55).
+
+    The boss floor's own row resists nothing, but its summons keep their kind's
+    armour: a type-4 creature halves physical blows, a type-6 one ignores fire.
+    """
+    state = _state()
+    state.player_level[:] = 8
+    state.melee_mobs.mask[:, 8, 0] = True
+    state.melee_mobs.health[:, 8, 0] = 10.0
+    state.melee_mobs.type_id[:, 8, 0] = torch.tensor([4, 6], dtype=torch.int32)
+    state.melee_mobs.position[:, 8, 0] = torch.tensor([5, 5], dtype=torch.int32)
+
+    mobs, _, struck, _ = mechanics.attack_mob_class(
+        state,
+        state.melee_mobs,
+        position=torch.tensor([[5, 5], [5, 5]]),
+        damage=torch.tensor([[2.0, 0.0, 0.0], [0.0, 2.0, 0.0]]),
+        mob_class=1,
+        can_unlock=torch.tensor([True, True]),
+    )
+
+    assert struck.tolist() == [True, True]
+    assert mobs.health[:, 8, 0].tolist() == [9.0, 10.0]
 
 
 def test_attacking_an_empty_tile_does_nothing() -> None:

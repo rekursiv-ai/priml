@@ -32,7 +32,7 @@ from priml.baselines.nanochat.model import (
     ScaledSoftCap,
 )
 from priml.baselines.nanochat.optimizers import BiasCorrectedRMSProp
-from priml.lib.custom_json import FloatCodec
+from priml.lib.custom_json import convert
 from priml.loss.custom_types import LossOutput
 from priml.math.schedules import Schedule, trapezoidal
 from priml.model.softcap import SoftCap
@@ -429,7 +429,7 @@ class NanoChatTrainStep(TrainStep):
         for group in self.optimizer.param_groups:
             group.setdefault(
                 "initial_weight_decay",
-                FloatCodec.coerce(group.get("weight_decay"), 0.0),
+                convert(group.get("weight_decay"), float, default=0.0),
             )
         self.schedule = config.schedule.make()
 
@@ -1105,15 +1105,12 @@ def _learning_rates(optimizer: HasParamGroups) -> dict[str, float]:
     """Return one rate per optimizer member, keyed by its class name."""
     if not isinstance(optimizer, CompositeOptimizer):
         return {
-            "all": FloatCodec.coerce(
-                cast(object, optimizer.param_groups[0]["lr"]),
-                None,
-            ),
+            "all": convert(cast(object, optimizer.param_groups[0]["lr"]), float),
         }
     return {
-        type(member).__name__.lower(): FloatCodec.coerce(
+        type(member).__name__.lower(): convert(
             cast(object, member.param_groups[0]["lr"]),
-            None,
+            float,
         )
         for member in optimizer.optimizers
         if member.param_groups

@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 
 from priml.data.pipeline.shuffle import ShuffleBuffer
-from priml.lib.custom_json import IntCodec
+from priml.lib.custom_json import convert
 
 
 def test_shuffle_buffer():
@@ -41,11 +41,11 @@ def test_shuffle_buffer_seed_is_reproducible():
     samples = [{"key": f"test_{i}", "index": i} for i in range(50)]
 
     a = [
-        IntCodec.coerce(r["index"], 0)
+        convert(r.get("index"), int, default=0)
         for r in ShuffleBuffer.Config(size=10, seed=123).make()(iter(samples))
     ]
     b = [
-        IntCodec.coerce(r["index"], 0)
+        convert(r.get("index"), int, default=0)
         for r in ShuffleBuffer.Config(size=10, seed=123).make()(iter(samples))
     ]
 

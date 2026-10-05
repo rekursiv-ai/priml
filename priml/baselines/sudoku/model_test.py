@@ -23,8 +23,6 @@ from priml.baselines.sudoku.model import (
     ForwardOutput,
     SudokuNet,
     _latent_init,
-    corrected_fan_in_normal,
-    fan_in_normal,
     lattice_positions,
 )
 from priml.baselines.sudoku.prefix import RegisterTokens
@@ -32,7 +30,7 @@ from priml.cost import Cost, cost
 from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.rope import RoPE
-from priml.model.init import kaiming_uniform, truncated_normal
+from priml.model.init import kaiming_uniform, truncated_normal, unit_normal
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
 from priml.model.special import Identity
@@ -309,6 +307,17 @@ def test_an_embedding_without_a_grid_is_rejected() -> None:
     config.embedding = cast("GridConfig", RMSNorm.Config(channels_in=16))
     with pytest.raises(AttributeError, match="grid_len"):
         _ = config.grid_len
+
+
+def test_a_rope_lattice_must_cover_the_grid() -> None:
+    """A lattice smaller than the grid would mis-place every grid position."""
+    config = _config(grid_shape=(2, 3))
+    config.rope = RoPE.Config(channels_head=[2])
+    config.rope_grid_shape = (2, 2)
+    with pytest.raises(ValueError, match="rope_grid_shape"):
+        config.make()
+    config.rope_grid_shape = (3, 2)
+    assert config.make().rope is not None
 
 
 @pytest.mark.parametrize(
@@ -791,47 +800,6 @@ def test_latent_init_preserves_dtype_and_variance(dtype: torch.dtype) -> None:
     assert torch.equal(actual, expected)
 
 
-def test_fan_in_initializers_match_their_truncated_normal_contracts() -> None:
-    shape = (2, 3, 257)
-    for initializer, variance_correction in (
-        (fan_in_normal, False),
-        (corrected_fan_in_normal, True),
-    ):
-        expected = torch.empty(shape)
-        torch.manual_seed(0)
-        truncated_normal(
-            expected,
-            std=shape[-1] ** -0.5,
-            depth_index=(),
-            variance_correction=variance_correction,
-        )
-        actual = torch.empty(shape)
-        torch.manual_seed(0)
-        initializer(actual, depth=2)
-        assert torch.equal(actual, expected)
-
-
-def test_corrected_initializers_explicitly_disable_depth_scaling(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[float, tuple[object, ...], bool]] = []
-
-    def record(
-        w: Tensor,
-        *,
-        std: float,
-        depth_index: tuple[object, ...],
-        variance_correction: bool,
-    ) -> None:
-        del w
-        calls.append((std, depth_index, variance_correction))
-
-    monkeypatch.setattr(model, "truncated_normal", record)
-    model.corrected_fan_in_normal(torch.empty(2, 3, 4))
-    model.corrected_unit_normal(torch.empty(2, 3, 4))
-    assert calls == [(0.5, (), True), (1.0, (), True)]
-
-
 def test_lattice_positions_include_prefix_offsets_and_device() -> None:
     positions = lattice_positions(8, grid_shape=(2, 3), device=torch.device("cpu"))
     assert torch.equal(
@@ -887,27 +855,13 @@ def test_two_latent_refine_forwards_rotary_factors_to_every_mix() -> None:
     assert all(value is factors for value in received)
 
 
-def test_unit_normal_passes_unit_standard_deviation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    standard_deviations: list[float] = []
-
-    def record(w: Tensor, *, std: float) -> None:
-        del w
-        standard_deviations.append(std)
-
-    monkeypatch.setattr(torch.nn.init, "trunc_normal_", record)
-    model.unit_normal(torch.empty(2, 3, 4))
-    assert standard_deviations == [1.0]
-
-
 def test_unit_normal_matches_torch_truncated_normal() -> None:
     expected = torch.empty(2, 3, 4)
     torch.manual_seed(0)
     torch.nn.init.trunc_normal_(expected, std=1.0)
     actual = torch.empty_like(expected)
     torch.manual_seed(0)
-    model.unit_normal(actual)
+    unit_normal(actual)
     assert torch.equal(actual, expected)
 
 

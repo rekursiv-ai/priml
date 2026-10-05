@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from priml.data.sources.prepared_image_latents import read_image, read_labels
+from priml.lib.custom_json import ReadError
 
 
 if TYPE_CHECKING:
@@ -38,7 +39,7 @@ def test_read_image_supports_numpy_and_pil(tmp_path: Path) -> None:
 def test_read_labels_rejects_a_non_integer_label(tmp_path: Path) -> None:
     path = tmp_path / "labels.json"
     path.write_text(json.dumps({"labels": [["x", "unknown"]]}), encoding="utf-8")
-    with pytest.raises(TypeError, match="cannot coerce 'unknown' to int"):
+    with pytest.raises(ReadError):
         read_labels(path)
 
 

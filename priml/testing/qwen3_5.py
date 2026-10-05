@@ -159,7 +159,7 @@ def torch_reference(reference: nn.Module) -> nn.Module:
         raise ValueError(
             'Expected importlib.metadata.version("transformers") == "5.17.0".',
         )
-    original = inspect.unwrap(reference.forward)
+    original = cast(object, inspect.unwrap(reference.forward))
     if not isinstance(original, FunctionType):
         raise TypeError("Expected the reference forward to be a plain function.")
     globals_ref = original.__globals__.copy()

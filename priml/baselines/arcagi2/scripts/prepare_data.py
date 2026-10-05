@@ -22,7 +22,7 @@ import hashlib
 import shutil
 import tempfile
 
-from priml.lib.custom_json import DictCodec, StrCodec, loads
+from priml.lib.custom_json import convert, loads
 from priml.paths import validated_output_path
 
 
@@ -77,10 +77,13 @@ def main() -> int:
 
 def _files(source: Path) -> list[Path]:
     """Admit the source subset identity and complete prepared-file boundary."""
-    params = DictCodec.coerce(loads((source / "_build_params.json").read_text()))
+    params = convert(
+        loads((source / "_build_params.json").read_text()),
+        dict[str, object],
+    )
     if (
         params.get("subsets") != ["training2", "evaluation2", "concept"]
-        or StrCodec.coerce(params.get("test_set_name")) != "evaluation2"
+        or convert(params.get("test_set_name"), str) != "evaluation2"
     ):
         raise ValueError("Expected an ARC2 training2/evaluation2/concept build")
     names = [Path("identifiers.json"), Path("test_puzzles.json")]

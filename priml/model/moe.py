@@ -29,7 +29,7 @@ from priml.cost import (
     resolve_dtype,
     traffic,
 )
-from priml.lib.custom_json import ListCodec
+from priml.lib.custom_json import convert
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
@@ -908,9 +908,9 @@ class MoE(nn.Module):
         starts = torch.cat([offsets.new_zeros(1), offsets[:-1]])
 
         y = x_flat.new_zeros(x_flat.shape[0], self.channels_out)
-        active_values = ListCodec.coerce(active.tolist())
-        starts_values = ListCodec.coerce(starts.tolist())
-        counts_values = ListCodec.coerce(counts.tolist())
+        active_values = convert(active.tolist(), list[object])
+        starts_values = convert(starts.tolist(), list[object])
+        counts_values = convert(counts.tolist(), list[object])
         for expert_index, expert_id in enumerate(active_values):
             assert isinstance(expert_id, int)
             start = starts_values[expert_index]

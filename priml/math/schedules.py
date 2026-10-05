@@ -275,7 +275,10 @@ def trapezoidal(
     """
     if flat < 0.0 or flat >= 1.0:
         raise ValueError(f"flat must lie in [0, 1); got {flat}.")
-    tail = max(0.0, (_clamped(progress) - flat) / (1.0 - flat))
+    spent = _clamped(progress)
+    if spent < flat:
+        return 1.0
+    tail = (spent - flat) / (1.0 - flat)
     return cosine(tail, final=final) if cooldown_cosine else linear(tail, final=final)
 
 
@@ -310,13 +313,13 @@ def one_cycle(
             f"warmup_fraction must lie in [0, 1); got {warmup_fraction}.",
         )
     spent = _clamped(progress)
-    if warmup_fraction == 0.0:
-        return cosine(spent, final=final)
-    rising = spent / warmup_fraction
-    tail = max(0.0, (spent - warmup_fraction) / (1.0 - warmup_fraction))
-    rise = initial + (1.0 - initial) * (1.0 - cosine(rising))
-    fall = cosine(tail, final=final)
-    return rise + fall - 1.0
+    if spent < warmup_fraction:
+        rising = spent / warmup_fraction if warmup_fraction else 1.0
+        # The rising leg is the falling cosine read backwards, so both legs
+        # meet at exactly 1.0 and the peak has no discontinuity.
+        return initial + (1.0 - initial) * (1.0 - cosine(rising))
+    tail = (spent - warmup_fraction) / (1.0 - warmup_fraction)
+    return cosine(tail, final=final)
 
 
 def cosine_restarts(

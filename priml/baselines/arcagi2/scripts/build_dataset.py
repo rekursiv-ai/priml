@@ -52,7 +52,7 @@ from priml.baselines.arcagi1.scripts.build_dataset import (
 )
 from priml.baselines.arcagi1.scripts.build_spatial_eval import spatial_eval_slug
 from priml.data.distributed_build import run_rank_zero_build
-from priml.lib.custom_json import DictCodec, ListCodec, loads
+from priml.lib.custom_json import parse
 
 
 if TYPE_CHECKING:
@@ -145,7 +145,7 @@ def arc2_spatial_eval_template(
 def arc2_num_puzzle_identifiers(dataset_dir: Path) -> int:
     """Return ``len(identifiers.json)`` for a built ARC-AGI-2 tree."""
     path = Path(dataset_dir).expanduser() / "identifiers.json"
-    return len(ListCodec.coerce(loads(path.read_text()), str))
+    return len(parse(path.read_text(), list[str]))
 
 
 def ensure_arc2_dataset(
@@ -396,7 +396,7 @@ def _params_match(root: Path, want: dict[str, object]) -> bool:
     if not path.is_file():
         return False
     try:
-        got = DictCodec.coerce(loads(path.read_text()), default=None)
+        got = parse(path.read_text(), dict[str, object])
     except (json.JSONDecodeError, TypeError):
         return False
     if got != want:

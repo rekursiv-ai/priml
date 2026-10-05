@@ -204,6 +204,7 @@ class CraftaxRollouts:
         self._pending_train_position = position
         if self._live_train is not None:
             self._live_train.position = position
+            self._pending_train_position = 0
 
 
 @runtime_checkable

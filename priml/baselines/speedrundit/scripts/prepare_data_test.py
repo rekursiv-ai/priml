@@ -17,7 +17,7 @@ from priml.baselines.speedrundit.data import PairedImageLatentDataset
 from priml.baselines.speedrundit.scripts import prepare_data
 from priml.data.processors.labels import ImagenetSynsetToIndex
 from priml.data.sources.extracted_imagenet import ExtractedImageNetSource
-from priml.lib.custom_json import DictCodec, loads
+from priml.lib.custom_json import convert, loads
 
 
 if TYPE_CHECKING:
@@ -301,14 +301,17 @@ def test_prepare_creates_manifest_for_empty_source(
     assert (output / "vae-in/dataset.json").read_bytes() == b'{"labels": []}'
 
 
-def test_main_reports_exact_missing_docstring_error(
+def test_main_help_keeps_every_description_line(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(prepare_data, "__doc__", None)
+    monkeypatch.setattr(prepare_data, "__doc__", "a\nb\nfirst line\nsecond line\n")
+    monkeypatch.setattr("sys.argv", ["prepare_data", "--help"])
 
-    with pytest.raises(ValueError, match=r"^Expected __doc__ is not None\.$") as error:
+    with pytest.raises(SystemExit):
         prepare_data.main()
-    assert str(error.value) == "Expected __doc__ is not None."
+
+    assert "first line\nsecond line\n" in capsys.readouterr().out
 
 
 def test_main_help_includes_module_description(
@@ -370,9 +373,9 @@ def test_preparer_writes_paired_source_layout(
         assert prepared_image.getpixel((128, 128)) == (128, 128, 128)
     latent = cast("NDArray[np.float32]", np.load(latent_path))
     assert latent.shape == (1, 32, 16, 16)
-    manifest = DictCodec.coerce(
+    manifest = convert(
         loads((output / "vae-in/dataset.json").read_text()),
-        default=None,
+        dict[str, object],
     )
     assert manifest["labels"] == [["00000/img-latents-00000000.npy", 0]]
     dataset = PairedImageLatentDataset.Config(working_dir=output).make()

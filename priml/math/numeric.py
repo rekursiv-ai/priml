@@ -42,7 +42,7 @@ def log_arctan_exp(x: Tensorable) -> Tensor:
     z = torch.exp(-x.abs()).clamp(min=torch.finfo(x.dtype).tiny)
     atan_z = torch.arctan(z)
     return torch.where(
-        torch.signbit(x),
+        x < 0,
         x + torch.log(atan_z / z),
         math.log(math.pi / 2) + torch.log1p((-2 / math.pi) * atan_z),
     )
@@ -90,7 +90,7 @@ def log1mexp(x: Tensorable) -> Tensor:
     """
     x = convert_to_tensor(x)
     return torch.where(
-        x > math.log(0.5),
+        x > -math.log(2),
         torch.log(-torch.expm1(x)),
         torch.log1p(-torch.exp(x)),
     )
@@ -190,14 +190,13 @@ def logerfc(x: Tensorable) -> Tensor:
 
     """
     x = convert_to_tensor(x)
-    negative = torch.signbit(x)
+    negative = x < 0
     # Double-where: each branch must see an operand inside its own safe domain
     # so the unselected branch cannot inject a NaN gradient. The erfcx branch
     # underflows for x < 0, and erfc(x) underflows for x >= 0, so feed each a
     # masked input pinned to its safe side.
-    zeros = torch.zeros_like(x)
-    safe_neg = torch.where(negative, x, zeros)
-    safe_pos = torch.where(negative, zeros, x)
+    safe_neg = torch.where(negative, x, -1.0)
+    safe_pos = torch.where(negative, 1.0, x)
     return torch.where(
         negative,
         torch.log(torch.erfc(safe_neg)),
@@ -241,7 +240,8 @@ def log_cosh(x: Tensorable) -> Tensor:
 def softplus_inverse(x: Tensorable) -> Tensor:
     """Inverse of softplus: y such that softplus(y) = x.
 
-    Uses ``x + log(-expm1(-x))`` to avoid overflow and cancellation.
+    Uses log(expm1(x)) = x + log(-expm1(-x)) for stability,
+    with asymptotic branches for extreme values.
 
     Args:
       x: Input tensor. The domain is x > 0 (softplus has range (0, inf));
@@ -256,7 +256,12 @@ def softplus_inverse(x: Tensorable) -> Tensor:
 
     """
     x = convert_to_tensor(x)
-    return x + torch.log(-torch.expm1(-x))
+    threshold = math.log(torch.finfo(x.dtype).eps) + 2
+    is_small = x < math.exp(threshold)
+    is_large = x > -threshold
+    safe = torch.where(is_small | is_large, 1.0, x)
+    y = safe + torch.log(-torch.expm1(-safe))
+    return torch.where(is_small, x.log(), torch.where(is_large, x, y))
 
 
 def log1psquare(x: Tensorable) -> Tensor:
@@ -279,7 +284,7 @@ def log1psquare(x: Tensorable) -> Tensor:
     is_large = x.abs() > threshold
     return torch.where(
         is_large,
-        2 * torch.where(is_large, x.abs(), torch.ones_like(x)).log(),
+        2 * torch.where(is_large, x.abs(), 1.0).log(),
         torch.log1p(x * x),
     )
 
@@ -389,8 +394,8 @@ def mesh_arange(
     start_, end_, step_ = broadcast_sequences(start, end, step)
     grid = torch.meshgrid(
         *[
-            torch.arange(start_[i], end_[i], step_[i], dtype=dtype, device=device)
-            for i in range(len(end_))
+            torch.arange(s, e, st, dtype=dtype, device=device)
+            for s, e, st in zip(start_, end_, step_, strict=True)
         ],
         indexing="ij",
     )
@@ -452,7 +457,7 @@ def matrix_signum_via_newtonschulz(
     for _ in range(steps):
         gram = x @ x.transpose(-1, -2)
         correction = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
-        x = torch.baddbmm(x, correction, x, beta=a)
+        x = torch.baddbmm(x, correction, x, beta=a, alpha=1)
     if transpose:
         x = x.transpose(-1, -2)
     return x.to(orig_dtype)
@@ -528,30 +533,26 @@ def kahan_sum(x: Tensorable, dim: int | None = None, keepdim: bool = False) -> T
     # Move target dim to front for iteration.
     x = x.moveaxis(dim, 0)
     n = x.shape[0]
-    if n == 0:
-        total = x.new_zeros(x.shape[1:])
-        if keepdim:
-            total = (
-                total.reshape((1,) * orig_ndim) if reduce_all else total.unsqueeze(dim)
-            )
-        return total
     # Blocked rather than one Python step per element: the recurrence is
     # sequential WITHIN a block, but blocks are independent, so ``blocks``
     # of them run as one vectorized step. That trades n iterations for
     # ``block_len + blocks`` (~2*sqrt(n)) -- measured 26,578x slower than
     # ``.sum()`` at n=10_000 before, against a docstring offering this for
     # "large batches".
-    blocks = math.isqrt(n)
-    block_len = ceil_div(n, blocks)
-    x = torch.cat(
-        [x, x.new_zeros(max(0, block_len * blocks - n), *x.shape[1:])],
-    )
+    blocks = math.isqrt(n) if n > 1 else 1
+    block_len = ceil_div(n, blocks) if blocks else 0
+    if n < block_len * blocks:
+        # Zero pads the final short block. A zero term leaves both the total
+        # and the compensation untouched, so it cannot perturb the result.
+        x = torch.cat([x, x.new_zeros(block_len * blocks - n, *x.shape[1:])])
     # ``[blocks, block_len, ...]`` keeps each block's elements CONTIGUOUS, so
     # the per-block order matches the sequential form; the leading axis is
     # then the one the vectorized step runs across.
     x = x.reshape(blocks, block_len, *x.shape[1:]).moveaxis(1, 0)
-    total = torch.zeros_like(x[0])
-    compensation = torch.zeros_like(total)
+    # An empty reduction sums to zero; ``x[0]`` would otherwise IndexError.
+    template = x[0] if block_len > 0 else x.new_zeros(x.shape[1:])
+    total = torch.zeros_like(template)
+    compensation = torch.zeros_like(template)
     for i in range(block_len):
         total, compensation = _kbn_step(total, compensation, x[i])
     # Fold the per-block partials, compensations included, the same way.
@@ -686,7 +687,7 @@ def sqrt1pm1(x: Tensorable) -> Tensor:
     # For large |x|, direct computation is fine.
     threshold = torch.finfo(x.dtype).eps ** 0.25
     is_small = x.abs() < threshold
-    safe_x = torch.where(is_small, x, torch.zeros_like(x))
+    safe_x = torch.where(is_small, x, 0.0)
     stable = safe_x / (safe_sqrt(1.0 + safe_x) + 1.0)
     direct = safe_sqrt(1.0 + x) - 1.0
     return torch.where(is_small, stable, direct)
@@ -974,7 +975,7 @@ def safe_log(input: Tensorable) -> Tensor:
     """
     input = convert_to_tensor(input)
     valid = input > 0
-    x = torch.where(valid, input, torch.ones_like(input))
+    x = torch.where(valid, input, 1.0)
     # NaN is not "non-positive", so it must not be rewritten to -inf: that
     # turns an upstream error into a plausible value far from where it began.
     fallback = torch.where(input.isnan(), math.nan, -math.inf)
@@ -998,7 +999,7 @@ def safe_xlogy(
 
     """
     input, other = convert_to_tensor(input, other)
-    return torch.xlogy(input, torch.where(input == 0.0, torch.ones_like(other), other))
+    return torch.xlogy(input, torch.where(input == 0.0, 1.0, other))
 
 
 def l2norm(x: Tensor, dim: int = -1, eps: float = 1e-6) -> Tensor:
@@ -1039,7 +1040,7 @@ def safe_sqrt(input: Tensorable) -> Tensor:
     # Moved OFF the boundary rather than clamped to it: d/dx sqrt(x) is
     # infinite at 0, and ``where`` multiplies that by zero to give a NaN
     # gradient. This is what ``safe_rsqrt`` already does.
-    x = torch.where(valid, input, torch.ones_like(input))
+    x = torch.where(valid, input, 1.0)
     fallback = torch.where(input.isnan(), math.nan, 0.0)
     return torch.where(valid, torch.sqrt(x), fallback)
 
@@ -1071,7 +1072,7 @@ def safe_rsqrt(input: Tensorable) -> Tensor:
     """
     input = convert_to_tensor(input)
     valid = input > 0
-    x = torch.where(valid, input, torch.ones_like(input))
+    x = torch.where(valid, input, 1.0)
     fallback = torch.where(input == 0, math.inf, 0.0)
     fallback = torch.where(input.isnan(), math.nan, fallback)
     return torch.where(valid, torch.rsqrt(x), fallback)
@@ -1105,14 +1106,14 @@ def safe_pow(base: Tensorable, exponent: Tensorable) -> Tensor:
     """
     base, exponent = convert_to_tensor(base, exponent)
     valid = base > 0
-    x = torch.where(valid, base, torch.ones_like(base))
+    x = torch.where(valid, base, 1.0)
     # NaN fails ``base > 0``, so without this it took the non-positive branch
     # and came back 0.0 -- a NaN that entered upstream vanishing into a
     # finite-looking number, which the sibling safe helpers refuse to do.
     nan = base.isnan() | exponent.isnan()
     fallback = torch.where(
         nan,
-        math.nan,
+        float("nan"),
         torch.where((base == 0) & (exponent == 0), 1.0, 0.0),
     )
     return torch.where(valid, torch.pow(x, exponent), fallback)
@@ -1123,8 +1124,14 @@ def _kbn_step(
     compensation: Tensor,
     term: Tensor,
 ) -> tuple[Tensor, Tensor]:
-    """Add ``term`` to ``total`` while recovering the exact rounding error."""
-    total_new = total + term
-    term_virtual = total_new - total
-    error = (total - (total_new - term_virtual)) + (term - term_virtual)
-    return total_new, compensation + error
+    """One Kahan-Babuska-Neumaier accumulation of ``term`` into ``total``."""
+    t = total + term
+    # Recover the low-order bits of whichever operand is larger: when the
+    # running total dominates, ``(total - t) + term`` captures term's lost
+    # bits; otherwise ``(term - t) + total`` captures total's lost bits.
+    total_dominates = total.abs() >= term.abs()
+    return t, compensation + torch.where(
+        total_dominates,
+        (total - t) + term,
+        (term - t) + total,
+    )

@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
 from functools import partial
-from typing import TYPE_CHECKING, Self, override
+from typing import TYPE_CHECKING, Self, cast, override
 
 from configgle import Makeable, Makes
 from torch import Tensor, nn
@@ -38,7 +38,7 @@ from torch import Tensor, nn
 import torch
 
 from priml import hub
-from priml.lib.custom_json import DictCodec, FloatCodec, IntCodec
+from priml.lib.custom_json import convert
 from priml.model.attention.attention import Attention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE
 from priml.model.custom_types import (
@@ -173,26 +173,40 @@ class Qwen3(Transformer):
                 # Validated rather than cast: this is an HF ``config.json``, so
                 # a malformed field is caller input. Casting produced an
                 # ``AttributeError`` from inside ``.get`` instead.
-                rope_params = DictCodec.coerce(config.get("rope_parameters") or {})
-                rope_theta = FloatCodec.coerce(rope_params.get("rope_theta"), 1e6)
-            channels_in = IntCodec.coerce(config["hidden_size"])
-            num_heads = IntCodec.coerce(config["num_attention_heads"])
+                raw_rope_parameters = config.get("rope_parameters")
+                rope_params = (
+                    convert(
+                        cast(dict[str, object], raw_rope_parameters),
+                        dict[str, object],
+                    )
+                    if isinstance(raw_rope_parameters, dict)
+                    else {}
+                )
+                rope_theta = convert(
+                    rope_params.get("rope_theta"),
+                    float,
+                    default=1e6,
+                    strict=False,
+                )
+            channels_in = convert(config["hidden_size"], int)
+            num_heads = convert(config["num_attention_heads"], int)
             # HF's schema is parsed into the CHILD configs; the parent does
             # not mirror foreign names onto itself. Everything below hangs off
             # the ONE block template, which is where each value lives.
             norm = RMSNorm.Config(elementwise_affine=True)
-            norm.eps = FloatCodec.coerce(config.get("rms_norm_eps", 1e-6), 1e-6)
+            norm.eps = convert(config.get("rms_norm_eps"), float, default=1e-6)
 
             frequencies = HuggingFaceFrequencies.Config()
-            frequencies.base = FloatCodec.coerce(rope_theta, 1e6)
+            frequencies.base = convert(rope_theta, float)
             rope = RoPE.Config()
             rope.frequencies = frequencies
 
             attn = Attention.Config(bias=False, causal=True, share_qk_norm=False)
             attn.num_heads = num_heads
-            num_heads_kv = IntCodec.coerce(
-                config.get("num_key_value_heads", num_heads),
-                num_heads,
+            num_heads_kv = convert(
+                config.get("num_key_value_heads"),
+                int,
+                default=num_heads,
             )
             if num_heads_kv < 1:
                 raise ValueError(
@@ -202,10 +216,11 @@ class Qwen3(Transformer):
             # Qwen3 states the head width, so it need not divide the model
             # width -- the attention's inner width is decoupled from the
             # residual. Falling back to the quotient matches HF's own default.
-            channels_head = IntCodec.coerce(
+            channels_head = convert(
                 config["head_dim"]
                 if "head_dim" in config
                 else channels_in // num_heads,
+                int,
             )
             if channels_head < 1:
                 raise ValueError(f"head_dim must be > 0, got {channels_head}.")
@@ -215,10 +230,7 @@ class Qwen3(Transformer):
 
             init_weight = partial(
                 nn.init.normal_,
-                std=FloatCodec.coerce(
-                    config.get("initializer_range", 0.02),
-                    default=None,
-                ),
+                std=convert(config.get("initializer_range"), float, default=0.02),
             )
             attn.init_weight = init_weight
             block = TransformerBlock.Config(prenorm=True)
@@ -228,7 +240,7 @@ class Qwen3(Transformer):
                 init_weight_out=init_weight,
                 gate=True,
                 bias=False,
-                channels_hidden=IntCodec.coerce(config["intermediate_size"]),
+                channels_hidden=convert(config["intermediate_size"], int),
             )
             block.norm1 = norm.copy_tree()
             block.norm2 = norm.copy_tree()
@@ -240,8 +252,8 @@ class Qwen3(Transformer):
             )
             return cls(
                 channels_in=channels_in,
-                channels_out=IntCodec.coerce(config["vocab_size"]),
-                num_layers=IntCodec.coerce(config["num_hidden_layers"]),
+                channels_out=convert(config["vocab_size"], int),
+                num_layers=convert(config["num_hidden_layers"], int),
                 proj_in=Embedding.Config(init_weight=init_weight, shard="vocab"),
                 proj_out=Sequential.Config(elements=[norm.copy_tree(), head]),
                 block=block,

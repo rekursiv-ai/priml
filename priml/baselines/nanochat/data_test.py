@@ -45,7 +45,7 @@ from priml.baselines.nanochat.data import (
     Tokenizer,
     token_bytes_fingerprint,
 )
-from priml.lib.custom_json import DictCodec, ListCodec, loads
+from priml.lib.custom_json import ReadError, convert, parse
 from priml.metrics.bits_per_byte import BitsPerByte
 
 
@@ -179,7 +179,7 @@ def _data(corpus: Path, **overrides: object) -> NanoChatData:
 
 def _object_dict(value: object) -> dict[str, object]:
     """Narrow a JSON object to a mutable string-keyed dictionary."""
-    return DictCodec.coerce(value, default=None)
+    return convert(value, dict[str, object])
 
 
 class _NumpyLoadSpy:
@@ -816,7 +816,7 @@ def _refingerprint(directory: Path, table: np.ndarray) -> None:
     np.save(directory / "token_bytes.npy", table)
     recipe_path = directory / "tokenizer_recipe.json"
     recipe = _object_dict(
-        DictCodec.coerce(loads(recipe_path.read_text()), default=None),
+        parse(recipe_path.read_text(), dict[str, object]),
     )
     recipe["token_bytes_sha256"] = token_bytes_fingerprint(table)
     recipe_path.write_text(json.dumps(recipe))
@@ -1005,8 +1005,8 @@ def test_prepared_evaluation_replays_packed_rows_and_primary_byte_rule(
         seen: list[list[int]] = []
         for batch in data.eval_dataloader():
             seen.extend(
-                ListCodec.coerce(row, int)
-                for row in ListCodec.coerce(batch["label"].tolist())
+                convert(row, list[int])
+                for row in convert(batch["label"].tolist(), list[object])
             )
             metric.update(torch.ones_like(batch["label"], dtype=torch.float32), **batch)
         assert seen == [[2, 0, 4, 1], [1, 2, 3, 0]]
@@ -1039,7 +1039,7 @@ def test_prepared_metadata_ignores_obsolete_checksums(
     prepared_config: NanoChatData.Config,
 ) -> None:
     path = Path(prepared_config.prepared_eval_manifest)
-    metadata = _object_dict(DictCodec.coerce(loads(path.read_text()), default=None))
+    metadata = _object_dict(parse(path.read_text(), dict[str, object]))
     metadata["eval_x_sha256"] = "obsolete"
     metadata["eval_y_sha256"] = "obsolete"
     metadata["loaded_modules_and_assets"] = {
@@ -1067,10 +1067,10 @@ def test_prepared_manifest_batches_match_nonunit_eval_batch_geometry(
     train_path = Path(prepared_config.prepared_train_manifest)
     evaluation_path = Path(prepared_config.prepared_eval_manifest)
     train_manifest = _object_dict(
-        DictCodec.coerce(loads(train_path.read_text()), default=None),
+        parse(train_path.read_text(), dict[str, object]),
     )
     evaluation_manifest = _object_dict(
-        DictCodec.coerce(loads(evaluation_path.read_text()), default=None),
+        parse(evaluation_path.read_text(), dict[str, object]),
     )
     train = _object_dict(train_manifest["train"])
     train["seq_len"] = 2
@@ -1119,7 +1119,7 @@ def test_prepared_batch_count_must_match_evaluation_rows(
     prepared_config: NanoChatData.Config,
 ) -> None:
     path = Path(prepared_config.prepared_eval_manifest)
-    manifest = _object_dict(DictCodec.coerce(loads(path.read_text()), default=None))
+    manifest = _object_dict(parse(path.read_text(), dict[str, object]))
     manifest["batches"] = 1
     path.write_text(json.dumps(manifest))
     with pytest.raises(
@@ -1134,7 +1134,7 @@ def test_prepared_training_rows_must_contain_whole_batches(
 ) -> None:
     train_manifest_path = Path(prepared_config.prepared_train_manifest)
     manifest = _object_dict(
-        DictCodec.coerce(loads(train_manifest_path.read_text()), default=None),
+        parse(train_manifest_path.read_text(), dict[str, object]),
     )
     train = _object_dict(manifest["train"])
     train["batch_size"] = 2
@@ -1484,9 +1484,9 @@ def test_token_byte_fingerprint_uses_canonical_int64_bytes() -> None:
 
 
 def test_manifest_coercers_reject_missing_required_values() -> None:
-    with pytest.raises(TypeError, match="cannot coerce None to int"):
+    with pytest.raises(ReadError):
         data._integer(None)
-    with pytest.raises(TypeError, match="cannot coerce None to dict"):
+    with pytest.raises(ReadError):
         data._mapping(None)
 
 
@@ -2073,7 +2073,7 @@ def test_tokenizer_rejects_a_null_bos_token(corpus: Path) -> None:
             },
         ),
     )
-    with pytest.raises(TypeError, match="cannot coerce None to str"):
+    with pytest.raises(ReadError):
         Tokenizer.from_directory(corpus / "tokenizer")
 
 
@@ -2445,7 +2445,7 @@ def test_prepared_byte_table_invariants_are_checked_independently(
     directory = Path(prepared_config.prepared_eval_manifest).parent
     manifest_path = Path(prepared_config.prepared_eval_manifest)
     manifest = _object_dict(
-        DictCodec.coerce(loads(manifest_path.read_text()), default=None),
+        parse(manifest_path.read_text(), dict[str, object]),
     )
     primary_path = directory / "token_bytes_primary.npy"
     literal_path = directory / "token_bytes_literal.npy"
@@ -2518,7 +2518,7 @@ def test_prepared_scoring_totals_are_recomputed_from_evaluation_targets(
         Path(prepared_config.prepared_eval_manifest).parent
         / "packed-eval-manifest.json"
     )
-    manifest = _object_dict(DictCodec.coerce(loads(path.read_text()), default=None))
+    manifest = _object_dict(parse(path.read_text(), dict[str, object]))
     byte_tables = _object_dict(manifest["byte_tables"])
     if field == "scored_positions":
         byte_tables[field] = value
@@ -2557,7 +2557,7 @@ def test_prepared_evaluation_manifest_must_match_its_packing(
         Path(prepared_config.prepared_eval_manifest).parent
         / "packed-eval-manifest.json"
     )
-    manifest = _object_dict(DictCodec.coerce(loads(path.read_text()), default=None))
+    manifest = _object_dict(parse(path.read_text(), dict[str, object]))
     manifest[field] = value
     path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="geometry"):

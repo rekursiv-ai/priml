@@ -13,7 +13,7 @@ ArcTrainLoop(
                 │       │               channels_out=512,
                 │       │               grid_shape=(900,),
                 │       │               channels=[],
-                │       │               init_weight=<function priml.baselines.sudoku.embedding.corrected_scaled_normal at 0xdefacedeface>
+                │       │               init_weight=functools.partial(<function priml.model.init.fan_in_truncated_normal at 0xdefacedeface>, variance_correction=True)
                 │       │       ),
                 │       │       block=RotaryBlock.Config(
                 │       │       │       channels_in=512,
@@ -32,7 +32,7 @@ ArcTrainLoop(
                 │       │       │               share_qk_norm=True,
                 │       │       │               norm_out=None,
                 │       │       │               split_qkv_projection=False,
-                │       │       │               init_weight=<function priml.baselines.sudoku.model.corrected_fan_in_normal at 0xdefacedeface>,
+                │       │       │               init_weight=functools.partial(<function priml.model.init.fan_in_truncated_normal at 0xdefacedeface>, variance_correction=True),
                 │       │       │               depth_index=(),
                 │       │       │               attn_kernel=SdpaFused.Config()
                 │       │       │       ),
@@ -48,8 +48,8 @@ ArcTrainLoop(
                 │       │       │               norm=None,
                 │       │       │               act=<function priml.model.swiglu.silu at 0xdefacedeface>,
                 │       │       │               depth_index=(),
-                │       │       │               init_weight=<function priml.baselines.sudoku.model.corrected_fan_in_normal at 0xdefacedeface>,
-                │       │       │               init_weight_out=<function priml.baselines.sudoku.model.corrected_fan_in_normal at 0xdefacedeface>,
+                │       │       │               init_weight=functools.partial(<function priml.model.init.fan_in_truncated_normal at 0xdefacedeface>, variance_correction=True),
+                │       │       │               init_weight_out=functools.partial(<function priml.model.init.fan_in_truncated_normal at 0xdefacedeface>, variance_correction=True),
                 │       │       │               shard='colwise'
                 │       │       │       ),
                 │       │       │       norm1=RMSNorm.Config(
@@ -104,11 +104,11 @@ ArcTrainLoop(
                 │       │               depth_index=(),
                 │       │               device=None,
                 │       │               dtype=None,
-                │       │               init_weight=<function priml.baselines.sudoku.model.corrected_fan_in_normal at 0xdefacedeface>,
+                │       │               init_weight=functools.partial(<function priml.model.init.fan_in_truncated_normal at 0xdefacedeface>, variance_correction=True),
                 │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                 │       │               shard=None
                 │       │       ),
-                │       │       init_latent=<function priml.baselines.sudoku.model.corrected_unit_normal at 0xdefacedeface>,
+                │       │       init_latent=functools.partial(<function priml.model.init.truncated_normal at 0xdefacedeface>, std=1.0, variance_correction=True),
                 │       │       halt_outputs=2,
                 │       │       halt_init_bias=-5.0,
                 │       │       dtype=None,

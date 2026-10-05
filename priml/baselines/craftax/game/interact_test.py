@@ -223,6 +223,24 @@ def test_eating_resets_only_the_faced_plant_growth() -> None:
     ]
 
 
+def test_eating_restarts_the_first_matching_slot_or_else_slot_zero() -> None:
+    """Upstream restarts one slot, the argmax of the matches (game_logic.py:12-22).
+
+    A ripe plant no slot tracks restarts slot 0, and of two slots on one tile
+    only the first restarts. Play keeps one crop per tile; this pins the rule.
+    """
+    state = _facing(_state(), BlockType.RIPE_PLANT)
+    state.growing_plants_mask[:, :3] = True
+    state.growing_plants_positions[:, :3] = torch.tensor(
+        [[5, 5], [6, 6], [6, 6]],
+        dtype=torch.int32,
+    )
+    state.growing_plants_positions[1, 1:3] = torch.tensor([10, 11], dtype=torch.int32)
+    state.growing_plants_age[:, :3] = torch.tensor([300, 400, 500])
+    state = interact.interact(state, doing=_all(), generator=_quiet())
+    assert state.growing_plants_age[:, :3].tolist() == [[0, 400, 500], [300, 0, 500]]
+
+
 def test_opening_a_chest_records_it_and_clears_the_tile() -> None:
     state = interact.interact(
         _facing(_state(), BlockType.CHEST),
@@ -943,6 +961,45 @@ def test_the_boss_takes_damage_only_when_exposed() -> None:
         True,
         True,
     ]
+
+
+def test_a_chest_seen_off_the_map_still_marks_the_floor_opened() -> None:
+    """Upstream sets the chest flag outside its in-bounds gate (game_logic.py:431, 467).
+
+    Facing up from row 0 reads row 47, as JAX wraps a negative index. Nothing is
+    looted and the chest stays, but the floor's first-chest book is spent.
+    """
+    state = _state()
+    state.player_level[:] = 4
+    state.player_position[:] = torch.tensor([0, 7], dtype=torch.int32)
+    state.player_direction[:] = int(Action.UP)
+    state.map[0, 4, 47, 7] = int(BlockType.CHEST)
+    state = interact.interact(state, doing=_all(), generator=_quiet())
+    assert state.chests_opened[:, 4].tolist() == [True, False]
+    assert state.map[0, 4, 47, 7].item() == int(BlockType.CHEST)
+    assert state.inventory.books.tolist() == [0, 0]
+    assert not state.achievements[:, int(Achievement.OPEN_CHEST)].any()
+
+
+def test_a_necromancer_seen_off_the_map_is_still_wounded() -> None:
+    """Upstream advances the fight outside its in-bounds gate (game_logic.py:442-457).
+
+    Facing left from column 0 reads column 47. The wave timer restarts, but the
+    achievement, which the gate does cover, is not unlocked.
+    """
+    boss_floor = constants.NUM_LEVELS - 1
+    state = _state()
+    state.player_level[:] = boss_floor
+    state.player_position[:] = torch.tensor([20, 0], dtype=torch.int32)
+    state.player_direction[:] = int(Action.LEFT)
+    state.map[0, boss_floor, 20, 47] = int(BlockType.NECROMANCER)
+    state = interact.interact(state, doing=_all(), generator=_quiet())
+    assert state.boss_progress.tolist() == [1, 0]
+    assert state.boss_timesteps_to_spawn_this_round.tolist() == [
+        constants.BOSS_FIGHT_SPAWN_TURNS,
+        0,
+    ]
+    assert not state.achievements[:, int(Achievement.DAMAGE_NECROMANCER)].any()
 
 
 def test_grass_sometimes_yields_a_sapling() -> None:

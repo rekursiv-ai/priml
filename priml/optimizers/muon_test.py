@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from priml import runtime
+from priml.lib.custom_json import ReadError
 from priml.optimizers import lr_scale
 from priml.optimizers.muon import (
     Muon,
@@ -318,7 +319,7 @@ class TestMuon:
         parameter.grad = torch.ones_like(parameter)
         optimizer.param_groups[0][field] = None
 
-        with pytest.raises(TypeError, match="cannot coerce None"):
+        with pytest.raises(ReadError):
             optimizer.step()
 
     def test_step_group_rejects_malformed_non_none_weight_decay(self) -> None:
@@ -327,7 +328,7 @@ class TestMuon:
         parameter.grad = torch.ones_like(parameter)
         optimizer.param_groups[0]["weight_decay"] = True
 
-        with pytest.raises(TypeError, match="cannot coerce True"):
+        with pytest.raises(ReadError):
             optimizer.step()
 
     def test_step_group_rejects_nontriplet_coefficients(self) -> None:

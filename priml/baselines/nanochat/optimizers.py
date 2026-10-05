@@ -27,7 +27,7 @@ from torch.optim import Optimizer, optimizer
 import torch
 
 from priml.kernel import jit_kernel
-from priml.lib.custom_json import FloatCodec
+from priml.lib.custom_json import convert
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.normuon import NorMuon
 from priml.train.custom_types import OptimizerProtocol
@@ -229,13 +229,13 @@ class BiasCorrectedRMSProp(Optimizer):
                     self._sparse_step(parameter, gradient, state, group)
                     continue
                 self.scalars["step"].fill_(step_count)
-                self.scalars["lr"].fill_(FloatCodec.coerce(group_values["lr"], None))
+                self.scalars["lr"].fill_(convert(group_values["lr"], float))
                 self.scalars["beta2"].fill_(
-                    FloatCodec.coerce(group_values["beta2"], None),
+                    convert(group_values["beta2"], float),
                 )
-                self.scalars["eps"].fill_(FloatCodec.coerce(group_values["eps"], None))
+                self.scalars["eps"].fill_(convert(group_values["eps"], float))
                 self.scalars["weight_decay"].fill_(
-                    FloatCodec.coerce(group_values["weight_decay"], None),
+                    convert(group_values["weight_decay"], float),
                 )
                 self.update(
                     parameter,
@@ -260,7 +260,7 @@ class BiasCorrectedRMSProp(Optimizer):
                 "sparse_rows is set but this table has no dirty bitmap; refusing to "
                 "fall back to the dense path and report it as a sparse step",
             )
-        weight_decay = FloatCodec.coerce(group["weight_decay"], None)
+        weight_decay = convert(group["weight_decay"], float)
         if weight_decay != 0.0:
             raise ValueError(
                 f"sparse_rows does not implement decoupled decay; group carries "
@@ -317,17 +317,17 @@ class BiasCorrectedRMSProp(Optimizer):
             }
         # Round before the bias correction; using the Python float changes updates.
         beta2 = float(
-            torch.tensor(FloatCodec.coerce(group["beta2"], None), dtype=torch.float32),
+            torch.tensor(convert(group["beta2"], float), dtype=torch.float32),
         )
         cum_before = cast(float, state["cum_log"])
         state["cum_log"] = cum_before + (math.log(beta2) if beta2 != 0.0 else -math.inf)
-        lr = FloatCodec.coerce(group["lr"], None)
+        lr = convert(group["lr"], float)
         scalars = cast("dict[str, Tensor]", state["sparse_scalars"])
         for name, value in (
             ("step", float(cast(int, state["step"]))),
             ("lr", lr),
             ("beta2", beta2),
-            ("eps", FloatCodec.coerce(group["eps"], None)),
+            ("eps", convert(group["eps"], float)),
             ("one_minus_lr_wd", 1.0),
             ("cum_before", cum_before),
             ("cum_after", state["cum_log"]),

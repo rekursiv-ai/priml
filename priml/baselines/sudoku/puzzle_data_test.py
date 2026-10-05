@@ -25,7 +25,7 @@ from priml.baselines.sudoku.puzzle_data import (
     resolve_working_dir,
 )
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
-from priml.lib.custom_json import IntCodec, ListCodec
+from priml.lib.custom_json import ReadError, convert
 
 
 def _write(
@@ -605,14 +605,14 @@ def _ordered_first_epoch(root: Path, seed: int) -> list[int]:
         num_instances=2,
         max_samples=6,
     ).make()
-    return ListCodec.coerce(
+    return convert(
         torch.cat(
             [
                 batch["media"][: batch["valid_count"], 0]
                 for batch in dataset.train_dataloader()
             ],
         ).tolist(),
-        int,
+        list[int],
     )
 
 
@@ -721,7 +721,7 @@ def test_loader_caps_rows_and_clips_group_boundaries(tmp_path: Path) -> None:
     assert empty["group_indices"].tolist() == [0]
 
     (split / "dataset.json").write_text("{}")
-    with pytest.raises(TypeError, match="cannot coerce None to int"):
+    with pytest.raises(ReadError):
         load_puzzle_dataset(tmp_path, "train")
 
 
@@ -837,9 +837,9 @@ def test_loader_preserves_mmap_and_metadata_contract(
     np.save(split / "all__labels.npy", source_labels)
 
     load = Mock(wraps=np.load)
-    coerce = Mock(wraps=IntCodec.coerce)
+    convert_metadata = Mock(wraps=convert)
     monkeypatch.setattr(np, "load", load)
-    monkeypatch.setattr(IntCodec, "coerce", coerce)
+    monkeypatch.setattr(puzzle_data, "convert", convert_metadata)
 
     data = load_puzzle_dataset(tmp_path, "test", max_samples=5)
 
@@ -870,9 +870,9 @@ def test_loader_preserves_mmap_and_metadata_contract(
         "r",
         "r",
     ]
-    assert [call.kwargs.get("default", object()) for call in coerce.call_args_list] == [
-        None,
-        None,
+    assert [call.args for call in convert_metadata.call_args_list[1:]] == [
+        (11, int),
+        (4, int),
     ]
 
 

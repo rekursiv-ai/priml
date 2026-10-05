@@ -355,9 +355,10 @@ def grow_plants(state: EnvState) -> EnvState:
     ) * state.growing_plants_mask.int()
     ripe = state.growing_plants_age >= 600
 
-    rows = batch_rows(state.num_envs, state.device)
-    level = state.player_level.long()
-    grid = state.map[rows, level]
+    # Plants grow only on the surface, which ripens wherever the player is:
+    # writing the player's own floor would leave the crop unripe and drop a
+    # solid one into the dungeon below.
+    grid = state.map[:, 0]
     for slot in range(state.growing_plants_mask.shape[1]):
         grid = scatter_tiles_where(
             grid,
@@ -369,7 +370,7 @@ def grow_plants(state: EnvState) -> EnvState:
             ),
             ripe[:, slot],
         )
-    state.map[rows, level] = grid
+    state.map[:, 0] = grid
     return state
 
 

@@ -22,7 +22,7 @@ from priml.baselines.sudoku.act import (
 )
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.baselines.sudoku.train_step import SudokuTrainStep
-from priml.lib.custom_json import DictCodec
+from priml.lib.custom_json import convert
 from priml.math.loss import stablemax_cross_entropy
 from priml.optimizers import (
     AdamATan2,
@@ -157,7 +157,7 @@ class ArcTrainStep(SudokuTrainStep):
         )
         if load_optimizer:
             self.sparse_optimizer.load_state_dict(
-                DictCodec.coerce(state_dict["sparse_optimizer"], default=None),
+                convert(state_dict["sparse_optimizer"], dict[str, object]),
             )
 
     @property

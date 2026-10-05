@@ -46,7 +46,7 @@ from torch.optim import Optimizer
 
 import torch
 
-from priml.lib.custom_json import FloatCodec
+from priml.lib.custom_json import convert
 
 
 if TYPE_CHECKING:
@@ -366,10 +366,10 @@ class NorMuon(Optimizer):
             )
         stacked_grads = torch.stack([_gradient(p) for p in params])
         stacked_params = torch.stack(list(params))
-        momentum = FloatCodec.coerce(group["momentum"], None)
-        lr = FloatCodec.coerce(group["lr"], None)
-        weight_decay = FloatCodec.coerce(group["weight_decay"], None)
-        beta2 = FloatCodec.coerce(group["beta2"], None)
+        momentum = convert(group["momentum"], float)
+        lr = convert(group["lr"], float)
+        weight_decay = convert(group["weight_decay"], float)
+        beta2 = convert(group["beta2"], float)
         for name, value in (
             ("momentum", momentum),
             # A tall matrix's orthogonal update has more rows than it has

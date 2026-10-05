@@ -58,7 +58,7 @@ import torch.distributed as dist
 
 from priml.baselines.arcagi1.augmentation import ArcAugmentation, ArcSpec
 from priml.baselines.arcagi1.scripts.build_dataset import ensure_arc_dataset
-from priml.lib.custom_json import DictCodec, IntCodec, ListCodec, loads
+from priml.lib.custom_json import convert, parse
 from priml.math.basic import ceil_div
 from priml.math.seed import salt
 from priml.paths import resolve_working_dir
@@ -355,7 +355,7 @@ def _load_split(dataset_dir: Path, *, split: str, mmap: bool = False) -> _Split:
             "`uv --quiet run --frozen python -m "
             "priml.baselines.arcagi1.scripts.prepare_data`.",
         )
-    metadata = DictCodec.coerce(loads(metadata_path.read_text()))
+    metadata = parse(metadata_path.read_text(), dict[str, object])
     logger.info("loading ARC split %r from %s", split, path)
     inputs: Tensor | NDArray[np.generic]
     labels: Tensor | NDArray[np.generic]
@@ -394,7 +394,7 @@ def _load_split(dataset_dir: Path, *, split: str, mmap: bool = False) -> _Split:
         "group_indices": groups,
         "puzzle_identifiers": identifiers,
         "spatial_tags": spatial_tags,
-        "ignore_label_id": IntCodec.coerce(metadata.get("ignore_label_id")),
+        "ignore_label_id": convert(metadata.get("ignore_label_id"), int, default=0),
     }
 
 
@@ -650,7 +650,7 @@ def load_puzzle_dataset(
     metadata_path = data_path / "dataset.json"
     if not metadata_path.exists():
         raise FileNotFoundError(f"Dataset metadata not found: {metadata_path}")
-    metadata = DictCodec.coerce(loads(metadata_path.read_text()))
+    metadata = parse(metadata_path.read_text(), dict[str, object])
     logger.info("loading ARC dataset split %r from %s", split, data_path)
     inputs = _load_int32(data_path / "all__inputs.npy", mmap=True)
     labels = _load_int32(data_path / "all__labels.npy", mmap=True)
@@ -761,9 +761,15 @@ class PuzzleBatches:
         self.group_indices = data["group_indices"]
         self.puzzle_identifiers = data["puzzle_identifiers"]
         self.spatial_tags = data["spatial_tags"]
-        self.ignore_label_id = IntCodec.coerce(self.metadata.get("ignore_label_id"))
-        self.blank_identifier_id = IntCodec.coerce(
+        self.ignore_label_id = convert(
+            self.metadata.get("ignore_label_id"),
+            int,
+            default=0,
+        )
+        self.blank_identifier_id = convert(
             self.metadata.get("blank_identifier_id"),
+            int,
+            default=0,
         )
         # Mixed-source hooks: an explicit remap table wins, else a flat offset moves
         # every non-blank id into this source's disjoint embedding band.
@@ -1089,7 +1095,7 @@ class PuzzleData:
                 augmentation=config.augmentation.make(),
             )
             path = self.dataset_dir.expanduser() / "identifiers.json"
-            actual = len(ListCodec.coerce(loads(path.read_text()), str))
+            actual = len(parse(path.read_text(), list[str]))
             if actual != config.num_puzzle_identifiers:
                 raise ValueError(
                     f"expected {config.num_puzzle_identifiers} puzzle identifiers "
@@ -1289,4 +1295,4 @@ def _at(values: NDArray[np.integer], index: int) -> int:
 
 
 def _int_list(values: NDArray[np.integer]) -> list[int]:
-    return ListCodec.coerce(cast(object, values.tolist()), int)
+    return convert(cast(object, values.tolist()), list[int])

@@ -61,7 +61,11 @@ from priml.cost import (
 )
 from priml.model.attention.rope import RoPE
 from priml.model.custom_types import ChannelsIn, ChannelsOut, TensorModule
-from priml.model.init import InitFn, truncated_normal
+from priml.model.init import (
+    InitFn,
+    corrected_fan_in_normal,
+    corrected_unit_normal,
+)
 from priml.model.linear import Linear
 from priml.model.sequential import Sequential
 from priml.model.transformer.block import TransformerBlock
@@ -72,54 +76,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-
-def corrected_fan_in_normal(w: Tensor, *, depth: int = -1) -> None:
-    """Initialize truncated normal at ``std = 1/sqrt(fan_in)``, variance-corrected.
-
-    The initialization every projection in this baseline uses. ``depth`` is
-    accepted and discarded: priml's layers pass it to every ``init_weight`` so
-    depth-scaled schemes can use it, and this one does not scale with depth.
-
-    Args:
-      w: Tensor to initialize in place.
-      depth: Ignored; present for the ``InitFn`` protocol.
-
-    """
-    del depth
-    truncated_normal(
-        w,
-        std=w.shape[-1] ** -0.5,
-        depth_index=(),
-        variance_correction=True,
-    )
-
-
-def fan_in_normal(w: Tensor, *, depth: int = -1) -> None:
-    """Initialize truncated normal at ``std = 1/sqrt(fan_in)``, clipped at 2 std.
-
-    The uncorrected sibling of :func:`corrected_fan_in_normal`: the realized
-    standard deviation is about 0.88x the request, as torch's own
-    ``trunc_normal_`` gives. ``depth`` is accepted and discarded for the same
-    reason as there.
-
-    Args:
-      w: Tensor to initialize in place.
-      depth: Ignored; present for the ``InitFn`` protocol.
-
-    """
-    del depth
-    truncated_normal(w, std=w.shape[-1] ** -0.5)
-
-
-def corrected_unit_normal(w: Tensor) -> None:
-    """Initialize truncated normal at realized std 1, variance-corrected."""
-    truncated_normal(w, std=1.0, depth_index=(), variance_correction=True)
-
-
-def unit_normal(w: Tensor) -> None:
-    """Initialize ``nn.init.trunc_normal_`` at std 1, clipped at 2 std."""
-    nn.init.trunc_normal_(w, std=1.0)
 
 
 class CoreOutput(NamedTuple):
@@ -738,6 +694,13 @@ class SudokuNet(nn.Module):
             )
         if config.rope is not None and not config.rope_grid_shape:
             raise ValueError("SudokuNet requires rope_grid_shape from the dataset.")
+        if config.rope is not None and math.prod(config.rope_grid_shape) != (
+            config.embedding.grid_len
+        ):
+            raise ValueError(
+                f"rope_grid_shape {config.rope_grid_shape} must cover the "
+                f"{config.embedding.grid_len}-token grid.",
+            )
         if config.block_checkpoint_fraction < 0 or config.block_checkpoint_fraction > 1:
             raise ValueError(
                 "block_checkpoint_fraction must be in [0, 1], got "

@@ -159,6 +159,13 @@ class Shrinkable(Protocol):
         ...
 
 
+class _FalsyCellCorruption(CellCorruption.Config):
+    """A corruption config whose truth value is False."""
+
+    def __bool__(self) -> bool:
+        return False
+
+
 def test_constraint_groups_follow_puzzle_spec() -> None:
     spec = SudokuSpec(grid_shape=(4, 4), box_shape=(2, 2), vocab_size=6)
     groups = sudoku_group_indices(spec)
@@ -551,6 +558,20 @@ def test_feedback_corruption_overrides_the_slot_scramble(tmp_path: Path) -> None
     assert carry is not None
     assert isinstance(carry.corruption, CellCorruption)
     assert carry.corruption.config.rate == 0.25
+
+
+def test_a_falsy_feedback_corruption_still_overrides_the_slot_scramble(
+    tmp_path: Path,
+) -> None:
+    """``or`` would discard a configured corruption whose truth value is False."""
+    config = port_config("exp010", tmp_path)
+    write_dataset(tmp_path / "data")
+    corruption = _FalsyCellCorruption()
+    config.feedback_corruption = corruption
+    assert not corruption
+    carry = config.make().pool.carry
+    assert carry is not None
+    assert isinstance(carry.corruption, CellCorruption)
 
 
 def test_trainer_constructor_rejects_invalid_protocol_configs(tmp_path: Path) -> None:

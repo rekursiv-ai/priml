@@ -76,9 +76,10 @@ def interact(
         target=target,
         block=block,
         acting=acting,
+        doing=doing,
         generator=generator,
     )
-    return _damage_boss(state, block=block, acting=acting)
+    return _damage_boss(state, block=block, acting=acting, doing=doing)
 
 
 def item_at(state: EnvState, position: Tensor) -> Tensor:
@@ -286,12 +287,15 @@ def _gather_ground(
         ),
         eating,
     )
-    # An eaten plant restarts its growth rather than vanishing.
-    eaten_here = (state.growing_plants_positions == target[:, None, :]).all(-1)
-    state.growing_plants_age = torch.where(
-        eaten_here & eating[:, None],
-        torch.zeros_like(state.growing_plants_age),
-        state.growing_plants_age,
+    # An eaten plant restarts its growth rather than vanishing. Upstream
+    # restarts one slot, the first on this tile, or slot 0 when none tracks it.
+    rows = batch_rows(state.num_envs, state.device)
+    slot = (state.growing_plants_positions == target[:, None, :]).all(-1).int()
+    slot = slot.argmax(1)
+    state.growing_plants_age[rows, slot] = torch.where(
+        eating,
+        torch.zeros_like(state.growing_plants_age[rows, slot]),
+        state.growing_plants_age[rows, slot],
     )
     return state
 
@@ -302,6 +306,7 @@ def _open_chest(
     target: Tensor,
     block: Tensor,
     acting: Tensor,
+    doing: Tensor,
     generator: torch.Generator | None,
 ) -> EnvState:
     """Empty a chest into the inventory and leave bare path behind."""
@@ -309,7 +314,11 @@ def _open_chest(
     state = _add_chest_loot(state, opening=opening, generator=generator)
     state = _replace_block(state, target, int(BlockType.PATH), opening)
     rows = batch_rows(state.num_envs, state.device)
-    state.chests_opened[rows, state.player_level.long()] |= opening
+    # Upstream sets this flag outside its in-bounds gate, so a chest read past
+    # the map edge marks the floor opened, spending its first-chest bow or book.
+    state.chests_opened[rows, state.player_level.long()] |= doing & (
+        block == int(BlockType.CHEST)
+    )
     state.achievements = mechanics.unlock_achievement(
         state,
         torch.full(
@@ -415,10 +424,18 @@ def _add_chest_loot(
     return state
 
 
-def _damage_boss(state: EnvState, *, block: Tensor, acting: Tensor) -> EnvState:
+def _damage_boss(
+    state: EnvState,
+    *,
+    block: Tensor,
+    acting: Tensor,
+    doing: Tensor,
+) -> EnvState:
     """Wound the necromancer, but only while its summons are dead."""
+    # Upstream advances the fight outside its in-bounds gate, as it does the
+    # chest flag; only the achievement below waits for an in-bounds blow.
     hitting = (
-        acting
+        doing
         & (block == int(BlockType.NECROMANCER))
         & mechanics.is_boss_vulnerable(state)
         & mechanics.is_fighting_boss(state)
@@ -441,7 +458,7 @@ def _damage_boss(state: EnvState, *, block: Tensor, acting: Tensor) -> EnvState:
             int(Achievement.DAMAGE_NECROMANCER),
             device=state.device,
         ),
-        hitting,
+        hitting & acting,
     )
     return state
 

@@ -27,7 +27,7 @@ from priml.baselines.craftax.env import CraftaxEnv
 from priml.baselines.craftax.evaluation import evaluation_mode
 from priml.baselines.craftax.game import constants
 from priml.baselines.craftax.restart import RestartOnDemand
-from priml.lib.custom_json import ListCodec
+from priml.lib.custom_json import convert
 from priml.math.numeric import shifted_geometric_mean
 
 
@@ -231,18 +231,17 @@ class CraftaxScore:
                 if bool(transition.done.any()):
                     finished = transition.done
                     self._returns.extend(
-                        ListCodec.coerce(episode_return[finished].tolist(), float),
+                        convert(episode_return[finished].tolist(), list[float]),
                     )
                     self._lengths.extend(
-                        ListCodec.coerce(episode_length[finished].tolist(), int),
+                        convert(episode_length[finished].tolist(), list[int]),
                     )
                     unlocked = torch.stack(
                         [transition.info[name] for name in sorted(transition.info)],
                         dim=-1,
                     )
                     self._unlocked.extend(
-                        ListCodec.coerce(row, float)
-                        for row in unlocked[finished].tolist()
+                        convert(row, list[float]) for row in unlocked[finished].tolist()
                     )
                     episode_return = episode_return * ~finished
                     episode_length = episode_length * ~finished

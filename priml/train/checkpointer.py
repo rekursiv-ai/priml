@@ -66,7 +66,7 @@ else:
 
 from configgle import Fig, Makeable
 
-from priml.lib.custom_json import DictCodec, FloatCodec, IntCodec, StrCodec, loads
+from priml.lib.custom_json import convert, parse
 from priml.paths import resolve_working_dir, validated_output_path
 from priml.runtime import is_rank_zero
 
@@ -897,17 +897,17 @@ class Checkpointer:
         path = self.checkpoint_dir / "best.json"
         if not path.is_file():
             return
-        record = DictCodec.coerce(loads(path.read_text()), default=None)
+        record = parse(path.read_text(), dict[str, object])
         if (
-            StrCodec.coerce(record.get("metric")) != self.best_metric
-            or StrCodec.coerce(record.get("mode")) != self.best_mode
+            convert(record.get("metric"), str, default="") != self.best_metric
+            or convert(record.get("mode"), str, default="") != self.best_mode
         ):
             return
-        step = IntCodec.coerce(record.get("step"), default=None)
+        step = convert(record.get("step"), int)
         if all(c.step != step for c in inventory):
             return
         self.best_step = step
-        self.best_value = FloatCodec.coerce(record.get("value"), default=None)
+        self.best_value = convert(record.get("value"), float)
         logger.info(
             "Restored best %s=%s at step %d from %s.",
             self.best_metric,

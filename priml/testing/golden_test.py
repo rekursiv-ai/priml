@@ -10,6 +10,7 @@ import zlib
 import pytest
 import torch
 
+from priml.lib.custom_json import ReadError
 from priml.testing import golden
 from priml.testing.golden import (
     assert_tensor_golden,
@@ -528,7 +529,7 @@ def test_unpack_rejects_payload_without_index() -> None:
 
 
 def test_unpack_rejects_a_non_mapping() -> None:
-    with pytest.raises(TypeError, match="cannot coerce"):
+    with pytest.raises(ReadError):
         golden.unpack("not a record")
 
 

@@ -20,7 +20,7 @@ import rustbpe
 import tokenizers
 
 from priml.baselines.nanochat.data import DEFAULT_ENCODE_THREADS
-from priml.lib.custom_json import DictCodec
+from priml.lib.custom_json import parse
 from priml.paths import validated_output_path
 
 
@@ -68,7 +68,7 @@ def read_mapping(path: Path) -> dict[str, object]:
 
     """
     return dict(
-        DictCodec.coerce(cast(object, json.loads(path.read_text())), default=None),
+        parse(path.read_text(), dict[str, object]),
     )
 
 

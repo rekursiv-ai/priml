@@ -45,7 +45,7 @@ from priml.data.processors.fields import FieldRenameKeys
 from priml.data.processors.labels import ImagenetSynsetToIndex
 from priml.data.processors.resize import Interpolate
 from priml.data.sources.extracted_imagenet import ExtractedImageNetSource
-from priml.lib.custom_json import DictCodec
+from priml.lib.custom_json import convert
 
 
 if TYPE_CHECKING:
@@ -383,9 +383,11 @@ def test_dataset_builds_loaders_from_both_pipelines_and_checkpoints_its_pass_cou
     dataset = config.make()
 
     train_items = [
-        DictCodec.coerce(item, Tensor) for item in dataset.train_dataloader()
+        convert(item, dict[str, Tensor]) for item in dataset.train_dataloader()
     ]
-    eval_items = [DictCodec.coerce(item, Tensor) for item in dataset.eval_dataloader()]
+    eval_items = [
+        convert(item, dict[str, Tensor]) for item in dataset.eval_dataloader()
+    ]
     assert [int(item["index"]) for item in train_items] == [0, 1]
     assert [int(item["index"]) for item in eval_items] == [0, 1, 2]
 

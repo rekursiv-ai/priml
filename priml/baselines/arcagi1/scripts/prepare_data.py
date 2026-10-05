@@ -30,7 +30,7 @@ from priml.baselines.arcagi1.scripts.build_dataset import (
     KaggleSource,
     build_arc_dataset,
 )
-from priml.lib.custom_json import DictCodec, IntCodec, loads
+from priml.lib.custom_json import convert, loads
 
 
 if TYPE_CHECKING:
@@ -122,10 +122,11 @@ def prepare(
 
 def num_puzzle_identifiers(directory: Path | str) -> int:
     """Read the identifier-table size recorded by a prepared dataset."""
-    metadata = DictCodec.coerce(
+    metadata = convert(
         loads((Path(directory) / "train" / "dataset.json").read_text()),
+        dict[str, object],
     )
-    return IntCodec.coerce(metadata["num_puzzle_identifiers"])
+    return convert(metadata.get("num_puzzle_identifiers"), int)
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:

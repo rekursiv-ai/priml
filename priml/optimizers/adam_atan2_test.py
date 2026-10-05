@@ -10,6 +10,7 @@ from torch import Tensor
 import pytest
 import torch
 
+from priml.lib.custom_json import ReadError
 from priml.optimizers.adam_atan2 import AdamATan2
 
 
@@ -122,7 +123,7 @@ def test_invalid_parameter_group_rates_are_rejected(name: str) -> None:
     optimizer = AdamATan2([parameter])
     optimizer.param_groups[0][name] = "invalid"
 
-    with pytest.raises(TypeError, match="cannot coerce 'invalid' to float"):
+    with pytest.raises(ReadError):
         optimizer.step()
 
 

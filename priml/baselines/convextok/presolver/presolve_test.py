@@ -44,7 +44,7 @@ from priml.baselines.convextok.presolver.presolve import (
     presolve,
 )
 from priml.baselines.convextok.program import LinearProgram, build_program
-from priml.lib.custom_json import DictCodec, IntCodec, ListCodec
+from priml.lib.custom_json import convert
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -387,17 +387,13 @@ def fixture_program() -> LinearProgram:
     return build_program(
         dict(
             zip(
-                ListCodec.coerce(pretokens.get("pretokens"), str, default=None),
-                ListCodec.coerce(pretokens.get("frequencies"), int, default=None),
+                convert(pretokens.get("pretokens"), list[str], default=[]),
+                convert(pretokens.get("frequencies"), list[int], default=[]),
                 strict=True,
             ),
         ),
-        ListCodec.coerce(
-            _read_json("candidates.json").get("tokens"),
-            str,
-            default=None,
-        ),
-        budget=IntCodec.coerce(_read_json("corpus.json").get("budget"), default=None),
+        convert(_read_json("candidates.json").get("tokens"), list[str], default=[]),
+        budget=convert(_read_json("corpus.json").get("budget"), int, default=0),
     ).program
 
 
@@ -460,7 +456,7 @@ def _npz(path: Path) -> np.lib.npyio.NpzFile:
 
 def _read_json(name: str) -> dict[str, object]:
     raw = cast(object, json.loads((_TESTDATA / name).read_text()))
-    return dict(DictCodec.coerce(raw, default=None))
+    return dict(convert(raw, dict[str, object]))
 
 
 def _stub_trivial_core(

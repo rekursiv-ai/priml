@@ -16,11 +16,11 @@ from priml.baselines.sudoku.model import (
     GridConfig,
     RecurrenceConfig,
     SudokuNet,
-    corrected_fan_in_normal,
 )
 from priml.baselines.sudoku.prefix import PrefixConfig, SparsePuzzleEmbedding
 from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE
+from priml.model.init import corrected_fan_in_normal
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock

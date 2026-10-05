@@ -1291,6 +1291,15 @@ def test_rope_mixed_requires_equal_active_widths_for_sum() -> None:
         _ = config.make()
 
 
+@pytest.mark.parametrize("num_heads", [4, 8])
+def test_rope_mixed_sum_rejects_widths_equal_only_after_head_division(
+    num_heads: int,
+) -> None:
+    config = RoPEMixed.Config([16, 20], num_heads=num_heads, reduction_mode="sum")
+    with pytest.raises(ValueError, match=r"^Sum mode requires uniform dims"):
+        _ = config.make()
+
+
 def test_rope_mixed_parameters_keep_empty_axes_and_learning_flags() -> None:
     learned = RoPEMixed.Config([8, 0], num_heads=2, learnable=True).make()
     assert learned._inv_freqs[0].shape == (2, 4)

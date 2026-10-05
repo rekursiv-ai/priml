@@ -94,7 +94,7 @@ from priml.baselines.nanochat.scripts.prepare_tokenizer import (
     UnigramPreparation,
     byte_alphabet,
 )
-from priml.lib.custom_json import DictCodec, IntCodec, ListCodec
+from priml.lib.custom_json import ReadError, convert, parse
 from priml.paths import validated_output_path
 from priml.train.checkpointer import Checkpointer
 from priml.train.tracker import TrackerList
@@ -105,9 +105,7 @@ _CWD: Final = Path(__file__).resolve().parent
 
 
 def _json_object(path: Path) -> dict[str, object]:
-    return dict(
-        DictCodec.coerce(cast(object, json.loads(path.read_text())), default=None),
-    )
+    return parse(path.read_text(), dict[str, object])
 
 
 def _write_shard(root: Path, index: int, documents: list[str]) -> None:
@@ -1693,7 +1691,9 @@ def test_every_replay_archive_counter_has_its_declared_integer_dtype() -> None:
     int64_list_count = 0
     for factory_call in array_factory.call_args_list:
         raw_values: object = factory_call.args[0]
-        values = ListCodec.coerce(raw_values, object)
+        if not isinstance(raw_values, list):
+            continue
+        values = convert(cast(list[object], raw_values), list[object])
         if values and all(isinstance(value, int) for value in values):
             integer_list_count += 1
             dtype: object = factory_call.kwargs.get("dtype")
@@ -2250,7 +2250,7 @@ def test_row_preparation_manifests_capture_loader_geometry(tmp_path: Path) -> No
     writes: dict[str, dict[str, object]] = {}
 
     def record_mapping(path: Path, *, value: object) -> None:
-        writes[path.name] = dict(DictCodec.coerce(value, default=None))
+        writes[path.name] = convert(value, dict[str, object])
 
     with (
         patch(
@@ -2868,7 +2868,7 @@ def test_build_reference_eval_writes_both_archives_and_protects_sources(
             "priml.baselines.nanochat.scripts.prepare_data.load",
             wraps=load,
         ) as load_mock,
-        patch.object(IntCodec, "coerce", wraps=IntCodec.coerce) as coerce,
+        patch.object(prepare_data, "convert", wraps=convert) as convert_mock,
         patch(
             "priml.baselines.nanochat.scripts.prepare_data.validated_output_path",
             wraps=validated_output_path,
@@ -2914,10 +2914,11 @@ def test_build_reference_eval_writes_both_archives_and_protects_sources(
     assert all(
         call.kwargs == {"allow_pickle": False} for call in load_mock.call_args_list
     )
-    assert [call.args for call in coerce.call_args_list] == [(2,), (2,)]
-    assert [call.kwargs for call in coerce.call_args_list] == [
-        {"default": None},
-        {"default": None},
+    assert [
+        call.args for call in convert_mock.call_args_list if call.args[1] is int
+    ] == [
+        (2, int),
+        (2, int),
     ]
     validate.assert_called_once_with(
         destination,
@@ -3211,7 +3212,7 @@ def test_reference_replay_rejects_non_matrix_rows() -> None:
 
 def _text_column(path: Path) -> list[str]:
     values: object = parquet.read_table(path).column("text").to_pylist()
-    return ListCodec.coerce(values, str)
+    return convert(values, list[str])
 
 
 def test_corpus_build_deduplicates_moves_donors_and_preserves_sources(
@@ -3449,7 +3450,7 @@ def test_fit_vocabulary_rejects_a_non_object_receipt(tmp_path: Path) -> None:
     byte_table.write_bytes(b"old byte table")
     before = {path.name: path.read_bytes() for path in output.iterdir()}
 
-    with pytest.raises(TypeError, match=r"^cannot coerce \[\] to dict$"):
+    with pytest.raises(ReadError):
         prepare_data._fit_vocabulary(
             [shard],
             out=output,

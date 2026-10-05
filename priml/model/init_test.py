@@ -21,6 +21,7 @@ from priml.model.custom_types import DepthIndex, HasResetParameters
 from priml.model.init import (
     call_init,
     dirac,
+    fan_in_truncated_normal,
     kaiming_normal,
     kaiming_uniform,
     mup_output,
@@ -84,6 +85,7 @@ def test_init_api_text(request: pytest.FixtureRequest) -> None:
                 xavier_normal,
                 normal,
                 truncated_normal,
+                fan_in_truncated_normal,
                 unit_fan_in_uniform,
                 mup_output,
                 dirac,
@@ -334,6 +336,40 @@ def test_truncated_normal_respects_scaled_bounds():
     truncated_normal(w, std=1.0, depth_index=(), variance_correction=True)
 
     assert w.abs().max().item() <= 2.0 * 1.1372
+
+
+@pytest.mark.parametrize("width", [1, 3, 4, 7, 512, 921])
+def test_fan_in_truncated_normal_is_truncated_normal_at_fan_in_std(width: int) -> None:
+    """Each form equals the explicit draw it names, at awkward widths too."""
+    std = width**-0.5
+
+    def drawn(init: Callable[[torch.Tensor], object]) -> torch.Tensor:
+        w = torch.empty(3, width)
+        torch.manual_seed(0)
+        init(w)
+        return w
+
+    assert torch.equal(
+        drawn(fan_in_truncated_normal),
+        drawn(lambda w: truncated_normal(w, std=std)),
+    )
+    assert torch.equal(
+        drawn(lambda w: fan_in_truncated_normal(w, variance_correction=True)),
+        drawn(lambda w: truncated_normal(w, std=std, variance_correction=True)),
+    )
+    assert torch.equal(
+        drawn(lambda w: fan_in_truncated_normal(w, absolute_bounds=True)),
+        drawn(lambda w: nn.init.trunc_normal_(w, std=std)),
+    )
+
+
+def test_fan_in_truncated_normal_ignores_depth() -> None:
+    w0, w3 = torch.empty(5, 6), torch.empty(5, 6)
+    torch.manual_seed(0)
+    fan_in_truncated_normal(w0)
+    torch.manual_seed(0)
+    fan_in_truncated_normal(w3, depth_index=((3, 4),))
+    assert torch.equal(w0, w3)
 
 
 def test_truncated_normal_corrected_zero_std_zeros_tensor():

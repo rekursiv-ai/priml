@@ -7,6 +7,7 @@ from torch import nn
 import pytest
 import torch
 
+from priml.lib.custom_json import ReadError
 from priml.optimizers.lr import (
     apply_lr_scale,
     clip_grad_norm,
@@ -62,7 +63,7 @@ def test_learning_rate_rejects_a_non_numeric_group_value() -> None:
     optimizer = torch.optim.SGD([nn.Parameter(torch.zeros(2))], lr=0.3)
     optimizer.param_groups[0]["lr"] = "invalid"
 
-    with pytest.raises(TypeError, match="cannot coerce"):
+    with pytest.raises(ReadError):
         learning_rate(optimizer)
 
 

@@ -619,7 +619,9 @@ def test_parmap_unbounded_output_can_buffer_past_one_item(
     assert buffered, "the unbounded output queue stopped before buffering 2 samples"
     assert {sample["id"] for sample in results} == {0, 1, 2}
     assert queues[1].maxsize == 0
-    assert queues[1].peak_size == 3
+    # 3 = two samples past the consumed one, plus the end sentinel; a consumer
+    # that reads late lets all three samples and the sentinel buffer (4).
+    assert queues[1].peak_size in {3, 4}
 
 
 def test_prefetchbuffer_counts_an_item_consumed_before_the_producer_samples_qsize(

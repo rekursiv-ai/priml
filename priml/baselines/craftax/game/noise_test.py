@@ -247,6 +247,27 @@ def test_fractal_noise_uses_each_octave_and_rescales_per_environment() -> None:
     torch.testing.assert_close(noise.amax(dim=(-2, -1)), torch.ones(2))
 
 
+def test_fractal_noise_rescales_by_the_reciprocal_of_its_span(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The bits XLA's CPU build gives 71 in a field spanning 0 to 300; a true
+    # division gives 1_047_681_215 and flips a terrain tile in some worlds.
+    field = torch.zeros((2, 3, 4))
+    field[:, 0, 0] = 300.0
+    field[:, 1, 2] = 71.0
+    monkeypatch.setattr(
+        "priml.baselines.craftax.game.noise.perlin_noise",
+        Mock(return_value=field),
+    )
+    rescaled = fractal_noise(
+        num_envs=2,
+        shape=(3, 4),
+        resolution=(1, 1),
+        device=torch.device("cpu"),
+    )
+    assert rescaled[:, 1, 2].view(torch.int32).tolist() == [1_047_681_216] * 2
+
+
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main
 

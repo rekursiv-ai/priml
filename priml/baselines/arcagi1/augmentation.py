@@ -22,7 +22,7 @@ from torch import Tensor
 import numpy as np
 import torch
 
-from priml.lib.custom_json import ListCodec
+from priml.lib.custom_json import convert
 
 
 if TYPE_CHECKING:
@@ -533,7 +533,9 @@ def canonicalize_arc_grid(
 
     """
     flat = tokens.detach().to("cpu", torch.uint8).reshape(-1).numpy()
-    tag = ListCodec.coerce(spatial_tags.reshape(-1).tolist(), int)
+    if spatial_tags.dtype.is_floating_point:
+        raise ValueError("spatial tags hold (scale, row, col); got float values.")
+    tag = convert(spatial_tags.reshape(-1).tolist(), list[int])
     if len(tag) != 3:
         raise ValueError(f"spatial tags hold (scale, row, col); got {tag}.")
     scale, pad_r, pad_c = tag

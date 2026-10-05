@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from priml.distributed.testing import WarmPoolGetter
     from priml.math.custom_types import TensorFn
 
-from priml.lib.custom_json import DictCodec
+from priml.lib.custom_json import convert
 from priml.model.attention.attention import Attention
 from priml.model.transformer.block import TransformerBlock
 from priml.testing import bfb
@@ -1077,9 +1077,9 @@ def test_stale_post_states_reports_then_clears_a_synthetic_golden(
 # annotation.
 def _loaded_golden(path: Path) -> dict[str, dict[str, Tensor]]:
     """Read a golden's two state dicts; a file with none (not a bfb golden) is empty."""
-    raw = DictCodec.coerce(
+    raw = convert(
         _torch_load(path, map_location="cpu", weights_only=False),
-        default=None,
+        dict[str, object],
     )
     if "state_dict" not in raw:
         return {}
@@ -2070,9 +2070,9 @@ def test_host_agnostic_numerics_loads_float32_checkpoints(tmp_path: Path) -> Non
     path = tmp_path / "state.pt"
     torch.save({"weight": saved}, path)
     with host_agnostic_numerics():
-        loaded = DictCodec.coerce(
+        loaded = convert(
             _torch_load(path, weights_only=True),
-            Tensor,
+            dict[str, Tensor],
         )
     assert torch.equal(loaded["weight"], saved)
 
@@ -2148,6 +2148,29 @@ def test_host_agnostic_numerics_preserves_explicit_output_dtype() -> None:
 
     assert actual.dtype == expected.dtype
     assert torch.equal(actual, expected)
+
+
+# A [2, 1] by [1, 2] product is the smallest one-term contraction x86's matrix
+# kernel stores as the product itself; aarch64 adds it to a zero accumulator.
+def test_host_agnostic_one_term_matmul_keeps_the_sign_of_a_zero_product() -> None:
+    left = torch.tensor([[-1.0], [1.0]])
+    right = torch.tensor([[0.0, -0.0]])
+
+    with host_agnostic_numerics():
+        product = torch.mm(left, right)
+
+    assert torch.signbit(product).tolist() == [[True, False], [False, True]]
+
+
+# A single output column takes x86's vector kernel, which adds to +0.0 too.
+def test_host_agnostic_matmul_by_a_single_column_adds_to_positive_zero() -> None:
+    left = torch.tensor([[-1.0], [1.0]])
+    right = torch.tensor([[0.0]])
+
+    with host_agnostic_numerics():
+        product = torch.mm(left, right)
+
+    assert torch.signbit(product).tolist() == [[False], [False]]
 
 
 def test_host_agnostic_numerics_preserves_mixed_foreach_dtypes() -> None:

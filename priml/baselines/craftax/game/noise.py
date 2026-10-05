@@ -77,7 +77,11 @@ def fractal_noise(
         frequency *= lacunarity
     lowest = noise.amin(dim=(-2, -1), keepdim=True)
     highest = noise.amax(dim=(-2, -1), keepdim=True)
-    return (noise - lowest) / (highest - lowest)
+    # Upstream divides, but XLA compiles a division by a run-time value into a
+    # multiply by its reciprocal, and that rounding is what generates the
+    # world: dividing here put sand for water, or fire grass for lava, at one
+    # tile in about 1 of 500 worlds (measured over 1,024 worlds on CPU).
+    return (noise - lowest) * (highest - lowest).reciprocal()
 
 
 def perlin_noise(

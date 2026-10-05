@@ -1,0 +1,38 @@
+{
+  "c": {
+    "pass@1": 0.0,
+    "pass@2": 1.0,
+    "had_preds": 1.0,
+    "votes_times_mean_q@1": 0.0,
+    "votes_times_mean_q@2": 1.0,
+    "votes_times_max_q@1": 0.0,
+    "votes_times_max_q@2": 1.0
+  },
+  "d": {
+    "pass@1": 0.0,
+    "pass@2": 0.0,
+    "had_preds": 0.0,
+    "votes_times_mean_q@1": 0.0,
+    "votes_times_mean_q@2": 0.0,
+    "votes_times_max_q@1": 0.0,
+    "votes_times_max_q@2": 0.0
+  },
+  "a": {
+    "pass@1": 0.5,
+    "pass@2": 0.5,
+    "had_preds": 1.0,
+    "votes_times_mean_q@1": 0.5,
+    "votes_times_mean_q@2": 0.5,
+    "votes_times_max_q@1": 0.5,
+    "votes_times_max_q@2": 0.5
+  },
+  "b": {
+    "pass@1": 1.0,
+    "pass@2": 1.0,
+    "had_preds": 1.0,
+    "votes_times_mean_q@1": 1.0,
+    "votes_times_mean_q@2": 1.0,
+    "votes_times_max_q@1": 1.0,
+    "votes_times_max_q@2": 1.0
+  }
+}

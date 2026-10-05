@@ -124,14 +124,18 @@ def damage_to_player(state: EnvState, damage: Tensor) -> Tensor:
       total: Damage actually taken, ``[envs]``.
 
     """
-    defense = torch.stack(
+    pieces = torch.stack(
         (
             state.inventory.armour * 0.1,
             (state.armour_enchantments == 1) * 0.2,
             (state.armour_enchantments == 2) * 0.2,
         ),
         dim=1,
-    ).sum(-1)
+    )
+    # Pairwise, as XLA sums the four pieces when it compiles deterministically
+    # (its GPU autotuner may pick another order per process). A torch ``sum``
+    # picks its own order per device and misses that last bit on ~1.5% of hits.
+    defense = (pieces[..., 0] + pieces[..., 1]) + (pieces[..., 2] + pieces[..., 3])
     scaled = damage * (
         1 + is_fighting_boss(state).float()[:, None] * constants.BOSS_FIGHT_EXTRA_DAMAGE
     )
@@ -149,7 +153,10 @@ def apply_defense(damage: Tensor, defense: Tensor) -> Tensor:
       total: Damage that lands, ``[envs]``.
 
     """
-    return ((1.0 - defense) * damage).sum(1)
+    landed = (1.0 - defense) * damage
+    # Left to right, as compiled XLA adds the three elements; see
+    # ``damage_to_player`` for why not ``sum``.
+    return (landed[:, 0] + landed[:, 1]) + landed[:, 2]
 
 
 def is_fighting_boss(state: EnvState) -> Tensor:
@@ -425,7 +432,7 @@ def attack_mob_class(
 
     species = _on_level(mobs.type_id, state.player_level)[rows, target]
     defense = constants.on_device(constants.MOB_DEFENSE, state.device)[
-        state.player_level.long(),
+        species.long(),
         mob_class,
     ]
     landed = apply_defense(damage, defense) * struck

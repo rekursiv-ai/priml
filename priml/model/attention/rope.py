@@ -1085,9 +1085,7 @@ class RoPEMixed(RoPE):
         self.num_heads = config.num_heads
         self.learnable = config.learnable
         if config.reduction_mode == "sum":
-            active_dims = {
-                f.numel() // self.num_heads for f in self._inv_freqs if f.numel()
-            }
+            active_dims = {f.shape[-1] for f in self._inv_freqs if f.numel()}
             if len(active_dims) > 1:
                 raise ValueError(f"Sum mode requires uniform dims, got {active_dims}.")
         # Capture the base (deterministic) per-axis frequencies; reset_parameters

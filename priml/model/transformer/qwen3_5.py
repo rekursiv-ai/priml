@@ -15,14 +15,7 @@ from torch import Tensor, nn
 import torch
 
 from priml import hub
-from priml.lib.custom_json import (
-    BoolCodec,
-    DictCodec,
-    FloatCodec,
-    IntCodec,
-    ListCodec,
-    loads,
-)
+from priml.lib.custom_json import convert, loads
 from priml.model.attention.gated_attention import GatedAttention
 from priml.model.attention.qwen3_5_delta import Qwen35GatedDeltaNet
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE
@@ -75,13 +68,14 @@ class Qwen35(Transformer):
             result.channels_out = _positive(config, name="vocab_size")
             count = _positive(config, name="num_hidden_layers")
             norm = CenteredRMSNorm.Config()
-            norm.eps = FloatCodec.coerce(config.get("rms_norm_eps", 1e-6), default=None)
+            norm.eps = convert(config.get("rms_norm_eps"), float, default=1e-6)
             if not math.isfinite(norm.eps) or norm.eps <= 0:
                 raise ValueError("rms_norm_eps must be finite and positive.")
             result.norm = norm.copy_tree()
-            initializer_range = FloatCodec.coerce(
-                config.get("initializer_range", 0.02),
-                default=None,
+            initializer_range = convert(
+                config.get("initializer_range"),
+                float,
+                default=0.02,
             )
             if not math.isfinite(initializer_range) or initializer_range <= 0:
                 raise ValueError("initializer_range must be finite and positive.")
@@ -93,7 +87,7 @@ class Qwen35(Transformer):
             embedding.channels_in = result.channels_out
             embedding.init_weight = init
             result.proj_in = embedding
-            if BoolCodec.coerce(config.get("tie_word_embeddings", False), default=None):
+            if convert(config.get("tie_word_embeddings"), bool, default=False):
                 head = TiedLinear.Config()
                 head.tied = "proj_in"
                 result.proj_out = head
@@ -188,9 +182,9 @@ class Qwen35(Transformer):
 
         """
         directory = Path(path)
-        metadata = DictCodec.coerce(
+        metadata = convert(
             loads((directory / "config.json").read_text()),
-            default=None,
+            dict[str, object],
         )
         config = cls.Config.from_hf(metadata)
         weights = remap_hf_state_dict(
@@ -375,7 +369,7 @@ class Qwen35(Transformer):
 def _text_config(config: Mapping[str, object]) -> dict[str, object]:
     model_type = config.get("model_type")
     if model_type == "qwen3_5":
-        result = DictCodec.coerce(config.get("text_config"), default=None)
+        result = convert(config.get("text_config"), dict[str, object])
         if "tie_word_embeddings" in config:
             result["tie_word_embeddings"] = config["tie_word_embeddings"]
     elif model_type == "qwen3_5_text":
@@ -397,7 +391,7 @@ def _text_config(config: Mapping[str, object]) -> dict[str, object]:
 
 
 def _positive(config: Mapping[str, object], *, name: str) -> int:
-    value = IntCodec.coerce(config.get(name), default=None)
+    value = convert(config.get(name), int)
     if value <= 0:
         raise ValueError(f"{name} must be positive.")
     return value
@@ -406,9 +400,10 @@ def _positive(config: Mapping[str, object], *, name: str) -> int:
 def _layer_types(config: Mapping[str, object], *, count: int) -> list[str]:
     raw = config.get("layer_types")
     if raw is None:
-        interval = IntCodec.coerce(
-            config.get("full_attention_interval", 4),
-            default=None,
+        interval = (
+            4
+            if "full_attention_interval" not in config
+            else convert(config["full_attention_interval"], int)
         )
         if interval <= 0:
             raise ValueError("full_attention_interval must be positive.")
@@ -416,9 +411,7 @@ def _layer_types(config: Mapping[str, object], *, count: int) -> list[str]:
             "full_attention" if (i + 1) % interval == 0 else "linear_attention"
             for i in range(count)
         ]
-    layers = [
-        layer for layer in ListCodec.coerce(raw, default=None) if isinstance(layer, str)
-    ]
+    layers = [layer for layer in convert(raw, list[object]) if isinstance(layer, str)]
     if len(layers) != count or any(
         layer not in ("full_attention", "linear_attention") for layer in layers
     ):
@@ -437,35 +430,34 @@ def _full_attention(config: Mapping[str, object]) -> GatedAttention.Config:
             "num_attention_heads must be divisible by num_key_value_heads.",
         )
     attention.channels_head = _positive(config, name="head_dim")
-    attention.bias = BoolCodec.coerce(config.get("attention_bias", False), default=None)
-    attention.dropout = FloatCodec.coerce(
-        config.get("attention_dropout", 0.0),
-        default=None,
-    )
+    attention.bias = convert(config.get("attention_bias"), bool, default=False)
+    attention.dropout = convert(config.get("attention_dropout"), float, default=0.0)
     if (
         not math.isfinite(attention.dropout)
         or attention.dropout < 0
         or attention.dropout >= 1
     ):
         raise ValueError("attention_dropout must be finite and in [0, 1).")
-    params = DictCodec.coerce(config.get("rope_parameters", {}), default=None)
+    params = convert(config.get("rope_parameters"), dict[str, object], default={})
     if (
         params.get("rope_type", "default") != "default"
         or config.get("rope_scaling") is not None
     ):
         raise ValueError("Only default text rotary frequencies are supported.")
-    fraction = FloatCodec.coerce(
-        params.get("partial_rotary_factor", config.get("partial_rotary_factor", 0.25)),
-        default=None,
+    fraction = convert(
+        params.get("partial_rotary_factor"),
+        float,
+        default=convert(config.get("partial_rotary_factor"), float, default=0.25),
     )
     if not math.isfinite(fraction) or fraction <= 0 or fraction > 1:
         raise ValueError("partial_rotary_factor must be finite and in (0, 1].")
     width = int(attention.channels_head * fraction)
     if width < 2 or width % 2:
         raise ValueError("The rotary prefix must have a positive even width.")
-    rope_theta = FloatCodec.coerce(
-        params.get("rope_theta", config.get("rope_theta", 10_000_000.0)),
-        default=None,
+    rope_theta = convert(
+        params.get("rope_theta"),
+        float,
+        default=convert(config.get("rope_theta"), float, default=10_000_000.0),
     )
     if not math.isfinite(rope_theta) or rope_theta <= 0:
         raise ValueError("rope_theta must be finite and positive.")

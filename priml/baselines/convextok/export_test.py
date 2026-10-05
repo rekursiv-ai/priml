@@ -16,7 +16,7 @@ from tokenizers import pre_tokenizers
 import pytest
 
 from priml.baselines.convextok.export import export_tokenizer
-from priml.lib.custom_json import DictCodec, ListCodec
+from priml.lib.custom_json import convert
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -26,11 +26,7 @@ def test_held_out_text_segments_as_upstream() -> None:
     alphabet = set(pre_tokenizers.ByteLevel.alphabet())
     learned = [
         token
-        for token in ListCodec.coerce(
-            _read_json("vocab.json").get("det"),
-            str,
-            default=None,
-        )
+        for token in convert(_read_json("vocab.json").get("det"), list[str])
         if token not in alphabet
     ]
     corpus = _read_json("corpus.json")
@@ -38,13 +34,12 @@ def test_held_out_text_segments_as_upstream() -> None:
         learned,
         split_pattern=str(corpus.get("split_pattern")),
     )
-    texts = ListCodec.coerce(corpus.get("heldout"), str, default=None)
+    texts = convert(corpus.get("heldout"), list[str])
     golden = [
-        ListCodec.coerce(row, str, default=None)
-        for row in ListCodec.coerce(
+        convert(row, list[str])
+        for row in convert(
             _read_json("heldout_tokens.json").get("tokens"),
-            object,
-            default=None,
+            list[object],
         )
     ]
     assert [
@@ -92,7 +87,7 @@ def test_single_bytes_are_rejected() -> None:
 
 def _read_json(name: str) -> dict[str, object]:
     raw = cast(object, json.loads((_CWD / "testdata" / name).read_text()))
-    return dict(DictCodec.coerce(raw, default=None))
+    return dict(convert(raw, dict[str, object]))
 
 
 if __name__ == "__main__":

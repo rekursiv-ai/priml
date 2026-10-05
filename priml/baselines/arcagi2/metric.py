@@ -15,14 +15,7 @@ from torch import Tensor
 import torch
 import torch.distributed as dist
 
-from priml.lib.custom_json import (
-    DictCodec,
-    FloatCodec,
-    IntCodec,
-    ListCodec,
-    StrCodec,
-    loads,
-)
+from priml.lib.custom_json import convert, loads, parse
 from priml.paths import resolve_working_dir
 
 
@@ -58,22 +51,25 @@ class PassK:
     @cached_property
     def identifiers(self) -> list[str]:
         """Prepared identifier table, loaded only when evaluation starts."""
-        return ListCodec.coerce(
+        return convert(
             loads((self.root / "identifiers.json").read_text()),
-            str,
+            list[str],
         )
 
     @cached_property
     def puzzles(self) -> dict[str, object]:
         """Canonical evaluation tasks, including tasks without predictions."""
-        return DictCodec.coerce(loads((self.root / "test_puzzles.json").read_text()))
+        return convert(
+            loads((self.root / "test_puzzles.json").read_text()),
+            dict[str, object],
+        )
 
     @cached_property
     def blank_identifier(self) -> int:
         """The same padding identifier honored by the prepared loader."""
         path = self.root / "test" / "dataset.json"
-        metadata = DictCodec.coerce(loads(path.read_text())) if path.is_file() else {}
-        return IntCodec.coerce(metadata.get("blank_identifier_id"), 0)
+        metadata = parse(path.read_text(), dict[str, object]) if path.is_file() else {}
+        return convert(metadata.get("blank_identifier_id"), int, default=0)
 
     def reset(self) -> None:
         """Discard the previous evaluation's ballots."""
@@ -101,7 +97,7 @@ class PassK:
             confidence.append(value)
         predictions = output[:, 1:].to(torch.uint8)
         for index, identifier in enumerate(identifiers.detach().cpu().tolist()):
-            ident = IntCodec.coerce(identifier)
+            ident = convert(identifier, int)
             if ident == self.blank_identifier:
                 continue
             if ident < 0 or ident >= len(self.identifiers):
@@ -135,7 +131,13 @@ class PassK:
         results = {f"{name}@{k}": 0.0 for name in names for k in self.config.pass_ks}
         output_count = 0
         for name, raw_puzzle in self.puzzles.items():
-            pairs = ListCodec.mappings(DictCodec.coerce(raw_puzzle)["test"])
+            pairs = convert(
+                convert(
+                    convert(raw_puzzle, dict[str, object]).get("test"),
+                    list[dict[str, object]],
+                ),
+                list[dict[str, object]],
+            )
             output_count += len(pairs)
             counts = {
                 f"{ranking}@{k}": 0
@@ -226,24 +228,19 @@ class PassK:
 
         """
         votes: dict[str, dict[str, list[tuple[str, float]]]] = {}
-        for name, raw_inputs in DictCodec.coerce(
-            state_dict["votes"],
-            default=None,
+        for name, raw_inputs in convert(
+            state_dict.get("votes"),
+            dict[str, object],
         ).items():
             by_input = votes.setdefault(name, {})
-            for input_hash, raw_records in DictCodec.coerce(
+            for input_hash, raw_records in convert(
                 raw_inputs,
-                default=None,
+                dict[str, object],
             ).items():
                 records: list[tuple[str, float]] = []
-                for raw_record in ListCodec.coerce(raw_records, default=None):
-                    digest, confidence = ListCodec.coerce(raw_record, default=None)
-                    records.append(
-                        (
-                            StrCodec.coerce(digest, default=None),
-                            FloatCodec.coerce(confidence, default=None),
-                        ),
-                    )
+                for raw_record in convert(raw_records, list[list[object]]):
+                    digest, confidence = convert(raw_record, list[object])
+                    records.append((convert(digest, str), convert(confidence, float)))
                 by_input[input_hash] = records
         self.votes = votes
 
@@ -276,7 +273,7 @@ def _crop(tokens: Tensor) -> Tensor:
     if side * side != tokens.numel():
         raise ValueError("ARC packed grids must be square")
     grid = tokens.reshape(side, side)
-    values = ListCodec.coerce(grid.flatten().tolist(), int)
+    values = convert(grid.flatten().tolist(), list[int])
     area = height = width = 0
     columns = side
     for rows in range(1, side + 1):
@@ -316,5 +313,5 @@ def _canonical(name: str, grid: Tensor) -> tuple[str, Tensor]:
 
 def _json_grid(value: object) -> Tensor:
     """Decode a raw ARC grid from its JSON boundary."""
-    rows = [ListCodec.coerce(row, int) for row in ListCodec.coerce(value)]
+    rows = convert(value, list[list[int]])
     return torch.tensor(rows, dtype=torch.uint8)

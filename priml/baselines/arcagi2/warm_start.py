@@ -21,7 +21,7 @@ from configgle import Fig
 
 import torch
 
-from priml.lib.custom_json import DictCodec
+from priml.lib.custom_json import convert
 
 
 if TYPE_CHECKING:
@@ -81,15 +81,29 @@ class WarmStart:
 
         """
         # A checkpoint this project wrote; its nested step state needs full unpickling.
-        checkpoint = DictCodec.coerce(
+        checkpoint = convert(
             cast(object, torch.load(self.path, map_location="cpu", weights_only=False)),
+            dict[str, object],
         )
-        step = DictCodec.coerce(checkpoint["step"])
-        state = DictCodec.coerce(step["model"], torch.Tensor)
+        step = convert(checkpoint["step"], dict[str, object])
+        raw_state = convert(step["model"], dict[str, object])
+        state = {
+            name: convert(value, torch.Tensor)
+            for name, value in raw_state.items()
+            if isinstance(value, torch.Tensor)
+        }
         ema = step.get("ema")
         if ema:
-            shadow = DictCodec.coerce(ema).get("shadow_params", ema)
-            state.update(DictCodec.coerce(shadow, torch.Tensor))
+            raw_ema = convert(ema, dict[str, object])
+            shadow = raw_ema.get("shadow_params", ema)
+            raw_shadow = convert(shadow, dict[str, object])
+            state.update(
+                {
+                    name: convert(value, torch.Tensor)
+                    for name, value in raw_shadow.items()
+                    if isinstance(value, torch.Tensor)
+                },
+            )
         own = model.state_dict()
         own_by_bare = {_bare(name): name for name in own}
         loadable: dict[str, Tensor] = {}

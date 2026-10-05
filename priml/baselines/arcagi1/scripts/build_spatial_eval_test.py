@@ -13,6 +13,7 @@ import pytest
 
 from priml.baselines.arcagi1.augmentation import ArcSpec
 from priml.baselines.arcagi1.scripts import build_spatial_eval
+from priml.lib.custom_json import ReadError
 
 
 if TYPE_CHECKING:
@@ -374,20 +375,13 @@ def test_build_spatial_eval_copies_metadata_and_expands_pairs(
     )
     (source / "identifiers.json").write_text('["<blank>", 1, "second"]')
     identity_target = tmp_path / "identity-target"
-    build_spatial_eval.build_spatial_eval(
-        spatial_views=1,
-        source_dir=source,
-        target_dir=identity_target,
-        spec=spec,
-    )
-    assert np.array_equal(
-        _load_int_array(identity_target / "test/all__spatial_tags.npy"),
-        [[1, 0, 0]] * 3,
-    )
-    assert (identity_target / "identifiers.json").read_text() == '["<blank>", "second"]'
-    assert (identity_target / "test/dataset.json").read_text() == (
-        '{"num_puzzle_identifiers": 2, "sentinel": 12}'
-    )
+    with pytest.raises(ReadError):
+        build_spatial_eval.build_spatial_eval(
+            spatial_views=1,
+            source_dir=source,
+            target_dir=identity_target,
+            spec=spec,
+        )
 
 
 def test_build_spatial_eval_accepts_identity_only_and_rejects_zero(

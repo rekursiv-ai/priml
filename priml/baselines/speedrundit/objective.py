@@ -40,13 +40,17 @@ def interpolant(
     """
     if path == "linear":
         return 1 - t, t, -torch.ones_like(t), torch.ones_like(t)
-    angle = math.pi * t / 2
-    return (
-        angle.cos(),
-        angle.sin(),
-        -(math.pi / 2) * angle.sin(),
-        (math.pi / 2) * angle.cos(),
-    )
+    if path == "cosine":
+        angle = math.pi * t / 2
+        return (
+            angle.cos(),
+            angle.sin(),
+            -(math.pi / 2) * angle.sin(),
+            (math.pi / 2) * angle.cos(),
+        )
+    raise ValueError(
+        f"unsupported flow path: {path}",
+    )  # pyright: ignore[reportUnreachable] -- Runtime guard protects untyped callers.
 
 
 def projection_loss(
@@ -127,13 +131,15 @@ class SpeedrunObjective:
         """
         if self.weighting == "uniform":
             t = torch.rand(latents.shape[0], device=latents.device)
-        else:
+        elif self.weighting == "lognormal":
             sigma = torch.randn(latents.shape[0], device=latents.device).exp()
             t = (
                 sigma / (1 + sigma)
                 if self.path == "linear"
                 else 2 * sigma.atan() / math.pi
             )
+        else:
+            raise ValueError(f"unsupported timestep weighting: {self.weighting}")
         if self.shift_time:
             t = time_shift(t, math.prod(latents.shape[1:]), self.shift_base)
         return t

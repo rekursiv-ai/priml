@@ -120,6 +120,14 @@ def test_loading_into_an_active_iterator_updates_its_cursor() -> None:
     assert list(iterator) == [{"valid_count": 1}]
 
 
+def test_loading_into_an_active_iterator_leaves_the_next_stream_fresh() -> None:
+    rollouts = _rollouts()
+    rollouts.train_dataloader()
+    rollouts.load_state_dict({"train_position": 2})
+
+    assert len(list(rollouts.train_dataloader())) == 3
+
+
 def test_loading_an_empty_state_restarts_an_active_iterator() -> None:
     rollouts = _rollouts()
     iterator = rollouts.train_dataloader()

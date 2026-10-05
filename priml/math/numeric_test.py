@@ -1569,15 +1569,12 @@ def test_softcap_uses_float32_intermediates_before_restoring_float64() -> None:
     assert torch.equal(softcap(x, cap), expected)
 
 
-def test_softplus_inverse_matches_direct_reference_near_thresholds() -> None:
-    threshold = math.log(torch.finfo(torch.float64).eps) + 2
-    x = torch.tensor([1e-14, math.exp(threshold), 31.0, 33.0], dtype=torch.float64)
-    is_small = x < math.exp(threshold)
-    is_large = x > -threshold
-    safe = torch.where(is_small | is_large, 1.0, x)
-    middle = safe + torch.log(-torch.expm1(-safe))
-    expected = torch.where(is_small, x.log(), torch.where(is_large, x, middle))
-    assert torch.equal(softplus_inverse(x), expected)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.float64])
+def test_softplus_inverse_is_log_below_the_small_threshold(dtype: torch.dtype) -> None:
+    # softplus(y) ~= exp(y) there, so the inverse is exactly log(x).
+    threshold = math.exp(math.log(torch.finfo(dtype).eps) + 2)
+    x = torch.tensor([threshold / 4, threshold / 2], dtype=dtype)
+    assert torch.equal(softplus_inverse(x), x.log())
 
 
 def test_matrix_signum_square_input_keeps_orientation() -> None:

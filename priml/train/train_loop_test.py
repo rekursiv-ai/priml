@@ -38,7 +38,7 @@ from configgle import Fig, InlineConfig, Makeable, Makes, PartialConfig
 
 from priml.cost import Cost, matmul_cost
 from priml.data.dummy import DummyDataset
-from priml.lib.custom_json import ListCodec
+from priml.lib.custom_json import convert
 from priml.math.seed import RngState, get_rng_state, salt
 from priml.metrics.binary_accuracy import BinaryAccuracy
 from priml.metrics.topk import TopK
@@ -208,10 +208,11 @@ class _WeightedEvalDataset:
     """Dataset exposing uneven eval batches with valid example counts."""
 
     class Config(Fig["_WeightedEvalDataset"]):
-        pass
+        # A collated batch carries its count as a 0-d tensor, not an int.
+        tensor_counts: bool = False
 
     def __init__(self, config: Config) -> None:
-        del config
+        self.tensor_counts = config.tensor_counts
         self.timer_epoch = CheckpointableStepTimer()
 
     def train_dataloader(self) -> list[dict[str, Tensor]]:
@@ -220,9 +221,10 @@ class _WeightedEvalDataset:
 
     def eval_dataloader(self) -> list[dict[str, object]]:
         """Return eval batches with uneven valid counts."""
+        counts = (torch.tensor(4), torch.tensor(1)) if self.tensor_counts else (4, 1)
         return [
-            {"media": torch.tensor([[1.0]]), "valid_count": 4},
-            {"media": torch.tensor([[0.0]]), "valid_count": 1},
+            {"media": torch.tensor([[1.0]]), "valid_count": counts[0]},
+            {"media": torch.tensor([[0.0]]), "valid_count": counts[1]},
         ]
 
     class StateDict(TypedDict):
@@ -1198,12 +1200,12 @@ def _make_recording_train_loop_config(
     return config
 
 
-def test_eval_weights_scalar_metrics_by_valid_count() -> None:
+@pytest.mark.parametrize("tensor_counts", [False, True])
+def test_eval_weights_scalar_metrics_by_valid_count(*, tensor_counts: bool) -> None:
     """Eval scalar means weight partial batches by valid example count."""
-    config = TrainLoop.Config(
-        step=_WeightedEvalStep.Config(),
-        dataset=_WeightedEvalDataset.Config(),
-    )
+    dataset = _WeightedEvalDataset.Config()
+    dataset.tensor_counts = tensor_counts
+    config = TrainLoop.Config(step=_WeightedEvalStep.Config(), dataset=dataset)
     config.metrics_eval = {}
     config.checkpointer = None
     config.max_steps = 0
@@ -1879,7 +1881,7 @@ def test_logged_train_loss_is_all_reduced_before_rank_zero_gate(
     calls: list[tuple[float, ...]] = []
 
     def all_reduce(tensor: Tensor) -> None:
-        calls.append(tuple(ListCodec.coerce(tensor.tolist(), float)))
+        calls.append(tuple(convert(tensor.tolist(), list[float])))
         tensor.mul_(8)
 
     loop = _make_step_logging_loop_config().make()

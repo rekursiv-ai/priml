@@ -45,7 +45,7 @@ import numpy as np
 import torch
 
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
-from priml.lib.custom_json import DictCodec, IntCodec
+from priml.lib.custom_json import convert
 
 
 if TYPE_CHECKING:
@@ -198,7 +198,10 @@ def load_puzzle_dataset(
     metadata_path = data_path / "dataset.json"
     if not metadata_path.exists():
         raise FileNotFoundError(f"Dataset metadata not found: {metadata_path}")
-    metadata = DictCodec.coerce(cast(object, json.loads(metadata_path.read_text())))
+    metadata = convert(
+        cast(object, json.loads(metadata_path.read_text())),
+        dict[str, object],
+    )
 
     group_path = data_path / "all__group_indices.npy"
     if not group_path.exists():
@@ -230,9 +233,14 @@ def load_puzzle_dataset(
         "inputs": inputs,
         "labels": labels,
         "group_indices": group_indices,
-        "vocab_size": IntCodec.coerce(metadata.get("vocab_size"), default=None),
-        "seq_len": IntCodec.coerce(metadata.get("seq_len"), default=None),
+        "vocab_size": _metadata_int(metadata, "vocab_size"),
+        "seq_len": _metadata_int(metadata, "seq_len"),
     }
+
+
+def _metadata_int(metadata: Mapping[str, object], key: str) -> int:
+    """Read a required integer metadata field."""
+    return convert(metadata.get(key), int)
 
 
 class PuzzleDataset:

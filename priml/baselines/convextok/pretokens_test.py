@@ -21,7 +21,7 @@ from priml.baselines.convextok.pretokens import (
     count_pretokens,
     merge_counts,
 )
-from priml.lib.custom_json import DictCodec, ListCodec, StrCodec
+from priml.lib.custom_json import convert
 
 
 if TYPE_CHECKING:
@@ -88,13 +88,12 @@ def test_default_chunk_size_counts_ten_thousand_documents(
 def test_counts_match_upstream_golden() -> None:
     corpus = _read_json("corpus.json")
     golden = _read_json("pretokens.json")
-    texts = ListCodec.coerce(corpus.get("texts"), str, default=None)
+    texts = convert(corpus.get("texts"), list[str])
     counts = count_pretokens(texts, split_pattern=_split_pattern())
-    assert list(counts) == ListCodec.coerce(golden.get("pretokens"), str, default=None)
-    assert list(counts.values()) == ListCodec.coerce(
+    assert list(counts) == convert(golden.get("pretokens"), list[str])
+    assert list(counts.values()) == convert(
         golden.get("frequencies"),
-        int,
-        default=None,
+        list[int],
     )
 
 
@@ -126,7 +125,7 @@ def test_bytes_map_to_the_byte_level_alphabet() -> None:
 @pytest.mark.cli_python_subprocess
 def test_worker_processes_match_serial_counts() -> None:
     corpus = _read_json("corpus.json")
-    texts = ListCodec.coerce(corpus.get("texts"), str, default=None)
+    texts = convert(corpus.get("texts"), list[str])
     serial = count_pretokens(texts, split_pattern=_split_pattern())
     parallel = count_pretokens(
         texts,
@@ -139,12 +138,12 @@ def test_worker_processes_match_serial_counts() -> None:
 
 def _read_json(name: str) -> dict[str, object]:
     raw = cast(object, json.loads((_CWD / "testdata" / name).read_text()))
-    return dict(DictCodec.coerce(raw, default=None))
+    return dict(convert(raw, dict[str, object]))
 
 
 def _split_pattern() -> str:
     """Upstream's nanochat regular expression, as recorded when the goldens were minted."""
-    return StrCodec.coerce(_read_json("corpus.json").get("split_pattern"), default=None)
+    return convert(_read_json("corpus.json").get("split_pattern"), str)
 
 
 if __name__ == "__main__":

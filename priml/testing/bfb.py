@@ -137,7 +137,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 
 import torch
 
-from priml.lib.custom_json import DictCodec, ListCodec
+from priml.lib.custom_json import convert
 from priml.testing.golden import pack, tensor_bits_equal, unpack
 
 
@@ -618,9 +618,11 @@ def stale_post_states(paths: Iterable[Path]) -> list[Path]:
     """
     stale: list[Path] = []
     for path in paths:
-        raw = DictCodec.coerce(
-            cast(object, torch.load(path, weights_only=False)),
-        )
+        loaded = cast(object, torch.load(path, weights_only=False))
+        if not isinstance(loaded, dict):
+            continue
+        typed_loaded = cast(dict[str, object], loaded)
+        raw = convert(typed_loaded, dict[str, object])
         if "post_state" not in raw or "state_dict" not in raw:
             continue
         payload = load_golden(path)
@@ -862,7 +864,14 @@ def _assert_same_input(live: object, stored: object, *, label: str) -> None:
 
 
 def _ints(values: object) -> list[int]:
-    return ListCodec.coerce(values, int)
+    if not isinstance(values, (list, tuple)):
+        return []
+    typed_values = cast(list[object] | tuple[object, ...], values)
+    return [
+        convert(value, int)
+        for value in typed_values
+        if isinstance(value, int) and not isinstance(value, bool)
+    ]
 
 
 def _assert_equal(a: object, b: object, *, label: str) -> None:
@@ -1193,6 +1202,25 @@ _UNFUSED_OPS: Final = frozenset(
 )
 
 
+# With a contraction of one, x86's matrix kernel stores the product itself, so
+# ``-1.0 * 0.0`` stays ``-0.0``; aarch64's adds it to a zero accumulator and stores
+# ``+0.0``. A single row or column takes x86's vector kernel, which also adds to
+# ``+0.0``, so those shapes run the kernel as usual.
+def _one_term_mm(
+    func: OpOverload[..., object],
+    args: tuple[object, ...],
+) -> Tensor | None:
+    """Return a one-term ``mm`` as its plain product, or ``None`` for any other op."""
+    if func.namespace != "aten" or _op_name(func) != "mm" or len(args) != 2:
+        return None
+    left, right = args
+    if not isinstance(left, Tensor) or not isinstance(right, Tensor):
+        return None
+    if left.shape[1] != 1 or left.shape[0] < 2 or right.shape[1] < 2:
+        return None
+    return left * right
+
+
 def _run_unfused(
     func: OpOverload[..., object],
     args: tuple[object, ...],
@@ -1386,7 +1414,9 @@ class _Float64Compute(TorchDispatchMode):
             isinstance(explicit_dtype, torch.dtype) and _is_narrow_float(explicit_dtype)
         ):
             up_kwargs["dtype"] = torch.float64
-        result = _run_unfused(func, up_args, up_kwargs)
+        result = _one_term_mm(func, args=up_args)
+        if result is None:
+            result = _run_unfused(func, up_args, up_kwargs)
         if any(
             arg.alias_info is not None and arg.alias_info.is_write
             for arg in func._schema.arguments  # noqa: SLF001 -- The harness reads the op schema to find write arguments.

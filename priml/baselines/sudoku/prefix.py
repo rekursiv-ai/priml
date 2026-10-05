@@ -29,7 +29,6 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.baselines.sudoku.embedding import corrected_scaled_normal
 from priml.cost import (
     Cost,
     cost,
@@ -37,7 +36,12 @@ from priml.cost import (
     traffic,
 )
 from priml.model.custom_types import ChannelsOut
-from priml.model.init import InitFn, call_init, truncated_normal
+from priml.model.init import (
+    InitFn,
+    call_init,
+    corrected_fan_in_normal,
+    truncated_normal,
+)
 
 
 if TYPE_CHECKING:
@@ -76,7 +80,7 @@ class RegisterTokens(nn.Module):
         channels_out: int = -1
         """Token width; -1 inherits the model's hidden size."""
 
-        init_weight: InitFn = corrected_scaled_normal
+        init_weight: InitFn = corrected_fan_in_normal
         """Token initializer, at the scale the runtime multiply expects."""
 
         learnable: bool = True

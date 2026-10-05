@@ -41,7 +41,7 @@ from priml.baselines.arcagi1.augmentation import (
 )
 from priml.data.distributed_build import run_rank_zero_build
 from priml.data.ensure import DataSpec, EnsureResult, FileSpec, ensure_data
-from priml.lib.custom_json import DictCodec, ListCodec, loads
+from priml.lib.custom_json import convert, parse
 from priml.paths import resolve_working_dir
 
 
@@ -387,25 +387,25 @@ def _build_arc_dataset(
     train_dest = ("train", "all")
     test_dest = ("test", "all")
     for subset_name in subsets:
-        raw_puzzles = DictCodec.coerce(
-            loads(
-                Path(f"{input_file_prefix}_{subset_name}_challenges.json").read_text(),
-            ),
+        raw_puzzles = parse(
+            Path(f"{input_file_prefix}_{subset_name}_challenges.json").read_text(),
+            dict[str, object],
         )
         puzzles = {
             pid: {
                 key: [
-                    DictCodec.coerce(example) for example in ListCodec.coerce(examples)
+                    convert(example, dict[str, object])
+                    for example in convert(examples, list[object])
                 ]
-                for key, examples in DictCodec.coerce(puzzle).items()
+                for key, examples in convert(puzzle, dict[str, object]).items()
             }
             for pid, puzzle in raw_puzzles.items()
         }
         solutions = Path(f"{input_file_prefix}_{subset_name}_solutions.json")
         if solutions.is_file():
-            raw_solutions = DictCodec.coerce(loads(solutions.read_text()))
+            raw_solutions = parse(solutions.read_text(), dict[str, object])
             for pid, puzzle in puzzles.items():
-                for index, grid in enumerate(ListCodec.coerce(raw_solutions[pid])):
+                for index, grid in enumerate(convert(raw_solutions[pid], list[object])):
                     puzzle["test"][index]["output"] = _int_grid(grid)
         else:
             logger.warning("%s solutions not found, filling with dummy", subset_name)
@@ -663,7 +663,7 @@ def _puzzle_group_hash(group: Mapping[tuple[str, str], _Puzzle]) -> str:
 
 
 def _int_grid(value: object) -> list[list[int]]:
-    return [ListCodec.coerce(row, int) for row in ListCodec.coerce(value)]
+    return [convert(row, list[int]) for row in convert(value, list[object])]
 
 
 class _ArcBuild:

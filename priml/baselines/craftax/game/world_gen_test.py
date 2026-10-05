@@ -22,7 +22,6 @@ from priml.baselines.craftax.game.constants import BlockType, ItemType
 from priml.baselines.craftax.game.world_gen import (
     _brighten_around,
     _carve_corridor,
-    _day_reciprocal,
     _distance_from,
     _place_room_features,
     _sample_tile,
@@ -31,7 +30,7 @@ from priml.baselines.craftax.game.world_gen import (
     generate_smooth_world,
     generate_world,
 )
-from priml.lib.custom_json import ListCodec
+from priml.lib.custom_json import convert
 
 
 if TYPE_CHECKING:
@@ -148,13 +147,6 @@ def test_corridor_coordinate_ranges_use_the_requested_device() -> None:
         )
     assert len(arange.call_args_list) == 2
     assert all(call.kwargs["device"] == device for call in arange.call_args_list)
-
-
-def test_reciprocal_conversion_requests_float32() -> None:
-    with patch("torch.tensor", wraps=torch.tensor) as tensor:
-        _day_reciprocal()
-    assert tensor.call_args is not None
-    assert tensor.call_args.kwargs["dtype"] == torch.float32
 
 
 def test_world_factories_use_the_requested_device() -> None:
@@ -692,7 +684,7 @@ def test_the_surface_ladder_starts_open() -> None:
 def test_potion_effects_are_shuffled_independently_per_environment() -> None:
     state = _world(num_envs=8, seed=3)
     for row in state.potion_mapping:
-        assert sorted(ListCodec.coerce(row.tolist(), int)) == list(range(6))
+        assert sorted(convert(row.tolist(), list[int])) == list(range(6))
     assert len({tuple(row.tolist()) for row in state.potion_mapping}) > 1
 
 
@@ -723,7 +715,7 @@ def test_the_overworld_grows_the_blocks_its_recipe_names() -> None:
         generator=torch.Generator().manual_seed(0),
         device=torch.device("cpu"),
     )
-    present = set(ListCodec.coerce(blocks.flatten().tolist(), int))
+    present = set(convert(blocks.flatten().tolist(), list[int]))
     assert int(BlockType.GRASS) in present
     assert int(BlockType.STONE) in present
     assert int(BlockType.TREE) in present
@@ -806,7 +798,7 @@ def test_a_dungeon_is_rooms_joined_by_corridors() -> None:
         generator=torch.Generator().manual_seed(0),
         device=torch.device("cpu"),
     )
-    present = set(ListCodec.coerce(blocks.flatten().tolist(), int))
+    present = set(convert(blocks.flatten().tolist(), list[int]))
     assert int(BlockType.PATH) in present
     assert int(BlockType.WALL) in present
     assert int(BlockType.CHEST) in present
@@ -974,29 +966,14 @@ def test_the_sewers_use_their_own_materials() -> None:
         generator=torch.Generator().manual_seed(0),
         device=torch.device("cpu"),
     )
-    present = set(ListCodec.coerce(blocks.flatten().tolist(), int))
+    present = set(convert(blocks.flatten().tolist(), list[int]))
     assert int(BlockType.ENCHANTMENT_TABLE_ICE) in present
     assert int(BlockType.WATER) in present
 
 
-def test_day_reciprocal_rounds_toward_zero_in_float32() -> None:
-    assert _day_reciprocal() == 0.003333333181217313
-
-
-def test_day_reciprocal_does_not_round_down_an_exact_value(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(constants, "DAY_LENGTH", 256)
-    assert _day_reciprocal() == 1 / 256
-
-
 def test_daylight_starts_one_third_into_the_cycle() -> None:
     steps = torch.tensor([17, 149, 299])
-    reciprocal = torch.nextafter(
-        torch.tensor(1 / constants.DAY_LENGTH, dtype=torch.float32),
-        torch.tensor(0.0),
-    )
-    phase = (steps.float() * reciprocal) % 1.0 + 0.3
+    phase = (steps.float() * (1 / constants.DAY_LENGTH)) % 1.0 + 0.3
     expected = 1.0 - (torch.pi * phase).cos().abs() ** 3
     assert torch.allclose(daylight(steps), expected, rtol=0.0, atol=1e-7)
 
@@ -1022,31 +999,35 @@ def test_daylight_pins_large_timestep_values() -> None:
     assert daylight(steps).view(torch.int32).tolist() == [
         1_062_091_936,
         1_061_797_309,
-        1_061_946_183,
+        1_061_946_187,
         1_062_091_936,
-        1_061_797_303,
-        1_062_091_926,
-        1_064_224_334,
+        1_061_797_309,
+        1_062_091_947,
+        1_064_224_244,
     ]
 
 
 @pytest.mark.gpu_torch_cuda
 def test_daylight_matches_compiled_reference_exactly() -> None:
     assert torch.cuda.is_available()
-    # Captured from upstream calculate_light_level on CUDA.
+    # Captured from upstream calculate_light_level on an RTX 5090, compiled as
+    # Craftax's training compiles it: jit over vmap with EnvParams closed over.
     expected = torch.tensor(
         [
             1_061_946_187,
             1_062_091_936,
             1_063_970_034,
-            1_056_379_802,
+            1_056_379_794,
             1_061_797_309,
-            1_061_946_182,
+            1_061_946_187,
+            1_064_988_890,
+            1_051_553_488,
+            1_064_301_888,
         ],
         dtype=torch.int32,
         device="cuda",
     )
-    steps = torch.tensor((0, 1, 17, 149, 299, 300), device="cuda")
+    steps = torch.tensor((0, 1, 17, 149, 299, 300, 33, 1061, 99_999), device="cuda")
     assert torch.equal(daylight(steps).view(torch.int32), expected)
 
 

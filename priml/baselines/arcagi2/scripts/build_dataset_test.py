@@ -29,7 +29,7 @@ from priml.baselines.arcagi2.scripts.build_dataset import (
     arc2_spatial_eval_template,
     ensure_arc2_dataset,
 )
-from priml.lib.custom_json import DictCodec, ListCodec, loads
+from priml.lib.custom_json import convert, parse
 
 
 if TYPE_CHECKING:
@@ -463,7 +463,10 @@ def test_ensure_builds_tiny_tree_and_sentinel(
     assert f"Done. ARC-AGI-2 dataset at {target}" in caplog.messages
     for spec in arc_manifest():
         assert (root / spec.rel_path).is_file(), spec.rel_path
-    params = DictCodec.coerce(loads((root / "_build_params.json").read_text()))
+    params = parse(
+        (root / "_build_params.json").read_text(),
+        dict[str, object],
+    )
     assert params["subsets"] == ["training2", "evaluation2", "concept"]
     assert params["test_set_name"] == "evaluation2"
     assert params["train_scale_weights"] == [[1, 1.0]]
@@ -480,13 +483,16 @@ def test_ensure_builds_tiny_tree_and_sentinel(
     # 6 source tasks, each <= 1 + num_aug identifiers, + the blank sentinel.
     n_ids = arc2_num_puzzle_identifiers(root)
     assert 1 < n_ids <= 1 + 6 * 3
-    identifiers = ListCodec.coerce(loads((root / "identifiers.json").read_text()), str)
+    identifiers = parse((root / "identifiers.json").read_text(), list[str])
     assert identifiers[0] == "<blank>"
     # Only the evaluation2 tasks form the test split.
-    test_puzzles = DictCodec.coerce(loads((root / "test_puzzles.json").read_text()))
+    test_puzzles = parse(
+        (root / "test_puzzles.json").read_text(),
+        dict[str, object],
+    )
     assert set(test_puzzles) == {"evaluation2_task0", "evaluation2_task1"}
-    task = DictCodec.coerce(test_puzzles["evaluation2_task1"])
-    assert len(ListCodec.coerce(task["test"])) == 2
+    task = convert(test_puzzles["evaluation2_task1"], dict[str, object])
+    assert len(convert(task["test"], list[object])) == 2
     second_root = ensure_arc2_dataset(
         target=tmp_path / "same-seed",
         num_aug=2,
@@ -576,7 +582,10 @@ def test_ensure_rebuilds_on_param_change(tmp_path: Path) -> None:
     mtime = (target / "train" / "all__inputs.npy").stat().st_mtime_ns
     ensure_arc2_dataset(target=target, num_aug=3, seed=7, input_file_prefix=prefix)
     assert (target / "train" / "all__inputs.npy").stat().st_mtime_ns != mtime
-    params = DictCodec.coerce(loads((target / "_build_params.json").read_text()))
+    params = parse(
+        (target / "_build_params.json").read_text(),
+        dict[str, object],
+    )
     assert params["num_aug"] == 3
 
 

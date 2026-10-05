@@ -17,7 +17,7 @@ from priml.baselines.arcagi1.augmentation import ColorDihedral
 from priml.baselines.sudoku import data
 from priml.baselines.sudoku.data import SudokuData, _load_split, augment_sudoku
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
-from priml.lib.custom_json import ListCodec
+from priml.lib.custom_json import convert
 from priml.math.seed import salt
 from priml.runtime import get_device
 from priml.testing.golden import assert_tensor_golden, stored
@@ -73,9 +73,9 @@ def test_batches_are_always_full_width(dataset_dir: Path) -> None:
     assert sorted(
         row
         for batch in batches
-        for row in ListCodec.coerce(
+        for row in convert(
             batch["media"][: batch["valid_count"], 0].tolist(),
-            int,
+            list[int],
         )
     ) == list(range(2, 8))
     assert torch.equal(tail["media"][:2], tail["label"][:2])
@@ -356,7 +356,7 @@ def test_augmentation_uses_the_dataset_spec() -> None:
     )
     assert actual.shape == (2, 16)
     assert torch.equal(actual, labels)
-    assert set(ListCodec.coerce(actual.flatten().tolist(), int)) == {2, 3, 4, 5}
+    assert set(convert(actual.flatten().tolist(), list[int])) == {2, 3, 4, 5}
 
 
 def test_augmentation_moves_the_label_with_the_input() -> None:
@@ -397,7 +397,7 @@ def test_augmentation_preserves_empties_and_padding() -> None:
     grid = torch.full((2, 81), 1, dtype=torch.long)  # Every cell empty.
     grid[:, :5] = 0  # Padding.
     inputs, _ = augment_sudoku(grid, grid.clone(), spec=SudokuSpec())
-    assert set(ListCodec.coerce(inputs.flatten().tolist(), int)) <= {0, 1}
+    assert set(convert(inputs.flatten().tolist(), list[int])) <= {0, 1}
 
 
 def test_augmentation_is_seedable() -> None:
@@ -472,9 +472,9 @@ def test_num_puzzles_keeps_a_prefix_of_whole_puzzles(dataset_dir: Path) -> None:
     assert sorted(
         value
         for batch in train_batches
-        for value in ListCodec.coerce(
+        for value in convert(
             batch["media"][: batch["valid_count"], 0].tolist(),
-            int,
+            list[int],
         )
     ) == [2, 3]
 

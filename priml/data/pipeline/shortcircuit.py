@@ -16,7 +16,7 @@ import time
 from configgle import Fig, Makeable
 
 from priml.data.custom_types import Processor
-from priml.lib.custom_json import ListCodec
+from priml.lib.custom_json import convert
 
 
 if TYPE_CHECKING:
@@ -232,7 +232,15 @@ class ShortCircuitProcessor:
         # Attribute each drop to the most recent fed sample's reasons; the
         # processor mutates filter_reasons in place before declining to yield,
         # so the last fed sample carries the rejection cause.
-        reasons = ListCodec.coerce(fed.last.get("filter_reasons"), str)
+        reasons = [
+            convert(reason, str)
+            for reason in convert(
+                fed.last.get("filter_reasons"),
+                list[object],
+                default=[],
+            )
+            if isinstance(reason, str)
+        ]
         for _ in range(fed.count - emitted_count):
             self.stats.record_drop(self.processor_name, reasons)
             logger.debug("%s: dropped a sample", self.processor_name)

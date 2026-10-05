@@ -11,6 +11,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
+from priml.lib.custom_json import ReadError
 from priml.optimizers.sign_sgd import (
     SignSGD,
     _is_distributed,
@@ -266,6 +267,20 @@ def test_dense_weight_decay_touches_only_rows_with_gradient() -> None:
     torch.testing.assert_close(p[2], torch.tensor([decayed, decayed - 0.1]))
 
 
+def test_touched_rows_never_materialize_a_count_per_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``count_nonzero`` allocates int64 per element, 8x a bool ``any`` reduction.
+    count_nonzero = Mock(side_effect=AssertionError("count_nonzero allocates int64"))
+    monkeypatch.setattr(Tensor, "count_nonzero", count_nonzero)
+    p = torch.nn.Parameter(torch.ones(3, 2))
+    p.grad = torch.tensor([[1.0, -1.0], [0.0, 0.0], [0.0, 2.0]])
+
+    SignSGD([p], lr=0.1, weight_decay=0.5).step()
+
+    count_nonzero.assert_not_called()
+
+
 def test_dense_weight_decay_of_one_still_applies() -> None:
     parameter = torch.nn.Parameter(torch.tensor([[2.0, -3.0], [4.0, 5.0]]))
     parameter.grad = torch.tensor([[1.0, -1.0], [0.0, 0.0]])
@@ -332,7 +347,7 @@ def test_optimizer_rejects_boolean_group_hyperparameters() -> None:
         parameter.grad = torch.ones(2)
         optimizer = SignSGD([parameter])
         optimizer.param_groups[0][key] = True
-        with pytest.raises(TypeError, match="cannot coerce"):
+        with pytest.raises(ReadError):
             optimizer.step()
 
 
@@ -343,7 +358,7 @@ def test_sparse_optimizer_rejects_boolean_group_hyperparameters() -> None:
         local_ids = torch.zeros(2, dtype=torch.int32)
         optimizer = SignSGD([weights, local_weights, local_ids])
         optimizer.param_groups[0][key] = True
-        with pytest.raises(TypeError, match="cannot coerce"):
+        with pytest.raises(ReadError):
             optimizer.step_sparse_embedding(torch.ones(2, 3), local_ids)
 
 
@@ -663,8 +678,8 @@ def test_distributed_dense_update_combines_rows_from_each_rank(
     gathered_counts = torch.tensor([1, 2], dtype=torch.long)
     gathered_ids = torch.tensor([1, 2], dtype=torch.long)
     gathered_grads = torch.tensor([[-1.0, 1.0], [-1.0, 1.0]])
-    padded_ids = torch.tensor([0, 5], dtype=torch.long)
-    padded_grads = torch.tensor([[1.0, -1.0], [1.0, 1.0]])
+    padded_ids = torch.tensor([0, 0], dtype=torch.long)
+    padded_grads = torch.tensor([[1.0, -1.0], [0.0, 0.0]])
 
     def gather(output: Tensor, values: Tensor) -> None:
         if output.numel() == 2:
@@ -686,7 +701,6 @@ def test_distributed_dense_update_combines_rows_from_each_rank(
     spies = {
         "arange": Mock(wraps=torch.arange),
         "empty": Mock(wraps=torch.empty),
-        "full": Mock(wraps=torch.full),
         "tensor": Mock(wraps=torch.tensor),
         "zeros": Mock(wraps=torch.zeros),
     }
@@ -694,7 +708,6 @@ def test_distributed_dense_update_combines_rows_from_each_rank(
     with monkeypatch.context() as context:
         context.setattr(torch, "arange", spies["arange"])
         context.setattr(torch, "empty", spies["empty"])
-        context.setattr(torch, "full", spies["full"])
         context.setattr(torch, "tensor", spies["tensor"])
         context.setattr(torch, "zeros", spies["zeros"])
         SignSGD([parameter], lr=0.1, weight_decay=1.0).step()

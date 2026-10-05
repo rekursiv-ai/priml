@@ -926,6 +926,19 @@ def test_a_young_plant_is_not_yet_ripe() -> None:
     assert grown.map[0, 0, 10, 12].item() == int(BlockType.GRASS)
 
 
+def test_plants_ripen_on_the_surface_while_the_player_is_below() -> None:
+    """Upstream ripens floor 0 whatever floor the player is on (game_logic.py:2007-2011)."""
+    state = _state()
+    state.player_level[:] = torch.tensor([0, 3], dtype=torch.int32)
+    state.growing_plants_mask[:, 0] = True
+    state.growing_plants_positions[:, 0] = torch.tensor([5, 5], dtype=torch.int32)
+    state.growing_plants_age[:, 0] = 599
+    state.map[:, 0, 5, 5] = int(BlockType.PLANT)
+    grown = abilities.grow_plants(state)
+    assert grown.map[:, 0, 5, 5].tolist() == [int(BlockType.RIPE_PLANT)] * 2
+    assert grown.map[:, 3, 5, 5].tolist() == [int(BlockType.GRASS)] * 2
+
+
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main
 

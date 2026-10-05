@@ -182,6 +182,7 @@ def test_eval_loader_reads_every_full_batch_in_order(tmp_path: Path) -> None:
     # drop_last discards the fifth sample.
     assert order == [[0, 1], [2, 3]]
     assert loader.num_workers == 0
+    assert loader.pin_memory is False
 
 
 def test_worker_loader_carries_its_prefetch_settings(tmp_path: Path) -> None:

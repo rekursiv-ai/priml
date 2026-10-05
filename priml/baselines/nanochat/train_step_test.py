@@ -30,7 +30,7 @@ from priml.baselines.nanochat.train_step import (
     matrix_parameters,
     nanochat_optimizer,
 )
-from priml.lib.custom_json import FloatCodec
+from priml.lib.custom_json import convert
 from priml.model.attention.value_gated_attention import (
     ValueGatedAttention,
     sdpa_attention,
@@ -639,23 +639,17 @@ def test_progress_drives_the_learning_rate() -> None:
     against a horizon that does not exist.
     """
     step = _step(train_budget_sec=100.0)
-    initial = FloatCodec.coerce(
-        cast(object, step.optimizer.param_groups[0]["initial_lr"]),
-        None,
-    )
+    initial = convert(cast(object, step.optimizer.param_groups[0]["initial_lr"]), float)
     step.train_step(**_batch())
-    assert FloatCodec.coerce(
+    assert convert(
         cast(object, step.optimizer.param_groups[0]["lr"]),
-        None,
+        float,
     ) == pytest.approx(initial)
 
     # Most of the budget spent: the trapezoid is into its decay.
     step.elapsed_sec = 75.0
     step.train_step(**_batch())
-    assert (
-        FloatCodec.coerce(cast(object, step.optimizer.param_groups[0]["lr"]), None)
-        < initial
-    )
+    assert convert(cast(object, step.optimizer.param_groups[0]["lr"]), float) < initial
 
 
 @pytest.mark.compute_training

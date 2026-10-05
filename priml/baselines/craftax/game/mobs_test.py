@@ -8,7 +8,7 @@ import torch
 from priml.baselines.craftax.game import constants, indexing, mechanics, mobs
 from priml.baselines.craftax.game.constants import Achievement, BlockType
 from priml.baselines.craftax.game.state import EnvState, Mobs, empty_state
-from priml.lib.custom_json import ListCodec
+from priml.lib.custom_json import convert
 
 
 def _state(num_envs: int = 2) -> EnvState:
@@ -247,7 +247,7 @@ def test_a_creature_will_not_walk_into_stone() -> None:
     state.map[:, 0, 9, 13] = int(BlockType.STONE)
     state.map[:, 0, 11, 13] = int(BlockType.STONE)
     state = mobs.update_mobs(state, generator=_seed())
-    landed = ListCodec.coerce(state.melee_mobs.position[0, 0, 0].tolist(), int)
+    landed = convert(state.melee_mobs.position[0, 0, 0].tolist(), list[int])
     assert landed != [10, 12]
     assert state.map[0, 0, landed[0], landed[1]].item() != int(BlockType.STONE)
 
@@ -557,6 +557,58 @@ def test_an_ice_bow_beats_a_fire_bow_in_the_fire_realm() -> None:
     assert float(ice.melee_mobs.health[0, 6, 0]) < float(
         fire.melee_mobs.health[0, 6, 0],
     )
+
+
+def test_a_creature_collides_as_its_type_not_its_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upstream reads collision by the creature's type (game_logic.py:1309).
+
+    A floor-1 cow is type 2, which lava stops; a floor-2 bat is type 1, which
+    flies over it. Both draw the step up, onto lava.
+    """
+    state = _state(num_envs=2)
+    state.player_level[:] = torch.tensor([1, 2], dtype=torch.int32)
+    state.player_position[:] = torch.tensor([10, 20], dtype=torch.int32)
+    for row, (floor, kind) in enumerate(((1, 2), (2, 1))):
+        state.passive_mobs.mask[row, floor, 0] = True
+        state.passive_mobs.health[row, floor, 0] = 3.0
+        state.passive_mobs.type_id[row, floor, 0] = kind
+        state.passive_mobs.position[row, floor, 0] = torch.tensor([10, 10])
+        state.mob_map[row, floor, 10, 10] = True
+        state.map[row, floor, 9, 10] = int(BlockType.LAVA)
+
+    def step_up(
+        low: int,
+        high: int,
+        size: tuple[int, ...],
+        *,
+        generator: torch.Generator | None = None,
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        del low, high, generator
+        return torch.full(size, 2, device=device)
+
+    monkeypatch.setattr(torch, "randint", step_up)
+    state = mobs.update_mobs(state, generator=_seed())
+    assert state.passive_mobs.position[0, 1, 0].tolist() == [10, 10]
+    assert state.passive_mobs.position[1, 2, 0].tolist() == [9, 10]
+
+
+def test_a_passive_slot_takes_its_floors_own_type_even_in_the_boss_fight() -> None:
+    """Upstream types a passive slot by floor, not boss wave (game_logic.py:2094).
+
+    Nothing passive spawns during the fight, but the empty slot still takes the
+    floor's type, while the monster slots take the wave's. Floor 3, out of the
+    fight, keeps its passive and melee types apart.
+    """
+    state = _state(num_envs=2)
+    state.player_level[:] = torch.tensor([8, 3], dtype=torch.int32)
+    state.boss_progress[:] = 3
+    state.map[:] = int(BlockType.PATH)
+    state = mobs.spawn_mobs(state, generator=_seed())
+    assert state.passive_mobs.type_id[[0, 1], [8, 3], 0].tolist() == [0, 2]
+    assert state.melee_mobs.type_id[[0, 1], [8, 3], 0].tolist() == [3, 3]
 
 
 def test_spawning_fills_empty_slots_near_the_player() -> None:

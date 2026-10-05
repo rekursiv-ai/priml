@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast, override
+from typing import TYPE_CHECKING, Final, cast, override
 
 import hashlib
 import json
@@ -48,12 +49,13 @@ from priml.baselines.arcagi1.metric import (
     encode_preds,
     write_signal_dump,
 )
-from priml.lib.custom_json import DictCodec, loads
+from priml.lib.custom_json import parse
 
+
+_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from pathlib import Path
 
     from numpy.typing import NDArray
 
@@ -264,39 +266,30 @@ def test_empty_metric_reports_zero() -> None:
     assert _metric().compute() == {"pass@1": 0.0, "pass@2": 0.0}
 
 
-def test_pass_k_votes_once_over_every_ranks_views(
+def test_pass_k_sums_each_ranks_solved_counts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A puzzle whose views straddle two ranks is one ballot, counted once."""
+    """Each rank scores its own ballots; the counts are summed across ranks."""
     labels = torch.full((2, 9), 3, dtype=torch.int64)
-    wrong = labels.clone()
-    wrong[:, 0] = 7
     local = _metric()
     local.update(
-        _packed(labels[:1].clone(), torch.zeros(1)),
-        label=labels[:1],
-        puzzle_identifiers=torch.zeros(1, dtype=torch.int64),
-    )
-    other = _metric()
-    other.update(
-        _packed(wrong, torch.zeros(2)),
+        _packed(labels.clone(), torch.zeros(2)),
         label=labels,
-        puzzle_identifiers=torch.zeros(2, dtype=torch.int64),
+        puzzle_identifiers=torch.tensor([0, 1]),
     )
+    # The other rank holds three puzzles and solved one of them.
+    remote_counts = torch.tensor([3.0, 1.0, 1.0], dtype=torch.float64)
 
-    def gather_states(
-        gathered: list[PassK.StateDict | None],
-        state: PassK.StateDict,
-    ) -> None:
-        gathered[:] = [state, other.state_dict()]
+    def all_reduce(counts: Tensor, op: object) -> None:
+        del op
+        counts += remote_counts
 
     monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
-    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
-    monkeypatch.setattr(torch.distributed, "all_gather_object", gather_states)
+    monkeypatch.setattr(torch.distributed, "get_backend", lambda: "gloo")
+    monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
 
-    # Two wrong votes outrank the one right vote: absent at K=1, present at 2.
-    assert local.compute() == {"pass@1": 0.0, "pass@2": 1.0}
+    assert local.compute() == {"pass@1": 3 / 5, "pass@2": 3 / 5}
 
 
 def test_canonical_scoring_without_pass_at_one(tmp_path: Path) -> None:
@@ -683,6 +676,82 @@ def test_canonical_excluded_tasks_leave_every_denominator(tmp_path: Path) -> Non
     assert scores["pass@1"] == 0.5
     assert scores["strict@1"] == 0.0
     assert scores["per_output@1"] == 0.5
+
+
+PER_TASK_GOLDEN: Final = _CWD / "testdata" / "per_task_pass.json"
+"""Minted by the reference ``PassKMetric`` (a22cbfa91) on :func:`_per_task_ballots`."""
+
+
+# ``c``'s wrong answer outvotes its right one, so ``c`` and the unanswered ``d`` tie at
+# pass@1 = 0 and keep their ``test_puzzles.json`` order.
+def _per_task_ballots(root: Path) -> dict[str, Tensor]:
+    """Four tasks on a 2x2 grid: half solved, solved, outvoted, and unanswered."""
+    (root / "identifiers.json").write_text(json.dumps(["<blank>", "a", "b", "c"]))
+    (root / "test_puzzles.json").write_text(
+        json.dumps(
+            {
+                "a": {
+                    "test": [
+                        {"input": [[2]], "output": [[5]]},
+                        {"input": [[3]], "output": [[6]]},
+                    ],
+                },
+                "b": {"test": [{"input": [[4]], "output": [[5]]}]},
+                "c": {"test": [{"input": [[1]], "output": [[6]]}]},
+                "d": {"test": [{"input": [[7]], "output": [[7]]}]},
+            },
+        ),
+    )
+    # Packed 2x2 tokens: color + 2, then the row/column EOS markers.
+    answers = torch.tensor([[7, 1, 1, 0]] * 5 + [[8, 1, 1, 0]])
+    return {
+        "logits": _packed(answers, torch.tensor([0.5, -1.0, 2.0, 1.0, -0.5, 3.0])),
+        "media": torch.tensor(
+            [[4, 1, 1, 0], [5, 1, 1, 0], [6, 1, 1, 0]] + [[3, 1, 1, 0]] * 3,
+        ),
+        "puzzle_identifiers": torch.tensor([1, 1, 2, 3, 3, 3]),
+    }
+
+
+def _per_task_metric(root: Path, *, dump: Path | None) -> CanonicalPassK:
+    spec = ArcSpec()
+    spec.max_grid = 2
+    config = CanonicalPassK.Config(working_dir=root, pass_ks=(1, 2), spec=spec)
+    if dump is not None:
+        config.dump_per_task_path = dump
+    return config.make()
+
+
+def test_canonical_per_task_dump_matches_the_reference_bytes(tmp_path: Path) -> None:
+    batch = _per_task_ballots(tmp_path)
+    logits = batch.pop("logits")
+    dump = tmp_path / "out" / "per_task_pass.json"
+    metric = _per_task_metric(tmp_path, dump=dump)
+    metric.update(logits, **batch)
+    metric.compute()
+    # The repo's end-of-file hook adds the golden's final newline; the dump has none.
+    assert dump.read_bytes() + b"\n" == PER_TASK_GOLDEN.read_bytes()
+
+
+def test_canonical_per_task_dump_off_writes_nothing_and_scores_alike(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batch = _per_task_ballots(tmp_path)
+    logits = batch.pop("logits")
+    dumping = _per_task_metric(tmp_path, dump=tmp_path / "dump.json")
+    dumping.update(logits, **batch)
+    plain = _per_task_metric(tmp_path, dump=None)
+    plain.update(logits, **batch)
+    # A relative write would land in the working directory, so watch it too.
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    before = set(tmp_path.rglob("*"))
+    scores = plain.compute()
+    assert set(tmp_path.rglob("*")) == before
+    assert scores == dumping.compute()
+    assert scores["pass@1"] == 0.375
 
 
 def test_canonical_construction_defers_reading_the_tree(tmp_path: Path) -> None:
@@ -1123,12 +1192,12 @@ def test_nccl_gather_places_buffers_on_cuda(
     assert transfer_devices == ["cpu"]
 
 
-def test_signal_tracker_writes_without_a_prefix(tmp_path: Path) -> None:
+def test_signal_tracker_writes_on_eval_prefix(tmp_path: Path) -> None:
     path = tmp_path / "signals.npz"
     tracker = SignalDumpTracker.Config(working_dir=path).make()
     payload = SignalDumpPayload(rows=[], grids={}, steps=[], pass_ks=(1, 3))
 
-    tracker.log_metrics({"extras": {"signal_dump": payload}}, 1)
+    tracker.log_metrics({"extras": {"signal_dump": payload}}, 1, prefix="eval/")
 
     assert path.exists()
     with zipfile.ZipFile(path) as archive:
@@ -1152,6 +1221,8 @@ def test_signal_tracker_writes_without_a_prefix(tmp_path: Path) -> None:
 def test_signal_tracker_branches(tmp_path: Path) -> None:
     tracker = SignalDumpTracker.Config(working_dir=tmp_path / "dump.npz").make()
     tracker.log_metrics({}, 1, prefix="train/")
+    # Only the eval stream writes; an unprefixed payload is not an eval result.
+    tracker.log_metrics({"extras": 3}, 1, prefix="")
     tracker.log_metrics({}, 1, prefix="eval/")
     with pytest.raises(TypeError) as mapping_error:
         tracker.log_metrics({"extras": 3}, 1, prefix="eval/")
@@ -1231,10 +1302,16 @@ def test_prediction_wire_format_lengths_are_unsigned_without_large_allocations()
     assert int.from_bytes(values[45:49], "little") == large_length
 
 
-def test_json_grid_drops_boolean_cells_before_integer_cells() -> None:
-    grid = _json_grid([[True, 2], [False, 3]], spec=ArcSpec(max_grid=3))
+@pytest.mark.parametrize("cell", [True, 2.0, "2", None])
+def test_json_grid_rejects_non_integer_cells(cell: object) -> None:
+    with pytest.raises(TypeError, match="ARC grid cell"):
+        _json_grid([[cell, 2], [1, 3]], spec=ArcSpec(max_grid=3))
 
-    assert grid.tolist() == [[2], [3]]
+
+def test_json_grid_reads_integer_cells() -> None:
+    grid = _json_grid([[1, 2], [0, 3]], spec=ArcSpec(max_grid=3))
+
+    assert grid.tolist() == [[1, 2], [0, 3]]
 
 
 def test_metric_private_helpers_and_width_errors() -> None:
@@ -1560,7 +1637,7 @@ def test_canonical_state_round_trip_preserves_ballots(tmp_path: Path) -> None:
     restored = CanonicalPassK.Config(working_dir=tmp_path, pass_ks=(1,)).make()
 
     restored.load_state_dict(
-        DictCodec.coerce(loads(json.dumps(source.state_dict()))),
+        parse(json.dumps(source.state_dict()), dict[str, object]),
     )
 
     assert restored.state_dict() == source.state_dict()
@@ -1578,8 +1655,17 @@ def test_canonical_state_load_defaults_missing_fields_to_empty() -> None:
 def test_canonical_state_does_not_accept_boolean_grid_dimensions() -> None:
     metric = CanonicalPassK.Config().make()
 
-    with pytest.raises(ValueError, match="not enough values to unpack"):
+    with pytest.raises(TypeError, match="grid shape"):
         metric.load_state_dict({"hmap": {"hash": [True, 3]}})
+
+
+def test_canonical_state_loads_tuple_grid_shapes() -> None:
+    # Checkpoints written before list-valued ``hmap`` hold in-memory tuples.
+    metric = CanonicalPassK.Config().make()
+
+    metric.load_state_dict({"hmap": {"hash": (3, 4)}})
+
+    assert metric.state_dict().get("hmap") == {"hash": [3, 4]}
 
 
 def test_canonical_compute_emits_signal_payload_from_wide_output(

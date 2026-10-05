@@ -115,6 +115,8 @@ def spawn_mobs(
         state.boss_progress.long()
     ]
     species = torch.where(fighting_boss[:, None], boss_species, floor_species)
+    # The boss's waves bring only monsters; a passive slot keeps the floor's type.
+    species[:, 0] = floor_species[:, 0]
     for mobs, column, mob_class in (
         (state.passive_mobs, 0, 0),
         (state.melee_mobs, 1, 1),
@@ -212,7 +214,7 @@ def _update_melee(
         )
 
         collides = constants.on_device(constants.MOB_COLLIDES_WITH, state.device)[
-            state.player_level.long(),
+            _slot(mobs.type_id, state, slot).long(),
             1,
         ]
         moved = torch.where(
@@ -256,7 +258,7 @@ def _update_passive(
             moves=8,
         )
         collides = constants.on_device(constants.MOB_COLLIDES_WITH, state.device)[
-            state.player_level.long(),
+            _slot(mobs.type_id, state, slot).long(),
             0,
         ]
         moved = torch.where(
@@ -304,7 +306,7 @@ def _update_ranged(
         proposed = torch.where(use_wander[:, None], wander, proposed)
 
         collides = constants.on_device(constants.MOB_COLLIDES_WITH, state.device)[
-            state.player_level.long(),
+            _slot(mobs.type_id, state, slot).long(),
             2,
         ]
         can_retreat = mechanics.can_walk_on(state, proposed, collides)
@@ -320,10 +322,6 @@ def _update_ranged(
         )
         proposed = torch.where(firing[:, None], position, proposed)
 
-        collides = constants.on_device(constants.MOB_COLLIDES_WITH, state.device)[
-            state.player_level.long(),
-            2,
-        ]
         moved = torch.where(
             mechanics.can_walk_on(state, proposed, collides)[:, None],
             proposed,

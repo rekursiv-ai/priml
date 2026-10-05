@@ -23,7 +23,7 @@ from priml.baselines.arcagi1.augmentation import ArcSpec, normalize_scale_weight
 from priml.baselines.arcagi1.scripts.build_dataset import DEFAULT_SCALE_WEIGHTS
 from priml.data.distributed_build import run_rank_zero_build
 from priml.data.ensure import DataSpec, FileSpec, ensure_data
-from priml.lib.custom_json import DictCodec, ListCodec, loads
+from priml.lib.custom_json import convert, loads
 from priml.paths import resolve_working_dir
 
 
@@ -187,9 +187,9 @@ def build_spatial_eval(
     puzzle_indices = _int_list(_load(src_test / "all__puzzle_indices.npy"))
     group_indices = _int_list(_load(src_test / "all__group_indices.npy"))
     puzzle_ids = _int_list(_load(src_test / "all__puzzle_identifiers.npy"))
-    identifiers = ListCodec.coerce(
+    identifiers = convert(
         loads((source_dir / "identifiers.json").read_text()),
-        str,
+        list[str],
     )
 
     new_inputs: list[NDArray[np.int64]] = []
@@ -387,6 +387,9 @@ def _sample_spatial(
 
 def _copy_dataset_json(source: Path, destination: Path, *, num_ids: int) -> None:
     """Copy a split's ``dataset.json`` with the identifier count restated."""
-    meta = DictCodec.coerce(loads((source / "dataset.json").read_text()))
+    meta = convert(
+        loads((source / "dataset.json").read_text()),
+        dict[str, object],
+    )
     meta["num_puzzle_identifiers"] = num_ids
     (destination / "dataset.json").write_text(json.dumps(meta))

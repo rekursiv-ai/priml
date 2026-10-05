@@ -26,7 +26,7 @@ from torch.optim import Optimizer
 
 import torch
 
-from priml.lib.custom_json import FloatCodec
+from priml.lib.custom_json import convert
 
 
 _ParamLike = Iterable[Tensor] | Iterable[dict[str, object]]
@@ -109,8 +109,8 @@ class AdamATan2(Optimizer):
         betas = group["betas"]
         assert isinstance(betas, tuple)
         beta1, beta2 = cast(tuple[float, float], betas)
-        lr = FloatCodec.coerce(group["lr"], None)
-        wd = FloatCodec.coerce(group["weight_decay"], None)
+        lr = convert(group["lr"], float)
+        wd = convert(group["weight_decay"], float)
         for p in cast(list[Tensor], group["params"]):
             if p.grad is None:
                 continue

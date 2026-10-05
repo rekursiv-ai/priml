@@ -14,6 +14,7 @@ from configgle.testing import assert_pprint_golden
 import pytest
 import torch
 
+from priml.lib.custom_json import ReadError
 from priml.model.attention.attention import Attention
 from priml.model.attention.gated_attention import GatedAttention
 from priml.model.attention.kernel import SdpaNaive
@@ -255,22 +256,21 @@ def test_unsupported_config_is_rejected(
 
 
 @pytest.mark.parametrize(
-    ("key", "value", "message"),
+    ("key", "value"),
     [
-        ("num_attention_heads", [], "cannot coerce [] to int"),
-        ("attention_bias", {}, "cannot coerce {} to bool"),
-        ("attention_dropout", True, "cannot coerce True to float"),
-        ("partial_rotary_factor", True, "cannot coerce True to float"),
-        ("rope_theta", [], "cannot coerce [] to float"),
-        ("rope_parameters", [], "cannot coerce [] to dict"),
-        ("layer_types", "bad", "cannot coerce 'bad' to list"),
-        ("full_attention_interval", None, "cannot coerce None to int"),
+        ("num_attention_heads", []),
+        ("attention_bias", {}),
+        ("attention_dropout", True),
+        ("partial_rotary_factor", True),
+        ("rope_theta", []),
+        ("rope_parameters", []),
+        ("layer_types", "bad"),
+        ("full_attention_interval", None),
     ],
 )
 def test_wrongly_typed_hf_fields_are_rejected(
     key: str,
     value: object,
-    message: str,
 ) -> None:
     config = hf_config()
     if key in {"partial_rotary_factor", "rope_theta"}:
@@ -281,9 +281,8 @@ def test_wrongly_typed_hf_fields_are_rejected(
         if key == "full_attention_interval":
             del config["layer_types"]
         config[key] = value
-    with pytest.raises(TypeError, match=re.escape(message)) as error:
+    with pytest.raises(ReadError):
         Qwen35.Config.from_hf(config)
-    assert str(error.value) == message
 
 
 @pytest.mark.parametrize(
@@ -396,9 +395,8 @@ def test_layer_types_use_the_default_interval_when_unspecified() -> None:
 
 
 def test_conditional_generation_rejects_a_non_object_text_config() -> None:
-    with pytest.raises(TypeError, match=re.escape("cannot coerce [] to dict")) as error:
+    with pytest.raises(ReadError):
         Qwen35.Config.from_hf({"model_type": "qwen3_5", "text_config": []})
-    assert str(error.value) == "cannot coerce [] to dict"
 
 
 def test_conditional_generation_text_defaults_and_nested_quantization() -> None:
@@ -490,9 +488,8 @@ def test_hidden_states_rejects_an_integer_4d_attention_mask() -> None:
 def test_load_rejects_a_non_object_checkpoint_config(tmp_path: Path) -> None:
     (tmp_path / "config.json").write_text("[]")
 
-    with pytest.raises(TypeError, match=re.escape("cannot coerce [] to dict")) as error:
+    with pytest.raises(ReadError):
         Qwen35.load(tmp_path)
-    assert str(error.value) == "cannot coerce [] to dict"
 
 
 def test_load_reads_a_local_checkpoint_onto_the_requested_dtype(

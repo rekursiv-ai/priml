@@ -14,8 +14,8 @@ from priml.baselines.sudoku.embedding import (
     GridChannel,
     GridEmbedding,
     PredictionFeedback,
-    scaled_normal,
 )
+from priml.model.init import scaled_normal
 from priml.testing.cost import assert_cost_matches_torch
 
 

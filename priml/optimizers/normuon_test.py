@@ -10,6 +10,7 @@ from torch import Tensor
 import pytest
 import torch
 
+from priml.lib.custom_json import ReadError
 from priml.optimizers import normuon
 from priml.optimizers.normuon import NorMuon
 
@@ -557,7 +558,7 @@ def test_invalid_parameter_group_scalar_has_exact_error(name: str) -> None:
     params = _parameters((2, 3))
     optimizer = NorMuon(params, compile=False)
     optimizer.param_groups[0][name] = None
-    with pytest.raises(TypeError, match=r"^cannot coerce None to float$"):
+    with pytest.raises(ReadError):
         optimizer.step()
 
 

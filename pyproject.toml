@@ -64,6 +64,7 @@ dependencies = [
     "einshape",
     # config; 1.4.1 first ships LateBound and Fig.finalized(), which priml imports
     "configgle>=1.4.1",
+    "msgspec>=0.22.0",
     # containers
     "wrapt",
     # misc
@@ -329,6 +330,7 @@ extend-safe-fixes = [
     "PT018",  # Split composite assertions.
     "PYI034", # Annotate __enter__/__new__/__iadd__ returns as Self.
     "RET504", # Remove unnecessary local assignment directly before return.
+    "RUF007", # Prefer `itertools.pairwise()` over `zip()` when iterating over successive pairs.
     "SIM102", # Collapse nested if statements.
     "SIM105", # Use contextlib.suppress instead of try-except-pass.
     "TC",     # Type-checking import and annotation rewrites.

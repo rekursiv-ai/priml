@@ -10,7 +10,7 @@ from configgle import Fig
 
 from priml.baselines.arcagi1.augmentation import ArcAugmentation, ArcSpec
 from priml.baselines.arcagi1.data import ArcData
-from priml.lib.custom_json import DictCodec, IntCodec
+from priml.lib.custom_json import convert
 from priml.paths import resolve_working_dir
 from priml.timer import CheckpointableStepTimer
 
@@ -294,16 +294,14 @@ class Arc2Data:
           state_dict: Saved global-plan cursor and epoch timer.
 
         """
-        self.passes = IntCodec.coerce(state_dict["passes"], default=None)
+        self.passes = convert(state_dict["passes"], int)
         active_pass = state_dict["active_pass"]
-        self.active_pass = (
-            None if active_pass is None else IntCodec.coerce(active_pass, default=None)
-        )
-        self.next_batch = IntCodec.coerce(state_dict["next_batch"], default=None)
+        self.active_pass = None if active_pass is None else convert(active_pass, int)
+        self.next_batch = convert(state_dict["next_batch"], int)
         if self.live is not None:
             self.live.passes = self.passes
             self.live.active_pass = self.active_pass
             self.live.next_batch = self.next_batch
         self.timer_epoch.load_state_dict(
-            DictCodec.coerce(state_dict["timer_epoch"], default=None),
+            convert(state_dict["timer_epoch"], dict[str, object]),
         )

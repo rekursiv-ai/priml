@@ -39,18 +39,6 @@ from priml.baselines.craftax.game.world_config import (
 )
 
 
-def _day_reciprocal() -> float:
-    exact = 1.0 / constants.DAY_LENGTH
-    nearest = torch.tensor(exact, dtype=torch.float32)
-    if float(nearest) > exact:
-        nearest = torch.nextafter(nearest, torch.zeros_like(nearest))
-    return float(nearest)
-
-
-# XLA GPU lowers traced f32 division to multiplication by a reciprocal rounded
-# toward zero.
-_DAY_RECIPROCAL: Final = _day_reciprocal()
-
 _LAVA_GLOW: Final = torch.tensor([[0.2, 0.7, 0.2], [0.7, 1.0, 0.7], [0.2, 0.7, 0.2]])
 """Light lava casts on its own tile and its eight neighbours."""
 
@@ -460,7 +448,12 @@ def daylight(timestep: Tensor) -> Tensor:
       light: Ambient surface light, same shape.
 
     """
-    phase = (timestep.float() * _DAY_RECIPROCAL) % 1.0 + 0.3
+    # Upstream training compiles ``t / day_length`` with the day length as a
+    # constant, which XLA folds into a multiply by its nearest float32
+    # reciprocal on CPU and CUDA alike; torch rounds this scalar the same way.
+    # A reciprocal rounded toward zero changed the game late in an episode
+    # (5 of 1,024 worlds diverged within 3,000 steps from t = 90,000).
+    phase = (timestep.float() * (1 / constants.DAY_LENGTH)) % 1.0 + 0.3
     return 1.0 - (torch.pi * phase).cos().abs() ** 3
 
 

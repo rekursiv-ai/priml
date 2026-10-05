@@ -14,7 +14,7 @@ from torch.optim import Optimizer
 
 import torch
 
-from priml.lib.custom_json import BoolCodec, FloatCodec, IntCodec
+from priml.lib.custom_json import convert
 from priml.math.numeric import matrix_signum_via_newtonschulz
 
 
@@ -255,23 +255,23 @@ class Muon(Optimizer):
         return loss
 
     def _step_group(self, group: dict[str, object]) -> None:
-        lr = FloatCodec.coerce(group["lr"], None)
+        lr = convert(group["lr"], float)
         weight_decay = (
             None
             if group["weight_decay"] is None
-            else FloatCodec.coerce(group["weight_decay"], None)
+            else convert(group["weight_decay"], float)
         )
-        momentum = FloatCodec.coerce(group["momentum"], None)
-        nesterov = BoolCodec.coerce(group["nesterov"], None)
+        momentum = convert(group["momentum"], float)
+        nesterov = convert(group["nesterov"], bool)
         ns_coefficients = group["ns_coefficients"]
         assert isinstance(ns_coefficients, tuple)
         ns_coefficients = cast(tuple[float, float, float], ns_coefficients)
         if len(ns_coefficients) != 3:
             raise ValueError("Expected len(ns_coefficients) == 3.")
-        eps = FloatCodec.coerce(group["eps"], None)
-        ns_steps = IntCodec.coerce(group["ns_steps"], None)
-        reference_numerics = BoolCodec.coerce(group["reference_numerics"], None)
-        ensemble_dims = IntCodec.coerce(group["ensemble_dims"], None)
+        eps = convert(group["eps"], float)
+        ns_steps = convert(group["ns_steps"], int)
+        reference_numerics = convert(group["reference_numerics"], bool)
+        ensemble_dims = convert(group["ensemble_dims"], int)
 
         for p in cast(list[Tensor], group["params"]):
             g = p.grad

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 import argparse
 import sys
 
-from priml.lib.custom_json import DictCodec, FloatCodec, loads
+from priml.lib.custom_json import convert, loads
 
 
 if TYPE_CHECKING:
@@ -36,7 +36,9 @@ def read_metrics(path: Path) -> dict[str, float]:
 
     """
     decoded = loads(path.read_text())
-    return {k: FloatCodec.coerce(v) for k, v in DictCodec.coerce(decoded).items()}
+    return {
+        k: convert(v, float) for k, v in convert(decoded, dict[str, object]).items()
+    }
 
 
 def format_summary(

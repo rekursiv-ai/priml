@@ -22,7 +22,7 @@ from priml.baselines.convextok.rounding import (
     deterministic_rounding,
     integral_rounding,
 )
-from priml.lib.custom_json import DictCodec, IntCodec, ListCodec
+from priml.lib.custom_json import convert
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -40,12 +40,11 @@ def test_rounding_matches_upstream_golden(
     rounding: RoundingFn,
     scheme: str,
 ) -> None:
-    candidates = ListCodec.coerce(
+    candidates = convert(
         _read_json("candidates.json").get("tokens"),
-        str,
-        default=None,
+        list[str],
     )
-    budget = IntCodec.coerce(_read_json("corpus.json").get("budget"), default=None)
+    budget = convert(_read_json("corpus.json").get("budget"), int)
     with _npz("program.npz") as program:
         token_edges, byte_edges, _ = (
             int(size) for size in torch.from_numpy(program["sizes"])
@@ -56,7 +55,7 @@ def test_rounding_matches_upstream_golden(
     chosen = rounding(solution[token_edges + byte_edges :], candidates, budget=budget)
     vocabulary = {candidates[int(position)] for position in chosen}
     vocabulary |= set(pre_tokenizers.ByteLevel.alphabet())
-    golden = ListCodec.coerce(_read_json("vocab.json").get(scheme), str, default=None)
+    golden = convert(_read_json("vocab.json").get(scheme), list[str])
     assert vocabulary == set(golden)
 
 
@@ -98,7 +97,7 @@ def _npz(name: str) -> np.lib.npyio.NpzFile:
 
 def _read_json(name: str) -> dict[str, object]:
     raw = cast(object, json.loads((_CWD / "testdata" / name).read_text()))
-    return dict(DictCodec.coerce(raw, default=None))
+    return dict(convert(raw, dict[str, object]))
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ from priml.baselines.arcagi1.data import (
     load_puzzle_dataset,
     resolve_rank,
 )
-from priml.lib.custom_json import DictCodec, ListCodec
+from priml.lib.custom_json import convert
 
 import priml.baselines.arcagi1.data as arc_data
 
@@ -289,7 +289,7 @@ def test_the_skipped_cell_marker_is_remapped(dataset_dir: Path) -> None:
     assert int(_tensor(batch["label"]).min()) >= 2  # Nothing was 0 to remap here.
     # A padded row carries the marker.
     padded = list(_data(dataset_dir, batch_size=7).eval_dataloader())[-1]
-    assert -100 in ListCodec.coerce(_tensor(padded["label"])[-1].tolist(), int)
+    assert -100 in convert(_tensor(padded["label"])[-1].tolist(), list[int])
 
 
 def test_sampling_is_reproducible_and_advances(dataset_dir: Path) -> None:
@@ -717,7 +717,10 @@ def test_load_split_preserves_spatial_sidecar(dataset_dir: Path) -> None:
 
 def test_load_split_defaults_missing_ignore_label(dataset_dir: Path) -> None:
     metadata_path = dataset_dir / "test" / "dataset.json"
-    metadata = DictCodec.coerce(cast(object, json.loads(metadata_path.read_text())))
+    metadata = convert(
+        cast(object, json.loads(metadata_path.read_text())),
+        dict[str, object],
+    )
     del metadata["ignore_label_id"]
     metadata_path.write_text(json.dumps(metadata))
 
@@ -742,7 +745,10 @@ def test_g11_load_split_requests_platform_independent_tag_dtype(
 
 def test_load_split_preserves_nonzero_ignore_label(dataset_dir: Path) -> None:
     metadata_path = dataset_dir / "test" / "dataset.json"
-    metadata = DictCodec.coerce(cast(object, json.loads(metadata_path.read_text())))
+    metadata = convert(
+        cast(object, json.loads(metadata_path.read_text())),
+        dict[str, object],
+    )
     metadata["ignore_label_id"] = 7
     metadata_path.write_text(json.dumps(metadata))
 
@@ -3021,18 +3027,11 @@ def test_puzzle_to_device_pins_cuda_before_nonblocking_transfer(
     assert move_calls == [(device, True)]
 
 
-def test_int_list_requests_python_integer_coercion(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    coerce = Mock(wraps=ListCodec.coerce)
-    monkeypatch.setattr(ListCodec, "coerce", coerce)
-
+def test_int_list_requests_python_integer_coercion() -> None:
     result = _int_list(np.array([4, 9, 12], dtype=np.int32))
 
     assert result == [4, 9, 12]
     assert all(type(value) is int for value in result)
-    coerce.assert_called_once()
-    assert coerce.call_args.args[1] is int
 
 
 def test_puzzle_eval_subset_preserves_rng_for_exact_limit_puzzle(

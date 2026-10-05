@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 from unittest.mock import Mock
 
 import math
@@ -281,6 +281,24 @@ def test_sampled_time_uses_the_latent_device(
     unused_sample = randn if weighting == "uniform" else rand
     sample.assert_called_once_with(2, device=latents.device)
     unused_sample.assert_not_called()
+
+
+@pytest.mark.parametrize("unknown", ["sigmoid"])
+def test_unknown_path_raises(unknown: str) -> None:
+    path = cast("Literal['linear', 'cosine']", unknown)
+    with pytest.raises(ValueError, match=rf"^unsupported flow path: {unknown}$"):
+        interpolant(torch.zeros(2), path)
+
+
+@pytest.mark.parametrize("unknown", ["logit"])
+def test_unknown_weighting_raises(unknown: str) -> None:
+    weighting = cast("Literal['uniform', 'lognormal']", unknown)
+    objective = SpeedrunObjective(weighting=weighting, shift_time=False)
+    with pytest.raises(
+        ValueError,
+        match=rf"^unsupported timestep weighting: {unknown}$",
+    ):
+        objective.sample_time(torch.zeros(2, 3, 4))
 
 
 def _unused_model(*args: Tensor) -> ModelOutput:

@@ -295,6 +295,7 @@ from typing import (
 )
 
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -326,7 +327,7 @@ from priml.baselines.sudoku.trainer import (
 )
 from priml.baselines.sudoku.trm import TRM
 from priml.cost import Cost, cost, elementwise_cost, reduction_cost
-from priml.lib.custom_json import DictCodec, ListCodec
+from priml.lib.custom_json import convert
 from priml.model.attention.kernel import attention_kernel_cost
 from priml.model.embedding import Embedding
 from priml.model.linear import Linear
@@ -3570,7 +3571,7 @@ def select_harvest_views(
             )
         generator = torch.Generator().manual_seed(seed + group * 1_000_003)
         selected = torch.randperm(view_count, generator=generator)[:views_per_group]
-        for view in ListCodec.coerce(selected.tolist(), int):
+        for view in convert(selected.tolist(), list[int]):
             flat_ids.append(group_start + view)
             group_ids.append(group)
             view_ids.append(view)
@@ -4011,8 +4012,8 @@ class Harvest:
                 np.unique(arrays["source_kind"], return_counts=True),
             )
             for kind, count in zip(
-                ListCodec.coerce(cast(object, kinds.tolist()), int),
-                ListCodec.coerce(cast(object, counts.tolist()), int),
+                convert(cast(object, kinds.tolist()), list[int]),
+                convert(cast(object, counts.tolist()), list[int]),
                 strict=True,
             ):
                 source_counts[kind] = source_counts.get(kind, 0) + count
@@ -4602,14 +4603,15 @@ class _Weights(TypedDict):
 
 def _checkpoint_payload(path: Path, device: torch.device | str) -> _Weights:
     """Load a checkpoint; return its nested full-state or top-level payload."""
-    state = DictCodec.coerce(
+    state = convert(
         cast(object, torch.load(path, map_location=device, weights_only=True)),
+        dict[str, object],
     )
     nested = state.get("step")
-    payload = DictCodec.coerce(nested) if nested is not None else state
-    weights: _Weights = {"model": DictCodec.coerce(payload["model"], Tensor)}
+    payload = convert(nested, dict[str, object]) if nested is not None else state
+    weights: _Weights = {"model": convert(payload["model"], dict[str, Tensor])}
     if "ema" in payload:
-        weights["ema"] = DictCodec.coerce(payload["ema"], Tensor)
+        weights["ema"] = convert(payload["ema"], dict[str, Tensor])
     return weights
 
 
@@ -5334,8 +5336,9 @@ class SieveEval:
         dataset_cfg = cfg.dataset.copy_tree()
         # The sieve evaluates the ordered prefix, so survivor positions ARE
         # global test indices.
-        dataset_cfg.eval_instance_indices = tuple(
-            ListCodec.coerce(survivors.tolist(), int),
+        indices = tuple(convert(survivors.to(torch.int64).tolist(), list[int]))
+        dataset_cfg.eval_instance_indices = (
+            indices if all(b > a for a, b in itertools.pairwise(indices)) else ()
         )
         dataset_cfg.eval_num_instances = None
         model = _eval_model(cfg.model, self._path(cfg.checkpoint_path), self.device)
@@ -5495,7 +5498,7 @@ def _survivor_indices(
     survivors: Tensor,
 ) -> tuple[int, ...]:
     """Global test indices for the disagreement subset."""
-    positions = ListCodec.coerce(survivors.tolist(), int)
+    positions = convert(survivors.tolist(), list[int])
     if base_indices:
         return tuple(base_indices[position] for position in positions)
     return tuple(positions)

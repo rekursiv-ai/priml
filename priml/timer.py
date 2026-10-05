@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Self, TypedDict, cast
 
 import time
 
-from priml.lib.custom_json import FloatCodec, IntCodec
+from priml.lib.custom_json import convert
 
 
 if TYPE_CHECKING:
@@ -124,7 +124,7 @@ class CheckpointableStepTimer:
         state = cast(CheckpointableStepTimer.StateDict, state_dict)
         # A checkpoint reader may hand back a float or a numeric string; a
         # value that is none of those is corruption, so the coercion raises.
-        self.global_count = IntCodec.coerce(state["global_count"], None)
-        self.global_sec = FloatCodec.coerce(state["global_sec"], None)
+        self.global_count = convert(state["global_count"], int)
+        self.global_sec = convert(state["global_sec"], float)
         self.local_count = 0
         self.local_sec = 0.0

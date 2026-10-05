@@ -30,7 +30,7 @@ from torch import Tensor
 import numpy as np
 import torch
 
-from priml.lib.custom_json import DictCodec, IntCodec, StrCodec, loads
+from priml.lib.custom_json import convert, loads, parse
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
 from priml.timer import CheckpointableStepTimer
@@ -435,7 +435,7 @@ class Tokenizer:
         with pickled.open("rb") as file:
             encoding = cast(object, pickle.load(file))  # noqa: S301 -- The artifact is a trusted tokenizer file created by this pipeline.
         assert isinstance(encoding, tiktoken.Encoding)
-        recipe = DictCodec.coerce(loads(recipe_path.read_text()), default=None)
+        recipe = parse(recipe_path.read_text(), dict[str, object])
         for field in ("bos_token", "token_bytes_sha256"):
             if field not in recipe:
                 raise ValueError(
@@ -479,7 +479,7 @@ class Tokenizer:
             )
         tokenizer = cls(
             encoding,
-            bos_token=StrCodec.coerce(recipe["bos_token"], default=None),
+            bos_token=convert(recipe["bos_token"], str),
             token_bytes=raw,
         )
         if raw.shape[0] != tokenizer.vocab_size:
@@ -1063,8 +1063,8 @@ def _byte_table(
 
 
 def _mapping(value: object) -> dict[str, object]:
-    return dict(DictCodec.coerce(value, default=None))
+    return dict(convert(value, dict[str, object]))
 
 
 def _integer(value: object) -> int:
-    return IntCodec.coerce(value, default=None)
+    return convert(value, int)

@@ -21,6 +21,7 @@ from priml.baselines.arcagi2.metric import (
     _json_grid,
 )
 from priml.baselines.arcagi2.record_test import assert_matches, reduce
+from priml.lib.custom_json import ReadError
 
 
 if TYPE_CHECKING:
@@ -179,7 +180,7 @@ def test_crop_preserves_color_boundaries_and_stops_at_padding() -> None:
     )
     wide_input = torch.tensor([[2, 3], [4, 5]], dtype=torch.int64)
     assert _crop(wide_input.flatten()).dtype == torch.uint8
-    with pytest.raises(IndexError):
+    with pytest.raises(ReadError):
         _crop(torch.tensor([[2.0, 3.0], [4.0, 5.0]]).flatten())
 
 
@@ -189,7 +190,7 @@ def test_hash_and_json_grid_use_uint8_boundary() -> None:
     grid = _json_grid([[1, 2], [3, 4]])
     assert grid.dtype == torch.uint8
     assert torch.equal(grid, values.to(torch.uint8))
-    with pytest.raises(ValueError, match="expected sequence of length 2"):
+    with pytest.raises(ReadError):
         _json_grid([[1, 2], [3, 4.5]])
 
 

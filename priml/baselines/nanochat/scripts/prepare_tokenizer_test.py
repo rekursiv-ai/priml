@@ -34,6 +34,7 @@ from priml.baselines.nanochat.scripts.prepare_tokenizer import (
     usage_scores,
     write_mapping,
 )
+from priml.lib.custom_json import ReadError
 
 
 def test_mapping_stages_in_destination_directory(
@@ -64,7 +65,7 @@ def test_mapping_io_and_usage_scores(tmp_path: Path) -> None:
     assert path.read_text() == '{\n  "a": [\n    true,\n    null\n  ],\n  "z": 1\n}\n'
     assert read_mapping(path) == {"a": [True, None], "z": 1}
     path.write_text("[]")
-    with pytest.raises(TypeError, match=r"cannot coerce .* to dict"):
+    with pytest.raises(ReadError):
         read_mapping(path)
     scores = usage_scores([b"a", b"b"], [0, 4])
     assert scores == [0.0, 4.0]

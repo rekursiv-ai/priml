@@ -16,7 +16,7 @@ import pytest
 import torch
 
 from priml.baselines.cifar10.data import Cifar10Data, _load_split, prepare
-from priml.lib.custom_json import ListCodec
+from priml.lib.custom_json import convert
 from priml.math.pixel import rgb2float
 
 
@@ -406,8 +406,8 @@ def test_prepare_normalizes_and_writes_both_splits(
         assert payload["media"].shape == (2, 3, 4, 5)
         assert payload["media"].dtype == torch.float32
         assert payload["label"].dtype == torch.int64
-        values = ListCodec.coerce(payload["media"][0, :, 0, 0].tolist(), float)
-        labels = ListCodec.coerce(payload["label"].tolist(), int)
+        values = convert(payload["media"][0, :, 0, 0].tolist(), list[float])
+        labels = convert(payload["label"].tolist(), list[int])
         assert values == pytest.approx(expected)
         assert labels == [0, 1]
         assert (destination / f"{split}.pt").read_bytes()

@@ -22,7 +22,7 @@ from torch import Tensor
 import torch
 import torch.distributed as dist
 
-from priml.lib.custom_json import FloatCodec, IntCodec
+from priml.lib.custom_json import convert
 
 
 if TYPE_CHECKING:
@@ -110,7 +110,7 @@ class GridAccuracy:
             dist.all_reduce(counts, op=dist.ReduceOp.SUM)
             counts = counts.cpu()
         solved, puzzles, cells_correct, cells = [
-            FloatCodec.coerce(count) for count in counts.tolist()
+            convert(count, float) for count in counts.tolist()
         ]
         return {
             "exact": solved / max(1.0, puzzles),
@@ -147,9 +147,21 @@ class GridAccuracy:
 
         """
         state = cast(GridAccuracy.StateDict, state_dict)
-        # A checkpoint reader may hand a count back as a float or a numeric
-        # string; anything else is corruption, so the coercion raises.
-        self.solved = IntCodec.coerce(state.get("solved"))
-        self.puzzles = IntCodec.coerce(state.get("puzzles"))
-        self.cells_correct = IntCodec.coerce(state.get("cells_correct"))
-        self.cells = IntCodec.coerce(state.get("cells"))
+        self.solved = _read_count(state, "solved")
+        self.puzzles = _read_count(state, "puzzles")
+        self.cells_correct = _read_count(state, "cells_correct")
+        self.cells = _read_count(state, "cells")
+
+
+def _read_count(state: Mapping[str, object], key: str) -> int:
+    """Read one checkpoint count, preserving absent-field defaults."""
+    if key not in state:
+        return 0
+    value = state[key]
+    if isinstance(value, str):
+        return convert(value, int, strict=False)
+    if isinstance(value, float):
+        converted = convert(value, float)
+        if converted.is_integer():
+            return int(converted)
+    return convert(value, int)
