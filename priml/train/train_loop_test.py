@@ -551,6 +551,7 @@ def test_train_loop_basic():
             device="cpu",
         ),
     )
+    config.runtime = SingleProcess.Config(device="cpu")
     config.metrics_eval = {}
     config.max_steps = 10
     config.num_steps_eval = 5
@@ -589,6 +590,7 @@ def test_train_loop_with_max_epochs():
             device="cpu",
         ),
     )
+    config.runtime = SingleProcess.Config(device="cpu")
     config.max_steps = 1000  # High limit.
     config.max_epochs = 2  # Should stop after 2 epochs (10 steps)
     config.num_steps_eval = 5
@@ -823,6 +825,7 @@ def test_eval_only_loads_checkpoint_and_skips_training(seeded_checkpoints: Path)
             step=_eval_only_step_config(),
             dataset=_BinaryDataset.Config(),
         )
+        eval_cfg.runtime = SingleProcess.Config(device="cpu")
         eval_cfg.metrics_eval = {"accuracy": BinaryAccuracy.Config()}
         eval_cfg.max_steps = 20
         eval_cfg.num_steps_eval = float("inf")
@@ -869,6 +872,7 @@ def _resume_table_config(checkpoint_dir: Path):
         step=_eval_only_step_config(),
         dataset=_BinaryDataset.Config(),
     )
+    cfg.runtime = SingleProcess.Config(device="cpu")
     cfg.metrics_eval = {}
     cfg.max_steps = 20
     cfg.num_steps_eval = float("inf")
@@ -1670,6 +1674,7 @@ def test_phase_timer_instruments_data_load_and_model_init():
     """PhaseTimer records data_load and model_init phases."""
     torch.manual_seed(42)
     config = TrainLoop.Config()
+    config.runtime = SingleProcess.Config(device="cpu")
     step_config = TrainStep.Config()
     step_config.model = _LinearModel.Config(in_features=2, out_features=2)
     step_config.optimizer = PartialConfig(torch.optim.Adam, lr=0.1)
@@ -1707,6 +1712,7 @@ def _make_step_logging_loop_config(
 ) -> TrainLoop.Config:
     """Minimal CPU loop that logs a per-step loss line on every step."""
     config = TrainLoop.Config()
+    config.runtime = SingleProcess.Config(device="cpu")
     if step_config is None:
         step_config = TrainStep.Config()
     step_config.model = _LinearModel.Config(in_features=2, out_features=2)
@@ -2175,6 +2181,7 @@ def test_phase_timer_disabled_no_overhead():
     """When disabled, no phases recorded."""
     torch.manual_seed(42)
     config = TrainLoop.Config()
+    config.runtime = SingleProcess.Config(device="cpu")
     step_config = TrainStep.Config()
     step_config.model = _LinearModel.Config(in_features=2, out_features=2)
     step_config.optimizer = PartialConfig(torch.optim.Adam, lr=0.1)
@@ -2207,6 +2214,7 @@ def test_phase_timer_passed_to_step():
     """TrainLoop passes timer to step."""
     torch.manual_seed(42)
     config = TrainLoop.Config()
+    config.runtime = SingleProcess.Config(device="cpu")
     step_config = TrainStep.Config()
     step_config.model = _LinearModel.Config(in_features=2, out_features=2)
     step_config.optimizer = PartialConfig(torch.optim.Adam, lr=0.1)
@@ -2931,6 +2939,7 @@ def test_a_train_metric_publishes_on_the_train_payload() -> None:
     step.parallelism = NoParallel.Config(device="cpu")
     step.compile = None
     config = TrainLoop.Config(step=step, dataset=_simple_dummy_dataset())
+    config.runtime = SingleProcess.Config(device="cpu")
     config.metrics_eval = {}
     config.checkpointer = None
     config.seed = 42
@@ -3665,6 +3674,7 @@ def test_eval_only_never_saves_a_best_checkpoint(seeded_checkpoints: Path) -> No
             step=_eval_only_step_config(),
             dataset=_BinaryDataset.Config(),
         )
+        eval_cfg.runtime = SingleProcess.Config(device="cpu")
         eval_cfg.metrics_eval = {"accuracy": BinaryAccuracy.Config()}
         eval_cfg.max_steps = 20
         eval_cfg.num_steps_eval = math.inf
@@ -3711,6 +3721,7 @@ def _make_accum_epoch_loop_config(
 ) -> TrainLoop.Config:
     """Loop whose per-epoch micro-batch count leaves a partial accumulation."""
     config = TrainLoop.Config()
+    config.runtime = SingleProcess.Config(device="cpu")
     step_config = TrainStep.Config()
     step_config.model = _LinearModel.Config(in_features=2, out_features=2)
     step_config.optimizer = PartialConfig(torch.optim.SGD, lr=0.1)

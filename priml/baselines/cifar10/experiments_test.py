@@ -43,6 +43,7 @@ from priml.baselines.cifar10.train_step import Cifar10TrainStep
 from priml.lib.absent import ABSENT
 from priml.metrics.topk import TopK
 from priml.optimizers import CompositeOptimizer
+from priml.runtime import SingleProcess
 from priml.testing.experiments import ExperimentFactory
 from priml.testing.golden import assert_pprint_golden
 from priml.train.parallelism import NoParallel
@@ -67,6 +68,8 @@ def shrink(config: Cifar10TrainLoop, *, directory: Path) -> Cifar10TrainLoop:
     runs here is the published recipe at minimum scale.
     """
     config.step.total_train_steps = 2
+    assert isinstance(config.runtime, SingleProcess.Config)
+    config.runtime.device = "cpu"
     config.step.parallelism = NoParallel.Config(device="cpu")
     config.step.compile = None
     config.step.translate_pad = 1

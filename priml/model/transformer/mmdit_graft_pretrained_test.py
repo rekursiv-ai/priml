@@ -35,7 +35,7 @@ def test_one_layer_pretrained_qwen3_graft(tmp_path: Path) -> None:
     )
 
     repo = "Qwen/Qwen3-0.6B"
-    hf_config = AutoConfig.from_pretrained(repo, cache_dir=tmp_path / "hf")
+    hf_config = AutoConfig.from_pretrained(repo)
     hf_config.num_hidden_layers = 1
     # ``PretrainedConfig`` resolves model fields through ``__getattribute__``,
     # so the checker sees no ``layer_types``; read it through ``to_dict``.
@@ -52,7 +52,6 @@ def test_one_layer_pretrained_qwen3_graft(tmp_path: Path) -> None:
         repo,
         "AutoModelForCausalLM",
         config=hf_config,
-        cache_dir=tmp_path / "hf",
         dtype=torch.float32,
         attn_implementation="eager",
     )

@@ -86,6 +86,8 @@ def shrink(config: _CraftaxLoop) -> _CraftaxLoop:
     coefficients, and schedule stay exactly as the experiment set them, so
     what runs here is the published recipe at minimum scale.
     """
+    assert isinstance(config.runtime, SingleProcess.Config)
+    config.runtime.device = "cpu"
     config.step.parallelism = NoParallel.Config(device="cpu")
     config.step.env.device = "cpu"
     config.step.env.num_envs = 2
