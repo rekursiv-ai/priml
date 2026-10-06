@@ -18,7 +18,10 @@ from priml.model.custom_types import has_weight
 from priml.model.linear import Linear
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.qwen3_5 import Qwen35
-from priml.model.transformer.qwen3_5_weights import remap_hf_state_dict
+from priml.model.transformer.qwen3_5_weights import (
+    export_hf_state_dict,
+    remap_hf_state_dict,
+)
 from priml.testing.qwen3_5 import hf_config
 
 
@@ -299,6 +302,71 @@ def test_tied_head_alias_must_match_the_embedding() -> None:
         remap_hf_state_dict(state, native_config)
     del state["lm_head.weight"]
     native_config.make().load_state_dict(remap_hf_state_dict(state, native_config))
+
+
+def test_export_is_the_inverse_of_remap() -> None:
+    """Recover every native weight after exporting and remapping it."""
+    native_config = Qwen35.Config.from_hf(hf_config())
+    model = native_config.make()
+    exported = export_hf_state_dict(model.state_dict(), native_config)
+    remapped = remap_hf_state_dict(exported, native_config)
+    expected = model.state_dict()
+    assert set(remapped) == set(expected)
+    for name, value in expected.items():
+        assert torch.equal(remapped[name], value)
+
+
+def test_export_splits_the_fused_gate_up_projection() -> None:
+    """Split the fused gate and up projection into Hugging Face weights."""
+    native_config = Qwen35.Config.from_hf(hf_config())
+    model = native_config.make()
+    fused = model.state_dict()["blocks.0.ffn.up_proj.weight"]
+    exported = export_hf_state_dict(model.state_dict(), native_config)
+    half = fused.shape[0] // 2
+    assert torch.equal(exported["model.layers.0.mlp.gate_proj.weight"], fused[:half])
+    assert torch.equal(exported["model.layers.0.mlp.up_proj.weight"], fused[half:])
+
+
+def test_export_omits_the_tied_head() -> None:
+    """Store a tied output head only through its shared embedding weight."""
+    config = hf_config()
+    config["tie_word_embeddings"] = True
+    native_config = Qwen35.Config.from_hf(config)
+    model = native_config.make()
+    exported = export_hf_state_dict(model.state_dict(), native_config)
+    assert "lm_head.weight" not in exported
+    # The tied layout HF ships -- head absent, sharing declared in config --
+    # loads back through the forward map.
+    model.load_state_dict(remap_hf_state_dict(exported, native_config), strict=True)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        ("missing", "Missing"),
+        ("extra", "Unexpected"),
+        ("shape", "has shape"),
+        ("integer", "floating-point"),
+    ],
+)
+def test_export_rejects_incomplete_or_malformed_native_state(
+    mutation: str,
+    match: str,
+) -> None:
+    """Reject missing, extra, reshaped, and non-floating native weights."""
+    native_config = Qwen35.Config.from_hf(hf_config())
+    state = dict(native_config.make().state_dict())
+    name = "blocks.0.ffn.up_proj.weight"
+    if mutation == "missing":
+        del state[name]
+    elif mutation == "extra":
+        state["blocks.9.norm.weight"] = torch.zeros(2, 3)
+    elif mutation == "shape":
+        state[name] = state[name][1:]
+    else:
+        state[name] = state[name].to(torch.int32)
+    with pytest.raises(ValueError, match=match):
+        export_hf_state_dict(state, native_config)
 
 
 if __name__ == "__main__":

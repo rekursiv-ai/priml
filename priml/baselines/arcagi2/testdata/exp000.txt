@@ -267,6 +267,7 @@ ArcTrainLoop(
                         deterministic=False,
                         float32_matmul_precision=None,
                         backend=None,
+                        process_group_timeout_sec=None,
                         mesh_topology={'dp': -1, 'pp': 1, 'tp': 1}
                 )
         )

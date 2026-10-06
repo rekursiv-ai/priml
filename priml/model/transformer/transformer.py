@@ -13,7 +13,7 @@ per-layer list. Each layer receives its own depth index.
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import Self, cast, override
+from typing import TYPE_CHECKING, Protocol, Self, cast, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -37,6 +37,22 @@ from priml.model.legacy_keys import absorb_legacy_keys
 from priml.model.sequential import Sequential
 from priml.model.special import TiedLinear
 from priml.model.transformer.block import TransformerBlock
+
+
+if TYPE_CHECKING:
+    from priml.math.custom_types import TensorFn
+
+
+class OutputProjection(Protocol):
+    """Let a caller control how hidden states pass through the output head.
+
+    This can score the vocabulary in small chunks instead of keeping the full
+    logits tensor in memory.
+    """
+
+    def __call__(self, head: TensorFn, hidden: Tensor, /) -> Tensor:
+        """Project head-ready hidden states to logits or derived scores."""
+        ...
 
 
 class Transformer(nn.Module):
@@ -211,27 +227,52 @@ class Transformer(nn.Module):
             if isinstance(module, HasResetParameters):
                 module.reset_parameters()
 
-    def project_to_logits(self, hidden: Tensor, **kwargs: object) -> Tensor:
+    def project_to_logits(
+        self,
+        hidden: Tensor,
+        *,
+        output_projection: OutputProjection | None = None,
+        **kwargs: object,
+    ) -> Tensor:
         """Apply the head, or return hidden states when absent.
 
         Args:
           hidden: Hidden.
+          output_projection: Optional replacement for the registered head call.
           **kwargs: Kwargs.
 
         Returns:
           result: The Tensor.
 
         """
-        return hidden if self.proj_out is None else self.proj_out(hidden, **kwargs)
+        self._validate_output_projection(output_projection)
+        if self.proj_out is None:
+            return hidden
+        if output_projection is not None:
+            return output_projection(self.proj_out, hidden)
+        return self.proj_out(hidden, **kwargs)
 
     @override
     def forward(self, x: Tensor, /, **kwargs: object) -> Tensor:
         """Apply input projection, blocks, and head."""
+        output_projection = kwargs.pop("output_projection", None)
+        self._validate_output_projection(output_projection)
         if self.proj_in is not None:
             x = self.proj_in(x)
         for block in self.blocks:
             x = cast(Tensor, block(x, **kwargs))
-        return self.project_to_logits(x, **kwargs)
+        return self.project_to_logits(
+            x,
+            output_projection=cast("OutputProjection | None", output_projection),
+            **kwargs,
+        )
+
+    def _validate_output_projection(self, output_projection: object | None) -> None:
+        """Reject an invalid output callback before running the stack."""
+        if output_projection is not None and not callable(output_projection):
+            raise TypeError("output_projection must be callable or None.")
+        if output_projection is not None and self.proj_out is None:
+            raise ValueError("output_projection requires an output projection.")
 
 
 def head_is_tied(config: Transformer.Config) -> bool:

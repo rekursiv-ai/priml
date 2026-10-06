@@ -7,10 +7,13 @@ with consistent caching behavior across all users.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
+import json
 import logging
 import os
+import shutil
+import tempfile
 
 from torch import Tensor, nn
 
@@ -21,7 +24,9 @@ from priml.lib.userdirs import cache_dir
 
 
 if TYPE_CHECKING:
-    from safetensors.torch import load_file
+    from collections.abc import Iterable, Mapping
+
+    from safetensors.torch import load_file, save_file
     from transformers.modeling_utils import PreTrainedModel
     from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
@@ -29,6 +34,7 @@ else:
     from wrapt import lazy_import
 
     load_file = lazy_import("safetensors.torch", "load_file")
+    save_file = lazy_import("safetensors.torch", "save_file")
 
 
 def get_cache_dir() -> Path:
@@ -313,3 +319,153 @@ def load_hf_checkpoint(
     return DictCodec.coerce(hf_model.config.to_dict(), default=None), {
         key: value.detach().cpu() for key, value in hf_model.state_dict().items()
     }
+
+
+_WEIGHT_SUFFIXES: Final[frozenset[str]] = frozenset(
+    {".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".gguf", ".msgpack", ".h5"},
+)
+"""Weight-bearing suffixes a tokenizer copy never carries."""
+
+
+_OWNED_CORE_FILES: Final[frozenset[str]] = frozenset(
+    {"config.json", "model.safetensors"},
+)
+
+
+def save_hf_checkpoint(
+    path: Path | str,
+    config: Mapping[str, object],
+    state: dict[str, Tensor],
+    *,
+    auxiliary_files: Iterable[Path | str] = (),
+) -> Path:
+    """Save a Hugging Face checkpoint in a local directory.
+
+    The checkpoint contains one ``config.json`` and one
+    ``model.safetensors``. Large checkpoints are not split into shards because
+    the loaders used here do not require Transformers' standard 5 GB sharding.
+
+    Tensors are detached, moved to CPU, and made contiguous before saving.
+    Their dtypes stay unchanged. Shared weights, such as a tied output head and
+    token embedding, must appear only once in ``state``. Their sharing must be
+    recorded in the config.
+
+    The caller may also copy selected tokenizer or generation files. A new
+    export is built in a temporary directory and published only after every
+    file is written. An existing export is updated only when its config,
+    auxiliary files, and file list still match. In that case, only
+    ``model.safetensors`` is replaced.
+
+    Args:
+      path: Destination directory, created if absent.
+      config: Values to write to ``config.json``.
+      state: Tensors keyed by their Hugging Face names.
+      auxiliary_files: Files to copy beside the config and weights. Each file
+        is copied under its basename.
+
+    Returns:
+      directory: The checkpoint directory.
+
+    Raises:
+      ValueError: An auxiliary file conflicts with a checkpoint file, or an
+        existing destination does not match the expected export.
+
+    """
+    directory = Path(path)
+    metadata = _export_metadata(config, auxiliary_files=auxiliary_files)
+    tensors = {name: value.detach().cpu().contiguous() for name, value in state.items()}
+    if directory.exists():
+        _validate_owned_export(directory, metadata)
+        temporary = _sibling_temp_file(directory)
+        try:
+            save_file(tensors, str(temporary))
+            temporary.replace(directory / "model.safetensors")
+        finally:
+            temporary.unlink(missing_ok=True)
+        return directory
+
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(prefix=f".{directory.name}.staging-", dir=directory.parent),
+    )
+    try:
+        for name, contents in metadata.items():
+            (staging / name).write_bytes(contents)
+        save_file(tensors, str(staging / "model.safetensors"))
+        staging.rename(directory)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return directory
+
+
+def _export_metadata(
+    config: Mapping[str, object],
+    *,
+    auxiliary_files: Iterable[Path | str],
+) -> dict[str, bytes]:
+    """Materialize the immutable files an export will publish."""
+    metadata = {
+        "config.json": (json.dumps(dict(config), indent=2) + "\n").encode(),
+    }
+    for source in auxiliary_files:
+        path = Path(source)
+        name = path.name
+        if name in metadata or name in _OWNED_CORE_FILES:
+            raise ValueError(
+                f"Auxiliary file conflicts with owned export file: {name}."
+            )
+        if _is_weight_artifact(name):
+            raise ValueError(f"Auxiliary file cannot be a weight artifact: {name}.")
+        metadata[name] = path.read_bytes()
+    return metadata
+
+
+def _is_weight_artifact(name: str) -> bool:
+    """Return whether a file name can add weights to an HF checkpoint."""
+    return Path(name).suffix in _WEIGHT_SUFFIXES or name.endswith(".index.json")
+
+
+def _validate_owned_export(directory: Path, metadata: Mapping[str, bytes]) -> None:
+    """Require a complete export containing only the files this writer owns."""
+    if not directory.is_dir():
+        raise ValueError(f"HF export destination {directory} is not a directory.")
+    entries = {entry.name: entry for entry in directory.iterdir()}
+    weight_artifacts = sorted(
+        name
+        for name, entry in entries.items()
+        if entry.is_file() and _is_weight_artifact(name) and name != "model.safetensors"
+    )
+    if weight_artifacts:
+        raise ValueError(
+            f"Refusing to write beside foreign/conflicting weight artifacts "
+            f"{weight_artifacts} in {directory}.",
+        )
+    expected = set(metadata) | _OWNED_CORE_FILES
+    unexpected = sorted(set(entries) - expected)
+    missing = sorted(expected - set(entries))
+    if unexpected or missing or any(not entry.is_file() for entry in entries.values()):
+        raise ValueError(
+            f"{directory} is not an owned HF export; missing={missing}, "
+            f"unexpected={unexpected}.",
+        )
+    mismatched = [
+        name
+        for name, contents in metadata.items()
+        if entries[name].read_bytes() != contents
+    ]
+    if mismatched:
+        raise ValueError(
+            f"{directory} immutable export metadata does not match: {mismatched}.",
+        )
+
+
+def _sibling_temp_file(directory: Path) -> Path:
+    """Reserve a sibling temp path for an atomic weight replacement."""
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".{directory.name}.weights-",
+        suffix=".safetensors",
+        dir=directory.parent,
+    )
+    os.close(descriptor)
+    return Path(name)

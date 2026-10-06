@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import cast
 
 import pytest
@@ -92,6 +93,76 @@ def test_multiprocess_backend_defaults_to_gloo_on_cpu() -> None:
 def test_multiprocess_backend_respects_explicit() -> None:
     runtime = MultiProcess.Config(device="cpu", backend="gloo").make()
     assert runtime.backend == "gloo"
+
+
+def test_multiprocess_process_group_timeout_defaults_to_pytorch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pass PyTorch's default timeout when no override is configured."""
+    record = _patch_distributed(monkeypatch, world_size=1)
+
+    MultiProcess.Config(
+        device="cpu",
+        mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+    ).make().initialize()
+
+    init_kwargs = cast(dict[str, object], record["init_kwargs"])
+    assert init_kwargs["timeout"] == torch.distributed.default_pg_timeout
+
+
+def test_multiprocess_passes_explicit_process_group_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pass an explicit timeout to the process group as a timedelta."""
+    record = _patch_distributed(monkeypatch, world_size=1)
+
+    process = MultiProcess.Config(
+        device="cpu",
+        mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+        process_group_timeout_sec=12.5,
+    ).make()
+    assert process.process_group_timeout_sec == 12.5
+    process.initialize()
+
+    init_kwargs = cast(dict[str, object], record["init_kwargs"])
+    assert init_kwargs["timeout"] == timedelta(seconds=12.5)
+
+
+@pytest.mark.parametrize(
+    "timeout", [0.0, -1.0, float("inf"), float("-inf"), float("nan")]
+)
+def test_multiprocess_rejects_invalid_process_group_timeout(
+    timeout: float,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject invalid timeouts before creating a process group."""
+    record = _patch_distributed(monkeypatch, world_size=1)
+
+    with pytest.raises(ValueError, match="finite and greater than 0"):
+        initialize_global_device_mesh(
+            device=torch.device("cpu"),
+            mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+            process_group_timeout_sec=timeout,
+        )
+
+    assert "init_kwargs" not in record
+
+
+def test_explicit_timeout_rejects_preexisting_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject a timeout override for a process group PriML did not create."""
+    record = _patch_distributed(monkeypatch, world_size=1, preinitialized=True)
+
+    with pytest.raises(RuntimeError, match="already initialized"):
+        initialize_global_device_mesh(
+            device=torch.device("cpu"),
+            mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+            process_group_timeout_sec=12.5,
+        )
+
+    assert "init_kwargs" not in record
+    assert "mesh_device_type" not in record
 
 
 def test_single_process_initialize_sets_float32_matmul_precision(

@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 
     from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
     from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
+
+    from priml.math.custom_types import TensorFn
 else:
     from wrapt import lazy_import
 
@@ -335,6 +337,31 @@ def test_hybrid_forwards_messages_to_injected_output_head_and_cache() -> None:
     assert recorder.messages[0] is message
     assert recorder.messages[1] is message
     assert recorder.messages[2] is message
+
+
+def test_forward_can_replace_only_the_output_projection() -> None:
+    """A bounded loss can consume hidden states through the registered head."""
+    model = Qwen35.Config.from_hf(hf_config()).make()
+    tokens = torch.arange(15).reshape(3, 5)
+    expected_hidden = model.hidden_states(tokens)
+    expected = model(tokens)[..., :3]
+    calls: list[tuple[TensorFn, torch.Tensor]] = []
+
+    def output_projection(
+        head: TensorFn,
+        hidden: torch.Tensor,
+    ) -> torch.Tensor:
+        """Record the head input and return a narrow projection."""
+        calls.append((head, hidden))
+        projected = head(hidden)
+        return projected[..., :3]
+
+    actual = model(tokens, output_projection=output_projection)
+
+    assert len(calls) == 1
+    assert calls[0][0] is model.proj_out
+    torch.testing.assert_close(calls[0][1], expected_hidden)
+    torch.testing.assert_close(actual, expected)
 
 
 def test_prepared_causal_mask_reaches_injected_self_attention_prefill_and_cache() -> (

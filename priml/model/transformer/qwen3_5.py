@@ -41,7 +41,7 @@ from priml.model.special import TiedLinear
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.qwen3_5_weights import remap_hf_state_dict
-from priml.model.transformer.transformer import Transformer
+from priml.model.transformer.transformer import OutputProjection, Transformer
 
 
 if TYPE_CHECKING:
@@ -211,9 +211,19 @@ class Qwen35(Transformer):
         self.norm.reset_parameters()
 
     @override
-    def project_to_logits(self, hidden: Tensor, **kwargs: object) -> Tensor:
+    def project_to_logits(
+        self,
+        hidden: Tensor,
+        *,
+        output_projection: OutputProjection | None = None,
+        **kwargs: object,
+    ) -> Tensor:
         """Normalize residual stream and apply the pretrained language-model head."""
-        return super().project_to_logits(self.norm(hidden), **kwargs)
+        return super().project_to_logits(
+            self.norm(hidden),
+            output_projection=output_projection,
+            **kwargs,
+        )
 
     def hidden_states(
         self,
@@ -299,11 +309,17 @@ class Qwen35(Transformer):
 
         """
         cache = kwargs.pop("cache", None)
+        output_projection = kwargs.pop("output_projection", None)
+        self._validate_output_projection(output_projection)
         if cache is not None and not isinstance(cache, list):
             raise TypeError("cache must be a list or None.")
         cache = cast(list[object] | None, cache)
         hidden = self.hidden_states(x, cache=cache, **kwargs)
-        return hidden if self.proj_out is None else self.proj_out(hidden, **kwargs)
+        return super().project_to_logits(
+            hidden,
+            output_projection=cast("OutputProjection | None", output_projection),
+            **kwargs,
+        )
 
     def alloc_cache(
         self,

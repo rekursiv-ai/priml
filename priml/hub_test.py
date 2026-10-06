@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 from typing import TYPE_CHECKING, cast
 from unittest.mock import (
     MagicMock,
@@ -25,6 +25,7 @@ from priml.hub import (
     load_local_state_dict,
     load_transformers_model,
     resolve_hf_dtype,
+    save_hf_checkpoint,
 )
 from priml.lib.userdirs import cache_dir
 
@@ -396,6 +397,200 @@ def test_load_hf_checkpoint_defaults_to_no_remote_code(
     load_hf_checkpoint("org/tiny", dtype=None)
 
     assert load.call_args.kwargs["trust_remote_code"] is False
+
+
+def test_save_hf_checkpoint_round_trips_locally(tmp_path: Path) -> None:
+    """Load back the exact config and tensors written by a local export."""
+    config = {"model_type": "toy", "hidden_size": 4}
+    state = {
+        "model.embed_tokens.weight": torch.arange(12.0).reshape(3, 4),
+        "lm_head.weight": torch.arange(12.0).reshape(4, 3),
+        # Non-contiguous on arrival: safetensors refuses those, so the save
+        # must make them contiguous without touching the values.
+        "model.norm.weight": torch.arange(6.0).reshape(2, 3).t(),
+    }
+    directory = save_hf_checkpoint(tmp_path / "nested" / "out", config, state)
+
+    hf_config, hf_sd = load_hf_checkpoint(directory, dtype=None)
+
+    assert hf_config == config
+    for name, value in state.items():
+        torch.testing.assert_close(hf_sd[name], value, rtol=0, atol=0)
+
+
+def test_save_hf_checkpoint_accepts_a_non_dict_mapping(tmp_path: Path) -> None:
+    """Accept every mapping type promised by the public signature."""
+    config = MappingProxyType({"model_type": "toy"})
+    directory = save_hf_checkpoint(
+        tmp_path / "out",
+        config,
+        {"weight": torch.ones(1)},
+    )
+
+    saved = cast(dict[str, object], json.loads((directory / "config.json").read_text()))
+    assert saved == dict(config)
+
+
+def test_save_hf_checkpoint_copies_only_explicit_auxiliary_files(
+    tmp_path: Path,
+) -> None:
+    """Copy only the auxiliary files selected by the caller."""
+    source = tmp_path / "source"
+    source.mkdir()
+    for name in (
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "generation_config.json",
+        "config.json",
+        "preprocessor_config.json",
+        "model.safetensors",
+        "old.safetensors",
+        "pytorch_model.bin",
+        "model.safetensors.index.json",
+    ):
+        (source / name).write_bytes(b"stale")
+
+    out = save_hf_checkpoint(
+        tmp_path / "out",
+        {"model_type": "toy"},
+        {"w": torch.zeros(2, 3)},
+        auxiliary_files=[
+            source / "tokenizer.json",
+            source / "tokenizer_config.json",
+            source / "special_tokens_map.json",
+            source / "generation_config.json",
+        ],
+    )
+
+    assert {entry.name for entry in out.iterdir()} == {
+        "config.json",
+        "model.safetensors",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "generation_config.json",
+    }
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["config.json", "model.safetensors", "weights.pt", "model.safetensors.index.json"],
+)
+def test_save_hf_checkpoint_rejects_conflicting_auxiliary_files(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    """Reject auxiliary files that could replace owned checkpoint files."""
+    source = tmp_path / name
+    source.write_bytes(b"stale")
+    with pytest.raises(ValueError, match="Auxiliary file"):
+        save_hf_checkpoint(
+            tmp_path / "out",
+            {},
+            {"w": torch.ones(1)},
+            auxiliary_files=[source],
+        )
+
+
+def test_save_hf_checkpoint_refuses_foreign_shards(tmp_path: Path) -> None:
+    """A stale shard would merge into every later load of the directory."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "model-00001-of-00002.safetensors").write_bytes(b"stale")
+
+    with pytest.raises(ValueError, match="foreign"):
+        save_hf_checkpoint(out, {"model_type": "toy"}, {"w": torch.zeros(2, 3)})
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "pytorch_model.bin",
+        "weights.pt",
+        "model.safetensors.index.json",
+        "pytorch_model.bin.index.json",
+    ],
+)
+def test_save_hf_checkpoint_refuses_all_conflicting_weight_artifacts(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    """Refuse every recognized foreign weight artifact beside an export."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / name).write_bytes(b"stale")
+    with pytest.raises(ValueError, match="weight artifacts"):
+        save_hf_checkpoint(out, {}, {"w": torch.ones(1)})
+
+
+def test_save_hf_checkpoint_failure_never_publishes_partial_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Leave no destination or staging directory after an initial save fails."""
+    out = tmp_path / "out"
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        """Simulate a safetensors write failure."""
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(hub, "save_file", fail)
+    with pytest.raises(RuntimeError, match="write failed"):
+        save_hf_checkpoint(out, {}, {"w": torch.ones(1)})
+
+    assert not out.exists()
+    assert not list(tmp_path.glob(".out.staging-*"))
+
+
+def test_save_hf_checkpoint_atomically_replaces_owned_weights(tmp_path: Path) -> None:
+    """Replace only the weights when updating an owned export."""
+    out = save_hf_checkpoint(
+        tmp_path / "out", {"model_type": "toy"}, {"w": torch.ones(1)}
+    )
+    save_hf_checkpoint(out, {"model_type": "toy"}, {"w": torch.zeros(1)})
+    _, state = load_hf_checkpoint(out, dtype=None)
+    torch.testing.assert_close(state["w"], torch.zeros(1))
+    assert {entry.name for entry in out.iterdir()} == {
+        "config.json",
+        "model.safetensors",
+    }
+
+
+def test_save_hf_checkpoint_rejects_changed_immutable_metadata(
+    tmp_path: Path,
+) -> None:
+    """Reject a re-export whose immutable metadata changed."""
+    out = save_hf_checkpoint(
+        tmp_path / "out", {"model_type": "toy"}, {"w": torch.ones(1)}
+    )
+    before = (out / "model.safetensors").read_bytes()
+    with pytest.raises(ValueError, match="metadata does not match"):
+        save_hf_checkpoint(out, {"model_type": "other"}, {"w": torch.zeros(1)})
+    assert (out / "model.safetensors").read_bytes() == before
+
+
+def test_failed_owned_overwrite_preserves_old_export(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preserve the published weights when their replacement fails."""
+    out = save_hf_checkpoint(
+        tmp_path / "out", {"model_type": "toy"}, {"w": torch.ones(1)}
+    )
+    before = (out / "model.safetensors").read_bytes()
+
+    def fail(_state: object, filename: str) -> None:
+        """Write a partial temporary file and then fail."""
+        Path(filename).write_bytes(b"partial")
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(hub, "save_file", fail)
+    with pytest.raises(RuntimeError, match="write failed"):
+        save_hf_checkpoint(out, {"model_type": "toy"}, {"w": torch.zeros(1)})
+
+    assert (out / "model.safetensors").read_bytes() == before
+    assert not list(tmp_path.glob(".out.weights-*"))
 
 
 if __name__ == "__main__":

@@ -1,5 +1,9 @@
 """Optional input/output projections and attention-owned causality."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, cast
+
 import pytest
 import torch
 
@@ -12,6 +16,10 @@ from priml.model.special import TiedLinear
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.transformer import Transformer
 from priml.testing.bfb import randomize_parameters
+
+
+if TYPE_CHECKING:
+    from priml.math.custom_types import TensorFn
 
 
 def _config() -> Transformer.Config:
@@ -64,6 +72,49 @@ def test_output_width_is_inferred_from_projection() -> None:
     assert resolved.channels_out == 3
     assert config.channels_out == -1
     assert config.make()(torch.randn(2, 3, 8)).shape == (2, 3, 3)
+
+
+def test_output_projection_can_replace_the_registered_head_call() -> None:
+    """Allow one forward pass to replace the registered output-head call."""
+    config = _config()
+    config.proj_out = Linear.Config(channels_out=3)
+    model = config.make()
+    inputs = torch.randn(2, 3, 8)
+    hidden = cast(torch.Tensor, model.blocks[0](inputs))
+    assert isinstance(model.proj_out, Linear)
+    calls: list[tuple[TensorFn, torch.Tensor]] = []
+
+    def output_projection(
+        head: TensorFn,
+        value: torch.Tensor,
+        /,
+    ) -> torch.Tensor:
+        """Record the head input and return a narrow projection."""
+        calls.append((head, value))
+        return head(value)[..., :2]
+
+    actual = model(inputs, output_projection=output_projection)
+
+    assert len(calls) == 1
+    assert calls[0][0] is model.proj_out
+    assert torch.equal(calls[0][1], hidden)
+    assert torch.equal(actual, model.proj_out(hidden)[..., :2])
+
+
+def test_output_projection_requires_a_registered_head() -> None:
+    """Reject an output callback when the transformer has no output head."""
+    model = _config().make()
+
+    def identity(
+        _head: TensorFn,
+        hidden: torch.Tensor,
+        /,
+    ) -> torch.Tensor:
+        """Return hidden states unchanged."""
+        return hidden
+
+    with pytest.raises(ValueError, match="requires an output projection"):
+        model(torch.randn(2, 3, 8), output_projection=identity)
 
 
 def test_generation_requires_token_input_projection() -> None:

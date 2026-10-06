@@ -32,7 +32,11 @@ if TYPE_CHECKING:
     from priml.data.custom_types import DatasetProtocol
     from priml.distributed.testing import WarmPoolGetter
     from priml.loss.custom_types import LossOutput
-    from priml.train.custom_types import TrackerProtocol, TrainStepOutput
+    from priml.train.custom_types import (
+        CheckpointerProtocol,
+        TrackerProtocol,
+        TrainStepOutput,
+    )
 
 from configgle import Fig, InlineConfig, Makeable, Makes, PartialConfig
 
@@ -4136,6 +4140,33 @@ class _ClosingStep(TrainStep):
         _ClosingStep.closes_total += 1
 
 
+class _ClosingDataset(_ScopedEvalDataset):
+    """A dataset that records ownership and cleanup across loop exit paths."""
+
+    closes_total: ClassVar[int] = 0
+    _events: ClassVar[_RuntimeEvents | None] = None
+
+    class Config(Makes["_ClosingDataset"], _ScopedEvalDataset.Config):
+        pass
+
+    @classmethod
+    def set_events(cls, events: _RuntimeEvents) -> None:
+        """Set the event recorder shared by dataset instances."""
+        cls._events = events
+
+    def __init__(self, config: Config) -> None:
+        """Initialize the dataset and its close counter."""
+        super().__init__(config)
+        self.closes = 0
+
+    def close(self) -> None:
+        """Record one dataset cleanup."""
+        self.closes += 1
+        _ClosingDataset.closes_total += 1
+        if self._events is not None:
+            self._events.append("dataset_close")
+
+
 def _closing_loop_config(
     tmp: str,
     *,
@@ -4155,6 +4186,11 @@ def _closing_loop_config(
 
 def _raise_on_build() -> DatasetProtocol:
     raise RuntimeError("the dataset failed")
+
+
+def _raise_after_dataset_build() -> CheckpointerProtocol:
+    """Simulate setup failing after the dataset has been acquired."""
+    raise RuntimeError("setup failed after dataset construction")
 
 
 def test_the_loop_closes_a_closeable_step_once_after_training() -> None:
@@ -4196,6 +4232,58 @@ def test_a_step_without_close_is_left_alone_by_cleanup() -> None:
         assert not isinstance(loop.step, Closeable)
         loop.train()
         assert loop._closed
+
+
+def test_the_loop_closes_a_closeable_dataset_once_before_its_runtime(
+    tmp_path: Path,
+    runtime_events: _RuntimeEvents,
+) -> None:
+    """Close the dataset once before destroying its owned runtime."""
+    _RecordingRuntime.set_events(runtime_events)
+    _ClosingDataset.set_events(runtime_events)
+    config = _closing_loop_config(str(tmp_path))
+    config.dataset = _ClosingDataset.Config()
+    config.runtime = _RecordingRuntime.Config()
+    loop = config.make()
+    dataset = loop.dataset
+    assert isinstance(dataset, _ClosingDataset)
+
+    loop.train()
+    loop.close()
+
+    assert dataset.closes == 1
+    assert runtime_events[-2:] == ["dataset_close", "runtime_destroy"]
+
+
+def test_the_loop_closes_a_closeable_dataset_when_training_raises(
+    tmp_path: Path,
+) -> None:
+    """Close the dataset exactly once when training fails."""
+    config = _closing_loop_config(str(tmp_path), fail_at_step=0)
+    config.dataset = _ClosingDataset.Config()
+    loop = config.make()
+    dataset = loop.dataset
+    assert isinstance(dataset, _ClosingDataset)
+
+    with pytest.raises(RuntimeError, match="the step failed"):
+        loop.train()
+
+    assert dataset.closes == 1
+
+
+def test_constructor_failure_closes_an_acquired_dataset(
+    tmp_path: Path,
+) -> None:
+    """Close an acquired dataset when later loop setup fails."""
+    before = _ClosingDataset.closes_total
+    config = _closing_loop_config(str(tmp_path))
+    config.dataset = _ClosingDataset.Config()
+    config.checkpointer = InlineConfig(_raise_after_dataset_build)
+
+    with pytest.raises(RuntimeError, match="after dataset construction"):
+        config.make()
+
+    assert _ClosingDataset.closes_total == before + 1
 
 
 def test_close_preserves_gc_disabled_by_caller() -> None:
