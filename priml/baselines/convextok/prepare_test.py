@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Final, cast
 
 import json
+import time
 
 from configgle import Fig
 from pyarrow import parquet
@@ -44,7 +45,7 @@ _CWD: Final = Path(__file__).resolve().parent
 @pytest.mark.compute_large_fixture
 def test_fixture_corpus_yields_upstream_tokenizer(tmp_path: Path) -> None:
     corpus = _read_json("corpus.json")
-    config = _fixture_config(tmp_path)
+    config = fixture_config(tmp_path)
     config.make().build()
 
     tokenizer = Tokenizer.from_file(str(config.working_dir / "tokenizer.json"))
@@ -99,7 +100,7 @@ def test_any_solver_fills_the_solver_slot(
 
     monkeypatch.setattr(prepare, "count_pretokens", patched_count_pretokens)
     monkeypatch.setattr(prepare, "count_candidates", patched_count_candidates)
-    config = _fixture_config(tmp_path)
+    config = fixture_config(tmp_path)
     config.working_dir = tmp_path / "new-parent" / "nested" / "convextok"
     config.device = "meta"
     config.presolve = None
@@ -164,7 +165,7 @@ def test_build_forwards_the_presolved_program_and_solution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = _fixture_config(tmp_path)
+    config = fixture_config(tmp_path)
     config.working_dir = tmp_path / "presolved" / "convextok"
     config.device = "meta"
     config.solver = _AllOnes.Config()
@@ -206,6 +207,30 @@ def test_build_forwards_the_presolved_program_and_solution(
     assert rounding_dtypes == [torch.float64]
 
 
+def test_fit_times_each_stage_and_keeps_both_programs(tmp_path: Path) -> None:
+    config = fixture_config(tmp_path)
+    config.solver = _AllOnes.Config()
+    start = time.perf_counter()
+    fit = config.make().fit()
+    wall = time.perf_counter() - start
+
+    assert list(fit.seconds) == [
+        "read",
+        "pretokens",
+        "candidates",
+        "program",
+        "presolve",
+        "solve",
+        "postsolve",
+        "rounding",
+    ]
+    assert all(0 <= value <= wall for value in fit.seconds.values())
+    columns = fit.program.program.num_columns
+    assert fit.solved.num_columns < columns
+    assert fit.solution.primal.shape == (fit.solved.num_columns,)
+    assert fit.primal.shape == (columns,)
+
+
 def test_vocabulary_must_leave_room_for_every_byte() -> None:
     config = ConvexTokPreparation.Config()
     config.vocab_size = 256
@@ -236,8 +261,17 @@ def test_donor_recipe_fits_convextok_on_its_raw_shards(tmp_path: Path) -> None:
     assert finalized.corpus == unigram.copy_tree().finalize().corpus
 
 
-def _fixture_config(tmp_path: Path) -> ConvexTokPreparation.Config:
-    """Write the fixture corpus as one raw shard and point a CPU preparation at it."""
+def fixture_config(tmp_path: Path) -> ConvexTokPreparation.Config:
+    """Write the fixture corpus as one raw shard and point a CPU preparation at it.
+
+    Args:
+      tmp_path: Directory that receives ``raw/shard_00000.parquet``.
+
+    Returns:
+      config: A one-worker CPU preparation over that shard, writing to
+        ``tmp_path / "convextok"``.
+
+    """
     corpus = _read_json("corpus.json")
     raw = tmp_path / "raw"
     raw.mkdir()

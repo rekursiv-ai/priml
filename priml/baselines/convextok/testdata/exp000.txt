@@ -1,0 +1,34 @@
+MeasuredFit.Config(
+                study_name='convextok',
+                experiment_name='exp000',
+                doc='',
+                base_dir='/opt/scratch',
+                working_dir=PosixPath('/opt/scratch/runs/convextok/exp000'),
+                preparation=ConvexTokPreparation.Config(
+                        raw_dir=PosixPath('/opt/scratch/datasets/nanochat/raw'),
+                        shard_indices=[0, 1, 2, 3, 4, 5, 6],
+                        working_dir=PosixPath('/opt/scratch/runs/convextok/exp000'),
+                        vocab_size=16_384,
+                        reserved_count=10,
+                        split_pattern="'(?i:[sdmt]|ll|ve|re)|[^\\r\\n\\p{L}\\p{N}]?+\\p{L}+|\\p{N}{1,2}| "
+                        '?[^\\s\\p{L}\\p{N}]++[\\r\\n]*|\\s*[\\r\\n]|\\s+(?!\\S)|\\s+',
+                        num_workers=16,
+                        presolve=<function priml.baselines.convextok.presolver.presolve.presolve at 0xdefacedeface>,
+                        solver=Pdlp.Config(
+                                tolerance=0.0001,
+                                iteration_limit=100_000,
+                                ruiz_iterations=10,
+                                restart_period=200,
+                                sufficient_reduction=0.2,
+                                necessary_reduction=0.8,
+                                artificial_restart=0.36,
+                                pid_proportional=0.99,
+                                pid_integral=0.01,
+                                pid_derivative=0.0,
+                                pid_integral_smoothing=0.3
+                        ),
+                        rounding=<function priml.baselines.convextok.rounding.deterministic_rounding at 0xdefacedeface>,
+                        device='cuda'
+                ),
+                reference=None
+        )

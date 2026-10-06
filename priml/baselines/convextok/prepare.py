@@ -8,10 +8,13 @@ is upstream's; its ten special tokens become the baseline's reserved IDs.
 """
 
 from collections.abc import Callable
-from dataclasses import field
+from dataclasses import dataclass, field
 from pathlib import Path
 
+import time
+
 from configgle import Fig, Makeable
+from torch import Tensor
 
 import torch
 
@@ -26,6 +29,7 @@ from priml.baselines.convextok.pretokens import count_pretokens
 from priml.baselines.convextok.program import (
     LinearProgram,
     LpSolution,
+    TokenizationProgram,
     build_program,
 )
 from priml.baselines.convextok.rounding import (
@@ -38,6 +42,28 @@ from priml.baselines.nanochat.scripts.prepare_data import (
 )
 from priml.baselines.nanochat.scripts.prepare_tokenizer import document_rows
 from priml.paths import validated_output_path
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Fit:
+    """One fit: its program, the solver's answer, the chosen pieces, and stage times.
+
+    Attributes:
+      program: The program as built, before presolve.
+      solved: The program the solver was given: presolved, or as built.
+      solution: The solver's answer to ``solved``.
+      primal: That answer on ``program``'s columns, on the CPU.
+      learned: The chosen pieces, in the order rounding chose them.
+      seconds: Wall-clock seconds per stage, in the order the stages ran.
+
+    """
+
+    program: TokenizationProgram
+    solved: LinearProgram
+    solution: LpSolution
+    primal: Tensor
+    learned: list[str]
+    seconds: dict[str, float]
 
 
 class ConvexTokPreparation:
@@ -91,6 +117,20 @@ class ConvexTokPreparation:
         config = self.config
         output = validated_output_path(config.working_dir, protected=[config.raw_dir])
         output.mkdir(parents=True)
+        export_tokenizer(
+            self.fit().learned,
+            split_pattern=config.split_pattern,
+        ).save(str(output / "tokenizer.json"))
+
+    def fit(self) -> Fit:
+        """Read the fitting shards, solve the program, and choose the learned pieces.
+
+        Returns:
+          fit: The program, the solution, the pieces, and each stage's seconds.
+
+        """
+        config = self.config
+        laps = _Laps()
         texts = [
             text
             for shard in config.shard_indices
@@ -99,30 +139,46 @@ class ConvexTokPreparation:
                 shard=shard,
             )
         ]
+        laps("read")
         pretokens = count_pretokens(
             texts,
             split_pattern=config.split_pattern,
             num_workers=config.num_workers,
         )
+        laps("pretokens")
         candidates = list(count_candidates(pretokens, num_workers=config.num_workers))
+        laps("candidates")
         budget = config.vocab_size - config.reserved_count - 256
         built = build_program(pretokens, candidates, budget=budget)
-        solver = config.solver.make()
-        if config.presolve is None:
-            primal = solver(built.program.to(config.device)).primal.cpu()
-        else:
-            presolved = config.presolve(built.program, torch.device(config.device))
-            result = solver(presolved.program.to(config.device))
-            primal = presolved.postsolve(result.primal)
+        laps("program")
+        device = torch.device(config.device)
+        solved, presolved = built.program, None
+        if config.presolve is not None:
+            presolved = config.presolve(built.program, device)
+            solved = presolved.program
+            laps("presolve")
+        solution = config.solver.make()(solved.to(device))
+        # Reading the answer back waits for the device, so the solve's lap is whole.
+        primal = solution.primal.cpu()
+        laps("solve")
+        if presolved is not None:
+            primal = presolved.postsolve(primal)
+            laps("postsolve")
         chosen = config.rounding(
             primal[built.num_token_edges + built.num_byte_edges :].to(torch.float64),
             candidates,
             budget=budget,
         )
-        export_tokenizer(
-            [candidates[int(position)] for position in chosen],
-            split_pattern=config.split_pattern,
-        ).save(str(output / "tokenizer.json"))
+        learned = [candidates[int(position)] for position in chosen]
+        laps("rounding")
+        return Fit(
+            program=built,
+            solved=solved,
+            solution=solution,
+            primal=primal,
+            learned=learned,
+            seconds=laps.seconds,
+        )
 
 
 def donor_convextok16k() -> Preparation.Config:
@@ -140,3 +196,16 @@ def donor_convextok16k() -> Preparation.Config:
     config.tokenizer = ConvexTokPreparation.Config()
     config.tokenizer_name = "convextok16k"
     return config
+
+
+@dataclass(slots=True, kw_only=True)
+class _Laps:
+    """Wall-clock seconds per stage, each timed from the end of the one before."""
+
+    seconds: dict[str, float] = field(default_factory=dict)
+    last: float = field(default_factory=time.perf_counter)
+
+    def __call__(self, stage: str) -> None:
+        now = time.perf_counter()
+        self.seconds[stage] = now - self.last
+        self.last = now

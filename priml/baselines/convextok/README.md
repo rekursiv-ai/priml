@@ -17,6 +17,7 @@ presolver with torch, Triton and Numba.
 - [Equivalence](#equivalence)
 - [Performance](#performance)
 - [Layout](#layout)
+- [Experiments](#experiments)
 - [Training nanochat on it](#training-nanochat-on-it)
 - [Out of scope](#out-of-scope)
 - [References](#references)
@@ -160,6 +161,8 @@ at 56.9 GiB.
 | `rounding.py` | `t`, candidates -> vocabulary (`det`, `bias`, `all_ones`) |
 | `export.py` | vocabulary -> `tokenizer.json` |
 | `prepare.py` | `ConvexTokPreparation`: every stage above, as one config |
+| `measure.py` | `MeasuredFit`: one fit, its `tokenizer.json` and `metrics.json` |
+| `experiments.py` | the fits, as experiments (`exp000`) |
 
 `ConvexTokPreparation.Config` holds its choices as slots, not mode strings:
 `presolve` (`None` solves the program as built), `solver`, and `rounding`, where
@@ -185,6 +188,60 @@ compiled kernels, which proves each kernel compiles and still matches PSLP, and
 one checks that a kernel keeps a single specialization. The interpreted run is
 also how the kernels' line coverage is measured, since coverage cannot trace
 compiled code.
+
+## Experiments
+
+`experiments.py` holds one fit per experiment. Each returns a
+`MeasuredFit.Config` (`measure.py`), which fits a vocabulary with
+`ConvexTokPreparation` and writes `tokenizer.json` and `metrics.json` to
+`/opt/scratch/runs/convextok/<experiment>`. `exp000` is the port's defaults:
+the paper's corpus, PSLP presolve, PDLP and `det` rounding. At paper scale it
+needs the memory under [Performance](#performance): an 80 GB GPU and about
+60 GiB of host memory.
+
+```bash
+uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data --stage fetch
+uv --quiet run --frozen python -m priml priml.baselines.convextok.experiments.exp000
+```
+
+| Metric | Meaning |
+|---|---|
+| `seconds` | Wall-clock seconds per stage, and `total` |
+| `peak_gpu_bytes` | Most memory torch held on the solver's GPU |
+| `peak_host_bytes` | This process's peak resident memory, without the pretokenizing workers |
+| `program`, `solved` | Rows, columns and nonzeros, as built and as given to the solver |
+| `objective` | The relaxation's frequency-weighted token count at the solution |
+| `infeasibility` | 2-norm of the solution's row- and variable-bound violations |
+| `iterations`, `optimal` | How the solver stopped, when it reports it (PDLP does) |
+| `pieces`, `missing`, `extra` | Vocabulary size, and its difference from `reference` |
+
+A fork changes one slot of `cfg.preparation` and names exp000's tokenizer as
+its `reference`:
+
+```python
+def exp001() -> MeasuredFit.Config:
+    """Fork exp000 with the following changes.
+
+    - Solve with MySolver instead of PDLP.
+    """
+    cfg = exp000()
+    cfg.experiment_name = "exp001"
+    cfg.preparation.solver = MySolver.Config()
+    cfg.reference = Path("/opt/scratch/runs/convextok/exp000/tokenizer.json")
+    return cfg
+```
+
+- `solver` takes any config whose made object maps a `LinearProgram` to a
+  result with a `primal` tensor. A result with `iterations` and `optimal`
+  reports them too.
+- `presolve = None` solves the program as built; `rounding` takes the other
+  schemes in `rounding.py`.
+- `shard_indices = [0]` fits a program about a seventh the size, for faster
+  iteration.
+- `missing == extra == 0` means the fork fits exp000's vocabulary. A fork
+  whose vocabulary differs is judged downstream: put the same preparation in
+  `donor_convextok16k` and train nanochat's `exp023` on it (next section).
+  Compare solvers at matched `infeasibility`.
 
 ## Training nanochat on it
 
