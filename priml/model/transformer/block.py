@@ -196,8 +196,6 @@ class TransformerBlock(nn.Module):
         cache: LayerCache | None = None,
         **kwargs: object,
     ) -> Tensor:
-        # In-place cache updates must not be checkpointed: backward recomputation
-        # would append the same keys and values a second time.
         if cache is not None:
             # In-place cache updates must not be checkpointed: backward
             # recomputation would append the same keys and values twice.

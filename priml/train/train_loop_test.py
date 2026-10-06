@@ -719,7 +719,6 @@ def test_train_loop_comprehensive():
         config = TrainLoop.Config(step=step_config, dataset=_BinaryDataset.Config())
         config.runtime = SingleProcess.Config(device="cpu")
         config.metrics_eval = {"accuracy": BinaryAccuracy.Config()}
-        config.runtime = SingleProcess.Config(device="cpu")
         config.max_steps = 20
         config.num_steps_eval = 10
         config.checkpointer = Checkpointer.Config(
@@ -757,7 +756,6 @@ def test_train_loop_comprehensive():
         config2 = TrainLoop.Config(step=step_config2, dataset=_BinaryDataset.Config())
         config2.runtime = SingleProcess.Config(device="cpu")
         config2.metrics_eval = {"accuracy": BinaryAccuracy.Config()}
-        config2.runtime = SingleProcess.Config(device="cpu")
         config2.max_steps = 30
         config2.num_steps_eval = 10
         config2.checkpointer = Checkpointer.Config(
