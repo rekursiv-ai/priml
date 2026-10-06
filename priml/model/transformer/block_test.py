@@ -188,6 +188,31 @@ def test_transformer_block_cached_forwards_kwargs_and_residuals(
 
 
 @pytest.mark.parametrize("prenorm", [True, False])
+@pytest.mark.parametrize("checkpoint", [True, False])
+def test_an_uncached_call_sends_no_cache_to_a_mixer_without_one(
+    prenorm: bool,
+    checkpoint: bool,
+) -> None:
+    """A recurrent or value-gated mixer has no ``cache`` parameter to receive."""
+    model = TransformerBlock.Config(
+        channels_in=4,
+        attn=Attention.Config(num_heads=2, channels_head=2),
+        prenorm=prenorm,
+        checkpoint=checkpoint,
+    ).make()
+    model.attn = _MarkerModule(2)
+    model.norm1 = _MarkerModule(5)
+    model.norm2 = _MarkerModule(7)
+    model.ffn = _MarkerModule(3)
+    x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4).requires_grad_()
+
+    output = model(x, marker="forwarded")
+
+    # Each marker adds its value; both orders land on the same affine map.
+    torch.testing.assert_close(output, 4 * x + 24)
+
+
+@pytest.mark.parametrize("prenorm", [True, False])
 def test_transformer_block_leaves_a_memory_to_the_blocks_that_cross_attend(
     prenorm: bool,
 ) -> None:

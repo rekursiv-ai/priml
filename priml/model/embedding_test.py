@@ -6,8 +6,6 @@ from functools import partial
 from pathlib import Path
 from typing import Final
 
-import multiprocessing
-
 from torch import Tensor
 
 import pytest
@@ -629,33 +627,33 @@ def test_multi_hot_embedding_cost_counts_cpu_gather_and_scatter() -> None:
 
 
 @pytest.mark.gpu_triton
-def test_multi_hot_triton_rejects_a_row_outside_the_table() -> None:
+def test_multi_hot_triton_reads_a_row_outside_the_table_as_zero() -> None:
+    """The kernel masks the bad row, as the backward skips it; torch raises."""
     if not torch.cuda.is_available():
         pytest.skip("needs a CUDA device")
-    # A device assertion poisons its CUDA context; isolate it from other tests.
-    process = multiprocessing.get_context("spawn").Process(
-        target=_check_triton_invalid_row,
-    )
-    process.start()
-    process.join(timeout=30)
-    assert process.exitcode == 0
-
-
-def _check_triton_invalid_row() -> None:
     config = _small_layout()
     model = config.make()
     rows = _draw_packed(config)
-    rows[0, 0] = config.channels_in
+    rows[0, 0] = -1
     with pytest.raises(IndexError):
         model.forward_torch(rows)
+    valid = rows.clone()
+    valid[0, 0] = 0
+    # The row just before the table is a live allocation the unmasked read
+    # would sum; row 0 is zeroed so the masked read and the valid id agree.
+    storage = torch.ones(
+        1 + config.channels_in,
+        config.channels_out,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
     model = model.cuda()
-    with pytest.raises(RuntimeError, match="device-side assert"):
-        _launch_invalid_row(model, rows.cuda())
-
-
-def _launch_invalid_row(model: MultiHotEmbedding, rows: Tensor) -> None:
-    model.forward_triton(rows)
-    torch.cuda.synchronize()
+    with torch.no_grad():
+        model.weight.data = storage[1:]
+        model.weight[0] = 0
+        actual = model.forward_triton(rows.cuda())
+        expected = model.forward_triton(valid.cuda())
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def test_multi_hot_materialization_rebuilds_offsets() -> None:

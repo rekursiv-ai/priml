@@ -198,31 +198,34 @@ class TransformerBlock(nn.Module):
     ) -> Tensor:
         # In-place cache updates must not be checkpointed: backward recomputation
         # would append the same keys and values a second time.
-        if self.checkpoint and torch.is_grad_enabled() and cache is None:
+        if cache is not None:
+            # In-place cache updates must not be checkpointed: backward
+            # recomputation would append the same keys and values twice.
+            return self._forward(x, cache=cache, **kwargs)
+        # Only a decoding call names a cache: a mixer without a cache slot (a
+        # recurrent or value-gated layer) forwards its kwargs to a kernel that
+        # rejects one.
+        if self.checkpoint and torch.is_grad_enabled():
             return torch_checkpoint(
-                partial(self._forward, cache=None, **kwargs),
+                partial(self._forward, **kwargs),
                 x,
                 use_reentrant=False,
             )
-        return self._forward(x, cache=cache, **kwargs)
+        return self._forward(x, **kwargs)
 
-    def _forward(
-        self,
-        x: Tensor,
-        *,
-        cache: object | None,
-        **kwargs: object,
-    ) -> Tensor:
+    def _forward(self, x: Tensor, **kwargs: object) -> Tensor:
         # Handed the memory a stack sends its cross-attending blocks, this
         # block's ``Attention`` would attend to it instead of to ``x``.
         kwargs.pop("memory", None)
+        cache = kwargs.pop("cache", None)
+        attn_kwargs = kwargs if cache is None else {**kwargs, "cache": cache}
         if self.prenorm:
             normed = self.norm1(x, **kwargs)
-            attn_out = self.attn(normed, cache=cache, **kwargs)
+            attn_out = self.attn(normed, **attn_kwargs)
             x = x + attn_out
             x = x + self.ffn(self.norm2(x, **kwargs), **kwargs)
         else:
-            attn_out = self.attn(x, cache=cache, **kwargs)
+            attn_out = self.attn(x, **attn_kwargs)
             x = self.norm1(x + attn_out, **kwargs)
             x = self.norm2(x + self.ffn(x, **kwargs), **kwargs)
         return x

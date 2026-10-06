@@ -329,6 +329,16 @@ def test_training_feeds_the_decoded_grid_back() -> None:
     assert not torch.equal(pool.feedback, pool.inputs)
 
 
+def test_an_empty_eval_batch_scores_zero_and_keeps_padded_rows() -> None:
+    torch.manual_seed(0)
+    step = training_config(4, None).make()
+    batch = {**training_batch(0, 0), "valid_count": 0}
+    result = step.eval_loss(**batch)
+    assert torch.equal(result["loss"], torch.zeros(1))
+    assert torch.equal(result["model"], torch.zeros(2, 4))
+    assert "metrics" not in result
+
+
 def test_arc_step_requires_atomic_act() -> None:
     config = training_config(4, None)
     config.pool = None

@@ -177,8 +177,7 @@ class ArcTrainStep(SudokuTrainStep):
         active: Tensor,
     ) -> tuple[Tensor, dict[str, float | Tensor]]:
         pool = self.pool
-        if not isinstance(pool, AtomicPool):
-            raise TypeError("ARC2 training requires an atomic ACT pool.")
+        assert isinstance(pool, AtomicPool)
         ignore = self.config.ignore_label_id
         per_token = stablemax_cross_entropy(
             logits.double(),
