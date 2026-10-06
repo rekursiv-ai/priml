@@ -16,7 +16,9 @@ import subprocess
 import sys
 
 import pytest
+import torch
 
+from priml.lib.testing.cli import assert_help_without_docstring
 from priml.model.attention import prepare_flash3
 from priml.model.attention.flash3 import (
     cutlass_revision,
@@ -27,6 +29,12 @@ from priml.model.attention.flash3 import (
 
 class _Arguments(Protocol):
     cache_root: Path
+
+
+@pytest.fixture(autouse=True)
+def cuda_128(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Present a cu128 torch, so receipts hold on a CPU-only torch too."""
+    monkeypatch.setattr(torch.version, "cuda", "12.8")
 
 
 @dataclass(kw_only=True, slots=True)
@@ -50,6 +58,10 @@ def _no_run(
     del command, cwd, environment
 
 
+def _two_cpus(pid: int) -> set[int]:
+    return {pid, 7}
+
+
 def _no_path_error(path: Path) -> str:
     del path
     return ""
@@ -69,11 +81,15 @@ def _no_staging(path: Path) -> None:
     del path
 
 
-def test_build_environment_pins_the_profile_and_preserves_path() -> None:
+def test_build_environment_pins_the_profile_and_preserves_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    monkeypatch.setattr(os, "sched_getaffinity", _two_cpus)
     assert prepare_flash3._build_environment({"PATH": "/usr/bin"}) == {
-        "PATH": "/usr/local/cuda-12.8/bin" + os.pathsep + "/usr/bin",
-        "CUDA_HOME": "/usr/local/cuda-12.8",
-        "MAX_JOBS": "32",
+        "PATH": "/usr/local/cuda/bin" + os.pathsep + "/usr/bin",
+        "CUDA_HOME": "/usr/local/cuda",
+        "MAX_JOBS": "2",
         "FLASH_ATTENTION_FORCE_BUILD": "TRUE",
         "FLASH_ATTENTION_FORCE_CXX11_ABI": "TRUE",
         "FLASH_ATTENTION_OFFLINE_BUILD": "TRUE",
@@ -96,62 +112,42 @@ def test_build_environment_pins_the_profile_and_preserves_path() -> None:
     }
 
 
-def test_build_environment_works_without_an_inherited_path() -> None:
+def test_build_environment_works_without_an_inherited_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CUDA_HOME", raising=False)
     environment = prepare_flash3._build_environment({"PRESERVED": "yes"})
-    assert environment["PATH"] == "/usr/local/cuda-12.8/bin"
+    assert environment["PATH"] == "/usr/local/cuda/bin"
     assert environment["PRESERVED"] == "yes"
 
 
-def test_nvcc_path_prefers_path_then_provisioned_toolkit(
+@pytest.mark.parametrize(
+    ("cuda_home", "nvcc"),
+    [(None, "/usr/local/cuda/bin/nvcc"), ("/opt/cuda", "/opt/cuda/bin/nvcc")],
+)
+def test_nvcc_path_names_missing_toolkit(
     monkeypatch: pytest.MonkeyPatch,
+    cuda_home: str | None,
+    nvcc: str,
 ) -> None:
-    def which_path(name: str) -> str | None:
-        assert name == "nvcc"
-        return "/custom/nvcc"
-
-    def which_none(name: str) -> str | None:
-        assert name == "nvcc"
-        return None
-
-    def is_file(path: Path) -> bool:
-        del path
-        return True
-
-    monkeypatch.setattr(shutil, "which", which_path)
-    assert prepare_flash3._nvcc_path() == Path("/custom/nvcc")
-
-    monkeypatch.setattr(shutil, "which", which_none)
-    monkeypatch.setattr(Path, "is_file", is_file)
-    assert prepare_flash3._nvcc_path() == Path("/usr/local/cuda-12.8/bin/nvcc")
-
-
-def test_nvcc_path_names_missing_toolkit(monkeypatch: pytest.MonkeyPatch) -> None:
-    def which_none(name: str) -> str | None:
-        assert name == "nvcc"
-        return None
-
     def is_file(path: Path) -> bool:
         del path
         return False
 
-    monkeypatch.setattr(shutil, "which", which_none)
+    if cuda_home is None:
+        monkeypatch.delenv("CUDA_HOME", raising=False)
+    else:
+        monkeypatch.setenv("CUDA_HOME", cuda_home)
     monkeypatch.setattr(Path, "is_file", is_file)
     with pytest.raises(RuntimeError) as error:
         prepare_flash3._nvcc_path()
-    assert str(error.value) == (
-        "FA3 source preparation requires nvcc 12.8 on PATH or at "
-        "/usr/local/cuda-12.8/bin/nvcc."
-    )
+    assert str(error.value) == f"FA3 source preparation requires nvcc at {nvcc}."
 
 
-def test_main_rejects_missing_module_docstring(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(prepare_flash3, "__doc__", None)
-    with pytest.raises(
-        ValueError,
-        match=r"^Expected __doc__ is not None\.$",
-    ) as error:
-        prepare_flash3.main()
-    assert str(error.value) == "Expected __doc__ is not None."
+def test_main_help_works_without_a_module_docstring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert_help_without_docstring(monkeypatch, prepare_flash3, prepare_flash3.main)
 
 
 def test_cli_parses_cache_root_and_prints_prepared_path(
@@ -222,6 +218,7 @@ def test_validate_build_runtime_pins_platform_torch_abi_and_nvcc(
         compiled_with_cxx11_abi=lambda: True,
     )
     monkeypatch.setattr(prepare_flash3, "torch", runtime)
+    monkeypatch.setattr(prepare_flash3, "cuda_version", lambda: runtime.version.cuda)
     monkeypatch.setattr(prepare_flash3, "_nvcc_path", lambda: Path("/nvcc"))
     observed: list[list[str]] = []
 
@@ -258,10 +255,6 @@ def test_validate_build_runtime_pins_platform_torch_abi_and_nvcc(
     ):
         prepare_flash3._validate_build_runtime()
     runtime.__version__ = "2.9.1+cu128"
-    runtime.version.cuda = "12.7"
-    with pytest.raises(RuntimeError, match=r"^FA3 requires CUDA 12.8; found 12.7\.$"):
-        prepare_flash3._validate_build_runtime()
-    runtime.version.cuda = "12.8"
     runtime.compiled_with_cxx11_abi = lambda: False
     with pytest.raises(
         RuntimeError,
@@ -275,7 +268,10 @@ def test_validate_build_runtime_pins_platform_torch_abi_and_nvcc(
         return "Cuda compilation tools, release 12.7, V12.7.0"
 
     monkeypatch.setattr(prepare_flash3, "_run_output", nvcc_output)
-    with pytest.raises(RuntimeError, match=r"^FA3 requires nvcc 12.8; found:"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"^FA3 requires nvcc 12\.8 to match torch's CUDA; found:",
+    ):
         prepare_flash3._validate_build_runtime()
 
 

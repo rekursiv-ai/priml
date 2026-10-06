@@ -21,11 +21,7 @@ from priml.metrics.binary_accuracy import BinaryAccuracy
 from priml.timer import CheckpointableStepTimer
 from priml.train.ema import EMA
 from priml.train.parallelism import NoParallel
-from priml.train.train_step import (
-    TrainStep,
-    _assert_uniform_microbatch_count,
-    _collective_device,
-)
+from priml.train.train_step import TrainStep, _assert_uniform_microbatch_count
 
 
 if TYPE_CHECKING:
@@ -923,6 +919,155 @@ def test_closure_reaches_an_optimizer_that_requires_it() -> None:
     assert recomputed.requires_grad
 
 
+def _record_output(
+    outputs: list[Tensor],
+    module: nn.Module,
+    args: tuple[object, ...],
+    output: Tensor,
+) -> None:
+    del module, args
+    outputs.append(output)
+
+
+def test_train_on_output_matches_train_step_without_a_second_forward() -> None:
+    torch.manual_seed(0)
+    x, label = torch.randn(4, 2), torch.tensor([0.0, 1.0, 1.0, 0.0])
+    reference = _linear_step()
+    via_output = _linear_step()
+    via_output.model.load_state_dict(reference.model.state_dict())
+    model = via_output.model
+    assert isinstance(model, _LinearModel)
+    calls: list[Tensor] = []
+    model.linear.register_forward_hook(functools.partial(_record_output, calls))
+
+    expected = reference.train_step(x=x, label=label)
+    result = via_output.train_on_output(via_output(x=x), x=x, label=label)
+
+    assert len(calls) == 1
+    assert via_output.global_step == 1
+    torch.testing.assert_close(result["loss"], expected["loss"])
+    for ours, theirs in zip(
+        via_output.model.parameters(),
+        reference.model.parameters(),
+        strict=True,
+    ):
+        torch.testing.assert_close(ours, theirs)
+
+
+def _weighted_bce(
+    output: object,
+    *,
+    label: Tensor,
+    weight: Tensor,
+    **_kwargs: object,
+) -> LossOutput:
+    """BCE scaled by a per-element ``weight`` the model never sees."""
+    assert isinstance(output, Tensor)
+    bce = torch.nn.functional.binary_cross_entropy_with_logits(
+        output,
+        label,
+        reduction="none",
+    )
+    return {"loss": bce * weight}
+
+
+class _StrictLinear(nn.Module):
+    """Takes ``x`` and nothing else, so a loss-only key reaching it raises."""
+
+    class Config(Fig["_StrictLinear"]): ...
+
+    def __init__(self, config: Config) -> None:
+        del config
+        super().__init__()
+        self.linear = nn.Linear(2, 1)
+
+    @override
+    def forward(self, x: Tensor) -> Tensor:
+        return self.linear(x).squeeze(-1)
+
+
+def test_train_on_output_passes_loss_only_keys_to_the_loss_alone() -> None:
+    step = _linear_step(
+        model=_StrictLinear.Config(),
+        loss=PartialConfig(_weighted_bce),
+    )
+    x = torch.randn(4, 2)
+    result = step.train_on_output(
+        step(x=x),
+        label=torch.ones(4),
+        weight=torch.full((4,), 2.0),
+    )
+    assert result["loss"].shape == (4,)
+
+
+class _NormedModel(nn.Module):
+    """Linear behind a BatchNorm, so training mode changes state."""
+
+    class Config(Fig["_NormedModel"], make_with_kwargs=True): ...
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.norm = nn.BatchNorm1d(2)
+        self.linear = nn.Linear(2, 1)
+
+    @override
+    def forward(self, x: Tensor, **_kwargs: object) -> Tensor:
+        return self.linear(self.norm(x)).squeeze(-1)
+
+    def reset_parameters(self) -> None:
+        self.norm.reset_parameters()
+        self.linear.reset_parameters()
+
+
+def test_call_frozen_keeps_state_and_parameters_out_of_the_graph() -> None:
+    torch.manual_seed(0)
+    step = _linear_step(model=_NormedModel.Config())
+    step.model.train()
+    norm = step.model.get_submodule("norm")
+    assert isinstance(norm, nn.BatchNorm1d)
+    step.model.get_parameter("linear.bias").requires_grad_(False)
+    running_mean = norm.running_mean
+    assert running_mean is not None
+    before = running_mean.clone()
+
+    x = torch.randn(4, 2, requires_grad=True)
+    output = step.call_frozen(x=x)
+    assert isinstance(output, Tensor)
+    output.sum().backward()
+
+    assert x.grad is not None
+    assert torch.count_nonzero(x.grad) > 0
+    assert all(p.grad is None for p in step.model.parameters())
+    torch.testing.assert_close(running_mean, before, rtol=0, atol=0)
+    assert step.model.training
+    assert norm.training
+    assert step.model.get_parameter("linear.weight").requires_grad
+    assert not step.model.get_parameter("linear.bias").requires_grad
+
+
+def test_call_frozen_restores_state_when_the_forward_raises() -> None:
+    step = _linear_step(model=_NormedModel.Config())
+    step.model.train()
+    step.model.get_submodule("norm").eval()  # A user-chosen submodule mode.
+    frozen = step.model.get_parameter("linear.bias")
+    frozen.requires_grad_(False)
+    with pytest.raises(RuntimeError):
+        step.call_frozen(x=torch.randn(4, 3))  # Wrong width.
+    assert step.model.training
+    assert not step.model.get_submodule("norm").training
+    assert step.model.get_parameter("linear.weight").requires_grad
+    assert not frozen.requires_grad
+
+
+def test_call_eval_restores_submodule_modes() -> None:
+    step = _linear_step(model=_NormedModel.Config())
+    step.model.train()
+    step.model.get_submodule("norm").eval()
+    step.call_eval(x=torch.randn(4, 2))
+    assert step.model.training
+    assert not step.model.get_submodule("norm").training
+
+
 def test_a_scalar_loss_is_refused() -> None:
     def reduced(output: object, **kwargs: object) -> LossOutput:
         del kwargs
@@ -1034,30 +1179,6 @@ def _gloo_backend(group: object) -> str:
 def _world_of_two(group: object = None) -> int:
     del group
     return 2
-
-
-def test_collective_device_follows_the_backend(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    group = cast(dist.ProcessGroup, object())
-
-    def backend_for_group(actual_group: object) -> str:
-        assert actual_group is group
-        return "gloo"
-
-    monkeypatch.setattr(dist, "get_backend", backend_for_group)
-    assert _collective_device(group) == torch.device("cpu")
-
-    def nccl_for_group(actual_group: object) -> str:
-        assert actual_group is group
-        return "nccl"
-
-    monkeypatch.setattr(dist, "get_backend", nccl_for_group)
-    # Scoped: the autouse ``cleanup_cuda`` teardown synchronizes the CURRENT
-    # device before monkeypatch unwinds, and index 2 is not a real ordinal.
-    with monkeypatch.context() as patch:
-        patch.setattr(torch.cuda, "current_device", lambda: 2)
-        assert _collective_device(group) == torch.device("cuda", 2)
 
 
 def test_uniform_count_guard_is_a_noop_on_a_single_rank_dp_group(

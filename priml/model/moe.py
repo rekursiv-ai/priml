@@ -642,7 +642,7 @@ class MoE(nn.Module):
                 )
                 # Each expert shards intra-expert over the tp dim (its own
                 # block style handles the split alignment).
-                if isinstance(cfg, Shardable):
+                if isinstance(cfg, Shardable) and cfg.shard is None:
                     cfg.shard = "colwise"
             return super().finalize()
 
@@ -825,10 +825,12 @@ class MoE(nn.Module):
             assert isinstance(expert, nn.Module)
             shared_experts.append(expert)
         self.shared_experts = nn.ModuleList(shared_experts)
-        # Buffer (not a plain attribute) so ``.to(device)`` tracks it;
-        # non-persistent since it is recomputed every training forward and
-        # carries no learned state.
         self._aux_loss = torch.tensor(0.0)
+
+    @property
+    def aux_loss(self) -> Tensor:
+        """Return this forward's weighted load-balancing penalty."""
+        return self._aux_loss
 
     @override
     def _apply(self, fn: Callable[[Tensor], Tensor], recurse: bool = True) -> Self:
@@ -838,10 +840,7 @@ class MoE(nn.Module):
 
     def reset_parameters(self) -> None:
         """Initialize every parameter in place."""
-        # Sole init source for every owned tensor (meta-init audit
-        # contract): ``_aux_loss`` is runtime scratch overwritten each
-        # forward, but as a registered buffer it must still be reset here.
-        self._aux_loss.zero_()
+        self._aux_loss = self._aux_loss.new_zeros(())
         self.router.reset_parameters()
         for group in (self.experts, self.shared_experts):
             for expert in group:
@@ -861,6 +860,8 @@ class MoE(nn.Module):
             and self.router.scoring_func == "softmax"
         ):
             self._aux_loss = self._load_balance_loss(logits, indices)
+        else:
+            self._aux_loss = logits.new_zeros(())
 
         y = self._dispatch_routed(
             x_flat,
@@ -908,15 +909,12 @@ class MoE(nn.Module):
         starts = torch.cat([offsets.new_zeros(1), offsets[:-1]])
 
         y = x_flat.new_zeros(x_flat.shape[0], self.channels_out)
-        active_values = convert(active.tolist(), list[object])
-        starts_values = convert(starts.tolist(), list[object])
-        counts_values = convert(counts.tolist(), list[object])
+        active_values = convert(active.tolist(), list[int])
+        starts_values = convert(starts.tolist(), list[int])
+        counts_values = convert(counts.tolist(), list[int])
         for expert_index, expert_id in enumerate(active_values):
-            assert isinstance(expert_id, int)
             start = starts_values[expert_index]
             count = counts_values[expert_index]
-            assert isinstance(start, int)
-            assert isinstance(count, int)
             end = start + count
             tok_slice = sorted_tok[start:end]
             w_slice = sorted_w[start:end].unsqueeze(1)

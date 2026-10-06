@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from priml.sharding import parse_shard_spec
 
 
@@ -94,6 +96,15 @@ def test_parse_shard_spec_edge_cases() -> None:
     assert parse_shard_spec("5:5", 10) == set()
     assert parse_shard_spec("5:3", 10) == set()
     assert parse_shard_spec("0,-1,:", 0) == set()
+
+
+@pytest.mark.parametrize("spec", ["1:4:1:99", "::1:", "0,1:2:3:4"])
+def test_parse_shard_spec_rejects_a_slice_with_more_than_three_fields(
+    spec: str,
+) -> None:
+    """A fourth field is a typo, not something to drop silently."""
+    with pytest.raises(ValueError, match="start:end:step"):
+        parse_shard_spec(spec, 10)
 
 
 if __name__ == "__main__":

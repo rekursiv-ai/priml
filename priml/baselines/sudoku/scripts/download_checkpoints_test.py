@@ -25,6 +25,7 @@ from priml.baselines.sudoku.scripts.download_checkpoints import (
     destination_path,
     main,
 )
+from priml.lib.testing.cli import assert_help_without_docstring
 
 
 _FILES: Final = [
@@ -139,13 +140,14 @@ def test_parse_args_defaults_and_types(tmp_path: Path) -> None:
     assert args.flavor == "full"
 
 
-def test_parse_args_requires_module_docstring(
+def test_main_help_works_without_a_module_docstring(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(download_checkpoints, "__doc__", None)
-
-    with pytest.raises(ValueError, match=r"^Expected __doc__ is not None\.$"):
-        _parse_args(["--names", "exp006"])
+    assert_help_without_docstring(
+        monkeypatch,
+        download_checkpoints,
+        lambda: _parse_args(["--help"]),
+    )
 
 
 def test_parse_args_rejects_missing_names_and_bad_flavor() -> None:

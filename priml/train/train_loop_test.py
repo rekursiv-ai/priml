@@ -62,6 +62,7 @@ from priml.train.train_loop import (
     _set_loader_epoch,
 )
 from priml.train.train_step import TrainStep
+from priml.train.train_step_gan import GANTrainStep
 
 
 _RuntimeEvents = list[str]
@@ -158,6 +159,35 @@ class _WarmupDataset:
 
     def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Load dataset state for checkpointing."""
+        del state_dict
+
+
+class _DeviceProbeDataset:
+    """Empty dataset recording its configured device and the one it was built under."""
+
+    class Config(Fig["_DeviceProbeDataset"]):
+        device: torch.device | str | None = None
+        """Where batches are built; ``None`` takes the loop's."""
+
+    def __init__(self, config: Config) -> None:
+        self.device = config.device
+        self.built_under = torch.get_default_device()
+        self.timer_epoch = CheckpointableStepTimer()
+
+    def train_dataloader(self) -> list[dict[str, Tensor]]:
+        """Return no batches."""
+        return []
+
+    def eval_dataloader(self) -> list[dict[str, Tensor]]:
+        """Return no batches."""
+        return []
+
+    def state_dict(self) -> dict[str, object]:
+        """Stateless."""
+        return {}
+
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
+        """Stateless."""
         del state_dict
 
 
@@ -446,6 +476,36 @@ class _ExtrasMetric:
         del state_dict
 
 
+class _DeviceProbeMetric:
+    """Metric with no ``device`` field, recording the device it was built under."""
+
+    class Config(Fig["_DeviceProbeMetric"]):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        del config
+        self.built_under = torch.get_default_device()
+
+    def update(self, logits: Tensor, **batch: object) -> None:
+        """Ignore batches."""
+        del logits, batch
+
+    def compute(self) -> dict[str, object]:
+        """Return nothing."""
+        return {}
+
+    def reset(self) -> None:
+        """Stateless."""
+
+    def state_dict(self) -> dict[str, object]:
+        """Stateless."""
+        return {}
+
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
+        """Stateless."""
+        del state_dict
+
+
 def _cross_entropy(output: Tensor, *, label: Tensor, **_kwargs: object) -> LossOutput:
     """Call cross_entropy with the label extracted from kwargs."""
     return {"loss": torch.nn.functional.cross_entropy(output, label, reduction="none")}
@@ -655,6 +715,7 @@ def test_train_loop_comprehensive():
         step_config.parallelism = NoParallel.Config(device="cpu")
         step_config.compile = None
         config = TrainLoop.Config(step=step_config, dataset=_BinaryDataset.Config())
+        config.runtime = SingleProcess.Config(device="cpu")
         config.metrics_eval = {"accuracy": BinaryAccuracy.Config()}
         config.max_steps = 20
         config.num_steps_eval = 10
@@ -691,6 +752,7 @@ def test_train_loop_comprehensive():
         step_config2.parallelism = NoParallel.Config(device="cpu")
         step_config2.compile = None
         config2 = TrainLoop.Config(step=step_config2, dataset=_BinaryDataset.Config())
+        config2.runtime = SingleProcess.Config(device="cpu")
         config2.metrics_eval = {"accuracy": BinaryAccuracy.Config()}
         config2.max_steps = 30
         config2.num_steps_eval = 10
@@ -1098,10 +1160,10 @@ def test_fresh_run_into_off_cadence_dir_is_rejected():
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
         checkpoint_dir.mkdir(parents=True)
-        (checkpoint_dir / "step_5.pt").write_bytes(b"x")  # Off the save cadence.
-
         cfg = _resume_table_config(checkpoint_dir)  # save_every=10 -> 10, 20.
         assert isinstance(cfg.checkpointer, Checkpointer.Config)
+        off_cadence = cfg.checkpointer.filename.format(step=5)
+        (checkpoint_dir / off_cadence).write_bytes(b"x")
         cfg.checkpointer.resume = False
         cfg.checkpointer.allow_checkpoint_overwrite = False
         with pytest.raises(RuntimeError, match="overwrite"):
@@ -1154,10 +1216,11 @@ def test_eval_only_never_trips_overwrite_guard(seeded_checkpoints: Path):
 def test_available_steps_lists_checkpoints():
     """available_steps surfaces the on-disk checkpoint steps for diagnostics."""
     with tempfile.TemporaryDirectory() as temp_dir:
-        ckpt = Checkpointer.Config(working_dir=Path(temp_dir), save_every=10).make()
+        config = Checkpointer.Config(working_dir=Path(temp_dir), save_every=10)
+        ckpt = config.make()
         assert ckpt.available_steps() == []
-        (Path(temp_dir) / "step_10.pt").write_bytes(b"x")
-        (Path(temp_dir) / "step_4000.pt").write_bytes(b"x")
+        for step in (10, 4000):
+            (Path(temp_dir) / config.filename.format(step=step)).write_bytes(b"x")
         assert ckpt.available_steps() == [10, 4000]
 
 
@@ -2169,6 +2232,77 @@ def test_phase_timer_passed_to_step():
     assert loop.step.timer is loop.phase_timer
 
 
+def _gan_loop_config() -> TrainLoop.Config:
+    config = TrainLoop.Config()
+    config.step = GANTrainStep.Config()
+    config.runtime = SingleProcess.Config(device="cpu")
+    config.dataset = _simple_dummy_dataset()
+    config.metrics_eval = {}
+    config.checkpointer = None
+    config.max_steps = 1
+    return config
+
+
+def test_runtime_device_reaches_composite_sub_steps() -> None:
+    """A GAN's sub-steps take the runtime's device, as a plain step does."""
+    loop = _gan_loop_config().make()
+    step = loop.step
+    assert isinstance(step, GANTrainStep)
+    for sub_step in (step.generator, step.discriminator):
+        assert sub_step.device == torch.device("cpu")
+    loop.close()
+
+
+def _device_probe_loop_config(
+    dataset: _DeviceProbeDataset.Config,
+) -> TrainLoop.Config[_WarmupStep.Config, _DeviceProbeDataset.Config]:
+    config = TrainLoop.Config(step=_WarmupStep.Config(), dataset=dataset)
+    config.runtime = SingleProcess.Config(device="meta")
+    config.metrics_eval = {}
+    config.checkpointer = None
+    config.max_steps = 0
+    return config
+
+
+def test_a_child_without_a_device_is_built_on_the_runtimes() -> None:
+    """``None`` is filled from the runtime, and the child is built under it."""
+    loop = _device_probe_loop_config(_DeviceProbeDataset.Config()).make()
+    dataset = loop.dataset
+    assert isinstance(dataset, _DeviceProbeDataset)
+    assert dataset.device == torch.device("meta")
+    assert dataset.built_under == torch.device("meta")
+    loop.close()
+
+
+def test_a_child_device_overrides_the_runtimes() -> None:
+    loop = _device_probe_loop_config(_DeviceProbeDataset.Config(device="cpu")).make()
+    dataset = loop.dataset
+    assert isinstance(dataset, _DeviceProbeDataset)
+    assert dataset.device == "cpu"
+    assert dataset.built_under == torch.device("cpu")
+    loop.close()
+
+
+def test_a_child_without_a_device_field_is_built_on_the_runtimes() -> None:
+    config = _device_probe_loop_config(_DeviceProbeDataset.Config(device="cpu"))
+    config.metrics_eval = {"probe": _DeviceProbeMetric.Config()}
+    loop = config.make()
+    metric = loop.metrics_eval["probe"]
+    assert isinstance(metric, _DeviceProbeMetric)
+    assert metric.built_under == torch.device("meta")
+    loop.close()
+
+
+def test_loop_binds_timers_into_composite_sub_steps() -> None:
+    loop = _gan_loop_config().make()
+    step = loop.step
+    assert isinstance(step, GANTrainStep)
+    for sub_step in (step.generator, step.discriminator):
+        assert sub_step.timer is loop.phase_timer
+        assert sub_step.timer_epoch is loop.dataset.timer_epoch
+    loop.close()
+
+
 # -- Regression tests (Issue#286 trainloop + checkpoint-loop group) ----------
 
 
@@ -2202,6 +2336,7 @@ def _make_simple_loop_config(
         step=step_config,
         dataset=dataset if dataset is not None else _simple_dummy_dataset(),
     )
+    config.runtime = SingleProcess.Config(device="cpu")
     config.metrics_eval = {}
     config.checkpointer = Checkpointer.Config(
         base_dir="/",
@@ -2949,7 +3084,7 @@ def test_complete_update_still_writes_terminal_checkpoint_and_resumes() -> None:
 def test_train_step_logs_gpu_memory_to_tracker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Train-step tracker logs process CUDA memory peaks when CUDA is available."""
+    """A run on a CUDA device logs that device's memory peaks."""
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
         config.checkpointer = None
@@ -2964,16 +3099,16 @@ def test_train_step_logs_gpu_memory_to_tracker(
 
         def train_step_with_cuda_metrics(**batch: object) -> TrainStepOutput:
             result = original_train_step(**batch)
-            monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+            monkeypatch.setattr(loop.runtime, "device", torch.device("cuda", 1))
             monkeypatch.setattr(
                 torch.cuda,
                 "max_memory_allocated",
-                lambda: 2_000_000_000,
+                _peak_bytes(2_000_000_000, expected=torch.device("cuda", 1)),
             )
             monkeypatch.setattr(
                 torch.cuda,
                 "max_memory_reserved",
-                lambda: 3_000_000_000,
+                _peak_bytes(3_000_000_000, expected=torch.device("cuda", 1)),
             )
             return result
 
@@ -2992,9 +3127,23 @@ def test_train_step_logs_gpu_memory_to_tracker(
     assert train_log["train/gpu_mem_reserved_gb"] == 3.0
 
 
-@pytest.mark.skipif(torch.cuda.is_available(), reason="CPU guard is host-specific")
-def test_train_step_omits_gpu_memory_on_cpu_tracker() -> None:
-    """CPU train-step tracker logs keep running without CUDA memory keys."""
+def _peak_bytes(value: int, *, expected: torch.device) -> Callable[..., int]:
+    def peak(device: torch.device) -> int:
+        assert device == expected
+        return value
+
+    return peak
+
+
+def test_train_step_omits_gpu_memory_on_a_cpu_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CPU run logs no GPU memory, even on a host that has CUDA."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    # The faked CUDA host must stay inert where torch itself probes it: Adam's
+    # step asks whether a CUDA graph is capturing, a real CUDA call that fails
+    # on a host with no GPU (a CPU CI runner).
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
         config.checkpointer = None
@@ -4345,14 +4494,22 @@ def _distributed_flag_broadcast(
 
     def broadcast(flag: Tensor, src: int) -> None:
         assert src == 0
+        assert flag.device == torch.device("cpu"), "gloo reduces CPU tensors only"
         broadcasts.append(float(flag.item()))
         if rank_zero_verdict is not None:
             flag.fill_(rank_zero_verdict)
 
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    # Gloo on a CUDA host: the flag must follow the backend, not the hardware.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_backend", _gloo_backend)
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.distributed, "broadcast", broadcast)
     return broadcasts
+
+
+def _gloo_backend(group: object = None) -> str:
+    del group
+    return "gloo"
 
 
 def test_time_limit_is_synced_on_the_log_cadence_and_latched(
@@ -5121,6 +5278,69 @@ def _metric_float(metrics: Mapping[str, object], key: str) -> float:
     """Return a numeric tracker metric, or a failing sentinel when absent."""
     value = metrics.get(key)
     return float(value) if isinstance(value, (int, float)) else -1.0
+
+
+class _GeneratorDataset:
+    """Dataset whose ``train_dataloader`` is a generator: one pass, or endless."""
+
+    class Config(Fig["_GeneratorDataset"], make_with_kwargs=True):
+        endless: bool = False
+
+    def __init__(self, endless: bool = False) -> None:
+        self.timer_epoch = CheckpointableStepTimer()
+        self.endless = endless
+
+    def train_dataloader(self) -> Iterator[dict[str, Tensor]]:
+        """Yield two batches, or batches without end."""
+        count = 0
+        while self.endless or count < 2:
+            count += 1
+            yield {"media": torch.tensor([[1.0, 0.0]]), "label": torch.tensor([0])}
+
+    def eval_dataloader(self) -> list[dict[str, Tensor]]:
+        """Return no eval batches."""
+        return []
+
+    def state_dict(self) -> dict[str, object]:
+        """Stateless."""
+        return {}
+
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
+        """Stateless."""
+        del state_dict
+
+
+def _generator_loop(
+    tmp: Path,
+    *,
+    endless: bool,
+    max_epochs: float,
+) -> TrainLoop:
+    config = _make_simple_loop_config(
+        str(tmp),
+        dataset=_GeneratorDataset.Config(endless=endless),
+    )
+    config.checkpointer = None
+    config.max_steps = 5
+    config.max_epochs = max_epochs
+    config.num_steps_eval = math.inf
+    return config.make()
+
+
+def test_a_one_shot_loader_is_refused_at_its_second_pass(tmp_path: Path) -> None:
+    loop = _generator_loop(tmp_path, endless=False, max_epochs=2)
+    with pytest.raises(TypeError, match=r"^_GeneratorDataset\.train_dataloader\(\)"):
+        loop.train()
+    assert loop.step.global_step == 2
+
+
+def test_an_endless_generator_and_a_single_pass_still_train(tmp_path: Path) -> None:
+    endless = _generator_loop(tmp_path / "endless", endless=True, max_epochs=math.inf)
+    endless.train()
+    assert endless.step.global_step == 5
+    single = _generator_loop(tmp_path / "single", endless=False, max_epochs=1)
+    single.train()
+    assert single.step.global_step == 2
 
 
 class _Stream(torch.utils.data.IterableDataset[int]):

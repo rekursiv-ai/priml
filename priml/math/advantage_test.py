@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 
@@ -255,6 +257,45 @@ def test_q_lambda_stops_at_a_terminal_step() -> None:
         trace_decay=0.9,
     )
     assert targets.tolist() == [[3.0, 4.0, 5.0, 6.0], [7.0, 8.0, 9.0, 10.0]]
+
+
+@pytest.mark.parametrize("bootstrap", [math.nan, math.inf])
+def test_q_lambda_terminal_ignores_a_non_finite_bootstrap(bootstrap: float) -> None:
+    # The state after a terminal belongs to no episode; whatever it holds,
+    # even a non-finite value, must not reach the target.
+    targets = q_lambda_targets(
+        rewards=torch.tensor([[1.0], [2.0]]),
+        q_values=torch.tensor([[[0.0]], [[0.0]], [[bootstrap]]]),
+        dones=torch.tensor([[False], [True]]),
+        discount=0.5,
+        trace_decay=0.5,
+    )
+    # Step 0 carries 1 + 0.5 * 0.5 * (2 - 0).
+    assert targets.tolist() == [[1.5], [2.0]]
+
+
+@pytest.mark.parametrize("bootstrap", [math.nan, math.inf])
+def test_gae_terminal_ignores_a_non_finite_bootstrap(bootstrap: float) -> None:
+    advantages, _ = generalized_advantage(
+        rewards=torch.tensor([[1.0], [2.0]]),
+        values=torch.tensor([[0.4], [0.2]]),
+        dones=torch.tensor([[0.0], [1.0]]),
+        last_value=torch.tensor([bootstrap]),
+        discount=0.5,
+        trace_decay=0.5,
+    )
+    torch.testing.assert_close(advantages, torch.tensor([[1.15], [1.8]]))
+
+
+def test_observation_aligned_terminal_ignores_a_non_finite_bootstrap() -> None:
+    advantages, _ = observation_aligned_advantage(
+        rewards=torch.tensor([[9.0, 1.0, 2.0]]),
+        values=torch.tensor([[0.4, 0.2, math.nan]]),
+        dones=torch.tensor([[False, False, True]]),
+        discount=0.5,
+        trace_decay=0.5,
+    )
+    torch.testing.assert_close(advantages, torch.tensor([[1.15, 1.8, 0.0]]))
 
 
 def test_q_lambda_at_zero_decay_is_the_one_step_target() -> None:

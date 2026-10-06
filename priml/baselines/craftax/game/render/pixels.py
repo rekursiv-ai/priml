@@ -7,16 +7,20 @@ this composites sprites with pygame instead of accumulating masked tensors:
 drawing one frame for one worker is a blit loop, and writing it as a batched
 tensor program would be slower AND harder to read.
 
-The frame is the player's own 9x11 view -- the same window the policy sees, so
-watching a replay shows what the agent knew, not what it could not have known.
-Darkness, night, and sleep dim it exactly as they dim the observation.
+The frame is the player's own view, 9x11 unless told otherwise -- pass the
+``view`` the policy was configured with and a replay shows the window the agent
+saw. Darkness, night, and sleep shade it, graded by how lit each tile is the
+way upstream's renderer shades; the observation instead hides a tile outright
+below a fixed light threshold.
+
+Nothing here initializes SDL or chooses its video driver. Surfaces load, scale,
+and composite without either, and SDL binds a driver once per process, so a
+viewer that bound one would decide the display of every later window.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-
-import os
 
 import numpy as np
 import pygame
@@ -45,6 +49,7 @@ class Renderer:
         *,
         block_pixels: int = 64,
         asset_dir: Path | None = None,
+        view: tuple[int, int] = constants.OBS_DIM,
     ) -> None:
         """Load and scale every sprite.
 
@@ -52,33 +57,24 @@ class Renderer:
           block_pixels: Edge of one tile in the output image; 64 is the size
             upstream calls "human".
           asset_dir: Where sprites are cached; defaults to the user cache.
+          view: Tiles drawn around the player, ``(rows, columns)``; pass the
+            environment's ``view`` to draw what its policy sees.
 
         Raises:
-          ValueError: The tile size is not positive.
+          ValueError: The tile size or the view is not positive.
 
         """
         if block_pixels <= 0:
             raise ValueError("block_pixels must be positive")
-        # Headless: this never opens a window, so it runs on a GPU worker and
-        # under pytest. ``play`` opens its own display.
-        #
-        # The driver request comes FIRST. SDL resolves it during the first init
-        # of any subsystem and caches the result for the process, so setting it
-        # after ``pygame.init()`` binds x11 on a machine with a display and puts
-        # a window on the operator's screen. ``setdefault`` so ``play`` -- which
-        # wants a real window -- can export its own choice beforehand.
-        if pygame.display.get_surface() is None:
-            os.environ.setdefault("SDL_VIDEODRIVER", "dummy")  # noqa: TID251 -- The baseline must use the vendor rendering API required by Craftax.
-        if not pygame.get_init():
-            pygame.init()
-        # No ``set_mode``. It would MAP a window -- instantly on a local
-        # display, and over a forwarded X connection slowly enough to dominate
-        # a test suite. Sprites are therefore kept unconverted: ``convert`` and
-        # ``convert_alpha`` need a display's pixel format, and the blit-time
-        # cost of going without is nothing beside opening a window nobody
-        # asked for. ``play`` calls ``set_mode`` itself, and its sprites are
-        # converted from that surface as a side effect of being blitted to it.
+        if min(view) <= 0:
+            raise ValueError("view must be positive in both dimensions")
+        # No ``pygame.init`` and no ``set_mode``: loading, scaling, and
+        # blitting need neither, while an init binds SDL's video driver for
+        # the whole process and ``set_mode`` maps a window. Sprites are
+        # therefore kept unconverted -- ``convert`` and ``convert_alpha`` need
+        # a display's pixel format. ``play`` opens its own display.
         self.block_pixels = block_pixels
+        self.view = view
         self._directory = asset_dir
         self._cache: dict[str, pygame.Surface] = {}
         for name in sprites.every_sprite():
@@ -89,10 +85,10 @@ class Renderer:
         """``(height, width)`` of every frame ``render`` returns.
 
         Exists so a caller sizing a video writer does not restate
-        ``OBS_DIM * block_pixels``: a writer told one geometry and fed another
+        ``view * block_pixels``: a writer told one geometry and fed another
         produces a file ffmpeg cannot read, and closes without raising.
         """
-        rows, columns = constants.OBS_DIM
+        rows, columns = self.view
         return rows * self.block_pixels, columns * self.block_pixels
 
     def render(self, state: EnvState, *, index: int = 0) -> np.ndarray:
@@ -125,7 +121,7 @@ class Renderer:
         index: int,
     ) -> None:
         """Fill every tile with its block, then the item lying on it."""
-        rows, columns = constants.OBS_DIM
+        rows, columns = self.view
         level = int(state.player_level[index])
         blocks = state.map[index, level]
         items = state.item_map[index, level]
@@ -194,7 +190,7 @@ class Renderer:
         mask = mobs.mask[index, level]
         positions = mobs.position[index, level]
         species = mobs.type_id[index, level]
-        rows, columns = constants.OBS_DIM
+        rows, columns = self.view
         top, left = self._corner(state, index)
 
         valid_rows, valid_columns = range(rows), range(columns)
@@ -220,7 +216,7 @@ class Renderer:
         index: int,
     ) -> None:
         """Draw the player at the centre, facing the way they last moved."""
-        rows, columns = constants.OBS_DIM
+        rows, columns = self.view
         if bool(state.is_sleeping[index]):
             sprite = sprites.PLAYER_SPRITES[-1]
         else:
@@ -247,13 +243,14 @@ class Renderer:
         index: int,
     ) -> None:
         """Darken unlit tiles, then the whole frame for night and sleep."""
-        rows, columns = constants.OBS_DIM
+        rows, columns = self.view
         level = int(state.player_level[index])
         light = state.light_map[index, level]
         top, left = self._corner(state, index)
 
-        # Unlit tiles go fully black rather than dim: darkness genuinely hides
-        # the world here, exactly as it does in the observation.
+        # Each tile darkens in proportion to its missing light, so only a fully
+        # unlit tile goes black. Graded like upstream's renderer, not cut at the
+        # observation's threshold: a viewer shows how lit a tile is.
         shadow = pygame.Surface((self.block_pixels, self.block_pixels))
         shadow.fill((0, 0, 0))
         for row in range(rows):
@@ -292,7 +289,7 @@ class Renderer:
 
     def _corner(self, state: EnvState, index: int) -> tuple[int, int]:
         """Return the map coordinate of the view's top-left tile."""
-        rows, columns = constants.OBS_DIM
+        rows, columns = self.view
         return (
             int(state.player_position[index, 0]) - rows // 2,
             int(state.player_position[index, 1]) - columns // 2,

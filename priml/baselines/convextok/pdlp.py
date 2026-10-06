@@ -3,10 +3,14 @@
 The program is scaled (``scaling``) and the constant step fixed (``step_size``). Each
 iteration then takes a reflected primal-dual step and pulls the result toward the last
 restart point with Halpern weight ``(n + 1) / (n + 2)``, ``n`` iterations after that
-restart. Termination is checked every 10 iterations below 1,000, every 100 below 10,000
-and every 1,000 beyond, and at every 200th iteration, on the unscaled "potential next"
-iterate. The 200th iterations also decide restarts by the fixed-point error, and a
-restart updates the primal weight with cuOpt's PID controller.
+restart. Termination is checked on the unscaled "potential next" iterate at a cadence
+that grows tenfold per decade -- every 10 iterations below 1,000, every 100 below
+10,000, every 1,000 below 100,000, and so on -- and independently at every
+``restart_period``-th iteration. Those major iterations also decide restarts by the
+fixed-point error, and a restart updates the primal weight with cuOpt's PID controller.
+
+PDLP detects optimality only, so an infeasible or unbounded program never converges;
+the finite ``iteration_limit`` is what ends such a solve, with ``optimal`` False.
 
 Everything follows cuOpt's operations. The one departure is summation order, and on
 the device cuOpt fuses multiply-adds where the port rounds twice, so iterates agree to
@@ -46,7 +50,8 @@ class PdlpResult:
       current_primal: Scaled current primal iterate (cuOpt's warm-start state).
       current_dual: Scaled current dual iterate.
       iterations: Iterations taken.
-      optimal: Whether the tolerances were met, rather than the iteration limit.
+      optimal: Whether the tolerances were met; False means the iteration limit
+        stopped the solve, as it must for an infeasible or unbounded program.
       step_size: The constant step size.
       primal_weight: The primal weight at the stop.
 
@@ -78,14 +83,18 @@ class Pdlp:
         tolerance: float = 1e-4
         """Absolute and relative tolerance on both residuals and the gap."""
 
-        iteration_limit: int | None = None
-        """Stop at the first check at or past this iteration; None runs to optimality."""
+        iteration_limit: int = 100_000
+        """Stop unconverged at the first check at or past this iteration.
+
+        Finite because nothing else ends a solve of an infeasible or unbounded
+        program; the real ConvexTok LP converges in about 5,600 iterations.
+        """
 
         ruiz_iterations: int = 10
         """Ruiz scaling passes."""
 
         restart_period: int = 200
-        """Iterations between restart decisions."""
+        """Iterations between restart decisions; at least one."""
 
         sufficient_reduction: float = 0.2
         """Restart once the fixed-point error falls to this fraction of its first value."""
@@ -109,6 +118,22 @@ class Pdlp:
         """Decay of the controller's integrated error at each restart."""
 
     def __init__(self, config: Config) -> None:
+        if config.restart_period < 1:
+            raise ValueError(
+                f"restart_period must be at least 1; got {config.restart_period}.",
+            )
+        if config.iteration_limit < 0:
+            raise ValueError(
+                f"iteration_limit must be nonnegative; got {config.iteration_limit}.",
+            )
+        if config.ruiz_iterations < 0:
+            raise ValueError(
+                f"ruiz_iterations must be nonnegative; got {config.ruiz_iterations}.",
+            )
+        if math.isnan(config.tolerance) or config.tolerance < 0:
+            raise ValueError(
+                f"tolerance must be nonnegative; got {config.tolerance}.",
+            )
         self.config = config
 
     def __call__(self, program: LinearProgram) -> PdlpResult:
@@ -151,11 +176,7 @@ class Pdlp:
                 )
                 check = termination(primal, dual, reduced_cost)
                 optimal = iteration > 1 and check.optimal(config.tolerance)
-                limited = (
-                    config.iteration_limit is not None
-                    and iteration >= config.iteration_limit
-                )
-                if optimal or limited:
+                if optimal or iteration >= config.iteration_limit:
                     return PdlpResult(
                         primal=primal,
                         dual=dual,
@@ -448,7 +469,7 @@ class _PrimalWeight:
 
 
 def _check_interval(iteration: int) -> int:
-    """Return the iterations between termination checks: 10 below 1,000, then tenfold per decade."""
+    """Return the iterations between minor termination checks: 10 below 1,000, then tenfold per decade."""
     interval, threshold = 10, 1000
     while iteration >= threshold:
         interval *= 10

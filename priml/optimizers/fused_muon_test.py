@@ -321,10 +321,15 @@ def test_a_missing_gradient_is_an_error() -> None:
 
 
 def test_invalid_hyperparameters_are_rejected() -> None:
-    for field_name in ("lr", "momentum", "max_grad_norm", "eps"):
+    for field_name, label in (
+        ("lr", "Learning rate"),
+        ("momentum", "Momentum"),
+        ("max_grad_norm", "Max grad norm"),
+        ("eps", "Epsilon"),
+    ):
         config = FusedMuon.Config()
         setattr(config, field_name, -1.0)
-        with pytest.raises(ValueError, match=f"FusedMuon {field_name}"):
+        with pytest.raises(ValueError, match=f"{label} must be finite"):
             config.make()([_parameter(2, 3)])
 
 

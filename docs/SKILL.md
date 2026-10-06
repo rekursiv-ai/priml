@@ -725,11 +725,11 @@ never by copying the number.
 
 ### Pprint golden tests
 
-Use the public Configgle harness when a config's defaults and finalized
-propagation are part of its tested contract:
+Use priml's pprint harness when a config's defaults and finalized propagation
+are part of its tested contract:
 
 ```python
-from configgle.testing import assert_pprint_golden
+from priml.testing.golden import assert_pprint_golden
 
 
 def test_sandwich_config_pprint() -> None:
@@ -746,13 +746,13 @@ stores `testdata/<name>.txt` beside the test. After an intentional change, read
 the diff, regenerate, inspect the file, then rerun without regeneration:
 
 ```bash
-CONFIGGLE_REGENERATE_GOLDEN=1 uv --quiet run --frozen pytest <test_file>::<test_nodeid>
+uv --quiet run --frozen pytest <test_file>::<test_nodeid> --regenerate-golden
 uv --quiet run --frozen pytest <test_file>::<test_nodeid>
 ```
 
-Import from `configgle.testing`, never through a consumer package's testing
-facade. Do not call `pformat` manually at the callsite; the harness owns the
-full finalized rendering policy.
+Tensor goldens regenerate with `--regenerate-b4b` instead. Do not call
+`pformat` manually at the callsite; the harness owns the full finalized
+rendering policy.
 
 ### Bit-for-bit goldens
 

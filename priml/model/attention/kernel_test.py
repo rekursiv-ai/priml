@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Final, cast, override
 import itertools
 
 from configgle import Fig
-from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
@@ -25,6 +24,7 @@ from priml.model.attention.kernel import (
 from priml.model.attention.rope import RoPE, RoPEMixed, rotation_cost
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 if TYPE_CHECKING:

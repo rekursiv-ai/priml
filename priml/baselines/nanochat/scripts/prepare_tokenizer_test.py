@@ -20,8 +20,8 @@ import pytest
 from priml.baselines.nanochat.data import DEFAULT_ENCODE_THREADS
 from priml.baselines.nanochat.scripts import prepare_tokenizer
 from priml.baselines.nanochat.scripts.prepare_tokenizer import (
+    SPLIT_PATTERN,
     ByteLevelTokenizer,
-    JsonValue,
     SamplePreparation,
     UnigramPreparation,
     _pruned_piece_indices,
@@ -34,7 +34,7 @@ from priml.baselines.nanochat.scripts.prepare_tokenizer import (
     usage_scores,
     write_mapping,
 )
-from priml.lib.custom_json import ReadError
+from priml.lib.custom_json import JSONValue, ReadError
 
 
 def test_mapping_stages_in_destination_directory(
@@ -59,7 +59,7 @@ def test_mapping_stages_in_destination_directory(
 
 def test_mapping_io_and_usage_scores(tmp_path: Path) -> None:
     path = tmp_path / "nested" / "deeper" / "mapping.json"
-    value: JsonValue = {"z": 1, "a": [True, None]}
+    value: JSONValue = {"z": 1, "a": [True, None]}
     write_mapping(path, value=value)
     write_mapping(path, value=value)
     assert path.read_text() == '{\n  "a": [\n    true,\n    null\n  ],\n  "z": 1\n}\n'
@@ -75,22 +75,23 @@ def test_mapping_io_and_usage_scores(tmp_path: Path) -> None:
         match=r"^Expected len\(pieces\) == len\(counts\)\.$",
     ):
         usage_scores([b"a"], [])
+    path.write_text("{}")
     for invalid_number in (float("nan"), float("inf")):
-        message = "JSON numbers must be finite."
-        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        with pytest.raises(ValueError, match=r"^Out of range float values"):
             write_mapping(path, value={"invalid": [invalid_number]})
+    assert read_mapping(path) == {}
 
     # The message is compared exactly with ``str``: ``match`` also reads the "when
     # serializing ..." notes Python 3.14's encoder adds, and 3.12, where the public
     # package runs, adds none.
     circular = "Circular reference detected"
-    recursive_value: list[prepare_tokenizer.JsonValue] = []
+    recursive_value: list[JSONValue] = []
     recursive_value.append(recursive_value)
     with pytest.raises(ValueError, match=f"^{circular}") as recursive_list:
         write_mapping(path, value={"recursive": recursive_value})
     assert str(recursive_list.value) == circular
 
-    recursive_mapping: dict[str, JsonValue] = {}
+    recursive_mapping: dict[str, JSONValue] = {}
     recursive_mapping["recursive"] = recursive_mapping
     with pytest.raises(ValueError, match=f"^{circular}") as recursive_dict:
         write_mapping(path, value=recursive_mapping)
@@ -450,10 +451,11 @@ def test_empty_utf8_window_is_empty() -> None:
 
 def test_sample_preparation_rejects_validation_shard_leakage() -> None:
     config = SamplePreparation.Config()
-    config.train_shard_indices = (config.val_shard,)
+    config.val_shard = 3
+    config.train_shard_indices = (3,)
     with pytest.raises(
         ValueError,
-        match=r"^The fitting sample must exclude validation shard7\.$",
+        match=r"^The fitting sample must exclude validation shard 3\.$",
     ):
         config.make()
 
@@ -486,6 +488,54 @@ def test_unigram_preparation_requires_every_ordinary_byte() -> None:
     message = "The ordinary vocabulary must contain every byte."
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         config.make()
+
+
+@pytest.mark.parametrize("overshoot", [0.0, 0.5, float("nan")])
+def test_unigram_preparation_refuses_a_seed_smaller_than_the_vocabulary(
+    overshoot: float,
+) -> None:
+    config = UnigramPreparation.Config()
+    config.overshoot_learned = overshoot
+    with pytest.raises(ValueError, match="overshoot_learned must be at least 1"):
+        config.make()
+
+
+def test_unigram_build_refuses_a_short_seed(tmp_path: Path) -> None:
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    parquet.write_table(
+        Table.from_pydict({"text": ["ab cab", "cab ab"]}),
+        sample_dir / "sample.parquet",
+    )
+    config = UnigramPreparation.Config()
+    config.sample_dir = sample_dir
+    config.working_dir = tmp_path / "unigram"
+    # Forty-two learned pieces asked for; this corpus yields only four merges.
+    config.vocab_size = 300
+    config.reserved_count = 2
+    config.num_passes = 1
+    config.batch_size = 2
+    config.num_threads = 1
+    with pytest.raises(ValueError, match="too few to prune to 298"):
+        config.make().build()
+
+
+def test_both_tokenizer_configs_reserve_an_id_for_bos(tmp_path: Path) -> None:
+    unigram = UnigramPreparation.Config()
+    unigram.reserved_count = 0
+    with pytest.raises(ValueError, match="reserved_count must be at least 1"):
+        unigram.make()
+    path = tmp_path / "tokenizer.json"
+    _byte_model().save(str(path))
+    reader = ByteLevelTokenizer.Config()
+    reader.path = path
+    reader.reserved_count = 0
+    with pytest.raises(ValueError, match="reserved_count must be at least 1"):
+        reader.make()
+
+
+def test_unigram_pretokenizes_with_the_shared_pattern() -> None:
+    assert UnigramPreparation.Config().split_pattern is SPLIT_PATTERN
 
 
 def test_preparations_protect_their_input_directories(

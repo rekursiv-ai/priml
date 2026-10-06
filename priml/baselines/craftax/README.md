@@ -155,7 +155,7 @@ Regenerate the golden only when a numeric change is intended, which means
 `exp000` has changed and its recorded result no longer describes the code:
 
 ```bash
-BFB_REGENERATE=1 uv --quiet run --frozen pytest priml/baselines/craftax
+uv --quiet run --frozen pytest priml/baselines/craftax --regenerate-b4b
 ```
 
 [craftax-paper]: https://arxiv.org/abs/2402.16801

@@ -77,7 +77,7 @@ ArcTrainLoop(
                 │       │       │               frequencies=HuggingFaceFrequencies.Config(
                 │       │       │                       base=10000.0
                 │       │       │               ),
-                │       │       │               dtype=None
+                │       │       │               dtype=torch.float32
                 │       │       │       )
                 │       │       ),
                 │       │       recurrence=DeepRecurrence.Config(
@@ -220,10 +220,10 @@ ArcTrainLoop(
                                 puzzle_id_separator='|||'
                         ),
                         base_dir='/opt/scratch',
-                        working_dir=PosixPath('/opt/scratch/datasets/arcagi2/arc2concept-aug-1000'),
+                        working_dir=PosixPath('/opt/scratch/datasets/arc2concept-aug-1000'),
                         batch_size=256,
                         eval_batch_size=None,
-                        device='auto',
+                        device=None,
                         seed=0,
                         num_tasks=None,
                         num_eval_tasks=None,
@@ -232,8 +232,20 @@ ArcTrainLoop(
                 metrics_train={},
                 metrics_eval={       '': PassK.Config(
                                 base_dir='/opt/scratch',
-                                working_dir=PosixPath('/opt/scratch/datasets/arcagi2/arc2concept-aug-1000'),
-                                pass_ks=(1, 2, 5, 10, 100, 1_000)
+                                working_dir=PosixPath('/opt/scratch/datasets/arc2concept-aug-1000'),
+                                pass_ks=(1, 2, 5, 10, 100, 1_000),
+                                spec=ArcSpec(
+                                        max_grid=30,
+                                        vocab_pad=0,
+                                        vocab_eos=1,
+                                        vocab_color_offset=2,
+                                        puzzle_id_separator='|||'
+                                ),
+                                transform=ColorDihedral.Config(
+                                        transforms=(0, 1, 2, 3, 4, 5, 6, 7),
+                                        colors=(1, 2, 3, 4, 5, 6, 7, 8, 9),
+                                        separator='|||'
+                                )
                         )},
                 checkpointer=Checkpointer.Config(
                         base_dir=PosixPath('/opt/scratch/runs/arcagi2/exp000'),
@@ -279,7 +291,7 @@ ArcTrainLoop(
                 mesh_dim_model_seed='pp',
                 mesh_dim_data_seed='dp',
                 runtime=MultiProcess.Config(
-                        device='auto',
+                        device=None,
                         deterministic=False,
                         float32_matmul_precision=None,
                         backend=None,

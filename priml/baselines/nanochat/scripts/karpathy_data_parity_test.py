@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 import argparse
 import importlib
-import subprocess
 import sys
 import types
 
@@ -21,192 +20,13 @@ from priml.baselines.nanochat.scripts.karpathy_data_parity import (
     compare,
     compare_stream,
 )
+from priml.lib.testing.cli import assert_help_without_docstring
 
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from priml.baselines.nanochat.data import NanoChatBatch
-
-
-def test_clone_and_git_use_only_the_temp_reference(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "nested" / "deep" / "reference"
-    commit = "b11d6f283f866eb7e10fb776a4b8553fef873fd5"
-    calls: list[tuple[list[str], Path | None, bool, bool, bool]] = []
-
-    def run(
-        arguments: list[str],
-        *,
-        cwd: Path | None = None,
-        check: bool = False,
-        capture_output: bool = False,
-        text: bool = False,
-    ) -> subprocess.CompletedProcess[str]:
-        calls.append((arguments, cwd, check, capture_output, text))
-        if arguments[1] == "clone":
-            root.mkdir()
-            (root / ".git").mkdir()
-            output = ""
-        elif arguments[1] == "checkout":
-            output = ""
-        elif arguments[1] == "rev-parse" and arguments[2] == "HEAD":
-            output = commit
-        else:
-            output = ""
-        return subprocess.CompletedProcess(arguments, 0, output, "")
-
-    monkeypatch.setattr(subprocess, "run", run)
-    assert karpathy_data_parity.clone_upstream(root) == root
-    assert calls == [
-        (
-            [
-                "git",
-                "clone",
-                "--quiet",
-                "https://github.com/karpathy/autoresearch.git",
-                str(root),
-            ],
-            None,
-            True,
-            False,
-            False,
-        ),
-        (["git", "checkout", "--quiet", commit], root, True, False, False),
-        (["git", "rev-parse", "HEAD"], root, True, True, True),
-        (["git", "status", "--porcelain"], root, True, True, True),
-    ]
-
-
-def test_clone_upstream_accepts_an_existing_parent_directory(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "reference"
-    root.mkdir()
-    commit = "b11d6f283f866eb7e10fb776a4b8553fef873fd5"
-    calls: list[tuple[list[str], Path | None, bool, bool, bool]] = []
-
-    def run(
-        arguments: list[str],
-        *,
-        cwd: Path | None = None,
-        check: bool = False,
-        capture_output: bool = False,
-        text: bool = False,
-    ) -> subprocess.CompletedProcess[str]:
-        calls.append((arguments, cwd, check, capture_output, text))
-        if arguments[1] == "clone":
-            (root / ".git").mkdir()
-            output = ""
-        elif arguments[1] == "rev-parse":
-            output = commit
-        else:
-            output = ""
-        return subprocess.CompletedProcess(arguments, 0, output, "")
-
-    monkeypatch.setattr(subprocess, "run", run)
-    assert karpathy_data_parity.clone_upstream(root) == root
-    assert calls[0] == (
-        [
-            "git",
-            "clone",
-            "--quiet",
-            "https://github.com/karpathy/autoresearch.git",
-            str(root),
-        ],
-        None,
-        True,
-        False,
-        False,
-    )
-
-
-def test_clone_upstream_rejects_a_different_revision(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "existing"
-    (root / ".git").mkdir(parents=True)
-
-    def run(
-        arguments: list[str],
-        *,
-        cwd: Path | None = None,
-        check: bool = False,
-        capture_output: bool = False,
-        text: bool = False,
-    ) -> subprocess.CompletedProcess[str]:
-        del cwd, check, capture_output, text
-        output = "wrong-revision" if arguments[1] == "rev-parse" else ""
-        return subprocess.CompletedProcess(arguments, 0, output, "")
-
-    monkeypatch.setattr(subprocess, "run", run)
-    with pytest.raises(RuntimeError) as exc_info:
-        karpathy_data_parity.clone_upstream(root)
-    assert str(exc_info.value) == (
-        "clone is at wrong-revision, expected b11d6f283f866eb7e10fb776a4b8553fef873fd5"
-    )
-
-
-def test_clone_upstream_rejects_a_dirty_clone(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "existing"
-    (root / ".git").mkdir(parents=True)
-
-    def run(
-        arguments: list[str],
-        *,
-        cwd: Path | None = None,
-        check: bool = False,
-        capture_output: bool = False,
-        text: bool = False,
-    ) -> subprocess.CompletedProcess[str]:
-        del cwd, check, capture_output, text
-        output = (
-            "b11d6f283f866eb7e10fb776a4b8553fef873fd5"
-            if arguments[1] == "rev-parse"
-            else " M prepare.py"
-        )
-        return subprocess.CompletedProcess(arguments, 0, output, "")
-
-    monkeypatch.setattr(subprocess, "run", run)
-    with pytest.raises(RuntimeError) as exc_info:
-        karpathy_data_parity.clone_upstream(root)
-    assert str(exc_info.value) == "clone has local modifications:\nM prepare.py"
-
-
-def test_clone_upstream_reuses_a_clean_existing_clone(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "existing"
-    (root / ".git").mkdir(parents=True)
-    commit = "b11d6f283f866eb7e10fb776a4b8553fef873fd5"
-    calls: list[tuple[list[str], Path | None, bool, bool, bool]] = []
-
-    def run(
-        arguments: list[str],
-        *,
-        cwd: Path | None = None,
-        check: bool = False,
-        capture_output: bool = False,
-        text: bool = False,
-    ) -> subprocess.CompletedProcess[str]:
-        calls.append((arguments, cwd, check, capture_output, text))
-        output = commit if arguments[1] == "rev-parse" else ""
-        return subprocess.CompletedProcess(arguments, 0, output, "")
-
-    monkeypatch.setattr(subprocess, "run", run)
-    assert karpathy_data_parity.clone_upstream(root) == root
-    assert calls == [
-        (["git", "rev-parse", "HEAD"], root, True, True, True),
-        (["git", "status", "--porcelain"], root, True, True, True),
-    ]
 
 
 def test_load_upstream_imports_and_points_to_the_supplied_corpus(
@@ -427,18 +247,14 @@ def test_parse_args_displays_exact_script_and_option_help(
     ).endswith("Device batches land on.")
 
 
-def test_parse_args_requires_the_module_docstring(
+def test_main_help_works_without_a_module_docstring(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(karpathy_data_parity, "__doc__", None)
-
-    with pytest.raises(
-        ValueError,
-        match=r"^Expected __doc__ is not None\.$",
-    ) as exc_info:
-        karpathy_data_parity._parse_args()
-
-    assert str(exc_info.value) == "Expected __doc__ is not None."
+    assert_help_without_docstring(
+        monkeypatch,
+        karpathy_data_parity,
+        karpathy_data_parity._parse_args,
+    )
 
 
 def test_parse_args_defaults_and_overrides(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -4,8 +4,6 @@ from pathlib import Path
 
 import json
 
-from configgle.testing import assert_pprint_golden
-
 import pytest
 import torch
 
@@ -28,6 +26,7 @@ from priml.model.transformer.qwen3_test import (
 )
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 def test_config_defaults_and_make() -> None:

@@ -12,6 +12,7 @@ import time
 
 import pytest
 
+from priml.lib.custom_json import ReadError
 from priml.timer import CheckpointableStepTimer
 
 
@@ -135,14 +136,28 @@ def test_a_restored_timer_keeps_counting_from_the_lifetime_total() -> None:
 
 @pytest.mark.parametrize(
     ("key", "invalid"),
-    [("global_count", "bad"), ("global_sec", "bad")],
+    [
+        ("global_count", "bad"),
+        ("global_sec", "bad"),
+        ("global_count", "3"),
+        ("global_sec", "2.0"),
+        ("global_count", 3.5),
+        ("global_count", True),
+        ("global_count", None),
+    ],
 )
-def test_resume_rejects_invalid_persisted_totals(key: str, invalid: str) -> None:
-    state: dict[str, int | float | str] = {"global_count": 1, "global_sec": 2.0}
+def test_resume_rejects_invalid_persisted_totals(key: str, invalid: object) -> None:
+    state: dict[str, object] = {"global_count": 1, "global_sec": 2.0}
     state[key] = invalid
 
-    with pytest.raises(TypeError):
+    with pytest.raises(ReadError):
         CheckpointableStepTimer().load_state_dict(state)
+
+
+def test_resume_reads_an_integral_seconds_total_as_a_float() -> None:
+    timer = CheckpointableStepTimer()
+    timer.load_state_dict({"global_count": 1, "global_sec": 2})
+    assert type(timer.global_sec) is float
 
 
 if __name__ == "__main__":

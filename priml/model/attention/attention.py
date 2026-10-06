@@ -26,6 +26,7 @@ from priml.model.custom_types import (
     ChannelsIn,
     DepthIndex,
     HasResetParameters,
+    LayerCache,
     RotaryConfig,
     TensorModule,
     infer_same_width,
@@ -463,6 +464,7 @@ class Attention(AttentionProjections):
                 num_heads=self.num_heads,
                 channels_head=self.channels_head,
                 dropout_p=self.dropout,
+                **kwargs,
             )
             return replace(
                 super().cost(
@@ -538,69 +540,27 @@ class Attention(AttentionProjections):
         x: Tensor,
         *,
         memory: Tensor | None = None,
-        positions: Tensor | list[Tensor] | None = None,
+        cache: LayerCache | None = None,
+        positions: Tensor | None = None,
         cos_sin: tuple[Tensor, Tensor] | None = None,
         dropout_p: float | None = None,
         is_causal: bool | None = None,
         attn_mask: Tensor | None = None,
+        window: int = -1,
         **kwargs: object,
     ) -> Tensor:
-        out, _ = self._forward(
+        return self._forward(
             x,
             memory=memory,
-            positions=positions,
-            cos_sin=cos_sin,
-            cache=None,
-            dropout_p=dropout_p,
-            is_causal=is_causal,
-            attn_mask=attn_mask,
-            **kwargs,
-        )
-        return out
-
-    def forward_cached(
-        self,
-        x: Tensor,
-        *,
-        cache: KVCache,
-        positions: Tensor | list[Tensor] | None = None,
-        cos_sin: tuple[Tensor, Tensor] | None = None,
-        dropout_p: float | None = None,
-        is_causal: bool | None = None,
-        attn_mask: Tensor | None = None,
-        **kwargs: object,
-    ) -> tuple[Tensor, KVCache]:
-        """Attend using and updating ``cache``.
-
-        Args:
-          x: Input query tensor.
-          cache: Pre-allocated KVCache to update with new keys/values.
-          positions: Token position indices for RoPE; None = sequential.
-          cos_sin: Pre-computed rotation angles (cos, sin); None = compute.
-          dropout_p: Dropout probability (0.0 to 1.0); None = no dropout.
-          is_causal: Mask future positions; None = no causal masking.
-          attn_mask: Custom attention mask; None = no additional masking.
-          **kwargs: Extra arguments passed to _forward.
-
-        Returns:
-          output: Attention output.
-          updated_cache: The cache with this step's keys and values appended.
-
-        """
-        out, updated = self._forward(
-            x,
-            memory=None,
             positions=positions,
             cos_sin=cos_sin,
             cache=cache,
             dropout_p=dropout_p,
             is_causal=is_causal,
             attn_mask=attn_mask,
+            window=window,
             **kwargs,
         )
-        if updated is None:
-            raise ValueError("Expected updated is not None.")
-        return out, updated
 
     def project_queries(self, x: Tensor) -> Tensor:
         """Project queries through the first ``num_heads`` heads of ``proj_qkv``.
@@ -648,15 +608,21 @@ class Attention(AttentionProjections):
         x: Tensor,
         *,
         memory: Tensor | None = None,
-        positions: Tensor | list[Tensor] | None,
+        positions: Tensor | None,
         cos_sin: tuple[Tensor, Tensor] | None,
-        cache: KVCache | None,
+        cache: LayerCache | None,
         dropout_p: float | None,
         is_causal: bool | None,
         attn_mask: Tensor | None,
+        window: int,
         **kwargs: object,
-    ) -> tuple[Tensor, KVCache | None]:
+    ) -> Tensor:
         S = x.shape[-2]
+        kv_cache: KVCache | None = None
+        if cache is not None:
+            state = cache[self.depth_index]
+            assert isinstance(state, KVCache)
+            kv_cache = state
 
         # proj_qkv: [..., S, C] -> [..., S, num_ensemble, channels_head].
         if memory is not None:
@@ -665,7 +631,7 @@ class Attention(AttentionProjections):
             if (
                 self.causal
                 or is_causal
-                or kwargs.get("window", -1) != -1
+                or window != -1
                 or self.rope is not None
                 or cos_sin is not None
                 or cache is not None
@@ -697,16 +663,15 @@ class Attention(AttentionProjections):
             q, k = RoPE.rotate(q, k, cos, sin)
         elif self.rope is not None:
             if positions is None:
-                offset = cache.seen if cache is not None else 0
+                offset = kv_cache.seen if kv_cache is not None else 0
                 positions = torch.arange(offset, offset + S, device=x.device)
-            assert isinstance(positions, Tensor)
             cos, sin = self.rope(positions)
             q, k = RoPE.rotate(q, k, cos, sin)
 
         # The cache stores [..., H, S, D]; the kernels take [..., S, H, D].
         q, k, v = (t.movedim(-3, -2) for t in (q, k, v))
-        if cache is not None:
-            k, v = cache.update(k, v)
+        if kv_cache is not None:
+            k, v = kv_cache.update(k, v)
 
         if self.kv_groups > 1:
             k = k.repeat_interleave(self.kv_groups, dim=-3)
@@ -717,9 +682,10 @@ class Attention(AttentionProjections):
         # chunk and honor ``window``; ``window_mask`` does both when finite, else
         # ``causal_chunk_mask`` gives the causal fallback. A single-token chunk needs
         # only ``window``, applied by the kernel's own fallback.
-        if attn_mask is None and self.causal and S > 1:
-            window = kwargs.get("window", -1)
-            assert isinstance(window, int)
+        causal = self.causal if is_causal is None else is_causal
+        # A caller's mask keeps the flag, so the kernel folds causality into it.
+        flag = causal and (k.shape[-3] == S or attn_mask is not None)
+        if attn_mask is None and causal and S > 1:
             attn_mask = window_mask(q, k, window=window)
             if attn_mask is None:
                 attn_mask = causal_chunk_mask(q, k)
@@ -733,10 +699,9 @@ class Attention(AttentionProjections):
                 if dropout_p is None
                 else dropout_p
             ),
-            is_causal=(
-                self.causal and k.shape[-3] == S if is_causal is None else is_causal
-            ),
+            is_causal=flag,
             attn_mask=attn_mask,
+            window=window,
             **kwargs,
         )
 
@@ -744,5 +709,4 @@ class Attention(AttentionProjections):
         out = out.flatten(-2)
         if self.norm_out is not None:
             out = self.norm_out(out)
-        out = self.proj_out(out)
-        return out, cache
+        return self.proj_out(out)

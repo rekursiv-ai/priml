@@ -210,8 +210,8 @@ def test_main_forwards_arguments_and_reports_prepared_count(
 
     def prepare(
         actual_source: Path,
-        actual_output: Path,
         *,
+        output: Path,
         resolution: int,
         checkpoint: Path | None,
         device: str,
@@ -219,7 +219,7 @@ def test_main_forwards_arguments_and_reports_prepared_count(
     ) -> int:
         captured.update(
             source=actual_source,
-            output=actual_output,
+            output=output,
             resolution=resolution,
             checkpoint=checkpoint,
             device=device,
@@ -279,6 +279,14 @@ def test_prepare_rejects_untyped_records(
     with pytest.raises(TypeError) as error:
         prepare_data.prepare(tmp_path, tmp_path / "out", device="cpu")
     assert str(error.value) == message
+
+
+def test_prepare_refuses_to_write_over_its_source(tmp_path: Path) -> None:
+    source = tmp_path / "raw"
+    source.mkdir()
+    with pytest.raises(ValueError, match="aliases protected input"):
+        prepare_data.prepare(source, source, limit=1)
+    assert list(source.iterdir()) == []
 
 
 def test_prepare_creates_manifest_for_empty_source(

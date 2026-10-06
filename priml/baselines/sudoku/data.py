@@ -119,7 +119,7 @@ class _SudokuBatches:
         self,
         *,
         dataset_dir: Path,
-        device: torch.device | str,
+        device: torch.device | str | None,
         batch_size: int,
         split: str,
         shuffle: bool,
@@ -133,6 +133,10 @@ class _SudokuBatches:
         if epoch < 0:
             raise ValueError(f"epoch must be non-negative; got {epoch}.")
         data = _load_split(dataset_dir, split)
+        if data["vocab_size"] != spec.vocab_size:
+            raise ValueError("Prepared vocabulary does not match dataset spec.")
+        if data["inputs"].shape[1] != math.prod(spec.grid_shape):
+            raise ValueError("Prepared grid does not match dataset spec.")
         bounds = data["group_indices"]
         if num_puzzles is not None:
             num_puzzles = min(num_puzzles, len(bounds) - 1)
@@ -148,10 +152,6 @@ class _SudokuBatches:
         self.inputs = inputs.to(self.device)
         self.labels = labels.to(self.device)
         self.bounds: Tensor = bounds.to(self.device)
-        if data["vocab_size"] != spec.vocab_size:
-            raise ValueError("Prepared vocabulary does not match dataset spec.")
-        if data["inputs"].shape[1] != math.prod(spec.grid_shape):
-            raise ValueError("Prepared grid does not match dataset spec.")
         self.spec = spec
         self.batch_size = batch_size
         self.shuffle = shuffle
@@ -169,27 +169,7 @@ class _SudokuBatches:
             self.epoch += 1
             self._next_batch = 0
         active_epoch = self._active_epoch
-        generator = self._shuffle_generator(active_epoch)
-        starts = self.bounds[:-1]
-        sizes = (self.bounds[1:] - starts).long()
-
-        # Two-level shuffle: permute each puzzle's own augmented copies, then
-        # permute globally. The first keeps a puzzle's variants from arriving
-        # in a fixed order; the second keeps whole puzzles from doing so.
-        chunks: list[Tensor] = []
-        for i in range(len(sizes)):
-            start, size = int(starts[i]), int(sizes[i])
-            index = torch.arange(start, start + size, device=self.device)
-            if self.shuffle:
-                index = index[
-                    torch.randperm(size, device=self.device, generator=generator)
-                ]
-            chunks.append(index)
-        order = torch.cat(chunks)
-        if self.shuffle:
-            order = order[
-                torch.randperm(len(order), device=self.device, generator=generator)
-            ]
+        order = self._order(active_epoch)
 
         for batch_index, start in enumerate(range(0, len(order), self.batch_size)):
             if batch_index < self._next_batch:
@@ -219,7 +199,7 @@ class _SudokuBatches:
 
     def __len__(self) -> int:
         """Batches per epoch, counting a short final batch."""
-        return ceil_div(int(self.bounds[-1]), self.batch_size)
+        return ceil_div(int(self.bounds[-1] - self.bounds[0]), self.batch_size)
 
     class StateDict(TypedDict):
         """Where an interrupted epoch stopped; ``active_epoch`` is None between epochs."""
@@ -252,6 +232,37 @@ class _SudokuBatches:
         self.epoch = state.get("epoch", self.epoch)
         self._active_epoch = state.get("active_epoch")
         self._next_batch = state.get("next_batch", 0)
+
+    def _order(self, epoch: int) -> Tensor:
+        """Return this epoch's row order: disk order, or the two-level shuffle."""
+        if not self.shuffle:
+            return torch.arange(
+                int(self.bounds[0]),
+                int(self.bounds[-1]),
+                device=self.device,
+            )
+        generator = self._shuffle_generator(epoch)
+        starts = self.bounds[:-1]
+        # One host sync for every bound, not two per puzzle.
+        bounds = zip(
+            convert(starts.tolist(), list[int]),
+            convert((self.bounds[1:] - starts).tolist(), list[int]),
+            strict=True,
+        )
+        # Two-level shuffle: permute each puzzle's own augmented copies, then
+        # permute globally. The first keeps a puzzle's variants from arriving
+        # in a fixed order; the second keeps whole puzzles from doing so.
+        order = torch.cat(
+            [
+                torch.arange(start, start + size, device=self.device)[
+                    torch.randperm(size, device=self.device, generator=generator)
+                ]
+                for start, size in bounds
+            ],
+        )
+        return order[
+            torch.randperm(len(order), device=self.device, generator=generator)
+        ]
 
     def _shuffle_generator(self, epoch: int) -> torch.Generator | None:
         """Return a named per-epoch generator, or the ambient stream."""
@@ -313,13 +324,9 @@ class SudokuData:
 
     Every batch is exactly ``batch_size`` rows: a short final batch is padded
     with zero rows and reports how many are real, so downstream tensor shapes
-    never change mid-epoch.
-
-    Raises:
-      FileNotFoundError: If the prepared arrays are absent. Run
-        ``uv --quiet run --frozen python -m
-        priml.baselines.sudoku.scripts.prepare_data`` first.
-
+    never change mid-epoch. Construction reads no files; each loader reads its
+    split when built and raises ``FileNotFoundError`` naming the preparer if
+    the split was never prepared.
     """
 
     class Config(Fig["SudokuData"]):
@@ -329,13 +336,14 @@ class SudokuData:
         """Puzzle geometry and token vocabulary."""
 
         base_dir: Path | str | None = None
-        """Resource root supplied during parent finalization."""
+        """Resource root supplied during parent finalization; ``None`` is
+        ``/opt/scratch``."""
 
         working_dir: Path | str = "/datasets/sudoku-extreme"
         """Directory holding the ``train/`` and ``test/`` splits.
 
-        Resolved beneath ``base_dir`` at finalize, so it names a location
-        within the resource root rather than an absolute filesystem path."""
+        A ``str`` is a logical location resolved beneath ``base_dir`` at
+        finalize; a ``Path`` is literal and kept as given."""
 
         batch_size: int = 384
         """Puzzles per training batch."""
@@ -343,8 +351,8 @@ class SudokuData:
         eval_batch_size: int | None = None
         """Puzzles per evaluation batch; ``None`` reuses ``batch_size``."""
 
-        device: str = "auto"
-        """Device holding the resident arrays ("auto" picks the best)."""
+        device: torch.device | str | None = None
+        """Device holding the resident arrays."""
 
         augment: bool = True
         """Apply digit relabeling and grid symmetry per training batch.
@@ -373,16 +381,22 @@ class SudokuData:
 
         @override
         def finalize(self) -> Self:
-            self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
+            if isinstance(self.working_dir, str):
+                self.working_dir = resolve_working_dir(
+                    "/opt/scratch" if self.base_dir is None else self.base_dir,
+                    self.working_dir,
+                )
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
-        if config.batch_size <= 0:
-            raise ValueError(f"batch_size must be positive; got {config.batch_size}.")
-        if config.eval_batch_size is not None and config.eval_batch_size <= 0:
-            raise ValueError(
-                f"eval_batch_size must be positive; got {config.eval_batch_size}.",
-            )
+        for name, value in (
+            ("batch_size", config.batch_size),
+            ("eval_batch_size", config.eval_batch_size),
+            ("num_train_puzzles", config.num_train_puzzles),
+            ("num_eval_puzzles", config.num_eval_puzzles),
+        ):
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be positive; got {value}.")
         self.config = config
         self.dataset_dir = Path(config.working_dir)
         self.batch_size = config.batch_size
@@ -495,11 +509,14 @@ class SudokuData:
         state = cast(SudokuData.StateDict, state_dict)
         if "timer_epoch" in state:
             self.timer_epoch.load_state_dict(state["timer_epoch"])
-        loader_state = state.get("loader")
-        if loader_state is not None:
+        self._epochs = state["epoch"]
+        loader_state = state["loader"] or {
+            "epoch": self._epochs,
+            "active_epoch": None,
+            "next_batch": 0,
+        }
+        if self._live is None:
             self._pending_loader_state = loader_state
-            if self._live is not None:
-                self._live.load_state_dict(loader_state)
-                self._pending_loader_state = None
-        elif self._live is not None:
-            self._live.epoch = self._epochs
+        else:
+            self._live.load_state_dict(loader_state)
+            self._pending_loader_state = None

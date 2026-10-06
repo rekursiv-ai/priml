@@ -28,6 +28,7 @@ from priml.model.custom_types import (
     ChannelsIn,
     DepthIndex,
     HasResetParameters,
+    LayerCache,
     RotaryConfig,
     TensorModule,
     infer_same_width,
@@ -170,6 +171,7 @@ class GatedAttention(nn.Module):
                 num_heads=self.num_heads,
                 channels_head=self.channels_head,
                 dropout_p=self.dropout,
+                **kwargs,
             )
             total += elementwise_cost(
                 primal=5 * inner * rows,
@@ -199,6 +201,7 @@ class GatedAttention(nn.Module):
         self.num_heads = config.num_heads
         self.num_heads_kv = config.num_heads_kv
         self.channels_head = config.channels_head
+        self.depth_index = config.depth_index
         self.dropout = config.dropout
         proj_q = Linear.Config()
         proj_q.channels_in = config.channels_in
@@ -282,45 +285,15 @@ class GatedAttention(nn.Module):
             dtype=self.proj_q.weight.dtype if dtype is None else dtype,
         )
 
-    def forward_cached(
-        self,
-        x: Tensor,
-        *,
-        cache: KVCache,
-        positions: Tensor | None = None,
-        attn_mask: Tensor | None = None,
-        **kwargs: object,
-    ) -> tuple[Tensor, KVCache]:
-        """Append tokens to cache and return their attention outputs.
-
-        Args:
-          x: Hidden states shaped [batch, sequence, channels].
-          cache: Preallocated cache updated in place.
-          positions: Optional supported text positions for rotary factors.
-          attn_mask: Optional additive mask broadcastable to [batch, heads, Q, K].
-          **kwargs: Messages for the injected attention kernel.
-
-        Returns:
-          output: Gated attention outputs for the new input tokens.
-          cache: The updated input cache.
-
-        """
-        return self.forward(
-            x,
-            cache=cache,
-            positions=positions,
-            attn_mask=attn_mask,
-            **kwargs,
-        ), cache
-
     @override
     def forward(
         self,
         x: Tensor,
         *,
-        cache: KVCache | None = None,
+        cache: LayerCache | None = None,
         positions: Tensor | None = None,
         attn_mask: Tensor | None = None,
+        window: int = -1,
         **kwargs: object,
     ) -> Tensor:
         """Attend causally, gating each value channel before projecting out.
@@ -332,20 +305,25 @@ class GatedAttention(nn.Module):
             ``[batch..., sequence, 1]``. The axis-last form must match x's
             batch and sequence axes; multiple position axes are unsupported.
           attn_mask: Optional additive mask broadcastable to [batch, heads, Q, K].
+          window: Previous keys each query reaches, plus itself; -1 for all.
           **kwargs: Messages for the injected attention kernel.
 
         Returns:
           output: Gated attention outputs with the input's batch and sequence axes.
 
         """
+        state: KVCache | None = None
         if cache is not None:
+            value = cache[self.depth_index]
+            assert isinstance(value, KVCache)
+            state = value
             _validate_cache_geometry(
-                cache,
+                state,
                 x=x,
                 num_heads_kv=self.num_heads_kv,
                 channels_head=self.channels_head,
             )
-            if cache.seen + x.shape[-2] > cache.max_seq:
+            if state.seen + x.shape[-2] > state.max_seq:
                 raise ValueError("The full-attention cache capacity would be exceeded.")
         kwargs.pop("is_causal", None)
         shape = (*x.shape[:-1], -1, self.channels_head)
@@ -363,7 +341,7 @@ class GatedAttention(nn.Module):
         v = self.proj_v(x).reshape(shape)
         if self.rope is not None:
             if positions is None:
-                offset = cache.seen if cache is not None else 0
+                offset = state.seen if state is not None else 0
                 positions = torch.arange(offset, offset + x.shape[-2], device=x.device)
             elif not _is_text_positions(positions, x=x):
                 raise ValueError(
@@ -373,8 +351,8 @@ class GatedAttention(nn.Module):
             cos, sin = self.rope(positions)
             q = _rotate(q, cos=cos.to(x.dtype), sin=sin.to(x.dtype))
             k = _rotate(k, cos=cos.to(x.dtype), sin=sin.to(x.dtype))
-        if cache is not None:
-            k, v = cache.update(k.movedim(-3, -2), v.movedim(-3, -2))
+        if state is not None:
+            k, v = state.update(k.movedim(-3, -2), v.movedim(-3, -2))
             k, v = k.movedim(-3, -2), v.movedim(-3, -2)
         groups = self.num_heads // self.num_heads_kv
         k, v = k.repeat_interleave(groups, dim=-2), v.repeat_interleave(groups, dim=-2)
@@ -383,8 +361,6 @@ class GatedAttention(nn.Module):
             # A window reaching the whole context returns None. In a rectangular
             # cached chunk, preserve the chunk's causal mask in that case; the
             # square fast path still keeps both masks absent.
-            window = kwargs.get("window", -1)
-            assert isinstance(window, int)
             mask = window_mask(q, k, window=window)
             if mask is None:
                 mask = causal_chunk_mask(q, k)
@@ -392,8 +368,6 @@ class GatedAttention(nn.Module):
             # Mixing -inf into Qwen's finite mask changes fully masked rows,
             # breaking exact Hugging Face parity. Apply its finite causal bias here.
             is_causal = False
-            window = kwargs.get("window", -1)
-            assert isinstance(window, int)
             mask = _causal_bias(q, k, dtype=x.dtype, window=window) + attn_mask
         output = (
             self.attn_kernel(
@@ -403,6 +377,7 @@ class GatedAttention(nn.Module):
                 is_causal=is_causal,
                 attn_mask=mask,
                 dropout_p=self.dropout if self.training else 0.0,
+                window=window,
                 **kwargs,
             )
             .flatten(-2)

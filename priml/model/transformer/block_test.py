@@ -1,8 +1,8 @@
-"""Tests for ``TransformerBlock``, including bit-for-bit golden coverage.
+r"""Tests for ``TransformerBlock``, including bit-for-bit golden coverage.
 
 Regenerate after an intentional numeric change::
 
-    BFB_REGENERATE=1 uv --quiet run --frozen pytest \
+    uv --quiet run --frozen pytest \ --regenerate-b4b
         priml/model/transformer/block_test.py
 
 Run through ``pytest``: the priml ``conftest.py`` sets ``MKL_CBWR`` and caps
@@ -17,7 +17,6 @@ from unittest.mock import Mock, patch
 
 import warnings
 
-from configgle.testing import assert_pprint_golden
 from torch.utils.checkpoint import checkpoint as real_checkpoint
 
 import pytest
@@ -26,7 +25,7 @@ import torch
 from priml.cost import Cost, cost
 from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
-from priml.model.attention.kvcache import KVCache
+from priml.model.attention.kvcache import KVCache, alloc_layer_cache
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
@@ -37,6 +36,7 @@ from priml.testing.bfb import (
     move_to_device,
 )
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -89,48 +89,64 @@ def test_transformer_block_cached(prenorm: bool) -> None:
             causal=True,
         ),
         prenorm=prenorm,
+        depth_index=((0, 1),),
     ).make()
     assert isinstance(m.attn, Attention)
-    cache = m.attn.alloc_kv_cache(batch=2, max_seq=8)
+    cache = alloc_layer_cache(m, batch=2, max_seq=8)
     x = torch.randn(2, 8, 64)
 
-    out, cache = m.forward_cached(x, cache=cache, window=3)
+    out = m(x, cache=cache, window=3)
 
     assert out.shape == (2, 8, 64)
-    assert cache.length == 8
+    state = cache[m.depth_index]
+    assert isinstance(state, KVCache)
+    assert state.length == 8
     assert torch.equal(out, m(x, window=3))
 
 
-def test_transformer_block_cached_rejects_attention_without_cached_path() -> None:
+def test_a_checkpointed_block_with_a_cache_writes_each_key_once() -> None:
+    """Recomputation in backward would append the same keys a second time."""
+    block = TransformerBlock.Config(
+        channels_in=16,
+        attn=Attention.Config(num_heads=2, channels_head=8, causal=True),
+        depth_index=((0, 1),),
+        checkpoint=True,
+    ).make()
+    cache = alloc_layer_cache(block, batch=2, max_seq=8)
+    x = torch.randn(2, 3, 16, requires_grad=True)
+
+    block(x, cache=cache).sum().backward()
+
+    state = cache[block.depth_index]
+    assert isinstance(state, KVCache)
+    assert (state.length, state.seen) == (3, 3)
+
+
+def test_transformer_block_forwards_cache_to_open_attention_kwargs() -> None:
     model = TransformerBlock.Config(
         channels_in=16,
         attn=Linear.Config(16, 16),
     ).make()
-    cache = KVCache.alloc(batch=2, num_heads=4, max_seq=3, channels_head=5)
 
-    with pytest.raises(TypeError) as error:
-        model.forward_cached(torch.randn(2, 3, 16), cache=cache)
-    assert str(error.value) == "The attention module must implement cached attention."
+    output = model(torch.randn(2, 3, 16), cache={})
+    assert output.shape == (2, 3, 16)
 
 
 class _CachedAttention(torch.nn.Module):
     def reset_parameters(self) -> None:
         pass
 
-    def alloc_kv_cache(self, **kwargs: object) -> str:
-        del kwargs
-        return "cache"
-
-    def forward_cached(
+    @override
+    def forward(
         self,
         x: torch.Tensor,
         *,
         cache: object,
         marker: str,
-    ) -> tuple[torch.Tensor, object]:
+    ) -> torch.Tensor:
         assert marker == "forwarded"
-        assert cache == "cache"
-        return torch.full_like(x, 2), "updated"
+        assert cache == {}
+        return torch.full_like(x, 2)
 
 
 class _MarkerModule(torch.nn.Module):
@@ -162,9 +178,8 @@ def test_transformer_block_cached_forwards_kwargs_and_residuals(
     model.ffn = _MarkerModule(3)
     x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
 
-    output, cache = model.forward_cached(x, cache="cache", marker="forwarded")
+    output = model(x, cache={}, marker="forwarded")
 
-    assert cache == "updated"
     if prenorm:
         expected = 2 * x + 14
     else:
@@ -193,17 +208,18 @@ def test_transformer_block_cached_leaves_a_memory_alone() -> None:
     block = TransformerBlock.Config(
         channels_in=12,
         attn=Attention.Config(num_heads=2, causal=True),
+        depth_index=((0, 1),),
     ).make()
     assert isinstance(block.attn, Attention)
     x, memory = torch.randn(3, 4, 12), torch.randn(3, 5, 12)
-    with_memory, _ = block.forward_cached(
+    with_memory = block(
         x,
-        cache=block.attn.alloc_kv_cache(batch=3, max_seq=7),
+        cache=alloc_layer_cache(block, batch=3, max_seq=7),
         memory=memory,
     )
-    without, _ = block.forward_cached(
+    without = block(
         x,
-        cache=block.attn.alloc_kv_cache(batch=3, max_seq=7),
+        cache=alloc_layer_cache(block, batch=3, max_seq=7),
     )
     torch.testing.assert_close(with_memory, without)
 

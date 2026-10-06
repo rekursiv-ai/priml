@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import json
 import math
-import os
 import shutil
 
 from torch import Tensor
@@ -53,6 +52,7 @@ from priml.baselines.arcagi1.metric import (
 )
 from priml.baselines.arcagi1.scripts import build_dataset, build_spatial_eval
 from priml.lib.custom_json import convert, parse
+from priml.testing import regenerate
 from priml.testing.golden import read_tensors, stored, write_tensors
 
 
@@ -351,7 +351,7 @@ class PortBackend:
         return config.make().sample(name, rng=rng)
 
     def build(self, case: BuildCase, prefix: Path, output: Path) -> None:
-        build_dataset._build_arc_dataset(
+        build_dataset.write_arc_tree(
             input_file_prefix=str(prefix),
             output_dir=output,
             augmentation=_recipe(case, spec=self.spec),
@@ -594,6 +594,8 @@ def leaf(value: object) -> Leaf:
         return stored(torch.from_numpy(np.array(array, copy=True)))
     if isinstance(value, bytes):
         return torch.frombuffer(bytearray(value), dtype=torch.uint8).clone()
+    if isinstance(value, (bool, int, float, np.bool_, np.integer, np.floating)):
+        return torch.tensor(value.item() if isinstance(value, np.generic) else value)
     return value if isinstance(value, str) else repr(value)
 
 
@@ -606,9 +608,19 @@ def put(out: Capture, key: str, *values: object) -> None:
         out[f"{key}/{index}"] = leaf(value)
 
 
-def rng_state(rng: np.random.Generator) -> str:
-    """Keep a generator's position as its canonical JSON state."""
-    return json.dumps(rng.bit_generator.state, sort_keys=True)
+def rng_state(rng: np.random.Generator) -> Tensor:
+    """Keep a PCG64 generator's position: its 128-bit state and increment."""
+    state = convert(rng.bit_generator.state, dict[str, object])
+    words = convert(state["state"], dict[str, int])
+    buffered = (convert(state["has_uint32"], int), convert(state["uinteger"], int))
+    return torch.tensor(
+        [*_u64_words(words["state"]), *_u64_words(words["inc"]), *buffered],
+        dtype=torch.uint64,
+    )
+
+
+def _u64_words(value: int) -> tuple[int, int]:
+    return value >> 64, value & ((1 << 64) - 1)
 
 
 def outcome(fn: Callable[[], object]) -> Leaf:
@@ -626,17 +638,9 @@ def scrub(value: Leaf, path: Path, name: str) -> Leaf:
 
 
 def put_tree(out: Capture, prefix: str, root: Path) -> None:
-    """Keep every file under ``root`` except the ensure completion marker."""
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.name == ".ensure_complete":
-            continue
-        key = f"{prefix}/{path.relative_to(root)}"
-        if path.suffix == ".npy":
-            out[key] = leaf(cast(object, np.load(path)))
-        elif path.suffix == ".json":
-            out[key] = path.read_text(encoding="utf-8")
-        else:
-            out[key] = leaf(path.read_bytes())
+    """Keep every array the builder wrote; its JSON follows from the config."""
+    for path in sorted(root.rglob("*.npy")):
+        out[f"{prefix}/{path.relative_to(root)}"] = leaf(cast(object, np.load(path)))
 
 
 def write_source(prefix: Path, *, with_solutions: bool = True) -> None:
@@ -1230,7 +1234,6 @@ def capture_loader(b: Backend, tmp: Path) -> Capture:
                 *(loaded[k] for k in ("inputs", "labels", "puzzle_indices")),
                 *(loaded[k] for k in ("group_indices", "puzzle_identifiers")),
                 loaded["spatial_tags"],
-                loaded["metadata"],
             )
     return out
 
@@ -1347,7 +1350,7 @@ def put_results(out: Capture, prefix: str, results: Mapping[str, object]) -> Non
     """Keep each scalar result's exact repr, and the signal payload whole."""
     for name, value in results.items():
         if name != "extras":
-            out[f"{prefix}/{name}"] = repr(value)
+            out[f"{prefix}/{name}"] = leaf(value)
             continue
         raw = convert(value, dict[str, object])["signal_dump"]
         assert isinstance(raw, tuple)
@@ -1735,7 +1738,7 @@ def save_golden(table: Mapping[str, Capture], *, spec: ArcSpec) -> None:
 @pytest.fixture(scope="module")
 def golden_fixture(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Capture]:
     """Decode the frozen CAPTURES, minting small inputs from the port on request."""
-    if os.environ.get("BFB_REGENERATE") == "1":
+    if regenerate.b4b():
         spec = ArcSpec()
         spec.max_grid = 4
         backend = PortBackend(spec=spec)

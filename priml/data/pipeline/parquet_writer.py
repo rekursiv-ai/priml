@@ -5,9 +5,13 @@ Utilities for reading and writing parquet files in data pipelines.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import logging
+import os
+import re
+import secrets
+import socket
 
 from configgle import Fig
 
@@ -51,9 +55,11 @@ class BufferProcessor:
     them in a buffer. After the iterator completes, accumulated samples can be
     retrieved via get_buffered_results().
 
-    Supports grouping by a key field - when the key changes, yields samples
-    for the previous group. When group_by_key is None, buffers all samples
-    until iterator completes.
+    Supports grouping by a key field: when its value changes, the buffer is
+    cleared and starts the new group, so ``get_buffered_results()`` holds only
+    the CURRENT (at stream end, the last) group; earlier groups are discarded,
+    not emitted. When group_by_key is None, buffers all samples until the
+    iterator completes.
 
     Use cases:
     - Batch updates: Collect pipeline results for writing back to storage
@@ -102,7 +108,11 @@ class BufferProcessor:
                     if group_value != first_sample.get(self.group_by_key):
                         self._buffer = {}
 
-            assert isinstance(sample_key, str)
+            if not isinstance(sample_key, str):
+                raise TypeError(
+                    f"BufferProcessor: {self.key_field!r} must be a string; "
+                    f"got {type(sample_key).__name__}.",
+                )
             self._buffer[sample_key] = dict(sample)
             yield sample
 
@@ -149,11 +159,13 @@ class ParquetMergeWriter:
 
     @classmethod
     def cleanup_stale_temp_files(cls, directory: Path) -> int:
-        """Remove orphaned ``*.parquet.new`` temp files left by crashes.
+        """Remove temp files orphaned by writers on this host that have died.
 
-        The atomic-write path crashes between writing the temp file and the
-        rename leave a stale ``.parquet.new`` orphan. Scan the directory and
-        delete them so a later run does not mistake them for real shards.
+        A crash between writing the temp file and its rename leaves an orphan.
+        Only temp files this class names are candidates, and only those whose
+        writing process -- named in the file -- is gone: a live writer's
+        in-flight temp and an ``overwrite=False`` ``.parquet.new`` output are
+        both kept. Another host's temps are left to that host.
 
         Args:
           directory: Directory to scan for orphaned temp files.
@@ -163,9 +175,18 @@ class ParquetMergeWriter:
 
         """
         removed_count = 0
-        for stale in directory.glob("*.parquet.new"):
-            stale.unlink()
-            logger.info("ParquetMergeWriter: Removed stale temp file %s", stale.name)
+        host = _host_label()
+        for candidate in directory.glob(".*.parquet.*.tmp"):
+            match = _TEMP_NAME.fullmatch(candidate.name)
+            if match is None or match["host"] != host:
+                continue
+            if _process_alive(int(match["pid"])):
+                continue
+            candidate.unlink(missing_ok=True)
+            logger.info(
+                "ParquetMergeWriter: Removed stale temp file %s",
+                candidate.name,
+            )
             removed_count += 1
         return removed_count
 
@@ -183,7 +204,11 @@ class ParquetMergeWriter:
         Args:
             parquet_path: Path to existing parquet file to update.
             buffered_results: Dict mapping sample keys to field dicts.
-            overwrite: If True, rename .new file over original. If False, leave .new file.
+            overwrite: If True, replace the original. If False, leave the result
+              beside it as ``<name>.parquet.new``.
+
+        Raises:
+            TypeError: The key column holds non-string values.
 
         """
         if len(buffered_results) == 0:
@@ -203,7 +228,22 @@ class ParquetMergeWriter:
         self.cleanup_stale_temp_files(parquet_path.parent)
 
         table = pq.read_table(parquet_path)
-        keys = cast(list[object], table.column(self.key_field).to_pylist())
+        raw_keys = cast(list[object], table.column(self.key_field).to_pylist())
+        keys = [key for key in raw_keys if isinstance(key, str)]
+        if len(keys) != len(raw_keys):
+            raise TypeError(
+                f"ParquetMergeWriter: key column {self.key_field!r} of "
+                f"{parquet_path.name} must hold strings.",
+            )
+        absent = sorted(set(buffered_results) - set(keys))
+        if absent:
+            logger.warning(
+                "ParquetMergeWriter: %s buffered keys are absent from %s and were "
+                "not written, e.g. %s",
+                len(absent),
+                parquet_path.name,
+                absent[:5],
+            )
 
         # Harvest field names from all buffered results, excluding
         # non-serializable fields.
@@ -219,15 +259,12 @@ class ParquetMergeWriter:
 
         # Build new columns via native pyarrow (no pandas).
         for field_name in field_names:
+            present = field_name in table.column_names
             existing = (
-                table.column(field_name).to_pylist()
-                if field_name in table.column_names
-                else [None] * len(keys)
+                table.column(field_name).to_pylist() if present else [None] * len(keys)
             )
             values: list[object] = []
-            for i, raw_key in enumerate(keys):
-                assert isinstance(raw_key, str)
-                key = raw_key
+            for i, key in enumerate(keys):
                 buf = buffered_results.get(key)
                 if buf is not None and field_name in buf:
                     value = self._convert_to_serializable(buf[field_name])
@@ -236,22 +273,26 @@ class ParquetMergeWriter:
                     values.append(value)
                 else:
                     values.append(existing[i])
-            table = (
-                table.drop(field_name) if field_name in table.column_names else table
+            # The column's own type, not one re-inferred from the values: an
+            # int32 column came back int64, and a mixed one raised ArrowInvalid.
+            column_type = table.schema.field(field_name).type if present else None
+            table = table.drop(field_name) if present else table
+            table = table.append_column(
+                field_name,
+                pa.array(values, type=column_type),
             )
-            table = table.append_column(field_name, pa.array(values))
 
-        # Write atomically.
-        new_path = parquet_path.with_suffix(".parquet.new")
-        pq.write_table(table, new_path)
-        logger.info("ParquetMergeWriter: Wrote %s", new_path.name)
-        if overwrite:
-            new_path.rename(parquet_path)
-            logger.info(
-                "ParquetMergeWriter: Renamed %s -> %s",
-                new_path.name,
-                parquet_path.name,
-            )
+        # Write atomically, through a temp name no other writer can share.
+        temp_path = _temp_path(parquet_path)
+        out_path = (
+            parquet_path if overwrite else parquet_path.with_suffix(".parquet.new")
+        )
+        try:
+            pq.write_table(table, temp_path)
+            temp_path.replace(out_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+        logger.info("ParquetMergeWriter: Wrote %s", out_path.name)
 
     def _convert_to_serializable(self, value: object) -> JsonValue:
         """Convert tensors and numpy arrays to lists for parquet serialization."""
@@ -267,3 +308,35 @@ class ParquetMergeWriter:
         if isinstance(value, list):
             return [self._convert_to_serializable(v) for v in cast(list[object], value)]
         return cast(JsonValue, value)
+
+
+_TEMP_NAME: Final = re.compile(
+    r"\.(?P<name>.+)\.(?P<host>[^.]+)\.(?P<pid>\d+)\.(?P<token>[0-9a-f]+)\.tmp",
+)
+
+
+# Host and pid say whose it is, so cleanup can tell a dead writer's orphan from a live
+# one's in-flight file; the random token keeps two writes from one process apart.
+def _temp_path(parquet_path: Path) -> Path:
+    """Return a hidden temp path beside ``parquet_path``, unique to this write."""
+    token = secrets.token_hex(4)
+    return parquet_path.with_name(
+        f".{parquet_path.name}.{_host_label()}.{os.getpid()}.{token}.tmp",
+    )
+
+
+def _host_label() -> str:
+    """Return this host's name with dots replaced, one field of a temp name."""
+    return socket.gethostname().replace(".", "-")
+
+
+def _process_alive(pid: int) -> bool:
+    """Whether a process with ``pid`` exists on this host."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    # PermissionError means the pid exists under another user: alive.
+    except PermissionError:
+        return True
+    return True

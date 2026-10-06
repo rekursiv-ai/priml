@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final, override
+from typing import TYPE_CHECKING, Final, override
 from unittest.mock import Mock
 
 from torch import Tensor, nn
@@ -11,9 +11,15 @@ from torch import Tensor, nn
 import pytest
 import torch
 
-from priml.model.attention.kvcache import KVCache
+from priml.model.attention.attention import Attention
+from priml.model.attention.kvcache import KVCache, alloc_layer_cache
+from priml.model.attention.output_gate import OutputGate
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.golden import assert_text_golden
+
+
+if TYPE_CHECKING:
+    from priml.model.custom_types import DepthIndex
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -276,10 +282,9 @@ def test_kv_cache_update_uses_sequence_axis_with_multiple_leading_dims() -> None
     torch.testing.assert_close(result_values, values, rtol=0, atol=0)
 
 
-def test_kv_cache_text(request: pytest.FixtureRequest) -> None:
+def test_kv_cache_text() -> None:
     output = _cache_contract(torch.arange(120, dtype=torch.float32).reshape(2, 3, 5, 4))
     assert_text_golden(
-        request,
         test_file=__file__,
         name="kv_cache",
         rendered=repr(output.tolist()),
@@ -295,6 +300,62 @@ def test_kv_cache_bfb(device: str) -> None:
         build_input=lambda: torch.randn(2, 3, 5, 4),
         seed=0,
     )
+
+
+def _attention(depth_index: DepthIndex) -> Attention:
+    return Attention.Config(
+        channels_in=8,
+        num_heads=2,
+        channels_head=4,
+        causal=True,
+        depth_index=depth_index,
+    ).make()
+
+
+def test_alloc_layer_cache_keys_each_cached_attention_by_its_depth_index() -> None:
+    model = nn.Sequential(_attention(((0, 2),)), _attention(((1, 2),)))
+
+    cache = alloc_layer_cache(model, batch=2, max_seq=5)
+
+    assert sorted(cache) == [((0, 2),), ((1, 2),)]
+    assert all(isinstance(state, KVCache) for state in cache.values())
+
+
+def test_alloc_layer_cache_gives_a_gated_attention_one_slot_for_its_inner() -> None:
+    gate = OutputGate.Config(
+        channels_in=8,
+        inner=Attention.Config(num_heads=2, channels_head=4, causal=True),
+        depth_index=((0, 1),),
+    ).make()
+
+    cache = alloc_layer_cache(gate, batch=2, max_seq=5)
+
+    assert list(cache) == [((0, 1),)]
+
+
+def test_alloc_layer_cache_rejects_an_empty_depth_index() -> None:
+    with pytest.raises(ValueError, match="empty depth_index"):
+        alloc_layer_cache(_attention(()), batch=2, max_seq=5)
+
+
+def test_alloc_layer_cache_rejects_a_duplicate_depth_index() -> None:
+    model = nn.Sequential(_attention(((0, 1),)), _attention(((0, 1),)))
+
+    with pytest.raises(ValueError, match="Duplicate depth_index"):
+        alloc_layer_cache(model, batch=2, max_seq=5)
+
+
+def test_a_plain_dict_is_a_layer_cache() -> None:
+    attention = _attention(((0, 1),))
+    state = KVCache.alloc(batch=2, num_heads=2, max_seq=5, channels_head=4)
+    x = torch.randn(2, 3, 8)
+
+    cache: dict[DepthIndex, KVCache] = {((0, 1),): state}
+
+    out = attention(x, cache=cache)
+
+    assert out.shape == (2, 3, 8)
+    assert state.length == 3
 
 
 if __name__ == "__main__":

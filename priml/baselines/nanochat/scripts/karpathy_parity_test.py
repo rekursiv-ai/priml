@@ -10,7 +10,6 @@ import ast
 import builtins
 import contextlib
 import importlib
-import subprocess
 import sys
 import types
 
@@ -26,7 +25,6 @@ import torch
 
 from priml.baselines.nanochat.scripts import karpathy_parity
 from priml.baselines.nanochat.train_step import NanoChatTrainStep
-from priml.model.attention.value_gated_attention import sdpa_attention
 from priml.optimizers.composite import CompositeOptimizer
 from priml.train.parallelism import NoParallel
 
@@ -305,7 +303,7 @@ def test_main_runs_the_requested_comparison_and_reports_eval_failures(
         return ["state issue"]
 
     monkeypatch.setattr(karpathy_parity, "compare_state", compare_state)
-    evaluations: list[tuple[object, int]] = []
+    evaluations: list[tuple[object, int, str]] = []
 
     def compare_eval(
         theirs: torch.nn.Module,
@@ -314,9 +312,10 @@ def test_main_runs_the_requested_comparison_and_reports_eval_failures(
         prepare: object,
         *,
         batches: int,
+        device: str,
     ) -> int:
         del theirs, ours, upstream
-        evaluations.append((prepare, batches))
+        evaluations.append((prepare, batches, device))
         return 1
 
     monkeypatch.setattr(karpathy_parity, "compare_eval", compare_eval)
@@ -375,7 +374,7 @@ def test_main_runs_the_requested_comparison_and_reports_eval_failures(
     assert sdpa_backends == [SDPBackend.MATH]
     assert len(evaluations) == 1
     assert evaluations[0][0] is not None
-    assert evaluations[0][1] == 5
+    assert evaluations[0][1:] == (5, "cpu")
     assert capsys.readouterr().out.splitlines() == [
         "",
         "[0] init from one RNG state: 1 differ",
@@ -394,7 +393,7 @@ def test_main_runs_the_requested_comparison_and_reports_eval_failures(
         "    weight issue",
         "    state issue",
         "",
-        "2 steps, FA3->FA2 only: 11 DIFFERENCE(S)",
+        "2 steps, FA3->SDPA (math backend) on both sides: 11 DIFFERENCE(S)",
     ]
 
 
@@ -412,72 +411,12 @@ def test_compare_checks_shape_dtype_and_exact_values() -> None:
     )
 
 
-class _FlashAttentionFunction(Protocol):
-    def __call__(
-        self,
-        q: Tensor,
-        k: Tensor,
-        v: Tensor,
-        *,
-        causal: bool,
-        window_size: tuple[int, int],
-    ) -> Tensor: ...
-
-
-class _FlashAttentionInterface(Protocol):
-    flash_attn_func: _FlashAttentionFunction
-
-
-class _KernelAdapter(Protocol):
-    flash_attn_interface: _FlashAttentionInterface
-
-
-@runtime_checkable
-class _KernelRegistry(Protocol):
-    def get_kernel(self, name: str) -> _KernelAdapter: ...
-
-
-def test_kernel_stub_supplies_the_portable_attention_adapter() -> None:
-    kernel = karpathy_parity._kernels_stub()
-    assert kernel.__name__ == "kernels"
-    assert isinstance(kernel, _KernelRegistry)
-    adapter = kernel.get_kernel("flash-attention-3")
-    assert (
-        adapter.flash_attn_interface.flash_attn_func is karpathy_parity.their_attention
-    )
-    with pytest.raises(ValueError, match=r"^other$"):
-        kernel.get_kernel("other")
-
-
 def test_progress_tracks_unbilled_prefix_and_caps_at_budget() -> None:
     progress = karpathy_parity._progress_at
     assert progress(1, warmup=2, budget_steps=4) == 0
     assert progress(3, warmup=2, budget_steps=4) == 0
     assert progress(4, warmup=2, budget_steps=4) == 0.25
     assert progress(20, warmup=2, budget_steps=4) == 1
-
-
-def test_portable_attention_requires_causal_no_future_window() -> None:
-    q = torch.arange(120, dtype=torch.float32).reshape(2, 3, 4, 5)
-    k = q.flip(1)
-    v = q.flip(-1)
-    output = karpathy_parity.their_attention(
-        q,
-        k,
-        v,
-        causal=True,
-        window_size=(1, 0),
-    )
-    torch.testing.assert_close(
-        output,
-        sdpa_attention(q, k, v, window=1),
-        rtol=0,
-        atol=0,
-    )
-    with pytest.raises(ValueError, match=r"^the recipe attends causally$"):
-        karpathy_parity.their_attention(q, k, v, causal=False, window_size=(1, 0))
-    with pytest.raises(ValueError, match="future window"):
-        karpathy_parity.their_attention(q, k, v, causal=True, window_size=(1, 1))
 
 
 class _ParsedArgs(Protocol):
@@ -506,112 +445,6 @@ class _EvaluationPrepareStub:
     def __init__(self, *, eval_tokens: int, max_seq_len: int) -> None:
         self.EVAL_TOKENS = eval_tokens
         self.MAX_SEQ_LEN = max_seq_len
-
-
-def test_clone_upstream_uses_the_pinned_git_commands(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "outer" / "nested" / "reference"
-    commit = "b11d6f283f866eb7e10fb776a4b8553fef873fd5"
-    calls: list[tuple[list[str], Path | None, bool, bool, bool]] = []
-
-    def run(
-        arguments: list[str],
-        *,
-        cwd: Path | None = None,
-        check: bool = False,
-        capture_output: bool = False,
-        text: bool = False,
-    ) -> subprocess.CompletedProcess[str]:
-        calls.append((arguments, cwd, check, capture_output, text))
-        if arguments[1] == "clone":
-            root.mkdir()
-            (root / ".git").mkdir()
-            output = ""
-        elif arguments[1] == "checkout":
-            output = ""
-        elif arguments[1] == "rev-parse" and arguments[2] == "HEAD":
-            output = commit
-        else:
-            output = ""
-        return subprocess.CompletedProcess(arguments, 0, output, "")
-
-    monkeypatch.setattr(subprocess, "run", run)
-    assert karpathy_parity.clone_upstream(root) == root
-    assert calls == [
-        (
-            [
-                "git",
-                "clone",
-                "--quiet",
-                "https://github.com/karpathy/autoresearch.git",
-                str(root),
-            ],
-            None,
-            True,
-            False,
-            False,
-        ),
-        (["git", "checkout", "--quiet", commit], root, True, False, False),
-        (["git", "rev-parse", "HEAD"], root, True, True, True),
-        (["git", "status", "--porcelain"], root, True, True, True),
-    ]
-
-
-def test_clone_upstream_allows_an_existing_parent_directory(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "parent" / "reference"
-    root.parent.mkdir()
-    commit = "pinned"
-
-    def run(
-        arguments: list[str],
-        *,
-        cwd: Path | None = None,
-        check: bool = False,
-        capture_output: bool = False,
-        text: bool = False,
-    ) -> subprocess.CompletedProcess[str]:
-        del cwd, check, capture_output, text
-        if arguments[1] == "clone":
-            root.mkdir()
-            (root / ".git").mkdir()
-            output = ""
-        elif arguments[1] == "rev-parse":
-            output = commit
-        else:
-            output = ""
-        return subprocess.CompletedProcess(arguments, 0, output, "")
-
-    monkeypatch.setattr(subprocess, "run", run)
-    assert karpathy_parity.clone_upstream(root, commit=commit) == root
-
-
-def test_clone_upstream_rejects_wrong_revision_and_dirty_tree(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "reference"
-    (root / ".git").mkdir(parents=True)
-    outputs = iter(["wrong-commit", ""])
-
-    def git(*args: object) -> str:
-        del args
-        return next(outputs)
-
-    monkeypatch.setattr(karpathy_parity, "_git", git)
-    with pytest.raises(RuntimeError, match="clone is at wrong-commit"):
-        karpathy_parity.clone_upstream(root, commit="expected")
-
-    outputs = iter(["expected", " M train.py"])
-    with pytest.raises(
-        RuntimeError,
-        match=r"clone has local modifications:\n M train.py",
-    ):
-        karpathy_parity.clone_upstream(root, commit="expected")
 
 
 def test_load_upstream_uses_the_supplied_reference_and_corpus(
@@ -905,30 +738,15 @@ def test_name_map_covers_gated_and_wrapped_parameters() -> None:
     )
 
 
-def test_name_map_preserves_compiled_parameter_prefix() -> None:
-    class Model(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self._orig_mod = torch.nn.Module()
-            self._orig_mod.value_embeds = torch.nn.ModuleList(
-                [torch.nn.Embedding(2, 3), torch.nn.Embedding(2, 3)],
-            )
-            self._orig_mod.transformer = torch.nn.Module()
-            self._orig_mod.transformer.h = torch.nn.ModuleList(
-                [torch.nn.Module(), torch.nn.Module()],
-            )
-            for block in self._orig_mod.transformer.h:
-                block.attn = torch.nn.Module()
-                block.attn.ve_gate = torch.nn.Linear(3, 2, bias=False)
+def test_their_compiled_model_is_compared_eager() -> None:
+    """Module scope ends after their ``torch.compile``, so the wrapper is undone.
 
-    mapping = karpathy_parity.name_map(Model(), layers=2)
-    assert mapping["blocks.0.attn.proj_q.weight"] == (
-        "_orig_mod.transformer.h.0.attn.c_q.weight"
-    )
-    assert mapping["value_embeds.1.inner.weight"] == ("_orig_mod.value_embeds.1.weight")
-    assert mapping["blocks.1.attn.value_gate.weight"] == (
-        "_orig_mod.transformer.h.1.attn.ve_gate.weight"
-    )
+    Comparing their compiled graph against our eager one would measure
+    inductor's fused reductions rather than the port.
+    """
+    model = torch.nn.Linear(2, 3)
+    assert karpathy_parity._eager(torch.compile(model)) is model
+    assert karpathy_parity._eager(model) is model
 
 
 def test_copy_weights_checks_mapping_and_copies_values() -> None:
@@ -959,6 +777,21 @@ def test_copy_weights_checks_mapping_and_copies_values() -> None:
             destination,
             {"weight": "missing.weight"},
         )
+
+
+def test_copy_weights_rejects_a_reference_parameter_nothing_maps_to() -> None:
+    """A reference parameter outside the map is never copied or compared."""
+    source = torch.nn.Linear(2, 3, bias=True)
+    destination = torch.nn.Linear(2, 3, bias=False)
+    with pytest.raises(RuntimeError, match=r"uncovered=\['bias'\]"):
+        karpathy_parity.copy_weights(source, destination, {"weight": "weight"})
+
+
+def test_copy_weights_rejects_one_of_ours_nothing_maps_to() -> None:
+    source = torch.nn.Linear(2, 3, bias=False)
+    destination = torch.nn.Linear(2, 3, bias=True)
+    with pytest.raises(RuntimeError, match=r"unmapped=\['bias'\] absent=\[\]"):
+        karpathy_parity.copy_weights(source, destination, {"weight": "weight"})
 
 
 def test_compare_all_reports_missing_and_different_gradients() -> None:
@@ -1222,7 +1055,8 @@ def test_compare_state_uses_the_reference_momentum_fallback() -> None:
     ) == ["state weight[second_moment]: DIFFERS max_abs=4.000e+00"]
 
 
-def test_compare_state_ignores_absent_or_shape_mismatched_buffers() -> None:
+def test_compare_state_reports_state_held_on_one_side_only() -> None:
+    """A moment one side never allocated is a difference, not a skip."""
     theirs = torch.nn.Linear(2, 3, bias=False)
     ours_model = torch.nn.Linear(2, 3, bias=False)
     their_optimizer = torch.optim.Adam(theirs.parameters())
@@ -1236,15 +1070,12 @@ def test_compare_state_ignores_absent_or_shape_mismatched_buffers() -> None:
         NanoChatTrainStep,
         types.SimpleNamespace(model=ours_model, optimizer=ours_optimizer),
     )
-    assert (
-        karpathy_parity.compare_state(
-            theirs,
-            their_optimizer,
-            step,
-            {"weight": "weight"},
-        )
-        == []
-    )
+    assert karpathy_parity.compare_state(
+        theirs,
+        their_optimizer,
+        step,
+        {"weight": "weight"},
+    ) == ["state weight[first_moment]: MISSING on ours"]
     stateless_reference = torch.nn.Linear(2, 3, bias=False)
     stateless_model = torch.nn.Linear(2, 3, bias=False)
     stateless_step = cast(
@@ -1267,7 +1098,7 @@ def test_compare_state_ignores_absent_or_shape_mismatched_buffers() -> None:
     )
 
 
-def test_compare_state_continues_after_shape_mismatched_buffer() -> None:
+def test_compare_state_reports_a_shape_mismatch_and_continues() -> None:
     theirs = torch.nn.Linear(2, 3, bias=False)
     ours_model = torch.nn.Linear(2, 3, bias=False)
     their_optimizer = torch.optim.Adam(theirs.parameters())
@@ -1291,7 +1122,38 @@ def test_compare_state_continues_after_shape_mismatched_buffer() -> None:
         their_optimizer,
         step,
         {"weight": "weight"},
-    ) == ["state weight[second_moment]: DIFFERS max_abs=2.000e+00"]
+    ) == [
+        "state weight[first_moment]: SHAPE (1,) vs (3, 2)",
+        "state weight[second_moment]: DIFFERS max_abs=2.000e+00",
+    ]
+
+
+def test_compare_state_reads_the_momentum_fallback_only_as_second_moment() -> None:
+    """Their Muon's ``second_momentum_buffer`` is not a first moment."""
+    theirs = torch.nn.Linear(2, 3, bias=False)
+    ours_model = torch.nn.Linear(2, 3, bias=False)
+    their_optimizer = torch.optim.SGD(theirs.parameters(), lr=0.1)
+    our_member = torch.optim.SGD(ours_model.parameters(), lr=0.1)
+    their_optimizer.state[theirs.weight] = {
+        "second_momentum_buffer": torch.full_like(theirs.weight, 4),
+    }
+    our_member.state[ours_model.weight] = {
+        "first_moment": torch.full_like(ours_model.weight, 4),
+        "second_moment": torch.full_like(ours_model.weight, 4),
+    }
+    step = cast(
+        NanoChatTrainStep,
+        types.SimpleNamespace(
+            model=ours_model,
+            optimizer=CompositeOptimizer([our_member]),
+        ),
+    )
+    assert karpathy_parity.compare_state(
+        theirs,
+        their_optimizer,
+        step,
+        {"weight": "weight"},
+    ) == ["state weight[first_moment]: MISSING on theirs"]
 
 
 def test_compare_eval_scores_both_models_and_restores_eval_tokens(
@@ -1335,6 +1197,7 @@ def test_compare_eval_scores_both_models_and_restores_eval_tokens(
             cast(karpathy_parity._ReferenceModule, upstream),
             cast(karpathy_parity._PrepareModule, prepare),
             batches=3,
+            device="cpu",
         )
         == 0
     )
@@ -1345,7 +1208,7 @@ def test_compare_eval_scores_both_models_and_restores_eval_tokens(
     adapter = scores[1][0]
     assert isinstance(adapter, karpathy_parity._LossAdapter)
     assert adapter.inner is ours_model
-    assert autocast_options == [{"device_type": "cuda", "dtype": torch.bfloat16}]
+    assert autocast_options == [{"device_type": "cpu", "dtype": torch.bfloat16}]
     assert prepare.EVAL_TOKENS == 99
     output = capsys.readouterr().out
     assert "their metric: theirs=1.250000000 ours=1.250000000" in output
@@ -1388,33 +1251,12 @@ def test_compare_eval_counts_disagreement_and_restores_after_error(
             cast(karpathy_parity._ReferenceModule, upstream),
             cast(karpathy_parity._PrepareModule, prepare),
             batches=2,
+            device="cuda",
         )
         == 1
     )
     assert prepare.EVAL_TOKENS == 20
     assert "bpb DIFFERS by 1.000e+00" in capsys.readouterr().out
-
-
-def test_git_runs_in_the_reference_directory(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[list[str], Path | None, bool, bool, bool]] = []
-
-    def run(
-        arguments: list[str],
-        *,
-        cwd: Path | None = None,
-        capture_output: bool = False,
-        text: bool = False,
-        check: bool = False,
-    ) -> subprocess.CompletedProcess[str]:
-        calls.append((arguments, cwd, check, capture_output, text))
-        return subprocess.CompletedProcess(arguments, 0, "commit\n", "")
-
-    monkeypatch.setattr(subprocess, "run", run)
-    assert karpathy_parity._git(tmp_path, "rev-parse", "HEAD") == "commit"
-    assert calls == [(["git", "rev-parse", "HEAD"], tmp_path, True, True, True)]
 
 
 def test_argument_defaults_and_overrides() -> None:

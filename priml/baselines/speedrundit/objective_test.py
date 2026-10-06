@@ -290,15 +290,34 @@ def test_unknown_path_raises(unknown: str) -> None:
         interpolant(torch.zeros(2), path)
 
 
-@pytest.mark.parametrize("unknown", ["logit"])
-def test_unknown_weighting_raises(unknown: str) -> None:
-    weighting = cast("Literal['uniform', 'lognormal']", unknown)
-    objective = SpeedrunObjective(weighting=weighting, shift_time=False)
-    with pytest.raises(
-        ValueError,
-        match=rf"^unsupported timestep weighting: {unknown}$",
-    ):
-        objective.sample_time(torch.zeros(2, 3, 4))
+@pytest.mark.parametrize("bogus", ["bogus"])
+def test_an_unknown_choice_is_refused_at_construction(bogus: str) -> None:
+    with pytest.raises(ValueError, match=r"^unsupported path: bogus$"):
+        SpeedrunObjective(path=cast("Literal['linear', 'cosine']", bogus))
+    with pytest.raises(ValueError, match=r"^unsupported weighting: bogus$"):
+        SpeedrunObjective(weighting=cast("Literal['uniform', 'lognormal']", bogus))
+    with pytest.raises(ValueError, match=r"^unsupported cfm_weighting: bogus$"):
+        SpeedrunObjective(cfm_weighting=cast("Literal['uniform', 'linear']", bogus))
+
+
+def test_the_velocity_loss_reduces_every_non_batch_axis() -> None:
+    latents = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4) / 5
+    target = latents  # d_alpha = -1, d_sigma = 1 with zero noise and t = 0.
+    output = ModelOutput(
+        velocity=torch.zeros_like(latents),
+        cls_velocity=torch.zeros(2, 3),
+        projections=(Projection(torch.ones(2, 5, 3), None),),
+    )
+    terms = SpeedrunObjective(shift_time=False)(
+        Mock(return_value=output),
+        latents,
+        torch.tensor([0, 1]),
+        (torch.ones(2, 5, 3),),
+        time=torch.zeros(2),
+        noise=torch.zeros_like(latents),
+        cls_noise=torch.zeros(2, 3),
+    )
+    torch.testing.assert_close(terms.velocity, target.square().mean(dim=(1, 2)))
 
 
 def _unused_model(*args: Tensor) -> ModelOutput:

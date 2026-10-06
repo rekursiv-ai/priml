@@ -61,6 +61,8 @@ def window_sizes(*, num_layers: int, max_seq_len: int, pattern: str) -> list[int
       ValueError: ``pattern`` is empty or holds a symbol other than S and L.
 
     """
+    if num_layers < 1:
+        raise ValueError("num_layers must be positive.")
     windows = [
         layer_window(
             depth_index=((layer, num_layers),),
@@ -110,7 +112,7 @@ def combined_mask(
     if attn_mask is None:
         attn_mask = window_mask(q, k, window=window)
         if attn_mask is None:
-            return None, is_causal
+            return None, is_causal or window >= 0
         # The window mask is already causal.
         return attn_mask, False
     # A window is causal by construction, so either flag folds the same bias.

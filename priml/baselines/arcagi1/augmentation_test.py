@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import cast
 
+import math
 import re
+
+from configgle import InlineConfig
 
 import numpy as np
 import pytest
@@ -878,7 +881,7 @@ def test_color_dihedral_exact_encoded_view_and_inverse_prefix() -> None:
     restored = inverse(augmented)
     assert np.array_equal(restored, grid)
     assert restored.dtype == np.uint8
-    with pytest.raises(ValueError, match=r"permutation of 0\.\.9"):
+    with pytest.raises(ValueError, match="expected a permutation of '0123456789'"):
         config.make().inverse("x::t0::0123456788")
     with pytest.raises(ValueError, match=r"invalid literal for int\(\)"):
         config.make().inverse("x::bad::0123456789")
@@ -962,7 +965,30 @@ def test_arc_grid_conversion_pins_each_validation_boundary() -> None:
         ):
             arc_grid_to_np(invalid, max_grid=2)
     assert np.array_equal(arc_grid_to_np([[9]], max_grid=1), [[9]])
-    assert np.array_equal(arc_grid_to_np([[9.5]], max_grid=1), [[9]])
+    assert np.array_equal(arc_grid_to_np([[9.0]], max_grid=1), [[9]])
+
+
+@pytest.mark.parametrize("cell", [9.5, -0.5, 9.9, math.nan, math.inf])
+def test_arc_grid_conversion_rejects_non_integral_colors(cell: float) -> None:
+    """A fractional color must not truncate into range before the check."""
+    with pytest.raises(ValueError, match=re.escape("ARC grid colors must be in 0..9.")):
+        arc_grid_to_np([[cell, 0]], max_grid=2)
+
+
+def test_scale_weight_normalization_survives_huge_weights() -> None:
+    assert normalize_scale_weights({1: 1e308, 2: 1e308}) == {1: 0.5, 2: 0.5}
+
+
+def test_augmentation_finalize_accepts_any_makeable_transform() -> None:
+    """``transform`` is a slot: a config of another type must not trip an assert."""
+    config = ArcAugmentation.Config(spec=ArcSpec())
+    config.transform = InlineConfig(_question_mark_policy)
+    augmentation = config.finalize().make()
+    assert augmentation.transform.config.separator == "?"
+
+
+def _question_mark_policy() -> ColorDihedral:
+    return ColorDihedral(ColorDihedral.Config(separator="?"))
 
 
 def test_arc_grid_conversion_errors_match_exact_messages() -> None:
@@ -1035,7 +1061,10 @@ def test_validation_errors_match_exact_messages() -> None:
                 .make()
                 .inverse("x|||t0|||0123456788")
             ),
-            "Encoded colors must be a permutation of 0..9.",
+            (
+                "invalid color-permutation suffix '0123456788' in identifier "
+                "'x|||t0|||0123456788'; expected a permutation of '0123456789'."
+            ),
         ),
         (
             lambda: (

@@ -63,7 +63,7 @@ class CraftaxScore:
         one-hot vector per visible tile, so a different window is a different
         input width and the network cannot read it at all."""
 
-        device: str = "auto"
+        device: torch.device | str | None = None
         """Device the evaluation runs on."""
 
     def __init__(self, config: Config) -> None:
@@ -94,6 +94,9 @@ class CraftaxScore:
         Args:
           logits: Unused; present to satisfy the metric interface.
           **batch: Must carry ``actor``, an isolated evaluation actor.
+
+        Raises:
+          TypeError: ``actor`` is missing or is not an ``EvaluationActor``.
 
         """
         del logits

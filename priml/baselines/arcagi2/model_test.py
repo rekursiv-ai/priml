@@ -157,6 +157,8 @@ def test_rotary_block_factor_branches() -> None:
     config.attn.channels_in = 4
     config.attn.num_heads = 2
     config.attn.channels_head = 2
+    assert config.rope is not None
+    config.rope.channels_head = 2
     block = config.make()
     factors = block.factors(3, device=torch.device("cpu"))
     assert factors is not None

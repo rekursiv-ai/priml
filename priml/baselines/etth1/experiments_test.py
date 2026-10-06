@@ -5,7 +5,6 @@ from typing import cast
 
 import copy
 
-from configgle.testing import assert_pprint_golden
 from torch import Tensor
 
 import pytest
@@ -16,7 +15,7 @@ from priml.baselines.etth1.data_test import fixture_config
 from priml.baselines.etth1.experiments import dlinear_type1, exp000, exp_smoke
 from priml.baselines.etth1.train_step import Etth1TrainLoop, Etth1TrainStep
 from priml.lib.custom_json import convert, parse
-from priml.testing.golden import mismatches
+from priml.testing.golden import assert_pprint_golden, mismatches
 
 
 def test_canonical_config_golden() -> None:

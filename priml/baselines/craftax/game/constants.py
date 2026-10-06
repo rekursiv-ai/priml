@@ -251,6 +251,9 @@ MAX_MOB_PROJECTILES: Final = 3
 MAX_PLAYER_PROJECTILES: Final = 3
 MAX_GROWING_PLANTS: Final = 10
 
+PLANT_LEVEL: Final = 0
+"""The one floor plants grow on: saplings need grass, which only the overworld has."""
+
 MONSTERS_KILLED_TO_CLEAR_LEVEL: Final = 8
 """Kills required before a floor's ladder down unblocks."""
 

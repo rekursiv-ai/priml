@@ -300,7 +300,7 @@ def test_overwrite_rejects_file_to_distributed_format_transition(
 
     monkeypatch.setattr(checkpointer, "_has_dtensor", is_distributed)
 
-    with pytest.raises(FileExistsError):
+    with pytest.raises(OSError, match="format mismatch"):
         ckpt.save(_DictTarget({"value": "distributed"}), 1)
 
 
@@ -490,8 +490,9 @@ def test_load_negative_index(temp_checkpoint_dir: Path) -> None:
     for step in (100, 200, 300, 400):
         _save(ckpt, step, {"step": step})
     assert _load(temp_checkpoint_dir, resume_step=-1)["step"] == 400
-    assert _load(temp_checkpoint_dir, resume_step=-2)["step"] == 300
-    assert _load(temp_checkpoint_dir, resume_step=-3)["step"] == 200
+    for step in (-2, -3):
+        with pytest.raises(ValueError, match="resume_step"):
+            _load(temp_checkpoint_dir, resume_step=step)
 
 
 def test_load_specific_step(temp_checkpoint_dir: Path) -> None:
@@ -509,17 +510,17 @@ def test_load_out_of_range_negative_index(temp_checkpoint_dir: Path) -> None:
     )
     for step in (100, 200):
         _save(ckpt, step, {"step": step})
-    out_of_range = Checkpointer(
-        Checkpointer.Config(working_dir=temp_checkpoint_dir, resume_step=-3),
-    )
-    assert out_of_range.load(_DictTarget({}), max_steps=1e9, guard=False) is False
+    with pytest.raises(ValueError, match="resume_step"):
+        Checkpointer(
+            Checkpointer.Config(working_dir=temp_checkpoint_dir, resume_step=-3),
+        )
 
 
 def test_available_steps_ignores_malformed_names(temp_checkpoint_dir: Path) -> None:
     """Malformed ``step_*.pt`` names must not crash int-parse."""
     ckpt = Checkpointer(Checkpointer.Config(working_dir=temp_checkpoint_dir))
     temp_checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    (temp_checkpoint_dir / "step_100.pt").write_bytes(b"x")
+    (temp_checkpoint_dir / "step_00000100.pt").write_bytes(b"x")
     (temp_checkpoint_dir / "step_latest.pt").write_bytes(b"x")  # Malformed.
     assert ckpt.available_steps() == [100]
 
@@ -813,6 +814,11 @@ def test_listing_a_missing_directory_is_empty(tmp_path: Path) -> None:
     assert ckpt.available_steps() == []
 
 
+def _accept_write_success(errors: list[str | None], src: int) -> None:
+    assert src == 0
+    assert errors == [None]
+
+
 def test_a_plain_write_off_rank_zero_only_joins_the_barrier(
     temp_checkpoint_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -822,6 +828,7 @@ def test_a_plain_write_off_rank_zero_only_joins_the_barrier(
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
     monkeypatch.setattr(dist, "get_rank", lambda: 1)
     monkeypatch.setattr(dist, "barrier", lambda: barriers.append(1))
+    monkeypatch.setattr(dist, "broadcast_object_list", _accept_write_success)
     after: list[int] = []
     path = temp_checkpoint_dir / "step_00000001.pt"
 
@@ -844,6 +851,7 @@ def test_a_plain_write_on_rank_zero_barriers_after_the_rename(
     path = temp_checkpoint_dir / "step_00000001.pt"
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
     monkeypatch.setattr(dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(dist, "broadcast_object_list", _accept_write_success)
     monkeypatch.setattr(
         dist,
         "barrier",
@@ -1110,9 +1118,10 @@ def test_on_eval_follows_the_rank_agreed_verdict(
     # Rank 0's answers to the two collectives: "improved", then "exists".
     rank_zero_verdicts = [True, False]
 
-    def broadcast_rank_zero(shared: list[bool], src: int) -> None:
+    def broadcast_rank_zero(shared: list[bool | None], src: int) -> None:
         del src
-        shared[0] = rank_zero_verdicts.pop(0)
+        if shared[0] is not None:
+            shared[0] = rank_zero_verdicts.pop(0)
 
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
     monkeypatch.setattr(dist, "get_rank", lambda: 0)
@@ -1818,15 +1827,15 @@ def test_async_storer_reports_pending_future_until_flush() -> None:
     storage = AsyncLocalStateDictStorer()
     future: Future[object] = Future()
 
-    assert not storage.has_pending_write()
+    assert storage._pending is None
     storage._pending = future
-    assert storage.has_pending_write()
+    assert storage._pending is not None
     future.set_result(None)
-    assert storage.has_pending_write()
+    assert storage._pending is not None
 
     storage.flush()
 
-    assert not storage.has_pending_write()
+    assert storage._pending is None
 
 
 def test_async_pending_overwrite_is_incomplete_without_join(tmp_path: Path) -> None:
@@ -1868,9 +1877,9 @@ def test_async_is_complete_is_pure_no_join(
     _ = storage.is_complete(temp_checkpoint_dir / "step_0.pt")
     _ = storage.is_complete(temp_checkpoint_dir / "step_10.pt")
     # ...and the in-flight write must still be unjoined (overlap preserved).
-    assert storage.has_pending_write(), "is_complete joined the write -> no overlap"
+    assert storage._pending is not None, "is_complete joined the write -> no overlap"
     storage.flush()
-    assert not storage.has_pending_write()
+    assert storage._pending is None
 
 
 # Mirrors a real loop: shard ONCE, then checkpoint repeatedly. (Re-sharding a fresh FSDP
@@ -2070,6 +2079,227 @@ def test_world_size_change_resume(warm_pools: WarmPoolGetter) -> None:
         "save_rank_1": "ok",
         "load_rank_0": "ok",
     }, results
+
+
+def test_async_failed_join_releases_pending_state(tmp_path: Path) -> None:
+    storage = AsyncLocalStateDictStorer()
+    future: Future[object] = Future()
+    future.set_exception(OSError("injected failure"))
+    storage._pending = future
+    storage._pending_path = tmp_path / "checkpoint"
+    callbacks: list[int] = []
+    storage._after_write = lambda: callbacks.append(1)
+    with pytest.raises(OSError, match="injected failure"):
+        storage.flush()
+    storage.flush()
+    assert storage._pending is None
+    assert storage._pending_path is None
+    assert callbacks == []
+
+
+def test_checkpoint_paths_have_one_canonical_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = Checkpointer.Config()
+    config.working_dir = "~/checkpoints"
+    checkpoint = config.make()
+    checkpoint.save(_DictTarget({"step": 1}), 1)
+    assert checkpoint.checkpoint_dir == tmp_path / "checkpoints"
+    assert checkpoint.available_steps() == [1]
+    assert config.make().load(_DictTarget({}), max_steps=1)
+
+
+def test_rewind_does_not_adopt_a_future_best(tmp_path: Path) -> None:
+    checkpoint = _best_checkpointer(tmp_path)
+    checkpoint.save(_DictTarget({}), 2)
+    checkpoint.on_eval(_DictTarget({}), 4, {"accuracy": 0.9})
+    config = Checkpointer.Config()
+    config.working_dir = tmp_path
+    config.best_metric = "accuracy"
+    config.resume_step = 2
+    config.allow_checkpoint_overwrite = True
+    resumed = config.make()
+    assert resumed.load(_DictTarget({}), max_steps=5)
+    assert resumed.best_step is None
+
+
+def test_fresh_trajectory_cannot_inherit_prior_best_on_later_resume(
+    tmp_path: Path,
+) -> None:
+    _best_checkpointer(tmp_path).on_eval(_DictTarget({}), 2, {"accuracy": 0.9})
+    config = Checkpointer.Config()
+    config.working_dir = tmp_path
+    config.best_metric = "accuracy"
+    config.resume = False
+    config.allow_checkpoint_overwrite = True
+    fresh = config.make()
+    assert not fresh.load(_DictTarget({}), max_steps=3)
+    fresh.save(_DictTarget({}), 2)
+    resumed = _best_checkpointer(tmp_path)
+    assert resumed.load(_DictTarget({}), max_steps=3)
+    assert resumed.best_step is None
+
+
+def test_inventory_accepts_only_the_configured_filename_spelling(
+    tmp_path: Path,
+) -> None:
+    config = Checkpointer.Config()
+    config.working_dir = tmp_path
+    config.filename = "step_{step}.pt"
+    (tmp_path / "step_100.pt").write_bytes(b"x")
+    (tmp_path / "step_0100.pt").write_bytes(b"x")
+    assert config.make().available_steps() == [100]
+
+
+def test_standalone_checkpointer_requires_an_explicit_destination() -> None:
+    with pytest.raises(ValueError, match="base_dir"):
+        Checkpointer.Config().make()
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_plain_write_failure_is_agreed_before_barrier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rank: int,
+) -> None:
+    errors_seen: list[str | None] = []
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(checkpointer, "is_rank_zero", lambda: rank == 0)
+    monkeypatch.setattr(dist, "get_rank", lambda: rank)
+
+    def fail_save(state: object, path: object) -> None:
+        del state, path
+        raise OSError("injected save failure")
+
+    def broadcast(errors: list[str | None], src: int) -> None:
+        assert src == 0
+        errors_seen.append(errors[0])
+        errors[0] = "injected save failure"
+
+    monkeypatch.setattr(torch, "save", fail_save)
+    monkeypatch.setattr(dist, "broadcast_object_list", broadcast)
+    monkeypatch.setattr(dist, "barrier", lambda: pytest.fail("unsafe barrier"))
+    with pytest.raises(OSError, match="injected save failure"):
+        SyncLocalStateDictStorer().write(tmp_path / "step.pt", {})
+    assert errors_seen == (["injected save failure"] if rank == 0 else [None])
+
+
+def test_distributed_overwrite_removes_stale_shards(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "step.pt"
+    path.mkdir()
+    (path / ".metadata").write_bytes(b"old")
+    stale = path / "old-rank.distcp"
+    stale.write_bytes(b"stale")
+
+    def has_dtensor(state: object) -> bool:
+        del state
+        return True
+
+    monkeypatch.setattr(checkpointer, "_has_dtensor", has_dtensor)
+
+    def save(state: object, *, checkpoint_id: str) -> None:
+        del state
+        assert Path(checkpoint_id) == path
+        assert not stale.exists()
+        (path / ".metadata").write_bytes(b"new")
+
+    monkeypatch.setattr(state_dict_saver, "save", save)
+    SyncLocalStateDictStorer().write(path, {})
+    assert not stale.exists()
+
+
+def test_load_reclaims_only_canonical_checkpoint_temps(tmp_path: Path) -> None:
+    config = Checkpointer.Config()
+    config.working_dir = tmp_path
+    orphan = tmp_path / "step_00000003.pt.tmp"
+    unrelated = tmp_path / "other.tmp"
+    orphan.write_bytes(b"partial")
+    unrelated.write_bytes(b"other")
+    assert not config.make().load(_DictTarget({}), max_steps=3)
+    assert not orphan.exists()
+    assert unrelated.read_bytes() == b"other"
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_async_failed_join_is_agreed_and_released_on_every_rank(
+    monkeypatch: pytest.MonkeyPatch,
+    rank: int,
+) -> None:
+    future: Future[object] = Future()
+    if rank == 0:
+        future.set_exception(OSError("injected async failure"))
+    else:
+        future.set_result(None)
+    storage = AsyncLocalStateDictStorer()
+    storage._pending = future
+    observed: list[str | None] = []
+    barriers: list[int] = []
+
+    def gather(errors: list[str | None], error: str | None) -> None:
+        observed.append(error)
+        errors[:] = ["injected async failure", None]
+
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(dist, "all_gather_object", gather)
+    monkeypatch.setattr(dist, "barrier", lambda: barriers.append(1))
+    with pytest.raises(OSError, match="injected async failure"):
+        storage.flush()
+    assert storage._pending is None
+    assert storage._pending_path is None
+    assert observed == (["injected async failure"] if rank == 0 else [None])
+    assert barriers == []
+    storage.flush()
+    assert barriers == [1]
+
+
+def _checkpoint_failure_worker(result_dir: str, mode: str, mesh: DeviceMesh) -> None:
+    rank = mesh.get_rank()
+    if mode == "plain":
+        storage = SyncLocalStateDictStorer()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(torch, "save", _fail_plain_save)
+            with pytest.raises(OSError, match="injected save failure"):
+                storage.write(Path(result_dir) / "checkpoint.pt", {"x": torch.ones(2)})
+    else:
+        storage = AsyncLocalStateDictStorer()
+        future: Future[object] = Future()
+        if rank == 0:
+            future.set_exception(OSError("injected async failure"))
+        else:
+            future.set_result(None)
+        storage._pending = future
+        with pytest.raises(OSError, match="injected async failure"):
+            storage.flush()
+        assert storage._pending is None
+        storage.flush()
+    (Path(result_dir) / f"rank_{rank}").write_text("ok")
+
+
+def _fail_plain_save(state: object, path: object) -> None:
+    del state, path
+    raise OSError("injected save failure")
+
+
+@pytest.mark.compute_distributed
+@pytest.mark.parametrize("mode", ["plain", "async"])
+def test_checkpoint_failure_reaches_real_peers(
+    warm_pools: WarmPoolGetter,
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    """Propagate a rank-zero storage failure across a real two-rank group."""
+    pool = warm_pools({"dp": 2})
+    pool(functools.partial(_checkpoint_failure_worker, str(tmp_path), mode))
+    assert {p.name: p.read_text() for p in tmp_path.iterdir()} == {
+        "rank_0": "ok",
+        "rank_1": "ok",
+    }
 
 
 if __name__ == "__main__":

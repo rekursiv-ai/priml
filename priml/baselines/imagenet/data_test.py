@@ -289,6 +289,8 @@ def test_deit_pipeline_configs_pin_augmentation_order_and_outputs() -> None:
     assert train_tensor.dtype is None
     assert eval_tensor.dtype == torch.int64
     assert isinstance(train.processors[-2], MixupCutmix.Config)
+    # Mixes the renamed ``image`` field, not the decoder's ``media_tensor``.
+    assert train.processors[-2].field == "image"
     assert isinstance(train.processors[-3], AsTensor.Config)
     assert isinstance(evaluate.processors[-2], AsTensor.Config)
     assert isinstance(train.processors[-1], PrefetchBuffer.Config)

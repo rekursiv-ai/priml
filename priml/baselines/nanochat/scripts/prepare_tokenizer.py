@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import hashlib
 import json
@@ -20,7 +20,7 @@ import rustbpe
 import tokenizers
 
 from priml.baselines.nanochat.data import DEFAULT_ENCODE_THREADS
-from priml.lib.custom_json import parse
+from priml.lib.custom_json import JSONValue, parse
 from priml.paths import validated_output_path
 
 
@@ -45,18 +45,6 @@ else:
 logger = logging.getLogger(__name__)
 
 
-type JsonValue = (
-    float
-    | int
-    | str
-    | bool
-    | list[JsonValue]
-    | tuple[JsonValue, ...]
-    | dict[str, JsonValue]
-    | None
-)
-
-
 def read_mapping(path: Path) -> dict[str, object]:
     """Read a JSON object without interpreting its nested schema.
 
@@ -67,20 +55,23 @@ def read_mapping(path: Path) -> dict[str, object]:
       mapping: The decoded object.
 
     """
-    return dict(
-        parse(path.read_text(), dict[str, object]),
-    )
+    return parse(path.read_text(), dict[str, object])
 
 
-def write_mapping(path: Path, *, value: JsonValue) -> None:
+def write_mapping(path: Path, *, value: JSONValue) -> None:
     """Publish deterministic JSON after its complete contents have been written.
 
     Args:
       path: Destination, outside protected inputs.
-      value: JSON-compatible preparation metadata.
+      value: JSON-compatible preparation metadata; every number finite.
+
+    Raises:
+      ValueError: A number is not finite, or the value is circular.
 
     """
-    _require_finite_json_numbers(value)
+    # Serialized before the destination is touched, so a rejected value leaves
+    # nothing behind.
+    text = json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
     destination = validated_output_path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -89,11 +80,23 @@ def write_mapping(path: Path, *, value: JsonValue) -> None:
         delete=False,
         prefix="nanochat-json-",
     ) as output:
-        output.write(
-            json.dumps(value, indent=2, sort_keys=True) + "\n",
-        )
+        output.write(text)
         staged = Path(output.name)
     staged.replace(destination)
+
+
+def shard_path(directory: Path, *, shard: int) -> Path:
+    """Return the corpus's file for one shard index.
+
+    Args:
+      directory: Directory holding the shards.
+      shard: Source shard index.
+
+    Returns:
+      path: ``directory/shard_NNNNN.parquet``.
+
+    """
+    return directory / f"shard_{shard:05d}.parquet"
 
 
 def document_rows(path: Path, *, shard: int) -> Iterator[tuple[str, str]]:
@@ -143,7 +146,7 @@ class SamplePreparation:
         """Heldout shard, excluded from vocabulary fitting."""
 
         train_shard_indices: tuple[int, ...] = (*range(7), *range(8, 15))
-        """Ordered training sources; validation shard7 is excluded."""
+        """Ordered training sources; must exclude ``val_shard``."""
 
         rows_per_shard: int = 4_096
         """Number of equal-population midpoint strata in each shard."""
@@ -154,7 +157,9 @@ class SamplePreparation:
     def __init__(self, config: Config) -> None:
         self.config = config
         if config.val_shard in config.train_shard_indices:
-            raise ValueError("The fitting sample must exclude validation shard7.")
+            raise ValueError(
+                f"The fitting sample must exclude validation shard {config.val_shard}.",
+            )
         if config.rows_per_shard <= 0 or config.max_bytes < 4:
             raise ValueError(
                 "Sample size must be positive and windows at least four bytes.",
@@ -169,7 +174,7 @@ class SamplePreparation:
         output.mkdir(parents=True)
         texts: list[str] = []
         for shard in self.config.train_shard_indices:
-            path = self.config.raw_dir / f"shard_{shard:05d}.parquet"
+            path = shard_path(self.config.raw_dir, shard=shard)
             total = parquet.read_metadata(path).num_rows
             count = min(total, self.config.rows_per_shard)
             selected = {
@@ -205,10 +210,13 @@ class UnigramPreparation:
         """Model vocabulary including reserved IDs."""
 
         reserved_count: int = 16
-        """IDs appended after ordinary byte pieces; the first is BOS."""
+        """IDs appended after ordinary byte pieces; at least 1, the first is BOS."""
 
         overshoot_learned: float = 1.15
-        """Multiplier applied to learned seed pieces beyond the 256 bytes."""
+        """Multiplier, at least 1, on learned seed pieces beyond the 256 bytes.
+
+        Pruning only removes pieces, so a seed smaller than the vocabulary
+        would leave it short."""
 
         num_passes: int = 2
         """Hard-EM Viterbi recount passes before one-shot pruning."""
@@ -219,16 +227,29 @@ class UnigramPreparation:
         num_threads: int = 8
         """Threads used by the initial tiktoken counting pass."""
 
-        split_pattern: str = r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"
-        """Inherited byte-BPE pretokenization expression."""
+        split_pattern: str = (
+            r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}"""
+            r"""| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
+        )
+        """Regex splitting text before pieces apply; shared with the BPE fit.
+
+        Caps numbers at two digits and keeps a leading space with its word,
+        both of which bound how much the vocabulary spends on rare literals.
+        :data:`SPLIT_PATTERN` reads it from here, so the two fits cannot fork."""
 
         pruning: Callable[[list[bytes], list[int]], list[float]] = usage_scores
         """Injected pruning objective; ties retain the earlier seed piece."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
+        _require_reserved_bos(config.reserved_count)
         if config.vocab_size - config.reserved_count < 256:
             raise ValueError("The ordinary vocabulary must contain every byte.")
+        if math.isnan(config.overshoot_learned) or config.overshoot_learned < 1:
+            raise ValueError(
+                "overshoot_learned must be at least 1, or the seed holds fewer "
+                f"pieces than the vocabulary; got {config.overshoot_learned}.",
+            )
 
     def build(self) -> None:
         """Fit the tokenizer from the selected text and save its piece counts."""
@@ -278,6 +299,12 @@ class UnigramPreparation:
             logger.info("Hard-EM pass %d: %d tokens", iteration + 1, sum(counts))
         scores = self.config.pruning(pieces, counts)
         keep = _pruned_piece_indices(scores, ordinary=ordinary)
+        # The trainer may stop short of its target on a small corpus.
+        if len(keep) != ordinary:
+            raise ValueError(
+                f"The fitted seed holds {len(pieces)} pieces, too few to prune to "
+                f"{ordinary} ordinary pieces; fit on more text.",
+            )
         model = frequency_model(
             [pieces[index] for index in keep],
             counts=[counts[index] for index in keep],
@@ -288,6 +315,10 @@ class UnigramPreparation:
             output / "counts.npy",
             array([counts[index] for index in keep], dtype="int64"),
         )
+
+
+SPLIT_PATTERN: Final = UnigramPreparation.Config().split_pattern
+"""The default pretokenizer, for the BPE fits that take no config."""
 
 
 def load_sample(directory: Path) -> list[str]:
@@ -395,9 +426,10 @@ class ByteLevelTokenizer:
         """Frozen HF tokenizer JSON."""
 
         reserved_count: int = 16
-        """Reserved IDs outside the ordinary tokenizer; first is BOS."""
+        """Reserved IDs outside the ordinary tokenizer; at least 1, first is BOS."""
 
     def __init__(self, config: Config) -> None:
+        _require_reserved_bos(config.reserved_count)
         self.backend = tokenizers.Tokenizer.from_file(str(config.path))
         document = read_mapping(config.path)
         if (
@@ -455,26 +487,13 @@ class ByteLevelTokenizer:
         return output
 
 
-def _require_finite_json_numbers(
-    value: JsonValue,
-    *,
-    visited: set[int] | None = None,
-) -> None:
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError("JSON numbers must be finite.")
-    if not isinstance(value, (list, tuple, dict)):
-        return
-    if visited is None:
-        visited = set()
-    if id(value) in visited:
-        return
-    visited.add(id(value))
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            _require_finite_json_numbers(item, visited=visited)
-    if isinstance(value, dict):
-        for item in value.values():
-            _require_finite_json_numbers(item, visited=visited)
+def _require_reserved_bos(reserved_count: int) -> None:
+    """Refuse a layout with no reserved ID for BOS, which takes the first."""
+    if reserved_count < 1:
+        raise ValueError(
+            "reserved_count must be at least 1: the first reserved ID is BOS; "
+            f"got {reserved_count}.",
+        )
 
 
 def _document_texts(path: Path) -> Iterator[str]:

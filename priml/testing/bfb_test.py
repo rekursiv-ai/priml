@@ -34,9 +34,8 @@ if TYPE_CHECKING:
 from priml.lib.custom_json import convert
 from priml.model.attention.attention import Attention
 from priml.model.transformer.block import TransformerBlock
-from priml.testing import bfb
+from priml.testing import bfb, regenerate
 from priml.testing.bfb import (
-    _ENV_REGENERATE,
     _EXACT_F32_OPS,
     _FLOAT_FACTORIES,
     _assert_equal,
@@ -112,17 +111,17 @@ class _FixedResult:
 
 
 @pytest.fixture(autouse=True)
-def isolate_regenerate_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Clear ``BFB_REGENERATE`` so a global regen run cannot disable these tests.
+def isolate_regenerate_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear ``--regenerate-b4b`` so a global regen run cannot disable these tests.
 
     The drift-detection and round-trip tests mint into ``tmp_path`` and must
-    compare, not regenerate. A suite-wide ``BFB_REGENERATE=1`` (set to remint
+    compare, not regenerate. A suite-wide ``--regenerate-b4b`` (set to remint
     committed goldens) would otherwise force every ``assert_bfb_against_golden``
     to regenerate, so the drift tests see no mismatch and fail "DID NOT RAISE".
     Tests that need regeneration call ``regenerate_golden``, which sets the flag
     locally.
     """
-    monkeypatch.delenv(_ENV_REGENERATE, raising=False)
+    regenerate.override(monkeypatch, b4b=False)
 
 
 def _build_min_linear() -> nn.Linear:
@@ -675,7 +674,7 @@ def test_explicit_regeneration_of_an_existing_golden_returns_normally(
     )
     path = tmp_path / "linear_min.pt"
     before = _loaded_golden(path)["state_dict"]
-    monkeypatch.setenv(_ENV_REGENERATE, "1")
+    regenerate.override(monkeypatch, b4b=True)
 
     assert_bfb_against_golden(
         golden_dir=tmp_path,
@@ -886,7 +885,7 @@ def test_expect_golden_mismatch_blocks_bfb_regeneration(
         def forward(self, input: Tensor) -> Tensor:
             return super().forward(input) + 1e-3
 
-    monkeypatch.setenv(_ENV_REGENERATE, "1")
+    regenerate.override(monkeypatch, b4b=True)
     before = (tmp_path / "linear_min.pt").read_bytes()
     assert_bfb_against_golden(
         golden_dir=tmp_path,
@@ -948,7 +947,7 @@ def test_regenerate_golden_helper_overwrites(tmp_path: Path) -> None:
         build_input=_build_min_input,
         seed=0,
     )
-    assert _ENV_REGENERATE not in os.environ
+    assert not regenerate.b4b()
     assert (tmp_path / "linear_min.pt").exists()
 
 
@@ -3094,16 +3093,16 @@ def test_input_validation_distinguishes_container_and_scalar_types(
         _assert_same_input(live, stored, label="input")
 
 
-def test_regenerate_golden_preserves_existing_regenerate_env(
+def test_regenerate_golden_preserves_existing_regenerate_flag(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``regenerate_golden`` restores a caller-set ``BFB_REGENERATE``.
+    """``regenerate_golden`` restores a caller-set ``--regenerate-b4b``.
 
     Unconditionally clearing it would silently disable regeneration for later
-    tests in a process launched with ``BFB_REGENERATE=1``.
+    tests in a run launched with ``--regenerate-b4b``.
     """
-    monkeypatch.setenv(_ENV_REGENERATE, "1")
+    regenerate.override(monkeypatch, b4b=True)
     regenerate_golden(
         golden_dir=tmp_path,
         golden_name="clean",
@@ -3111,7 +3110,7 @@ def test_regenerate_golden_preserves_existing_regenerate_env(
         build_input=_build_min_input,
         seed=0,
     )
-    assert os.environ[_ENV_REGENERATE] == "1"
+    assert regenerate.b4b()
 
 
 def test_input_comparison_reports_nested_paths_and_container_lengths() -> None:

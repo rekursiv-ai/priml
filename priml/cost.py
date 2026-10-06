@@ -74,7 +74,6 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Final, Literal, cast, overload, override
 
-import contextlib
 import functools
 import math
 
@@ -85,6 +84,7 @@ __all__ = [
     "KERNELS",
     "MEASURES",
     "PHASES",
+    "Axis",
     "Cost",
     "Device",
     "Index",
@@ -116,6 +116,7 @@ type Key = tuple[Axis, Axis, Axis, Axis]
 type Index = Axis | tuple[Axis] | tuple[Axis, Axis] | tuple[Axis, Axis, Axis]
 """Fewer axes than the table has, in any order: reads the sub-table."""
 
+_COST_AXES: Final = ("measure", "phase", "kernel", "dtype")
 MEASURES: Final = ("flops", "bytes")
 _REPORT_MEASURES: Final = (*MEASURES, "intensity")
 PHASES: Final = ("primal", "adjoint")
@@ -140,8 +141,9 @@ class Cost:
     a cell never written is zero. Index with axis values in any order -- each
     value names its own axis, since measures, phases, kernels and dtypes never
     collide -- and get the count when every axis is fixed, else the sub-table.
-    A combination no cell holds is an empty table, i.e. zero; only a value that
-    names no axis at all (``"gemm"``) is a ``KeyError``.
+    A combination no cell holds is an empty table, i.e. zero; a value that
+    names no axis at all (``"gemm"``), or two values on one axis, is a
+    ``KeyError`` -- empty table or not.
 
     The three ownership fields are not per cell: a slice owns nothing; they
     add under ``+`` and scale only by ``copies`` in :meth:`tile`.
@@ -190,8 +192,9 @@ class Cost:
             raise KeyError("'intensity' is a reporting-only measure")
         if not wanted:
             return self
+        _validate_axes(wanted)
         if not self.cells:
-            return Cost() if len(wanted) < 4 else 0
+            return Cost() if len(wanted) < len(_COST_AXES) else 0
         sample = next(iter(self.cells))
         fixed = {_axis_of(sample, want): want for want in wanted}
         if len(fixed) == len(sample):
@@ -337,11 +340,7 @@ class Report:
             self,
             "cells",
             MappingProxyType(
-                {
-                    key: float(value)
-                    for key, value in self.cells.items()
-                    if value != 0 or math.isnan(value)
-                },
+                {key: float(value) for key, value in self.cells.items() if value != 0},
             ),
         )
 
@@ -356,8 +355,11 @@ class Report:
     def _select(self, wanted: list[object]) -> float | Report:
         if not wanted:
             return self
+        _validate_axes(wanted)
+        # An empty report has no keys to read its width from; the derived
+        # reports (``intensity``, ``utilization``) are phase x kernel x dtype.
         if not self.cells:
-            return Report() if len(wanted) < 3 else 0.0
+            return Report() if len(wanted) < len(_COST_AXES) - 1 else 0.0
         sample = next(iter(self.cells))
         fixed = {_axis_of(sample, want): want for want in wanted}
         if len(fixed) == len(sample):
@@ -424,9 +426,6 @@ def resolve_dtype(dtype: torch.dtype | None) -> torch.dtype:
     return torch.get_default_dtype() if dtype is None else dtype
 
 
-_FUNCTION_COSTS: dict[object, Callable[..., Cost]] = {}
-
-
 def cost(config: object, **kwargs: object) -> Cost:
     """Cost one complete invocation, forwarding the bus unchanged.
 
@@ -447,12 +446,11 @@ def cost(config: object, **kwargs: object) -> Cost:
     # importing it here would close an import cycle.
     original: object = config
     method = getattr(original, "cost", None)
+    # Unnarrowed by the ``isinstance(partial)`` below, which would leave
+    # ``partial[Unknown]`` in the name lookup.
     name_target: object = original
-    if not callable(method):
-        with contextlib.suppress(TypeError):
-            method = _FUNCTION_COSTS.get(original)
     if not callable(method) and isinstance(original, functools.partial):
-        method = _FUNCTION_COSTS.get(cast(object, original.func))
+        method = getattr(cast(object, original.func), "cost", None)
     if not callable(method):
         name = getattr(name_target, "__qualname__", type(name_target).__qualname__)
         raise TypeError(
@@ -500,12 +498,15 @@ def set_cost[**P, R](
         per-element case.
 
     Returns:
-      decorator: Returns the original function unchanged.
+      decorator: Returns the original function with ``cost_fn`` stored as its
+        ``cost`` attribute, which :func:`cost` reads like a config's method.
 
     """
 
     def decorate(function: Callable[P, R]) -> Callable[P, R]:
-        _FUNCTION_COSTS[function] = cost_fn
+        # On the function, not in a registry: a registry would keep every
+        # decorated closure alive for the life of the process.
+        vars(function)["cost"] = cost_fn
         return function
 
     return decorate
@@ -778,9 +779,12 @@ type Device = Literal[
 # H100 SXM5: NVIDIA H100 Tensor Core GPU datasheet, "no sparsity" column
 #   (FP64 TC 67 is not used; the vector rate is FP32 CUDA 67). Mirrored at
 #   https://www.spheron.network/blog/nvidia-h100-specs/ "Throughput by Precision".
-# H100 PCIe: same tensor rates, 2.0 TB/s HBM2e -- 60% of the SXM5 bandwidth.
-#   The intensity ridge therefore sits 1.68x higher on the PCIe board, which is
-#   enough to change which config reads as well tuned.
+# H100 PCIe: the same datasheet's PCIe column --
+#   https://www.arrow.com/globalecs-media/15wfdnib/h100-datasheet-2430615.pdf
+#   -- whose starred tensor figures are "with sparsity", so each is halved (TF32
+#   756 -> 378, BF16 1513 -> 756.5, FP8/INT8 3026 -> 1513); FP64 26, FP32 CUDA
+#   51. The board clocks lower than SXM5, so its rates are NOT the SXM5 rates.
+#   2.0 TB/s HBM2e is 60% of the SXM5 bandwidth.
 # H200 SXM: same GH100 die and rates; 4.8 TB/s HBM3e from the same source.
 # B200: HGX B200 PCF summary (8 GPUs) divided by 8 --
 #   https://images.nvidia.com/aem-dam/Solutions/documents/HGX-B200-PCF-Summary.pdf
@@ -854,15 +858,15 @@ _DEVICES: Final[Mapping[Device, tuple[float, Mapping[torch.dtype, float], float]
     "h100-pcie": (
         2.0,
         {
-            torch.float64: 34,
-            torch.float32: 494,
-            torch.bfloat16: 989,
-            torch.float16: 989,
-            torch.float8_e4m3fn: 1979,
-            torch.float8_e5m2: 1979,
-            torch.int8: 1979,
+            torch.float64: 26,
+            torch.float32: 378,
+            torch.bfloat16: 756.5,
+            torch.float16: 756.5,
+            torch.float8_e4m3fn: 1513,
+            torch.float8_e5m2: 1513,
+            torch.int8: 1513,
         },
-        67,
+        51,
     ),
     "h200": (
         4.8,
@@ -1021,6 +1025,18 @@ def utilization(
         achieved = flops / duration_sec
         cells[key] = _div(achieved, min(compute, memory))
     return Report(cells=cells)
+
+
+# Checked before any cell is read, so an empty table refuses ``"gemm"`` as a full one
+# does, and ``("primal", "adjoint")`` cannot let the last one win.
+def _validate_axes(wanted: list[object]) -> None:
+    """Raise unless each value names an axis, and no axis is named twice."""
+    kinds: set[str] = set()
+    for want in wanted:
+        kind = _kind(want)
+        if kind in kinds:
+            raise KeyError(f"{want!r} names the {kind} axis twice.")
+        kinds.add(kind)
 
 
 def _axis_of(key: tuple[object, ...], value: object) -> int:

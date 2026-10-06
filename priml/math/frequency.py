@@ -39,6 +39,8 @@ def dct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:
 
     """
     x = convert_to_tensor(x)
+    if not x.dtype.is_floating_point:
+        raise TypeError("DCT requires a floating-point input.")
     shape = x.shape
     n = shape[-1]
     x = x.contiguous().view(-1, n)
@@ -76,6 +78,8 @@ def idct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:
 
     """
     x = convert_to_tensor(x)
+    if not x.dtype.is_floating_point:
+        raise TypeError("DCT requires a floating-point input.")
     shape = x.shape
     n = shape[-1]
 
@@ -181,7 +185,10 @@ def _normalize_axes(
 ) -> list[int]:
     if axis is None:
         return list(range(ndim))
-    axes = sorted(a % ndim for a in ([axis] if isinstance(axis, int) else axis))
+    requested = [axis] if isinstance(axis, int) else axis
+    if any(a < -ndim or a >= ndim for a in requested):
+        raise IndexError(f"DCT axis {axis!r} is out of range for rank {ndim}.")
+    axes = sorted(a % ndim for a in requested)
     if len(axes) != len(set(axes)):
         raise ValueError(
             f"Duplicate axes after normalization: axis={axis!r} maps to {axes} "

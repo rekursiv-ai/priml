@@ -174,7 +174,10 @@ class SparsePuzzleEmbedding(nn.Module):
         """Cost size, prefix width, and the per-batch gradient buffer."""
 
         channels_in: int = -1
-        """Model width; -1 inherits it. Sets the reshaped token width."""
+        """Width of each prefix token; -1 uses ``channels_out``.
+
+        Set it when the per-puzzle vector is narrower than the model: the vector
+        is zero-padded to ``num_tokens * channels_in`` before the reshape."""
 
         channels_out: int = -1
         """Per-puzzle vector width; -1 inherits the model's hidden size."""
@@ -203,13 +206,18 @@ class SparsePuzzleEmbedding(nn.Module):
         """Realized standard deviation; 0 zero-initializes the table."""
 
         embed_scale: float = -1.0
-        """Runtime multiplier; -1 derives it from ``channels_out``."""
+        """Runtime multiplier; -1 derives it from :attr:`channels_token`."""
 
         dtype: torch.dtype | None = None
         """Cast applied to looked-up rows before reshape; ``None`` keeps their dtype."""
 
         dtype_scale: torch.dtype | None = None
         """Cast the prefix before scaling; ``None`` scales in its current dtype."""
+
+        @property
+        def channels_token(self) -> int:
+            """Width of one prefix token: ``channels_in``, else ``channels_out``."""
+            return self.channels_in if self.channels_in > 0 else self.channels_out
 
         def cost(
             self,
@@ -238,7 +246,7 @@ class SparsePuzzleEmbedding(nn.Module):
 
             """
             del seq_len, kwargs
-            width = self.num_tokens * self.channels_out
+            width = self.num_tokens * self.channels_token
             copied = 4 * self.channels_out
             if width > self.channels_out:
                 copied += self.channels_out + width
@@ -273,9 +281,15 @@ class SparsePuzzleEmbedding(nn.Module):
                 "channels_out must be positive; it is normally inherited "
                 f"from the model during finalize. Got {config.channels_out}.",
             )
+        if config.channels_out > config.num_tokens * config.channels_token:
+            raise ValueError(
+                f"channels_out={config.channels_out} exceeds num_tokens * "
+                f"channels_token={config.num_tokens} * {config.channels_token}; "
+                "the per-puzzle vector cannot be reshaped into its prefix tokens.",
+            )
         self.config = config
         self.embed_scale = (
-            config.channels_out**0.5 if config.embed_scale < 0 else config.embed_scale
+            config.channels_token**0.5 if config.embed_scale < 0 else config.embed_scale
         )
         table = torch.zeros(config.num_puzzles, config.channels_out)
         if config.init_std > 0:
@@ -310,6 +324,7 @@ class SparsePuzzleEmbedding(nn.Module):
 
         Raises:
           TypeError: If ``puzzle_identifiers`` is absent from the batch.
+          ValueError: If a training batch does not fill the gradient buffer.
 
         """
         identifiers = kwargs.get("puzzle_identifiers")
@@ -318,15 +333,21 @@ class SparsePuzzleEmbedding(nn.Module):
                 "SparsePuzzleEmbedding requires puzzle_identifiers in the batch; "
                 f"got {type(identifiers).__name__}.",
             )
-        vectors = self._lookup(identifiers)
         config = self.config
-        width = config.num_tokens * config.channels_out
+        if self.training and identifiers.shape[0] != config.batch_size:
+            raise ValueError(
+                f"A training batch of {identifiers.shape[0]} puzzles does not fill "
+                f"the gradient buffer sized by batch_size={config.batch_size}; pad "
+                "the batch or set batch_size to the training batch size.",
+            )
+        vectors = self._lookup(identifiers)
+        width = config.num_tokens * config.channels_token
         if vectors.shape[-1] < width:
             vectors = nn.functional.pad(vectors, (0, width - vectors.shape[-1]))
         prefix: Tensor = vectors.reshape(
             batch_size,
             config.num_tokens,
-            config.channels_out,
+            config.channels_token,
         )
         if config.dtype_scale is not None:
             prefix = prefix.to(config.dtype_scale)

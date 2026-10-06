@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import fields, is_dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
 import pytest
@@ -22,10 +21,11 @@ import torch
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from _typeshed import DataclassInstance
 
 from configgle import InlineConfig
-from configgle.pprinting import pformat
 
 from priml.baselines.cifar10 import experiments
 from priml.baselines.cifar10.data import Cifar10Data
@@ -44,11 +44,9 @@ from priml.lib.absent import ABSENT
 from priml.metrics.topk import TopK
 from priml.optimizers import CompositeOptimizer
 from priml.testing.experiments import ExperimentFactory
+from priml.testing.golden import assert_pprint_golden
 from priml.train.parallelism import NoParallel
 from priml.train.train_loop import TrainLoop
-
-
-_CWD: Final = Path(__file__).resolve().parent
 
 
 ALL_EXPERIMENTS: Final[list[ExperimentFactory[Cifar10TrainLoop]]] = [
@@ -360,26 +358,9 @@ def _flatten(config: DataclassInstance, prefix: str = "") -> dict[str, object]:
     return flat
 
 
-def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> None:
-    """Pin the WHOLE finalized ``exp000`` as readable text.
-
-    ``exp000`` is the control every fork is measured against, so a change to
-    it invalidates published numbers. A digest would say only that something
-    moved; this golden says WHICH field, from what, to what.
-    ``hide_default_values=False`` so a field that changes only because a
-    library default changed still shows up here.
-
-    Refresh with ``--golden-overwrite`` after reading the diff.
-    """
-    snapshot = _CWD / "testdata" / "exp000.txt"
-    rendered = pformat(exp000().copy_tree().finalize(), hide_default_values=False)
-    if request.config.getoption("--golden-overwrite", default=False):
-        snapshot.parent.mkdir(parents=True, exist_ok=True)
-        _ = snapshot.write_text(rendered + "\n", encoding="utf-8")
-    assert snapshot.read_text(encoding="utf-8") == rendered + "\n", (
-        "exp000 changed; read the diff, then rerun with --golden-overwrite "
-        "if the change is intended."
-    )
+def test_exp000_matches_its_golden_config() -> None:
+    """Pin the WHOLE finalized ``exp000``: the control every fork is measured against."""
+    assert_pprint_golden(test_file=__file__, name="exp000", config=exp000())
 
 
 if __name__ == "__main__":

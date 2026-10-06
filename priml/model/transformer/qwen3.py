@@ -30,7 +30,9 @@ from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
 from functools import partial
-from typing import TYPE_CHECKING, Self, cast, override
+from typing import TYPE_CHECKING, Self, override
+
+import math
 
 from configgle import Makeable, Makes
 from torch import Tensor, nn
@@ -40,7 +42,7 @@ import torch
 from priml import hub
 from priml.lib.custom_json import convert
 from priml.model.attention.attention import Attention
-from priml.model.attention.rope import HuggingFaceFrequencies, RoPE
+from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsInOutConfig,
@@ -65,7 +67,7 @@ if TYPE_CHECKING:
 # Read off the BLOCK rather than a parent mirror of it: the geometry lives where the
 # layer is built, so a per-layer list and a broadcast template both answer here without
 # this function knowing which it was given.
-def _attn_of(config: Qwen3.Config, layer: int = 0) -> Attention.Config:
+def _attn_of(config: Qwen3.Config, layer: int) -> Attention.Config:
     """Return one layer's attention config."""
     blocks = config.block if isinstance(config.block, list) else [config.block]
     # ``len == 1`` is the pre-finalize broadcast template, which answers for
@@ -160,6 +162,10 @@ class Qwen3(Transformer):
             Returns:
               result: Loop Qwen3.Config parsed from HF schema.
 
+            Raises:
+              ValueError: An architecture field is unsupported or invalid.
+              ReadError: A configuration field has the wrong type.
+
             """
             model_type = config.get("model_type")
             if model_type != "qwen3":
@@ -167,21 +173,15 @@ class Qwen3(Transformer):
                     f"Expected model_type='qwen3', got {model_type!r}. "
                     "Qwen3-MoE and earlier Qwen versions need their own loader.",
                 )
+            _reject_unsupported(config)
             # ``transformers`` 4.55+ nests rope params; earlier has rope_theta flat.
+            rope_params = convert(
+                config.get("rope_parameters"),
+                dict[str, object],
+                default={},
+            )
             rope_theta = config.get("rope_theta")
             if rope_theta is None:
-                # Validated rather than cast: this is an HF ``config.json``, so
-                # a malformed field is caller input. Casting produced an
-                # ``AttributeError`` from inside ``.get`` instead.
-                raw_rope_parameters = config.get("rope_parameters")
-                rope_params = (
-                    convert(
-                        cast(dict[str, object], raw_rope_parameters),
-                        dict[str, object],
-                    )
-                    if isinstance(raw_rope_parameters, dict)
-                    else {}
-                )
                 rope_theta = convert(
                     rope_params.get("rope_theta"),
                     float,
@@ -202,6 +202,9 @@ class Qwen3(Transformer):
             rope.frequencies = frequencies
 
             attn = Attention.Config(bias=False, causal=True, share_qk_norm=False)
+            attn.dropout = convert(config.get("attention_dropout"), float, default=0.0)
+            if not math.isfinite(attn.dropout) or attn.dropout < 0 or attn.dropout >= 1:
+                raise ValueError("attention_dropout must be finite and in [0, 1).")
             attn.num_heads = num_heads
             num_heads_kv = convert(
                 config.get("num_key_value_heads"),
@@ -247,7 +250,7 @@ class Qwen3(Transformer):
 
             head: Makeable[TensorModule] = (
                 TiedLinear.Config(tied="proj_in")
-                if bool(config.get("tie_word_embeddings", False))
+                if convert(config.get("tie_word_embeddings"), bool, default=False)
                 else Linear.Config(init_weight=init_weight, shard="vocab")
             )
             return cls(
@@ -330,6 +333,25 @@ class Qwen3(Transformer):
         return model
 
 
+def _reject_unsupported(config: Mapping[str, object]) -> None:
+    """Raise on an HF field this loader would otherwise silently drop."""
+    if config.get("quantization_config") is not None:
+        raise ValueError("Quantized checkpoint configurations are unsupported.")
+    if convert(config.get("hidden_act"), str, default="silu") != "silu":
+        raise ValueError("Only the SwiGLU/silu Qwen3 architecture is supported.")
+    if convert(config.get("attention_bias"), bool, default=False):
+        raise ValueError("Attention projection biases are unsupported.")
+    # HF ignores ``sliding_window`` unless ``use_sliding_window`` is set, and
+    # Qwen3 checkpoints ship ``sliding_window: 4096`` with it off.
+    layer_types = convert(config.get("layer_types"), list[str], default=[])
+    if convert(config.get("use_sliding_window"), bool, default=False) or any(
+        layer != "full_attention" for layer in layer_types
+    ):
+        raise ValueError("Sliding-window attention is unsupported.")
+    if YarnScaling.Config.from_hf(config) is not None:
+        raise ValueError("Only default rotary frequencies are supported.")
+
+
 def remap_hf_state_dict(
     hf_sd: dict[str, Tensor],
     config: Qwen3.Config,
@@ -347,17 +369,19 @@ def remap_hf_state_dict(
 
     """
     h = config.channels_in
-    attn = _attn_of(config)
-    n_q = attn.num_heads
-    n_kv = attn.num_heads_kv
-    d = attn.channels_head
+    # Every layer's geometry is resolved before any weight is read, so a config
+    # the remap cannot serve fails as a config error, not as a missing key.
+    attns = [_attn_of(config, i) for i in range(config.num_layers)]
     out: dict[str, Tensor] = {
         "proj_in.weight": hf_sd["model.embed_tokens.weight"],
         "proj_out.0.weight": hf_sd["model.norm.weight"],
     }
     if not head_is_tied(config):
         out["proj_out.1.weight"] = hf_sd["lm_head.weight"]
-    for i in range(config.num_layers):
+    for i, attn in enumerate(attns):
+        n_q = attn.num_heads
+        n_kv = attn.num_heads_kv
+        d = attn.channels_head
         p, b = f"model.layers.{i}", f"blocks.{i}"
         out[f"{b}.norm1.weight"] = hf_sd[f"{p}.input_layernorm.weight"]
         out[f"{b}.norm2.weight"] = hf_sd[f"{p}.post_attention_layernorm.weight"]

@@ -21,6 +21,7 @@ from priml.baselines.arcagi2.metric import PassK
 from priml.baselines.arcagi2.model import PuzzleEmbedding, RotaryBlock
 from priml.baselines.arcagi2.puzzle_data import Arc2PuzzleDataset
 from priml.baselines.arcagi2.scripts.build_dataset import (
+    ARC2_DATASET_DIR,
     arc2_aug_policy_template,
     arc2_spatial_eval_template,
 )
@@ -415,7 +416,7 @@ def _on_arc2(
     cfg.update(source, skip_missing=True)
     cfg.step = source.step
     cfg.dataset = Arc2PuzzleDataset.Config().update(source.dataset, skip_missing=True)
-    cfg.dataset.working_dir = "/datasets/arc2concept-aug-1000"
+    cfg.dataset.working_dir = ARC2_DATASET_DIR
     cfg.dataset.epochs_per_iter = 4
     cfg.dataset.num_puzzle_identifiers = NUM_PUZZLE_IDENTIFIERS
     cfg.study_name = "arcagi2"

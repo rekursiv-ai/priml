@@ -5,8 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
-from configgle.testing import assert_pprint_golden
-
 import torch
 
 from priml.cost import Cost, cost
@@ -20,6 +18,7 @@ from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent

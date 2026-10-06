@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Final, cast
 
 from configgle import Fig, Makeable
-from configgle.testing import assert_pprint_golden
 from torch import nn
 
 import pytest
@@ -27,6 +26,7 @@ from priml.model.norm import (
 )
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 def _config_id(value: object) -> str | None:

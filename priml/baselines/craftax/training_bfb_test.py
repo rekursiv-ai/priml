@@ -17,7 +17,7 @@ Mirrors the JAX study's ``training_bfb_test``, with two deliberate departures:
 
 Regenerate after an intentional numeric change::
 
-    BFB_REGENERATE=1 uv --quiet run --frozen pytest \\
+    uv --quiet run --frozen pytest \\ --regenerate-b4b
         priml/baselines/craftax/training_bfb_test.py
 
 """

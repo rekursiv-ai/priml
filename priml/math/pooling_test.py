@@ -152,7 +152,7 @@ def test_invalid_pooling_shapes_name_the_rejected_dimension() -> None:
         adaptive_avg_pool2d(torch.ones(2, 3, 0, 4), (2, 2), True)
     with pytest.raises(
         RuntimeError,
-        match=r"Expected non-zero output_size, got \(0, 2\)",
+        match=r"Expected positive output_size, got \(0, 2\)",
     ):
         adaptive_avg_pool2d(torch.ones(2, 3, 4, 6), (0, 2), True)
     with pytest.raises(RuntimeError, match=r"Expected 4D or 5D tensor, got 3D"):
@@ -658,6 +658,16 @@ def test_adaptive_avg_pool2d_both_dims_adaptive_vp() -> None:
     result = adaptive_avg_pool2d(x, (3, 3), variance_preserving=True)
     assert result.shape == (2, 3, 3, 3)
     assert not torch.isnan(result).any()
+
+
+@pytest.mark.parametrize("variance_preserving", [False, True])
+def test_pool_negative_output_dimension_is_rejected(variance_preserving: bool) -> None:
+    with pytest.raises(RuntimeError, match="positive output_size"):
+        adaptive_avg_pool2d(
+            torch.zeros(2, 3, 4, 5),
+            (-1, 2),
+            variance_preserving=variance_preserving,
+        )
 
 
 if __name__ == "__main__":

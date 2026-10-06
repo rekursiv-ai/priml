@@ -15,6 +15,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
+from priml.baselines.arcagi1 import data as arcagi1_data
 from priml.baselines.arcagi1.augmentation import ArcSpec
 from priml.baselines.arcagi2.data import Arc2Data, ArcBatches
 from priml.baselines.arcagi2.record_test import assert_matches, reduce
@@ -480,6 +481,28 @@ def test_task_limits_and_spec_reach_the_prepared_reader(tmp_path: Path) -> None:
     assert data.prepared.config.device == "meta"
     assert data.prepared.config.num_tasks == 1
     assert data.prepared.config.num_eval_tasks == 1
+
+
+def test_evaluation_reads_the_test_split_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every evaluation would otherwise reload the whole split from disk."""
+    write_tree(tmp_path)
+    data = Arc2Data.Config(working_dir=tmp_path, batch_size=2, device="cpu").make()
+    loads: list[str] = []
+    load_split = arcagi1_data._load_split
+
+    def counting_load(dataset_dir: Path, *, split: str, mmap: bool = False) -> object:
+        loads.append(split)
+        return load_split(dataset_dir, split=split, mmap=mmap)
+
+    monkeypatch.setattr(arcagi1_data, "_load_split", counting_load)
+    first = [_tensor(b, "media") for b in data.eval_dataloader()]
+    second = [_tensor(b, "media") for b in data.eval_dataloader()]
+
+    assert loads == ["test"]
+    assert all(torch.equal(a, b) for a, b in zip(first, second, strict=True))
 
 
 @pytest.mark.parametrize("rank", [0, 1])

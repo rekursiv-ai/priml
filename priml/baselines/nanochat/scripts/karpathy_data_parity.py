@@ -35,7 +35,6 @@ from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 import argparse
 import importlib
-import subprocess
 import sys
 
 from torch import Tensor
@@ -47,6 +46,7 @@ from priml.baselines.nanochat.data import (
     NanoChatData,
     PackedTokenStream,
 )
+from priml.baselines.nanochat.scripts.karpathy_upstream import clone_upstream
 from priml.baselines.nanochat.scripts.prepare_data import prepare
 
 
@@ -71,47 +71,6 @@ class _PrepareModule(Protocol):
     EVAL_TOKENS: int
     Tokenizer: _TokenizerFactory
     make_dataloader: Callable[..., Iterator[tuple[Tensor, Tensor, int]]]
-
-
-def clone_upstream(
-    root: Path,
-    *,
-    url: str = "https://github.com/karpathy/autoresearch.git",
-    commit: str = "b11d6f283f866eb7e10fb776a4b8553fef873fd5",
-) -> Path:
-    """Clone the reference at its pinned commit, or verify an existing clone.
-
-    Args:
-      root: Directory the clone lives in.
-      url: Repository to clone.
-      commit: Revision the comparison is against.
-
-    Returns:
-      path: The clone's path.
-
-    Raises:
-      RuntimeError: An existing clone is dirty or at another commit, so what it
-        contains is no longer the reference this comparison names.
-
-    """
-    if not (root / ".git").is_dir():
-        root.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(  # noqa: S603 -- The parity script launches fixed local Git commands from a signed source specification.
-            ["git", "clone", "--quiet", url, str(root)],  # noqa: S607 -- The parity script uses fixed command argv and validated paths.
-            check=True,
-        )
-        subprocess.run(  # noqa: S603 -- The parity script launches fixed local Git commands from a signed source specification.
-            ["git", "checkout", "--quiet", commit],  # noqa: S607 -- The parity script uses fixed command argv and validated paths.
-            cwd=root,
-            check=True,
-        )
-    head = _git(root, "rev-parse", "HEAD")
-    if head != commit:
-        raise RuntimeError(f"clone is at {head}, expected {commit}")
-    dirty = _git(root, "status", "--porcelain")
-    if dirty:
-        raise RuntimeError(f"clone has local modifications:\n{dirty}")
-    return root
 
 
 def load_upstream(root: Path, *, corpus: Path) -> _PrepareModule:
@@ -323,23 +282,10 @@ def main() -> int:
     return 1 if failures else 0
 
 
-def _git(root: Path, *arguments: str) -> str:
-    """Run a read-only git command in the clone."""
-    return subprocess.run(  # noqa: S603 -- The parity script runs the caller-selected read-only Git subcommand in the cloned fixture.
-        ["git", *arguments],  # noqa: S607 -- The parity script uses fixed command argv and validated paths.
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-
-
 def _parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
-    if __doc__ is None:
-        raise ValueError("Expected __doc__ is not None.")
     parser = argparse.ArgumentParser(
-        description=__doc__.split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(

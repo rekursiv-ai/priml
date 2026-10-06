@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
+
+import os
 
 import pytest
 import torch
@@ -18,6 +20,10 @@ from priml.runtime import (
 )
 
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+
 def test_get_device_explicit() -> None:
     assert get_device("cpu") == torch.device("cpu")
 
@@ -26,20 +32,37 @@ def test_get_device_none_returns_the_torch_default() -> None:
     assert get_device(None) == torch.get_default_device()
 
 
+def test_get_device_has_no_auto_spelling() -> None:
+    with pytest.raises(RuntimeError, match="auto"):
+        get_device("auto")
+
+
 @pytest.mark.parametrize(
-    ("cuda", "mps", "expected"),
-    [(True, True, "cuda"), (False, True, "mps"), (False, False, "cpu")],
+    ("accelerator", "available", "expected"),
+    [
+        (torch.device("cuda"), True, "cuda"),
+        (torch.device("mps"), True, "mps"),
+        # A CUDA wheel on a machine with no GPU, as on a CPU CI runner.
+        (torch.device("cuda"), False, "cpu"),
+        (None, False, "cpu"),
+    ],
 )
-def test_get_device_auto_prefers_cuda_then_mps_then_cpu(
+@pytest.mark.parametrize("runtime_config", [SingleProcess.Config, MultiProcess.Config])
+def test_a_runtime_without_a_device_takes_the_best_accelerator(
     monkeypatch: pytest.MonkeyPatch,
-    cuda: bool,
-    mps: bool,
+    accelerator: torch.device | None,
+    available: bool,
     expected: str,
+    runtime_config: type[SingleProcess.Config | MultiProcess.Config],
 ) -> None:
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
-    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: mps)
-    assert get_device("auto") == torch.device(expected)
-    assert get_device() == torch.device(expected)
+    def current_accelerator(*, check_available: bool = False) -> torch.device | None:
+        """Torch's contract: the build's accelerator, or ``None`` if unusable."""
+        return accelerator if available or not check_available else None
+
+    monkeypatch.setattr(torch.accelerator, "current_accelerator", current_accelerator)
+    config = runtime_config()
+    assert config.device is None
+    assert config.make().device == torch.device(expected)
 
 
 class _StubRuntime:
@@ -124,6 +147,9 @@ def test_multiprocess_initialize_passes_configured_device_and_backend(
     init_kwargs = record["init_kwargs"]
     assert init_kwargs["backend"] == "custom"
     assert init_kwargs["device_id"] == torch.device("cuda", 0)
+    # The runtime's device is the rank's own GPU, so children built in its
+    # context land on the bound device rather than whatever ``cuda`` means.
+    assert process.device == torch.device("cuda", 0)
 
 
 def test_single_process_initialize_sets_float32_matmul_precision(
@@ -233,6 +259,7 @@ def test_single_process_initialize_rejects_multiprocess_runtime(
         SingleProcess.Config(device="cpu").make().initialize()
 
 
+@pytest.mark.usefixtures("torch_globals_restored")
 def test_single_process_destroy_clears_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -285,24 +312,13 @@ def test_resolve_mesh_topology_uses_exact_integer_auto_dimension() -> None:
     assert type(resolved["dp"]) is int
 
 
-def test_resolve_mesh_topology_preserves_zero_dimension_in_auto_topology() -> None:
-    with pytest.raises(
-        RuntimeError,
-        match=(
-            r"^World size 4 does not match mesh topology "
-            r"\{'pp': 0, 'dp': 2, 'tp': 2\} \(expected 0\)$"
-        ),
-    ):
-        runtime._resolve_mesh_topology({"pp": 0, "dp": -1, "tp": 2}, 4)
-
-
 def test_multiprocess_finalize_leaves_device_unresolved() -> None:
     # Finalize stays hermetic: it must not probe hardware, so a pprint golden
     # is identical on a CUDA box and a CPU CI runner. Resolution happens in
     # ``__init__``.
-    config = MultiProcess.Config(device="auto").finalize()
-    assert config.device == "auto"
-    assert config.make().device == get_device("auto")
+    config = MultiProcess.Config().finalize()
+    assert config.device is None
+    assert config.make().device.type in {"cpu", "cuda", "mps"}
 
 
 def test_multiprocess_initialize_and_destroy_drive_the_global_mesh(
@@ -933,6 +949,154 @@ def test_cpu_branch_does_not_bind_or_pass_device_id(
     assert init_kwargs["device_id"] is None
     assert "mesh_device_type" in record
     assert record["mesh_device_type"] == "cpu"
+
+
+@pytest.fixture
+def torch_globals_restored() -> Iterator[None]:
+    """Put back the real torch settings a test drives through the runtime."""
+    before = runtime._snapshot_torch_globals()
+    yield
+    before.restore()
+
+
+@pytest.mark.usefixtures("torch_globals_restored")
+def test_single_process_destroy_restores_the_torch_globals_it_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime, "_runtime_initialized", False)
+    monkeypatch.setattr(runtime, "_single_process_settings", None)
+    monkeypatch.setattr(runtime, "_torch_globals_before", None)
+    precision = torch.get_float32_matmul_precision()
+    assert not torch.are_deterministic_algorithms_enabled()
+
+    first = SingleProcess.Config(
+        device="cpu",
+        deterministic=True,
+        float32_matmul_precision="medium",
+    ).make()
+    first.initialize()
+    assert torch.are_deterministic_algorithms_enabled()
+    first.destroy()
+
+    assert not torch.are_deterministic_algorithms_enabled()
+    assert torch.get_float32_matmul_precision() == precision
+    SingleProcess.Config(device="cpu").make().initialize()
+    assert not torch.are_deterministic_algorithms_enabled()
+
+
+@pytest.mark.usefixtures("torch_globals_restored")
+def test_multiprocess_destroy_restores_the_torch_globals_it_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_distributed(monkeypatch, world_size=1)
+    monkeypatch.setattr(runtime, "_torch_globals_before", None)
+    precision = torch.get_float32_matmul_precision()
+
+    initialize_global_device_mesh(
+        device=torch.device("cpu"),
+        backend="gloo",
+        mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+        deterministic=True,
+        float32_matmul_precision="medium",
+    )
+    assert torch.are_deterministic_algorithms_enabled()
+    runtime.destroy_global_device_mesh()
+
+    assert not torch.are_deterministic_algorithms_enabled()
+    assert torch.get_float32_matmul_precision() == precision
+
+
+@pytest.mark.usefixtures("torch_globals_restored")
+def test_failed_initialize_rolls_back_torch_globals_and_cuda_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _patch_distributed(monkeypatch, world_size=2)
+    monkeypatch.setattr(runtime, "_torch_globals_before", None)
+    monkeypatch.setenv("LOCAL_RANK", "3")
+    bound: list[object] = []
+    precision = torch.get_float32_matmul_precision()
+
+    # Scoped: the suite's CUDA reclaim teardown must see the real device state.
+    with monkeypatch.context() as cuda:
+        cuda.setattr(torch.cuda, "is_initialized", lambda: True)
+        cuda.setattr(torch.cuda, "current_device", lambda: 5)
+        cuda.setattr(torch.cuda, "set_device", bound.append)
+        with pytest.raises(RuntimeError, match="World"):
+            initialize_global_device_mesh(
+                device=torch.device("cuda"),
+                backend="gloo",
+                mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+                deterministic=True,
+                float32_matmul_precision="medium",
+            )
+
+    assert not torch.are_deterministic_algorithms_enabled()
+    assert torch.get_float32_matmul_precision() == precision
+    assert bound == [torch.device("cuda", 3), 5]
+    assert "destroy_calls" in record
+    assert record["destroy_calls"] == 1
+    assert runtime._torch_globals_before is None
+
+
+@pytest.mark.usefixtures("torch_globals_restored")
+@pytest.mark.parametrize("lifecycle", ["single", "multi", "failed"])
+@pytest.mark.parametrize("prior", [None, ":16:8"])
+def test_runtime_restores_cublas_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    lifecycle: str,
+    prior: str | None,
+) -> None:
+    _patch_distributed(monkeypatch, world_size=2 if lifecycle == "failed" else 1)
+    monkeypatch.setattr(runtime, "_torch_globals_before", None)
+    if prior is None:
+        monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
+    else:
+        monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", prior)
+    if lifecycle == "single":
+        process = SingleProcess.Config(device="cpu", deterministic=True).make()
+        process.initialize()
+        process.destroy()
+    elif lifecycle == "failed":
+        with pytest.raises(RuntimeError, match="World size"):
+            initialize_global_device_mesh(
+                device="cpu",
+                mesh_topology={"dp": 1},
+                deterministic=True,
+            )
+    else:
+        initialize_global_device_mesh(
+            device="cpu",
+            mesh_topology={"dp": 1},
+            deterministic=True,
+        )
+        runtime.destroy_global_device_mesh()
+    restored = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+    assert restored == prior
+
+
+@pytest.mark.usefixtures("torch_globals_restored")
+def test_single_process_failed_settings_application_restores_prior_precision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime, "_runtime_initialized", False)
+    monkeypatch.setattr(runtime, "_single_process_settings", None)
+    monkeypatch.setattr(runtime, "_torch_globals_before", None)
+    precision = torch.get_float32_matmul_precision()
+
+    def fail_determinism() -> None:
+        raise RuntimeError("Determinism setup failed")
+
+    monkeypatch.setattr(runtime, "enable_determinism", fail_determinism)
+    process = SingleProcess.Config(
+        device="cpu",
+        deterministic=True,
+        float32_matmul_precision="medium",
+    ).make()
+    with pytest.raises(RuntimeError, match="Determinism setup failed"):
+        process.initialize()
+    assert torch.get_float32_matmul_precision() == precision
+    assert not runtime.runtime_initialized()
+    assert runtime._torch_globals_before is None
 
 
 if __name__ == "__main__":

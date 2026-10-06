@@ -8,6 +8,10 @@ from typing import TYPE_CHECKING, Self, TypedDict, cast, override
 
 from configgle import Fig
 
+import numpy as np
+import torch
+import torch.distributed as dist
+
 from priml.baselines.arcagi1.augmentation import ArcAugmentation, ArcSpec
 from priml.baselines.arcagi1.data import ArcData
 from priml.lib.custom_json import convert
@@ -20,10 +24,6 @@ if TYPE_CHECKING:
     from typing import Protocol
 
     from numpy.typing import NDArray
-
-    import numpy as np
-    import torch
-    import torch.distributed as dist
 
     class _PreparedArcSplit(Protocol):
         inputs: torch.Tensor | NDArray[np.generic]
@@ -40,12 +40,6 @@ if TYPE_CHECKING:
         def train_dataloader(self) -> _PreparedArcSplit: ...
 
         def eval_dataloader(self) -> _PreparedArcSplit: ...
-else:
-    from wrapt import lazy_import
-
-    np = lazy_import("numpy")
-    torch = lazy_import("torch")
-    dist = lazy_import("torch.distributed")
 
 
 class ArcBatches:
@@ -190,7 +184,7 @@ class Arc2Data:
         base_dir: Path | str | None = None
         """Resource root supplied by the training loop."""
 
-        working_dir: Path | str = "/datasets/arcagi2/arc2concept-aug-1000"
+        working_dir: Path | str = "/datasets/arc2concept-aug-1000"
         """Shared corpus resolved beneath the training loop's resource root."""
 
         batch_size: int = 256
@@ -199,7 +193,7 @@ class Arc2Data:
         eval_batch_size: int | None = None
         """Evaluation examples per rank; None reuses the training width."""
 
-        device: str = "auto"
+        device: torch.device | str | None = None
         """Device holding the resident arrays."""
 
         seed: int = 0
@@ -236,6 +230,7 @@ class Arc2Data:
         self.timer_epoch = CheckpointableStepTimer()
         self.passes = 0
         self.live: ArcBatches | None = None
+        self._eval: ArcBatches | None = None
         self.active_pass: int | None = None
         self.next_batch = 0
 
@@ -258,8 +253,16 @@ class Arc2Data:
         return self.live
 
     def eval_dataloader(self) -> ArcBatches:
-        """Visit every evaluation row, padding the last batch."""
-        return ArcBatches(self.prepared, train=False, epochs_per_iter=1)
+        """Visit every evaluation row, padding the last batch.
+
+        Returns:
+          stream: Ordered evaluation batches over the split loaded at the
+            first call; later evaluations reuse it instead of re-reading disk.
+
+        """
+        if self._eval is None:
+            self._eval = ArcBatches(self.prepared, train=False, epochs_per_iter=1)
+        return self._eval
 
     class StateDict(TypedDict):
         """Iteration seed and epoch timer for checkpoint replay."""

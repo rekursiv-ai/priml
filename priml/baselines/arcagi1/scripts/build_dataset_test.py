@@ -942,6 +942,7 @@ def test_ensure_arc_dataset_uses_rank_zero_callback_and_caches_result(
 
     def ensure_data(spec: DataSpec) -> EnsureResult:
         specs.append(spec)
+        spec.target_dir.mkdir()
         return EnsureResult.DOWNLOADED
 
     monkeypatch.setattr(
@@ -973,11 +974,15 @@ def test_ensure_arc_dataset_uses_rank_zero_callback_and_caches_result(
         ensure_arc_dataset(
             target_dir=target,
             augmentation=augmentation,
-            input_file_prefix="missing-source",
+            input_file_prefix="source",
         )
         is result
     )
     assert names == ["ensure_arc_dataset"]
+    assert parse(
+        (target / build_dataset.RECIPE_FILE).read_text(),
+        dict[str, object],
+    ) == (build_dataset.arc_recipe(augmentation, input_file_prefix="source"))
 
 
 def test_ensure_arc_dataset_returns_present_when_rank_skips_build(
@@ -1021,14 +1026,126 @@ def test_ensure_arc_dataset_returns_and_caches_outcome(
         input_file_prefix=str(source_prefix),
     )
     assert result is EnsureResult.DOWNLOADED
+    # A cache hit: the source is not read again, so deleting it changes nothing.
+    for source_file in source_prefix.parent.iterdir():
+        source_file.unlink()
     assert (
         ensure_arc_dataset(
             target_dir=target,
             augmentation=augmentation,
-            input_file_prefix=str(tmp_path / "missing"),
+            input_file_prefix=str(source_prefix),
         )
         is result
     )
+
+
+def test_a_vendored_build_stamps_the_pinned_source_not_its_clone_path(
+    tmp_path: Path,
+    source_prefix: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The clone lives in a fresh temp dir; stamping it would never match again."""
+
+    class Clone:
+        def __enter__(self) -> Path:
+            return source_prefix
+
+        def __exit__(self, *exc: object) -> None:
+            del exc
+
+    monkeypatch.setattr(build_dataset, "KaggleSource", Clone)
+    target = tmp_path / "dataset"
+    augmentation = ArcAugmentation.Config(spec=ArcSpec(), num_aug=0).make()
+
+    build_arc_dataset(
+        target_dir=target,
+        input_file_prefix=None,
+        augmentation=augmentation,
+    )
+
+    stamped = parse((target / build_dataset.RECIPE_FILE).read_text(), dict[str, object])
+    assert stamped["source"] == (
+        f"{build_dataset.SOURCE_URL}@{build_dataset.SOURCE_REVISION}"
+    )
+    assert str(source_prefix) not in json.dumps(stamped)
+
+
+def test_ensure_refuses_a_tree_built_by_another_recipe(
+    tmp_path: Path,
+    source_prefix: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A path names a recipe; a tree built by a different one must not be adopted."""
+    target = tmp_path / "dataset"
+    first = ArcAugmentation.Config(spec=ArcSpec(), num_aug=1)
+    ensure_arc_dataset(
+        target_dir=target,
+        augmentation=first.make(),
+        input_file_prefix=str(source_prefix),
+    )
+    monkeypatch.setattr(build_dataset, "_ensure_cache", {})
+    second = ArcAugmentation.Config(spec=ArcSpec(), num_aug=2)
+    with pytest.raises(ValueError, match="was built by a different recipe"):
+        ensure_arc_dataset(
+            target_dir=target,
+            augmentation=second.make(),
+            input_file_prefix=str(source_prefix),
+        )
+
+
+def test_ensure_refuses_a_recipe_the_process_cache_saw_at_that_path(
+    tmp_path: Path,
+    source_prefix: Path,
+) -> None:
+    target = tmp_path / "dataset"
+    for num_aug in (1, 2):
+        config = ArcAugmentation.Config(spec=ArcSpec(), num_aug=num_aug)
+        if num_aug == 1:
+            ensure_arc_dataset(
+                target_dir=target,
+                augmentation=config.make(),
+                input_file_prefix=str(source_prefix),
+            )
+            continue
+        with pytest.raises(ValueError, match="was built by a different recipe"):
+            ensure_arc_dataset(
+                target_dir=target,
+                augmentation=config.make(),
+                input_file_prefix=str(source_prefix),
+            )
+
+
+def test_ensure_adopts_a_legacy_tree_and_names_the_restamp(
+    tmp_path: Path,
+    source_prefix: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A tree from before the sentinel is adopted with a one-step stamp command."""
+    target = tmp_path / "dataset"
+    augmentation = ArcAugmentation.Config(spec=ArcSpec(), num_aug=1).make()
+    ensure_arc_dataset(
+        target_dir=target,
+        augmentation=augmentation,
+        input_file_prefix=str(source_prefix),
+    )
+    sentinel = target / build_dataset.RECIPE_FILE
+    stamped = sentinel.read_text()
+    sentinel.unlink()
+    monkeypatch.setattr(build_dataset, "_ensure_cache", {})
+    caplog.set_level("WARNING", logger=build_dataset.logger.name)
+
+    ensure_arc_dataset(
+        target_dir=target,
+        augmentation=augmentation,
+        input_file_prefix=str(source_prefix),
+    )
+
+    (message,) = caplog.messages
+    assert str(target) in message
+    command = message.rpartition("Stamp it with: ")[2]
+    subprocess.run(["sh", "-c", command], check=True)  # noqa: S603, S607 -- The test executes the stamp command the warning hands an operator.
+    assert sentinel.read_text() == stamped
 
 
 def test_arc_build_fetch_runs_once_and_logs_missing_path(
@@ -1084,7 +1201,7 @@ def test_arc_build_without_local_prefix_uses_clone_path_once(
         calls.append((input_file_prefix, output_dir, augmentation))
 
     monkeypatch.setattr(build_dataset, "KaggleSource", SourceContext)
-    monkeypatch.setattr(build_dataset, "_build_arc_dataset", build_from_source)
+    monkeypatch.setattr(build_dataset, "write_arc_tree", build_from_source)
     target = tmp_path / "dataset"
     augmentation = ArcAugmentation.Config(spec=ArcSpec()).make()
     fetch = _ArcBuild(
@@ -1219,7 +1336,7 @@ def test_build_arc_dataset_stages_in_target_parent_with_fixed_name(
         temporary_directory,
     )
     monkeypatch.setattr(
-        "priml.baselines.arcagi1.scripts.build_dataset._build_arc_dataset",
+        "priml.baselines.arcagi1.scripts.build_dataset.write_arc_tree",
         build_staging,
     )
     build_arc_dataset(

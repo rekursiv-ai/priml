@@ -10,10 +10,7 @@ ladder stays checkable on any machine.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, Self, cast
-
-from configgle.pprinting import pformat
 
 import pytest
 
@@ -44,6 +41,7 @@ from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
+from priml.testing.golden import assert_pprint_golden
 
 
 if TYPE_CHECKING:
@@ -52,9 +50,6 @@ if TYPE_CHECKING:
     import torch
 
     from priml.baselines.sudoku.experiments import SudokuTrainLoop
-
-
-_CWD: Final = Path(__file__).resolve().parent
 
 
 LADDER: Final[list[tuple[str, Callable[[], SudokuTrainLoop]]]] = [
@@ -272,29 +267,9 @@ def test_smoke_is_small_on_every_costly_axis() -> None:
     ) == (32, 1, 8, 4, 4, 4, 4, 2)
 
 
-def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> None:
-    """Pin the WHOLE finalized ``exp000`` as readable text.
-
-    ``exp000`` is the control every fork is measured against, so a change to
-    it invalidates published numbers. A digest would say only that something
-    moved; this golden says WHICH field, from what, to what.
-    ``hide_default_values=False`` so a field that changes only because a
-    library default changed still shows up here.
-
-    Refresh with ``--golden-overwrite`` after reading the diff.
-    """
-    golden = _CWD / "testdata" / "exp000.txt"
-    rendered = pformat(
-        experiments.exp000().copy_tree().finalize(),
-        hide_default_values=False,
-    )
-    if request.config.getoption("--golden-overwrite", default=False):
-        golden.parent.mkdir(parents=True, exist_ok=True)
-        _ = golden.write_text(rendered + "\n", encoding="utf-8")
-    assert golden.read_text(encoding="utf-8") == rendered + "\n", (
-        "exp000 changed; read the diff, then rerun with --golden-overwrite "
-        "if the change is intended."
-    )
+def test_exp000_matches_its_golden_config() -> None:
+    """Pin the WHOLE finalized ``exp000``: the control every fork is measured against."""
+    assert_pprint_golden(test_file=__file__, name="exp000", config=experiments.exp000())
 
 
 TRM_LADDER: Final = (

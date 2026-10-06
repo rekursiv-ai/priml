@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 import scipy
 import torch
 
 from priml.math.frequency import dct1d, dctnd, idct1d, idctnd
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from torch import Tensor
+
+    from priml.math.custom_types import TensorableFn
 
 
 @pytest.mark.parametrize(
@@ -115,12 +125,11 @@ def test_dct1d_preserves_leading_dims():
     torch.testing.assert_close(idct1d(x), flat_inverse, atol=1e-5, rtol=1e-4)
 
 
-def test_dct1d_preserves_integer_dtype() -> None:
-    x = torch.tensor([[1, 2, 3, 4], [3, 1, -2, 5]], dtype=torch.int64)
-    expected_dct = torch.as_tensor(scipy.fft.dct(x), dtype=x.dtype)
-    expected_idct = torch.as_tensor(scipy.fft.idct(x), dtype=x.dtype)
-    assert torch.equal(dct1d(x), expected_dct)
-    assert torch.equal(idct1d(x), expected_idct)
+@pytest.mark.parametrize("function", [dct1d, idct1d])
+def test_dct1d_rejects_integer_dtype(function: TensorableFn) -> None:
+    x = torch.tensor([[1, 2, 3], [3, 1, -2]], dtype=torch.int64)
+    with pytest.raises(TypeError, match="floating"):
+        function(x)
 
 
 def test_idct1d_arange_preserves_dtype_and_device(
@@ -152,6 +161,16 @@ def test_dctnd_invalid_axis():
     # Aliased axes (e.g. 1 and -3 for rank 4) must also report the raw input.
     with pytest.raises(ValueError, match=r"axis=\[1, -3\]"):
         dctnd(x, axis=[1, -3])
+
+
+@pytest.mark.parametrize("axis", [3, -4])
+@pytest.mark.parametrize("function", [dctnd, idctnd])
+def test_dctnd_rejects_out_of_rank_axis(
+    axis: int,
+    function: Callable[..., Tensor],
+) -> None:
+    with pytest.raises(IndexError, match="axis"):
+        function(torch.ones(2, 3), axis=axis)
 
 
 if __name__ == "__main__":

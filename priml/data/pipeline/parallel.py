@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import field
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Final
 
+import functools
 import logging
 import queue
 import threading
@@ -47,7 +48,13 @@ class ParMap:
         interleaving does not affect model quality).
 
         For deterministic RNG call order and output order, set num_threads=0
-        (or 1) to run processors in the calling thread with no thread pool.
+        to run processors in the calling thread with no thread pool.
+        num_threads=1 keeps the output order but still runs the processors on
+        a background thread, concurrently with whatever consumes them.
+
+    Each worker drives the processors over ONE continuous stream of the
+    samples it pulls, so a stateful or N->1 stage (``Batcher``) accumulates
+    within a worker and flushes when that worker's share ends.
 
     Example:
         # Parallelize image decoding with 8 threads
@@ -96,6 +103,8 @@ class ParMap:
         """List of processors to apply to each sample."""
 
     def __init__(self, config: Config):
+        if config.num_threads < 0:
+            raise ValueError(f"num_threads must be >= 0; got {config.num_threads}.")
         self.num_threads = config.num_threads
         self.max_input_queue_size = config.max_input_queue_size
         self.max_output_queue_size = config.max_output_queue_size
@@ -116,101 +125,41 @@ class ParMap:
         WARNING: Samples may be yielded out of order.
 
         """
-        if self.num_threads < 1 or not self.processors:
-            stream: Iterator[Any] = samples  # pyright: ignore[reportExplicitAny] -- The stage chain is typed pairwise; the running stream has no single element type.
-            for processor in self.processors:
-                stream = processor(stream)
-            yield from stream  # ty: ignore[unsound-yield] -- The last stage's output shape is what the pipeline yields.
+        if self.num_threads == 0 or not self.processors:
+            yield from _chain(self.processors, samples)
             return
 
-        input_queue: queue.Queue[dict[str, object] | None] = queue.Queue(
-            maxsize=0 if self.max_input_queue_size == -1 else self.max_input_queue_size,
+        run = _ParMapRun(
+            processors=self.processors,
+            input_queue=queue.Queue(
+                maxsize=max(self.max_input_queue_size, 0),
+            ),
+            output_queue=queue.Queue(
+                maxsize=max(self.max_output_queue_size, 0),
+            ),
         )
-        output_queue: queue.Queue[dict[str, object] | None] = queue.Queue(
-            maxsize=0
-            if self.max_output_queue_size == -1
-            else self.max_output_queue_size,
-        )
-        exception_holder: list[Exception] = []
-        # Set when any worker dies or the consumer stops early, so the feeder
-        # stops blocking on a bounded input_queue that no one is draining.
-        stop_event = threading.Event()
-        peak_input_queue_size = [0]
-        peak_output_queue_size = [0]
-
-        def worker() -> None:
-            """Worker thread that processes samples from input queue."""
-            try:
-                while True:
-                    sample = input_queue.get()
-                    if sample is None:
-                        return
-                    stream: Iterator[Any] = iter([sample])  # pyright: ignore[reportExplicitAny] -- The stage chain is typed pairwise; the running stream has no single element type.
-                    for processor in self.processors:
-                        stream = processor(stream)
-                    for result in stream:  # pyright: ignore[reportAny] -- The last stage's output shape is what the queue carries.
-                        output_queue.put(result)  # pyright: ignore[reportAny] -- Same boundary as the loop binding above.
-            except Exception as e:  # noqa: BLE001 -- Feeder failures must stop workers and reach the consumer through the shared exception channel.
-                exception_holder.append(e)
-                stop_event.set()
-
         threads = [
-            threading.Thread(target=worker, daemon=True)
+            threading.Thread(target=run.work, daemon=True)
             for _ in range(self.num_threads)
         ]
         for thread in threads:
             thread.start()
+        threading.Thread(
+            target=functools.partial(run.feed, samples, self.num_threads),
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=functools.partial(run.finish, threads),
+            daemon=True,
+        ).start()
 
-        def feeder() -> None:
-            """Pull from upstream and distribute to workers."""
-            try:
-                for sample in samples:
-                    if stop_event.is_set():
-                        return
-                    _put_until_stopped(input_queue, sample, stop_event)
-                    peak_input_queue_size[0] = max(
-                        peak_input_queue_size[0],
-                        input_queue.qsize(),
-                    )
-            except Exception as e:  # noqa: BLE001 -- Feeder failures must stop workers and reach the consumer through the shared exception channel.
-                exception_holder.append(e)
-                stop_event.set()
-            finally:
-                for _ in range(self.num_threads):
-                    # Best-effort poison pills; workers may already be gone.
-                    try:
-                        input_queue.put(None, timeout=0.1)
-                    except queue.Full:
-                        break
-
-        feeder_thread = threading.Thread(target=feeder, daemon=True)
-        feeder_thread.start()
-
-        def monitor() -> None:
-            """Wait for all workers and signal completion."""
-            for thread in threads:
-                thread.join()
-            output_queue.put(None)
-
-        monitor_thread = threading.Thread(target=monitor, daemon=True)
-        monitor_thread.start()
-
-        while True:
-            item = output_queue.get()
-
-            if exception_holder:
-                stop_event.set()
-                raise exception_holder[0]
-
-            if item is None:
-                break
-
-            peak_output_queue_size[0] = max(
-                peak_output_queue_size[0],
-                output_queue.qsize() + 1,
-            )
-
-            yield item
+        try:
+            yield from run.drain()
+        finally:
+            # Reached on exhaustion, an error, or the consumer closing early:
+            # every thread polls these, so none outlives the stream.
+            run.consumer_closed.set()
+            run.stop_event.set()
 
         input_max = (
             "∞" if self.max_input_queue_size == -1 else str(self.max_input_queue_size)
@@ -221,9 +170,9 @@ class ParMap:
         logger.info(
             "ParMap(%s threads) peak queue usage: input=%s/%s, output=%s/%s",
             self.num_threads,
-            peak_input_queue_size[0],
+            run.peak_input_queue_size,
             input_max,
-            peak_output_queue_size[0],
+            run.peak_output_queue_size,
             output_max,
         )
 
@@ -282,50 +231,198 @@ class PrefetchBuffer:
             yield from buffer
             return
 
-        q: queue.Queue[dict[str, object] | None] = queue.Queue(
-            maxsize=max(self.size, 0),
+        run = _PrefetchRun(
+            items=queue.Queue(maxsize=max(self.size, 0)),
+            fill_bound=self.size if self.fill_first else 0,
         )
-        # Diagnostic only; the producer/consumer race on this counter is
-        # benign under the GIL and never affects correctness.
-        peak_queue_size = [0]
-        buffer_ready = threading.Event()
+        threading.Thread(
+            target=functools.partial(run.produce, samples),
+            daemon=True,
+        ).start()
 
-        def producer() -> None:
-            try:
-                for sample in samples:
-                    q.put(sample)
-                    peak_queue_size[0] = max(peak_queue_size[0], q.qsize())
-                    if self.fill_first and q.qsize() >= self.size:
-                        buffer_ready.set()
-            finally:
-                buffer_ready.set()
-                q.put(None)
-
-        thread = threading.Thread(target=producer, daemon=True)
-        thread.start()
-
-        if self.fill_first:
-            buffer_ready.wait()
-            size_str = str(self.size)
-            logger.info(
-                "PrefetchBuffer filled: %s/%s items buffered before yielding",
-                q.qsize(),
-                size_str,
-            )
-
-        while True:
-            item = q.get()
-            if item is None:
-                break
-            peak_queue_size[0] = max(peak_queue_size[0], q.qsize() + 1)
-            yield item
+        try:
+            if self.fill_first:
+                run.buffer_ready.wait()
+                logger.info(
+                    "PrefetchBuffer filled: %s/%s items buffered before yielding",
+                    run.items.qsize(),
+                    self.size,
+                )
+            yield from run.drain()
+        finally:
+            run.consumer_closed.set()
 
         size_str = "∞" if self.size <= -1 else str(self.size)
         logger.info(
             "PrefetchBuffer peak queue usage: %s/%s",
-            peak_queue_size[0],
+            run.peak_queue_size,
             size_str,
         )
+
+
+class _End:
+    """End-of-stream marker; distinct from any sample, ``None`` included."""
+
+
+_END: Final = _End()
+
+
+@dataclass(slots=True, kw_only=True)
+class _ParMapRun:
+    """Queues, stop signals, and diagnostics shared by one ``ParMap`` call."""
+
+    processors: list[Processor[Any, Any]]  # pyright: ignore[reportExplicitAny] -- Stages are typed pairwise; a list of them has no expressible element type.
+    input_queue: queue.Queue[dict[str, object] | _End]
+    output_queue: queue.Queue[dict[str, object] | _End]
+    errors: list[Exception] = field(default_factory=list[Exception])
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    """Set on any failure or on close: workers and the feeder stop."""
+
+    consumer_closed: threading.Event = field(default_factory=threading.Event)
+    """Set once nobody will read ``output_queue`` again."""
+
+    # Diagnostic only; the races on these counters are benign under the GIL.
+    peak_input_queue_size: int = 0
+    peak_output_queue_size: int = 0
+
+    def work(self) -> None:
+        """Run the processors over ONE continuous stream of this worker's inputs.
+
+        A stateful or N->1 stage (a ``Batcher``) keeps its accumulation and
+        end-of-stream flush only when it sees the whole stream; re-invoking it
+        per sample handed it one-element streams.
+        """
+        try:
+            for result in _chain(self.processors, self._inputs()):
+                _put_until_stopped(self.output_queue, result, self.stop_event)
+        except Exception as e:  # noqa: BLE001 -- Worker failures must stop the run and reach the consumer through the shared exception channel.
+            self.errors.append(e)
+            self.stop_event.set()
+
+    def feed(self, samples: Iterator[dict[str, object]], num_workers: int) -> None:
+        """Pull from upstream, distribute to workers, then end every worker.
+
+        Args:
+          samples: Upstream stream.
+          num_workers: Workers to send an end marker to.
+
+        """
+        try:
+            for sample in samples:
+                if self.stop_event.is_set():
+                    return
+                _put_until_stopped(self.input_queue, sample, self.stop_event)
+                self.peak_input_queue_size = max(
+                    self.peak_input_queue_size,
+                    self.input_queue.qsize(),
+                )
+        except Exception as e:  # noqa: BLE001 -- Feeder failures must stop workers and reach the consumer through the shared exception channel.
+            self.errors.append(e)
+            self.stop_event.set()
+        finally:
+            # One end marker per worker, each waited for: a worker left without
+            # one blocks forever and so does the end of the stream.
+            for _ in range(num_workers):
+                _put_until_stopped(self.input_queue, _END, self.stop_event)
+
+    def finish(self, workers: list[threading.Thread]) -> None:
+        """Wait for every worker, then end the output stream."""
+        for worker in workers:
+            worker.join()
+        _put_until_stopped(self.output_queue, _END, self.consumer_closed)
+
+    def drain(self) -> Iterator[dict[str, object]]:
+        """Yield worker results until the end marker; raise the first failure.
+
+        Yields:
+          sample: One worker result, in completion order.
+
+        """
+        while True:
+            item = self.output_queue.get()
+            if self.errors:
+                raise self.errors[0]
+            if isinstance(item, _End):
+                return
+            self.peak_output_queue_size = max(
+                self.peak_output_queue_size,
+                self.output_queue.qsize() + 1,
+            )
+            yield item
+
+    def _inputs(self) -> Iterator[dict[str, object]]:
+        """Yield queued samples until this worker's end marker or a stop."""
+        while not self.stop_event.is_set():
+            try:
+                item = self.input_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if isinstance(item, _End):
+                return
+            yield item
+
+
+@dataclass(slots=True, kw_only=True)
+class _PrefetchRun:
+    """Queue, signals, and diagnostics shared by one ``PrefetchBuffer`` call."""
+
+    items: queue.Queue[dict[str, object] | _End]
+    fill_bound: int
+    """Items buffered before ``buffer_ready``; 0 releases it at once."""
+
+    error: list[Exception] = field(default_factory=list[Exception])
+    buffer_ready: threading.Event = field(default_factory=threading.Event)
+    consumer_closed: threading.Event = field(default_factory=threading.Event)
+    peak_queue_size: int = 0
+    """Diagnostic only; the producer/consumer race on it is benign."""
+
+    def produce(self, samples: Iterator[dict[str, object]]) -> None:
+        """Buffer upstream samples; forward an upstream failure to the consumer.
+
+        Args:
+          samples: Upstream stream.
+
+        """
+        try:
+            for sample in samples:
+                if self.consumer_closed.is_set():
+                    return
+                _put_until_stopped(self.items, sample, self.consumer_closed)
+                self.peak_queue_size = max(self.peak_queue_size, self.items.qsize())
+                if self.fill_bound and self.items.qsize() >= self.fill_bound:
+                    self.buffer_ready.set()
+        except Exception as e:  # noqa: BLE001 -- An upstream failure is re-raised by the consumer, not mistaken for the end of the data.
+            self.error.append(e)
+        finally:
+            self.buffer_ready.set()
+            _put_until_stopped(self.items, _END, self.consumer_closed)
+
+    def drain(self) -> Iterator[dict[str, object]]:
+        """Yield buffered samples until the end marker; raise an upstream failure.
+
+        Yields:
+          sample: One buffered sample, in upstream order.
+
+        """
+        while True:
+            item = self.items.get()
+            if isinstance(item, _End):
+                if self.error:
+                    raise self.error[0]
+                return
+            self.peak_queue_size = max(self.peak_queue_size, self.items.qsize() + 1)
+            yield item
+
+
+def _chain(
+    processors: list[Processor[Any, Any]],  # pyright: ignore[reportExplicitAny] -- Stages are typed pairwise; a list of them has no expressible element type.
+    samples: Iterator[dict[str, object]],
+) -> Iterator[dict[str, object]]:
+    """Run ``samples`` through every processor in order."""
+    stream: Iterator[Any] = samples  # pyright: ignore[reportExplicitAny] -- The stage chain is typed pairwise; the running stream has no single element type.
+    for processor in processors:
+        stream = processor(stream)
+    return stream  # ty: ignore[unsound-return-statement] -- The last stage's output shape is what the pipeline yields.
 
 
 # A bounded put may block; time out so a dead-worker stop_event is observed

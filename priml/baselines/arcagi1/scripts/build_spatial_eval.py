@@ -11,25 +11,32 @@ The train split and root files are copied through.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
+import dataclasses
 import json
 import logging
 import shutil
+import tempfile
 
 import numpy as np
 
 from priml.baselines.arcagi1.augmentation import ArcSpec, normalize_scale_weights
-from priml.baselines.arcagi1.scripts.build_dataset import DEFAULT_SCALE_WEIGHTS
+from priml.baselines.arcagi1.scripts.build_dataset import (
+    DEFAULT_SCALE_WEIGHTS,
+    RECIPE_FILE,
+    check_recipe,
+    stamp_recipe,
+)
 from priml.data.distributed_build import run_rank_zero_build
-from priml.data.ensure import DataSpec, FileSpec, ensure_data
-from priml.lib.custom_json import convert, loads
-from priml.paths import resolve_working_dir
+from priml.data.ensure import DataSpec, EnsureResult, FileSpec, ensure_data
+from priml.lib.custom_json import convert, loads, parse
+from priml.paths import resolve_working_dir, validated_output_path
 
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
-    from pathlib import Path
 
     from numpy.typing import NDArray
 
@@ -77,8 +84,8 @@ def spatial_eval_dataset_dir(
     return resolve_working_dir(base_dir, working_dir) / f"{base}-{slug}"
 
 
-_ensure_cache: set[tuple[str, str, int, tuple[tuple[int, float], ...], int]] = set()
-"""Per-(source, target, policy) ensures already completed in this process."""
+_ensure_cache: set[tuple[Path, str]] = set()
+"""``(target, serialized recipe)`` ensures already completed in this process."""
 
 
 def ensure_spatial_eval_data(
@@ -93,7 +100,9 @@ def ensure_spatial_eval_data(
     """Ensure the spatial-eval expansion of an existing ``source_dir``.
 
     Rank-safe and process-cached. The manifest lists every file the build
-    writes, train split included, so a preempted build is never adopted.
+    writes, train split included, so a preempted build is never adopted. The
+    tree's recipe sentinel must match every input (see ``check_recipe``), so a
+    path never serves an expansion it was not built by.
 
     Args:
       source_dir: A built ARC tree.
@@ -106,6 +115,9 @@ def ensure_spatial_eval_data(
     Returns:
       target: The spatial-eval dataset directory.
 
+    Raises:
+      ValueError: The tree at ``target`` was built by a different recipe.
+
     """
     if target is None:
         target = spatial_eval_dataset_dir(
@@ -115,15 +127,21 @@ def ensure_spatial_eval_data(
         )
     if spec is None:
         spec = ArcSpec()
-    key = (
-        str(source_dir),
-        str(target),
-        spatial_views,
-        tuple(sorted(scale_weights.items())),
-        spec.max_grid,
+    recipe = _spatial_recipe(
+        source_dir=source_dir,
+        spatial_views=spatial_views,
+        scale_weights=scale_weights,
+        seed=seed,
+        spec=spec,
     )
+    key = (target, json.dumps(recipe, sort_keys=True))
     if key in _ensure_cache:
         return target
+    if any(cached == target for cached, _ in _ensure_cache):
+        raise ValueError(
+            f"{target} was built by a different recipe than requested earlier "
+            "in this process.",
+        )
     manifest = [
         FileSpec(rel_path="identifiers.json"),
         FileSpec(rel_path="test_puzzles.json"),
@@ -148,7 +166,9 @@ def ensure_spatial_eval_data(
     data_spec = DataSpec(target_dir=target, manifest=manifest, fetch=fetch)
 
     def _build() -> None:
-        ensure_data(data_spec)
+        check_recipe(target, recipe)
+        if ensure_data(data_spec) is EnsureResult.DOWNLOADED:
+            stamp_recipe(target, recipe)
 
     run_rank_zero_build(name="ensure_spatial_eval_data", build=_build)
     _ensure_cache.add(key)
@@ -177,6 +197,7 @@ def build_spatial_eval(
     """
     if spatial_views < 1:
         raise ValueError(f"spatial_views must be >= 1, got {spatial_views}.")
+    target_dir = validated_output_path(target_dir, protected=(source_dir,))
     if spec is None:
         spec = ArcSpec()
     scale_weights = normalize_scale_weights(scale_weights)
@@ -243,36 +264,84 @@ def build_spatial_eval(
             new_group_indices.append(len(new_puzzle_ids))
             group_ptr += 1
 
-    test_out = target_dir / "test"
-    test_out.mkdir(parents=True, exist_ok=True)
-    np.save(test_out / "all__inputs.npy", np.stack(new_inputs))
-    np.save(test_out / "all__labels.npy", np.stack(new_labels))
-    for name, values in (
-        ("all__puzzle_indices.npy", new_puzzle_indices),
-        ("all__group_indices.npy", new_group_indices),
-        ("all__puzzle_identifiers.npy", new_puzzle_ids),
-    ):
-        np.save(test_out / name, np.array(values, dtype=np.int32))
-    np.save(
-        test_out / "all__spatial_tags.npy",
-        np.array(new_spatial_tags, dtype=np.int32),
-    )
-    _copy_dataset_json(src_test, test_out, num_ids=len(identifiers))
-    (target_dir / "identifiers.json").write_text(json.dumps(identifiers))
-    shutil.copy(source_dir / "test_puzzles.json", target_dir / "test_puzzles.json")
-    src_train = source_dir / "train"
-    if src_train.is_dir():
-        dst_train = target_dir / "train"
-        dst_train.mkdir(exist_ok=True)
-        for name in SPLIT_FILES:
-            shutil.copy(src_train / name, dst_train / name)
-        _copy_dataset_json(src_train, dst_train, num_ids=len(identifiers))
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    # Written beside the target and moved in only once complete, so a failure
+    # mid-build never leaves a mixed tree at a path its readers trust.
+    with tempfile.TemporaryDirectory(
+        dir=target_dir.parent,
+        prefix=f".{target_dir.name}-",
+    ) as temporary:
+        staging = Path(temporary)
+        test_out = staging / "test"
+        test_out.mkdir()
+        np.save(test_out / "all__inputs.npy", np.stack(new_inputs))
+        np.save(test_out / "all__labels.npy", np.stack(new_labels))
+        for name, values in (
+            ("all__puzzle_indices.npy", new_puzzle_indices),
+            ("all__group_indices.npy", new_group_indices),
+            ("all__puzzle_identifiers.npy", new_puzzle_ids),
+        ):
+            np.save(test_out / name, np.array(values, dtype=np.int32))
+        np.save(
+            test_out / "all__spatial_tags.npy",
+            np.array(new_spatial_tags, dtype=np.int32),
+        )
+        _copy_dataset_json(
+            src_test,
+            test_out,
+            num_ids=len(identifiers),
+            num_puzzles=len(new_puzzle_ids),
+            num_examples=example_count,
+        )
+        (staging / "identifiers.json").write_text(json.dumps(identifiers))
+        shutil.copy(source_dir / "test_puzzles.json", staging / "test_puzzles.json")
+        src_train = source_dir / "train"
+        if src_train.is_dir():
+            dst_train = staging / "train"
+            dst_train.mkdir()
+            for name in SPLIT_FILES:
+                shutil.copy(src_train / name, dst_train / name)
+            _copy_dataset_json(src_train, dst_train, num_ids=len(identifiers))
+        _publish(staging, target_dir)
     logger.info(
         "spatial eval: %d puzzles (from %d), %d examples -> %s",
         len(new_puzzle_ids),
         len(puzzle_ids),
         example_count,
         target_dir,
+    )
+
+
+def _spatial_recipe(
+    *,
+    source_dir: Path,
+    spatial_views: int,
+    scale_weights: Mapping[int, float],
+    seed: int,
+    spec: ArcSpec,
+) -> dict[str, object]:
+    """Return every input that changes an expansion's bytes, as JSON."""
+    source_recipe = source_dir / RECIPE_FILE
+    return parse(
+        json.dumps(
+            {
+                "builder": "spatial_eval",
+                "source": str(source_dir),
+                "source_recipe": (
+                    parse(source_recipe.read_text(), dict[str, object])
+                    if source_recipe.is_file()
+                    else None
+                ),
+                "spatial_views": spatial_views,
+                "scale_weights": [
+                    [scale, weight]
+                    for scale, weight in normalize_scale_weights(scale_weights).items()
+                ],
+                "seed": seed,
+                "spec": dataclasses.asdict(spec),
+            },
+        ),
+        dict[str, object],
     )
 
 
@@ -385,11 +454,31 @@ def _sample_spatial(
     return scale, pad_r, pad_c
 
 
-def _copy_dataset_json(source: Path, destination: Path, *, num_ids: int) -> None:
-    """Copy a split's ``dataset.json`` with the identifier count restated."""
+# ``num_puzzles`` is ``None`` for a split copied verbatim, whose puzzle counts stand.
+def _copy_dataset_json(
+    source: Path,
+    destination: Path,
+    *,
+    num_ids: int,
+    num_puzzles: int | None = None,
+    num_examples: int = 0,
+) -> None:
+    """Copy a split's ``dataset.json``, restating the counts the expansion changed."""
     meta = convert(
         loads((source / "dataset.json").read_text()),
         dict[str, object],
     )
     meta["num_puzzle_identifiers"] = num_ids
+    if num_puzzles is not None:
+        meta["total_puzzles"] = num_puzzles
+        meta["mean_puzzle_examples"] = num_examples / num_puzzles
     (destination / "dataset.json").write_text(json.dumps(meta))
+
+
+def _publish(staging: Path, target_dir: Path) -> None:
+    """Move every staged file into ``target_dir``, replacing what it held."""
+    for path in sorted(staging.rglob("*")):
+        if path.is_file():
+            destination = target_dir / path.relative_to(staging)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            path.replace(destination)

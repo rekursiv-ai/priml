@@ -879,6 +879,32 @@ def test_calc_resize_rejects_empty_buckets_and_zero_compression():
         _ = CalcResizeDimensions.Config(compression=(1, 0, 16)).make()
 
 
+def test_calc_resize_rejects_an_aspect_that_rounds_a_bucket_side_to_zero():
+    with pytest.raises(ValueError, match="aspects"):
+        _ = CalcResizeDimensions.Config(aspects=[1e6]).make()
+
+
+def test_calc_resize_filters_a_dimension_that_truncates_to_zero() -> None:
+    calc = CalcResizeDimensions.Config().make()
+    sample: CalcResizeDimensions.Input = {"frames": 1, "height": 0.5, "width": 64}
+
+    result = next(iter(calc(iter([sample]))))
+
+    assert result.get("filter_reasons") == [
+        "CalcResizeDimensions:invalid_dimensions:f=1_h=0_w=64",
+    ]
+    assert "target_height" not in result
+
+
+def test_calc_resize_docstring_example_matches_the_defaults() -> None:
+    calc = CalcResizeDimensions.Config().make()
+    sample: CalcResizeDimensions.Input = {"frames": 1, "width": 1920, "height": 1080}
+
+    result = next(iter(calc(iter([sample]))))
+
+    assert (result["target_height"], result["target_width"]) == (192, 304)
+
+
 def test_resize_dimensions_reports_exact_filter_reasons() -> None:
     calc = CalcResizeDimensions.Config(
         square_resolutions=[2],

@@ -20,6 +20,7 @@ from PIL import Image
 from priml.data.processors.labels import ImagenetSynsetToIndex
 from priml.data.sources.extracted_imagenet import ExtractedImageNetSource
 from priml.model.invae import encode_image, load_invae
+from priml.paths import validated_output_path
 
 
 if TYPE_CHECKING:
@@ -81,12 +82,14 @@ def prepare(
       count: Number of image-latent pairs written.
 
     Raises:
-      ValueError: The requested resolution is unsupported.
+      ValueError: The requested resolution is unsupported, or ``output`` is
+        unusable or aliases ``source``.
       TypeError: An input record lacks a typed class label or path.
 
     """
     if resolution not in (256, 512):
         raise ValueError("resolution must be 256 or 512")
+    output = validated_output_path(output, protected=[source])
     image_source = ExtractedImageNetSource.Config(
         working_dir=source,
         split="train",
@@ -110,7 +113,7 @@ def prepare(
         image_path.parent.mkdir(parents=True, exist_ok=True)
         latent_path.parent.mkdir(parents=True, exist_ok=True)
         with Image.open(file_path) as opened:
-            cropped = center_crop(opened.convert("RGB"), resolution)
+            cropped = center_crop(opened.convert("RGB"), size=resolution)
         cropped.save(image_path)
         image = (
             torch.from_numpy(np.asarray(cropped).copy())
@@ -135,7 +138,7 @@ def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -143,7 +146,7 @@ def main() -> int:
     print(
         prepare(
             flags.source,
-            flags.output,
+            output=flags.output,
             resolution=flags.resolution,
             checkpoint=flags.checkpoint,
             device=flags.device,

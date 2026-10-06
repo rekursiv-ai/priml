@@ -325,10 +325,9 @@ def test_a_window_and_is_causal_together_are_accepted() -> None:
         )
 
 
-def test_window_text(request: pytest.FixtureRequest) -> None:
+def test_window_text() -> None:
     output = _window_contract(torch.zeros(2, 4, 3, 5))
     assert_text_golden(
-        request,
         test_file=__file__,
         name="window",
         rendered=repr(output.tolist()),
@@ -365,6 +364,20 @@ def test_a_segment_mask_window_admits_that_many_earlier_keys() -> None:
         [False, False, True, True, False],
         [False, False, False, False, True],
     ]
+
+
+@pytest.mark.parametrize("num_layers", [0, -2])
+def test_window_sizes_rejects_empty_stack(num_layers: int) -> None:
+    with pytest.raises(ValueError, match="num_layers"):
+        window_sizes(num_layers=num_layers, max_seq_len=8, pattern="SL")
+
+
+def test_window_causality_does_not_depend_on_context_coverage() -> None:
+    query = torch.randn(2, 4, 3, 5)
+    with sdpa_kernel(SDPBackend.MATH):
+        limited = SdpaFused()(query, query, query, is_causal=False, window=3)
+        full = SdpaFused()(query, query, query, is_causal=False, window=4)
+    torch.testing.assert_close(limited, full, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

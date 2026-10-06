@@ -3,7 +3,7 @@
 Regenerate canonical artifacts through pytest so Priml's deterministic setup
 applies::
 
-    BFB_REGENERATE=1 uv --quiet run --frozen pytest priml/model/residual_mix_test.py
+    uv --quiet run --frozen pytest priml/model/residual_mix_test.py --regenerate-b4b
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
-from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
 
 import torch
@@ -19,6 +18,7 @@ import torch
 from priml.model.residual_mix import ResidualMix
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent

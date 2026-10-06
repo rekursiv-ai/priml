@@ -261,7 +261,13 @@ def place(state: EnvState, action: Tensor) -> EnvState:
             & (_inventory_tensor(state, material) >= cost)
         )
         if action_kind == Action.PLACE_PLANT:
-            placing = placing & (block == int(BlockType.GRASS))
+            # A plant slot records row and column only; its floor is always
+            # PLANT_LEVEL, where all grass grows.
+            placing = (
+                placing
+                & (block == int(BlockType.GRASS))
+                & (state.player_level == constants.PLANT_LEVEL)
+            )
         state = _write_block(state, target, int(block_kind), placing)
         setattr(
             state.inventory,
@@ -286,7 +292,7 @@ def _craft_armour(
     near_table: Tensor,
     near_furnace: Tensor,
 ) -> EnvState:
-    """Make a full set of armour, which fills all four body slots at once."""
+    """Make one armour piece, upgrading the first body slot below the recipe's tier."""
     recipes = (
         (
             Action.MAKE_IRON_ARMOUR,
@@ -309,8 +315,6 @@ def _craft_armour(
             making = making & near_furnace
         for material, amount in costs.items():
             making = making & (_inventory_tensor(state, material) >= amount)
-        # Armour is made a piece at a time: the recipe fills the first slot
-        # that is not already at this tier.
         upgradeable = (state.inventory.armour < tier).any(dim=1)
         making = making & upgradeable
         slot = (state.inventory.armour < tier).int().argmax(dim=1)

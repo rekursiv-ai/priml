@@ -20,10 +20,12 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, cast
 
+import dataclasses
 import hashlib
 import json
 import logging
 import math
+import shlex
 import subprocess
 import tempfile
 
@@ -73,14 +75,15 @@ class _Puzzle:
 def build_arc_dataset(
     *,
     target_dir: Path,
-    input_file_prefix: str,
+    input_file_prefix: str | None,
     augmentation: ArcAugmentation,
 ) -> None:
-    """Build a fresh ARC tree without overwriting an existing dataset.
+    """Build a fresh, recipe-stamped ARC tree without overwriting an existing one.
 
     Args:
       target_dir: Destination for the complete dataset tree.
-      input_file_prefix: Local prefix of the pinned challenge/solution JSON files.
+      input_file_prefix: Local prefix of the challenge/solution JSON files;
+        ``None`` clones the pinned source.
       augmentation: Dataset-owned augmentation recipe and transforms.
 
     Raises:
@@ -95,10 +98,14 @@ def build_arc_dataset(
         prefix=f".{target_dir.name}-",
     ) as temporary:
         staging = Path(temporary) / "dataset"
-        _build_arc_dataset(
-            input_file_prefix=input_file_prefix,
+        _write_from_source(
             output_dir=staging,
             augmentation=augmentation,
+            input_file_prefix=input_file_prefix,
+        )
+        stamp_recipe(
+            staging,
+            arc_recipe(augmentation, input_file_prefix=input_file_prefix),
         )
         staging.replace(target_dir)
 
@@ -129,8 +136,86 @@ def arc_manifest() -> list[FileSpec]:
     return manifest
 
 
-_ensure_cache: dict[Path, EnsureResult] = {}
-"""Per-target outcome, so repeated finalize/make passes build and sync once."""
+RECIPE_FILE: Final = "_build_params.json"
+"""Root-level sentinel recording every input that shaped a tree's bytes."""
+
+ARC1_SUBSETS: Final = ("training", "evaluation", "concept")
+"""Kaggle subsets the ARC-AGI-1 ``arc1concept`` tree is built from."""
+
+ARC1_TEST_SET: Final = "evaluation"
+"""The subset whose test pairs form the ARC-AGI-1 test split."""
+
+
+def arc_recipe(
+    augmentation: ArcAugmentation,
+    *,
+    input_file_prefix: str | None,
+    subsets: Sequence[str] = ARC1_SUBSETS,
+    test_set_name: str = ARC1_TEST_SET,
+) -> dict[str, object]:
+    """Return the JSON recipe of a tree: every input that changes its bytes.
+
+    Args:
+      augmentation: Recipe the tree is built with.
+      input_file_prefix: Local source prefix; ``None`` names the pinned source.
+      subsets: Kaggle subsets read, in order.
+      test_set_name: Subset whose test pairs form the test split.
+
+    Returns:
+      recipe: JSON-ready mapping, compared verbatim against a tree's sentinel.
+
+    """
+    return parse(
+        json.dumps(
+            {
+                "builder": "arc",
+                "source": input_file_prefix or f"{SOURCE_URL}@{SOURCE_REVISION}",
+                "subsets": list(subsets),
+                "test_set_name": test_set_name,
+                "augmentation": dataclasses.asdict(augmentation.config),
+            },
+        ),
+        dict[str, object],
+    )
+
+
+def check_recipe(target_dir: Path, recipe: Mapping[str, object]) -> None:
+    """Refuse a tree stamped by another recipe; adopt an unstamped one, warning.
+
+    Args:
+      target_dir: Dataset root that may hold :data:`RECIPE_FILE`.
+      recipe: Recipe the caller is about to read the tree as.
+
+    Raises:
+      ValueError: The tree's sentinel records a different recipe.
+
+    """
+    path = target_dir / RECIPE_FILE
+    if not path.is_file():
+        if any((target_dir / spec.rel_path).is_file() for spec in arc_manifest()):
+            logger.warning(
+                "%s has no recipe sentinel; adopting it as built by the requested "
+                "recipe. Stamp it with: %s",
+                target_dir,
+                _stamp_command(path, recipe),
+            )
+        return
+    stamped = parse(path.read_text(), dict[str, object])
+    if stamped != recipe:
+        raise ValueError(
+            f"{target_dir} was built by a different recipe than requested; "
+            f"stamped {stamped}, requested {dict(recipe)}. Point working_dir at a "
+            "fresh directory, or delete the tree to rebuild it.",
+        )
+
+
+def stamp_recipe(target_dir: Path, recipe: Mapping[str, object]) -> None:
+    """Write ``recipe`` as ``target_dir``'s :data:`RECIPE_FILE` sentinel."""
+    (target_dir / RECIPE_FILE).write_text(json.dumps(recipe, sort_keys=True))
+
+
+_ensure_cache: dict[Path, tuple[dict[str, object], EnsureResult]] = {}
+"""Per-target recipe and outcome, so repeated finalize/make passes build once."""
 
 
 def ensure_arc_dataset(
@@ -142,8 +227,9 @@ def ensure_arc_dataset(
     """Ensure the ARC tree is present at ``target_dir``, building it if not.
 
     Rank-safe: rank 0 builds and :func:`run_rank_zero_build`'s all-reduce is
-    the cross-rank sync. Cached per target, so every rank sees one build.
-    Distinct recipes must resolve to distinct directories.
+    the cross-rank sync. Cached per target, so every rank sees one build. The
+    tree's :data:`RECIPE_FILE` must match ``augmentation`` (see
+    :func:`check_recipe`), so a path never serves a recipe it was not built by.
 
     Args:
       target_dir: Destination dataset root.
@@ -153,9 +239,19 @@ def ensure_arc_dataset(
     Returns:
       result: Outcome of the underlying :func:`ensure_data` call.
 
+    Raises:
+      ValueError: The tree at ``target_dir`` was built by a different recipe.
+
     """
+    recipe = arc_recipe(augmentation, input_file_prefix=input_file_prefix)
     if target_dir in _ensure_cache:
-        return _ensure_cache[target_dir]
+        cached, result = _ensure_cache[target_dir]
+        if cached != recipe:
+            raise ValueError(
+                f"{target_dir} was built by a different recipe than requested "
+                "earlier in this process.",
+            )
+        return result
     spec = DataSpec(
         target_dir=target_dir,
         manifest=arc_manifest(),
@@ -169,10 +265,13 @@ def ensure_arc_dataset(
 
     def _build() -> None:
         nonlocal result
+        check_recipe(target_dir, recipe)
         result = ensure_data(spec)
+        if result is EnsureResult.DOWNLOADED:
+            stamp_recipe(target_dir, recipe)
 
     run_rank_zero_build(name="ensure_arc_dataset", build=_build)
-    _ensure_cache[target_dir] = result
+    _ensure_cache[target_dir] = (recipe, result)
     return result
 
 
@@ -240,6 +339,8 @@ def aug_policy_slug(
     _validate_prob("translation_prob", translation_prob)
     _validate_prob("scale_prob", scale_prob)
     # Rounding keeps IEEE-754 repr noise (0.1 + 0.2) from splitting equal policies.
+    # Two recipes that round alike share a name; the tree's recipe sentinel then
+    # refuses the second one instead of serving it the first one's arrays.
     tr = str(round(translation_prob, 6)).replace(".", "p")
     sc = str(round(scale_prob, 6)).replace(".", "p")
     if scale_prob == 0:
@@ -267,7 +368,9 @@ def aug_policy_template(
       seed: Build seed; must match the build.
 
     Returns:
-      working_dir: ``/datasets/arc1concept-aug-1000-<slug>``.
+      working_dir: ``/datasets/arc1concept-aug-1000-<slug>``. The prefix names
+        the reference build family, as published trees spell it; ``num_aug``
+        itself is the slug's ``n<num_aug>`` field.
 
     """
     slug = aug_policy_slug(
@@ -308,14 +411,16 @@ def aug_policy_dataset_dir(
       dataset_dir: The aug-policy dataset root.
 
     """
-    slug = aug_policy_slug(
-        translation_prob=translation_prob,
-        scale_prob=scale_prob,
-        train_scale_weights=train_scale_weights,
-        num_aug=num_aug,
-        seed=seed,
-    )
-    return resolve_working_dir(base_dir, working_dir) / f"arc1concept-aug-1000-{slug}"
+    name = Path(
+        aug_policy_template(
+            translation_prob=translation_prob,
+            scale_prob=scale_prob,
+            train_scale_weights=train_scale_weights,
+            num_aug=num_aug,
+            seed=seed,
+        ),
+    ).name
+    return resolve_working_dir(base_dir, working_dir) / name
 
 
 def build(
@@ -373,14 +478,27 @@ def build(
     logger.info("Aug-policy ARC dataset at %s", root)
 
 
-def _build_arc_dataset(
+def write_arc_tree(
     *,
     input_file_prefix: str,
     output_dir: Path,
     augmentation: ArcAugmentation,
-    subsets: Sequence[str] = ("training", "evaluation", "concept"),
-    test_set_name: str = "evaluation",
+    subsets: Sequence[str] = ARC1_SUBSETS,
+    test_set_name: str = ARC1_TEST_SET,
 ) -> None:
+    """Write an ARC tree's arrays and root JSON from Kaggle-format sources.
+
+    Writes no recipe sentinel: the caller owns where the tree is published and
+    stamps it with :func:`stamp_recipe` once complete.
+
+    Args:
+      input_file_prefix: Prefix of ``<prefix>_<subset>_challenges.json`` files.
+      output_dir: Directory receiving the tree; created as needed.
+      augmentation: Dataset-owned augmentation recipe and transforms.
+      subsets: Kaggle subsets to read, in order; they share one id space.
+      test_set_name: Subset whose test pairs form the test split.
+
+    """
     rng = np.random.default_rng(augmentation.config.seed)
     results: dict[str, dict[str, list[list[_Puzzle]]]] = {}
     test_puzzles: dict[str, object] = {}
@@ -690,20 +808,40 @@ class _ArcBuild:
             self._target_dir,
             rel_path,
         )
-        if self._input_file_prefix is not None:
-            _build_arc_dataset(
-                input_file_prefix=self._input_file_prefix,
-                output_dir=self._target_dir,
-                augmentation=self._augmentation,
-            )
-        else:
-            with KaggleSource() as prefix:
-                _build_arc_dataset(
-                    input_file_prefix=str(prefix),
-                    output_dir=self._target_dir,
-                    augmentation=self._augmentation,
-                )
+        _write_from_source(
+            output_dir=self._target_dir,
+            augmentation=self._augmentation,
+            input_file_prefix=self._input_file_prefix,
+        )
         self._built = True
+
+
+def _write_from_source(
+    *,
+    output_dir: Path,
+    augmentation: ArcAugmentation,
+    input_file_prefix: str | None,
+) -> None:
+    """Write the ARC-AGI-1 tree from a local prefix, or from a pinned-source clone."""
+    if input_file_prefix is not None:
+        write_arc_tree(
+            input_file_prefix=input_file_prefix,
+            output_dir=output_dir,
+            augmentation=augmentation,
+        )
+        return
+    with KaggleSource() as prefix:
+        write_arc_tree(
+            input_file_prefix=str(prefix),
+            output_dir=output_dir,
+            augmentation=augmentation,
+        )
+
+
+def _stamp_command(path: Path, recipe: Mapping[str, object]) -> str:
+    """Return a shell command writing exactly the sentinel :func:`stamp_recipe` would."""
+    text = json.dumps(recipe, sort_keys=True)
+    return f"printf %s {shlex.quote(text)} > {shlex.quote(str(path))}"
 
 
 def _validate_prob(name: str, prob: float) -> None:

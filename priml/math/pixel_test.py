@@ -1345,17 +1345,9 @@ def test_rgb2float_inplace_on_a_grad_leaf_names_the_argument_at_fault() -> None:
         _ = rgb2float(leaf.to(torch.float32), inplace=True)
 
 
-def test_float2rgb_lets_torch_reject_an_inplace_grad_leaf() -> None:
-    """``float2rgb`` adds no guard of its own; the leaf complains instead.
-
-    Its result is uint8, and an integer tensor cannot carry grad at all
-    (``Only Tensors of floating point and complex dtype can require grad``),
-    so no caller differentiates through this function and the donation is
-    incoherent rather than merely mistaken. Torch still rejects it -- at the
-    first in-place op, before the cast -- which is the whole contract.
-    """
+def test_float2rgb_rejects_an_inplace_grad_leaf() -> None:
     leaf = torch.tensor([0.5], dtype=torch.float32, requires_grad=True)
-    with pytest.raises(RuntimeError, match="leaf Variable that requires grad"):
+    with pytest.raises(ValueError, match="leaf requiring grad"):
         _ = float2rgb(leaf, float_dtype=torch.float32, inplace=True)
     assert not float2rgb(torch.tensor([0.5])).requires_grad
 
@@ -1737,12 +1729,6 @@ def test_pixel_interpolation_defaults_and_rank_aliases() -> None:
     ) as error:
         _process_interpolate_args("area")
     assert str(error.value) == "Unable to infer the output rank."
-    with pytest.raises(
-        ValueError,
-        match=re.escape("Unable to infer the output rank."),
-    ) as error:
-        _process_interpolate_args()
-    assert str(error.value) == "Unable to infer the output rank."
 
     source = torch.tensor([[[[1.0, 2.0], [3.0, 4.0]]]])
     with patch("priml.math.pixel.torch.permute", wraps=torch.permute) as permute:
@@ -2073,6 +2059,30 @@ def test_jpeg_tensor_wrapper_forwards_zero_size_floors() -> None:
         min_height=0,
         min_width=0,
     )
+
+
+@pytest.mark.parametrize("use_scale", [False, True])
+def test_interpolate_scalar_infers_input_spatial_rank(use_scale: bool) -> None:
+    x = torch.arange(2 * 3 * 4 * 5, dtype=torch.float32).reshape(2, 3, 4, 5)
+    actual = interpolate(x, scale_factor=2.0) if use_scale else interpolate(x, size=6)
+    expected = (
+        torch.nn.functional.interpolate(x, scale_factor=2.0)
+        if use_scale
+        else torch.nn.functional.interpolate(x, size=6)
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_reconstruction_diffs_negative_amplification_is_black() -> None:
+    x = torch.zeros(2, 3)
+    y = torch.ones(2, 3)
+    assert torch.equal(reconstruction_diffs(x, y, amplification=-3), x.to(torch.uint8))
+
+
+def test_float2rgb_rejects_inplace_grad_leaf() -> None:
+    x = torch.zeros(2, 3, requires_grad=True)
+    with pytest.raises(ValueError, match="leaf requiring grad"):
+        float2rgb(x, inplace=True)
 
 
 if __name__ == "__main__":

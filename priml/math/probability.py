@@ -151,9 +151,7 @@ def quantile_uniform(
 
     """
     p, low, high = convert_to_tensor(p, low, high)
-    if not torch.all((p >= 0) & (p <= 1)):
-        raise ValueError("quantile_uniform requires p in [0, 1].")
-    return p * (high - low) + low
+    return torch.where((p >= 0) & (p <= 1), p * (high - low) + low, math.nan)
 
 
 def log_prob_discretized_logistic(
@@ -202,8 +200,10 @@ def log_prob_discretized_logistic(
     a = torch.where(below_location, upper, -lower)
     b = torch.where(below_location, lower, -upper)
     log_a = nn.functional.logsigmoid(a)
-    # Clamped only where both edges round to one tail value in float32.
-    gap = (nn.functional.logsigmoid(b) - log_a).clamp_max(-1e-30)
+    # Coincident rounded edges need a representable negative log gap.
+    gap = (nn.functional.logsigmoid(b) - log_a).clamp_max(
+        -torch.finfo(log_a.dtype).tiny,
+    )
     return torch.where(
         x <= 0,
         nn.functional.logsigmoid(upper),
@@ -300,7 +300,8 @@ def cdf_truncated_normal(
 
     """
     x, loc, scale, low, high = convert_to_tensor(x, loc, scale, low, high)
-    std_x = (x - loc) / scale
+    bounded_x = x.clamp(min=torch.minimum(low, high), max=torch.maximum(low, high))
+    std_x = (bounded_x - loc) / scale
     std_low = (low - loc) / scale
     std_high = (high - loc) / scale
     span = ndtr(std_high) - ndtr(std_low)
@@ -339,29 +340,22 @@ def log_cdf_truncated_normal(
 
     """
     x, loc, scale, low, high = convert_to_tensor(x, loc, scale, low, high)
-    std_x = (x - loc) / scale
-    std_low = (low - loc) / scale
-    std_high = (high - loc) / scale
-    # Degenerate interval (high == low) is a point mass at ``low``: the log CDF
-    # is the log of the unit step (-inf below, 0 at/above), not
-    # logsubexp(-inf, -inf) == nan. Guard only exact equality so the
-    # deliberately reversed low > high direction still flows through logsubexp
-    # (which orders its operands internally). Mirror cdf_truncated_normal.
-    nondegenerate = std_high != std_low
-    safe_high = torch.where(
-        nondegenerate,
-        std_high,
-        torch.add(std_low, torch.ones_like(std_low)),
-    )
+    interior = (x > torch.minimum(low, high)) & (x < torch.maximum(low, high))
+    # Mask all operands, not only the result: logsubexp(a, a) has an
+    # infinite derivative that would leak through the unselected branch.
+    std_x = torch.where(interior, (x - loc) / scale, 0.5)
+    std_low = torch.where(interior, (low - loc) / scale, 0.0)
+    std_high = torch.where(interior, (high - loc) / scale, 1.0)
     log_cdf = logsubexp(
         torch.special.log_ndtr(std_x),
         torch.special.log_ndtr(std_low),
     ) - logsubexp(
-        torch.special.log_ndtr(safe_high),
+        torch.special.log_ndtr(std_high),
         torch.special.log_ndtr(std_low),
     )
-    step = torch.where(x >= low, 0.0, -math.inf)
-    return torch.where(nondegenerate, log_cdf, step)
+    at_one = torch.where(high < low, x <= high, x >= high)
+    step = torch.where(at_one, 0.0, -math.inf)
+    return torch.where(interior, log_cdf, step)
 
 
 def quantile_truncated_normal(
@@ -389,12 +383,12 @@ def quantile_truncated_normal(
 
     """
     p, loc, scale, low, high = convert_to_tensor(p, loc, scale, low, high)
-    if not torch.all((p >= 0) & (p <= 1)):
-        raise ValueError("quantile_truncated_normal requires p in [0, 1].")
+    in_domain = (p >= 0) & (p <= 1)
+    safe_p = torch.where(in_domain, p, 0.5)
     std_low = (low - loc) / scale
     std_high = (high - loc) / scale
-    y = ndtri(ndtr(std_low) + p * _normal_cdf_difference(std_high, std_low))
-    return y * scale + loc
+    y = ndtri(ndtr(std_low) + safe_p * _normal_cdf_difference(std_high, std_low))
+    return torch.where(in_domain, y * scale + loc, math.nan)
 
 
 def pdf_logit_distribution(
@@ -592,11 +586,11 @@ def random_categorical(
       *samples_size: Output sample shape.
       probs: Unnormalized probabilities. Exactly one of probs/logits required.
       logits: Log-odds. Exactly one of probs/logits required.
-      dtype: Output dtype.
+      dtype: Floating-point dtype used for probabilities and random draws.
       device: Output device.
 
     Returns:
-      samples: Integer tensor of shape (*samples_size, *batch_shape).
+      samples: Int64 tensor of shape (*samples_size, *batch_shape).
 
     Raises:
       ValueError: If both or neither of probs and logits are provided.
@@ -612,10 +606,6 @@ def random_categorical(
             raise ValueError("Specify exactly one of probs or logits.")
         logits = convert_to_tensor(logits, dtype=dtype, device=device)
         cmf = torch.logcumsumexp(logits, dim=-1)
-        if not torch.all(torch.isfinite(cmf[..., -1:])):
-            raise ValueError(
-                "random_categorical requires at least one finite logit per row.",
-            )
         cmf = torch.exp(cmf - cmf[..., -1:])
     else:
         if logits is not None:
@@ -623,7 +613,13 @@ def random_categorical(
         probs = convert_to_tensor(probs, dtype=dtype, device=device)
         cmf = torch.cumsum(probs, dim=-1)
         cmf = cmf / cmf[..., -1:]
-    z = torch.rand(*samples_size, *[1] * cmf.ndim, dtype=cmf.dtype, device=cmf.device)
+    z = torch.rand(
+        *samples_size,
+        *cmf.shape[:-1],
+        1,
+        dtype=cmf.dtype,
+        device=cmf.device,
+    )
     return (z >= cmf).sum(dim=-1)
 
 
@@ -761,16 +757,15 @@ def ndtri(p: Tensorable) -> Tensor:
     Returns:
       x: Value such that ndtr(x) = p.
 
-    Note: torch.special.ndtri exists but is less accurate in the
-    tails than erfinv(2p - 1) * √2.
-
+    Uses the tail-aware inverse directly: forming ``2p - 1`` rounds to -1
+    for small float32 probabilities and loses the finite left tail.
 
     References:
       tfp.math.ndtri
 
     """
     p = convert_to_tensor(p)
-    return torch.erfinv(2 * p - 1) * 2**0.5
+    return torch.special.ndtri(p)
 
 
 def log_gamma_correction(x: Tensorable) -> Tensor:

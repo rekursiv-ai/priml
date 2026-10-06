@@ -11,7 +11,6 @@ from typing import (
     TYPE_CHECKING,
     Final,
     Protocol,
-    TypedDict,
     cast,
     overload,
     override,
@@ -129,21 +128,6 @@ class BiasCorrectedRMSProp(Optimizer):
             if config.compile
             else _rmsprop_update
         )
-
-    class StateDict(TypedDict):
-        """Torch optimizer checkpoint payload."""
-
-        state: dict[int, optimizer.StateDict]
-        param_groups: list[optimizer.StateDict]
-
-    @override
-    def state_dict(self) -> optimizer.StateDict:
-        raw = super().state_dict()
-        state: BiasCorrectedRMSProp.StateDict = {
-            "state": raw["state"],
-            "param_groups": raw["param_groups"],
-        }
-        return {**state}
 
     @override
     def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
@@ -301,43 +285,26 @@ class BiasCorrectedRMSProp(Optimizer):
                 dtype=torch.int32,
                 device=device,
             )
-            state["last_step"] = torch.zeros(rows, dtype=torch.int32, device=device)
-            state["cum_log"] = 0.0
             state["sparse_scalars"] = {
                 name: torch.zeros((), dtype=torch.float32, device=device)
-                for name in (
-                    "step",
-                    "lr",
-                    "beta2",
-                    "eps",
-                    "one_minus_lr_wd",
-                    "cum_before",
-                    "cum_after",
-                )
+                for name in ("step", "lr", "beta2", "eps")
             }
         # Round before the bias correction; using the Python float changes updates.
         beta2 = float(
             torch.tensor(convert(group["beta2"], float), dtype=torch.float32),
         )
-        cum_before = cast(float, state["cum_log"])
-        state["cum_log"] = cum_before + (math.log(beta2) if beta2 != 0.0 else -math.inf)
-        lr = convert(group["lr"], float)
         scalars = cast("dict[str, Tensor]", state["sparse_scalars"])
         for name, value in (
             ("step", float(cast(int, state["step"]))),
-            ("lr", lr),
+            ("lr", convert(group["lr"], float)),
             ("beta2", beta2),
             ("eps", convert(group["eps"], float)),
-            ("one_minus_lr_wd", 1.0),
-            ("cum_before", cum_before),
-            ("cum_after", state["cum_log"]),
         ):
             scalars[name].fill_(value)
         sparse_rmsprop_rows(
             parameter,
             gradient,
             moment,
-            cast(Tensor, state["last_step"]),
             bitmap,
             cast(Tensor, state["sparse_index"]),
             cast(Tensor, state["sparse_count"]),
@@ -572,7 +539,6 @@ def sparse_rmsprop_rows(  # noqa: PLR0917 -- Each sparse kernel operand requires
     parameter: Tensor,
     gradient: Tensor,
     second_moment: Tensor,
-    last_step: Tensor,
     bitmap: Tensor,
     index: Tensor,
     count: Tensor,
@@ -585,13 +551,11 @@ def sparse_rmsprop_rows(  # noqa: PLR0917 -- Each sparse kernel operand requires
       parameter: Contiguous two-dimensional embedding table.
       gradient: Table gradients matching ``parameter``.
       second_moment: FP32 rowwise state shaped ``[rows, 1]``.
-      last_step: Last update index for each active row; written in place.
       bitmap: Zero-or-one active flag per row.
       index: Preallocated row-index buffer filled by compaction.
       count: Scalar active-row count filled by compaction.
       scratch: Compaction buffer with one extra slot.
-      scalars: Device tensors for step, lr, beta2, eps, and one_minus_lr_wd.
-        Cumulative-decay fields are accepted but unused.
+      scalars: Device tensors for step, lr, beta2, and eps.
 
     """
     compact_bitmap(bitmap, index, count, scratch)
@@ -600,7 +564,6 @@ def sparse_rmsprop_rows(  # noqa: PLR0917 -- Each sparse kernel operand requires
             parameter,
             gradient,
             second_moment,
-            last_step,
             bitmap,
             index,
             count,
@@ -608,9 +571,6 @@ def sparse_rmsprop_rows(  # noqa: PLR0917 -- Each sparse kernel operand requires
             scalars["lr"],
             scalars["beta2"],
             scalars["eps"],
-            scalars["one_minus_lr_wd"],
-            scalars["cum_before"],
-            scalars["cum_after"],
         )
         return
     _inactive_moment_reference(second_moment, bitmap, scalars["beta2"])
@@ -618,7 +578,6 @@ def sparse_rmsprop_rows(  # noqa: PLR0917 -- Each sparse kernel operand requires
         parameter,
         gradient,
         second_moment,
-        last_step,
         index[: int(count)].to(torch.int64),
         scalars,
     )
@@ -637,11 +596,10 @@ def _inactive_moment_reference(
     second_moment[idle] = torch.lerp(rows, torch.zeros_like(rows), 1 - float(beta2))
 
 
-def _sparse_rmsprop_reference(  # noqa: PLR0917 -- The reference mirrors the sparse kernel signature.
+def _sparse_rmsprop_reference(
     parameter: Tensor,
     gradient: Tensor,
     second_moment: Tensor,
-    last_step: Tensor,
     rows: Tensor,
     scalars: dict[str, Tensor],
 ) -> None:
@@ -654,8 +612,7 @@ def _sparse_rmsprop_reference(  # noqa: PLR0917 -- The reference mirrors the spa
     lr = float(scalars["lr"])
     moment_rows = second_moment[rows]
     grad_rows = gradient[rows]
-    parameter_rows = parameter[rows].clone()
-    parameter_rows.mul_(float(scalars["one_minus_lr_wd"]))
+    parameter_rows = parameter[rows]
     moment_rows = torch.lerp(
         moment_rows,
         grad_rows.float().square().mean(dim=1, keepdim=True),
@@ -669,17 +626,7 @@ def _sparse_rmsprop_reference(  # noqa: PLR0917 -- The reference mirrors the spa
     )
     parameter[rows] = parameter_rows
     second_moment[rows] = moment_rows
-    last_step[rows] = step
 
-
-USES_LAZY_ANCHOR: Final = False
-"""Whether idle moments use deferred decay; all moments advance every step."""
-
-MAINTAINS_LAST_CUM: Final = False
-"""Whether cumulative-decay state is updated; it is unused and unchanged."""
-
-MAINTAINS_LAST_STEP: Final = True
-"""Whether active rows record their latest optimizer step."""
 
 INACTIVE_BLOCK: Final = 1024
 """Rows per program in the inactive-moment kernel."""
@@ -739,16 +686,12 @@ def _sparse_rmsprop_rows_triton(
         p_ptr,
         grad_ptr,
         v_ptr,
-        last_step_ptr,
         index_ptr,
         count_ptr,
         step_ptr,
         lr_ptr,
         beta2_ptr,
         eps_ptr,
-        one_minus_lr_wd_ptr,
-        _cum_before_ptr,
-        _cum_after_ptr,
     ) = buffers
     pid = language.program_id(0)
     count = language.load(count_ptr)
@@ -756,8 +699,6 @@ def _sparse_rmsprop_rows_triton(
     lr = language.load(lr_ptr)
     beta2 = language.load(beta2_ptr)
     eps = language.load(eps_ptr)
-    one_minus_lr_wd = language.load(one_minus_lr_wd_ptr)
-    # Cumulative-decay pointers are unused because idle moments advance every step.
     offs = language.arange(0, block_w)
     mask = offs < n_cols
 
@@ -785,12 +726,10 @@ def _sparse_rmsprop_rows_triton(
         pv = language.load(p_ptr + base + offs, mask=mask, other=0.0).to(
             language.float32,
         )
-        pv = language.fma(term, -lr, pv * one_minus_lr_wd)
+        pv = language.fma(term, -lr, pv)
 
         language.store(p_ptr + base + offs, pv.to(p_ptr.dtype.element_ty), mask=mask)
         language.store(v_ptr + row, v_new)
-        # Leave unused cumulative-decay state untouched.
-        language.store(last_step_ptr + row, step.to(language.int32))
         slot += programs
 
 
@@ -798,7 +737,6 @@ def _sparse_rmsprop_rows_cuda(  # noqa: PLR0917 -- Each sparse kernel operand re
     parameter: Tensor,
     gradient: Tensor,
     second_moment: Tensor,
-    last_step: Tensor,
     bitmap: Tensor,
     index: Tensor,
     count: Tensor,
@@ -806,9 +744,6 @@ def _sparse_rmsprop_rows_cuda(  # noqa: PLR0917 -- Each sparse kernel operand re
     lr: Tensor,
     beta2: Tensor,
     eps: Tensor,
-    one_minus_lr_wd: Tensor,
-    cum_before: Tensor,
-    cum_after: Tensor,
     *,
     programs: int = 8192,
     block_w: int = 512,
@@ -838,16 +773,12 @@ def _sparse_rmsprop_rows_cuda(  # noqa: PLR0917 -- Each sparse kernel operand re
             parameter,
             gradient,
             second_moment,
-            last_step,
             index,
             count,
             step,
             lr,
             beta2,
             eps,
-            one_minus_lr_wd,
-            cum_before,
-            cum_after,
         ),
         n_cols=cols,
         programs=programs,

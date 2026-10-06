@@ -155,7 +155,7 @@ ArcTrainLoop(
                 │       train_budget_sec=inf,
                 │       train_budget_epochs=inf,
                 │       lr_schedule=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.constant at 0xdefacedeface>),
-                │       parallelism=NoParallel.Config(device='auto'),
+                │       parallelism=NoParallel.Config(device=None),
                 │       model_quantization=NoModelQuantization.Config(),
                 │       activation_memoization=DefaultActivationStorage.Config(),
                 │       compile=PartialConfig(<class 'functools.partial'>, <function torch.compile at 0xdefacedeface>, fullgraph=True),
@@ -215,10 +215,10 @@ ArcTrainLoop(
                 │               puzzle_id_separator='|||'
                 │       ),
                 │       base_dir='/opt/scratch',
-                │       working_dir=PosixPath('/opt/scratch/datasets/arcagi1'),
+                │       working_dir=PosixPath('/opt/scratch/datasets/arc1concept-aug-1000'),
                 │       batch_size=256,
                 │       eval_batch_size=256,
-                │       device='auto',
+                │       device=None,
                 │       seed=0,
                 │       num_tasks=None,
                 │       num_eval_tasks=None,
@@ -228,9 +228,28 @@ ArcTrainLoop(
                 │       device_resident=True
                 ),
                 metrics_train={},
-                metrics_eval={       'pass': PassK.Config(
+                metrics_eval={       'pass': CanonicalPassK.Config(
+                                base_dir='/opt/scratch',
+                                working_dir=PosixPath('/opt/scratch/datasets/arc1concept-aug-1000'),
                                 pass_ks=(1, 2, 5, 10),
-                                ignore_label_id=-100
+                                spatial_views='all',
+                                max_views_per_input=0,
+                                per_step_acts=0,
+                                spec=ArcSpec(
+                                        max_grid=30,
+                                        vocab_pad=0,
+                                        vocab_eos=1,
+                                        vocab_color_offset=2,
+                                        puzzle_id_separator='|||'
+                                ),
+                                transform=ColorDihedral.Config(
+                                        transforms=(0, 1, 2, 3, 4, 5, 6, 7),
+                                        colors=(1, 2, 3, 4, 5, 6, 7, 8, 9),
+                                        separator='|||'
+                                ),
+                                rules=[],
+                                exclude_tasks=[],
+                                dump_per_task_path=''
                         )},
                 checkpointer=Checkpointer.Config(
                         base_dir=PosixPath('/opt/scratch/runs/arcagi1/exp000'),
@@ -276,7 +295,7 @@ ArcTrainLoop(
                 mesh_dim_model_seed='pp',
                 mesh_dim_data_seed='dp',
                 runtime=SingleProcess.Config(
-                        device='auto',
+                        device=None,
                         deterministic=False,
                         float32_matmul_precision=None
                 )

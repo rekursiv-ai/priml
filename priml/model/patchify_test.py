@@ -6,8 +6,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Final, cast
 
-from configgle.testing import assert_pprint_golden
-
 import pytest
 import torch
 
@@ -15,6 +13,7 @@ from priml.cost import Cost
 from priml.model.patchify import Patchify, Unpatchify
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent

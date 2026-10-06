@@ -92,8 +92,8 @@ class CraftaxEnv:
         num_envs: int = 256
         """Parallel worlds stepped together."""
 
-        device: str = "auto"
-        """Device the world lives on; ``"auto"`` picks the best available."""
+        device: torch.device | str | None = None
+        """Device the world lives on; ``None`` is the loop's."""
 
         seed: int = 0
         """Seed for world generation and every in-game draw.

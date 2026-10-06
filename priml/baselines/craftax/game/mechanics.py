@@ -21,67 +21,27 @@ from priml.baselines.craftax.game.state import EnvState, Mobs
 
 
 def max_health(state: EnvState) -> Tensor:
-    """Health cap, which strength raises.
-
-    Args:
-      state: State.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Health cap, which strength raises, ``[envs]``."""
     return 8 + state.player_strength
 
 
 def max_food(state: EnvState) -> Tensor:
-    """Food cap, which dexterity raises.
-
-    Args:
-      state: State.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Food cap, which dexterity raises, ``[envs]``."""
     return 7 + 2 * state.player_dexterity
 
 
 def max_drink(state: EnvState) -> Tensor:
-    """Water cap, which dexterity raises.
-
-    Args:
-      state: State.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Water cap, which dexterity raises, ``[envs]``."""
     return 7 + 2 * state.player_dexterity
 
 
 def max_energy(state: EnvState) -> Tensor:
-    """Energy cap, which dexterity raises.
-
-    Args:
-      state: State.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Energy cap, which dexterity raises, ``[envs]``."""
     return 7 + 2 * state.player_dexterity
 
 
 def max_mana(state: EnvState) -> Tensor:
-    """Mana cap, which intelligence raises.
-
-    Args:
-      state: State.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Mana cap, which intelligence raises, ``[envs]``."""
     return 6 + 3 * state.player_intelligence
 
 
@@ -112,9 +72,10 @@ def player_damage(state: EnvState) -> Tensor:
 def damage_to_player(state: EnvState, damage: Tensor) -> Tensor:
     """Return the damage a hit lands on the player after their armour.
 
-    Each armour piece blocks a tenth of physical damage, and an enchanted
-    piece blocks a fifth of its element. The boss floor multiplies incoming
-    damage, which is what makes the final fight lethal rather than long.
+    Each armour piece blocks a tenth of physical damage per tier -- 10% iron,
+    20% diamond -- and an enchanted piece blocks a fifth of its element. The
+    boss floor multiplies incoming damage, which is what makes the final fight
+    lethal rather than long.
 
     Args:
       state: The current world.
@@ -160,15 +121,7 @@ def apply_defense(damage: Tensor, defense: Tensor) -> Tensor:
 
 
 def is_fighting_boss(state: EnvState) -> Tensor:
-    """Whether the player stands on the final floor.
-
-    Args:
-      state: State.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Whether the player stands on the final floor, ``[envs]``."""
     return state.player_level == constants.NUM_LEVELS - 1
 
 
@@ -193,15 +146,7 @@ def is_boss_vulnerable(state: EnvState) -> Tensor:
 
 
 def has_beaten_boss(state: EnvState) -> Tensor:
-    """Whether the boss has been defeated, which ends the episode in victory.
-
-    Args:
-      state: State.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Whether the boss has been defeated, ending the episode in victory, ``[envs]``."""
     return state.boss_progress >= constants.NUM_LEVELS - 1
 
 
@@ -257,16 +202,7 @@ def in_bounds(position: Tensor) -> Tensor:
 
 
 def is_occupied(state: EnvState, position: Tensor) -> Tensor:
-    """Whether a creature or the player already stands at ``position``.
-
-    Args:
-      state: State.
-      position: Position.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Whether a creature or the player already stands at ``[envs, 2]`` ``position``."""
     return gather_tiles(current_mobs(state), position) | (
         state.player_position == position
     ).all(1)

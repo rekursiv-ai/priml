@@ -385,7 +385,13 @@ def test_materialize_barriers_when_a_group_is_initialized(
     """Ranks re-init in lockstep so no rank reads a peer's shard early."""
     barriers: list[int] = []
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
-    monkeypatch.setattr(torch.distributed, "barrier", lambda: barriers.append(1))
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
+
+    def gather(errors: list[str | None], error: str | None) -> None:
+        errors[0] = error
+        barriers.append(1)
+
+    monkeypatch.setattr(torch.distributed, "all_gather_object", gather)
     with torch.device("meta"):
         model = SimpleModel()
 
@@ -884,11 +890,7 @@ def test_materialize_meta_raises_on_partial_param_init() -> None:
 
 
 def test_materialize_meta_allows_integer_buffer() -> None:
-    """Integer buffers (e.g.
-
-    counters) cannot hold NaN and must not trip the float-only poison audit; a valid
-    module with one must materialize cleanly.
-    """
+    """Materialize an integer buffer whose owner resets its allocated storage."""
 
     class _IntBuf(nn.Module):
         def __init__(self) -> None:
@@ -898,11 +900,198 @@ def test_materialize_meta_allows_integer_buffer() -> None:
 
         def reset_parameters(self) -> None:
             nn.init.ones_(self.weight)
+            self.get_buffer("count").zero_()
 
     with torch.device("meta"):
         mod = _IntBuf()
     materialize_meta(mod, torch.device("cpu"))
     assert torch.isfinite(mod.weight).all()
+    assert torch.equal(mod.get_buffer("count"), torch.zeros(1, dtype=torch.long))
+
+
+def test_materialization_rejects_mixed_storage_before_discarding_weights() -> None:
+    model = _TwoLinear()
+    before = model.fc1.weight.detach().clone()
+    model.fc2 = nn.Linear(8, 8, device="meta")
+    with pytest.raises(ValueError, match="mixed"):
+        NoParallel.Config(device="cpu").make()(model)
+    assert torch.equal(model.fc1.weight, before)
+    assert model.fc2.weight.is_meta
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.complex64])
+def test_materialization_audits_every_nan_capable_dtype(dtype: torch.dtype) -> None:
+    class ForgottenBuffer(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.register_buffer("forgotten", torch.zeros(2, dtype=dtype))
+
+    with torch.device("meta"):
+        model = ForgottenBuffer()
+    with pytest.raises(RuntimeError, match="forgotten"):
+        materialize_meta(model, torch.device("cpu"))
+
+
+@pytest.mark.parametrize(
+    ("dtype", "extreme"),
+    [(torch.uint8, 255), (torch.int8, -128), (torch.int64, -(2**63))],
+)
+def test_materialization_accepts_integer_extremes(
+    dtype: torch.dtype,
+    extreme: int,
+) -> None:
+    """Every integer value is a legal initial state; none can mark "unwritten"."""
+
+    class ExtremeBuffer(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.register_buffer("table", torch.empty(3, dtype=dtype))
+
+        def reset_parameters(self) -> None:
+            self.get_buffer("table").fill_(extreme)
+
+    with torch.device("meta"):
+        model = ExtremeBuffer()
+    materialize_meta(model, torch.device("cpu"))
+    assert torch.equal(
+        model.get_buffer("table"),
+        torch.full((3,), extreme, dtype=dtype),
+    )
+
+
+@pytest.mark.parametrize(
+    "strategy_type",
+    [FullySharded, HybridSharded, RecursiveSharded],
+)
+@pytest.mark.parametrize("dtype", [None, torch.bfloat16])
+def test_batchnorm_is_separate_only_with_mixed_precision(
+    monkeypatch: pytest.MonkeyPatch,
+    strategy_type: type[FullySharded | HybridSharded | RecursiveSharded],
+    dtype: torch.dtype | None,
+) -> None:
+    monkeypatch.setattr(parallelism, "global_device_mesh", _FakeMesh)
+    sharded: list[nn.Module] = []
+
+    def shard(module: nn.Module, **kwargs: object) -> None:
+        del kwargs
+        sharded.append(module)
+        monkeypatch.setattr(module, "_get_fsdp_state", lambda: None, raising=False)
+
+    monkeypatch.setattr(parallelism, "fully_shard", shard)
+    config = strategy_type.Config()
+    config.mp_param_dtype = dtype
+    if isinstance(config, RecursiveSharded.Config):
+        config.module_types = (_BNBlock,)
+    model = _BNModel()
+    config.make()(model)
+    assert (model.block.bn in sharded) is (dtype is not None)
+    assert sharded[-1] is model
+    if dtype is not None:
+        assert sharded.count(model.block.bn) == 1
+
+
+def test_zero_match_plan_does_not_mutate_batchnorm_children(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(parallelism, "global_device_mesh", _FakeMesh)
+    sharded: list[nn.Module] = []
+
+    def shard(module: nn.Module, **kwargs: object) -> None:
+        del kwargs
+        sharded.append(module)
+
+    monkeypatch.setattr(parallelism, "fully_shard", shard)
+    config = RecursiveSharded.Config()
+    config.module_types = (nn.Conv2d,)
+    config.mp_param_dtype = torch.bfloat16
+    with pytest.raises(ValueError, match="found 0"):
+        config.make()(_BNModel())
+    assert sharded == []
+
+
+@pytest.mark.parametrize("dtype", [torch.bool, torch.uint8])
+def test_materialization_accepts_initialized_discrete_buffers(
+    dtype: torch.dtype,
+) -> None:
+    class InitializedBuffer(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.register_buffer("state", torch.empty(2, dtype=dtype))
+
+        def reset_parameters(self) -> None:
+            self.get_buffer("state").fill_(True if dtype == torch.bool else 0)
+
+    with torch.device("meta"):
+        model = InitializedBuffer()
+    materialize_meta(model, torch.device("cpu"))
+    assert torch.equal(
+        model.get_buffer("state"),
+        torch.full((2,), True if dtype == torch.bool else 0, dtype=dtype),
+    )
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_materialization_failure_reaches_every_rank(
+    monkeypatch: pytest.MonkeyPatch,
+    rank: int,
+) -> None:
+    class FailingReset(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = nn.Parameter(torch.empty(2, 3))
+
+        def reset_parameters(self) -> None:
+            if rank == 0:
+                raise RuntimeError("injected reset failure")
+            nn.init.ones_(self.weight)
+
+    observed: list[str | None] = []
+
+    def gather(errors: list[str | None], error: str | None) -> None:
+        observed.append(error)
+        errors[:] = ["injected reset failure", None]
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+    monkeypatch.setattr(torch.distributed, "all_gather_object", gather)
+    with torch.device("meta"):
+        model = FailingReset()
+    with pytest.raises(RuntimeError, match="injected reset failure"):
+        materialize_meta(model, torch.device("cpu"))
+    assert observed == (["injected reset failure"] if rank == 0 else [None])
+
+
+class _RankFailingReset(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.empty(2, 3))
+
+    def reset_parameters(self) -> None:
+        if torch.distributed.get_rank() == 0:
+            raise RuntimeError("injected reset failure")
+        nn.init.ones_(self.weight)
+
+
+def _materialization_failure_worker(result_dir: str, mesh: DeviceMesh) -> None:
+    with torch.device("meta"):
+        model = _RankFailingReset()
+    with pytest.raises(RuntimeError, match="injected reset failure"):
+        materialize_meta(model, torch.device("cpu"))
+    (Path(result_dir) / f"rank_{mesh.get_rank()}").write_text("ok")
+
+
+@pytest.mark.compute_distributed
+def test_materialization_failure_reaches_real_peers(
+    warm_pools: WarmPoolGetter,
+    tmp_path: Path,
+) -> None:
+    """Propagate a rank-zero reset failure across a real two-rank group."""
+    pool = warm_pools({"dp": 2})
+    pool(functools.partial(_materialization_failure_worker, str(tmp_path)))
+    assert {p.name: p.read_text() for p in tmp_path.iterdir()} == {
+        "rank_0": "ok",
+        "rank_1": "ok",
+    }
 
 
 if __name__ == "__main__":

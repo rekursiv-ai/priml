@@ -300,6 +300,7 @@ def test_one_cycle_rises_then_falls() -> None:
 
 
 def test_one_cycle_rejects_an_all_ramp_run() -> None:
+    assert one_cycle(0.0, warmup_fraction=0.0) == 1.0
     assert one_cycle(0.5, warmup_fraction=0.0) == pytest.approx(0.5)
     assert one_cycle(0.5, warmup_fraction=0.0, final=0.2) == pytest.approx(0.6)
     with pytest.raises(ValueError, match=r"warmup_fraction must lie in \[0, 1\)"):
@@ -391,6 +392,12 @@ def test_multiply_schedules_carries_a_phased_progress() -> None:
         return 0.5
 
     assert multiply_schedules(ramp, half)(("warmup", 0.4)) == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize("power", [-1.0, float("nan"), float("inf")])
+def test_polynomial_rejects_invalid_power(power: float) -> None:
+    with pytest.raises(ValueError, match="power"):
+        polynomial(1.0, power=power)
 
 
 if __name__ == "__main__":

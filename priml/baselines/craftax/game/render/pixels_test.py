@@ -164,8 +164,7 @@ def test_beyond_the_map_edge_is_flat_grey(renderer: Renderer) -> None:
 
 @pytest.mark.compute_large_fixture
 def test_an_unlit_tile_is_black(renderer: Renderer) -> None:
-    # Darkness genuinely hides the world here, exactly as it does in the
-    # observation the agent reads.
+    # Shading is proportional to missing light, so no light at all is black.
     state = _state()
     state.light_map[:] = 0.0
     frame = cast(NDArray[np.uint8], renderer.render(state))
@@ -305,40 +304,49 @@ def test_default_renderer_has_default_tile_geometry(sprite_dir: Path) -> None:
     assert renderer.frame_shape == (rows * 64, columns * 64)
 
 
-def test_renderer_initializes_pygame_when_needed(
+def test_rendering_leaves_sdl_and_the_environment_untouched(
     sprite_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    initialized: list[None] = []
-    monkeypatch.setattr(pygame.display, "get_surface", lambda: None)
-    monkeypatch.setattr(pygame, "get_init", lambda: False)
-    monkeypatch.setattr(pygame, "init", lambda: initialized.append(None))
-    monkeypatch.setattr(sprites, "every_sprite", lambda: ())
+    """A viewer object must not decide which display a later window gets.
 
-    Renderer(asset_dir=sprite_dir)
-
-    assert initialized == [None]
-
-
-def test_constructing_a_renderer_requests_the_headless_driver(
-    sprite_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A viewer object must not put a window on an operator's screen.
-
-    Checked by reading the request the renderer makes, not by spawning an
-    interpreter to see which driver SDL then bound. The two are the same
-    assertion -- SDL resolves the driver at the FIRST init of any subsystem
-    and honours ``SDL_VIDEODRIVER`` when it does, so a renderer that sets it
-    to ``dummy`` before that init cannot end up on x11 -- and this form costs
-    a dictionary read rather than a fresh torch import.
-
-    The variable is cleared first, because the surrounding suite sets it: left
-    in place the assertion would pass without the renderer doing anything.
+    SDL binds its video driver at the first subsystem init and keeps it for
+    the process, so a renderer that initialized SDL, or exported a driver,
+    would leave a later ``play`` in the same process without a window.
+    Loading, scaling, compositing, and reading back surfaces need neither.
+    The variable is cleared first, because the surrounding suite sets it.
     """
     monkeypatch.delenv("SDL_VIDEODRIVER", raising=False)
-    Renderer(block_pixels=TILE, asset_dir=sprite_dir)
-    assert os.environ["SDL_VIDEODRIVER"] == "dummy"
+    inits: list[str] = []
+    monkeypatch.setattr(pygame, "init", lambda: inits.append("pygame"))
+    monkeypatch.setattr(pygame.display, "init", lambda: inits.append("display"))
+
+    Renderer(block_pixels=TILE, asset_dir=sprite_dir).render(_state())
+
+    assert "SDL_VIDEODRIVER" not in os.environ
+    assert inits == []
+
+
+@pytest.mark.parametrize("view", [(5, 7), (3, 3)])
+def test_the_frame_is_the_configured_view(
+    sprite_dir: Path,
+    view: tuple[int, int],
+) -> None:
+    renderer = Renderer(block_pixels=TILE, asset_dir=sprite_dir, view=view)
+    frame = cast(NDArray[np.uint8], renderer.render(_state()))
+    assert renderer.frame_shape == (view[0] * TILE, view[1] * TILE)
+    assert frame.shape == (*renderer.frame_shape, 3)
+    # The player stands at the centre of the configured view, not of 9x11.
+    center = (view[0] // 2 * TILE, view[1] // 2 * TILE)
+    assert _pixel(frame, *center) == _colour(
+        sprites.PLAYER_SPRITES[3],
+    )
+
+
+@pytest.mark.parametrize("view", [(0, 3), (3, -1)])
+def test_a_degenerate_view_is_refused(sprite_dir: Path, view: tuple[int, int]) -> None:
+    with pytest.raises(ValueError, match=r"^view must be positive in both dimensions$"):
+        Renderer(asset_dir=sprite_dir, view=view)
 
 
 def test_constructing_a_renderer_creates_no_display_surface(

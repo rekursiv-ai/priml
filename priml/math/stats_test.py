@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 import functools
@@ -28,6 +29,10 @@ from priml.math.stats import (
     quantile_normalize,
     total_variation,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _power_input() -> Tensor:
@@ -114,7 +119,7 @@ def test_cov_1d_cross_is_the_scalar_cross_covariance():
 def test_cov_1d_unbiased_singleton_and_two_observations():
     one = cov(torch.tensor([2.0]), bias=False)
     two = cov(torch.tensor([1.0, 3.0]), bias=False)
-    torch.testing.assert_close(one, torch.tensor(0.0))
+    assert torch.isnan(one)
     torch.testing.assert_close(two, torch.tensor(2.0))
 
 
@@ -573,7 +578,8 @@ def test_cov_rowvar_cross_and_single_observation():
     torch.testing.assert_close(cov(x, y, rowvar=True), expected)
     one = cov(torch.tensor([[2.0, 8.0]]), bias=False)
     # `cov` returns a square variable-by-variable covariance matrix.
-    torch.testing.assert_close(one, torch.zeros((2, 2)))
+    assert one.shape == (2, 2)
+    assert torch.isnan(one).all()
 
 
 def test_cov_batched_rowvar_cross_centers_and_preserves_batch_axis():
@@ -879,15 +885,16 @@ def test_householder_qr_uses_strict_scaled_zero_threshold():
     assert torch.equal(r, expected)
 
 
-def test_householder_qr_scales_zero_threshold_by_rows_not_columns():
+def test_householder_qr_threshold_tracks_matrix_scale():
     epsilon = torch.finfo(torch.float32).eps
     matrix = torch.tensor(
         [[1.25 * epsilon, 0.0], [0.0, 0.0], [0.0, 0.0]],
         dtype=torch.float32,
     )
     q, r = _householder_qr(matrix)
-    assert torch.equal(q, torch.eye(3))
-    assert torch.equal(r, matrix)
+    torch.testing.assert_close(q @ r, matrix)
+    assert q[0, 0] == -1
+    assert torch.equal(r, -matrix)
 
 
 def test_householder_qr_continues_after_a_zero_column():
@@ -925,6 +932,80 @@ def test_sliding_window_uses_elapsed_time_and_cumulative_count_deltas():
     window.add(3.0, 10.0)
     window.add(8.0, 20.0)
     assert window.compute_rate(9.0, 30.0) == pytest.approx(22.0 / 6.1)
+
+
+def test_householder_zero_pivot_is_triangular() -> None:
+    # QR of a permutation is square by definition.
+    matrix = torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=torch.float64)
+    q, r = _householder_qr(matrix)
+    torch.testing.assert_close(q @ r, matrix)
+    torch.testing.assert_close(r.tril(-1), torch.zeros_like(r), atol=1e-14, rtol=0)
+
+
+def test_pca_power_is_scale_equivariant() -> None:
+    x = torch.tensor([[1.0, 2.0], [3.0, -2.0], [-1.0, 4.0]]) * 1e-5
+    x = x - x.mean(0)
+    expected, _ = pca_eigh(x)
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(7)
+        actual, _ = pca_power(x, num_iters=40)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=0)
+
+
+def test_quantile_normalize_float64() -> None:
+    x = torch.arange(6, dtype=torch.float64).reshape(2, 3)
+    torch.testing.assert_close(quantile_normalize(x, q=0.2), (x - 1) / 3)
+
+
+@pytest.mark.parametrize("keepdim", [False, True])
+def test_entropy_logits_joint_event_axes(keepdim: bool) -> None:
+    x = torch.zeros(2, 3, 4, dtype=torch.float64)
+    result = entropy_logits(x, dim=(1, 2), keepdim=keepdim)
+    expected = torch.full((2, 1, 1) if keepdim else (2,), math.log(12), dtype=x.dtype)
+    torch.testing.assert_close(result, expected)
+
+
+def test_entropy_mean_remaps_event_axis() -> None:
+    x = torch.zeros(2, 3, 4, dtype=torch.float64)
+    result = entropy_logits_mean_all_to_all(x, dim=1, dim_mean=0)
+    torch.testing.assert_close(result, torch.full((4,), math.log(3), dtype=x.dtype))
+
+
+def test_entropy_boundary_contracts() -> None:
+    torch.testing.assert_close(
+        entropy_logits(torch.tensor([0.0, -math.inf])),
+        torch.tensor(0.0),
+    )
+    assert entropy_probs(torch.tensor([1.0, 0.0]), torch.tensor([0.0, 1.0])).isposinf()
+    assert cov(torch.tensor([2.0]), bias=False).isnan()
+    assert cov(torch.tensor([[2.0, 3.0]]), bias=False).isnan().all()
+
+
+@pytest.mark.parametrize("constant", [False, True])
+def test_pca_rank_deficient_whitening_is_finite(constant: bool) -> None:
+    x = (
+        torch.zeros(2, 3)
+        if constant
+        else torch.tensor([[1.0, 2.0, 3.0], [-1.0, -2.0, -3.0]])
+    )
+    _, vectors = pca(x, whiten=True)
+    assert vectors.isfinite().all()
+
+
+_EMPTY_DIM_REDUCERS: list[Callable[[Tensor], Tensor]] = [
+    functools.partial(entropy_logits, dim=()),
+    functools.partial(entropy_probs, dim=()),
+    functools.partial(total_variation, torch.zeros(2, 3), dim=()),
+    functools.partial(entropy_logits_mean_all_to_all, dim=()),
+    functools.partial(jsd, ensemble_dim=()),
+    functools.partial(jsd, event_dim=()),
+]
+
+
+@pytest.mark.parametrize("reduce", _EMPTY_DIM_REDUCERS)
+def test_reducers_reject_an_empty_dim(reduce: Callable[[Tensor], Tensor]) -> None:
+    with pytest.raises(ValueError, match="at least one axis"):
+        reduce(torch.zeros(2, 3))
 
 
 if __name__ == "__main__":

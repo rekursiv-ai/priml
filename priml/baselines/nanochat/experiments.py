@@ -35,10 +35,10 @@ optimization, and fused attention kernels. ``exp020`` switches to prepared
 swaps them for a ConvexTok vocabulary (``priml.baselines.convextok``).
 
 ``exp004`` through ``exp023`` default to 525 charged training seconds for
-H-series GPUs, excluding compilation warmup and evaluation. Each factory
-includes a commented 300-second budget for B200. In this added sequence,
-``exp004`` through ``exp015`` also use Hopper-only FA3 and need an
-attention-backend change for B200. ``exp016`` onward use FlashAttention-4 and
+H-series GPUs, excluding compilation warmup and evaluation. ``exp024`` is
+``exp022`` at B200's 300-second budget. In this added sequence, ``exp004``
+through ``exp015`` also use Hopper-only FA3 and need an attention-backend
+change for B200. ``exp016`` onward use FlashAttention-4 and
 Triton kernels. ``exp_smoke`` uses portable attention and a small model to
 check an installation.
 
@@ -464,14 +464,10 @@ def exp004() -> NgramTrainLoop.Config:
     config = NgramTrainLoop.Config().update(exp000())
     config.step = NgramTrainStep.Config().update(config.step)
     config.step.model = MemoryNanoChatLM.Config().update(config.step.model)
-    config.study_name = "nanochat"
     config.experiment_name = "exp004"
     config.step.train_budget_sec = 525.0
     config.max_time = config.step.train_budget_sec
-    config.seed = 42
     config.working_dir = "/runs/{study_name}/{experiment_name}"
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # config.max_time = config.step.train_budget_sec = 300.0 # Seconds.
     return config
 
 
@@ -490,15 +486,12 @@ def exp005() -> NgramTrainLoop.Config:
     """
     cfg = exp004()
     cfg.experiment_name = "exp005"
-    cfg.working_dir = "/runs/{study_name}/{experiment_name}"
     cfg.step.rows_per_pass = 256
     cfg.step.model.channels_in = 768
     cfg.step.model.num_layers = 5
     attention = cfg.step.model.template.attn
     assert isinstance(attention, ValueGatedAttention.Config)
     attention.window = 384
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg
 
 
@@ -522,8 +515,6 @@ def exp006() -> NgramTrainLoop.Config:
     context.channels_in = 1_048_576
     context.inner = Embedding.Config(init_weight=torch.nn.init.zeros_)
     cfg.step.model.embedding = embedding
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg
 
 
@@ -570,8 +561,6 @@ def exp007() -> NgramTrainLoop.Config:
             "embed.contexts.trigram.inner",
         ),
     )
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg
 
 
@@ -635,8 +624,6 @@ def exp008() -> NgramTrainLoop.Config:
     schedule.flat = 0.4
     schedule.final = 0.05
     cfg.step.momentum_warmup_steps = 200
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg
 
 
@@ -686,8 +673,6 @@ def exp009() -> NgramTrainLoop.Config:
         fullgraph=True,
         mode="max-autotune-no-cudagraphs",
     )
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg
 
 
@@ -712,6 +697,9 @@ def exp010() -> NgramTrainLoop.Config:
     assert isinstance(model.lm_head, softcap.SoftCap.Config)
     model.lm_head = ScaledSoftCap.Config().update(model.lm_head)
     model.lm_head.output_cap = 15
+    # Caps in the projection's own width, as the campaign measured it; the
+    # inherited float32 would widen before the tanh.
+    model.lm_head.dtype = None
     assert isinstance(model.block, list)
     for block in model.block:
         assert isinstance(
@@ -730,8 +718,6 @@ def exp010() -> NgramTrainLoop.Config:
         for norm in (block.norm1, block.norm2):
             assert isinstance(norm, RMSNorm.Config)
             norm.eps = None
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg
 
 
@@ -771,8 +757,6 @@ def exp011() -> NgramTrainLoop.Config:
     pooling.lr = cast(float, pooling.lr) * 0.15
     optimizer.optimizers.append(pooling)
     optimizer.select.append(matching("pool_weights"))
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg
 
 
@@ -791,8 +775,6 @@ def exp012() -> NgramTrainLoop.Config:
     cfg.experiment_name = "exp012"
     cfg.dataset.working_dir = "/datasets/nanochat/train14"
     cfg.dataset.train_shard_indices = (0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14)
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg
 
 
@@ -929,8 +911,6 @@ def exp013() -> NgramTrainLoop.Config:
     optimizer.optimizers.append(matrices)
     step.optimizer = optimizer
     cfg.step = step
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg
 
 
@@ -956,8 +936,6 @@ def exp014() -> NgramTrainLoop.Config:
         assert isinstance(block.ffn, OutputNormFeedForward.Config)
         block.ffn.expansion = expansion
     # Inherited FFNScaledNorMuon now applies sqrt(4 / expansion) to FFN inputs.
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg
 
 
@@ -998,8 +976,6 @@ def exp015() -> NgramTrainLoop.Config:
     matrices.channels_in = model.channels_in
     matrices.ffn_lr_multiplier = 1.25
     cfg.dataset.train_buffer_size = 256
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg
 
 
@@ -1023,8 +999,6 @@ def exp016() -> NgramTrainLoop.Config:
     for block in cfg.step.model.block:
         assert isinstance(block.attn, CausalAttention.Config)
         block.attn.kernel = Flash4Attention.Config()
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg
 
 
@@ -1048,8 +1022,6 @@ def exp017() -> NgramTrainLoop.Config:
     for block in model.block:
         assert isinstance(block.attn, CausalAttention.Config)
         block.attn.fused_qk_rope = True
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg
 
 
@@ -1095,8 +1067,6 @@ def exp018() -> NgramTrainLoop.Config:
     matrices = optimizer.optimizers[8]
     assert isinstance(matrices, FFNScaledNorMuon.Config)
     matrices.channels_in = model.channels_in
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg
 
 
@@ -1122,8 +1092,6 @@ def exp019() -> NgramTrainLoop.Config:
         SourceReuseTransformerBlock.Config().update(block) for block in model.block
     ]
     cfg.dataset.working_dir = "/datasets/nanochat/augmented"
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg
 
 
@@ -1171,8 +1139,6 @@ def exp020() -> NgramTrainLoop.Config:
         "/datasets/nanochat/unigram16k/prepared/eval/PACKED_EVAL_MANIFEST.json"
     )
     cfg.dataset.reference_evaluation = ReferenceEvaluation.Config()
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg
 
 
@@ -1202,8 +1168,6 @@ def exp021() -> NgramTrainLoop.Config:
     for member in optimizer.optimizers:
         if isinstance(member, BiasCorrectedRMSProp.Config):
             member.sparse_rows = True
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg
 
 
@@ -1211,11 +1175,13 @@ def exp022() -> NgramTrainLoop.Config:
     """Fork exp021 with the following changes.
 
     - Zero-initialize memory tables after consuming their original initialization draws.
+    - Redraw every hash multiplier from a range of 64x the vocabulary (was 128x).
+
+    The two travel together: the campaign measured them as one checkpoint.
 
     Results:
       Campaign H200, 525s: 0.887457 mean BPB (10 seeds).
       Campaign H200, 300s: 0.922382 mean BPB (10 seeds).
-      Campaign B200, 300s: 0.887791 mean BPB (10 seeds).
       Standalone Priml H200, 300s: 0.923656 mean BPB (3 seeds).
 
     """
@@ -1223,7 +1189,7 @@ def exp022() -> NgramTrainLoop.Config:
     cfg.experiment_name = "exp022"
     model = cfg.step.model
     assert isinstance(model, MemoryNanoChatLM.Config)
-    # Widening the coefficient range changes the mapping, even with the same seed.
+    # Narrowing the coefficient range changes the mapping, even with the same seed.
     hash_capacity = model.vocab_size * 64
     rng = torch.Generator().manual_seed(0)
     for table in (*model.bigrams.values(), *model.trigrams.values()):
@@ -1246,8 +1212,6 @@ def exp022() -> NgramTrainLoop.Config:
     for tables in (model.bigrams, model.trigrams):
         for table in tables.values():
             table.init_after = torch.nn.init.zeros_
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg
 
 
@@ -1283,8 +1247,28 @@ def exp023() -> NgramTrainLoop.Config:
     cfg.dataset.prepared_eval_manifest = (
         "/datasets/nanochat/convextok16k/prepared/eval/PACKED_EVAL_MANIFEST.json"
     )
-    # Uncomment for B200's 300-second budget; leave commented for H-series.
-    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
+    return cfg
+
+
+def exp024() -> NgramTrainLoop.Config:
+    """Fork exp022 with the following changes.
+
+    - Train for B200's 300-second budget instead of Hopper's 525.
+
+    Hypothesis:
+      A B200 completes in 300 seconds about the steps an H200 completes in
+      525, so the recipe should score as exp022 does on H200 at 525 seconds.
+
+    References:
+      https://rekursiv.ai/blog/autoautoresearch/
+
+    Results:
+      Campaign B200, 300s: 0.887791 mean BPB (10 seeds).
+
+    """
+    cfg = exp022()
+    cfg.experiment_name = "exp024"
+    cfg.max_time = cfg.step.train_budget_sec = 300.0
     return cfg
 
 
@@ -1306,10 +1290,10 @@ def exp_smoke() -> NanoChatLoop.Config:
     parallelism = cfg.step.parallelism
     assert isinstance(parallelism, NoParallel.Config)
     parallelism.device = None
-    cfg.dataset.device = "auto"
+    cfg.dataset.device = None
     runtime = cfg.runtime
     assert isinstance(runtime, SingleProcess.Config)
-    runtime.device = "auto"
+    runtime.device = None
     cfg.step.model.vocab_size = 16
     # The value gate reads a fixed 32 channels_in of its input, so a model
     # narrower than 32 has a gate of a different shape than the reference's.

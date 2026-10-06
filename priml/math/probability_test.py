@@ -186,13 +186,14 @@ def test_uniform_functions_use_nonzero_support_bounds() -> None:
     )
 
 
-def test_quantile_uniform_rejects_out_of_range_p():
-    """P outside [0, 1] is outside the quantile domain and must raise."""
-    error = r"\Aquantile_uniform requires p in \[0, 1\]\.\Z"
-    with pytest.raises(ValueError, match=error):
-        quantile_uniform(torch.tensor([0.5, 2.0]), 0.0, 1.0)
-    with pytest.raises(ValueError, match=error):
-        quantile_uniform(torch.tensor([-0.1, 0.5]), 0.0, 1.0)
+def test_quantile_uniform_out_of_domain_is_nan():
+    p = torch.tensor([-0.1, 0.5, 2.0, math.nan])
+    result = quantile_uniform(p, 0.0, 1.0)
+    torch.testing.assert_close(
+        result,
+        torch.tensor([math.nan, 0.5, math.nan, math.nan]),
+        equal_nan=True,
+    )
 
 
 def test_pdf_logit_normal():
@@ -243,7 +244,9 @@ def test_truncated_normal_cdf_matches_asymmetric_reference() -> None:
     std_high = (high - loc) / scale
     low_cdf = torch.special.ndtr(torch.tensor(std_low, dtype=x.dtype))
     high_cdf = torch.special.ndtr(torch.tensor(std_high, dtype=x.dtype))
-    expected = (torch.special.ndtr((x - loc) / scale) - low_cdf) / (high_cdf - low_cdf)
+    expected = (
+        (torch.special.ndtr((x - loc) / scale) - low_cdf) / (high_cdf - low_cdf)
+    ).clamp(0, 1)
     torch.testing.assert_close(result, expected, rtol=1e-12, atol=1e-12)
 
 
@@ -275,7 +278,7 @@ def test_truncated_normal_defaults_use_zero_location_and_unit_scale() -> None:
     result = cdf_truncated_normal(x, low=low, high=high)
     low_cdf = torch.special.ndtr(torch.tensor(low, dtype=x.dtype))
     high_cdf = torch.special.ndtr(torch.tensor(high, dtype=x.dtype))
-    expected = (torch.special.ndtr(x) - low_cdf) / (high_cdf - low_cdf)
+    expected = ((torch.special.ndtr(x) - low_cdf) / (high_cdf - low_cdf)).clamp(0, 1)
     torch.testing.assert_close(result, expected, rtol=1e-12, atol=1e-12)
 
 
@@ -410,29 +413,29 @@ def test_degenerate_probability_gradients_are_finite_and_zero(
             assert torch.equal(value, torch.zeros_like(value))
 
 
-def test_quantile_truncated_normal_rejects_out_of_range_p():
-    """P outside [0, 1] is outside the quantile domain and must raise.
-
-    Matches quantile_uniform, which already guards its p-domain.
-    """
-    error = r"\Aquantile_truncated_normal requires p in \[0, 1\]\.\Z"
-    with pytest.raises(ValueError, match=error):
-        quantile_truncated_normal(torch.tensor([0.5, 2.0]), low=-2.0, high=2.0)
-    with pytest.raises(ValueError, match=error):
-        quantile_truncated_normal(torch.tensor([-0.1, 0.5]), low=-2.0, high=2.0)
+def test_quantile_truncated_normal_out_of_domain_is_nan():
+    p = torch.tensor([-0.1, 0.5, 2.0, math.nan])
+    result = quantile_truncated_normal(p, low=-2.0, high=2.0)
+    assert result[[0, 2, 3]].isnan().all()
+    torch.testing.assert_close(result[1], torch.tensor(0.0), atol=1e-6, rtol=0)
 
 
-def test_random_categorical_all_neg_inf_logits_raises():
-    """All -inf logits define no distribution; the cmf becomes NaN.
+def test_quantile_truncated_normal_sanitizes_out_of_domain_gradient() -> None:
+    p = torch.tensor([-0.1, 0.4, 1.1], requires_grad=True)
+    result = quantile_truncated_normal(p, low=-2.0, high=2.0)
+    result[1].backward()
+    assert p.grad is not None
+    assert torch.isfinite(p.grad[1])
+    torch.testing.assert_close(result[1], torch.tensor(-0.24158715), atol=1e-6, rtol=0)
 
-    Silently returning index 0 (or out-of-range) hides a malformed input, so
-    the function must reject it rather than sample garbage.
-    """
-    with pytest.raises(
-        ValueError,
-        match=r"\Arandom_categorical requires at least one finite logit per row\.\Z",
-    ):
-        random_categorical(5, logits=torch.tensor([-math.inf, -math.inf, -math.inf]))
+
+def test_random_categorical_all_neg_inf_logits_propagate_nan():
+    result = random_categorical(
+        5,
+        logits=torch.tensor([-math.inf, -math.inf, -math.inf]),
+    )
+    assert result.shape == (5,)
+    assert torch.equal(result, torch.zeros(5, dtype=torch.long))
 
 
 def test_pdf_logit_distribution_outside_unit_interval_is_zero():
@@ -804,8 +807,8 @@ def test_random_categorical_uses_cumulative_probability_boundaries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     probabilities = torch.tensor([[0.2, 0.3, 0.5], [0.6, 0.4, 0.0]])
-    # random_categorical draws have the production sample shape [N, 1, 1].
-    draws = torch.tensor([0.1, 0.2, 0.5, 0.6, 0.9]).reshape(5, 1, 1)
+    # Pin the same boundary probes on each independent batch row.
+    draws = torch.tensor([0.1, 0.2, 0.5, 0.6, 0.9]).reshape(5, 1, 1).expand(5, 2, 1)
     rand = Mock(return_value=draws)
     monkeypatch.setattr(torch, "rand", rand)
 
@@ -817,7 +820,7 @@ def test_random_categorical_uses_cumulative_probability_boundaries(
     )
     assert rand.call_args == call(
         5,
-        1,
+        2,
         1,
         dtype=probabilities.dtype,
         device=probabilities.device,
@@ -836,12 +839,9 @@ def test_random_categorical_normalizes_unnormalized_probabilities(
     assert torch.equal(samples, torch.tensor([1]))
 
 
-def test_random_categorical_rejects_all_negative_infinity_singleton() -> None:
-    with pytest.raises(
-        ValueError,
-        match=r"\Arandom_categorical requires at least one finite logit per row\.\Z",
-    ):
-        random_categorical(1, logits=torch.tensor([-math.inf]))
+def test_random_categorical_all_negative_infinity_singleton_propagates_nan() -> None:
+    result = random_categorical(1, logits=torch.tensor([-math.inf]))
+    assert torch.equal(result, torch.zeros(1, dtype=torch.long))
 
 
 @pytest.mark.parametrize("use_logits", [False, True])
@@ -1407,6 +1407,88 @@ def test_random_logit_normal_default_dtype_hint_is_float32() -> None:
         torch.set_default_dtype(previous)
 
     assert result.dtype is torch.float32
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_ndtri_exact_tail_cases(dtype: torch.dtype) -> None:
+    p = torch.tensor([1e-30, 1e-10, 1e-8, 0.5, 1 - 1e-6, 0.0, 1.0], dtype=dtype)
+    expected = torch.special.ndtri(p)
+    torch.testing.assert_close(
+        ndtri(p),
+        expected,
+        rtol=1e-6 if dtype == torch.float32 else 1e-14,
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize("use_logits", [False, True])
+def test_categorical_batch_rows_are_independent(use_logits: bool) -> None:
+    probs = torch.full((2, 3), 1 / 3)
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(17)
+        samples = (
+            random_categorical(300, logits=probs.log())
+            if use_logits
+            else random_categorical(300, probs=probs)
+        )
+    agreement = (samples[:, 0] == samples[:, 1]).float().mean()
+    assert 0.2 < agreement < 0.5
+
+
+@pytest.mark.parametrize(
+    "probs",
+    [[0.0, 0.0], [-1.0, 2.0], [math.nan, 1.0], [math.inf, 1.0]],
+)
+def test_categorical_invalid_probability_rows_propagate_nan(
+    probs: list[float],
+) -> None:
+    result = random_categorical(2, probs=probs)
+    assert result.shape == (2,)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_truncated_cdf_saturates_at_support(reverse: bool) -> None:
+    low, high = (1.0, 0.0) if reverse else (0.0, 1.0)
+    x = torch.tensor([-1.0, 2.0], dtype=torch.float64)
+    expected = torch.tensor([1.0, 0.0] if reverse else [0.0, 1.0], dtype=x.dtype)
+    torch.testing.assert_close(
+        cdf_truncated_normal(x, low=low, high=high),
+        expected,
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        log_cdf_truncated_normal(x, low=low, high=high),
+        expected.log(),
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_point_mass_log_cdf_boundary_gradient() -> None:
+    x = torch.tensor([1.0, 2.0], dtype=torch.float64, requires_grad=True)
+    low = torch.tensor([1.0, 2.0], dtype=torch.float64, requires_grad=True)
+    high = low.detach().clone().requires_grad_()
+    log_cdf_truncated_normal(x, low=low, high=high).sum().backward()
+    for value in (x, low, high):
+        assert value.grad is not None
+        torch.testing.assert_close(value.grad, torch.zeros_like(value), rtol=0, atol=0)
+
+
+def test_discretized_logistic_collapsed_float16_edges() -> None:
+    result = log_prob_discretized_logistic(
+        torch.tensor([128.0, 129.0], dtype=torch.float16),
+        torch.tensor(100.0, dtype=torch.float16),
+        torch.tensor(0.0, dtype=torch.float16),
+    )
+    assert result.isfinite().all()
+
+
+@pytest.mark.parametrize("function", [quantile_uniform, quantile_truncated_normal])
+def test_quantile_fullgraph(function: Callable[..., Tensor]) -> None:
+    compiled = torch.compile(function, backend="eager", fullgraph=True)
+    p = torch.tensor([0.25, 0.75])
+    torch.testing.assert_close(compiled(p), function(p))
 
 
 if __name__ == "__main__":

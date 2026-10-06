@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 import torch
 import torch.distributed as dist
 
+from priml.math.distributed import collective_device
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -43,18 +45,10 @@ def run_rank_zero_build(*, name: str, build: Callable[[], None]) -> None:
             error = exc
             message = f"{type(exc).__name__}: {exc}"
 
-    # NCCL all_reduce requires a CUDA tensor; only gloo reduces CPU tensors
-    # (cf. seed.py, train_loop.py). A CPU tensor here would raise an NCCL error
-    # on the GPU cluster -- defeating this helper's whole fail-fast purpose.
-    device = (
-        torch.device(torch.cuda.current_device())
-        if dist.get_backend() == "nccl"
-        else torch.device("cpu")
-    )
     success = torch.tensor(
         [1 if message is None else 0],
         dtype=torch.int32,
-        device=device,
+        device=collective_device(),
     )
     dist.all_reduce(success, op=dist.ReduceOp.MIN)
     if int(success.item()) == 1:

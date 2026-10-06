@@ -105,6 +105,11 @@ class ExtractedImageNetSource:
         with labels_file.open() as f:
             labels = [line.strip() for line in f]
 
+        if len(filenames) != len(labels):
+            raise ValueError(
+                f"{len(filenames)} validation images but {len(labels)} labels "
+                f"in {labels_file}.",
+            )
         return dict(zip(filenames, labels, strict=True))
 
     def __iter__(self) -> Iterator[Sample]:
@@ -166,10 +171,3 @@ class ExtractedImageNetSource:
                 "frames": 1,
             }
             yield sample
-
-    def __len__(self) -> int:
-        """Return approximate number of samples."""
-        if self.split == "train":
-            return 1_281_167
-        # Val.
-        return 50_000

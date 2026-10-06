@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Final, override
 
 from configgle import Fig, Makeable
-from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
 
 import pytest
@@ -45,6 +44,7 @@ from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.mmdit import MMDiTBlock
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent

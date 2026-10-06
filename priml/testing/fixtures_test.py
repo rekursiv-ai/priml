@@ -12,40 +12,13 @@ import torch
 
 from priml.testing import fixtures
 from priml.testing.fixtures import (
-    get_device,
     poison_free_pool,
     torch_compiler_isolation,
 )
 
 
-def test_get_device_returns_device():
-    """Test that get_device returns a torch.device."""
-    device = get_device()
-    assert device.type in ("cpu", "cuda")
-
-
-@pytest.mark.parametrize(
-    ("available", "expected"),
-    [(False, "cpu"), (True, "cuda")],
-)
-def test_get_device_matches_cuda_availability(
-    monkeypatch: pytest.MonkeyPatch,
-    available: bool,
-    expected: str,
-) -> None:
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: available)
-
-    assert get_device() == torch.device(expected)
-
-
-def test_get_device_prefers_cuda():
-    """Test that get_device returns CUDA if available."""
-    if torch.cuda.is_available():
-        device = get_device()
-        assert device.type == "cuda"
-    else:
-        device = get_device()
-        assert device.type == "cpu"
+def test_the_testing_helpers_leave_device_choice_to_the_runtime() -> None:
+    assert not hasattr(fixtures, "get_device")
 
 
 @pytest.mark.gpu_torch_cuda

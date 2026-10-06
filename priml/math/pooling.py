@@ -168,14 +168,10 @@ def _adaptive_avg_pool(
             s != 0,
             lambda: f"Expected non-zero spatial dims, got shape {tuple(x.shape)}",
         )
-    # Zero is checked but negatives are not: torch already rejects those with
-    # "elements of output_size must be greater than or equal to 0", while it
-    # ACCEPTS zero and returns an empty tensor -- which the variance-preserving
-    # path below cannot, since it divides by the window size.
     for o in output_size:
         _check(
-            o != 0,
-            lambda: f"Expected non-zero output_size, got {output_size}",
+            o > 0,
+            lambda: f"Expected positive output_size, got {output_size}",
         )
 
     # Plain mean pooling has a fused primitive; only the variance-preserving

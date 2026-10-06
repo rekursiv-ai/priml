@@ -11,6 +11,7 @@ from torch import Tensor
 import torch
 import torch.distributed as dist
 
+from priml.math.basic import reduction_dims
 from priml.memory import convert_to_tensor
 
 
@@ -20,9 +21,36 @@ if TYPE_CHECKING:
     from priml.math.custom_types import Tensorable
 
 
+def collective_device(group: dist.ProcessGroup | None = None) -> torch.device:
+    """Return the device a collective on ``group`` must run on.
+
+    NCCL reduces only CUDA tensors, on this rank's CURRENT device -- index 0
+    would put every rank's tensor on one GPU. Every other backend (gloo) takes
+    CPU tensors.
+
+    Args:
+      group: Process group whose backend decides; ``None`` is the default group.
+
+    Returns:
+      device: ``torch.device("cuda", current)`` for NCCL, else the CPU.
+
+    Raises:
+      ValueError: The backend is NCCL but this host has no CUDA device.
+
+    """
+    if dist.get_backend(group) != "nccl":
+        return torch.device("cpu")
+    if not torch.cuda.is_available():
+        raise ValueError(
+            "NCCL backend declared but no CUDA devices are available; "
+            "use gloo for CPU-only distributed training.",
+        )
+    return torch.device("cuda", torch.cuda.current_device())
+
+
 def logsumexp_all_to_all(
     x: Tensorable,
-    dim: int | Sequence[int] = -1,
+    dim: int | Sequence[int] | None = -1,
     keepdim: bool = False,
     world_size: int | None = None,
 ) -> Tensor:
@@ -30,7 +58,7 @@ def logsumexp_all_to_all(
 
     Args:
       x: Local tensor to reduce.
-      dim: Dimension(s) over which to sum in log-space.
+      dim: Dimension(s) over which to sum in log-space; None for all.
       keepdim: If True, reduced dimensions are kept with size 1.
       world_size: Number of ranks; if None, auto-detect from distributed setup.
 
@@ -43,7 +71,7 @@ def logsumexp_all_to_all(
 
 def logmeanexp_all_to_all(
     x: Tensorable,
-    dim: int | Sequence[int] = -1,
+    dim: int | Sequence[int] | None = -1,
     keepdim: bool = False,
     world_size: int | None = None,
 ) -> Tensor:
@@ -51,7 +79,7 @@ def logmeanexp_all_to_all(
 
     Args:
       x: Local tensor to reduce.
-      dim: Dimension(s) over which to average in log-space.
+      dim: Dimension(s) over which to average in log-space; None for all.
       keepdim: If True, reduced dimensions are kept with size 1.
       world_size: Number of ranks; if None, auto-detect from distributed setup.
 
@@ -68,14 +96,18 @@ def logmeanexp_all_to_all(
 # replica reduction.
 def _logsumexp_all_to_all(
     x: Tensorable,
-    dim: int | Sequence[int] = -1,
+    dim: int | Sequence[int] | None = -1,
     keepdim: bool = False,
     world_size: int | None = None,
     mean: bool = False,
 ) -> Tensor:
     """Distributed logsumexp via all_gather + local reduction."""
     x = convert_to_tensor(x)
-    partial_result = torch.logsumexp(x, dim=dim, keepdim=keepdim)
+    partial_result = torch.logsumexp(
+        x,
+        dim=reduction_dims(dim, ndim=x.ndim),
+        keepdim=keepdim,
+    )
     reduced = partial_result.numel()
     # An empty reduction (e.g. a zero-length batch dim) leaves nothing to
     # average; return the empty partial result instead of dividing by zero.

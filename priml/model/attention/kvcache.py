@@ -2,11 +2,29 @@
 
 from __future__ import annotations
 
-from typing import override
+from typing import TYPE_CHECKING, Protocol, override
 
-from torch import Tensor
+from torch import Tensor, nn
 
 import torch
+
+from priml.model.custom_types import (
+    DepthIndex,
+    HasDepthIndex,
+    is_cached_attention,
+)
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+
+class HasModules(Protocol):
+    """A module tree, walked to find every cached attention."""
+
+    def modules(self) -> Iterator[nn.Module]:
+        """Yield every submodule, the root included."""
+        ...
 
 
 class KVCache:
@@ -127,6 +145,56 @@ class KVCache:
         self.length = end
         self.seen += s
         return self.k[..., :end, :], self.v[..., :end, :]
+
+
+def alloc_layer_cache(
+    model: HasModules,
+    *,
+    batch: int | tuple[int, ...],
+    max_seq: int,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype | None = None,
+) -> dict[DepthIndex, object]:
+    """Allocate one cache slot for every cached attention in ``model``.
+
+    Args:
+      model: Module tree containing cached attentions.
+      batch: Batch size or batch shape.
+      max_seq: Maximum sequence length.
+      device: Device for allocated tensors.
+      dtype: Dtype for allocated tensors.
+
+    Returns:
+      cache: Mutable state keyed by each attention's full depth index.
+
+    """
+    result: dict[DepthIndex, object] = {}
+    owners: dict[DepthIndex, str] = {}
+    for module_index, module in enumerate(model.modules()):
+        name = f"{type(module).__name__}[{module_index}]"
+        if not is_cached_attention(module):
+            continue
+        if not isinstance(module, HasDepthIndex):
+            raise TypeError(
+                f"Cached attention {name} has no depth_index.",
+            )
+        key = module.depth_index
+        if not key:
+            raise ValueError(
+                f"Cached attention {name} has an empty depth_index.",
+            )
+        if key in result:
+            raise ValueError(
+                f"Duplicate depth_index {key}: {owners[key]!r} and {name!r}.",
+            )
+        result[key] = module.alloc_kv_cache(
+            batch=batch,
+            max_seq=max_seq,
+            device=device,
+            dtype=dtype,
+        )
+        owners[key] = name or "<root>"
+    return result
 
 
 class _FrozenKVCache(KVCache):

@@ -158,7 +158,7 @@ def change_floor(state: EnvState, action: Tensor) -> EnvState:
     delta = descending.int() - ascending.int()
     arrival = state.player_level.long() + delta
     below = state.up_ladders[rows, arrival]
-    above = state.down_ladders[rows, arrival.clamp(min=0)]
+    above = state.down_ladders[rows, arrival]
     state.player_position = torch.where(
         descending[:, None],
         below,

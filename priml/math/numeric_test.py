@@ -1024,11 +1024,11 @@ def test_log_modulus_is_odd() -> None:
 
 
 def test_log_modulus_gradients() -> None:
-    """d/dx = 1/(1+|x|) off the origin; sign(0) == 0 kills it at the kink."""
+    """The derivative is 1/(1+|x|), including at the origin."""
     x = torch.tensor([-1.0, 0.0, 1.0], dtype=torch.float64, requires_grad=True)
     log_modulus(x).sum().backward()
     assert x.grad is not None
-    expected = torch.tensor([0.5, 0.0, 0.5], dtype=torch.float64)
+    expected = torch.tensor([0.5, 1.0, 0.5], dtype=torch.float64)
     torch.testing.assert_close(x.grad, expected)
 
 
@@ -1378,6 +1378,16 @@ def test_logmeanexp_matches_log_of_mean_for_nonempty_reductions() -> None:
     )
 
 
+def test_logmeanexp_none_reduces_all_dims() -> None:
+    x = torch.tensor([[0.0, 1.0, 2.0], [2.0, -1.0, 0.5]], dtype=torch.float64)
+    for keepdim in (False, True):
+        # `keepdim` keeps the input's rank, as torch's own reductions do.
+        torch.testing.assert_close(
+            logmeanexp(x, dim=None, keepdim=keepdim),
+            torch.logsumexp(x, dim=(0, 1), keepdim=keepdim) - math.log(x.numel()),
+        )
+
+
 def test_mesh_arange_respects_dtype_device_and_exclusive_bounds() -> None:
     grid = mesh_arange(
         [5, 6],
@@ -1467,12 +1477,12 @@ def test_softplus_inverse_pins_both_asymptotic_transitions() -> None:
     )
 
 
-def test_sqrt1pm1_pins_threshold_and_large_negative_input() -> None:
+def test_sqrt1pm1_pins_stable_formula_and_large_negative_input() -> None:
     threshold = torch.finfo(torch.float64).eps ** 0.25
     x = torch.tensor([-0.75, -threshold, threshold / 2, 3.0], dtype=torch.float64)
-    expected = torch.sqrt(1 + x) - 1
+    expected = x / (torch.sqrt(1 + x) + 1)
     torch.testing.assert_close(sqrt1pm1(x), expected, rtol=1e-14, atol=1e-15)
-    assert torch.equal(sqrt1pm1(x[[1, 3]]), expected[[1, 3]])
+    assert torch.equal(sqrt1pm1(x), expected)
     tiny = torch.tensor([1e-8], dtype=torch.float64)
     stable = tiny / (torch.sqrt(1 + tiny) + 1)
     assert torch.equal(sqrt1pm1(tiny), stable)
@@ -1561,12 +1571,11 @@ def test_smoothstep_inverse_matches_clamped_reference() -> None:
         assert torch.equal(actual, expected)
 
 
-def test_softcap_uses_float32_intermediates_before_restoring_float64() -> None:
-    x = torch.tensor([0.25, 1.5, -3.0], dtype=torch.float64)
+def test_softcap_preserves_float64_precision() -> None:
+    x = torch.tensor([1e-10, 0.25, 1.5, -3.0], dtype=torch.float64)
     cap = torch.tensor(1.7, dtype=torch.float64)
-    x32, cap32 = x.float(), cap.float()
-    expected = (torch.tanh(x32 / cap32) * cap32).to(x.dtype)
-    assert torch.equal(softcap(x, cap), expected)
+    expected = torch.tanh(x / cap) * cap
+    torch.testing.assert_close(softcap(x, cap), expected, rtol=1e-15, atol=0)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.float64])
@@ -1625,6 +1634,43 @@ def test_matrix_signum_reference_numerics_pins_default_iteration() -> None:
         actual = matrix_signum_via_newtonschulz(x, reference_numerics=True)
         assert actual.dtype == x.dtype
         assert torch.equal(actual, reference(x))
+
+
+def test_logmeanexp_rejects_no_axes() -> None:
+    with pytest.raises(ValueError, match="at least one axis"):
+        logmeanexp(torch.zeros(2, 3), dim=())
+
+
+def test_matrix_signum_rank_two_uses_same_fused_arithmetic() -> None:
+    x = torch.arange(12, dtype=torch.float32).reshape(3, 4) + 0.3
+    torch.testing.assert_close(
+        matrix_signum_via_newtonschulz(x),
+        matrix_signum_via_newtonschulz(x.unsqueeze(0)).squeeze(0),
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_safe_xlogy_preserves_nan_with_zero_multiplier() -> None:
+    assert safe_xlogy(torch.zeros(2), torch.full((2,), math.nan)).isnan().all()
+
+
+def test_sqrt1pm1_crossover_accuracy() -> None:
+    x = torch.tensor([0.02, -0.02, 1e-10, 1e30], dtype=torch.float32)
+    reference = (x.double() / (torch.sqrt(1 + x.double()) + 1)).float()
+    torch.testing.assert_close(sqrt1pm1(x), reference, rtol=2e-7, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_sqrt1pm1_infinite_endpoints(dtype: torch.dtype) -> None:
+    x = torch.tensor([-math.inf, math.inf, math.nan], dtype=dtype)
+    expected = torch.tensor([-1.0, math.inf, math.nan], dtype=dtype)
+    torch.testing.assert_close(sqrt1pm1(x), expected, rtol=0, atol=0, equal_nan=True)
+
+
+def test_shifted_geometric_mean_rejects_an_empty_dim() -> None:
+    with pytest.raises(ValueError, match="at least one axis"):
+        shifted_geometric_mean(torch.ones(2, 3), dim=())
 
 
 if __name__ == "__main__":

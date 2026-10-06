@@ -377,6 +377,11 @@ def test_cuda_fused_mix_matches_autograd_and_marks_rows(sources: int) -> None:
 def test_ngram_configs_validate_hash_geometry() -> None:
     with pytest.raises(ValueError, match="divide"):
         HashedNgramTables.Config(channels_out=3, hash_multipliers=((1,), (1,))).make()
+    with pytest.raises(ValueError, match="divide"):
+        HashedNgramTables.Config(channels_out=4, hash_multipliers=()).make()
+    # Rejected at build, so the finalized view still prints its derived width.
+    printed = HashedNgramTables.Config(channels_out=3, hash_multipliers=((1,), (1,)))
+    assert printed.copy_tree().finalize().table.channels_out == 1
     with pytest.raises(ValueError, match="same n-gram"):
         HashedNgramTables.Config(channels_out=4, hash_multipliers=((1,), (1, 2))).make()
 

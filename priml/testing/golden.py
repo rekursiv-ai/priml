@@ -9,12 +9,12 @@ one storage and :func:`put_steps` stacks per-step values under one key.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from difflib import unified_diff
 from pathlib import Path
 from re import Pattern
 from typing import TYPE_CHECKING, Final, cast
 
 import math
-import os
 import re
 import zlib
 
@@ -23,36 +23,92 @@ from torch import Tensor
 import torch
 
 from priml.lib.custom_json import convert
+from priml.testing import regenerate
 
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable, Mapping
+    from collections.abc import Callable, Generator, Iterable, Mapping
 
-    import pytest
+    from configgle.fig import Maker
 
 
 _INDEX: Final = "index"
 
 
-def assert_text_golden(
-    request: pytest.FixtureRequest,
+def assert_pprint_golden(
     *,
     test_file: str,
     name: str,
-    rendered: str,
+    config: Maker[object],
+    normalize: Callable[[str], str] = str,
 ) -> None:
-    """Assert rendered text matches its test-local golden.
+    """Assert a config's full finalized pprint matches its test-local golden.
+
+    A missing golden is written, then raises for inspection;
+    ``--regenerate-golden`` rewrites an existing one.
 
     Args:
-      request: Active pytest request carrying ``--golden-overwrite``.
+      test_file: ``__file__`` of the owning test module.
+      name: Golden filename without its extension.
+      config: Config to finalize and render with every field visible.
+      normalize: Maps rendered text to its host-independent form.
+
+    Raises:
+      AssertionError: The golden was missing, or the render differs; the
+        message holds the diff.
+
+    """
+    golden = Path(test_file).resolve().parent / "testdata" / f"{name}.txt"
+    rendered = normalize(
+        config.pformat(
+            finalize=True,
+            mask_memory_addresses=True,
+            hide_default_values=False,
+        )
+        + "\n",
+    )
+    missing = not golden.exists()
+    if missing or regenerate.golden():
+        golden.parent.mkdir(parents=True, exist_ok=True)
+        golden.write_bytes(rendered.encode())
+    if missing:
+        raise AssertionError(
+            f"Missing golden regenerated at {golden}; inspect it, then rerun the test.",
+        )
+    expected = golden.read_bytes().decode()
+    if expected == rendered:
+        return
+    diff = "".join(
+        unified_diff(
+            expected.splitlines(keepends=True),
+            rendered.splitlines(keepends=True),
+            fromfile=str(golden),
+            tofile=f"{name} (rendered)",
+        ),
+    )
+    raise AssertionError(
+        f"{name} changed; rerun with --regenerate-golden if intended.\n{diff}",
+    )
+
+
+def assert_text_golden(*, test_file: str, name: str, rendered: str) -> None:
+    """Assert rendered text matches its test-local golden.
+
+    A missing golden is written, then raises for inspection;
+    ``--regenerate-golden`` rewrites an existing one.
+
+    Args:
       test_file: ``__file__`` of the owning test module.
       name: Golden filename without its extension.
       rendered: Snapshot text without a trailing newline.
 
+    Raises:
+      AssertionError: The golden was missing, or ``rendered`` differs from it.
+
     """
     golden = Path(test_file).resolve().parent / "testdata" / f"{name}.txt"
     missing = not golden.exists()
-    if missing or request.config.getoption("--golden-overwrite", default=False):
+    if missing or regenerate.golden():
         golden.parent.mkdir(parents=True, exist_ok=True)
         _ = golden.write_text(rendered + "\n", encoding="utf-8")
     if missing:
@@ -61,7 +117,7 @@ def assert_text_golden(
         )
     if golden.read_text(encoding="utf-8") != rendered + "\n":
         raise AssertionError(
-            f"{name} changed; read the diff, then rerun with --golden-overwrite "
+            f"{name} changed; read the diff, then rerun with --regenerate-golden "
             "if the change is intended.",
         )
 
@@ -213,18 +269,14 @@ def expect_golden_mismatch(match: str | Pattern[str]) -> Generator[None]:
       nothing: No value; used as a context manager around a golden assertion.
 
     """
-    prior = os.environ.pop("BFB_REGENERATE", None)
     mismatch = False
-    try:
+    with regenerate.suppressed():
         try:
             yield
         except AssertionError as error:
             if not re.search(match, str(error)):
                 raise
             mismatch = True
-    finally:
-        if prior is not None:
-            os.environ["BFB_REGENERATE"] = prior
     if not mismatch:
         raise AssertionError("Expected a golden mismatch, but the comparison passed.")
 
@@ -233,7 +285,7 @@ def assert_tensor_golden(path: Path, record: Mapping[str, Tensor]) -> None:
     """Require ``record`` to equal the tensor golden at ``path``.
 
     A missing golden is written and the call fails, forcing review before the
-    next run accepts it; ``BFB_REGENERATE=1`` rewrites an existing one.
+    next run accepts it; ``--regenerate-b4b`` rewrites an existing one.
 
     Args:
       path: The ``.pt`` golden.
@@ -244,7 +296,7 @@ def assert_tensor_golden(path: Path, record: Mapping[str, Tensor]) -> None:
 
     """
     missing = not path.is_file()
-    if missing or os.environ.get("BFB_REGENERATE") == "1":
+    if missing or regenerate.b4b():
         path.parent.mkdir(parents=True, exist_ok=True)
         write_tensors(path, record)
     if missing:

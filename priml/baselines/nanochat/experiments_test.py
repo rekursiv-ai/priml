@@ -19,7 +19,6 @@ import math
 import pickle
 
 from configgle import PartialConfig
-from configgle.testing import assert_pprint_golden
 from pyarrow import parquet
 
 import numpy as np
@@ -52,6 +51,7 @@ from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.normuon import NorMuon
 from priml.optimizers.parameter_filter import matching
 from priml.runtime import SingleProcess
+from priml.testing.golden import assert_pprint_golden
 from priml.train.checkpointer import Checkpointer
 from priml.train.parallelism import NoParallel
 from priml.train.tracker import (
@@ -129,9 +129,9 @@ def test_hash_configuration_ignores_the_default_device(
     )
 
 
-def test_experiment_ladder_has_twenty_four_rungs() -> None:
-    """Expose all twenty-four numbered experiment factories."""
-    expected = {f"exp{index:03d}" for index in range(24)}
+def test_experiment_ladder_has_twenty_five_rungs() -> None:
+    """Expose all twenty-five numbered experiment factories."""
+    expected = {f"exp{index:03d}" for index in range(25)}
     assert expected == {
         name
         for name in vars(experiments)
@@ -156,6 +156,25 @@ def test_exp023_changes_only_the_prepared_inputs() -> None:
         changed.copy_tree().finalize().serialize()
         == original.copy_tree().finalize().serialize()
     )
+
+
+def test_exp024_changes_only_the_budget() -> None:
+    changed = experiments.exp024()
+    assert changed.max_time == changed.step.train_budget_sec == 300.0
+    original = experiments.exp022()
+    changed.experiment_name = original.experiment_name
+    changed.max_time = original.max_time
+    changed.step.train_budget_sec = original.step.train_budget_sec
+    assert (
+        changed.copy_tree().finalize().serialize()
+        == original.copy_tree().finalize().serialize()
+    )
+
+
+def test_no_experiment_carries_commented_out_config() -> None:
+    """A toggle in a comment is a config that exists in no printed tree."""
+    source = (_CWD / "experiments.py").read_text()
+    assert "Uncomment" not in source
 
 
 @pytest.mark.parametrize(
@@ -407,9 +426,9 @@ def test_smoke_keeps_automatic_device_selection() -> None:
 
     assert isinstance(config.step.parallelism, NoParallel.Config)
     assert config.step.parallelism.device is None
-    assert config.dataset.device == "auto"
+    assert config.dataset.device is None
     assert isinstance(config.runtime, SingleProcess.Config)
-    assert config.runtime.device == "auto"
+    assert config.runtime.device is None
 
 
 def test_exp002_removes_only_the_value_embeddings() -> None:
@@ -561,7 +580,7 @@ def test_every_experiments_eval_geometry_is_constructible(
     embedding = model.embedding
     assert isinstance(embedding, NarrowEmbedding.Config)
     embedding.dtype = None
-    model.rope.dtype = None
+    model.rope.dtype = torch.float32
 
     # A corpus at the vocabulary this experiment declares. Two shards, since
     # the validation one is pinned and excluded from training.

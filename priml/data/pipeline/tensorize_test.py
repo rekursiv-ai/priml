@@ -12,6 +12,7 @@ from torch import Tensor
 import pytest
 import torch
 
+from priml.data.pipeline.batching import Batcher, Unbatcher
 from priml.data.pipeline.tensorize import AsTensor, StreamSync
 
 
@@ -338,13 +339,17 @@ class TestAsTensor:
 
         monkeypatch.setattr(torch.Tensor, "to", record_transfer)
         processor = _make_processor(
-            AsTensor.Config(device="cpu", dtype=torch.float64, non_blocking=True),
+            AsTensor.Config(device="cpu", dtype=torch.float64),
         )
         result = next(processor(iter([{"label": [2, 3]}])))
 
         assert _tensor(result, "label").tolist() == [2, 3]
         assert calls == [
-            {"device": "cpu", "dtype": torch.float64, "non_blocking": True},
+            {
+                "device": torch.device("cpu"),
+                "dtype": torch.float64,
+                "non_blocking": False,
+            },
         ]
 
     def test_omits_noop_transfer_when_device_and_dtype_are_unset(
@@ -397,7 +402,11 @@ class TestAsTensor:
         assert label.tolist() == [2.0, 3.0]
         assert pinned == [label]
         assert transfers == [
-            {"device": "cuda", "dtype": torch.float32, "non_blocking": False},
+            {
+                "device": torch.device("cuda"),
+                "dtype": torch.float32,
+                "non_blocking": False,
+            },
         ]
 
     def test_dtype_only_transfer_and_field_filtering(self):
@@ -448,6 +457,74 @@ class TestAsTensor:
 
         assert result["before"] == [2, 3]
         assert _tensor(result, "after").tolist() == [6, 7]
+
+    def test_equal_interned_scalars_are_each_tensorized(self):
+        processor = _make_processor(AsTensor.Config(device="cpu"))
+
+        result = next(processor(iter([{"a": 2, "b": 2}])))
+
+        assert _tensor(result, "a").tolist() == 2
+        assert _tensor(result, "b").tolist() == 2
+
+    def test_a_list_shared_with_an_excluded_field_is_still_tensorized(self):
+        processor = _make_processor(AsTensor.Config(device="cpu"))
+        shared = [1, 2]
+
+        result = next(processor(iter([{"raw": [{"label": shared}], "label": shared}])))
+
+        assert _tensor(result, "label").tolist() == [1, 2]
+
+    def test_int_keyed_frame_dicts_are_tensorized(self):
+        processor = _make_processor(AsTensor.Config(device="cpu"))
+
+        result = next(processor(iter([{"x": {0: [1.0], 1: [2.0]}}])))
+
+        nested = result["x"]
+        assert isinstance(nested, dict)
+        values = list(cast(dict[int, object], nested).values())
+        assert all(isinstance(value, Tensor) for value in values)
+        assert [cast(Tensor, value).tolist() for value in values] == [[1.0], [2.0]]
+
+    def test_batcher_astensor_unbatcher_roundtrip(self):
+        samples: list[dict[str, object]] = [
+            {"key": "a", "image": torch.zeros(2, 3), "label": 4, "note": None},
+            {"key": "b", "image": torch.ones(2, 3), "label": 5, "note": None},
+        ]
+        batches = Batcher(
+            Batcher.Config(size=2, field_names=["image", "label", "key"]),
+        )(iter(samples))
+        tensorized = _make_processor(AsTensor.Config(device="cpu"))(batches)
+
+        results = list(Unbatcher(Unbatcher.Config())(tensorized))
+
+        assert [(r["key"], _tensor(r, "label").tolist()) for r in results] == [
+            ("a", 4),
+            ("b", 5),
+        ]
+
+    def test_cpu_target_transfers_block(self, monkeypatch: pytest.MonkeyPatch):
+        calls: list[object] = []
+
+        def record_transfer(tensor: Tensor, **kwargs: object) -> Tensor:
+            calls.append(kwargs["non_blocking"])
+            return tensor
+
+        monkeypatch.setattr(torch.Tensor, "to", record_transfer)
+        processor = _make_processor(AsTensor.Config(device="cpu", non_blocking=True))
+
+        _ = next(processor(iter([{"label": [2, 3]}])))
+
+        assert calls == [False]
+
+    @pytest.mark.gpu_torch_cuda
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_pin_memory_leaves_a_cuda_tensor_alone(self):
+        processor = _make_processor(AsTensor.Config(device="cuda", pin_memory=True))
+        scores = torch.arange(3.0, device="cuda")
+
+        result = next(processor(iter([{"scores": scores}])))
+
+        assert _tensor(result, "scores").tolist() == [0.0, 1.0, 2.0]
 
 
 class TestStreamSync:

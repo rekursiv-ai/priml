@@ -32,10 +32,13 @@ from priml.cost import (
     resolve_dtype,
     traffic,
 )
+from priml.lib.custom_json import convert
 from priml.math.basic import broadcast_sequences
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from priml.model.custom_types import RotaryConfig
 
 
@@ -195,8 +198,8 @@ class HuggingFaceFrequencies:
 
 def _validated_base(base: float) -> float:
     """Reject a base that builds an all-NaN or degenerate table."""
-    if not math.isfinite(base) or base <= 0:
-        raise ValueError(f"base must be finite and positive; got {base}.")
+    if not math.isfinite(base) or base <= 1:
+        raise ValueError(f"base must be finite and greater than 1; got {base}.")
     return base
 
 
@@ -253,7 +256,67 @@ class YarnScaling:
         inner: Makeable[FrequencyTable] = field(
             default_factory=HuggingFaceFrequencies.Config,
         )
-        """Cost this rescales; matches ``RoPE.Config.frequencies``' default."""
+        """Frequency table this rescales; matches ``RoPE.Config.frequencies``' default."""
+
+        def softmax_scale(self, channels_head: int) -> float | None:
+            """Return the DeepSeek attention scale correction, if configured."""
+            if self.mscale_all_dim == 0:
+                return None
+            mscale = _yarn_mscale(self.factor, self.mscale_all_dim)
+            return channels_head**-0.5 * mscale * mscale
+
+        @classmethod
+        def from_hf(cls, config: Mapping[str, object]) -> Self | None:
+            """Parse a Hugging Face ``config.json``'s rotary scaling.
+
+            Transformers 5 names the settings ``rope_parameters``; earlier
+            releases, and checkpoints written by them, ``rope_scaling``.
+
+            Args:
+              config: The whole parsed Hugging Face configuration.
+
+            Returns:
+              yarn: The YaRN settings, or None when the rotary is unscaled.
+                ``inner`` keeps its default; the caller sets the base table.
+
+            Raises:
+              ValueError: The two aliases disagree, or the scaling is not YaRN.
+              ReadError: A field has the wrong type, or scaling parameters
+                name no type.
+
+            """
+            current, legacy = (
+                convert(config.get(key), dict[str, object], default=None)
+                for key in ("rope_parameters", "rope_scaling")
+            )
+            if current is not None and legacy is not None and current != legacy:
+                raise ValueError("rope_parameters and rope_scaling disagree.")
+            scaling = current if current is not None else legacy
+            if scaling is None:
+                return None
+            kind = scaling.get("rope_type", scaling.get("type"))
+            # Untyped settings are HF's default rotary, unless they carry a
+            # scale factor: that names a scaling without saying which one.
+            if kind is None and "factor" not in scaling:
+                return None
+            kind = convert(kind, str)
+            if kind == "default":
+                return None
+            if kind != "yarn":
+                raise ValueError(
+                    f"Unsupported rope_scaling type={kind!r}; only yarn is implemented.",
+                )
+            yarn = cls()
+            yarn.factor = convert(scaling.get("factor"), float)
+            yarn.original_max_position_embeddings = convert(
+                scaling.get("original_max_position_embeddings", 4_096),
+                int,
+            )
+            yarn.beta_fast = convert(scaling.get("beta_fast", 32.0), float)
+            yarn.beta_slow = convert(scaling.get("beta_slow", 1.0), float)
+            yarn.mscale = convert(scaling.get("mscale", 1.0), float)
+            yarn.mscale_all_dim = convert(scaling.get("mscale_all_dim", 0.0), float)
+            return yarn
 
         def cost(
             self,
@@ -298,6 +361,16 @@ class YarnScaling:
         ):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive; got {value}.")
+        for name, value in (
+            ("mscale", config.mscale),
+            ("mscale_all_dim", config.mscale_all_dim),
+        ):
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be finite; got {value}.")
+        if _yarn_mscale(config.factor, config.mscale_all_dim) == 0:
+            raise ValueError(
+                "mscale_all_dim produces a zero attention-scale denominator.",
+            )
         self.factor = config.factor
         self.original_max_position_embeddings = config.original_max_position_embeddings
         self.beta_fast = config.beta_fast
@@ -315,8 +388,7 @@ class YarnScaling:
                 f"YarnScaling needs a base to place its ramp, and "
                 f"{type(inner).__name__} has none.",
             )
-        if inner.base == 1.0:
-            raise ValueError("base must not be 1 when yarn is set; log(1) is 0.")
+        _validated_base(inner.base)
         self.inner = inner
 
     def __call__(self, *, channels: int, device: torch.device) -> tuple[Tensor, float]:
@@ -367,7 +439,7 @@ class RoPE(nn.Module):
           across 3 axes -> [44, 42, 42]), sum mode replicates (e.g. 64 across
           2 axes -> [64, 64]). A sequence allocates explicitly. Each nonzero
           value must be even and >= 2. Use 0 to skip an axis.
-      frequencies: Cost template, or one per axis. Each carries its own
+      frequencies: Frequency-table template, or one per axis. Each carries its own
           ``base`` where it has one; ``smallest_recommended_base`` computes
           one from a max position count.
       reduction_mode: "cat" (axial; default) or "sum" (RoPE-Mixed).
@@ -411,15 +483,13 @@ class RoPE(nn.Module):
             ]
         """
 
-        dtype: torch.dtype | None = None
-        """Width the cos/sin factors are rounded to; None keeps float32.
+        dtype: torch.dtype = torch.float32
+        """Initial cos/sin factor dtype.
 
-        Not a memory choice -- the table is two vectors -- but an arithmetic
-        one: rounding the factors makes every product inside the rotation
-        accumulate at that width, where float32 factors promote the whole
-        rotation and round once at the end. The two differ in the last bits of
-        every query and key, so a port has to hold the factors at the width the
-        reference held them.
+        Module dtype casts also change the factor dtype.
+        Factors are rounded before rotation; ``RoPE.rotate`` upcasts the input
+        to float32 for products and rounds the result back to the input dtype.
+        Matching a reference therefore requires matching its factor precision.
         """
 
         def rotated_channels(self, channels_head: int) -> int:
@@ -575,7 +645,9 @@ class RoPE(nn.Module):
             # than shared: a table holds its own state once made.
             self._frequencies = [tables.copy_tree().make() for _ in channels]
         self.channels_head = tuple(channels)
-        if config.dtype is not None and not config.dtype.is_floating_point:
+        if config.reduction_mode == "sum" and len({c for c in channels if c}) > 1:
+            raise ValueError(f"Sum mode requires uniform dims, got {channels}.")
+        if not config.dtype.is_floating_point:
             # The cos/sin factors are rounded to this width, so an integer one
             # quantizes every rotation to {-1, 0, 1}.
             raise ValueError(f"dtype must be floating point; got {config.dtype}.")
@@ -721,6 +793,8 @@ class RoPE(nn.Module):
             )
         rot_dim = cos.shape[-1] * 2
         D = q.shape[-1]
+        if rot_dim > min(D, k.shape[-1]):
+            raise ValueError("cos/sin cover more channels than q/k.")
         if rot_dim < D:
             q_rot, q_pass = q[..., :rot_dim], q[..., rot_dim:]
             k_rot, k_pass = k[..., :rot_dim], k[..., rot_dim:]
@@ -815,8 +889,7 @@ class RoPE(nn.Module):
             out[..., 0::2] = x0 * cos - x1 * sin
             out[..., 1::2] = x1 * cos + x0 * sin
         else:
-            # Half-split (i, i+D/2) -- the production convention (HuggingFace; every
-            # call site uses the default ``interleave=False``). The two rotated
+            # Half-split (i, i+D/2), used by most HuggingFace models. The two rotated
             # halves CONCATENATE to the full output out-of-place: no uninitialized
             # memory, no strided in-place write, no ``stack``, no ``reshape``.
             half = x.shape[-1] // 2
@@ -864,24 +937,6 @@ class RoPE(nn.Module):
             raise ValueError(f"Dim {c} must be at least 2.")
         if c % 2 == 1:
             raise ValueError(f"Dim {c} must be even.")
-
-    # E.g. _split_dim(128, 3) -> [44, 42, 42].
-    @classmethod
-    def _split_dim(cls, total: int, naxes: int) -> list[int]:
-        """Split total channels across axes, each even, front-loaded."""
-        if total % 2:
-            raise ValueError(f"Total dim={total} must be even.")
-        if total < 2 * naxes:
-            raise ValueError(
-                f"Cannot split dim={total} across {naxes} axes"
-                f" (need at least {2 * naxes}).",
-            )
-        per = (total // (2 * naxes)) * 2
-        remainder = total - per * naxes
-        dims = [per] * naxes
-        for i in range(remainder // 2):
-            dims[i] += 2
-        return dims
 
 
 def rotation_cost(
@@ -937,10 +992,27 @@ def _axis_channels(
     channels = [int(v) for v in c] if isinstance(c, Sequence) else [c]
     if isinstance(tables, list):
         if reduction_mode == "cat" and isinstance(c, int):
-            channels = RoPE._split_dim(c, len(tables))  # noqa: SLF001 -- This module helper shares RoPE's private axis allocator with its config.
+            channels = _split_dim(c, len(tables))
         if len(channels) == 1 and tables:
             channels = channels * len(tables)
     return channels
+
+
+def _split_dim(total: int, naxes: int) -> list[int]:
+    """Split total channels across axes, each even, front-loaded."""
+    if total % 2:
+        raise ValueError(f"Total dim={total} must be even.")
+    if total < 2 * naxes:
+        raise ValueError(
+            f"Cannot split dim={total} across {naxes} axes"
+            f" (need at least {2 * naxes}).",
+        )
+    per = (total // (2 * naxes)) * 2
+    remainder = total - per * naxes
+    dims = [per] * naxes
+    for i in range(remainder // 2):
+        dims[i] += 2
+    return dims
 
 
 def rotate_conjugate(x: Tensor, *, cos: Tensor, sin: Tensor) -> Tensor:
@@ -992,7 +1064,7 @@ class RoPEMixed(RoPE):
     Args:
       channels_head: Channel count per axis (same semantics as ``RoPE``).
       num_heads: Attention-head count.
-      base: Frequency base(s) (same semantics as ``RoPE``).
+      frequencies: Frequency-table template(s), as in ``RoPE``.
       reduction_mode: "cat" (axial; default) or "sum" (RoPE-Mixed).
       learnable: If True, frequencies are learnable. Default False.
 
@@ -1084,18 +1156,22 @@ class RoPEMixed(RoPE):
             raise ValueError(f"num_heads must be positive; got {config.num_heads}.")
         self.num_heads = config.num_heads
         self.learnable = config.learnable
-        if config.reduction_mode == "sum":
-            active_dims = {f.shape[-1] for f in self._inv_freqs if f.numel()}
-            if len(active_dims) > 1:
-                raise ValueError(f"Sum mode requires uniform dims, got {active_dims}.")
         # Capture the base (deterministic) per-axis frequencies; reset_parameters
         # is the sole source of the per-head scaling, so it can rebuild the
         # learnable _inv_freqs from these without re-deriving them. The scaled
         # shape is the base broadcast against a per-head column, computed once
         # here so the empty parameters are allocated at the right shape.
-        self._base_inv_freqs: list[Tensor] = [
-            f.detach().clone() for f in self._inv_freqs
-        ]
+        self._base_names = tuple(
+            f"_base_inv_freq_{i}" for i in range(len(self._inv_freqs))
+        )
+        # ``RoPE`` builds its table on the CPU whatever the default device; these
+        # are this module's state, so they live on its device.
+        for name, frequency in zip(self._base_names, self._inv_freqs, strict=True):
+            self.register_buffer(
+                name,
+                frequency.detach().to(self.device, copy=True),
+                persistent=False,
+            )
         head_col = torch.empty(self.num_heads, 1)
         self._inv_freqs = nn.ParameterList(
             nn.Parameter(
@@ -1112,11 +1188,22 @@ class RoPEMixed(RoPE):
         """Initialize every parameter in place."""
         # Sole source of the per-head frequency init: draw fresh random
         # directions on the N-sphere and scale the base frequencies by them.
+        for i, (name, channels) in enumerate(
+            zip(self._base_names, self.channels_head, strict=True),
+        ):
+            if channels:
+                frequency, _ = self._frequencies[i](
+                    channels=channels,
+                    device=self.device,
+                )
+                self.get_buffer(name).copy_(frequency.unsqueeze(-2))
         directions = None
         active_count = sum(1 for f in self._base_inv_freqs if f.numel())
         if self.num_heads > 1:
             directions = nn.functional.normalize(
-                nn.init.trunc_normal_(torch.empty(active_count, self.num_heads, 1)),
+                nn.init.trunc_normal_(
+                    torch.empty(active_count, self.num_heads, 1, device=self.device),
+                ),
                 dim=0,
             )
         with torch.no_grad():
@@ -1138,13 +1225,21 @@ class RoPEMixed(RoPE):
     @override
     def _apply(self, fn: Callable[[Tensor], Tensor], recurse: bool = True) -> Self:
         """Move the module, carrying the LEARNED frequencies across."""
-        freqs = [f.data.clone() for f in self._inv_freqs]
-        # The grandparent's ``_apply`` is the only route that moves the module
-        # without the parent's rebuild; see the docstring for what that costs.
-        nn.Module._apply(self, fn, recurse)  # noqa: SLF001 -- The test reaches the private cache seam under test.
-        for i, f in enumerate(freqs):
-            self._inv_freqs[i].data = f.to(device=self._dtype.device)
+        # Fixed frequencies are the config's float32 table, as in ``RoPE``; a
+        # module dtype cast must not round them. Learned ones follow the cast.
+        fixed = [] if self.learnable else [f.detach().clone() for f in self._inv_freqs]
+        super(RoPE, self)._apply(fn, recurse)
+        for frequency, kept in zip(self._inv_freqs, fixed, strict=False):
+            frequency.data = (
+                torch.empty_like(kept, device=frequency.device)
+                if kept.is_meta
+                else kept.to(device=frequency.device)
+            )
         return self
+
+    @property
+    def _base_inv_freqs(self) -> list[Tensor]:
+        return [self.get_buffer(name) for name in self._base_names]
 
 
 def _yarn_mscale(scale: float, mscale: float) -> float:

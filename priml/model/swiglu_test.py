@@ -9,7 +9,6 @@ from typing import Final, cast, override
 
 import functools
 
-from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.parallel import (
@@ -42,6 +41,7 @@ from priml.model.swiglu import (
 from priml.testing import golden
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent

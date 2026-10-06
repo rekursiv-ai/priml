@@ -1,17 +1,20 @@
 """Safe persistence boundary for native Qwen3.5 mixed attention caches."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping
 from typing import TypeGuard
 
 from torch import Tensor
 
+import torch
+
 from priml.model.attention.kvcache import KVCache
+from priml.model.custom_types import DepthIndex
 
 
-type Qwen35CacheState = list[dict[str, Tensor | int | str]]
+type Qwen35CacheState = dict[DepthIndex, dict[str, Tensor | int | str]]
 
 
-def cache_state_dict(cache: Sequence[object]) -> Qwen35CacheState:
+def cache_state_dict(cache: Mapping[DepthIndex, object]) -> Qwen35CacheState:
     """Convert a live Qwen3.5 cache to tensors and primitive metadata.
 
     The returned tensors and primitive metadata can be passed to ``torch.save``
@@ -25,12 +28,13 @@ def cache_state_dict(cache: Sequence[object]) -> Qwen35CacheState:
 
     Raises:
       TypeError: A layer cache is not native Qwen3.5 attention state.
-      ValueError: A full-attention cache has incompatible tensors or progress
-        metadata.
+      ValueError: A cache layer has incompatible tensors or progress metadata.
 
     """
-    state: Qwen35CacheState = []
-    for layer in cache:
+    state: Qwen35CacheState = {}
+    for key, layer in cache.items():
+        if not key:
+            raise ValueError("A Qwen3.5 cache key must be nonempty.")
         if isinstance(layer, KVCache):
             _validate_kv_cache(
                 k=layer.k,
@@ -38,17 +42,16 @@ def cache_state_dict(cache: Sequence[object]) -> Qwen35CacheState:
                 length=layer.length,
                 seen=layer.seen,
             )
-            state.append(
-                {
-                    "kind": "full_attention",
-                    "k": layer.k.detach().clone(),
-                    "v": layer.v.detach().clone(),
-                    "length": layer.length,
-                    "seen": layer.seen,
-                },
-            )
+            state[key] = {
+                "kind": "full_attention",
+                "k": layer.k.detach().clone(),
+                "v": layer.v.detach().clone(),
+                "length": layer.length,
+                "seen": layer.seen,
+            }
         elif (delta_cache := _delta_cache(layer)) is not None:
-            state.append({"kind": "linear_attention", **_tensor_dict(delta_cache)})
+            _validate_delta_cache(delta_cache)
+            state[key] = {"kind": "linear_attention", **_tensor_dict(delta_cache)}
         else:
             raise TypeError(
                 "A Qwen3.5 cache layer must be KV or delta attention state.",
@@ -56,7 +59,7 @@ def cache_state_dict(cache: Sequence[object]) -> Qwen35CacheState:
     return state
 
 
-def cache_from_state_dict(state: object) -> list[object]:
+def cache_from_state_dict(state: object) -> dict[DepthIndex, object]:
     """Restore an independent mutable Qwen3.5 inference snapshot.
 
     Restored caches do not preserve behavioral cache subclasses. Their tensors
@@ -66,18 +69,21 @@ def cache_from_state_dict(state: object) -> list[object]:
       state: Cache tensors plus primitive metadata from ``cache_state_dict``.
 
     Returns:
-      cache: Live caches accepted by ``Qwen35.forward_cached``.
+      cache: Live caches accepted by ``Qwen35.forward`` with ``cache=``.
 
     Raises:
       TypeError: State containers, keys, or values have unsupported types.
-      ValueError: A cache layer kind or field set is invalid, or full-attention
-        tensors or progress metadata are incompatible.
+      ValueError: A cache layer kind or field set is invalid, or its tensors or
+        progress metadata are incompatible.
 
     """
-    if not _is_object_list(state):
-        raise TypeError("Qwen3.5 cache state must be a list.")
-    cache: list[object] = []
-    for raw_layer in state:
+    if not _is_object_dict(state):
+        raise TypeError("Qwen3.5 cache state must be a dictionary.")
+    state_dict: dict[object, object] = state
+    cache: dict[DepthIndex, object] = {}
+    for key, raw_layer in state_dict.items():
+        if not isinstance(key, tuple) or not key:
+            raise TypeError("Qwen3.5 cache keys must be nonempty depth indices.")
         layer = _string_keyed_dict(raw_layer)
         kind = layer.get("kind")
         if not isinstance(kind, str):
@@ -96,7 +102,7 @@ def cache_from_state_dict(state: object) -> list[object]:
                 length=length,
             )
             restored.seen = seen
-            cache.append(restored)
+            cache[key] = restored
         elif kind == "linear_attention":
             tensors: dict[str, Tensor] = {}
             for name, value in layer.items():
@@ -109,7 +115,8 @@ def cache_from_state_dict(state: object) -> list[object]:
                 tensors[name] = value
             if set(tensors) not in (set(), {"conv_state", "recurrent_state"}):
                 raise ValueError("A delta-attention cache has an invalid field set.")
-            cache.append(_tensor_dict(tensors))
+            _validate_delta_cache(tensors)
+            cache[key] = _tensor_dict(tensors)
         else:
             raise ValueError("A Qwen3.5 cache layer has an unknown kind.")
     return cache
@@ -139,6 +146,30 @@ def _validate_kv_cache(
         raise ValueError("Full-attention cache progress metadata is invalid.")
 
 
+# Checks only what the snapshot alone determines. Widths and the conv dtype depend on
+# the layer it is resumed into, which ``Qwen35GatedDeltaNet`` checks on first use.
+def _validate_delta_cache(state: dict[str, Tensor]) -> None:
+    """Validate native delta-attention cache tensors against each other."""
+    if not state:
+        return
+    conv_state = state["conv_state"]
+    recurrent_state = state["recurrent_state"]
+    if (
+        conv_state.ndim != 3
+        or recurrent_state.ndim != 4
+        or conv_state.shape[0] != recurrent_state.shape[0]
+        or not conv_state.is_floating_point()
+        or recurrent_state.dtype != torch.float32
+        or conv_state.device != recurrent_state.device
+        or conv_state.layout != torch.strided
+        or recurrent_state.layout != torch.strided
+    ):
+        raise ValueError(
+            "Delta-attention conv and recurrent states have incompatible shapes, "
+            "dtypes, or devices.",
+        )
+
+
 def _delta_cache(value: object) -> dict[str, Tensor] | None:
     """Return one validated native delta-attention cache, when present."""
     if not _is_object_dict(value):
@@ -160,11 +191,6 @@ def _delta_cache(value: object) -> dict[str, Tensor] | None:
 def _tensor_dict(state: dict[str, Tensor]) -> dict[str, Tensor]:
     """Clone a delta-attention cache snapshot."""
     return {name: tensor.detach().clone() for name, tensor in state.items()}
-
-
-def _is_object_list(value: object) -> TypeGuard[list[object]]:
-    """Return whether a value is a list whose members are runtime objects."""
-    return isinstance(value, list)
 
 
 def _string_keyed_dict(value: object) -> dict[str, object]:

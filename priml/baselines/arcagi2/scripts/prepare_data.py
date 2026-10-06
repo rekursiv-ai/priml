@@ -22,8 +22,9 @@ import hashlib
 import shutil
 import tempfile
 
+from priml.baselines.arcagi2.scripts.build_dataset import ARC2_DATASET_DIR
 from priml.lib.custom_json import convert, loads
-from priml.paths import validated_output_path
+from priml.paths import resolve_working_dir, validated_output_path
 
 
 def prepare(source: Path, *, destination: Path) -> None:
@@ -66,9 +67,9 @@ def main() -> int:
       exit_code: Zero after successful staging.
 
     """
-    if __doc__ is None:
-        raise ValueError("Expected __doc__ is not None.")
-    parser = argparse.ArgumentParser(description=__doc__.split("\n", 2)[2])
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
+    )
     _add_arguments(parser)
     flags = cast(_Flags, parser.parse_args())
     prepare(flags.source, destination=flags.destination)
@@ -123,7 +124,7 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--destination",
         type=Path,
-        default=Path("/opt/scratch/datasets/arcagi2/arc2concept-aug-1000"),
+        default=resolve_working_dir("/opt/scratch", ARC2_DATASET_DIR),
     )
 
 

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 from unittest.mock import Mock
 
 from configgle import PartialConfig
-from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
 
 import pytest
@@ -19,6 +19,7 @@ from priml.model.attention.attention import (
     Attention,
     AttentionProjections,
 )
+from priml.model.attention.flash3 import Flash3Attention
 from priml.model.attention.kernel import (
     SdpaFused,
     SdpaNaive,
@@ -36,6 +37,18 @@ from priml.testing.bfb import (
     host_agnostic_numerics,
 )
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+
+def _layer_cache(
+    module: MultiStreamAttention,
+    states: Sequence[KVCache | None],
+) -> dict[object, object]:
+    return {module.depth_index: states}
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -315,9 +328,8 @@ def test_multi_stream_cache():
     ]
     x0 = torch.randn(2, 8, 64)
     x1 = torch.randn(2, 12, 64)
-    result = m.forward_cached([x0, x1], cache=caches)
-    assert len(result) == 2
-    outputs, caches = result
+    outputs = m.forward([x0, x1], cache=_layer_cache(m, caches))
+    assert len(outputs) == 2
     y0, y1 = outputs
     assert y0.shape == (2, 8, 64)
     assert y1.shape == (2, 12, 64)
@@ -333,7 +345,8 @@ def test_multi_stream_cache_allocates_for_an_uncached_stream() -> None:
         num_streams=1,
     ).make()
 
-    outputs, caches = m.forward_cached([torch.randn(4, 3, 8)], cache=[None])
+    caches = m.alloc_kv_cache(batch=4, max_seq=3)
+    outputs = m.forward([torch.randn(4, 3, 8)], cache=_layer_cache(m, caches))
 
     assert outputs[0].shape == (4, 3, 8)
     assert caches[0].length == 3
@@ -341,7 +354,7 @@ def test_multi_stream_cache_allocates_for_an_uncached_stream() -> None:
     assert caches[0].v.shape == (4, 2, 3, 4)
 
 
-def test_forward_cached_forwards_overrides_and_messages() -> None:
+def test_forward_forwards_overrides_and_messages() -> None:
     received: list[tuple[float, bool, Tensor | None, object]] = []
 
     def kernel(
@@ -374,13 +387,14 @@ def test_forward_cached_forwards_overrides_and_messages() -> None:
     masks = [torch.ones(2, 5, dtype=torch.bool), None]
     message = object()
 
-    outputs, caches = model.forward_cached(
+    caches = model.alloc_kv_cache(batch=2, max_seq=5)
+    outputs = model.forward(
         xs,
-        cache=[None, None],
+        cache=_layer_cache(model, caches),
         positions=[torch.arange(4), torch.arange(3)],
         cos_sin=cos_sin,
         dropout_p=0.25,
-        is_causal=True,
+        is_causal=False,
         attn_mask=masks,
         message=message,
     )
@@ -388,8 +402,8 @@ def test_forward_cached_forwards_overrides_and_messages() -> None:
     assert [output.shape for output in outputs] == [(2, 4, 8), (2, 3, 8)]
     assert [cache.length for cache in caches] == [4, 3]
     assert [(rate, causal, msg) for rate, causal, _, msg in received] == [
-        (0.25, True, message),
-        (0.25, True, message),
+        (0.25, False, message),
+        (0.25, False, message),
     ]
     assert received[0][2] is masks[0]
     assert received[1][2] is None
@@ -397,7 +411,7 @@ def test_forward_cached_forwards_overrides_and_messages() -> None:
         xs,
         cos_sin=cos_sin,
         dropout_p=0.25,
-        is_causal=True,
+        is_causal=False,
         attn_mask=masks,
         message=message,
     )
@@ -407,9 +421,9 @@ def test_forward_cached_forwards_overrides_and_messages() -> None:
     )
 
     positions = [torch.tensor([2, 4]), torch.tensor([1, 5, 8])]
-    cached_positions, _ = model.forward_cached(
+    cached_positions = model.forward(
         xs,
-        cache=[None, None],
+        cache=_layer_cache(model, model.alloc_kv_cache(batch=2, max_seq=5)),
         positions=positions,
         message=message,
     )
@@ -500,12 +514,10 @@ def test_explicit_causal_streams_require_single_stream():
     )
     with pytest.raises(
         ValueError,
-        match=r"^Causal streams require a single stream; use per-stream masks\.$",
+        match=r"^causal=True requires num_streams=1\.$",
     ) as exc_info:
         config.make()
-    assert str(exc_info.value) == (
-        "Causal streams require a single stream; use per-stream masks."
-    )
+    assert str(exc_info.value) == ("causal=True requires num_streams=1.")
 
 
 def test_multi_stream_kv_heads_validation():
@@ -597,11 +609,12 @@ def test_cached_internal_rope_uses_each_cache_offset() -> None:
         KVCache.alloc(batch=2, num_heads=2, max_seq=12, channels_head=4),
         KVCache.alloc(batch=2, num_heads=2, max_seq=12, channels_head=4),
     ]
-    _, caches = attention.forward_cached(initial, cache=caches)
+    _ = attention.forward(initial, cache=_layer_cache(attention, caches))
     xs = [torch.randn(2, 4, 8), torch.randn(2, 3, 8)]
     positions = [torch.arange(4, 8), torch.arange(3, 6)]
 
-    cached, updated = attention.forward_cached(xs, cache=caches)
+    cached = attention.forward(xs, cache=_layer_cache(attention, caches))
+    updated = caches
     cos_sin = [
         attention.ropes[str(index)](position)
         for index, position in enumerate(positions)
@@ -717,17 +730,72 @@ def test_training_dropout_eval_and_explicit_override() -> None:
     assert [call["dropout_p"] for call in calls] == [0.25, 0.25, 0.0, 0.0, 0.5, 0.5]
 
 
-def test_explicit_per_query_masks_and_causal_override_reach_kernel() -> None:
+def test_explicit_per_query_masks_reach_kernel() -> None:
     attention, calls = _recording_multi_stream_attention()
     xs = [torch.randn(2, 3, 12), torch.randn(2, 5, 12)]
     masks = [torch.ones(3, 8, dtype=torch.bool), None]
 
-    attention(xs, attn_mask=masks, is_causal=True)
+    attention(xs, attn_mask=masks)
 
     assert calls[0]["attn_mask"] is masks[0]
-    assert calls[0]["is_causal"] is True
+    assert calls[0]["is_causal"] is False
     assert calls[1]["attn_mask"] is None
-    assert calls[1]["is_causal"] is True
+    assert calls[1]["is_causal"] is False
+
+
+def test_causal_override_requires_a_single_stream_like_the_config() -> None:
+    attention, calls = _recording_multi_stream_attention()
+    xs = [torch.randn(2, 3, 12), torch.randn(2, 5, 12)]
+
+    with pytest.raises(
+        ValueError,
+        match=r"^is_causal=True requires num_streams=1\.$",
+    ):
+        attention(xs, is_causal=True)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_causal_override_decides_both_flag_and_chunk_mask(configured: bool) -> None:
+    """A cached chunk under ``is_causal`` matches a config with that causal policy."""
+    config = MultiStreamAttention.Config(
+        channels_in=8,
+        num_heads=2,
+        channels_head=4,
+        num_streams=1,
+        attn_kernel=SdpaNaive.Config(),
+    )
+    config.causal = configured
+    model = config.make()
+    config.causal = not configured
+    reference = config.make()
+    reference.load_state_dict(model.state_dict())
+    x = torch.randn(2, 5, 8)
+
+    def decode(
+        module: MultiStreamAttention,
+        *,
+        is_causal: bool | None = None,
+    ) -> Tensor:
+        cache = KVCache.alloc(batch=2, num_heads=2, max_seq=5, channels_head=4)
+        _ = module.forward(
+            [x[:, :2]],
+            cache=_layer_cache(module, [cache]),
+            is_causal=is_causal,
+        )
+        return module.forward(
+            [x[:, 2:]],
+            cache=_layer_cache(module, [cache]),
+            is_causal=is_causal,
+        )[0]
+
+    torch.testing.assert_close(
+        decode(model, is_causal=not configured),
+        decode(reference),
+        rtol=0,
+        atol=0,
+    )
 
 
 def test_single_stream_causal_mask_is_constructed_for_missing_mask() -> None:
@@ -937,7 +1005,14 @@ def test_forward_reports_argument_name_for_wrong_stream_count(argument: str) -> 
     elif argument == "cos_sin":
         invoke = partial(attention, xs, cos_sin=[None])
     else:
-        invoke = partial(attention.forward_cached, xs, cache=[None])
+        invoke = partial(
+            attention.forward,
+            xs,
+            cache=_layer_cache(
+                attention,
+                [KVCache.alloc(batch=2, num_heads=2, max_seq=3, channels_head=4)],
+            ),
+        )
 
     with pytest.raises(
         ValueError,
@@ -946,34 +1021,6 @@ def test_forward_reports_argument_name_for_wrong_stream_count(argument: str) -> 
         invoke()
 
     assert str(exc_info.value) == message
-
-
-def test_forward_cached_rejects_missing_updated_cache_list(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    model = MultiStreamAttention.Config(
-        channels_in=4,
-        num_heads=2,
-        channels_head=2,
-    ).make()
-
-    def missing_cache_list(
-        *args: object,
-        **kwargs: object,
-    ) -> tuple[tuple[Tensor, ...], None]:
-        del args, kwargs
-        return ((torch.zeros(2, 3, 4),), None)
-
-    monkeypatch.setattr(model, "_forward", missing_cache_list)
-    inputs = [torch.zeros(2, 3, 4)]
-
-    with pytest.raises(
-        ValueError,
-        match=r"^Expected updated is not None\.$",
-    ) as exc_info:
-        model.forward_cached(inputs, cache=[None])
-
-    assert str(exc_info.value) == "Expected updated is not None."
 
 
 def test_explicit_stream_uses_its_causal_and_dropout_settings() -> None:
@@ -1020,9 +1067,9 @@ def test_cached_causal_chunk_builds_mask_for_prefix() -> None:
         attn_kernel=PartialConfig(kernel),
     ).make()
     cache = KVCache.alloc(batch=2, num_heads=2, max_seq=8, channels_head=4)
-    attention.forward_cached([torch.randn(2, 3, 8)], cache=[cache])
+    attention.forward([torch.randn(2, 3, 8)], cache=_layer_cache(attention, [cache]))
 
-    attention.forward_cached([torch.randn(2, 3, 8)], cache=[cache])
+    attention.forward([torch.randn(2, 3, 8)], cache=_layer_cache(attention, [cache]))
 
     mask = calls[-1]["attn_mask"]
     assert isinstance(mask, Tensor)
@@ -1322,6 +1369,91 @@ def test_multi_stream_cost_prices_explicit_streams_by_their_own_config() -> None
     assert model_cost["flops", "primal", "matmul"].sum() == (
         owned["flops", "primal", "matmul"].sum()
         + 2 * kernel["flops", "primal", "matmul"].sum()
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("bias", True),
+        ("dropout", 0.25),
+        ("causal", True),
+        ("rope", [RoPE.Config(4)]),
+        ("norm_qk", RMSNorm.Config()),
+        ("share_qk_norm", False),
+        ("norm_out", RMSNorm.Config()),
+        ("init_weight", nn.init.ones_),
+    ],
+)
+def test_explicit_streams_reject_parent_stream_fields(
+    field: str,
+    value: object,
+) -> None:
+    config = MultiStreamAttention.Config(
+        channels_in=8,
+        num_heads=2,
+        channels_head=4,
+        streams=[AttentionProjections.Config()],
+    )
+    setattr(config, field, value)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"^{field} must be set on each stream, not on the parent",
+    ):
+        config.finalize()
+
+
+def test_multi_stream_cost_prices_each_stream_kernel_at_its_own_dropout() -> None:
+    streams = [AttentionProjections.Config(), AttentionProjections.Config(dropout=0.25)]
+    finalized = (
+        MultiStreamAttention.Config(
+            channels_in=16,
+            num_heads=2,
+            channels_head=8,
+            streams=streams,
+        )
+        .copy_tree()
+        .finalize()
+    )
+    model_cost = finalized.cost(seq_len=8, batch_size=1, dtype=None)
+    owned = sum(
+        (cost(s, seq_len=8, batch_size=1, dtype=None) for s in finalized.streams),
+        Cost(),
+    )
+    kernels = sum(
+        (
+            attention_kernel_cost(
+                seq_len=16,
+                rows=8,
+                dtype=None,
+                num_heads=2,
+                channels_head=8,
+                dropout_p=dropout,
+            )
+            for dropout in (0.0, 0.25)
+        ),
+        Cost(),
+    )
+    assert model_cost == replace(owned + kernels, bytes_state=model_cost.bytes_state)
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_multi_stream_cost_forwards_the_bus_to_the_kernel(explicit: bool) -> None:
+    config = MultiStreamAttention.Config(
+        channels_in=16,
+        num_heads=2,
+        channels_head=8,
+        attn_kernel=Flash3Attention.Config(),
+    )
+    if explicit:
+        config.streams = [AttentionProjections.Config(), AttentionProjections.Config()]
+    finalized = config.copy_tree().finalize()
+    full = finalized.cost(seq_len=8, batch_size=1, dtype=None)
+    windowed = finalized.cost(seq_len=8, batch_size=1, dtype=None, window=2)
+    assert (
+        windowed["flops", "primal", "matmul"].sum()
+        < full["flops", "primal", "matmul"].sum()
     )
 
 

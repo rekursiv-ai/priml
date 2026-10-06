@@ -1,9 +1,12 @@
-"""pass@K voting over a puzzle's augmented views.
+"""pass@K voting over each test input's augmented views.
 
-Each ARC puzzle is evaluated many times -- once per augmented view -- and the
-model may answer differently on each. The score is the consensus: group every
-prediction for one puzzle, rank the distinct answers, and count the puzzle
-solved if the true grid is among the top K.
+Each ARC task is evaluated many times -- once per augmented view -- and the
+model may answer differently on each. A view's prepared id names the VIEW, and
+every test input of that view shares it, so the vote cannot be keyed by id:
+:class:`CanonicalPassK` inverts each view to the canonical frame and votes per
+``(task, canonical test input)``. A test input counts solved if its true grid
+is among the top K answers; a task scores the mean over its test inputs, and
+the reported number is the mean over tasks in ``test_puzzles.json``.
 
 Ranking is by vote count, with mean halt confidence breaking ties. Count
 dominates because agreement across independent views is the stronger signal;
@@ -11,11 +14,6 @@ confidence only separates answers that tied.
 
 Predictions are stored as hashes, not grids. A full evaluation is hundreds of
 thousands of 900-cell grids, and only equality between them matters.
-
-:class:`PassK` votes per prepared puzzle id against its label.
-:class:`CanonicalPassK` is the TRM reference evaluator: it inverts each view to
-the canonical frame, votes per canonical test input, and scores against
-``test_puzzles.json``, averaging within a task and then across tasks.
 """
 
 from __future__ import annotations
@@ -36,7 +34,6 @@ from typing import (
     override,
 )
 
-import hashlib
 import json
 import logging
 import re
@@ -71,149 +68,6 @@ logger = logging.getLogger(__name__)
 type _Preds = dict[str, dict[str, list[tuple[str, float]]]]
 type _SignalRow = tuple[str, str, str, float, float, float, int, int]
 type _StepRow = tuple[int, int, tuple[float, ...], tuple[int, ...]]
-
-
-class PassK:
-    """Consensus accuracy over each puzzle's augmented views.
-
-    Consumes the packed evaluation output the puzzle train step emits: a halt
-    logit in column 0 and the predicted tokens in the last ``grid_len``
-    columns, so any diagnostic columns between them are ignored.
-    """
-
-    class Config(Fig["PassK"]):
-        """Which K values to report, and how a vote is counted."""
-
-        pass_ks: tuple[int, ...] = (1, 2, 5, 10)
-        """Report the true grid appearing in the top K ranked answers.
-
-        pass@1 is the headline -- the model's single best guess. Larger K
-        measures whether the right answer was present but outvoted, which
-        separates a model that cannot solve a task from one that cannot pick
-        its own best attempt."""
-
-        ignore_label_id: int = -100
-        """Label value marking cells excluded from the comparison.
-
-        Padding rows appended to square off a short batch carry it, so they
-        neither count as solved nor as failed."""
-
-    def __init__(self, config: Config) -> None:
-        self.config = config
-        self.reset()
-
-    def reset(self) -> None:
-        """Drop every accumulated vote."""
-        # Puzzle id -> answer hash -> [votes, summed confidence].
-        self._votes: dict[int, dict[str, list[float]]] = {}
-        # Puzzle id -> the true answer's hash.
-        self._truth: dict[int, str] = {}
-
-    def update(self, logits: Tensor, **batch: object) -> None:
-        """Record one batch of predictions as votes.
-
-        Args:
-          logits: Packed model output; column 0 is the halt logit and the last
-            ``grid_len`` columns are the predicted tokens.
-          **batch: Must carry ``label`` and ``puzzle_identifiers``;
-            ``valid_count`` truncates the padded tail when present.
-
-        """
-        label_raw = batch["label"]
-        assert isinstance(label_raw, Tensor)
-        labels = label_raw.detach()
-        puzzle_identifiers_raw = batch["puzzle_identifiers"]
-        assert isinstance(puzzle_identifiers_raw, Tensor)
-        identifiers = puzzle_identifiers_raw.detach()
-        grid_len = labels.shape[1]
-        packed = logits.detach()
-        predictions = packed[:, -grid_len:]
-        # Confidence in [0, 1] so ties break on a comparable scale.
-        confidence = torch.sigmoid(packed[:, 0].float())
-
-        raw_count = batch.get("valid_count", labels.shape[0])
-        assert isinstance(raw_count, int)
-        valid_count = raw_count
-        labels = labels[:valid_count].to(predictions.device)
-        predictions = predictions[:valid_count]
-        identifiers = identifiers[:valid_count].to(predictions.device)
-        confidence = confidence[:valid_count]
-
-        counted = labels != self.config.ignore_label_id
-        for row in range(predictions.shape[0]):
-            keep = counted[row]
-            if not bool(keep.any()):
-                continue  # An all-ignored row is padding, not a puzzle.
-            puzzle = int(identifiers[row])
-            answer = _digest(predictions[row][keep])
-            truth = _digest(labels[row][keep])
-            self._truth.setdefault(puzzle, truth)
-            tally = self._votes.setdefault(puzzle, {}).setdefault(answer, [0.0, 0.0])
-            tally[0] += 1.0
-            tally[1] += float(confidence[row])
-
-    def compute(self) -> dict[str, float]:
-        """Rank each puzzle's answers and score every K.
-
-        Returns:
-          metrics: Accuracy at each pass@K threshold, keyed as "pass@{k}".
-
-        """
-        solved = dict.fromkeys(self.config.pass_ks, 0)
-        for puzzle, tally in self._votes.items():
-            truth = self._truth[puzzle]
-            # Count first, then mean confidence: agreement across independent
-            # views outranks a single confident view.
-            ranked = sorted(
-                tally.items(),
-                key=lambda item: (item[1][0], item[1][1] / item[1][0]),
-                reverse=True,
-            )
-            for k in self.config.pass_ks:
-                if any(answer == truth for answer, _ in ranked[:k]):
-                    solved[k] += 1
-        counts = torch.tensor(
-            [float(len(self._votes)), *(float(solved[k]) for k in self.config.pass_ks)],
-            dtype=torch.float64,
-        )
-        if dist.is_available() and dist.is_initialized():
-            # NCCL reduces only CUDA tensors; gloo only CPU ones. Move for the
-            # former and come back, so ``.tolist()`` works either way.
-            if dist.get_backend() != "gloo":
-                counts = counts.to(torch.device("cuda", torch.cuda.current_device()))
-            dist.all_reduce(counts, op=dist.ReduceOp.SUM)
-            counts = counts.cpu()
-        total, *hits = (float(count) for count in counts)
-        return {
-            f"pass@{k}": hit / max(1.0, total)
-            for k, hit in zip(self.config.pass_ks, hits, strict=True)
-        }
-
-    class StateDict(TypedDict):
-        """Per-puzzle vote tallies and the digest of each puzzle's answer."""
-
-        votes: dict[int, dict[str, list[float]]]
-        truth: dict[int, str]
-
-    def state_dict(self) -> StateDict:
-        """Return the accumulated votes.
-
-        Returns:
-          state: The vote tallies and answer digests, keyed by puzzle.
-
-        """
-        return {"votes": self._votes, "truth": self._truth}
-
-    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
-        """Restore votes produced by :meth:`state_dict`.
-
-        Args:
-          state_dict: State dict.
-
-        """
-        state = cast(PassK.StateDict, state_dict)
-        self._votes = state.get("votes", {})
-        self._truth = state.get("truth", {})
 
 
 class SignalDumpPayload(NamedTuple):
@@ -425,22 +279,15 @@ class CanonicalPassK:
         preds_t = _uint8_rows(out[:, n_header:])
         raw_q_halt = _floats(out[:, 0].to(torch.float32))
         steps = _act_step_rows(out, k_steps)
-        puzzle_ids_t = batch["puzzle_identifiers"]
-        assert isinstance(puzzle_ids_t, Tensor)
-        if puzzle_ids_t.dtype.is_floating_point:
-            return
-        puzzle_ids = convert(puzzle_ids_t.detach().cpu().tolist(), list[int])
-        spatial_tags_t = batch.get("spatial_tags")
-        if spatial_tags_t is None:
-            spatial_tags = [[1, 0, 0]] * len(puzzle_ids)
-        else:
-            assert isinstance(spatial_tags_t, Tensor)
-            if spatial_tags_t.dtype.is_floating_point:
-                raise ValueError("not enough values to unpack")
-            spatial_tags = [
-                convert(row, list[int])
-                for row in convert(spatial_tags_t.detach().cpu().tolist(), list[object])
-            ]
+        puzzle_ids = convert(
+            _integer_field(batch, "puzzle_identifiers").tolist(),
+            list[int],
+        )
+        spatial_tags = (
+            convert(_integer_field(batch, "spatial_tags").tolist(), list[list[int]])
+            if "spatial_tags" in batch
+            else [[1, 0, 0]] * len(puzzle_ids)
+        )
         for i, ident in enumerate(puzzle_ids):
             if ident == self._blank_identifier_id:
                 continue
@@ -1091,6 +938,15 @@ _REPORT_ONLY_RANK_SCORERS: dict[str, Callable[[float, float, float], float]] = {
 }
 
 
+def _integer_field(batch: Mapping[str, object], name: str) -> Tensor:
+    """Return ``batch[name]`` on CPU, rejecting a floating tensor by field name."""
+    value = batch[name]
+    assert isinstance(value, Tensor)
+    if value.dtype.is_floating_point:
+        raise TypeError(f"CanonicalPassK expects integer {name}; got {value.dtype}.")
+    return value.detach().cpu()
+
+
 def _act_step_rows(out: Tensor, k_steps: int) -> list[_StepRow]:
     if k_steps == 0:
         return []
@@ -1210,13 +1066,3 @@ def _gather_grids(grids: dict[str, NDArray[np.uint8]]) -> dict[str, NDArray[np.u
         if part is not None:
             merged.update(part)
     return merged
-
-
-# Only equality between grids matters, and an evaluation holds hundreds of thousands of
-# them, so a digest is stored instead of the grid.
-def _digest(grid: Tensor) -> str:
-    """Hash one grid's tokens."""
-    return hashlib.blake2b(
-        grid.to(torch.int16).cpu().numpy().tobytes(),
-        digest_size=16,
-    ).hexdigest()

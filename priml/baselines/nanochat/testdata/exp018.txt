@@ -779,7 +779,7 @@ NgramTrainLoop.Config(
                 │       │                       init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                 │       │                       shard=None
                 │       │               ),
-                │       │               dtype=torch.float32,
+                │       │               dtype=None,
                 │       │               output_cap=15
                 │       │       ),
                 │       │       rope=RoPE.Config(

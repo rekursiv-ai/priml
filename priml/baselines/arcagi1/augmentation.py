@@ -137,11 +137,16 @@ class ColorDihedral:
         if separator not in name:
             return name, lambda grid: grid
         tid_text, permutation = name.split(separator)[-2:]
-        if len(permutation) != 10 or set(permutation) != set("0123456789"):
-            raise ValueError("Encoded colors must be a permutation of 0..9.")
         tid = int(tid_text.removeprefix("t"))
+        # A negative id would index the inverse table from the end and decode silently.
         if tid < 0 or tid > 7:
             raise ValueError("Encoded transform must be in 0..7.")
+        # A non-bijective suffix would misroute colors and silently miscompare hashes.
+        if len(permutation) != 10 or set(permutation) != set("0123456789"):
+            raise ValueError(
+                f"invalid color-permutation suffix {permutation!r} in identifier "
+                f"{name!r}; expected a permutation of '0123456789'.",
+            )
         inverse_tid = (0, 3, 2, 1, 4, 5, 6, 7)[tid]
         inverse_colors = np.argsort(list(permutation)).astype(np.uint8)
 
@@ -415,8 +420,11 @@ class ArcAugmentation:
         def finalize(self) -> Self:
             """Push the dataset's geometry into its transform and spatial packer."""
             self.spatial.spec = self.spec
-            assert isinstance(self.transform, ColorDihedral.Config)
-            if self.spec is not None and not self.transform.separator:
+            if (
+                self.spec is not None
+                and isinstance(self.transform, ColorDihedral.Config)
+                and not self.transform.separator
+            ):
                 self.transform.separator = self.spec.puzzle_id_separator
             return super().finalize()
 
@@ -488,26 +496,7 @@ def inverse_aug(
         inverse dihedral first, then the inverse color permutation.
 
     """
-    separator = spec.puzzle_id_separator
-    if separator not in name:
-        return name, lambda x: x
-    tid_str, perm_str = name.split(separator)[-2:]
-    tid = int(tid_str[1:])
-    # A negative id would index the inverse table from the end and decode silently.
-    if tid < 0 or tid > 7:
-        raise ValueError("Encoded transform must be in 0..7.")
-    # A non-bijective suffix would misroute colors and silently miscompare hashes.
-    if len(perm_str) != 10 or set(perm_str) != set("0123456789"):
-        raise ValueError(
-            f"invalid color-permutation suffix {perm_str!r} in identifier {name!r}; "
-            "expected a permutation of '0123456789'.",
-        )
-    inv_perm = np.argsort(list(perm_str)).astype(np.uint8)
-
-    def _map_grid(grid: NDArray[np.uint8]) -> NDArray[np.uint8]:
-        return inv_perm[inverse_dihedral_transform(grid, tid=tid)]
-
-    return name.partition(separator)[0], _map_grid
+    return ColorDihedral.Config(separator=spec.puzzle_id_separator).make().inverse(name)
 
 
 def canonicalize_arc_grid(
@@ -632,6 +621,12 @@ def normalize_scale_weights(
         raise ValueError(
             f"scale weights must include a positive weight: {train_scale_weights}.",
         )
+    # Rescale only on overflow: the result names dataset directories (via
+    # ``scale_weights_slug``), so finite totals must keep their exact quotients.
+    if math.isinf(total):
+        peak = max(normalized.values())
+        normalized = {scale: weight / peak for scale, weight in normalized.items()}
+        total = sum(normalized.values())
     return {scale: weight / total for scale, weight in normalized.items()}
 
 
@@ -769,15 +764,16 @@ def arc_grid_to_np(
       grid: Validated uint8 array.
 
     """
-    arr = np.array(grid, dtype=np.int64)
+    arr = np.array(grid, dtype=np.float64)
     if arr.ndim != 2:
         raise ValueError("Expected arr.ndim == 2.")
     if arr.shape[0] > max_grid:
         raise ValueError(f"Expected arr.shape[0] <= max_grid={max_grid}.")
     if arr.shape[1] > max_grid:
         raise ValueError(f"Expected arr.shape[1] <= max_grid={max_grid}.")
-    # Checked on the wide dtype, so 256 is rejected rather than wrapping to a color.
-    if not np.all((arr >= 0) & (arr <= 9)):
+    # Checked before any integer cast, so 256 cannot wrap and 9.9 cannot truncate
+    # into a valid color.
+    if not np.all(np.isin(arr, np.arange(10))):
         raise ValueError("ARC grid colors must be in 0..9.")
     return arr.astype(np.uint8)
 

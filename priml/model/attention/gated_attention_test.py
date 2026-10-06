@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from priml.cost import cost
+from priml.model.attention.flash3 import Flash3Attention
 from priml.model.attention.gated_attention import (
     GatedAttention,
     _causal_bias,
@@ -24,6 +25,13 @@ from priml.model.attention.kernel import (
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.rope import RoPE, RoPEMixed, rotation_cost
 from priml.testing.cost import assert_cost_matches_torch
+
+
+def _layer_cache(
+    module: GatedAttention,
+    state: KVCache,
+) -> dict[object, object]:
+    return {module.depth_index: state}
 
 
 if TYPE_CHECKING:
@@ -43,8 +51,8 @@ def test_gated_attention_cache_continuation() -> None:
     with torch.no_grad():
         expected = model(x)
         cache = model.alloc_kv_cache(batch=2, max_seq=5)
-        prefix, cache = model.forward_cached(x[:, :3], cache=cache)
-        suffix, cache = model.forward_cached(x[:, 3:], cache=cache)
+        prefix = model.forward(x[:, :3], cache=_layer_cache(model, cache))
+        suffix = model.forward(x[:, 3:], cache=_layer_cache(model, cache))
     torch.testing.assert_close(torch.cat([prefix, suffix], dim=1), expected)
     assert cache.seen == 5
 
@@ -119,7 +127,7 @@ def test_gated_attention_rejects_cache_geometry_before_mutation(
     original_k, original_v = cache.k.clone(), cache.v.clone()
 
     with pytest.raises(ValueError, match="cache batch, head, and feature geometry"):
-        model.forward_cached(torch.randn(2, 3, 8), cache=cache)
+        model.forward(torch.randn(2, 3, 8), cache=_layer_cache(model, cache))
 
     assert cache.length == 0
     assert cache.seen == 0
@@ -236,10 +244,10 @@ def test_gated_attention_cached_decode_window_restricts_attention(
     with torch.no_grad():
         cache_a = model.alloc_kv_cache(batch=2, max_seq=6)
         cache_b = model.alloc_kv_cache(batch=2, max_seq=6)
-        _, cache_a = model.forward_cached(x[:, :4], cache=cache_a)
-        _, cache_b = model.forward_cached(x[:, :4], cache=cache_b)
-        windowed, _ = model.forward_cached(x[:, 4:], cache=cache_a, window=0)
-        full, _ = model.forward_cached(x[:, 4:], cache=cache_b, window=-1)
+        _ = model.forward(x[:, :4], cache=_layer_cache(model, cache_a))
+        _ = model.forward(x[:, :4], cache=_layer_cache(model, cache_b))
+        windowed = model.forward(x[:, 4:], cache=_layer_cache(model, cache_a), window=0)
+        full = model.forward(x[:, 4:], cache=_layer_cache(model, cache_b), window=-1)
 
     assert not torch.equal(windowed, full)
 
@@ -261,8 +269,8 @@ def test_gated_attention_cached_decode_window_zero_pins_to_value_projection() ->
 
     with torch.no_grad():
         cache = model.alloc_kv_cache(batch=2, max_seq=6)
-        _, cache = model.forward_cached(x[:, :4], cache=cache)
-        actual, _ = model.forward_cached(decode, cache=cache, window=0)
+        _ = model.forward(x[:, :4], cache=_layer_cache(model, cache))
+        actual = model.forward(decode, cache=_layer_cache(model, cache), window=0)
 
         shape = (*decode.shape[:-1], -1, model.channels_head)
         gate = (
@@ -304,13 +312,13 @@ def test_gated_attention_cached_chunk_keeps_causality_when_window_is_unmasked(
         model.proj_v.weight.fill_(1)
         model.proj_out.weight.fill_(1)
         cache = model.alloc_kv_cache(batch=2, max_seq=4)
-        _, cache = model.forward_cached(
+        _ = model.forward(
             torch.tensor([[[2.0], [4.0]], [[2.0], [4.0]]]),
-            cache=cache,
+            cache=_layer_cache(model, cache),
         )
-        actual, _ = model.forward_cached(
+        actual = model.forward(
             torch.tensor([[[6.0], [8.0]], [[6.0], [8.0]]]),
-            cache=cache,
+            cache=_layer_cache(model, cache),
             window=window,
         )
 
@@ -331,8 +339,16 @@ def test_gated_attention_consumes_caller_causality_message(is_causal: bool) -> N
         expected = model(x)
         direct = model(x, is_causal=is_causal)
         cache = model.alloc_kv_cache(batch=2, max_seq=4)
-        prefix, cache = model.forward_cached(x[:, :2], cache=cache, is_causal=is_causal)
-        suffix, _ = model.forward_cached(x[:, 2:], cache=cache, is_causal=is_causal)
+        prefix = model.forward(
+            x[:, :2],
+            cache=_layer_cache(model, cache),
+            is_causal=is_causal,
+        )
+        suffix = model.forward(
+            x[:, 2:],
+            cache=_layer_cache(model, cache),
+            is_causal=is_causal,
+        )
 
     torch.testing.assert_close(direct, expected)
     torch.testing.assert_close(torch.cat((prefix, suffix), dim=1), expected)
@@ -497,6 +513,22 @@ def test_gated_attention_cost_is_projections_norms_rotary_kernel_and_gate() -> N
     )
 
 
+def test_gated_attention_cost_forwards_the_bus_to_the_kernel() -> None:
+    config = GatedAttention.Config()
+    config.channels_in = 8
+    config.num_heads = 2
+    config.num_heads_kv = 1
+    config.channels_head = 4
+    config.attn_kernel = Flash3Attention.Config()
+    finalized = config.copy_tree().finalize()
+    full = finalized.cost(seq_len=8, batch_size=1, dtype=None)
+    windowed = finalized.cost(seq_len=8, batch_size=1, dtype=None, window=2)
+    assert (
+        windowed["flops", "primal", "matmul"].sum()
+        < full["flops", "primal", "matmul"].sum()
+    )
+
+
 def test_gated_attention_cost_hands_dropout_to_the_kernel() -> None:
     """Attention dropout is a mask and a rescale over each head's key row, both ways."""
     config = GatedAttention.Config()
@@ -635,7 +667,7 @@ def test_gated_attention_cache_uses_projection_device_and_dtype() -> None:
     assert explicit.k.dtype == torch.float32
 
 
-def test_gated_attention_forward_cached_forwards_positions_and_mask() -> None:
+def test_gated_attention_forward_forwards_positions_and_mask() -> None:
     config = GatedAttention.Config()
     config.channels_in = 8
     config.num_heads = config.num_heads_kv = 1
@@ -650,15 +682,14 @@ def test_gated_attention_forward_cached_forwards_positions_and_mask() -> None:
     expected = model(x, positions=positions, attn_mask=mask)
     cache = model.alloc_kv_cache(batch=2, max_seq=3)
 
-    actual, returned_cache = model.forward_cached(
+    actual = model.forward(
         x,
-        cache=cache,
+        cache=_layer_cache(model, cache),
         positions=positions,
         attn_mask=mask,
     )
 
     torch.testing.assert_close(actual, expected)
-    assert returned_cache is cache
     assert cache.seen == 3
 
 

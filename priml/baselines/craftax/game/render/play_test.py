@@ -237,8 +237,14 @@ def test_play_closes_cleanly_on_quit(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeRenderer:
         frame_shape = (2, 4)
 
-        def __init__(self, *, block_pixels: int, asset_dir: Path | None) -> None:
-            assert (block_pixels, asset_dir) == (64, None)
+        def __init__(
+            self,
+            *,
+            block_pixels: int,
+            asset_dir: Path | None,
+            view: tuple[int, int],
+        ) -> None:
+            assert (block_pixels, asset_dir, view) == (64, None, constants.OBS_DIM)
 
         def render(self, state: object) -> np.ndarray:
             del state
@@ -321,8 +327,14 @@ def test_play_routes_input_and_resets_finished_worlds(
     class FakeRenderer:
         frame_shape = (2, 4)
 
-        def __init__(self, *, block_pixels: int, asset_dir: Path | None) -> None:
-            assert (block_pixels, asset_dir) == (8, tmp_path)
+        def __init__(
+            self,
+            *,
+            block_pixels: int,
+            asset_dir: Path | None,
+            view: tuple[int, int],
+        ) -> None:
+            assert (block_pixels, asset_dir, view) == (8, tmp_path, (5, 7))
 
         def render(self, state: object) -> np.ndarray:
             return np.full((2, 4, 3), states_seen.index(state), dtype=np.uint8)
@@ -366,7 +378,7 @@ def test_play_routes_input_and_resets_finished_worlds(
     monkeypatch.setattr(step, "step", take_step)
     monkeypatch.setattr(step, "is_done", is_done)
 
-    result = play.play(seed=37, block_pixels=8, asset_dir=tmp_path)
+    result = play.play(seed=37, block_pixels=8, asset_dir=tmp_path, view=(5, 7))
 
     assert result is moved_again
     assert screen_sizes == [(4, 2)]
@@ -412,16 +424,28 @@ def test_record_uses_defaults_and_closes_writer(
         num_envs = 1
         device = "cpu"
         seed = 0
+        view = (0, 0)
 
         def make(self) -> FakeEnv:
             assert (self.num_envs, self.device, self.seed) == (1, "cpu", 0)
+            assert self.view == constants.OBS_DIM
             return environment
 
     class FakeRenderer:
         frame_shape = (2, 3)
 
-        def __init__(self, *, block_pixels: int, asset_dir: Path | None) -> None:
-            assert (block_pixels, asset_dir) == (64, tmp_path)
+        def __init__(
+            self,
+            *,
+            block_pixels: int,
+            asset_dir: Path | None,
+            view: tuple[int, int],
+        ) -> None:
+            assert (block_pixels, asset_dir, view) == (
+                64,
+                tmp_path,
+                constants.OBS_DIM,
+            )
 
         def render(self, state: object) -> np.ndarray:
             del state
@@ -507,11 +531,13 @@ def test_record_passes_exact_geometry_rng_and_terminal_frame(
     class FakeConfig:
         def __init__(self) -> None:
             self.num_envs = 256
-            self.device = "auto"
+            self.device = None
             self.seed = 0
+            self.view = (0, 0)
 
         def make(self) -> FakeEnv:
             assert (self.num_envs, self.device, self.seed) == (1, "cpu", 23)
+            assert self.view == (5, 7)
             return environment
 
     class FakeEnvironmentType:
@@ -522,8 +548,14 @@ def test_record_passes_exact_geometry_rng_and_terminal_frame(
     class FakeRenderer:
         frame_shape = (2, 4)
 
-        def __init__(self, *, block_pixels: int, asset_dir: Path | None) -> None:
-            assert (block_pixels, asset_dir) == (4, None)
+        def __init__(
+            self,
+            *,
+            block_pixels: int,
+            asset_dir: Path | None,
+            view: tuple[int, int],
+        ) -> None:
+            assert (block_pixels, asset_dir, view) == (4, None, (5, 7))
 
         def render(self, state: object) -> np.ndarray:
             rendered.append(state)
@@ -573,6 +605,7 @@ def test_record_passes_exact_geometry_rng_and_terminal_frame(
         max_steps=1,
         fps=1,
         block_pixels=4,
+        view=(5, 7),
     )
 
     assert result == 1

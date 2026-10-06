@@ -22,11 +22,9 @@ from priml.baselines.craftax.game import constants, mechanics
 from priml.baselines.craftax.game.constants import (
     Achievement,
     BlockType,
-    ItemType,
 )
 from priml.baselines.craftax.game.indexing import (
     batch_rows,
-    gather_tiles,
     scatter_tiles_where,
 )
 
@@ -80,16 +78,6 @@ def interact(
         generator=generator,
     )
     return _damage_boss(state, block=block, acting=acting, doing=doing)
-
-
-def item_at(state: EnvState, position: Tensor) -> Tensor:
-    """Return the item lying on ``position`` of the player's floor, ``[envs]``."""
-    return gather_tiles(mechanics.current_items(state), position)
-
-
-def is_ladder(item: Tensor, kind: ItemType) -> Tensor:
-    """Whether ``item`` is the named ladder."""
-    return item == int(kind)
 
 
 def _strike_whatever_stands_there(

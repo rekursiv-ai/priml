@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sized
 from functools import partialmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -613,23 +614,14 @@ class TestImageNetIteration:
     ) -> None:
         train_tar = temp_dir / "ILSVRC2012_img_train.tar"
         create_nested_tar(train_tar, "n01440764", num_images=2)
-        source = ImageNetSource(
-            ImageNetSource.Config(
-                working_dir=temp_dir,
-                split="train",
-                num_concurrently_read_shards=0,
-            ),
-        )
-
-        samples = list(source)
-        file_names: list[str] = []
-        for sample in samples:
-            assert "file_name" in sample
-            file_names.append(sample["file_name"])
-        assert file_names == [
-            "n01440764_0.JPEG",
-            "n01440764_1.JPEG",
-        ]
+        with pytest.raises(ValueError, match="num_concurrently_read_shards"):
+            ImageNetSource(
+                ImageNetSource.Config(
+                    working_dir=temp_dir,
+                    split="train",
+                    num_concurrently_read_shards=0,
+                ),
+            )
 
     def test_iter_val_basic(self, temp_dir: Path) -> None:
         """Test basic validation iteration."""
@@ -782,7 +774,7 @@ class TestImageNetIteration:
             info = tarfile.TarInfo(name="subdir")
             info.type = tarfile.DIRTYPE
             tar.addfile(info)
-        (temp_dir / "validation_labels.txt").write_text("n01440764\n")
+        (temp_dir / "validation_labels.txt").write_text("")
 
         config = ImageNetSource.Config(working_dir=temp_dir, split="val")
         source = ImageNetSource(config)
@@ -945,7 +937,7 @@ class TestImageNetLength:
         config = ImageNetSource.Config(working_dir=temp_dir, split="train")
         source = ImageNetSource(config)
 
-        assert len(source) == 1_281_167
+        assert not isinstance(source, Sized)
 
     def test_len_val(self, temp_dir: Path) -> None:
         """Test length for val split."""
@@ -956,7 +948,7 @@ class TestImageNetLength:
         config = ImageNetSource.Config(working_dir=temp_dir, split="val")
         source = ImageNetSource(config)
 
-        assert len(source) == 50_000
+        assert not isinstance(source, Sized)
 
     def test_len_test(self, temp_dir: Path) -> None:
         """Test length for test split."""
@@ -966,7 +958,7 @@ class TestImageNetLength:
         config = ImageNetSource.Config(working_dir=temp_dir, split="test")
         source = ImageNetSource(config)
 
-        assert len(source) == 100_000
+        assert not isinstance(source, Sized)
 
     def test_iter_train_parallel_exhausted_shard(self, temp_dir: Path) -> None:
         """Test parallel reading when shards get exhausted (lines 141-142)."""
@@ -1140,6 +1132,56 @@ class TestReadClassTar:
             samples = list(_read_class_tar(tar, member))
 
         assert len(samples) == 0
+
+
+def test_validation_directory_members_do_not_consume_labels(tmp_path: Path) -> None:
+    archive = tmp_path / "ILSVRC2012_img_val.tar"
+    create_flat_tar(archive)
+    with tarfile.open(archive, "a") as tar:
+        directory = tarfile.TarInfo("subdir")
+        directory.type = tarfile.DIRTYPE
+        tar.addfile(directory)
+    (tmp_path / "validation_labels.txt").write_text("first\nsecond\n")
+    source = ImageNetSource.Config(working_dir=tmp_path, split="val").make()
+    assert [sample.get("label") for sample in source] == ["first", "second"]
+
+
+def test_multiple_test_archives_are_rejected(tmp_path: Path) -> None:
+    create_flat_tar(tmp_path / "ILSVRC2012_img_test_a.tar")
+    create_flat_tar(tmp_path / "ILSVRC2012_img_test_b.tar")
+    with pytest.raises(ValueError, match="Multiple test archives"):
+        ImageNetSource.Config(working_dir=tmp_path, split="test").make()
+
+
+@pytest.mark.parametrize("shards", [0, -1])
+def test_imagenet_rejects_nonpositive_concurrency(tmp_path: Path, shards: int) -> None:
+    create_nested_tar(tmp_path / "ILSVRC2012_img_train.tar", "class")
+    config = ImageNetSource.Config(working_dir=tmp_path)
+    config.num_concurrently_read_shards = shards
+    with pytest.raises(ValueError, match="num_concurrently_read_shards"):
+        config.make()
+
+
+def test_string_labels_resolve_beneath_owner_and_members_are_cached(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    create_flat_tar(dataset / "ILSVRC2012_img_val.tar")
+    (tmp_path / "labels.txt").write_text("first\nsecond\n")
+    source = ImageNetSource.Config(
+        base_dir=tmp_path,
+        working_dir="/dataset",
+        validation_labels_file="/labels.txt",
+        split="val",
+    ).make()
+
+    def reject_scan(_: tarfile.TarFile) -> list[tarfile.TarInfo]:
+        raise AssertionError("Validation members must reuse the construction scan.")
+
+    monkeypatch.setattr(tarfile.TarFile, "getmembers", reject_scan)
+    assert [sample.get("label") for sample in source] == ["first", "second"]
 
 
 if __name__ == "__main__":

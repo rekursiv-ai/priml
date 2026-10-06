@@ -229,7 +229,7 @@ def test_a_negative_stride_is_rejected() -> None:
     A bad one has no list to fall back to and would silently gate nothing.
     """
     with pytest.raises(ValueError, match="value_embedding_stride"):
-        _config(value_embedding_stride=-1).copy_tree().finalize()
+        _config(value_embedding_stride=-1).make()
 
 
 def test_the_gated_layers_count_back_from_the_last() -> None:
@@ -271,7 +271,78 @@ def test_layers_disagreeing_on_head_shape_are_rejected() -> None:
         "got (channels_head, num_heads * channels_head) of [(2, 4), (2, 8)]."
     )
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
-        config.copy_tree().finalize()
+        config.make()
+
+
+def test_an_invalid_stack_still_prints_its_finalized_tree() -> None:
+    """Validation lives at build, so pprint shows the propagated widths.
+
+    A raise in finalize would leave the config the user most needs to inspect
+    printed as typed, without the derived values that explain the error.
+    """
+    config = _config(num_layers=2, value_embedding_stride=-1)
+    final = config.copy_tree().finalize()
+    assert isinstance(final.block, list)
+    assert final.mix.num_layers == 2
+    assert final.rope.channels_head == 2
+    with pytest.raises(ValueError, match="value_embedding_stride"):
+        config.make()
+
+
+def test_the_rotation_cache_follows_a_dtype_change() -> None:
+    """``.double()`` moves the rope; the cached factors must follow it."""
+    model = _model()
+    model(_tokens())
+    model.double()
+    cos, sin = model._rotation_table(SEQ, device=torch.device("cpu"))
+    assert cos.dtype == sin.dtype == model.rope.dtype == torch.float64
+
+
+def test_receiving_the_attention_source_requires_a_reusing_block() -> None:
+    """A plain block drops the source, so the field would silently do nothing."""
+    config = _memory_config()
+    config.num_layers = 3
+    config.attention_source_layers = (2,)
+    with pytest.raises(TypeError, match="layer 2 receives the attention source"):
+        config.make()
+
+
+def test_fused_tables_need_exactly_two_hashes() -> None:
+    config = _memory_config()
+    config.fused_ngram = True
+    config.bigrams["0"].hash_multipliers = ((1, 3), (5, 7), (9, 11))
+    config.bigrams["0"].num_embeddings = 16
+    config.channels_in = 24
+    attention = config.template.attn
+    assert isinstance(attention, CausalAttention.Config)
+    attention.num_heads = 3
+    with pytest.raises(ValueError, match="fused_ngram needs two hashes"):
+        config.make()
+
+
+def test_a_memory_table_needs_its_gate() -> None:
+    config = _memory_config()
+    attention = config.template.attn
+    assert isinstance(attention, CausalAttention.Config)
+    attention.bigram = False
+    with pytest.raises(ValueError, match="builds no bigram gate"):
+        config.make()
+
+
+def test_gated_residual_mix_keeps_the_parent_layer_guard() -> None:
+    with pytest.raises(ValueError, match="num_layers must be positive"):
+        GatedResidualMix.Config(num_layers=0).make()
+
+
+def test_scaled_soft_cap_caps_at_its_declared_dtype() -> None:
+    """The inherited ``dtype`` is the width the cap runs at, as for ``SoftCap``."""
+    config = ScaledSoftCap.Config(cap=2.0, output_cap=3.0, dtype=torch.bfloat16)
+    config.channels_in = config.channels_out = 3
+    torch.manual_seed(0)
+    module = config.make()
+    values = torch.randn(2, 3)
+    expected = (3.0 * torch.tanh(module.inner(values).bfloat16() / 2.0)).float()
+    assert torch.equal(module(values), expected)
 
 
 def test_a_uniform_stack_of_explicit_blocks_still_builds() -> None:
@@ -639,7 +710,7 @@ def test_a_block_whose_attention_declares_no_heads_is_rejected() -> None:
     config = _config()
     config.block = ResetlessBlock.Config(attn=Linear.Config(16, 16))
     with pytest.raises(AttributeError, match=r"Linear\.Config.*channels_head"):
-        config.copy_tree().finalize()
+        config.make()
 
 
 def test_value_tables_are_held_at_the_token_tables_dtype() -> None:
@@ -827,6 +898,11 @@ def test_memory_model_preserves_runtime_configuration() -> None:
     config.attention_source_after_layer = 0
     config.ngram_dirty_clear = True
     config.fused_ngram = True
+    config.block = SourceReuseTransformerBlock.Config().update(config.template)
+    attention = config.template.attn
+    assert isinstance(attention, CausalAttention.Config)
+    attention.trigram = True
+    attention.gate_channels = 4  # Three gate slices must fit channels_in=16.
     config.trigrams["0"] = HashedNgramTables.Config(
         num_embeddings=16,
         hash_multipliers=((1, 3, 5), (5, 7, 9)),

@@ -122,8 +122,8 @@ class CheckpointableStepTimer:
 
         """
         state = cast(CheckpointableStepTimer.StateDict, state_dict)
-        # A checkpoint reader may hand back a float or a numeric string; a
-        # value that is none of those is corruption, so the coercion raises.
+        # Only an int count and an int-or-float seconds total are valid; a
+        # string, bool, or fractional count is corruption, so the read raises.
         self.global_count = convert(state["global_count"], int)
         self.global_sec = convert(state["global_sec"], float)
         self.local_count = 0

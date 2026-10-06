@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 import json
+import re
 
 from torch import Tensor
 
@@ -12,14 +13,8 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.arcagi1.augmentation import dihedral_transform
-from priml.baselines.arcagi2.metric import (
-    PassK,
-    _canonical,
-    _crop,
-    _hash,
-    _json_grid,
-)
+from priml.baselines.arcagi1.augmentation import dihedral_transform, grid_hash
+from priml.baselines.arcagi2.metric import PassK
 from priml.baselines.arcagi2.record_test import assert_matches, reduce
 from priml.lib.custom_json import ReadError
 
@@ -120,7 +115,11 @@ def test_reference_metric_golden_bites(tmp_path: Path) -> None:
         assert_matches("metric", "votes", record)
 
 
-def test_metric_error_and_canonical_helpers() -> None:
+def _hash(rows: list[list[int]]) -> str:
+    return grid_hash(np.array(rows, dtype=np.uint8))
+
+
+def test_update_rejects_a_header_that_is_not_one_halt_column() -> None:
     metric = PassK.Config(working_dir="/opt/scratch/absent").make()
     with pytest.raises(ValueError, match="Expected one halt column") as header_error:
         metric.update(
@@ -129,87 +128,46 @@ def test_metric_error_and_canonical_helpers() -> None:
             puzzle_identifiers=torch.zeros(2, dtype=torch.long),
         )
     assert str(header_error.value) == "Expected one halt column followed by the grid"
-    with pytest.raises(
-        ValueError,
-        match="ARC packed grids must be square",
-    ) as crop_error:
-        _crop(torch.zeros(3, dtype=torch.uint8))
-    assert str(crop_error.value) == "ARC packed grids must be square"
-    with pytest.raises(ValueError, match="Invalid ARC color"):
-        _canonical("task|||t0|||bad", torch.zeros(2, 3, dtype=torch.uint8))
-    with pytest.raises(ValueError, match="Invalid ARC dihedral"):
-        _canonical("task|||t9|||0123456789", torch.zeros(2, 3, dtype=torch.uint8))
-    assert _hash(torch.zeros(2, 3, dtype=torch.uint8))
-    assert _json_grid([[1, 2, 3], [4, 5, 6]]).shape == (2, 3)
 
 
-def test_canonical_inverts_every_dihedral_view_of_rectangular_grid() -> None:
-    grid = np.array([[0, 1, 2], [3, 4, 5]], dtype=np.uint8)
-    permutation = np.array([0, 2, 1, 3, 4, 5, 6, 7, 8, 9], dtype=np.uint8)
-    permuted = permutation[grid]
-    for tid in range(8):
-        augmented = dihedral_transform(permuted, tid=tid)
-        task, restored = _canonical(
-            f"task|||t{tid}|||0213456789",
-            torch.from_numpy(augmented.copy()),
+@pytest.mark.parametrize(
+    ("name", "message"),
+    [
+        ("multi|||t0|||0213456788", "expected a permutation of '0123456789'"),
+        ("multi|||t9|||0213456789", "Encoded transform must be in 0..7"),
+    ],
+)
+def test_update_rejects_a_malformed_view_name(
+    tmp_path: Path,
+    name: str,
+    message: str,
+) -> None:
+    write_manifest(tmp_path)
+    (tmp_path / "identifiers.json").write_text(json.dumps(["<blank>", name]))
+    metric = PassK.Config(working_dir=tmp_path).make()
+    with pytest.raises(ValueError, match=re.escape(message)):
+        metric.update(
+            torch.tensor([[0.0, 3.0, 0.0, 0.0, 0.0]]),
+            media=torch.tensor([[3, 0, 0, 0]], dtype=torch.int32),
+            puzzle_identifiers=torch.tensor([1]),
         )
-        assert task == "task"
-        assert torch.equal(restored, torch.from_numpy(grid))
 
 
-def test_crop_preserves_color_boundaries_and_stops_at_padding() -> None:
-    packed = torch.tensor(
-        [[2, 11, 12], [3, 4, 11], [0, 0, 0]],
-        dtype=torch.uint8,
+def test_answer_grids_reject_non_integer_cells(tmp_path: Path) -> None:
+    write_manifest(tmp_path)
+    (tmp_path / "test_puzzles.json").write_text(
+        json.dumps({"multi": {"test": [{"input": [[1, 2.5]], "output": [[1]]}]}}),
     )
-    assert torch.equal(
-        _crop(packed.flatten()),
-        torch.tensor([[0, 9], [1, 2]], dtype=torch.uint8),
-    )
-    assert (
-        _crop(torch.tensor([[0, 2], [3, 4]], dtype=torch.uint8).flatten()).numel() == 0
-    )
-    widest = torch.tensor([[2, 3, 4], [5, 0, 0], [6, 0, 0]], dtype=torch.uint8)
-    assert torch.equal(
-        _crop(widest.flatten()),
-        torch.tensor([[0, 1, 2]], dtype=torch.uint8),
-    )
-    assert torch.equal(
-        _crop(torch.tensor([[2, 3], [4, 5]], dtype=torch.uint8).flatten()),
-        torch.tensor([[0, 1], [2, 3]], dtype=torch.uint8),
-    )
-    wide_input = torch.tensor([[2, 3], [4, 5]], dtype=torch.int64)
-    assert _crop(wide_input.flatten()).dtype == torch.uint8
     with pytest.raises(ReadError):
-        _crop(torch.tensor([[2.0, 3.0], [4.0, 5.0]]).flatten())
-
-
-def test_hash_and_json_grid_use_uint8_boundary() -> None:
-    values = torch.tensor([[1, 2], [3, 4]], dtype=torch.int16)
-    assert _hash(values) == _hash(values.to(torch.uint8))
-    grid = _json_grid([[1, 2], [3, 4]])
-    assert grid.dtype == torch.uint8
-    assert torch.equal(grid, values.to(torch.uint8))
-    with pytest.raises(ReadError):
-        _json_grid([[1, 2], [3, 4.5]])
-
-
-def test_canonical_rejects_non_permutations_and_returns_uint8() -> None:
-    with pytest.raises(ValueError, match="Invalid ARC color permutation: 'abcdefghij'"):
-        _canonical("task|||t0|||abcdefghij", torch.zeros(2, 3, dtype=torch.uint8))
-    _, restored = _canonical(
-        "task|||t0|||0123456789",
-        torch.ones(2, 3, dtype=torch.int64),
-    )
-    assert restored.dtype == torch.uint8
+        PassK.Config(working_dir=tmp_path).make().compute()
 
 
 def test_vote_rankings_resolve_ties_by_the_documented_keys(tmp_path: Path) -> None:
     write_manifest(tmp_path)
     metric = PassK.Config(working_dir=tmp_path, pass_ks=(1, 2)).make()
-    input_hash = _hash(torch.tensor([[1, 2]], dtype=torch.uint8))
-    truth_hash = _hash(torch.tensor([[2], [1]], dtype=torch.uint8))
-    other_hash = _hash(torch.tensor([[7]], dtype=torch.uint8))
+    input_hash = _hash([[1, 2]])
+    truth_hash = _hash([[2], [1]])
+    other_hash = _hash([[7]])
     metric.votes = {
         "multi": {input_hash: [(other_hash, 0.5), (truth_hash, 0.5)]},
     }
@@ -227,9 +185,9 @@ def test_vote_rankings_resolve_ties_by_the_documented_keys(tmp_path: Path) -> No
 def test_pass_tie_ignores_the_maximum_confidence(tmp_path: Path) -> None:
     write_manifest(tmp_path)
     metric = PassK.Config(working_dir=tmp_path, pass_ks=(1,)).make()
-    input_hash = _hash(torch.tensor([[1, 2]], dtype=torch.uint8))
-    truth_hash = _hash(torch.tensor([[2], [1]], dtype=torch.uint8))
-    other_hash = _hash(torch.tensor([[7]], dtype=torch.uint8))
+    input_hash = _hash([[1, 2]])
+    truth_hash = _hash([[2], [1]])
+    other_hash = _hash([[7]])
     metric.votes = {
         "multi": {
             input_hash: [
@@ -246,9 +204,9 @@ def test_pass_tie_ignores_the_maximum_confidence(tmp_path: Path) -> None:
 def test_rankings_use_count_mean_and_max_confidence(tmp_path: Path) -> None:
     write_manifest(tmp_path)
     metric = PassK.Config(working_dir=tmp_path, pass_ks=(1, 2)).make()
-    input_hash = _hash(torch.tensor([[1, 2]], dtype=torch.uint8))
-    truth_hash = _hash(torch.tensor([[2], [1]], dtype=torch.uint8))
-    other_hash = _hash(torch.tensor([[7]], dtype=torch.uint8))
+    input_hash = _hash([[1, 2]])
+    truth_hash = _hash([[2], [1]])
+    other_hash = _hash([[7]])
     metric.votes = {
         "multi": {
             input_hash: [
@@ -274,9 +232,9 @@ def test_rankings_use_count_mean_and_max_confidence(tmp_path: Path) -> None:
 def test_vote_aggregation_distinguishes_count_from_confidence(tmp_path: Path) -> None:
     write_manifest(tmp_path)
     metric = PassK.Config(working_dir=tmp_path, pass_ks=(1, 2)).make()
-    input_hash = _hash(torch.tensor([[1, 2]], dtype=torch.uint8))
-    truth_hash = _hash(torch.tensor([[2], [1]], dtype=torch.uint8))
-    other_hash = _hash(torch.tensor([[7]], dtype=torch.uint8))
+    input_hash = _hash([[1, 2]])
+    truth_hash = _hash([[2], [1]])
+    other_hash = _hash([[7]])
     metric.votes = {
         "multi": {
             input_hash: [
@@ -299,12 +257,12 @@ def test_vote_aggregation_distinguishes_count_from_confidence(tmp_path: Path) ->
 def test_vote_rankings_use_confidence_sum_and_maximum(tmp_path: Path) -> None:
     write_manifest(tmp_path)
     metric = PassK.Config(working_dir=tmp_path, pass_ks=(1,)).make()
-    input_a = _hash(torch.tensor([[1, 2]], dtype=torch.uint8))
-    input_b = _hash(torch.tensor([[3]], dtype=torch.uint8))
-    truth_a = _hash(torch.tensor([[2], [1]], dtype=torch.uint8))
-    truth_b = _hash(torch.tensor([[4]], dtype=torch.uint8))
-    wrong_a = _hash(torch.tensor([[7]], dtype=torch.uint8))
-    wrong_b = _hash(torch.tensor([[6]], dtype=torch.uint8))
+    input_a = _hash([[1, 2]])
+    input_b = _hash([[3]])
+    truth_a = _hash([[2], [1]])
+    truth_b = _hash([[4]])
+    wrong_a = _hash([[7]])
+    wrong_b = _hash([[6]])
     metric.votes = {
         "multi": {
             input_a: [(truth_a, 0.9), (wrong_a, 0.425), (wrong_a, 0.425)],
@@ -327,8 +285,8 @@ def test_update_records_halt_confidence_and_validates_identifiers(
     media = torch.tensor([[4, 3, 0, 0]], dtype=torch.int32)
     logits = torch.tensor([[-2.0, 3.0, 0.0, 4.0, 0.0]])
     metric.update(logits, media=media, puzzle_identifiers=torch.tensor([1]))
-    input_hash = _hash(torch.tensor([[1, 2]], dtype=torch.uint8))
-    output_hash = _hash(torch.tensor([[2], [1]], dtype=torch.uint8))
+    input_hash = _hash([[1, 2]])
+    output_hash = _hash([[2], [1]])
     confidence = torch.sigmoid(torch.tensor(-2.0, dtype=torch.float64)).item()
     assert metric.votes["multi"][input_hash] == [(output_hash, confidence)]
 
@@ -342,8 +300,8 @@ def test_update_records_halt_confidence_and_validates_identifiers(
         media=torch.tensor([[3, 4, 0, 0]], dtype=torch.int32),
         puzzle_identifiers=torch.tensor([0]),
     )
-    identity_input = _hash(torch.tensor([[1, 2]], dtype=torch.uint8))
-    identity_output = _hash(torch.tensor([[2], [1]], dtype=torch.uint8))
+    identity_input = _hash([[1, 2]])
+    identity_output = _hash([[2], [1]])
     assert metric.votes["<blank>"][identity_input][0][0] == identity_output
 
     for invalid_identifier in (-1, len(metric.identifiers)):
@@ -378,8 +336,8 @@ def test_update_continues_after_blank_identifier_in_same_batch(tmp_path: Path) -
         puzzle_identifiers=torch.tensor([1, 2]),
     )
 
-    input_hash = _hash(torch.tensor([[1, 2]], dtype=torch.uint8))
-    output_hash = _hash(torch.tensor([[2, 1]], dtype=torch.uint8))
+    input_hash = _hash([[1, 2]])
+    output_hash = _hash([[2, 1]])
     confidence = torch.sigmoid(torch.tensor(-2.0, dtype=torch.float64)).item()
     assert metric.votes == {
         "task": {input_hash: [(output_hash, confidence)]},
@@ -391,15 +349,24 @@ def test_strict_score_accumulates_across_tasks(tmp_path: Path) -> None:
     metric = PassK.Config(working_dir=tmp_path, pass_ks=(1,)).make()
     metric.votes = {
         "multi": {
-            _hash(torch.tensor([[1, 2]], dtype=torch.uint8)): [
-                (_hash(torch.tensor([[2], [1]], dtype=torch.uint8)), 0.5),
+            _hash([[1, 2]]): [
+                (_hash([[2], [1]]), 0.5),
             ],
-            _hash(torch.tensor([[3]], dtype=torch.uint8)): [
-                (_hash(torch.tensor([[4]], dtype=torch.uint8)), 0.5),
+            _hash([[3]]): [
+                (_hash([[4]]), 0.5),
             ],
         },
     }
     assert metric.compute()["strict@1"] == 0.5
+
+
+def test_a_task_with_no_test_inputs_is_never_strictly_solved(tmp_path: Path) -> None:
+    (tmp_path / "identifiers.json").write_text(json.dumps(["<blank>", "task"]))
+    (tmp_path / "test_puzzles.json").write_text(
+        json.dumps({"empty": {"test": []}, "task": {"test": []}}),
+    )
+    metric = PassK.Config(working_dir=tmp_path, pass_ks=(1,)).make()
+    assert metric.compute()["strict@1"] == 0.0
 
 
 def test_single_task_single_output_scores_keep_unit_denominators(
@@ -416,9 +383,9 @@ def test_single_task_single_output_scores_keep_unit_denominators(
         ),
     )
     metric = PassK.Config(working_dir=tmp_path, pass_ks=(1,)).make()
-    input_grid = torch.tensor([[1, 2], [3, 4]], dtype=torch.uint8)
-    output_grid = torch.tensor([[4, 3], [2, 1]], dtype=torch.uint8)
-    metric.votes = {"task": {_hash(input_grid): [(_hash(output_grid), 0.5)]}}
+    metric.votes = {
+        "task": {_hash([[1, 2], [3, 4]]): [(_hash([[4, 3], [2, 1]]), 0.5)]},
+    }
 
     scores = metric.compute()
 

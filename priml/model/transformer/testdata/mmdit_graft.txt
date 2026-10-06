@@ -32,7 +32,7 @@ MMDiTGraft.Config(
                 │       │                               frequencies=HuggingFaceFrequencies.Config(
                 │       │                                       base=1000000.0
                 │       │                               ),
-                │       │                               dtype=None
+                │       │                               dtype=torch.float32
                 │       │                       ),
                 │       │                       norm_qk=RMSNorm.Config(
                 │       │                               channels_in=6,
@@ -209,7 +209,7 @@ MMDiTGraft.Config(
                 │               │       │                       frequencies=HuggingFaceFrequencies.Config(
                 │               │       │                               base=1000000.0
                 │               │       │                       ),
-                │               │       │                       dtype=None
+                │               │       │                       dtype=torch.float32
                 │               │       │               ),
                 │               │       │               norm_qk=RMSNorm.Config(
                 │               │       │                       channels_in=6,
@@ -275,7 +275,7 @@ MMDiTGraft.Config(
                 │               │                               frequencies=HuggingFaceFrequencies.Config(
                 │               │                                       base=1000000.0
                 │               │                               ),
-                │               │                               dtype=None
+                │               │                               dtype=torch.float32
                 │               │                       ),
                 │               │                       norm_qk=RMSNorm.Config(
                 │               │                               channels_in=6,

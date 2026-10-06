@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
-from typing import Final, TypedDict, cast
+from typing import TYPE_CHECKING, Final, TypedDict, cast
 
 from torch import Tensor
 
@@ -12,6 +13,10 @@ import torch
 
 from priml.lib.custom_json import ReadError
 from priml.optimizers.adam_atan2 import AdamATan2
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -108,12 +113,57 @@ def test_finalized_config_is_not_finalized_twice() -> None:
 
 def test_invalid_hyperparameters_are_rejected() -> None:
     p = torch.zeros(2)
-    with pytest.raises(ValueError, match="Invalid learning rate"):
+    with pytest.raises(
+        ValueError,
+        match="Learning rate must be finite and nonnegative",
+    ):
         AdamATan2([p], lr=-1.0)
-    with pytest.raises(ValueError, match="Invalid betas"):
+    with pytest.raises(ValueError, match="Betas must be finite and lie in"):
         AdamATan2([p], betas=(0.9, 1.0))
-    with pytest.raises(ValueError, match="Invalid weight_decay"):
+    with pytest.raises(ValueError, match="Weight decay must be finite and nonnegative"):
         AdamATan2([p], weight_decay=-1.0)
+
+
+@pytest.mark.parametrize(
+    ("build", "message"),
+    [
+        (partial(AdamATan2, lr=float("nan")), "Learning rate must be finite"),
+        (partial(AdamATan2, lr=float("inf")), "Learning rate must be finite"),
+        (partial(AdamATan2, betas=(0.9, float("nan"))), "Betas must be finite"),
+        (partial(AdamATan2, betas=(0.9, float("inf"))), "Betas must be finite"),
+        (partial(AdamATan2, weight_decay=float("nan")), "Weight decay must be finite"),
+        (partial(AdamATan2, weight_decay=float("inf")), "Weight decay must be finite"),
+    ],
+)
+def test_non_finite_hyperparameter_is_rejected(
+    build: Callable[[list[Tensor]], AdamATan2],
+    message: str,
+) -> None:
+    """Non-finite values are rejected before they poison optimizer state."""
+    with pytest.raises(ValueError, match=message):
+        build([torch.zeros(2)])
+
+
+def test_list_betas_from_a_restored_group_are_accepted() -> None:
+    """A JSON-restored group holds a list; torch's own Adam accepts one."""
+    listed = torch.nn.Parameter(torch.tensor([0.5, -0.25]))
+    tupled = torch.nn.Parameter(listed.detach().clone())
+    with_list = AdamATan2([listed], betas=(0.9, 0.99))
+    with_list.param_groups[0]["betas"] = [0.9, 0.99]
+    with_tuple = AdamATan2([tupled], betas=(0.9, 0.99))
+    for parameter, optimizer in ((listed, with_list), (tupled, with_tuple)):
+        parameter.grad = torch.tensor([0.1, -0.3])
+        optimizer.step()
+    assert torch.equal(listed.detach(), tupled.detach())
+
+
+def test_malformed_betas_in_a_group_are_rejected() -> None:
+    parameter = torch.nn.Parameter(torch.ones(2))
+    parameter.grad = torch.ones_like(parameter)
+    optimizer = AdamATan2([parameter])
+    optimizer.param_groups[0]["betas"] = [0.9]
+    with pytest.raises(ReadError):
+        optimizer.step()
 
 
 @pytest.mark.parametrize("name", ["lr", "weight_decay"])

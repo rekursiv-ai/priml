@@ -48,8 +48,6 @@ def test_trm_cost_matches_torch() -> None:
         z_slow, z_fast = module.init_z(2)
         out = module(tokens, z_slow, z_fast, torch.tensor([1, 2]), feedback_ids=tokens)
         logits, q_halt = out["logits"], out["q_halt"]
-        assert isinstance(logits, Tensor)
-        assert isinstance(q_halt, Tensor)
         return logits.sum() + q_halt.sum()
 
     assert_cost_matches_torch(

@@ -154,6 +154,38 @@ def argsort(
     return sorted(range(len(x)), key=x.__getitem__, reverse=descending)
 
 
+def reduction_dims(dim: int | Sequence[int] | None, *, ndim: int) -> tuple[int, ...]:
+    """Normalize a reducer's ``dim`` to sorted nonnegative axes.
+
+    ``None`` means every axis. An empty sequence is an error: torch reads
+    ``dim=()`` as every axis too, so a caller who computed no axes would
+    silently reduce the whole tensor.
+
+    Args:
+      dim: An axis, a sequence of axes, or None.
+      ndim: Rank of the tensor being reduced.
+
+    Returns:
+      dims: Sorted, distinct, nonnegative axes.
+
+    Raises:
+      ValueError: ``dim`` is empty or names an axis twice.
+      IndexError: An axis is outside ``[-ndim, ndim)``.
+
+    """
+    if dim is None:
+        return tuple(range(ndim))
+    requested = (dim,) if isinstance(dim, int) else tuple(dim)
+    if not requested:
+        raise ValueError("dim must name at least one axis; use None for all.")
+    if any(d < -ndim or d >= ndim for d in requested):
+        raise IndexError(f"dim {requested} is out of range for rank {ndim}.")
+    dims = tuple(sorted(d % ndim for d in requested))
+    if len(set(dims)) != len(dims):
+        raise ValueError(f"Duplicate axes in dim {requested} for rank {ndim}.")
+    return dims
+
+
 def broadcast_sequences[T](*args: T | Sequence[T]) -> tuple[list[T], ...]:
     """Broadcast scalar-or-sequence arguments to matching lengths.
 
@@ -176,11 +208,14 @@ def broadcast_sequences[T](*args: T | Sequence[T]) -> tuple[list[T], ...]:
       ValueError: If two sequences have different lengths and neither is 1.
 
     """
-    # Cast rather than narrowed by ``isinstance``: ``T`` may itself be a
-    # Sequence, so the check cannot tell the two arms of the union apart and
-    # both checkers widen the element type the signature already stated.
+    # Cast both arms: ``T`` may itself be a Sequence (including str/bytes),
+    # so isinstance cannot separate the union and both checkers widen the
+    # element type the signature already stated.
     lists: list[list[T]] = [
-        list(cast(Sequence[T], a)) if isinstance(a, Sequence) else [a] for a in args
+        list(cast(Sequence[T], a))
+        if isinstance(a, Sequence) and not isinstance(a, (str, bytes))
+        else [cast(T, a)]
+        for a in args
     ]
     n = max(len(a) for a in lists)
     for a in lists:
@@ -209,15 +244,22 @@ def _to_multiple(
     # input's width and leaves an integer one to promote, as torch and numpy
     # would unaided.
     if isinstance(x, Tensor):
-        scaled = {"ceil": torch.ceil, "floor": torch.floor}[rounding](x / multiple)
+        if isinstance(multiple, int) and not (x.is_floating_point() or x.is_complex()):
+            scale = -(-x // multiple) if rounding == "ceil" else x // multiple
+            return scale * multiple
+        ratio = x / multiple
+        scaled = ratio.ceil() if rounding == "ceil" else ratio.floor()
         snapped = multiple * scaled
         if isinstance(multiple, int):
             return snapped.to(torch.int64)
         return snapped
     if isinstance(x, np.ndarray):
         array: np.ndarray = cast("np.ndarray", x)
+        if isinstance(multiple, int) and np.issubdtype(array.dtype, np.integer):
+            scale = -(-array // multiple) if rounding == "ceil" else array // multiple
+            return scale * multiple
         ratio = array / multiple
-        scaled = {"ceil": np.ceil, "floor": np.floor}[rounding](ratio)
+        scaled = np.ceil(ratio) if rounding == "ceil" else np.floor(ratio)
         snapped = multiple * scaled
         if isinstance(multiple, int):
             return snapped.astype(np.int64)
@@ -236,5 +278,5 @@ def _to_multiple(
         scale = ceil_div(x, multiple) if rounding == "ceil" else x // multiple
         return multiple * scale
     value = x / multiple
-    scaled_scalar = {"ceil": math.ceil, "floor": math.floor}[rounding](value)
+    scaled_scalar = math.ceil(value) if rounding == "ceil" else math.floor(value)
     return type(multiple)(multiple * scaled_scalar)

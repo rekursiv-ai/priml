@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from priml.data.pipeline.batching import (
+    BATCHED_FIELDS_KEY,
     Batcher,
     Unbatcher,
 )
@@ -424,7 +425,7 @@ def test_unbatcher_strips_batch_size_marker():
 
     batch: dict[str, object] = {
         "_batch_size": 2,
-        "_batched_list_fields": ["labels"],
+        BATCHED_FIELDS_KEY: ["labels"],
         "embeddings": torch.randn(2, 4),
         "raw": [{"id": 0}, {"id": 1}],
     }
@@ -433,7 +434,7 @@ def test_unbatcher_strips_batch_size_marker():
 
     assert all("_batch_size" not in r for r in results)
     assert all("raw" not in r for r in results)
-    assert all("_batched_list_fields" not in r for r in results)
+    assert all(BATCHED_FIELDS_KEY not in r for r in results)
 
 
 def test_unbatcher_does_not_split_batchlevel_list_of_batch_len():
@@ -476,7 +477,7 @@ def test_batcher_unbatcher_roundtrip_splits_tagged_list_field():
     batches = list(batcher(iter(samples)))
     assert len(batches) == 1
     # The Batcher tagged 'label' as a per-sample list field.
-    assert batches[0]["_batched_list_fields"] == ["label"]
+    assert batches[0][BATCHED_FIELDS_KEY] == ["raw", "image", "label"]
 
     results = list(unbatcher(iter(batches)))
 
@@ -572,14 +573,14 @@ def test_batcher_passes_configured_device_to_tensor_to(
     assert devices == [torch.device("cpu")]
 
 
-def test_batcher_omits_raw_when_the_stacked_fields_were_everything():
+def test_batcher_writes_raw_even_when_the_stacked_fields_were_everything():
     batcher = Batcher(Batcher.Config(size=2))
 
     samples: list[dict[str, object]] = [{"media_tensor": torch.zeros(2)}] * 2
 
     results = list(batcher(iter(samples)))
 
-    assert "raw" not in results[0]
+    assert results[0]["raw"] == [{}, {}]
     assert results[0]["_batch_size"] == 2
 
 
@@ -733,12 +734,12 @@ _MALFORMED_BATCHES: Final[list[tuple[dict[str, object], str]]] = [
     ({"raw": [{}], "_batch_size": "1"}, "_batch_size must be an integer"),
     ({"raw": [{}], "filter_reasons": 5}, "filter_reasons must be iterable"),
     (
-        {"raw": [{}], "_batched_list_fields": "x"},
-        "_batched_list_fields must be a list of strings",
+        {"raw": [{}], BATCHED_FIELDS_KEY: "x"},
+        "_batched_fields must be a list of strings",
     ),
     (
-        {"raw": [{}], "_batched_list_fields": [1]},
-        "_batched_list_fields must be a list of strings",
+        {"raw": [{}], BATCHED_FIELDS_KEY: [1]},
+        "_batched_fields must be a list of strings",
     ),
 ]
 
@@ -819,6 +820,72 @@ def test_unbatcher_has_batch_dimension_rejects_non_arrays():
     assert not unbatcher._has_batch_dimension([1, 2], 2)
     assert not unbatcher._has_batch_dimension(torch.zeros(2), 2)
     assert unbatcher._has_batch_dimension(torch.zeros(2, 3), 2)
+
+
+def _roundtrip(
+    samples: list[dict[str, object]],
+    field_names: list[str],
+) -> list[dict[str, object]]:
+    batches = list(
+        Batcher(Batcher.Config(size=len(samples), field_names=field_names))(
+            iter(samples),
+        ),
+    )
+    return list(Unbatcher(Unbatcher.Config())(iter(batches)))
+
+
+def test_batcher_unbatcher_roundtrip_when_every_field_is_stacked() -> None:
+    samples: list[dict[str, object]] = [
+        {"media_tensor": torch.zeros(2, 3)},
+        {"media_tensor": torch.ones(2, 3)},
+    ]
+
+    results = _roundtrip(samples, ["media_tensor"])
+
+    assert [_tensor(r, "media_tensor").tolist() for r in results] == [
+        torch.zeros(2, 3).tolist(),
+        torch.ones(2, 3).tolist(),
+    ]
+
+
+def test_batcher_unbatcher_roundtrip_keeps_none_aligned() -> None:
+    samples: list[dict[str, object]] = [
+        {"id": 0, "label": None},
+        {"id": 1, "label": 7},
+    ]
+
+    results = _roundtrip(samples, ["label"])
+
+    assert [(r["id"], r["label"]) for r in results] == [(0, None), (1, 7)]
+
+
+def test_batcher_unbatcher_roundtrip_splits_stacked_scalar_tensors() -> None:
+    samples: list[dict[str, object]] = [
+        {"id": 0, "label": torch.tensor(1)},
+        {"id": 1, "label": torch.tensor(2)},
+    ]
+
+    results = _roundtrip(samples, ["label"])
+
+    assert [_tensor(r, "label").tolist() for r in results] == [1, 2]
+
+
+def test_unbatcher_copies_a_replicated_list_per_sample() -> None:
+    batch: dict[str, object] = {
+        "_batch_size": 2,
+        "shared": ["a"],
+        "raw": [{"id": 0}, {"id": 1}],
+    }
+
+    results = list(Unbatcher(Unbatcher.Config())(iter([batch])))
+    _list_field(results[0], "shared").append("b")
+
+    assert results[1]["shared"] == ["a"]
+
+
+def test_batcher_rejects_a_non_positive_size() -> None:
+    with pytest.raises(ValueError, match="size"):
+        Batcher(Batcher.Config(size=0))
 
 
 # PrefetchBuffer Tests

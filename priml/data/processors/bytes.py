@@ -1,7 +1,7 @@
-"""Resize dimension calculation processor.
+"""Media byte readers and decoders.
 
-Calculates target resize dimensions for samples based on aspect-ratio bucketing.
-Does not perform actual resizing - just adds target dimension fields to samples.
+Reads raw bytes from files or tar members, measures images without decoding,
+and decodes images and videos to the ``(C, F, H, W)`` ``media_tensor``.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from configgle import Fig
 from turbojpeg import TurboJPEG
 
 import imageio_ffmpeg
+import torch
 
 from priml.data.pipeline.dataset import add_filter_reason_typed
 from priml.image import get_dimensions
@@ -33,15 +34,7 @@ if TYPE_CHECKING:
 
     from torch import Tensor
 
-    import torch
-
     from priml.data.sources.tarhandle import TarFileProtocol
-else:
-    # Defer the ~1s torch import: only video decode builds a tensor, so the
-    # image processors in this module never pay for it.
-    from wrapt import lazy_import
-
-    torch = lazy_import("torch")
 
 
 __all__ = [
@@ -284,15 +277,13 @@ class CropDuringDecodeImage:
     For JPEG: Uses PyTurboJPEG for true crop-during-decode (efficient).
     For WebP: Uses libwebp for true crop-during-decode (efficient).
 
-    If target_height/target_width are present, crops during decode to match target
-    aspect ratio using the formula:
-        target_aspect = target_width / target_height
-        crop_height = min(actual_height, actual_width / target_aspect)
-        crop_width = min(actual_width, actual_height * target_aspect)
+    Only an explicit ``crop`` field crops (``SetCropFromTargetDimensions``
+    derives one from the target dimensions); ``target_height``/``target_width``
+    are read only as the ``scale_to_target`` floor. Use Interpolate afterward to
+    reach the exact target dimensions.
 
-    This preserves maximum resolution while matching target aspect ratio.
-    Use Interpolate processor afterward to interpolate to exact target dimensions.
-    Yields sample unchanged if format not in known_formats or target_frames != 1.
+    Yields sample unchanged if format not in known_formats or the sample is a
+    video (``frames`` or ``target_frames`` other than 1).
     """
 
     class Config(Fig["CropDuringDecodeImage"]):
@@ -360,8 +351,8 @@ class CropDuringDecodeImage:
     class Output(Input):
         """Output produced by CropDuringDecodeImage."""
 
-        media_tensor: NotRequired[Tensor]
         filter_reasons: NotRequired[list[str]]
+        media_tensor: NotRequired[Tensor]
         """``(C, F, H, W)``: uint8 in ``[0, 255]``, or the configured
         floating-point ``dtype`` in ``[-1, 1]``. An image has ``F=1``, but
         ``F=1`` is not necessarily an image.
@@ -494,17 +485,15 @@ class CropDuringDecodeImage:
         fmt = sample.get("format")
 
         # No bytes yet is a routing outcome, not a defect: an upstream reader
-        # may not have run. A sample WITH bytes but no dimensions cannot be
-        # decoded, so it is reported rather than passed on silently -- the
-        # filter accounting is the only place a vanished sample shows up.
-        if media_bytes is None:
+        # may not have run. Nor is a video: DecodeVideo handles anything with
+        # more than one frame, and reports its own missing dimensions.
+        if media_bytes is None or frames != 1 or target_frames != 1:
             return None
+        # An image WITH bytes but no dimensions cannot be decoded, so it is
+        # reported rather than passed on silently -- the filter accounting is
+        # the only place a vanished sample shows up.
         if height is None or width is None:
             add_filter_reason_typed(sample, type(self).__name__, "missing_dimensions")
-            return None
-
-        # Not an image: DecodeVideo handles anything with more than one frame.
-        if frames != 1 or target_frames != 1:
             return None
 
         return (media_bytes, fmt, height, width, crop)
@@ -542,8 +531,6 @@ class CropDuringDecodeImage:
             return (None, "all_formats_failed")
 
         errors: list[str] = []
-        if self.use_turbojpeg and self.turbo_jpeg is None:
-            raise ValueError("Expected self.turbo_jpeg is not None.")
         for ext in extensions:
             try:
                 # Use PyTurboJPEG for JPEG files.
@@ -608,10 +595,13 @@ class CropDuringDecodeImage:
 
 
 class DecodeVideo:
-    """Decode videos to float16 tensor, with optional center crop and resize.
+    """Decode videos to float16 tensor, with optional resize.
 
-    If target_height/target_width are not present, decodes without resizing.
-    Yields sample unchanged if format not in known_formats or frames <= 1.
+    The resize scales the whole frame to ``target_height x target_width``; it
+    does not crop, so a different aspect stretches. Without targets, decodes
+    at source size. Yields sample unchanged if format not in known_formats or
+    frames <= 1; a clip that fails to decode, or decodes only partly, is
+    filtered with ``decode_failed``.
 
     Why imageio-ffmpeg, and why the scale is in the filter graph
     -----------------------------------------------------------
@@ -752,6 +742,11 @@ class DecodeVideo:
                 target_width,
             ) = result
 
+            # Routing, not filtering: a sibling decoder may claim the format.
+            if fmt and fmt not in self.known_formats:
+                yield sample
+                continue
+
             media_tensor = self._process_video(
                 tar_handle,
                 key,
@@ -765,7 +760,9 @@ class DecodeVideo:
                 media=sample.get("media"),
             )
 
-            if media_tensor is not None:
+            if media_tensor is None:
+                add_filter_reason_typed(sample, type(self).__name__, "decode_failed")
+            else:
                 sample["media_tensor"] = media_tensor
             # Decoded or not, the archive is no longer needed: keeping the
             # handle pins it open for as long as the sample sits in the
@@ -807,11 +804,12 @@ class DecodeVideo:
         # neither the address nor an open archive is part of the decode.
         if not sample.get("media") and (tar_handle is None or key is None):
             return None
-        if frames is None or height is None or width is None:
+        # Only multi-frame videos; anything else is routed, not filtered.
+        if frames is None or frames <= 1:
             return None
-
-        # Only handle multi-frame videos (frames > 1)
-        if frames <= 1:
+        name = type(self).__name__
+        if height is None or width is None:
+            add_filter_reason_typed(sample, name, "missing_dimensions")
             return None
 
         # If any resize dimension is present, all three must be present.
@@ -821,6 +819,7 @@ class DecodeVideo:
             target_width is not None,
         ]
         if any(resize_present) and not all(resize_present):
+            add_filter_reason_typed(sample, name, "partial_target")
             return None
 
         # A non-positive target is a planner bug, not a request for an empty
@@ -834,7 +833,7 @@ class DecodeVideo:
         ):
             add_filter_reason_typed(
                 sample,
-                type(self).__name__,
+                name,
                 f"invalid_target:f={target_frames}_h={target_height}_w={target_width}",
             )
             return None
@@ -922,17 +921,22 @@ class DecodeVideo:
         with tempfile.NamedTemporaryFile(prefix="bytes-", suffix=".mp4") as handle:
             _ = handle.write(payload)
             handle.flush()
-            scale = (
-                f"scale={width}:{height}"
-                ":in_color_matrix=bt709:out_color_matrix=bt709"
-                ":in_range=tv:out_range=full"
-            )
+            # No ``in_color_matrix``: swscale then honours the stream's own
+            # tag, where forcing bt709 mis-coloured every bt601 source.
+            scale = f"scale={width}:{height}:out_range=full"
             try:
                 process = subprocess.Popen(  # noqa: S603 -- Media probing invokes the trusted local decoder command.
                     [
                         self.ffmpeg_exe,
                         "-v",
                         "error",
+                        # A corrupt packet exits non-zero instead of being
+                        # skipped; the exit status is what flags a clip that
+                        # decoded only partly.
+                        "-xerror",
+                        # Before ``-i``, so it is an input (decoder) option.
+                        "-threads",
+                        "1",
                         "-i",
                         handle.name,
                         "-pix_fmt",
@@ -943,8 +947,6 @@ class DecodeVideo:
                         "image2pipe",
                         "-vf",
                         scale,
-                        "-threads",
-                        "1",
                         "-",
                     ],
                     stdout=subprocess.PIPE,
@@ -952,7 +954,7 @@ class DecodeVideo:
                 )
             except OSError:
                 return None
-            if process.stdout is None:
+            if process.stdout is None:  # Popen(stdout=PIPE) always sets it.
                 raise ValueError("Expected process.stdout is not None.")
             stdout = process.stdout
             frame_bytes = height * width * 3
@@ -977,7 +979,9 @@ class DecodeVideo:
                     process.kill()
                     process.wait()
 
-        if not chunks:
+        # Only a stream that ended before the request is checked: one cut off
+        # after ``keep_frames`` was terminated by us, and its status says so.
+        if not chunks or (len(chunks) < keep_frames and process.returncode != 0):
             return None
         # A source shorter than the request is padded by repeating its last
         # frame. ``keep_frames`` is a TARGET, not a ceiling: the planner rounds

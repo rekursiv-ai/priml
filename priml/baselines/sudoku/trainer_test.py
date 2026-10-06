@@ -112,7 +112,7 @@ class ShrinkableData(Protocol):
     """The dataset fields a size-only shrink sets."""
 
     working_dir: Path | str
-    device: str
+    device: torch.device | str | None
     batch_size: int
     eval_batch_size: int | None
     eval_num_instances: int | None
@@ -455,6 +455,39 @@ def test_do_train_step_advances_training(tmp_path: Path) -> None:
 
     assert subject.global_step == 1
     assert subject.local_step == 1
+
+
+def test_a_cpu_run_logs_no_gpu_memory_on_a_cuda_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = port_config("exp004", tmp_path)
+    config.num_steps_log = 1
+    write_dataset(tmp_path / "data")
+    subject = config.make()
+    assert subject.device == torch.device("cpu")
+    logged: list[Mapping[str, float]] = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    # The faked CUDA host must stay inert where torch itself probes it: Adam's
+    # step asks whether a CUDA graph is capturing, a real CUDA call that fails
+    # on a host with no GPU (a CPU CI runner).
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    monkeypatch.setattr(subject._trackers[0], "log_metrics", _recorder(logged))
+
+    subject._do_train_step(subject._next_batch())
+
+    assert logged
+    assert all("gpu_mem_allocated_gb" not in metrics for metrics in logged)
+
+
+def _recorder(
+    logged: list[Mapping[str, float]],
+) -> Callable[..., None]:
+    def record(metrics: Mapping[str, float], *args: object, **kwargs: object) -> None:
+        del args, kwargs
+        logged.append(metrics)
+
+    return record
 
 
 def test_trainer_execution_variants(tmp_path: Path) -> None:

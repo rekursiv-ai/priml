@@ -23,7 +23,10 @@ weight.
 Parameters of one shape are stacked and stepped as a single batched tensor. A
 language model has many identically-shaped matrices, and one batched
 orthogonalization over them is far faster than a loop -- which is why the
-grouping is by shape and happens here rather than in the caller's recipe.
+grouping is by shape and happens here rather than in the caller's recipe. The
+optimizer state stays per parameter and is stacked alongside: which parameters
+share a bucket changes whenever one has no gradient, so state keyed by the
+bucket would hand one parameter's history to another.
 
 References:
     https://arxiv.org/abs/2505.16932
@@ -39,6 +42,8 @@ from __future__ import annotations
 
 from functools import cache, partial
 from typing import TYPE_CHECKING, cast, overload, override
+
+import math
 
 from configgle import Fig
 from torch import Tensor
@@ -280,14 +285,16 @@ class NorMuon(Optimizer):
             (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
         ),
     ) -> None:
-        if lr < 0.0:
-            raise ValueError(f"Invalid learning rate: {lr}.")
-        if momentum < 0.0 or momentum >= 1.0:
-            raise ValueError(f"momentum must lie in [0, 1); got {momentum}.")
-        if beta2 < 0.0 or beta2 >= 1.0:
-            raise ValueError(f"beta2 must lie in [0, 1); got {beta2}.")
-        if weight_decay < 0.0:
-            raise ValueError(f"Invalid weight_decay: {weight_decay}.")
+        if not math.isfinite(lr) or lr < 0.0:
+            raise ValueError(f"Learning rate must be finite and nonnegative: {lr}.")
+        if not math.isfinite(momentum) or momentum < 0.0 or momentum >= 1.0:
+            raise ValueError(f"Momentum must be finite and lie in [0, 1): {momentum}.")
+        if not math.isfinite(beta2) or beta2 < 0.0 or beta2 >= 1.0:
+            raise ValueError(f"Beta2 must be finite and lie in [0, 1): {beta2}.")
+        if not math.isfinite(weight_decay) or weight_decay < 0.0:
+            raise ValueError(
+                f"Weight decay must be finite and nonnegative: {weight_decay}.",
+            )
         if ns_steps < 1 or ns_steps > len(coefficients):
             raise ValueError(
                 f"ns_steps must lie in [1, {len(coefficients)}]; got {ns_steps}.",
@@ -347,23 +354,9 @@ class NorMuon(Optimizer):
             raise ValueError(f"NorMuon requires ndim >= 2; got shape {tuple(shape)}.")
         rows = shape[len(shape) - 2]
         columns = shape[len(shape) - 1]
-        state = cast(dict[str, object], self.state[params[0]])
-        if "momentum_buffer" not in state:
-            state["momentum_buffer"] = torch.zeros(
-                len(params),
-                *shape,
-                dtype=params[0].dtype,
-                device=params[0].device,
-            )
-            # The second moment is per ROW of the update when the matrix is
-            # tall and per column otherwise, so its buffer collapses whichever
-            # axis the mean reduces.
-            tall = rows >= columns
-            state["second_moment"] = torch.zeros(
-                (len(params), rows, 1) if tall else (len(params), 1, columns),
-                dtype=params[0].dtype,
-                device=params[0].device,
-            )
+        states = [self._state(p, rows=rows, columns=columns) for p in params]
+        momentum_buffers = torch.stack([s["momentum_buffer"] for s in states])
+        second_moments = torch.stack([s["second_moment"] for s in states])
         stacked_grads = torch.stack([_gradient(p) for p in params])
         stacked_params = torch.stack(list(params))
         momentum = convert(group["momentum"], float)
@@ -383,8 +376,8 @@ class NorMuon(Optimizer):
         self._update(
             stacked_grads,
             stacked_params,
-            state["momentum_buffer"],
-            state["second_moment"],
+            momentum_buffers,
+            second_moments,
             **self._scalars,
             ns_steps=group["ns_steps"],
             # Decided HERE, from the shape, rather than inside the kernel: the
@@ -393,4 +386,37 @@ class NorMuon(Optimizer):
             reduce_dim=-1 if rows >= columns else -2,
             coefficients=group["coefficients"],
         )
-        torch._foreach_copy_(list(params), list(stacked_params.unbind(0)))
+        torch._foreach_copy_(
+            [
+                *params,
+                *(s["momentum_buffer"] for s in states),
+                *(s["second_moment"] for s in states),
+            ],
+            [
+                *stacked_params.unbind(0),
+                *momentum_buffers.unbind(0),
+                *second_moments.unbind(0),
+            ],
+        )
+
+    def _state(
+        self,
+        parameter: Tensor,
+        *,
+        rows: int,
+        columns: int,
+    ) -> dict[str, Tensor]:
+        """Return one parameter's own buffers, allocating them on first use."""
+        state = cast(dict[str, Tensor], self.state[parameter])
+        if "momentum_buffer" not in state:
+            state["momentum_buffer"] = torch.zeros_like(parameter)
+            # The second moment is per ROW of the update when the matrix is
+            # tall and per column otherwise, so its buffer collapses whichever
+            # axis the mean reduces. Leading (batch) axes are kept.
+            batch = parameter.shape[: parameter.ndim - 2]
+            state["second_moment"] = torch.zeros(
+                (*batch, rows, 1) if rows >= columns else (*batch, 1, columns),
+                dtype=parameter.dtype,
+                device=parameter.device,
+            )
+        return state

@@ -2,31 +2,98 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import argparse
 import json
 import logging
 
+import numpy as np
 import pytest
 
 from priml.baselines.arcagi1.scripts import prepare_data
+from priml.lib.custom_json import convert
+from priml.lib.testing.cli import assert_help_without_docstring
 
 
 if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
     from priml.baselines.arcagi1.augmentation import ArcAugmentation
     from priml.baselines.arcagi1.data import ArcData, PuzzleData
 
 
+def _write_source(source: Path) -> Path:
+    """Write one tiny task per subset; return the ``--input-prefix``."""
+    source.mkdir()
+    puzzle = {
+        "train": [{"input": [[0, 1, 2], [3, 4, 5]], "output": [[5, 4, 3], [2, 1, 0]]}],
+        "test": [{"input": [[1, 2, 3], [4, 5, 6]]}],
+    }
+    for subset in ("training", "evaluation", "concept"):
+        (source / f"arc_{subset}_challenges.json").write_text(
+            json.dumps({f"{subset}-puzzle": puzzle}),
+        )
+        (source / f"arc_{subset}_solutions.json").write_text(
+            json.dumps({f"{subset}-puzzle": [[[6, 5, 4], [3, 2, 1]]]}),
+        )
+    return source / "arc"
+
+
 def test_default_directory_matches_exp000_dataset() -> None:
-    assert prepare_data.default_directory() == Path("/opt/scratch/datasets/arcagi1")
+    assert prepare_data.default_directory() == Path(
+        "/opt/scratch/datasets/arc1concept-aug-1000",
+    )
 
 
 def test_dataset_config_uses_experiment_dataset_and_base() -> None:
     config = prepare_data.dataset_config("exp_smoke").finalize()
-    assert config.working_dir == Path("/opt/scratch/datasets/arcagi1")
+    assert config.working_dir == Path("/opt/scratch/datasets/arc1concept-aug-1000")
+
+
+def test_exp007_prepares_the_spatial_views_its_directory_names(tmp_path: Path) -> None:
+    """The ``-spatialeval-v2`` tree must carry tagged spatial views.
+
+    Without them every view is the identity, and exp007's ``spatial_eq`` and
+    ``spatial_big`` slices silently equal its non-spatial one.
+    """
+    config = prepare_data.dataset_config("exp007")
+    config.base_dir = None
+    config.working_dir = tmp_path / "prepared"
+    config.augmentation.num_aug = 0
+    target = prepare_data.prepare(
+        config,
+        input_file_prefix=_write_source(tmp_path / "source"),
+    )
+    loaded = cast(
+        "NDArray[np.int32]",
+        np.load(target / "test" / "all__spatial_tags.npy"),
+    )
+    tags = convert(cast(object, loaded.tolist()), list[list[int]])
+    assert any(tag != [1, 0, 0] for tag in tags)
+
+
+def test_explicit_directory_is_taken_verbatim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--directory /x`` writes to ``/x``, never beneath the experiment's root."""
+    target = tmp_path / "explicit"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "prepare_data.py",
+            "--directory",
+            str(target),
+            "--input-prefix",
+            str(_write_source(tmp_path / "source")),
+            "--num-aug",
+            "0",
+        ],
+    )
+    assert prepare_data.main() == 0
+    assert (target / "identifiers.json").is_file()
 
 
 def test_num_puzzle_identifiers_reads_metadata(tmp_path: Path) -> None:
@@ -41,15 +108,10 @@ def test_num_puzzle_identifiers_rejects_missing_metadata(tmp_path: Path) -> None
         prepare_data.num_puzzle_identifiers(tmp_path)
 
 
-def test_main_rejects_missing_module_docstring_with_exact_message(
+def test_main_help_works_without_a_module_docstring(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(prepare_data, "__doc__", None)
-    with pytest.raises(
-        ValueError,
-        match=r"\AExpected __doc__ is not None\.\Z",
-    ):
-        prepare_data.main()
+    assert_help_without_docstring(monkeypatch, prepare_data, prepare_data.main)
 
 
 def test_prepare_uses_the_pinned_source(
@@ -57,30 +119,29 @@ def test_prepare_uses_the_pinned_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     target = tmp_path / "prepared"
-    prefix = tmp_path / "pinned" / "arc"
     config = prepare_data.dataset_config("exp000")
     config.base_dir = None
     config.working_dir = target
     config.augmentation.num_aug = 7
     config.augmentation.seed = 9
-    calls: list[tuple[Path, str, ArcAugmentation]] = []
+    calls: list[tuple[Path, str | None, ArcAugmentation]] = []
 
     def build_override(
         *,
         target_dir: Path,
-        input_file_prefix: str,
+        input_file_prefix: str | None,
         augmentation: ArcAugmentation,
     ) -> None:
         calls.append((target_dir, input_file_prefix, augmentation))
 
-    monkeypatch.setattr(prepare_data, "KaggleSource", lambda: nullcontext(prefix))
     monkeypatch.setattr(prepare_data, "build_arc_dataset", build_override)
 
     assert prepare_data.prepare(config) == target
     assert len(calls) == 1
     built_target, built_prefix, augmentation = calls[0]
     assert built_target == target
-    assert built_prefix == str(prefix)
+    # None selects the pinned clone inside the builder, which stamps the pin.
+    assert built_prefix is None
     assert augmentation.config.num_aug == 7
     assert augmentation.config.seed == 9
 
@@ -138,6 +199,7 @@ def test_main_builds_tiny_local_dataset(
 
     assert prepare_data.main() == 0
     assert sorted(path.name for path in target.iterdir()) == [
+        "_build_params.json",
         "identifiers.json",
         "test",
         "test_puzzles.json",

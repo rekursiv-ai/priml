@@ -20,11 +20,10 @@ import sys
 
 import pytest
 
+from priml.lib.testing import userdirs_fixture
 from priml.lib.testing.resource_markers import pytest_collection_modifyitems
-from priml.lib.testing.userdirs_fixture import (
-    isolate_user_dirs,
-    pytest_configure,
-)
+from priml.lib.testing.userdirs_fixture import isolate_user_dirs
+from priml.testing import regenerate
 from priml.testing.fixtures import cleanup_cuda
 
 
@@ -67,10 +66,26 @@ class _NumbaConfig(Protocol):
 __all__ = [
     "cleanup_cuda",
     "isolate_user_dirs",
+    "pytest_addoption",
     "pytest_collection_modifyitems",
     "pytest_configure",
     "seed_rng",
 ]
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register ``--regenerate-golden`` and ``--regenerate-b4b``.
+
+    Defined here so the exported package ships the flags; the repo-root
+    conftest calls this rather than registering its own.
+    """
+    regenerate.add_options(parser)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Declare the ``real_user_dirs`` marker and read the regeneration flags."""
+    userdirs_fixture.pytest_configure(config)
+    regenerate.configure(config)
 
 
 def cap_math_threads() -> None:

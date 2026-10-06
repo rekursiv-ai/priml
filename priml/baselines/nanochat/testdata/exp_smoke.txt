@@ -251,7 +251,7 @@ NanoChatLoop.Config(
                 │       train_budget_sec=10.0,
                 │       train_budget_epochs=inf,
                 │       lr_schedule=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.constant at 0xdefacedeface>),
-                │       parallelism=NoParallel.Config(device='auto'),
+                │       parallelism=NoParallel.Config(device=None),
                 │       model_quantization=NoModelQuantization.Config(),
                 │       activation_memoization=DefaultActivationStorage.Config(),
                 │       compile=None,
@@ -287,7 +287,7 @@ NanoChatLoop.Config(
                         eval_tokens=64,
                         buffer_size=1_000,
                         train_buffer_size=None,
-                        device='auto',
+                        device=None,
                         vocab_size=16,
                         max_seq_len=8
                 ),
@@ -370,7 +370,7 @@ NanoChatLoop.Config(
                 mesh_dim_model_seed='pp',
                 mesh_dim_data_seed='dp',
                 runtime=SingleProcess.Config(
-                        device='auto',
+                        device=None,
                         deterministic=False,
                         float32_matmul_precision='high'
                 )

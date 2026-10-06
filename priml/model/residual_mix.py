@@ -125,7 +125,9 @@ class ResidualMix(nn.Module):
         self.config = config
         self.running = nn.Parameter(torch.empty(config.num_layers))
         self.original = nn.Parameter(torch.empty(config.num_layers))
-        self.reset_parameters()
+        # Not the virtual call: a subclass's override would run before the
+        # subclass had built what it resets, forcing it to skip this guard.
+        ResidualMix.reset_parameters(self)
 
     def reset_parameters(self) -> None:
         """Fill both weight vectors with their configured constants."""

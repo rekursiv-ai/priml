@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sized
 from pathlib import Path
 
 import pytest
@@ -55,7 +56,7 @@ def test_extracted_imagenet_train_walks_sorted_synsets(
         "label": "n01440764",
         "frames": 1,
     }
-    assert len(source) == 1_281_167
+    assert not isinstance(source, Sized)
 
 
 def test_extracted_imagenet_train_shards_and_shuffles_images(tmp_path: Path) -> None:
@@ -102,7 +103,7 @@ def test_extracted_imagenet_val_reads_labels_relative_to_the_dataset(
     assert [s.get("label") for s in samples] == ["n01440764", "n01443537", "n01484850"]
     assert samples[0].get("key") == "ILSVRC2012_val_00000000"
     assert samples[0].get("format") == "jpg"
-    assert len(source) == 50_000
+    assert not isinstance(source, Sized)
 
 
 def test_extracted_imagenet_val_without_labels_reports_unknown(tmp_path: Path) -> None:
@@ -153,7 +154,10 @@ def test_extracted_imagenet_rejects_a_label_count_mismatch(tmp_path: Path) -> No
     config.split = "val"
     config.validation_labels_file = labels
 
-    with pytest.raises(ValueError, match=r"zip\(\) argument"):
+    with pytest.raises(
+        ValueError,
+        match=r"^3 validation images but 1 labels in .*short\.txt\.$",
+    ):
         _ = config.make()
 
 

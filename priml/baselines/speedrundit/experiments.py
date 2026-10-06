@@ -52,9 +52,8 @@ def exp000() -> SpeedrunTrainLoop:
     config.study_name = "speedrundit"
     config.experiment_name = "exp000"
     config.max_steps = config.step.train_budget_steps = 400_000
-    config.num_steps_eval = (
-        math.inf
-    )  # The reference evaluates generated images separately.
+    # The reference evaluates generated images separately.
+    config.num_steps_eval = math.inf
     config.eval_every_epoch = False
     config.seed = 0
     config.runtime = MultiProcess.Config(float32_matmul_precision="high")

@@ -2,7 +2,7 @@
 
 Regenerate after an intentional numeric change::
 
-    BFB_REGENERATE=1 uv --quiet run --frozen pytest priml/model/moe_test.py
+    uv --quiet run --frozen pytest priml/model/moe_test.py --regenerate-b4b
 
 Run through ``pytest``: the priml ``conftest.py`` sets ``MKL_CBWR`` and caps
 math threads before torch imports. Minting from bare Python skips that setup.
@@ -12,10 +12,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Final, cast, override
+from typing import Final, Literal, cast, override
 from unittest import mock
 
-from configgle.testing import assert_pprint_golden
 from torch import Tensor
 
 import pytest
@@ -31,6 +30,7 @@ from priml.testing.bfb import (
     move_to_device,
 )
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -166,6 +166,32 @@ def test_moe_dispatch_forwards_expert_kwargs():
 
     assert torch.equal(result, torch.full((3, 2), 3.0))
     arange.assert_called_once_with(3, device=x.device)
+
+
+def test_moe_aux_loss_is_public_and_clears_on_eval() -> None:
+    config = MoE.Config(channels_in=3)
+    config.router = SoftmaxRouter.Config(num_experts=2, top_k=1)
+    model = config.make()
+    rows = torch.randn(2, 3)
+    model(rows)
+    assert model.aux_loss.item() > 0
+    model.eval()
+    model(rows)
+    assert model.aux_loss.item() == 0
+    assert not model.aux_loss.requires_grad
+
+
+@pytest.mark.parametrize("shard", ["colwise", "rowwise"])
+def test_moe_preserves_explicit_expert_shard(
+    shard: Literal["colwise", "rowwise"],
+) -> None:
+    config = MoE.Config(channels_in=3)
+    expert = SwiGLU.Config()
+    expert.shard = shard
+    config.expert = expert
+    finalized = config.copy_tree().finalize()
+    assert isinstance(finalized.expert, SwiGLU.Config)
+    assert finalized.expert.shard == shard
 
 
 def test_moe_aux_loss():
@@ -471,7 +497,7 @@ def test_router_bfb(device: str) -> None:
 
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_moe_bfb(device: str) -> None:
-    """Regenerate with ``BFB_REGENERATE=1`` against this canonical sidecar.
+    """Regenerate with ``--regenerate-b4b`` against this canonical sidecar.
 
     Args:
       device: Device on which to run the golden comparison.

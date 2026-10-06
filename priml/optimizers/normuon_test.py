@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Final
+from typing import Final, cast
 
 from torch import Tensor
 
@@ -22,6 +22,13 @@ def _parameters(*shapes: tuple[int, ...]) -> list[torch.nn.Parameter]:
     for parameter in params:
         parameter.grad = torch.randn_like(parameter)
     return params
+
+
+def _state_tensor(optimizer: NorMuon, parameter: Tensor, name: str) -> Tensor:
+    """One per-parameter state buffer, narrowed from torch's untyped state."""
+    value = cast(dict[str, object], optimizer.state[parameter])[name]
+    assert isinstance(value, Tensor)
+    return value
 
 
 def _capture_kernel_state(
@@ -426,41 +433,10 @@ def test_row_rescaling_redistributes_without_resizing() -> None:
             weight_decay=0.0,
             compile=False,
         )
-        second_moments: list[Tensor] = []
-
-        def capture_update(
-            stacked_grads: Tensor,
-            stacked_params: Tensor,
-            momentum_buffer: Tensor,
-            second_moment: Tensor,
-            *,
-            momentum: Tensor,
-            lr: Tensor,
-            weight_decay: Tensor,
-            beta2: Tensor,
-            ns_steps: int,
-            reduce_dim: int,
-            coefficients: tuple[tuple[float, float, float], ...],
-        ) -> None:
-            second_moments.append(second_moment)
-            normuon._normuon_update(
-                stacked_grads,
-                stacked_params,
-                momentum_buffer,
-                second_moment,
-                momentum=momentum,
-                lr=lr,
-                weight_decay=weight_decay,
-                beta2=beta2,
-                ns_steps=ns_steps,
-                reduce_dim=reduce_dim,
-                coefficients=coefficients,
-            )
-
-        optimizer._update = capture_update
         optimizer.step()
         if skew:
-            second_moments[0][:, :8] *= 0.25
+            second_moment = _state_tensor(optimizer, params[0], "second_moment")
+            second_moment[:8] *= 0.25
         assert params[0].grad is not None
         params[0].grad = torch.randn_like(params[0])
         optimizer.step()
@@ -496,10 +472,10 @@ def test_eligibility_names_the_rank_rule() -> None:
 _Build = Callable[[list[torch.nn.Parameter]], NorMuon]
 
 _INVALID: Final[list[tuple[str, _Build, str]]] = [
-    ("lr", lambda p: NorMuon(p, lr=-1.0), "learning rate"),
-    ("momentum", lambda p: NorMuon(p, momentum=1.0), "momentum"),
-    ("beta2", lambda p: NorMuon(p, beta2=1.0), "beta2"),
-    ("weight_decay", lambda p: NorMuon(p, weight_decay=-1.0), "weight_decay"),
+    ("lr", lambda p: NorMuon(p, lr=-1.0), "Learning rate"),
+    ("momentum", lambda p: NorMuon(p, momentum=1.0), "Momentum"),
+    ("beta2", lambda p: NorMuon(p, beta2=1.0), "Beta2"),
+    ("weight_decay", lambda p: NorMuon(p, weight_decay=-1.0), "Weight decay"),
     ("ns_steps", lambda p: NorMuon(p, ns_steps=99), "ns_steps"),
 ]
 
@@ -667,7 +643,8 @@ def test_shape_setup_preserves_dtype_and_reduces_over_the_short_axis() -> None:
     assert len(calls) == 1
     assert calls[0][0].shape == (1, 2, 4, 3)
     assert calls[0][0].dtype == torch.bfloat16
-    assert calls[0][1].shape == (1, 4, 1)
+    # One second moment per row of EACH matrix in the batch, not shared.
+    assert calls[0][1].shape == (1, 2, 4, 1)
     assert calls[0][1].dtype == torch.bfloat16
     assert calls[0][2] == -1
     assert calls[0][3] == 5
@@ -714,6 +691,110 @@ def test_compile_is_on_by_default_and_wraps_the_step(
         assert optimizer._update is normuon._normuon_update
     finally:
         normuon._compiled_update.cache_clear()
+
+
+def test_bucket_membership_changes_do_not_move_optimizer_state() -> None:
+    """Each parameter keeps its own history when a bucket-mate drops out.
+
+    Buckets are rebuilt every step from the parameters holding a gradient, so
+    a parameter missing one step changes who shares its bucket. Stepping two
+    same-shape parameters through that must match stepping each alone.
+    """
+    shared = _parameters((2, 3), (2, 3))
+    alone = [torch.nn.Parameter(p.detach().clone()) for p in shared]
+    joint = NorMuon(shared, lr=0.1, compile=False)
+    solo = [NorMuon([p], lr=0.1, compile=False) for p in alone]
+    torch.manual_seed(1)
+    grads = [[torch.randn(2, 3) for _ in shared] for _ in range(3)]
+    for step, step_grads in enumerate(grads):
+        for index, (a, b, grad) in enumerate(
+            zip(shared, alone, step_grads, strict=True),
+        ):
+            dropped = step == 1 and index == 0
+            a.grad = None if dropped else grad.clone()
+            b.grad = None if dropped else grad.clone()
+        joint.step()
+        for optimizer, parameter in zip(solo, alone, strict=True):
+            if parameter.grad is not None:
+                optimizer.step()
+    for a, b in zip(shared, alone, strict=True):
+        assert torch.equal(a.detach(), b.detach())
+
+
+def test_a_batched_matrix_parameter_steps_through_the_real_kernel() -> None:
+    """A rank-3 parameter keeps one row moment per matrix in its batch."""
+    parameter = torch.nn.Parameter(torch.randn(2, 4, 3))
+    parameter.grad = torch.randn_like(parameter)
+    optimizer = NorMuon([parameter], lr=0.1, compile=False)
+    before = parameter.detach().clone()
+    optimizer.step()
+    assert not torch.equal(parameter.detach(), before)
+    second_moment = _state_tensor(optimizer, parameter, "second_moment")
+    momentum_buffer = _state_tensor(optimizer, parameter, "momentum_buffer")
+    assert second_moment.shape == (2, 4, 1)
+    assert momentum_buffer.shape == (2, 4, 3)
+
+
+_NAN: Final = float("nan")
+
+_NON_FINITE: Final[list[tuple[str, _Build, str]]] = [
+    (
+        "lr_nan",
+        lambda p: NorMuon(p, lr=_NAN, compile=False),
+        "Learning rate must be finite",
+    ),
+    (
+        "lr_inf",
+        lambda p: NorMuon(p, lr=float("inf"), compile=False),
+        "Learning rate must be finite",
+    ),
+    (
+        "momentum_nan",
+        lambda p: NorMuon(p, momentum=_NAN, compile=False),
+        "Momentum must be finite",
+    ),
+    (
+        "momentum_inf",
+        lambda p: NorMuon(p, momentum=float("inf"), compile=False),
+        "Momentum must be finite",
+    ),
+    (
+        "beta2_nan",
+        lambda p: NorMuon(p, beta2=_NAN, compile=False),
+        "Beta2 must be finite",
+    ),
+    (
+        "beta2_inf",
+        lambda p: NorMuon(p, beta2=float("inf"), compile=False),
+        "Beta2 must be finite",
+    ),
+    (
+        "weight_decay_nan",
+        lambda p: NorMuon(p, weight_decay=_NAN, compile=False),
+        "Weight decay must be finite",
+    ),
+    (
+        "weight_decay_inf",
+        lambda p: NorMuon(p, weight_decay=float("inf"), compile=False),
+        "Weight decay must be finite",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "build", "message"),
+    _NON_FINITE,
+    ids=[name for name, _, _ in _NON_FINITE],
+)
+def test_non_finite_hyperparameter_is_rejected(
+    name: str,
+    build: _Build,
+    message: str,
+) -> None:
+    """Non-finite values are rejected before they poison optimizer state."""
+    del name
+    with pytest.raises(ValueError, match=message):
+        build(_parameters((2, 3)))
 
 
 def test_a_prefix_of_the_coefficients_is_a_shorter_iteration() -> None:

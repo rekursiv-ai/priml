@@ -48,7 +48,8 @@ class _FakeDist:
     def get_rank(self) -> int:
         return self.rank
 
-    def get_backend(self) -> str:
+    def get_backend(self, group: object = None) -> str:
+        del group
         return self.backend
 
     def all_reduce(self, tensor: Tensor, op: object) -> None:
@@ -70,7 +71,7 @@ def test_rank_zero_build_reraises_original_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_dist = _FakeDist(rank=0, status=0, message=None)
-    monkeypatch.setattr("priml.data.distributed_build.dist", fake_dist)
+    _install(monkeypatch, fake_dist)
 
     with pytest.raises(ValueError, match="boom"):
         run_rank_zero_build(
@@ -87,7 +88,7 @@ def test_nonzero_rank_fails_fast_with_rank_zero_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_dist = _FakeDist(rank=1, status=0, message="ValueError: boom")
-    monkeypatch.setattr("priml.data.distributed_build.dist", fake_dist)
+    _install(monkeypatch, fake_dist)
 
     with pytest.raises(
         RuntimeError,
@@ -103,7 +104,7 @@ def test_missing_rank_zero_error_uses_fallback_detail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_dist = _FakeDist(rank=1, status=0, message=None)
-    monkeypatch.setattr("priml.data.distributed_build.dist", fake_dist)
+    _install(monkeypatch, fake_dist)
 
     with pytest.raises(
         RuntimeError,
@@ -130,7 +131,7 @@ def test_rank_zero_error_survives_broadcast_failure(
             raise RuntimeError("NCCL broadcast aborted")
 
     fake_dist = _BroadcastBoomDist(rank=0, status=0, message="ValueError: boom")
-    monkeypatch.setattr("priml.data.distributed_build.dist", fake_dist)
+    _install(monkeypatch, fake_dist)
 
     with pytest.raises(ValueError, match="boom"):
         run_rank_zero_build(
@@ -145,7 +146,7 @@ def test_successful_rank_zero_build_runs_once(
     import torch  # noqa: PLC0415 -- import only for asserting the flag dtype.
 
     fake_dist = _FakeDist(rank=0, status=1, message=None)
-    monkeypatch.setattr("priml.data.distributed_build.dist", fake_dist)
+    _install(monkeypatch, fake_dist)
     calls = 0
 
     def build() -> None:
@@ -185,7 +186,8 @@ def test_success_flag_device_tracks_backend(
     import torch  # noqa: PLC0415 -- import only for this device-specific test.
 
     fake_dist = _FakeDist(rank=0, status=1, message=None, backend=backend)
-    monkeypatch.setattr("priml.data.distributed_build.dist", fake_dist)
+    _install(monkeypatch, fake_dist)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
 
     captured: dict[str, torch.device] = {}
@@ -229,7 +231,7 @@ def test_build_runs_locally_when_no_process_group_is_initialized(
     # Rank 1 with a failed status: had the guard not short-circuited, this
     # rank would skip the build and hit the raising all_reduce.
     fake_dist = _UninitializedDist(rank=1, status=0, message="ValueError: boom")
-    monkeypatch.setattr("priml.data.distributed_build.dist", fake_dist)
+    _install(monkeypatch, fake_dist)
     calls = 0
 
     def build() -> None:
@@ -239,6 +241,12 @@ def test_build_runs_locally_when_no_process_group_is_initialized(
     run_rank_zero_build(name="test build", build=build)
 
     assert calls == 1
+
+
+def _install(monkeypatch: pytest.MonkeyPatch, fake_dist: _FakeDist) -> None:
+    """Route the helper and the collective-device lookup it calls to the fake."""
+    monkeypatch.setattr("priml.data.distributed_build.dist", fake_dist)
+    monkeypatch.setattr("priml.math.distributed.dist", fake_dist)
 
 
 if __name__ == "__main__":

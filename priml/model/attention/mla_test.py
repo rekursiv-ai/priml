@@ -1,10 +1,10 @@
-"""Tests for ``priml.model.attention.mla``.
+r"""Tests for ``priml.model.attention.mla``.
 
 The Hugging Face formula-reference tests run offline from local tensors.
 
 Regenerate the bit-for-bit golden after an intentional numeric change::
 
-    BFB_REGENERATE=1 uv --quiet run --frozen pytest \
+    uv --quiet run --frozen pytest \ --regenerate-b4b
         priml/model/attention/mla_test.py
 
 Run regeneration through ``pytest``: the priml ``conftest.py`` sets
@@ -22,7 +22,6 @@ import re
 import tempfile
 
 from configgle import Makeable, PartialConfig
-from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel
@@ -33,12 +32,12 @@ import torch
 
 from priml import runtime
 from priml.cost import Cost, cost
+from priml.model.attention.flash3 import Flash3Attention
 from priml.model.attention.kernel import (
     SdpaFused,
     SdpaNaive,
     attention_kernel_cost,
 )
-from priml.model.attention.kvcache import KVCache
 from priml.model.attention.mla import LatentAttention, MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, RoPEMixed
 from priml.model.linear import Linear
@@ -50,7 +49,19 @@ from priml.testing.bfb import (
     move_to_device,
 )
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 from priml.train.tensor_parallel import apply_tensor_parallel
+
+
+if TYPE_CHECKING:
+    from priml.model.attention.kvcache import KVCache
+
+
+def _layer_cache(
+    module: MultiHeadLatentAttention,
+    state: KVCache,
+) -> dict[object, object]:
+    return {module.depth_index: state}
 
 
 if TYPE_CHECKING:
@@ -113,12 +124,10 @@ class _ForwardCapture:
         self.output = output
         self.captured = captured
 
-    def __call__(self, x: Tensor, **kwargs: object) -> tuple[Tensor, KVCache]:
+    def __call__(self, x: Tensor, **kwargs: object) -> Tensor:
         del x
-        cache = kwargs["cache"]
-        assert isinstance(cache, KVCache)
         self.captured.update(kwargs)
-        return self.output, cache
+        return self.output
 
 
 def test_mla_reset_parameters_resets_injected_children() -> None:
@@ -171,26 +180,7 @@ def test_mla_mismatched_widths_reject_at_make() -> None:
         config.make()
 
 
-def test_mla_cached_forward_requires_an_updated_cache(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _tiny()
-
-    def no_cache_update(*args: object, **kwargs: object) -> tuple[Tensor, None]:
-        del args, kwargs
-        return torch.zeros(2, 3, 128), None
-
-    monkeypatch.setattr(module, "_forward", no_cache_update)
-    expected = "Expected updated is not None."
-    with pytest.raises(ValueError, match=f"^{re.escape(expected)}$") as error:
-        module.forward_cached(
-            torch.randn(2, 3, 128),
-            cache=module.alloc_kv_cache(batch=2, max_seq=4),
-        )
-    assert str(error.value) == expected
-
-
-def test_mla_forward_cached_forwards_each_override_and_keyword(
+def test_mla_forward_forwards_each_override_and_keyword(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _tiny()
@@ -205,9 +195,10 @@ def test_mla_forward_cached_forwards_each_override_and_keyword(
     captured: dict[str, object] = {}
     monkeypatch.setattr(module, "_forward", _ForwardCapture(output, captured))
 
-    result, updated = module.forward_cached(
+    layer_cache = _layer_cache(module, cache)
+    result = module.forward(
         x,
-        cache=cache,
+        cache=layer_cache,
         positions=positions,
         cos_sin=cos_sin,
         scale=0.125,
@@ -218,10 +209,9 @@ def test_mla_forward_cached_forwards_each_override_and_keyword(
     )
 
     assert result is output
-    assert updated is cache
     assert captured["positions"] is positions
     assert captured["cos_sin"] is cos_sin
-    assert captured["cache"] is cache
+    assert captured["cache"] is layer_cache
     assert captured["scale"] == 0.125
     assert captured["is_causal"] is False
     assert captured["dropout_p"] == 0.25
@@ -345,12 +335,12 @@ def test_prealloc_cache_decode():
     assert placed.k.dtype is torch.float64
     assert placed.v.dtype is torch.float64
     prompt = torch.randn(2, 5, 128)
-    out, cache = m.forward_cached(prompt, cache=cache)
+    out = m.forward(prompt, cache=_layer_cache(m, cache))
     assert out.shape == (2, 5, 128)
     assert cache.length == 5
     for _ in range(3):
         step = torch.randn(2, 3, 128)
-        out, cache = m.forward_cached(step, cache=cache)
+        out = m.forward(step, cache=_layer_cache(m, cache))
         assert out.shape == (2, 3, 128)
     assert cache.length == 5 + 3 * 3
 
@@ -371,10 +361,10 @@ def test_decode_equivalent_to_full_reforward():
     # Path B: prefill + 3 decode steps via cache.
     cache = m.alloc_kv_cache(batch=2, max_seq=16)
     with torch.no_grad():
-        _, cache = m.forward_cached(prompt, cache=cache)
+        _ = m.forward(prompt, cache=_layer_cache(m, cache))
         decode_outs: list[Tensor] = []
         for step in steps:
-            out, cache = m.forward_cached(step, cache=cache)
+            out = m.forward(step, cache=_layer_cache(m, cache))
             decode_outs.append(out)
     cached_tail = torch.cat(decode_outs, dim=1)
     assert torch.allclose(full_out[:, 3:], cached_tail, atol=1e-5, rtol=1e-4)
@@ -396,8 +386,8 @@ def test_mla_cached_chunk_matches_full_causal_forward(
     with torch.no_grad():
         full = module(x)
         cache = module.alloc_kv_cache(batch=2, max_seq=8)
-        _, cache = module.forward_cached(x[:, :split], cache=cache)
-        chunk, _ = module.forward_cached(x[:, split:], cache=cache)
+        _ = module.forward(x[:, :split], cache=_layer_cache(module, cache))
+        chunk = module.forward(x[:, split:], cache=_layer_cache(module, cache))
     torch.testing.assert_close(chunk, full[:, split:], atol=1e-5, rtol=1e-4)
 
 
@@ -409,19 +399,22 @@ def test_is_causal_false_overrides_causal_config() -> None:
     cache = module.alloc_kv_cache(batch=2, max_seq=8)
 
     with torch.no_grad():
-        _, cache = module.forward_cached(x[:, :2], cache=cache)
-        overridden, _ = module.forward_cached(
+        _ = module.forward(x[:, :2], cache=_layer_cache(module, cache))
+        overridden = module.forward(
             x[:, 2:],
-            cache=cache,
+            cache=_layer_cache(module, cache),
             is_causal=False,
         )
         module.causal = False
         reference_cache = module.alloc_kv_cache(batch=2, max_seq=8)
-        _, reference_cache = module.forward_cached(
+        _ = module.forward(
             x[:, :2],
-            cache=reference_cache,
+            cache=_layer_cache(module, reference_cache),
         )
-        configured, _ = module.forward_cached(x[:, 2:], cache=reference_cache)
+        configured = module.forward(
+            x[:, 2:],
+            cache=_layer_cache(module, reference_cache),
+        )
 
     assert torch.equal(overridden, configured)
 
@@ -539,6 +532,20 @@ def test_latent_attention_cost_attends_over_the_latent_when_absorbed() -> None:
     assert (
         model_cost["bytes", "primal", "elementwise"].sum()
         == inner["bytes", "primal", "elementwise"].sum()
+    )
+
+
+@pytest.mark.parametrize("absorb", [False, True])
+def test_mla_cost_forwards_the_bus_to_the_kernel(absorb: bool) -> None:
+    config, kernel = _mla_config()
+    kernel.absorb = absorb
+    kernel.attn_kernel = Flash3Attention.Config()
+    finalized = config.copy_tree().finalize()
+    full = finalized.cost(seq_len=8, batch_size=1, dtype=None)
+    windowed = finalized.cost(seq_len=8, batch_size=1, dtype=None, window=2)
+    assert (
+        windowed["flops", "primal", "matmul"].sum()
+        < full["flops", "primal", "matmul"].sum()
     )
 
 
@@ -922,10 +929,10 @@ def test_mla_decode_matches_reference() -> None:
         reference_full = _reference_mla_forward(module, full_input)
 
         cache = module.alloc_kv_cache(batch=2, max_seq=16)
-        _, cache = module.forward_cached(prompt, cache=cache)
+        _ = module.forward(prompt, cache=_layer_cache(module, cache))
         decoded: list[Tensor] = []
         for step in steps:
-            out, cache = module.forward_cached(step, cache=cache)
+            out = module.forward(step, cache=_layer_cache(module, cache))
             decoded.append(out)
     cached_tail = torch.cat(decoded, dim=1)
     diff = (reference_full[:, 3:] - cached_tail).abs().max().item()

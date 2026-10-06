@@ -6,7 +6,6 @@ Provides wrapper that skips already-filtered samples and tracks statistics.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import logging
@@ -59,6 +58,7 @@ class FilterStats:
         self.last_log_time = 0.0
         self.start_time = time.time()
         self.last_processed_count = 0
+        self.last_rate_time = self.start_time
 
     def record_processed(self) -> None:
         """Increment the processed-sample counter under the lock."""
@@ -110,13 +110,13 @@ class FilterStats:
 
     def _log_summary(self) -> None:
         """Log summary statistics."""
-        # Calculate throughput.
+        # Over the time that actually elapsed: a forced log, or one after a
+        # quiet stretch, is not one configured interval after the last.
+        now = time.time()
         samples_since_last = self.samples_processed - self.last_processed_count
-        samples_per_sec = (
-            samples_since_last / self._config.log_interval_sec
-            if self._config.log_interval_sec > 0
-            else 0
-        )
+        elapsed = now - self.last_rate_time
+        samples_per_sec = samples_since_last / elapsed if elapsed > 0 else 0.0
+        self.last_rate_time = now
 
         # Calculate actual work done (not skipped)
         actually_processed = self.samples_processed - self.samples_skipped
@@ -209,51 +209,33 @@ class ShortCircuitProcessor:
         # are queued here and flushed around each processor output, preserving
         # the original interleaving for one-in-one-out processors.
         bypassed: deque[dict[str, object]] = deque()
-        # Drops are counted, not identified by object id: a processor may yield
-        # a NEW dict per input (e.g. a field rename), so the output object is
-        # not the fed object. Identity matching would mis-record every such
-        # pass-through as a drop. The fed count minus the emitted count is the
-        # net number the processor filtered out (>= 0 for filter/1:1
-        # processors; an expanding 1->N processor simply records no drops).
-        # Only the count and the newest sample are kept: holding every fed
-        # sample pins each one's payload (JPEG bytes) for the whole epoch.
-        fed = _FedTally()
-        emitted_count = 0
 
-        for processed_sample in self.processor(self._feed(samples, bypassed, fed)):
+        for processed_sample in self.processor(self._feed(samples, bypassed)):
             while bypassed:
                 yield bypassed.popleft()
-            emitted_count += 1
             yield processed_sample
+            self.stats.log_statistics()
 
         while bypassed:
             yield bypassed.popleft()
-
-        # Attribute each drop to the most recent fed sample's reasons; the
-        # processor mutates filter_reasons in place before declining to yield,
-        # so the last fed sample carries the rejection cause.
-        reasons = [
-            convert(reason, str)
-            for reason in convert(
-                fed.last.get("filter_reasons"),
-                list[object],
-                default=[],
-            )
-            if isinstance(reason, str)
-        ]
-        for _ in range(fed.count - emitted_count):
-            self.stats.record_drop(self.processor_name, reasons)
-            logger.debug("%s: dropped a sample", self.processor_name)
         self.stats.log_statistics()
 
+    # A drop is a fed sample whose ``filter_reasons`` grew while the processor held it
+    # -- judged when the processor asks for the next input, and at the end. Counting
+    # outputs instead mistook every annotate-and- yield filter for a pass and every N->1
+    # stage (``Batcher``) for N-1 drops. Only the newest fed sample is held: holding
+    # every one pins each payload (JPEG bytes) for the whole epoch.
     def _feed(
         self,
         samples: Iterator[dict[str, object]],
         bypassed: deque[dict[str, object]],
-        fed: _FedTally,
     ) -> Iterator[dict[str, object]]:
         """Yield non-filtered samples to the processor; queue filtered ones."""
+        pending: tuple[dict[str, object], int] | None = None
         for sample in samples:
+            if pending is not None:
+                self._record_if_dropped(*pending)
+                pending = None
             self.stats.record_processed()
             if sample.get("filter_reasons"):
                 self.stats.record_skipped()
@@ -265,14 +247,20 @@ class ShortCircuitProcessor:
                 )
                 bypassed.append(sample)
                 continue
-            fed.count += 1
-            fed.last = sample
+            pending = (sample, len(_reasons(sample)))
             yield sample
+        if pending is not None:
+            self._record_if_dropped(*pending)
+
+    def _record_if_dropped(self, sample: dict[str, object], count_before: int) -> None:
+        """Record a drop when the processor added reasons to ``sample``."""
+        added = _reasons(sample)[count_before:]
+        if added:
+            self.stats.record_drop(self.processor_name, added)
+            logger.debug("%s: dropped a sample", self.processor_name)
 
 
-@dataclass(slots=True, kw_only=True)
-class _FedTally:
-    """How many samples reached the processor, and the newest of them."""
-
-    count: int = 0
-    last: dict[str, object] = field(default_factory=dict[str, object])
+def _reasons(sample: dict[str, object]) -> list[str]:
+    """Return the string ``filter_reasons`` of ``sample``."""
+    reasons = convert(sample.get("filter_reasons"), list[object], default=[])
+    return [reason for reason in reasons if isinstance(reason, str)]

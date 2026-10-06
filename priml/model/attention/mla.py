@@ -87,6 +87,7 @@ from priml.model.custom_types import (
     DepthIndex,
     HasResetParameters,
     LatentAttentionKernel,
+    LayerCache,
     RotaryConfig,
     TensorModule,
     WeightedTensorModule,
@@ -154,6 +155,7 @@ class LatentAttention(nn.Module):
             kv_lora_rank: int,
             channels_qk_rope_head: int,
             dropout_p: float,
+            **kwargs: object,
         ) -> Cost:
             """Cost the kernel's two products at the widths this form hands it.
 
@@ -180,6 +182,7 @@ class LatentAttention(nn.Module):
               kv_lora_rank: Width of the shared KV latent.
               channels_qk_rope_head: Width of the rotated key slice.
               dropout_p: Attention dropout rate.
+              **kwargs: The open bus, forwarded to the kernel.
 
             Returns:
               cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
@@ -199,6 +202,7 @@ class LatentAttention(nn.Module):
                 channels_head=channels_k,
                 channels_v_head=channels_v,
                 dropout_p=dropout_p,
+                **kwargs,
             )
             moved = (
                 (2 * num_heads - 1) * kv_lora_rank * seq_len * batch_size
@@ -489,6 +493,7 @@ class MultiHeadLatentAttention(nn.Module):
                 kv_lora_rank=self.kv_lora_rank,
                 channels_qk_rope_head=self.channels_qk_rope_head,
                 dropout_p=self.dropout,
+                **kwargs,
             )
             return replace(
                 total,
@@ -666,6 +671,7 @@ class MultiHeadLatentAttention(nn.Module):
         self,
         x: Tensor,
         *,
+        cache: LayerCache | None = None,
         positions: Tensor | None = None,
         cos_sin: tuple[Tensor, Tensor] | None = None,
         scale: float | None = None,
@@ -674,51 +680,7 @@ class MultiHeadLatentAttention(nn.Module):
         attn_mask: Tensor | None = None,
         **kwargs: object,
     ) -> Tensor:
-        out, _ = self._forward(
-            x,
-            positions=positions,
-            cos_sin=cos_sin,
-            cache=None,
-            scale=scale,
-            is_causal=is_causal,
-            dropout_p=dropout_p,
-            attn_mask=attn_mask,
-            **kwargs,
-        )
-        return out
-
-    def forward_cached(
-        self,
-        x: Tensor,
-        *,
-        cache: KVCache,
-        positions: Tensor | None = None,
-        cos_sin: tuple[Tensor, Tensor] | None = None,
-        scale: float | None = None,
-        is_causal: bool | None = None,
-        dropout_p: float | None = None,
-        attn_mask: Tensor | None = None,
-        **kwargs: object,
-    ) -> tuple[Tensor, KVCache]:
-        """Attend using and updating the compressed latent cache.
-
-        Args:
-          x: Input tokens; [batch, seq, hidden].
-          cache: KVCache to update with new compressed latents.
-          positions: Token positions for RoPE; inferred from cache.seen.
-          cos_sin: Precomputed RoPE (cos, sin); recomputed if None.
-          scale: Attention softmax scale (Q·K^T multiplier).
-          is_causal: Apply causal mask; uses config default if None.
-          dropout_p: Attention dropout probability (0 at eval).
-          attn_mask: Optional custom attention mask.
-          **kwargs: Passed to the attention kernel.
-
-        Returns:
-          output: Attention output; [batch, seq, hidden].
-          updated_cache: Updated KVCache with new seq appended.
-
-        """
-        out, updated = self._forward(
+        return self._forward(
             x,
             positions=positions,
             cos_sin=cos_sin,
@@ -729,9 +691,6 @@ class MultiHeadLatentAttention(nn.Module):
             attn_mask=attn_mask,
             **kwargs,
         )
-        if updated is None:
-            raise ValueError("Expected updated is not None.")
-        return out, updated
 
     def _forward(
         self,
@@ -739,14 +698,19 @@ class MultiHeadLatentAttention(nn.Module):
         *,
         positions: Tensor | None,
         cos_sin: tuple[Tensor, Tensor] | None,
-        cache: KVCache | None,
+        cache: LayerCache | None,
         scale: float | None,
         is_causal: bool | None,
         dropout_p: float | None,
         attn_mask: Tensor | None,
         **kwargs: object,
-    ) -> tuple[Tensor, KVCache | None]:
+    ) -> Tensor:
         S = x.shape[-2]
+        kv_cache: KVCache | None = None
+        if cache is not None:
+            state = cache[self.depth_index]
+            assert isinstance(state, KVCache)
+            kv_cache = state
 
         q = self._project_q(x)
         q_nope = q[..., : self.channels_qk_nope_head]
@@ -758,7 +722,7 @@ class MultiHeadLatentAttention(nn.Module):
 
         if cos_sin is None and self.rope is not None:
             if positions is None:
-                offset = cache.seen if cache is not None else 0
+                offset = kv_cache.seen if kv_cache is not None else 0
                 positions = torch.arange(offset, offset + S, device=x.device)
             cos_sin = self.rope(positions)
         if cos_sin is not None:
@@ -775,8 +739,8 @@ class MultiHeadLatentAttention(nn.Module):
         # c_kv, ``v`` slot holds k_pe (asymmetric dims OK).
         c_kv_cache_in = c_kv_new.unsqueeze(-3)
         k_pe_cache_in = k_pe_new.movedim(-3, -2)
-        if cache is not None:
-            c_kv_full_c, k_pe_full_c = cache.update(c_kv_cache_in, k_pe_cache_in)
+        if kv_cache is not None:
+            c_kv_full_c, k_pe_full_c = kv_cache.update(c_kv_cache_in, k_pe_cache_in)
         else:
             c_kv_full_c, k_pe_full_c = c_kv_cache_in, k_pe_cache_in
 
@@ -801,7 +765,7 @@ class MultiHeadLatentAttention(nn.Module):
             ),
             attn_mask=attn_mask,
             **kwargs,
-        ), cache
+        )
 
     # Under tensor parallelism the q-path is colwise-sharded over the head dim, so
     # ``proj_q``/``proj_q_b`` emit only this rank's ``heads_local = num_heads // tp``

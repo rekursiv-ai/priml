@@ -20,6 +20,7 @@ from priml.cost import Cost, cost
 from priml.model.attention import flash4
 from priml.model.attention.flash4 import (
     Flash4Attention,
+    Flash4UnavailableError,
     Flash4Varlen,
     _flash4_backward,
     _flash4_backward_fake,
@@ -52,9 +53,13 @@ would fail the test. Scoped by module, a warning from priml still fails it."""
 
 @pytest.fixture
 def fake_flash4(monkeypatch: pytest.MonkeyPatch) -> Iterator[_FakeInterface]:
-    """Serve ``_FakeInterface`` as FA4, with a fresh import and Dynamo cache."""
+    """Serve ``_FakeInterface`` as FA4, with a fresh import and Dynamo cache.
+
+    The device reads as SM90, one FA4 runs on, whatever the host has.
+    """
     module = _FakeInterface()
     monkeypatch.setitem(sys.modules, "flash_attn.cute.interface", module)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", _sm90)
     flash4._interface.cache_clear()
     torch.compiler.reset()
     yield module
@@ -87,6 +92,21 @@ def test_an_fa4_without_the_entry_points_is_refused(
     with pytest.raises(TypeError, match="FA4 must provide"):
         Flash4Attention.Config().make()
     flash4._interface.cache_clear()
+
+
+@pytest.mark.usefixtures("fake_flash4")
+@pytest.mark.parametrize("config", [Flash4Attention.Config(), Flash4Varlen.Config()])
+def test_the_kernels_require_sm90_or_sm100(
+    monkeypatch: pytest.MonkeyPatch,
+    config: Flash4Attention.Config | Flash4Varlen.Config,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (12, 0))
+    with pytest.raises(Flash4UnavailableError) as error:
+        config.make()
+    assert str(error.value) == (
+        "FlashAttention 4 requires SM90 or SM100; this device is SM120. "
+        "Inject a portable kernel such as SdpaFused or SdpaVarlen instead."
+    )
 
 
 @pytest.mark.parametrize("window", [-1, 0, 1, 5, 16])
@@ -174,6 +194,7 @@ def test_the_backward_owns_the_contiguous_layout_its_fake_declares(
     saved = [value, value, value, torch.empty_like(gradient), torch.empty(2, 3, 4)]
     backend = _LayoutInterface()
     monkeypatch.setitem(sys.modules, "flash_attn.cute.interface", backend)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", _sm90)
     flash4._interface.cache_clear()
     actual = _flash4_backward(saved, gradient, 0, -1, None)
     declared = _flash4_backward_fake(saved, gradient, 0, -1, None)
@@ -565,6 +586,12 @@ def _cuda_interface() -> flash4._Flash4Interface:
     pytest.importorskip("flash_attn.cute.interface", reason="Requires flash-attn-4.")
     flash4._interface.cache_clear()
     return flash4._interface()
+
+
+def _sm90(device: object = None) -> tuple[int, int]:
+    """Stand in for ``get_device_capability``; CUDA's lazy init passes a device."""
+    del device
+    return 9, 0
 
 
 class _FakeInterface(ModuleType):

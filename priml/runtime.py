@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import field
-from typing import TYPE_CHECKING, Literal, Protocol
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Protocol
 
 import math
+import os
 
 from configgle import Fig
+
+from priml.custom_types import Float32MatmulPrecision
 
 
 if TYPE_CHECKING:
@@ -26,7 +29,18 @@ else:
     enable_determinism = lazy_import("priml.math.seed", "enable_determinism")
 
 
-Float32MatmulPrecision = Literal["highest", "high", "medium"]
+__all__ = [
+    "MultiProcess",
+    "RuntimeProtocol",
+    "SingleProcess",
+    "best_device",
+    "destroy_global_device_mesh",
+    "get_device",
+    "global_device_mesh",
+    "initialize_global_device_mesh",
+    "is_rank_zero",
+    "runtime_initialized",
+]
 
 
 class RuntimeProtocol(Protocol):
@@ -47,52 +61,37 @@ class RuntimeProtocol(Protocol):
         ...
 
 
-__all__ = [
-    "MultiProcess",
-    "RuntimeProtocol",
-    "SingleProcess",
-    "destroy_global_device_mesh",
-    "get_device",
-    "global_device_mesh",
-    "initialize_global_device_mesh",
-    "is_rank_zero",
-    "runtime_initialized",
-]
+def get_device(device: torch.device | str | None = None) -> torch.device:
+    """Resolve a component's ``device`` to a ``torch.device``.
 
-
-def get_device(device: torch.device | str | None = "auto") -> torch.device:
-    """Resolve a device specification to a ``torch.device``.
+    ``None`` is the device being built under: ``torch.get_default_device()``,
+    which ``TrainLoop`` sets with a ``torch.device`` context around each child.
 
     Args:
-      device: One of:
-
-        - ``"auto"`` (default): probe hardware and return the best
-          available backend: CUDA > MPS > CPU.
-        - ``None``: return ``torch.get_default_device()``, i.e.
-          whatever was set via ``torch.set_default_device()``.
-        - A device string (``"cuda"``, ``"cuda:1"``, ``"mps"``,
-          ``"cpu"``, …) or an existing ``torch.device``: passed
-          through unchanged.
+      device: A device, a device string (``"cuda:1"``, ``"mps"``, ``"cpu"``),
+        or ``None``.
 
     Returns:
       device: Resolved ``torch.device``.
 
-    Examples::
-
-        get_device()           # "auto" → cuda on GPU box, mps on Mac
-        get_device("cuda:1")   # explicit GPU
-        get_device(None)       # torch global default
-
     """
     if device is None:
         return torch.get_default_device()
-    if isinstance(device, str) and device == "auto":
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        if torch.backends.mps.is_available():
-            return torch.device("mps")
-        return torch.device("cpu")
     return torch.device(device)
+
+
+def best_device() -> torch.device:
+    """Return the best available accelerator, else CPU: a runtime's ``None``.
+
+    Returns:
+      device: The accelerator this process can use, else ``cpu``.
+
+    """
+    # ``check_available``: without it torch names the accelerator the wheel was
+    # BUILT for, so a CUDA wheel on a machine with no GPU (a CPU CI runner)
+    # answers ``cuda`` and every runtime then fails on its first allocation.
+    accelerator = torch.accelerator.current_accelerator(check_available=True)
+    return accelerator or torch.device("cpu")
 
 
 _device_mesh: DeviceMesh | None = None
@@ -112,6 +111,11 @@ _single_process_settings: tuple[bool, Float32MatmulPrecision | None] | None = No
 _process_group_owned: bool = (
     False  # house-ignore[globals] -- Process-global resource ownership.
 )
+# The torch globals as they stood before initialization applied determinism and
+# matmul precision. Settings a runtime applies are its to undo: clearing only
+# the bookkeeping left a later ``deterministic=False`` runtime silently
+# deterministic, since the settings check compares records, not torch.
+_torch_globals_before: _TorchGlobals | None = None
 
 
 class SingleProcess:
@@ -137,8 +141,8 @@ class SingleProcess:
     """
 
     class Config(Fig["SingleProcess"]):
-        device: torch.device | str | None = "auto"
-        """Target device ("auto" = best available, None = torch default)."""
+        device: torch.device | str | None = None
+        """Target device; ``None`` is the best available accelerator, else CPU."""
 
         deterministic: bool = False
         """Enable deterministic CUDA operations."""
@@ -147,7 +151,9 @@ class SingleProcess:
         """Float32 matmul precision override; None preserves PyTorch's default."""
 
     def __init__(self, config: Config):
-        self.device = get_device(config.device)
+        self.device = (
+            best_device() if config.device is None else torch.device(config.device)
+        )
         self.deterministic = config.deterministic
         self.float32_matmul_precision: Float32MatmulPrecision | None = (
             config.float32_matmul_precision
@@ -169,6 +175,7 @@ class SingleProcess:
 
         """
         global _runtime_initialized, _single_process_settings  # noqa: PLW0603 -- Runtime init state is process-global by nature; torch's process group is a singleton too.
+        global _torch_globals_before  # noqa: PLW0603 -- Runtime init state is process-global by nature; torch's process group is a singleton too.
         settings = (self.deterministic, self.float32_matmul_precision)
         if _runtime_initialized:
             if _single_process_settings is None:
@@ -182,17 +189,25 @@ class SingleProcess:
                     f"{settings}. These apply process-globally.",
                 )
             return
-        _set_float32_matmul_precision(self.float32_matmul_precision)
-        if self.deterministic:
-            enable_determinism()
+        _torch_globals_before = _apply_torch_globals(
+            deterministic=self.deterministic,
+            float32_matmul_precision=self.float32_matmul_precision,
+        )
         _single_process_settings = settings
         _runtime_initialized = True
 
     def destroy(self) -> None:
-        """Cleanup runtime resources."""
+        """Release runtime resources and restore the torch globals it applied.
+
+        Raises:
+          RuntimeError: A device mesh is live, so a multi-process runtime owns
+            the process.
+
+        """
         global _runtime_initialized, _single_process_settings  # noqa: PLW0603 -- Runtime init state is process-global by nature; torch's process group is a singleton too.
         if global_device_mesh() is not None:
             raise RuntimeError("Device mesh initialized but single process.")
+        _restore_torch_globals()
         _single_process_settings = None
         _runtime_initialized = False
 
@@ -224,19 +239,19 @@ class MultiProcess:
 
     Examples:
       # Pure DDP (8 GPUs, all data parallel)
-      MultiProcess.Config(mesh={"dp": 8, "pp": 1, "tp": 1})
+      MultiProcess.Config(mesh_topology={"dp": 8, "pp": 1, "tp": 1})
 
       # Pure TP (4 GPUs on one host, one data replica)
-      MultiProcess.Config(mesh={"dp": 1, "pp": 1, "tp": 4})
+      MultiProcess.Config(mesh_topology={"dp": 1, "pp": 1, "tp": 4})
 
       # DP + TP (8 GPUs = 2 DP replicas x 4 TP per replica)
-      MultiProcess.Config(mesh={"dp": 2, "pp": 1, "tp": 4})
+      MultiProcess.Config(mesh_topology={"dp": 2, "pp": 1, "tp": 4})
 
       # DP + PP + TP (16 GPUs = 2 DP replicas x 2 PP stages x 4 TP per stage)
-      MultiProcess.Config(mesh={"dp": 2, "pp": 2, "tp": 4})
+      MultiProcess.Config(mesh_topology={"dp": 2, "pp": 2, "tp": 4})
 
       # Auto-infer DP size
-      MultiProcess.Config(mesh={"dp": -1, "pp": 1, "tp": 4})
+      MultiProcess.Config(mesh_topology={"dp": -1, "pp": 1, "tp": 4})
 
     Note:
       All three dimensions (dp, pp, tp) are mandatory. Use 1 for unused dimensions.
@@ -244,8 +259,8 @@ class MultiProcess:
     """
 
     class Config(Fig["MultiProcess"]):
-        device: torch.device | str | None = "auto"
-        """Target device ("auto" = best available, None = torch default)."""
+        device: torch.device | str | None = None
+        """Target device; ``None`` is the best available accelerator, else CPU."""
 
         deterministic: bool = False
         """Enable deterministic CUDA operations."""
@@ -262,7 +277,9 @@ class MultiProcess:
         """Device mesh dimensions (-1 = auto-infer from world size)."""
 
     def __init__(self, config: Config):
-        self.device = get_device(config.device)
+        self.device = (
+            best_device() if config.device is None else torch.device(config.device)
+        )
         if config.backend is None:
             self.backend = "nccl" if self.device.type.startswith("cuda") else "gloo"
         else:
@@ -271,25 +288,19 @@ class MultiProcess:
         self.float32_matmul_precision: Float32MatmulPrecision | None = (
             config.float32_matmul_precision
         )
-        if (
-            any(s == 0 or s < -1 for s in config.mesh_topology.values())
-            or sum(s == -1 for s in config.mesh_topology.values()) > 1
-        ):
-            raise ValueError(
-                "Mesh topology dimensions must be positive except for at most "
-                f"one -1 (auto); got {config.mesh_topology}.",
-            )
+        _validate_mesh_topology(config.mesh_topology)
         self.mesh_topology = dict(config.mesh_topology)
 
     def initialize(self) -> None:
-        """Initialize distributed backend and device mesh."""
-        initialize_global_device_mesh(
+        """Initialize distributed backend and device mesh, binding this rank's device."""
+        _ = initialize_global_device_mesh(
             backend=self.backend,
             device=self.device,
             mesh_topology=self.mesh_topology,
             deterministic=self.deterministic,
             float32_matmul_precision=self.float32_matmul_precision,
         )
+        self.device = _bind_local_cuda_device(self.device)
 
     def destroy(self) -> None:
         """Cleanup distributed backend."""
@@ -356,7 +367,7 @@ def initialize_global_device_mesh(
 
     """
     global _runtime_initialized, _device_mesh, _single_process_settings  # noqa: PLW0603 -- Runtime init state is process-global by nature; torch's process group is a singleton too.
-    global _process_group_owned  # noqa: PLW0603 -- Runtime init state is process-global by nature; torch's process group is a singleton too.
+    global _process_group_owned, _torch_globals_before  # noqa: PLW0603 -- Runtime init state is process-global by nature; torch's process group is a singleton too.
 
     if _runtime_initialized:
         raise RuntimeError("Runtime already initialized.")
@@ -371,37 +382,26 @@ def initialize_global_device_mesh(
             "mesh_topology cannot be empty. "
             "Specify dimensions, e.g., {'dp': -1, 'pp': 1, 'tp': 1}",
         )
-    if (
-        any(size == 0 or size < -1 for size in mesh_topology.values())
-        or sum(size == -1 for size in mesh_topology.values()) > 1
-    ):
-        raise ValueError(
-            "Mesh topology dimensions must be positive except for at most "
-            f"one -1 (auto); got {mesh_topology}.",
-        )
+    _validate_mesh_topology(mesh_topology)
 
     device = get_device(device)
-
-    _set_float32_matmul_precision(float32_matmul_precision)
-
-    if deterministic:
-        enable_determinism()
-
     if backend is None:
         backend = "nccl" if device.type.startswith("cuda") else "gloo"
 
-    # Bind this rank to its own GPU before initializing NCCL. torchrun launches
-    # every rank with the same default device (cuda:0); without an explicit
-    # bind, NCCL sees the same device on multiple ranks and raises "Duplicate
-    # GPU detected" (Issue#368). ``get_node_local_rank`` reads ``LOCAL_RANK``
-    # and falls back to 0 for single-process / non-torchrun launches.
-    if device.type == "cuda":
-        local_rank = torch.distributed.get_node_local_rank(fallback_rank=0)
-        device = torch.device(f"cuda:{local_rank}")
-        torch.cuda.set_device(device)
-
+    # Every process-global change below happens inside the ``try``, so a failed
+    # initialization hands the process back as it found it -- torch settings
+    # and the bound CUDA device included, not only the process group.
     process_group_preexisting = torch.distributed.is_initialized()
+    cuda_device_before = (
+        torch.cuda.current_device() if torch.cuda.is_initialized() else None
+    )
+    torch_globals = _snapshot_torch_globals()
     try:
+        _apply_torch_globals(
+            deterministic=deterministic,
+            float32_matmul_precision=float32_matmul_precision,
+        )
+        device = _bind_local_cuda_device(device)
         if not process_group_preexisting:
             torch.distributed.init_process_group(
                 backend=backend,
@@ -422,6 +422,10 @@ def initialize_global_device_mesh(
         _single_process_settings = None
         _runtime_initialized = False
         _process_group_owned = False
+        _torch_globals_before = None
+        torch_globals.restore()
+        if cuda_device_before is not None:
+            torch.cuda.set_device(cuda_device_before)
         if not process_group_preexisting and torch.distributed.is_initialized():
             try:
                 torch.distributed.destroy_process_group()
@@ -434,6 +438,7 @@ def initialize_global_device_mesh(
 
     _device_mesh = device_mesh
     _process_group_owned = not process_group_preexisting
+    _torch_globals_before = torch_globals
     _runtime_initialized = True
     return device_mesh
 
@@ -455,6 +460,7 @@ def destroy_global_device_mesh() -> None:
         return
     if _process_group_owned and torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
+    _restore_torch_globals()
     _device_mesh = None
     _single_process_settings = None
     _process_group_owned = False
@@ -472,9 +478,7 @@ def _resolve_mesh_topology(
     )
     if automatic_key is not None:
         world_size_fixed = math.prod(
-            size
-            for key, size in mesh_topology.items()
-            if key != automatic_key and size != 0
+            size for key, size in mesh_topology.items() if key != automatic_key
         )
         automatic_size = world_size_actual // world_size_fixed
         mesh_topology = {
@@ -490,9 +494,99 @@ def _resolve_mesh_topology(
     return mesh_topology
 
 
-def _set_float32_matmul_precision(
-    precision: Float32MatmulPrecision | None,
-) -> None:
-    """Apply the requested float32 matmul precision override."""
-    if precision is not None:
-        torch.set_float32_matmul_precision(precision)
+def _validate_mesh_topology(mesh_topology: dict[str, int]) -> None:
+    """Reject a dimension that is zero, below -1, or a second -1."""
+    sizes = mesh_topology.values()
+    if (
+        any(size == 0 or size < -1 for size in sizes)
+        or sum(size == -1 for size in sizes) > 1
+    ):
+        raise ValueError(
+            "Mesh topology dimensions must be positive except for at most "
+            f"one -1 (auto); got {mesh_topology}.",
+        )
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class _TorchGlobals:
+    """The process-global torch settings a runtime may change, as captured."""
+
+    deterministic: bool
+    deterministic_warn_only: bool
+    float32_matmul_precision: str
+    cudnn_benchmark: bool
+    cudnn_deterministic: bool
+    flash_sdp: bool
+    mem_efficient_sdp: bool
+    cublas_workspace_config: str | None
+
+    def restore(self) -> None:
+        """Put every captured setting back."""
+        torch.use_deterministic_algorithms(
+            self.deterministic,
+            warn_only=self.deterministic_warn_only,
+        )
+        torch.set_float32_matmul_precision(self.float32_matmul_precision)
+        torch.backends.cudnn.benchmark = self.cudnn_benchmark
+        torch.backends.cudnn.deterministic = self.cudnn_deterministic
+        torch.backends.cuda.enable_flash_sdp(self.flash_sdp)
+        torch.backends.cuda.enable_mem_efficient_sdp(self.mem_efficient_sdp)
+        if self.cublas_workspace_config is None:
+            os.environ.pop("CUBLAS_WORKSPACE_CONFIG", None)
+        else:
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = self.cublas_workspace_config
+
+
+def _snapshot_torch_globals() -> _TorchGlobals:
+    """Capture the torch settings ``_apply_torch_globals`` may change."""
+    return _TorchGlobals(
+        deterministic=torch.are_deterministic_algorithms_enabled(),
+        deterministic_warn_only=torch.is_deterministic_algorithms_warn_only_enabled(),
+        float32_matmul_precision=torch.get_float32_matmul_precision(),
+        cudnn_benchmark=torch.backends.cudnn.benchmark,
+        cudnn_deterministic=torch.backends.cudnn.deterministic,
+        flash_sdp=torch.backends.cuda.flash_sdp_enabled(),
+        mem_efficient_sdp=torch.backends.cuda.mem_efficient_sdp_enabled(),
+        cublas_workspace_config=os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+    )
+
+
+def _apply_torch_globals(
+    *,
+    deterministic: bool,
+    float32_matmul_precision: Float32MatmulPrecision | None,
+) -> _TorchGlobals:
+    """Apply the runtime's torch settings; return what they replaced."""
+    before = _snapshot_torch_globals()
+    try:
+        if float32_matmul_precision is not None:
+            torch.set_float32_matmul_precision(float32_matmul_precision)
+        if deterministic:
+            enable_determinism()
+    except BaseException:
+        before.restore()
+        raise
+    return before
+
+
+def _restore_torch_globals() -> None:
+    """Undo the torch settings the live runtime applied, if any."""
+    global _torch_globals_before  # noqa: PLW0603 -- Runtime init state is process-global by nature; torch's process group is a singleton too.
+    if _torch_globals_before is not None:
+        _torch_globals_before.restore()
+    _torch_globals_before = None
+
+
+def _bind_local_cuda_device(device: torch.device) -> torch.device:
+    """Bind this rank to its node-local GPU; a non-CUDA device passes through."""
+    # Bind this rank to its own GPU before initializing NCCL. torchrun launches
+    # every rank with the same default device (cuda:0); without an explicit
+    # bind, NCCL sees the same device on multiple ranks and raises "Duplicate
+    # GPU detected" (Issue#368). ``get_node_local_rank`` reads ``LOCAL_RANK``
+    # and falls back to 0 for single-process / non-torchrun launches.
+    if device.type != "cuda":
+        return device
+    local_rank = torch.distributed.get_node_local_rank(fallback_rank=0)
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
+    return device

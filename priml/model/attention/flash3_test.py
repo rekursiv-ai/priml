@@ -47,6 +47,12 @@ INTERFACE_SOURCE: Final = (
 """A prepared interface that satisfies ``Flash3Interface`` and needs no GPU."""
 
 
+@pytest.fixture(autouse=True)
+def cuda_128(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Present a cu128 torch, so artifact paths hold on a CPU-only torch too."""
+    monkeypatch.setattr(torch.version, "cuda", "12.8")
+
+
 @pytest.fixture
 def fake_flash3(monkeypatch: pytest.MonkeyPatch) -> _FakeInterface:
     """Build kernels on a stand-in FA3, as if on an SM90 device."""
@@ -103,14 +109,25 @@ def test_the_kernel_refuses_what_fa3_cannot_express(
 
 
 def test_the_kernel_rejects_an_unqualified_revision() -> None:
-    with pytest.raises(ValueError, match="revision identifies"):
+    with pytest.raises(ValueError, match="revision identifies") as error:
         Flash3Attention.Config(revision="wrong").make()
+    assert str(error.value) == (
+        "revision identifies the qualified parity reference and must remain "
+        "de87b9b5af06dd9984df595bef90b2eba44b181a; got wrong."
+    )
 
 
 def test_the_kernel_requires_sm90(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (8, 9))
-    with pytest.raises(Flash3UnavailableError, match=r"requires SM90; .* SM89"):
+    with pytest.raises(
+        Flash3UnavailableError,
+        match=r"requires SM90; .* SM89",
+    ) as error:
         Flash3Attention.Config().make()
+    assert str(error.value) == (
+        "The pinned FlashAttention 3 build requires SM90; this device is SM89. "
+        "Inject a portable kernel such as SdpaCausal instead."
+    )
 
 
 @pytest.mark.parametrize("window", [-1, 0, 1, 4, 8, 12])
@@ -160,16 +177,37 @@ def test_the_cost_is_whole_invocations_by_batch() -> None:
     )
 
 
-def test_the_artifact_path_names_the_pinned_build(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("cuda", "tag"), [("12.8", "cu128"), ("12.9", "cu129")])
+def test_the_artifact_path_names_torchs_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cuda: str,
+    tag: str,
+) -> None:
+    monkeypatch.setattr(torch.version, "cuda", cuda)
     path = artifact_path(cache_root=tmp_path)
     assert path.parent == tmp_path
     assert path.name == (
         "3da5f873029162763568db56546fee70a779fade"
-        "-torch2.9.1-cu128-cxx11-x86_64-nanochat-hdim128-bf16-local"
+        f"-torch2.9.1-{tag}-cxx11-x86_64-nanochat-hdim128-bf16-local"
     )
 
 
-def test_the_receipt_pins_the_build_lane() -> None:
+def test_a_cpu_only_torch_has_no_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(torch.version, "cuda", None)
+    with pytest.raises(Flash3UnavailableError, match="CUDA build of torch"):
+        artifact_path(cache_root=tmp_path)
+
+
+@pytest.mark.parametrize("cuda", ["12.8", "12.9"])
+def test_the_receipt_pins_the_build_lane(
+    monkeypatch: pytest.MonkeyPatch,
+    cuda: str,
+) -> None:
+    monkeypatch.setattr(torch.version, "cuda", cuda)
     assert expected_receipt(
         binary_sha256="b",
         interface_sha256="i",
@@ -178,7 +216,7 @@ def test_the_receipt_pins_the_build_lane() -> None:
         "source_revision": "3da5f873029162763568db56546fee70a779fade",
         "cutlass_revision": "dc4817921edda44a549197ff3a9dcf5df0636e7b",
         "torch": "2.9.1",
-        "cuda": "12.8",
+        "cuda": cuda,
         "cxx11_abi": "true",
         "build_profile": "nanochat-hdim128-bf16-local",
         "binary_sha256": "b",

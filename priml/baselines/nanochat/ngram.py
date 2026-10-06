@@ -235,13 +235,11 @@ class HashedNgramTables(nn.Module):
 
         @override
         def finalize(self) -> Self:
-            if not self.hash_multipliers or self.channels_out % len(
-                self.hash_multipliers,
-            ):
-                raise ValueError("Hash count must divide the value width.")
-            if len({len(row) for row in self.hash_multipliers}) != 1:
-                raise ValueError("All hashes must have the same n-gram order.")
-            self.table.channels_out = self.channels_out // len(self.hash_multipliers)
+            # ``max`` only so an empty tuple still prints; the build rejects it.
+            self.table.channels_out = self.channels_out // max(
+                len(self.hash_multipliers),
+                1,
+            )
             self.table.channels_in = self.num_embeddings
             bound = (3 / self.channels_out) ** 0.5
             self.table.init_weight = partial(nn.init.uniform_, a=-bound, b=bound)
@@ -310,6 +308,12 @@ class HashedNgramTables(nn.Module):
             )
 
     def __init__(self, config: Config) -> None:
+        if not config.hash_multipliers or config.channels_out % len(
+            config.hash_multipliers,
+        ):
+            raise ValueError("Hash count must divide the value width.")
+        if len({len(row) for row in config.hash_multipliers}) != 1:
+            raise ValueError("All hashes must have the same n-gram order.")
         super().__init__()
         self.hash_multipliers = config.hash_multipliers
         self.num_embeddings = config.num_embeddings
@@ -542,7 +546,7 @@ def _mix_backward(  # noqa: PLR0917 -- The operator schema fixes the positional 
         for bitmap, index in zip(bitmaps, indices, strict=False):
             flat = index.reshape(-1)
             bitmap[flat[flat != -1]] = 1
-    # A list return prevents auto-functionalization of this mutating custom op.
+    # Two tensors, never a list: the second is an empty placeholder for one source.
     return grads[0], grads[1] if len(grads) == 2 else gates[0].new_empty(0)
 
 

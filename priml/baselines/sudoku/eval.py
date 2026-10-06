@@ -295,7 +295,6 @@ from typing import (
 )
 
 import hashlib
-import itertools
 import json
 import logging
 import math
@@ -316,7 +315,6 @@ from priml.baselines.sudoku.puzzle_data import (
     PuzzleBatch,
     PuzzleDataset,
     load_puzzle_dataset,
-    resolve_working_dir,
 )
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
 from priml.baselines.sudoku.trainer import (
@@ -327,12 +325,13 @@ from priml.baselines.sudoku.trainer import (
 )
 from priml.baselines.sudoku.trm import TRM
 from priml.cost import Cost, cost, elementwise_cost, reduction_cost
-from priml.lib.custom_json import convert
+from priml.lib.custom_json import ReadError, convert, loads, parse
 from priml.model.attention.kernel import attention_kernel_cost
 from priml.model.embedding import Embedding
 from priml.model.linear import Linear
 from priml.model.norm import LayerNorm
-from priml.runtime import SingleProcess
+from priml.paths import resolve_working_dir
+from priml.runtime import SingleProcess, get_device
 from priml.train.tracker import WandbTracker
 
 
@@ -1627,10 +1626,10 @@ def run_pin_search_fast(
     grids = media.clone()
 
     for attempt in range(cell_attempts):
-        unresolved = active & ~found
-        if not bool(unresolved.any()):
+        eligible = active & ~found & (nodes + candidates <= budget)
+        puzzles = eligible.nonzero(as_tuple=True)[0]
+        if not puzzles.shape[0]:
             break
-        puzzles = unresolved.nonzero(as_tuple=True)[0]
         # Level-1 frontier: C candidate boards per puzzle at this attempt's
         # root entropy cell.
         frontier_puzzle = puzzles.repeat_interleave(candidates)
@@ -2424,9 +2423,8 @@ class VerifierData:
         dev_puzzles: int = 5000
         """Dev slice: first N test puzzles in file order."""
 
-        device: str = "auto"
-        """Device for cached data and generation ("auto" = CUDA, else MPS,
-        else CPU)."""
+        device: torch.device | str | None = None
+        """Device for cached data and generation."""
 
         seed: int = 0
         """Train-stream seed (folded with the epoch index)."""
@@ -2448,7 +2446,11 @@ class VerifierData:
 
     def __init__(self, config: Config) -> None:
         self.config = config
-        self.device = _resolve_device(config.device)
+        self.device = get_device(config.device)
+        if config.steps_per_epoch < 1:
+            raise ValueError(
+                f"steps_per_epoch must be >= 1, got {config.steps_per_epoch}.",
+            )
         fractions = (
             config.real_fraction,
             config.positive_fraction,
@@ -2815,12 +2817,12 @@ class VerifierFit:
         """Autocast compute dtype for the forward pass (weights stay fp32;
         the loss runs outside autocast). None disables autocast."""
 
-        device: str = "auto"
-        """Training device ("auto" = CUDA, else MPS, else CPU)."""
+        device: torch.device | str | None = None
+        """Training device."""
 
         @override
         def finalize(self) -> Self:
-            if self.dataset.device == "auto":
+            if self.dataset.device is None:
                 self.dataset.device = self.device
             if self.dataset.base_dir is None:
                 self.dataset.base_dir = self.base_dir
@@ -2835,7 +2837,7 @@ class VerifierFit:
                 f"{config.gradient_clip_norm}.",
             )
         self.config = config
-        self.device = _resolve_device(config.device)
+        self.device = get_device(config.device)
         base = config.base_dir if config.base_dir is not None else Path("/opt/scratch")
         self.run_dir = resolve_working_dir(
             base,
@@ -2988,8 +2990,8 @@ class VerifierAcceptor(CommitteeLock):
         max_rows: int = 8_192
         """Scoring chunk width (memory guard)."""
 
-        device: str = "auto"
-        """Device for the committee ("auto" = CUDA, else MPS, else CPU)."""
+        device: torch.device | str | None = None
+        """Device for the committee."""
 
     def __init__(self, config: Config) -> None:
         if not config.checkpoint_paths:
@@ -2997,7 +2999,7 @@ class VerifierAcceptor(CommitteeLock):
         if config.max_rows < 1:
             raise ValueError(f"max_rows must be >= 1, got {config.max_rows}.")
         self.config = config
-        device = _resolve_device(config.device)
+        device = get_device(config.device)
         base = config.base_dir if config.base_dir is not None else Path("/opt/scratch")
         self.members: list[SudokuVerifier] = []
         for path in config.checkpoint_paths:
@@ -3162,6 +3164,24 @@ def _finish_batch(
     }
 
 
+class _HarvestShardEntry(TypedDict):
+    """One shard's line in the harvest manifest."""
+
+    file: str
+    rows: int
+    sha256: str
+
+
+class _HarvestManifest(TypedDict):
+    """The fields of ``manifest.json`` the loader binds shards to."""
+
+    schema_version: Literal[1]
+    groups_per_shard: int
+    shards: list[_HarvestShardEntry]
+    shard_count: int
+    row_count: int
+
+
 def _load_harvest(
     harvest_dir: Path,
     *,
@@ -3172,33 +3192,18 @@ def _load_harvest(
     if not manifest_path.is_file():
         raise FileNotFoundError(f"harvest manifest not found: {manifest_path}.")
     try:
-        manifest = cast(object, json.loads(manifest_path.read_text()))
-    except (OSError, json.JSONDecodeError) as error:
+        manifest = parse(manifest_path.read_text(), _HarvestManifest)
+    except (json.JSONDecodeError, ReadError) as error:
         raise ValueError(
             f"invalid harvest manifest {manifest_path}: {error}",
         ) from error
-    if not isinstance(manifest, dict):
-        raise TypeError(f"harvest manifest {manifest_path} must be a JSON object.")
-    manifest_fields = cast(dict[object, object], manifest)
-    if manifest_fields.get("schema_version") != 1:
-        raise ValueError(f"harvest manifest {manifest_path} must use schema_version 1.")
-    raw_entries = manifest_fields.get("shards")
-    groups_per_shard = manifest_fields.get("groups_per_shard")
-    if not isinstance(raw_entries, list) or not isinstance(groups_per_shard, int):
-        raise TypeError(f"harvest manifest {manifest_path} has invalid shard metadata.")
-    entries: list[dict[object, object]] = []
-    declared_names: list[str] = []
-    for raw_entry in cast(list[object], raw_entries):
-        if not isinstance(raw_entry, dict):
-            raise TypeError(f"harvest manifest {manifest_path} has an invalid entry.")
-        entry = cast(dict[object, object], raw_entry)
-        name = entry.get("file")
-        if not isinstance(name, str) or Path(name).name != name:
-            raise ValueError(
-                f"harvest manifest {manifest_path} has an invalid shard name.",
-            )
-        entries.append(entry)
-        declared_names.append(name)
+    groups_per_shard = manifest["groups_per_shard"]
+    entries = manifest["shards"]
+    declared_names = [entry["file"] for entry in entries]
+    if any(Path(name).name != name for name in declared_names):
+        raise ValueError(
+            f"harvest manifest {manifest_path} has an invalid shard name.",
+        )
     actual_names = sorted(path.name for path in harvest_dir.glob("shard-*.npz"))
     if actual_names != sorted(declared_names):
         raise ValueError(
@@ -3216,9 +3221,8 @@ def _load_harvest(
     groups: list[Tensor] = []
     row_count = 0
     for index, entry in enumerate(entries):
-        shard = harvest_dir / declared_names[index]
-        expected_digest = entry.get("sha256")
-        if not isinstance(expected_digest, str) or _sha256(shard) != expected_digest:
+        shard = harvest_dir / entry["file"]
+        if _sha256(shard) != entry["sha256"]:
             raise ValueError(f"harvest shard digest mismatch: {shard}.")
         with _npz(shard) as data:
             base_groups = np.array(data["base_group_id"], dtype=np.int64)
@@ -3234,13 +3238,10 @@ def _load_harvest(
             flat_views.append(torch.from_numpy(np.array(data["flat_view_id"])))
             groups.append(torch.from_numpy(base_groups) + groups_per_shard * index)
             rows = len(data["original"])
-        if entry.get("rows") != rows:
+        if entry["rows"] != rows:
             raise ValueError(f"harvest shard row count mismatch: {shard}.")
         row_count += rows
-    if (
-        manifest_fields.get("shard_count") != len(entries)
-        or manifest_fields.get("row_count") != row_count
-    ):
+    if manifest["shard_count"] != len(entries) or manifest["row_count"] != row_count:
         raise ValueError(f"harvest manifest aggregate count mismatch: {manifest_path}.")
     return (
         torch.cat(originals).to(device).long(),
@@ -3860,8 +3861,8 @@ class Harvest:
         before generator model construction -- required for sound compiled
         bf16 rollouts (the trainer contract)."""
 
-        device: str = "auto"
-        """Rollout device ("auto" = CUDA, else MPS, else CPU)."""
+        device: torch.device | str | None = None
+        """Rollout device."""
 
     def __init__(self, config: Config) -> None:
         if not str(config.harvest_source_checkpoint):
@@ -3904,7 +3905,7 @@ class Harvest:
             random_corruption_strengths=config.random_corruption_strengths,
             random_starts_per_strength=config.random_starts_per_strength,
         )
-        self.device = _resolve_device(config.device)
+        self.device = get_device(config.device)
 
         base = config.base_dir if config.base_dir is not None else Path("/opt/scratch")
         self.dataset_dir = Path(resolve_working_dir(base, config.working_dir))
@@ -3912,14 +3913,11 @@ class Harvest:
             base,
             str(config.run_dir).format(experiment_name=config.experiment_name),
         )
-        if isinstance(config.harvest_source_checkpoint, Path):
-            self.checkpoint_path = config.harvest_source_checkpoint
-        elif config.harvest_source_checkpoint:
-            self.checkpoint_path = Path(
-                resolve_working_dir(base, config.harvest_source_checkpoint),
-            )
-        else:
-            self.checkpoint_path = Path()
+        self.checkpoint_path = (
+            config.harvest_source_checkpoint
+            if isinstance(config.harvest_source_checkpoint, Path)
+            else resolve_working_dir(base, config.harvest_source_checkpoint)
+        )
 
         train = load_puzzle_dataset(self.dataset_dir, "train")
         self._train_inputs: Tensor = train["inputs"]
@@ -3945,15 +3943,17 @@ class Harvest:
     def run(self) -> Path:
         """Harvest every selected view and publish the corpus.
 
-        Writes ``shard-<i>.npz`` (8 base groups each, atomic, overwrite
-        refused) and then ``manifest.json`` with exact row/shard accounting.
+        Writes ``shard-<i>.npz`` (8 base groups each, atomic) and then
+        ``manifest.json`` with exact row/shard accounting. A shard left by an
+        interrupted run is reused once it matches the deterministic output.
 
         Returns:
           out_dir: The harvest directory holding the shards and manifest
             (what ``VerifierData.Config.harvest_dir`` consumes).
 
         Raises:
-          FileExistsError: A shard or the manifest already exists.
+          FileExistsError: The manifest already exists.
+          ValueError: An existing shard differs from the deterministic output.
 
         """
         cfg = self.config
@@ -4468,15 +4468,15 @@ def _board_rollout(
     return rollout(boards, boards, rows)
 
 
-# ``np.savez_compressed`` stamps wall-clock zip entry times, so identical arrays produce
-# different bytes across runs; a fixed epoch keeps shard bytes (and the manifest's
-# sha256 provenance) reproducible. Written via temp file + atomic rename, so a present
-# file is complete.
 def _npz(path: Path) -> NpzFile:
     """Open an npz archive; ``np.load`` itself returns ``Any``."""
     return cast("NpzFile", np.load(path))
 
 
+# ``np.savez_compressed`` stamps wall-clock zip entry times, so identical arrays produce
+# different bytes across runs; a fixed epoch keeps shard bytes (and the manifest's
+# sha256 provenance) reproducible. Written via temp file + atomic rename, so a present
+# file is complete.
 def _write_npz(path: Path, arrays: dict[str, np.ndarray]) -> None:
     """Write a compressed npz with fixed zip timestamps (byte-deterministic)."""
     temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
@@ -4633,7 +4633,7 @@ class HpsEval:
         """Checkpoint, search policy, population, and outputs."""
 
         runtime: SingleProcess.Config = field(
-            # Device PINNED: priml defaults to "auto" (see Trainer.Config).
+            # Device PINNED: priml defaults to ``None`` (see Trainer.Config).
             default_factory=lambda: SingleProcess.Config(device="cuda"),
         )
         """Process runtime (device + determinism)."""
@@ -4683,7 +4683,7 @@ class HpsEval:
 
         @override
         def finalize(self) -> Self:
-            if self.dataset.device == "auto":
+            if self.dataset.device is None:
                 self.dataset.device = str(self.runtime.device)
             if self.dataset.base_dir is None:
                 self.dataset.base_dir = self.base_dir
@@ -4742,6 +4742,7 @@ class HpsEval:
         finally:
             del model
             _release()
+        _require_population(labels.shape[0], cfg.evaluation_count, label="HpsEval")
         metrics = {
             f"eval/{name}": value
             for name, value in summarize_search(rows, labels).items()
@@ -4773,7 +4774,7 @@ class AgreementLockEval:
         """Committee membership, search policy, population, and outputs."""
 
         runtime: SingleProcess.Config = field(
-            # Device PINNED: priml defaults to "auto" (see Trainer.Config).
+            # Device PINNED: priml defaults to ``None`` (see Trainer.Config).
             default_factory=lambda: SingleProcess.Config(device="cuda"),
         )
         """Process runtime (device + determinism)."""
@@ -4844,7 +4845,7 @@ class AgreementLockEval:
 
         @override
         def finalize(self) -> Self:
-            if self.dataset.device == "auto":
+            if self.dataset.device is None:
                 self.dataset.device = str(self.runtime.device)
             if self.dataset.base_dir is None:
                 self.dataset.base_dir = self.base_dir
@@ -4888,15 +4889,11 @@ class AgreementLockEval:
         config = self.config
         names = [member.name or member.view.name for member in config.members]
         first, first_seconds = self._member_pass(0, survivors=None)
-        # Population guard (mirrors SieveEval's round-0 check): a short
-        # dataset must fail loudly, not silently shrink the evaluation.
-        expected = len(config.eval_instance_indices) or config.evaluation_count
-        if first["label"].shape[0] != expected:
-            raise RuntimeError(
-                f"first member pass evaluated {int(first['label'].shape[0])} "
-                f"puzzles; the configured population is {expected} "
-                "(eval_instance_indices if set, else evaluation_count).",
-            )
+        _require_population(
+            first["label"].shape[0],
+            len(config.eval_instance_indices) or config.evaluation_count,
+            label="first member pass",
+        )
         second, second_seconds = self._member_pass(1, survivors=None)
         if not torch.equal(first["media"], second["media"]) or not torch.equal(
             first["label"],
@@ -5033,7 +5030,7 @@ class SieveEval:
         """Generator, lock committee, round ladder, and outputs."""
 
         runtime: SingleProcess.Config = field(
-            # Device PINNED: priml defaults to "auto" (see Trainer.Config).
+            # Device PINNED: priml defaults to ``None`` (see Trainer.Config).
             default_factory=lambda: SingleProcess.Config(device="cuda"),
         )
         """Process runtime (device + determinism)."""
@@ -5119,13 +5116,13 @@ class SieveEval:
 
         @override
         def finalize(self) -> Self:
-            if self.dataset.device == "auto":
+            if self.dataset.device is None:
                 self.dataset.device = str(self.runtime.device)
             if self.dataset.base_dir is None:
                 self.dataset.base_dir = self.base_dir
             if isinstance(self.acceptor, VerifierAcceptor.Config):
                 self.acceptor.checkpoint_paths = self.verifier_checkpoints
-                if self.acceptor.device == "auto":
+                if self.acceptor.device is None:
                     self.acceptor.device = str(self.runtime.device)
                 if self.acceptor.base_dir is None:
                     self.acceptor.base_dir = self.base_dir
@@ -5167,19 +5164,23 @@ class SieveEval:
             logger.info("Ignoring launcher passthrough args: %r.", args)
         cfg = self.config
         n_puzzles = cfg.evaluation_count
-        final_grids: Tensor | None = None
-        labels_all: Tensor | None = None
-        media_all: Tensor | None = None
+        started = time.monotonic()
+        grids, media_all, labels_all = self._run_round(0, torch.arange(n_puzzles))
+        _require_population(grids.shape[0], n_puzzles, label="sieve round 0")
+        final_grids = torch.zeros_like(grids)
         locked = torch.zeros(n_puzzles, dtype=torch.bool)
         collected: list[tuple[Tensor, Tensor]] = []
         round_stats: list[dict[str, float | int | str]] = []
         survivors = torch.arange(n_puzzles)
-        rounds = self._round_names()
-        for round_index, round_name in enumerate(rounds):
+        media = media_all
+        for round_index, round_name in enumerate(self._round_names()):
             if survivors.shape[0] == 0:
                 break
-            started = time.monotonic()
-            grids, media, labels = self._run_round(round_index, survivors)
+            if round_index > 0:
+                started = time.monotonic()
+                grids, media, _ = self._run_round(round_index, survivors)
+                if not torch.equal(media, media_all[survivors]):
+                    raise RuntimeError("sieve round media misaligned with round 0.")
             # Decode-clamp every emitted grid to its input givens BEFORE any
             # lock offering or candidate collection. Givens are trusted input
             # conditioning; deep-search and modal emissions can garble them,
@@ -5187,15 +5188,6 @@ class SieveEval:
             # training corruptions only touch non-given cells, and measured
             # committee false accepts were given-violating near-misses.
             grids = _clamp_to_givens(grids, media)
-            if final_grids is None:
-                if grids.shape[0] != n_puzzles:
-                    raise RuntimeError(
-                        f"round 0 evaluated {grids.shape[0]} puzzles; "
-                        f"evaluation_count is {n_puzzles}.",
-                    )
-                final_grids = torch.zeros_like(grids)
-                labels_all = labels.clone()
-                media_all = media.clone()
             # The committee is made and torn down per round so no resident
             # committee coexists with the next round's compiled generator
             # (the internal run died with a SIGSEGV when it did).
@@ -5203,19 +5195,12 @@ class SieveEval:
             accepted = self._lock(acceptor, grids, media)
             del acceptor
             _release()
-            if labels_all is None:
-                raise ValueError("Expected labels_all is not None.")
-            if media_all is None:
-                raise ValueError("Expected media_all is not None.")
-            if round_index > 0 and not torch.equal(media, media_all[survivors]):
-                raise RuntimeError("sieve round media misaligned with round 0.")
             collected.append((survivors.clone(), grids))
             final_grids[survivors[accepted]] = grids[accepted]
             locked[survivors[accepted]] = True
+            on_cuda = self.device.type == "cuda"
             peak_mem_gb = (
-                torch.cuda.max_memory_allocated() / 1e9
-                if torch.cuda.is_available()
-                else 0.0
+                torch.cuda.max_memory_allocated(self.device) / 1e9 if on_cuda else 0.0
             )
             stats: dict[str, float | int | str] = {
                 "round": round_name,
@@ -5228,13 +5213,9 @@ class SieveEval:
             }
             round_stats.append(stats)
             logger.info("[sieve] %s", json.dumps(stats))
-            if torch.cuda.is_available():
-                torch.cuda.reset_peak_memory_stats()
+            if on_cuda:
+                torch.cuda.reset_peak_memory_stats(self.device)
             survivors = survivors[~accepted]
-        if final_grids is None:
-            raise ValueError("Expected final_grids is not None.")
-        if labels_all is None:
-            raise ValueError("Expected labels_all is not None.")
         if survivors.shape[0]:
             final_grids[survivors] = _modal_tail(collected, survivors)
         exact = (final_grids == labels_all).all(dim=-1)
@@ -5335,10 +5316,9 @@ class SieveEval:
         cfg = self.config
         dataset_cfg = cfg.dataset.copy_tree()
         # The sieve evaluates the ordered prefix, so survivor positions ARE
-        # global test indices.
-        indices = tuple(convert(survivors.to(torch.int64).tolist(), list[int]))
-        dataset_cfg.eval_instance_indices = (
-            indices if all(b > a for a, b in itertools.pairwise(indices)) else ()
+        # global test indices; mask-filtering an ``arange`` keeps them ascending.
+        dataset_cfg.eval_instance_indices = tuple(
+            convert(survivors.to(torch.int64).tolist(), list[int]),
         )
         dataset_cfg.eval_num_instances = None
         model = _eval_model(cfg.model, self._path(cfg.checkpoint_path), self.device)
@@ -5473,8 +5453,9 @@ def _search_pass(
         search_batch: dict[str, object] = dict(batch)
         search_batch["media"] = view.apply(media)
         result = run_search(model, search_batch, search)
+        # The trace lives in view space, so the labels join there too.
         visited = (
-            solution_visited_flags(result, batch["label"])
+            solution_visited_flags(result, view.apply(batch["label"]))
             if join_solution_visited
             else None
         )
@@ -5491,6 +5472,19 @@ def _search_pass(
     if not rows_parts:
         raise ValueError(f"{label} found no valid eval rows.")
     return torch.cat(rows_parts), torch.cat(media_parts), torch.cat(label_parts)
+
+
+# Every full-set engine shares this: the dataset silently clips a too-large instance
+# cap to the split, so an unchecked pass would publish metrics over fewer puzzles than
+# configured.
+def _require_population(evaluated: int, expected: int, *, label: str) -> None:
+    """Raise unless a pass evaluated exactly the configured population."""
+    if evaluated != expected:
+        raise RuntimeError(
+            f"{label} evaluated {evaluated} puzzles; the configured population "
+            f"is {expected} (eval_instance_indices if set, else "
+            "evaluation_count).",
+        )
 
 
 def _survivor_indices(
@@ -5640,17 +5634,6 @@ def _write_sieve_dump(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_device(device: str) -> torch.device:
-    """Resolve "auto" to the best available backend: CUDA > MPS > CPU."""
-    if device != "auto":
-        return torch.device(device)
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
-
-
 # ---------------------------------------------------------------------------
 # End-to-end reproduction pipelines.
 # ---------------------------------------------------------------------------
@@ -5723,7 +5706,7 @@ class Reproduction:
         """Generator recipe/identities, screens, trigger, and the full eval."""
 
         runtime: SingleProcess.Config = field(
-            # Device PINNED: priml defaults to "auto" (see Trainer.Config).
+            # Device PINNED: priml defaults to ``None`` (see Trainer.Config).
             default_factory=lambda: SingleProcess.Config(device="cuda"),
         )
         """The SINGLE process runtime of the whole staged job; ``finalize()``
@@ -5850,9 +5833,9 @@ class Reproduction:
         def finalize(self) -> Self:
             self.generator.runtime = self.runtime
             self.full_eval.runtime = self.runtime
-            if self.harvest.device == "auto":
+            if self.harvest.device is None:
                 self.harvest.device = str(self.runtime.device)
-            if self.verifier.device == "auto":
+            if self.verifier.device is None:
                 self.verifier.device = str(self.runtime.device)
             for child in (
                 self.generator,
@@ -6176,38 +6159,32 @@ class Reproduction:
         """Load completed-stage seconds from progress or legacy final metrics."""
         progress_path = self._progress_path()
         if progress_path.is_file():
-            progress = cast(object, json.loads(progress_path.read_text()))
-            if not isinstance(progress, dict):
-                raise ValueError(f"invalid reproduction progress: {progress_path}.")
-            progress_fields = cast(dict[object, object], progress)
-            if progress_fields.get("schema_version") != 1:
-                raise ValueError(f"invalid reproduction progress: {progress_path}.")
-            raw_seconds = progress_fields.get("stage_seconds")
-            if not isinstance(raw_seconds, dict):
-                raise ValueError(f"invalid reproduction progress: {progress_path}.")
-            seconds_fields = cast(dict[object, object], raw_seconds)
-            return {str(key): _as_float(value) for key, value in seconds_fields.items()}
+            try:
+                progress = parse(progress_path.read_text(), _ReproductionProgress)
+            except ReadError as error:
+                raise ValueError(
+                    f"invalid reproduction progress: {progress_path}.",
+                ) from error
+            return progress["stage_seconds"]
 
+        # A legacy final metrics file: best effort, since it was never a resume
+        # contract -- any row that is not a timed stage is skipped.
         metrics_path = self._metrics_path()
         if not metrics_path.is_file():
             return {}
-        metrics = cast(object, json.loads(metrics_path.read_text()))
-        if not isinstance(metrics, dict):
+        try:
+            metrics = convert(loads(metrics_path.read_text()), dict[str, object])
+            rows = convert(metrics.get("eval/stages"), list[object], default=[])
+        except ReadError:
             return {}
-        metrics_fields = cast(dict[object, object], metrics)
-        raw_rows = metrics_fields.get("eval/stages")
-        if not isinstance(raw_rows, list):
-            return {}
-        restored: dict[str, float] = {}
-        for raw_row in cast(list[object], raw_rows):
-            if not isinstance(raw_row, dict):
+        seconds: dict[str, float] = {}
+        for row in rows:
+            try:
+                stage = convert(row, _StageRow)
+            except ReadError:
                 continue
-            row = cast(dict[object, object], raw_row)
-            stage = row.get("stage")
-            seconds = row.get("seconds")
-            if isinstance(stage, str) and isinstance(seconds, int | float | str):
-                restored[stage] = _as_float(seconds)
-        return restored
+            seconds[stage["stage"]] = stage["seconds"]
+        return seconds
 
     def _record_stage_seconds(
         self,
@@ -6244,10 +6221,9 @@ class Reproduction:
             # Reuse is keyed on corpus IDENTITY, not mere existence: a corpus
             # rolled out from a different generator must never silently train
             # this pipeline's committee.
-            recorded = cast(
-                Mapping[str, object],
-                json.loads(manifest_path.read_text()),
-            ).get("source_checkpoint")
+            recorded = parse(manifest_path.read_text(), _HarvestSource)[
+                "source_checkpoint"
+            ]
             source_checkpoint = harvest.harvest_source_checkpoint
             configured = str(
                 source_checkpoint
@@ -6403,7 +6379,7 @@ class Reproduction:
         dataset = cfg.generator.dataset.copy_tree()
         dataset.eval_num_instances = cfg.dev_screen_count
         dataset.eval_instance_indices = ()
-        if dataset.device == "auto":
+        if dataset.device is None:
             dataset.device = str(cfg.runtime.device)
         try:
             accepted, exact_rows = _screen_pass(
@@ -6432,7 +6408,7 @@ class Reproduction:
         dataset = cfg.generator.dataset.copy_tree()
         dataset.eval_num_instances = cfg.dev_screen_count
         dataset.eval_instance_indices = ()
-        if dataset.device == "auto":
+        if dataset.device is None:
             dataset.device = str(cfg.runtime.device)
         try:
             _, exact_rows = _screen_pass(
@@ -6462,7 +6438,7 @@ class Reproduction:
             return base
         acceptor = base.copy_tree()
         acceptor.checkpoint_paths = self._verifier_checkpoints()
-        if acceptor.device == "auto":
+        if acceptor.device is None:
             acceptor.device = str(cfg.runtime.device)
         if acceptor.base_dir is None:
             acceptor.base_dir = cfg.base_dir
@@ -6848,14 +6824,34 @@ class _OuterRun:
         """
         if self._tracker is None or not metrics_path.exists():
             return
-        rows = cast(object, json.loads(metrics_path.read_text()))
-        if isinstance(rows, dict) and rows:
-            self.log(cast(dict[str, object], rows), step, prefix=prefix)
+        rows = parse(metrics_path.read_text(), dict[str, object])
+        if rows:
+            self.log(rows, step, prefix=prefix)
 
     def close(self) -> None:
         """Finish the tracker (idempotent by tracker contract)."""
         if self._tracker is not None:
             self._tracker.close()
+
+
+class _ReproductionProgress(TypedDict):
+    """The durable completed-stage timing file."""
+
+    schema_version: Literal[1]
+    stage_seconds: dict[str, float]
+
+
+class _StageRow(TypedDict):
+    """One timed stage of a legacy final metrics file."""
+
+    stage: str
+    seconds: float
+
+
+class _HarvestSource(TypedDict):
+    """The provenance field a reused harvest corpus is keyed on."""
+
+    source_checkpoint: str
 
 
 def _first_perfect(fulls: Sequence[Mapping[str, object]]) -> int:

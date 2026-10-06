@@ -12,7 +12,8 @@ channels added to the grid-token embeddings:
 * a decoded-grid feedback embedding (``embed_feedback``) re-injecting the
   previous ACT step's own prediction.
 
-Core computation per slow-cycle::
+Core computation per slow cycle (the reference TRM's H-cycle; ``fast_cycles``
+are its L-cycles)::
 
     c = z_slow + input_emb
     for _ in range(fast_cycles):
@@ -24,6 +25,13 @@ Core computation per slow-cycle::
 :meth:`TRM.forward` runs ``slow_cycles`` of ``core()``, gradient only on the
 last. :meth:`TRM.act_step` is the eval unit: one full ``slow_cycles`` forward
 per ACT step, exactly the unit training carries latents across.
+
+The per-puzzle prefix is the shared :class:`~priml.baselines.sudoku.prefix.
+SparsePuzzleEmbedding`, so the cost model prices the module that runs. The
+position and feedback tables stay local: composing
+:mod:`~priml.baselines.sudoku.embedding` would nest their state_dict keys
+under a slot name, and this class exists to load the reference checkpoints,
+whose keys are flat.
 
 Precision and compile contract (the trainer's side of the seam):
 
@@ -48,8 +56,7 @@ must not be renamed.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import NamedTuple, Protocol, Self, cast, override
+from typing import NamedTuple, Protocol, Self, TypedDict, cast, override
 
 import functools
 import logging
@@ -60,8 +67,8 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.baselines.sudoku import prefix
 from priml.baselines.sudoku.embedding import FactoredPositions, PredictionFeedback
+from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.cost import Cost, cost, elementwise_cost, traffic
 from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE
@@ -75,9 +82,6 @@ from priml.model.transformer.block import TransformerBlock
 
 
 logger = logging.getLogger(__name__)
-
-InitFn = Callable[[Tensor], object]
-"""Weight-init callable: mutates the tensor in place."""
 
 
 def recipe_block() -> TransformerBlock.Config:
@@ -95,26 +99,26 @@ def recipe_block() -> TransformerBlock.Config:
         norms, shared affine-free eps-1e-6 qk-norm, modified SwiGLU).
 
     """
-    return TransformerBlock.Config(
-        prenorm=False,
-        attn=Attention.Config(
-            # -1 means "inherit TRM.Config.num_heads" -- priml defaults heads
-            # to 8, which would silently override the model's own width.
-            num_heads=-1,
-            norm_qk=RMSNorm.Config(),
-            init_weight=trm_truncated_normal_corrected,
-        ),
-        ffn=SwiGLU.Config(
-            expansion=8 / 3,
-            round_to=256,
-            gate=True,
-            norm=RMSNorm.Config(),
-            init_weight=trm_truncated_normal_corrected,
-            init_weight_out=trm_truncated_normal_corrected,
-        ),
-        norm1=RMSNorm.Config(eps=1e-5),
-        norm2=RMSNorm.Config(eps=1e-5),
-    )
+    block = TransformerBlock.Config()
+    block.prenorm = False
+    attn = block.attn = Attention.Config()
+    # -1 means "inherit TRM.Config.num_heads" -- priml defaults heads to 8,
+    # which would silently override the model's own width.
+    attn.num_heads = -1
+    attn.norm_qk = RMSNorm.Config()
+    attn.init_weight = trm_truncated_normal_corrected
+    ffn = block.ffn = SwiGLU.Config()
+    ffn.expansion = 8 / 3
+    ffn.round_to = 256
+    ffn.gate = True
+    ffn.norm = RMSNorm.Config()
+    ffn.init_weight = trm_truncated_normal_corrected
+    ffn.init_weight_out = trm_truncated_normal_corrected
+    norm1 = block.norm1 = RMSNorm.Config()
+    norm1.eps = 1e-5
+    norm2 = block.norm2 = RMSNorm.Config()
+    norm2.eps = 1e-5
+    return block
 
 
 class TRM(nn.Module):
@@ -138,7 +142,7 @@ class TRM(nn.Module):
         """Reasoning blocks per application."""
 
         num_heads: int = 8
-        """Attention heads; also sets the RoPE dim (channels_in // num_heads)."""
+        """Attention heads, pushed into ``block.attn`` when it inherits (-1)."""
 
         slow_cycles: int = 6
         """Outer iterations per forward pass."""
@@ -174,13 +178,14 @@ class TRM(nn.Module):
         """(rows, cols) of one constraint box tiling the grid (sudoku 3x3)."""
 
         pos2d_init_std: float = 1.0
-        """Pre-rescale trunc-normal std for the positional tables (effective
-        std 1.0 after the embed_scale multiply at runtime)."""
+        """Realized std of the positional tables after the runtime embed_scale
+        multiply; stored entries are drawn at this over ``sqrt(channels_in)``."""
 
         feedback_init_std: float = 0.0
-        """Pre-rescale trunc-normal std for the feedback table. The default
-        0.0 zero-initializes it, making the initial forward bit-identical to
-        a model without the feedback channel regardless of ``feedback_ids``."""
+        """Realized std of the feedback table after the runtime embed_scale
+        multiply. The default 0.0 zero-initializes it, making the initial
+        forward bit-identical to a model without the feedback channel
+        regardless of ``feedback_ids``."""
 
         compile: bool = True
         """Bind ``torch.compile(reasoning.forward, fullgraph=True)`` at
@@ -266,18 +271,34 @@ class TRM(nn.Module):
             )
             if self.num_prefix_tokens > 0:
                 total += cost(
-                    prefix.SparsePuzzleEmbedding.Config(
-                        channels_in=width,
-                        channels_out=self.puzzle_emb_ndim,
-                        num_puzzles=self.num_puzzle_identifiers,
-                        num_tokens=self.puzzle_emb_len,
-                        batch_size=self.puzzle_emb_batch_size,
-                    ),
+                    self.puzzle_emb_config(),
                     seq_len=1,
                     batch_size=batch_size,
                     dtype=dtype,
                 )
             return total
+
+        def puzzle_emb_config(self) -> SparsePuzzleEmbedding.Config:
+            """Return the per-puzzle prefix config; the runtime and cost share it.
+
+            Returns:
+              config: Rows of ``puzzle_emb_ndim`` padded to ``puzzle_emb_len``
+                tokens of ``channels_in``, scaled like the grid tokens.
+
+            """
+            table = SparsePuzzleEmbedding.Config()
+            table.channels_in = self.channels_in
+            table.channels_out = self.puzzle_emb_ndim
+            table.num_puzzles = self.num_puzzle_identifiers
+            table.num_tokens = self.puzzle_emb_len
+            table.batch_size = self.puzzle_emb_batch_size
+            table.init_std = self.puzzle_emb_init_std
+            table.dtype = self.dtype
+            # The reference rounds rows to ``dtype`` but scales them in master
+            # precision, as it does the grid tokens; scaling in bf16 would round
+            # the prefix a second time.
+            table.dtype_scale = None if self.dtype is None else torch.float32
+            return table
 
         def _embedding_cost(
             self,
@@ -347,14 +368,17 @@ class TRM(nn.Module):
             assert isinstance(attn, Attention.Config)
             if attn.num_heads == -1:
                 attn.num_heads = self.num_heads
-            if attn.channels_head == -1:
-                attn.channels_head = self.channels_in // self.num_heads
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
         super().__init__()
         if config.vocab_size < 1 or not config.puzzle_grid_shape:
             raise ValueError("TRM requires vocabulary and grid shape from the dataset.")
+        if config.slow_cycles < 1 or config.fast_cycles < 1:
+            raise ValueError(
+                f"slow_cycles and fast_cycles must be >= 1; got "
+                f"{config.slow_cycles} and {config.fast_cycles}.",
+            )
         if config.pos2d_grid_shape is not None and (
             min(*config.pos2d_grid_shape, *config.pos2d_box_shape) < 1
         ):
@@ -397,16 +421,11 @@ class TRM(nn.Module):
             init_bias=functools.partial(nn.init.constant_, val=-5.0),
         ).make()
 
-        if config.num_puzzle_identifiers > 0:
-            self.puzzle_emb: SparsePuzzleEmbedding | None = SparsePuzzleEmbedding(
-                num_embeddings=config.num_puzzle_identifiers,
-                embedding_dim=config.puzzle_emb_ndim,
-                batch_size=config.puzzle_emb_batch_size,
-                init_std=config.puzzle_emb_init_std,
-                cast_to=config.dtype,
-            )
-        else:
-            self.puzzle_emb = None
+        self.puzzle_emb: SparsePuzzleEmbedding | None = (
+            config.puzzle_emb_config().make()
+            if config.num_puzzle_identifiers > 0
+            else None
+        )
 
         block = config.block
         if block is None:
@@ -419,9 +438,7 @@ class TRM(nn.Module):
             repeat=config.num_layers,
         ).make()
 
-        self.rope = RoPE.Config(
-            channels_head=divmod(c, config.num_heads)[0],
-        ).make()
+        self.rope = RoPE.Config(channels_head=block.channels_head).make()
 
         self.slow_init: Tensor = nn.Buffer(_corrected(torch.empty(1, c), std=1.0))
         self.fast_init: Tensor = nn.Buffer(_corrected(torch.empty(1, c), std=1.0))
@@ -500,6 +517,27 @@ class TRM(nn.Module):
         """
         self._feedback_ids = feedback_ids
 
+    class Output(TypedDict):
+        """One :meth:`TRM.forward`: the final slow cycle, plus requested history."""
+
+        logits: Tensor
+        """``[B, grid_len, V]`` grid logits, prefix stripped."""
+
+        q_halt: Tensor
+        """``[B]`` float32 halt logit."""
+
+        z_slow: Tensor
+        """``[B, total_seq_len, hidden]`` slow latent, detached."""
+
+        z_fast: Tensor
+        """``[B, total_seq_len, hidden]`` fast latent, detached."""
+
+        all_logits: list[Tensor]
+        """Per-slow-cycle grid logits, detached; empty unless collected."""
+
+        all_z_slow: list[Tensor]
+        """Per-slow-cycle slow latents, detached; empty unless collected."""
+
     @override
     def forward(
         self,
@@ -508,8 +546,10 @@ class TRM(nn.Module):
         z_fast: Tensor,
         puzzle_identifiers: Tensor | None = None,
         feedback_ids: Tensor | None = None,
-    ) -> dict[str, Tensor | list[Tensor]]:
-        """Multi H-cycle forward.
+        *,
+        collect_intermediates: bool = False,
+    ) -> Output:
+        """Run ``slow_cycles`` core applications, gradient only through the last.
 
         Args:
           input_ids: ``[B, grid_len]`` token ids.
@@ -520,35 +560,38 @@ class TRM(nn.Module):
           feedback_ids: ``[B, grid_len]`` decoded-grid tokens; when None the
             stash set via :meth:`set_feedback` (if any) is consumed instead,
             so both calling conventions compose.
+          collect_intermediates: Keep every slow cycle's logits and slow
+            latent. Off by default: each costs ``[B, S, V]`` and ``[B, S, C]``
+            per cycle, and training reads only the final cycle.
 
         Returns:
-          out: Dict with logits, all_logits, q_halt, z_slow, z_fast,
-            all_z_slow (grid logits prefix-stripped; latents detached).
+          out: The final cycle's outputs and, when collected, every cycle's.
 
         """
-        if feedback_ids is not None:
-            self.set_feedback(feedback_ids)
-        input_emb, cos_sin = self._embed_and_prepare(input_ids, puzzle_identifiers)
-        hc = self.run_h_cycles(
+        # Consume the stash before anything can raise, so a failed forward
+        # cannot leave its grid for the next one.
+        feedback = feedback_ids if feedback_ids is not None else self._feedback_ids
+        self._feedback_ids = None
+        input_emb, cos_sin = self._embed_and_prepare(
+            input_ids,
+            puzzle_identifiers,
+            feedback,
+        )
+        result = self.run_slow_cycles(
             input_emb,
             z_slow,
             z_fast,
             cos_sin,
-            collect_intermediates=True,
+            collect_intermediates=collect_intermediates,
         )
-        logits = hc.logits
-        all_logits = list(hc.all_logits)
         n_prefix = self.config.num_prefix_tokens
-        if n_prefix > 0:
-            logits = logits[:, n_prefix:]
-            all_logits = [lg[:, n_prefix:] for lg in all_logits]
         return {
-            "logits": logits,
-            "all_logits": all_logits,
-            "q_halt": hc.q_halt,
-            "z_slow": hc.z_slow.detach(),
-            "z_fast": hc.z_fast.detach(),
-            "all_z_slow": list(hc.all_z_slow),
+            "logits": result.logits[:, n_prefix:],
+            "q_halt": result.q_halt,
+            "z_slow": result.z_slow.detach(),
+            "z_fast": result.z_fast.detach(),
+            "all_logits": [lg[:, n_prefix:] for lg in result.all_logits],
+            "all_z_slow": list(result.all_z_slow),
         }
 
     def act_step(
@@ -583,19 +626,11 @@ class TRM(nn.Module):
 
         """
         out = self.forward(input_ids, z_slow, z_fast, puzzle_identifiers, feedback_ids)
-        logits = out["logits"]
-        q_halt = out["q_halt"]
-        z_slow_out = out["z_slow"]
-        z_fast_out = out["z_fast"]
-        assert isinstance(logits, Tensor)
-        assert isinstance(q_halt, Tensor)
-        assert isinstance(z_slow_out, Tensor)
-        assert isinstance(z_fast_out, Tensor)
         return {
-            "logits": logits,
-            "q_halt": q_halt,
-            "z_slow": z_slow_out,
-            "z_fast": z_fast_out,
+            "logits": out["logits"],
+            "q_halt": out["q_halt"],
+            "z_slow": out["z_slow"],
+            "z_fast": out["z_fast"],
         }
 
     def init_z(self, batch_size: int) -> tuple[Tensor, Tensor]:
@@ -614,7 +649,7 @@ class TRM(nn.Module):
         z_fast = self.fast_init[0].expand(batch_size, s, -1).contiguous()
         return z_slow, z_fast
 
-    def run_h_cycles(
+    def run_slow_cycles(
         self,
         input_emb: Tensor,
         z_slow: Tensor,
@@ -622,7 +657,7 @@ class TRM(nn.Module):
         cos_sin: tuple[Tensor, Tensor] | None = None,
         *,
         collect_intermediates: bool = False,
-    ) -> HCycleResult:
+    ) -> SlowCycleResult:
         """Run ``slow_cycles - 1`` cycles under no_grad, the final with grad.
 
         Args:
@@ -633,7 +668,7 @@ class TRM(nn.Module):
           collect_intermediates: Also return per-cycle logits and z_slow.
 
         Returns:
-          result: The :class:`HCycleResult` bundle for the final cycle
+          result: The :class:`SlowCycleResult` bundle for the final cycle
             (plus per-cycle intermediates when requested).
 
         """
@@ -657,7 +692,7 @@ class TRM(nn.Module):
         if collect_intermediates:
             all_logits.append(logits.detach())
             all_z_slow.append(z_slow.detach())
-        return HCycleResult(
+        return SlowCycleResult(
             logits,
             q_halt,
             z_slow,
@@ -706,11 +741,7 @@ class TRM(nn.Module):
         # Q readout at sequence position 0 (the first puzzle-emb prefix
         # token). Index 0 of the q-head output is q_halt; the second output
         # (q_continue) exists only for reference weight-shape parity.
-        q_logits = self.q_head(z_slow[:, 0]).to(torch.float32)
-        if self.config.q_head_outputs == 1:
-            q_halt = q_logits.squeeze(1)
-        else:
-            q_halt = q_logits[..., 0]
+        q_halt = self.q_head(z_slow[:, 0]).to(torch.float32)[..., 0]
         return logits, q_halt, z_slow, z_fast
 
     # Composition order is a numerics contract: (base embedding + scaled puzzle prefix
@@ -719,39 +750,32 @@ class TRM(nn.Module):
     def _embed_and_prepare(
         self,
         input_ids: Tensor,
-        puzzle_identifiers: Tensor | None = None,
-    ) -> tuple[Tensor, tuple[Tensor, Tensor] | None]:
+        puzzle_identifiers: Tensor | None,
+        feedback: Tensor | None,
+    ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
         """Embed tokens, prepend the puzzle prefix, add pos2d + feedback."""
-        cfg = self.config
         input_emb = self.embed_scale * self.embed_tokens(input_ids)
         if self.puzzle_emb is not None:
             if puzzle_identifiers is None:
                 raise ValueError(
                     "puzzle_identifiers is required when num_puzzle_identifiers > 0.",
                 )
-            B = input_emb.shape[0]
-            puzzle_vec = self.puzzle_emb(puzzle_identifiers)
-            # Pad puzzle_emb_ndim out to puzzle_emb_len * channels_in, then
-            # reshape into [B, puzzle_emb_len, channels_in]. Matches reference
-            # TRM's prepend behavior.
-            total = cfg.puzzle_emb_len * cfg.channels_in
-            pad = max(total - puzzle_vec.size(1), 0)
-            puzzle_vec = nn.functional.pad(puzzle_vec, (0, pad))
-            puzzle_prefix = puzzle_vec.reshape(B, cfg.puzzle_emb_len, cfg.channels_in)
             # Reference TRM concatenates the raw puzzle embedding with the raw
-            # token embedding and scales the whole sequence by embed_scale
-            # afterwards. The token embedding here is already pre-scaled, so
-            # the puzzle prefix must be scaled too; otherwise it enters
-            # embed_scale (= sqrt(hidden)) too weak.
-            puzzle_prefix = self.embed_scale * puzzle_prefix.to(dtype=input_emb.dtype)
-            input_emb = torch.cat([puzzle_prefix, input_emb], dim=1)
+            # token embedding and scales the whole sequence afterwards; the
+            # prefix module applies the same ``sqrt(channels_in)`` scale.
+            puzzle_prefix = self.puzzle_emb(
+                input_emb.shape[0],
+                puzzle_identifiers=puzzle_identifiers,
+            )
+            input_emb = torch.cat(
+                [puzzle_prefix.to(dtype=input_emb.dtype), input_emb],
+                dim=1,
+            )
         if self.embed_pos_row is not None:
             pos = self.embed_scale * self._pos2d().to(dtype=input_emb.dtype)
             n_grid = pos.shape[0]
             grid_emb = input_emb[:, -n_grid:] + pos
             input_emb = torch.cat([input_emb[:, :-n_grid], grid_emb], dim=1)
-        feedback = self._feedback_ids
-        self._feedback_ids = None  # Consume-once: stale grids never leak.
         if feedback is not None:
             fb_emb = self.embed_scale * self.embed_feedback[feedback].to(
                 dtype=input_emb.dtype,
@@ -760,9 +784,9 @@ class TRM(nn.Module):
             grid_emb = input_emb[:, -n_grid:] + fb_emb
             input_emb = torch.cat([input_emb[:, :-n_grid], grid_emb], dim=1)
         cos_sin = self.rope(
-            torch.arange(cfg.total_seq_len, device=input_emb.device),
+            torch.arange(self.config.total_seq_len, device=input_emb.device),
         )
-        return cast(tuple[Tensor, tuple[Tensor, Tensor] | None], (input_emb, cos_sin))
+        return input_emb, cos_sin
 
     def _pos2d(self) -> Tensor:
         """Factored ``[grid_len, hidden]`` positional embedding: row+col+box."""
@@ -793,8 +817,8 @@ class TRM(nn.Module):
             logger.info("model parameters: %.2fM (body)", body / 1e6)
 
 
-class HCycleResult(NamedTuple):
-    """Bundle of one H-cycle forward's outputs."""
+class SlowCycleResult(NamedTuple):
+    """Outputs of :meth:`TRM.run_slow_cycles`: the final cycle, plus history."""
 
     logits: Tensor
     q_halt: Tensor
@@ -802,14 +826,6 @@ class HCycleResult(NamedTuple):
     z_fast: Tensor
     all_logits: tuple[Tensor, ...] = ()
     all_z_slow: tuple[Tensor, ...] = ()
-
-
-# Only the two buffer constructions need a value back; every other call site uses
-# ``truncated_normal`` directly.
-def _corrected(tensor: Tensor, *, std: float) -> Tensor:
-    """Initialize in place with the JAX-corrected truncated normal and return it."""
-    truncated_normal(tensor, std=std, depth_index=(), variance_correction=True)
-    return tensor
 
 
 def trm_truncated_normal_corrected(w: Tensor, *, depth: int = -1) -> None:
@@ -833,75 +849,6 @@ def trm_truncated_normal_corrected(w: Tensor, *, depth: int = -1) -> None:
     )
 
 
-class SparsePuzzleEmbedding(nn.Module):
-    """Reference-style sparse puzzle embedding with local gradient buffer.
-
-    Stores a flat ``[num_embeddings, embedding_dim]`` master table as a
-    persistent fp32 buffer. During training, the forward pass copies
-    looked-up rows into a non-persistent ``local_weights`` buffer with
-    ``requires_grad=True`` and returns that, so backprop accumulates
-    gradients only against the rows touched this batch. The trainer's
-    SignSGD sparse-embedding step scatters those gradients back into the
-    master table. During eval the master table is read directly.
-
-    Args:
-      num_embeddings: Vocabulary size (number of distinct puzzle IDs).
-      embedding_dim: Per-ID embedding dimension.
-      batch_size: Train batch size; sizes the local gradient buffer.
-      init_std: Stddev for truncated-normal init of the master table.
-        Reference uses 0 (all zeros) for stable initial training.
-      cast_to: Optional dtype to cast outputs into for autocast forward.
-
-    """
-
-    def __init__(
-        self,
-        num_embeddings: int,
-        *,
-        embedding_dim: int,
-        batch_size: int,
-        init_std: float,
-        cast_to: torch.dtype | None,
-    ) -> None:
-        super().__init__()
-        self.cast_to = cast_to
-        self.weights = nn.Buffer(
-            _corrected(torch.empty(num_embeddings, embedding_dim), std=init_std),
-        )
-        self.local_weights = nn.Buffer(
-            torch.zeros(batch_size, embedding_dim, requires_grad=True),
-            persistent=False,
-        )
-        self.local_ids = nn.Buffer(
-            torch.zeros(batch_size, dtype=torch.int32),
-            persistent=False,
-        )
-
-    @override
-    def forward(self, inputs: Tensor) -> Tensor:
-        if not self.training:
-            out = self.weights[inputs.to(torch.long)]
-            return out if self.cast_to is None else out.to(self.cast_to)
-        with torch.no_grad():
-            self.local_weights.copy_(self.weights[inputs.to(torch.long)])
-            self.local_ids.copy_(inputs.to(torch.int32))
-        return (
-            self.local_weights
-            if self.cast_to is None
-            else self.local_weights.to(self.cast_to)
-        )
-
-    @override
-    def _apply(self, fn: Callable[[Tensor], Tensor], recurse: bool = True) -> Self:
-        module = super()._apply(fn, recurse=recurse)
-        self.local_weights = nn.Buffer(
-            self.local_weights.detach().requires_grad_(True),
-            persistent=False,
-        )
-        self.local_ids = nn.Buffer(self.local_ids.detach(), persistent=False)
-        return module
-
-
 class _ReasoningFn(Protocol):
     """Signature of ``TRM.reasoning`` forward / its compiled wrapper.
 
@@ -918,6 +865,14 @@ class _ReasoningFn(Protocol):
         *,
         cos_sin: tuple[Tensor, Tensor] | None = None,
     ) -> Tensor: ...
+
+
+# Only the two buffer constructions need a value back; every other call site uses
+# ``truncated_normal`` directly.
+def _corrected(tensor: Tensor, *, std: float) -> Tensor:
+    """Initialize in place with the JAX-corrected truncated normal and return it."""
+    truncated_normal(tensor, std=std, depth_index=(), variance_correction=True)
+    return tensor
 
 
 def _pos_table(num_embeddings: int, config: TRM.Config) -> nn.Parameter:

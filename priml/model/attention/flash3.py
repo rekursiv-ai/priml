@@ -224,6 +224,21 @@ def hf_reference_revision() -> str:
     return "de87b9b5af06dd9984df595bef90b2eba44b181a"
 
 
+def cuda_version() -> str:
+    """Return the CUDA version this torch was built against.
+
+    Returns:
+      version: ``torch.version.cuda``, e.g. ``"12.8"``.
+
+    Raises:
+      Flash3UnavailableError: This torch is a CPU-only build.
+
+    """
+    if torch.version.cuda is None:
+        raise Flash3UnavailableError("FA3 requires a CUDA build of torch.")
+    return torch.version.cuda
+
+
 # The root and the identity keep the names of the baseline that first built
 # this profile; renaming either orphans every node already prepared.
 def artifact_path(
@@ -239,10 +254,9 @@ def artifact_path(
       path: Installation path for the pinned source and runtime combination.
 
     """
-    identity = (
-        f"{source_revision()}-torch2.9.1-cu128-cxx11-x86_64-nanochat-hdim128-bf16-local"
-    )
-    return cache_root / identity
+    cuda = cuda_version().replace(".", "")
+    build = "cxx11-x86_64-nanochat-hdim128-bf16-local"
+    return cache_root / f"{source_revision()}-torch2.9.1-cu{cuda}-{build}"
 
 
 def expected_receipt(
@@ -266,7 +280,7 @@ def expected_receipt(
         "source_revision": source_revision(),
         "cutlass_revision": cutlass_revision(),
         "torch": "2.9.1",
-        "cuda": "12.8",
+        "cuda": cuda_version(),
         "cxx11_abi": "true",
         "build_profile": "nanochat-hdim128-bf16-local",
         "binary_sha256": binary_sha256,

@@ -71,8 +71,8 @@ class Cifar10Data:
         drop_last: bool = False
         """Drop a final short training batch instead of yielding it."""
 
-        device: str = "auto"
-        """Device holding the resident tensors ("auto" picks the best)."""
+        device: torch.device | str | None = None
+        """Device holding the resident tensors."""
 
         dtype: torch.dtype = torch.float32
         """Storage dtype for the resident images."""

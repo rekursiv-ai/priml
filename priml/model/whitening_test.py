@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
+import textwrap
+
 from torch import Tensor, nn
 
 import pytest
@@ -51,6 +53,22 @@ def test_init_whiten_rejects_wrong_out_channels():
     images = torch.randn(16, 3, 8, 9)
     with pytest.raises(ValueError, match="out_channels"):
         layer.init_whiten(images, decompose=pca_eigh)
+
+
+def test_the_documented_usage_runs() -> None:
+    """The class docstring's example is code a reader copies; run it verbatim."""
+    doc = PCAWhiteningConv2d.__doc__
+    assert doc is not None
+    usage = textwrap.dedent(doc.split("Typical usage::", 1)[1]).strip()
+    torch.manual_seed(0)
+    namespace: dict[str, object] = {
+        "PCAWhiteningConv2d": PCAWhiteningConv2d,
+        "train_images": torch.randn(8, 3, 6, 7),
+    }
+    exec(usage, namespace)  # noqa: S102 -- executes this module's own docstring.
+    layer = namespace["layer"]
+    assert isinstance(layer, PCAWhiteningConv2d)
+    assert not layer.weight.requires_grad
 
 
 def test_init_whiten_shape():
@@ -140,9 +158,8 @@ def test_weights_frozen():
     assert not layer.weight.requires_grad
 
 
-def test_whitening_text(request: pytest.FixtureRequest) -> None:
+def test_whitening_text() -> None:
     assert_text_golden(
-        request,
         test_file=__file__,
         name="whitening",
         rendered=repr(_whitening()),

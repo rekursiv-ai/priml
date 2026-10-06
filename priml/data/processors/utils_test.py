@@ -289,12 +289,31 @@ def test_progressive_bisection_splits_first_of_equal_gaps() -> None:
     assert compute_keyframes_as_progressive_bisection(6, 6) == [0, 1, 2, 3, 4, 5]
 
 
-def test_preprocess_images_rejects_integer_and_non_nchw_inputs() -> None:
+def test_preprocess_images_lifts_uint8_to_the_float_range() -> None:
+    x = torch.tensor([0, 255], dtype=torch.uint8).repeat(2, 3, 4, 1)
+
+    out = preprocess_images(x, size=(4, 2), dtype=torch.float32)
+
+    assert out.dtype == torch.float32
+    assert out[0, 0, 0].tolist() == [-1.0, 1.0]
+
+
+def test_preprocess_images_rejects_other_integer_and_non_nchw_inputs() -> None:
     with pytest.raises(TypeError, match="float type"):
-        preprocess_images(torch.zeros(2, 3, 4, 5, dtype=torch.uint8), size=(2, 3))
+        preprocess_images(torch.zeros(2, 3, 4, 5, dtype=torch.int32), size=(2, 3))
     # preprocess_images rejects this deliberately invalid rank-3 input.
     with pytest.raises(TypeError, match="NCHW"):
         preprocess_images(torch.zeros(3, 4, 5), size=(2, 3))
+
+
+@pytest.mark.gpu_torch_cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_preprocess_images_lanczos_keeps_the_input_device() -> None:
+    x = torch.zeros(2, 3, 4, 5, device="cuda")
+
+    out = preprocess_images(x, size=(2, 3), mode="lanczos")
+
+    assert out.device == x.device
 
 
 def test_preprocess_images_lanczos_resizes_through_pil_and_rejects_align_corners():

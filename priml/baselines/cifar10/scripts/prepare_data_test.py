@@ -10,6 +10,7 @@ import sys
 import pytest
 
 from priml.baselines.cifar10.scripts import prepare_data
+from priml.lib.testing.cli import assert_help_without_docstring
 
 
 def test_default_directory_matches_the_loop_resolution() -> None:
@@ -69,13 +70,10 @@ def test_main_uses_line_delimited_docstring_for_help(
     assert "\nexact description\n" in help_text
 
 
-def test_main_requires_its_module_docstring(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(prepare_data, "__doc__", None)
-    with pytest.raises(
-        ValueError,
-        match=r"\AExpected __doc__ is not None\.\Z",
-    ):
-        prepare_data.main()
+def test_main_help_works_without_a_module_docstring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert_help_without_docstring(monkeypatch, prepare_data, prepare_data.main)
 
 
 def test_main_configures_info_logging(

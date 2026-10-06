@@ -1,8 +1,8 @@
-"""Tests for gated_delta_net module.
+r"""Tests for gated_delta_net module.
 
 Regenerate the numerical golden after an intentional change with::
 
-    BFB_REGENERATE=1 uv --quiet run --frozen pytest \
+    uv --quiet run --frozen pytest \ --regenerate-b4b
         priml/model/attention/gated_delta_net_test.py
 
 Run regeneration through pytest so Priml's deterministic math setup applies.
@@ -12,8 +12,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Final
-
-from configgle.testing import assert_pprint_golden
 
 import pytest
 import torch
@@ -28,6 +26,7 @@ from priml.testing.bfb import (
     move_to_device,
 )
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent

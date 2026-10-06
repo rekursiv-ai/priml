@@ -39,9 +39,8 @@ class DummyDataset:
         num_classes: int = 1000
         """Label range; labels are drawn uniformly below this."""
 
-        device: torch.device | str | None = "auto"
-        """Device batches are delivered on. ``"auto"`` picks the best available,
-        so the default dataset is usable on a CPU-only box."""
+        device: torch.device | str | None = None
+        """Device batches are delivered on; ``None`` is the loop's."""
 
         seed: int = 0
         """Seed for the random data/labels so runs are reproducible."""
@@ -60,15 +59,20 @@ class DummyDataset:
         self.timer_epoch = CheckpointableStepTimer()
         """Passes over the data; ticked by the loop when the loader runs out."""
 
-        # Seed a dedicated generator so the synthetic data is reproducible and
-        # independent of the global torch RNG state.
-        generator = torch.Generator().manual_seed(config.seed)
-        data = torch.randn(config.num_samples, *config.input_shape, generator=generator)
-        labels = torch.randint(
-            config.num_classes,
-            (config.num_samples,),
-            generator=generator,
-        )
+        # A dedicated CPU generator keeps the data reproducible across hosts and
+        # independent of the global RNG; batches move to ``config.device`` later.
+        with torch.device("cpu"):
+            generator = torch.Generator().manual_seed(config.seed)
+            data = torch.randn(
+                config.num_samples,
+                *config.input_shape,
+                generator=generator,
+            )
+            labels = torch.randint(
+                config.num_classes,
+                (config.num_samples,),
+                generator=generator,
+            )
 
         self.dataset = TensorDataset(data, labels)
 

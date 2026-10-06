@@ -19,7 +19,7 @@ import pygame
 import torch
 
 from priml.baselines.craftax.env import CraftaxEnv
-from priml.baselines.craftax.game import step, world_gen
+from priml.baselines.craftax.game import constants, step, world_gen
 from priml.baselines.craftax.game.constants import Action
 from priml.baselines.craftax.game.render.pixels import Renderer
 
@@ -68,7 +68,7 @@ KEYS: dict[int, Action] = {
 
 
 class Policy(Protocol):
-    """objectthing that scores actions from an observation."""
+    """Anything that scores actions from an observation."""
 
     def __call__(self, observation: Tensor) -> tuple[Tensor, Tensor]:
         """Return action logits and a value estimate."""
@@ -80,6 +80,7 @@ def play(
     seed: int = 0,
     block_pixels: int = 64,
     asset_dir: Path | None = None,
+    view: tuple[int, int] = constants.OBS_DIM,
 ) -> EnvState:
     """Open a window and play one world from the keyboard.
 
@@ -90,6 +91,7 @@ def play(
       seed: World seed.
       block_pixels: Tile size, and therefore window size.
       asset_dir: Where sprites are cached; defaults to the user cache.
+      view: Tiles shown around the player, ``(rows, columns)``.
 
     Returns:
       state: The world as it stood when the window closed.
@@ -102,7 +104,7 @@ def play(
         generator=generator,
         device=torch.device("cpu"),
     )
-    renderer = Renderer(block_pixels=block_pixels, asset_dir=asset_dir)
+    renderer = Renderer(block_pixels=block_pixels, asset_dir=asset_dir, view=view)
     height, width = renderer.frame_shape
     screen = pygame.display.set_mode((width, height))
     pygame.display.set_caption(f"Craftax (seed {seed})")
@@ -149,6 +151,7 @@ def record(
     fps: int = 10,
     block_pixels: int = 64,
     asset_dir: Path | None = None,
+    view: tuple[int, int] = constants.OBS_DIM,
 ) -> int:
     """Write an mp4 of one episode played by ``policy``.
 
@@ -160,6 +163,8 @@ def record(
       fps: Frames per second in the output.
       block_pixels: Tile size in the output.
       asset_dir: Where sprites are cached; defaults to the user cache.
+      view: Tiles the policy observes and the video shows, ``(rows,
+        columns)``; must be the view the policy trained on.
 
     Returns:
       steps: How many steps the episode ran.
@@ -175,10 +180,11 @@ def record(
     config.num_envs = 1
     config.device = "cpu"
     config.seed = seed
+    config.view = view
     env = config.make()
     observation = env.reset()
 
-    renderer = Renderer(block_pixels=block_pixels, asset_dir=asset_dir)
+    renderer = Renderer(block_pixels=block_pixels, asset_dir=asset_dir, view=view)
     generator = torch.Generator().manual_seed(seed)
 
     # Asked of the renderer rather than recomputed here, so the writer cannot

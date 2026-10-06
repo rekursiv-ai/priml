@@ -6,8 +6,6 @@ from typing import TYPE_CHECKING
 
 import math
 
-from configgle.testing import assert_pprint_golden
-
 import pytest
 import torch
 
@@ -20,6 +18,7 @@ from priml.baselines.speedrundit.experiments import (
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.muon import Muon
 from priml.runtime import SingleProcess
+from priml.testing.golden import assert_pprint_golden
 from priml.train.parallelism import NoParallel
 
 

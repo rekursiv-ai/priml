@@ -2,7 +2,8 @@
 
 Works with any model exposing the standard interface:
   proj_in(tokens) -> hidden
-  blocks: Iterable[TransformerBlock]
+  blocks: Iterable[nn.Module], each taking the shared ``cache=``
+  modules() -> every submodule, from which the cache is allocated
   project_to_logits(hidden) -> logits
 
 Example::
@@ -18,7 +19,7 @@ Example::
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 import math
 
@@ -26,20 +27,17 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.custom_types import (
-    HasForwardCached,
-    TensorModule,
-    has_forward_cached,
-    has_weight,
-    is_cached_attention,
-)
+from priml.model.attention.kvcache import HasModules, alloc_layer_cache
+from priml.model.custom_types import TensorModule, has_weight
 
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from priml.model.custom_types import LayerCache
 
-class TransformerLike(Protocol):
+
+class TransformerLike(HasModules, Protocol):
     """The model surface ``generate`` uses -- nothing more.
 
     Declared structurally rather than against ``nn.Module``: a ``Protocol``
@@ -54,7 +52,7 @@ class TransformerLike(Protocol):
 
     @property
     def blocks(self) -> Iterable[nn.Module]:
-        """Blocks."""
+        """Blocks, each called with the shared ``cache``."""
         ...
 
     def project_to_logits(self, hidden: Tensor, /) -> Tensor:
@@ -118,44 +116,24 @@ def generate(
 
     proj_in = model.proj_in
     if proj_in is None or not has_weight(proj_in):
-        raise TypeError("Token generation requires an proj_in with embedding weights.")
-    forward = proj_in
+        raise TypeError("Token generation requires a proj_in with embedding weights.")
     dtype = proj_in.weight.dtype
 
-    # Delegate cache alloc to the block's attention; keeps generate
-    # arch-agnostic (MLA caches a compressed latent).
-    blocks: list[HasForwardCached[object]] = []
-    caches: list[object] = []
-    for block in model.blocks:
-        attn = getattr(block, "attn", None)
-        if not is_cached_attention(attn):
-            raise TypeError(
-                "Token generation requires blocks with an attn attribute "
-                "implementing alloc_kv_cache.",
-            )
-        if not has_forward_cached(block):
-            raise TypeError(
-                "Token generation requires blocks with a forward_cached method.",
-            )
-        caches.append(
-            attn.alloc_kv_cache(
-                batch=B,
-                max_seq=max_seq_len,
-                device=device,
-                dtype=dtype,
-            ),
-        )
-        blocks.append(block)
+    cache = alloc_layer_cache(
+        model,
+        batch=B,
+        max_seq=max_seq_len,
+        device=device,
+        dtype=dtype,
+    )
 
-    x: Tensor = forward(prompt_ids)
-    for i, block in enumerate(blocks):
-        x, caches[i] = block.forward_cached(x, cache=caches[i])
+    x = _decode(model, proj_in(prompt_ids), cache=cache)
     logits: Tensor = model.project_to_logits(x[:, -1:, :])
 
     generated: list[Tensor] = []
     finished = torch.zeros(B, dtype=torch.bool, device=device)
 
-    for _ in range(max_new_tokens):
+    for step in range(max_new_tokens):
         next_token = _sample(
             logits[:, -1, :],
             temperature=temperature,
@@ -175,14 +153,22 @@ def generate(
             if finished.all():
                 break
 
-        x = forward(next_token)
-        for i, block in enumerate(blocks):
-            x, caches[i] = block.forward_cached(x, cache=caches[i])
-        logits = model.project_to_logits(x)
+        if step + 1 == max_new_tokens:
+            break
+        logits = model.project_to_logits(
+            _decode(model, proj_in(next_token), cache=cache),
+        )
 
     if not generated:
         return prompt_ids
     return torch.cat([prompt_ids, *generated], dim=-1)
+
+
+def _decode(model: TransformerLike, x: Tensor, *, cache: LayerCache) -> Tensor:
+    """Run every block on ``x``, each reading and updating its slot of ``cache``."""
+    for block in model.blocks:
+        x = cast(Tensor, block(x, cache=cache))
+    return x
 
 
 def _sample(

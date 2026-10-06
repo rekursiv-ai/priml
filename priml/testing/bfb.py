@@ -12,7 +12,7 @@ Pattern:
 
 Regenerate (after an intentional numeric change)::
 
-    BFB_REGENERATE=1 uv --quiet run --frozen pytest <test_file>
+    uv --quiet run --frozen pytest <test_file> --regenerate-b4b
 
 Cross-architecture portability (the whole point):
   A float32 CPU kernel's last mantissa bit depends on the host's vector width
@@ -125,7 +125,6 @@ from typing import (
     override,
 )
 
-import os
 import tempfile
 
 from torch import Tensor, nn
@@ -138,6 +137,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 import torch
 
 from priml.lib.custom_json import convert
+from priml.testing import regenerate
 from priml.testing.golden import pack, tensor_bits_equal, unpack
 
 
@@ -145,9 +145,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 
     from torch._ops import OpOverload
-
-
-_ENV_REGENERATE: Final = "BFB_REGENERATE"
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -450,7 +447,7 @@ def assert_bfb_against_golden[InputT](
 ) -> None:
     """Assert that running ``module(input)`` reproduces the saved golden.
 
-    First call (no golden file present, or ``BFB_REGENERATE=1`` set):
+    First call (no golden file present, or ``--regenerate-b4b`` passed):
       - Builds the module, builds the input, randomizes parameters under
         ``seed``, runs ``module(input)``, and writes ``{golden_name}.pt``
         containing the pre-run state_dict, input, output, and every post-run
@@ -519,9 +516,8 @@ def regenerate_golden[InputT](
 ) -> None:
     """Force-regenerate a golden, ignoring any existing file.
 
-    Equivalent to setting ``BFB_REGENERATE=1`` and calling
-    ``assert_bfb_against_golden`` once. The freshly written golden is
-    replayed and must round-trip bit-exactly.
+    Equivalent to ``assert_bfb_against_golden`` under ``--regenerate-b4b``.
+    The freshly written golden is replayed and must round-trip bit-exactly.
 
     Args:
       golden_dir: Directory for the golden file.
@@ -532,26 +528,15 @@ def regenerate_golden[InputT](
       run: Optional custom runner.
 
     """
-    prior = os.environ.get(_ENV_REGENERATE)
-    os.environ[_ENV_REGENERATE] = "1"
-    try:
-        with suppress(_MissingGoldenError):
-            assert_bfb_against_golden(
-                golden_dir=golden_dir,
-                golden_name=golden_name,
-                build_module=build_module,
-                build_input=build_input,
-                seed=seed,
-                run=run,
-            )
-    finally:
-        # Restore the caller's prior value rather than unconditionally
-        # clearing it, so calling this inside a process launched with
-        # BFB_REGENERATE=1 does not silently disable regeneration afterward.
-        if prior is None:
-            del os.environ[_ENV_REGENERATE]
-        else:
-            os.environ[_ENV_REGENERATE] = prior
+    with regenerate.forced(), suppress(_MissingGoldenError):
+        assert_bfb_against_golden(
+            golden_dir=golden_dir,
+            golden_name=golden_name,
+            build_module=build_module,
+            build_input=build_input,
+            seed=seed,
+            run=run,
+        )
 
 
 class _Golden(TypedDict):
@@ -1518,7 +1503,7 @@ def _assert_bfb[InputT](
     golden_dir.mkdir(parents=True, exist_ok=True)
     golden_path = golden_dir / f"{golden_name}.pt"
     missing = not golden_path.exists()
-    if missing or os.environ.get(_ENV_REGENERATE) == "1":
+    if missing or regenerate.b4b():
         # The candidate belongs to the destination filesystem and is cleaned
         # up on every exit. Publish only after the complete replay succeeds.
         with tempfile.TemporaryDirectory(

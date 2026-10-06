@@ -20,7 +20,7 @@ from priml.math.gated_delta_rule import (
     recurrent_gated_delta_rule,
 )
 from priml.model.attention.gated_delta_net import GatedDeltaNet
-from priml.model.custom_types import TensorModule
+from priml.model.custom_types import LayerCache, TensorModule
 from priml.model.init import InitFn
 from priml.model.norm import RMSNorm
 
@@ -147,6 +147,10 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
             del rows, dtype
             return Cost()
 
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.depth_index = config.depth_index
+
     @override
     def forward(self, x: Tensor, **kwargs: object) -> Tensor:
         """Apply delta attention, updating caller-owned cache tensors when present.
@@ -161,7 +165,12 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
           output: Hidden states with the same shape as x.
 
         """
-        cache = _validated_cache(kwargs.get("cache"))
+        layer_cache = kwargs.get("cache")
+        if layer_cache is not None:
+            assert isinstance(layer_cache, LayerCache)
+            cache = _validated_cache(layer_cache[self.depth_index])
+        else:
+            cache = None
         attention_mask = kwargs.get("attention_mask")
         if attention_mask is not None and not isinstance(attention_mask, Tensor):
             raise TypeError("attention_mask must be a Tensor or None.")
@@ -251,27 +260,6 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
         """
         del batch, max_seq, device, dtype
         return {}
-
-    def forward_cached(
-        self,
-        x: Tensor,
-        *,
-        cache: dict[str, Tensor],
-        **kwargs: object,
-    ) -> tuple[Tensor, dict[str, Tensor]]:
-        """Apply a cached chunk and return the same cache object.
-
-        Args:
-          x: Hidden states shaped ``[..., sequence, channels]``.
-          cache: Mutable delta cache updated in place.
-          **kwargs: Messages forwarded to delta attention.
-
-        Returns:
-          output: Hidden states with x's shape.
-          cache: The updated input cache.
-
-        """
-        return self.forward(x, cache=cache, **kwargs), cache
 
     def _validate_cache_state(
         self,

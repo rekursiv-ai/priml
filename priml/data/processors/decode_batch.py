@@ -23,6 +23,7 @@ from torch import Tensor
 
 import torch
 
+from priml.data.pipeline.batching import BATCHED_FIELDS_KEY
 from priml.image import decode_jpeg_turbojpeg_region
 
 
@@ -190,7 +191,7 @@ def _completed(
 
 def _drop_failed(batch: dict[str, object], *, keep: Sequence[int], size: int) -> None:
     """Remove failed samples from every per-sample field, and count them."""
-    listed = set(cast(list[str], batch.get("_batched_list_fields", [])))
+    listed = set(cast(list[str], batch.get(BATCHED_FIELDS_KEY, [])))
     for key, value in list(batch.items()):
         if key in listed and isinstance(value, list):
             batch[key] = [cast(list[object], value)[index] for index in keep]

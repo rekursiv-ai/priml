@@ -151,6 +151,24 @@ def test_step_size_of_a_diagonal_matrix() -> None:
     )
 
 
+def test_step_size_of_a_zero_matrix_is_the_unit_operator_step() -> None:
+    # A zero operator couples nothing, so any step is stable; the unit
+    # operator's keeps the step on the scale every scaled program shares.
+    zero = _diagonal_program()
+    zero = LinearProgram(
+        crow_indices=zero.crow_indices,
+        col_indices=zero.col_indices,
+        values=torch.zeros(2, dtype=torch.float64),
+        num_columns=zero.num_columns,
+        row_lower=zero.row_lower,
+        row_upper=zero.row_upper,
+        objective=zero.objective,
+        lower=zero.lower,
+        upper=zero.upper,
+    )
+    assert initial_step_size(scale_program(zero)) == 0.998
+
+
 def test_initial_step_size_places_probe_and_accumulator_on_cpu(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

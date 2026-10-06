@@ -56,7 +56,8 @@ def initial_step_size(
       max_iterations: Most power-iteration steps.
 
     Returns:
-      step_size: ``0.998 / sigma_max``.
+      step_size: ``0.998 / sigma_max``; ``0.998`` for a zero matrix, whose
+        primal and dual steps decouple, so the unit operator's step is stable.
 
     """
     program = scaled.program
@@ -68,7 +69,8 @@ def initial_step_size(
         sigma_squared = torch.dot(q, z)
         if torch.linalg.vector_norm(z - sigma_squared * q).item() < tolerance:
             break
-    return 0.998 / sigma_squared.sqrt().item()
+    sigma = sigma_squared.sqrt().item()
+    return 0.998 / sigma if sigma > 0 else 0.998
 
 
 def _polar_pairs() -> Iterator[np.ndarray]:

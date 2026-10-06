@@ -31,7 +31,7 @@ import sys
 import threading
 import time
 
-from configgle import Fig, Makeable
+from configgle import Fig, Makeable, traverse
 from torch import Tensor
 
 import torch
@@ -50,6 +50,7 @@ if TYPE_CHECKING:
 from priml.custom_types import (
     HasNormalizedWorkingDirPattern,
 )
+from priml.math.distributed import collective_device
 from priml.math.seed import (
     RngState,
     get_rng_state,
@@ -274,13 +275,6 @@ class TrainLoop:
                     and part.base_dir is None
                 ):
                     part.base_dir = self.working_dir
-            placement = getattr(self.step, "parallelism", None)
-            if (
-                isinstance(self.runtime, _DeclaresDevice)
-                and isinstance(placement, _DeclaresDevice)
-                and placement.device is None
-            ):
-                placement.device = self.runtime.device
             for metric in (*self.metrics_train.values(), *self.metrics_eval.values()):
                 if (
                     not isinstance(metric, HasNormalizedWorkingDirPattern)
@@ -319,6 +313,20 @@ class TrainLoop:
         self._runtime_destroyed = False
         if self._owns_runtime:
             self.runtime.initialize()
+        # Children left at ``device=None`` take the runtime's; every TrainStep in
+        # the tree, so a GAN's sub-steps place where a plain step does.
+        for child in (
+            config.dataset,
+            *config.metrics_train.values(),
+            *config.metrics_eval.values(),
+            getattr(config.step, "parallelism", None),
+            *(
+                match.config.parallelism
+                for match in traverse(config.step, TrainStep.Config, recurse=True)
+            ),
+        ):
+            if isinstance(child, _DeclaresDevice) and child.device is None:
+                child.device = self.runtime.device
 
         self.checkpointer: CheckpointerProtocol | None = None
         self.tracker: TrackerProtocol | None = None
@@ -343,23 +351,30 @@ class TrainLoop:
                 base_seed = set_seed_local(config.seed)
 
             self.phase_timer = config.phase_timer.make()
-            with self.phase_timer.phase("model_init"):
+            with (
+                self.phase_timer.phase("model_init"),
+                torch.device(self.runtime.device),
+            ):
                 self.step = config.step.make()
             if isinstance(self.step, Closeable):
                 self._close_step = self.step.close
             if isinstance(self.step, _HasTimer):
                 self.step.timer = self.phase_timer
-            self.metrics_train = {
-                name: cfg.make() for name, cfg in config.metrics_train.items()
-            }
+            self.metrics_train: dict[str, MetricProtocol] = {}
+            self.metrics_eval: dict[str, MetricProtocol] = {}
+            for metrics, configs in (
+                (self.metrics_train, config.metrics_train),
+                (self.metrics_eval, config.metrics_eval),
+            ):
+                for name, cfg in configs.items():
+                    device = cfg.device if isinstance(cfg, _DeclaresDevice) else None
+                    with torch.device(device or self.runtime.device):
+                        metrics[name] = cfg.make()
             self._requires_device_timing = self.runtime.device.type != "cpu" and any(
                 isinstance(metric, RequiresDeviceTiming)
                 and metric.requires_device_timing
                 for metric in self.metrics_train.values()
             )
-            self.metrics_eval = {
-                name: cfg.make() for name, cfg in config.metrics_eval.items()
-            }
 
             if mesh:
                 data_local_rank = mesh[config.mesh_dim_data_seed].get_local_rank()
@@ -370,7 +385,15 @@ class TrainLoop:
                         salt(config.mesh_dim_data_seed, base_seed),
                     ),
                 )
-            with self.phase_timer.phase("data_load"):
+            device = (
+                config.dataset.device
+                if isinstance(config.dataset, _DeclaresDevice)
+                else None
+            )
+            with (
+                self.phase_timer.phase("data_load"),
+                torch.device(device or self.runtime.device),
+            ):
                 self.dataset = config.dataset.make()
             _bind_dataset_step(self.dataset, self.step)
             # Dataset and step share one checkpointed epoch counter.
@@ -578,10 +601,7 @@ class TrainLoop:
         if self.step.global_step % self.num_steps_log != 0:
             return False
         over = is_rank_zero() and self._max_time_elapsed() >= self.max_time
-        flag = torch.tensor(
-            1.0 if over else 0.0,
-            device="cuda" if torch.cuda.is_available() else "cpu",
-        )
+        flag = torch.tensor(1.0 if over else 0.0, device=collective_device())
         dist.broadcast(flag, src=0)
         reached = bool(flag.item() > 0.0)
         if reached:
@@ -638,10 +658,7 @@ class TrainLoop:
         over = is_rank_zero() and (
             time.perf_counter() - eval_start > self.max_eval_time
         )
-        flag = torch.tensor(
-            1.0 if over else 0.0,
-            device="cuda" if torch.cuda.is_available() else "cpu",
-        )
+        flag = torch.tensor(1.0 if over else 0.0, device=collective_device())
         dist.broadcast(flag, src=0)
         return bool(flag.item() > 0.0)
 
@@ -765,6 +782,7 @@ class TrainLoop:
                     self._on_epoch_boundary()
                     if self.current_epoch >= self.max_epochs:
                         raise
+                _require_another_pass(self.train_loader, dataset=self.dataset)
                 _set_loader_epoch(self.train_loader, self.current_epoch)
                 self.train_iter = iter(self.train_loader)
         raise RuntimeError("Failed to get next batch after epoch reset")
@@ -897,11 +915,14 @@ class TrainLoop:
                 **step_metrics,
                 **train_metrics,
             }
-            if torch.cuda.is_available():
+            device = self.runtime.device
+            if device.type == "cuda":
                 metrics["gpu_mem_allocated_gb"] = (
-                    torch.cuda.max_memory_allocated() / 1e9
+                    torch.cuda.max_memory_allocated(device) / 1e9
                 )
-                metrics["gpu_mem_reserved_gb"] = torch.cuda.max_memory_reserved() / 1e9
+                metrics["gpu_mem_reserved_gb"] = (
+                    torch.cuda.max_memory_reserved(device) / 1e9
+                )
             self.tracker.log_metrics(metrics, self.step.global_step, prefix="train/")
 
     def _compute_train_metrics(self) -> dict[str, float]:
@@ -1293,11 +1314,7 @@ def _finish_resources(actions: Iterable[Callable[[], object]]) -> None:
 
 @runtime_checkable
 class _DeclaresDevice(Protocol):
-    """A config naming the device its component uses.
-
-    Both the runtime's and the placement strategy's, so the loop can hand the
-    first's answer to the second without either importing the other.
-    """
+    """A config naming the device its component is built on."""
 
     device: torch.device | str | None
 
@@ -1349,6 +1366,18 @@ def _loader_length(loader: object) -> int:
         return len(loader)
     except TypeError:
         return 0
+
+
+# Checked when the second pass would START, not when the loader is built: a stream
+# that never ends never reaches here, so an endless generator stays legal.
+def _require_another_pass(loader: Iterable[object], *, dataset: object) -> None:
+    """Refuse to restart a loader that is its own, now exhausted, iterator."""
+    if isinstance(loader, Iterator) and iter(loader) is loader:
+        raise TypeError(
+            f"{type(dataset).__qualname__}.train_dataloader() returned a one-shot "
+            f"{type(loader).__qualname__}, which has no second pass to start. "
+            "Return a re-iterable, e.g. priml.data.passes.Passes.",
+        )
 
 
 def _set_loader_epoch(loader: object, epoch: int) -> None:

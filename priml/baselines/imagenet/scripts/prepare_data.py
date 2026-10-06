@@ -59,7 +59,7 @@ def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description="Verify an extracted ImageNet and write its validation labels beside it.",
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)

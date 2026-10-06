@@ -353,11 +353,10 @@ def _tta_logits(model: TensorFn, media: Tensor) -> Tensor:
     """Average logits over the mirror pair of three overlapping crops."""
     size = media.shape[-1]
     padded = functional.pad(media, (1,) * 4, "reflect")
-    bottom_right = padded[..., 2:, 2:][..., :size, :]
     return (
         _mirrored(model, media)
-        + _mirrored(model, padded[..., 0:size, 0:size])
-        + _mirrored(model, bottom_right)
+        + _mirrored(model, padded[..., :size, :size])
+        + _mirrored(model, padded[..., 2 : 2 + size, 2 : 2 + size])
     ) / 3
 
 

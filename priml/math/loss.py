@@ -6,6 +6,8 @@ config slot takes one of these directly via ``PartialConfig``.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from torch import Tensor, nn
 
 import torch
@@ -58,7 +60,7 @@ def cross_entropy_with_batched_smoothing(
     *,
     weight: Tensor | None = None,
     ignore_index: int = -100,
-    reduction: str = "mean",
+    reduction: Literal["none", "mean", "sum"] = "mean",
     label_smoothing: float | Tensor = 0.0,
 ) -> Tensor:
     """Cross-entropy loss supporting per-element label smoothing.
@@ -94,10 +96,9 @@ def cross_entropy_with_batched_smoothing(
     num_classes = input.shape[1]
     log_probs = input.log_softmax(dim=1)
 
-    # ``ignore_index`` may exceed ``num_classes``; clamp the index used for
-    # gathering and zero those positions out via ``mask`` afterwards.
+    # Only ignored targets may be outside the class range; gather rejects others.
     mask = target != ignore_index
-    safe_target = target.clamp(0, num_classes - 1)
+    safe_target = torch.where(mask, target, 0)
     gathered = log_probs.gather(1, safe_target.unsqueeze(1)).squeeze(1)
 
     # PyTorch weights both the NLL and the smoothing term by the per-class
@@ -119,7 +120,7 @@ def cross_entropy_with_batched_smoothing(
     if reduction == "sum":
         return loss.sum()
     # "mean"
-    return loss.sum() / (target_weight * mask).sum().clamp(min=1)
+    return loss.sum() / (target_weight * mask).sum()
 
 
 def log_stablemax(x: Tensor, dim: int = -1) -> Tensor:

@@ -39,6 +39,10 @@ from priml.cost import Cost
 from priml.model.attention.kernel import attention_kernel_cost
 
 
+class Flash4UnavailableError(RuntimeError):
+    """Raised when FlashAttention 4 cannot run on this device."""
+
+
 class Flash4Attention(nn.Module):
     """Causal FlashAttention 4 over dense rows, optionally within a sliding window.
 
@@ -440,12 +444,21 @@ def _flash4_grad(
 
 @functools.cache
 def _interface() -> "_Flash4Interface":
-    """Import FA4's CuTe interface and check the entry points this module calls."""
+    """Import FA4's CuTe interface and check its entry points and this device."""
     module = importlib.import_module("flash_attn.cute.interface")
     if not isinstance(module, _Flash4Interface):
         raise TypeError(
             "FA4 must provide flash_attn_func, flash_attn_varlen_func and "
             "_flash_attn_bwd.",
+        )
+    # FA4 also runs elsewhere, silently wrong: on SM120 and SM121 its forward and
+    # query gradients match masked SDPA while its key and value gradients do not.
+    capability = torch.cuda.get_device_capability()
+    if capability not in {(9, 0), (10, 0)}:
+        raise Flash4UnavailableError(
+            "FlashAttention 4 requires SM90 or SM100; this device is "
+            f"SM{capability[0]}{capability[1]}. Inject a portable kernel such "
+            "as SdpaFused or SdpaVarlen instead.",
         )
     return module
 

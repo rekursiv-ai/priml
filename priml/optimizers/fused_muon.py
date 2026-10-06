@@ -167,14 +167,16 @@ class FusedMuon(Optimizer):
         ns_coefficients: tuple[tuple[float, float, float], ...],
         eps: float,
     ) -> None:
-        for name, value in (
-            ("lr", lr),
-            ("momentum", momentum),
-            ("max_grad_norm", max_grad_norm),
-            ("eps", eps),
-        ):
-            if not math.isfinite(value) or value < 0:
-                raise ValueError(f"FusedMuon {name} must be finite and nonnegative.")
+        if not math.isfinite(lr) or lr < 0.0:
+            raise ValueError(f"Learning rate must be finite and nonnegative: {lr}.")
+        if not math.isfinite(momentum) or momentum < 0.0:
+            raise ValueError(f"Momentum must be finite and nonnegative: {momentum}.")
+        if not math.isfinite(max_grad_norm) or max_grad_norm < 0.0:
+            raise ValueError(
+                f"Max grad norm must be finite and nonnegative: {max_grad_norm}.",
+            )
+        if not math.isfinite(eps) or eps < 0.0:
+            raise ValueError(f"Epsilon must be finite and nonnegative: {eps}.")
         super().__init__(params, {"lr": lr, "momentum": momentum, "eps": eps})
         # The clip and the polynomial are the run's code, not its state, so they
         # stay off the groups a checkpoint serializes and are rebuilt from config

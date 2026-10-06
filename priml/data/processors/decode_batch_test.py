@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 import torch
 
+from priml.data.pipeline.batching import BATCHED_FIELDS_KEY
 from priml.data.processors.decode_batch import DecodeCropResizeBatch, _drop_failed
 
 
@@ -49,7 +50,7 @@ def _batch(crops: list[Crop], *, size: int = 8) -> dict[str, object]:
         "target_width": [size] * len(crops),
         "label": torch.arange(len(crops)),
         "_batch_size": len(crops),
-        "_batched_list_fields": ["media", "crop", "target_height", "target_width"],
+        BATCHED_FIELDS_KEY: ["media", "crop", "target_height", "target_width"],
     }
 
 
@@ -107,7 +108,7 @@ def test_drop_failed_filters_list_fields_and_aligned_tensors() -> None:
     aligned = torch.tensor([10, 20])
     unaligned = torch.tensor([30])
     batch: dict[str, object] = {
-        "_batched_list_fields": ["names"],
+        BATCHED_FIELDS_KEY: ["names"],
         "names": names,
         "unlisted": unlisted,
         "aligned": aligned,

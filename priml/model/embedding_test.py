@@ -6,7 +6,8 @@ from functools import partial
 from pathlib import Path
 from typing import Final
 
-from configgle.testing import assert_pprint_golden
+import multiprocessing
+
 from torch import Tensor
 
 import pytest
@@ -18,6 +19,7 @@ from priml.model.embedding import Embedding, MultiHotEmbedding, _power_of_two
 from priml.model.init import normal
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -451,6 +453,7 @@ def test_multi_hot_embedding_kernel_host_dispatch_with_fake_launches(
         "width_block": 2,
         "cell_block": 4,
         "scalar_block": 2,
+        "table_rows": config.channels_in,
         "num_warps": 4,
     }
 
@@ -620,9 +623,56 @@ def test_multi_hot_backward_triton_program_count_ceil_division(
 def test_multi_hot_embedding_cost_counts_cpu_gather_and_scatter() -> None:
     config = _small_layout()
     cost = config.cost(seq_len=3, batch_size=2, dtype=torch.float32)
-    assert cost.params == 0
-    assert cost.params_active == 0
+    assert cost.params == config.channels_in * config.channels_out
+    assert cost.params_active == len(config.offsets) * config.channels_out
     assert cost["flops", "adjoint", "selection"].sum() == 3 * 2 * 3 * 4 * 2
+
+
+@pytest.mark.gpu_triton
+def test_multi_hot_triton_rejects_a_row_outside_the_table() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA device")
+    # A device assertion poisons its CUDA context; isolate it from other tests.
+    process = multiprocessing.get_context("spawn").Process(
+        target=_check_triton_invalid_row,
+    )
+    process.start()
+    process.join(timeout=30)
+    assert process.exitcode == 0
+
+
+def _check_triton_invalid_row() -> None:
+    config = _small_layout()
+    model = config.make()
+    rows = _draw_packed(config)
+    rows[0, 0] = config.channels_in
+    with pytest.raises(IndexError):
+        model.forward_torch(rows)
+    model = model.cuda()
+    with pytest.raises(RuntimeError, match="device-side assert"):
+        _launch_invalid_row(model, rows.cuda())
+
+
+def _launch_invalid_row(model: MultiHotEmbedding, rows: Tensor) -> None:
+    model.forward_triton(rows)
+    torch.cuda.synchronize()
+
+
+def test_multi_hot_materialization_rebuilds_offsets() -> None:
+    config = _small_layout()
+    model = config.make().to("meta")
+    model.to_empty(device="cpu")
+    model.offsets.fill_(-1)
+    model.reset_parameters()
+    assert torch.equal(model.offsets, torch.tensor(config.offsets))
+
+
+@pytest.mark.parametrize("offsets", [(), (3, 1), (0, 2, 2), (0, 8), (-1, 2)])
+def test_multi_hot_invalid_field_offsets_rejected(offsets: tuple[int, ...]) -> None:
+    config = _small_layout()
+    config.offsets = offsets
+    with pytest.raises(ValueError, match="offsets"):
+        config.make()
 
 
 def test_embedding_keeps_shard_and_requested_meta_device() -> None:
@@ -935,7 +985,11 @@ def _launch_backward_mutation_case(
 ) -> tuple[_FakeKernel, Tensor, Tensor]:
     # The launch reads only metadata; a real 2^25-row table took 4.5s to draw.
     with torch.device("meta"):
-        module = _mutation_layout(offsets=offsets, width=16, rows=rows)
+        module = _mutation_layout(
+            offsets=offsets,
+            width=16,
+            rows=max(rows, offsets[-1] + 1),
+        )
     kernels = _FakeBackwardKernels()
     devices: list[torch.device] = []
 

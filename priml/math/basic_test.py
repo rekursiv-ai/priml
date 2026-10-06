@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import math
 
 from torch import Tensor
@@ -15,7 +17,12 @@ from priml.math.basic import (
     ceil_multiple,
     factors,
     floor_multiple,
+    reduction_dims,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 def test_factors_small_numbers() -> None:
@@ -273,6 +280,51 @@ def test_multiple_is_exact_beyond_float53() -> None:
     assert floor_multiple(big, 1) == big
     assert ceil_multiple(big, 2) == big + 1
     assert floor_multiple(big, 2) == big - 1
+
+
+def test_integer_tensor_grids_never_round_through_float() -> None:
+    x = torch.tensor([2**24 + 1, 2**53 + 1, -(2**53 + 1)])
+    up = ceil_multiple(x, 2)
+    down = floor_multiple(x, 2)
+    assert isinstance(up, Tensor)
+    assert isinstance(down, Tensor)
+    assert torch.equal(up, torch.tensor([2**24 + 2, 2**53 + 2, -(2**53)]))
+    assert torch.equal(down, torch.tensor([2**24, 2**53, -(2**53 + 2)]))
+    np.testing.assert_array_equal(ceil_multiple(x.numpy(), 2), up.numpy())
+    np.testing.assert_array_equal(floor_multiple(x.numpy(), 2), down.numpy())
+
+
+def test_broadcast_text_is_scalar() -> None:
+    assert broadcast_sequences("abc", ["x", "y", "z"])[0] == ["abc"] * 3
+    assert broadcast_sequences(b"abc", [b"x", b"y", b"z"])[0] == [b"abc"] * 3
+
+
+@pytest.mark.parametrize(
+    ("dim", "expected"),
+    [(None, (0, 1, 2)), (-1, (2,)), ([2, 0], (0, 2)), ((1,), (1,))],
+)
+def test_reduction_dims_normalizes_every_spelling(
+    dim: int | Sequence[int] | None,
+    expected: tuple[int, ...],
+) -> None:
+    assert reduction_dims(dim, ndim=3) == expected
+
+
+@pytest.mark.parametrize(
+    ("dim", "error", "match"),
+    [
+        ((), ValueError, "at least one"),
+        ([0, -3], ValueError, "Duplicate"),
+        (3, IndexError, "out of range"),
+    ],
+)
+def test_reduction_dims_rejects_empty_duplicate_and_out_of_range(
+    dim: int | Sequence[int],
+    error: type[Exception],
+    match: str,
+) -> None:
+    with pytest.raises(error, match=match):
+        reduction_dims(dim, ndim=3)
 
 
 if __name__ == "__main__":

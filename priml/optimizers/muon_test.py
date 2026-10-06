@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-import functools
 import tempfile
 
 from torch import Tensor, nn
@@ -27,6 +27,8 @@ from priml.optimizers.muon import (
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from torch.distributed.device_mesh import DeviceMesh
 
     from priml.distributed.testing import WarmPoolGetter
@@ -337,9 +339,57 @@ class TestMuon:
         parameter.grad = torch.ones_like(parameter)
         optimizer.param_groups[0]["ns_coefficients"] = (1.0, 2.0)
 
-        with pytest.raises(ValueError, match="Expected len") as error:
+        with pytest.raises(ReadError):
             optimizer.step()
-        assert str(error.value) == "Expected len(ns_coefficients) == 3."
+
+    def test_step_group_accepts_list_coefficients_from_a_restored_group(
+        self,
+    ) -> None:
+        """A JSON-restored group holds a list where the config held a tuple."""
+        listed = nn.Parameter(torch.tensor([[1.0, -2.0, 3.0], [0.5, 4.0, -1.0]]))
+        tupled = nn.Parameter(listed.detach().clone())
+        with_list, with_tuple = Muon([listed]), Muon([tupled])
+        with_list.param_groups[0]["ns_coefficients"] = [3.4445, -4.775, 2.0315]
+        for parameter, optimizer in ((listed, with_list), (tupled, with_tuple)):
+            parameter.grad = torch.tensor([[0.1, 0.2, -0.3], [0.4, -0.5, 0.6]])
+            optimizer.step()
+        assert torch.equal(listed.detach(), tupled.detach())
+
+    @pytest.mark.parametrize(
+        ("build", "message"),
+        [
+            (partial(Muon, lr=float("nan")), "Learning rate must be finite"),
+            (partial(Muon, lr=float("inf")), "Learning rate must be finite"),
+            (partial(Muon, momentum=float("nan")), "Momentum must be finite"),
+            (partial(Muon, momentum=float("inf")), "Momentum must be finite"),
+            (partial(Muon, weight_decay=float("nan")), "Weight decay must be finite"),
+            (partial(Muon, weight_decay=float("inf")), "Weight decay must be finite"),
+            (partial(Muon, eps=float("inf")), "Epsilon must be finite"),
+            (partial(Muon, eps=float("nan")), "Epsilon must be finite"),
+            (partial(Muon, momentum=1.0), "Momentum must be finite and lie in"),
+            (partial(Muon, eps=0.0), "Epsilon must be finite and positive"),
+            (partial(Muon, ns_steps=0), "Invalid ns_steps"),
+            (partial(Muon, ensemble_dims=-1), "Invalid ensemble_dims"),
+        ],
+    )
+    def test_invalid_scalar_hyperparameters_are_rejected(
+        self,
+        build: Callable[[list[nn.Parameter]], Muon],
+        message: str,
+    ) -> None:
+        """Each bound would otherwise fail deep in a step, or poison it with NaN."""
+        with pytest.raises(ValueError, match=message):
+            build([nn.Parameter(torch.ones(2, 3))])
+
+    def test_ensemble_axes_are_leading_and_need_a_matrix_behind_them(self) -> None:
+        """``ensemble_dims`` peels LEADING axes; what remains must be a matrix."""
+        stacked = nn.Parameter(torch.ones(2, 3, 4))
+        stacked.grad = torch.ones_like(stacked)
+        Muon([stacked], ensemble_dims=1).step()
+        too_flat = nn.Parameter(torch.ones(2, 3))
+        too_flat.grad = torch.ones_like(too_flat)
+        with pytest.raises(ValueError, match=r"ndim >= 3 \(ensemble_dims=1\)"):
+            Muon([too_flat], ensemble_dims=1).step()
 
     def test_step_group_continues_after_a_missing_gradient(
         self,
@@ -440,17 +490,17 @@ class TestMuon:
 
     def test_invalid_lr(self):
         model = self._make_model()
-        with pytest.raises(ValueError, match="learning rate"):
+        with pytest.raises(ValueError, match="Learning rate"):
             Muon(model.parameters(), lr=-1.0)
 
     def test_invalid_momentum(self):
         model = self._make_model()
-        with pytest.raises(ValueError, match="momentum"):
+        with pytest.raises(ValueError, match="Momentum"):
             Muon(model.parameters(), lr=0.02, momentum=-0.1)
 
     def test_invalid_weight_decay(self):
         model = self._make_model()
-        with pytest.raises(ValueError, match="weight_decay"):
+        with pytest.raises(ValueError, match="Weight decay"):
             Muon(model.parameters(), lr=0.02, weight_decay=-0.1)
 
     def test_nesterov_requires_momentum(self):
@@ -541,7 +591,7 @@ def test_muon_sharded_matches_replicated_multirank(
     """Muon on a 2-way row-sharded param must equal the single-device update."""
     pool = warm_pools({"dp": 2})
     with tempfile.TemporaryDirectory() as tmp:
-        pool(functools.partial(_muon_shard_worker, tmp))
+        pool(partial(_muon_shard_worker, tmp))
         results = {p.name: p.read_text() for p in Path(tmp).iterdir() if p.is_file()}
     assert results == {"rank_0": "ok", "rank_1": "ok"}, results
 

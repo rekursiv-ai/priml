@@ -3,20 +3,27 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
+
+import argparse
 
 import pytest
 import torch
 
-from priml.baselines.arcagi1.data import PuzzleData
 from priml.baselines.arcagi2 import puzzle_data
+from priml.baselines.arcagi2.data import Arc2Data
+from priml.baselines.arcagi2.metric import PassK
 from priml.baselines.arcagi2.puzzle_data import Arc2PuzzleDataset
+from priml.baselines.arcagi2.scripts import prepare_data
 from priml.baselines.arcagi2.scripts.build_dataset import (
+    ARC2_DATASET_DIR,
     arc2_num_puzzle_identifiers,
     ensure_arc2_dataset,
 )
 from priml.baselines.arcagi2.scripts.build_dataset_test import (
     write_tiny_kaggle_source,
 )
+from priml.paths import resolve_working_dir
 
 
 def _tiny_tree(tmp_path: Path) -> tuple[Path, str]:
@@ -35,6 +42,20 @@ def _tiny_tree(tmp_path: Path) -> tuple[Path, str]:
 def test_default_working_dir_is_arc2_logical() -> None:
     cfg = Arc2PuzzleDataset.Config()
     assert cfg.working_dir == "/datasets/arc2concept-aug-1000"
+
+
+def test_every_arc2_reader_defaults_to_the_directory_the_builder_writes() -> None:
+    """A reader defaulting elsewhere would find no tree, or another build's."""
+    readers = (
+        Arc2PuzzleDataset.Config().working_dir,
+        Arc2Data.Config().working_dir,
+        PassK.Config().working_dir,
+    )
+    assert set(readers) == {ARC2_DATASET_DIR}
+    parser = argparse.ArgumentParser()
+    prepare_data._add_arguments(parser)
+    flags = cast(prepare_data._Flags, parser.parse_args(["source"]))
+    assert flags.destination == resolve_working_dir("/opt/scratch", ARC2_DATASET_DIR)
 
 
 def test_finalize_resolves_working_dir_under_base_dir() -> None:
@@ -110,6 +131,26 @@ def test_correct_identifier_count_accepted(tmp_path: Path) -> None:
     assert dataset.dataset_dir == root
 
 
+def test_an_arc2_tree_is_never_checked_against_the_arc1_recipe(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The ARC2 tree is stamped by the ARC2 builder; the ARC1 ensure must not run."""
+    root, prefix = _tiny_tree(tmp_path)
+    cfg = Arc2PuzzleDataset.Config()
+    cfg.working_dir = root
+    cfg.augmentation.num_aug = 2
+    cfg.augmentation.seed = 7
+    cfg.input_file_prefix = prefix
+    cfg.num_puzzle_identifiers = arc2_num_puzzle_identifiers(root)
+    cfg.batch_size = 2
+    cfg.device = "cpu"
+    caplog.set_level("WARNING")
+
+    assert cfg.make().dataset_dir == root
+    assert caplog.messages == []
+
+
 def test_staging_forwards_the_complete_recipe_and_one_spatial_view(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -125,11 +166,6 @@ def test_staging_forwards_the_complete_recipe_and_one_spatial_view(
 
     monkeypatch.setattr(puzzle_data, "ensure_arc2_dataset", record_arc2)
     monkeypatch.setattr(puzzle_data, "ensure_spatial_eval_data", record_spatial)
-
-    def no_parent_init(self: PuzzleData, config: PuzzleData.Config) -> None:
-        del self, config
-
-    monkeypatch.setattr(PuzzleData, "__init__", no_parent_init)
     source = tmp_path / "source"
     target = tmp_path / "target"
     cfg = Arc2PuzzleDataset.Config()
@@ -143,6 +179,9 @@ def test_staging_forwards_the_complete_recipe_and_one_spatial_view(
     cfg.augmentation.num_aug = 3
     cfg.augmentation.seed = 13
     cfg.input_file_prefix = "alternate-"
+    # The id-count check after staging reads this; the stubs build nothing.
+    target.mkdir()
+    (target / "identifiers.json").write_text('["<blank>", "task"]')
 
     Arc2PuzzleDataset(cfg)
 

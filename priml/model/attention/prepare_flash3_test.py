@@ -6,8 +6,11 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 from threading import Barrier
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
+import argparse
+import inspect
+import os
 import platform
 import shutil
 import sys
@@ -21,6 +24,7 @@ from priml.model.attention.flash3 import (
     artifact_path,
     artifact_validation_error,
     cutlass_revision,
+    load_flash3,
     runtime_receipt,
     source_revision,
 )
@@ -28,6 +32,12 @@ from priml.model.attention.flash3 import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+
+@pytest.fixture(autouse=True)
+def cuda_128(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Present a cu128 torch, so artifact paths hold on a CPU-only torch too."""
+    monkeypatch.setattr(torch.version, "cuda", "12.8")
 
 
 @pytest.fixture
@@ -147,11 +157,15 @@ def test_the_build_refuses_a_checkout_off_its_pins(
         prepare_flash3._build_flash3(destination)
 
 
-def test_build_environment_matches_qualified_hopper_lane() -> None:
+def test_build_environment_matches_qualified_hopper_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    monkeypatch.setattr(os, "sched_getaffinity", _three_cpus)
     environment = prepare_flash3._build_environment({"PATH": "/usr/bin"})
-    assert environment["PATH"] == "/usr/local/cuda-12.8/bin:/usr/bin"
-    assert environment["CUDA_HOME"] == "/usr/local/cuda-12.8"
-    assert environment["MAX_JOBS"] == "32"
+    assert environment["PATH"] == "/usr/local/cuda/bin:/usr/bin"
+    assert environment["CUDA_HOME"] == "/usr/local/cuda"
+    assert environment["MAX_JOBS"] == "3"
     for flag in (
         "FORCE_BUILD",
         "FORCE_CXX11_ABI",
@@ -176,11 +190,27 @@ def test_build_environment_matches_qualified_hopper_lane() -> None:
         assert environment[f"FLASH_ATTENTION_{flag}"] == "TRUE"
     for kept in ("HDIM128", "LOCAL", "BACKWARD"):
         assert f"FLASH_ATTENTION_DISABLE_{kept}" not in environment
-    assert prepare_flash3._build_environment({})["PATH"] == "/usr/local/cuda-12.8/bin"
+    assert prepare_flash3._build_environment({})["PATH"] == "/usr/local/cuda/bin"
 
 
-def test_the_pinned_build_runtime_passes(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_lane(monkeypatch, {})
+def test_build_environment_uses_the_callers_cuda_home(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CUDA_HOME", "/opt/cuda-12.9")
+    environment = prepare_flash3._build_environment({"PATH": "/usr/bin"})
+    assert environment["PATH"] == "/opt/cuda-12.9/bin:/usr/bin"
+    assert environment["CUDA_HOME"] == "/opt/cuda-12.9"
+
+
+@pytest.mark.parametrize("cuda", ["12.8", "12.9"])
+def test_a_build_runtime_whose_nvcc_matches_torch_passes(
+    monkeypatch: pytest.MonkeyPatch,
+    cuda: str,
+) -> None:
+    _stub_lane(
+        monkeypatch,
+        {"cuda": cuda, "nvcc": f"Cuda compilation tools, release {cuda}, V{cuda}.0"},
+    )
     prepare_flash3._validate_build_runtime()
 
 
@@ -195,9 +225,11 @@ def test_the_pinned_build_runtime_passes(monkeypatch: pytest.MonkeyPatch) -> Non
                 r"priml/baselines/nanochat/runtime"
             ),
         ),
-        ({"cuda": "12.9"}, r"CUDA 12\.8; found 12\.9"),
+        ({"cuda": "12.9"}, r"nvcc 12\.9 to match torch's CUDA"),
+        ({"cuda": None}, "CUDA build of torch"),
         ({"cxx11_abi": False}, r"C\+\+11 ABI"),
-        ({"nvcc": "release 12.9"}, "nvcc 12.8"),
+        ({"nvcc": "release 12.9"}, r"nvcc 12\.8 to match torch's CUDA"),
+        ({"nvcc": "Cuda compilation tools, release 12.80, V12.80.0"}, "nvcc 12.8"),
     ],
 )
 def test_any_other_build_runtime_is_refused(
@@ -210,38 +242,45 @@ def test_any_other_build_runtime_is_refused(
         prepare_flash3._validate_build_runtime()
 
 
-@pytest.mark.parametrize(
-    ("on_path", "provisioned", "expected"),
-    [
-        ("/opt/cuda/bin/nvcc", False, "/opt/cuda/bin/nvcc"),
-        (None, True, "/usr/local/cuda-12.8/bin/nvcc"),
-        (None, False, None),
-    ],
-)
-def test_nvcc_comes_from_path_then_the_provisioned_toolkit(
+@pytest.mark.parametrize("provisioned", [False, True])
+def test_validated_nvcc_is_the_one_the_build_runs(
     monkeypatch: pytest.MonkeyPatch,
-    on_path: str | None,
     provisioned: bool,
-    expected: str | None,
 ) -> None:
-    def which(executable: str) -> str | None:
-        assert executable == "nvcc"
-        return on_path
+    """An nvcc on PATH never stands in for the ``CUDA_HOME`` toolkit."""
+
+    def which(executable: str) -> str:
+        return f"/opt/{executable}"
+
+    build_nvcc = Path(prepare_flash3._build_environment({})["CUDA_HOME"]) / "bin/nvcc"
 
     def is_file(path: Path) -> bool:
-        return provisioned and path == Path("/usr/local/cuda-12.8/bin/nvcc")
+        return provisioned and path == build_nvcc
 
     monkeypatch.setattr(shutil, "which", which)
     monkeypatch.setattr(Path, "is_file", is_file)
-    if expected is None:
-        with pytest.raises(RuntimeError, match=r"requires nvcc 12\.8"):
-            prepare_flash3._nvcc_path()
+    if provisioned:
+        assert prepare_flash3._nvcc_path() == build_nvcc
     else:
-        assert prepare_flash3._nvcc_path() == Path(expected)
+        with pytest.raises(RuntimeError, match=r"requires nvcc at "):
+            prepare_flash3._nvcc_path()
+
+
+def test_every_cache_root_default_names_one_root() -> None:
+    parser = argparse.ArgumentParser()
+    prepare_flash3._add_arguments(parser)
+    defaults: set[object] = {
+        cast(prepare_flash3.Flags, parser.parse_args([])).cache_root,
+        *(
+            cast(object, inspect.signature(function).parameters["cache_root"].default)
+            for function in (prepare_flash3.prepare_flash3, artifact_path, load_flash3)
+        ),
+    }
+    assert defaults == {Path("/opt/scratch/caches/nanochat/fa3")}
 
 
 def _stub_lane(monkeypatch: pytest.MonkeyPatch, change: Mapping[str, object]) -> None:
-    """Present the qualified build lane, with ``change`` applied to it."""
+    """Present the cu128 build lane, with ``change`` applied to it."""
     lane: dict[str, object] = {
         "system": "Linux",
         "version": "2.9.1+cu128",
@@ -262,6 +301,10 @@ def _stub_lane(monkeypatch: pytest.MonkeyPatch, change: Mapping[str, object]) ->
         return str(lane["nvcc"])
 
     monkeypatch.setattr(prepare_flash3, "_run_output", nvcc_version)
+
+
+def _three_cpus(pid: int) -> set[int]:
+    return {pid, 3, 5}
 
 
 def _build_nothing(destination: Path) -> None:

@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import logging
 
@@ -94,16 +94,7 @@ class WarmStart:
         }
         ema = step.get("ema")
         if ema:
-            raw_ema = convert(ema, dict[str, object])
-            shadow = raw_ema.get("shadow_params", ema)
-            raw_shadow = convert(shadow, dict[str, object])
-            state.update(
-                {
-                    name: convert(value, torch.Tensor)
-                    for name, value in raw_shadow.items()
-                    if isinstance(value, torch.Tensor)
-                },
-            )
+            state.update(_ema_shadow(convert(ema, dict[str, object]), path=self.path))
         own = model.state_dict()
         own_by_bare = {_bare(name): name for name in own}
         loadable: dict[str, Tensor] = {}
@@ -131,17 +122,43 @@ class WarmStart:
             fresh=tuple(sorted(name for name in own if name not in loadable)),
         )
         logger.info(
-            "warm start %s: loaded %d tensor(s); shape-skipped %s; fresh %s",
+            "warm start %s: loaded %d tensor(s); shape-skipped %s; missing %s; fresh %s",
             self.path,
             len(report.loaded),
             list(report.skipped_shape) or "none",
+            list(report.skipped_missing) or "none",
             list(report.fresh) or "none",
         )
         return report
 
 
+# ``EMA.state_dict`` stores ``shadow_params`` (param_dict kind) or ``shadow_model``
+# (module kind); older checkpoints stored the shadow mapping flat.
+def _ema_shadow(ema: dict[str, object], *, path: Path) -> dict[str, Tensor]:
+    """Return the EMA shadow tensors, rejecting an EMA that holds none."""
+    shadow = ema.get("shadow_params", ema.get("shadow_model", ema))
+    tensors = {
+        name: value
+        for name, value in convert(shadow, dict[str, object]).items()
+        if isinstance(value, torch.Tensor)
+    }
+    if not tensors:
+        raise ValueError(
+            f"warm start from {path}: the checkpoint's EMA state holds no tensors "
+            f"(keys {sorted(ema)}); refusing to evaluate live weights instead.",
+        )
+    return tensors
+
+
+_WRAPPER_PREFIXES: Final = ("module.", "_orig_mod.")
+
+
 def _bare(name: str) -> str:
-    """Strip data-parallel and compile wrapper prefixes from a state-dict key."""
-    for prefix in ("module.", "_orig_mod."):
-        name = name.removeprefix(prefix)
+    """Strip data-parallel and compile wrapper prefixes, in any order and nesting."""
+    while name.startswith(_WRAPPER_PREFIXES):
+        name = next(
+            name.removeprefix(prefix)
+            for prefix in _WRAPPER_PREFIXES
+            if name.startswith(prefix)
+        )
     return name

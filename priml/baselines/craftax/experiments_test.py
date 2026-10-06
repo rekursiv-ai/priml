@@ -13,12 +13,13 @@ Two kinds of assertion, and the distinction matters:
 from __future__ import annotations
 
 from dataclasses import fields, is_dataclass
-from pathlib import Path
+from importlib import util
 from typing import TYPE_CHECKING, Final, cast
 from unittest.mock import patch
 
+import re
+
 from configgle import InlineConfig
-from configgle.pprinting import pformat
 
 import pytest
 
@@ -45,15 +46,13 @@ from priml.baselines.craftax.rnn_train_step import CraftaxRNNTrainStep
 from priml.baselines.craftax.train_step import CraftaxTrainStep
 from priml.lib.absent import ABSENT
 from priml.runtime import SingleProcess
+from priml.testing.golden import assert_pprint_golden
 from priml.train.parallelism import NoParallel
 from priml.train.train_loop import TrainLoop
 
 
 if TYPE_CHECKING:
     from priml.testing.experiments import ExperimentFactory
-
-
-_CWD: Final = Path(__file__).resolve().parent
 
 
 type _CraftaxLoop = (
@@ -701,6 +700,118 @@ def test_exp013_changes_the_architecture_and_what_travels_with_it() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("factory", "treatment"),
+    [
+        (exp002, set[str]()),
+        (
+            exp003,
+            {
+                # Q-learning's recipe: rollout, minibatches, optimizer, and
+                # bootstrap target travel together, as the docstring states.
+                "step.rollout_steps",
+                "step.num_minibatches",
+                "step.learning_rate",
+                "step.trace_decay",
+                "step.max_grad_norm",
+            },
+        ),
+        (
+            exp013,
+            {
+                # Memory and what only makes sense alongside it.
+                "step.rollout_steps",
+                "step.discount",
+                "step.entropy_coefficient",
+                "step.model.channels_in",
+            },
+        ),
+    ],
+    ids=["exp002", "exp003", "exp013"],
+)
+def test_cross_architecture_forks_keep_every_shared_parent_setting(
+    factory: ExperimentFactory[_CraftaxLoop],
+    treatment: set[str],
+) -> None:
+    """A fork that swaps the step class keeps every setting both steps share.
+
+    Only the documented treatment, the new step class, and the budget it
+    implies may differ from exp001; anything else is a re-tune smuggled in
+    with the architecture.
+    """
+    parent = _flatten(exp001())
+    child = _flatten(factory())
+    budget = {
+        "max_steps",
+        "step.total_train_steps",
+        "num_steps_eval",
+        "dataset.updates_per_epoch",
+    }
+    moved = {
+        name
+        for name in parent.keys() & child.keys()
+        if parent[name] != child[name]
+        and not name.startswith("step.model.")
+        and name not in {"experiment_name", "step", "step.model"}
+    }
+    assert moved <= treatment | budget
+    assert {name for name in treatment if parent[name] == child[name]} == set()
+
+
+class _RetunedExp001:
+    """exp001 with every shared setting moved, to see which forks follow."""
+
+    def __init__(self, parent: ExperimentFactory[CraftaxTrainLoop]) -> None:
+        self.parent = parent
+
+    def __call__(self) -> CraftaxTrainLoop:
+        cfg = self.parent()
+        cfg.study_name = "craftax-retuned"
+        cfg.step.env.seed = 7
+        cfg.step.env.optimistic_reset_ratio = 8
+        cfg.step.num_epochs = 3
+        cfg.step.anneal_learning_rate = False
+        cfg.step.clip_epsilon = 0.3
+        cfg.step.value_coefficient = 0.25
+        cfg.step.seed = 7
+        score = cfg.metrics_eval["craftax"]
+        assert isinstance(score, CraftaxScore.Config)
+        score.seed = 7
+        return cfg
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [exp002, exp003, exp013],
+    ids=["exp002", "exp003", "exp013"],
+)
+def test_cross_architecture_forks_inherit_parent_settings(
+    factory: ExperimentFactory[_CraftaxLoop],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A setting exp001 owns reaches each fork without being retyped there."""
+    monkeypatch.setattr(experiments, "exp001", _RetunedExp001(experiments.exp001))
+    parent = _flatten(experiments.exp001())
+    child = _flatten(factory())
+    shared = {
+        "study_name",
+        "step.env.seed",
+        "step.env.optimistic_reset_ratio",
+        "step.num_epochs",
+        "step.anneal_learning_rate",
+        "step.clip_epsilon",
+        "step.value_coefficient",
+        "step.seed",
+        "runtime",
+    }
+    assert {
+        name for name in shared if name in child and child[name] != parent[name]
+    } == set()
+    score = factory().metrics_eval["craftax"]
+    assert isinstance(score, CraftaxScore.Config)
+    assert score.seed == 7
+
+
 def test_exp013_windows_divide_its_rollout() -> None:
     # A ragged final window would receive gradients over a shorter context
     # than every other one.
@@ -726,6 +837,16 @@ def test_module_docstring_lists_every_published_experiment() -> None:
     documented = experiments.__doc__ or ""
     for factory in PUBLISHED_EXPERIMENTS:
         assert factory.__name__ in documented
+
+
+def test_the_launch_command_names_importable_targets() -> None:
+    match = re.search(r"python -m (\S+) (\S+)", experiments.__doc__ or "")
+    assert match is not None
+    module, factory = match.group(1, 2)
+    assert util.find_spec(str(module)) is not None
+    owner, _, name = str(factory).rpartition(".")
+    assert owner == experiments.__name__
+    assert name in {published.__name__ for published in PUBLISHED_EXPERIMENTS}
 
 
 def test_each_fork_names_its_parent_in_the_first_line() -> None:
@@ -790,26 +911,9 @@ def _flatten(config: object, prefix: str = "") -> dict[str, object]:
     return flat
 
 
-def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> None:
-    """Pin the WHOLE finalized ``exp000`` as readable text.
-
-    ``exp000`` is the control every fork is measured against, so a change to
-    it invalidates published numbers. A digest would say only that something
-    moved; this golden says WHICH field, from what, to what.
-    ``hide_default_values=False`` so a field that changes only because a
-    library default changed still shows up here.
-
-    Refresh with ``--golden-overwrite`` after reading the diff.
-    """
-    golden = _CWD / "testdata" / "exp000.txt"
-    rendered = pformat(exp000().copy_tree().finalize(), hide_default_values=False)
-    if request.config.getoption("--golden-overwrite", default=False):
-        golden.parent.mkdir(parents=True, exist_ok=True)
-        _ = golden.write_text(rendered + "\n", encoding="utf-8")
-    assert golden.read_text(encoding="utf-8") == rendered + "\n", (
-        "exp000 changed; read the diff, then rerun with --golden-overwrite "
-        "if the change is intended."
-    )
+def test_exp000_matches_its_golden_config() -> None:
+    """Pin the WHOLE finalized ``exp000``: the control every fork is measured against."""
+    assert_pprint_golden(test_file=__file__, name="exp000", config=exp000())
 
 
 if __name__ == "__main__":

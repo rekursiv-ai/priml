@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
-import json
 import math
 
 import numpy as np
 
-from priml.lib.custom_json import convert
+from priml.lib.custom_json import parse
 
 
 if TYPE_CHECKING:
@@ -33,16 +32,8 @@ def read_labels(manifest: Path) -> dict[str, int]:
       labels: Class labels keyed by normalized latent names.
 
     """
-    decoded = cast(object, json.loads(manifest.read_bytes().decode()))
-    payload = convert(decoded, dict[str, object])
-    entries = [
-        convert(entry, list[object])
-        for entry in convert(payload["labels"], list[object])
-    ]
-    return {
-        convert(entry[0], str).replace("\\", "/"): convert(entry[1], int)
-        for entry in entries
-    }
+    payload = parse(manifest.read_bytes(), _LabelManifest)
+    return {name.replace("\\", "/"): label for name, label in payload["labels"]}
 
 
 def read_image(path: Path) -> NDArray[np.uint8]:
@@ -57,8 +48,16 @@ def read_image(path: Path) -> NDArray[np.uint8]:
     """
     if path.suffix.lower() == ".npy":
         array = cast("NDArray[np.uint8]", np.load(path))
+        if array.dtype != np.uint8 or array.ndim < 3:
+            raise ValueError(
+                f"Stored image {path} must be uint8 with at least three dimensions.",
+            )
         shape = cast("tuple[int, ...]", array.shape)
         return array.reshape(math.prod(shape[:-2]), *shape[-2:])
     with Image.open(path) as handle:
         array = np.asarray(handle.convert("RGB"))
     return array.transpose(2, 0, 1)
+
+
+class _LabelManifest(TypedDict):
+    labels: list[tuple[str, int]]

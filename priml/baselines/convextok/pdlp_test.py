@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Final, cast, override
 
 import math
+import re
 
 import numpy as np
 import pytest
@@ -98,17 +99,6 @@ def test_iteration_limit_stops_unconverged() -> None:
     config = Pdlp.Config()
     config.iteration_limit = 10
     result = config.make()(_program(0))
-    assert not result.optimal
-
-
-def test_restart_state_is_used_before_a_negative_period_restarts() -> None:
-    config = Pdlp.Config()
-    config.restart_period = -1
-    config.iteration_limit = 2
-
-    result = config.make()(_small_program())
-
-    assert result.iterations == 2
     assert not result.optimal
 
 
@@ -768,6 +758,95 @@ def _npz(name: str) -> np.lib.npyio.NpzFile:
     loaded = cast(object, np.load(_CWD / "testdata" / name))
     assert isinstance(loaded, np.lib.npyio.NpzFile)
     return loaded
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("restart_period", 0, "restart_period must be at least 1; got 0."),
+        ("restart_period", -1, "restart_period must be at least 1; got -1."),
+        ("iteration_limit", -1, "iteration_limit must be nonnegative; got -1."),
+        ("ruiz_iterations", -1, "ruiz_iterations must be nonnegative; got -1."),
+        ("tolerance", -1.0, "tolerance must be nonnegative; got -1.0."),
+        ("tolerance", math.nan, "tolerance must be nonnegative; got nan."),
+    ],
+)
+def test_invalid_settings_are_rejected_at_construction(
+    field: str,
+    value: float,
+    message: str,
+) -> None:
+    config = Pdlp.Config()
+    setattr(config, field, value)
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        config.make()
+
+
+def test_unit_restart_period_decides_a_restart_every_iteration() -> None:
+    config = Pdlp.Config()
+    config.restart_period = 1
+    config.iteration_limit = 2
+
+    result = config.make()(_small_program())
+
+    assert result.iterations == 2
+    assert not result.optimal
+
+
+def test_the_default_solve_is_bounded() -> None:
+    # Nothing but the limit ends a solve of an infeasible program, so an
+    # unbounded default would spin forever on one.
+    limit = Pdlp.Config().iteration_limit
+    assert limit >= 0
+
+
+def test_an_infeasible_program_stops_unconverged_at_the_limit() -> None:
+    # One column pinned to 1 by its first row and to 2 by its second.
+    config = Pdlp.Config()
+    config.iteration_limit = 30
+
+    result = config.make()(_infeasible_program())
+
+    assert not result.optimal
+    assert result.iterations == 30
+
+
+def test_check_cadence_keeps_growing_past_one_hundred_thousand() -> None:
+    assert _check_interval(100_000) == 10_000
+    assert "every 1,000 beyond" not in (pdlp.__doc__ or "")
+
+
+def test_a_zero_constraint_matrix_solves() -> None:
+    program = replace(
+        _feasible_zero_program(),
+        values=torch.zeros(2, dtype=torch.float64),
+        objective=torch.tensor([1.0, -1.0, 0.5], dtype=torch.float64),
+    )
+
+    result = Pdlp.Config().make()(program)
+
+    assert result.optimal
+    assert result.step_size == 0.998
+    torch.testing.assert_close(
+        result.primal,
+        torch.tensor([0.0, 1.0, 0.0], dtype=torch.float64),
+        rtol=0.0,
+        atol=1e-4,
+    )
+
+
+def _infeasible_program() -> LinearProgram:
+    return LinearProgram(
+        crow_indices=torch.tensor([0, 1, 2]),
+        col_indices=torch.tensor([0, 0]),
+        values=torch.ones(2, dtype=torch.float64),
+        num_columns=1,
+        row_lower=torch.tensor([1.0, 2.0], dtype=torch.float64),
+        row_upper=torch.tensor([1.0, 2.0], dtype=torch.float64),
+        objective=torch.zeros(1, dtype=torch.float64),
+        lower=torch.zeros(1, dtype=torch.float64),
+        upper=torch.full((1,), 3.0, dtype=torch.float64),
+    )
 
 
 if __name__ == "__main__":

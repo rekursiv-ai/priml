@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from configgle import Fig
 
@@ -71,6 +71,66 @@ def test_cuda_profile_records_and_logs_each_sample(
     assert caplog.records[0].msg == "%s: %.1fms"
     assert caplog.records[0].args == ("Identity", 2.5)
     assert caplog.records[0].getMessage() == "Identity: 2.5ms"
+
+
+class _OrderedEvent:
+    log: ClassVar[list[str]] = []
+
+    def __init__(self, *, enable_timing: bool) -> None:
+        del enable_timing
+
+    def record(self) -> None:
+        self.log.append("record")
+
+    def elapsed_time(self, end_event: object) -> float:
+        del end_event
+        return 1.0
+
+
+def test_cuda_timing_starts_after_the_upstream_pull(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log: list[str] = []
+    monkeypatch.setattr(_OrderedEvent, "log", log)
+    monkeypatch.setattr(torch.cuda, "Event", _OrderedEvent)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    processor = ProfiledProcessor.Config(processor=Identity.Config()).make()
+    processor.use_cuda = True
+
+    def source() -> Iterator[dict[str, object]]:
+        log.append("pull")
+        yield {"x": 1}
+
+    assert list(processor(source())) == [{"x": 1}]
+    assert log == ["pull", "record", "record"]
+
+
+class YieldsEmpty:
+    """Yields a falsy ``{}`` before each sample; only exhaustion ends a stream."""
+
+    class Config(Fig["YieldsEmpty"]): ...
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def __call__(
+        self,
+        samples: Iterator[dict[str, object]],
+    ) -> Iterator[dict[str, object]]:
+        for sample in samples:
+            yield {}
+            yield sample
+
+
+def test_a_falsy_output_is_not_end_of_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "Event", _OrderedEvent)
+    monkeypatch.setattr(_OrderedEvent, "log", [])
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    processor = ProfiledProcessor.Config(processor=YieldsEmpty.Config()).make()
+    processor.use_cuda = True
+    sample: dict[str, object] = {"x": 1}
+
+    assert list(processor(iter([sample]))) == [{}, {"x": 1}]
 
 
 if __name__ == "__main__":

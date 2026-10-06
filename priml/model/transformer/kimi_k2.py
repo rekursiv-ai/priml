@@ -43,7 +43,7 @@ from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
 from functools import partial
-from typing import TYPE_CHECKING, Literal, Self, cast, override
+from typing import TYPE_CHECKING, Self, override
 
 from configgle import Makeable, Makes
 from torch import Tensor, nn
@@ -77,47 +77,6 @@ if TYPE_CHECKING:
 
 
 _VALID_MODEL_TYPES = frozenset({"kimi_k2", "deepseek_v3"})
-
-
-def _parse_yarn(rope_scaling: object) -> YarnScaling.Config | None:
-    """Parse HF ``rope_scaling`` → config. None-pass-through; strict on type."""
-    if not rope_scaling:
-        return None
-    # Validated rather than cast: this is an HF ``config.json``, so a
-    # malformed field is caller input, and casting surfaced it as an
-    # ``AttributeError`` from inside ``.get``.
-    scaling = convert(rope_scaling, dict[str, object])
-    stype = scaling.get("type") or scaling.get("rope_type")
-    if stype is None:
-        return None
-    if stype != "yarn":
-        raise ValueError(
-            f"Unsupported rope_scaling type={stype!r}; only yarn is implemented.",
-        )
-    config = YarnScaling.Config()
-    config.factor = convert(scaling["factor"], float)
-    config.original_max_position_embeddings = convert(
-        scaling.get("original_max_position_embeddings"),
-        int,
-        default=4_096,
-    )
-    config.beta_fast = convert(scaling.get("beta_fast"), float, default=32.0)
-    config.beta_slow = convert(scaling.get("beta_slow"), float, default=1.0)
-    config.mscale = convert(scaling.get("mscale"), float, default=1.0)
-    config.mscale_all_dim = convert(scaling.get("mscale_all_dim"), float, default=0.0)
-    return config
-
-
-def _remap_shared(
-    hf_sd: dict[str, Tensor],
-    sp: str,
-    bs: str,
-    out: dict[str, Tensor],
-) -> None:
-    gate = hf_sd[f"{sp}.gate_proj.weight"]
-    up = hf_sd[f"{sp}.up_proj.weight"]
-    out[f"{bs}.up_proj.weight"] = torch.cat([gate, up])
-    out[f"{bs}.down_proj.weight"] = hf_sd[f"{sp}.down_proj.weight"]
 
 
 # Read off the BLOCK rather than a parent mirror of it: the geometry lives where the
@@ -221,13 +180,9 @@ class KimiK2(Transformer):
         )
         """Block template (broadcast ``num_hidden_layers`` times), or a list.
 
-        ONE slot rather than a `router`, a `norm` and a `rope` beside it: each
-        of those belongs to something the block already holds, and hoisting
-        them flattened the tree the reader is supposed to descend one node at
-        a time. The routing policy is ``block.ffn.router``, the epsilon is
-        ``block.norm1.eps``, the rotary base is
-        ``block.attn.rope.frequencies.base`` -- each named by its position, and
-        each editable without this class knowing the field exists.
+        Routing and normalization live on ``block.ffn.router`` and
+        ``block.norm1``. The default template has no rotary embedding;
+        ``from_hf`` installs it from the checkpoint's rotary settings.
 
         ``finalize`` copies the template per layer and pushes only the widths
         the PARENT owns (``channels_in`` and the hidden widths), so an edit to
@@ -245,39 +200,40 @@ class KimiK2(Transformer):
               result: KimiK2.Config instance.
 
             """
-            model_type = config.get("model_type")
-            assert isinstance(model_type, str)
+            if config.get("quantization_config") is not None:
+                raise ValueError(
+                    "Unsupported quantization_config; load dequantized weights.",
+                )
+            model_type = convert(config.get("model_type"), str)
             if model_type not in _VALID_MODEL_TYPES:
                 raise ValueError(
                     f"Expected model_type in {sorted(_VALID_MODEL_TYPES)}, "
                     f"got {model_type!r}.",
                 )
-            scoring_func_value = config.get("scoring_func", "sigmoid")
-            if scoring_func_value not in ("softmax", "sigmoid"):
+            scoring_func = convert(config.get("scoring_func", "sigmoid"), str)
+            if scoring_func not in ("softmax", "sigmoid"):
                 raise ValueError(
                     f"Expected scoring_func in ('softmax', 'sigmoid'), "
-                    f"got {scoring_func_value!r}.",
+                    f"got {scoring_func!r}.",
                 )
-            scoring_func = cast(Literal["softmax", "sigmoid"], scoring_func_value)  # pyright: ignore[reportUnnecessaryCast] -- Pyright narrows from the `in` check above; ty does not, so the cast stays.
             # HF's schema is parsed into the CHILD configs; the parent does
             # not mirror foreign names onto itself. Everything below hangs off
             # the ONE block template, which is where each value lives.
-            eps = convert(config.get("rms_norm_eps"), float, default=1e-6)
+            eps = convert(config.get("rms_norm_eps", 1e-6), float)
             norm = RMSNorm.Config(elementwise_affine=True)
             norm.eps = eps
 
             frequencies = HuggingFaceFrequencies.Config()
-            frequencies.base = convert(
-                config.get("rope_theta"),
-                float,
-                default=10_000.0,
-            )
+            frequencies.base = convert(config.get("rope_theta", 10_000.0), float)
             rope = RoPE.Config()
-            rope.frequencies = _parse_yarn(config.get("rope_scaling")) or frequencies
+            yarn = YarnScaling.Config.from_hf(config)
+            if yarn is not None:
+                yarn.inner = frequencies
+            rope.frequencies = yarn or frequencies
 
             init_weight = partial(
                 nn.init.normal_,
-                std=convert(config.get("initializer_range"), float, default=0.02),
+                std=convert(config.get("initializer_range", 0.02), float),
             )
             attn = MultiHeadLatentAttention.Config(
                 bias=False,
@@ -286,23 +242,25 @@ class KimiK2(Transformer):
             )
             attn.num_heads = convert(config["num_attention_heads"], int)
             attn.channels_qk_nope_head = convert(
-                config.get("qk_nope_head_dim"),
+                config.get("qk_nope_head_dim", 128),
                 int,
-                default=128,
             )
             attn.channels_qk_rope_head = convert(
-                config.get("qk_rope_head_dim"),
+                config.get("qk_rope_head_dim", 64),
                 int,
-                default=64,
             )
-            attn.channels_v_head = convert(config.get("v_head_dim"), int, default=128)
+            attn.channels_v_head = convert(config.get("v_head_dim", 128), int)
             attn.q_lora_rank = (
                 convert(config["q_lora_rank"], int)
                 if config.get("q_lora_rank") is not None
                 else None
             )
-            attn.kv_lora_rank = convert(config.get("kv_lora_rank"), int, default=512)
+            attn.kv_lora_rank = convert(config.get("kv_lora_rank", 512), int)
             attn.rope = rope
+            if yarn is not None:
+                softmax_scale = yarn.softmax_scale(attn.channels_qk_head)
+                if softmax_scale is not None:
+                    attn.softmax_scale = softmax_scale
             attn.norm_q_lora = norm.copy_tree()
             attn.norm_kv_lora = norm.copy_tree()
 
@@ -311,15 +269,15 @@ class KimiK2(Transformer):
                 if scoring_func == "sigmoid"
                 else SoftmaxRouter.Config()
             )
-            router.top_k = convert(config.get("num_experts_per_tok"), int, default=1)
-            router.norm_topk_prob = bool(config.get("norm_topk_prob", True))
+            router.top_k = convert(config.get("num_experts_per_tok", 8), int)
+            router.norm_topk_prob = convert(config.get("norm_topk_prob", True), bool)
             if isinstance(router, SigmoidRouter.Config):
                 router.routed_scaling_factor = convert(
                     config.get("routed_scaling_factor", 1.0),
                     float,
                 )
-                router.n_group = convert(config.get("n_group"), int, default=1)
-                router.topk_group = convert(config.get("topk_group"), int, default=1)
+                router.n_group = convert(config.get("n_group", 1), int)
+                router.topk_group = convert(config.get("topk_group", 1), int)
 
             moe = MoE.Config(
                 expert=SwiGLU.Config(
@@ -332,12 +290,8 @@ class KimiK2(Transformer):
                 ),
             )
             moe.router = router
-            moe.num_shared_experts = convert(
-                config.get("n_shared_experts"),
-                int,
-                default=0,
-            )
-            router.num_experts = convert(config.get("n_routed_experts"), int, default=0)
+            moe.num_shared_experts = convert(config.get("n_shared_experts", 0), int)
+            router.num_experts = convert(config.get("n_routed_experts", 256), int)
 
             block = TransformerBlock.Config(prenorm=True)
             block.attn = attn
@@ -359,9 +313,12 @@ class KimiK2(Transformer):
                     f"moe_intermediate_size must be > 0, got {channels_hidden_expert}.",
                 )
 
+            channels_hidden_dense = convert(config.get("intermediate_size"), int)
+            if channels_hidden_dense < 1:
+                raise ValueError("intermediate_size must be positive.")
             head: Makeable[TensorModule] = (
                 TiedLinear.Config(tied="proj_in")
-                if bool(config.get("tie_word_embeddings", False))
+                if convert(config.get("tie_word_embeddings", False), bool)
                 else Linear.Config(init_weight=init_weight, shard="vocab")
             )
             return cls(
@@ -370,12 +327,11 @@ class KimiK2(Transformer):
                 num_layers=convert(config["num_hidden_layers"], int),
                 proj_in=Embedding.Config(init_weight=init_weight, shard="vocab"),
                 proj_out=Sequential.Config(elements=[norm.copy_tree(), head]),
-                channels_hidden_dense=convert(config["intermediate_size"], int),
+                channels_hidden_dense=channels_hidden_dense,
                 channels_hidden_expert=channels_hidden_expert,
                 first_k_dense_replace=convert(
-                    config.get("first_k_dense_replace"),
+                    config.get("first_k_dense_replace", 3),
                     int,
-                    default=0,
                 ),
                 block=block,
             )
@@ -440,6 +396,7 @@ class KimiK2(Transformer):
         *,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
+        trust_remote_code: bool = False,
     ) -> KimiK2:
         """Build a KimiK2 with HF weights loaded.
 
@@ -447,6 +404,7 @@ class KimiK2(Transformer):
           path_or_repo: Local checkpoint directory or HF model id.
           device: Target device (default: CPU).
           dtype: Override the dtype recorded in config.json.
+          trust_remote_code: Allow executing the checkpoint repository's code.
 
         Returns:
           model: KimiK2 instance with weights loaded.
@@ -455,7 +413,7 @@ class KimiK2(Transformer):
         hf_config, hf_sd = hub.load_hf_checkpoint(
             path_or_repo,
             dtype=dtype,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
         )
         config = cls.Config.from_hf(hf_config).finalize()
         model = config.make()
@@ -535,31 +493,30 @@ def remap_hf_state_dict(
             moe = _moe_of(config, i)
             router = moe.router
             if isinstance(router, SigmoidRouter.Config) and router.use_correction_bias:
-                out[f"{bf}.router.e_score_correction_bias"] = hf_sd.get(
-                    f"{p}.mlp.gate.e_score_correction_bias",
-                    torch.zeros(router.num_experts),
-                )
+                out[f"{bf}.router.e_score_correction_bias"] = hf_sd[
+                    f"{p}.mlp.gate.e_score_correction_bias"
+                ]
             for e in range(router.num_experts):
                 ep, be = f"{p}.mlp.experts.{e}", f"{bf}.experts.{e}"
                 gate = hf_sd[f"{ep}.gate_proj.weight"]
                 up = hf_sd[f"{ep}.up_proj.weight"]
                 out[f"{be}.up_proj.weight"] = torch.cat([gate, up])
                 out[f"{be}.down_proj.weight"] = hf_sd[f"{ep}.down_proj.weight"]
-            # Shared experts: HF collapses ``n_shared_experts=1`` into
-            # a single module; loop stores a ModuleList indexed from 0.
-            if moe.num_shared_experts == 1:
-                _remap_shared(
-                    hf_sd,
-                    f"{p}.mlp.shared_experts",
-                    f"{bf}.shared_experts.0",
-                    out,
+            if moe.num_shared_experts:
+                sp = f"{p}.mlp.shared_experts"
+                gates = hf_sd[f"{sp}.gate_proj.weight"].chunk(
+                    moe.num_shared_experts,
+                    dim=0,
                 )
-            else:
-                for s in range(moe.num_shared_experts):
-                    _remap_shared(
-                        hf_sd,
-                        f"{p}.mlp.shared_experts.{s}",
-                        f"{bf}.shared_experts.{s}",
-                        out,
-                    )
+                ups = hf_sd[f"{sp}.up_proj.weight"].chunk(moe.num_shared_experts, dim=0)
+                downs = hf_sd[f"{sp}.down_proj.weight"].chunk(
+                    moe.num_shared_experts,
+                    dim=1,
+                )
+                for s, (gate, up, down) in enumerate(
+                    zip(gates, ups, downs, strict=True),
+                ):
+                    bs = f"{bf}.shared_experts.{s}"
+                    out[f"{bs}.up_proj.weight"] = torch.cat([gate, up])
+                    out[f"{bs}.down_proj.weight"] = down
     return out

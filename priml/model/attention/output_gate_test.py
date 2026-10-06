@@ -5,19 +5,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
-from configgle.testing import assert_pprint_golden
-
 import pytest
 import torch
 
 from priml.cost import cost
 from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
+from priml.model.attention.kvcache import KVCache, alloc_layer_cache
 from priml.model.attention.output_gate import OutputGate
 from priml.model.attention.rope import RoPE
 from priml.model.norm import RMSNorm
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -72,13 +72,17 @@ def test_output_gate_cached():
             channels_head=16,
             causal=True,
         ),
+        depth_index=((0, 1),),
     ).make()
-    cache = m.alloc_kv_cache(batch=2, max_seq=8)
+    cache = alloc_layer_cache(m, batch=2, max_seq=8)
 
-    out, cache = m.forward_cached(torch.randn(2, 8, 64), cache=cache)
+    out = m(torch.randn(2, 8, 64), cache=cache)
 
     assert out.shape == (2, 8, 64)
-    assert cache.length == 8
+    assert isinstance(m.inner, Attention)
+    state = cache[m.inner.depth_index]
+    assert isinstance(state, KVCache)
+    assert state.length == 8
 
 
 def test_output_gate_passthrough_kwargs():
@@ -213,21 +217,27 @@ def test_output_gate_traffic_prices_projection_and_scalar_operands() -> None:
     )
 
 
-def test_output_gate_allocates_cache_with_requested_placement() -> None:
+def test_output_gate_allocates_one_logical_cache_slot() -> None:
     model = OutputGate.Config(
         channels_in=12,
         inner=Attention.Config(num_heads=3, channels_head=4),
+        depth_index=((0, 1),),
     ).make()
-    cache = model.alloc_kv_cache(
+    cache = alloc_layer_cache(
+        model,
         batch=2,
         max_seq=5,
         device="meta",
         dtype=torch.bfloat16,
     )
-    assert cache.k.shape == (2, 3, 5, 4)
-    assert cache.v.shape == (2, 3, 5, 4)
-    assert cache.k.device == cache.v.device == torch.device("meta")
-    assert cache.k.dtype == cache.v.dtype == torch.bfloat16
+    assert isinstance(model.inner, Attention)
+    assert list(cache) == [model.inner.depth_index]
+    state = cache[model.inner.depth_index]
+    assert isinstance(state, KVCache)
+    assert state.k.shape == (2, 3, 5, 4)
+    assert state.v.shape == (2, 3, 5, 4)
+    assert state.k.device == state.v.device == torch.device("meta")
+    assert state.k.dtype == state.v.dtype == torch.bfloat16
 
 
 def test_output_gate_cached_forwards_kwargs_and_multiplies_by_gate() -> None:
@@ -238,6 +248,7 @@ def test_output_gate_cached_forwards_kwargs_and_multiplies_by_gate() -> None:
             channels_head=4,
             attn_kernel=SdpaNaive.Config(),
         ),
+        depth_index=((0, 1),),
     ).make()
     with torch.no_grad():
         model.gate_proj.weight.zero_()
@@ -245,22 +256,18 @@ def test_output_gate_cached_forwards_kwargs_and_multiplies_by_gate() -> None:
     # Attention masks are [batch, heads, sequence, sequence].
     mask = torch.full((2, 3, 5, 5), -float("inf"))
     mask[..., 0] = 0
-    actual_cache = model.alloc_kv_cache(batch=2, max_seq=5)
-    reference_cache = model.alloc_kv_cache(batch=2, max_seq=5)
+    actual_cache = alloc_layer_cache(model, batch=2, max_seq=5)
+    reference_cache = alloc_layer_cache(model, batch=2, max_seq=5)
 
-    actual, updated = model.forward_cached(
-        x,
-        cache=actual_cache,
-        attn_mask=mask,
-    )
+    actual = model(x, cache=actual_cache, attn_mask=mask)
     assert isinstance(model.inner, Attention)
-    inner, reference_updated = model.inner.forward_cached(
-        x,
-        cache=reference_cache,
-        attn_mask=mask,
-    )
+    inner = model.inner(x, cache=reference_cache, attn_mask=mask)
     torch.testing.assert_close(actual, inner * torch.sigmoid(model.gate_proj(x)))
     assert not torch.equal(actual, inner / torch.sigmoid(model.gate_proj(x)))
+    updated = actual_cache[model.inner.depth_index]
+    reference_updated = reference_cache[model.inner.depth_index]
+    assert isinstance(updated, KVCache)
+    assert isinstance(reference_updated, KVCache)
     assert torch.equal(updated.k, reference_updated.k)
     assert torch.equal(updated.v, reference_updated.v)
     assert updated.length == reference_updated.length == 5

@@ -20,6 +20,7 @@ from priml.baselines.arcagi1.train_step_test import port_config
 from priml.baselines.sudoku.act import AtomicPool
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.lib.custom_json import convert
+from priml.lib.testing.cli import assert_help_without_docstring
 from priml.runtime import SingleProcess
 from priml.train.checkpointer import Checkpointer
 from priml.train.parallelism import NoParallel
@@ -153,13 +154,14 @@ def test_main_rejects_unsupported_world_size(
     assert error.value.code == "Use one CUDA GPU or torchrun with eight CUDA GPUs"
 
 
-def test_main_rejects_missing_docstring(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(reproduce_blog_post, "__doc__", None)
-
-    with pytest.raises(ValueError, match=r"Expected __doc__ is not None\.") as error:
-        reproduce_blog_post.main()
-
-    assert str(error.value) == "Expected __doc__ is not None."
+def test_main_help_works_without_a_module_docstring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert_help_without_docstring(
+        monkeypatch,
+        reproduce_blog_post,
+        reproduce_blog_post.main,
+    )
 
 
 def test_main_help_shows_launcher_documentation(

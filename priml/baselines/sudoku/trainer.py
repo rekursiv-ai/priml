@@ -326,7 +326,7 @@ class Trainer:
         """Checkpoint engine; None disables checkpointing entirely."""
 
         runtime: SingleProcess.Config = field(
-            # The device is PINNED: priml defaults to "auto", which silently trains on
+            # The device is PINNED: priml defaults to ``None``, which silently trains on
             # CPU when a GPU is absent. This recipe is CUDA-only; failing loudly
             # beats a 100x-slow run nobody notices.
             default_factory=lambda: SingleProcess.Config(device="cuda"),
@@ -553,7 +553,7 @@ class Trainer:
             self.model.puzzle_emb_batch_size = self.dataset.batch_size
             # One device for data and compute unless the dataset was pointed
             # elsewhere explicitly.
-            if self.dataset.device == "auto":
+            if self.dataset.device is None:
                 self.dataset.device = str(self.runtime.device)
             # Push run context down; explicit child values win. The dataset is
             # a resource child (rooted at the scratch base); the checkpointer is
@@ -1340,19 +1340,17 @@ class Trainer:
         pool = self.pool
         if pool.carry is not None:
             self.model.set_feedback(pool.feedback)
-        forward_kwargs: dict[str, Tensor] = {}
-        if self.model.puzzle_emb is not None:
-            forward_kwargs["puzzle_identifiers"] = pool.puzzle_ids
         with self._autocast():
-            out = self.model(pool.inputs, pool.z_slow, pool.z_fast, **forward_kwargs)
+            out = self.model(
+                pool.inputs,
+                pool.z_slow,
+                pool.z_fast,
+                pool.puzzle_ids if self.model.puzzle_emb is not None else None,
+            )
         logits = out["logits"]
         q_halt = out["q_halt"]
         z_slow_out = out["z_slow"]
         z_fast_out = out["z_fast"]
-        assert isinstance(logits, Tensor)
-        assert isinstance(q_halt, Tensor)
-        assert isinstance(z_slow_out, Tensor)
-        assert isinstance(z_fast_out, Tensor)
 
         lm_loss = self._compute_loss(
             logits=logits,
@@ -1777,9 +1775,13 @@ class Trainer:
             "elapsed": self._train_elapsed(),
             **step_metrics,
         }
-        if torch.cuda.is_available():
-            metrics["gpu_mem_allocated_gb"] = torch.cuda.max_memory_allocated() / 1e9
-            metrics["gpu_mem_reserved_gb"] = torch.cuda.max_memory_reserved() / 1e9
+        if self.device.type == "cuda":
+            metrics["gpu_mem_allocated_gb"] = (
+                torch.cuda.max_memory_allocated(self.device) / 1e9
+            )
+            metrics["gpu_mem_reserved_gb"] = (
+                torch.cuda.max_memory_reserved(self.device) / 1e9
+            )
         for tracker in self._trackers:
             tracker.log_metrics(metrics, self.global_step, prefix="train/")
 

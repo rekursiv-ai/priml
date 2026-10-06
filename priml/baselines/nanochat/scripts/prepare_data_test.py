@@ -27,6 +27,7 @@ import logging
 import os
 import pickle
 import pickletools
+import re
 import runpy
 import shutil
 import subprocess
@@ -89,6 +90,7 @@ from priml.baselines.nanochat.scripts.prepare_data import (
     unique_rows,
 )
 from priml.baselines.nanochat.scripts.prepare_tokenizer import (
+    SPLIT_PATTERN,
     ByteLevelTokenizer,
     SamplePreparation,
     UnigramPreparation,
@@ -314,27 +316,42 @@ def test_bpe_preparation_build_uses_configured_recipe(tmp_path: Path) -> None:
     )
 
 
-def test_download_fetches_missing_shards_and_retains_existing(tmp_path: Path) -> None:
+_PINNED: Final = (
+    "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve/"
+    "915333b4f8b8684f39aeaafea600fea6f43fb703/"
+)
+
+
+def test_download_fetches_missing_shards_and_retains_verified(tmp_path: Path) -> None:
     existing = tmp_path / "shard_00000.parquet"
     existing.write_bytes(b"original")
+    (tmp_path / "shard_00000.parquet.source-url").write_text(
+        _PINNED + "shard_00000.parquet",
+        encoding="utf-8",
+    )
     with patch(
         "priml.baselines.nanochat.scripts.prepare_data.request.urlopen",
         return_value=io.BytesIO(b"downloaded"),
     ) as fetch:
         paths = _download(tmp_path, count=2)
-    fetch.assert_called_once_with(
-        "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve/main/shard_00001.parquet",
-    )
+    fetch.assert_called_once_with(_PINNED + "shard_00001.parquet", timeout=120)
     assert [path.name for path in paths] == [
         "shard_00000.parquet",
         "shard_00001.parquet",
     ]
     assert existing.read_bytes() == b"original"
     assert paths[1].read_bytes() == b"downloaded"
-    assert sorted(path.name for path in tmp_path.iterdir()) == [
-        "shard_00000.parquet",
-        "shard_00001.parquet",
-    ]
+
+
+def test_download_names_the_fix_for_a_cache_without_a_receipt(tmp_path: Path) -> None:
+    legacy = tmp_path / "shard_00000.parquet"
+    legacy.write_bytes(b"fetched at an unknown revision")
+    with pytest.raises(
+        ValueError,
+        match=r"no source receipt.*Delete it to re-download",
+    ):
+        _download(tmp_path, count=1)
+    assert legacy.read_bytes() == b"fetched at an unknown revision"
 
 
 def test_donor_texts_reads_only_requested_rows(corpus: Path) -> None:
@@ -391,7 +408,7 @@ def test_fit_vocabulary_records_and_reuses_exact_artifacts(
         "train_chars": 24,
         "doc_cap": 7,
         "shards": [shard.name],
-        "split_pattern": prepare_data.SPLIT_PATTERN,
+        "split_pattern": SPLIT_PATTERN,
         "bos_token": BOS_TOKEN,
         "token_bytes_sha256": token_bytes_fingerprint(token_bytes),
     }
@@ -500,7 +517,7 @@ def test_fit_vocabulary_checks_its_unicode_round_trip_probe(
     trainer.train_from_iterator.assert_called_once_with(
         documents.return_value,
         1,
-        pattern=prepare_data.SPLIT_PATTERN,
+        pattern=SPLIT_PATTERN,
     )
 
 
@@ -905,7 +922,7 @@ def test_the_builtin_experiment_ladder_includes_both_endpoints(
     assert last.dataset.reference_evaluation.path == (
         preparation.config.working_dir / "reference-eval/unigram.npz"
     )
-    for unknown in ("exp003", "exp024"):
+    for unknown in ("exp999", "default_directory", "exp022x"):
         with pytest.raises(
             ValueError,
             match=f"Unknown NanoChat experiment: {unknown}\\.",
@@ -1225,7 +1242,7 @@ def test_corpus_fetch_rejects_changed_source(
 def test_fetch_rejects_existing_file_without_source_identity(tmp_path: Path) -> None:
     destination = tmp_path / "shard.parquet"
     destination.write_bytes(b"unknown source")
-    with pytest.raises(ValueError, match=r"source.*match"):
+    with pytest.raises(ValueError, match=r"no source receipt"):
         fetch_file("https://example.com/pinned/shard.parquet", destination=destination)
     assert destination.read_bytes() == b"unknown source"
 
@@ -2567,33 +2584,24 @@ def test_differing_reports_only_requested_values_that_changed() -> None:
     assert _differing(recorded, requested) == {"changed": (5, 6)}
 
 
-def test_download_logs_url_and_stages_in_destination(
+def test_download_logs_url_and_records_its_receipt(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    url = (
-        "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve/"
-        "main/shard_00000.parquet"
-    )
+    url = _PINNED + "shard_00000.parquet"
     caplog.set_level(
         "INFO",
         logger="priml.baselines.nanochat.scripts.prepare_data",
     )
-    with (
-        patch(
-            "priml.baselines.nanochat.scripts.prepare_data.request.urlopen",
-            return_value=io.BytesIO(b"payload"),
-        ),
-        patch(
-            "priml.baselines.nanochat.scripts.prepare_data.tempfile.mkstemp",
-            wraps=tempfile.mkstemp,
-        ) as mkstemp,
+    with patch(
+        "priml.baselines.nanochat.scripts.prepare_data.request.urlopen",
+        return_value=io.BytesIO(b"payload"),
     ):
         paths = _download(tmp_path, count=1)
 
-    assert caplog.messages == [f"downloading {url}"]
-    mkstemp.assert_called_once_with(dir=tmp_path, prefix=".shard_00000.parquet.")
+    assert caplog.messages == [f"fetching {url}"]
     assert paths[0].read_bytes() == b"payload"
+    assert (tmp_path / "shard_00000.parquet.source-url").read_text() == url
 
 
 def test_token_bytes_uses_utf8_lengths_and_int32() -> None:
@@ -3042,7 +3050,6 @@ def test_main_print_config_uses_absolute_directory_and_skips_build(
                 "inputs",
             ],
             {
-                "directory": Path("inputs"),
                 "num_train_shards": 3,
                 "vocab_size": 41,
                 "tokenizer_train_chars": 52,
@@ -3052,7 +3059,6 @@ def test_main_print_config_uses_absolute_directory_and_skips_build(
         (
             ["--vocab-size", "41", "--directory", "inputs"],
             {
-                "directory": Path("inputs"),
                 "num_train_shards": 7,
                 "vocab_size": 41,
                 "tokenizer_train_chars": 2_000_000_000,
@@ -3072,10 +3078,8 @@ def test_main_bpe_flags_forward_overrides_and_defaults(
 
     assert prepare_data.main() == 0
 
-    assert prepare_mock.call_args.args == (expected["directory"],)
-    assert prepare_mock.call_args.kwargs == {
-        name: value for name, value in expected.items() if name != "directory"
-    }
+    assert prepare_mock.call_args.args == (Path("inputs").absolute(),)
+    assert prepare_mock.call_args.kwargs == expected
 
 
 def test_main_dump_and_regular_stages_dispatch_without_training(
@@ -3580,6 +3584,30 @@ def test_main_bpe_override_keeps_other_vocabulary_defaults(
     )
 
 
+@pytest.mark.parametrize("conflict", [["--stage", "rows"], ["--print-config"]])
+def test_main_refuses_bpe_flags_beside_a_prepared_workflow_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    conflict: list[str],
+) -> None:
+    _configure_main(monkeypatch, ["--vocab-size", "41", *conflict])
+    prepare = Mock()
+    monkeypatch.setattr(prepare_data, "prepare", prepare)
+    with pytest.raises(SystemExit) as error:
+        prepare_data.main()
+    assert error.value.code == 2
+    prepare.assert_not_called()
+
+
+def test_main_hands_prepare_the_expanded_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_main(monkeypatch, ["--vocab-size", "41", "--directory", "~/corpus"])
+    prepare = Mock()
+    monkeypatch.setattr(prepare_data, "prepare", prepare)
+    assert prepare_data.main() == 0
+    assert prepare.call_args.args == (Path("~/corpus").expanduser().absolute(),)
+
+
 def test_launch_training_emits_exact_recipe_text_and_explicit_config_format(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3673,7 +3701,11 @@ def test_encode_fragment_reports_changed_bytes_exactly() -> None:
     encoded = tokenizer.encode("a", add_special_tokens=False)
 
     with (
-        patch.object(prepare_data, "byte_alphabet", return_value=altered),
+        patch.object(
+            prepare_data,
+            "_BYTE_VALUES",
+            {char: value for value, char in altered.items()},
+        ),
         patch.object(tokenizers.Tokenizer, "encode", return_value=encoded),
         patch.object(
             tokenizers.Tokenizer,
@@ -3948,6 +3980,115 @@ def test_training_config_leaves_absent_reference_evaluation_unchanged(
         )
 
     assert training.dataset.reference_evaluation is None
+
+
+def _corpus_config(raw: Path, output: Path) -> CorpusPreparation.Config:
+    config = CorpusPreparation.Config()
+    config.raw_dir = raw
+    config.working_dir = output
+    config.donor_destination_shards = 2
+    return config
+
+
+def test_a_noncanonical_donor_publishes_nothing(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    _write_shard(raw, 0, ["same", "keep"])
+    _write_shard(raw, 1, ["same"])
+    _write_shard(raw, 2, ["heldout"])
+    config = _corpus_config(raw, tmp_path / "prepared")
+    config.train_shard_indices = (0, 1)
+    config.val_shard = 2
+    config.donor_source_ids = ("1:0",)  # A duplicate of 0:0, so not canonical.
+    with pytest.raises(ValueError, match="not a canonical training document"):
+        config.make().build()
+    assert not config.working_dir.exists()
+
+
+def test_donors_reach_destinations_whose_ids_exceed_the_count(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    _write_shard(raw, 8, ["a", "b"])
+    _write_shard(raw, 9, ["c", "donor"])
+    _write_shard(raw, 2, ["heldout"])
+    config = _corpus_config(raw, tmp_path / "prepared")
+    config.train_shard_indices = (8, 9)
+    config.val_shard = 2
+    config.donor_source_ids = ("9:1",)
+    config.make().build()
+    written = [
+        *_text_column(config.working_dir / "shard_00008.parquet"),
+        *_text_column(config.working_dir / "shard_00009.parquet"),
+    ]
+    assert sorted(written) == ["a", "b", "c", "donor"]
+
+
+def test_the_corpus_split_reaches_every_stage() -> None:
+    config = Preparation.Config()
+    config.corpus.val_shard = 8
+    config.corpus.train_shard_indices = (0, 1, 7)
+    config.finalize()
+    for stage in (config.sample, config.rows):
+        assert stage.val_shard == 8
+        assert stage.train_shard_indices == (0, 1, 7)
+
+
+def test_running_one_stage_builds_only_that_stage() -> None:
+    config = Preparation.Config()
+    config.sample.rows_per_shard = 0  # Invalid; must not block "fetch".
+    with patch.object(prepare_data.CorpusPreparation, "fetch") as fetch:
+        Preparation(config).run("fetch")
+    fetch.assert_called_once_with()
+
+
+def test_a_corrupted_byte_table_is_refitted(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    shard = tmp_path / "shard_00000.parquet"
+    parquet.write_table(pa.table({"text": ["hello world 123", "café hello"]}), shard)
+    output = tmp_path / "tokenizer"
+    fit = partial(
+        prepare_data._fit_vocabulary,
+        [shard],
+        out=output,
+        vocab_size=280,
+        train_chars=24,
+        doc_cap=7,
+    )
+    fit()
+    table = output / "token_bytes.npy"
+    original = table.read_bytes()
+    np.save(table, np.zeros(280, dtype=np.int32))
+    caplog.set_level("WARNING", logger="rustbpe")
+    caplog.set_level("INFO", logger=prepare_data.__name__)
+    fit()
+    assert "byte table differs from its recorded digest" in caplog.text
+    assert table.read_bytes() == original
+
+
+def test_prepare_refuses_to_write_over_a_protected_root() -> None:
+    with pytest.raises(ValueError, match="must not be root"):
+        prepare(Path("/"), download=False)
+
+
+@pytest.mark.parametrize("vocab_size", [65_537, 70_000])
+def test_prepare_refuses_ids_a_uint16_row_cannot_hold(
+    tmp_path: Path,
+    vocab_size: int,
+) -> None:
+    with pytest.raises(ValueError, match="vocab_size must be at most 65536"):
+        prepare(tmp_path, vocab_size=vocab_size, download=False)
+
+
+def test_prepared_rows_refuse_a_vocabulary_beyond_uint16() -> None:
+    prepare_data._require_uint16_ids(np.zeros(65_536))
+    with pytest.raises(ValueError, match="exceeds 65536"):
+        prepare_data._require_uint16_ids(np.zeros(65_537))
+
+
+def test_the_source_revision_is_a_commit() -> None:
+    assert re.fullmatch(r"[0-9a-f]{40}", CorpusPreparation.Config().revision)
 
 
 if __name__ == "__main__":

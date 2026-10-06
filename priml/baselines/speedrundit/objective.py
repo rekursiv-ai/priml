@@ -64,7 +64,8 @@ def projection_loss(
       teacher_features: Teacher token features at matching depths.
 
     Returns:
-      loss: Per-sample sum of mean token alignment losses.
+      loss: Per-sample mean, over depths, of each depth's mean token
+        alignment loss.
 
     Raises:
       ValueError: Projection counts or token shapes do not match.
@@ -78,8 +79,12 @@ def projection_loss(
         selected = teacher_target
         if prediction.ids_keep is not None:
             selected = teacher_target.gather(
-                1,
-                prediction.ids_keep[..., None].expand(-1, -1, teacher_target.shape[-1]),
+                dim=1,
+                index=prediction.ids_keep[..., None].expand(
+                    -1,
+                    -1,
+                    teacher_target.shape[-1],
+                ),
             )
         if prediction.tokens.shape != selected.shape:
             raise ValueError("teacher tokens do not match the student projection")
@@ -93,7 +98,7 @@ def projection_loss(
     return total / len(predictions)
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class LossTerms:
     """Unreduced objective and its component losses."""
 
@@ -106,9 +111,21 @@ class LossTerms:
     output: ModelOutput
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SpeedrunObjective:
-    """Combine SiT velocity, REG alignment, CLS diffusion, and CFM."""
+    """Combine SiT velocity, REG alignment, CLS diffusion, and CFM.
+
+    Attributes:
+      path: Probability path; see :func:`interpolant`.
+      weighting: Flow-time sampling distribution.
+      cfm_weighting: Time weighting of the contrastive term.
+      projection_coeff: Weight of REG alignment.
+      cls_coeff: Weight of CLS-token diffusion.
+      cfm_coeff: Weight of contrastive flow matching.
+      shift_time: Shift sampled times by latent size.
+      shift_base: Latent size at which the shift is identity.
+
+    """
 
     path: Literal["linear", "cosine"] = "linear"
     weighting: Literal["uniform", "lognormal"] = "uniform"
@@ -117,7 +134,17 @@ class SpeedrunObjective:
     cls_coeff: float = 0.03
     cfm_coeff: float = 0.05
     shift_time: bool = True
-    shift_base: int = 4096
+    shift_base: int = 4_096
+
+    def __post_init__(self) -> None:
+        """Reject a choice the objective has no branch for."""
+        for name, value, known in (
+            ("path", self.path, ("linear", "cosine")),
+            ("weighting", self.weighting, ("uniform", "lognormal")),
+            ("cfm_weighting", self.cfm_weighting, ("uniform", "linear")),
+        ):
+            if value not in known:
+                raise ValueError(f"unsupported {name}: {value}")
 
     def sample_time(self, latents: Tensor) -> Tensor:
         """Draw and optionally shift one flow time per latent sample.
@@ -131,17 +158,19 @@ class SpeedrunObjective:
         """
         if self.weighting == "uniform":
             t = torch.rand(latents.shape[0], device=latents.device)
-        elif self.weighting == "lognormal":
+        else:
             sigma = torch.randn(latents.shape[0], device=latents.device).exp()
             t = (
                 sigma / (1 + sigma)
                 if self.path == "linear"
                 else 2 * sigma.atan() / math.pi
             )
-        else:
-            raise ValueError(f"unsupported timestep weighting: {self.weighting}")
         if self.shift_time:
-            t = time_shift(t, math.prod(latents.shape[1:]), self.shift_base)
+            t = time_shift(
+                t,
+                latent_dimensions=math.prod(latents.shape[1:]),
+                reference_dimensions=self.shift_base,
+            )
         return t
 
     def __call__(
@@ -155,7 +184,26 @@ class SpeedrunObjective:
         noise: Tensor | None = None,
         cls_noise: Tensor | None = None,
     ) -> LossTerms:
-        """Corrupt latents and CLS features, run the model, and score losses."""
+        """Corrupt latents and CLS features, run the model, and score losses.
+
+        Args:
+          model: Student called as ``model(noisy, time, labels, cls_noisy)``.
+          latents: Clean latents ``[B, ...]``, any rank of at least two.
+          labels: Class labels ``[B]``.
+          teacher_features: Teacher tokens per projection depth; the last
+            carries the CLS token at position 0.
+          time: Flow times ``[B]``; sampled when omitted.
+          noise: Latent noise like ``latents``; sampled when omitted.
+          cls_noise: CLS noise ``[B, C]``; sampled when omitted.
+
+        Returns:
+          terms: Per-sample ``loss`` and its components, their batch-mean
+            ``mean_loss``, and the model output.
+
+        Raises:
+          ValueError: Batch sizes differ, or no teacher features are given.
+
+        """
         if latents.shape[0] != labels.shape[0]:
             raise ValueError("labels and latents have different batch sizes")
         if not teacher_features:
@@ -164,16 +212,21 @@ class SpeedrunObjective:
         time = self.sample_time(latents) if time is None else time
         noise = torch.randn_like(latents) if noise is None else noise
         cls_noise = torch.randn_like(cls_clean) if cls_noise is None else cls_noise
-        alpha, sigma, d_alpha, d_sigma = interpolant(time, self.path)
+        alpha, sigma, d_alpha, d_sigma = interpolant(time, path=self.path)
         broadcast = (slice(None),) + (None,) * (latents.ndim - 1)
         noisy = alpha[broadcast] * latents + sigma[broadcast] * noise
         target = d_alpha[broadcast] * latents + d_sigma[broadcast] * noise
         cls_noisy = alpha[:, None] * cls_clean + sigma[:, None] * cls_noise
         cls_target = d_alpha[:, None] * cls_clean + d_sigma[:, None] * cls_noise
         output = model(noisy, time, labels, cls_noisy)
-        velocity = (output.velocity - target).square().mean(dim=(1, 2, 3))
+        velocity = (
+            (output.velocity - target).square().mean(dim=tuple(range(1, target.ndim)))
+        )
         cls = (output.cls_velocity - cls_target).square().mean(dim=1)
-        projection = projection_loss(output.projections, teacher_features)
+        projection = projection_loss(
+            output.projections,
+            teacher_features=teacher_features,
+        )
         cfm = contrastive_flow_loss(
             output.velocity,
             target,

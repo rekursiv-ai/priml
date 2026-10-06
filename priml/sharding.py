@@ -16,6 +16,10 @@ def parse_shard_spec(spec: str, total_shards: int) -> set[int]:
     Returns:
         shards: Set of shard IDs to process.
 
+    Raises:
+        ValueError: A slice has more than three ``:``-separated fields, or a
+            field is not an integer.
+
     Examples:
         >>> parse_shard_spec("1,3,5", 10)
         {1, 3, 5}
@@ -52,6 +56,11 @@ def parse_shard_spec(spec: str, total_shards: int) -> set[int]:
             # (e.g. "::-1") and negative indices behave exactly as slicing
             # a list of shard IDs would -- including clamping to bounds.
             parts = part_stripped.split(":")
+            if len(parts) > 3:
+                raise ValueError(
+                    f"Shard slice {part_stripped!r} has {len(parts)} fields; "
+                    "expected at most start:end:step.",
+                )
             start_str = parts[0].strip()
             end_str = parts[1].strip()
             step_str = parts[2].strip() if len(parts) > 2 else ""

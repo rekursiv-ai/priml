@@ -6,7 +6,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Final, cast, override
 
-import hashlib
 import json
 import logging
 import zipfile
@@ -26,14 +25,12 @@ from priml.baselines.arcagi1.augmentation import (
 )
 from priml.baselines.arcagi1.metric import (
     CanonicalPassK,
-    PassK,
     PerOutputPass,
     SignalDumpPayload,
     SignalDumpTracker,
     StrictPass,
     TaskScore,
     _any_rank,
-    _digest,
     _floats,
     _gather_grids,
     _gather_list,
@@ -65,233 +62,6 @@ def _packed(predictions: Tensor, halt: Tensor) -> Tensor:
     return torch.cat([halt.reshape(-1, 1), predictions.float()], dim=-1)
 
 
-def _metric(**overrides: object) -> PassK:
-    config = PassK.Config(pass_ks=(1, 2))
-    for name, value in overrides.items():
-        setattr(config, name, value)
-    return config.make()
-
-
-def test_a_puzzle_solved_by_every_view_passes_at_one() -> None:
-    metric = _metric()
-    labels = torch.full((3, 9), 3, dtype=torch.int64)
-    metric.update(
-        _packed(labels.clone(), torch.zeros(3)),
-        label=labels,
-        puzzle_identifiers=torch.zeros(3, dtype=torch.int64),
-    )
-    assert metric.compute() == {"pass@1": 1.0, "pass@2": 1.0}
-
-
-def test_the_majority_answer_wins() -> None:
-    """Agreement across views is the signal, so two votes beat one."""
-    metric = _metric()
-    labels = torch.full((3, 9), 3, dtype=torch.int64)
-    predictions = labels.clone()
-    predictions[:2] = 7  # Two views agree on a WRONG answer.
-    metric.update(
-        _packed(predictions, torch.zeros(3)),
-        label=labels,
-        puzzle_identifiers=torch.zeros(3, dtype=torch.int64),
-    )
-    # The truth was outvoted, but it is still the second-ranked answer.
-    assert metric.compute() == {"pass@1": 0.0, "pass@2": 1.0}
-
-
-def test_confidence_only_breaks_a_tie() -> None:
-    """One vote each: the more confident answer ranks first."""
-    metric = _metric()
-    labels = torch.full((2, 9), 3, dtype=torch.int64)
-    predictions = labels.clone()
-    predictions[0] = 7  # A wrong answer, but stated with low confidence.
-    metric.update(
-        _packed(predictions, torch.tensor([-5.0, 5.0])),
-        label=labels,
-        puzzle_identifiers=torch.zeros(2, dtype=torch.int64),
-    )
-    assert metric.compute()["pass@1"] == 1.0
-
-
-def test_vote_count_outranks_accumulated_confidence() -> None:
-    metric = _metric()
-    labels = torch.full((3, 9), 3, dtype=torch.int64)
-    predictions = labels.clone()
-    predictions[:2] = 7
-
-    metric.update(
-        _packed(predictions, torch.tensor([-5.0, -5.0, 5.0])),
-        label=labels,
-        puzzle_identifiers=torch.zeros(3, dtype=torch.int64),
-    )
-
-    assert metric.compute() == {"pass@1": 0.0, "pass@2": 1.0}
-
-
-def test_votes_are_grouped_per_puzzle() -> None:
-    """One puzzle's views must not vote in another's ballot."""
-    metric = _metric()
-    labels = torch.full((4, 9), 3, dtype=torch.int64)
-    predictions = labels.clone()
-    predictions[2:] = 7  # The second puzzle is answered wrongly.
-    metric.update(
-        _packed(predictions, torch.zeros(4)),
-        label=labels,
-        puzzle_identifiers=torch.tensor([0, 0, 1, 1]),
-    )
-    assert metric.compute()["pass@1"] == 0.5
-
-
-def test_padding_rows_are_not_puzzles() -> None:
-    """Rows squaring off a short batch must not enter the denominator."""
-    metric = _metric()
-    labels = torch.full((4, 9), 3, dtype=torch.int64)
-    labels[2:] = -100
-    metric.update(
-        _packed(labels.clone(), torch.zeros(4)),
-        label=labels,
-        puzzle_identifiers=torch.tensor([0, 1, 2, 3]),
-    )
-    assert metric.compute()["pass@1"] == 1.0
-
-
-def test_all_ignored_row_does_not_hide_later_puzzle() -> None:
-    labels = torch.full((3, 9), 3, dtype=torch.int64)
-    labels[1] = -100
-    predictions = labels.clone()
-    predictions[0] = 7
-    metric = _metric()
-
-    metric.update(
-        _packed(predictions, torch.zeros(3)),
-        label=labels,
-        puzzle_identifiers=torch.tensor([0, 1, 2]),
-    )
-
-    assert metric.compute() == {"pass@1": 0.5, "pass@2": 0.5}
-
-
-def test_valid_count_truncates_before_voting() -> None:
-    metric = _metric()
-    labels = torch.full((4, 9), 3, dtype=torch.int64)
-    predictions = labels.clone()
-    predictions[2:] = 7
-    metric.update(
-        _packed(predictions, torch.zeros(4)),
-        label=labels,
-        puzzle_identifiers=torch.tensor([0, 1, 2, 3]),
-        valid_count=2,
-    )
-    assert metric.compute()["pass@1"] == 1.0
-
-
-def test_valid_count_defaults_to_number_of_batch_rows() -> None:
-    labels = torch.tensor([[3, 4], [5, 6], [7, 8]])
-    predictions = labels.clone()
-    predictions[1] = torch.tensor([0, 0])
-    metric = PassK.Config(pass_ks=(1,)).make()
-
-    metric.update(
-        _packed(predictions, torch.zeros(3)),
-        label=labels,
-        puzzle_identifiers=torch.tensor([0, 1, 2]),
-    )
-
-    assert metric.compute() == {"pass@1": 2 / 3}
-
-
-def test_pass_k_moves_labels_and_identifiers_to_prediction_device(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    labels = torch.tensor([[3, 4], [5, 6]])
-    predictions = labels.clone()
-    metric = PassK.Config(pass_ks=(1,)).make()
-    requested_devices: list[object] = []
-
-    def capture_to(self: Tensor, *args: object, **kwargs: object) -> Tensor:
-        device = kwargs.get("device", args[0] if args else None)
-        if isinstance(device, torch.device):
-            requested_devices.append(device)
-        return self
-
-    monkeypatch.setattr(Tensor, "to", capture_to)
-    metric.update(
-        _packed(predictions, torch.zeros(2)),
-        label=labels,
-        puzzle_identifiers=torch.tensor([0, 1]),
-    )
-
-    assert requested_devices == [torch.device("cpu"), torch.device("cpu")]
-
-
-def test_votes_accumulate_across_batches() -> None:
-    """Views of one puzzle arrive in different batches and must still group."""
-    metric = _metric()
-    labels = torch.full((2, 9), 3, dtype=torch.int64)
-    wrong = labels.clone()
-    wrong[:, 0] = 7
-    identifiers = torch.zeros(2, dtype=torch.int64)
-    metric.update(
-        _packed(wrong, torch.zeros(2)),
-        label=labels,
-        puzzle_identifiers=identifiers,
-    )
-    metric.update(
-        _packed(wrong, torch.zeros(2)),
-        label=labels,
-        puzzle_identifiers=identifiers,
-    )
-    metric.update(
-        _packed(labels.clone(), torch.zeros(2)),
-        label=labels,
-        puzzle_identifiers=identifiers,
-    )
-    # Two wrong votes against one right: outvoted at K=1, present at K=2.
-    assert metric.compute() == {"pass@1": 0.0, "pass@2": 1.0}
-
-
-def test_grid_is_read_from_the_end() -> None:
-    """Diagnostic columns between the halt logit and the grid are ignored."""
-    metric = _metric()
-    labels = torch.full((2, 9), 3, dtype=torch.int64)
-    padded = torch.cat([torch.zeros(2, 6), labels.float()], dim=-1)
-    metric.update(
-        padded,
-        label=labels,
-        puzzle_identifiers=torch.zeros(2, dtype=torch.int64),
-    )
-    assert metric.compute()["pass@1"] == 1.0
-
-
-def test_empty_metric_reports_zero() -> None:
-    assert _metric().compute() == {"pass@1": 0.0, "pass@2": 0.0}
-
-
-def test_pass_k_sums_each_ranks_solved_counts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Each rank scores its own ballots; the counts are summed across ranks."""
-    labels = torch.full((2, 9), 3, dtype=torch.int64)
-    local = _metric()
-    local.update(
-        _packed(labels.clone(), torch.zeros(2)),
-        label=labels,
-        puzzle_identifiers=torch.tensor([0, 1]),
-    )
-    # The other rank holds three puzzles and solved one of them.
-    remote_counts = torch.tensor([3.0, 1.0, 1.0], dtype=torch.float64)
-
-    def all_reduce(counts: Tensor, op: object) -> None:
-        del op
-        counts += remote_counts
-
-    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
-    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
-    monkeypatch.setattr(torch.distributed, "get_backend", lambda: "gloo")
-    monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
-
-    assert local.compute() == {"pass@1": 3 / 5, "pass@2": 3 / 5}
-
-
 def test_canonical_scoring_without_pass_at_one(tmp_path: Path) -> None:
     batch = _two_input_tree(tmp_path)
     logits = batch.pop("logits")
@@ -301,62 +71,6 @@ def test_canonical_scoring_without_pass_at_one(tmp_path: Path) -> None:
     candidate.update(logits, **batch)
 
     assert candidate.compute()["pass@2"] == 0.75
-
-
-def test_state_round_trips() -> None:
-    metric = _metric()
-    labels = torch.full((2, 9), 3, dtype=torch.int64)
-    metric.update(
-        _packed(labels.clone(), torch.zeros(2)),
-        label=labels,
-        puzzle_identifiers=torch.zeros(2, dtype=torch.int64),
-    )
-    restored = _metric()
-    restored.load_state_dict(metric.state_dict())
-    assert restored.compute() == metric.compute()
-
-
-def test_pass_k_state_load_defaults_missing_fields_to_empty() -> None:
-    metric = _metric()
-
-    metric.load_state_dict({})
-
-    assert metric.state_dict() == {"votes": {}, "truth": {}}
-    assert metric.compute() == {"pass@1": 0.0, "pass@2": 0.0}
-
-
-def test_pass_k_state_records_each_vote_and_reset_clears_it() -> None:
-    labels = torch.tensor([[2, 3, 4, 5]] * 3, dtype=torch.int64)
-    predictions = torch.tensor(
-        [[6, 7, 8, 9], [6, 7, 8, 9], [2, 3, 4, 5]],
-        dtype=torch.int64,
-    )
-    metric = _metric()
-    metric.update(
-        _packed(predictions, torch.tensor([-1.0, 0.0, 1.0])),
-        label=labels,
-        puzzle_identifiers=torch.zeros(3, dtype=torch.int64),
-    )
-    wrong_hash = _digest(predictions[0])
-    truth_hash = _digest(labels[0])
-    assert metric.state_dict() == {
-        "votes": {
-            0: {
-                wrong_hash: [
-                    2.0,
-                    float(torch.sigmoid(torch.tensor(-1.0)))
-                    + float(torch.sigmoid(torch.tensor(0.0))),
-                ],
-                truth_hash: [1.0, float(torch.sigmoid(torch.tensor(1.0)))],
-            },
-        },
-        "truth": {0: truth_hash},
-    }
-
-    metric.reset()
-
-    assert metric.state_dict() == {"votes": {}, "truth": {}}
-    assert metric.compute() == {"pass@1": 0.0, "pass@2": 0.0}
 
 
 def test_canonical_votes_restore_augmented_views_and_cap_by_confidence(
@@ -1321,14 +1035,6 @@ def test_metric_private_helpers_and_width_errors() -> None:
     assert floats == [0.25, -1.5]
     assert all(type(value) is float for value in floats)
     assert _read_u32(b"\xff\xff\xff\xff", 0) == (4_294_967_295, 4)
-    grid = torch.tensor([[1, 2], [3, 4]], dtype=torch.uint8)
-    assert (
-        _digest(grid)
-        == hashlib.blake2b(
-            np.array([[1, 2], [3, 4]], dtype=np.int16).tobytes(),
-            digest_size=16,
-        ).hexdigest()
-    )
     assert _shape(np.zeros((2, 3), dtype=np.uint8)) == (2, 3)
     assert _any_rank(True)
     assert _gather_list([1, 2]) == [1, 2]
@@ -1566,16 +1272,24 @@ def test_canonical_skips_blank_before_later_puzzles(tmp_path: Path) -> None:
     assert set(metric._preds) == {"a", "b"}
 
 
-def test_canonical_discards_noninteger_puzzle_identifiers(tmp_path: Path) -> None:
+@pytest.mark.parametrize("field", ["puzzle_identifiers", "spatial_tags"])
+def test_canonical_rejects_floating_integer_fields(tmp_path: Path, field: str) -> None:
+    """A float id or tag is a caller bug; dropping or misreading it hides ballots."""
     batch = _two_input_tree(tmp_path)
     logits = batch.pop("logits")
     assert isinstance(logits, Tensor)
-    batch["puzzle_identifiers"] = torch.tensor([1.0, 1.0, 2.0])
+    batch["spatial_tags"] = torch.tensor([[1, 0, 0]] * 3)
+    integral = batch[field]
+    assert isinstance(integral, Tensor)
+    batch[field] = integral.float()
     candidate = CanonicalPassK.Config(working_dir=tmp_path, pass_ks=(1,)).make()
 
-    candidate.update(logits, **batch)
+    with pytest.raises(TypeError) as error:
+        candidate.update(logits, **batch)
 
-    assert candidate._preds == {}
+    assert str(error.value) == (
+        f"CanonicalPassK expects integer {field}; got torch.float32."
+    )
 
 
 def test_canonical_accepts_zero_when_blank_identifier_is_nonzero(
@@ -1615,17 +1329,6 @@ def test_non_spatial_filter_rejects_each_spatial_component(
     candidate.update(logits, **batch)
 
     assert [len(rows) for rows in candidate._preds.values()] == [1, 1]
-
-
-def test_canonical_rejects_noninteger_spatial_tags(tmp_path: Path) -> None:
-    batch = _two_input_tree(tmp_path)
-    logits = batch.pop("logits")
-    assert isinstance(logits, Tensor)
-    batch["spatial_tags"] = torch.tensor([[1.0, 0.0, 0.0]] * 3)
-    metric = CanonicalPassK.Config(working_dir=tmp_path, pass_ks=(1,)).make()
-
-    with pytest.raises(ValueError, match="not enough values to unpack"):
-        metric.update(logits, **batch)
 
 
 def test_canonical_state_round_trip_preserves_ballots(tmp_path: Path) -> None:

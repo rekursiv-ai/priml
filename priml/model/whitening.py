@@ -24,7 +24,7 @@ class PCAWhiteningConv2d(nn.Conv2d):
 
     Typical usage::
 
-        layer = PCAWhiteningConv2d(3, 48, kernel_size=3, padding=1, bias=False)
+        layer = PCAWhiteningConv2d(3, 54, kernel_size=3, padding=1, bias=False)
         layer.init_whiten(train_images, eps=5e-4)  # train_images: (N, C, H, W)
 
     """

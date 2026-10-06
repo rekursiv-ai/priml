@@ -24,16 +24,6 @@ else:
     torch = lazy_import("torch")
 
 
-def get_device() -> torch.device:
-    """Return the preferred test device, CUDA when available.
-
-    Returns:
-      device: ``cuda`` if a CUDA device is present, else ``cpu``.
-
-    """
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
 @pytest.fixture(autouse=True)
 def cleanup_cuda() -> Generator[None]:
     """Reclaim CUDA memory symmetrically around each test (no-op on CPU).

@@ -106,9 +106,8 @@ class _PassthroughModule(nn.Module):
         return torch.cat((self.read(input), self.read_write(input)))
 
 
-def test_passthrough_text(request: pytest.FixtureRequest) -> None:
+def test_passthrough_text() -> None:
     assert_text_golden(
-        request,
         test_file=__file__,
         name="passthrough",
         rendered=str(_PassthroughModule()),

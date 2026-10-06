@@ -158,7 +158,7 @@ SpeedrunTrainLoop(
                 mesh_dim_model_seed='pp',
                 mesh_dim_data_seed='dp',
                 runtime=MultiProcess.Config(
-                        device='auto',
+                        device=None,
                         deterministic=False,
                         float32_matmul_precision='high',
                         backend=None,

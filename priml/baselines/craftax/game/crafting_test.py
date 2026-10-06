@@ -367,6 +367,41 @@ def test_sowing_a_sapling_records_a_growing_plant() -> None:
     assert placed.achievements[:, int(Achievement.PLACE_PLANT)].tolist() == [True, True]
 
 
+@pytest.mark.parametrize(
+    ("action", "costs", "tier"),
+    [
+        (Action.MAKE_IRON_ARMOUR, {"iron": 3, "coal": 3}, 1),
+        (Action.MAKE_DIAMOND_ARMOUR, {"diamond": 3}, 2),
+    ],
+)
+def test_one_armour_recipe_upgrades_exactly_one_slot(
+    action: Action,
+    costs: dict[str, int],
+    tier: int,
+) -> None:
+    state = _with_furnace(_with_table(_state()))
+    for material, amount in costs.items():
+        getattr(state.inventory, material)[:] = amount
+    made = crafting.craft(state, _act(action))
+    assert made.inventory.armour.tolist() == [[tier, 0, 0, 0]] * 2
+    assert crafting._craft_armour.__doc__ is not None
+    assert "four" not in crafting._craft_armour.__doc__
+
+
+def test_a_sapling_is_sown_only_on_the_plant_floor() -> None:
+    # Plant slots carry no floor, so a plant sown below would ripen at the same
+    # row and column on the overworld.
+    state = _state()
+    state.player_level[:] = 1
+    state.inventory.sapling[:] = 1
+
+    placed = crafting.place(state, _act(Action.PLACE_PLANT))
+
+    assert placed.map[:, 1, 10, 11].tolist() == [int(BlockType.GRASS)] * 2
+    assert placed.growing_plants_mask.any().item() is False
+    assert placed.inventory.sapling.tolist() == [1, 1]
+
+
 def test_planting_with_no_free_growth_slot_does_not_overwrite_a_plant() -> None:
     state = _state()
     state.inventory.sapling[:] = 1

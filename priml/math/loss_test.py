@@ -6,6 +6,7 @@ import math
 
 from torch import nn
 
+import pytest
 import torch
 
 from priml.math.loss import (
@@ -376,6 +377,36 @@ def test_stablemax_cross_entropy_handles_rank_three_logits() -> None:
 
     assert actual.shape == (2, 3)
     torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("ignored", [False, True])
+def test_tensor_smoothing_matches_scalar_with_subunit_weight(ignored: bool) -> None:
+    logits = torch.zeros(2, 3, dtype=torch.float64)
+    target = torch.full((2,), -100) if ignored else torch.tensor([0, 2])
+    weight = torch.full((3,), 0.1, dtype=logits.dtype)
+    actual = cross_entropy_with_batched_smoothing(
+        logits,
+        target,
+        weight=weight,
+        label_smoothing=torch.full((2,), 0.2),
+    )
+    expected = nn.functional.cross_entropy(
+        logits,
+        target,
+        weight=weight,
+        label_smoothing=0.2,
+    )
+    torch.testing.assert_close(actual, expected, equal_nan=True)
+
+
+@pytest.mark.parametrize("target", [torch.tensor([0, 3]), torch.tensor([-1, 0])])
+def test_tensor_smoothing_rejects_invalid_targets(target: torch.Tensor) -> None:
+    with pytest.raises((IndexError, RuntimeError), match=r"(bounds|range)"):
+        cross_entropy_with_batched_smoothing(
+            torch.zeros(2, 3),
+            target,
+            label_smoothing=torch.zeros(2),
+        )
 
 
 if __name__ == "__main__":

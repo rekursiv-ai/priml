@@ -61,6 +61,20 @@ def test_read_image_converts_grayscale_to_rgb(tmp_path: Path) -> None:
     assert np.array_equal(result, np.stack((gray, gray, gray)))
 
 
+@pytest.mark.parametrize(
+    "array",
+    [np.zeros((2, 3, 4), dtype=np.float32), np.zeros((2, 3), dtype=np.uint8)],
+)
+def test_read_image_rejects_invalid_numpy_metadata(
+    tmp_path: Path,
+    array: np.ndarray,
+) -> None:
+    path = tmp_path / "invalid.npy"
+    np.save(path, array)
+    with pytest.raises(ValueError, match=r"uint8.*at least three dimensions"):
+        read_image(path)
+
+
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main
 

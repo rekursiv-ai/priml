@@ -29,7 +29,7 @@ from priml.model.transformer.block import TransformerBlock
 if TYPE_CHECKING:
     from configgle.custom_types import Makeable
 
-    from priml.model.custom_types import TensorModule
+    from priml.model.custom_types import LayerCache, TensorModule
 
 
 class RotaryBlock(TransformerBlock):
@@ -78,14 +78,20 @@ class RotaryBlock(TransformerBlock):
         self.rope = None if config.rope is None else config.rope.make()
 
     @override
-    def forward(self, x: Tensor, **kwargs: object) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        *,
+        cache: LayerCache | None = None,
+        **kwargs: object,
+    ) -> Tensor:
         """Supply rotary positions unless the caller precomputed them."""
         if kwargs.get("cos_sin") is None:
             factors = self.factors(x.shape[-2], device=x.device)
             if factors is None:
                 raise ValueError("RotaryBlock without a rope needs cos_sin.")
             kwargs["cos_sin"] = factors
-        return super().forward(x, **kwargs)
+        return super().forward(x, cache=cache, **kwargs)
 
     def factors(
         self,

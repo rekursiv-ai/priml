@@ -17,13 +17,14 @@ import torch
 from priml import hub
 from priml.lib.custom_json import convert, loads
 from priml.model.attention.gated_attention import GatedAttention
+from priml.model.attention.kvcache import alloc_layer_cache
 from priml.model.attention.qwen3_5_delta import Qwen35GatedDeltaNet
-from priml.model.attention.rope import HuggingFaceFrequencies, RoPE
+from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.custom_types import (
     ChannelsIn,
+    DepthIndex,
+    LayerCache,
     TensorModule,
-    has_forward_cached,
-    is_cached_attention,
     propagate_attr,
 )
 from priml.model.embedding import Embedding
@@ -205,35 +206,47 @@ class Qwen35(Transformer):
 
     @override
     def project_to_logits(self, hidden: Tensor, **kwargs: object) -> Tensor:
-        """Normalize residual stream and apply the pretrained language-model head."""
+        """Normalize the residual stream, then apply the language-model head.
+
+        The final norm lives HERE rather than in :meth:`hidden_states`, so the
+        residual from ``hidden_states`` -- and from ``generate``'s own block
+        loop -- is projected exactly once through it.
+
+        Args:
+          hidden: Pre-norm residual stream [..., sequence, channels_in].
+          **kwargs: Messages forwarded to the output head.
+
+        Returns:
+          output: Logits, or normalized hidden states without an output head.
+
+        """
         return super().project_to_logits(self.norm(hidden), **kwargs)
 
     def hidden_states(
         self,
         x: Tensor,
         *,
-        cache: list[object] | None = None,
+        cache: LayerCache | None = None,
         **kwargs: object,
     ) -> Tensor:
-        """Return normalized text hidden states from token IDs or input embeddings.
+        """Return the residual stream after the last block, before the final norm.
 
         Args:
           x: Integer token IDs [batch, sequence], or floating input embeddings.
-          cache: One cache per block, optionally updated in place.
+          cache: Shared layer cache, each attention's slot updated in place.
           **kwargs: Messages forwarded to native blocks, including positions and a
             2-D padding or prepared floating additive causal 4-D text attention
             mask.
 
         Returns:
-          hidden: Normalized hidden states [batch, sequence, channels_in].
+          hidden: Pre-norm residual [batch, sequence, channels_in]; pass it to
+            :meth:`project_to_logits`, which applies the final norm.
 
         """
         if not x.is_floating_point():
             if self.proj_in is None:
                 raise ValueError("Token IDs require an input embedding.")
             x = self.proj_in(x)
-        if cache is not None and len(cache) != len(self.blocks):
-            raise ValueError("The cache must have one entry per transformer block.")
         attention_mask = _pop_tensor(kwargs, name="attention_mask")
         positions = _pop_tensor(kwargs, name="positions")
         position_ids = _pop_tensor(kwargs, name="position_ids")
@@ -264,20 +277,9 @@ class Qwen35(Transformer):
             # so it is absorbed by **kwargs, but the first one that does would
             # see a different shape than `positions`.
             block_kwargs["position_ids"] = position_ids
-        for index, block in enumerate(self.blocks):
-            if cache is None:
-                x = cast(Tensor, block(x, **block_kwargs))
-            else:
-                if not has_forward_cached(block):
-                    raise TypeError(
-                        "Cached decoding requires blocks with a forward_cached method.",
-                    )
-                x, cache[index] = block.forward_cached(
-                    x,
-                    cache=cache[index],
-                    **block_kwargs,
-                )
-        return self.norm(x)
+        for block in self.blocks:
+            x = cast(Tensor, block(x, cache=cache, **block_kwargs))
+        return x
 
     @override
     def forward(self, x: Tensor, /, **kwargs: object) -> Tensor:
@@ -285,18 +287,19 @@ class Qwen35(Transformer):
 
         Args:
           x: Token IDs or input embeddings.
-          **kwargs: Block messages and an optional native cache list.
+          **kwargs: Block messages and an optional shared layer cache.
 
         Returns:
-          output: Logits, or hidden states when no output projection is present.
+          output: Logits, or normalized hidden states without an output head.
 
         """
         cache = kwargs.pop("cache", None)
-        if cache is not None and not isinstance(cache, list):
-            raise TypeError("cache must be a list or None.")
-        cache = cast(list[object] | None, cache)
-        hidden = self.hidden_states(x, cache=cache, **kwargs)
-        return hidden if self.proj_out is None else self.proj_out(hidden, **kwargs)
+        if cache is not None and not isinstance(cache, LayerCache):
+            raise TypeError("cache must satisfy LayerCache or be None.")
+        return self.project_to_logits(
+            self.hidden_states(x, cache=cache, **kwargs),
+            **kwargs,
+        )
 
     def alloc_cache(
         self,
@@ -305,64 +308,25 @@ class Qwen35(Transformer):
         max_seq: int,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
-    ) -> list[object]:
-        """Allocate one native attention state per block for cached decoding.
+    ) -> dict[DepthIndex, object]:
+        """Allocate shared decode state for every cached attention layer.
 
         Args:
-          batch: Batch size.
-          max_seq: Maximum cache length.
-          device: Cache device; None uses each block's parameter device.
-          dtype: Cache dtype; None uses each block's parameter dtype.
+          batch: Batch size or batch shape.
+          max_seq: Maximum cached sequence length.
+          device: Device for the cache tensors.
+          dtype: Dtype for the cache tensors.
 
         Returns:
-          cache: One attention cache per transformer block.
+          cache: One slot per cached attention, keyed by its depth index.
 
         """
-        caches: list[object] = []
-        for block in self.blocks:
-            try:
-                attention = block.get_submodule("attn")
-            except AttributeError as error:
-                raise TypeError(
-                    "Cached decoding requires blocks with an attn submodule.",
-                ) from error
-            if not is_cached_attention(attention):
-                raise TypeError(
-                    "Cached decoding requires attention with an alloc_kv_cache method.",
-                )
-            caches.append(
-                attention.alloc_kv_cache(
-                    batch=batch,
-                    max_seq=max_seq,
-                    device=device,
-                    dtype=dtype,
-                ),
-            )
-        return caches
-
-    def forward_cached(
-        self,
-        x: Tensor,
-        *,
-        cache: list[object],
-        **kwargs: object,
-    ) -> tuple[Tensor, list[object]]:
-        """Compute logits while updating recurrent, convolution, and KV states.
-
-        Args:
-          x: Token IDs or input embeddings for the new positions.
-          cache: One mutable cache per transformer block.
-          **kwargs: Block messages, including text positions and attention masks.
-
-        Returns:
-          output: Logits or hidden states when no output projection is present.
-          cache: The updated input cache list.
-
-        """
-        hidden = self.hidden_states(x, cache=cache, **kwargs)
-        return (
-            hidden if self.proj_out is None else self.proj_out(hidden, **kwargs),
-            cache,
+        return alloc_layer_cache(
+            self,
+            batch=batch,
+            max_seq=max_seq,
+            device=device,
+            dtype=dtype,
         )
 
 
@@ -411,7 +375,7 @@ def _layer_types(config: Mapping[str, object], *, count: int) -> list[str]:
             "full_attention" if (i + 1) % interval == 0 else "linear_attention"
             for i in range(count)
         ]
-    layers = [layer for layer in convert(raw, list[object]) if isinstance(layer, str)]
+    layers = convert(raw, list[str])
     if len(layers) != count or any(
         layer not in ("full_attention", "linear_attention") for layer in layers
     ):
@@ -438,12 +402,9 @@ def _full_attention(config: Mapping[str, object]) -> GatedAttention.Config:
         or attention.dropout >= 1
     ):
         raise ValueError("attention_dropout must be finite and in [0, 1).")
-    params = convert(config.get("rope_parameters"), dict[str, object], default={})
-    if (
-        params.get("rope_type", "default") != "default"
-        or config.get("rope_scaling") is not None
-    ):
+    if YarnScaling.Config.from_hf(config) is not None:
         raise ValueError("Only default text rotary frequencies are supported.")
+    params = convert(config.get("rope_parameters"), dict[str, object], default={})
     fraction = convert(
         params.get("partial_rotary_factor"),
         float,

@@ -41,7 +41,7 @@ Etth1TrainLoop.Config(
                         train_budget_sec=inf,
                         train_budget_epochs=10,
                         lr_schedule=PartialConfig(<class 'functools.partial'>, <function priml.baselines.etth1.experiments.dlinear_type1 at 0xdefacedeface>, epochs=10),
-                        parallelism=NoParallel.Config(device='cpu'),
+                        parallelism=NoParallel.Config(device=None),
                         model_quantization=NoModelQuantization.Config(),
                         activation_memoization=DefaultActivationStorage.Config(),
                         compile=None,

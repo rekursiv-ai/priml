@@ -14,7 +14,6 @@ from priml.baselines.craftax.game.constants import (
     Achievement,
     Action,
     BlockType,
-    ItemType,
 )
 from priml.baselines.craftax.game.state import EnvState, Inventory, empty_state
 
@@ -63,15 +62,6 @@ def _ore(
             return inventory.sapphire
         case "ruby":
             return inventory.ruby
-
-
-def test_item_at_reads_the_current_floor_and_ladder_checks_kind() -> None:
-    state = _state()
-    state.item_map[:, 0, 10, 11] = int(ItemType.LADDER_DOWN)
-    item = interact.item_at(state, torch.tensor([[10, 11], [10, 11]]))
-    assert item.tolist() == [int(ItemType.LADDER_DOWN)] * 2
-    assert interact.is_ladder(item, ItemType.LADDER_DOWN).tolist() == [True, True]
-    assert interact.is_ladder(item, ItemType.LADDER_UP).tolist() == [False, False]
 
 
 def test_chopping_a_tree_yields_wood_and_leaves_grass() -> None:

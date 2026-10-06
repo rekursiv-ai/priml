@@ -75,6 +75,7 @@ from priml.baselines.sudoku.eval import (
     validate_grid_permutation,
     write_member_dump,
 )
+from priml.lib.custom_json import ReadError
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import mismatches, read_tensors, stored
@@ -1152,7 +1153,12 @@ def test_reproduction_restores_stage_seconds_from_progress_or_metrics(
     assert recorded == 4.0
     assert repro._load_stage_seconds() == {"train_to_4": 4.0}
     progress = repro._progress_path()
-    for payload in ("[]", '{"schema_version": 2}', '{"schema_version": 1}'):
+    for payload in (
+        "[]",
+        '{"schema_version": 2}',
+        '{"schema_version": 1}',
+        '{"schema_version": 1, "stage_seconds": {"a": "x"}}',
+    ):
         progress.write_text(payload)
         with pytest.raises(ValueError, match="invalid reproduction progress"):
             repro._load_stage_seconds()
@@ -1173,6 +1179,10 @@ def test_reproduction_reuses_only_a_harvest_from_its_own_source(
     manifest.write_text(json.dumps({"source_checkpoint": "/elsewhere.pt"}))
     with pytest.raises(ValueError, match="rolled out from"):
         repro._run_harvest()
+    for text in ("[]", "{}"):
+        manifest.write_text(text)
+        with pytest.raises(ReadError):
+            repro._run_harvest()
 
 
 def test_reproduction_skips_a_trained_verifier(tmp_path: Path) -> None:
@@ -1223,6 +1233,9 @@ def test_outer_run_clamps_steps_and_forwards_segments(tmp_path: Path) -> None:
         ({"eval/loss": 0.5}, 7, "gen/"),
     ]
     assert tracker.closed
+    segment.write_text("[]")
+    with pytest.raises(ReadError):
+        _OuterRun(_RecordingTracker()).forward_segment(segment, 8)
     disabled = _outer_run(None, name="n", notes="")
     disabled.log({"a": 1}, 2)
     disabled.forward_segment(segment, 2)
@@ -1378,25 +1391,31 @@ def test_load_harvest_rejects_a_malformed_manifest(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.json"
     with pytest.raises(FileNotFoundError, match="manifest not found"):
         _load_harvest(tmp_path, device=cpu)
-    cases: tuple[tuple[str, type[Exception], str], ...] = (
-        ("{", ValueError, "invalid harvest manifest"),
-        ("[]", TypeError, "JSON object"),
-        ('{"schema_version": 2}', ValueError, "schema_version 1"),
-        ('{"schema_version": 1, "shards": {}}', TypeError, "invalid shard metadata"),
+    entry = {"file": "a/b", "rows": 1, "sha256": "0"}
+    counts = {"groups_per_shard": 2, "shard_count": 1, "row_count": 1}
+    cases: tuple[tuple[str, str], ...] = (
+        ("{", "invalid harvest manifest"),
+        ("[]", r"Expected `object`, got `array`"),
         (
-            '{"schema_version": 1, "shards": [3], "groups_per_shard": 2}',
-            TypeError,
-            "invalid entry",
+            json.dumps({"schema_version": 2, "shards": [], **counts}),
+            r"\$\.schema_version",
         ),
         (
-            '{"schema_version": 1, "shards": [{"file": "a/b"}], "groups_per_shard": 2}',
-            ValueError,
+            json.dumps({"schema_version": 1, "shards": {}, **counts}),
+            r"\$\.shards",
+        ),
+        (
+            json.dumps({"schema_version": 1, "shards": [3], **counts}),
+            r"\$\.shards\[0\]",
+        ),
+        (
+            json.dumps({"schema_version": 1, "shards": [entry], **counts}),
             "invalid shard name",
         ),
     )
-    for text, error, message in cases:
+    for text, message in cases:
         manifest.write_text(text)
-        with pytest.raises(error, match=message):
+        with pytest.raises(ValueError, match=message):
             _load_harvest(tmp_path, device=cpu)
 
 
@@ -1868,8 +1887,8 @@ def test_sieve_hps_round_scopes_search_to_the_survivors(
     assert grids.dtype == torch.int64
     assert torch.equal(grids, torch.full((2, 3), 7, dtype=torch.int64))
     assert released == [True]
-    sieve._hps_round(view, search, torch.tensor([7.0, 2.0]))
-    assert seen["indices"] == ()
+    with pytest.raises(ValueError, match="strictly ascending"):
+        sieve._hps_round(view, search, torch.tensor([7, 2]))
 
 
 def test_sieve_hps_round_releases_model_after_search_failure(
@@ -2891,6 +2910,112 @@ def test_group_violations_and_acceptance_enforce_sudoku_token_rules() -> None:
     assert ev.accepted_grids(alternate.unsqueeze(0), ten_givens, groups).tolist() == [
         False,
     ]
+
+
+def test_run_pin_search_fast_starts_no_attempt_past_its_budget() -> None:
+    """Each root attempt costs ``candidates`` nodes; the second would exceed 2."""
+
+    def rollout(boards: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
+        del rows
+        return torch.zeros(len(boards), 4, 11), torch.zeros(len(boards))
+
+    _, _, nodes, _ = run_pin_search_fast(
+        rollout,
+        media=torch.ones(2, 4, dtype=torch.long),
+        base_logits=torch.zeros(2, 4, 11),
+        active=torch.tensor([True, True]),
+        groups=torch.empty(0, 9, dtype=torch.long),
+        depth=1,
+        candidates=2,
+        cell_attempts=2,
+        budget=2,
+        max_rows=8,
+        accept_fn=lambda preds, _: torch.zeros(len(preds), dtype=torch.bool),
+    )
+    assert nodes.tolist() == [2, 2]
+
+
+def test_hps_eval_rejects_a_population_short_of_evaluation_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 2-puzzle split clips ``evaluation_count=3``; the run must not publish."""
+    ev = sudoku_eval
+    cfg = ev.HpsEval.Config()
+    cfg.experiment_name = "hps"
+    cfg.base_dir = tmp_path
+    cfg.runtime.device = "cpu"
+    cfg.dataset.working_dir = write_dataset(tmp_path / "data")
+    cfg.evaluation_count = 3
+
+    def search_pass(**_: object) -> tuple[Tensor, Tensor, Tensor]:
+        labels = torch.full((2, 81), 2, dtype=torch.int64)
+        return torch.zeros(2, ev.learned_hps_output_width(81)), labels, labels
+
+    def eval_model(*_: object) -> object:
+        return object()
+
+    monkeypatch.setattr(ev, "_eval_model", eval_model)
+    monkeypatch.setattr(ev, "_search_pass", search_pass)
+    with pytest.raises(RuntimeError, match=r"evaluated 2 puzzles.*population is 3"):
+        cfg.make().run()
+    assert not (tmp_path / "runs" / "hps" / "dumps").exists()
+
+
+def test_search_pass_joins_solution_visited_in_view_space(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An oracle solving the shifted puzzle emits the shifted solution."""
+    ev = sudoku_eval
+    view = NINE_VIEWS[1]
+    assert view.name == "shift1"
+    dataset = puzzle_data.PuzzleDataset.Config(
+        working_dir=write_dataset(tmp_path / "data"),
+        batch_size=2,
+        device="cpu",
+    )
+
+    def oracle(
+        model: object,
+        batch: Mapping[str, object],
+        search: object,
+    ) -> SearchResult:
+        del model, search
+        label = cast("Tensor", batch["label"])
+        rows = label.shape[0]
+        return SearchResult(
+            accepted=torch.zeros(rows, dtype=torch.bool),
+            root_predictions=view.apply(label),
+            final_predictions=view.apply(label),
+            scores=torch.zeros(rows),
+            root_scores=torch.zeros(rows),
+            nodes=torch.zeros(rows, dtype=torch.int64),
+            depth=torch.full((rows,), -1),
+            scored=torch.ones(rows, dtype=torch.bool),
+            visited_predictions=[],
+            visited_puzzles=[],
+        )
+
+    monkeypatch.setattr(ev, "run_search", oracle)
+    rows, _, _ = ev._search_pass(
+        model=cast("trm.TRM", object()),
+        dataset=dataset.finalize().make(),
+        view=view,
+        search=HpsSearch.Config(),
+        device=torch.device("cpu"),
+        deadline_seconds=float("inf"),
+        label="probe",
+        join_solution_visited=True,
+    )
+    assert rows[:, 5].tolist() == [1.0, 1.0]
+
+
+@pytest.mark.parametrize("steps", [0, -1])
+def test_verifier_data_rejects_a_nonpositive_epoch(steps: int) -> None:
+    """``VerifierFit.run`` would otherwise loop forever on an empty epoch."""
+    with pytest.raises(ValueError, match="steps_per_epoch must be >= 1"):
+        VerifierData.Config(steps_per_epoch=steps).make()
 
 
 def _solution() -> Tensor:

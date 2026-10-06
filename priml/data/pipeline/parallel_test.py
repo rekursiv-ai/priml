@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, cast, override
 
 import logging
 import queue
@@ -780,7 +780,7 @@ def test_parmap_limits_poison_pill_waits(
             block: bool = True,
             timeout: float | None = None,
         ) -> None:
-            if item is None:
+            if not isinstance(item, dict):
                 self.poison_timeouts.append(timeout)
             super().put(item, block=block, timeout=timeout)
 
@@ -1018,6 +1018,160 @@ def test_parmap_close_mid_iteration_stops_inline_source() -> None:
     stream.close()
     assert seen == [0]
     assert list(stream) == []
+
+
+class PairProcessor:
+    """Stateful N->1 stage: emits one sample per two inputs, flushing a remainder."""
+
+    class Config(Fig["PairProcessor"]): ...
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def __call__(self, samples: Iterator[TestSample]) -> Iterator[TestSample]:
+        pending: list[object] = []
+        for sample in samples:
+            pending.append(sample["id"])
+            if len(pending) == 2:
+                yield {"ids": pending}
+                pending = []
+        if pending:
+            yield {"ids": pending}
+
+
+def test_parmap_worker_runs_one_continuous_stream_through_stateful_stages() -> None:
+    parmap = ParMap.Config(num_threads=1, processors=[PairProcessor.Config()]).make()
+
+    results = list(parmap(_samples(4)))
+
+    assert sorted(len(cast(list[object], r["ids"])) for r in results) == [2, 2]
+
+
+def test_parmap_end_of_stream_reaches_every_worker_when_pills_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_queue = queue.Queue
+    pill_waited = threading.Event()
+    release = threading.Event()
+
+    class ObservedQueue(real_queue[dict[str, object] | None]):
+        @override
+        def put(
+            self,
+            item: dict[str, object] | None,
+            block: bool = True,
+            timeout: float | None = None,
+        ) -> None:
+            try:
+                super().put(item, block=block, timeout=timeout)
+            except queue.Full:
+                if not isinstance(item, dict):
+                    pill_waited.set()
+                raise
+
+    def make_queue(*, maxsize: int = 0) -> ObservedQueue:
+        return ObservedQueue(maxsize=maxsize)
+
+    class GatedProcessor:
+        class Config(Fig["GatedProcessor"]): ...
+
+        def __init__(self, config: Config) -> None:
+            del config
+
+        def __call__(self, samples: Iterator[TestSample]) -> Iterator[TestSample]:
+            for sample in samples:
+                release.wait(timeout=5)
+                yield sample
+
+    monkeypatch.setattr("priml.data.pipeline.parallel.queue.Queue", make_queue)
+    parmap = ParMap.Config(
+        num_threads=2,
+        max_input_queue_size=1,
+        processors=[GatedProcessor.Config()],
+    ).make()
+    results: list[TestSample] = []
+    consumer = threading.Thread(
+        target=lambda: results.extend(parmap(_samples(3))),
+        daemon=True,
+    )
+    consumer.start()
+    assert pill_waited.wait(timeout=2), "the feeder never waited on a full queue"
+    release.set()
+    consumer.join(timeout=2)
+
+    assert not consumer.is_alive(), "a worker never received its end-of-stream pill"
+    assert {r["id"] for r in results} == {0, 1, 2}
+
+
+def _capture_threads(monkeypatch: pytest.MonkeyPatch) -> list[threading.Thread]:
+    real_thread = threading.Thread
+    threads: list[threading.Thread] = []
+
+    def make_thread(
+        *,
+        target: Callable[..., object] | None,
+        daemon: bool | None = None,
+    ) -> threading.Thread:
+        thread = real_thread(target=target, daemon=daemon)
+        threads.append(thread)
+        return thread
+
+    monkeypatch.setattr(
+        "priml.data.pipeline.parallel.threading.Thread",
+        make_thread,
+    )
+    return threads
+
+
+def _endless() -> Iterator[TestSample]:
+    index = 0
+    while True:
+        yield {"id": index}
+        index += 1
+
+
+def test_parmap_close_stops_every_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    threads = _capture_threads(monkeypatch)
+    parmap = ParMap.Config(
+        num_threads=2,
+        max_input_queue_size=1,
+        max_output_queue_size=1,
+        processors=[SlowProcessor.Config(delay_ms=0)],
+    ).make()
+    stream = parmap(_endless())
+
+    _ = next(stream)
+    stream.close()
+
+    for thread in threads:
+        thread.join(timeout=2)
+    assert [thread.is_alive() for thread in threads] == [False] * len(threads)
+
+
+def test_prefetchbuffer_reraises_an_upstream_exception() -> None:
+    def source() -> Iterator[TestSample]:
+        yield {"id": 0}
+        yield {"id": 1}
+        raise ValueError("upstream")
+
+    stream = PrefetchBuffer.Config(size=4).make()(source())
+
+    assert [next(stream)["id"], next(stream)["id"]] == [0, 1]
+    with pytest.raises(ValueError, match=r"^upstream$"):
+        _ = next(stream)
+
+
+def test_prefetchbuffer_close_stops_the_producer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    threads = _capture_threads(monkeypatch)
+    stream = PrefetchBuffer.Config(size=1).make()(_endless())
+
+    _ = next(stream)
+    cast("Generator[TestSample, None, None]", stream).close()
+
+    threads[0].join(timeout=2)
+    assert not threads[0].is_alive()
 
 
 if __name__ == "__main__":

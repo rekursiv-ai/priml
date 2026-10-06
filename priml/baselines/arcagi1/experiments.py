@@ -34,11 +34,7 @@ from configgle import Makes
 
 from priml.baselines.arcagi1.data import ArcData, PuzzleData
 from priml.baselines.arcagi1.loss import MeanOverBatch, StablemaxTokens
-from priml.baselines.arcagi1.metric import (
-    CanonicalPassK,
-    PassK,
-    SignalDumpTracker,
-)
+from priml.baselines.arcagi1.metric import CanonicalPassK, SignalDumpTracker
 from priml.baselines.arcagi1.model import (
     ConvSwiGLU,
     UrmRecurrence,
@@ -135,7 +131,7 @@ class ArcTrainLoop(
             model.block.seq_len = model.total_seq_len
         pool = self.step.pool
         if pool is not None and pool.feedback is not None:
-            pool.feedback.givens = (2, spec.vocab_size - 1)
+            pool.feedback.givens = (spec.vocab_color_offset, spec.vocab_size - 1)
         return super().finalize()
 
 
@@ -201,7 +197,8 @@ def exp000() -> ArcTrainLoop:
     cfg.dataset.batch_size = batch_size
     cfg.dataset.eval_batch_size = batch_size
 
-    cfg.metrics_eval["pass"] = PassK.Config()
+    cfg.metrics_eval["pass"] = CanonicalPassK.Config(pass_ks=(1, 2, 5, 10))
+    cfg.metrics_eval["pass"].working_dir = cfg.dataset.working_dir
     cfg.max_steps = cfg.step.total_train_steps
     cfg.num_steps_eval = 10_000
     cfg.num_steps_log = 100
@@ -557,10 +554,11 @@ def exp007() -> TrmTrainLoop:
     cfg.dataset.augmentation.spatial.translation_prob = 0.2
     cfg.dataset.augmentation.spatial.scale_prob = 0.2
     cfg.dataset.augmentation.spatial.train_scale_weights = dict(DEFAULT_SCALE_WEIGHTS)
+    # The directory names a spatial-eval tree; this is the flag that builds one.
+    cfg.dataset.augmentation.spatial_eval_views = True
     cfg.dataset.batch_size = batch_size
     cfg.dataset.eval_batch_size = 256
-    # The spatial expansion is built by scripts/build_spatial_eval.py, not the
-    # loader; a positive count would make the loader rebuild the plain tree.
+    # Staged by scripts/prepare_data.py; zero keeps the loader from building it.
     cfg.dataset.num_puzzle_identifiers = 0
 
     base = CanonicalPassK.Config(per_step_acts=cfg.step.pool.max_steps)
@@ -573,11 +571,13 @@ def exp007() -> TrmTrainLoop:
     }
     assert isinstance(cfg.checkpointer, Checkpointer.Config)
     cfg.checkpointer.save_every = 5_000
+    # Dumps rotate with the checkpoints they describe, so disk stays bounded.
+    signals = SignalDumpTracker.Config(
+        keep_last_n=cfg.checkpointer.keep_last_n,
+        keep_every=cfg.checkpointer.keep_every,
+    )
     cfg.tracker = TrackerList.Config(
-        trackers={
-            "wandb": WandbTracker.Config(project="trm"),
-            "signals": SignalDumpTracker.Config(),
-        },
+        trackers={"wandb": WandbTracker.Config(project="trm"), "signals": signals},
     )
     return cfg
 

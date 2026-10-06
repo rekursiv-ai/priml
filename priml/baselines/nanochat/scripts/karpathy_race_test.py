@@ -9,7 +9,6 @@ from unittest.mock import Mock, call, patch
 import argparse
 import builtins
 import importlib
-import subprocess
 import sys
 import time
 import types
@@ -18,7 +17,7 @@ import pytest
 import torch
 
 from priml.baselines.nanochat.scripts import karpathy_race
-from priml.model.attention.value_gated_attention import sdpa_attention
+from priml.lib.testing.cli import assert_help_without_docstring
 
 
 class _Flags(Protocol):
@@ -46,110 +45,10 @@ def test_microbatch_rewrite_requires_one_assignment() -> None:
         )
 
 
-def test_portable_kernel_stub_matches_the_reference_contract() -> None:
-    kernel = karpathy_race._kernels_stub()
-    assert isinstance(kernel, types.ModuleType)
-    assert kernel.__name__ == "kernels"
-    attention = kernel.get_kernel("flash-attention-3").flash_attn_interface
-    q = torch.arange(2 * 3 * 4 * 5, dtype=torch.float32).reshape(2, 3, 4, 5)
-    k = q.flip(1)
-    v = q + 2
-    assert torch.equal(
-        attention.flash_attn_func(
-            q,
-            k,
-            v,
-            causal=True,
-            window_size=(1, 0),
-        ),
-        sdpa_attention(q, k, v, window=1),
-    )
-    with pytest.raises(ValueError, match=r"^other$"):
-        kernel.get_kernel("other")
-
-
-def test_their_attention_rejects_unsupported_masks_exactly() -> None:
-    q = torch.zeros((2, 3, 4, 5))
-    with pytest.raises(ValueError, match=r"^the recipe attends causally$"):
-        karpathy_race.their_attention(
-            q,
-            q,
-            q,
-            causal=False,
-            window_size=(0, 0),
-        )
-    with pytest.raises(ValueError, match=r"^unexpected future window 1$"):
-        karpathy_race.their_attention(
-            q,
-            q,
-            q,
-            causal=True,
-            window_size=(0, 1),
-        )
-
-
-def test_main_requires_a_module_docstring(
+def test_main_help_works_without_a_module_docstring(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(karpathy_race, "__doc__", None)
-    with pytest.raises(ValueError, match=r"^Expected __doc__ is not None\.$"):
-        karpathy_race.main()
-
-
-def test_clone_upstream_clones_and_checks_the_pinned_reference(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "one" / "missing" / "clone"
-    git = Mock()
-    git_state = Mock(
-        side_effect=[
-            "b11d6f283f866eb7e10fb776a4b8553fef873fd5",
-            "",
-            "b11d6f283f866eb7e10fb776a4b8553fef873fd5",
-            "",
-        ],
-    )
-    monkeypatch.setattr(subprocess, "run", git)
-    monkeypatch.setattr(karpathy_race, "_git", git_state)
-
-    assert karpathy_race.clone_upstream(root) == root
-    assert [call.args[0] for call in git.call_args_list] == [
-        [
-            "git",
-            "clone",
-            "--quiet",
-            "https://github.com/karpathy/autoresearch.git",
-            str(root),
-        ],
-        ["git", "checkout", "--quiet", "b11d6f283f866eb7e10fb776a4b8553fef873fd5"],
-    ]
-    assert git.call_args_list[0].kwargs == {"check": True}
-    assert git.call_args_list[1].kwargs == {"cwd": root, "check": True}
-
-    sibling = root.parent / "clone-again"
-    assert karpathy_race.clone_upstream(sibling) == sibling
-    assert git.call_args_list[2].args[0] == [
-        "git",
-        "clone",
-        "--quiet",
-        "https://github.com/karpathy/autoresearch.git",
-        str(sibling),
-    ]
-    assert git.call_args_list[3].args[0] == [
-        "git",
-        "checkout",
-        "--quiet",
-        "b11d6f283f866eb7e10fb776a4b8553fef873fd5",
-    ]
-    assert git.call_args_list[2].kwargs == {"check": True}
-    assert git.call_args_list[3].kwargs == {"cwd": sibling, "check": True}
-    assert git_state.call_args_list == [
-        ((root, "rev-parse", "HEAD"), {}),
-        ((root, "status", "--porcelain"), {}),
-        ((sibling, "rev-parse", "HEAD"), {}),
-        ((sibling, "status", "--porcelain"), {}),
-    ]
+    assert_help_without_docstring(monkeypatch, karpathy_race, karpathy_race.main)
 
 
 def test_add_arguments_sets_machine_local_defaults() -> None:
@@ -182,23 +81,6 @@ def test_add_arguments_sets_machine_local_defaults() -> None:
     assert flags.rows == 7
     assert flags.output == Path("result.json")
     assert parser.format_help().count("--") == 9
-
-
-def test_git_returns_trimmed_stdout(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    run = Mock(return_value=types.SimpleNamespace(stdout=" pinned \n"))
-    monkeypatch.setattr(subprocess, "run", run)
-
-    assert karpathy_race._git(tmp_path, "rev-parse", "HEAD") == "pinned"
-    assert run.call_args.args[0] == ["git", "rev-parse", "HEAD"]
-    assert run.call_args.kwargs == {
-        "cwd": tmp_path,
-        "capture_output": True,
-        "text": True,
-        "check": True,
-    }
 
 
 def test_import_prepare_points_both_paths_at_shared_corpus(
@@ -359,28 +241,6 @@ def test_main_executes_reference_script_and_reports_summary(
         "}"
     )
     assert f"wrote {output_path}" in output
-
-
-def test_clone_upstream_rejects_wrong_revision_and_dirty_clone(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "clone"
-    (root / ".git").mkdir(parents=True)
-    git = Mock(side_effect=["other"])
-    monkeypatch.setattr(karpathy_race, "_git", git)
-    with pytest.raises(RuntimeError, match="at other, expected pinned"):
-        karpathy_race.clone_upstream(root, commit="pinned")
-    assert git.call_args_list == [((root, "rev-parse", "HEAD"), {})]
-
-    git.reset_mock(side_effect=True)
-    git.side_effect = ["pinned", " M train.py"]
-    with pytest.raises(RuntimeError, match="has local modifications"):
-        karpathy_race.clone_upstream(root, commit="pinned")
-    assert git.call_args_list == [
-        ((root, "rev-parse", "HEAD"), {}),
-        ((root, "status", "--porcelain"), {}),
-    ]
 
 
 if __name__ == "__main__":

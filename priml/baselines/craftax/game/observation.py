@@ -1,8 +1,9 @@
 """The symbolic observation: what the agent actually sees.
 
-The view is a 9x11 window centered on the player, one-hot encoded per channel
--- block, item, and one plane per creature class and species -- followed by the
-inventory and the player's condition as scalars. Everything outside the lit
+The view is a window centered on the player, the benchmark's 9x11 unless the
+caller passes another ``view``. Each tile is one-hot encoded per channel --
+block, item, and one plane per creature class and species -- and the window is
+followed by the inventory and the player's condition as scalars. Everything outside the lit
 region is zeroed, so darkness genuinely hides the world rather than merely
 dimming it.
 

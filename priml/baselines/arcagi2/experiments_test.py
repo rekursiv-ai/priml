@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import json
-
-from configgle.testing import assert_pprint_golden
 
 import numpy as np
 import torch
@@ -38,6 +36,7 @@ from priml.baselines.arcagi2.experiments import (
 from priml.baselines.arcagi2.metric import PassK
 from priml.baselines.arcagi2.model import PuzzleEmbedding, RotaryBlock
 from priml.baselines.arcagi2.scripts.build_dataset import (
+    ARC2_DATASET_DIR,
     arc2_aug_policy_template,
     arc2_spatial_eval_template,
 )
@@ -51,10 +50,16 @@ from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE
 from priml.model.swiglu import SwiGLU
+from priml.paths import resolve_working_dir
 from priml.runtime import MultiProcess, SingleProcess
+from priml.testing.golden import assert_pprint_golden
 from priml.train.checkpointer import Checkpointer
 from priml.train.parallelism import NoParallel
 from priml.train.tracker import TrackerList
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_arc2_retargets_a_complete_arc1_recipe() -> None:
@@ -188,8 +193,10 @@ def test_finalized_reference_recipe() -> None:
     assert config.dataset.make().prepared.eval_batch_size == 256
     assert config.dataset.epochs_per_iter == 4
     assert config.max_steps == config.step.total_train_steps == 541_580
-    assert config.dataset.working_dir == Path(
-        "/opt/scratch/datasets/arcagi2/arc2concept-aug-1000",
+    # The directory the builder writes, so the reader never looks elsewhere.
+    assert config.dataset.working_dir == resolve_working_dir(
+        "/opt/scratch",
+        ARC2_DATASET_DIR,
     )
     metric = config.metrics_eval[""]
     assert isinstance(metric, PassK.Config)
@@ -218,9 +225,7 @@ def test_resource_paths_follow_base_dir(tmp_path: Path) -> None:
     config = config.finalize()
     metric = config.metrics_eval[""]
     assert isinstance(metric, PassK.Config)
-    assert (
-        config.dataset.working_dir == tmp_path / "datasets/arcagi2/arc2concept-aug-1000"
-    )
+    assert config.dataset.working_dir == tmp_path / "datasets/arc2concept-aug-1000"
     assert metric.working_dir == config.dataset.working_dir
 
 
@@ -261,7 +266,7 @@ def test_full_recipe_pprint() -> None:
 
 def test_train_loop_evaluation_checkpoint_and_resume(tmp_path: Path) -> None:
     """Run the actual loop through a midpass checkpoint and its next update."""
-    root = tmp_path / "datasets/arcagi2/arc2concept-aug-1000"
+    root = tmp_path / "datasets/arc2concept-aug-1000"
     root.mkdir(parents=True)
     (root / "identifiers.json").write_text('["<blank>", "puzzle"]')
     grid = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]

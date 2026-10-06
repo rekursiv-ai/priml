@@ -13,7 +13,8 @@ import pytest
 
 from priml.baselines.arcagi1.augmentation import ArcSpec
 from priml.baselines.arcagi1.scripts import build_spatial_eval
-from priml.lib.custom_json import ReadError
+from priml.data.ensure import EnsureResult
+from priml.lib.custom_json import ReadError, parse
 
 
 if TYPE_CHECKING:
@@ -339,9 +340,10 @@ def test_build_spatial_eval_copies_metadata_and_expands_pairs(
     assert np.array_equal(outputs[2:4], np.stack([grid, grid]))
     assert (target / "identifiers.json").read_text() == '["<blank>", "first", "second"]'
     assert (target / "test_puzzles.json").read_text() == '{"first": {}, "second": {}}'
-    assert (
-        out / "dataset.json"
-    ).read_text() == '{"num_puzzle_identifiers": 3, "sentinel": 12}'
+    assert (out / "dataset.json").read_text() == (
+        '{"num_puzzle_identifiers": 3, "sentinel": 12, "total_puzzles": 6, '
+        f'"mean_puzzle_examples": {8 / 6}}}'
+    )
     output_train = target / "train"
     for name, _ in source_arrays:
         assert np.array_equal(
@@ -382,6 +384,105 @@ def test_build_spatial_eval_copies_metadata_and_expands_pairs(
             target_dir=identity_target,
             spec=spec,
         )
+
+
+def _tiny_source(source: Path, *, spec: ArcSpec) -> None:
+    """Write a two-puzzle, one-task source tree with a train split."""
+    grid = np.zeros(spec.max_grid**2, dtype=np.int64)
+    grid[:2] = spec.vocab_color_offset + 1
+    for split in ("test", "train"):
+        out = source / split
+        out.mkdir(parents=True)
+        np.save(out / "all__inputs.npy", np.stack([grid, grid, grid]))
+        np.save(out / "all__labels.npy", np.stack([grid, grid, grid]))
+        np.save(out / "all__puzzle_indices.npy", np.array([0, 1, 3], dtype=np.int32))
+        np.save(out / "all__group_indices.npy", np.array([0, 2], dtype=np.int32))
+        np.save(out / "all__puzzle_identifiers.npy", np.array([1, 1], dtype=np.int32))
+        (out / "dataset.json").write_text(
+            '{"num_puzzle_identifiers": 2, "total_puzzles": 2, '
+            '"mean_puzzle_examples": 1.5, "total_groups": 1}',
+        )
+    (source / "identifiers.json").write_text('["<blank>", "task"]')
+    (source / "test_puzzles.json").write_text('{"task": {}}')
+
+
+def test_expanded_metadata_counts_the_expanded_puzzles(tmp_path: Path) -> None:
+    spec = ArcSpec(max_grid=4)
+    source = tmp_path / "source"
+    _tiny_source(source, spec=spec)
+    target = tmp_path / "target"
+    build_spatial_eval.build_spatial_eval(
+        spatial_views=2,
+        source_dir=source,
+        target_dir=target,
+        scale_weights={2: 1.0},
+        spec=spec,
+    )
+    meta = parse((target / "test" / "dataset.json").read_text(), dict[str, object])
+    ids = _load_int_array(target / "test" / "all__puzzle_identifiers.npy")
+    rows = len(_load_int_array(target / "test" / "all__inputs.npy"))
+    assert meta["total_puzzles"] == len(ids) == 4
+    assert meta["mean_puzzle_examples"] == rows / len(ids)
+    assert meta["total_groups"] == 1
+
+
+@pytest.mark.parametrize("alias", ["same", "symlink"])
+def test_build_refuses_to_write_over_its_source(tmp_path: Path, alias: str) -> None:
+    spec = ArcSpec(max_grid=4)
+    source = tmp_path / "source"
+    _tiny_source(source, spec=spec)
+    target = source
+    if alias == "symlink":
+        target = tmp_path / "link"
+        target.symlink_to(source)
+    before = {p: p.read_bytes() for p in source.rglob("*") if p.is_file()}
+    with pytest.raises(ValueError, match="aliases protected input"):
+        build_spatial_eval.build_spatial_eval(
+            spatial_views=2,
+            source_dir=source,
+            target_dir=target,
+            scale_weights={2: 1.0},
+            spec=spec,
+        )
+    assert {p: p.read_bytes() for p in source.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"seed": 1}, {"spec": ArcSpec(max_grid=4, vocab_eos=0, vocab_pad=1)}],
+)
+def test_ensure_refuses_a_tree_built_by_another_recipe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: dict[str, object],
+) -> None:
+    """Seed and vocabulary change the bytes, so they are part of the identity."""
+    spec = ArcSpec(max_grid=4)
+    source = tmp_path / "source"
+    _tiny_source(source, spec=spec)
+    target = tmp_path / "target"
+    first: dict[str, object] = {"seed": 0, "spec": spec}
+    build_spatial_eval.ensure_spatial_eval_data(
+        source_dir=source,
+        target=target,
+        spatial_views=2,
+        scale_weights={2: 1.0},
+        seed=0,
+        spec=spec,
+    )
+    second = {**first, **change}
+    for cold in (False, True):
+        if cold:
+            monkeypatch.setattr(build_spatial_eval, "_ensure_cache", set[object]())
+        with pytest.raises(ValueError, match="was built by a different recipe"):
+            build_spatial_eval.ensure_spatial_eval_data(
+                source_dir=source,
+                target=target,
+                spatial_views=2,
+                scale_weights={2: 1.0},
+                seed=cast(int, second["seed"]),
+                spec=cast(ArcSpec, second["spec"]),
+            )
 
 
 def test_build_spatial_eval_accepts_identity_only_and_rejects_zero(
@@ -448,8 +549,9 @@ def test_ensure_spatial_eval_data_declares_split_manifest(
     specs: list[DataSpec] = []
     rank_builds: list[str] = []
 
-    def ensure_data(spec: DataSpec) -> None:
+    def ensure_data(spec: DataSpec) -> EnsureResult:
         specs.append(spec)
+        return EnsureResult.PRESENT
 
     def run_build(*, name: str, build: Callable[[], None]) -> None:
         rank_builds.append(name)
@@ -475,15 +577,13 @@ def test_ensure_spatial_eval_data_declares_split_manifest(
         == target
     )
     other_source = tmp_path / "other-source"
-    assert (
+    with pytest.raises(ValueError, match="was built by a different recipe"):
         build_spatial_eval.ensure_spatial_eval_data(
             source_dir=other_source,
             target=target,
             spatial_views=2,
             spec=ArcSpec(max_grid=4),
         )
-        == target
-    )
     other_target = tmp_path / "other-target"
     assert (
         build_spatial_eval.ensure_spatial_eval_data(
@@ -504,8 +604,9 @@ def test_ensure_spatial_eval_data_declares_split_manifest(
         )
         == next_target
     )
-    assert rank_builds == ["ensure_spatial_eval_data"] * 4
-    assert len(specs) == 4
+    # The refused recipe never reaches a build.
+    assert rank_builds == ["ensure_spatial_eval_data"] * 3
+    assert len(specs) == 3
     assert specs[0].target_dir == target
     assert isinstance(specs[0].fetch, build_spatial_eval._SpatialEvalBuild)
     assert specs[0].fetch._source_dir == source
@@ -527,7 +628,7 @@ def test_ensure_spatial_eval_data_declares_split_manifest(
         )
         == default_target
     )
-    assert specs[4].target_dir == default_target
+    assert specs[3].target_dir == default_target
     paths = [file.rel_path for file in specs[0].manifest]
     split_names = (
         "all__inputs.npy",
@@ -536,7 +637,7 @@ def test_ensure_spatial_eval_data_declares_split_manifest(
         "all__group_indices.npy",
         "all__puzzle_identifiers.npy",
     )
-    default_paths = [file.rel_path for file in specs[4].manifest]
+    default_paths = [file.rel_path for file in specs[3].manifest]
     assert all(not path.startswith("train/") for path in default_paths)
     assert paths == [
         "identifiers.json",

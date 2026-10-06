@@ -343,6 +343,9 @@ def level_up(state: EnvState, action: Tensor) -> EnvState:
 def grow_plants(state: EnvState) -> EnvState:
     """Age every sown plant and ripen the ones that are ready.
 
+    Plants live on the overworld (:data:`constants.PLANT_LEVEL`) whichever floor
+    the player is on: a sapling needs grass, which no other floor grows.
+
     Args:
       state: The current world.
 
@@ -358,7 +361,7 @@ def grow_plants(state: EnvState) -> EnvState:
     # Plants grow only on the surface, which ripens wherever the player is:
     # writing the player's own floor would leave the crop unripe and drop a
     # solid one into the dungeon below.
-    grid = state.map[:, 0]
+    grid = state.map[:, constants.PLANT_LEVEL]
     for slot in range(state.growing_plants_mask.shape[1]):
         grid = scatter_tiles_where(
             grid,
@@ -370,7 +373,7 @@ def grow_plants(state: EnvState) -> EnvState:
             ),
             ripe[:, slot],
         )
-    state.map[:, 0] = grid
+    state.map[:, constants.PLANT_LEVEL] = grid
     return state
 
 
@@ -379,8 +382,8 @@ def _launch(state: EnvState, *, firing: Tensor, kind: Tensor) -> EnvState:
     projectiles = state.player_projectiles
     rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
-    free = projectiles.mask[rows, level]
-    slot = (~free).int().argmax(1)
+    free = ~projectiles.mask[rows, level]
+    slot = free.int().argmax(1)
 
     heading = constants.on_device(constants.DIRECTIONS, state.device)[
         state.player_direction.long()

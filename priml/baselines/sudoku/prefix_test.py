@@ -126,6 +126,47 @@ def test_gradient_buffer_survives_a_device_move() -> None:
     assert module.local_weights.requires_grad
 
 
+def test_a_vector_narrower_than_the_model_pads_out_to_model_width_tokens() -> None:
+    """``channels_out`` sizes the stored row; ``channels_in`` sizes each token.
+
+    The row is zero-padded to ``num_tokens * channels_in`` and scaled like the
+    grid tokens it precedes, and the cost prices that padded prefix.
+    """
+    config = SparsePuzzleEmbedding.Config(num_puzzles=8, num_tokens=2, batch_size=4)
+    config.channels_in = 8
+    config.channels_out = 5
+    config.init_std = 1.0
+    module = config.make()
+    module.eval()
+    identifiers = torch.tensor([3, 1, 0, 2])
+    out = module(4, puzzle_identifiers=identifiers)
+    assert out.shape == (4, 2, 8)
+    assert torch.equal(out[:, 0, :5], module.weights[identifiers] * 8**0.5)
+    assert bool((out[:, 0, 5:] == 0).all())
+    assert bool((out[:, 1] == 0).all())
+    costed = cost(config, seq_len=1, batch_size=4, dtype=None)
+    assert costed["flops", "primal", "elementwise"].sum() == 4 * 2 * 8
+
+
+def test_a_vector_wider_than_its_tokens_is_rejected_at_construction() -> None:
+    """The reshape into tokens cannot hold it; fail where the field is named."""
+    config = SparsePuzzleEmbedding.Config(num_puzzles=8, num_tokens=2, batch_size=4)
+    config.channels_in = 4
+    config.channels_out = 9
+    with pytest.raises(ValueError, match=r"channels_out=9 exceeds num_tokens"):
+        config.make()
+
+
+def test_a_training_batch_must_fill_the_gradient_buffer() -> None:
+    """A short batch would broadcast into, or fail to fill, the gradient buffer."""
+    module = _sparse()
+    module.train()
+    with pytest.raises(ValueError, match=r"batch_size=4"):
+        module(2, puzzle_identifiers=torch.arange(2))
+    module.eval()
+    assert module(2, puzzle_identifiers=torch.arange(2)).shape == (2, 2, 8)
+
+
 def test_missing_identifiers_is_rejected() -> None:
     module = _sparse()
     with pytest.raises(TypeError, match="requires puzzle_identifiers"):

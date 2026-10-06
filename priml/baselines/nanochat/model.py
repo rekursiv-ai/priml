@@ -33,6 +33,7 @@ from torch import Tensor, nn
 
 import torch
 
+from priml.baselines.nanochat.attention import CausalAttention
 from priml.baselines.nanochat.ngram import (
     HashedNgramTables,
     NgramSource,
@@ -204,29 +205,8 @@ class NanoChatLM(nn.Module):
 
         @override
         def finalize(self) -> Self:
-            if self.vocab_size <= 0:
-                raise ValueError(f"vocab_size must be positive; got {self.vocab_size}.")
-            if self.max_seq_len < 2:
-                raise ValueError(
-                    f"max_seq_len must be at least two; got {self.max_seq_len}.",
-                )
-            if self.num_layers <= 0 or self.channels_in <= 0:
-                raise ValueError(
-                    "num_layers and channels_in must be positive; got "
-                    f"{self.num_layers} and {self.channels_in}.",
-                )
-            if self.value_embedding_stride < 0:
-                raise ValueError(
-                    "value_embedding_stride must be nonnegative; got "
-                    f"{self.value_embedding_stride}.",
-                )
             if not isinstance(self.block, Sequence):
                 self.block = [self.block.copy_tree() for _ in range(self.num_layers)]
-            if len(self.block) != self.num_layers:
-                raise ValueError(
-                    f"block names {len(self.block)} layers for "
-                    f"num_layers={self.num_layers}.",
-                )
             gated = set(self.value_embedding_layers)
             last = self.num_layers - 1
             for layer, block in enumerate(self.block):
@@ -259,12 +239,6 @@ class NanoChatLM(nn.Module):
                 # rotary factors and value tables below are sized from it.
                 if not getattr(block, "_finalized", False):
                     block.finalize()
-            # The value-embedding tables and the rotary factors are built ONCE,
-            # to layer 0's geometry, and handed to every layer -- so a stack
-            # disagreeing on head shape is a contradiction settled here. Left to
-            # run time it surfaces as a reshape failure naming a tensor size
-            # rather than the layer.
-            _reject_ragged_heads(self.block)
             propagate_attr(self.embedding, "channels_out", self.channels_in)
             propagate_attr(self.embedding, "channels_in", self.vocab_size)
             propagate_attr(self.lm_head, "channels_in", self.channels_in)
@@ -277,10 +251,13 @@ class NanoChatLM(nn.Module):
             )
             self.mix.num_layers = self.num_layers
             self.mix.channels_in = self.channels_in
-            self.rope.channels_head = cast(
-                HeadGeometry,
-                self.block[0].attn,
-            ).channels_head
+            # Guarded rather than raised: an empty stack is rejected at build,
+            # and finalize must still print the rest of the tree.
+            if self.block:
+                self.rope.channels_head = cast(
+                    HeadGeometry,
+                    self.block[0].attn,
+                ).channels_head
             self._propagate_layer_table_widths()
             return super().finalize()
 
@@ -334,6 +311,7 @@ class NanoChatLM(nn.Module):
             """Propagate attention-value widths into subclass-owned layer tables."""
 
     def __init__(self, config: Config) -> None:
+        _validate_stack(config)
         super().__init__()
         self.config = config
         assert isinstance(config.block, list)
@@ -456,17 +434,58 @@ class NanoChatLM(nn.Module):
         device: torch.device,
     ) -> tuple[Tensor, Tensor]:
         """Return the rotation factors for ``length`` positions, built once."""
-        if self._rotation is None or self._rotation_device != device:
+        if self._rotation_is_stale(device):
             # REBUILT on a device change, never moved there: the factors come
             # from a transcendental whose last bit differs between CPU and CUDA
             # (rope.py:395-401), so a moved table is not the table that device
             # would have produced.
-            self._rotation = self.rope(
-                _positions(self.config.max_seq_len, device=device),
-            )
-            self._rotation_device = device
+            self.materialize_rotation_table(device=device)
+        if self._rotation is None:
+            raise ValueError("Expected self._rotation is not None.")
         cos, sin = self._rotation
         return cos[:length], sin[:length]
+
+    def materialize_rotation_table(self, *, device: torch.device) -> None:
+        """Build rotary factors on ``device`` at the rope's current dtype.
+
+        A compiled forward must find them already built: allocating inside
+        compilation risks CUDA-graph storage reuse.
+
+        Args:
+          device: Materialized model device.
+
+        """
+        self._rotation = self.rope(
+            _positions(self.config.max_seq_len, device=device),
+        )
+        self._rotation_device = device
+
+    def _rotation_is_stale(self, device: torch.device) -> bool:
+        """Whether the cached factors miss, or belong to another device or dtype."""
+        return (
+            self._rotation is None
+            or self._rotation_device != device
+            or self._rotation[0].dtype != self.rope.dtype
+        )
+
+    # Plain tuples are not moved by ``Module._apply``, so a ``.to``/``.double()``
+    # would otherwise leave the cache at the old device or dtype while the rope moved.
+    @override
+    def _apply(self, fn: Callable[[Tensor], Tensor], recurse: bool = True) -> Self:
+        """Rebuild the cached factors after the rope's device or dtype changes."""
+        super()._apply(fn, recurse)
+        device = self._materialized_device()
+        if device is None:
+            self._rotation = None
+        else:
+            self.materialize_rotation_table(device=device)
+        return self
+
+    def _materialized_device(self) -> torch.device | None:
+        """Return the first parameter's device, excluding meta tensors."""
+        for tensor in self.parameters():
+            return None if tensor.device.type == "meta" else tensor.device
+        return None
 
     def flops_per_token(self) -> float:
         """Report matmul FLOPs per token at the configured context.
@@ -524,6 +543,37 @@ def _inner_width(block: HasAttention) -> int:
     """Return a block's attention inner width, ``num_heads * channels_head``."""
     geometry = cast(HeadGeometry, block.attn)
     return geometry.num_heads * geometry.channels_head
+
+
+def _validate_stack(config: NanoChatLM.Config) -> None:
+    """Raise on a stack geometry the model cannot build."""
+    if config.vocab_size <= 0:
+        raise ValueError(f"vocab_size must be positive; got {config.vocab_size}.")
+    if config.max_seq_len < 2:
+        raise ValueError(
+            f"max_seq_len must be at least two; got {config.max_seq_len}.",
+        )
+    if config.num_layers <= 0 or config.channels_in <= 0:
+        raise ValueError(
+            "num_layers and channels_in must be positive; got "
+            f"{config.num_layers} and {config.channels_in}.",
+        )
+    if config.value_embedding_stride < 0:
+        raise ValueError(
+            "value_embedding_stride must be nonnegative; got "
+            f"{config.value_embedding_stride}.",
+        )
+    assert isinstance(config.block, Sequence)
+    if len(config.block) != config.num_layers:
+        raise ValueError(
+            f"block names {len(config.block)} layers for "
+            f"num_layers={config.num_layers}.",
+        )
+    # The value-embedding tables and the rotary factors are built ONCE, to layer
+    # 0's geometry, and handed to every layer -- so a stack disagreeing on head
+    # shape is a contradiction settled here. Left to run time it surfaces as a
+    # reshape failure naming a tensor size rather than the layer.
+    _reject_ragged_heads(config.block)
 
 
 def _reject_ragged_heads(blocks: Sequence[HasAttention]) -> None:
@@ -622,11 +672,15 @@ class ScaledSoftCap(SoftCap):
         super().__init__(config)
         self.output_cap = config.output_cap
 
+    # Capped at the inherited ``dtype`` (None keeps the projection's own), then
+    # widened: the float32 return is the loss's contract, the cap's width the
+    # recipe's choice.
     @override
     def forward(self, x: Tensor, **kwargs: object) -> Tensor:
-        return (
-            self.output_cap * torch.tanh(self.inner(x, **kwargs) / self.cap)
-        ).float()
+        out = self.inner(x, **kwargs)
+        if self.dtype is not None:
+            out = out.to(self.dtype)
+        return (self.output_cap * torch.tanh(out / self.cap)).float()
 
 
 class GatedResidualMix(ResidualMix):
@@ -697,14 +751,10 @@ class GatedResidualMix(ResidualMix):
             return base + gate.tile(self.num_layers, copies=self.num_layers)
 
     def __init__(self, config: Config) -> None:
-        # The parent's constructor invokes reset before this added vector exists.
-        nn.Module.__init__(self)
-        self.config = config
-        self.running = nn.Parameter(torch.empty(config.num_layers))
-        self.original = nn.Parameter(torch.empty(config.num_layers))
+        super().__init__(config)
         self.gate_scales = nn.Parameter(torch.empty(config.num_layers))
         self.gate_scale = config.gate_scale
-        self.reset_parameters()
+        nn.init.constant_(self.gate_scales, self.gate_scale)
 
     @override
     def reset_parameters(self) -> None:
@@ -794,21 +844,6 @@ class MemoryNanoChatLM(NanoChatLM):
         """Save the residual after this zero-based layer, without detaching it."""
 
         @override
-        def finalize(self) -> Self:
-            if self.num_pool_layers < 1 or self.num_pool_layers > self.num_layers:
-                raise ValueError("num_pool_layers must be between one and num_layers.")
-            if self.attention_source_layers and (
-                self.attention_source_after_layer < 0
-                or any(
-                    layer <= self.attention_source_after_layer
-                    or layer >= self.num_layers
-                    for layer in self.attention_source_layers
-                )
-            ):
-                raise ValueError("Attention source must precede every receiving layer.")
-            return super().finalize()
-
-        @override
         def cost(
             self,
             *,
@@ -885,14 +920,12 @@ class MemoryNanoChatLM(NanoChatLM):
             assert isinstance(self.block, Sequence)
             for name, table in (*self.bigrams.items(), *self.trigrams.items()):
                 layer = int(name)
-                if layer < 0 or layer >= len(self.block):
-                    raise ValueError(
-                        f"Memory table layer {layer} is outside "
-                        f"the {len(self.block)}-layer model.",
-                    )
-                table.channels_out = _inner_width(self.block[layer])
+                # Out of range is rejected at build; finalize still prints.
+                if 0 <= layer < len(self.block):
+                    table.channels_out = _inner_width(self.block[layer])
 
     def __init__(self, config: Config) -> None:
+        _validate_memory(config)
         super().__init__(config)
         self.bigrams = nn.ModuleDict(
             {name: cfg.make() for name, cfg in config.bigrams.items()},
@@ -1015,21 +1048,8 @@ class MemoryNanoChatLM(NanoChatLM):
             x = x + pooled
         return self.lm_head(self.norm_out(x))
 
-    def materialize_rotation_table(self, *, device: torch.device) -> None:
-        """Build rotary factors on the model device before compilation.
-
-        Allocating inside compilation risks CUDA-graph storage reuse. Moving factors
-        between devices preserves the source device's transcendental rounding.
-
-        Args:
-          device: Materialized model device.
-
-        """
-        self._rotation = self.rope(
-            _positions(self.config.max_seq_len, device=device),
-        )
-        self._rotation_device = device
-
+    # This model's forward is compiled whole, CUDA graphs included, and its reset
+    # materializes the table first; a miss here means a caller skipped that.
     @override
     def _rotation_table(
         self,
@@ -1037,46 +1057,17 @@ class MemoryNanoChatLM(NanoChatLM):
         *,
         device: torch.device,
     ) -> tuple[Tensor, Tensor]:
-        """Slice rotary factors, rebuilding outside compilation on device changes."""
-        if (
-            self._rotation is None
-            or self._rotation_device != device
-            or self._rotation[0].dtype != self.rope.dtype
-        ):
-            if torch.compiler.is_compiling():
-                raise RuntimeError(
-                    "The rotation table must be materialized outside compilation. "
-                    "Call materialize_rotation_table(device=...) before the "
-                    "first compiled forward.",
-                )
-            # Recompute on the target device; moving factors retains different
-            # transcendental rounding.
-            self.materialize_rotation_table(device=device)
-        if self._rotation is None:
-            raise ValueError("Expected self._rotation is not None.")
-        cos, sin = self._rotation
-        return cos[:length], sin[:length]
-
-    @override
-    def _apply(self, fn: Callable[[Tensor], Tensor], recurse: bool = True) -> Self:
-        """Rebuild factors after the rope's device or dtype changes."""
-        super()._apply(fn, recurse)
-        # Plain tuples are not moved by Module._apply. Whole-model precision
-        # casts to float before base reset and back to BF16 afterwards.
-        device = self._materialized_device()
-        if device is None:
-            self._rotation = None
-        else:
-            self.materialize_rotation_table(device=device)
-        return self
-
-    def _materialized_device(self) -> torch.device | None:
-        """Return the first parameter's device, excluding meta tensors."""
-        for tensor in self.parameters():
-            return None if tensor.device.type == "meta" else tensor.device
-        return None
+        """Slice rotary factors, refusing to build them inside compilation."""
+        if self._rotation_is_stale(device) and torch.compiler.is_compiling():
+            raise RuntimeError(
+                "The rotation table must be materialized outside compilation. "
+                "Call materialize_rotation_table(device=...) before the "
+                "first compiled forward.",
+            )
+        return super()._rotation_table(length, device=device)
 
     def _fused_sources(self, name: str, tokens: Tensor) -> list[NgramSource]:
+        """One fused source per table this layer reads, bigram first."""
         sources: list[NgramSource] = []
         for gate_index, tables in ((1, self.bigrams), (2, self.trigrams)):
             if name in tables:
@@ -1084,3 +1075,61 @@ class MemoryNanoChatLM(NanoChatLM):
                 assert isinstance(table, HashedNgramTables)
                 sources.append(NgramSource(gate_index, table, table.indices(tokens)))
         return sources
+
+
+# Each field is read by a component it names only by index, so a mismatch builds a model
+# that silently ignores the field or fails on first forward.
+def _validate_memory(config: MemoryNanoChatLM.Config) -> None:
+    """Raise on a memory, pooling, or source-reuse field the stack cannot honor."""
+    if config.num_pool_layers < 1 or config.num_pool_layers > config.num_layers:
+        raise ValueError("num_pool_layers must be between one and num_layers.")
+    if config.attention_source_layers and (
+        config.attention_source_after_layer < 0
+        or any(
+            layer <= config.attention_source_after_layer or layer >= config.num_layers
+            for layer in config.attention_source_layers
+        )
+    ):
+        raise ValueError("Attention source must precede every receiving layer.")
+    assert isinstance(config.block, Sequence)
+    for layer in config.attention_source_layers:
+        if not isinstance(config.block[layer], SourceReuseTransformerBlock.Config):
+            raise TypeError(
+                f"layer {layer} receives the attention source but its block is "
+                f"{type(config.block[layer]).__name__}, which would ignore it; "
+                "use SourceReuseTransformerBlock.Config.",
+            )
+    for gate, tables in (("bigram", config.bigrams), ("trigram", config.trigrams)):
+        for name, table in tables.items():
+            _validate_memory_table(config, name=name, gate=gate, table=table)
+
+
+def _validate_memory_table(
+    config: MemoryNanoChatLM.Config,
+    *,
+    name: str,
+    gate: str,
+    table: HashedNgramTables.Config,
+) -> None:
+    """Raise unless layer ``name`` exists and its attention reads ``gate``."""
+    assert isinstance(config.block, Sequence)
+    layer = int(name)
+    if layer < 0 or layer >= len(config.block):
+        raise ValueError(
+            f"Memory table layer {layer} is outside the {len(config.block)}-layer "
+            "model.",
+        )
+    attention = config.block[layer].attn
+    if not isinstance(attention, CausalAttention.Config) or not (
+        attention.bigram if gate == "bigram" else attention.trigram
+    ):
+        raise ValueError(
+            f"layer {layer} holds a {gate} table but its attention builds no "
+            f"{gate} gate to read it; set CausalAttention.Config.{gate}.",
+        )
+    # The fused kernel splits the value width into exactly two half tables.
+    if config.fused_ngram and len(table.hash_multipliers) != 2:
+        raise ValueError(
+            f"fused_ngram needs two hashes per table; the layer-{layer} {gate} "
+            f"table declares {len(table.hash_multipliers)}.",
+        )

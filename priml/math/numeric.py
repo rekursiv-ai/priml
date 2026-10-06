@@ -10,7 +10,7 @@ from torch import Tensor
 
 import torch
 
-from priml.math.basic import broadcast_sequences, ceil_div
+from priml.math.basic import broadcast_sequences, ceil_div, reduction_dims
 from priml.memory import convert_to_tensor
 
 
@@ -162,7 +162,8 @@ def softcap(x: Tensorable, cap: Tensorable = 1.0) -> Tensor:
 
     """
     orig_dtype = torch.as_tensor(x).dtype
-    x, cap = convert_to_tensor(x, cap, dtype=torch.float32)
+    compute_dtype = torch.promote_types(orig_dtype, torch.float32)
+    x, cap = convert_to_tensor(x, cap, dtype=compute_dtype)
     capped = torch.tanh(x / cap) * cap
     # Only a float input gets its dtype back. Capping is real-valued -- tanh(1)
     # is 0.7616 -- so restoring an integer dtype would floor every capped value
@@ -291,16 +292,17 @@ def log1psquare(x: Tensorable) -> Tensor:
 
 def logmeanexp(
     x: Tensorable,
-    dim: int | Sequence[int] = -1,
+    dim: int | Sequence[int] | None = -1,
     keepdim: bool = False,
 ) -> Tensor:
     """Log-mean-exp: logsumexp(x, dim) - log(size(dim)).
 
-    Computes log(mean(exp(x))) in a numerically stable way.
+    Computes log(mean(exp(x))) in a numerically stable way. ``dim=None``
+    flattens the input before reducing all its elements.
 
     Args:
       x: Input tensor.
-      dim: Dimension(s) to reduce.
+      dim: Dimension(s) to reduce, or None for every dimension.
       keepdim: Whether to keep the reduced dimension.
 
     Returns:
@@ -308,21 +310,20 @@ def logmeanexp(
 
     """
     x = convert_to_tensor(x)
-    dim_ = (dim,) if isinstance(dim, int) else tuple(dim)
+    dim_ = reduction_dims(dim, ndim=x.ndim)
     n = math.prod(x.shape[d] for d in dim_)
     if n == 0:
         # Reducing over nothing sums to zero, so every entry is log(0). Built
         # directly because the value is a constant: ``math.log(n)`` raises on
         # the empty case, and running the reduction to obtain it would launch
         # a kernel to compute something already known.
-        axes = {d % x.ndim for d in dim_}
         shape = [
-            1 if i in axes else s
+            1 if i in dim_ else s
             for i, s in enumerate(x.shape)
-            if keepdim or i not in axes
+            if keepdim or i not in dim_
         ]
         return torch.full(shape, -math.inf, dtype=x.dtype, device=x.device)
-    return torch.logsumexp(x, dim=dim, keepdim=keepdim) - math.log(n)
+    return torch.logsumexp(x, dim=dim_, keepdim=keepdim) - math.log(n)
 
 
 def shifted_geometric_mean(
@@ -362,7 +363,7 @@ def shifted_geometric_mean(
 
     """
     x = convert_to_tensor(x)
-    dim_ = None if dim is None else (dim,) if isinstance(dim, int) else tuple(dim)
+    dim_ = reduction_dims(dim, ndim=x.ndim)
     # `shift` is a Python float, so Dynamo specializes on it and this stays one
     # graph; a tensor-valued shift would make the branch a graph break.
     if shift == 1.0:
@@ -451,6 +452,8 @@ def matrix_signum_via_newtonschulz(
         if transpose:
             x = x.mT
         return x.to(orig_dtype)
+    original_shape = x.shape
+    x = x.reshape(-1, *x.shape[-2:])
     x = x / x.norm(dim=[-2, -1], keepdim=True).clamp(min=eps)
     if transpose := x.shape[-2] > x.shape[-1]:
         x = x.transpose(-2, -1)
@@ -460,7 +463,7 @@ def matrix_signum_via_newtonschulz(
         x = torch.baddbmm(x, correction, x, beta=a, alpha=1)
     if transpose:
         x = x.transpose(-1, -2)
-    return x.to(orig_dtype)
+    return x.reshape(original_shape).to(orig_dtype)
 
 
 def log_cumsum_exp(x: Tensorable, dim: int = -1) -> Tensor:
@@ -540,7 +543,7 @@ def kahan_sum(x: Tensorable, dim: int | None = None, keepdim: bool = False) -> T
     # ``.sum()`` at n=10_000 before, against a docstring offering this for
     # "large batches".
     blocks = math.isqrt(n) if n > 1 else 1
-    block_len = ceil_div(n, blocks) if blocks else 0
+    block_len = ceil_div(n, blocks)
     if n < block_len * blocks:
         # Zero pads the final short block. A zero term leaves both the total
         # and the compensation untouched, so it cannot perturb the result.
@@ -683,14 +686,12 @@ def sqrt1pm1(x: Tensorable) -> Tensor:
 
     """
     x = convert_to_tensor(x)
-    # For |x| < threshold, use the stable form x/(sqrt(1+x)+1).
-    # For large |x|, direct computation is fine.
-    threshold = torch.finfo(x.dtype).eps ** 0.25
-    is_small = x.abs() < threshold
-    safe_x = torch.where(is_small, x, 0.0)
-    stable = safe_x / (safe_sqrt(1.0 + safe_x) + 1.0)
-    direct = safe_sqrt(1.0 + x) - 1.0
-    return torch.where(is_small, stable, direct)
+    positive_infinity = x == math.inf
+    below_domain = x < -1
+    safe_x = torch.where(positive_infinity | below_domain, 0.0, x)
+    root = safe_sqrt(1.0 + safe_x)
+    result = safe_x / (root + 1.0)
+    return torch.where(positive_infinity, x, torch.where(below_domain, -1.0, result))
 
 
 def log_modulus(x: Tensorable) -> Tensor:
@@ -712,7 +713,9 @@ def log_modulus(x: Tensorable) -> Tensor:
 
     """
     x = convert_to_tensor(x)
-    return x.sign() * torch.log1p(x.abs())
+    one = torch.ones_like(x)
+    sign = torch.where(x < 0, -one, one)
+    return sign * torch.log1p(sign * x)
 
 
 def softsign(x: Tensorable) -> Tensor:
@@ -999,7 +1002,8 @@ def safe_xlogy(
 
     """
     input, other = convert_to_tensor(input, other)
-    return torch.xlogy(input, torch.where(input == 0.0, 1.0, other))
+    safe_other = torch.where((input == 0.0) & ~other.isnan(), 1.0, other)
+    return torch.xlogy(input, safe_other)
 
 
 def l2norm(x: Tensor, dim: int = -1, eps: float = 1e-6) -> Tensor:

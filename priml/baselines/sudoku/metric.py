@@ -42,10 +42,8 @@ class GridAccuracy:
         """Which label value marks a cell as not counting."""
 
         ignore_label_id: int = -100
-        """Label value excluded from both accuracies.
-
-        Padding rows appended to square off a short final batch carry it, so
-        they neither count as solved nor as failed."""
+        """Label value excluded from both accuracies; a row of only this value
+        counts as no puzzle at all."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -64,8 +62,9 @@ class GridAccuracy:
         Args:
           logits: Packed model output; the last ``grid_len`` columns are the
             predicted tokens.
-          **batch: Must carry ``label``; ``valid_count`` truncates the padded
-            tail when present.
+          **batch: Must carry ``label`` and ``valid_count``. The loaders pad a
+            short final batch with zero labels, which only ``valid_count``
+            tells apart from real puzzles, so it is required.
 
         """
         label_raw = batch["label"]
@@ -74,9 +73,8 @@ class GridAccuracy:
         grid_len = labels.shape[1]
         predictions = logits.detach()[:, -grid_len:].to(torch.int64)
         labels = labels.to(predictions.device)
-        raw_count = batch.get("valid_count", labels.shape[0])
-        assert isinstance(raw_count, int)
-        valid_count = raw_count
+        valid_count = batch["valid_count"]
+        assert isinstance(valid_count, int)
         predictions = predictions[:valid_count]
         labels = labels[:valid_count]
 

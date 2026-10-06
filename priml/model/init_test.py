@@ -70,9 +70,8 @@ class _InitModule(nn.Module):
         return torch.cat(initialized)
 
 
-def test_init_api_text(request: pytest.FixtureRequest) -> None:
+def test_init_api_text() -> None:
     assert_text_golden(
-        request,
         test_file=__file__,
         name="init",
         rendered="\n".join(

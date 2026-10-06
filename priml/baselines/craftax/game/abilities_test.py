@@ -918,6 +918,22 @@ def test_plants_age_and_ripen_independently_by_slot() -> None:
     ]
 
 
+def test_a_plant_ripens_on_the_overworld_while_the_player_is_below() -> None:
+    # Upstream update_plants writes state.map[0] (game_logic.py:2005-2011):
+    # saplings need GRASS, which only the overworld grows.
+    state = _state()
+    state.map[:, 1] = int(BlockType.STONE)
+    state.player_level[:] = 1
+    state.growing_plants_mask[:, 0] = True
+    state.growing_plants_positions[:, 0] = torch.tensor([10, 12], dtype=torch.int32)
+    state.growing_plants_age[:, 0] = 599
+
+    grown = abilities.grow_plants(state)
+
+    assert grown.map[:, 0, 10, 12].tolist() == [int(BlockType.RIPE_PLANT)] * 2
+    assert grown.map[:, 1, 10, 12].tolist() == [int(BlockType.STONE)] * 2
+
+
 def test_a_young_plant_is_not_yet_ripe() -> None:
     state = _state()
     state.growing_plants_mask[:, 0] = True

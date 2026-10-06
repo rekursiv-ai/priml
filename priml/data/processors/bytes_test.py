@@ -340,6 +340,128 @@ def test_decode_video_media_bytes_roundtrip(video_tar: Path) -> None:
 
 
 @pytest.mark.cli_python_subprocess
+def test_decode_video_filters_a_clip_it_cannot_decode(video_tar: Path) -> None:
+    sample = cast(
+        DecodeVideo.Input,
+        {
+            "media": b"not a video",
+            "format": "mp4",
+            "frames": 8,
+            "height": 4,
+            "width": 4,
+        },
+    )
+
+    out = list(DecodeVideo(DecodeVideo.Config())(_as_stream([sample])))
+
+    del video_tar
+    assert "media_tensor" not in out[0]
+    assert out[0].get("filter_reasons") == ["DecodeVideo:decode_failed"]
+
+
+@pytest.mark.cli_python_subprocess
+def test_decode_video_filters_a_clip_truncated_mid_stream(tmp_path: Path) -> None:
+    mp4 = tmp_path / "long.mp4"
+    _ = subprocess.run(  # noqa: S603 -- argv is built from literals and ints.
+        [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=s=64x64:d=8:r=16",
+            "-g",
+            "8",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(mp4),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    payload = mp4.read_bytes()
+    # A faststart file cut at 60% still decodes its first ~64 of 128 frames,
+    # then ffmpeg hits the missing data and stops early.
+    sample = cast(
+        DecodeVideo.Input,
+        {
+            "media": payload[: len(payload) * 6 // 10],
+            "format": "mp4",
+            "frames": 128,
+            "height": 64,
+            "width": 64,
+            "target_frames": 128,
+            "target_height": 8,
+            "target_width": 8,
+        },
+    )
+
+    out = list(DecodeVideo(DecodeVideo.Config())(_as_stream([sample])))
+
+    assert "media_tensor" not in out[0]
+    assert out[0].get("filter_reasons") == ["DecodeVideo:decode_failed"]
+
+
+@pytest.mark.cli_python_subprocess
+def test_decode_video_decodes_untagged_red_as_pure_red(video_tar: Path) -> None:
+    """The fixture is encoded with ffmpeg's default BT.601 matrix, untagged.
+
+    Forcing ``in_color_matrix=bt709`` decoded it with the wrong matrix, which
+    shifts pure red visibly into green and blue.
+    """
+    out = _run(video_tar, target_frames=1, target_height=16, target_width=16)
+    tensor = out[0].get("media_tensor")
+    assert isinstance(tensor, torch.Tensor)
+
+    left = tensor[:, 0, 4:12, 1:5].float().mean(dim=(1, 2))
+
+    torch.testing.assert_close(left, torch.tensor([1.0, -1.0, -1.0]), atol=0.04, rtol=0)
+
+
+@pytest.mark.parametrize(
+    ("targets", "reason"),
+    [
+        ({"target_frames": 4}, "DecodeVideo:partial_target"),
+        ({"target_height": 4, "target_width": 4}, "DecodeVideo:partial_target"),
+    ],
+)
+def test_decode_video_filters_a_partial_target(
+    targets: dict[str, int],
+    reason: str,
+) -> None:
+    sample = cast(
+        DecodeVideo.Input,
+        {"media": b"clip", "frames": 8, "height": 4, "width": 4, **targets},
+    )
+
+    out = list(DecodeVideo(DecodeVideo.Config())(_as_stream([sample])))
+
+    assert out[0].get("filter_reasons") == [reason]
+
+
+def test_decode_video_filters_a_video_without_dimensions() -> None:
+    sample = cast(DecodeVideo.Input, {"media": b"clip", "frames": 8, "width": 4})
+
+    out = list(DecodeVideo(DecodeVideo.Config())(_as_stream([sample])))
+
+    assert out[0].get("filter_reasons") == ["DecodeVideo:missing_dimensions"]
+
+
+def test_image_decoder_leaves_a_video_without_dimensions_to_the_video_decoder() -> None:
+    sample = cast(CropDuringDecodeImage.Input, {"media": b"clip", "frames": 8})
+
+    out = list(CropDuringDecodeImage(CropDuringDecodeImage.Config())(iter([sample])))
+
+    assert out[0].get("filter_reasons") is None
+
+
+@pytest.mark.cli_python_subprocess
 def test_decode_video_filters_a_non_positive_target(video_tar: Path) -> None:
     """A zero target is filtered rather than quietly yielding one frame.
 
@@ -1233,9 +1355,6 @@ def test_crop_image_backend_error_and_decode_video_helpers() -> None:
         decoded = image._process_image(b"x", "jpg", 2, 2, None)
     assert decoded is not None
     assert decoded[0] is None
-    image.turbo_jpeg = None
-    with pytest.raises(ValueError, match="turbo_jpeg"):
-        image._process_image(b"x", "jpg", 2, 2, None)
 
     processor = DecodeVideo(DecodeVideo.Config())
     assert (
@@ -1302,24 +1421,6 @@ def test_decode_video_read_media_and_decode_oserror() -> None:
         assert processor._decode(b"x", height=1, width=1, keep_frames=1) is None
 
 
-def test_decode_video_requires_process_stdout() -> None:
-    class Process:
-        stdout = None
-
-    processor = DecodeVideo(DecodeVideo.Config())
-    with (
-        patch(
-            "priml.data.processors.bytes.subprocess.Popen",
-            return_value=Process(),
-        ),
-        pytest.raises(
-            ValueError,
-            match=r"^Expected process\.stdout is not None\.$",
-        ),
-    ):
-        processor._decode(b"x", height=1, width=1, keep_frames=1)
-
-
 def test_decode_video_reads_tar_and_handles_decode_stream_failures() -> None:
     class Tar:
         name: str | None = None
@@ -1348,6 +1449,7 @@ def test_decode_video_reads_tar_and_handles_decode_stream_failures() -> None:
 
     class Process:
         stdout = Stdout()
+        returncode = 0
 
         def poll(self) -> None:
             return None
@@ -1559,6 +1661,7 @@ def test_video_processor_uses_tar_fallback_and_source_geometry(
 
     class Process:
         stdout = Stdout()
+        returncode = 0
 
         def poll(self) -> None:
             return None
@@ -1573,7 +1676,7 @@ def test_video_processor_uses_tar_fallback_and_source_geometry(
         del stdout, stderr
         nonlocal captured_payload
         captured_args.extend(args)
-        captured_payload = Path(args[4]).read_bytes()
+        captured_payload = Path(args[args.index("-i") + 1]).read_bytes()
         return Process()
 
     archive = tmp_path / "clip.tar"
@@ -1732,6 +1835,7 @@ def test_decode_video_routes_tar_media_and_requested_geometry(
 
     class Process:
         stdout = Stdout()
+        returncode = 0
 
         def poll(self) -> None:
             return None
@@ -2083,14 +2187,6 @@ def test_image_decode_normalizes_in_place_and_initializes_only_enabled_backends(
     assert inplace
     assert result.get("media_tensor") is normalized
 
-    monkeypatch.setattr(
-        "priml.data.processors.bytes.TurboJPEG",
-        lambda: None,
-    )
-    broken = CropDuringDecodeImage(CropDuringDecodeImage.Config())
-    with pytest.raises(ValueError, match=r"^Expected self\.turbo_jpeg is not None\.$"):
-        broken._process_image(b"jpeg", "jpg", 4, 6, None)
-
 
 def test_image_cascade_continues_after_backend_failures() -> None:
     processor = CropDuringDecodeImage(
@@ -2157,6 +2253,7 @@ def test_video_processor_reads_tar_bytes_and_repeats_the_last_distinct_frame(
 
     class Process:
         stdout = Stdout()
+        returncode = 0
 
         def poll(self) -> None:
             return None
@@ -2170,7 +2267,7 @@ def test_video_processor_reads_tar_bytes_and_repeats_the_last_distinct_frame(
     def launch(args: list[str], *, stdout: int, stderr: int) -> Process:
         del stdout, stderr
         nonlocal captured_payload
-        captured_payload = Path(args[4]).read_bytes()
+        captured_payload = Path(args[args.index("-i") + 1]).read_bytes()
         return Process()
 
     archive = tmp_path / "video.tar"
@@ -2258,6 +2355,7 @@ def test_video_decoder_invokes_ffmpeg_with_the_output_contract() -> None:
 
     class Process:
         stdout = Stdout()
+        returncode = 0
 
         def poll(self) -> None:
             return None
@@ -2276,7 +2374,7 @@ def test_video_decoder_invokes_ffmpeg_with_the_output_contract() -> None:
     ) -> Process:
         nonlocal captured_payload
         captured_args.extend(args)
-        captured_payload = Path(args[4]).read_bytes()
+        captured_payload = Path(args[args.index("-i") + 1]).read_bytes()
         captured_options.update(stdout=stdout, stderr=stderr)
         return Process()
 
@@ -2294,12 +2392,17 @@ def test_video_decoder_invokes_ffmpeg_with_the_output_contract() -> None:
 
     assert result is not None
     assert result.shape == (3, 2, height, width)
+    # ``-threads`` and ``-xerror`` precede ``-i``: placed after it, ``-threads``
+    # applied to the output encoder, not the decoder.
     assert captured_args == [
         "chosen-ffmpeg",
         "-v",
         "error",
+        "-xerror",
+        "-threads",
+        "1",
         "-i",
-        captured_args[4],
+        captured_args[7],
         "-pix_fmt",
         "rgb24",
         "-vcodec",
@@ -2307,13 +2410,11 @@ def test_video_decoder_invokes_ffmpeg_with_the_output_contract() -> None:
         "-f",
         "image2pipe",
         "-vf",
-        "scale=6:4:in_color_matrix=bt709:out_color_matrix=bt709:in_range=tv:out_range=full",
-        "-threads",
-        "1",
+        "scale=6:4:out_range=full",
         "-",
     ]
-    assert Path(captured_args[4]).name.startswith("bytes-")
-    assert Path(captured_args[4]).suffix == ".mp4"
+    assert Path(captured_args[7]).name.startswith("bytes-")
+    assert Path(captured_args[7]).suffix == ".mp4"
     assert captured_payload == b"video-payload"
     assert captured_options == {
         "stdout": subprocess.PIPE,

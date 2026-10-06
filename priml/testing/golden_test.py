@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, Self, override
 
+import subprocess
+import sys
+import textwrap
 import zlib
+
+from configgle.fig import Fig, Maker
 
 import pytest
 import torch
 
 from priml.lib.custom_json import ReadError
-from priml.testing import golden
+from priml.testing import golden, regenerate
 from priml.testing.golden import (
+    assert_pprint_golden,
     assert_tensor_golden,
     assert_text_golden,
     expect_golden_mismatch,
@@ -37,57 +43,235 @@ if TYPE_CHECKING:
     from torch import Tensor
 
 
-def test_assert_text_golden_reads_testdata(
-    request: pytest.FixtureRequest,
+@pytest.fixture(autouse=True)
+def compare_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Assert, not regenerate, whatever flags this run was started with."""
+    regenerate.override(monkeypatch, golden=False, b4b=False)
+
+
+class _DefaultsOnly:
+    class Config(Fig["_DefaultsOnly"]):
+        default_value: int = 3
+        """A value retained in the full golden."""
+
+        long_default: str = "a default long enough to force dataclass pprint dispatch"
+        """A long default retained in the full golden."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+
+class _Example:
+    class Config(Fig["_Example"]):
+        inherited: int = -1
+        """A value filled during finalization."""
+
+        @override
+        def finalize(self) -> Self:
+            self.inherited = 7
+            return super().finalize()
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+
+def test_assert_pprint_golden_reads_full_finalized_config(tmp_path: Path) -> None:
+    test_file = tmp_path / "owner_test.py"
+    testdata = tmp_path / "testdata"
+    testdata.mkdir()
+    path = testdata / "example.txt"
+    path.write_text(
+        _Example.Config().pformat(hide_default_values=False) + "\n",
+        encoding="utf-8",
+    )
+
+    assert_pprint_golden(
+        test_file=str(test_file),
+        name="example",
+        config=_Example.Config(),
+    )
+
+    assert "inherited=7" in path.read_text(encoding="utf-8")
+
+
+def test_assert_pprint_golden_pins_rendering_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    seen: dict[str, object] = {}
+
+    def pformat(config: Maker[object], **kwargs: object) -> str:
+        del config
+        seen.update(kwargs)
+        return "rendered"
+
+    monkeypatch.setattr(Maker, "pformat", pformat)
+    test_file = tmp_path / "owner_test.py"
+    testdata = tmp_path / "testdata"
+    testdata.mkdir()
+    (testdata / "example.txt").write_text("rendered\n", encoding="utf-8")
+
+    assert_pprint_golden(
+        test_file=str(test_file),
+        name="example",
+        config=_Example.Config(),
+    )
+
+    assert seen == {
+        "finalize": True,
+        "hide_default_values": False,
+        "mask_memory_addresses": True,
+    }
+
+
+def test_assert_pprint_golden_normalizes_rendered_text(tmp_path: Path) -> None:
+    test_file = tmp_path / "owner_test.py"
+    testdata = tmp_path / "testdata"
+    testdata.mkdir()
+    (testdata / "example.txt").write_text(
+        "_EXAMPLE.CONFIG(INHERITED=7)\n",
+        encoding="utf-8",
+    )
+
+    assert_pprint_golden(
+        test_file=str(test_file),
+        name="example",
+        config=_Example.Config(),
+        normalize=str.upper,
+    )
+
+
+def test_assert_pprint_golden_writes_full_unchanged_defaults(tmp_path: Path) -> None:
+    test_file = tmp_path / "nested" / "owner_test.py"
+
+    with pytest.raises(AssertionError, match="Missing golden regenerated"):
+        assert_pprint_golden(
+            test_file=str(test_file),
+            name="defaults",
+            config=_DefaultsOnly.Config(),
+        )
+
+    rendered = (tmp_path / "nested" / "testdata" / "defaults.txt").read_text(
+        encoding="utf-8",
+    )
+    assert "default_value=3" in rendered
+    assert "long_default='a default long enough" in rendered
+
+
+def test_assert_pprint_golden_reports_mismatch_without_rewriting(
     tmp_path: Path,
 ) -> None:
     test_file = tmp_path / "owner_test.py"
     testdata = tmp_path / "testdata"
     testdata.mkdir()
-    (testdata / "example.txt").write_text("value\n", encoding="utf-8")
+    path = testdata / "example.txt"
+    path.write_text("stale\n", encoding="utf-8")
 
-    assert_text_golden(
-        request,
-        test_file=str(test_file),
-        name="example",
-        rendered="value",
+    with pytest.raises(AssertionError) as exc_info:
+        assert_pprint_golden(
+            test_file=str(test_file),
+            name="example",
+            config=_Example.Config(),
+        )
+
+    assert str(exc_info.value) == (
+        "example changed; rerun with --regenerate-golden if intended.\n"
+        f"--- {path}\n"
+        "+++ example (rendered)\n"
+        "@@ -1 +1 @@\n"
+        "-stale\n"
+        "+_Example.Config(inherited=7)\n"
     )
+    assert path.read_text(encoding="utf-8") == "stale\n"
 
 
-def test_assert_text_golden_regenerates_missing_then_fails(
-    request: pytest.FixtureRequest,
+@pytest.mark.cli_python_subprocess
+def test_assert_pprint_golden_rejects_mismatch_under_optimized_python(
     tmp_path: Path,
 ) -> None:
     test_file = tmp_path / "owner_test.py"
+    testdata = tmp_path / "testdata"
+    testdata.mkdir()
+    (testdata / "example.txt").write_text("stale\n", encoding="utf-8")
+    script = textwrap.dedent(
+        f"""
+        from configgle.fig import Fig
+        from priml.testing.golden import assert_pprint_golden
+
+        class Example:
+            class Config(Fig["Example"]):
+                value: int = 1
+
+            def __init__(self, config: Config) -> None:
+                del config
+
+        assert_pprint_golden(
+            test_file={str(test_file)!r},
+            name="example",
+            config=Example.Config(),
+        )
+        """,
+    )
+
+    result = subprocess.run(  # noqa: S603 -- The test invokes a fixed helper command with controlled fixture arguments.
+        [sys.executable, "-O", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "AssertionError" in result.stderr
+
+
+def test_assert_pprint_golden_regenerates_under_the_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    test_file = tmp_path / "owner_test.py"
+    testdata = tmp_path / "testdata"
+    testdata.mkdir()
+    path = testdata / "example.txt"
+    path.write_text("stale\n", encoding="utf-8")
+    regenerate.override(monkeypatch, golden=True)
+
+    assert_pprint_golden(
+        test_file=str(test_file),
+        name="example",
+        config=_Example.Config(),
+    )
+
+    assert "inherited=7" in path.read_text(encoding="utf-8")
+
+
+def test_assert_text_golden_reads_testdata(tmp_path: Path) -> None:
+    test_file = tmp_path / "owner_test.py"
+    testdata = tmp_path / "testdata"
+    testdata.mkdir()
+    (testdata / "example.txt").write_text("value\n", encoding="utf-8")
+
+    assert_text_golden(test_file=str(test_file), name="example", rendered="value")
+
+
+def test_assert_text_golden_regenerates_missing_then_fails(tmp_path: Path) -> None:
+    test_file = tmp_path / "owner_test.py"
 
     with pytest.raises(AssertionError, match="Missing golden regenerated"):
-        assert_text_golden(
-            request,
-            test_file=str(test_file),
-            name="example",
-            rendered="value",
-        )
+        assert_text_golden(test_file=str(test_file), name="example", rendered="value")
 
     assert (tmp_path / "testdata" / "example.txt").read_text() == "value\n"
 
 
 def test_assert_text_golden_creates_missing_ancestor_directories(
-    request: pytest.FixtureRequest,
     tmp_path: Path,
 ) -> None:
     test_file = tmp_path / "absent" / "owner_test.py"
     with pytest.raises(AssertionError, match="Missing golden regenerated"):
-        assert_text_golden(
-            request,
-            test_file=str(test_file),
-            name="example",
-            rendered="value",
-        )
+        assert_text_golden(test_file=str(test_file), name="example", rendered="value")
     assert (tmp_path / "absent" / "testdata" / "example.txt").read_text() == "value\n"
 
 
 def test_assert_text_golden_fails_a_changed_render_as_an_assertion(
-    request: pytest.FixtureRequest,
     tmp_path: Path,
 ) -> None:
     test_file = tmp_path / "owner_test.py"
@@ -96,14 +280,9 @@ def test_assert_text_golden_fails_a_changed_render_as_an_assertion(
     (testdata / "example.txt").write_text("value\n", encoding="utf-8")
 
     with pytest.raises(AssertionError) as error:
-        assert_text_golden(
-            request,
-            test_file=str(test_file),
-            name="example",
-            rendered="other",
-        )
+        assert_text_golden(test_file=str(test_file), name="example", rendered="other")
     assert str(error.value) == (
-        "example changed; read the diff, then rerun with --golden-overwrite "
+        "example changed; read the diff, then rerun with --regenerate-golden "
         "if the change is intended."
     )
 
@@ -331,7 +510,6 @@ def test_assert_tensor_golden_mints_missing_then_compares(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("BFB_REGENERATE", raising=False)
     path = tmp_path / "testdata" / "g.pt"
     record = _record()
     with pytest.raises(AssertionError, match="Missing golden minted"):
@@ -340,7 +518,7 @@ def test_assert_tensor_golden_mints_missing_then_compares(
     changed = {**record, "d": torch.tensor(2.5, dtype=torch.float64)}
     with pytest.raises(AssertionError, match="1 mismatches"):
         assert_tensor_golden(path, changed)
-    monkeypatch.setenv("BFB_REGENERATE", "1")
+    regenerate.override(monkeypatch, b4b=True)
     assert_tensor_golden(path, changed)
     assert torch.equal(read_tensors(path)["d"], changed["d"])
 
@@ -352,12 +530,11 @@ def test_expect_golden_mismatch_blocks_regeneration(
     path = tmp_path / "testdata" / "g.pt"
     original = _record()
     changed = {**original, "d": torch.tensor(2.5, dtype=torch.float64)}
-    monkeypatch.delenv("BFB_REGENERATE", raising=False)
     with pytest.raises(AssertionError, match="Missing golden minted"):
         assert_tensor_golden(path, original)
     before = path.read_bytes()
 
-    monkeypatch.setenv("BFB_REGENERATE", "1")
+    regenerate.override(monkeypatch, b4b=True)
     assert_tensor_golden(path, changed)
     assert path.read_bytes() != before
 
@@ -383,36 +560,25 @@ def test_expect_golden_mismatch_requires_the_message_to_match(
 
 
 def test_assert_text_golden_overwrites_only_when_requested(
-    request: pytest.FixtureRequest,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     test_file = tmp_path / "nested" / "owner_test.py"
-    golden = tmp_path / "nested" / "testdata" / "named.txt"
-    golden.parent.mkdir(parents=True)
-    golden.write_text("old\n", encoding="utf-8")
-    options: list[tuple[str, dict[str, object]]] = []
-
-    def getoption(name: str, *args: object, **kwargs: object) -> bool:
-        options.append((name, {"args": args, **kwargs}))
-        return True
-
-    monkeypatch.setattr(request.config, "getoption", getoption)
-    assert_text_golden(
-        request,
-        test_file=str(test_file),
-        name="named",
-        rendered="new",
-    )
-    assert options == [("--golden-overwrite", {"args": (), "default": False})]
-    assert golden.read_text(encoding="utf-8") == "new\n"
+    path = tmp_path / "nested" / "testdata" / "named.txt"
+    path.parent.mkdir(parents=True)
+    path.write_text("old\n", encoding="utf-8")
+    regenerate.override(monkeypatch, b4b=True)
+    with pytest.raises(AssertionError, match="named changed"):
+        assert_text_golden(test_file=str(test_file), name="named", rendered="new")
+    assert path.read_text(encoding="utf-8") == "old\n"
+    regenerate.override(monkeypatch, golden=True)
+    assert_text_golden(test_file=str(test_file), name="named", rendered="new")
+    assert path.read_text(encoding="utf-8") == "new\n"
 
 
 def test_assert_tensor_golden_creates_nested_parent_and_reports_every_diff(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("BFB_REGENERATE", raising=False)
     path = tmp_path / "deep" / "nested" / "g.pt"
     original = {"a": torch.tensor([1.0]), "b": torch.tensor([2.0])}
     with pytest.raises(AssertionError, match="Missing golden minted"):
@@ -424,7 +590,7 @@ def test_assert_tensor_golden_creates_nested_parent_and_reports_every_diff(
     assert str(error.value) == "2 mismatches:\na: 1/1 differ\nb: 1/1 differ"
 
 
-def test_assert_tensor_golden_regeneration_uses_only_exact_one_flag(
+def test_assert_tensor_golden_regenerates_only_under_the_b4b_flag(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -433,11 +599,11 @@ def test_assert_tensor_golden_regeneration_uses_only_exact_one_flag(
     with pytest.raises(AssertionError, match="Missing golden minted"):
         assert_tensor_golden(path, record)
     before = path.read_bytes()
-    monkeypatch.setenv("BFB_REGENERATE", "true")
+    regenerate.override(monkeypatch, golden=True)
     with pytest.raises(AssertionError, match="mismatches"):
         assert_tensor_golden(path, {"x": torch.tensor([3.0, 4.0])})
     assert path.read_bytes() == before
-    monkeypatch.setenv("BFB_REGENERATE", "1")
+    regenerate.override(monkeypatch, b4b=True)
     assert_tensor_golden(path, {"x": torch.tensor([3.0, 4.0])})
     assert torch.equal(read_tensors(path)["x"], torch.tensor([3.0, 4.0]))
 
@@ -538,7 +704,6 @@ def test_unpack_empty_index_returns_empty_record() -> None:
 
 
 def test_text_golden_uses_utf8_for_disk_io(
-    request: pytest.FixtureRequest,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -566,13 +731,8 @@ def test_text_golden_uses_utf8_for_disk_io(
     monkeypatch.setattr(Path, "write_text", track_write)
     monkeypatch.setattr(Path, "read_text", track_read)
 
-    def getoption(name: str, *args: object, **kwargs: object) -> bool:
-        del args, kwargs
-        return name == "--golden-overwrite"
-
-    monkeypatch.setattr(request.config, "getoption", getoption)
+    regenerate.override(monkeypatch, golden=True)
     assert_text_golden(
-        request,
         test_file=str(test_file),
         name="disk",
         rendered="value",

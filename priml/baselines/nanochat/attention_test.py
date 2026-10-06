@@ -144,6 +144,25 @@ def test_causal_attention_forwards_unconsumed_messages() -> None:
     assert output.shape == x.shape
 
 
+def test_causal_attention_keeps_the_block_cache_from_its_kernel() -> None:
+    """A block hands every attention ``cache``; a bus-naming kernel never sees it."""
+    config = CausalAttention.Config()
+    config.channels_in = 18
+    config.channels_head = 6
+    config.gate_channels = 6
+    config.kernel = PartialConfig(_message_kernel)
+    attention = config.make()
+    x = torch.ones(2, 4, 18)
+    # CausalAttention broadcasts rotary values across the head axis.
+    cos_sin = (torch.ones(4, 1, 3), torch.zeros(4, 1, 3))
+
+    output = attention(x, cos_sin=cos_sin, message=123, cache=None)
+
+    assert output.shape == x.shape
+    with pytest.raises(TypeError, match="CausalAttention keeps no decode cache"):
+        attention(x, cos_sin=cos_sin, message=123, cache={})
+
+
 @pytest.mark.parametrize(
     ("gate_channels", "bigram", "trigram", "required_slices"),
     [
@@ -472,13 +491,17 @@ def test_causal_attention_rejects_non_tensor_memories_and_supports_fused_rope(
     x = torch.randn(2, 3, 8)
     # Rotary factors use a singleton head axis for production broadcasting.
     cos_sin = (torch.ones(3, 1, 2), torch.zeros(3, 1, 2))
-    with pytest.raises(ValueError, match="bigram_value"):
+    with pytest.raises(TypeError, match=r"^bigram_value must be Tensor or None"):
         causal(x, cos_sin=cos_sin, bigram_value=3)
-    with pytest.raises(ValueError, match="trigram_value"):
+    with pytest.raises(TypeError, match=r"^trigram_value must be Tensor or None"):
         causal(x, cos_sin=cos_sin, trigram_value=3)
+    with pytest.raises(TypeError, match=r"^fused_tables must be list or None"):
+        causal(x, cos_sin=cos_sin, fused_tables=(1,))
     output = causal(x, cos_sin=cos_sin)
     assert output.shape == x.shape
     assert fused_calls == 1
+    with pytest.raises(TypeError, match=r"^fused_tables must hold NgramSource"):
+        causal(x, cos_sin=cos_sin, fused_tables=[3])
 
     gated = CausalAttention.Config()
     gated.channels_in = 16

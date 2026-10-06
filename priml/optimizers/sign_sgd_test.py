@@ -330,11 +330,27 @@ def test_step_evaluates_and_returns_the_closure() -> None:
 
 def test_negative_hyperparameters_are_rejected() -> None:
     p = torch.zeros(2)
-    with pytest.raises(ValueError, match="Invalid learning rate"):
+    with pytest.raises(
+        ValueError,
+        match="Learning rate must be finite and nonnegative",
+    ):
         SignSGD([p], lr=-1.0)
-    with pytest.raises(ValueError, match="Invalid weight_decay"):
+    with pytest.raises(ValueError, match="Weight decay must be finite and nonnegative"):
         SignSGD([p], weight_decay=-1.0)
     assert SignSGD([p], lr=0.0).param_groups[0]["lr"] == 0.0
+
+
+def test_nan_hyperparameters_are_rejected() -> None:
+    """NaN evades every ``<`` range check, then poisons every parameter."""
+    p = torch.zeros(2)
+    with pytest.raises(ValueError, match="Learning rate must be finite"):
+        SignSGD([p], lr=float("nan"))
+    with pytest.raises(ValueError, match="Learning rate must be finite"):
+        SignSGD([p], lr=float("inf"))
+    with pytest.raises(ValueError, match="Weight decay must be finite"):
+        SignSGD([p], weight_decay=float("nan"))
+    with pytest.raises(ValueError, match="Weight decay must be finite"):
+        SignSGD([p], weight_decay=float("inf"))
 
 
 def test_default_learning_rate_is_point_zero_one() -> None:

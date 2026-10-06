@@ -40,8 +40,8 @@ these prepared 8K BPE inputs unchanged.
 `exp022` uses FlashAttention-4, Triton, BF16 weights, and prepared 16K Unigram
 rows. It targets a single high-memory NVIDIA GPU. Its default training budget is
 525 seconds for H-series GPUs, excluding compilation warmup and evaluation.
-For B200, uncomment the marked 300-second budget line in `exp022`; it updates
-both the training schedule and the loop's stop time.
+For B200, run `exp024`: `exp022` at a 300-second budget, applied to both the
+training schedule and the loop's stop time.
 
 The 16K experiments select ATen matrix multiplication inside the compiled
 model. This avoids large-matrix indexing errors observed with PyTorch 2.11
@@ -94,7 +94,7 @@ the steps that you would get on a B200, but on on an H-series GPU.
 
 `exp004` starts from `exp000`; later factories inherit their predecessor.
 `exp004`–`exp022` default to 525 seconds. To reproduce the final experiment, `exp022`,
-on b200, override with `--override step.train_budget_sec=300.0 --override max_time=300.0`.
+on B200, run `exp024`, its 300-second fork.
 
 Δ BPB compares each recipe with its parent at the same budget; negative is
 better. `—` means no measured comparison is available.
@@ -159,7 +159,7 @@ better. `—` means no measured comparison is available.
 
 | Experiment | Change | Mean BPB | Δ BPB | Seeds |
 |---|---|---:|---:|---|
-| `exp022` | Zero-initialize memory tables | 0.887791 | — | 10 (42–51) |
+| `exp024` | `exp022` at a 300-second budget | 0.887791 | — | 10 (42–51) |
 
 ### References
 

@@ -1,8 +1,8 @@
-"""Tests for MMDiT block.
+r"""Tests for MMDiT block.
 
 Regenerate bit-for-bit goldens after an intentional numeric change::
 
-    BFB_REGENERATE=1 uv --quiet run --frozen pytest \
+    uv --quiet run --frozen pytest \ --regenerate-b4b
         priml/model/transformer/mmdit_test.py
 
 Run regeneration through pytest so priml's conftest establishes the required
@@ -14,7 +14,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
-from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
 
 import pytest
@@ -38,6 +37,7 @@ from priml.testing.bfb import (
     randomize_parameters,
 )
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent

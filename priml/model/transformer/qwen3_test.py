@@ -9,16 +9,16 @@ from unittest.mock import Mock
 
 import json
 import os
+import re
 import sys
 
-from configgle.testing import assert_pprint_golden
 from torch import Tensor
 
 import pytest
 import torch
 
 from priml import hub
-from priml.lib.custom_json import convert
+from priml.lib.custom_json import ReadError, convert
 from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.rope import (
@@ -37,6 +37,7 @@ from priml.model.transformer.qwen3 import Qwen3, remap_hf_state_dict
 from priml.model.transformer.transformer import Transformer, head_is_tied
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 if TYPE_CHECKING:
@@ -135,11 +136,6 @@ def test_qwen3_cost_matches_torch(tie_embeddings: bool) -> None:
 def synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, Tensor]:
     """Build a random-weight state_dict in HF Qwen3 layout."""
     h = cfg.channels_in
-    inter = ffn(cfg).channels_hidden
-    attention = attn(cfg)
-    n_q = attention.num_heads
-    n_kv = attention.num_heads_kv
-    d = attention.channels_head
     sd: dict[str, Tensor] = {
         "model.embed_tokens.weight": torch.randn(cfg.channels_out, h),
         "model.norm.weight": torch.randn(h),
@@ -147,6 +143,11 @@ def synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, Tensor]:
     if not head_is_tied(cfg):
         sd["lm_head.weight"] = torch.randn(cfg.channels_out, h)
     for i in range(cfg.num_layers):
+        inter = ffn(cfg, i).channels_hidden
+        attention = attn(cfg, i)
+        n_q = attention.num_heads
+        n_kv = attention.num_heads_kv
+        d = attention.channels_head
         p = f"model.layers.{i}"
         sd[f"{p}.input_layernorm.weight"] = torch.randn(h)
         sd[f"{p}.post_attention_layernorm.weight"] = torch.randn(h)
@@ -247,13 +248,125 @@ class TestConfig:
         assert isinstance(rope.frequencies, HuggingFaceFrequencies.Config)
         assert rope.frequencies.base == 25_000.0
 
-    def test_malformed_nested_rope_parameters_use_default(self):
-        cfg = hf_config(rope_theta=None, rope_parameters=["not", "an", "object"])
-        parsed = Qwen3.Config.from_hf(cfg)
-        rope = attn(parsed).rope
+    @pytest.mark.parametrize("rope_theta", [None, 1_000_000])
+    def test_malformed_nested_rope_parameters_are_rejected(
+        self,
+        rope_theta: int | None,
+    ) -> None:
+        """A wrongly typed field is caller input, never a silent default."""
+        cfg = hf_config(
+            rope_theta=rope_theta,
+            rope_parameters=["not", "an", "object"],
+        )
+        with pytest.raises(ReadError):
+            Qwen3.Config.from_hf(cfg)
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            (
+                {"rope_scaling": {"rope_type": "yarn", "factor": 4.0}},
+                "Only default rotary frequencies are supported.",
+            ),
+            (
+                {
+                    "rope_parameters": {
+                        "rope_type": "yarn",
+                        "factor": 4.0,
+                        "rope_theta": 1e6,
+                    },
+                },
+                "Only default rotary frequencies are supported.",
+            ),
+            (
+                {"attention_bias": True},
+                "Attention projection biases are unsupported.",
+            ),
+            (
+                {"use_sliding_window": True, "sliding_window": 4096},
+                "Sliding-window attention is unsupported.",
+            ),
+            (
+                {"layer_types": ["full_attention", "sliding_attention"]},
+                "Sliding-window attention is unsupported.",
+            ),
+            (
+                {"hidden_act": "gelu"},
+                "Only the SwiGLU/silu Qwen3 architecture is supported.",
+            ),
+            (
+                {"quantization_config": {"quant_method": "fp8"}},
+                "Quantized checkpoint configurations are unsupported.",
+            ),
+            (
+                {"attention_dropout": 1.0},
+                "attention_dropout must be finite and in [0, 1).",
+            ),
+        ],
+    )
+    def test_unrepresentable_architectures_are_rejected(
+        self,
+        overrides: dict[str, object],
+        message: str,
+    ) -> None:
+        """Each of these would otherwise load a different model than HF's."""
+        with pytest.raises(ValueError, match=re.escape(message)) as error:
+            Qwen3.Config.from_hf(hf_config(**overrides))
+        assert str(error.value) == message
+
+    def test_hf_serialized_default_config_is_accepted(self) -> None:
+        """HF's own ``to_dict`` carries every field the gate inspects."""
+        pytest.importorskip("transformers")
+        from transformers.models.qwen3.configuration_qwen3 import (  # noqa: PLC0415 -- The optional Transformers dependency is loaded only in these tests.
+            Qwen3Config,
+        )
+
+        serialized = Qwen3Config(
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=24,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=8,
+        ).to_dict()
+        cfg = Qwen3.Config.from_hf(serialized)
+        rope = attn(cfg).rope
         assert isinstance(rope, RoPE.Config)
         assert isinstance(rope.frequencies, HuggingFaceFrequencies.Config)
-        assert rope.frequencies.base == 1_000_000.0
+        assert rope.frequencies.base == serialized["rope_parameters"]["rope_theta"]
+
+    def test_hf_defaults_for_inert_fields_are_accepted(self) -> None:
+        """Real checkpoints ship ``sliding_window`` with the window switched off."""
+        cfg = Qwen3.Config.from_hf(
+            hf_config(
+                sliding_window=4096,
+                use_sliding_window=False,
+                attention_bias=False,
+                hidden_act="silu",
+                layer_types=["full_attention", "full_attention"],
+                rope_scaling=None,
+                attention_dropout=0.25,
+            ),
+        )
+        assert attn(cfg).dropout == 0.25
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"tie_word_embeddings": "false"},
+            {"attention_bias": "false"},
+            {"use_sliding_window": 0},
+            {"layer_types": "full_attention"},
+        ],
+    )
+    def test_wrongly_typed_fields_are_rejected(
+        self,
+        overrides: dict[str, object],
+    ) -> None:
+        """``bool("false")`` is True; a typed read refuses it instead."""
+        with pytest.raises(ReadError):
+            Qwen3.Config.from_hf(hf_config(**overrides))
 
     @pytest.mark.parametrize(
         "overrides",
@@ -286,16 +399,6 @@ class TestConfig:
     def test_make_returns_qwen3_instance(self):
         """Makes[Qwen3] re-narrows .make() to Qwen3, not Transformer."""
         Qwen3.Config.from_hf(hf_config()).make()
-
-    def test_attn_of_defaults_to_layer_zero(self):
-        cfg = Qwen3.Config.from_hf(hf_config()).finalize()
-        assert isinstance(cfg.block, list)
-        second = cfg.block[1]
-        assert isinstance(second, TransformerBlock.Config)
-        assert isinstance(second.attn, Attention.Config)
-        second.attn.channels_head = 12
-
-        assert qwen3._attn_of(cfg).channels_head == 16
 
     def test_attn_of_broadcasts_a_single_block_to_any_layer(self):
         cfg = Qwen3.Config.from_hf(hf_config())
@@ -577,6 +680,22 @@ class TestRemap:
         assert isinstance(k_weight, Tensor)
         assert torch.equal(q_weight, torch.full_like(q_weight, 2.0))
         assert torch.equal(k_weight, torch.full_like(k_weight, 3.0))
+
+    def test_per_layer_head_geometry_remaps_and_loads_strictly(self) -> None:
+        """Each layer's heads are read off that layer, not off layer 0."""
+        cfg = Qwen3.Config.from_hf(hf_config()).finalize()
+        assert isinstance(cfg.block, list)
+        second = cfg.block[1]
+        assert isinstance(second, TransformerBlock.Config)
+        assert isinstance(second.attn, Attention.Config)
+        second.attn.num_heads_kv = 4
+        model = cfg.make()
+        model.load_state_dict(
+            remap_hf_state_dict(synth_hf_state_dict(cfg), cfg),
+            strict=True,
+        )
+        toks = torch.randint(0, cfg.channels_out, (3, 5))
+        assert model(toks).shape == (3, 5, cfg.channels_out)
 
     @pytest.mark.parametrize("bad_part", ["block", "attention"])
     def test_remap_rejects_incompatible_layer_configs(self, bad_part: str):

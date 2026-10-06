@@ -371,7 +371,7 @@ def log_snr_from_log_time_per_linear(
     return high - log_t.exp() * (high - low)
 
 
-# Per sample, scalar: subtract, divide, log. No gradient reaches a drawn time, so the
+# Per sample, scalar: two subtracts, divide, log. No gradient reaches a drawn time, so the
 # adjoint is zero.
 @set_cost(
     map_cost(
@@ -407,9 +407,7 @@ def log_time_from_log_snr_per_linear(
 
 
 # Regarding shift: rule of thumb for images ≥ 64×64: shift = log((64 × 64) / (H × W)).
-# Per sample, scalar: clamp (two), two shifted halves (two each), two log_arctan_exp
-# (three each), logsubexp (three), add, logaddexp (two), log_tan_exp (three), scale and
-# shift (two), clamp (two). No gradient reaches a drawn time, so the adjoint is zero.
+# Per-sample primal cost is 21; drawn times receive no adjoint.
 @set_cost(
     map_cost(
         primal=21,
@@ -425,7 +423,7 @@ def log_snr_from_log_time_per_logtan(
     low: Tensorable = -20,
     high: Tensorable = +20,
 ) -> Tensor:
-    """log_snr ∝ -log(tan(t)). The "cosine schedule.".
+    """log_snr ∝ -log(tan(t)). The "cosine schedule".
 
     Regarding shift: rule of thumb for images ≥ 64×64:
         shift = log((64 × 64) / (H × W)).
@@ -467,9 +465,7 @@ def log_snr_from_log_time_per_logtan(
     return torch.clamp(log_snr, low, high)
 
 
-# Per sample, scalar: clamp (two), three shifted halves (two each), three log_arctan_exp
-# (three each), two logsubexp (three each), subtract. No gradient reaches a drawn time,
-# so the adjoint is zero.
+# Per-sample primal cost is 20; drawn times receive no adjoint.
 @set_cost(
     map_cost(
         primal=20,
@@ -534,7 +530,7 @@ def log_snr_from_log_time_per_truncnormicdf(
     high: Tensorable = +20,
     scale: Tensorable = 2,
 ) -> Tensor:
-    """log_snr ∝ Φ_trunc⁻¹(t). The "logistic normal schedule.".
+    """log_snr ∝ Φ_trunc⁻¹(t). The "logistic normal schedule".
 
     Regarding shift: rule of thumb for images ≥ 64×64:
         shift = log((64 × 64) / (H × W)).

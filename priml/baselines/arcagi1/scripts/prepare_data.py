@@ -26,10 +26,7 @@ import argparse
 import logging
 
 from priml.baselines.arcagi1 import experiments
-from priml.baselines.arcagi1.scripts.build_dataset import (
-    KaggleSource,
-    build_arc_dataset,
-)
+from priml.baselines.arcagi1.scripts.build_dataset import build_arc_dataset
 from priml.lib.custom_json import convert, loads
 
 
@@ -44,10 +41,8 @@ def main() -> int:
       result: Process exit code.
 
     """
-    if __doc__ is None:
-        raise ValueError("Expected __doc__ is not None.")
     parser = argparse.ArgumentParser(
-        description=__doc__.split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -55,6 +50,9 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     config = dataset_config(flags.experiment)
     if flags.directory is not None:
+        # An explicit directory is a filesystem path, not a logical one under the
+        # experiment's resource root.
+        config.base_dir = None
         config.working_dir = flags.directory
     if flags.num_aug is not None:
         config.augmentation.num_aug = flags.num_aug
@@ -102,21 +100,11 @@ def prepare(
     """
     config = config.copy_tree().finalize()
     target = Path(config.working_dir)
-    augmentation = config.augmentation.make()
-    if input_file_prefix is not None:
-        build_arc_dataset(
-            target_dir=target,
-            input_file_prefix=str(input_file_prefix),
-            augmentation=augmentation,
-        )
-        return target
-
-    with KaggleSource() as prefix:
-        build_arc_dataset(
-            target_dir=target,
-            input_file_prefix=str(prefix),
-            augmentation=augmentation,
-        )
+    build_arc_dataset(
+        target_dir=target,
+        input_file_prefix=None if input_file_prefix is None else str(input_file_prefix),
+        augmentation=config.augmentation.make(),
+    )
     return target
 
 

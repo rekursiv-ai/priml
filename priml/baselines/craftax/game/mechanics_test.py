@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -103,6 +105,22 @@ def test_armour_reduces_incoming_damage() -> None:
     assert bare.tolist() == [10.0, 10.0]
     # Four pieces at two points each block eight tenths of the blow.
     assert armoured.tolist() == pytest.approx([2.0, 2.0])
+
+
+def test_a_tier_two_piece_blocks_a_fifth_of_physical_damage() -> None:
+    state = _state()
+    state.inventory.armour[:, 0] = 2
+    incoming = torch.tensor([[10.0, 0.0, 0.0], [10.0, 0.0, 0.0]])
+    assert mechanics.damage_to_player(state, incoming).tolist() == pytest.approx(
+        [8.0, 8.0],
+    )
+    assert "per tier" in (mechanics.damage_to_player.__doc__ or "")
+
+
+def test_docstrings_carry_no_placeholder_sections() -> None:
+    source = Path(mechanics.__file__).read_text()
+    assert "result: The Tensor." not in source
+    assert "      state: State.\n" not in source
 
 
 def test_each_armour_enchantment_reduces_only_its_element() -> None:

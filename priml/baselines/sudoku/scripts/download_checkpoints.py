@@ -186,10 +186,8 @@ class _Flags(Protocol):
 
 
 def _parse_args(argv: list[str] | None) -> _Flags:
-    if __doc__ is None:
-        raise ValueError("Expected __doc__ is not None.")
     parser = argparse.ArgumentParser(
-        description=__doc__.split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
     )
     _add_arguments(parser)
     return cast(_Flags, parser.parse_args(argv))

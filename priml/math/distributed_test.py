@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import math
 
 from torch import Tensor
 
+import pytest
 import torch
+import torch.distributed as dist
 
 from priml.math.distributed import (
     _logsumexp_all_to_all,
+    collective_device,
     logmeanexp_all_to_all,
     logsumexp_all_to_all,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def test_logsumexp_all_to_all():
@@ -219,6 +227,43 @@ def test_explicit_world_size_controls_gather_and_mean():
         averaged = logmeanexp_all_to_all(x, dim=-1, world_size=3)
         expected_mean = expected_sum - math.log(x.shape[-1] * 3)
         torch.testing.assert_close(averaged, expected_mean)
+
+
+def test_collective_device_follows_the_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """NCCL reduces on this rank's CURRENT CUDA device; gloo on the CPU."""
+    group = cast(dist.ProcessGroup, object())
+    backends = {"gloo": torch.device("cpu"), "nccl": torch.device("cuda", 2)}
+    for backend, expected in backends.items():
+        with monkeypatch.context() as patched:
+            patched.setattr(dist, "get_backend", {group: backend}.__getitem__)
+            patched.setattr(torch.cuda, "is_available", lambda: True)
+            patched.setattr(torch.cuda, "current_device", lambda: 2)
+            assert collective_device(group) == expected
+
+
+def test_collective_device_rejects_nccl_without_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dist, "get_backend", {None: "nccl"}.__getitem__)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(ValueError, match=r"^NCCL backend declared but no CUDA"):
+        collective_device()
+
+
+@pytest.mark.parametrize("reduce", [logsumexp_all_to_all, logmeanexp_all_to_all])
+def test_log_reductions_reject_an_empty_dim(
+    reduce: Callable[..., Tensor],
+) -> None:
+    with pytest.raises(ValueError, match="at least one axis"):
+        reduce(torch.zeros(2, 3), dim=())
+
+
+def test_log_reductions_reduce_every_axis_for_none() -> None:
+    x = torch.arange(6.0).reshape(2, 3)
+    torch.testing.assert_close(
+        logsumexp_all_to_all(x, dim=None),
+        torch.logsumexp(x.flatten(), dim=0),
+    )
 
 
 if __name__ == "__main__":

@@ -6,13 +6,13 @@ from typing import TYPE_CHECKING, Literal
 
 import math
 
-from PIL import Image as PILImage
+from PIL import Image
 from torch import Tensor
+from torchvision.transforms import functional as tvf
 
 import torch
-import torchvision.transforms.functional as tvf
 
-from priml.math.pixel import float2rgb
+from priml.math.pixel import float2rgb, rgb2float
 
 
 if TYPE_CHECKING:
@@ -48,7 +48,7 @@ def safe_aspect_ratio(height: float, width: float) -> float:
       width: Width value
 
     Returns:
-      aspect_ratio: width / height, or torch.inf if height is zero
+      aspect_ratio: width / height, or math.inf if height is zero
 
     """
     return width / height if height != 0 else math.inf
@@ -81,7 +81,7 @@ def compute_keyframes_as_progressive_bisection(
       >>> compute_keyframes_as_progressive_bisection(10, 3)
       [0, 4, 9]
       >>> compute_keyframes_as_progressive_bisection(10, 5)
-      [0, 2, 4, 7, 9]
+      [0, 2, 4, 6, 9]
 
     """
     num_keyframes = min(num_keyframes, total_frames)
@@ -204,7 +204,9 @@ def preprocess_images(
     Performs resize and normalize entirely on GPU.
 
     Args:
-        x: Input tensor (N, C, H, W) in float [-1, 1] range, on GPU.
+        x: Input tensor (N, C, H, W): float in [-1, 1], or uint8 in [0, 255],
+           which is lifted to [-1, 1] first -- what ``CropDuringDecodeImage``
+           emits by default.
         size: Target (height, width) for resizing.
         mean: Normalization mean per channel (list or pre-created tensor).
               If None, normalization is skipped.
@@ -229,10 +231,12 @@ def preprocess_images(
         x: Preprocessed tensor (N, C, H, W) in the specified dtype.
 
     """
-    if not torch.is_floating_point(x):
-        raise TypeError(f"Input tensor must be a float type, but got {x.dtype}")
     if x.ndim != 4:
         raise TypeError(f"Input format must be NCHW but {x.shape=}.")
+    if x.dtype == torch.uint8:
+        x = rgb2float(x, float_dtype=dtype or torch.get_default_dtype())
+    if not torch.is_floating_point(x):
+        raise TypeError(f"Input tensor must be a float type, but got {x.dtype}")
     dtype = x.dtype if dtype is None else dtype
 
     # Use input dtype for resize (no conversion overhead)
@@ -251,11 +255,11 @@ def preprocess_images(
             pil_images = image_batch_to_pil_list(x)
             resized_samples: list[Tensor] = []
             for img in pil_images:
-                img_resized = img.resize((width, height), PILImage.Resampling.LANCZOS)
+                img_resized = img.resize((width, height), Image.Resampling.LANCZOS)
                 tensor_resized = tvf.to_tensor(img_resized)
                 resized_samples.append(tensor_resized)
-            x = torch.stack(resized_samples)
-            x = (x * 2.0 - 1.0).to(resize_dtype)
+            # PIL runs on the host; the result goes back where it came from.
+            x = (torch.stack(resized_samples) * 2.0 - 1.0).to(x.device, resize_dtype)
         else:
             # Convert to resize dtype before resize.
             if x.dtype != resize_dtype:
@@ -315,7 +319,7 @@ def preprocess_images(
     return x
 
 
-def image_batch_to_pil_list(x: Tensor) -> list[PILImage.Image]:
+def image_batch_to_pil_list(x: Tensor) -> list[Image.Image]:
     """Convert batch of images to list of PIL Images.
 
     Args:

@@ -1,21 +1,14 @@
 """Parallelism strategies.
 
-A single ``ParallelStrategy`` protocol owns the full placement lifecycle for a
-module, applied in a fixed order inside ``__call__``:
+Each strategy applies the placement lifecycle in ``__call__``:
 
   1. Shard application -- ``fully_shard`` / ``replicate`` / per-block sharding.
   2. Placement -- :func:`place`, which materializes a meta module onto
      ``self.device`` or moves an already-allocated one there.
 
-Placement runs AFTER sharding in the sharded strategies, so each rank
-allocates and initializes only its own shard through a DTensor-aware
-``reset_parameters``. ``NoParallel`` has no shard step to order against.
-
-:func:`place` is the one entry point for step 2 because its two halves are
-mutually exclusive and each is wrong for the other's input: ``Module.to``
-cannot copy out of meta storage, and ``to_empty`` would discard an eager
-module's weights. Choosing per strategy is what let four of them skip eager
-placement while a fifth skipped materialization.
+Placement follows sharding, so each rank allocates and initializes its own
+shard through a DTensor-aware ``reset_parameters``. :func:`place` chooses
+materialization for meta modules and preserves existing weights for eager ones.
 
 Tensor parallelism lives beside this module in ``train/tensor_parallel.py``:
 its plan is read off the model's own ``shard`` declarations rather than
@@ -36,6 +29,7 @@ from torch.distributed._composable.fsdp import (
     fully_shard,
 )
 from torch.distributed._composable.replicate import replicate
+from torch.distributed.tensor import DTensor
 from torch.nn.modules.batchnorm import _BatchNorm
 
 import torch
@@ -70,11 +64,12 @@ class NoParallel:
 
     class Config(Fig["NoParallel"]):
         device: torch.device | str | None = None
-        """Target device; ``None`` takes the runtime's.
+        """Target device; ``None`` takes torch's default device.
 
-        Left unset the loop injects ``runtime.device`` at finalize, so ONE
-        field names the device a single-process run uses. Set it to override
-        that for this model alone (a CPU reference beside a GPU run)."""
+        Left unset, the loop sets ``runtime.device`` when it is constructed,
+        before it makes its children, so ONE field names the device a
+        single-process run uses. Set it to override that for this model alone
+        (a CPU reference beside a GPU run)."""
 
     def __init__(self, config: Config) -> None:
         self.device = get_device(config.device)
@@ -112,23 +107,14 @@ class DataParallel:
         """If True, make gradients views into DDP all-reduce buckets."""
 
     def __init__(self, config: Config) -> None:
-        mesh = global_device_mesh()
-        if mesh is None:
-            raise RuntimeError(
-                "DataParallel requires distributed mode. "
-                "Initialize with MultiProcess runtime.",
-            )
-        if mesh.mesh_dim_names is None or config.mesh_dim not in mesh.mesh_dim_names:
-            raise ValueError(
-                f"Mesh dimension '{config.mesh_dim}' not in {mesh.mesh_dim_names}. "
-                f"Configure runtime with mesh_topology containing '{config.mesh_dim}'.",
-            )
+        mesh = _require_mesh("DataParallel")
+        _require_mesh_dimension(mesh, config.mesh_dim)
         self.device = _mesh_device(mesh)
         self.process_group = mesh.get_group(config.mesh_dim)
         self.bucket_cap_mb = config.bucket_cap_mb
         self.find_unused_parameters = config.find_unused_parameters
         self.gradient_as_bucket_view = config.gradient_as_bucket_view
-        self.config = config
+        self.mesh_dim = config.mesh_dim
 
     def __call__(self, model: nn.Module) -> nn.Module:
         """Apply to the input."""
@@ -142,7 +128,7 @@ class DataParallel:
         )
         logger.info(
             "Applied DataParallel: mesh_dim=%s, bucket_cap_mb=%s, gradient_as_bucket_view=%s",
-            self.config.mesh_dim,
+            self.mesh_dim,
             self.bucket_cap_mb,
             self.gradient_as_bucket_view,
         )
@@ -173,17 +159,8 @@ class FullySharded:
         """Mixed precision dtype for output."""
 
     def __init__(self, config: Config) -> None:
-        mesh = global_device_mesh()
-        if mesh is None:
-            raise RuntimeError(
-                "FullySharded requires distributed mode. "
-                "Initialize with MultiProcess runtime.",
-            )
-        if mesh.mesh_dim_names is None or config.mesh_dim not in mesh.mesh_dim_names:
-            raise ValueError(
-                f"Mesh dimension '{config.mesh_dim}' not in {mesh.mesh_dim_names}. "
-                f"Configure runtime with mesh_topology containing '{config.mesh_dim}'.",
-            )
+        mesh = _require_mesh("FullySharded")
+        _require_mesh_dimension(mesh, config.mesh_dim)
 
         self.device = _mesh_device(mesh)
         self.mesh = mesh[config.mesh_dim]
@@ -193,7 +170,7 @@ class FullySharded:
             reduce_dtype=config.mp_reduce_dtype,
             output_dtype=config.mp_output_dtype,
         )
-        self.config = config
+        self.mesh_dim = config.mesh_dim
 
     def __call__(self, model: nn.Module) -> nn.Module:
         """Apply to the input."""
@@ -208,7 +185,7 @@ class FullySharded:
         model = place(model, self.device)
         logger.info(
             "Applied FullySharded: mesh_dim=%s, reshard_after_forward=%s",
-            self.config.mesh_dim,
+            self.mesh_dim,
             self.reshard_after_forward,
         )
         return model
@@ -241,12 +218,7 @@ class HybridSharded:
         """Mixed precision dtype for output."""
 
     def __init__(self, config: Config) -> None:
-        mesh = global_device_mesh()
-        if mesh is None:
-            raise RuntimeError(
-                "HybridSharded requires distributed mode. "
-                "Initialize with MultiProcess runtime.",
-            )
+        mesh = _require_mesh("HybridSharded")
 
         missing: list[str] = []
         if (
@@ -272,7 +244,8 @@ class HybridSharded:
             reduce_dtype=config.mp_reduce_dtype,
             output_dtype=config.mp_output_dtype,
         )
-        self.config = config
+        self.replicate_dim = config.replicate_dim
+        self.shard_dim = config.shard_dim
 
     def __call__(self, model: nn.Module) -> nn.Module:
         """Apply to the input."""
@@ -285,8 +258,8 @@ class HybridSharded:
         model = place(model, self.device)
         logger.info(
             "Applied HybridSharded: replicate_dim=%s, shard_dim=%s, mesh_shape=%s",
-            self.config.replicate_dim,
-            self.config.shard_dim,
+            self.replicate_dim,
+            self.shard_dim,
             self.mesh.shape,
         )
         return model
@@ -319,17 +292,8 @@ class RecursiveSharded:
         """Mixed precision dtype for output."""
 
     def __init__(self, config: Config) -> None:
-        mesh = global_device_mesh()
-        if mesh is None:
-            raise RuntimeError(
-                "RecursiveSharded requires distributed mode. "
-                "Initialize with MultiProcess runtime.",
-            )
-        if mesh.mesh_dim_names is None or config.mesh_dim not in mesh.mesh_dim_names:
-            raise ValueError(
-                f"Mesh dimension '{config.mesh_dim}' not in {mesh.mesh_dim_names}. "
-                f"Configure runtime with mesh_topology containing '{config.mesh_dim}'.",
-            )
+        mesh = _require_mesh("RecursiveSharded")
+        _require_mesh_dimension(mesh, config.mesh_dim)
         if not config.module_types:
             raise ValueError(
                 "RecursiveSharded requires module_types to be specified. "
@@ -345,35 +309,27 @@ class RecursiveSharded:
             reduce_dtype=config.mp_reduce_dtype,
             output_dtype=config.mp_output_dtype,
         )
-        self.config = config
+        self.mesh_dim = config.mesh_dim
 
     def __call__(self, model: nn.Module) -> nn.Module:
         """Apply to the input."""
-        # Standard per-block FSDP sharding pattern from PyTorch composable API
-        # docs. Shard matching submodules in reverse order (leaves first).
-        # BatchNorm is sharded individually (leaves-first ordering reaches it
-        # before its enclosing block) so ``_shard`` can apply the float32
-        # override to its statistics even when it is nested inside a matched
-        # block running under a reduced-precision policy.
-        matched_count = 0
-        for child in reversed(list(model.modules())[1:]):
-            if not isinstance(child, (*self.module_types, _BatchNorm)):
+        modules = list(model.modules())
+        matched_count = sum(isinstance(child, self.module_types) for child in modules)
+        if matched_count == 0:
+            raise ValueError(
+                f"RecursiveSharded found 0 modules matching {self.module_types}. "
+                f"Verify module_types contains correct classes.",
+            )
+        for child in reversed(modules[1:]):
+            if not isinstance(child, self.module_types) and not (
+                self.mp_policy is not None and isinstance(child, _BatchNorm)
+            ):
                 continue
-            if isinstance(child, self.module_types):
-                matched_count += 1
             _shard(
                 child,
                 mesh=self.mesh,
                 mp_policy=self.mp_policy,
                 reshard_after_forward=self.reshard_after_forward,
-            )
-
-        if isinstance(model, self.module_types):
-            matched_count += 1
-        if matched_count == 0:
-            raise ValueError(
-                f"RecursiveSharded found 0 modules matching {self.module_types}. "
-                f"Verify module_types contains correct classes.",
             )
 
         # Shard root module.
@@ -389,7 +345,7 @@ class RecursiveSharded:
             "Applied RecursiveSharded: sharded %s modules matching %s, mesh_dim=%s",
             matched_count,
             [t.__name__ for t in self.module_types],
-            self.config.mesh_dim,
+            self.mesh_dim,
         )
         return model
 
@@ -397,14 +353,8 @@ class RecursiveSharded:
 def place(model: nn.Module, device: torch.device) -> nn.Module:
     """Put ``model`` on ``device``, by materializing it or by moving it.
 
-    The single answer to "get this module onto its device", because the two
-    ways of doing it are mutually exclusive and each is wrong for the other's
-    input: ``Module.to`` cannot copy out of meta storage (torch raises and
-    names ``to_empty``), and ``to_empty`` would discard the weights an eager
-    module already holds. Strategies call this instead of choosing, so a
-    strategy cannot forget the case it does not use -- which is how the
-    distributed four came to skip eager placement entirely while the
-    single-device one skipped materialization.
+    ``Module.to`` preserves eager weights but cannot copy meta storage;
+    ``to_empty`` allocates meta weights but would discard eager ones.
 
     Args:
       model: Module to place, meta-constructed or already allocated.
@@ -462,38 +412,74 @@ def materialize_meta(model: nn.Module, device: torch.device) -> None:
       device: Target device for real storage.
 
     """
-    meta_tensors = [t for _, t in named_meta_state(model) if t.is_meta]
-    if not meta_tensors:
+    state = named_meta_state(model)
+    if not any(t.is_meta for _, t in state):
         return
-    model.to_empty(device=device)
-    # Poison the freshly-allocated (garbage) storage with NaN, then let the
-    # model recurse into its own ownership tree. Any floating-point tensor with
-    # ANY remaining NaN was never written (or only partially written) by a
-    # reset_parameters -- some module forgot to re-initialize a child it
-    # constructed, or wrote only a slice -- so fail loudly rather than train on
-    # garbage. ``.any()`` (not ``.all()``) also catches partial-slice writes.
-    # Buffers are poisoned and audited too: a forgotten buffer is just as fatal
-    # as a forgotten parameter. Integer buffers (e.g. ``num_batches_tracked``)
-    # cannot hold NaN, so they are skipped -- ``to_empty`` zero-fills them and
-    # there is no garbage-vs-init signal to check.
-    with torch.no_grad():
-        for _, tensor in named_meta_state(model):
-            if tensor.is_floating_point():
-                tensor.fill_(torch.nan)
-    reset_parameters = getattr(model, "reset_parameters", None)
-    if reset_parameters is not None:
-        reset_parameters()
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        torch.distributed.barrier()
-    uninitialized = [
-        name
-        for name, tensor in named_meta_state(model)
-        if tensor.is_floating_point() and torch.isnan(tensor).any()
-    ]
-    if uninitialized:
+    if any(not t.is_meta for _, t in state):
+        raise ValueError("Cannot materialize a module with mixed meta and eager state.")
+    error: Exception | None = None
+    try:
+        model.to_empty(device=device)
+        # Poison floating state with NaN so a missing or partial reset cannot
+        # train on garbage. Integer and bool state has no value that cannot also
+        # be a legal initial one, so ``to_empty``'s contents stand for it.
+        with torch.no_grad():
+            for _, tensor in named_meta_state(model):
+                if _nan_capable(tensor):
+                    tensor.fill_(torch.nan)
+        reset_parameters = getattr(model, "reset_parameters", None)
+        if reset_parameters is not None:
+            reset_parameters()
+    except (RuntimeError, ValueError, TypeError, OSError, LookupError) as exc:
+        error = exc
+    if error is None:
+        uninitialized = [
+            name
+            for name, tensor in named_meta_state(model)
+            if _nan_capable(tensor) and bool(torch.isnan(_local(tensor)).any())
+        ]
+        if uninitialized:
+            error = RuntimeError(
+                "State not initialized after materialize (a module did not reset a "
+                f"parameter or buffer it constructed): {uninitialized}",
+            )
+    if torch.distributed.is_initialized():
+        errors: list[str | None] = [None] * torch.distributed.get_world_size()
+        torch.distributed.all_gather_object(
+            errors,
+            None if error is None else str(error),
+        )
+        if any(message is not None for message in errors):
+            raise RuntimeError(
+                f"Distributed materialization failed: {errors}",
+            ) from error
+    elif error is not None:
+        raise error
+
+
+def _nan_capable(tensor: Tensor) -> bool:
+    return tensor.is_floating_point() or tensor.is_complex()
+
+
+def _local(tensor: Tensor) -> Tensor:
+    return tensor.to_local() if isinstance(tensor, DTensor) else tensor
+
+
+def _require_mesh(strategy: str) -> DeviceMesh:
+    mesh = global_device_mesh()
+    if mesh is None:
         raise RuntimeError(
-            "State not initialized after materialize (a module did not reset a "
-            f"parameter or buffer it constructed): {uninitialized}",
+            f"{strategy} requires distributed mode. "
+            "Initialize with MultiProcess runtime.",
+        )
+    return mesh
+
+
+def _require_mesh_dimension(mesh: DeviceMesh, name: str) -> None:
+    if mesh.mesh_dim_names is None or name not in mesh.mesh_dim_names:
+        raise ValueError(
+            f"Mesh dimension '{name}' not in {mesh.mesh_dim_names}. "
+            f"Configure runtime with mesh_topology containing '{name}'.",
         )
 
 
@@ -545,6 +531,15 @@ def _shard(
     reshard_after_forward: bool,
 ) -> None:
     """Apply fully_shard with optional mixed precision (BatchNorm forced fp32)."""
+    if mp_policy is not None:
+        for child in reversed(list(module.modules())[1:]):
+            if isinstance(child, _BatchNorm) and not hasattr(child, "_get_fsdp_state"):
+                _shard(
+                    child,
+                    mesh=mesh,
+                    mp_policy=mp_policy,
+                    reshard_after_forward=reshard_after_forward,
+                )
     policy = _module_mp_policy(module, mp_policy)
     if policy is not None:
         fully_shard(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from importlib import util
 from typing import TYPE_CHECKING, Final, cast
 from unittest.mock import Mock
 
@@ -873,6 +874,9 @@ def test_load_split_missing_metadata_reports_exact_build_command(
         f"no prepared ARC data at {split}; build it with `uv --quiet run --frozen "
         "python -m priml.baselines.arcagi1.scripts.prepare_data`."
     )
+    # The command must name a module that imports, or the hint is a dead end.
+    module = str(error.value).rpartition("python -m ")[2].rstrip("`.")
+    assert util.find_spec(module) is not None
 
 
 def test_puzzle_data_eval_subsets_and_rejects_competing_caps(dataset_dir: Path) -> None:

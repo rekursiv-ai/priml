@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, override
 from unittest.mock import patch
 
+import dataclasses
 import json
 import re
 
 from configgle import Fig
-from configgle.testing import assert_pprint_golden
 
 import pytest
 import torch
@@ -18,7 +18,8 @@ from priml.lib.custom_json import ReadError
 from priml.model.attention.attention import Attention
 from priml.model.attention.gated_attention import GatedAttention
 from priml.model.attention.kernel import SdpaNaive
-from priml.model.attention.rope import HuggingFaceFrequencies, RoPE
+from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
+from priml.model.custom_types import DepthIndex, LayerCache
 from priml.model.generate import generate
 from priml.model.norm import CenteredRMSNorm
 from priml.model.special import TiedLinear
@@ -29,6 +30,7 @@ from priml.model.transformer.qwen3_5 import (
     _layer_types,
 )
 from priml.model.transformer.qwen3_5_weights import _sources
+from priml.testing.golden import assert_pprint_golden
 from priml.testing.qwen3_5 import hf_config
 
 
@@ -86,6 +88,20 @@ def test_hybrid_config_preserves_injected_blocks() -> None:
     assert model.hidden_states(torch.arange(15).reshape(3, 5)).shape == (3, 5, 16)
 
 
+def test_projecting_hidden_states_reproduces_forward() -> None:
+    """``hidden_states`` is pre-norm; ``project_to_logits`` norms it exactly once."""
+    model = Qwen35.Config.from_hf(hf_config()).make().eval()
+    assert isinstance(model.norm, CenteredRMSNorm)
+    with torch.no_grad():
+        # Zero-centered weight: a non-identity scale makes a doubled norm visible.
+        model.norm.weight.fill_(1.0)
+    tokens = torch.arange(15).reshape(3, 5)
+    with torch.no_grad():
+        hidden = model.hidden_states(tokens)
+        assert torch.equal(model.project_to_logits(hidden), model(tokens))
+        assert not torch.equal(model.norm(hidden), hidden)
+
+
 def test_hidden_states_rejects_token_ids_without_input_embedding() -> None:
     config = Qwen35.Config.from_hf(hf_config())
     config.proj_in = None
@@ -99,15 +115,11 @@ def test_hidden_states_rejects_token_ids_without_input_embedding() -> None:
     assert str(error.value) == "Token IDs require an input embedding."
 
 
-def test_hidden_states_rejects_a_cache_with_the_wrong_number_of_entries() -> None:
+def test_hidden_states_raises_on_a_cache_missing_a_layer_slot() -> None:
     model = Qwen35.Config.from_hf(hf_config()).make()
 
-    with pytest.raises(
-        ValueError,
-        match=re.escape("The cache must have one entry per transformer block."),
-    ) as error:
-        model.hidden_states(torch.arange(15).reshape(3, 5), cache=[])
-    assert str(error.value) == "The cache must have one entry per transformer block."
+    with pytest.raises(KeyError):
+        model.hidden_states(torch.arange(15).reshape(3, 5), cache={})
 
 
 def test_hidden_states_rejects_positions_and_position_ids_together() -> None:
@@ -125,11 +137,22 @@ def test_hidden_states_rejects_positions_and_position_ids_together() -> None:
     assert str(error.value) == "Pass either positions or position_ids, not both."
 
 
-def test_forward_rejects_a_non_list_cache() -> None:
+def test_forward_rejects_a_cache_that_is_not_a_layer_cache() -> None:
     model = Qwen35.Config.from_hf(hf_config()).make()
 
-    with pytest.raises(TypeError, match="cache must be a list or None"):
-        model(torch.arange(15).reshape(3, 5), cache="not-a-list")
+    with pytest.raises(
+        TypeError,
+        match=re.escape("cache must satisfy LayerCache or be None."),
+    ):
+        model(torch.arange(15).reshape(3, 5), cache=7)
+
+
+def test_alloc_cache_keys_one_slot_per_cached_attention_by_depth_index() -> None:
+    model = Qwen35.Config.from_hf(hf_config()).make()
+
+    cache = model.alloc_cache(batch=3, max_seq=5)
+
+    assert sorted(cache) == [((0, 2),), ((1, 2),)]
 
 
 def test_hidden_states_rejects_an_attention_mask_that_is_neither_2d_nor_4d() -> None:
@@ -191,11 +214,6 @@ def test_final_norm_width_inference_respects_explicit_configuration() -> None:
             ["linear_attention", "sliding"],
             "layer_types must name one supported attention type per layer.",
         ),
-        (
-            "layer_types",
-            ["full_attention", 1],
-            "layer_types must name one supported attention type per layer.",
-        ),
         ("num_attention_heads", 0, "num_attention_heads must be positive."),
         (
             "initializer_range",
@@ -231,7 +249,7 @@ def test_final_norm_width_inference_respects_explicit_configuration() -> None:
         ),
         (
             "rope_scaling",
-            {"type": "yarn"},
+            {"type": "yarn", "factor": 4.0},
             "Only default text rotary frequencies are supported.",
         ),
         (
@@ -249,6 +267,8 @@ def test_unsupported_config_is_rejected(
     config = hf_config()
     if key == "full_attention_interval":
         del config["layer_types"]
+    if key == "rope_scaling":
+        del config["rope_parameters"]
     config[key] = value
     with pytest.raises(ValueError, match=re.escape(message)) as error:
         Qwen35.Config.from_hf(config)
@@ -265,6 +285,8 @@ def test_unsupported_config_is_rejected(
         ("rope_theta", []),
         ("rope_parameters", []),
         ("layer_types", "bad"),
+        # A non-string entry is a type error, not a silently dropped layer.
+        ("layer_types", ["full_attention", 1]),
         ("full_attention_interval", None),
     ],
 )
@@ -329,9 +351,47 @@ def test_unsupported_rope_parameters_are_rejected(
     rope = config["rope_parameters"]
     assert isinstance(rope, dict)
     rope[key] = value
+    if key == "rope_type":
+        rope["factor"] = 4.0
     with pytest.raises(ValueError, match=re.escape(message)) as error:
         Qwen35.Config.from_hf(config)
     assert str(error.value) == message
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("rope_scaling", {"type": "yarn", "factor": 4.0}),
+        ("rope_parameters", {"rope_type": "linear", "factor": 2.0}),
+        ("rope_parameters", {"rope_type": "yarn"}),
+        ("rope_parameters", {"factor": 4.0}),
+    ],
+)
+def test_rotary_scaling_is_read_as_yarn_reads_it(key: str, value: object) -> None:
+    """A scaled rotary is refused exactly when :class:`YarnScaling` finds one."""
+    config = hf_config()
+    config.pop("rope_parameters")
+    config[key] = value
+    expected: Exception = ValueError(
+        "Only default text rotary frequencies are supported.",
+    )
+    try:
+        _ = YarnScaling.Config.from_hf(config)
+    except (ValueError, ReadError) as error:
+        expected = error
+    with pytest.raises(type(expected), match=re.escape(str(expected))):
+        Qwen35.Config.from_hf(config)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [{"rope_type": "default", "rope_theta": 1e6}, {"rope_theta": 1e6}],
+)
+def test_an_unscaled_rotary_is_accepted(value: dict[str, object]) -> None:
+    config = hf_config()
+    config["rope_parameters"] = value
+    assert YarnScaling.Config.from_hf(config) is None
+    Qwen35.Config.from_hf(config)
 
 
 def test_layer_types_default_to_a_full_attention_interval() -> None:
@@ -809,7 +869,7 @@ def test_hybrid_forwards_messages_to_injected_output_head_and_cache() -> None:
     tokens = torch.arange(15).reshape(3, 5)
     model(tokens, marker=message)
     cache = model.alloc_cache(batch=3, max_seq=5)
-    model.forward_cached(tokens, cache=cache, marker=message)
+    model(tokens, cache=cache, marker=message)
     model.project_to_logits(torch.ones(3, 5, 16), marker=message)
 
     assert len(recorder.messages) == 3
@@ -845,8 +905,8 @@ def test_prepared_causal_mask_reaches_injected_self_attention_prefill_and_cache(
     masked_cache = model.alloc_cache(batch=3, max_seq=5)
     prefix = prompt[:, :4]
     prefix_mask = _prepared_causal_mask(batch=3, queries=4, keys=4)
-    plain_prefix, _ = model.forward_cached(prefix, cache=plain_cache)
-    masked_prefix, _ = model.forward_cached(
+    plain_prefix = model(prefix, cache=plain_cache)
+    masked_prefix = model(
         prefix,
         cache=masked_cache,
         attention_mask=prefix_mask,
@@ -856,11 +916,11 @@ def test_prepared_causal_mask_reaches_injected_self_attention_prefill_and_cache(
     continuation_mask = _prepared_causal_mask(batch=3, queries=1, keys=5)
     continuation_mask[..., 0] = torch.finfo(continuation_mask.dtype).min
     continuation = prompt[:, 4:]
-    plain_continuation, _ = model.forward_cached(
+    plain_continuation = model(
         continuation,
         cache=plain_cache,
     )
-    masked_continuation, _ = model.forward_cached(
+    masked_continuation = model(
         continuation,
         cache=masked_cache,
         attention_mask=continuation_mask,
@@ -965,19 +1025,22 @@ def test_hybrid_cached_dispatch_accepts_injected_cached_block() -> None:
         device="meta",
         dtype=torch.float64,
     )
-    actual, returned = model.forward_cached(tokens, cache=cache)
+    actual = model(tokens, cache=cache)
 
     assert actual.shape == (3, 5, 32)
-    assert returned is cache
-    assert cache[0] == {
-        "batch": 3,
-        "max_seq": 5,
-        "device": "meta",
-        "dtype": torch.float64,
+    assert cache == {
+        ((index, 2),): _Slot(
+            batch=3,
+            max_seq=5,
+            device="meta",
+            dtype=torch.float64,
+            reads=1,
+        )
+        for index in range(2)
     }
 
 
-def test_forward_cached_rejects_a_block_without_forward_cached() -> None:
+def test_forward_rejects_a_block_without_cache_argument() -> None:
     config = Qwen35.Config.from_hf(hf_config())
     assert isinstance(config.block, list)
     config.block[0] = _AttnOnlyBlock.Config()
@@ -987,62 +1050,71 @@ def test_forward_cached_rejects_a_block_without_forward_cached() -> None:
     with pytest.raises(
         TypeError,
         match=re.escape(
-            "Cached decoding requires blocks with a forward_cached method.",
+            "cache",
         ),
     ) as error:
-        model.forward_cached(torch.arange(15).reshape(3, 5), cache=cache)
-    assert str(error.value) == (
-        "Cached decoding requires blocks with a forward_cached method."
-    )
+        model(torch.arange(15).reshape(3, 5), cache=cache)
+    assert "cache" in str(error.value)
 
 
-def test_forward_cached_returns_hidden_states_without_an_output_head() -> None:
+def test_forward_returns_hidden_states_without_an_output_head() -> None:
     config = Qwen35.Config.from_hf(hf_config())
     config.proj_out = None
     model = config.make().eval()
     tokens = torch.arange(15).reshape(3, 5)
     cache = model.alloc_cache(batch=3, max_seq=5)
 
-    output, returned = model.forward_cached(tokens, cache=cache)
+    output = model(tokens, cache=cache)
 
     assert output.shape == (3, 5, 16)
-    assert returned is cache
 
 
-def test_alloc_cache_rejects_a_block_without_an_attn_submodule() -> None:
+@pytest.mark.parametrize("block", ["uncached", "non_cacheable"])
+def test_alloc_cache_allocates_nothing_for_a_block_with_no_cached_attention(
+    block: str,
+) -> None:
     config = Qwen35.Config.from_hf(hf_config())
     assert isinstance(config.block, list)
-    config.block[0] = _UncachedIdentityBlock.Config()
-    model = config.make()
-
-    with pytest.raises(
-        TypeError,
-        match=re.escape("Cached decoding requires blocks with an attn submodule."),
-    ) as error:
-        model.alloc_cache(batch=3, max_seq=5)
-    assert str(error.value) == "Cached decoding requires blocks with an attn submodule."
-
-
-def test_alloc_cache_rejects_attn_without_alloc_kv_cache() -> None:
-    config = Qwen35.Config.from_hf(hf_config())
-    assert isinstance(config.block, list)
-    config.block[0] = _NonCacheableAttentionBlock.Config()
-    model = config.make()
-
-    with pytest.raises(
-        TypeError,
-        match=re.escape(
-            "Cached decoding requires attention with an alloc_kv_cache method.",
-        ),
-    ) as error:
-        model.alloc_cache(batch=3, max_seq=5)
-    assert str(error.value) == (
-        "Cached decoding requires attention with an alloc_kv_cache method."
+    config.block[0] = (
+        _UncachedIdentityBlock.Config()
+        if block == "uncached"
+        else _NonCacheableAttentionBlock.Config()
     )
+    model = config.make()
+
+    assert sorted(model.alloc_cache(batch=3, max_seq=5)) == [((1, 2),)]
+
+
+def test_alloc_cache_rejects_a_cached_attention_without_a_depth_index() -> None:
+    config = Qwen35.Config.from_hf(hf_config())
+    assert isinstance(config.block, list)
+    config.block[0] = _CachedIdentityBlock.Config()
+    model = config.make()
+    block = model.blocks[0]
+    assert isinstance(block, _CachedIdentityBlock)
+    del block.attn.depth_index
+
+    with pytest.raises(TypeError, match="has no depth_index"):
+        model.alloc_cache(batch=3, max_seq=5)
+
+
+@dataclasses.dataclass(slots=True, kw_only=True)
+class _Slot:
+    """What one injected attention allocated, and how often it was read."""
+
+    batch: int | tuple[int, ...]
+    max_seq: int
+    device: torch.device | str | None
+    dtype: torch.dtype | None
+    reads: int = 0
 
 
 class _CachedIdentityAttention(torch.nn.Module):
-    """Allocate a cache for an injected identity block."""
+    """Allocate a cache for an injected identity block, and count its reads."""
+
+    def __init__(self, depth_index: DepthIndex) -> None:
+        super().__init__()
+        self.depth_index = depth_index
 
     def alloc_kv_cache(
         self,
@@ -1051,23 +1123,23 @@ class _CachedIdentityAttention(torch.nn.Module):
         max_seq: int,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
-    ) -> dict[str, object]:
-        return {
-            "batch": batch,
-            "max_seq": max_seq,
-            "device": device,
-            "dtype": dtype,
-        }
+    ) -> _Slot:
+        return _Slot(batch=batch, max_seq=max_seq, device=device, dtype=dtype)
 
-    def forward_cached(
+    @override
+    def forward(
         self,
         x: torch.Tensor,
+        /,
         *,
-        cache: object,
+        cache: LayerCache,
         **kwargs: object,
-    ) -> tuple[torch.Tensor, object]:
+    ) -> torch.Tensor:
         del kwargs
-        return x, cache
+        state = cache[self.depth_index]
+        assert isinstance(state, _Slot)
+        state.reads += 1
+        return x
 
 
 class _CachedIdentityBlock(torch.nn.Module):
@@ -1080,32 +1152,30 @@ class _CachedIdentityBlock(torch.nn.Module):
         channels_out: int = -1
         """Output feature width."""
 
+        depth_index: DepthIndex = ()
+        """Stack position, stamped by the transformer."""
+
     def __init__(self, config: Config) -> None:
-        del config
         super().__init__()
-        self.attn = _CachedIdentityAttention()
+        self.attn = _CachedIdentityAttention(config.depth_index)
 
     def reset_parameters(self) -> None:
         """Leave the parameter-free test block unchanged."""
 
     @override
-    def forward(self, x: torch.Tensor, **kwargs: object) -> torch.Tensor:
-        del kwargs
-        return x
-
-    def forward_cached(
+    def forward(
         self,
         x: torch.Tensor,
+        /,
         *,
-        cache: object,
+        cache: LayerCache,
         **kwargs: object,
-    ) -> tuple[torch.Tensor, object]:
-        del kwargs
-        return x, cache
+    ) -> torch.Tensor:
+        return self.attn(x, cache=cache, **kwargs)
 
 
 class _UncachedIdentityBlock(torch.nn.Module):
-    """A Configgle-injectable block missing both attn and forward_cached."""
+    """A Configgle-injectable block missing both attn and cache handling."""
 
     class Config(Fig["_UncachedIdentityBlock"]):
         channels_in: int = -1
@@ -1128,7 +1198,7 @@ class _UncachedIdentityBlock(torch.nn.Module):
 
 
 class _AttnOnlyBlock(torch.nn.Module):
-    """A Configgle-injectable block with attn but no forward_cached."""
+    """A Configgle-injectable block with attn but no cache argument."""
 
     class Config(Fig["_AttnOnlyBlock"]):
         channels_in: int = -1
@@ -1137,17 +1207,18 @@ class _AttnOnlyBlock(torch.nn.Module):
         channels_out: int = -1
         """Output feature width."""
 
+        depth_index: DepthIndex = ()
+        """Stack position, stamped by the transformer."""
+
     def __init__(self, config: Config) -> None:
-        del config
         super().__init__()
-        self.attn = _CachedIdentityAttention()
+        self.attn = _CachedIdentityAttention(config.depth_index)
 
     def reset_parameters(self) -> None:
         """Leave the parameter-free test block unchanged."""
 
     @override
-    def forward(self, x: torch.Tensor, **kwargs: object) -> torch.Tensor:
-        del kwargs
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x
 
 

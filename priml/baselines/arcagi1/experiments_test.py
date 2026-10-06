@@ -14,14 +14,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
 import inspect
+import json
 
 from configgle import PartialConfig
-from configgle.pprinting import pformat
 
+import numpy as np
 import pytest
 import torch
 
 from priml.baselines.arcagi1 import experiments
+from priml.baselines.arcagi1.augmentation import (
+    ArcSpec,
+    ColorDihedral,
+    SpatialAugmentation,
+)
 from priml.baselines.arcagi1.loss import MeanOverBatch, StablemaxTokens
 from priml.baselines.arcagi1.metric import CanonicalPassK, SignalDumpTracker
 from priml.baselines.arcagi1.model import (
@@ -74,7 +80,7 @@ from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.muon import Muon
 from priml.optimizers.parameter_filter import complement, excluding
 from priml.runtime import MultiProcess
-from priml.testing.golden import assert_text_golden
+from priml.testing.golden import assert_pprint_golden
 from priml.train.checkpointer import Checkpointer
 from priml.train.ema import EMA
 from priml.train.tracker import TrackerList, WandbTracker
@@ -479,15 +485,17 @@ def test_exp007_moves_to_the_urm_recipe() -> None:
     assert fork.dataset.augmentation.spatial.train_scale_weights == dict(
         DEFAULT_SCALE_WEIGHTS,
     )
+    assert fork.dataset.augmentation.spatial_eval_views is True
     assert fork.dataset.num_puzzle_identifiers == 0
     assert isinstance(fork.tracker, TrackerList.Config)
     assert set(fork.tracker.trackers) == {"wandb", "signals"}
     assert isinstance(fork.tracker.trackers["wandb"], WandbTracker.Config)
     assert fork.tracker.trackers["wandb"].project == "trm"
-    assert isinstance(
-        fork.tracker.trackers["signals"],
-        SignalDumpTracker.Config,
-    )
+    signals = fork.tracker.trackers["signals"]
+    assert isinstance(signals, SignalDumpTracker.Config)
+    assert isinstance(fork.checkpointer, Checkpointer.Config)
+    assert signals.keep_last_n == fork.checkpointer.keep_last_n == 8
+    assert signals.keep_every == fork.checkpointer.keep_every == 40_000
 
     optimizer = fork.step.optimizer
     assert isinstance(optimizer, CompositeOptimizer.Config)
@@ -568,26 +576,66 @@ def test_reference_model_preserves_the_trm_architecture() -> None:
     assert isinstance(model.compile_core, CoreCompile.Config)
 
 
-def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> None:
-    """Pin the WHOLE finalized ``exp000`` as readable text.
+def test_exp000_votes_each_test_input_across_views(tmp_path: Path) -> None:
+    """A task asking for two outputs is scored per output, pooled over its views.
 
-    ``exp000`` is the control every fork is measured against, so a change to
-    it invalidates published numbers. A digest would say only that something
-    moved; this golden says WHICH field, from what, to what.
-    ``hide_default_values=False`` so a field that changes only because a
-    library default changed still shows up here.
-
-    Refresh with ``--golden-overwrite`` after reading the diff.
+    The build gives each VIEW one id shared by all of that view's test inputs,
+    so a vote keyed by id would rank one input's answer against the other's and
+    score the view, not the task.
     """
-    assert_text_golden(
-        request,
-        test_file=__file__,
-        name="exp000",
-        rendered=pformat(
-            experiments.exp000().copy_tree().finalize(),
-            hide_default_values=False,
+    pack = SpatialAugmentation.Config(spec=ArcSpec()).make()
+    name, forward = (
+        ColorDihedral.Config(separator="|||")
+        .make()
+        .sample("a", rng=np.random.default_rng(0))
+    )
+    pairs = [
+        (np.array([[1]], dtype=np.uint8), np.array([[4]], dtype=np.uint8)),
+        (np.array([[2]], dtype=np.uint8), np.array([[5]], dtype=np.uint8)),
+    ]
+    (tmp_path / "identifiers.json").write_text(json.dumps(["<blank>", "a", name]))
+    (tmp_path / "test_puzzles.json").write_text(
+        json.dumps(
+            {
+                "a": {
+                    "test": [
+                        {"input": i.tolist(), "output": o.tolist()} for i, o in pairs
+                    ],
+                },
+            },
         ),
     )
+    views = [*pairs, *((forward(i), forward(o)) for i, o in pairs)]
+    rows = [
+        pack.pack(i, o, training=False, rng=np.random.default_rng(0)) for i, o in views
+    ]
+    media = torch.tensor(np.stack([r[0] for r in rows]), dtype=torch.int64)
+    labels = torch.tensor(np.stack([r[1] for r in rows]), dtype=torch.int64)
+    # Every view answers the second input and misses the first: an EOS in the
+    # first cell crops to the empty grid whatever the view's color permutation.
+    predictions = labels.clone()
+    predictions[0::2, 0] = ArcSpec().vocab_eos
+    config = experiments.exp000().copy_tree().finalize()
+    (configured,) = config.metrics_eval.values()
+    assert isinstance(configured, CanonicalPassK.Config)
+    metric_config = configured.copy_tree()
+    metric_config.working_dir = tmp_path
+    metric = metric_config.make()
+    # CanonicalPassK.update reads one q_halt header column before the grid.
+    metric.update(
+        torch.cat([torch.zeros(4, 1), predictions.float()], dim=-1),
+        media=media,
+        label=labels,
+        puzzle_identifiers=torch.tensor([1, 1, 2, 2]),
+        spatial_tags=torch.tensor([[1, 0, 0]] * 4),
+    )
+    scores = metric.compute()
+    assert (scores["pass@1"], scores["pass@2"]) == (0.5, 0.5)
+
+
+def test_exp000_matches_its_golden_config() -> None:
+    """Pin the WHOLE finalized ``exp000``: the control every fork is measured against."""
+    assert_pprint_golden(test_file=__file__, name="exp000", config=experiments.exp000())
 
 
 if __name__ == "__main__":

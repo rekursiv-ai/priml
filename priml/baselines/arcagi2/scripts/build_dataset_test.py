@@ -30,6 +30,7 @@ from priml.baselines.arcagi2.scripts.build_dataset import (
     ensure_arc2_dataset,
 )
 from priml.lib.custom_json import convert, parse
+from priml.lib.testing.cli import assert_help_without_docstring
 
 
 if TYPE_CHECKING:
@@ -307,13 +308,10 @@ def test_argument_defaults_and_cli_main_target(
     ]
 
 
-def test_main_requires_module_docstring(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(build_dataset, "__doc__", None)
-    with pytest.raises(
-        ValueError,
-        match=r"^Expected __doc__ is not None[.]$",
-    ):
-        build_dataset.main()
+def test_main_help_works_without_a_module_docstring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert_help_without_docstring(monkeypatch, build_dataset, build_dataset.main)
 
 
 def test_cli_help_includes_builder_description(

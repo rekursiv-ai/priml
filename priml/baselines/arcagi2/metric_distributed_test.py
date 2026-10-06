@@ -84,7 +84,7 @@ class _LocalVotes(PassK):
 
 
 def _local_metric(root: Path) -> PassK:
-    return _LocalVotes(PassK.Config(working_dir=root))
+    return _LocalVotes(PassK.Config(working_dir=root).finalize())
 
 
 def _manifest(root: Path) -> None:

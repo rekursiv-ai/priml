@@ -257,37 +257,9 @@ def exp002() -> CraftaxRNNTrainLoop:
       TBD. The JAX port of this recipe measured 16.099% at seed 42.
 
     """
-    parent = exp001()
-    cfg = CraftaxRNNTrainLoop()
-    cfg.study_name = parent.study_name
+    cfg = _fork(exp001(), CraftaxRNNTrainLoop())
     cfg.experiment_name = "exp002"
-
-    cfg.step.env.num_envs = 1_024
-    cfg.step.env.seed = 42
-    cfg.step.env.optimistic_reset_ratio = 16
-    cfg.step.rollout_steps = 64
-    cfg.step.num_epochs = 4
-    cfg.step.num_minibatches = 8
-    cfg.step.learning_rate = 2e-4
-    cfg.step.anneal_learning_rate = True
-    cfg.step.discount = 0.99
-    cfg.step.trace_decay = 0.8
-    cfg.step.clip_epsilon = 0.2
-    cfg.step.entropy_coefficient = 0.01
-    cfg.step.value_coefficient = 0.5
-    cfg.step.max_grad_norm = 1.0
-    cfg.step.seed = 42
     cfg.step.model.channels_in = 512
-
-    cfg.max_steps = cfg.step.total_train_steps = _updates(
-        interactions=1_000_000_000,
-        num_envs=cfg.step.env.num_envs,
-        rollout_steps=cfg.step.rollout_steps,
-    )
-    cfg.dataset.updates_per_epoch = int(cfg.max_steps)
-    cfg.num_steps_eval = cfg.max_steps
-    cfg.metrics_eval = dict(parent.metrics_eval)
-    cfg.runtime = parent.runtime
     return cfg
 
 
@@ -323,37 +295,21 @@ def exp003() -> CraftaxPQNTrainLoop:
       H100-hours. The public baseline reports about 16.0 normalized return.
 
     """
-    parent = exp001()
-    cfg = CraftaxPQNTrainLoop()
-    cfg.study_name = parent.study_name
+    cfg = _fork(exp001(), CraftaxPQNTrainLoop())
     cfg.experiment_name = "exp003"
-
-    cfg.step.env.num_envs = 1_024
-    cfg.step.env.seed = 42
-    cfg.step.env.optimistic_reset_ratio = 16
+    # Q-learning's recipe, as one treatment: longer rollouts in fewer
+    # minibatches, its own rate and clipping, a short bootstrap trace, and the
+    # epsilon schedule that replaces the entropy bonus.
     cfg.step.rollout_steps = 128
-    cfg.step.num_epochs = 4
     cfg.step.num_minibatches = 4
     cfg.step.learning_rate = 3e-4
-    cfg.step.anneal_learning_rate = True
-    cfg.step.discount = 0.99
     cfg.step.trace_decay = 0.5
+    cfg.step.max_grad_norm = 0.5
     cfg.step.epsilon_start = 1.0
     cfg.step.epsilon_finish = 0.005
     cfg.step.epsilon_decay_fraction = 0.1
-    cfg.step.max_grad_norm = 0.5
-    cfg.step.seed = 42
     cfg.step.model.channels_in = 512
-
-    cfg.max_steps = cfg.step.total_train_steps = _updates(
-        interactions=1_000_000_000,
-        num_envs=cfg.step.env.num_envs,
-        rollout_steps=cfg.step.rollout_steps,
-    )
-    cfg.dataset.updates_per_epoch = int(cfg.max_steps)
-    cfg.num_steps_eval = cfg.max_steps
-    cfg.metrics_eval = dict(parent.metrics_eval)
-    cfg.runtime = parent.runtime
+    _rebudget(cfg)
     return cfg
 
 
@@ -437,27 +393,13 @@ def exp013() -> CraftaxGTrXLTrainLoop:
       TBD. The JAX port of this recipe measured 18.159% at seed 42.
 
     """
-    parent = exp001()
-    cfg = CraftaxGTrXLTrainLoop()
-    cfg.study_name = parent.study_name
+    cfg = _fork(exp001(), CraftaxGTrXLTrainLoop())
     cfg.experiment_name = "exp013"
-
-    cfg.step.env.num_envs = 1_024
-    cfg.step.env.seed = 42
-    cfg.step.env.optimistic_reset_ratio = 16
+    # Memory, and the settings that only make sense alongside it.
     cfg.step.rollout_steps = 128
     cfg.step.gradient_window = 64
-    cfg.step.num_epochs = 4
-    cfg.step.num_minibatches = 8
-    cfg.step.learning_rate = 2e-4
-    cfg.step.anneal_learning_rate = True
     cfg.step.discount = 0.999
-    cfg.step.trace_decay = 0.8
-    cfg.step.clip_epsilon = 0.2
     cfg.step.entropy_coefficient = 0.002
-    cfg.step.value_coefficient = 0.5
-    cfg.step.max_grad_norm = 1.0
-    cfg.step.seed = 42
 
     cfg.step.model.embed_dim = 256
     cfg.step.model.num_heads = 8
@@ -466,16 +408,7 @@ def exp013() -> CraftaxGTrXLTrainLoop:
     cfg.step.model.channels_in = 256
     cfg.step.model.memory_length = 128
     cfg.step.model.gating_bias = 2.0
-
-    cfg.max_steps = cfg.step.total_train_steps = _updates(
-        interactions=1_000_000_000,
-        num_envs=cfg.step.env.num_envs,
-        rollout_steps=cfg.step.rollout_steps,
-    )
-    cfg.dataset.updates_per_epoch = int(cfg.max_steps)
-    cfg.num_steps_eval = cfg.max_steps
-    cfg.metrics_eval = dict(parent.metrics_eval)
-    cfg.runtime = parent.runtime
+    _rebudget(cfg)
     return cfg
 
 
@@ -505,6 +438,32 @@ def exp_smoke() -> CraftaxTrainLoop:
     score.num_envs = 4
     score.steps = 64
     return cfg
+
+
+# A fork that swaps the step class must not retype its parent's recipe: retyped values
+# drift silently when the parent changes. The child keeps only its own step class and
+# model; everything both steps declare, the environment, evaluation, and runtime come
+# from the parent.
+def _fork[
+    LoopT: (CraftaxRNNTrainLoop, CraftaxPQNTrainLoop, CraftaxGTrXLTrainLoop),
+](parent: CraftaxTrainLoop, child: LoopT) -> LoopT:
+    """Carry every setting ``parent`` and ``child`` share into ``child``."""
+    step = child.step
+    step.update(parent.step, skip_missing=True, model=step.model)
+    return child.update(parent, step=step)
+
+
+def _rebudget(
+    cfg: CraftaxPQNTrainLoop | CraftaxGTrXLTrainLoop,
+) -> None:
+    """Respend exp001's billion interactions at ``cfg``'s own rollout length."""
+    cfg.max_steps = cfg.step.total_train_steps = _updates(
+        interactions=1_000_000_000,
+        num_envs=cfg.step.env.num_envs,
+        rollout_steps=cfg.step.rollout_steps,
+    )
+    cfg.dataset.updates_per_epoch = int(cfg.max_steps)
+    cfg.num_steps_eval = cfg.max_steps
 
 
 # Floors, because a partial update is not an update: the run stops one rollout short of

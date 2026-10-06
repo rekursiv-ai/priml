@@ -119,8 +119,8 @@ def load_transformers_model(
                    "AutoImageProcessor"). Using string form delays transformers
                    import to avoid CUDA initialization before fork.
       device: Device to load model on (e.g., "cuda", "cpu")
-      dtype: Data type to load model in (e.g., torch.float16). Converted to
-             torch_dtype parameter for from_pretrained().
+      dtype: Data type to load model in (e.g., torch.float16), passed to
+             from_pretrained() as ``dtype``.
       revision: Git revision to use (default: None = latest)
       trust_remote_code: Whether to trust remote code (default: False)
       force_redownload: Force download from internet, skip cache (default: False)

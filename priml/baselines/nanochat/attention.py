@@ -32,7 +32,7 @@ from priml.cost import (
 from priml.kernel import jit_kernel
 from priml.model.attention.rope import rotate_conjugate
 from priml.model.attention.value_gated_attention import ValueGatedAttention
-from priml.model.custom_types import TensorModule, propagate_attr
+from priml.model.custom_types import LayerCache, TensorModule, propagate_attr
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.special import Identity
@@ -217,6 +217,7 @@ class CausalAttention(ValueGatedAttention):
         cos_sin: tuple[Tensor, Tensor],
         value_embedding: Tensor | None = None,
         window: int | None = None,
+        cache: LayerCache | None = None,
         **kwargs: object,
     ) -> Tensor:
         """Apply causal attention with normalized rotary queries and keys.
@@ -226,22 +227,23 @@ class CausalAttention(ValueGatedAttention):
           cos_sin: Rotary factors by position and half-channel.
           value_embedding: Optional token-specific attention values.
           window: History distance; None uses the configured attention window.
+          cache: The block's decode cache; must be ``None``.
           **kwargs: Memory values and unconsumed messages for the attention kernel.
 
         Returns:
           output: Projected attention output with the shape of ``x``.
 
+        Raises:
+          TypeError: If ``cache`` is given.
+
         """
-        bigram_value = kwargs.pop("bigram_value", None)
-        trigram_value = kwargs.pop("trigram_value", None)
-        if bigram_value is not None and not isinstance(bigram_value, Tensor):
-            raise ValueError(
-                "Expected bigram_value is None or isinstance(bigram_value, Tensor).",
-            )
-        if trigram_value is not None and not isinstance(trigram_value, Tensor):
-            raise ValueError(
-                "Expected trigram_value is None or isinstance(trigram_value, Tensor).",
-            )
+        # Overrides the base forward whole, so it repeats the base's refusal:
+        # ``cache`` must not reach a kernel that names only its window.
+        if cache is not None:
+            raise TypeError(f"{type(self).__name__} keeps no decode cache.")
+        bigram_value = _optional_message(kwargs, "bigram_value", Tensor)
+        trigram_value = _optional_message(kwargs, "trigram_value", Tensor)
+        fused_tables = _fused_sources(kwargs.pop("fused_tables", None))
         cfg = self.config
         shape = (*x.shape[:-1], cfg.num_heads, cfg.channels_head)
         q, k = self.proj_q(x).view(shape), self.proj_k(x).view(shape)
@@ -269,28 +271,23 @@ class CausalAttention(ValueGatedAttention):
                     gate(x[..., start : start + cfg.gate_channels]),
                 )
                 v = v + weight.unsqueeze(-1) * value.view(shape)
-        fused_tables = kwargs.pop("fused_tables", None)
         if fused_tables is not None:
-            assert isinstance(fused_tables, list)
             logits: list[Tensor] = []
             weights: list[Tensor] = []
             indices: list[Tensor] = []
             sinks: list[Tensor] = []
-            for source in cast(list[object], fused_tables):
-                assert isinstance(source, NgramSource)
-                gate_index, table, hashed = source
+            bitmaps: list[Tensor] = []
+            for gate_index, table, hashed in fused_tables:
                 gate = self.bigram_gate if gate_index == 1 else self.trigram_gate
                 if gate is None:
-                    raise ValueError("Expected gate is not None.")
+                    raise ValueError(
+                        f"fused source {gate_index} has no gate on this attention.",
+                    )
                 start = gate_index * cfg.gate_channels
                 logits.append(gate(x[..., start : start + cfg.gate_channels]))
                 weights.extend(part.weight for part in table.tables)
                 indices.extend(hashed)
                 sinks.extend(table.gradient_sinks)
-            bitmaps: list[Tensor] = []
-            for source in cast(list[object], fused_tables):
-                assert isinstance(source, NgramSource)
-                (_gate_index, table, _hashed) = source
                 bitmaps.extend(table.gradient_bitmaps)
             v = ngram_mix(v.contiguous(), logits, weights, indices, sinks, bitmaps)
         out = self.norm_out(
@@ -700,3 +697,35 @@ def _value_mix_cost(
             phase="adjoint",
         )
     )
+
+
+def _optional_message[T](
+    kwargs: dict[str, object],
+    name: str,
+    kind: type[T],
+) -> T | None:
+    """Pop an optional message, raising TypeError when it is the wrong type."""
+    value = kwargs.pop(name, None)
+    if value is not None and not isinstance(value, kind):
+        raise TypeError(
+            f"{name} must be {kind.__name__} or None; got {type(value).__name__}.",
+        )
+    return value
+
+
+def _fused_sources(value: object) -> list[NgramSource] | None:
+    """Narrow the ``fused_tables`` message, raising TypeError on any other shape."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise TypeError(
+            f"fused_tables must be list or None; got {type(value).__name__}.",
+        )
+    sources: list[NgramSource] = []
+    for source in cast(list[object], value):
+        if not isinstance(source, NgramSource):
+            raise TypeError(
+                f"fused_tables must hold NgramSource; got {type(source).__name__}.",
+            )
+        sources.append(source)
+    return sources

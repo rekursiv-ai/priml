@@ -2,27 +2,27 @@
 
 from __future__ import annotations
 
-from typing import cast
-
 from torch import Tensor
 
 import pytest
 import torch
 
 from priml.baselines.sudoku import trm
+from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.baselines.sudoku.trm import (
     TRM,
-    SparsePuzzleEmbedding,
     _corrected,
     _feedback_table,
     _pos_table,
     recipe_block,
     trm_truncated_normal_corrected,
 )
+from priml.cost import cost
 from priml.model.attention.attention import Attention
 from priml.model.init import truncated_normal
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
+from priml.testing.golden import assert_pprint_golden
 
 
 def _config(**overrides: object) -> TRM.Config:
@@ -48,24 +48,9 @@ def _config(**overrides: object) -> TRM.Config:
     return config
 
 
-def test_recipe_block_passes_explicit_swiglu_recipe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def capture_config(**kwargs: object) -> dict[str, object]:
-        return kwargs
-
-    monkeypatch.setattr(SwiGLU, "Config", capture_config)
-    recipe = recipe_block()
-
-    assert isinstance(recipe.ffn, dict)
-    assert recipe.ffn == {
-        "expansion": 8 / 3,
-        "round_to": 256,
-        "gate": True,
-        "norm": recipe.ffn["norm"],
-        "init_weight": trm_truncated_normal_corrected,
-        "init_weight_out": trm_truncated_normal_corrected,
-    }
+def test_finalized_config_pprint() -> None:
+    """Pins every recipe default the block factory sets, after propagation."""
+    assert_pprint_golden(test_file=__file__, name="trm", config=_config())
 
 
 def test_config_finalizes_recipe_and_rejects_invalid_geometry() -> None:
@@ -166,18 +151,13 @@ def test_forward_returns_grid_logits_and_consumes_feedback() -> None:
     feedback = torch.tensor([[2, 1, 3, 2, 1, 4], [1, 2, 3, 1, 2, 3]])
 
     model.set_feedback(feedback)
-    output = model(inputs, z_slow, z_fast, identifiers)
+    output = model(inputs, z_slow, z_fast, identifiers, collect_intermediates=True)
 
-    logits = cast(Tensor, output["logits"])
-    all_logits = cast(list[Tensor], output["all_logits"])
-    q_halt = cast(Tensor, output["q_halt"])
-    assert logits.shape == (2, 6, 5)
-    assert len(all_logits) == 2
-    assert all(item.shape == (2, 6, 5) for item in all_logits)
-    assert q_halt.shape == (2,)
-    z_slow_output = output["z_slow"]
-    assert isinstance(z_slow_output, Tensor)
-    assert not z_slow_output.requires_grad
+    assert output["logits"].shape == (2, 6, 5)
+    assert len(output["all_logits"]) == 2
+    assert all(item.shape == (2, 6, 5) for item in output["all_logits"])
+    assert output["q_halt"].shape == (2,)
+    assert not output["z_slow"].requires_grad
     assert model._feedback_ids is None
 
 
@@ -254,34 +234,8 @@ def test_single_output_q_head_returns_one_halt_logit_per_puzzle() -> None:
     z_slow, z_fast = model.init_z(2)
 
     output = model(inputs, z_slow, z_fast, torch.tensor([0, 1]))
-    q_halt = output["q_halt"]
 
-    assert isinstance(q_halt, Tensor)
-    assert q_halt.shape == (2,)
-
-
-def test_sparse_puzzle_embedding_training_eval_and_device_apply() -> None:
-    embedding = SparsePuzzleEmbedding(
-        3,
-        embedding_dim=4,
-        batch_size=2,
-        init_std=0.0,
-        cast_to=torch.float64,
-    )
-    ids = torch.tensor([2, 0])
-    train_output = embedding(ids)
-    assert train_output.dtype == torch.float64
-    assert train_output.shape == (2, 4)
-    assert embedding.local_ids.tolist() == [2, 0]
-    train_output.sum().backward()
-    assert embedding.local_weights.grad is not None
-
-    embedding.eval()
-    eval_output = embedding(torch.tensor([1]))
-    assert torch.equal(eval_output, embedding.weights[[1]].to(torch.float64))
-    assert "local_weights" not in embedding.state_dict()
-    embedding.to(torch.float64)
-    assert embedding.local_weights.requires_grad
+    assert output["q_halt"].shape == (2,)
 
 
 def test_init_helpers_use_expected_shapes_and_corrected_init() -> None:
@@ -372,13 +326,13 @@ def test_init_helpers_pass_exact_truncation_arguments(
     ]
 
 
-def test_run_h_cycles_collects_each_cycle_and_gradients_only_last() -> None:
+def test_run_slow_cycles_collects_each_cycle_and_gradients_only_last() -> None:
     model = _config(slow_cycles=3).make()
     inputs = torch.tensor([[1, 2, 3, 1, 4, 2], [3, 1, 2, 4, 1, 3]])
-    embedded, cos_sin = model._embed_and_prepare(inputs, torch.tensor([0, 1]))
+    embedded, cos_sin = model._embed_and_prepare(inputs, torch.tensor([0, 1]), None)
     z_slow, z_fast = model.init_z(2)
 
-    result = model.run_h_cycles(
+    result = model.run_slow_cycles(
         embedded,
         z_slow,
         z_fast,
@@ -457,7 +411,7 @@ def test_core_updates_fast_state_then_slow_state_with_rope(
     )
 
 
-def test_run_h_cycles_detaches_prior_cycles_and_rope_inputs(
+def test_run_slow_cycles_detaches_prior_cycles_and_rope_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = _config(slow_cycles=3).make()
@@ -482,7 +436,7 @@ def test_run_h_cycles_detaches_prior_cycles_and_rope_inputs(
         return next_slow, next_slow[:, 0, 0], next_slow, next_fast
 
     monkeypatch.setattr(model, "core", core)
-    result = model.run_h_cycles(input_emb, z_slow, z_fast, cos_sin)
+    result = model.run_slow_cycles(input_emb, z_slow, z_fast, cos_sin)
 
     assert len(calls) == 3
     assert all(not value.requires_grad for value in calls[0][:3])
@@ -500,7 +454,7 @@ def test_run_h_cycles_detaches_prior_cycles_and_rope_inputs(
     assert result.all_z_slow == ()
 
     calls.clear()
-    collected = model.run_h_cycles(
+    collected = model.run_slow_cycles(
         input_emb,
         z_slow,
         z_fast,
@@ -513,7 +467,7 @@ def test_run_h_cycles_detaches_prior_cycles_and_rope_inputs(
     assert all(value.shape == (2, 8, 12) for value in collected.all_z_slow)
 
     calls.clear()
-    model.run_h_cycles(input_emb, z_slow, z_fast, None)
+    model.run_slow_cycles(input_emb, z_slow, z_fast, None)
     assert len(calls) == 3
     assert all(rotary is None for *_, rotary in calls)
 
@@ -549,7 +503,7 @@ def test_position_and_feedback_embeddings_are_applied_to_grid_tokens(
         )
 
     token_embeddings = model.embed_scale * model.embed_tokens(inputs)
-    puzzle_vectors = model.puzzle_emb(identifiers)
+    puzzle_vectors = model.puzzle_emb.weights[identifiers].to(torch.float64)
     puzzle_prefix = torch.nn.functional.pad(puzzle_vectors, (0, 19)).reshape(
         batch_size,
         2,
@@ -583,8 +537,7 @@ def test_position_and_feedback_embeddings_are_applied_to_grid_tokens(
         return arange(*args, device=token_embeddings.device)
 
     monkeypatch.setattr(torch, "arange", capture_arange)
-    model.set_feedback(feedback)
-    embedded, cos_sin = model._embed_and_prepare(inputs, identifiers)
+    embedded, cos_sin = model._embed_and_prepare(inputs, identifiers, feedback)
 
     assert embedded.dtype is torch.float32
     assert torch.equal(embedded, expected)
@@ -592,7 +545,6 @@ def test_position_and_feedback_embeddings_are_applied_to_grid_tokens(
     assert cos_sin is not None
     assert cos_sin[0].shape[0] == 8
     assert arange_calls == [((8,), {"device": token_embeddings.device})]
-    assert model._feedback_ids is None
 
 
 def test_exact_width_puzzle_embedding_is_not_padded() -> None:
@@ -605,6 +557,7 @@ def test_exact_width_puzzle_embedding_is_not_padded() -> None:
     embedded, _ = model._embed_and_prepare(
         torch.zeros(2, 6, dtype=torch.long),
         identifiers,
+        None,
     )
     # Two puzzles, each 24 = 2 prefix tokens x 12 hidden.
     expected_prefix = model.embed_scale * model.puzzle_emb.weights[identifiers].reshape(
@@ -625,7 +578,7 @@ def test_non_square_grid_preserves_padded_puzzle_prefix() -> None:
     inputs = torch.zeros(32, 6, dtype=torch.long)
     identifiers = torch.arange(32) % 2
 
-    embedded, _ = model._embed_and_prepare(inputs, identifiers)
+    embedded, _ = model._embed_and_prepare(inputs, identifiers, None)
 
     prefix = embedded[:, :2]
     assert prefix.shape == (32, 2, 12)
@@ -726,7 +679,7 @@ def test_constructor_pins_init_and_device_buffers(
     monkeypatch.setattr(trm, "_corrected", capture_init)
     model = _config().make()
 
-    assert init_calls == [((2, 12), 0.0), ((1, 12), 1.0), ((1, 12), 1.0)]
+    assert init_calls == [((1, 12), 1.0), ((1, 12), 1.0)]
     assert model.slow_init.shape == (1, 12)
     assert model.fast_init.shape == (1, 12)
     assert model._dummy.shape == (0,)
@@ -772,7 +725,7 @@ def test_constructor_pins_embedding_init_and_repeats_blocks(
     }
     assert model.puzzle_emb is not None
     assert model.puzzle_emb.weights.shape == (1, 6)
-    assert model.puzzle_emb.cast_to is torch.float64
+    assert model.puzzle_emb.config.dtype is torch.float64
     assert len(model.reasoning) == 2
     assert model.reasoning[0] is not model.reasoning[1]
     first_params = list(model.reasoning[0].parameters())
@@ -833,6 +786,97 @@ def test_constructor_uses_corrected_head_initializer(
     assert calls[0] == (5, 12)
 
 
+def test_runtime_puzzle_embedding_is_the_shared_module_the_cost_prices() -> None:
+    """A vector narrower than the model pads to whole model-width tokens."""
+    model = _config(puzzle_emb_ndim=5).make()
+    assert isinstance(model.puzzle_emb, SparsePuzzleEmbedding)
+    table = model.puzzle_emb.config
+    assert (table.channels_out, table.num_tokens, table.channels_token) == (5, 2, 12)
+    priced = cost(table, seq_len=1, batch_size=3, dtype=None)
+    assert priced["flops", "primal", "elementwise"].sum() == 3 * 2 * 12
+    assert "puzzle_emb.weights" in model.state_dict()
+
+
+def test_rope_follows_an_explicit_attention_head_width() -> None:
+    config = _config()
+    config.block = recipe_block()
+    assert isinstance(config.block.attn, Attention.Config)
+    config.block.attn.channels_head = 8
+    model = config.make()
+    assert model.rope.channels_head == (8,)
+    z_slow, z_fast = model.init_z(2)
+    out = model(torch.zeros(2, 6, dtype=torch.long), z_slow, z_fast, torch.arange(2))
+    assert out["logits"].shape == (2, 6, 5)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"slow_cycles": 0}, "slow_cycles"),
+        ({"fast_cycles": 0}, "fast_cycles"),
+        ({"channels_in": 10}, "not divisible by num_heads"),
+        ({"puzzle_emb_ndim": 25}, "channels_out=25 exceeds"),
+    ],
+)
+def test_invalid_scalar_config_is_rejected_at_construction(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _config(**overrides).make()
+
+
+def test_the_prefix_joins_the_sequence_in_the_token_dtype() -> None:
+    """The prefix scales in fp32; it must not promote a bf16 sequence."""
+    model = _config(dtype=torch.bfloat16).make().to(torch.bfloat16).eval()
+    embedded, _ = model._embed_and_prepare(
+        torch.zeros(2, 6, dtype=torch.long),
+        torch.arange(2),
+        None,
+    )
+    assert embedded.dtype is torch.bfloat16
+
+
+def test_a_training_batch_short_of_the_puzzle_buffer_is_rejected() -> None:
+    model = _config(puzzle_emb_batch_size=3).make()
+    z_slow, z_fast = model.init_z(2)
+    with pytest.raises(ValueError, match="batch_size=3"):
+        model(torch.zeros(2, 6, dtype=torch.long), z_slow, z_fast, torch.arange(2))
+
+
+def test_a_failed_forward_does_not_leak_its_feedback() -> None:
+    """The stash is consumed even when the forward raises before using it."""
+    torch.manual_seed(5)
+    model = _config(feedback_init_std=1.0).make()
+    torch.manual_seed(5)
+    fresh = _config(feedback_init_std=1.0).make()
+    inputs = torch.tensor([[1, 2, 3, 1, 4, 2], [3, 1, 2, 4, 1, 3]])
+    z_slow, z_fast = model.init_z(2)
+    with pytest.raises(ValueError, match="puzzle_identifiers is required"):
+        model(inputs, z_slow, z_fast, feedback_ids=(inputs + 1) % 5)
+    identifiers = torch.tensor([0, 1])
+    after = model(inputs, z_slow, z_fast, identifiers)
+    expected = fresh(inputs, z_slow, z_fast, identifiers)
+    assert torch.equal(after["logits"], expected["logits"])
+
+
+def test_forward_keeps_per_cycle_tensors_only_on_request() -> None:
+    model = _config(slow_cycles=3).make().eval()
+    inputs = torch.tensor([[1, 2, 3, 1, 4, 2], [3, 1, 2, 4, 1, 3]])
+    identifiers = torch.tensor([0, 1])
+    z_slow, z_fast = model.init_z(2)
+    lean = model(inputs, z_slow, z_fast, identifiers)
+    full = model(inputs, z_slow, z_fast, identifiers, collect_intermediates=True)
+    assert lean["all_logits"] == []
+    assert lean["all_z_slow"] == []
+    assert len(full["all_logits"]) == len(full["all_z_slow"]) == 3
+    logits: Tensor = lean["logits"]
+    assert torch.equal(logits, full["logits"])
+    assert torch.equal(lean["q_halt"], full["q_halt"])
+    assert torch.equal(lean["z_slow"], full["z_slow"])
+    assert torch.equal(lean["z_fast"], full["z_fast"])
+
+
 def test_model_without_optional_embeddings_uses_plain_grid_sequence() -> None:
     model = _config(num_puzzle_identifiers=0, pos2d_grid_shape=None).make()
     inputs = torch.tensor([[1, 2, 3, 1, 4, 2], [3, 1, 2, 4, 1, 3]])
@@ -845,7 +889,6 @@ def test_model_without_optional_embeddings_uses_plain_grid_sequence() -> None:
     assert model.embed_pos_col is None
     assert model.embed_pos_box is None
     logits = output["logits"]
-    assert isinstance(logits, Tensor)
     assert logits.shape == (2, 6, 5)
 
 

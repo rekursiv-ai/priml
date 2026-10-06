@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from priml.baselines.arcagi2.scripts import prepare_data
+from priml.lib.testing.cli import assert_help_without_docstring
 
 
 def test_cli_arguments_and_main_dispatch() -> None:
@@ -22,9 +23,7 @@ def test_cli_arguments_and_main_dispatch() -> None:
     defaults = parser.parse_args(["source"])
     assert vars(defaults) == {
         "source": Path("source"),
-        "destination": Path(
-            "/opt/scratch/datasets/arcagi2/arc2concept-aug-1000",
-        ),
+        "destination": Path("/opt/scratch/datasets/arc2concept-aug-1000"),
     }
     flags = parser.parse_args(
         ["source-tree", "--destination", "prepared-tree"],
@@ -49,12 +48,10 @@ def test_cli_arguments_and_main_dispatch() -> None:
     )
 
 
-def test_main_rejects_a_missing_module_docstring() -> None:
-    with (
-        patch.object(prepare_data, "__doc__", None),
-        pytest.raises(ValueError, match=r"^Expected __doc__ is not None\.$"),
-    ):
-        prepare_data.main()
+def test_main_help_works_without_a_module_docstring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert_help_without_docstring(monkeypatch, prepare_data, prepare_data.main)
 
 
 def test_main_help_preserves_the_executable_description() -> None:

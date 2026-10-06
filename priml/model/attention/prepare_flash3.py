@@ -13,9 +13,9 @@ Clones the pinned FA3 revision, checks the CUTLASS submodule against its pin,
 builds the SM90 wheel with the nanochat hdim128/bf16 profile, and installs it
 atomically under the content-addressed artifact path that
 ``priml.model.attention.flash3.load_flash3`` reads. A valid artifact
-returns at once, so rerunning is free. Needs x86_64 Linux, torch 2.9.1+cu128
-with the C++11 ABI, and nvcc 12.8; the isolated runtime below supplies the
-torch.
+returns at once, so rerunning is free. Needs x86_64 Linux, torch 2.9.1 with the
+C++11 ABI, and an nvcc under ``$CUDA_HOME`` (default ``/usr/local/cuda``)
+matching torch's CUDA version; the isolated runtime below supplies the torch.
 
 Examples:
   uv --quiet run --frozen --isolated --project priml/baselines/nanochat/runtime python -m priml.model.attention.prepare_flash3
@@ -40,6 +40,7 @@ import tempfile
 from priml.model.attention.flash3 import (
     artifact_path,
     artifact_validation_error,
+    cuda_version,
     cutlass_revision,
     runtime_files_error,
     runtime_receipt,
@@ -64,10 +65,8 @@ def main() -> int:
       code: Process exit code.
 
     """
-    if __doc__ is None:
-        raise ValueError("Expected __doc__ is not None.")
     parser = argparse.ArgumentParser(
-        description=__doc__.split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -210,7 +209,7 @@ def _build_flash3(destination: Path) -> None:
 
 
 def _build_environment(environment: Mapping[str, str]) -> dict[str, str]:
-    cuda_home = Path("/usr/local/cuda-12.8")
+    cuda_home = _cuda_home()
     path = str(cuda_home / "bin")
     if inherited_path := environment.get("PATH"):
         path = f"{path}{os.pathsep}{inherited_path}"
@@ -218,7 +217,7 @@ def _build_environment(environment: Mapping[str, str]) -> dict[str, str]:
         **environment,
         "PATH": path,
         "CUDA_HOME": str(cuda_home),
-        "MAX_JOBS": "32",
+        "MAX_JOBS": str(len(os.sched_getaffinity(0))),
         "FLASH_ATTENTION_FORCE_BUILD": "TRUE",
         "FLASH_ATTENTION_FORCE_CXX11_ABI": "TRUE",
         "FLASH_ATTENTION_OFFLINE_BUILD": "TRUE",
@@ -248,27 +247,32 @@ def _validate_build_runtime() -> None:
         raise RuntimeError(
             f"FA3 requires Torch 2.9.1; found {torch.__version__}. Build it in the isolated runtime: `uv --quiet run --frozen --isolated --project priml/baselines/nanochat/runtime python -m priml.model.attention.prepare_flash3`.",
         )
-    if torch.version.cuda != "12.8":
-        raise RuntimeError(f"FA3 requires CUDA 12.8; found {torch.version.cuda}.")
+    cuda = cuda_version()
     if not torch.compiled_with_cxx11_abi():
         raise RuntimeError("FA3 requires the Torch C++11 ABI runtime.")
     nvcc = _nvcc_path()
     version = _run_output([str(nvcc), "--version"])
-    if "release 12.8" not in version:
-        raise RuntimeError(f"FA3 requires nvcc 12.8; found:\n{version}")
+    # `nvcc` must match torch's CUDA: an extension built by another toolkit links
+    # against a runtime torch does not load.
+    if f"release {cuda}," not in version:
+        raise RuntimeError(
+            f"FA3 requires nvcc {cuda} to match torch's CUDA; found:\n{version}",
+        )
 
 
+# Not ``shutil.which``: the build sets ``CUDA_HOME`` to this toolkit, so an nvcc
+# found on PATH would validate a compiler the build never runs.
 def _nvcc_path() -> Path:
-    """Return nvcc from PATH or the provisioned CUDA 12.8 toolkit."""
-    if nvcc := shutil.which("nvcc"):
-        return Path(nvcc)
-    provisioned = Path("/usr/local/cuda-12.8/bin/nvcc")
-    if provisioned.is_file():
-        return provisioned
-    raise RuntimeError(
-        "FA3 source preparation requires nvcc 12.8 on PATH or at "
-        "/usr/local/cuda-12.8/bin/nvcc.",
-    )
+    """Return the nvcc of the toolkit the build sets as ``CUDA_HOME``."""
+    nvcc = _cuda_home() / "bin" / "nvcc"
+    if not nvcc.is_file():
+        raise RuntimeError(f"FA3 source preparation requires nvcc at {nvcc}.")
+    return nvcc
+
+
+def _cuda_home() -> Path:
+    """Return the toolkit that both validates and builds FA3: ``$CUDA_HOME``."""
+    return Path(os.environ.get("CUDA_HOME") or "/usr/local/cuda")
 
 
 def _write_receipt(path: Path) -> None:

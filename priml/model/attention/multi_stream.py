@@ -31,6 +31,7 @@ from priml.model.custom_types import (
     ChannelsIn,
     DepthIndex,
     HasResetParameters,
+    LayerCache,
     RotaryConfig,
     TensorModule,
     infer_same_width,
@@ -65,8 +66,9 @@ class MultiStreamAttention(nn.Module):
         """Explicit stream subtrees.
 
         Residual/head geometry and depth come from the parent.
-        Each stream owns its projections, norms, RoPE, dropout and causal policy.
-        An empty list retains the shared norm configuration below.
+        Each stream owns its projections, norms, RoPE, dropout and causal policy,
+        so ``finalize`` rejects any of those set on the parent beside streams.
+        An empty list retains the shared configuration below.
         """
 
         num_heads: int = 8
@@ -135,6 +137,25 @@ class MultiStreamAttention(nn.Module):
             ):
                 self.norm_out.channels_in = self.num_heads * self.channels_head
             if self.streams:
+                ignored = [
+                    name
+                    for name, value in (
+                        ("bias", self.bias),
+                        ("dropout", self.dropout),
+                        ("causal", self.causal),
+                        ("rope", self.rope),
+                        ("norm_qk", self.norm_qk),
+                        ("share_qk_norm", not self.share_qk_norm),
+                        ("norm_out", self.norm_out),
+                        ("init_weight", self.init_weight is not kaiming_uniform),
+                    )
+                    if value
+                ]
+                if ignored:
+                    raise ValueError(
+                        f"{', '.join(ignored)} must be set on each stream, not on "
+                        "the parent, when streams are explicit.",
+                    )
                 self.num_streams = len(self.streams)
                 for stream in self.streams:
                     stream.channels_in = self.channels_in
@@ -154,13 +175,12 @@ class MultiStreamAttention(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost one position: every stream's token, each attending jointly.
+            """Cost every stream's ``seq_len`` tokens, each stream attending jointly.
 
-            A position holds ``num_streams`` tokens. Each pays its own
-            projections, runs the kernel over the
-            ``num_streams * seq_len`` concatenated keys, and shares those keys
-            only across its own ``seq_len`` query rows. A shared norm runs
-            on every stream's rows but is owned once.
+            Each stream pays its own projections, runs the kernel at its own
+            dropout over the ``num_streams * seq_len`` concatenated keys, and
+            shares those keys only across its own ``seq_len`` query rows. A
+            shared norm runs on every stream's rows but is owned once.
 
             Args:
               seq_len: Tokens per sequence of one stream.
@@ -242,18 +262,30 @@ class MultiStreamAttention(nn.Module):
                         dtype=dtype,
                         **kwargs,
                     )
-            kernel = cost(
-                self.attn_kernel,
-                seq_len=seq_len * self.num_streams,
-                batch_size=batch_size,
-                dtype=dtype,
-                num_heads=self.num_heads,
-                channels_head=self.channels_head,
-                dropout_p=self.dropout,
-                rows=seq_len,
+            dropouts = (
+                [s.dropout for s in self.streams]
+                if self.streams
+                else [self.dropout] * self.num_streams
+            )
+            kernels = sum(
+                (
+                    cost(
+                        self.attn_kernel,
+                        seq_len=seq_len * self.num_streams,
+                        batch_size=batch_size,
+                        dtype=dtype,
+                        num_heads=self.num_heads,
+                        channels_head=self.channels_head,
+                        dropout_p=dropout,
+                        rows=seq_len,
+                        **kwargs,
+                    )
+                    for dropout in dropouts
+                ),
+                Cost(),
             )
             return replace(
-                total + kernel.tile(self.num_streams, copies=self.num_streams),
+                total + kernels,
                 bytes_state=resolve_dtype(dtype).itemsize
                 * self.num_streams
                 * 2
@@ -273,7 +305,8 @@ class MultiStreamAttention(nn.Module):
                 f"num_heads={config.num_heads} must be divisible by "
                 f"num_heads_kv={config.num_heads_kv}.",
             )
-        if config.causal and config.num_streams > 1:
+        causal = config.causal or any(s.causal for s in config.streams)
+        if causal and config.num_streams > 1:
             raise ValueError("causal=True requires num_streams=1.")
         self.num_streams = config.num_streams
         self.num_heads = config.num_heads
@@ -404,22 +437,66 @@ class MultiStreamAttention(nn.Module):
         _validate_native_state(target, source=source)
         target.load_state_dict(source.state_dict())
 
+    def alloc_kv_cache(
+        self,
+        *,
+        batch: int | tuple[int, ...],
+        max_seq: int,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> tuple[KVCache, ...]:
+        """Allocate one KV cache for every stream.
+
+        Args:
+          batch: Batch size or batch shape.
+          max_seq: Maximum cached sequence length.
+          device: Device for the cache tensors.
+          dtype: Dtype for the cache tensors.
+
+        Returns:
+          caches: One KV cache per stream, in stream order.
+
+        """
+        heads = (
+            [stream.num_heads_kv for stream in self.streams]
+            if self.streams
+            else [self.num_heads_kv] * self.num_streams
+        )
+        widths = (
+            [stream.channels_head for stream in self.streams]
+            if self.streams
+            else [self.channels_head] * self.num_streams
+        )
+        return tuple(
+            KVCache.alloc(
+                batch=batch,
+                num_heads=num_heads,
+                max_seq=max_seq,
+                channels_head=channels_head,
+                device=device,
+                dtype=dtype,
+            )
+            for num_heads, channels_head in zip(heads, widths, strict=True)
+        )
+
     @override
     def forward(
         self,
         xs: Sequence[Tensor],
         *,
-        positions: Sequence[Tensor | list[Tensor] | None] | None = None,
+        cache: LayerCache | None = None,
+        positions: Sequence[Tensor | None] | None = None,
         cos_sin: Sequence[tuple[Tensor, Tensor] | None] | None = None,
         dropout_p: float | None = None,
         is_causal: bool | None = None,
         attn_mask: Tensor | Sequence[Tensor | None] | None = None,
         **kwargs: object,
     ) -> tuple[Tensor, ...]:
-        """Attend jointly without caching.
+        """Attend jointly, reading and updating this layer's cache slot when given.
 
         Args:
           xs: Token streams shaped [..., S_i, channels_in].
+          cache: Shared layer cache; this layer's slot holds one KV cache per stream.
           positions: Optional position indices for each stream.
           cos_sin: Optional rotary factors for each stream.
           dropout_p: Override the configured attention dropout probability.
@@ -432,49 +509,7 @@ class MultiStreamAttention(nn.Module):
           outputs: One tensor per input stream, with the original shape.
 
         """
-        outputs, caches = self._forward(
-            xs,
-            positions=positions,
-            cos_sin=cos_sin,
-            cache=None,
-            dropout_p=dropout_p,
-            is_causal=is_causal,
-            attn_mask=attn_mask,
-            **kwargs,
-        )
-        if caches is not None:
-            raise ValueError("Expected caches is None.")
-        return outputs
-
-    def forward_cached(
-        self,
-        xs: Sequence[Tensor],
-        *,
-        cache: Sequence[KVCache | None],
-        positions: Sequence[Tensor | list[Tensor] | None] | None = None,
-        cos_sin: Sequence[tuple[Tensor, Tensor] | None] | None = None,
-        dropout_p: float | None = None,
-        is_causal: bool | None = None,
-        attn_mask: Tensor | Sequence[Tensor | None] | None = None,
-        **kwargs: object,
-    ) -> tuple[tuple[Tensor, ...], list[KVCache]]:
-        """Attend jointly using and updating per-stream caches.
-
-        Args:
-          xs: Input tensors, one per stream.
-          cache: Per-stream KVCache or None for prefill.
-          positions: Per-stream position indices.
-          cos_sin: Per-stream pre-computed sin/cos for rotary embeddings.
-          dropout_p: Attention dropout rate (None for inference).
-          is_causal: Whether to apply causal mask.
-          attn_mask: Per-stream attention mask or single mask for all.
-          **kwargs: Extra arguments forwarded to the base forward.
-
-        Returns:
-          result: Tuple of per-stream outputs and updated KVCaches.
-
-        """
-        outputs, updated = self._forward(
+        return self._forward(
             xs,
             positions=positions,
             cos_sin=cos_sin,
@@ -484,49 +519,54 @@ class MultiStreamAttention(nn.Module):
             attn_mask=attn_mask,
             **kwargs,
         )
-        if updated is None:
-            raise ValueError("Expected updated is not None.")
-        return outputs, updated
 
     def _forward(
         self,
         xs: Sequence[Tensor],
         *,
-        positions: Sequence[Tensor | list[Tensor] | None] | None,
+        positions: Sequence[Tensor | None] | None,
         cos_sin: Sequence[tuple[Tensor, Tensor] | None] | None,
-        cache: Sequence[KVCache | None] | None,
+        cache: LayerCache | None,
         dropout_p: float | None,
         is_causal: bool | None,
         attn_mask: Tensor | Sequence[Tensor | None] | None,
         **kwargs: object,
-    ) -> tuple[tuple[Tensor, ...], list[KVCache] | None]:
+    ) -> tuple[Tensor, ...]:
         N = self.num_streams
         if len(xs) != N:
             raise ValueError(f"Expected {N} streams, got {len(xs)}.")
+        if is_causal and N > 1:
+            raise ValueError("is_causal=True requires num_streams=1.")
         masks = list(attn_mask) if isinstance(attn_mask, Sequence) else [attn_mask] * N
         for name, values in (
             ("attn_mask", masks),
             ("positions", positions),
             ("cos_sin", cos_sin),
-            ("cache", cache),
         ):
             if values is not None and len(values) != N:
                 raise ValueError(f"{name} must contain one entry per stream ({N}).")
 
-        pos_list: list[Tensor | list[Tensor] | None] = (
+        cache_list: tuple[KVCache, ...] | None = None
+        if cache is not None:
+            value = cache[self.depth_index]
+            assert isinstance(value, Sequence)
+            caches: list[KVCache] = []
+            for item in value:
+                assert isinstance(item, KVCache)
+                caches.append(item)
+            cache_list = tuple(caches)
+            if len(cache_list) != N:
+                raise ValueError(f"cache must contain one entry per stream ({N}).")
+
+        pos_list: list[Tensor | None] = (
             list(positions) if positions is not None else [None] * N
         )
         cs_list: list[tuple[Tensor, Tensor] | None] = (
             list(cos_sin) if cos_sin is not None else [None] * N
         )
-        cache_list: list[KVCache | None] = (
-            list(cache) if cache is not None else [None] * N
-        )
-
         all_q: list[Tensor] = []
         all_k: list[Tensor] = []
         all_v: list[Tensor] = []
-        out_caches: list[KVCache] = []
 
         for i, x in enumerate(xs):
             S = x.shape[-2]
@@ -564,22 +604,17 @@ class MultiStreamAttention(nn.Module):
             elif rope is not None:
                 p = pos_list[i]
                 if p is None:
-                    c_i = cache_list[i]
+                    c_i = cache_list[i] if cache_list is not None else None
                     offset = c_i.seen if c_i is not None else 0
                     p = torch.arange(offset, offset + S, device=x.device)
-                assert isinstance(p, Tensor)
                 cos, sin = rope(p)
                 q, k = RoPE.rotate(q, k, cos, sin)
 
             # The cache stores [..., H, S, hd]; the kernels take [..., S, H, hd].
             q, k, v = (t.movedim(-3, -2) for t in (q, k, v))
-            c_i = cache_list[i]
-            if cache is not None:
-                if c_i is not None:
-                    k, v = c_i.update(k, v)
-                else:
-                    c_i = KVCache(k, v)
-                out_caches.append(c_i)
+            c_i = cache_list[i] if cache_list is not None else None
+            if c_i is not None:
+                k, v = c_i.update(k, v)
 
             all_q.append(q)
             all_k.append(k)
@@ -600,7 +635,8 @@ class MultiStreamAttention(nn.Module):
             q_i = all_q[i].movedim(-3, -2)
             S_i = q_i.shape[-3]
             stream = self.streams[i] if self.streams else None
-            causal = stream.causal if stream is not None else self.causal
+            configured = stream.causal if stream is not None else self.causal
+            causal = configured if is_causal is None else is_causal
             dropout = stream.dropout if stream is not None else self.dropout
             mask = masks[i]
             out = self.attn_kernel(
@@ -612,9 +648,8 @@ class MultiStreamAttention(nn.Module):
                     if dropout_p is None
                     else dropout_p
                 ),
-                is_causal=(
-                    causal and total_kv == S_i if is_causal is None else is_causal
-                ),
+                # A caller's mask keeps the flag, so the kernel folds causality in.
+                is_causal=causal and (total_kv == S_i or mask is not None),
                 attn_mask=(
                     causal_chunk_mask(q_i, k_cat) if mask is None and causal else mask
                 ),
@@ -631,16 +666,9 @@ class MultiStreamAttention(nn.Module):
             out = projection_out(out)
             results.append(out)
 
-        outputs = tuple(results)
-        if cache is None:
-            return outputs, None
-        return outputs, out_caches
+        return tuple(results)
 
     def _init_streams(self, config: Config) -> None:
-        if len(config.streams) > 1 and any(s.causal for s in config.streams):
-            raise ValueError(
-                "Causal streams require a single stream; use per-stream masks.",
-            )
         self.streams = nn.ModuleList(
             AttentionProjections(stream) for stream in config.streams
         )
