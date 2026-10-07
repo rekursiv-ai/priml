@@ -1155,7 +1155,7 @@ class TrainLoop:
                 batch_start = time.perf_counter()
                 continue
             metric_only = bool(batch.pop("metric_only", False))
-            extra_votes = None
+            extra_votes: list[tuple[Tensor, dict[str, object]]] = []
             if metric_only:
                 model_output: object = torch.empty(0)
             else:
@@ -1165,7 +1165,7 @@ class TrainLoop:
                     fault_dump_interval_sec=self.phase_timer.fault_dump_interval_sec,
                 ):
                     step_results = self.step.eval_loss(**batch)
-                extra_votes = step_results.get("eval_extra_votes")
+                extra_votes = step_results.get("eval_extra_votes", [])
                 loss = step_results["loss"]
                 model_output = step_results["model"]
                 total_weight += weight
@@ -1190,13 +1190,12 @@ class TrainLoop:
                     fault_dump_interval_sec=self.phase_timer.fault_dump_interval_sec,
                 ):
                     metric.update(model_output, **batch, step_sec=batch_dt)
-                    if extra_votes:
-                        for extra_output, extra_batch in extra_votes:
-                            metric.update(
-                                extra_output,
-                                **extra_batch,
-                                step_sec=batch_dt,
-                            )
+                    for extra_output, extra_batch in extra_votes:
+                        metric.update(
+                            extra_output,
+                            **extra_batch,
+                            step_sec=batch_dt,
+                        )
                 self._record_cuda_timing(f"eval_metric_{name}_update", cuda_events)
 
             if narrate and num_batches % log_every == 0:

@@ -123,48 +123,6 @@ def test_hf_reference_rejects_non_module() -> None:
         hf_reference(object())
 
 
-def test_torch_reference_rejects_an_unpinned_transformers_version(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def version(package: str) -> str:
-        del package
-        return "0.0.0"
-
-    monkeypatch.setattr(
-        "priml.testing.qwen3_5.metadata.version",
-        version,
-    )
-
-    with pytest.raises(ValueError, match="transformers") as error:
-        torch_reference(nn.Identity())
-    assert str(error.value) == (
-        'Expected importlib.metadata.version("transformers") == "5.17.0".'
-    )
-
-
-def test_torch_reference_checks_the_transformers_distribution_name(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    checked: list[str] = []
-
-    def version(package: str) -> str:
-        checked.append(package)
-        return "5.17.0"
-
-    monkeypatch.setattr(
-        "priml.testing.qwen3_5.metadata.version",
-        version,
-    )
-
-    with pytest.raises(
-        TypeError,
-        match=r"^Expected the reference forward to be a plain function\.$",
-    ):
-        torch_reference(nn.Identity())
-
-    assert checked == ["transformers"]
-
-
 def torch_chunk_gated_delta_rule(value: Tensor) -> Tensor:
     return value
 
@@ -263,17 +221,6 @@ def _reference_with_defaults(captured: int) -> nn.Module:
     return Reference()
 
 
-def _pin_transformers_version(monkeypatch: pytest.MonkeyPatch) -> None:
-    def version(package: str) -> str:
-        assert package == "transformers"
-        return "5.17.0"
-
-    monkeypatch.setattr(
-        "priml.testing.qwen3_5.metadata.version",
-        version,
-    )
-
-
 def test_torch_reference_unwraps_module_kernel_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -283,7 +230,6 @@ def test_torch_reference_unwraps_module_kernel_fallback(
         "torch_chunk_gated_delta_rule",
         _module_fallback(called),
     )
-    _pin_transformers_version(monkeypatch)
 
     reference = torch_reference(_Reference())
     value = torch.zeros(2, 3)
@@ -301,7 +247,6 @@ def test_torch_reference_preserves_defaults_closure_and_receiver(
         "torch_chunk_gated_delta_rule",
         _module_fallback(called),
     )
-    _pin_transformers_version(monkeypatch)
 
     reference = torch_reference(_reference_with_defaults(captured=7))
     value = torch.zeros(2, 3)
@@ -319,7 +264,6 @@ def test_torch_reference_rejects_non_callable_kernel(
         "torch_chunk_gated_delta_rule",
         object(),
     )
-    _pin_transformers_version(monkeypatch)
 
     with pytest.raises(TypeError) as error:
         torch_reference(_Reference())

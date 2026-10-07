@@ -1,9 +1,8 @@
-"""Shared Qwen3.5 test fixtures and pinned reference helpers."""
+"""Shared Qwen3.5 test fixtures and reference helpers."""
 
 from __future__ import annotations
 
 from functools import partial
-from importlib import metadata
 from types import FunctionType
 from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
@@ -142,11 +141,9 @@ def hf_tensor(value: object) -> Tensor:
     return value
 
 
-# The full model source SHA256 is
-# 762feb6c7426a7f15b5bf830df54c07438bf9e7c27b8cdb23179045920412c3b. Hub and installed
-# FLA kernels are bypassed only for this reference instance.
+# Hub and installed FLA kernels are bypassed only for this reference instance.
 def torch_reference(reference: nn.Module) -> nn.Module:
-    """Bind pinned HF bytecode to its PyTorch kernel fallbacks.
+    """Bind the installed HF bytecode to its PyTorch kernel fallbacks.
 
     Args:
       reference: Hugging Face Qwen3.5 delta-attention module to adapt.
@@ -155,10 +152,6 @@ def torch_reference(reference: nn.Module) -> nn.Module:
       reference: The same module with PyTorch fallback functions bound.
 
     """
-    if metadata.version("transformers") != "5.17.0":
-        raise ValueError(
-            'Expected importlib.metadata.version("transformers") == "5.17.0".',
-        )
     original = cast(object, inspect.unwrap(reference.forward))
     if not isinstance(original, FunctionType):
         raise TypeError("Expected the reference forward to be a plain function.")

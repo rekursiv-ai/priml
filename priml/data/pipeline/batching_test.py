@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final, cast
+from typing import Final, cast
 
 from torch import Tensor
 
@@ -17,10 +17,6 @@ from priml.data.pipeline.batching import (
 from priml.data.pipeline.parallel import (
     PrefetchBuffer,
 )
-
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
 
 
 # Batcher Tests.
@@ -561,14 +557,8 @@ def test_batcher_passes_configured_device_to_tensor_to(
 
     monkeypatch.setattr(Tensor, "to", record_to)
     batcher = Batcher(Batcher.Config(size=2, device="cpu"))
-    list(
-        batcher(
-            cast(
-                "Iterator[Batcher.Input]",
-                iter([{"media_tensor": torch.zeros(2, 3)}] * 2),
-            ),
-        ),
-    )
+    samples: list[Batcher.Input] = [{"media_tensor": torch.zeros(2, 3)}] * 2
+    list(batcher(iter(samples)))
 
     assert devices == [torch.device("cpu")]
 
@@ -620,28 +610,16 @@ def test_batcher_logs_exactly_full_and_dropped_batches(
     caplog.set_level("INFO", logger=logger)
 
     full_batcher = Batcher(Batcher.Config(size=2))
-    full = list(
-        full_batcher(
-            cast(
-                "Iterator[Batcher.Input]",
-                iter([{"media_tensor": torch.zeros(2, 3)}] * 2),
-            ),
-        ),
-    )
+    full_samples: list[Batcher.Input] = [{"media_tensor": torch.zeros(2, 3)}] * 2
+    full = list(full_batcher(iter(full_samples)))
     assert [batch["_batch_size"] for batch in full] == [2]
     assert "batched 2 samples across 1 batches (= 2 samples/batch)" in caplog.text
     assert "flushed" not in caplog.text
 
     caplog.clear()
     drop_batcher = Batcher(Batcher.Config(size=2, drop_remainder=True))
-    dropped = list(
-        drop_batcher(
-            cast(
-                "Iterator[Batcher.Input]",
-                iter([{"media_tensor": torch.zeros(2, 3)}] * 3),
-            ),
-        ),
-    )
+    drop_samples: list[Batcher.Input] = [{"media_tensor": torch.zeros(2, 3)}] * 3
+    dropped = list(drop_batcher(iter(drop_samples)))
     assert [batch["_batch_size"] for batch in dropped] == [2]
     assert "flushed" not in caplog.text
 
@@ -652,14 +630,8 @@ def test_batcher_logs_a_single_trailing_sample_batch(
     batcher = Batcher(Batcher.Config(size=2))
     caplog.set_level("INFO", logger="priml.data.pipeline.batching")
 
-    batches = list(
-        batcher(
-            cast(
-                "Iterator[Batcher.Input]",
-                iter([{"media_tensor": torch.zeros(2, 3)}] * 3),
-            ),
-        ),
-    )
+    samples: list[Batcher.Input] = [{"media_tensor": torch.zeros(2, 3)}] * 3
+    batches = list(batcher(iter(samples)))
 
     assert [batch["_batch_size"] for batch in batches] == [2, 1]
     assert "flushed 1 samples across 1 batches (≈ 1.0 samples/batch)" in caplog.text
@@ -719,11 +691,8 @@ def test_batcher_debug_timing_threshold(
     batcher = Batcher(Batcher.Config(size=1))
     caplog.set_level("DEBUG", logger="priml.data.pipeline.batching")
 
-    list(
-        batcher(
-            cast("Iterator[Batcher.Input]", iter([{"media_tensor": torch.zeros(2)}])),
-        ),
-    )
+    samples: list[Batcher.Input] = [{"media_tensor": torch.zeros(2)}]
+    list(batcher(iter(samples)))
 
     assert ("Batcher: batch_size=1" in caplog.text) is should_log
 

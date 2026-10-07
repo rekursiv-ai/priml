@@ -832,20 +832,18 @@ def test_image_decode_uses_the_jpeg_and_webp_fast_paths() -> None:
         Image.new("RGB", (16, 16), (255, 0, 0)).save(buffer, format=encoding, **options)
 
         processor = CropDuringDecodeImage(CropDuringDecodeImage.Config())
+        samples: list[CropDuringDecodeImage.Input] = [
+            {
+                "media": buffer.getvalue(),
+                "format": fmt,
+                "height": 16,
+                "width": 16,
+            },
+        ]
         out = list(
             processor(
                 iter(
-                    [
-                        cast(
-                            CropDuringDecodeImage.Input,
-                            {
-                                "media": buffer.getvalue(),
-                                "format": fmt,
-                                "height": 16,
-                                "width": 16,
-                            },
-                        ),
-                    ],
+                    samples,
                 ),
             ),
         )
@@ -881,20 +879,18 @@ def test_image_decode_names_the_backend_that_rejected_the_bytes() -> None:
         encoded = buffer.getvalue()
         truncated = encoded[: len(encoded) // 3]
 
+        samples: list[CropDuringDecodeImage.Input] = [
+            {
+                "media": truncated,
+                "format": fmt,
+                "height": 16,
+                "width": 16,
+            },
+        ]
         out = list(
             processor(
                 iter(
-                    [
-                        cast(
-                            CropDuringDecodeImage.Input,
-                            {
-                                "media": truncated,
-                                "format": fmt,
-                                "height": 16,
-                                "width": 16,
-                            },
-                        ),
-                    ],
+                    samples,
                 ),
             ),
         )
@@ -1004,27 +1000,16 @@ def test_tar_reader_skips_what_it_cannot_or_need_not_read(tmp_path: Path) -> Non
 
     processor = GetBytesFromTarHandle(GetBytesFromTarHandle.Config())
     with TarFileHandle(archive, use_mmap=False) as handle:
-        out = list(
-            processor(
-                iter(
-                    [
-                        cast(
-                            GetBytesFromTarHandle.Input,
-                            {"_tar_handle": handle, "key": "k0", "media": b"already"},
-                        ),
-                        cast(GetBytesFromTarHandle.Input, {"_tar_handle": handle}),
-                        cast(
-                            GetBytesFromTarHandle.Input,
-                            {"_tar_handle": handle, "key": "k0", "format": "png"},
-                        ),
-                        cast(
-                            GetBytesFromTarHandle.Input,
-                            {"_tar_handle": handle, "key": "absent", "format": "mp4"},
-                        ),
-                    ],
-                ),
+        samples: list[GetBytesFromTarHandle.Input] = [
+            cast(
+                GetBytesFromTarHandle.Input,
+                {"_tar_handle": handle, "key": "k0", "media": b"already"},
             ),
-        )
+            {"_tar_handle": handle},
+            {"_tar_handle": handle, "key": "k0", "format": "png"},
+            {"_tar_handle": handle, "key": "absent", "format": "mp4"},
+        ]
+        out = list(processor(iter(samples)))
 
     assert all("_tar_handle" not in out[index] for index in (0, 1, 3))
     assert "_tar_handle" in out[2]
@@ -1053,19 +1038,14 @@ def test_image_decode_falls_through_to_pil_and_reports_a_corrupt_payload() -> No
     buffer = io.BytesIO()
     Image.new("RGB", (8, 8), (0, 255, 0)).save(buffer, format="PNG")
 
+    samples: list[CropDuringDecodeImage.Input] = [
+        {"media": buffer.getvalue(), "height": 8, "width": 8},
+        {"media": b"not an image", "height": 8, "width": 8},
+    ]
     out = list(
         processor(
             iter(
-                [
-                    cast(
-                        CropDuringDecodeImage.Input,
-                        {"media": buffer.getvalue(), "height": 8, "width": 8},
-                    ),
-                    cast(
-                        CropDuringDecodeImage.Input,
-                        {"media": b"not an image", "height": 8, "width": 8},
-                    ),
-                ],
+                samples,
             ),
         ),
     )
@@ -1096,20 +1076,18 @@ def test_image_decode_skips_a_format_it_does_not_claim() -> None:
     buffer = io.BytesIO()
     Image.new("RGB", (8, 8), (255, 0, 0)).save(buffer, format="PNG")
 
+    samples: list[CropDuringDecodeImage.Input] = [
+        {
+            "media": buffer.getvalue(),
+            "format": "png",
+            "height": 8,
+            "width": 8,
+        },
+    ]
     out = list(
         processor(
             iter(
-                [
-                    cast(
-                        CropDuringDecodeImage.Input,
-                        {
-                            "media": buffer.getvalue(),
-                            "format": "png",
-                            "height": 8,
-                            "width": 8,
-                        },
-                    ),
-                ],
+                samples,
             ),
         ),
     )
@@ -1128,13 +1106,14 @@ def test_image_decode_reports_a_sample_it_cannot_size() -> None:
     """
     processor = CropDuringDecodeImage(CropDuringDecodeImage.Config())
 
+    samples: list[CropDuringDecodeImage.Input] = [
+        {"media": b"payload"},
+        {"height": 8, "width": 8},
+    ]
     out = list(
         processor(
             iter(
-                [
-                    cast(CropDuringDecodeImage.Input, {"media": b"payload"}),
-                    cast(CropDuringDecodeImage.Input, {"height": 8, "width": 8}),
-                ],
+                samples,
             ),
         ),
     )
@@ -1159,27 +1138,16 @@ def test_get_dimensions_remeasures_a_non_positive_cached_value() -> None:
     media = buffer.getvalue()
 
     processor = GetDimensionsFromBytes(GetDimensionsFromBytes.Config())
+    samples: list[GetDimensionsFromBytes.Input] = [
+        {"media": media, "height": 999, "width": 999},
+        {"media": media, "height": 0, "width": 12},
+        {"media": media, "height": 7, "width": 0},
+        {"media": media, "height": 0, "width": 0},
+    ]
     out = list(
         processor(
             iter(
-                [
-                    cast(
-                        GetDimensionsFromBytes.Input,
-                        {"media": media, "height": 999, "width": 999},
-                    ),
-                    cast(
-                        GetDimensionsFromBytes.Input,
-                        {"media": media, "height": 0, "width": 12},
-                    ),
-                    cast(
-                        GetDimensionsFromBytes.Input,
-                        {"media": media, "height": 7, "width": 0},
-                    ),
-                    cast(
-                        GetDimensionsFromBytes.Input,
-                        {"media": media, "height": 0, "width": 0},
-                    ),
-                ],
+                samples,
             ),
         ),
     )
@@ -1213,16 +1181,14 @@ def test_get_dimensions_passes_through_what_it_cannot_measure() -> None:
     """
     processor = GetDimensionsFromBytes(GetDimensionsFromBytes.Config())
 
+    samples: list[GetDimensionsFromBytes.Input] = [
+        {},
+        {"media": b"not an image header"},
+    ]
     out = list(
         processor(
             iter(
-                [
-                    cast(GetDimensionsFromBytes.Input, {}),
-                    cast(
-                        GetDimensionsFromBytes.Input,
-                        {"media": b"not an image header"},
-                    ),
-                ],
+                samples,
             ),
         ),
     )
@@ -1276,22 +1242,17 @@ def test_get_bytes_from_file_reports_an_unreadable_path(tmp_path: Path) -> None:
     absent = tmp_path / "absent.bin"
     _ = present.write_bytes(b"payload")
 
-    out = list(
-        processor(
-            iter(
-                [
-                    cast(
-                        GetBytesFromFile.Input,
-                        {"file_path": str(present), "media": b"preserved"},
-                    ),
-                    cast(GetBytesFromFile.Input, {}),
-                    cast(GetBytesFromFile.Input, {"file_path": str(present)}),
-                    cast(GetBytesFromFile.Input, {"file_path": str(absent)}),
-                    cast(GetBytesFromFile.Input, {}),
-                ],
-            ),
+    samples: list[GetBytesFromFile.Input] = [
+        cast(
+            GetBytesFromFile.Input,
+            {"file_path": str(present), "media": b"preserved"},
         ),
-    )
+        {},
+        {"file_path": str(present)},
+        {"file_path": str(absent)},
+        {},
+    ]
+    out = list(processor(iter(samples)))
 
     assert len(out) == 5, "no sample may be dropped"
     assert out[0].get("media") == b"preserved"
@@ -1375,7 +1336,7 @@ def test_crop_image_backend_error_and_decode_video_helpers() -> None:
         processor._process_video(
             None,
             "x",
-            None,
+            "",
             frames=2,
             height=2,
             width=2,
@@ -1390,7 +1351,7 @@ def test_crop_image_backend_error_and_decode_video_helpers() -> None:
             processor._process_video(
                 None,
                 "x",
-                None,
+                "",
                 frames=2,
                 height=2,
                 width=2,
@@ -1413,7 +1374,7 @@ def test_crop_image_backend_error_and_decode_video_helpers() -> None:
 
 def test_decode_video_read_media_and_decode_oserror() -> None:
     processor = DecodeVideo(DecodeVideo.Config())
-    assert processor._read_media(None, "x", None) == b""
+    assert processor._read_media(None, "x", "") == b""
     with patch(
         "priml.data.processors.bytes.subprocess.Popen",
         side_effect=OSError,
@@ -1698,7 +1659,7 @@ def test_video_processor_uses_tar_fallback_and_source_geometry(
         tensor = processor._process_video(
             handle,
             "clip",
-            None,
+            "",
             frames=frames,
             height=height,
             width=width,
@@ -1790,7 +1751,7 @@ def test_image_decode_names_an_empty_backend_cascade() -> None:
         CropDuringDecodeImage.Config(known_formats=[]),
     )
 
-    assert processor._process_image(b"payload", None, 4, 6, None) == (
+    assert processor._process_image(b"payload", "", 4, 6, None) == (
         None,
         "all_formats_failed",
     )
@@ -2095,7 +2056,7 @@ def test_image_cascade_keeps_trying_after_none_and_exceptions() -> None:
             return_value=decoded,
         ) as decode_pil,
     ):
-        result = processor._process_image(b"image", None, 4, 6, None)
+        result = processor._process_image(b"image", "", 4, 6, None)
 
     assert result is not None
     assert result[0] is decoded
@@ -2114,7 +2075,7 @@ def test_image_cascade_keeps_trying_after_none_and_exceptions() -> None:
             return_value=None,
         ),
     ):
-        assert processor._process_image(b"image", None, 4, 6, None) == (
+        assert processor._process_image(b"image", "", 4, 6, None) == (
             None,
             "png_decode_failed",
         )
@@ -2160,20 +2121,18 @@ def test_image_decode_normalizes_in_place_and_initializes_only_enabled_backends(
         "priml.data.processors.bytes.decode_image_pil",
         return_value=decoded,
     ):
+        samples: list[CropDuringDecodeImage.Input] = [
+            {
+                "media": b"image",
+                "format": "png",
+                "height": 4,
+                "width": 6,
+            },
+        ]
         result = next(
             processor(
                 iter(
-                    [
-                        cast(
-                            CropDuringDecodeImage.Input,
-                            {
-                                "media": b"image",
-                                "format": "png",
-                                "height": 4,
-                                "width": 6,
-                            },
-                        ),
-                    ],
+                    samples,
                 ),
             ),
         )
@@ -2203,7 +2162,7 @@ def test_image_cascade_continues_after_backend_failures() -> None:
             return_value=decoded,
         ) as decode_pil,
     ):
-        result = processor._process_image(b"image", None, 4, 6, None)
+        result = processor._process_image(b"image", "", 4, 6, None)
 
     assert result is not None
     assert result[0] is decoded
@@ -2222,7 +2181,7 @@ def test_image_cascade_continues_after_backend_failures() -> None:
             return_value=decoded,
         ) as decode_jpeg,
     ):
-        result = processor._process_image(b"image", None, 4, 6, None)
+        result = processor._process_image(b"image", "", 4, 6, None)
 
     assert result is not None
     assert result[0] is decoded

@@ -200,7 +200,7 @@ def compare_stream(
             ("label", their_label, our_batch["label"]),
         ):
             found = compare(f"{tag}[{index}] {name}", a.cpu(), b.cpu())
-            if found:
+            if found is not None:
                 problems.append(found)
     return problems
 

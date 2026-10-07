@@ -349,7 +349,7 @@ def initialize_global_device_mesh(
     *,
     device: torch.device | str | None = None,
     backend: str | None = None,
-    mesh_topology: dict[str, int] | None = None,
+    mesh_topology: dict[str, int],
     deterministic: bool = False,
     float32_matmul_precision: Float32MatmulPrecision | None = None,
 ) -> DeviceMesh:

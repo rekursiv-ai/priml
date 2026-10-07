@@ -826,7 +826,7 @@ def test_training_handoff_preserves_config_and_uses_priml(
         "PYTHONPATH": os.pathsep.join(sys.path),
     }
     display = config.copy_tree()
-    if save_checkpoint:
+    if save_checkpoint is True:
         display.checkpointer = Checkpointer.Config()
         display.checkpointer.save_every = sys.maxsize
         display.checkpointer.resume = False
@@ -836,7 +836,7 @@ def test_training_handoff_preserves_config_and_uses_priml(
     namespace = runpy.run_path(str(config.working_dir / "prepared_experiment.py"))
     experiment = cast(Callable[[], NgramTrainLoop.Config], namespace["experiment"])
     restored = experiment()
-    if save_checkpoint:
+    if save_checkpoint is True:
         checkpoint = cast(Checkpointer.Config, restored.checkpointer)
         assert isinstance(checkpoint, Checkpointer.Config)
         assert checkpoint.save_every == sys.maxsize

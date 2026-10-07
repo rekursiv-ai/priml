@@ -93,7 +93,11 @@ class AsTensor:
         self.non_blocking = config.non_blocking
         self.stream_field = config.stream_field
 
-        if self.include and self.exclude and self.include & self.exclude:
+        if (
+            self.include is not None
+            and self.exclude is not None
+            and self.include & self.exclude
+        ):
             raise ValueError(
                 f"'include' and 'exclude' cannot overlap. "
                 f"Overlapping fields: {self.include & self.exclude}",
@@ -146,9 +150,9 @@ class AsTensor:
             # them next.
             if key.startswith("_") or key == self.stream_field:
                 continue
-            if self.include and key not in self.include:
+            if self.include is not None and key not in self.include:
                 continue
-            if self.exclude and key in self.exclude:
+            if self.exclude is not None and key in self.exclude:
                 continue
             sample[key] = self._convert(value)
 

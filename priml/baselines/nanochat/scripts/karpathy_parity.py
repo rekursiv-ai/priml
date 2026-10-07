@@ -433,7 +433,7 @@ def compare_all(
                 continue
             a, b = a.grad, b.grad
         found = compare(f"{tag} {our_name}", a.detach(), b.detach())
-        if found:
+        if found is not None:
             problems.append(found)
     return problems
 
@@ -883,7 +883,7 @@ def _compare_state_entry(
     if theirs is None or ours is None:
         return [f"{label}: MISSING on {'theirs' if theirs is None else 'ours'}"]
     found = compare(label, theirs, ours)
-    return [found] if found else []
+    return [found] if found is not None else []
 
 
 def _compare_steps(
@@ -978,11 +978,14 @@ def _compare_steps(
             tag="weight",
         )
 
-        step_problems = [*([loss_problem] if loss_problem else []), *grad_problems]
+        step_problems = [
+            *([loss_problem] if loss_problem is not None else []),
+            *grad_problems,
+        ]
         step_problems += weight_problems + state_problems
         failures += len(step_problems)
         print(
-            f"[{index}] loss {'DIFFERS' if loss_problem else 'identical'} | "
+            f"[{index}] loss {'DIFFERS' if loss_problem is not None else 'identical'} | "
             f"grads {len(grad_problems)} differ | "
             f"weights {len(weight_problems)} differ | "
             f"state {len(state_problems)} differ",

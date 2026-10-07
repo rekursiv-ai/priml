@@ -52,7 +52,7 @@ def get_cache_dir() -> Path:
       models_dir: Path to the model cache directory (created if absent).
 
     """
-    if torch_home := os.environ.get("TORCH_HOME"):
+    if torch_home := os.environ.get("TORCH_HOME", ""):
         models_dir = Path(torch_home)
     else:
         models_dir = cache_dir() / "rekursiv-ai" / "models"

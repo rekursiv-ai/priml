@@ -427,7 +427,7 @@ def aug_policy_dataset_dir(
 
 def build(
     *,
-    dataset_dir: str | None = None,
+    dataset_dir: str = "",
     input_file_prefix: str | None = None,
     translation_prob: float = 0.1,
     scale_prob: float = 0.1,
@@ -439,7 +439,7 @@ def build(
     """Ensure an aug-policy ARC tree, defaulting to its slugged scratch path.
 
     Args:
-      dataset_dir: Destination; ``None`` resolves :func:`aug_policy_dataset_dir`.
+      dataset_dir: Destination; empty resolves :func:`aug_policy_dataset_dir`.
       input_file_prefix: Local source prefix; ``None`` clones the pinned source.
       translation_prob: Per-example translation probability in ``[0, 1]``.
       scale_prob: Per-example scale probability in ``[0, 1]``.
