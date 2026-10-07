@@ -71,7 +71,6 @@ def test_utilization_is_a_metric() -> None:
 
 def test_utilization_requires_completed_device_work() -> None:
     meter = Utilization(Utilization.Config())
-    assert isinstance(meter, RequiresDeviceTiming)
     assert meter.requires_device_timing
 
 
@@ -113,8 +112,21 @@ def test_utilization_rejects_nonpositive_or_nonfinite_peaks(
         config.peak_vector_flops_per_sec = peak
     else:
         config.peak_flops_per_sec = peak
-    with pytest.raises(ValueError, match="positive and finite"):
+    with pytest.raises(ValueError, match="positive and finite") as exc_info:
         Utilization(config)
+    assert str(exc_info.value) == (
+        f"{'peak_vector_flops_per_sec' if vector else 'peak_flops_per_sec'} "
+        f"must be positive and finite; got {peak}."
+    )
+
+
+def test_utilization_accepts_positive_subunit_peaks() -> None:
+    config = Utilization.Config()
+    config.peak_flops_per_sec = 0.5
+    config.peak_vector_flops_per_sec = 0.25
+    meter = Utilization(config)
+    assert meter.peak["matmul"] == 0.5
+    assert meter.peak["elementwise"] == 0.25
 
 
 def test_built_alone_it_is_unbound() -> None:
@@ -287,8 +299,11 @@ def test_bind_rejects_a_root_without_a_model_config() -> None:
 
 def test_update_before_bind_fails_loudly() -> None:
     meter = Utilization(Utilization.Config())
-    with pytest.raises(RuntimeError, match="bind"):
+    with pytest.raises(RuntimeError, match="bind") as exc_info:
         meter.update(torch.empty(0), input_ids=torch.zeros(2, 8), step_sec=1.0)
+    assert str(exc_info.value) == (
+        "bind() must precede update(); build through make()."
+    )
 
 
 def test_update_rejects_a_non_tensor_token_field() -> None:
@@ -304,8 +319,50 @@ def test_update_requires_step_sec() -> None:
     """A bus without ``step_sec`` is a caller that cannot be timed."""
     meter = Utilization(Utilization.Config())
     meter.bind(_root(_Counted.Config()))
-    with pytest.raises(TypeError, match="step_sec"):
+    with pytest.raises(TypeError) as exc_info:
         meter.update(torch.empty(0), input_ids=torch.zeros(2, 8))
+    assert str(exc_info.value) == (
+        "update() needs a floating-point step_sec on the metric bus."
+    )
+
+
+def test_update_reports_the_actual_non_tensor_field_type() -> None:
+    config = Utilization.Config()
+    config.tokens_key = "valid_count"
+    meter = Utilization(config)
+    meter.bind(_root(_Counted.Config()))
+    with pytest.raises(TypeError, match="valid_count") as exc_info:
+        meter.update(torch.empty(0), valid_count=4, step_sec=1.0)
+    assert str(exc_info.value) == (
+        "batch['valid_count'] is int, not a Tensor; tokens_key must select "
+        "the token tensor."
+    )
+
+
+def test_update_uses_last_axis_for_rank_three_tokens() -> None:
+    seen: list[tuple[int, int]] = []
+
+    class _Spy:
+        class Config(Fig["_Spy"]):
+            def cost(
+                self,
+                *,
+                seq_len: int,
+                batch_size: int,
+                dtype: torch.dtype | None,
+                **kwargs: object,
+            ) -> Cost:
+                del dtype, kwargs
+                seen.append((seq_len, batch_size))
+                return Cost()
+
+        def __init__(self, config: Config) -> None:
+            del config
+
+    meter = Utilization(Utilization.Config())
+    meter.bind(_root(_Spy.Config()))
+    meter.update(torch.empty(0), input_ids=torch.zeros(2, 3, 4), step_sec=1.0)
+    assert seen == [(4, 6)]
 
 
 if __name__ == "__main__":

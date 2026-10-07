@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from itertools import islice
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import math
 
@@ -12,6 +13,7 @@ import pytest
 import torch
 
 from priml.math.diffusion.sampling import (
+    SampleOneStepResult,
     SampleResult,
     ddpm,
     ddpm_ddim_step,
@@ -31,6 +33,8 @@ from priml.memory import convert_to_tensor
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+
+    from priml.math.custom_types import Tensorable
 
 
 @pytest.fixture(autouse=True)
@@ -232,18 +236,18 @@ def test_sample_with_insufficient_steps():
 
     log_snr_empty = torch.tensor([])
     x = torch.randn(2, 3)
-    with pytest.raises(
-        ValueError,
-        match="Expected log_snr to have leading size",
-    ):
+    with pytest.raises(ValueError, match="Expected log_snr") as error:
         sample(log_snr_empty, model_fn, x)
+    assert str(error.value) == (
+        "Expected log_snr to have leading size of at least 2 but saw 0."
+    )
 
     log_snr_single = torch.tensor([1.0])
-    with pytest.raises(
-        ValueError,
-        match="Expected log_snr to have leading size",
-    ):
+    with pytest.raises(ValueError, match="Expected log_snr") as error:
         sample(log_snr_single, model_fn, x)
+    assert str(error.value) == (
+        "Expected log_snr to have leading size of at least 2 but saw 1."
+    )
 
 
 def test_sample_iter_yields_each_step():
@@ -312,6 +316,20 @@ def test_sample_wrap_steps_default_does_not_change_result():
         torch.manual_seed(0)
         wrapped = sample(log_snr, _identity_model_fn, x, wrap_steps=lambda it: it)
     torch.testing.assert_close(wrapped.x_curr, plain.x_curr)
+
+
+def test_sample_raises_when_wrapped_stream_is_empty() -> None:
+    with pytest.raises(
+        ValueError,
+        match="sample produced no steps; check log_snr length\\.",
+    ) as error:
+        sample(
+            torch.tensor([2.0, -1.0]),
+            _identity_model_fn,
+            torch.ones(2, 3),
+            wrap_steps=lambda _: [],
+        )
+    assert str(error.value) == "sample produced no steps; check log_snr length."
 
 
 def test_sample_wrap_steps_can_truncate_the_run():
@@ -480,6 +498,183 @@ def test_rescale_cfg_eps_parameter():
     )
     assert result.shape == guided.shape
     assert torch.isfinite(result).all()
+
+
+def test_rescale_cfg_matches_per_batch_reference_and_strength_endpoints() -> None:
+    guided = torch.tensor([[[0.0, 2.0], [4.0, 6.0]], [[1.0, 2.0], [3.0, 4.0]]])
+    unguided = torch.tensor([[[1.0, 5.0], [3.0, 7.0]], [[2.0, 6.0], [4.0, 8.0]]])
+    strength = 0.25
+    eps = 0.5
+    sigma_ratio = torch.std(unguided, dim=(-2, -1), keepdim=True) / (
+        torch.std(guided, dim=(-2, -1), keepdim=True) + eps
+    )
+    expected = guided * sigma_ratio.lerp(torch.ones_like(sigma_ratio), 1 - strength)
+
+    actual = rescale_classifier_free_guidance(
+        guided,
+        unguided,
+        strength=strength,
+        eps=eps,
+        spatial_dims=(-2, -1),
+    )
+    torch.testing.assert_close(actual, expected)
+    assert (
+        rescale_classifier_free_guidance(
+            guided,
+            unguided,
+            spatial_dims=(-2, -1),
+        )
+        is guided
+    )
+    fully_rescaled = rescale_classifier_free_guidance(
+        guided,
+        unguided,
+        strength=1.0,
+        spatial_dims=(-2, -1),
+    )
+    torch.testing.assert_close(
+        fully_rescaled.std(dim=(-2, -1)),
+        unguided.std(dim=(-2, -1)),
+    )
+
+
+def test_sample_iter_passes_step_metadata_and_yields_each_field() -> None:
+    log_snr = torch.tensor([-2.0, 0.5, 3.0])
+    x_init = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    calls: list[tuple[Tensor, Tensor, Tensor, int, Tensor]] = []
+
+    def model_fn(
+        x: Tensor,
+        log_snr: Tensor,
+        it: Tensor,
+        num_steps: int,
+        log_snr_next: Tensor,
+    ) -> Tensor:
+        calls.append((x, log_snr, it, num_steps, log_snr_next))
+        return x + it
+
+    def onestep_fn(
+        model: Tensor,
+        x_curr: Tensorable,
+        log_snr_curr: Tensorable,
+        log_snr_next: Tensorable,
+    ) -> SampleOneStepResult:
+        del x_curr, log_snr_curr, log_snr_next
+        return SampleOneStepResult(
+            model + 10,
+            model + 20,
+            torch.full_like(model, -2.0),
+        )
+
+    results = list(sample_iter(log_snr, model_fn, x_init, onestep_fn))
+    assert len(results) == 2
+    assert calls[0][0] is x_init
+    assert calls[0][1] == log_snr[0]
+    assert calls[0][2].item() == 0
+    assert calls[0][2].dtype == torch.int64
+    assert calls[0][2].device == x_init.device
+    assert calls[0][3:] == (2, log_snr[1])
+    assert calls[1][2].item() == 1
+    assert calls[1][0] is results[0].x_curr
+    torch.testing.assert_close(results[0].model, x_init)
+    torch.testing.assert_close(results[0].x_clean, x_init + 10)
+    torch.testing.assert_close(results[0].mean, x_init + 20)
+    torch.testing.assert_close(results[0].log_std, torch.full_like(x_init, -2.0))
+    torch.testing.assert_close(results[1].x_curr, results[1].mean)
+
+
+def test_sample_iter_constructs_iteration_tensor_with_explicit_metadata() -> None:
+    log_snr = torch.tensor([-1.0, 1.0])
+    x_init = torch.ones(2, 3)
+    original_tensor = torch.tensor
+
+    def model_fn(
+        x: Tensor,
+        log_snr: Tensor,
+        it: Tensor,
+        num_steps: int,
+        log_snr_next: Tensor,
+    ) -> Tensor:
+        del log_snr, num_steps, log_snr_next
+        assert it.device == x.device
+        return x + it
+
+    with patch("torch.tensor", wraps=original_tensor) as tensor_spy:
+        list(sample_iter(log_snr, model_fn, x_init))
+    tensor_spy.assert_called_once_with(0, dtype=torch.int64, device=x_init.device)
+
+
+def test_sample_iter_adds_gaussian_noise_before_the_final_step() -> None:
+    x_init = torch.tensor([[2.0, 3.0], [4.0, 5.0]])
+    torch.manual_seed(47)
+    expected_noise = torch.randn_like(x_init)
+    torch.manual_seed(47)
+
+    def model_fn(
+        x: Tensor,
+        log_snr: Tensor,
+        it: Tensor,
+        num_steps: int,
+        log_snr_next: Tensor,
+    ) -> Tensor:
+        del log_snr, it, num_steps, log_snr_next
+        return x
+
+    def onestep_fn(
+        model: Tensor,
+        x_curr: Tensorable,
+        log_snr_curr: Tensorable,
+        log_snr_next: Tensorable,
+    ) -> SampleOneStepResult:
+        del x_curr, log_snr_curr, log_snr_next
+        return SampleOneStepResult(
+            model,
+            model + 10,
+            torch.full_like(model, -2.0),
+        )
+
+    steps = list(
+        sample_iter(torch.tensor([-1.0, 0.0, 1.0]), model_fn, x_init, onestep_fn),
+    )
+    torch.testing.assert_close(
+        steps[0].x_curr,
+        x_init + 10 + torch.exp(torch.tensor(-2.0)) * expected_noise,
+    )
+    torch.testing.assert_close(steps[1].x_curr, steps[1].mean)
+
+
+def test_sample_uses_the_requested_one_step_function() -> None:
+    x_init = torch.tensor([[2.0, 3.0], [4.0, 5.0]])
+
+    def model_fn(
+        x: Tensor,
+        log_snr: Tensor,
+        it: Tensor,
+        num_steps: int,
+        log_snr_next: Tensor,
+    ) -> Tensor:
+        del log_snr, it, num_steps, log_snr_next
+        return x
+
+    def onestep_fn(
+        model: Tensor,
+        x_curr: Tensorable,
+        log_snr_curr: Tensorable,
+        log_snr_next: Tensorable,
+    ) -> SampleOneStepResult:
+        del x_curr, log_snr_curr, log_snr_next
+        return SampleOneStepResult(
+            model + 1,
+            model + 7,
+            torch.full_like(model, -3.0),
+        )
+
+    result = sample(torch.tensor([0.0, 1.0]), model_fn, x_init, onestep_fn)
+    torch.testing.assert_close(result.x_clean, x_init + 1)
+    torch.testing.assert_close(result.mean, x_init + 7)
+    torch.testing.assert_close(result.x_curr, x_init + 7)
+    torch.testing.assert_close(result.log_std, torch.full_like(x_init, -3.0))
+    torch.testing.assert_close(result.model, x_init)
 
 
 if __name__ == "__main__":

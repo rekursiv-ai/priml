@@ -1,8 +1,8 @@
-"""Architecture, transferred weights, and language-preserving graft behavior.
+r"""Architecture, transferred weights, and language-preserving graft behavior.
 
 Regenerate bit-for-bit goldens after an intentional numeric change::
 
-    BFB_REGENERATE=1 uv --quiet run --frozen pytest \
+    uv --quiet run --frozen pytest \ --regenerate-b4b
         priml/model/transformer/mmdit_graft_test.py
 
 Run regeneration through pytest so priml's conftest establishes the required
@@ -14,16 +14,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
-from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
 
 import pytest
 import torch
 
 from priml.cost import Cost, cost
-from priml.lib.custom_json import DictCodec
+from priml.lib.custom_json import convert
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.embedding import Embedding
 from priml.model.linear import Linear
 from priml.model.sequential import Sequential
@@ -42,6 +41,7 @@ from priml.testing.bfb import (
     randomize_parameters,
 )
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -55,7 +55,7 @@ def _backbone(*, depth: int = 1, tie: bool = False) -> Qwen3.Config:
         assert isinstance(config.proj_out.elements, list)
         config.proj_out.elements[1] = TiedLinear.Config(tied="proj_in")
     assert isinstance(config.block, TransformerBlock.Config)
-    assert isinstance(config.block.attn, SelfAttention.Config)
+    assert isinstance(config.block.attn, Attention.Config)
     config.block.attn.attn_kernel = SdpaNaive.Config()
     return config
 
@@ -91,7 +91,7 @@ def test_graft_config_pprint() -> None:
 def _constructor_state(module: nn.Module, input: Tensor) -> Tensor:
     del module, input
     model = _golden_config().make()
-    state = DictCodec.coerce(model.state_dict(), Tensor)
+    state = convert(model.state_dict(), dict[str, Tensor])
     # The fingerprint pins the draw count.
     return golden.joined([*state.values(), golden.rng_fingerprint().float()])
 
@@ -121,7 +121,7 @@ def _golden_config() -> MMDiTGraft.Config:
         ),
     )
     assert isinstance(config.backbone.block, TransformerBlock.Config)
-    assert isinstance(config.backbone.block.attn, SelfAttention.Config)
+    assert isinstance(config.backbone.block.attn, Attention.Config)
     config.backbone.block.attn.attn_kernel = SdpaNaive.Config()
     config.streams[0].attn.num_heads = 2
     config.streams[0].attn.channels_head = 2
@@ -214,7 +214,7 @@ def _frozen_graft() -> MMDiTGraft:
     backbone.proj_in.channels_in = 2
     backbone_block = backbone.block
     assert isinstance(backbone_block, TransformerBlock.Config)
-    assert isinstance(backbone_block.attn, SelfAttention.Config)
+    assert isinstance(backbone_block.attn, Attention.Config)
     backbone_block.attn.num_heads = 2
     backbone_block.attn.channels_head = 2
     assert isinstance(backbone_block.ffn, SwiGLU.Config)
@@ -277,8 +277,8 @@ def _run_frozen_step(
 def _assert_same_state(source: object, target: object) -> None:
     assert isinstance(source, nn.Module)
     assert isinstance(target, nn.Module)
-    before = DictCodec.coerce(source.state_dict(), Tensor)
-    after = DictCodec.coerce(target.state_dict(), Tensor)
+    before = convert(source.state_dict(), dict[str, Tensor])
+    after = convert(target.state_dict(), dict[str, Tensor])
     assert before.keys() == after.keys()
     for name, value in before.items():
         assert torch.equal(value, after[name]), name
@@ -308,11 +308,11 @@ def test_load_backbone_transfers_only_language_weights(depth: int, tie: bool) ->
     modality = nn.ModuleList([graft.blocks[0].attn.streams[1], graft.blocks[0].ffns[1]])
     modality_before = {
         name: value.clone()
-        for name, value in DictCodec.coerce(modality.state_dict(), Tensor).items()
+        for name, value in convert(modality.state_dict(), dict[str, Tensor]).items()
     }
     graft.load_backbone(source)
     _assert_transferred(source, graft=graft)
-    for name, value in DictCodec.coerce(modality.state_dict(), Tensor).items():
+    for name, value in convert(modality.state_dict(), dict[str, Tensor]).items():
         assert torch.equal(value, modality_before[name]), name
 
 
@@ -367,7 +367,7 @@ def test_continuous_backbone_projections(projected: bool) -> None:
     backbone.channels_in = 4 if projected else 16
     backbone.num_layers = 1
     assert isinstance(backbone.block, TransformerBlock.Config)
-    backbone.block.attn = SelfAttention.Config(
+    backbone.block.attn = Attention.Config(
         num_heads=2,
         attn_kernel=SdpaNaive.Config(),
     )
@@ -442,11 +442,11 @@ def test_loading_preflights_every_layer_before_copying() -> None:
     graft = _config(depth=2).make()
     assert isinstance(source.blocks[1], TransformerBlock)
     source.blocks[1].ffn = SwiGLU.Config(16, channels_hidden=48).make()
-    graft_state = DictCodec.coerce(graft.state_dict(), Tensor)
+    graft_state = convert(graft.state_dict(), dict[str, Tensor])
     before = {name: value.clone() for name, value in graft_state.items()}
     with pytest.raises(ValueError, match="shape"):
         graft.load_backbone(source)
-    after = DictCodec.coerce(graft.state_dict(), Tensor)
+    after = convert(graft.state_dict(), dict[str, Tensor])
     assert all(torch.equal(before[name], value) for name, value in after.items())
 
 
@@ -560,7 +560,7 @@ def test_loading_rejects_a_source_whose_blocks_are_not_native() -> None:
     source = _backbone().make()
     source.blocks[0] = nn.Identity()
     graft = _config().make()
-    with pytest.raises(ValueError, match="native prenorm SelfAttention"):
+    with pytest.raises(ValueError, match="native prenorm Attention"):
         graft.load_backbone(source)
 
 
@@ -568,10 +568,10 @@ def test_reset_parameters_redraws_every_owned_module() -> None:
     graft = _config().make()
     torch.manual_seed(0)
     graft.reset_parameters()
-    first = DictCodec.coerce(graft.state_dict(), Tensor)["proj_in.weight"].clone()
+    first = convert(graft.state_dict(), dict[str, Tensor])["proj_in.weight"].clone()
     torch.manual_seed(1)
     graft.reset_parameters()
-    after = DictCodec.coerce(graft.state_dict(), Tensor)["proj_in.weight"]
+    after = convert(graft.state_dict(), dict[str, Tensor])["proj_in.weight"]
     assert not torch.equal(first, after)
 
 
@@ -585,10 +585,20 @@ def test_forward_rejects_the_wrong_stream_count() -> None:
 def test_load_backbone_state_accepts_transformer_named_weights() -> None:
     source = _backbone().make()
     graft = _config().make()
-    graft.load_backbone_state(DictCodec.coerce(source.state_dict(), Tensor))
-    loaded = DictCodec.coerce(graft.state_dict(), Tensor)
-    expected = DictCodec.coerce(source.state_dict(), Tensor)
+    graft.load_backbone_state(convert(source.state_dict(), dict[str, Tensor]))
+    loaded = convert(graft.state_dict(), dict[str, Tensor])
+    expected = convert(source.state_dict(), dict[str, Tensor])
     assert torch.equal(loaded["proj_in.weight"], expected["proj_in.weight"])
+
+
+def test_load_backbone_state_rejects_missing_weights() -> None:
+    source = _backbone().make()
+    graft = _config().make()
+    state = convert(source.state_dict(), dict[str, Tensor])
+    state.pop("proj_in.weight")
+
+    with pytest.raises(RuntimeError, match=r"Missing key.*proj_in\.weight"):
+        graft.load_backbone_state(state)
 
 
 def test_head_is_tied_reads_through_a_sequential_head() -> None:

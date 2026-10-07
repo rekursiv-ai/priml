@@ -34,29 +34,32 @@ Examples:
 from __future__ import annotations
 
 from collections.abc import Callable, Generator, Iterator
-from contextlib import ExitStack
 from pathlib import Path
-from typing import NoReturn, Protocol, cast, override
+from typing import Literal, NoReturn, Protocol, cast, override
 
 import argparse
 import ast
 import contextlib
+import functools
 import importlib
 import re
-import subprocess
 import sys
 import types
 
 from torch import Tensor, nn
+from torch._dynamo.eval_frame import OptimizedModule
 from torch.nn import functional
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 import torch
 
 from priml.baselines.nanochat.experiments import exp001
+from priml.baselines.nanochat.scripts.karpathy_upstream import (
+    clone_upstream,
+    kernels_stub,
+)
 from priml.baselines.nanochat.train_step import NanoChatTrainStep
 from priml.math.seed import RngState, get_rng_state, set_rng_state
-from priml.model.attention.value_gated_attention import sdpa_attention
 from priml.optimizers.composite import CompositeOptimizer
 from priml.train.parallelism import NoParallel
 
@@ -81,6 +84,7 @@ class _NanoChatConfig(Protocol):
 
 class _ReferenceModule(Protocol):
     __file__: str
+    __name__: str
     fa3: _AttentionKernel
     model: nn.Module
     optimizer: torch.optim.Optimizer
@@ -110,78 +114,9 @@ class _PrepareModule(Protocol):
     make_dataloader: Callable[..., Iterator[tuple[Tensor, Tensor, object]]]
 
 
-def their_attention(
-    q: Tensor,
-    k: Tensor,
-    v: Tensor,
-    *,
-    causal: bool,
-    window_size: tuple[int, int],
-) -> Tensor:
-    """``exp001``'s own kernel, behind FlashAttention-3's call signature.
-
-    The reference calls ``fa3.flash_attn_func(q, k, v, causal=True,
-    window_size=(w, 0))``; this hands that call to the very function
-    ``exp001`` puts in its kernel slot, so both sides issue ONE kernel and
-    what remains between them is the recipe rather than the backend.
-
-    Args:
-      q: ``[B, S, heads, channels_head]`` queries.
-      k: Keys, same shape.
-      v: Values, same shape.
-      causal: Whether the mask is causal; the recipe always passes True.
-      window_size: ``(history, future)``; the recipe always passes future 0.
-
-    Returns:
-      out: Attention output, same shape as ``q``.
-
-    """
-    if not causal:
-        raise ValueError("the recipe attends causally")
-    if window_size[1] != 0:
-        raise ValueError(f"unexpected future window {window_size[1]}")
-    return sdpa_attention(q, k, v, window=window_size[0])
-
-
-def clone_upstream(
-    root: Path,
-    *,
-    url: str = "https://github.com/karpathy/autoresearch.git",
-    commit: str = "b11d6f283f866eb7e10fb776a4b8553fef873fd5",
-) -> Path:
-    """Clone the reference at its pinned commit, or verify an existing clone.
-
-    Args:
-      root: Directory the clone lives in.
-      url: Repository to clone.
-      commit: Revision the comparison is against.
-
-    Returns:
-      path: The clone's path.
-
-    Raises:
-      RuntimeError: An existing clone is dirty or at another commit, so what
-        it contains is no longer the reference this comparison names.
-
-    """
-    if not (root / ".git").is_dir():
-        root.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(  # noqa: S603 -- The parity harness invokes the fixed repository command from its signature.
-            ["git", "clone", "--quiet", url, str(root)],  # noqa: S607 -- The parity harness uses fixed Git subcommands for the pinned reference.
-            check=True,
-        )
-        subprocess.run(  # noqa: S603 -- The parity harness invokes the fixed repository command from its signature.
-            ["git", "checkout", "--quiet", commit],  # noqa: S607 -- The parity harness uses fixed Git subcommands for the pinned reference.
-            cwd=root,
-            check=True,
-        )
-    head = _git(root, "rev-parse", "HEAD")
-    if head != commit:
-        raise RuntimeError(f"clone is at {head}, expected {commit}")
-    dirty = _git(root, "status", "--porcelain")
-    if dirty:
-        raise RuntimeError(f"clone has local modifications:\n{dirty}")
-    return root
+class _EvaluationPrepare(Protocol):
+    EVAL_TOKENS: int
+    MAX_SEQ_LEN: int
 
 
 def build_theirs(
@@ -220,11 +155,12 @@ def build_theirs(
     upstream = load_upstream(root, corpus=corpus, loader=loader, rows=rows, rng=rng)
     print(f"upstream: {upstream.__file__}")
     print(f"kernel:   {upstream.fa3.flash_attn_func.__qualname__}")
-    # The module BENEATH their ``torch.compile`` wrapper (train.py:506). Both
-    # sides then run eager, which is the only pairing that isolates the port:
-    # a compiled graph fuses reductions differently, so comparing one side
-    # compiled against the other eager measures inductor, not the recipe.
-    model = upstream.model
+    # Module scope ends at their dataloader (train.py:508), after their
+    # ``torch.compile`` wrapper (:506). Unwrapped to the module beneath it so
+    # both sides run eager, the only pairing that isolates the port: a compiled
+    # graph fuses reductions differently, so one side compiled against the
+    # other eager measures inductor, not the recipe.
+    model = _eager(upstream.model)
     optimizer = upstream.optimizer
     assert isinstance(model, nn.Module), type(model).__name__
     assert isinstance(optimizer, torch.optim.Optimizer), type(optimizer).__name__
@@ -251,12 +187,15 @@ def their_schedules(root: Path, module: types.ModuleType) -> _ReferenceModule:
     source = (root / "train.py").read_text().splitlines()
     tree = ast.parse("\n".join(source))
     wanted = {"get_lr_multiplier", "get_muon_momentum", "get_weight_decay"}
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name in wanted:
-            exec(  # noqa: S102 -- The parity harness executes function definitions from the pinned reference clone.
-                compile(ast.Module([node], []), str(root / "train.py"), "exec"),
-                module.__dict__,
-            )
+    tree.body = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    exec(  # noqa: S102 -- The parity harness executes function definitions from the pinned reference clone.
+        compile(tree, str(root / "train.py"), "exec"),
+        module.__dict__,
+    )
     missing = wanted - set(module.__dict__)
     if missing:
         raise RuntimeError(f"train.py defines no {sorted(missing)}")
@@ -302,7 +241,7 @@ def load_upstream(
 
     """
     sys.path.insert(0, str(root))
-    sys.modules["kernels"] = _kernels_stub()
+    sys.modules["kernels"] = kernels_stub()
     # Their own knob, at the value that ends their training loop as early as
     # their ``step > 10`` guard allows. Their context length is left alone.
     constants = importlib.import_module("constants")
@@ -384,17 +323,8 @@ def name_map(theirs: nn.Module, *, layers: int) -> dict[str, str]:
         "mix.running": "resid_lambdas",
         "mix.original": "x0_lambdas",
     }
-    # ``torch.compile`` wraps the module, so its parameters answer to an
-    # ``_orig_mod.`` prefix. Read off the model rather than assumed, since the
-    # comparison runs their compiled path and ours alike.
-    prefix = (
-        "_orig_mod."
-        if any(name.startswith("_orig_mod.") for name, _ in theirs.named_parameters())
-        else ""
-    )
-    mapping = {ours: f"{prefix}{them}" for ours, them in mapping.items()}
     for layer in range(layers):
-        ours, them = f"blocks.{layer}", f"{prefix}transformer.h.{layer}"
+        ours, them = f"blocks.{layer}", f"transformer.h.{layer}"
         mapping |= {
             f"{ours}.attn.proj_q.weight": f"{them}.attn.c_q.weight",
             f"{ours}.attn.proj_k.weight": f"{them}.attn.c_k.weight",
@@ -408,13 +338,12 @@ def name_map(theirs: nn.Module, *, layers: int) -> dict[str, str]:
     # parameter they never created -- and a disagreement about WHICH layers
     # then surfaces as an unmapped name rather than passing silently.
     for name, _ in theirs.named_parameters():
-        bare = name.removeprefix(prefix)
-        if bare.startswith("value_embeds."):
+        if name.startswith("value_embeds."):
             # Ours narrows its tables, so the parameter sits under the wrapper.
-            layer = bare.split(".")[1]
+            layer = name.split(".")[1]
             mapping[f"value_embeds.{layer}.inner.weight"] = name
-        elif bare.endswith("attn.ve_gate.weight"):
-            mapping[f"blocks.{bare.split('.')[2]}.attn.value_gate.weight"] = name
+        elif name.endswith("attn.ve_gate.weight"):
+            mapping[f"blocks.{name.split('.')[2]}.attn.value_gate.weight"] = name
     return mapping
 
 
@@ -439,11 +368,16 @@ def copy_weights(theirs: nn.Module, ours: nn.Module, mapping: dict[str, str]) ->
     dst = dict(ours.named_parameters())
     unmapped = sorted(k for k in dst if k not in mapping)
     absent = sorted(v for v in mapping.values() if v not in src)
-    if unmapped or absent:
-        raise RuntimeError(f"name map incomplete: {unmapped=} {absent=}")
+    # Theirs too: a reference parameter no name maps to is never copied or
+    # compared, so every later "identical" would be silent about it.
+    uncovered = sorted(set(src) - set(mapping.values()))
+    if unmapped or absent or uncovered:
+        raise RuntimeError(
+            f"name map incomplete: {unmapped=} {absent=} {uncovered=}",
+        )
     with torch.no_grad():
         for our_name, their_name in mapping.items():
-            dst[our_name].copy_(src[their_name].to(dst[our_name].dtype))
+            dst[our_name].copy_(src[their_name])
 
 
 def compare(label: str, a: Tensor, b: Tensor) -> str | None:
@@ -523,41 +457,40 @@ def compare_state(
       mapping: Our parameter names to theirs.
 
     Returns:
-      problems: One description per differing state tensor.
+      problems: One description per differing, missing, or one-sided state
+        tensor.
 
     """
-    names = {
-        "first_moment": "exp_avg",
-        "second_moment": "exp_avg_sq",
-        "momentum_buffer": "momentum_buffer",
-    }
     src = dict(theirs.named_parameters())
     dst = dict(ours.model.named_parameters())
     # The recipe runs two optimizers; the state lives on each member.
     assert isinstance(ours.optimizer, CompositeOptimizer)
+    their_state = cast(dict[Tensor, object], their_optimizer.state)
+    # Our name to the names theirs may use. Their AdamW keeps ``exp_avg_sq`` and
+    # their Muon ``second_momentum_buffer``; ours names both ``second_moment``. A
+    # member holds one or the other, never both.
+    names = {
+        "first_moment": ("exp_avg",),
+        "second_moment": ("exp_avg_sq", "second_momentum_buffer"),
+        "momentum_buffer": ("momentum_buffer",),
+    }
     problems: list[str] = []
     for our_name, their_name in mapping.items():
-        mine: dict[str, Tensor] = {}
-        for member in ours.optimizer.optimizers:
-            member_state = cast(dict[Tensor, object], member.state)
-            if dst[our_name] in member_state:
-                value = member_state[dst[our_name]]
-                assert isinstance(value, dict)
-                mine = cast(dict[str, Tensor], value)
-        their_state = cast(dict[Tensor, object], their_optimizer.state)
+        mine = _member_state(ours.optimizer, dst[our_name])
         other_value = their_state.get(src[their_name], {})
         assert isinstance(other_value, dict)
         other = cast(dict[str, Tensor], other_value)
-        for our_key, their_key in names.items():
-            key = their_key if their_key in other else "second_momentum_buffer"
-            if our_key not in mine or key not in other:
-                continue
-            a, b = other[key], mine[our_key]
-            if a.shape != b.shape:
-                continue
-            found = compare(f"state {our_name}[{our_key}]", a, b)
-            if found:
-                problems.append(found)
+        for our_key, their_keys in names.items():
+            problems.extend(
+                _compare_state_entry(
+                    f"state {our_name}[{our_key}]",
+                    theirs=next(
+                        (other[key] for key in their_keys if key in other),
+                        None,
+                    ),
+                    ours=mine.get(our_key),
+                ),
+            )
     return problems
 
 
@@ -569,7 +502,7 @@ def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -621,7 +554,6 @@ def main() -> int:
         f"theirs={[w[0] for w in reference.window_sizes]}",
     )
 
-    autocast = torch.amp.autocast(device_type=flags.device, dtype=torch.bfloat16)
     theirs.train()
     ours.model.train()
     # The recipe expresses its window as a MASK, which disqualifies every
@@ -630,110 +562,29 @@ def main() -> int:
     # runs of the same second step differed in 3 to 50 gradients. Both sides
     # are pinned to the math backend so a difference between them is the port
     # rather than the kernel's own scatter order.
-    stack = ExitStack()
-    stack.enter_context(sdpa_kernel(SDPBackend.MATH))
-    failures = len(problems)
-
-    for index in range(1, flags.steps + 1):
-        # THEIR loader, over the real corpus. The packer is a stateful stream --
-        # best-fit out of a document buffer refilled a fixed number at a time --
-        # so it is part of the recipe rather than a fixture, and random ids left
-        # it the one piece of the port nothing here compared. Taking it from
-        # their side keeps the reference virgin: what our packer produces is a
-        # separate question, and answering it with our own rows would let a
-        # packing difference cancel itself on both sides of the comparison.
-        tokens, targets, _ = next(train_loader)
-
-        with autocast:
-            their_loss = reference(tokens, targets)
-        with autocast:
-            logits = cast(Tensor, ours.model(tokens))
-        # Their forward folds the loss in; ours returns logits, so the same
-        # cross-entropy is spelled here rather than compared through a
-        # different reduction.
-        our_loss = functional.cross_entropy(
-            logits.reshape(-1, logits.shape[-1]).float(),
-            targets.reshape(-1).long(),
-            ignore_index=-1,
-        )
-        loss_problem = compare("loss", their_loss.detach(), our_loss.detach())
-
-        their_loss.backward()
-        our_loss.backward()
-        grad_problems = compare_all(
+    with sdpa_kernel(SDPBackend.MATH):
+        failures = len(problems) + _compare_steps(
             theirs,
-            ours.model,
-            mapping,
-            grads=True,
-            tag="grad",
+            their_optimizer,
+            ours,
+            upstream=upstream,
+            loader=train_loader,
+            mapping=mapping,
+            flags=flags,
         )
-
-        # Their schedules, from their own functions, exactly as their training
-        # loop applies them (train.py:552-561). Ours applies its own inside
-        # ``_apply_update``; stepping either optimizer bare would compare a run
-        # whose momentum never ramps against one whose does.
-        #
-        # Progress is SUPPLIED, identically to both sides, rather than measured
-        # on either: both read it off a wall clock, so letting it run would
-        # freeze how fast this machine is and compare two different schedules.
-        # It follows the fencepost a real run has -- the first
-        # ``budget_warmup_steps`` updates charge nothing (train.py:576, ours at
-        # train_step.py:506), so progress is pinned at zero across them and
-        # advances one step's share afterwards. That is what carries the LR
-        # curve, the weight-decay ramp, and the momentum ramp into the
-        # comparison instead of sampling one point of each.
-        progress = _progress_at(
-            index,
-            warmup=flags.warmup,
-            budget_steps=flags.budget_steps,
-        )
-        multiplier = upstream.get_lr_multiplier(progress)
-        for group in their_optimizer.param_groups:
-            group["lr"] = group["initial_lr"] * multiplier
-            if group["kind"] == "muon":
-                group["momentum"] = upstream.get_muon_momentum(index - 1)
-                group["weight_decay"] = upstream.get_weight_decay(progress)
-        their_optimizer.step()
-
-        ours.elapsed_sec = progress * ours.config.train_budget_sec
-        # Written through the timer: ``global_step`` reads it and is read-only,
-        # since a caller able to assign it could move the run's position out
-        # from under the schedule. The momentum ramp is step-indexed, so the
-        # count still has to be pinned to match theirs.
-        ours.timer_step.global_count = index - 1
-        ours._apply_update()  # noqa: SLF001 -- The parity comparison must invoke the implementation's private update hook.
-        theirs.zero_grad(set_to_none=True)
-        state_problems = compare_state(theirs, their_optimizer, ours, mapping)
-        weight_problems = compare_all(
+        failures += compare_eval(
             theirs,
-            ours.model,
-            mapping,
-            grads=False,
-            tag="weight",
+            ours,
+            upstream,
+            cast(_PrepareModule, their_loader["prepare"]),
+            batches=flags.eval_batches,
+            device=flags.device,
         )
-
-        step_problems = [*([loss_problem] if loss_problem else []), *grad_problems]
-        step_problems += weight_problems + state_problems
-        failures += len(step_problems)
-        print(
-            f"[{index}] loss {'DIFFERS' if loss_problem else 'identical'} | "
-            f"grads {len(grad_problems)} differ | "
-            f"weights {len(weight_problems)} differ | "
-            f"state {len(state_problems)} differ",
-        )
-        for line in step_problems[:8]:
-            print(f"    {line}")
-
-    failures += compare_eval(
-        theirs,
-        ours,
-        upstream,
-        cast(_PrepareModule, their_loader["prepare"]),
-        batches=flags.eval_batches,
-    )
 
     verdict = f"{failures} DIFFERENCE(S)" if failures else "BIT-IDENTICAL"
-    print(f"\n{flags.steps} steps, FA3->FA2 only: {verdict}")
+    print(
+        f"\n{flags.steps} steps, FA3->SDPA (math backend) on both sides: {verdict}",
+    )
     return 1 if failures else 0
 
 
@@ -741,23 +592,20 @@ def compare_eval(
     theirs: nn.Module,
     ours: NanoChatTrainStep,
     upstream: _ReferenceModule,
-    prepare: _PrepareModule,
+    prepare: _EvaluationPrepare,
     *,
     batches: int,
+    device: str,
 ) -> int:
-    """Score both models with THEIR metric and with ours, on their rows.
+    """Score both models with THEIR metric, on their rows.
 
     The reported number is bits per byte, and until now nothing here touched
     it: twenty bit-identical updates say the weights agree, not that the two
     implementations turn the same weights into the same score. Their
     ``evaluate_bpb`` is marked DO NOT CHANGE (``prepare.py:324``) precisely
     because it IS the comparison, so it is the one run here -- against their
-    model and ours in turn, which isolates the metric from the models.
-
-    Ours is then run on the same rows through :class:`BitsPerByte`, so a
-    difference in the ACCOUNTING shows up as well: theirs sums nats in float32
-    and multiplies by a mask (``prepare.py:347``), ours accumulates float64 and
-    indexes. Both drop zero-byte tokens, which is the part that must agree.
+    model and ours in turn, which isolates the models from the metric. Our own
+    ``BitsPerByte`` accounting is not exercised here.
 
     Args:
       theirs: The reference model.
@@ -766,6 +614,7 @@ def compare_eval(
       prepare: Their ``prepare`` module, holding the metric and its constants.
       batches: Validation batches to score; their full evaluation is 40x
         larger and answers the same question far more slowly.
+      device: Device type both models run on, for the autocast region.
 
     Returns:
       failures: One per disagreement found.
@@ -781,7 +630,7 @@ def compare_eval(
     prepare.EVAL_TOKENS = batches * rows * int(prepare.MAX_SEQ_LEN)
     # Under autocast, as their own final eval runs it (train.py:609-611): their
     # tables are held in bfloat16, so the model is only runnable inside one.
-    autocast = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
+    autocast = torch.amp.autocast(device_type=device, dtype=torch.bfloat16)
     try:
         with autocast:
             their_bpb = float(upstream.evaluate_bpb(theirs, tokenizer, rows))
@@ -817,7 +666,7 @@ class _LossAdapter(nn.Module):
         self,
         tokens: Tensor,
         targets: Tensor,
-        reduction: str = "mean",
+        reduction: Literal["none", "mean", "sum"] = "mean",
     ) -> Tensor:
         logits = cast(Tensor, self.inner(tokens))
         return functional.cross_entropy(
@@ -826,34 +675,6 @@ class _LossAdapter(nn.Module):
             ignore_index=-1,
             reduction=reduction,
         )
-
-
-def _git(root: Path, *arguments: str) -> str:
-    """Run a read-only git command in the clone."""
-    return subprocess.run(  # noqa: S603 -- The parity harness invokes read-only subcommands supplied by its controlled caller.
-        ["git", *arguments],  # noqa: S607 -- The parity harness uses fixed Git subcommands for the pinned reference.
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-
-
-def _kernels_stub() -> types.ModuleType:
-    """Return a ``kernels`` module whose ``get_kernel`` yields ``exp001``'s kernel."""
-    module = types.ModuleType("kernels")
-
-    def get_kernel(name: str) -> types.SimpleNamespace:
-        if "flash-attention-3" not in name:
-            raise ValueError(name)
-        return types.SimpleNamespace(
-            flash_attn_interface=types.SimpleNamespace(
-                flash_attn_func=their_attention,
-            ),
-        )
-
-    module.get_kernel = get_kernel  # ty: ignore[unresolved-attribute] -- The test mutates a stub module built at runtime.  # pyright: ignore[reportAttributeAccessIssue] -- The test mutates a stub module built at runtime.
-    return module
 
 
 # Their own module, not a stub: the packer it holds is a stateful stream -- best-fit out
@@ -877,30 +698,30 @@ def _prepare_module(corpus: Path, loader: dict[str, object]) -> _PrepareModule:
     cast(types.FunctionType, module.Tokenizer.from_directory.__func__).__defaults__ = (
         str(corpus / "tokenizer"),
     )
-    real_make_dataloader = module.make_dataloader
-
-    def make_dataloader(*args: object, **kwargs: object) -> NoReturn:
-        """Build their loader, keep it, and end their module scope.
-
-        Restores their own function first: their ``evaluate_bpb`` builds a
-        VALIDATION loader through the same name (``prepare.py:337``), and a
-        wrapper still in place would end the scoring run instead.
-
-        Args:
-          *args: Their positional loader arguments, forwarded verbatim.
-          **kwargs: Their keyword loader arguments, forwarded verbatim.
-
-        Raises:
-          _StopModuleScopeError: Always, once the loader is captured.
-
-        """
-        module.make_dataloader = real_make_dataloader
-        loader["train"] = real_make_dataloader(*args, **kwargs)
-        loader["prepare"] = module
-        raise _StopModuleScopeError
-
-    module.make_dataloader = make_dataloader
+    module.make_dataloader = functools.partial(
+        _capture_loader,
+        module=module,
+        real=module.make_dataloader,
+        loader=loader,
+    )
     return module
+
+
+# Restores their own function first: their ``evaluate_bpb`` builds a VALIDATION loader
+# through the same name (``prepare.py:337``), and a wrapper still in place would end the
+# scoring run instead.
+def _capture_loader(
+    *args: object,
+    module: _PrepareModule,
+    real: Callable[..., Iterator[tuple[Tensor, Tensor, object]]],
+    loader: dict[str, object],
+    **kwargs: object,
+) -> NoReturn:
+    """Build their loader, keep it, and end their module scope."""
+    module.make_dataloader = real
+    loader["train"] = real(*args, **kwargs)
+    loader["prepare"] = module
+    raise _StopModuleScopeError
 
 
 class _StopModuleScopeError(Exception):
@@ -923,17 +744,36 @@ class _StopModuleScopeError(Exception):
 def _capture_rng_after_seeding(rng: dict[str, object]) -> Generator[None]:
     """Record the RNG state their module scope seeds, before it draws."""
     real_cuda_seed = torch.cuda.manual_seed
-
-    def capture(seed: int) -> None:
-        torch.cuda.init()
-        real_cuda_seed(seed)
-        rng.setdefault("state", get_rng_state())
-
-    torch.cuda.manual_seed = capture  # ty: ignore[invalid-assignment] -- The parity harness mutates attributes on dynamically loaded reference modules..
+    torch.cuda.manual_seed = functools.partial(
+        _seed_and_capture,
+        real=real_cuda_seed,
+        rng=rng,
+    )
     try:
         yield
     finally:
         torch.cuda.manual_seed = real_cuda_seed
+
+
+def _seed_and_capture(
+    seed: int,
+    *,
+    real: Callable[[int], None],
+    rng: dict[str, object],
+) -> None:
+    """Seed CUDA as they asked, then record the first state after seeding."""
+    torch.cuda.init()
+    real(seed)
+    rng.setdefault("state", get_rng_state())
+
+
+def _eager(model: object) -> object:
+    """Return the module beneath a ``torch.compile`` wrapper, or ``model`` itself."""
+    if not isinstance(model, OptimizedModule):
+        return model
+    inner = cast(object, model._orig_mod)  # noqa: SLF001 -- torch's only handle on the module it wrapped.
+    assert isinstance(inner, nn.Module)
+    return inner
 
 
 # The first ``warmup`` updates are unbilled on both sides, so progress is zero across
@@ -1015,6 +855,141 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
 
 class _NanoChatModel(Protocol):
     config: _NanoChatConfig
+
+
+def _member_state(
+    optimizer: CompositeOptimizer,
+    parameter: Tensor,
+) -> dict[str, Tensor]:
+    """Return the state of the member owning ``parameter``; empty when none does."""
+    for member in optimizer.optimizers:
+        member_state = cast(dict[Tensor, object], member.state)
+        if parameter in member_state:
+            value = member_state[parameter]
+            assert isinstance(value, dict)
+            return cast(dict[str, Tensor], value)
+    return {}
+
+
+def _compare_state_entry(
+    label: str,
+    *,
+    theirs: Tensor | None,
+    ours: Tensor | None,
+) -> list[str]:
+    """Report a one-sided entry as a difference; absent on both sides agrees."""
+    if theirs is None and ours is None:
+        return []
+    if theirs is None or ours is None:
+        return [f"{label}: MISSING on {'theirs' if theirs is None else 'ours'}"]
+    found = compare(label, theirs, ours)
+    return [found] if found else []
+
+
+def _compare_steps(
+    theirs: nn.Module,
+    their_optimizer: torch.optim.Optimizer,
+    ours: NanoChatTrainStep,
+    *,
+    upstream: _ReferenceModule,
+    loader: Iterator[tuple[Tensor, Tensor, object]],
+    mapping: dict[str, str],
+    flags: _Flags,
+) -> int:
+    """Step both sides together on their rows; return the differences found."""
+    reference = cast(_UpstreamModel, theirs)
+    autocast = torch.amp.autocast(device_type=flags.device, dtype=torch.bfloat16)
+    failures = 0
+    for index in range(1, flags.steps + 1):
+        # THEIR loader, over the real corpus. The packer is a stateful stream --
+        # best-fit out of a document buffer refilled a fixed number at a time --
+        # so it is part of the recipe rather than a fixture, and random ids left
+        # it the one piece of the port nothing here compared. Taking it from
+        # their side keeps the reference virgin: what our packer produces is a
+        # separate question, and answering it with our own rows would let a
+        # packing difference cancel itself on both sides of the comparison.
+        tokens, targets, _ = next(loader)
+
+        with autocast:
+            their_loss = reference(tokens, targets)
+        with autocast:
+            logits = cast(Tensor, ours.model(tokens))
+        # Their forward folds the loss in; ours returns logits, so the same
+        # cross-entropy is spelled here rather than compared through a
+        # different reduction.
+        our_loss = functional.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]).float(),
+            targets.reshape(-1).long(),
+            ignore_index=-1,
+        )
+        loss_problem = compare("loss", their_loss.detach(), our_loss.detach())
+
+        their_loss.backward()
+        our_loss.backward()
+        grad_problems = compare_all(
+            theirs,
+            ours.model,
+            mapping,
+            grads=True,
+            tag="grad",
+        )
+
+        # Their schedules, from their own functions, exactly as their training
+        # loop applies them (train.py:552-561). Ours applies its own inside
+        # ``_apply_update``; stepping either optimizer bare would compare a run
+        # whose momentum never ramps against one whose does.
+        #
+        # Progress is SUPPLIED, identically to both sides, rather than measured
+        # on either: both read it off a wall clock, so letting it run would
+        # freeze how fast this machine is and compare two different schedules.
+        # It follows the fencepost a real run has -- the first
+        # ``budget_warmup_steps`` updates charge nothing (train.py:576, ours at
+        # train_step.py:506), so progress is pinned at zero across them and
+        # advances one step's share afterwards. That is what carries the LR
+        # curve, the weight-decay ramp, and the momentum ramp into the
+        # comparison instead of sampling one point of each.
+        progress = _progress_at(
+            index,
+            warmup=flags.warmup,
+            budget_steps=flags.budget_steps,
+        )
+        multiplier = upstream.get_lr_multiplier(progress)
+        for group in their_optimizer.param_groups:
+            group["lr"] = group["initial_lr"] * multiplier
+            if group["kind"] == "muon":
+                group["momentum"] = upstream.get_muon_momentum(index - 1)
+                group["weight_decay"] = upstream.get_weight_decay(progress)
+        their_optimizer.step()
+
+        ours.elapsed_sec = progress * ours.config.train_budget_sec
+        # Written through the timer: ``global_step`` reads it and is read-only,
+        # since a caller able to assign it could move the run's position out
+        # from under the schedule. The momentum ramp is step-indexed, so the
+        # count still has to be pinned to match theirs.
+        ours.timer_step.global_count = index - 1
+        ours._apply_update()  # noqa: SLF001 -- The parity comparison must invoke the implementation's private update hook.
+        theirs.zero_grad(set_to_none=True)
+        state_problems = compare_state(theirs, their_optimizer, ours, mapping)
+        weight_problems = compare_all(
+            theirs,
+            ours.model,
+            mapping,
+            grads=False,
+            tag="weight",
+        )
+
+        step_problems = [*([loss_problem] if loss_problem else []), *grad_problems]
+        step_problems += weight_problems + state_problems
+        failures += len(step_problems)
+        print(
+            f"[{index}] loss {'DIFFERS' if loss_problem else 'identical'} | "
+            f"grads {len(grad_problems)} differ | "
+            f"weights {len(weight_problems)} differ | "
+            f"state {len(state_problems)} differ",
+        )
+        for line in step_problems[:8]:
+            print(f"    {line}")
+    return failures
 
 
 if __name__ == "__main__":

@@ -20,7 +20,9 @@ LEAKAGE: ARC-AGI-2 ``training2`` contains 376/400 ARC-AGI-1 public eval tasks,
 and 6/120 ``evaluation2`` tasks are re-partitions of ARC-AGI-1 public eval
 tasks. A model trained on this tree must never be scored on ARC-AGI-1.
 
-Prebuild from the CLI (the dataset also stages itself at ``__init__``):
+Prebuild from the CLI. ``Arc2PuzzleDataset`` also stages the tree at
+``__init__`` when its ``num_puzzle_identifiers`` is positive; ``Arc2Data``
+only reads a prepared tree:
 
     uv --quiet run --frozen python "$0" [OPTIONS]
 '''
@@ -45,14 +47,16 @@ from priml.baselines.arcagi1.augmentation import (
 )
 from priml.baselines.arcagi1.scripts.build_dataset import (
     DEFAULT_SCALE_WEIGHTS,
+    RECIPE_FILE,
     KaggleSource,
-    _build_arc_dataset,
     arc_manifest,
     aug_policy_slug,
+    write_arc_tree,
 )
 from priml.baselines.arcagi1.scripts.build_spatial_eval import spatial_eval_slug
 from priml.data.distributed_build import run_rank_zero_build
-from priml.lib.custom_json import DictCodec, ListCodec, loads
+from priml.lib.custom_json import parse
+from priml.paths import resolve_working_dir
 
 
 if TYPE_CHECKING:
@@ -61,7 +65,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_BUILD_PARAMS_FILE: Final = "_build_params.json"
+ARC2_DATASET_DIR: Final = "/datasets/arc2concept-aug-1000"
+"""Logical root of the plain ARC-AGI-2 build, resolved beneath ``base_dir``.
+
+The builder, preparer, and experiments read it here. Config defaults
+(``Arc2Data``, ``Arc2PuzzleDataset``, ``PassK``) spell the literal so the
+default prints in the Config; ``puzzle_data_test`` pins all of them to this."""
+
 _ensure_cache: dict[Path, Path] = {}
 _ARC2_SUBSETS: Final = ("training2", "evaluation2", "concept")
 _ARC2_TEST_SET: Final = "evaluation2"
@@ -100,7 +110,7 @@ def arc2_aug_policy_template(
         num_aug=num_aug,
         seed=seed,
     )
-    return f"/datasets/arc2concept-aug-1000-{slug}"
+    return f"{ARC2_DATASET_DIR}-{slug}"
 
 
 def arc2_spatial_eval_template(
@@ -145,7 +155,7 @@ def arc2_spatial_eval_template(
 def arc2_num_puzzle_identifiers(dataset_dir: Path) -> int:
     """Return ``len(identifiers.json)`` for a built ARC-AGI-2 tree."""
     path = Path(dataset_dir).expanduser() / "identifiers.json"
-    return len(ListCodec.coerce(loads(path.read_text()), str))
+    return len(parse(path.read_text(), list[str]))
 
 
 def ensure_arc2_dataset(
@@ -200,7 +210,7 @@ def ensure_arc2_dataset(
             # Invalidate any previous build's sentinel BEFORE mutating the
             # tree in place: a crash mid-rebuild must leave a tree that
             # matches NO params (forcing a rebuild), never the old ones.
-            (root / _BUILD_PARAMS_FILE).unlink(missing_ok=True)
+            (root / RECIPE_FILE).unlink(missing_ok=True)
             logger.info("ensure_arc2_dataset: building %s", root)
             if input_file_prefix is not None:
                 _build_arc2_tree(
@@ -239,7 +249,7 @@ def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -252,7 +262,7 @@ def main() -> int:
         # Data-helper-only path-owner (CLI prebuild), not for experiments:
         # configs carry the "/datasets/..." working_dir instead. The CLI is
         # the top-level path owner, so it injects base_dir="/opt/scratch".
-        target = Path("/opt/scratch/datasets/arc2concept-aug-1000")
+        target = resolve_working_dir("/opt/scratch", ARC2_DATASET_DIR)
     elif not plain:
         # Fold the policy into the slug so a policy prebuild can NEVER
         # rebuild the plain tree in place (distinct policies get distinct
@@ -262,7 +272,7 @@ def main() -> int:
             scale_prob=args.scale_prob,
             num_aug=args.num_aug,
             seed=args.seed,
-        ).rsplit("/", 1)[-1]
+        ).removeprefix("/datasets/")
         target = Path(f"/opt/scratch/datasets/{slug}")
     else:
         parser.error(
@@ -340,15 +350,15 @@ def _build_arc2_tree(
     augmentation.spatial.train_scale_weights = dict(train_scale_weights)
     augmentation.spatial.translation_prob = translation_prob
     augmentation.spatial.scale_prob = scale_prob
-    root.mkdir(parents=True, exist_ok=True)
-    _build_arc_dataset(
+    root.mkdir(exist_ok=True)
+    write_arc_tree(
         input_file_prefix=prefix,
         output_dir=root,
         augmentation=augmentation.make(),
         subsets=_ARC2_SUBSETS,
         test_set_name=_ARC2_TEST_SET,
     )
-    with (root / _BUILD_PARAMS_FILE).open("w") as f:
+    with (root / RECIPE_FILE).open("w") as f:
         json.dump(want, f)
     logger.info("Done. ARC-AGI-2 dataset at %s", root)
 
@@ -390,11 +400,11 @@ def _build_params(
 # skip a build the loader then fails on.
 def _params_match(root: Path, want: dict[str, object]) -> bool:
     """Whether ``root`` holds a completed compatible build."""
-    path = root / _BUILD_PARAMS_FILE
+    path = root / RECIPE_FILE
     if not path.is_file():
         return False
     try:
-        got = DictCodec.coerce(loads(path.read_text()), default=None)
+        got = parse(path.read_text(), dict[str, object])
     except (json.JSONDecodeError, TypeError):
         return False
     if got != want:

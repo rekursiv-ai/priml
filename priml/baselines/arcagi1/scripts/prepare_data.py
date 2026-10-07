@@ -26,11 +26,8 @@ import argparse
 import logging
 
 from priml.baselines.arcagi1 import experiments
-from priml.baselines.arcagi1.scripts.build_dataset import (
-    KaggleSource,
-    build_arc_dataset,
-)
-from priml.lib.custom_json import DictCodec, IntCodec, loads
+from priml.baselines.arcagi1.scripts.build_dataset import build_arc_dataset
+from priml.lib.custom_json import convert, loads
 
 
 if TYPE_CHECKING:
@@ -45,7 +42,7 @@ def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -53,6 +50,9 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     config = dataset_config(flags.experiment)
     if flags.directory is not None:
+        # An explicit directory is a filesystem path, not a logical one under the
+        # experiment's resource root.
+        config.base_dir = None
         config.working_dir = flags.directory
     if flags.num_aug is not None:
         config.augmentation.num_aug = flags.num_aug
@@ -100,43 +100,34 @@ def prepare(
     """
     config = config.copy_tree().finalize()
     target = Path(config.working_dir)
-    augmentation = config.augmentation.make()
-    if input_file_prefix is not None:
-        build_arc_dataset(
-            target_dir=target,
-            input_file_prefix=str(input_file_prefix),
-            augmentation=augmentation,
-        )
-        return target
-
-    with KaggleSource() as prefix:
-        build_arc_dataset(
-            target_dir=target,
-            input_file_prefix=str(prefix),
-            augmentation=augmentation,
-        )
+    build_arc_dataset(
+        target_dir=target,
+        input_file_prefix=None if input_file_prefix is None else str(input_file_prefix),
+        augmentation=config.augmentation.make(),
+    )
     return target
 
 
 def num_puzzle_identifiers(directory: Path | str) -> int:
     """Read the identifier-table size recorded by a prepared dataset."""
-    metadata = DictCodec.coerce(
+    metadata = convert(
         loads((Path(directory) / "train" / "dataset.json").read_text()),
+        dict[str, object],
     )
-    return IntCodec.coerce(metadata["num_puzzle_identifiers"])
+    return convert(metadata.get("num_puzzle_identifiers"), int)
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:
     """Register flags on ``parser``."""
-    parser.add_argument("--directory", type=Path, default=None)
+    parser.add_argument("--directory", type=Path)
     parser.add_argument(
         "--experiment",
         default="exp000",
         help="experiment whose dataset recipe to build",
     )
-    parser.add_argument("--input-prefix", type=Path, default=None)
-    parser.add_argument("--num-aug", type=int, default=None)
-    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--input-prefix", type=Path)
+    parser.add_argument("--num-aug", type=int)
+    parser.add_argument("--seed", type=int)
 
 
 class _Flags(Protocol):

@@ -16,6 +16,9 @@ from priml.data.pipeline.gpu_pipelining import (
     PipelinedGPUProcessor2Stream,
     PipelinedGPUProcessor3Stream,
     Sample,
+    to_cpu,
+    to_cpu_non_blocking,
+    to_cuda_non_blocking,
 )
 
 
@@ -783,6 +786,30 @@ def test_inference_mode_with_pipelined_processor(
     assert len(result) == 1
     assert result[0]["processed"]
     assert result[0]["value"] == 42
+
+
+def test_tensor_transfer_helpers_pass_exact_device_and_non_blocking_flag() -> None:
+    tensor = torch.empty(2, 3)
+    moved = torch.empty(2, 3)
+
+    with patch.object(Tensor, "to", autospec=True, return_value=moved) as move:
+        assert to_cuda_non_blocking(tensor) is moved
+    move.assert_called_once_with("cuda", non_blocking=True)
+
+    with patch.object(Tensor, "to", autospec=True, return_value=moved) as move:
+        assert to_cpu(tensor) is moved
+    move.assert_called_once_with("cpu")
+
+    with patch.object(Tensor, "to", autospec=True, return_value=moved) as move:
+        assert to_cpu_non_blocking(tensor) is moved
+    move.assert_called_once_with("cpu", non_blocking=True)
+
+
+def test_tensor_transfer_helpers_pass_non_tensors_through() -> None:
+    value = {"payload": [1, 2]}
+    assert to_cuda_non_blocking(value) is value
+    assert to_cpu(value) is value
+    assert to_cpu_non_blocking(value) is value
 
 
 def _times_ten(value: object) -> object:

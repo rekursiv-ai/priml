@@ -4,9 +4,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
+import logging
+import os
+import socket
+import subprocess
+
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 import torch
 
 from priml.data.pipeline.parquet_writer import (
@@ -100,6 +106,26 @@ def test_parquet_merge_writer_basic(tmp_path: Path):
     assert result.column("other_field").to_pylist() == ["x", None, "z"]
 
 
+def test_parquet_merge_writer_logs_each_write_phase(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    parquet_path = tmp_path / "test.parquet"
+    pq.write_table(pa.table({"key": ["a", "b"]}), parquet_path)
+
+    ParquetMergeWriter.Config().make().write(
+        parquet_path,
+        {"a": {"new_field": 10}},
+    )
+
+    assert [record.getMessage() for record in caplog.records] == [
+        "ParquetMergeWriter: Writing 1 samples to test.parquet",
+        "ParquetMergeWriter: Merging fields: ['new_field']",
+        "ParquetMergeWriter: Wrote test.parquet",
+    ]
+
+
 def test_parquet_merge_writer_no_overwrite(tmp_path: Path):
     """Test merge without overwriting original file."""
     parquet_path = tmp_path / "test.parquet"
@@ -121,8 +147,12 @@ def test_parquet_merge_writer_no_overwrite(tmp_path: Path):
     assert result.column("new_field").to_pylist() == [10]
 
 
-def test_parquet_merge_writer_empty_buffered_results(tmp_path: Path):
+def test_parquet_merge_writer_empty_buffered_results(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Test that empty buffered results is a no-op."""
+    caplog.set_level(logging.WARNING)
     parquet_path = tmp_path / "test.parquet"
     pq.write_table(pa.table({"key": ["a"], "value": [1]}), parquet_path)
 
@@ -132,6 +162,9 @@ def test_parquet_merge_writer_empty_buffered_results(tmp_path: Path):
     writer.write(parquet_path, {}, overwrite=True)
 
     assert parquet_path.stat().st_mtime == original_mtime
+    assert [record.getMessage() for record in caplog.records] == [
+        "ParquetMergeWriter: No buffered results to write for test.parquet",
+    ]
 
 
 def test_parquet_merge_writer_dict_with_int_keys(tmp_path: Path):
@@ -184,7 +217,20 @@ def test_parquet_merge_writer_skips_internal_fields(tmp_path: Path):
     assert "_tar_handle" not in col_names
     assert "image" not in col_names
     assert "media_tensor" not in col_names
-    assert "caption_tokens" not in col_names
+    assert col_names == ["key", "good_field"]
+
+
+def test_parquet_merge_writer_replaces_existing_column_and_preserves_unmatched_rows(
+    tmp_path: Path,
+) -> None:
+    parquet_path = tmp_path / "test.parquet"
+    pq.write_table(pa.table({"key": ["a", "b"], "score": [1, 2]}), parquet_path)
+
+    ParquetMergeWriter.Config().make().write(parquet_path, {"a": {"score": 10}})
+
+    result = pq.read_table(parquet_path)
+    assert result.column_names == ["key", "score"]
+    assert result.column("score").to_pylist() == [10, 2]
 
 
 def test_parquet_merge_writer_custom_key_field(tmp_path: Path):
@@ -205,31 +251,145 @@ def test_parquet_merge_writer_custom_key_field(tmp_path: Path):
     assert result.column("new_field").to_pylist() == [10, 20]
 
 
-def test_cleanup_stale_temp_files_removes_orphans(tmp_path: Path):
-    """Orphaned .parquet.new temp files from a crash are removed."""
-    orphan = tmp_path / "00000000.parquet.new"
-    orphan.write_bytes(b"partial")
-    keep = tmp_path / "00000000.parquet"
-    keep.write_bytes(b"real")
+def _dead_pid() -> int:
+    """Return a pid whose process has exited and been reaped."""
+    child = subprocess.Popen(["true"])  # noqa: S607 -- Any short-lived child yields a reaped pid.
+    child.wait()
+    return child.pid
+
+
+def test_cleanup_stale_temp_files_removes_only_dead_writers_temps(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    host = socket.gethostname().replace(".", "-")
+    dead = _dead_pid()
+    orphans = [tmp_path / f".{i}.parquet.{host}.{dead}.abcd.tmp" for i in range(2)]
+    live = tmp_path / f".2.parquet.{host}.{os.getpid()}.abcd.tmp"
+    foreign = tmp_path / f".3.parquet.otherhost.{dead}.abcd.tmp"
+    output = tmp_path / "4.parquet.new"
+    for path in (*orphans, live, foreign, output):
+        path.write_bytes(b"partial")
 
     removed = ParquetMergeWriter.cleanup_stale_temp_files(tmp_path)
 
-    assert removed == 1
-    assert not orphan.exists()
-    assert keep.exists()
+    assert removed == 2
+    assert all(not orphan.exists() for orphan in orphans)
+    assert live.exists()
+    assert foreign.exists()
+    assert output.exists()
+    assert {record.getMessage() for record in caplog.records} == {
+        f"ParquetMergeWriter: Removed stale temp file {orphan.name}"
+        for orphan in orphans
+    }
 
 
-def test_write_cleans_orphan_before_writing(tmp_path: Path):
-    """A stale temp file from a prior crash is purged on the next write."""
+def test_write_cleans_a_dead_writers_orphan_before_writing(tmp_path: Path):
     parquet_path = tmp_path / "test.parquet"
     pq.write_table(pa.table({"key": ["a"], "value": [1]}), parquet_path)
-    orphan = tmp_path / "stale.parquet.new"
+    host = socket.gethostname().replace(".", "-")
+    orphan = tmp_path / f".stale.parquet.{host}.{_dead_pid()}.abcd.tmp"
     orphan.write_bytes(b"partial")
 
     writer = ParquetMergeWriter.Config().make()
     writer.write(parquet_path, {"a": {"new_field": 10}}, overwrite=True)
 
     assert not orphan.exists()
+
+
+def test_a_later_write_keeps_an_overwrite_false_output(tmp_path: Path) -> None:
+    a = tmp_path / "a.parquet"
+    b = tmp_path / "b.parquet"
+    for path in (a, b):
+        pq.write_table(pa.table({"key": ["k"]}), path)
+
+    ParquetMergeWriter.Config().make().write(a, {"k": {"x": 1}}, overwrite=False)
+    ParquetMergeWriter.Config().make().write(b, {"k": {"x": 2}})
+
+    assert pq.read_table(a.with_suffix(".parquet.new")).column("x").to_pylist() == [1]
+
+
+def test_one_writers_cleanup_leaves_anothers_in_flight_temp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Writer B runs its cleanup while A's temp is written but not yet renamed."""
+    a = tmp_path / "a.parquet"
+    b = tmp_path / "b.parquet"
+    for path in (a, b):
+        pq.write_table(pa.table({"key": ["k"]}), path)
+    real_write = pq.write_table
+    survived: list[bool] = []
+
+    def write_then_interleave(table: pa.Table, where: Path) -> None:
+        real_write(table, where)
+        if not survived:
+            survived.append(False)
+            ParquetMergeWriter.Config().make().write(b, {"k": {"x": 2}})
+            survived[0] = where.exists()
+
+    monkeypatch.setattr(
+        "priml.data.pipeline.parquet_writer.pq.write_table",
+        write_then_interleave,
+    )
+    ParquetMergeWriter.Config().make().write(a, {"k": {"x": 1}})
+
+    assert survived == [True]
+    assert pq.read_table(a).column("x").to_pylist() == [1]
+    assert pq.read_table(b).column("x").to_pylist() == [2]
+
+
+def test_write_keeps_the_existing_column_type(tmp_path: Path) -> None:
+    path = tmp_path / "a.parquet"
+    pq.write_table(
+        pa.table({"key": ["a", "b"], "score": pa.array([1, 2], pa.int32())}),
+        path,
+    )
+
+    ParquetMergeWriter.Config().make().write(path, {"a": {"score": 10}})
+
+    assert pq.read_table(path).schema.field("score").type == pa.int32()
+
+
+def test_write_reports_buffered_keys_absent_from_the_file(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    path = tmp_path / "a.parquet"
+    pq.write_table(pa.table({"key": ["a"]}), path)
+
+    ParquetMergeWriter.Config().make().write(
+        path,
+        {"a": {"x": 1}, "ghost": {"x": 2}, "phantom": {"x": 3}},
+    )
+
+    assert (
+        "ParquetMergeWriter: 2 buffered keys are absent from a.parquet and were not "
+        "written, e.g. ['ghost', 'phantom']"
+    ) in caplog.text
+
+
+def test_write_rejects_a_non_string_key_column(tmp_path: Path) -> None:
+    path = tmp_path / "a.parquet"
+    pq.write_table(pa.table({"key": [1]}), path)
+
+    with pytest.raises(TypeError, match="key column"):
+        ParquetMergeWriter.Config().make().write(path, {"1": {"x": 1}})
+
+
+def test_buffer_processor_rejects_a_non_string_key() -> None:
+    processor = BufferProcessor.Config().make()
+    samples: list[dict[str, object]] = [{"key": 3}]
+    with pytest.raises(TypeError, match="key"):
+        list(processor(iter(samples)))
+
+
+def test_buffer_processor_starts_with_an_empty_buffer() -> None:
+    processor = BufferProcessor.Config().make()
+
+    assert processor.get_buffered_results() == {}
 
 
 def test_buffer_processor_passes_everything_through_and_keeps_keyed_samples() -> None:

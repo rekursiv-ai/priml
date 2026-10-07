@@ -1,8 +1,8 @@
-"""Tests for ``TransformerBlock``, including bit-for-bit golden coverage.
+r"""Tests for ``TransformerBlock``, including bit-for-bit golden coverage.
 
 Regenerate after an intentional numeric change::
 
-    BFB_REGENERATE=1 uv --quiet run --frozen pytest \
+    uv --quiet run --frozen pytest \ --regenerate-b4b
         priml/model/transformer/block_test.py
 
 Run through ``pytest``: the priml ``conftest.py`` sets ``MKL_CBWR`` and caps
@@ -12,21 +12,20 @@ math threads before torch imports. Minting from bare Python skips that setup.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final
+from typing import Final, override
 from unittest.mock import Mock, patch
 
 import warnings
 
-from configgle.testing import assert_pprint_golden
 from torch.utils.checkpoint import checkpoint as real_checkpoint
 
 import pytest
 import torch
 
 from priml.cost import Cost, cost
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
-from priml.model.attention.kvcache import KVCache
-from priml.model.attention.self_attention import SelfAttention
+from priml.model.attention.kvcache import KVCache, alloc_layer_cache
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
@@ -37,6 +36,7 @@ from priml.testing.bfb import (
     move_to_device,
 )
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -45,7 +45,7 @@ _CWD: Final = Path(__file__).resolve().parent
 def _canonical_config() -> TransformerBlock.Config:
     return TransformerBlock.Config(
         channels_in=16,
-        attn=SelfAttention.Config(num_heads=2, channels_head=8),
+        attn=Attention.Config(num_heads=2, channels_head=8),
     )
 
 
@@ -60,7 +60,7 @@ def test_transformer_block_config_pprint() -> None:
 def test_transformer_block_prenorm():
     m = TransformerBlock.Config(
         channels_in=64,
-        attn=SelfAttention.Config(num_heads=4, channels_head=16),
+        attn=Attention.Config(num_heads=4, channels_head=16),
         prenorm=True,
     ).make()
     x = torch.randn(2, 8, 64)
@@ -71,7 +71,7 @@ def test_transformer_block_prenorm():
 def test_transformer_block_postnorm():
     m = TransformerBlock.Config(
         channels_in=64,
-        attn=SelfAttention.Config(num_heads=4, channels_head=16),
+        attn=Attention.Config(num_heads=4, channels_head=16),
         prenorm=False,
     ).make()
     x = torch.randn(2, 8, 64)
@@ -83,37 +83,176 @@ def test_transformer_block_postnorm():
 def test_transformer_block_cached(prenorm: bool) -> None:
     m = TransformerBlock.Config(
         channels_in=64,
-        attn=SelfAttention.Config(
+        attn=Attention.Config(
             num_heads=4,
             channels_head=16,
             causal=True,
         ),
         prenorm=prenorm,
+        depth_index=((0, 1),),
     ).make()
-    assert isinstance(m.attn, SelfAttention)
-    cache = m.attn.alloc_kv_cache(batch=2, max_seq=8)
+    assert isinstance(m.attn, Attention)
+    cache = alloc_layer_cache(m, batch=2, max_seq=8)
+    x = torch.randn(2, 8, 64)
 
-    out, cache = m.forward_cached(torch.randn(2, 8, 64), cache=cache)
+    out = m(x, cache=cache, window=3)
 
     assert out.shape == (2, 8, 64)
-    assert cache.length == 8
+    state = cache[m.depth_index]
+    assert isinstance(state, KVCache)
+    assert state.length == 8
+    assert torch.equal(out, m(x, window=3))
 
 
-def test_transformer_block_cached_rejects_attention_without_cached_path() -> None:
+def test_a_checkpointed_block_with_a_cache_writes_each_key_once() -> None:
+    """Recomputation in backward would append the same keys a second time."""
+    block = TransformerBlock.Config(
+        channels_in=16,
+        attn=Attention.Config(num_heads=2, channels_head=8, causal=True),
+        depth_index=((0, 1),),
+        checkpoint=True,
+    ).make()
+    cache = alloc_layer_cache(block, batch=2, max_seq=8)
+    x = torch.randn(2, 3, 16, requires_grad=True)
+
+    block(x, cache=cache).sum().backward()
+
+    state = cache[block.depth_index]
+    assert isinstance(state, KVCache)
+    assert (state.length, state.seen) == (3, 3)
+
+
+def test_transformer_block_forwards_cache_to_open_attention_kwargs() -> None:
     model = TransformerBlock.Config(
         channels_in=16,
         attn=Linear.Config(16, 16),
     ).make()
-    cache = KVCache.alloc(batch=2, num_heads=4, max_seq=3, channels_head=5)
 
-    with pytest.raises(TypeError, match="cached attention"):
-        model.forward_cached(torch.randn(2, 3, 16), cache=cache)
+    output = model(torch.randn(2, 3, 16), cache={})
+    assert output.shape == (2, 3, 16)
+
+
+class _CachedAttention(torch.nn.Module):
+    def reset_parameters(self) -> None:
+        pass
+
+    @override
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        cache: object,
+        marker: str,
+    ) -> torch.Tensor:
+        assert marker == "forwarded"
+        assert cache == {}
+        return torch.full_like(x, 2)
+
+
+class _MarkerModule(torch.nn.Module):
+    def __init__(self, value: float) -> None:
+        super().__init__()
+        self.value = value
+
+    def reset_parameters(self) -> None:
+        pass
+
+    @override
+    def forward(self, x: torch.Tensor, *, marker: str) -> torch.Tensor:
+        assert marker == "forwarded"
+        return x + self.value
+
+
+@pytest.mark.parametrize("prenorm", [True, False])
+def test_transformer_block_cached_forwards_kwargs_and_residuals(
+    prenorm: bool,
+) -> None:
+    model = TransformerBlock.Config(
+        channels_in=4,
+        attn=Attention.Config(num_heads=2, channels_head=2),
+        prenorm=prenorm,
+    ).make()
+    model.attn = _CachedAttention()
+    model.norm1 = _MarkerModule(5)
+    model.norm2 = _MarkerModule(7)
+    model.ffn = _MarkerModule(3)
+    x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+
+    output = model(x, cache={}, marker="forwarded")
+
+    if prenorm:
+        expected = 2 * x + 14
+    else:
+        expected = 2 * x + 24
+    assert torch.equal(output, expected)
+
+
+@pytest.mark.parametrize("prenorm", [True, False])
+@pytest.mark.parametrize("checkpoint", [True, False])
+def test_an_uncached_call_sends_no_cache_to_a_mixer_without_one(
+    prenorm: bool,
+    checkpoint: bool,
+) -> None:
+    """A recurrent or value-gated mixer has no ``cache`` parameter to receive."""
+    model = TransformerBlock.Config(
+        channels_in=4,
+        attn=Attention.Config(num_heads=2, channels_head=2),
+        prenorm=prenorm,
+        checkpoint=checkpoint,
+    ).make()
+    model.attn = _MarkerModule(2)
+    model.norm1 = _MarkerModule(5)
+    model.norm2 = _MarkerModule(7)
+    model.ffn = _MarkerModule(3)
+    x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4).requires_grad_()
+
+    output = model(x, marker="forwarded")
+
+    # Each marker adds its value; both orders land on the same affine map.
+    torch.testing.assert_close(output, 4 * x + 24)
+
+
+@pytest.mark.parametrize("prenorm", [True, False])
+def test_transformer_block_leaves_a_memory_to_the_blocks_that_cross_attend(
+    prenorm: bool,
+) -> None:
+    """A stack hands ``memory`` to every block; this block's attention reads ``x``.
+
+    Handed the memory, its ``Attention`` would attend to it instead, silently.
+    """
+    block = TransformerBlock.Config(
+        channels_in=12,
+        attn=Attention.Config(num_heads=2),
+        prenorm=prenorm,
+    ).make()
+    x, memory = torch.randn(3, 4, 12), torch.randn(3, 5, 12)
+    torch.testing.assert_close(block(x, memory=memory), block(x))
+
+
+def test_transformer_block_cached_leaves_a_memory_alone() -> None:
+    block = TransformerBlock.Config(
+        channels_in=12,
+        attn=Attention.Config(num_heads=2, causal=True),
+        depth_index=((0, 1),),
+    ).make()
+    assert isinstance(block.attn, Attention)
+    x, memory = torch.randn(3, 4, 12), torch.randn(3, 5, 12)
+    with_memory = block(
+        x,
+        cache=alloc_layer_cache(block, batch=3, max_seq=7),
+        memory=memory,
+    )
+    without = block(
+        x,
+        cache=alloc_layer_cache(block, batch=3, max_seq=7),
+    )
+    torch.testing.assert_close(with_memory, without)
 
 
 def test_transformer_block_reset(monkeypatch: pytest.MonkeyPatch) -> None:
     m = TransformerBlock.Config(
         channels_in=64,
-        attn=SelfAttention.Config(num_heads=4, channels_head=16),
+        attn=Attention.Config(num_heads=4, channels_head=16),
     ).make()
     resetters: list[Mock] = []
     for module in (m.attn, m.ffn, m.norm1, m.norm2):
@@ -130,7 +269,7 @@ def test_transformer_block_reset(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_transformer_block_config_reports_attention_dimensions() -> None:
     config = TransformerBlock.Config(
         channels_in=16,
-        attn=SelfAttention.Config(num_heads=2, channels_head=8),
+        attn=Attention.Config(num_heads=2, channels_head=8),
     )
     assert config.num_heads == 2
     assert config.channels_head == 8
@@ -155,7 +294,7 @@ def test_transformer_block_config_refuses_to_invent_attention_dimensions() -> No
 def test_transformer_block_infers_input_width_from_output() -> None:
     model = TransformerBlock.Config(
         channels_out=16,
-        attn=SelfAttention.Config(num_heads=2, channels_head=8),
+        attn=Attention.Config(num_heads=2, channels_head=8),
     ).make()
 
     assert model(torch.randn(2, 4, 16)).shape == (2, 4, 16)
@@ -165,7 +304,7 @@ def test_transformer_block_rejects_width_changing_config() -> None:
     config = TransformerBlock.Config(
         channels_in=16,
         channels_out=8,
-        attn=SelfAttention.Config(num_heads=2, channels_head=8),
+        attn=Attention.Config(num_heads=2, channels_head=8),
     )
     with pytest.raises(ValueError, match="channels_in=16 must equal channels_out=8"):
         config.make()
@@ -187,7 +326,7 @@ def test_transformer_block_rejects_ffn_output_width(channels_out: int) -> None:
 def test_transformer_block_rejects_attention_output_width() -> None:
     config = TransformerBlock.Config(
         channels_in=8,
-        attn=SelfAttention.Config(
+        attn=Attention.Config(
             num_heads=1,
             channels_in=4,
             channels_head=8,
@@ -201,7 +340,7 @@ def test_transformer_block_rejects_attention_output_width() -> None:
 def test_transformer_block_depth_propagation():
     cfg = TransformerBlock.Config(
         channels_in=64,
-        attn=SelfAttention.Config(num_heads=4, channels_head=16),
+        attn=Attention.Config(num_heads=4, channels_head=16),
         depth_index=((5, 6),),
     ).finalize()
     assert isinstance(cfg.ffn, SwiGLU.Config)
@@ -243,7 +382,7 @@ def test_block_checkpoint_skipped_under_eval():
     """
     m = TransformerBlock.Config(
         channels_in=64,
-        attn=SelfAttention.Config(num_heads=4, channels_head=16),
+        attn=Attention.Config(num_heads=4, channels_head=16),
         checkpoint=True,
     ).make()
     x = torch.randn(2, 8, 64)
@@ -262,7 +401,7 @@ def test_block_checkpoint_wraps_under_grad():
     """With grad enabled, ``checkpoint=True`` does enter ``torch_checkpoint``."""
     m = TransformerBlock.Config(
         channels_in=64,
-        attn=SelfAttention.Config(num_heads=4, channels_head=16),
+        attn=Attention.Config(num_heads=4, channels_head=16),
         checkpoint=True,
     ).make()
     x = torch.randn(2, 8, 64, requires_grad=True)
@@ -281,7 +420,7 @@ def test_block_checkpoint_wraps_under_grad():
 def test_transformer_block_bfb(device: str) -> None:
     config = _canonical_config()
     config.channels_in = 4
-    assert isinstance(config.attn, SelfAttention.Config)
+    assert isinstance(config.attn, Attention.Config)
     config.attn.channels_in = 4
     config.attn.channels_head = 2
     assert isinstance(config.ffn, SwiGLU.Config)
@@ -299,7 +438,7 @@ def test_transformer_block_bfb(device: str) -> None:
 def test_block_cost_sums_its_four_children() -> None:
     config = TransformerBlock.Config(
         channels_in=16,
-        attn=SelfAttention.Config(
+        attn=Attention.Config(
             num_heads=2,
             channels_head=8,
             attn_kernel=SdpaNaive.Config(),

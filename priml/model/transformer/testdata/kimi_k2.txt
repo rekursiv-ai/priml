@@ -35,7 +35,7 @@ KimiK2.Config(
                 │               │               frequencies=HuggingFaceFrequencies.Config(
                 │               │                       base=50000.0
                 │               │               ),
-                │               │               dtype=None
+                │               │               dtype=torch.float32
                 │               │       ),
                 │               │       attn_kernel=LatentAttention.Config(
                 │               │               absorb=True,
@@ -185,7 +185,7 @@ KimiK2.Config(
                 │               │               frequencies=HuggingFaceFrequencies.Config(
                 │               │                       base=50000.0
                 │               │               ),
-                │               │               dtype=None
+                │               │               dtype=torch.float32
                 │               │       ),
                 │               │       attn_kernel=LatentAttention.Config(
                 │               │               absorb=True,

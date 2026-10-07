@@ -6,6 +6,8 @@ from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, override
 
+import re
+
 from configgle import Fig, Makeable
 from torch import Tensor, nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -26,10 +28,10 @@ from priml.baselines.nanochat.model import (
 from priml.baselines.nanochat.ngram import HashedNgramTables
 from priml.cost import cost
 from priml.custom_types import HasCost
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.output_gate import OutputGate
 from priml.model.attention.rope import RoPE
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.attention.value_gated_attention import ValueGatedAttention
 from priml.model.custom_types import TensorModule
 from priml.model.embedding import Embedding
@@ -227,7 +229,7 @@ def test_a_negative_stride_is_rejected() -> None:
     A bad one has no list to fall back to and would silently gate nothing.
     """
     with pytest.raises(ValueError, match="value_embedding_stride"):
-        _config(value_embedding_stride=-1).copy_tree().finalize()
+        _config(value_embedding_stride=-1).make()
 
 
 def test_the_gated_layers_count_back_from_the_last() -> None:
@@ -263,8 +265,84 @@ def test_layers_disagreeing_on_head_shape_are_rejected() -> None:
     config.block = blocks
     config.num_layers = len(blocks)
 
-    with pytest.raises(ValueError, match="same attention head geometry"):
-        config.copy_tree().finalize()
+    message = (
+        "every block must declare the same attention head geometry, since "
+        "the value embeddings and rotary factors are shared across layers; "
+        "got (channels_head, num_heads * channels_head) of [(2, 4), (2, 8)]."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        config.make()
+
+
+def test_an_invalid_stack_still_prints_its_finalized_tree() -> None:
+    """Validation lives at build, so pprint shows the propagated widths.
+
+    A raise in finalize would leave the config the user most needs to inspect
+    printed as typed, without the derived values that explain the error.
+    """
+    config = _config(num_layers=2, value_embedding_stride=-1)
+    final = config.copy_tree().finalize()
+    assert isinstance(final.block, list)
+    assert final.mix.num_layers == 2
+    assert final.rope.channels_head == 2
+    with pytest.raises(ValueError, match="value_embedding_stride"):
+        config.make()
+
+
+def test_the_rotation_cache_follows_a_dtype_change() -> None:
+    """``.double()`` moves the rope; the cached factors must follow it."""
+    model = _model()
+    model(_tokens())
+    model.double()
+    cos, sin = model._rotation_table(SEQ, device=torch.device("cpu"))
+    assert cos.dtype == sin.dtype == model.rope.dtype == torch.float64
+
+
+def test_receiving_the_attention_source_requires_a_reusing_block() -> None:
+    """A plain block drops the source, so the field would silently do nothing."""
+    config = _memory_config()
+    config.num_layers = 3
+    config.attention_source_layers = (2,)
+    with pytest.raises(TypeError, match="layer 2 receives the attention source"):
+        config.make()
+
+
+def test_fused_tables_need_exactly_two_hashes() -> None:
+    config = _memory_config()
+    config.fused_ngram = True
+    config.bigrams["0"].hash_multipliers = ((1, 3), (5, 7), (9, 11))
+    config.bigrams["0"].num_embeddings = 16
+    config.channels_in = 24
+    attention = config.template.attn
+    assert isinstance(attention, CausalAttention.Config)
+    attention.num_heads = 3
+    with pytest.raises(ValueError, match="fused_ngram needs two hashes"):
+        config.make()
+
+
+def test_a_memory_table_needs_its_gate() -> None:
+    config = _memory_config()
+    attention = config.template.attn
+    assert isinstance(attention, CausalAttention.Config)
+    attention.bigram = False
+    with pytest.raises(ValueError, match="builds no bigram gate"):
+        config.make()
+
+
+def test_gated_residual_mix_keeps_the_parent_layer_guard() -> None:
+    with pytest.raises(ValueError, match="num_layers must be positive"):
+        GatedResidualMix.Config(num_layers=0).make()
+
+
+def test_scaled_soft_cap_caps_at_its_declared_dtype() -> None:
+    """The inherited ``dtype`` is the width the cap runs at, as for ``SoftCap``."""
+    config = ScaledSoftCap.Config(cap=2.0, output_cap=3.0, dtype=torch.bfloat16)
+    config.channels_in = config.channels_out = 3
+    torch.manual_seed(0)
+    module = config.make()
+    values = torch.randn(2, 3)
+    expected = (3.0 * torch.tanh(module.inner(values).bfloat16() / 2.0)).float()
+    assert torch.equal(module(values), expected)
 
 
 def test_a_uniform_stack_of_explicit_blocks_still_builds() -> None:
@@ -281,7 +359,7 @@ def test_a_wrapped_attention_exposes_its_own_head_attributes() -> None:
         channels_in=512,
         attn=OutputGate.Config(
             channels_in=512,
-            inner=SelfAttention.Config(num_heads=4, channels_head=128),
+            inner=Attention.Config(num_heads=4, channels_head=128),
         ),
     )
     assert gated.channels_head == 128
@@ -565,6 +643,21 @@ def test_the_cached_rotation_table_is_the_one_a_fresh_build_produces() -> None:
     assert torch.equal(cached_sin, fresh_sin[:length])
 
 
+def test_rotation_materialization_and_rebuild_use_the_requested_device() -> None:
+    meta = torch.device("meta")
+    memory = _memory_config().make()
+    memory.rope.to(meta)
+    memory.materialize_rotation_table(device=meta)
+    assert memory._rotation is not None
+    assert all(factor.device == meta for factor in memory._rotation)
+
+    model = _model()
+    model.rope.to(meta)
+    model._rotation_table(SEQ, device=meta)
+    assert model._rotation is not None
+    assert all(factor.device == meta for factor in model._rotation)
+
+
 def test_the_rotation_table_is_rebuilt_when_the_frequencies_are() -> None:
     """``reset_parameters`` re-derives the rope, so a stale table cannot survive.
 
@@ -584,7 +677,7 @@ class ResetlessBlock(nn.Module):
 
     class Config(Fig["ResetlessBlock"]):
         attn: Makeable[TensorModule] = field(
-            default_factory=lambda: SelfAttention.Config(num_heads=2, channels_head=8),
+            default_factory=lambda: Attention.Config(num_heads=2, channels_head=8),
         )
         """Attention metadata consumed by the model config."""
 
@@ -617,7 +710,7 @@ def test_a_block_whose_attention_declares_no_heads_is_rejected() -> None:
     config = _config()
     config.block = ResetlessBlock.Config(attn=Linear.Config(16, 16))
     with pytest.raises(AttributeError, match=r"Linear\.Config.*channels_head"):
-        config.copy_tree().finalize()
+        config.make()
 
 
 def test_value_tables_are_held_at_the_token_tables_dtype() -> None:
@@ -797,12 +890,43 @@ def test_memory_model_direct_fused_make_supports_forward_and_backward() -> None:
     assert all(part.weight.grad is None for part in table.tables)
 
 
+def test_memory_model_preserves_runtime_configuration() -> None:
+    config = _memory_config()
+    config.num_layers = 3
+    config.num_pool_layers = 2
+    config.attention_source_layers = (2,)
+    config.attention_source_after_layer = 0
+    config.ngram_dirty_clear = True
+    config.fused_ngram = True
+    config.block = SourceReuseTransformerBlock.Config().update(config.template)
+    attention = config.template.attn
+    assert isinstance(attention, CausalAttention.Config)
+    attention.trigram = True
+    attention.gate_channels = 4  # Three gate slices must fit channels_in=16.
+    config.trigrams["0"] = HashedNgramTables.Config(
+        num_embeddings=16,
+        hash_multipliers=((1, 3, 5), (5, 7, 9)),
+    )
+
+    model = config.make()
+
+    assert model.pool_start == 1
+    assert model.attention_source_after_layer == 0
+    assert model.ngram_dirty_clear
+    trigram = model.trigrams["0"]
+    assert isinstance(trigram, HashedNgramTables)
+    assert len(trigram.gradient_bitmaps) == len(trigram.tables) == 2
+    sources = model._fused_sources("0", torch.tensor([[1, 2, 3, 4]]))
+    assert [source.gate_index for source in sources] == [1, 2]
+
+
 def test_memory_model_meta_materialization_preserves_dtype_and_fused_sinks() -> None:
     config = _memory_config()
     config.dtype = torch.bfloat16
     config.fused_ngram = True
     with torch.device("meta"):
         model = config.make()
+    assert model._materialized_device() is None
     table = model.bigrams["0"]
     assert isinstance(table, HashedNgramTables)
     assert all(parameter.is_meta for parameter in model.parameters())
@@ -813,6 +937,7 @@ def test_memory_model_meta_materialization_preserves_dtype_and_fused_sinks() -> 
     materialize_meta(model, torch.device("cpu"))
 
     assert all(not parameter.is_meta for parameter in model.parameters())
+    assert model._materialized_device() == torch.device("cpu")
     assert all(parameter.dtype == torch.bfloat16 for parameter in model.parameters())
     assert all(
         not sink.is_meta and sink.dtype == torch.float32

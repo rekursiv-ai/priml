@@ -9,6 +9,7 @@ from configgle import InlineConfig
 import pytest
 import torch
 
+from priml.math.diffusion.conditioning import timestep_embedding
 from priml.model.conditioning import LabelEmbedder, TimestepEmbedder
 
 
@@ -18,13 +19,44 @@ def test_timestep_embedder_features_forward_and_cost() -> None:
     times = torch.tensor([0.25, 0.75])
     features = embedder.frequencies(times)
     assert features.shape == (2, 6)
+    torch.testing.assert_close(features, timestep_embedding(times, 6, 100.0))
     assert embedder(times, ignored=True).shape == (2, 4)
     assert config.cost(batch_size=2, dtype=torch.float32).params > 0
 
 
 def test_timestep_embedder_accepts_custom_activation() -> None:
-    config = TimestepEmbedder.Config(4, activation=InlineConfig(torch.nn.ReLU))
-    assert config.make()(torch.tensor([0.2, 0.8])).shape == (2, 4)
+    config = TimestepEmbedder.Config(
+        4,
+        channels_frequency=6,
+        activation=InlineConfig(torch.nn.ReLU),
+    )
+    embedder = config.make()
+    first = embedder.mlp[0]
+    activation = embedder.mlp[1]
+    second = embedder.mlp[2]
+    assert isinstance(first, torch.nn.Linear)
+    assert isinstance(activation, torch.nn.ReLU)
+    assert isinstance(second, torch.nn.Linear)
+    assert first.bias is not None
+    assert second.bias is not None
+    assert first.weight.shape == (4, 6)
+    assert second.weight.shape == (4, 4)
+
+
+def test_token_drop_uses_device_and_strict_probability_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fixed_random(size: int, *, device: torch.device) -> torch.Tensor:
+        if device.type == "cpu":
+            assert size == 3
+            assert device.type == "cpu"
+        return torch.full((size,), 0.5, device=device)
+
+    monkeypatch.setattr(torch, "rand", fixed_random)
+    embedder = LabelEmbedder.Config(5, 4, dropout=0.5).make()
+    labels = torch.tensor([0, 2, 4])
+    assert torch.equal(embedder.token_drop(labels), labels)
+    assert embedder.token_drop(torch.empty((2,), device="meta")).device.type == "meta"
 
 
 @pytest.mark.parametrize("dropout", [math.nan, -0.1, 1.0])

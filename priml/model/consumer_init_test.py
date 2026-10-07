@@ -10,10 +10,10 @@ import pytest
 import torch
 
 from priml.baselines.nanochat.model import NanoChatLM
-from priml.lib.custom_json import DictCodec
+from priml.lib.custom_json import convert
+from priml.model.attention.attention import Attention
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.multi_stream import MultiStreamAttention
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.attention.value_gated_attention import ValueGatedAttention
 from priml.model.embedding import Embedding
 from priml.model.init import kaiming_uniform, unit_fan_in_uniform
@@ -76,7 +76,7 @@ def test_reference_initialization(kind: str, std: float) -> None:
         )
     torch.manual_seed(13)
     model = config.make()
-    initial_state = DictCodec.coerce(model.state_dict(), Tensor)
+    initial_state = convert(model.state_dict(), dict[str, Tensor])
     initial: dict[str, Tensor] = {
         name: value.clone() for name, value in initial_state.items()
     }
@@ -84,7 +84,7 @@ def test_reference_initialization(kind: str, std: float) -> None:
     torch.manual_seed(13)
     model.reset_parameters()
     assert torch.equal(torch.get_rng_state(), initial_rng)
-    state = DictCodec.coerce(model.state_dict(), Tensor)
+    state = convert(model.state_dict(), dict[str, Tensor])
     for name, value in state.items():
         assert torch.equal(value, initial[name]), name
     for name, module in model.named_modules():
@@ -205,7 +205,7 @@ def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
     )
     if kind == "transformer":
         cfg = TransformerBlock.Config(channels_in=4, ffn=legacy_ffn)
-        cfg.attn = SelfAttention.Config(num_heads=2, channels_head=2)
+        cfg.attn = Attention.Config(num_heads=2, channels_head=2)
         model = cfg.make()
     elif kind == "mmdit":
         cfg_mmdit = MMDiTBlock.Config(channels_in=4, num_streams=2, ffn=legacy_ffn)
@@ -271,7 +271,7 @@ def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
             attn = block.attn
             assert isinstance(
                 attn,
-                (SelfAttention.Config, MultiHeadLatentAttention.Config),
+                (Attention.Config, MultiHeadLatentAttention.Config),
             )
             attn.init_weight = kaiming_uniform
             if isinstance(attn, MultiHeadLatentAttention.Config):
@@ -303,7 +303,7 @@ def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
         cfg_nano.block.attn.channels_head = 2
         cfg_nano.block.attn.gate_channels = 2
         model = cfg_nano.make()
-    state = DictCodec.coerce(model.state_dict(), Tensor)
+    state = convert(model.state_dict(), dict[str, Tensor])
     # The fingerprint pins the draw count in 8 values instead of the 5 KB
     # Mersenne state.
     values: list[Tensor] = [

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Self
+from urllib import error, request
 
-import urllib.error
-import urllib.request
+import hashlib
 
 import pytest
 
@@ -23,6 +23,62 @@ def _png(directory: Path, name: str, payload: bytes = b"\x89PNG-stub") -> Path:
     return path
 
 
+def test_default_directory_and_request_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc_value: BaseException | None,
+            traceback: object,
+        ) -> None:
+            del exc_type, exc_value, traceback
+
+        def read(self) -> bytes:
+            return b"payload"
+
+    requests: list[tuple[str, int]] = []
+
+    def open_response(url: str, *, timeout: int) -> Response:
+        requests.append((url, timeout))
+        return Response()
+
+    monkeypatch.setattr(assets, "cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(request, "urlopen", open_response)
+    path = assets.fetch("zombie.png")
+
+    assert path == tmp_path / "rekursiv-ai/craftax/assets/v1.6.1/zombie.png"
+    assert path.read_bytes() == b"payload"
+    expected_url = (
+        "https://raw.githubusercontent.com/MichaelTMatthews/Craftax/"
+        "v1.6.1/craftax/craftax/assets/zombie.png"
+    )
+    assert requests == [(expected_url, 30)]
+    assert not list(path.parent.glob("*.partial"))
+
+
+def test_default_digest_hashes_sorted_png_name_content_pairs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = tmp_path / "rekursiv-ai/craftax/assets/v1.6.1"
+    _png(directory, "b.png", b"bee")
+    _png(directory, "a.png", b"aye")
+    _png(directory, "ignored.txt", b"not a sprite")
+    monkeypatch.setattr(assets, "cache_dir", lambda: tmp_path)
+
+    expected = hashlib.sha256()
+    for name, payload in (("a.png", b"aye"), ("b.png", b"bee")):
+        expected.update(name.encode())
+        expected.update(payload)
+    assert assets.digest() == expected.hexdigest()
+
+
 def test_the_revision_defaults_to_a_tag(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -34,9 +90,9 @@ def test_the_revision_defaults_to_a_tag(
     def capture(url: str, **kwargs: object) -> object:
         del kwargs
         seen.append(url)
-        raise urllib.error.URLError("stop here")
+        raise error.URLError("stop here")
 
-    monkeypatch.setattr(urllib.request, "urlopen", capture)
+    monkeypatch.setattr(request, "urlopen", capture)
     with pytest.raises(RuntimeError):
         assets.fetch("zombie.png", directory=tmp_path)
     assert "/v1.6.1/" in seen[0]
@@ -65,7 +121,7 @@ def test_a_successful_download_is_atomically_cached(
         del url, timeout
         return Response()
 
-    monkeypatch.setattr(urllib.request, "urlopen", open_response)
+    monkeypatch.setattr(request, "urlopen", open_response)
     path = assets.fetch("zombie.png", directory=tmp_path)
     assert path.read_bytes() == b"payload"
     assert not list(tmp_path.glob("*.partial"))
@@ -81,7 +137,7 @@ def test_a_cached_sprite_is_not_downloaded_again(
         del args, kwargs
         raise AssertionError("a cached sprite must not be re-fetched")
 
-    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    monkeypatch.setattr(request, "urlopen", boom)
     assert assets.fetch("zombie.png", directory=tmp_path).exists()
 
 
@@ -91,9 +147,9 @@ def test_a_download_failure_is_reported_by_name(
 ) -> None:
     def boom(*args: object, **kwargs: object) -> object:
         del args, kwargs
-        raise urllib.error.URLError("offline")
+        raise error.URLError("offline")
 
-    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    monkeypatch.setattr(request, "urlopen", boom)
     with pytest.raises(RuntimeError, match=r"zombie\.png"):
         assets.fetch("zombie.png", directory=tmp_path)
 
@@ -108,7 +164,7 @@ def test_an_interrupted_download_leaves_no_cached_file(
         del args, kwargs
         raise TimeoutError
 
-    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    monkeypatch.setattr(request, "urlopen", boom)
     with pytest.raises(RuntimeError):
         assets.fetch("zombie.png", directory=tmp_path)
     assert not (tmp_path / "zombie.png").exists()

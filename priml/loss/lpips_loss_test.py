@@ -12,6 +12,7 @@ import torch
 
 from priml.loss.lpips_loss import (
     LPIPSLoss,
+    _lpips,
     _normalize_cost,
     _spatial_average_cost,
 )
@@ -42,6 +43,29 @@ def lpips_loss() -> LPIPSLoss:
     return _make_loss_with_mocked_lpips(
         lambda x, _: torch.rand(x.shape[0], 2, 3, 4).mean(dim=(1, 2, 3)),
         max_num_random_frames=10,
+    )
+
+
+@pytest.mark.parametrize("pretrained", [True, False])
+def test_lpips_factory_passes_exact_options(pretrained: bool) -> None:
+    mock_lpips = MagicMock()
+    with (
+        patch("priml.loss.lpips_loss.lpips", mock_lpips),
+        patch("priml.loss.lpips_loss.warnings.filterwarnings") as filter_warnings,
+    ):
+        result = _lpips("alex", pretrained=pretrained)
+
+    assert result is mock_lpips.LPIPS.return_value
+    filter_warnings.assert_called_once_with(
+        "ignore",
+        category=UserWarning,
+        module=r"torchvision\.models\._utils",
+    )
+    mock_lpips.LPIPS.assert_called_once_with(
+        net="alex",
+        pretrained=pretrained,
+        pnet_rand=not pretrained,
+        verbose=False,
     )
 
 

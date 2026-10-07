@@ -12,6 +12,7 @@ from torch import Tensor, nn
 
 import pytest
 import torch
+import torch.distributed as dist
 
 from priml.baselines.nanochat import experiments, train_step
 from priml.baselines.nanochat.attention import CausalAttention
@@ -29,7 +30,8 @@ from priml.baselines.nanochat.train_step import (
     matrix_parameters,
     nanochat_optimizer,
 )
-from priml.lib.custom_json import FloatCodec
+from priml.lib.custom_json import convert
+from priml.math.schedules import trapezoidal
 from priml.model.attention.value_gated_attention import (
     ValueGatedAttention,
     sdpa_attention,
@@ -48,6 +50,48 @@ _CWD: Final = Path(__file__).resolve().parent
 
 VOCAB: Final = 32
 SEQ: Final = 8
+
+
+def test_reference_metric_accepts_single_byte_denominators(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The metric accepts a positive one-byte count."""
+    metric = train_step.ReferenceBitsPerByte.Config().make()
+    metric.update(
+        torch.ones(2, 3),
+        score_mask=torch.ones(2, 3, dtype=torch.bool),
+        evaluation_batch=0,
+        evaluation_batches=1,
+        reference_bytes=1,
+        literal_bytes=1,
+    )
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 1)
+    assert metric.compute() == {
+        "bpb": 6 / math.log(2),
+        "literal_bpb": 6 / math.log(2),
+    }
+
+
+def test_reference_metric_refuses_a_sharded_evaluation_at_its_first_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second process is refused before the evaluation does any work."""
+    metric = train_step.ReferenceBitsPerByte.Config().make()
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    with pytest.raises(
+        ValueError,
+        match=r"^Exact reference evaluation requires one process\.$",
+    ):
+        metric.update(
+            torch.ones(2, 3),
+            score_mask=torch.ones(2, 3, dtype=torch.bool),
+            evaluation_batch=0,
+            evaluation_batches=1,
+            reference_bytes=1,
+            literal_bytes=1,
+        )
 
 
 def test_reference_metric_preserves_native_reduction_and_two_denominators() -> None:
@@ -84,11 +128,91 @@ def test_reference_metric_requires_complete_ordered_batches() -> None:
         "reference_bytes": 2,
         "literal_bytes": 2,
     }
+    with pytest.raises(
+        ValueError,
+        match=r"^Reference evaluation batch order or extent changed\.$",
+    ):
+        metric.update(losses, **(batch | {"evaluation_batches": 0}))
     metric.update(losses, **batch)
-    with pytest.raises(ValueError, match="incomplete"):
+    with pytest.raises(ValueError, match=r"^Reference evaluation is incomplete\.$"):
         metric.compute()
-    with pytest.raises(ValueError, match="order or extent"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Reference evaluation batch order or extent changed\.$",
+    ):
         metric.update(losses, **batch)
+
+
+def test_reference_metric_accumulates_batches_and_round_trips_state() -> None:
+    """Every batch contributes, and reset discards the complete snapshot."""
+    metric = train_step.ReferenceBitsPerByte.Config().make()
+    losses = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    mask = torch.tensor([[True, False], [True, True]])
+    for index, (reference_bytes, literal_bytes) in enumerate(((2, 1), (3, 2))):
+        metric.update(
+            losses + index,
+            score_mask=mask,
+            evaluation_batch=index,
+            evaluation_batches=2,
+            reference_bytes=reference_bytes,
+            literal_bytes=literal_bytes,
+        )
+    expected = {
+        "nats": 19.0,
+        "bytes": 5,
+        "literal_bytes": 3,
+        "batches": 2,
+        "expected_batches": 2,
+    }
+    assert metric.state_dict() == expected
+    restored = train_step.ReferenceBitsPerByte.Config().make()
+    restored.load_state_dict(expected)
+    assert restored.state_dict() == expected
+    assert restored.compute() == {
+        "bpb": 19.0 / (math.log(2) * 5),
+        "literal_bpb": 19.0 / (math.log(2) * 3),
+    }
+    restored.reset()
+    assert restored.state_dict() == {
+        "nats": 0.0,
+        "bytes": 0,
+        "literal_bytes": 0,
+        "batches": 0,
+        "expected_batches": 0,
+    }
+    with pytest.raises(ValueError, match=r"^Reference evaluation is incomplete\.$"):
+        restored.compute()
+
+
+def test_reference_metric_rejects_zero_denominators_and_bad_mask_metadata() -> None:
+    """The metric rejects empty byte counts and either mask-contract violation."""
+    metric = train_step.ReferenceBitsPerByte.Config().make()
+    with pytest.raises(ValueError, match=r"^Reference evaluation is incomplete\.$"):
+        metric.compute()
+    metric.update(
+        torch.ones(2, 3),
+        score_mask=torch.ones(2, 3, dtype=torch.bool),
+        evaluation_batch=0,
+        evaluation_batches=1,
+        reference_bytes=0,
+        literal_bytes=1,
+    )
+    with pytest.raises(ValueError, match=r"^Reference evaluation is incomplete\.$"):
+        metric.compute()
+    for bad_mask in (torch.ones(2, 4, dtype=torch.bool), torch.ones(2, 3)):
+        metric.reset()
+        with pytest.raises(
+            ValueError,
+            match=r"^Reference scoring mask differs from loss geometry\.$",
+        ):
+            metric.update(
+                torch.ones(2, 3),
+                score_mask=bad_mask,
+                evaluation_batch=0,
+                evaluation_batches=1,
+                reference_bytes=2,
+                literal_bytes=1,
+            )
 
 
 def test_bounded_loss_preserves_saved_precision_and_ignored_gradient() -> None:
@@ -122,15 +246,21 @@ def test_bounded_loss_requires_a_matching_symmetric_readout(capped: bool) -> Non
     config = train_step.NgramTrainStep.Config()
     config.loss = train_step.BoundedTokenCrossEntropy.Config()
     config.model.lm_head = SoftCap.Config(cap=1000) if capped else Linear.Config()
+    config.finalize()  # Validation is make()'s, so the tree still prints.
     with pytest.raises(ValueError, match=r"symmetric.*bound"):
-        config.finalize()
+        config.make()
 
 
-def test_ngram_step_charges_the_receiving_update_after_warmup() -> None:
+@pytest.mark.parametrize(
+    "step_type",
+    [NanoChatTrainStep, train_step.NgramTrainStep],
+)
+def test_loading_is_charged_to_the_update_it_feeds(
+    step_type: type[NanoChatTrainStep],
+) -> None:
     """Loading update two is charged even before update two completes."""
-    assert "NgramTrainStep" in vars(train_step)
-    step = train_step.NgramTrainStep.__new__(train_step.NgramTrainStep)
-    step.config = train_step.NgramTrainStep.Config(budget_warmup_steps=1)
+    step = step_type.__new__(step_type)
+    step.config = step_type.Config(budget_warmup_steps=1)
     step.elapsed_sec = 0.0
     step._steps_this_process = 0
     step.charge_budget(5.0)
@@ -138,7 +268,36 @@ def test_ngram_step_charges_the_receiving_update_after_warmup() -> None:
     step._steps_this_process = 1
     step.charge_budget(5.0)
     assert step.elapsed_sec == 5.0
-    assert step.completed_updates == 1
+
+
+@pytest.mark.parametrize(
+    "config",
+    [NanoChatTrainStep.Config(), train_step.NgramTrainStep.Config()],
+)
+def test_every_pass_of_the_first_billed_update_is_charged(
+    config: NanoChatTrainStep.Config,
+) -> None:
+    """Warmup zero bills update one -- its first pass and its loading included."""
+    step = _step(config=config, tokens_per_optimizer_step=4 * SEQ)
+    assert step.accumulate_passes == 2
+    step.charge_budget(5.0)
+    assert step.elapsed_sec == 5.0
+    step.train_step(**_batch())  # Update one's FIRST pass; it has not completed.
+    assert step.global_step == 0
+    assert step.elapsed_sec > 5.0
+
+
+def test_an_injected_update_rejects_a_schedule_it_would_ignore() -> None:
+    config = train_step.NgramTrainStep.Config()
+    config.optimizer_update = PartialConfig(_no_update)
+    config.schedule = PartialConfig(trapezoidal, flat=0.0)
+    with pytest.raises(ValueError, match="schedule is ignored"):
+        _step(config=config)
+
+
+def _no_update(step: train_step.NgramTrainStep) -> dict[str, float | Tensor]:
+    del step
+    return {}
 
 
 class _EndpointTrajectory(nn.Module):
@@ -380,7 +539,7 @@ def test_a_token_batch_no_whole_number_of_passes_reaches_is_rejected() -> None:
     config.rows_per_pass = 3
     config.tokens_per_optimizer_step = 1_000
     with pytest.raises(ValueError, match="not divisible"):
-        config.copy_tree().finalize()
+        config.make()
 
 
 @pytest.mark.parametrize(
@@ -406,15 +565,16 @@ def test_an_invalid_geometry_is_rejected_by_name(field: str, value: float) -> No
 
     ``tokens_per_optimizer_step=0`` is the sharp one: it passes a divisibility
     check, then makes ``accumulate_passes`` zero, so the run divides the loss
-    by zero rather than ever stepping. ``rows_per_pass=0`` reaches a modulo by
-    zero inside ``finalize``, which also runs from ``pprint`` -- so a bare
-    ZeroDivisionError there hides the whole config a reader was inspecting.
+    by zero rather than ever stepping. ``rows_per_pass=0`` would reach a modulo
+    by zero. Both are refused at ``make()``, never in ``finalize``, which also
+    runs from ``pprint`` -- so the invalid tree still prints.
     """
     config = NanoChatTrainStep.Config()
     config.model.max_seq_len = SEQ
     setattr(config, field, value)
+    config.copy_tree().pprint()
     with pytest.raises(ValueError, match=field):
-        config.copy_tree().finalize()
+        config.make()
 
 
 @pytest.mark.compute_training
@@ -513,23 +673,17 @@ def test_progress_drives_the_learning_rate() -> None:
     against a horizon that does not exist.
     """
     step = _step(train_budget_sec=100.0)
-    initial = FloatCodec.coerce(
-        cast(object, step.optimizer.param_groups[0]["initial_lr"]),
-        None,
-    )
+    initial = convert(cast(object, step.optimizer.param_groups[0]["initial_lr"]), float)
     step.train_step(**_batch())
-    assert FloatCodec.coerce(
+    assert convert(
         cast(object, step.optimizer.param_groups[0]["lr"]),
-        None,
+        float,
     ) == pytest.approx(initial)
 
     # Most of the budget spent: the trapezoid is into its decay.
     step.elapsed_sec = 75.0
     step.train_step(**_batch())
-    assert (
-        FloatCodec.coerce(cast(object, step.optimizer.param_groups[0]["lr"]), None)
-        < initial
-    )
+    assert convert(cast(object, step.optimizer.param_groups[0]["lr"]), float) < initial
 
 
 @pytest.mark.compute_training
@@ -543,8 +697,12 @@ def test_every_optimizer_members_rate_is_reported() -> None:
     step = _step()
     metrics = step.train_step(**_batch()).get("metrics", {})
     rates = {name: value for name, value in metrics.items() if name.startswith("lr_")}
-    assert set(rates) == {"lr_fusedadamw", "lr_normuon"}
-    assert rates["lr_normuon"] != rates["lr_fusedadamw"]
+    # _step's model has value embeddings off, so drop_empty removes that member.
+    assert set(rates) == {
+        *(f"lr_{index}_fusedadamw" for index in range(4)),
+        "lr_4_normuon",
+    }
+    assert rates["lr_4_normuon"] != rates["lr_0_fusedadamw"]
 
 
 @pytest.mark.compute_training
@@ -830,7 +988,7 @@ def test_train_config_rejects_invalid_accumulation_settings(
     config = NanoChatTrainStep.Config()
     setattr(config, field, value)
     with pytest.raises(ValueError, match=message):
-        config.finalize()
+        config.make()
 
 
 @pytest.mark.gpu_torch_cuda
@@ -866,18 +1024,56 @@ def test_fused_ngram_binding_routes_every_table_to_rmsprop() -> None:
     rmsprop = [member for member in members if isinstance(member, BiasCorrectedRMSProp)]
     assert rmsprop
     expected: set[Tensor] = set()
+    expected_sinks: dict[Tensor, Tensor] = {}
+    expected_bitmaps: dict[Tensor, Tensor] = {}
     for table in tables:
-        for part in table.tables:
+        for part, sink, bitmap in zip(
+            table.tables,
+            table.gradient_sinks,
+            table.gradient_bitmaps,
+            strict=True,
+        ):
             assert isinstance(part, nn.Embedding)
             expected.add(part.weight)
-    actual = {parameter for member in rmsprop for parameter in member.gradient_sinks}
-    assert actual == expected
-    for member in rmsprop:
-        assert set(member.gradient_sinks) <= expected
+            expected_sinks[part.weight] = sink
+            expected_bitmaps[part.weight] = bitmap
+    actual_sinks = {
+        parameter: sink
+        for member in rmsprop
+        for parameter, sink in member.gradient_sinks.items()
+    }
+    actual_bitmaps = {
+        parameter: bitmap
+        for member in rmsprop
+        for parameter, bitmap in member.gradient_bitmaps.items()
+    }
+    assert set(actual_sinks) == expected
+    assert all(
+        actual_sinks[parameter] is sink for parameter, sink in expected_sinks.items()
+    )
+    assert actual_bitmaps.keys() == expected_bitmaps.keys()
+    assert all(
+        actual_bitmaps[parameter] is bitmap
+        for parameter, bitmap in expected_bitmaps.items()
+    )
 
+    for table in tables:
+        table.gradient_bitmaps = []
+    step._bind_ngram_gradients(step.model)
+    assert all(not member.gradient_bitmaps for member in rmsprop)
+
+    tables[0].gradient_sinks.pop()
+    with pytest.raises(ValueError, match="zip\\(\\) argument"):
+        step._bind_ngram_gradients(step.model)
+
+    tables[0].prepare_gradient_sinks(dirty_bitmaps=True)
+    step._bind_ngram_gradients(step.model)
     first = rmsprop[0]
     first.param_groups[0]["params"] = []
-    with pytest.raises(ValueError, match="must route to RMSProp"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Every fused n-gram table must route to RMSProp\.$",
+    ):
         step._bind_ngram_gradients(step.model)
 
 
@@ -892,6 +1088,9 @@ def test_a_two_pass_update_charges_the_budget_and_guards_the_worst_pass() -> Non
     step = _step(tokens_per_optimizer_step=4 * SEQ)
     step.config.budget_warmup_steps = 0
     batch = _batch()
+    # The update-boundary assertions need a short, valid sequence.
+    batch["media"] = batch["media"][:, :2]
+    batch["label"] = batch["label"][:, :2]
     first = step.train_step(**batch)
     assert step.global_step == 0
     assert not step.accumulation_complete
@@ -944,11 +1143,33 @@ def test_bounded_cross_entropy_masks_ignored_targets_and_has_gradients() -> None
 def test_train_step_rejects_invalid_budget_and_gradient_settings() -> None:
     config = NanoChatTrainStep.Config()
     config.train_budget_sec = 0
+    assert "train_budget_sec=0" in config.copy_tree().finalize().pformat()
     with pytest.raises(ValueError, match="train_budget_sec"):
-        config.finalize()
+        config.make()
     config = NanoChatTrainStep.Config()
     config.gradient_clip_norm = 0
     with pytest.raises(ValueError, match="gradient_clip_norm"):
+        config.make()
+
+
+def test_an_integer_rate_is_rescaled_with_width() -> None:
+    config = NanoChatTrainStep.Config()
+    config.model.channels_in = 192
+    member = PartialConfig(FusedAdamW, lr=1, width_scaled=True)
+    config.optimizer = CompositeOptimizer.Config(optimizers=[member])
+    config.adam_lr_tuned_at_channels = 768
+    finalized = config.finalize().optimizer
+    assert isinstance(finalized, CompositeOptimizer.Config)
+    (scaled,) = finalized.optimizers
+    assert isinstance(scaled, PartialConfig)
+    assert convert(cast(object, scaled.lr), float) == 1 / (192 / 768) ** 0.5
+
+
+def test_a_scaled_member_without_a_numeric_rate_is_refused() -> None:
+    config = NanoChatTrainStep.Config()
+    member = PartialConfig(FusedAdamW, width_scaled=True)
+    config.optimizer = CompositeOptimizer.Config(optimizers=[member])
+    with pytest.raises(TypeError, match="numeric lr"):
         config.finalize()
 
 

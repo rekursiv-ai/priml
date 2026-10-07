@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-_AVG_POOL: dict[int, Callable[[Tensor, tuple[int, ...], tuple[int, ...]], Tensor]] = {
+_AVG_POOL: dict[int, Callable[[Tensor, tuple[int, ...]], Tensor]] = {
     2: torch.nn.functional.avg_pool2d,
     3: torch.nn.functional.avg_pool3d,
 }
@@ -130,11 +130,9 @@ def _dim_info(
         device=device,
         dtype=torch.int64,
     )
-    idx = start.unsqueeze(-1) + max_kernel_size_range
+    idx = start[:, None] + max_kernel_size_range
 
     if needs_irregular_kernel:
-        if in_size <= 0:
-            raise ValueError(f"in_size must be positive; got {in_size}.")
         idx = torch.minimum(
             idx,
             torch.scalar_tensor(in_size - 1, dtype=idx.dtype, device=idx.device),
@@ -170,14 +168,10 @@ def _adaptive_avg_pool(
             s != 0,
             lambda: f"Expected non-zero spatial dims, got shape {tuple(x.shape)}",
         )
-    # Zero is checked but negatives are not: torch already rejects those with
-    # "elements of output_size must be greater than or equal to 0", while it
-    # ACCEPTS zero and returns an empty tensor -- which the variance-preserving
-    # path below cannot, since it divides by the window size.
     for o in output_size:
         _check(
-            o != 0,
-            lambda: f"Expected non-zero output_size, got {output_size}",
+            o > 0,
+            lambda: f"Expected positive output_size, got {output_size}",
         )
 
     # Plain mean pooling has a fused primitive; only the variance-preserving
@@ -192,14 +186,13 @@ def _adaptive_avg_pool(
         return torch.nn.functional.adaptive_avg_pool3d(x, (of, oh, ow))
 
     # Fast path: all dims evenly divisible.
-    if all(s % o == 0 for s, o in zip(spatial, output_size, strict=True)):
-        stride = tuple(s // o for s, o in zip(spatial, output_size, strict=True))
-        kernel = tuple(
-            s - (o - 1) * st
-            for s, o, st in zip(spatial, output_size, stride, strict=True)
-        )
+    if all(
+        output_size[i] * (spatial[i] // output_size[i]) == spatial[i] for i in range(n)
+    ):
+        stride = tuple(spatial[i] // output_size[i] for i in range(n))
+        kernel = tuple(spatial[i] - (output_size[i] - 1) * stride[i] for i in range(n))
         # Unconditional: the plain-mean case returned above.
-        return _AVG_POOL[n](x, kernel, stride) * float(math.prod(stride) ** 0.5)
+        return _AVG_POOL[n](x, kernel) * float(math.prod(stride) ** 0.5)
 
     # Per-dimension index tables.
     dims = [_dim_info(spatial[i], output_size[i], x.device) for i in range(n)]
@@ -217,35 +210,34 @@ def _adaptive_avg_pool(
         )
 
     # Mask out-of-window positions; accumulate per-position window sizes.
-    window: int | Tensor = 1
+    window = x.new_ones((), dtype=torch.int64)
     for i, d in enumerate(dims):
         if isinstance(d.length, int):
             window = window * d.length
             continue
         vals_pad = 2 * (n - 1 - i)
         mask = _trailing(
-            d.max_kernel_size_range >= d.length.unsqueeze(-1),
+            d.max_kernel_size_range >= d.length[:, None],
             vals_pad,
         )
         vals = vals.masked_fill(mask, 0.0)
         window = window * _trailing(d.length, n - 1 - i)
 
     # Sum over kernel elements explicitly (kernel sizes are small).
-    acc: Tensor | None = None
-    for combo in itertools.product(
-        *(range(d.idx.shape[-1]) for d in dims),
-    ):
-        slc: list[int | slice] = []
+    combos = itertools.product(
+        *(range(d.max_kernel_size_range.numel()) for d in dims),
+    )
+    combo = next(combos)
+    slc: list[int | slice] = []
+    for c in combo:
+        slc.extend([slice(None), c])
+    acc = vals[(..., *slc)]
+    for combo in combos:
+        slc = []
         for c in combo:
             slc.extend([slice(None), c])
-        term = vals[(..., *slc)]
-        acc = term if acc is None else acc + term
+        acc = acc + vals[(..., *slc)]
 
-    if acc is None:
-        raise ValueError("Expected acc is not None.")
-    if isinstance(window, int):
-        # A Python float promotes to whatever ``acc`` carries.
-        return acc / float(window**0.5)
     # Cast before the root: ``window`` is an int64 count, and ``int64 ** 0.5``
     # lands in float32 regardless of the input -- which lost 24 bits of a
     # float64 pool and returned float32 for a float16 one.

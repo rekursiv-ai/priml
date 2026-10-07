@@ -20,13 +20,15 @@ from collections.abc import Callable, Iterable
 from functools import partial
 from typing import cast, overload, override
 
+import math
+
 from configgle import Fig
 from torch import Tensor
 from torch.optim import Optimizer
 
 import torch
 
-from priml.lib.custom_json import FloatCodec
+from priml.lib.custom_json import convert
 
 
 _ParamLike = Iterable[Tensor] | Iterable[dict[str, object]]
@@ -71,12 +73,14 @@ class AdamATan2(Optimizer):
         betas: tuple[float, float] = (0.9, 0.999),
         weight_decay: float = 1e-2,
     ) -> None:
-        if lr < 0.0:
-            raise ValueError(f"Invalid learning rate: {lr}.")
-        if any(beta < 0.0 or beta >= 1.0 for beta in betas):
-            raise ValueError(f"Invalid betas: {betas}.")
-        if weight_decay < 0.0:
-            raise ValueError(f"Invalid weight_decay: {weight_decay}.")
+        if not math.isfinite(lr) or lr < 0.0:
+            raise ValueError(f"Learning rate must be finite and nonnegative: {lr}.")
+        if any(not math.isfinite(beta) or beta < 0.0 or beta >= 1.0 for beta in betas):
+            raise ValueError(f"Betas must be finite and lie in [0, 1): {betas}.")
+        if not math.isfinite(weight_decay) or weight_decay < 0.0:
+            raise ValueError(
+                f"Weight decay must be finite and nonnegative: {weight_decay}.",
+            )
         defaults: dict[str, object] = {
             "lr": lr,
             "betas": betas,
@@ -106,11 +110,11 @@ class AdamATan2(Optimizer):
 
     def _step_group(self, group: dict[str, object]) -> None:
         """Update every parameter in one group."""
-        betas = group["betas"]
-        assert isinstance(betas, tuple)
-        beta1, beta2 = cast(tuple[float, float], betas)
-        lr = FloatCodec.coerce(group["lr"], None)
-        wd = FloatCodec.coerce(group["weight_decay"], None)
+        # A list is what a JSON-restored checkpoint holds, and torch's Adam
+        # accepts one; a tuple-only check rejected a resumed run.
+        beta1, beta2 = convert(group["betas"], tuple[float, float])
+        lr = convert(group["lr"], float)
+        wd = convert(group["weight_decay"], float)
         for p in cast(list[Tensor], group["params"]):
             if p.grad is None:
                 continue
@@ -124,14 +128,8 @@ class AdamATan2(Optimizer):
                 # Python int avoids the sync; foreach kernels aren't used
                 # here so the tensor form bought us nothing.
                 state["step"] = 0
-                state["exp_avg"] = torch.zeros_like(
-                    p,
-                    memory_format=torch.preserve_format,
-                )
-                state["exp_avg_sq"] = torch.zeros_like(
-                    p,
-                    memory_format=torch.preserve_format,
-                )
+                state["exp_avg"] = torch.zeros_like(p)
+                state["exp_avg_sq"] = torch.zeros_like(p)
             step = state["step"]
             assert isinstance(step, int)
             step += 1

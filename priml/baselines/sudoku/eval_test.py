@@ -25,17 +25,60 @@ import pytest
 import torch
 
 from priml.baselines.sudoku import (
+    eval as sudoku_eval,
+    puzzle_data,
     trainer,
     trm,
 )
 from priml.baselines.sudoku.eval import (
+    NINE_VIEWS,
+    AgreementLockEval,
+    Harvest,
+    HpsEval,
+    HpsSearch,
+    LearnedCheckpointRollout,
+    Member,
     Reproduction,
+    SearchResult,
+    SieveEval,
+    SudokuVerifier,
+    VerifierAcceptor,
+    VerifierData,
+    VerifierFit,
+    View,
+    _fill_template,
+    _load_harvest,
+    _outer_run,
+    _OuterRun,
+    _run_training,
+    _sha256,
+    _validate_views,
+    _violated_group_counts,
+    accepted_grids,
+    fixed_hps_node_count,
+    learned_checkpoint_rollout_rows,
+    learned_hps_output_width,
+    learned_persistence_scores,
+    make_random_unstuck_starts,
+    modal_grid_predictions,
+    pack_search_rows,
+    read_member_dump,
+    rows_per_view,
+    run_learned_pin_search_fast,
+    run_pin_search_fast,
+    seed_ensemble_members,
+    segmented_rollout_rows,
+    select_harvest_views,
+    select_pin_candidates,
+    sudoku_groups,
+    summarize_search,
+    validate_grid_permutation,
+    write_member_dump,
 )
+from priml.lib.custom_json import ReadError
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import mismatches, read_tensors, stored
-
-import priml.baselines.sudoku.eval
 
 
 if TYPE_CHECKING:
@@ -44,19 +87,6 @@ if TYPE_CHECKING:
 
     from numpy.lib.npyio import NpzFile
 
-    from priml.baselines.sudoku.eval import (
-        AgreementLockEval,
-        Harvest,
-        HpsEval,
-        HpsSearch,
-        Member,
-        SieveEval,
-        SudokuVerifier,
-        VerifierAcceptor,
-        VerifierData,
-        VerifierFit,
-        View,
-    )
     from priml.baselines.sudoku.puzzle_data import PuzzleDataset
     from priml.model.transformer.block import TransformerBlock
 
@@ -141,6 +171,7 @@ def run_case(stack: Stack, case: str, scratch: Path) -> dict[str, Tensor]:
       trajectory: Flat name-to-tensor record.
 
     """
+    puzzle_data._build_dihedral_indices.cache_clear()
     write_dataset(scratch / "data")
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         torch.manual_seed(0)
@@ -168,8 +199,15 @@ class PrimlStack:
 
 
 @pytest.mark.parametrize("case", CASES)
-def test_golden_replays_bit_for_bit(case: str, tmp_path: Path) -> None:
+def test_golden_replays_bit_for_bit(
+    case: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The runner reproduces the frozen evaluation with zero mismatches."""
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path / "torchinductor"))
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton"))
+    puzzle_data._build_dihedral_indices.cache_clear()
     report = mismatches(load_golden(case), run_case(PrimlStack(), case, tmp_path))
     assert not report, f"{len(report)} mismatches:\n" + "\n".join(report)
 
@@ -495,7 +533,7 @@ def _record_node_corpus(h: _Harness) -> dict[str, Tensor]:
 
 
 def _pipeline(h: _Harness, name: str) -> _PipelineConfig:
-    """Return a 4-step pipeline with 2-step evaluation segments."""
+    """Return a 3-step pipeline with 2-step evaluation segments."""
     cfg = h.eval.Reproduction.Config()
     cfg.study_name = "sudoku"
     cfg.experiment_name = name
@@ -506,8 +544,8 @@ def _pipeline(h: _Harness, name: str) -> _PipelineConfig:
     generator.dataset.working_dir = h.data
     generator.dataset.batch_size = 2
     generator.dataset.augment = True  # The recipe's; draws from the segment seed.
-    generator.max_steps = 4
-    generator.max_act_steps = 3
+    generator.max_steps = 3
+    generator.max_act_steps = 2
     generator.dtype_autocast = None
     generator.eval_warmup_batches = 0
     cfg.generator = generator
@@ -548,7 +586,11 @@ def _run_pipeline(
         state = cast(
             "dict[str, dict[str, dict[str, Tensor]]]",
             torch.load(
-                h.scratch / "runs" / generator / "checkpoints" / "step_00000004.pt",
+                h.scratch
+                / "runs"
+                / generator
+                / "checkpoints"
+                / f"step_{int(config.generator.max_steps):08d}.pt",
                 weights_only=True,
             ),
         )
@@ -623,6 +665,7 @@ def _record_repro_seeds(h: _Harness) -> dict[str, Tensor]:
     cfg = _pipeline(h, "repro_seeds")
     cfg.screen = "single_view"
     cfg.trigger = "final_only"
+    cfg.eval_every_steps = 3  # One training segment per seed.
     cfg.generator_seeds = (44, 45, 46)
     cfg.generator_names = tuple(f"repro_s{seed}" for seed in cfg.generator_seeds)
     lock = h.eval.AgreementLockEval.Config()
@@ -646,9 +689,7 @@ _RECORDERS: Final[dict[str, Callable[[_Harness], dict[str, Tensor]]]] = {
 
 def _tiny_trm() -> trm.TRM:
     """Build a real CPU TRM at the smallest size the eval runners accept."""
-    model = _tiny_config().make()
-    assert isinstance(model, trm.TRM)
-    return model.eval()
+    return _tiny_config().make().eval()
 
 
 def _tiny_config() -> trm.TRM.Config:
@@ -675,22 +716,21 @@ def _tiny_config() -> trm.TRM.Config:
 
 def test_eval_pure_helpers_and_validation(tmp_path: Path) -> None:
     """Exercise label-free helpers, dump schemas, and validation branches."""
-    ev = priml.baselines.sudoku.eval
     grid = torch.arange(2 * 81).reshape(2, 81) % 9 + 2
-    for view in ev.NINE_VIEWS:
+    for view in NINE_VIEWS:
         assert torch.equal(view.invert(view.apply(grid)), grid)
     with pytest.raises(ValueError, match="permutation"):
-        ev.validate_grid_permutation("rows", (0, 0, 1, 2, 3, 4, 5, 6, 7))
+        validate_grid_permutation("rows", (0, 0, 1, 2, 3, 4, 5, 6, 7))
     with pytest.raises(ValueError, match="band"):
-        ev.validate_grid_permutation("rows", (0, 1, 3, 2, 4, 5, 6, 7, 8))
+        validate_grid_permutation("rows", (0, 1, 3, 2, 4, 5, 6, 7, 8))
     with pytest.raises(ValueError, match="at least two"):
-        ev.AgreementLockEval.Config(
+        AgreementLockEval.Config(
             experiment_name="x",
-            members=(ev.Member("x", ev.NINE_VIEWS[0]),),
+            members=(Member("x", NINE_VIEWS[0]),),
         ).make()
-    assert ev.fixed_hps_node_count(depth=2, candidates=3, cell_attempts=2) == 24
+    assert fixed_hps_node_count(depth=2, candidates=3, cell_attempts=2) == 24
     assert (
-        ev.rows_per_view(
+        rows_per_view(
             search_depth=2,
             search_candidates=3,
             search_cell_attempts=2,
@@ -700,16 +740,16 @@ def test_eval_pure_helpers_and_validation(tmp_path: Path) -> None:
         == 29
     )
     with pytest.raises(ValueError, match="positive"):
-        ev.fixed_hps_node_count(depth=0, candidates=2, cell_attempts=2)
+        fixed_hps_node_count(depth=0, candidates=2, cell_attempts=2)
     with pytest.raises(ValueError, match="nonempty"):
-        ev.rows_per_view(
+        rows_per_view(
             search_depth=2,
             search_candidates=2,
             search_cell_attempts=2,
             random_corruption_strengths=(),
             random_starts_per_strength=2,
         )
-    selected = ev.select_harvest_views(
+    selected = select_harvest_views(
         torch.tensor([0, 2, 4, 6]),
         group_count=2,
         views_per_group=2,
@@ -718,7 +758,7 @@ def test_eval_pure_helpers_and_validation(tmp_path: Path) -> None:
     assert selected.flat_view_id.shape == (4,)
     originals = grid[:2].clone()
     originals[:, :4] = 1
-    starts = ev.make_random_unstuck_starts(
+    starts = make_random_unstuck_starts(
         originals,
         grid[:2],
         base_group_ids=torch.tensor([0, 2]),
@@ -733,7 +773,7 @@ def test_eval_pure_helpers_and_validation(tmp_path: Path) -> None:
         grid[:2, 4:].repeat_interleave(2, dim=0),
     )
     with pytest.raises(ValueError, match="no blank"):
-        ev.make_random_unstuck_starts(
+        make_random_unstuck_starts(
             torch.full((2, 81), 2),
             grid[:2],
             base_group_ids=torch.tensor([0, 1]),
@@ -742,12 +782,18 @@ def test_eval_pure_helpers_and_validation(tmp_path: Path) -> None:
             corruption_strengths=(2,),
             starts_per_strength=2,
         )
-    assert ev.modal_grid_predictions(
+    assert modal_grid_predictions(
         torch.stack((grid[:2], grid[:2].flip(0), grid[:2])),
     )[1].tolist() == [0, 0]
-    assert ev.escalated_search_config().search_candidates == 7
+    escalated = sudoku_eval.escalated_search_config()
     assert (
-        ev._fill_template(
+        escalated.search_candidates,
+        escalated.search_depth,
+        escalated.search_cell_attempts,
+        escalated.search_budget,
+    ) == (7, 4, 3, 8_400)
+    assert (
+        _fill_template(
             "/runs/{experiment_name}/x-{index}",
             base_dir=tmp_path,
             experiment_name="e",
@@ -759,18 +805,17 @@ def test_eval_pure_helpers_and_validation(tmp_path: Path) -> None:
 
 def test_eval_search_helpers_and_dump_roundtrip(tmp_path: Path) -> None:
     """Cover search acceptance, persistence, packing, and npz round trips."""
-    ev = priml.baselines.sudoku.eval
     media = torch.full((2, 81), 1, dtype=torch.long)
     media[:, 0] = 2
     logits = torch.zeros(2, 81, 11)
     logits[..., 2] = 4
-    cells, _ = ev.select_pin_candidates(logits, media, n_cells=2, n_digits=3)
+    cells, _ = select_pin_candidates(logits, media, n_cells=2, n_digits=3)
     assert cells.shape == (2, 2)
-    groups = ev.sudoku_groups()
+    groups = sudoku_groups()
     preds = torch.full((2, 81), 2, dtype=torch.long)
-    assert not bool(ev.accepted_grids(preds, media, groups).any())
-    assert torch.equal(ev._violated_group_counts(preds, groups), torch.full((2,), 27.0))
-    result = ev.SearchResult(
+    assert not bool(accepted_grids(preds, media, groups).any())
+    assert torch.equal(_violated_group_counts(preds, groups), torch.full((2,), 27.0))
+    result = SearchResult(
         accepted=torch.tensor([True, False]),
         root_predictions=preds,
         final_predictions=preds,
@@ -782,17 +827,17 @@ def test_eval_search_helpers_and_dump_roundtrip(tmp_path: Path) -> None:
         visited_predictions=[],
         visited_puzzles=[],
     )
-    rows = ev.pack_search_rows(result)
-    assert rows.shape == (2, ev.learned_hps_output_width(81))
+    rows = pack_search_rows(result)
+    assert rows.shape == (2, learned_hps_output_width(81))
     path = tmp_path / "member.npz"
-    ev.write_member_dump(path, rows, media=media, label=preds)
-    loaded = ev.read_member_dump(path)
+    write_member_dump(path, rows, media=media, label=preds)
+    loaded = read_member_dump(path)
     assert torch.equal(loaded.final_predictions, preds.to(torch.uint8))
-    assert ev.summarize_search(rows, preds)["accepted"] == 1.0
+    assert summarize_search(rows, preds)["accepted"] == 1.0
     with pytest.raises(ValueError, match="packed width"):
-        ev.write_member_dump(tmp_path / "bad.npz", rows[:, :-1], media=media)
+        write_member_dump(tmp_path / "bad.npz", rows[:, :-1], media=media)
     with pytest.raises(ValueError, match="at least one"):
-        ev.learned_checkpoint_rollout_rows(
+        learned_checkpoint_rollout_rows(
             _tiny_trm(),
             {},
             2,
@@ -800,34 +845,33 @@ def test_eval_search_helpers_and_dump_roundtrip(tmp_path: Path) -> None:
             torch.arange(2),
             checkpoints=(),
         )
-    rollout = ev.LearnedCheckpointRollout(
+    rollout = LearnedCheckpointRollout(
         logits=logits,
         q_scores=torch.tensor([[2.0, 3.0, 4.0], [2.0, 3.0, 4.0]]),
         predictions=preds.unsqueeze(1).expand(-1, 3, -1),
     )
     assert torch.equal(
-        ev.learned_persistence_scores(rollout, require_prediction_stability=True),
+        learned_persistence_scores(rollout, require_prediction_stability=True),
         torch.tensor([2.0, 2.0]),
     )
-    unstable = ev.LearnedCheckpointRollout(
+    unstable = LearnedCheckpointRollout(
         logits=rollout.logits,
         q_scores=rollout.q_scores,
         predictions=rollout.predictions.clone(),
     )
     unstable.predictions[0, 0, 0] = 3
     assert torch.isneginf(
-        ev.learned_persistence_scores(unstable, require_prediction_stability=True)[0],
+        learned_persistence_scores(unstable, require_prediction_stability=True)[0],
     )
 
 
 def test_eval_rollout_and_pin_search_engines() -> None:
     """Exercise segmented ACT rollouts and candidate-parallel search engines."""
-    ev = priml.baselines.sudoku.eval
     typed_model = _tiny_trm()
     boards = torch.full((2, 81), 1, dtype=torch.long)
     boards[:, 0] = 2
     kwargs: dict[str, Tensor] = {}
-    logits, scores = ev.segmented_rollout_rows(
+    logits, scores = segmented_rollout_rows(
         typed_model,
         kwargs,
         10,
@@ -838,7 +882,7 @@ def test_eval_rollout_and_pin_search_engines() -> None:
     )
     assert logits.shape == (2, 81, 11)
     assert scores.shape == (2,)
-    checkpoint = ev.learned_checkpoint_rollout_rows(
+    checkpoint = learned_checkpoint_rollout_rows(
         typed_model,
         kwargs,
         3,
@@ -847,21 +891,24 @@ def test_eval_rollout_and_pin_search_engines() -> None:
         checkpoints=(2, 3),
     )
     assert checkpoint.q_scores.shape == (2, 2)
-    assert ev.learned_persistence_scores(
+    assert learned_persistence_scores(
         checkpoint,
         require_prediction_stability=False,
     ).shape == (2,)
     root_logits = torch.zeros(2, 81, 11)
     root_logits[..., 2] = 1
     active = torch.tensor([True, False])
+    rollout_batches: list[tuple[int, tuple[int, ...]]] = []
+    rollout_boards: list[Tensor] = []
 
     def rollout(candidate: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
-        del rows
+        rollout_batches.append((len(candidate), tuple(int(row) for row in rows)))
+        rollout_boards.append(candidate.clone())
         out = torch.zeros(candidate.shape[0], 81, 11)
         out[..., 2] = 1
         return out, torch.full((candidate.shape[0],), 3.0)
 
-    learned = ev.run_learned_pin_search_fast(
+    learned = run_learned_pin_search_fast(
         rollout,
         media=boards,
         base_logits=root_logits,
@@ -873,32 +920,64 @@ def test_eval_rollout_and_pin_search_engines() -> None:
         budget=8,
         max_rows=3,
     )
-    assert learned.accepted.shape == (2,)
+    assert torch.equal(learned.accepted, torch.tensor([False, False]))
+    assert torch.equal(learned.grids, boards)
+    assert torch.equal(learned.scores, torch.full((2,), float("-inf")))
+    assert torch.equal(learned.nodes, torch.tensor([8, 0]))
+    assert torch.equal(learned.depth, torch.tensor([-1, -1]))
+    assert [len(rows) for rows in learned.visited_predictions] == [2, 4, 2]
+    assert [len(rows) for rows in learned.visited_puzzles] == [2, 4, 2]
+    expected_pins = boards[0].repeat(2, 1)
+    expected_pins[:, 1] = torch.tensor([2, 3])
+    assert torch.equal(rollout_boards[0], expected_pins)
 
     def accepts(predictions: Tensor, media: Tensor) -> Tensor:
-        del media
+        assert media.shape == (predictions.shape[0], 81)
         return torch.zeros(predictions.shape[0], dtype=torch.bool)
 
-    found, grids, nodes, depth = ev.run_pin_search_fast(
+    found, grids, nodes, depth = run_pin_search_fast(
         rollout,
         media=boards,
         base_logits=root_logits,
         active=active,
-        groups=ev.sudoku_groups(),
-        depth=2,
+        groups=sudoku_eval.sudoku_groups(),
+        depth=3,
         candidates=2,
         cell_attempts=2,
-        budget=8,
+        budget=12,
         max_rows=3,
         accept_fn=accepts,
     )
-    assert found.shape == grids.shape[:1] == nodes.shape == depth.shape
+    assert torch.equal(found, torch.tensor([False, False]))
+    assert torch.equal(grids, boards)
+    assert torch.equal(nodes, torch.tensor([12, 0]))
+    assert torch.equal(depth, torch.tensor([-1, -1]))
+    default_found, default_grids, default_nodes, default_depth = (
+        sudoku_eval.run_pin_search_fast(
+            rollout,
+            media=boards,
+            base_logits=root_logits,
+            active=active,
+            groups=sudoku_eval.sudoku_groups(),
+            depth=3,
+            candidates=2,
+            cell_attempts=2,
+            budget=12,
+            max_rows=3,
+        )
+    )
+    assert torch.equal(default_found, torch.tensor([False, False]))
+    assert torch.equal(default_grids, boards)
+    assert torch.equal(default_nodes, torch.tensor([12, 0]))
+    assert torch.equal(default_depth, torch.tensor([-1, -1]))
+    assert rollout_batches
+    assert all(size <= 3 for size, _ in rollout_batches)
+    assert all(set(rows) <= {0} for _, rows in rollout_batches)
 
 
 def test_eval_search_run_branches_and_errors() -> None:
-    ev = priml.baselines.sudoku.eval
     model = _tiny_trm()
-    config = ev.HpsSearch.Config(
+    config = HpsSearch.Config(
         max_act_steps=2,
         acceptance_checkpoints=(1, 2),
         search_depth=1,
@@ -908,11 +987,43 @@ def test_eval_search_run_branches_and_errors() -> None:
         search_max_rows=4,
         acceptance_threshold=0.0,
     )
-    batch = {"media": torch.full((2, 81), 1, dtype=torch.long), "valid_count": 2}
+    media = torch.full((2, 81), 1, dtype=torch.long)
+    batch = {"media": media, "valid_count": 2}
     learned = config.make().run(model, batch)
     assert learned.accepted.shape == (2,)
-    empty = config.make().run(model, {"media": batch["media"], "valid_count": 0})
-    assert not bool(empty.scored.any())
+    empty = config.make().run(model, {"media": media, "valid_count": 0})
+    assert torch.equal(empty.scored, torch.zeros(2, dtype=torch.bool))
+    assert torch.equal(empty.accepted, torch.zeros(2, dtype=torch.bool))
+    assert torch.equal(empty.root_predictions, media)
+    assert torch.equal(empty.final_predictions, media)
+    assert torch.equal(empty.scores, torch.zeros(2))
+    assert torch.equal(empty.root_scores, torch.zeros(2))
+    assert torch.equal(empty.nodes, torch.zeros(2, dtype=torch.int64))
+    assert torch.equal(empty.depth, torch.full((2,), -1, dtype=torch.int64))
+    assert empty.visited_predictions == []
+    assert empty.visited_puzzles == []
+    meta_empty = sudoku_eval._empty_result(media.to("meta"))
+    assert all(
+        tensor.device.type == "meta"
+        for tensor in (
+            meta_empty.accepted,
+            meta_empty.root_predictions,
+            meta_empty.final_predictions,
+            meta_empty.scores,
+            meta_empty.root_scores,
+            meta_empty.nodes,
+            meta_empty.depth,
+            meta_empty.scored,
+        )
+    )
+    previous_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(torch.float64)
+        typed_empty = sudoku_eval._empty_result(media)
+        assert typed_empty.scores.dtype == torch.float32
+        assert typed_empty.root_scores.dtype == torch.float32
+    finally:
+        torch.set_default_dtype(previous_dtype)
     predicate = config.make().run(
         model,
         batch,
@@ -923,36 +1034,35 @@ def test_eval_search_run_branches_and_errors() -> None:
 
 def test_eval_config_error_branches() -> None:
     """Exercise constructor guards for search, verifier, and harvest jobs."""
-    ev = priml.baselines.sudoku.eval
     with pytest.raises(ValueError, match="max_act_steps"):
-        ev.HpsSearch.Config(max_act_steps=0).make()
+        HpsSearch.Config(max_act_steps=0).make()
     with pytest.raises(ValueError, match="finite"):
-        ev.HpsSearch.Config(acceptance_threshold=float("inf")).make()
+        HpsSearch.Config(acceptance_threshold=float("inf")).make()
     with pytest.raises(ValueError, match="root_acceptance"):
-        ev.HpsSearch.Config(root_acceptance_threshold=float("inf")).make()
+        HpsSearch.Config(root_acceptance_threshold=float("inf")).make()
     with pytest.raises(ValueError, match="within"):
-        ev.HpsSearch.Config(max_act_steps=2, acceptance_checkpoints=(3,)).make()
+        HpsSearch.Config(max_act_steps=2, acceptance_checkpoints=(3,)).make()
     with pytest.raises(ValueError, match="needs"):
-        ev.HpsSearch.Config(
+        HpsSearch.Config(
             acceptance_checkpoints=(),
             require_prediction_stability=True,
         ).make()
     with pytest.raises(ValueError, match="search_budget"):
-        ev.HpsSearch.Config(search_budget=2, search_candidates=3).make()
+        HpsSearch.Config(search_budget=2, search_candidates=3).make()
     with pytest.raises(ValueError, match="strictly increasing"):
-        ev.HpsSearch.Config(acceptance_checkpoints=(2, 2)).make()
+        HpsSearch.Config(acceptance_checkpoints=(2, 2)).make()
     with pytest.raises(ValueError, match="early_exit"):
-        ev.HpsSearch.Config(early_exit_at_q8=True, acceptance_checkpoints=(2,)).make()
+        HpsSearch.Config(early_exit_at_q8=True, acceptance_checkpoints=(2,)).make()
     with pytest.raises(ValueError, match="width"):
-        ev.SudokuVerifier.Config(width=5, heads=2).make()
+        SudokuVerifier.Config(width=5, heads=2).make()
     with pytest.raises(ValueError, match="max_steps"):
-        ev.VerifierFit.Config(max_steps=0).make()
+        VerifierFit.Config(max_steps=0).make()
     with pytest.raises(ValueError, match="max_rows"):
-        ev.VerifierAcceptor.Config(max_rows=0).make()
+        VerifierAcceptor.Config(max_rows=0).make()
     with pytest.raises(ValueError, match="checkpoint"):
-        ev.Harvest.Config().make()
+        Harvest.Config().make()
     with pytest.raises(ValueError, match="experiment_name"):
-        ev.HpsEval.Config().make()
+        HpsEval.Config().make()
 
 
 def _reproduction_config(tmp_path: Path) -> Reproduction.Config:
@@ -967,7 +1077,6 @@ def _reproduction_config(tmp_path: Path) -> Reproduction.Config:
 
 
 def test_reproduction_rejects_an_invalid_config(tmp_path: Path) -> None:
-    ev = priml.baselines.sudoku.eval
     cfg = _reproduction_config(tmp_path)
     cfg.experiment_name = ""
     with pytest.raises(ValueError, match="experiment_name is required"):
@@ -994,11 +1103,11 @@ def test_reproduction_rejects_an_invalid_config(tmp_path: Path) -> None:
         cfg.make()
     cfg = _reproduction_config(tmp_path)
     cfg.trigger = "final_only"
-    cfg.full_eval = ev.SieveEval.Config()
+    cfg.full_eval = SieveEval.Config()
     with pytest.raises(ValueError, match="agreement lock"):
         cfg.make()
     cfg = _reproduction_config(tmp_path)
-    cfg.full_eval = ev.SieveEval.Config()
+    cfg.full_eval = SieveEval.Config()
     with pytest.raises(ValueError, match="nine_view"):
         cfg.make()
     cfg = _reproduction_config(tmp_path)
@@ -1044,7 +1153,12 @@ def test_reproduction_restores_stage_seconds_from_progress_or_metrics(
     assert recorded == 4.0
     assert repro._load_stage_seconds() == {"train_to_4": 4.0}
     progress = repro._progress_path()
-    for payload in ("[]", '{"schema_version": 2}', '{"schema_version": 1}'):
+    for payload in (
+        "[]",
+        '{"schema_version": 2}',
+        '{"schema_version": 1}',
+        '{"schema_version": 1, "stage_seconds": {"a": "x"}}',
+    ):
         progress.write_text(payload)
         with pytest.raises(ValueError, match="invalid reproduction progress"):
             repro._load_stage_seconds()
@@ -1065,6 +1179,10 @@ def test_reproduction_reuses_only_a_harvest_from_its_own_source(
     manifest.write_text(json.dumps({"source_checkpoint": "/elsewhere.pt"}))
     with pytest.raises(ValueError, match="rolled out from"):
         repro._run_harvest()
+    for text in ("[]", "{}"):
+        manifest.write_text(text)
+        with pytest.raises(ReadError):
+            repro._run_harvest()
 
 
 def test_reproduction_skips_a_trained_verifier(tmp_path: Path) -> None:
@@ -1100,9 +1218,8 @@ class _RecordingTracker:
 
 
 def test_outer_run_clamps_steps_and_forwards_segments(tmp_path: Path) -> None:
-    ev = priml.baselines.sudoku.eval
     tracker = _RecordingTracker()
-    outer = ev._OuterRun(tracker)
+    outer = _OuterRun(tracker)
     outer.log({"a": 1}, 5, prefix="x/")
     outer.log({"b": 2}, 3)
     segment = tmp_path / "metrics.json"
@@ -1116,7 +1233,10 @@ def test_outer_run_clamps_steps_and_forwards_segments(tmp_path: Path) -> None:
         ({"eval/loss": 0.5}, 7, "gen/"),
     ]
     assert tracker.closed
-    disabled = ev._outer_run(None, name="n", notes="")
+    segment.write_text("[]")
+    with pytest.raises(ReadError):
+        _OuterRun(_RecordingTracker()).forward_segment(segment, 8)
+    disabled = _outer_run(None, name="n", notes="")
     disabled.log({"a": 1}, 2)
     disabled.forward_segment(segment, 2)
     disabled.close()
@@ -1125,7 +1245,6 @@ def test_outer_run_clamps_steps_and_forwards_segments(tmp_path: Path) -> None:
 def test_run_training_skips_or_refuses_existing_segment_checkpoints(
     tmp_path: Path,
 ) -> None:
-    ev = priml.baselines.sudoku.eval
     cfg = trainer.Trainer.Config()
     cfg.experiment_name = "segment"
     cfg.base_dir = tmp_path
@@ -1134,19 +1253,18 @@ def test_run_training_skips_or_refuses_existing_segment_checkpoints(
     checkpoints.mkdir(parents=True)
     (checkpoints / "step_00000006.pt").write_bytes(b"")
     with pytest.raises(RuntimeError, match="cannot safely resume"):
-        ev._run_training(cfg)
+        _run_training(cfg)
     (checkpoints / "step_00000004.pt").write_bytes(b"")
-    assert ev._run_training(cfg) == (0.0, False)
+    assert _run_training(cfg) == (0.0, False)
 
 
 def test_segmented_rollout_continues_confident_rows_past_q8() -> None:
-    ev = priml.baselines.sudoku.eval
     model = _tiny_trm()
     boards = torch.full((3, 81), 1, dtype=torch.long)
     boards[:, 0] = 2
     rows = torch.arange(3)
     with pytest.raises(ValueError, match="max_steps"):
-        ev.segmented_rollout_rows(
+        segmented_rollout_rows(
             model,
             {},
             0,
@@ -1155,7 +1273,18 @@ def test_segmented_rollout_continues_confident_rows_past_q8() -> None:
             continue_threshold=0.0,
             early_exit_at_q8=False,
         )
-    logits, scores = ev.segmented_rollout_rows(
+    one_step_logits, one_step_scores = sudoku_eval.segmented_rollout_rows(
+        model,
+        {},
+        1,
+        boards,
+        rows,
+        continue_threshold=0.0,
+        early_exit_at_q8=False,
+    )
+    assert one_step_logits.shape == (3, 81, 11)
+    assert one_step_scores.shape == (3,)
+    logits, scores = sudoku_eval.segmented_rollout_rows(
         model,
         {},
         10,
@@ -1166,6 +1295,66 @@ def test_segmented_rollout_continues_confident_rows_past_q8() -> None:
     )
     assert logits.shape == (3, 81, 11)
     assert scores.shape == (3,)
+
+
+def test_segmented_rollout_without_q8_gate_continues_all_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ev = sudoku_eval
+    boards = torch.tensor([[2, 1], [1, 3]])
+    arange = cast("Callable[..., Tensor]", torch.arange)
+    devices: list[object] = []
+
+    def record_arange(*args: object, **kwargs: object) -> Tensor:
+        devices.append(kwargs.get("device"))
+        return arange(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "arange", record_arange)
+
+    class RecordingModel:
+        device = torch.device("cpu")
+
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        def init_z(self, batch_size: int) -> tuple[Tensor, Tensor]:
+            return torch.zeros(batch_size, 1), torch.zeros(batch_size, 1)
+
+        def act_step(
+            self,
+            input_ids: Tensor,
+            z_slow: Tensor,
+            z_fast: Tensor,
+            *,
+            puzzle_identifiers: Tensor | None = None,
+            feedback_ids: Tensor,
+        ) -> dict[str, Tensor]:
+            del puzzle_identifiers, feedback_ids
+            self.batch_sizes.append(input_ids.shape[0])
+            logits = torch.zeros(len(input_ids), 2, 4)
+            logits[..., 2] = 1
+            return {
+                "logits": logits,
+                "q_halt": torch.tensor([-1.0, -2.0])[: len(input_ids)],
+                "z_slow": z_slow + 1,
+                "z_fast": z_fast + 1,
+            }
+
+    model = RecordingModel()
+    logits, scores = ev.segmented_rollout_rows(
+        cast("trm.TRM", model),
+        {},
+        10,
+        boards,
+        torch.tensor([1, 0]),
+        continue_threshold=0.0,
+        early_exit_at_q8=False,
+    )
+
+    assert model.batch_sizes == [2] * 10
+    assert devices == [boards.device]
+    assert logits.device == scores.device == boards.device
+    assert scores.tolist() == [-1.0, -2.0]
 
 
 def _write_harvest_shard(directory: Path, name: str, *, groups: list[int]) -> str:
@@ -1179,7 +1368,7 @@ def _write_harvest_shard(directory: Path, name: str, *, groups: list[int]) -> st
         candidate=grid,
         flat_view_id=np.arange(rows, dtype=np.int64),
     )
-    return priml.baselines.sudoku.eval._sha256(directory / name)
+    return _sha256(directory / name)
 
 
 def _write_manifest(
@@ -1198,35 +1387,39 @@ def _write_manifest(
 
 
 def test_load_harvest_rejects_a_malformed_manifest(tmp_path: Path) -> None:
-    ev = priml.baselines.sudoku.eval
     cpu = torch.device("cpu")
     manifest = tmp_path / "manifest.json"
     with pytest.raises(FileNotFoundError, match="manifest not found"):
-        ev._load_harvest(tmp_path, device=cpu)
-    cases: tuple[tuple[str, type[Exception], str], ...] = (
-        ("{", ValueError, "invalid harvest manifest"),
-        ("[]", TypeError, "JSON object"),
-        ('{"schema_version": 2}', ValueError, "schema_version 1"),
-        ('{"schema_version": 1, "shards": {}}', TypeError, "invalid shard metadata"),
+        _load_harvest(tmp_path, device=cpu)
+    entry = {"file": "a/b", "rows": 1, "sha256": "0"}
+    counts = {"groups_per_shard": 2, "shard_count": 1, "row_count": 1}
+    cases: tuple[tuple[str, str], ...] = (
+        ("{", "invalid harvest manifest"),
+        ("[]", r"Expected `object`, got `array`"),
         (
-            '{"schema_version": 1, "shards": [3], "groups_per_shard": 2}',
-            TypeError,
-            "invalid entry",
+            json.dumps({"schema_version": 2, "shards": [], **counts}),
+            r"\$\.schema_version",
         ),
         (
-            '{"schema_version": 1, "shards": [{"file": "a/b"}], "groups_per_shard": 2}',
-            ValueError,
+            json.dumps({"schema_version": 1, "shards": {}, **counts}),
+            r"\$\.shards",
+        ),
+        (
+            json.dumps({"schema_version": 1, "shards": [3], **counts}),
+            r"\$\.shards\[0\]",
+        ),
+        (
+            json.dumps({"schema_version": 1, "shards": [entry], **counts}),
             "invalid shard name",
         ),
     )
-    for text, error, message in cases:
+    for text, message in cases:
         manifest.write_text(text)
-        with pytest.raises(error, match=message):
-            ev._load_harvest(tmp_path, device=cpu)
+        with pytest.raises(ValueError, match=message):
+            _load_harvest(tmp_path, device=cpu)
 
 
 def test_load_harvest_binds_shards_to_the_manifest(tmp_path: Path) -> None:
-    ev = priml.baselines.sudoku.eval
     cpu = torch.device("cpu")
     manifest = tmp_path / "manifest.json"
     first = _write_harvest_shard(tmp_path, "shard-00000.npz", groups=[0, 1])
@@ -1246,9 +1439,9 @@ def test_load_harvest_binds_shards_to_the_manifest(tmp_path: Path) -> None:
     for shards, overrides, message in broken:
         _write_manifest(manifest, shards, **overrides)
         with pytest.raises(ValueError, match=message):
-            ev._load_harvest(tmp_path, device=cpu)
+            _load_harvest(tmp_path, device=cpu)
     _write_manifest(manifest, good)
-    originals, candidates, views, groups = ev._load_harvest(tmp_path, device=cpu)
+    originals, candidates, views, groups = _load_harvest(tmp_path, device=cpu)
     assert originals.shape == candidates.shape == (5, 81)
     assert views.tolist() == [0, 1, 0, 1, 2]
     assert groups.tolist() == [0, 1, 3, 2, 3]
@@ -1295,7 +1488,7 @@ def _bound_harvest(
         flat_views=flat_views,
         groups=groups,
     )
-    digest = priml.baselines.sudoku.eval._sha256(shard)
+    digest = _sha256(shard)
     entry = {"file": shard.name, "sha256": digest, "rows": len(groups)}
     manifest = {
         "schema_version": 1,
@@ -1309,7 +1502,7 @@ def _bound_harvest(
 
 
 def _verifier_data_config(root: Path, harvest: Path) -> VerifierData.Config:
-    cfg = priml.baselines.sudoku.eval.VerifierData.Config()
+    cfg = VerifierData.Config()
     cfg.working_dir = root / "data"
     cfg.harvest_dir = harvest
     cfg.node_corpus = root / "node_corpus.npz"
@@ -1372,7 +1565,7 @@ def _rebind_digest(harvest: Path) -> None:
         "dict[str, list[dict[str, object]]]",
         json.loads(manifest.read_text()),
     )
-    fields["shards"][0]["sha256"] = priml.baselines.sudoku.eval._sha256(
+    fields["shards"][0]["sha256"] = _sha256(
         harvest / "shard-00000.npz",
     )
     manifest.write_text(json.dumps(fields))
@@ -1442,7 +1635,6 @@ def test_verifier_data_mixes_contradictions_and_node_candidates(tmp_path: Path) 
 
 
 def test_harvest_rejects_an_invalid_plan_before_loading() -> None:
-    ev = priml.baselines.sudoku.eval
     plans: tuple[tuple[dict[str, object], str], ...] = (
         ({"group_count": 0}, "group_count"),
         ({"search_max_rows": 0}, "search_max_rows"),
@@ -1450,7 +1642,7 @@ def test_harvest_rejects_an_invalid_plan_before_loading() -> None:
         ({"search_budget": 1}, "cannot exhaust"),
     )
     for overrides, message in plans:
-        cfg = ev.Harvest.Config()
+        cfg = Harvest.Config()
         cfg.harvest_source_checkpoint = "/runs/source.pt"
         for name, value in overrides.items():
             setattr(cfg, name, value)
@@ -1459,8 +1651,7 @@ def test_harvest_rejects_an_invalid_plan_before_loading() -> None:
 
 
 def test_search_without_checkpoints_rolls_the_family_forward() -> None:
-    ev = priml.baselines.sudoku.eval
-    config = ev.HpsSearch.Config(
+    config = HpsSearch.Config(
         max_act_steps=2,
         acceptance_checkpoints=(),
         require_prediction_stability=False,
@@ -1479,19 +1670,18 @@ def test_search_without_checkpoints_rolls_the_family_forward() -> None:
 
 
 def test_dump_and_summary_guards_reject_misaligned_rows(tmp_path: Path) -> None:
-    ev = priml.baselines.sudoku.eval
-    width = ev.learned_hps_output_width(81)
+    width = learned_hps_output_width(81)
     rows = torch.zeros(2, width)
     media = torch.full((2, 81), 2, dtype=torch.long)
     with pytest.raises(ValueError, match="packed width"):
-        ev.summarize_search(rows[:, :-1], media)
+        summarize_search(rows[:, :-1], media)
     with pytest.raises(ValueError, match="disagree on N"):
-        ev.write_member_dump(tmp_path / "n.npz", rows[:1], media=media)
+        write_member_dump(tmp_path / "n.npz", rows[:1], media=media)
     with pytest.raises(ValueError, match="disagree on shape"):
-        ev.write_member_dump(tmp_path / "s.npz", rows, media=media, label=media[:, :3])
+        write_member_dump(tmp_path / "s.npz", rows, media=media, label=media[:, :3])
     unlabeled = tmp_path / "unlabeled.npz"
-    ev.write_member_dump(unlabeled, rows, media=media)
-    assert ev.read_member_dump(unlabeled).label is None
+    write_member_dump(unlabeled, rows, media=media)
+    assert read_member_dump(unlabeled).label is None
     narrow = tmp_path / "narrow.npz"
     np.savez(
         narrow,
@@ -1499,16 +1689,51 @@ def test_dump_and_summary_guards_reject_misaligned_rows(tmp_path: Path) -> None:
         media=np.zeros((2, 81), np.uint8),
     )
     with pytest.raises(ValueError, match="packed width"):
-        ev.read_member_dump(narrow)
+        read_member_dump(narrow)
+
+
+def test_read_member_dump_decodes_each_packed_field(tmp_path: Path) -> None:
+    ev = sudoku_eval
+    width = ev.learned_hps_output_width(81)
+    rows = np.zeros((2, width), dtype=np.float64)
+    rows[0, :7] = (0.75, 0.8, 3.9, -1.2, 4.8, 0.9, 7.0)
+    rows[1, :7] = (-0.5, 0.2, 8.1, 2.9, 5.1, 0.1, 9.0)
+    roots = np.arange(2 * 81).reshape(2, 81) + 2
+    finals = roots + 1
+    rows[:, 7 : 7 + 81] = roots
+    rows[:, -81:] = finals
+    media = np.arange(2 * 81).reshape(2, 81).astype(np.int16) + 1
+    label = media + 1
+    path = tmp_path / "member.npz"
+    np.savez(path, rows=rows, media=media, label=label)
+    dump = ev.read_member_dump(path)
+    assert dump.rows.dtype == torch.float32
+    assert dump.media.dtype == torch.uint8
+    assert dump.label is not None
+    assert dump.label.dtype == torch.uint8
+    assert dump.score.tolist() == [0.75, -0.5]
+    assert dump.accepted.tolist() == [True, False]
+    assert dump.nodes.tolist() == [3, 8]
+    assert dump.depth.tolist() == [-1, 2]
+    assert dump.candidate_count.tolist() == [4, 5]
+    assert dump.solution_visited.tolist() == [True, False]
+    assert dump.root_predictions.dtype == torch.uint8
+    assert dump.final_predictions.dtype == torch.uint8
+    assert torch.equal(dump.root_predictions, torch.from_numpy(roots.astype(np.uint8)))
+    assert torch.equal(
+        dump.final_predictions,
+        torch.from_numpy(finals.astype(np.uint8)),
+    )
+    assert torch.equal(dump.media, torch.from_numpy(media.astype(np.uint8)))
+    assert torch.equal(dump.label, torch.from_numpy(label.astype(np.uint8)))
 
 
 def test_checkpoint_rollout_rejects_disordered_or_out_of_range_steps() -> None:
-    ev = priml.baselines.sudoku.eval
     model = _tiny_trm()
     boards = torch.full((2, 81), 1, dtype=torch.long)
     for checkpoints, message in (((3, 2), "strictly increasing"), ((2, 5), "within")):
         with pytest.raises(ValueError, match=message):
-            ev.learned_checkpoint_rollout_rows(
+            learned_checkpoint_rollout_rows(
                 model,
                 {},
                 3,
@@ -1516,56 +1741,198 @@ def test_checkpoint_rollout_rejects_disordered_or_out_of_range_steps() -> None:
                 torch.arange(2),
                 checkpoints=checkpoints,
             )
-    rollout = ev.LearnedCheckpointRollout(
+    rollout = LearnedCheckpointRollout(
         logits=torch.zeros(2, 81, 11),
         q_scores=torch.zeros(2, 3),
         predictions=torch.zeros(2, 4, 81),
     )
     with pytest.raises(ValueError, match="align by row and step"):
-        ev.learned_persistence_scores(rollout, require_prediction_stability=False)
-    flat = ev.LearnedCheckpointRollout(
+        learned_persistence_scores(rollout, require_prediction_stability=False)
+    flat = LearnedCheckpointRollout(
         logits=torch.zeros(2, 81, 11),
         q_scores=torch.zeros(2),
         predictions=torch.zeros(2, 4, 81),
     )
     with pytest.raises(ValueError, match="ranks 2 and 3"):
-        ev.learned_persistence_scores(flat, require_prediction_stability=False)
+        learned_persistence_scores(flat, require_prediction_stability=False)
 
 
 def test_committee_and_view_validation_rejects_empty_inputs() -> None:
-    ev = priml.baselines.sudoku.eval
     with pytest.raises(ValueError, match=">= 1 checkpoint"):
-        ev.VerifierAcceptor.Config(checkpoint_paths=()).make()
+        VerifierAcceptor.Config(checkpoint_paths=()).make()
     with pytest.raises(ValueError, match="at least one checkpoint"):
-        ev.seed_ensemble_members(())
+        seed_ensemble_members(())
     with pytest.raises(ValueError, match=r"\[members, puzzles, cells\]"):
-        ev.modal_grid_predictions(torch.zeros(2, 81))
-    bad = ev.View("bad", (1, 1, 2, 3, 4, 5, 6, 7, 8), False)
+        modal_grid_predictions(torch.zeros(2, 81))
+    bad = View("bad", (1, 1, 2, 3, 4, 5, 6, 7, 8), False)
     with pytest.raises(ValueError, match="digit_permutation"):
-        ev._validate_views((bad,))
+        _validate_views((bad,))
     literal = Path("/abs/metrics.json")
-    assert (
-        ev._fill_template(literal, base_dir=None, experiment_name="unused") is literal
+    assert _fill_template(literal, base_dir=None, experiment_name="unused") is literal
+
+
+def test_grid_acceptance_and_group_counts_pin_validity_rules() -> None:
+    ev = sudoku_eval
+    solution = torch.tensor(
+        [((row * 3 + row // 3 + col) % 9) + 2 for row in range(9) for col in range(9)],
     )
+    valid = solution.repeat(4, 1)
+    duplicate = valid[1].clone()
+    duplicate[0] = duplicate[1]
+    negative = valid[2].clone()
+    negative[0] = -1
+    too_large = valid[3].clone()
+    too_large[0] = 11
+    predictions = torch.stack((valid[0], duplicate, negative, too_large))
+    media = torch.zeros_like(predictions)
+    media[:, 0] = valid[:, 0]
+    groups = ev.sudoku_groups()
+    assert ev.accepted_grids(predictions, media, groups).tolist() == [
+        True,
+        False,
+        False,
+        False,
+    ]
+    assert ev._violated_group_counts(predictions, groups).tolist() == [
+        0.0,
+        3.0,
+        3.0,
+        3.0,
+    ]
 
 
 def test_modal_tail_votes_over_every_round_a_survivor_reached() -> None:
-    ev = priml.baselines.sudoku.eval
-    first = torch.full((3, 81), 2, dtype=torch.long)
-    second = torch.full((2, 81), 3, dtype=torch.long)
-    third = torch.full((2, 81), 3, dtype=torch.long)
+    ev = sudoku_eval
+    first = torch.full((3, 81), 2, dtype=torch.float32)
+    second = torch.full((2, 81), 3, dtype=torch.float32)
+    third = torch.full((2, 81), 3, dtype=torch.float32)
     collected = [
         (torch.tensor([0, 1, 2]), first),
         (torch.tensor([1, 2]), second),
         (torch.tensor([2, 1]), third),
     ]
-    tail = ev._modal_tail(collected, torch.tensor([2, 1]))
-    assert torch.equal(tail, torch.full((2, 81), 3, dtype=torch.long))
+    tail = ev._modal_tail(collected, torch.tensor([2, 1, 4]))
+    assert tail.dtype == torch.float32
+    assert torch.equal(tail[:2], torch.full((2, 81), 3, dtype=torch.float32))
+    assert torch.equal(tail[2], torch.full((81,), 255, dtype=torch.float32))
+
+
+def test_sieve_hps_round_scopes_search_to_the_survivors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ev = sudoku_eval
+    cfg = ev.SieveEval.Config()
+    cfg.experiment_name = "sieve"
+    cfg.base_dir = tmp_path
+    cfg.runtime.device = "cpu"
+    cfg.dataset.working_dir = write_dataset(tmp_path / "data")
+    cfg.model = _tiny_config()
+    sieve = cfg.make()
+    seen: dict[str, object] = {}
+    model = object()
+    released: list[bool] = []
+
+    def eval_model(
+        model_config: object,
+        checkpoint_path: Path,
+        device: torch.device,
+    ) -> object:
+        seen["eval_model"] = (model_config, checkpoint_path, device)
+        return model
+
+    monkeypatch.setattr(ev, "_eval_model", eval_model)
+    monkeypatch.setattr(ev, "_release", lambda: released.append(True))
+
+    def search_pass(**kwargs: object) -> tuple[Tensor, Tensor, Tensor]:
+        dataset = cast("PuzzleDataset", kwargs["dataset"])
+        seen["indices"] = dataset.config.eval_instance_indices
+        seen["eval_num_instances"] = dataset.config.eval_num_instances
+        # _search_pass returns batch x grid rows x grid columns for this stub.
+        media = torch.ones(2, 2, 3, dtype=torch.int64)
+        labels = torch.full((2, 2, 3), 2, dtype=torch.int64)
+        rows = torch.zeros(len(media), ev.learned_hps_output_width(3))
+        rows[:, -3:] = 7
+        seen["view"] = kwargs["view"]
+        seen["search"] = kwargs["search"]
+        seen["deadline"] = kwargs["deadline_seconds"]
+        seen["label"] = kwargs["label"]
+        seen["model"] = kwargs["model"]
+        seen["device"] = kwargs["device"]
+        return rows, media, labels
+
+    monkeypatch.setattr(ev, "_search_pass", search_pass)
+    view = ev.NINE_VIEWS[0]
+    search = cfg.search.copy_tree()
+    grids, media, labels = sieve._hps_round(view, search, torch.tensor([0, 1]))
+    model_config, checkpoint_path, device = cast(
+        "tuple[object, Path, torch.device]",
+        seen.pop("eval_model"),
+    )
+    assert seen == {
+        "indices": (0, 1),
+        "eval_num_instances": None,
+        "view": view,
+        "search": search,
+        "deadline": cfg.max_round_eval_seconds,
+        "label": f"round {view.name}",
+        "model": model,
+        "device": sieve.device,
+    }
+    assert model_config is sieve.config.model
+    assert checkpoint_path == sieve._path(cfg.checkpoint_path)
+    assert device == sieve.device
+    assert grids.shape == (2, 3)
+    assert media.shape == labels.shape == (2, 2, 3)
+    assert grids.dtype == torch.int64
+    assert torch.equal(grids, torch.full((2, 3), 7, dtype=torch.int64))
+    assert released == [True]
+    with pytest.raises(ValueError, match="strictly ascending"):
+        sieve._hps_round(view, search, torch.tensor([7, 2]))
+
+
+def test_sieve_hps_round_releases_model_after_search_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ev = sudoku_eval
+    cfg = ev.SieveEval.Config()
+    cfg.experiment_name = "sieve"
+    cfg.base_dir = tmp_path
+    cfg.runtime.device = "cpu"
+    cfg.dataset.working_dir = write_dataset(tmp_path / "data")
+    cfg.model = _tiny_config()
+    sieve = cfg.make()
+    released: list[bool] = []
+
+    def eval_model(
+        config: object,
+        checkpoint_path: Path,
+        device: torch.device,
+    ) -> object:
+        del config, checkpoint_path, device
+        return object()
+
+    monkeypatch.setattr(ev, "_eval_model", eval_model)
+
+    def fail_search(**_kwargs: object) -> tuple[Tensor, Tensor, Tensor]:
+        raise RuntimeError("search failed")
+
+    monkeypatch.setattr(ev, "_search_pass", fail_search)
+    monkeypatch.setattr(ev, "_release", lambda: released.append(True))
+
+    with pytest.raises(RuntimeError, match="search failed"):
+        sieve._hps_round(
+            ev.NINE_VIEWS[0],
+            cfg.search,
+            torch.tensor([4]),
+        )
+
+    assert released == [True]
 
 
 def test_sieve_tail_search_escalates_the_view_policy(tmp_path: Path) -> None:
-    ev = priml.baselines.sudoku.eval
-    cfg = ev.SieveEval.Config()
+    cfg = SieveEval.Config()
     cfg.experiment_name = "sieve"
     cfg.base_dir = tmp_path
     cfg.runtime.device = "cpu"
@@ -1584,6 +1951,1077 @@ def test_sieve_tail_search_escalates_the_view_policy(tmp_path: Path) -> None:
     cfg.evaluation_count = 0
     with pytest.raises(ValueError, match="evaluation_count"):
         cfg.make()
+
+
+def test_gelu_cost_counts_exact_forward_and_backward_work() -> None:
+    ev = sudoku_eval
+    result = ev._gelu_cost(channels=3, rows=5, dtype=torch.float32)
+    assert result["flops", "primal", "elementwise", torch.float32] == 120
+    assert result["flops", "adjoint", "elementwise", torch.float32] == 120
+    assert result["bytes", "primal", "elementwise", torch.float32] == 120
+    assert result["bytes", "adjoint", "elementwise", torch.float32] == 180
+    float64_result = ev._gelu_cost(channels=3, rows=5, dtype=torch.float64)
+    assert float64_result["flops", "primal", "elementwise", torch.float64] == 120
+    assert float64_result["bytes", "primal", "elementwise", torch.float64] == 240
+
+
+def test_verifier_eval_iterator_length_counts_ragged_batches() -> None:
+    ev = sudoku_eval
+    blocks = [
+        {"label": torch.zeros(3), "media": torch.zeros(3, 4)},
+        {"label": torch.zeros(2), "media": torch.zeros(2, 4)},
+    ]
+    batches = ev._VerifierEvalIterator(blocks, batch_size=2)
+    assert len(batches) == 3
+    assert [len(batch["label"]) for batch in batches] == [2, 1, 2]
+
+
+def test_pin_search_acceptance_records_exact_winning_path() -> None:
+    ev = sudoku_eval
+    solution = torch.tensor(
+        [((row * 3 + row // 3 + col) % 9) + 2 for row in range(9) for col in range(9)],
+    )
+    media = torch.full((2, 81), 1, dtype=torch.int64)
+    base_logits = torch.zeros(2, 81, 11)
+    seen_boards: list[Tensor] = []
+    seen_rows: list[Tensor] = []
+
+    def rollout(boards: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
+        seen_boards.append(boards.clone())
+        seen_rows.append(rows.clone())
+        logits = torch.zeros(len(boards), 81, 11)
+        logits.scatter_(2, solution.expand(len(boards), -1).unsqueeze(-1), 1)
+        return logits, torch.full((len(boards),), -99.0)
+
+    found, grids, nodes, depth = ev.run_pin_search_fast(
+        rollout,
+        media=media,
+        base_logits=base_logits,
+        active=torch.tensor([True, False]),
+        groups=ev.sudoku_groups(),
+        depth=2,
+        candidates=2,
+        cell_attempts=2,
+        budget=8,
+        max_rows=3,
+        accept_fn=lambda predictions, _: torch.ones(len(predictions), dtype=torch.bool),
+    )
+    assert found.tolist() == [True, False]
+    assert torch.equal(grids[0], solution)
+    assert torch.equal(grids[1], media[1])
+    assert nodes.tolist() == [2, 0]
+    assert depth.tolist() == [1, -1]
+    assert [batch.shape for batch in seen_boards] == [(2, 81)]
+    assert seen_rows[0].tolist() == [0, 0]
+    assert torch.equal(seen_boards[0][:, 0], torch.tensor([2, 3]))
+    assert torch.equal(seen_boards[0][:, 1:], torch.ones(2, 80, dtype=torch.int64))
+
+
+def test_grid_scoring_and_acceptance_pin_token_boundaries() -> None:
+    ev = sudoku_eval
+    solution = torch.tensor(
+        [((row * 3 + row // 3 + col) % 9) + 2 for row in range(9) for col in range(9)],
+    )
+    predictions = solution.repeat(5, 1)
+    predictions[1, 0] = 0
+    predictions[2, 0] = 1
+    predictions[3] = 0
+    predictions[4] = 1
+    assert ev._violated_group_counts(
+        predictions,
+        ev.sudoku_groups(),
+    ).tolist() == [0.0, 3.0, 3.0, 27.0, 27.0]
+
+    media = torch.zeros(2, 81, dtype=torch.int64)
+    media[0, 0] = media[1, 0] = 2
+    media[0, 8] = media[1, 8] = 10
+    media[1, 1] = 1
+    media[1, 2] = 0
+    assert ev.accepted_grids(
+        solution.expand(2, -1),
+        media,
+        ev.sudoku_groups(),
+    ).tolist() == [True, True]
+    media[1, 8] = 9
+    assert ev.accepted_grids(
+        solution.expand(2, -1),
+        media,
+        ev.sudoku_groups(),
+    ).tolist() == [True, False]
+
+
+def test_segmented_rollout_returns_q8_for_early_rows_and_continues_selected_rows() -> (
+    None
+):
+    ev = sudoku_eval
+    boards = torch.tensor([[2, 1, 1], [1, 1, 3]])
+    rows = torch.tensor([1, 0])
+    puzzle_ids = torch.tensor([17, 29, 41])
+
+    class RecordingModel:
+        device = torch.device("cpu")
+
+        def __init__(self) -> None:
+            self.steps = 0
+            self.calls: list[tuple[Tensor, Tensor, Tensor]] = []
+
+        def init_z(self, batch_size: int) -> tuple[Tensor, Tensor]:
+            return torch.zeros(batch_size, 3), torch.zeros(batch_size, 4)
+
+        def act_step(
+            self,
+            input_ids: Tensor,
+            z_slow: Tensor,
+            z_fast: Tensor,
+            *,
+            puzzle_identifiers: Tensor | None = None,
+            feedback_ids: Tensor,
+        ) -> dict[str, Tensor]:
+            assert puzzle_identifiers is not None
+            self.steps += 1
+            self.calls.append(
+                (input_ids.clone(), feedback_ids.clone(), puzzle_identifiers.clone()),
+            )
+            logits = torch.zeros(len(input_ids), 3, 5)
+            logits[..., self.steps % 5] = 1
+            return {
+                "logits": logits,
+                "q_halt": torch.tensor([0.0, -1.0])[: len(input_ids)],
+                "z_slow": z_slow + 1,
+                "z_fast": z_fast + 1,
+            }
+
+    model = RecordingModel()
+    logits, scores = ev.segmented_rollout_rows(
+        cast("trm.TRM", model),
+        {"puzzle_identifiers": puzzle_ids},
+        10,
+        boards,
+        rows,
+        continue_threshold=0.0,
+        early_exit_at_q8=True,
+    )
+    assert model.steps == 10
+    assert [call[0].shape[0] for call in model.calls] == [2] * 8 + [1] * 2
+    assert model.calls[0][2].tolist() == [29, 17]
+    assert model.calls[8][2].tolist() == [29]
+    assert torch.equal(model.calls[0][1], boards)
+    assert torch.equal(model.calls[8][1], torch.tensor([[2, 3, 3]]))
+    assert logits.argmax(dim=-1).tolist() == [[0, 0, 0], [3, 3, 3]]
+    assert scores.tolist() == [0.0, -1.0]
+
+
+def test_run_pin_search_fast_obeys_budget_and_skips_inactive_rows() -> None:
+    ev = sudoku_eval
+    media = torch.ones(2, 4, dtype=torch.long)
+    logits = torch.zeros(2, 4, 11)
+    logits[..., 2] = 1
+    calls: list[tuple[Tensor, Tensor]] = []
+
+    def rollout(boards: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
+        calls.append((boards.clone(), rows.clone()))
+        out = torch.zeros(len(boards), 4, 11)
+        out[..., 2] = 1
+        return out, torch.zeros(len(boards))
+
+    found, grids, nodes, depth = ev.run_pin_search_fast(
+        rollout,
+        media=media,
+        base_logits=logits,
+        active=torch.tensor([True, False]),
+        groups=torch.empty(0, 9, dtype=torch.long),
+        depth=3,
+        candidates=2,
+        cell_attempts=1,
+        budget=6,
+        max_rows=3,
+        accept_fn=lambda preds, _: torch.zeros(len(preds), dtype=torch.bool),
+    )
+    assert not found.any()
+    assert torch.equal(grids, media)
+    assert nodes.tolist() == [6, 0]
+    assert depth.tolist() == [-1, -1]
+    assert [len(rows) for _, rows in calls] == [2, 3, 1]
+    assert [rows.tolist() for _, rows in calls] == [[0, 0], [0, 0, 0], [0]]
+
+    calls.clear()
+    _, _, depth_limited_nodes, _ = ev.run_pin_search_fast(
+        rollout,
+        media=media,
+        base_logits=logits,
+        active=torch.tensor([True, False]),
+        groups=torch.empty(0, 9, dtype=torch.long),
+        depth=1,
+        candidates=2,
+        cell_attempts=1,
+        budget=100,
+        max_rows=100,
+        accept_fn=lambda preds, _: torch.zeros(len(preds), dtype=torch.bool),
+    )
+    assert depth_limited_nodes.tolist() == [2, 0]
+    assert [len(rows) for _, rows in calls] == [2]
+
+
+def test_member_dump_decodes_fields_for_a_small_grid(tmp_path: Path) -> None:
+    ev = sudoku_eval
+    grid_len = 2
+    rows = np.array(
+        [
+            [0.25, 0.75, 3.9, -1.2, 4.8, 0.9, 42, 2, 3, 4, 5],
+            [-0.5, 0.2, 8.1, 2.9, 5.1, 0.1, 43, 6, 7, 8, 9],
+        ],
+    )
+    assert rows.shape[1] == ev.learned_hps_output_width(grid_len)
+    path = tmp_path / "member.npz"
+    np.savez(
+        path,
+        rows=rows,
+        media=np.array([[7, 8], [10, 11]], dtype=np.int16),
+        label=np.array([[9, 10], [12, 13]], dtype=np.int16),
+    )
+    dump = ev.read_member_dump(path)
+    assert dump.rows.dtype == torch.float32
+    assert dump.score.tolist() == [0.25, -0.5]
+    assert dump.accepted.tolist() == [True, False]
+    assert dump.nodes.tolist() == [3, 8]
+    assert dump.depth.tolist() == [-1, 2]
+    assert dump.candidate_count.tolist() == [4, 5]
+    assert dump.solution_visited.tolist() == [True, False]
+    assert dump.root_predictions.tolist() == [[2, 3], [6, 7]]
+    assert dump.final_predictions.tolist() == [[4, 5], [8, 9]]
+    assert dump.media.tolist() == [[7, 8], [10, 11]]
+    assert dump.label is not None
+    assert dump.label.tolist() == [[9, 10], [12, 13]]
+
+
+def test_sieve_tail_search_preserves_non_escalated_policy() -> None:
+    ev = sudoku_eval
+    config = ev.SieveEval.Config()
+    config.search.max_act_steps = 3
+    config.search.acceptance_threshold = 2.5
+    config.tail_search = (5, 4, 3, 7)
+    sieve = object.__new__(ev.SieveEval)
+    sieve.config = config
+    tail = sieve._tail_search_config()
+    assert (
+        tail.search_candidates,
+        tail.search_depth,
+        tail.search_cell_attempts,
+        tail.search_budget,
+    ) == (5, 4, 3, 7)
+    assert tail.max_act_steps == 3
+    assert tail.acceptance_threshold == 2.5
+    assert tail.search_max_rows == config.search.search_max_rows
+
+
+def test_contradiction_rows_follow_two_seeded_draws_and_align_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ev = sudoku_eval
+    data = object.__new__(ev.VerifierData)
+    data.device = torch.device("meta")
+    data.train_inputs = torch.tensor([[2, 1], [3, 1], [4, 1]])
+    data.train_labels = torch.tensor([[5, 6], [7, 8], [9, 10]])
+    generator = torch.Generator().manual_seed(91)
+    expected_generator = torch.Generator().manual_seed(91)
+    row_indices = torch.randint(3, (4,), generator=expected_generator)
+    sibling_indices = torch.randint(3, (4,), generator=expected_generator)
+    original_randint = torch.randint
+    devices: list[object] = []
+
+    def record_randint(*args: object, **kwargs: object) -> Tensor:
+        devices.append(kwargs.get("device"))
+        return original_randint(
+            cast(int, args[0]),
+            cast(tuple[int, ...], args[1]),
+            device="cpu",
+            generator=cast(torch.Generator, kwargs["generator"]),
+        )
+
+    monkeypatch.setattr(torch, "randint", record_randint)
+    puzzle, candidate, solution = data._contradiction_rows(4, generator=generator)
+    assert devices == [data.device, data.device]
+    assert torch.equal(puzzle, data.train_inputs[row_indices].long())
+    assert torch.equal(candidate, data.train_labels[sibling_indices].long())
+    assert torch.equal(solution, data.train_labels[row_indices].long())
+
+
+def test_verifier_eval_iterator_yields_exact_ragged_chunks() -> None:
+    ev = sudoku_eval
+    blocks = [
+        {"label": torch.arange(5), "media": torch.arange(10).reshape(5, 2)},
+        {
+            "label": torch.arange(2) + 10,
+            "media": torch.arange(6).reshape(2, 3) + 10,
+        },
+    ]
+    batches = list(ev._VerifierEvalIterator(blocks, batch_size=2))
+    assert [batch["label"].tolist() for batch in batches] == [
+        [0, 1],
+        [2, 3],
+        [4],
+        [10, 11],
+    ]
+    assert [batch["media"].shape for batch in batches] == [
+        (2, 2),
+        (2, 2),
+        (1, 2),
+        (2, 3),
+    ]
+    assert [batch["media"].tolist() for batch in batches] == [
+        [[0, 1], [2, 3]],
+        [[4, 5], [6, 7]],
+        [[8, 9]],
+        [[10, 11, 12], [13, 14, 15]],
+    ]
+
+
+def test_unchecked_eval_helpers_have_exact_cost_and_round_contracts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ev = sudoku_eval
+    cost = ev._gelu_cost(channels=2, rows=3, dtype=torch.float32)
+    assert cost["flops", "primal", "elementwise", torch.float32] == 48
+    assert cost["flops", "adjoint", "elementwise", torch.float32] == 48
+
+    blocks = [
+        {"label": torch.arange(5), "media": torch.arange(10).reshape(5, 2)},
+        {"label": torch.arange(2) + 10, "media": torch.arange(6).reshape(2, 3)},
+    ]
+    batches = ev._VerifierEvalIterator(blocks, batch_size=2)
+    assert len(batches) == 4
+    assert [batch["label"].tolist() for batch in batches] == [
+        [0, 1],
+        [2, 3],
+        [4],
+        [10, 11],
+    ]
+
+    config = ev.SieveEval.Config()
+    config.experiment_name = "sieve"
+    config.base_dir = tmp_path
+    config.runtime.device = "cpu"
+    config.tail_search = (3, 2, 4, 30)
+    sieve = config.make()
+    observed: dict[str, object] = {}
+
+    def eval_model(*_: object) -> object:
+        return object()
+
+    def search_pass(**kwargs: object) -> tuple[Tensor, Tensor, Tensor]:
+        dataset = cast("PuzzleDataset", kwargs["dataset"])
+        observed["indices"] = dataset.config.eval_instance_indices
+        observed["search"] = kwargs["search"]
+        return (
+            torch.zeros(2, ev.learned_hps_output_width(4)),
+            torch.ones(2, 4),
+            torch.ones(2, 4),
+        )
+
+    monkeypatch.setattr(ev, "_eval_model", eval_model)
+    monkeypatch.setattr(ev, "_search_pass", search_pass)
+    grids, media, labels = sieve._hps_round(
+        ev.NINE_VIEWS[0],
+        config.search,
+        torch.tensor([1, 3]),
+    )
+    assert observed == {"indices": (1, 3), "search": config.search}
+    assert grids.shape == media.shape == labels.shape == (2, 4)
+    assert grids.dtype == torch.int64
+
+
+def test_accepted_grids_rejects_each_invalid_grid_and_preserves_valid_solution() -> (
+    None
+):
+    solution = _solution()
+    duplicate = solution.clone()
+    duplicate[0] = duplicate[1]
+    blank = solution.clone()
+    blank[0] = 1
+    media = torch.zeros(4, 81, dtype=torch.long)
+    media[:, 0] = solution[0]
+    media[3, 1] = solution[1]
+    media[3, 2] = 1
+    mismatched_given = solution.clone()
+    mismatched_given[0] = 3
+    predictions = torch.stack((solution, duplicate, blank, mismatched_given))
+
+    accepted = sudoku_eval.accepted_grids(
+        predictions,
+        media,
+        sudoku_eval.sudoku_groups(),
+    )
+
+    assert accepted.tolist() == [True, False, False, False]
+
+
+def test_run_pin_search_fast_uses_default_acceptance_and_preserves_outputs() -> None:
+    ev = sudoku_eval
+    solution = _solution()
+    media = torch.ones(2, 81, dtype=torch.long)
+    base_logits = torch.zeros(2, 81, 11)
+    base_logits[..., 2] = 1
+    calls: list[tuple[Tensor, Tensor]] = []
+
+    def rollout(boards: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
+        calls.append((boards.clone(), rows.clone()))
+        logits = torch.zeros(len(boards), 81, 11)
+        logits.scatter_(2, solution.expand(len(boards), -1).unsqueeze(-1), 1)
+        return logits, torch.zeros(len(boards))
+
+    found, grids, nodes, depth = ev.run_pin_search_fast(
+        rollout,
+        media=media,
+        base_logits=base_logits,
+        active=torch.tensor([True, False]),
+        groups=ev.sudoku_groups(),
+        depth=2,
+        candidates=2,
+        cell_attempts=2,
+        budget=6,
+        max_rows=3,
+    )
+
+    assert found.tolist() == [True, False]
+    assert torch.equal(grids[0], solution)
+    assert torch.equal(grids[1], media[1])
+    assert nodes.tolist() == [2, 0]
+    assert depth.tolist() == [1, -1]
+    assert [len(rows) for _, rows in calls] == [2]
+    assert calls[0][1].tolist() == [0, 0]
+
+
+def test_run_pin_search_fast_expands_breadth_first_with_exact_budget_and_chunks() -> (
+    None
+):
+    ev = sudoku_eval
+    media = torch.ones(2, 5, dtype=torch.long)
+    base_logits = torch.zeros(2, 5, 11)
+    base_logits[..., 2] = 1
+    calls: list[tuple[Tensor, Tensor]] = []
+
+    def rollout(boards: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
+        calls.append((boards.clone(), rows.clone()))
+        logits = torch.zeros(len(boards), 5, 11)
+        logits[..., 2] = 1
+        return logits, torch.zeros(len(boards))
+
+    found, grids, nodes, depth = ev.run_pin_search_fast(
+        rollout,
+        media=media,
+        base_logits=base_logits,
+        active=torch.tensor([True, False]),
+        groups=torch.empty(0, 9, dtype=torch.long),
+        depth=3,
+        candidates=2,
+        cell_attempts=1,
+        budget=6,
+        max_rows=3,
+        accept_fn=lambda preds, _: torch.zeros(len(preds), dtype=torch.bool),
+    )
+
+    assert not found.any()
+    assert torch.equal(grids, media)
+    assert nodes.tolist() == [6, 0]
+    assert depth.tolist() == [-1, -1]
+    assert [len(rows) for _, rows in calls] == [2, 3, 1]
+    assert [rows.tolist() for _, rows in calls] == [[0, 0], [0, 0, 0], [0]]
+
+
+def test_run_pin_search_fast_uses_root_and_child_selector_widths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ev = sudoku_eval
+    original = ev.select_pin_candidates
+    widths: list[tuple[int, int]] = []
+
+    def record_widths(
+        logits: Tensor,
+        boards: Tensor,
+        *,
+        n_cells: int,
+        n_digits: int,
+    ) -> tuple[Tensor, Tensor]:
+        widths.append((n_cells, n_digits))
+        return original(logits, boards, n_cells=n_cells, n_digits=n_digits)
+
+    monkeypatch.setattr(ev, "select_pin_candidates", record_widths)
+    # Pin-search inputs use the production batch x token-grid contract.
+    media = torch.ones((1, 5), dtype=torch.int64)
+    base_logits = torch.zeros((1, 5, 11))
+    base_logits[..., 2] = 1
+
+    def rollout(boards: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
+        del rows
+        return (
+            base_logits.expand(len(boards), -1, -1),
+            torch.zeros(len(boards)),
+        )
+
+    ev.run_pin_search_fast(
+        rollout,
+        media=media,
+        base_logits=base_logits,
+        active=torch.ones(1, dtype=torch.bool),
+        groups=torch.empty((0, 9), dtype=torch.int64),
+        depth=2,
+        candidates=2,
+        cell_attempts=2,
+        budget=100,
+        max_rows=100,
+        accept_fn=lambda predictions, _: torch.zeros(
+            len(predictions),
+            dtype=torch.bool,
+        ),
+    )
+
+    assert widths == [(2, 2), (1, 2), (1, 2)]
+
+
+def test_run_pin_search_fast_preserves_device_dtypes_and_conversions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ev = sudoku_eval
+    missing = object()
+    zero = cast("Callable[..., Tensor]", torch.zeros)
+    full = cast("Callable[..., Tensor]", torch.full)
+    arange = cast("Callable[..., Tensor]", torch.arange)
+    tensor_to = cast("Callable[..., Tensor]", Tensor.to)
+    zero_calls: list[tuple[object, object]] = []
+    full_calls: list[tuple[object, object]] = []
+    arange_calls: list[object] = []
+    to_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def record_zeros(*args: object, **kwargs: object) -> Tensor:
+        zero_calls.append((kwargs.get("dtype", missing), kwargs.get("device", missing)))
+        return zero(*args, **kwargs)
+
+    def record_full(*args: object, **kwargs: object) -> Tensor:
+        full_calls.append((kwargs.get("dtype", missing), kwargs.get("device", missing)))
+        return full(*args, **kwargs)
+
+    def record_arange(*args: object, **kwargs: object) -> Tensor:
+        arange_calls.append(kwargs.get("device", missing))
+        return arange(*args, **kwargs)
+
+    def record_to(
+        self: Tensor,
+        *args: object,
+        **kwargs: object,
+    ) -> Tensor:
+        to_calls.append((args, kwargs))
+        return tensor_to(self, *args, **kwargs)
+
+    media = torch.ones((2, 5), dtype=torch.int64)
+    media[0, 0] = 2
+    media[1, 0] = 3
+    base_logits = torch.zeros((2, 5, 11))
+    base_logits[..., 2] = 1
+    monkeypatch.setattr(torch, "zeros", record_zeros)
+    monkeypatch.setattr(torch, "full", record_full)
+    monkeypatch.setattr(torch, "arange", record_arange)
+    monkeypatch.setattr(Tensor, "to", record_to)
+    acceptance_calls = 0
+
+    def accept_one_row(predictions: Tensor, boards: Tensor) -> Tensor:
+        nonlocal acceptance_calls
+        acceptance_calls += 1
+        if acceptance_calls == 1:
+            return boards[:, 0] == 2
+        return torch.ones(predictions.shape[0], dtype=torch.bool)
+
+    def rollout(boards: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
+        del rows
+        return base_logits[:1].expand(len(boards), -1, -1), boards[:, 0]
+
+    found, _, _, depth_used = ev.run_pin_search_fast(
+        rollout,
+        media=media,
+        base_logits=base_logits,
+        active=torch.ones(2, dtype=torch.bool),
+        groups=torch.empty((0, 9), dtype=torch.int64),
+        depth=2,
+        candidates=2,
+        cell_attempts=1,
+        budget=10,
+        max_rows=100,
+        accept_fn=accept_one_row,
+    )
+
+    assert found.tolist() == [True, True]
+    assert depth_used.tolist() == [1, 2]
+    assert zero_calls == [
+        (torch.int64, media.device),
+        (torch.bool, media.device),
+    ]
+    assert full_calls == [(torch.int64, media.device)]
+    assert arange_calls == [media.device, media.device]
+    assert to_calls == [((torch.int64,), {})] * 4
+
+
+def test_run_pin_search_fast_gathers_every_active_puzzle() -> None:
+    ev = sudoku_eval
+    media = torch.ones((2, 5), dtype=torch.int64)
+    base_logits = torch.zeros((2, 5, 11))
+    base_logits[..., 2] = 1
+
+    def rollout(boards: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
+        del rows
+        logits = base_logits[:1].expand(len(boards), -1, -1)
+        return logits, torch.zeros(len(boards))
+
+    _, _, nodes, _ = ev.run_pin_search_fast(
+        rollout,
+        media=media,
+        base_logits=base_logits,
+        active=torch.ones(2, dtype=torch.bool),
+        groups=torch.empty((0, 9), dtype=torch.int64),
+        depth=1,
+        candidates=2,
+        cell_attempts=1,
+        budget=2,
+        max_rows=100,
+        accept_fn=lambda predictions, _: torch.zeros(
+            len(predictions),
+            dtype=torch.bool,
+        ),
+    )
+
+    assert nodes.tolist() == [2, 2]
+
+
+def test_empty_result_preserves_batch_device_and_field_contract() -> None:
+    ev = sudoku_eval
+    media = torch.tensor([[2, 1, 3], [1, 4, 1]])
+
+    class ModelStub:
+        puzzle_emb = None
+
+    result = (
+        ev.HpsSearch.Config()
+        .make()
+        .run(
+            cast("trm.TRM", ModelStub()),
+            {"media": media, "valid_count": 0},
+        )
+    )
+
+    assert result.depth.tolist() == [-1, -1]
+    assert result.accepted.shape == result.scored.shape == (2,)
+    assert result.accepted.dtype == result.scored.dtype == torch.bool
+    assert result.root_predictions.shape == result.final_predictions.shape == (2, 3)
+    assert (
+        result.root_predictions.dtype == result.final_predictions.dtype == torch.int64
+    )
+    assert result.scores.shape == result.root_scores.shape == (2,)
+    assert result.scores.dtype == result.root_scores.dtype == torch.float32
+    assert result.nodes.shape == result.depth.shape == (2,)
+    assert result.nodes.dtype == result.depth.dtype == torch.int64
+    assert result.visited_predictions == []
+    assert result.visited_puzzles == []
+
+    meta_result = (
+        ev.HpsSearch.Config()
+        .make()
+        .run(
+            cast("trm.TRM", ModelStub()),
+            {"media": media.to("meta"), "valid_count": 0},
+        )
+    )
+    assert all(
+        tensor.device.type == "meta"
+        for tensor in (
+            meta_result.accepted,
+            meta_result.root_predictions,
+            meta_result.final_predictions,
+            meta_result.scores,
+            meta_result.root_scores,
+            meta_result.nodes,
+            meta_result.depth,
+            meta_result.scored,
+        )
+    )
+
+
+def test_segmented_rollout_keeps_q8_boundary_and_gathers_live_rows() -> None:
+    ev = sudoku_eval
+    boards = torch.tensor([[10, 1, 1], [11, 1, 3], [1, 4, 1]])
+    puzzle_ids = torch.tensor([10, 20, 30, 40])
+
+    class RecordingModel:
+        device = torch.device("cpu")
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[Tensor, Tensor, Tensor]] = []
+
+        def init_z(self, batch_size: int) -> tuple[Tensor, Tensor]:
+            return torch.zeros(batch_size, 1), torch.zeros(batch_size, 1)
+
+        def act_step(
+            self,
+            input_ids: Tensor,
+            z_slow: Tensor,
+            z_fast: Tensor,
+            *,
+            puzzle_identifiers: Tensor | None = None,
+            feedback_ids: Tensor,
+        ) -> dict[str, Tensor]:
+            assert puzzle_identifiers is not None
+            self.calls.append(
+                (input_ids.clone(), feedback_ids.clone(), puzzle_identifiers.clone()),
+            )
+            step = int(z_slow[0, 0]) + 1
+            logits = torch.zeros(len(input_ids), 3, 5)
+            logits[..., step % 5] = 1
+            q_by_id = {10: -1.0, 20: -1.0, 30: 0.0, 40: 1.0}
+            q_halt = torch.tensor(
+                [q_by_id[int(identifier)] for identifier in puzzle_identifiers],
+            )
+            return {
+                "logits": logits,
+                "q_halt": q_halt,
+                "z_slow": z_slow + 1,
+                "z_fast": z_fast + 1,
+            }
+
+    model = RecordingModel()
+    logits, scores = ev.segmented_rollout_rows(
+        cast("trm.TRM", model),
+        {"puzzle_identifiers": puzzle_ids},
+        10,
+        boards,
+        torch.tensor([2, 3, 0]),
+        continue_threshold=0.0,
+        early_exit_at_q8=True,
+    )
+
+    assert len(model.calls) == 10
+    assert [call[0].shape[0] for call in model.calls] == [3] * 8 + [2] * 2
+    assert model.calls[0][2].tolist() == [30, 40, 10]
+    assert model.calls[8][2].tolist() == [30, 40]
+    assert torch.equal(model.calls[0][1], boards)
+    assert torch.equal(model.calls[8][1], torch.tensor([[10, 3, 3], [3, 3, 3]]))
+    assert logits.argmax(dim=-1).tolist() == [[0, 0, 0], [0, 0, 0], [3, 3, 3]]
+    assert scores.tolist() == [0.0, 1.0, -1.0]
+
+
+def test_segmented_rollout_feedback_uses_per_cell_predictions() -> None:
+    ev = sudoku_eval
+    boards = torch.ones((2, 3), dtype=torch.int64)
+
+    class RecordingModel:
+        device = torch.device("cpu")
+
+        def __init__(self) -> None:
+            self.feedback: list[Tensor] = []
+
+        def init_z(self, batch_size: int) -> tuple[Tensor, Tensor]:
+            return torch.zeros(batch_size, 1), torch.zeros(batch_size, 1)
+
+        def act_step(
+            self,
+            input_ids: Tensor,
+            z_slow: Tensor,
+            z_fast: Tensor,
+            *,
+            puzzle_identifiers: Tensor | None = None,
+            feedback_ids: Tensor,
+        ) -> dict[str, Tensor]:
+            del puzzle_identifiers
+            self.feedback.append(feedback_ids.clone())
+            logits = torch.zeros(len(input_ids), 3, 4)
+            logits[:, 0, 1] = 1
+            logits[:, 1, 2] = 2
+            logits[:, 2, 3] = 3
+            return {
+                "logits": logits,
+                "q_halt": torch.ones(len(input_ids)),
+                "z_slow": z_slow + 1,
+                "z_fast": z_fast + 1,
+            }
+
+    model = RecordingModel()
+    ev.segmented_rollout_rows(
+        cast("trm.TRM", model),
+        {},
+        10,
+        boards,
+        torch.tensor([0, 1]),
+        continue_threshold=0.0,
+        early_exit_at_q8=True,
+    )
+
+    assert len(model.feedback) == 10
+    assert torch.equal(model.feedback[9], torch.tensor([[1, 2, 3], [1, 2, 3]]))
+
+
+def test_read_member_dump_uses_strict_half_threshold_for_flags(
+    tmp_path: Path,
+) -> None:
+    grid_len = 2
+    rows = np.zeros(
+        (3, sudoku_eval.learned_hps_output_width(grid_len)),
+        dtype=np.float32,
+    )
+    rows[:, 1] = (0.49, 0.5, 0.51)
+    rows[:, 2] = (3.1, 4.2, 5.3)
+    rows[:, 5] = (0.49, 0.5, 0.51)
+    path = tmp_path / "member.npz"
+    np.savez(path, rows=rows, media=np.ones((3, grid_len), dtype=np.uint8))
+
+    dump = sudoku_eval.read_member_dump(path)
+
+    assert dump.accepted.tolist() == [False, False, True]
+    assert dump.nodes.tolist() == [3, 4, 5]
+    assert dump.nodes.dtype == torch.int64
+    assert dump.solution_visited.tolist() == [False, False, True]
+
+
+def test_read_member_dump_reports_actual_packed_width(tmp_path: Path) -> None:
+    rows = np.zeros((2, 3), dtype=np.float32)
+    # Packed-member fixtures use two rows and three token columns.
+    media = np.zeros((2, 3), dtype=np.uint8)
+    path = tmp_path / "wrong_width.npz"
+    np.savez(path, rows=rows, media=media)
+
+    with pytest.raises(
+        ValueError,
+        match="packed width 3 does not match learned-HPS width 13\\.",
+    ) as error:
+        sudoku_eval.read_member_dump(path)
+
+    assert str(error.value) == "packed width 3 does not match learned-HPS width 13."
+
+
+def test_modal_tail_preserves_dtype_sentinel_and_survivor_order() -> None:
+    ev = sudoku_eval
+    first = torch.full((3, 5), 2, dtype=torch.float32)
+    second = torch.full((2, 5), 3, dtype=torch.float32)
+    collected = [
+        (torch.tensor([0, 1, 2]), first),
+        (torch.tensor([1, 2]), second),
+    ]
+    result = ev._modal_tail(collected, torch.tensor([2, 1, 3]))
+
+    assert result.dtype == torch.float32
+    assert torch.equal(result[0], torch.full((5,), 2.0))
+    assert torch.equal(result[1], torch.full((5,), 2.0))
+    assert torch.equal(result[2], torch.full((5,), 255.0))
+
+
+def test_group_violations_token_normalization_matches_clamp() -> None:
+    ev = sudoku_eval
+    predictions = torch.tensor([[-3, -1, 0, 1, 2, 10, 11, 12, 13]])
+    # Sudoku group indexing is a single nine-cell row by contract.
+    groups = torch.arange(9).reshape(1, 9)
+    old_tokens = predictions.clamp(min=0, max=10)[:, groups]
+    expected_counts = torch.nn.functional.one_hot(
+        old_tokens,
+        num_classes=len(ev.IDENTITY_DIGITS) + 2,
+    ).sum(dim=2)
+    expected_violations = (
+        (
+            (expected_counts[..., 2:] > 1).any(dim=2)
+            | (expected_counts[..., :2] > 0).any(dim=2)
+        )
+        .sum(dim=1)
+        .float()
+    )
+
+    assert torch.equal(
+        ev._violated_group_counts(predictions, groups),
+        expected_violations,
+    )
+
+
+def test_group_violations_and_acceptance_enforce_sudoku_token_rules() -> None:
+    ev = sudoku_eval
+    solution = _solution()
+    duplicate = solution.clone()
+    duplicate[0] = duplicate[1]
+    blank = solution.clone()
+    blank[0] = 1
+    negative = solution.clone()
+    negative[0] = -1
+    too_large = solution.clone()
+    too_large[0] = 11
+    predictions = torch.stack((solution, duplicate, blank, negative, too_large))
+    groups = ev.sudoku_groups()
+
+    assert ev._violated_group_counts(predictions, groups).tolist() == [
+        0.0,
+        3.0,
+        3.0,
+        3.0,
+        3.0,
+    ]
+    media = torch.zeros_like(predictions)
+    media[:, 0] = solution[0]
+    assert ev.accepted_grids(predictions, media, groups).tolist() == [
+        True,
+        False,
+        False,
+        False,
+        False,
+    ]
+    mismatched_given = media[:1].clone()
+    mismatched_given[0, 0] = 3
+    assert ev.accepted_grids(
+        solution.unsqueeze(0),
+        mismatched_given,
+        groups,
+    ).tolist() == [False]
+    ten_token = torch.where(solution == 10)[0][0]
+    invalid_digit = solution.clone()
+    invalid_digit[ten_token] = 11
+    assert ev.accepted_grids(
+        invalid_digit.unsqueeze(0),
+        torch.zeros_like(solution).unsqueeze(0),
+        groups,
+    ).tolist() == [False]
+    two_token = torch.where(solution == 2)[0][0]
+    alternate_two = torch.where(
+        solution == 2,
+        3,
+        torch.where(solution == 3, 2, solution),
+    )
+    given_two = torch.zeros_like(solution).unsqueeze(0)
+    given_two[0, two_token] = 2
+    assert ev.accepted_grids(
+        alternate_two.unsqueeze(0),
+        given_two,
+        groups,
+    ).tolist() == [
+        False,
+    ]
+    invalid_given = torch.zeros_like(solution).unsqueeze(0)
+    invalid_given[0, two_token] = 11
+    assert ev.accepted_grids(solution.unsqueeze(0), invalid_given, groups).tolist() == [
+        True,
+    ]
+    alternate = torch.where(
+        solution == 10,
+        9,
+        torch.where(solution == 9, 10, solution),
+    )
+    ten_givens = torch.zeros_like(solution).unsqueeze(0)
+    ten_givens[0, solution == 10] = 10
+    assert ev.accepted_grids(alternate.unsqueeze(0), ten_givens, groups).tolist() == [
+        False,
+    ]
+
+
+def test_run_pin_search_fast_starts_no_attempt_past_its_budget() -> None:
+    """Each root attempt costs ``candidates`` nodes; the second would exceed 2."""
+
+    def rollout(boards: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
+        del rows
+        return torch.zeros(len(boards), 4, 11), torch.zeros(len(boards))
+
+    _, _, nodes, _ = run_pin_search_fast(
+        rollout,
+        media=torch.ones(2, 4, dtype=torch.long),
+        base_logits=torch.zeros(2, 4, 11),
+        active=torch.tensor([True, True]),
+        groups=torch.empty(0, 9, dtype=torch.long),
+        depth=1,
+        candidates=2,
+        cell_attempts=2,
+        budget=2,
+        max_rows=8,
+        accept_fn=lambda preds, _: torch.zeros(len(preds), dtype=torch.bool),
+    )
+    assert nodes.tolist() == [2, 2]
+
+
+def test_hps_eval_rejects_a_population_short_of_evaluation_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 2-puzzle split clips ``evaluation_count=3``; the run must not publish."""
+    ev = sudoku_eval
+    cfg = ev.HpsEval.Config()
+    cfg.experiment_name = "hps"
+    cfg.base_dir = tmp_path
+    cfg.runtime.device = "cpu"
+    cfg.dataset.working_dir = write_dataset(tmp_path / "data")
+    cfg.evaluation_count = 3
+
+    def search_pass(**_: object) -> tuple[Tensor, Tensor, Tensor]:
+        labels = torch.full((2, 81), 2, dtype=torch.int64)
+        return torch.zeros(2, ev.learned_hps_output_width(81)), labels, labels
+
+    def eval_model(*_: object) -> object:
+        return object()
+
+    monkeypatch.setattr(ev, "_eval_model", eval_model)
+    monkeypatch.setattr(ev, "_search_pass", search_pass)
+    with pytest.raises(RuntimeError, match=r"evaluated 2 puzzles.*population is 3"):
+        cfg.make().run()
+    assert not (tmp_path / "runs" / "hps" / "dumps").exists()
+
+
+def test_search_pass_joins_solution_visited_in_view_space(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An oracle solving the shifted puzzle emits the shifted solution."""
+    ev = sudoku_eval
+    view = NINE_VIEWS[1]
+    assert view.name == "shift1"
+    dataset = puzzle_data.PuzzleDataset.Config(
+        working_dir=write_dataset(tmp_path / "data"),
+        batch_size=2,
+        device="cpu",
+    )
+
+    def oracle(
+        model: object,
+        batch: Mapping[str, object],
+        search: object,
+    ) -> SearchResult:
+        del model, search
+        label = cast("Tensor", batch["label"])
+        rows = label.shape[0]
+        return SearchResult(
+            accepted=torch.zeros(rows, dtype=torch.bool),
+            root_predictions=view.apply(label),
+            final_predictions=view.apply(label),
+            scores=torch.zeros(rows),
+            root_scores=torch.zeros(rows),
+            nodes=torch.zeros(rows, dtype=torch.int64),
+            depth=torch.full((rows,), -1),
+            scored=torch.ones(rows, dtype=torch.bool),
+            visited_predictions=[],
+            visited_puzzles=[],
+        )
+
+    monkeypatch.setattr(ev, "run_search", oracle)
+    rows, _, _ = ev._search_pass(
+        model=cast("trm.TRM", object()),
+        dataset=dataset.finalize().make(),
+        view=view,
+        search=HpsSearch.Config(),
+        device=torch.device("cpu"),
+        deadline_seconds=float("inf"),
+        label="probe",
+        join_solution_visited=True,
+    )
+    assert rows[:, 5].tolist() == [1.0, 1.0]
+
+
+@pytest.mark.parametrize("steps", [0, -1])
+def test_verifier_data_rejects_a_nonpositive_epoch(steps: int) -> None:
+    """``VerifierFit.run`` would otherwise loop forever on an empty epoch."""
+    with pytest.raises(ValueError, match="steps_per_epoch must be >= 1"):
+        VerifierData.Config(steps_per_epoch=steps).make()
+
+
+def _solution() -> Tensor:
+    return torch.tensor(
+        [((row * 3 + row // 3 + col) % 9) + 2 for row in range(9) for col in range(9)],
+    )
 
 
 if __name__ == "__main__":

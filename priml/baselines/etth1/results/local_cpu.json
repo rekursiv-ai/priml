@@ -1,0 +1,40 @@
+{
+  "reference_epochs": 5,
+  "reference_validation_float32": [
+    0.6575846672058105,
+    0.6461290121078491,
+    0.6575121879577637,
+    0.6488664150238037,
+    0.6558535099029541
+  ],
+  "priml_validation_float32": [
+    0.6575846672058105,
+    0.6461290121078491,
+    0.6575121879577637,
+    0.6488664150238037,
+    0.6558535099029541
+  ],
+  "best_step": 2052,
+  "best_parameter_mismatches": [],
+  "epoch_parameter_mismatches": {
+    "2": [],
+    "3": [],
+    "4": [],
+    "5": []
+  },
+  "prediction_differing_elements": 0,
+  "target_differing_elements": 0,
+  "prediction_elements": 1870848,
+  "reference_test_mse": 0.3748246133327484,
+  "reference_test_mae": 0.39947351813316345,
+  "priml_evaluation": {
+    "mse": 0.3748246133327484,
+    "mae": 0.39947351813316345,
+    "mean_batch_mse": 0.37482463367197705,
+    "mean_batch_mae": 0.3994735362029624,
+    "batches": 348,
+    "windows": 2784,
+    "elements": 1870848
+  },
+  "final_torch_rng_equal": true
+}

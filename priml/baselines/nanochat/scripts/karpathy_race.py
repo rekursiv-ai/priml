@@ -93,88 +93,22 @@ from typing import TYPE_CHECKING, Protocol, cast
 import argparse
 import json
 import re
-import subprocess
 import sys
 import time
-import types
-
-from torch import Tensor
-
-import torch
-
-from priml.model.attention.value_gated_attention import sdpa_attention
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    import torch
+else:
+    from wrapt import lazy_import
 
+    torch = lazy_import("torch")  # ~1050 ms; only ``main`` reaches it.
 
-def their_attention(
-    q: Tensor,
-    k: Tensor,
-    v: Tensor,
-    *,
-    causal: bool,
-    window_size: tuple[int, int],
-) -> Tensor:
-    """``exp001``'s own kernel, behind FlashAttention-3's call signature.
-
-    Args:
-      q: ``[B, S, heads, channels_head]`` queries.
-      k: Keys, same shape.
-      v: Values, same shape.
-      causal: Whether the mask is causal; the recipe always passes True.
-      window_size: ``(history, future)``; the recipe always passes future 0.
-
-    Returns:
-      out: Attention output, same shape as ``q``.
-
-    """
-    if not causal:
-        raise ValueError("the recipe attends causally")
-    if window_size[1] != 0:
-        raise ValueError(f"unexpected future window {window_size[1]}")
-    return sdpa_attention(q, k, v, window=window_size[0])
-
-
-def clone_upstream(
-    root: Path,
-    *,
-    url: str = "https://github.com/karpathy/autoresearch.git",
-    commit: str = "b11d6f283f866eb7e10fb776a4b8553fef873fd5",
-) -> Path:
-    """Clone the reference at its pinned commit, or verify an existing clone.
-
-    Args:
-      root: Directory the clone lives in.
-      url: Repository to clone.
-      commit: Revision this run is of.
-
-    Returns:
-      path: The clone's path.
-
-    Raises:
-      RuntimeError: The clone is dirty or at another commit, so what it holds
-        is no longer the reference this run claims to be.
-
-    """
-    if not (root / ".git").is_dir():
-        root.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(  # noqa: S603 -- The script invokes the fixed git command for the pinned repository.
-            ["git", "clone", "--quiet", url, str(root)],  # noqa: S607 -- The script invokes the fixed git executable.
-            check=True,
-        )
-        subprocess.run(  # noqa: S603 -- The script invokes the fixed git command for the pinned repository.
-            ["git", "checkout", "--quiet", commit],  # noqa: S607 -- The script invokes the fixed git executable.
-            cwd=root,
-            check=True,
-        )
-    head = _git(root, "rev-parse", "HEAD")
-    if head != commit:
-        raise RuntimeError(f"clone is at {head}, expected {commit}")
-    if dirty := _git(root, "status", "--porcelain"):
-        raise RuntimeError(f"clone has local modifications:\n{dirty}")
-    return root
+from priml.baselines.nanochat.scripts.karpathy_upstream import (
+    clone_upstream,
+    kernels_stub,
+    their_attention,
+)
 
 
 def main() -> int:
@@ -185,7 +119,7 @@ def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -193,7 +127,7 @@ def main() -> int:
     root = clone_upstream(flags.clone)
 
     sys.path.insert(0, str(root))
-    sys.modules["kernels"] = cast(types.ModuleType, _kernels_stub())
+    sys.modules["kernels"] = kernels_stub()
 
     # Their corpus location, and the microbatch this card can hold. Both are
     # module-level constants their script reads at import, so they are set
@@ -311,37 +245,6 @@ def _import_prepare(corpus: Path) -> _Prepare:
     return prepare
 
 
-def _kernels_stub() -> _KernelModule:
-    """Return a ``kernels`` module whose ``get_kernel`` yields the portable kernel."""
-    module = cast(_KernelModule, types.ModuleType("kernels"))
-
-    def get_kernel(name: str) -> _Kernel:
-        if "flash-attention-3" not in name:
-            raise ValueError(name)
-        return cast(
-            _Kernel,
-            types.SimpleNamespace(
-                flash_attn_interface=types.SimpleNamespace(
-                    flash_attn_func=their_attention,
-                ),
-            ),
-        )
-
-    module.get_kernel = get_kernel
-    return module
-
-
-def _git(root: Path, *arguments: str) -> str:
-    """Run a read-only git command in the clone."""
-    return subprocess.run(  # noqa: S603 -- The helper invokes git read-only subcommands without a shell.
-        ["git", *arguments],  # noqa: S607 -- The script invokes the fixed git executable.
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-
-
 class _Tokenizer(Protocol):
     """The tokenizer API used by the upstream preparation module."""
 
@@ -373,24 +276,6 @@ class _Prepare(Protocol):
     DATA_DIR: str
     TOKENIZER_DIR: str
     Tokenizer: _TokenizerClass
-
-
-class _FlashAttentionInterface(Protocol):
-    """The upstream kernel interface used by the training script."""
-
-    flash_attn_func: Callable[..., Tensor]
-
-
-class _Kernel(Protocol):
-    """The upstream kernel object slice used by the training script."""
-
-    flash_attn_interface: _FlashAttentionInterface
-
-
-class _KernelModule(Protocol):
-    """The dynamically injected kernels module slice."""
-
-    get_kernel: Callable[[str], _Kernel]
 
 
 if __name__ == "__main__":

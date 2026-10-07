@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import logging
 
@@ -21,7 +21,7 @@ from configgle import Fig
 
 import torch
 
-from priml.lib.custom_json import DictCodec
+from priml.lib.custom_json import convert
 
 
 if TYPE_CHECKING:
@@ -81,15 +81,20 @@ class WarmStart:
 
         """
         # A checkpoint this project wrote; its nested step state needs full unpickling.
-        checkpoint = DictCodec.coerce(
+        checkpoint = convert(
             cast(object, torch.load(self.path, map_location="cpu", weights_only=False)),
+            dict[str, object],
         )
-        step = DictCodec.coerce(checkpoint["step"])
-        state = DictCodec.coerce(step["model"], torch.Tensor)
+        step = convert(checkpoint["step"], dict[str, object])
+        raw_state = convert(step["model"], dict[str, object])
+        state = {
+            name: convert(value, torch.Tensor)
+            for name, value in raw_state.items()
+            if isinstance(value, torch.Tensor)
+        }
         ema = step.get("ema")
         if ema:
-            shadow = DictCodec.coerce(ema).get("shadow_params", ema)
-            state.update(DictCodec.coerce(shadow, torch.Tensor))
+            state.update(_ema_shadow(convert(ema, dict[str, object]), path=self.path))
         own = model.state_dict()
         own_by_bare = {_bare(name): name for name in own}
         loadable: dict[str, Tensor] = {}
@@ -117,17 +122,43 @@ class WarmStart:
             fresh=tuple(sorted(name for name in own if name not in loadable)),
         )
         logger.info(
-            "warm start %s: loaded %d tensor(s); shape-skipped %s; fresh %s",
+            "warm start %s: loaded %d tensor(s); shape-skipped %s; missing %s; fresh %s",
             self.path,
             len(report.loaded),
             list(report.skipped_shape) or "none",
+            list(report.skipped_missing) or "none",
             list(report.fresh) or "none",
         )
         return report
 
 
+# ``EMA.state_dict`` stores ``shadow_params`` (param_dict kind) or ``shadow_model``
+# (module kind); older checkpoints stored the shadow mapping flat.
+def _ema_shadow(ema: dict[str, object], *, path: Path) -> dict[str, Tensor]:
+    """Return the EMA shadow tensors, rejecting an EMA that holds none."""
+    shadow = ema.get("shadow_params", ema.get("shadow_model", ema))
+    tensors = {
+        name: value
+        for name, value in convert(shadow, dict[str, object]).items()
+        if isinstance(value, torch.Tensor)
+    }
+    if not tensors:
+        raise ValueError(
+            f"warm start from {path}: the checkpoint's EMA state holds no tensors "
+            f"(keys {sorted(ema)}); refusing to evaluate live weights instead.",
+        )
+    return tensors
+
+
+_WRAPPER_PREFIXES: Final = ("module.", "_orig_mod.")
+
+
 def _bare(name: str) -> str:
-    """Strip data-parallel and compile wrapper prefixes from a state-dict key."""
-    for prefix in ("module.", "_orig_mod."):
-        name = name.removeprefix(prefix)
+    """Strip data-parallel and compile wrapper prefixes, in any order and nesting."""
+    while name.startswith(_WRAPPER_PREFIXES):
+        name = next(
+            name.removeprefix(prefix)
+            for prefix in _WRAPPER_PREFIXES
+            if name.startswith(prefix)
+        )
     return name

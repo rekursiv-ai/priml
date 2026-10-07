@@ -12,12 +12,13 @@ ArcTrainLoop(
                 │       │               channels_in=12,
                 │       │               channels_out=512,
                 │       │               grid_shape=(900,),
-                │       │               channels=[]
+                │       │               channels=[],
+                │       │               init_weight=functools.partial(<function priml.model.init.fan_in_truncated_normal at 0xdefacedeface>, variance_correction=True)
                 │       │       ),
                 │       │       block=TransformerBlock.Config(
                 │       │       │       channels_in=512,
                 │       │       │       channels_out=512,
-                │       │       │       attn=SelfAttention.Config(
+                │       │       │       attn=Attention.Config(
                 │       │       │               channels_in=512,
                 │       │       │               channels_out=512,
                 │       │       │               num_heads=8,
@@ -88,7 +89,7 @@ ArcTrainLoop(
                 │       │                       RegisterTokens.Config(
                 │       │                               num_tokens=1,
                 │       │                               channels_out=512,
-                │       │                               init_std=1.0,
+                │       │                               init_weight=functools.partial(<function priml.model.init.fan_in_truncated_normal at 0xdefacedeface>, variance_correction=True),
                 │       │                               learnable=True,
                 │       │                               embed_scale=-1.0
                 │       │                       )
@@ -97,13 +98,27 @@ ArcTrainLoop(
                 │       │       ),
                 │       │       num_prefix_tokens=17,
                 │       │       vocab_size=12,
+                │       │       head=Linear.Config(
+                │       │               channels_in=512,
+                │       │               channels_out=12,
+                │       │               bias=False,
+                │       │               depth_index=(),
+                │       │               device=None,
+                │       │               dtype=None,
+                │       │               init_weight=functools.partial(<function priml.model.init.fan_in_truncated_normal at 0xdefacedeface>, variance_correction=True),
+                │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │               shard=None
+                │       │       ),
+                │       │       init_latent=functools.partial(<function priml.model.init.truncated_normal at 0xdefacedeface>, std=1.0, variance_correction=True),
                 │       │       halt_outputs=2,
                 │       │       halt_init_bias=-5.0,
                 │       │       dtype=None,
                 │       │       rope=None,
                 │       │       rope_grid_shape=(),
                 │       │       compile_core=None,
-                │       │       dtype_latent_init=None
+                │       │       dtype_latent_init=None,
+                │       │       checkpoint_core=False,
+                │       │       block_checkpoint_fraction=0.0
                 │       ),
                 │       optimizer=CompositeOptimizer.Config(
                 │               optimizers=[
@@ -140,7 +155,7 @@ ArcTrainLoop(
                 │       train_budget_sec=inf,
                 │       train_budget_epochs=inf,
                 │       lr_schedule=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.constant at 0xdefacedeface>),
-                │       parallelism=NoParallel.Config(device='auto'),
+                │       parallelism=NoParallel.Config(device=None),
                 │       model_quantization=NoModelQuantization.Config(),
                 │       activation_memoization=DefaultActivationStorage.Config(),
                 │       compile=PartialConfig(<class 'functools.partial'>, <function torch.compile at 0xdefacedeface>, fullgraph=True),
@@ -153,7 +168,7 @@ ArcTrainLoop(
                 │       total_train_steps=388_670,
                 │       warmup_steps=2_000,
                 │       lr_min_ratio=0.0,
-                │       act=None,
+                │       pool=None,
                 │       label_smoothing=0.0,
                 │       ignore_label_id=-100,
                 │       use_ema=True,
@@ -200,10 +215,10 @@ ArcTrainLoop(
                 │               puzzle_id_separator='|||'
                 │       ),
                 │       base_dir='/opt/scratch',
-                │       working_dir=PosixPath('/opt/scratch/datasets/arcagi1'),
+                │       working_dir=PosixPath('/opt/scratch/datasets/arc1concept-aug-1000'),
                 │       batch_size=256,
                 │       eval_batch_size=256,
-                │       device='auto',
+                │       device=None,
                 │       seed=0,
                 │       num_tasks=None,
                 │       num_eval_tasks=None,
@@ -213,9 +228,28 @@ ArcTrainLoop(
                 │       device_resident=True
                 ),
                 metrics_train={},
-                metrics_eval={       'pass': PassK.Config(
+                metrics_eval={       'pass': CanonicalPassK.Config(
+                                base_dir='/opt/scratch',
+                                working_dir=PosixPath('/opt/scratch/datasets/arc1concept-aug-1000'),
                                 pass_ks=(1, 2, 5, 10),
-                                ignore_label_id=-100
+                                spatial_views='all',
+                                max_views_per_input=0,
+                                per_step_acts=0,
+                                spec=ArcSpec(
+                                        max_grid=30,
+                                        vocab_pad=0,
+                                        vocab_eos=1,
+                                        vocab_color_offset=2,
+                                        puzzle_id_separator='|||'
+                                ),
+                                transform=ColorDihedral.Config(
+                                        transforms=(0, 1, 2, 3, 4, 5, 6, 7),
+                                        colors=(1, 2, 3, 4, 5, 6, 7, 8, 9),
+                                        separator='|||'
+                                ),
+                                rules=[],
+                                exclude_tasks=[],
+                                dump_per_task_path=''
                         )},
                 checkpointer=Checkpointer.Config(
                         base_dir=PosixPath('/opt/scratch/runs/arcagi1/exp000'),
@@ -261,7 +295,7 @@ ArcTrainLoop(
                 mesh_dim_model_seed='pp',
                 mesh_dim_data_seed='dp',
                 runtime=SingleProcess.Config(
-                        device='auto',
+                        device=None,
                         deterministic=False,
                         float32_matmul_precision=None
                 )

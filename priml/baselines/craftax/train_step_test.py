@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, cast, override
 
 import copy
 import math
@@ -13,6 +13,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
+from priml.baselines.craftax import train_step
 from priml.baselines.craftax.train_step import CraftaxTrainStep
 from priml.optimizers import learning_rate
 from priml.testing.fixtures import torch_compiler_isolation
@@ -359,6 +360,88 @@ def test_a_graphed_update_replays_the_eager_procedures_bit_for_bit() -> None:
         strict=True,
     ):
         assert torch.equal(mine, theirs)
+
+
+def test_a_capturable_rate_is_annealed_in_the_memory_a_graph_replays() -> None:
+    """What the graphed update needs of Adam, checked without a GPU.
+
+    Capture needs the rate and the step count as device tensors, and a replay
+    reads the rate from the memory it was captured against -- so annealing
+    must overwrite that tensor, never rebind the group's entry to a new one.
+    """
+    weight = nn.Parameter(torch.zeros(2, 3))
+    adam = torch.optim.Adam([weight], lr=0.5)
+    adam.state[weight]["step"] = torch.tensor(3.0, dtype=torch.float64)
+    train_step._make_capturable(adam.param_groups, adam.state, torch.device("cpu"))
+    group = adam.param_groups[0]
+    # `torch` types a group and a parameter's state as dict[str, Any].
+    rate = cast("object", group["lr"])
+    assert group["capturable"] is True
+    assert isinstance(rate, Tensor)
+    assert float(rate) == 0.5
+    step = cast("object", adam.state[weight]["step"])
+    assert isinstance(step, Tensor)
+    assert step.dtype == torch.float32
+    assert float(step) == 3.0
+
+    train_step._write_rate(group, 0.25)
+
+    assert group["lr"] is rate
+    assert float(rate) == 0.25
+
+
+def test_cpu_procedure_runs_eagerly() -> None:
+    step = _step()
+    called: list[bool] = []
+
+    def procedure() -> None:
+        called.append(True)
+
+    wrapped = step._procedure(procedure)
+
+    assert wrapped is procedure
+    wrapped()
+    assert called == [True]
+
+
+def test_capturable_state_moves_to_the_requested_device() -> None:
+    parameter = nn.Parameter(torch.zeros(2, 3))
+    optimizer = torch.optim.Adam([parameter], lr=0.5)
+    optimizer.state[parameter]["step"] = torch.tensor(3.0, dtype=torch.float64)
+
+    train_step._make_capturable(
+        optimizer.param_groups,
+        optimizer.state,
+        torch.device("meta"),
+    )
+
+    rate = cast("object", optimizer.param_groups[0]["lr"])
+    assert isinstance(rate, Tensor)
+    assert rate.device.type == "meta"
+    step = cast("object", optimizer.state[parameter]["step"])
+    assert isinstance(step, Tensor)
+    assert step.device.type == "meta"
+    assert step.dtype == torch.float32
+
+
+def test_a_load_recaptures_the_update_it_replaced_the_optimizer_of() -> None:
+    """A load replaces the optimizer state a captured update addresses.
+
+    So a graphed step must rebuild its update procedure on load, and keep the
+    restored optimizer capturable; replaying the old graph would step tensors
+    the step no longer holds. ``_cuda_graphs`` is set by hand because only a
+    GPU sets it, and the procedures stay eager, so no capture happens here.
+    """
+    config = _config(cuda_graphs=True)
+    config.env.view = (3, 5)
+    step = _EagerProcedures(config.copy_tree().finalize())
+    step._cuda_graphs = True
+    update = step._update_procedure
+
+    step.load_state_dict(step.state_dict())
+
+    assert step._update_procedure is not update
+    assert isinstance(step._adam.param_groups[0]["lr"], Tensor)
 
 
 class _EagerProcedures(CraftaxTrainStep):

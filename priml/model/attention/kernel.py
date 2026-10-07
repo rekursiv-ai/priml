@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import override
 
+import math
+
 from configgle import Fig
 from torch import Tensor, nn
 from torch.nn import functional
@@ -17,7 +19,11 @@ from priml.cost import (
     reduction_cost,
     traffic,
 )
-from priml.model.attention.window import causal_chunk_mask, combined_mask
+from priml.model.attention.window import (
+    causal_chunk_mask,
+    combined_mask,
+    segment_mask,
+)
 
 
 def attention_kernel_cost(
@@ -315,3 +321,148 @@ class SdpaNaive(nn.Module):
         if dropout_p > 0.0:
             attn = functional.dropout(attn, p=dropout_p)
         return torch.matmul(attn, v).movedim(-3, -2)
+
+
+class SdpaVarlen(nn.Module):
+    """Causal SDPA within packed segments under a dense mask: the portable varlen kernel.
+
+    The layout is ``SdpaFused``'s, ``[..., S, num_heads, channels_head]``, and
+    ``cu_seqlens`` bounds the segments of the flattened leading and ``S`` axes,
+    none crossing a row (:func:`~priml.model.attention.window.segment_mask`).
+    Keys and values may carry fewer heads than the queries, a divisor of
+    theirs, which SDPA groups. It runs on any device and is the reference a
+    varlen flash kernel must match, at the dense mask's ``S × S`` memory per row.
+
+    Attributes:
+      max_logit: The largest scaled ``q·k`` the mask admitted in the last
+        forward that asked for it (``record_max_logit``), detached float32;
+        None otherwise.
+
+    """
+
+    class Config(Fig["SdpaVarlen"]):
+        """No options: the segments come from ``cu_seqlens`` at call time."""
+
+        @classmethod
+        def cost(
+            cls,
+            *,
+            seq_len: int,
+            batch_size: int = 1,
+            dtype: torch.dtype | None,
+            num_heads: int,
+            channels_head: int,
+            channels_v_head: int = -1,
+            window: int = -1,
+            dropout_p: float = 0.0,
+            rows: int = -1,
+            **kwargs: object,
+        ) -> Cost:
+            """Cost the kernel from the shapes its owner hands it.
+
+            See :func:`attention_kernel_cost` for every argument.
+
+            Args:
+              seq_len: Tokens per row.
+              batch_size: Rows in this invocation.
+              dtype: Activation dtype; ``None`` is torch's default.
+              num_heads: Query heads.
+              channels_head: Width of each query/key head.
+              channels_v_head: Value width; -1 uses the query/key width.
+              window: Previous keys each query reaches, plus itself; negative is unbounded.
+              dropout_p: Attention dropout rate.
+              rows: Query rows sharing K/V, or ``-1`` to use the key count.
+              **kwargs: The rest of the owner's bus, unread.
+
+            Returns:
+              cost: Whole-invocation FLOPs and logical tensor bytes.
+
+            """
+            # A dense mask, segments or window, removes no rows or columns.
+            del kwargs, window
+            return attention_kernel_cost(
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+                num_heads=num_heads,
+                channels_head=channels_head,
+                channels_v_head=channels_v_head,
+                window=-1,
+                dropout_p=dropout_p,
+                rows=rows,
+            )
+
+    def __init__(self, config: Config) -> None:
+        del config
+        super().__init__()
+        self.max_logit: Tensor | None = None
+
+    @override
+    def forward(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        *,
+        cu_seqlens: Tensor,
+        window: int = -1,
+        is_causal: bool = True,
+        attn_mask: Tensor | None = None,
+        dropout_p: float = 0.0,
+        scale: float | None = None,
+        record_max_logit: bool = False,
+        **kwargs: object,
+    ) -> Tensor:
+        """Attend causally within each segment.
+
+        Args:
+          q: Queries ``[..., S, H, D]``.
+          k: Keys ``[..., S, H_kv, D]``; ``H_kv`` divides ``H``.
+          v: Values, shaped like ``k``.
+          cu_seqlens: Int32 segment boundaries of the flattened leading and
+            ``S`` axes.
+          window: Previous keys each query reaches, plus itself; -1 for all.
+          is_causal: Must be True: segments attend causally.
+          attn_mask: Must be None; the segments are the mask.
+          dropout_p: Must be 0.
+          scale: Logit scale; None is ``D**-0.5``.
+          record_max_logit: Set ``max_logit``; it forms the logits a second
+            time, ``H`` times the mask's memory.
+          **kwargs: The rest of the bus, unread.
+
+        Returns:
+          out: ``[..., S, H, D]``.
+
+        Raises:
+          ValueError: Non-causal attention, a mask, or dropout was asked for.
+
+        """
+        del kwargs
+        if not is_causal or attn_mask is not None or dropout_p:
+            raise ValueError("SdpaVarlen is causal and takes no mask or dropout.")
+        lead, length = q.shape[:-3], q.shape[-3]
+        mask = segment_mask(
+            cu_seqlens,
+            rows=math.prod(lead),
+            length=length,
+            window=window,
+        ).view(*lead, 1, length, length)
+        q, k, v = (t.movedim(-3, -2) for t in (q, k, v))
+        out = functional.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=mask,
+            scale=scale,
+            enable_gqa=True,
+        )
+        self.max_logit = None
+        if record_max_logit:
+            # SDPA never exposes its logits, so they are formed again.
+            with torch.no_grad():
+                keys = k.repeat_interleave(q.shape[-3] // k.shape[-3], dim=-3)
+                logit_scale = float(q.shape[-1] ** -0.5) if scale is None else scale
+                logits = q @ keys.transpose(-1, -2) * logit_scale
+                masked = logits.masked_fill(~mask, float("-inf"))
+                self.max_logit = masked.amax().float()
+        return out.movedim(-2, -3)

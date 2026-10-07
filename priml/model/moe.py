@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import KW_ONLY, field, replace
 from functools import partial
+from math import inf
 from typing import Literal, Protocol, Self, cast, override, runtime_checkable
 
 from configgle import Fig, Makeable, Makes
@@ -28,7 +29,7 @@ from priml.cost import (
     resolve_dtype,
     traffic,
 )
-from priml.lib.custom_json import ListCodec
+from priml.lib.custom_json import convert
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
@@ -555,13 +556,13 @@ class SigmoidRouter(Router):
         group_size = self.num_experts // self.n_group
         grouped = selection.view(t, self.n_group, group_size)
         # DSV3 convention: group score = sum of top-2 within the group.
-        top2 = grouped.topk(min(2, group_size), dim=-1).values
-        group_scores = top2.sum(dim=-1)
-        top_groups = group_scores.topk(self.topk_group, dim=-1).indices
+        top2 = grouped.topk(min(2, group_size)).values
+        group_scores = top2.sum(dim=2)
+        top_groups = group_scores.topk(self.topk_group).indices
         group_mask = torch.zeros_like(group_scores, dtype=torch.bool)
         group_mask.scatter_(1, top_groups, True)
-        expert_mask = group_mask.unsqueeze(-1).expand(-1, -1, group_size).reshape(t, -1)
-        return selection.masked_fill(~expert_mask, float("-inf"))
+        expert_mask = group_mask.unsqueeze(2).expand(-1, -1, group_size).reshape(t, -1)
+        return selection.masked_fill(~expert_mask, -inf)
 
 
 class MoE(nn.Module):
@@ -641,7 +642,7 @@ class MoE(nn.Module):
                 )
                 # Each expert shards intra-expert over the tp dim (its own
                 # block style handles the split alignment).
-                if isinstance(cfg, Shardable):
+                if isinstance(cfg, Shardable) and cfg.shard is None:
                     cfg.shard = "colwise"
             return super().finalize()
 
@@ -824,20 +825,22 @@ class MoE(nn.Module):
             assert isinstance(expert, nn.Module)
             shared_experts.append(expert)
         self.shared_experts = nn.ModuleList(shared_experts)
-        # Buffer (not a plain attribute) so ``.to(device)`` tracks it;
-        # non-persistent since it is recomputed every training forward and
-        # carries no learned state. The trailing assignment is routed into
-        # the buffer dict by ``nn.Module.__setattr__`` and satisfies the
-        # type checker's initialized-instance-variable check.
-        self.register_buffer("_aux_loss", torch.tensor(0.0), persistent=False)
         self._aux_loss = torch.tensor(0.0)
+
+    @property
+    def aux_loss(self) -> Tensor:
+        """Return this forward's weighted load-balancing penalty."""
+        return self._aux_loss
+
+    @override
+    def _apply(self, fn: Callable[[Tensor], Tensor], recurse: bool = True) -> Self:
+        super()._apply(fn, recurse)
+        self._aux_loss = fn(self._aux_loss)
+        return self
 
     def reset_parameters(self) -> None:
         """Initialize every parameter in place."""
-        # Sole init source for every owned tensor (meta-init audit
-        # contract): ``_aux_loss`` is runtime scratch overwritten each
-        # forward, but as a registered buffer it must still be reset here.
-        self._aux_loss.zero_()
+        self._aux_loss = self._aux_loss.new_zeros(())
         self.router.reset_parameters()
         for group in (self.experts, self.shared_experts):
             for expert in group:
@@ -857,6 +860,8 @@ class MoE(nn.Module):
             and self.router.scoring_func == "softmax"
         ):
             self._aux_loss = self._load_balance_loss(logits, indices)
+        else:
+            self._aux_loss = logits.new_zeros(())
 
         y = self._dispatch_routed(
             x_flat,
@@ -882,11 +887,11 @@ class MoE(nn.Module):
         **kwargs: object,
     ) -> Tensor:
         """Sort (token, expert) pairs by expert; dispatch contiguously."""
-        k = indices.shape[-1]
+        k = indices.shape[1]
         flat_idx = indices.reshape(-1)
         flat_w = weights.reshape(-1)
         token_ix = (
-            torch.arange(rows, device=x_flat.device).unsqueeze(-1).expand(-1, k)
+            torch.arange(rows, device=x_flat.device).unsqueeze(1).expand(-1, k)
         ).reshape(-1)
 
         order = flat_idx.argsort()
@@ -901,18 +906,18 @@ class MoE(nn.Module):
         result = unique_consecutive(sorted_expert, return_counts=True)
         active, counts = result
         offsets = torch.cumsum(counts, dim=0)
-        starts = torch.cat([offsets.new_zeros(1), offsets[:-1]], dim=0)
+        starts = torch.cat([offsets.new_zeros(1), offsets[:-1]])
 
         y = x_flat.new_zeros(x_flat.shape[0], self.channels_out)
-        for expert_id, start, count in zip(
-            ListCodec.coerce(active.tolist(), int),
-            ListCodec.coerce(starts.tolist(), int),
-            ListCodec.coerce(counts.tolist(), int),
-            strict=True,
-        ):
+        active_values = convert(active.tolist(), list[int])
+        starts_values = convert(starts.tolist(), list[int])
+        counts_values = convert(counts.tolist(), list[int])
+        for expert_index, expert_id in enumerate(active_values):
+            start = starts_values[expert_index]
+            count = counts_values[expert_index]
             end = start + count
             tok_slice = sorted_tok[start:end]
-            w_slice = sorted_w[start:end].unsqueeze(-1)
+            w_slice = sorted_w[start:end].unsqueeze(1)
             x_e = x_flat.index_select(0, tok_slice)
             expert_out = cast(Tensor, self.experts[expert_id](x_e, **kwargs))
             y.index_add_(0, tok_slice, expert_out * w_slice)
@@ -921,7 +926,7 @@ class MoE(nn.Module):
     def _load_balance_loss(self, logits: Tensor, indices: Tensor) -> Tensor:
         """Switch Transformer load-balancing loss (softmax routing only)."""
         t = logits.shape[0]
-        probs = logits.softmax(dim=-1)
+        probs = logits.softmax(dim=1)
         counts = torch.zeros(
             self.num_experts,
             device=logits.device,

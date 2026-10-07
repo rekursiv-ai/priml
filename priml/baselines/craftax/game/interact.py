@@ -22,11 +22,9 @@ from priml.baselines.craftax.game import constants, mechanics
 from priml.baselines.craftax.game.constants import (
     Achievement,
     BlockType,
-    ItemType,
 )
 from priml.baselines.craftax.game.indexing import (
     batch_rows,
-    gather_tiles,
     scatter_tiles_where,
 )
 
@@ -76,19 +74,10 @@ def interact(
         target=target,
         block=block,
         acting=acting,
+        doing=doing,
         generator=generator,
     )
-    return _damage_boss(state, block=block, acting=acting)
-
-
-def item_at(state: EnvState, position: Tensor) -> Tensor:
-    """Return the item lying on ``position`` of the player's floor, ``[envs]``."""
-    return gather_tiles(mechanics.current_items(state), position)
-
-
-def is_ladder(item: Tensor, kind: ItemType) -> Tensor:
-    """Whether ``item`` is the named ladder."""
-    return item == int(kind)
+    return _damage_boss(state, block=block, acting=acting, doing=doing)
 
 
 def _strike_whatever_stands_there(
@@ -99,15 +88,14 @@ def _strike_whatever_stands_there(
 ) -> tuple[EnvState, Tensor]:
     """Hit any creature on the faced tile, across all three classes."""
     damage = mechanics.player_damage(state) * doing[:, None]
-    yes = torch.ones(state.num_envs, dtype=torch.bool, device=state.device)
     struck = torch.zeros(state.num_envs, dtype=torch.bool, device=state.device)
     killed_monster = struck.clone()
     killed_any = struck.clone()
 
-    for field, input_mobs, mob_class, can_unlock in (
-        ("melee_mobs", state.melee_mobs, 1, yes),
-        ("passive_mobs", state.passive_mobs, 0, yes),
-        ("ranged_mobs", state.ranged_mobs, 2, yes),
+    for field, input_mobs, mob_class in (
+        ("melee_mobs", state.melee_mobs, 1),
+        ("passive_mobs", state.passive_mobs, 0),
+        ("ranged_mobs", state.ranged_mobs, 2),
     ):
         mobs, killed, hit, achievements = mechanics.attack_mob_class(
             state,
@@ -115,7 +103,7 @@ def _strike_whatever_stands_there(
             position=target,
             damage=damage,
             mob_class=mob_class,
-            can_unlock=can_unlock & doing,
+            can_unlock=doing,
         )
         setattr(state, field, mobs)
         state.achievements = torch.where(
@@ -287,12 +275,15 @@ def _gather_ground(
         ),
         eating,
     )
-    # An eaten plant restarts its growth rather than vanishing.
-    eaten_here = (state.growing_plants_positions == target[:, None, :]).all(-1)
-    state.growing_plants_age = torch.where(
-        eaten_here & eating[:, None],
-        torch.zeros_like(state.growing_plants_age),
-        state.growing_plants_age,
+    # An eaten plant restarts its growth rather than vanishing. Upstream
+    # restarts one slot, the first on this tile, or slot 0 when none tracks it.
+    rows = batch_rows(state.num_envs, state.device)
+    slot = (state.growing_plants_positions == target[:, None, :]).all(-1).int()
+    slot = slot.argmax(1)
+    state.growing_plants_age[rows, slot] = torch.where(
+        eating,
+        torch.zeros_like(state.growing_plants_age[rows, slot]),
+        state.growing_plants_age[rows, slot],
     )
     return state
 
@@ -303,6 +294,7 @@ def _open_chest(
     target: Tensor,
     block: Tensor,
     acting: Tensor,
+    doing: Tensor,
     generator: torch.Generator | None,
 ) -> EnvState:
     """Empty a chest into the inventory and leave bare path behind."""
@@ -310,7 +302,11 @@ def _open_chest(
     state = _add_chest_loot(state, opening=opening, generator=generator)
     state = _replace_block(state, target, int(BlockType.PATH), opening)
     rows = batch_rows(state.num_envs, state.device)
-    state.chests_opened[rows, state.player_level.long()] |= opening
+    # Upstream sets this flag outside its in-bounds gate, so a chest read past
+    # the map edge marks the floor opened, spending its first-chest bow or book.
+    state.chests_opened[rows, state.player_level.long()] |= doing & (
+        block == int(BlockType.CHEST)
+    )
     state.achievements = mechanics.unlock_achievement(
         state,
         torch.full(
@@ -380,23 +376,13 @@ def _add_chest_loot(
         + 1
     )
 
-    inventory.torches += (torch_found & opening).to(torch.int32) * torch_amount
-    inventory.coal += (ore_found & (ore_types == 0) & opening).to(
-        torch.int32,
-    ) * coal_amount
-    inventory.iron += (ore_found & (ore_types == 1) & opening).to(
-        torch.int32,
-    ) * iron_amount
-    inventory.diamond += (ore_found & (ore_types == 2) & opening).to(
-        torch.int32,
-    ) * gem_amount
-    inventory.sapphire += (ore_found & (ore_types == 3) & opening).to(
-        torch.int32,
-    ) * gem_amount
-    inventory.ruby += (ore_found & (ore_types == 4) & opening).to(
-        torch.int32,
-    ) * gem_amount
-    inventory.arrows += (arrows_found & opening).to(torch.int32) * arrows_amount
+    inventory.torches += (torch_found & opening) * torch_amount
+    inventory.coal += (ore_found & (ore_types == 0) & opening) * coal_amount
+    inventory.iron += (ore_found & (ore_types == 1) & opening) * iron_amount
+    inventory.diamond += (ore_found & (ore_types == 2) & opening) * gem_amount
+    inventory.sapphire += (ore_found & (ore_types == 3) & opening) * gem_amount
+    inventory.ruby += (ore_found & (ore_types == 4) & opening) * gem_amount
+    inventory.arrows += (arrows_found & opening) * arrows_amount
 
     pickaxe_found = tool_found & (tool_ids == 0) & opening
     inventory.pickaxe = torch.where(
@@ -411,7 +397,7 @@ def _add_chest_loot(
         inventory.sword,
     )
 
-    potion_loot = (potion_found & opening).to(torch.int32) * potion_amount
+    potion_loot = (potion_found & opening) * potion_amount
     inventory.potions[rows, potion_indices] += potion_loot
 
     first_chest = opening & ~state.chests_opened[rows, levels]
@@ -422,14 +408,22 @@ def _add_chest_loot(
         inventory.bow,
     )
     book_reward = first_chest & ((levels == 3) | (levels == 4))
-    inventory.books += book_reward.to(torch.int32)
+    inventory.books += book_reward
     return state
 
 
-def _damage_boss(state: EnvState, *, block: Tensor, acting: Tensor) -> EnvState:
+def _damage_boss(
+    state: EnvState,
+    *,
+    block: Tensor,
+    acting: Tensor,
+    doing: Tensor,
+) -> EnvState:
     """Wound the necromancer, but only while its summons are dead."""
+    # Upstream advances the fight outside its in-bounds gate, as it does the
+    # chest flag; only the achievement below waits for an in-bounds blow.
     hitting = (
-        acting
+        doing
         & (block == int(BlockType.NECROMANCER))
         & mechanics.is_boss_vulnerable(state)
         & mechanics.is_fighting_boss(state)
@@ -452,7 +446,7 @@ def _damage_boss(state: EnvState, *, block: Tensor, acting: Tensor) -> EnvState:
             int(Achievement.DAMAGE_NECROMANCER),
             device=state.device,
         ),
-        hitting,
+        hitting & acting,
     )
     return state
 

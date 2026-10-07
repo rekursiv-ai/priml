@@ -251,6 +251,9 @@ MAX_MOB_PROJECTILES: Final = 3
 MAX_PLAYER_PROJECTILES: Final = 3
 MAX_GROWING_PLANTS: Final = 10
 
+PLANT_LEVEL: Final = 0
+"""The one floor plants grow on: saplings need grass, which only the overworld has."""
+
 MONSTERS_KILLED_TO_CLEAR_LEVEL: Final = 8
 """Kills required before a floor's ladder down unblocks."""
 
@@ -277,10 +280,10 @@ REWARD_CEILING: Final = 226.0
 def _directions() -> Tensor:
     """Map every action to the step it moves the player."""
     steps = torch.zeros((len(Action), 2), dtype=torch.int32)
-    steps[Action.LEFT] = torch.tensor([0, -1], dtype=torch.int32)
-    steps[Action.RIGHT] = torch.tensor([0, 1], dtype=torch.int32)
-    steps[Action.UP] = torch.tensor([-1, 0], dtype=torch.int32)
-    steps[Action.DOWN] = torch.tensor([1, 0], dtype=torch.int32)
+    steps[Action.LEFT] = torch.tensor([0, -1])
+    steps[Action.RIGHT] = torch.tensor([0, 1])
+    steps[Action.UP] = torch.tensor([-1, 0])
+    steps[Action.DOWN] = torch.tensor([1, 0])
     return steps
 
 
@@ -408,7 +411,11 @@ MOB_COLLIDES_WITH: Final = torch.tensor(
     ],
     dtype=torch.bool,
 )
-"""Per floor and mob class, whether ``(path, water, lava)`` blocks movement."""
+"""Per species and mob class, whether ``(path, water, lava)`` blocks movement.
+
+Upstream labels these rows by floor but indexes them by species, and the two
+differ: a floor-1 cow is species 2, so lava stops it.
+"""
 
 PLAYER_COLLIDES_WITH: Final = torch.tensor(_LAND)
 """Whether ``(path, water, lava)`` blocks the player, who walks like the land mobs."""
@@ -442,7 +449,7 @@ MOB_HEALTH: Final = torch.tensor(
     ],
     dtype=torch.float32,
 )
-"""Per floor and mob class, the health a freshly spawned creature has."""
+"""Per species and mob class, the health a freshly spawned creature has."""
 
 MOB_DEFENSE: Final = torch.tensor(
     [
@@ -458,7 +465,11 @@ MOB_DEFENSE: Final = torch.tensor(
     ],
     dtype=torch.float32,
 )
-"""Per floor and mob class, the fraction of ``(physical, fire, ice)`` resisted."""
+"""Per species and mob class, the fraction of ``(physical, fire, ice)`` resisted.
+
+Indexed by the struck creature's species, never the floor: the boss floor's
+own row resists nothing, but the creatures it summons keep their armour.
+"""
 
 RANGED_MOB_PROJECTILE: Final = torch.tensor(
     [
@@ -599,12 +610,12 @@ MOB_ACHIEVEMENT: Final = torch.tensor(
 
 def _torch_light_map() -> Tensor:
     """Build the radial falloff a placed torch casts on its 9x9 neighborhood."""
-    offsets = (torch.arange(9, dtype=torch.int32) - 4).abs()
+    offsets = (torch.arange(9) - 4).abs()
     squared = offsets[:, None] ** 2 + offsets[None, :] ** 2
     distance = squared.to(torch.float32).sqrt()
     # Upstream constants.py:593 lowers division by five to reciprocal multiplication.
     scaled = distance * 0.2
-    return (1.0 - scaled).clamp(0.0, 1.0)
+    return (1.0 - scaled).clamp_min(0.0)
 
 
 TORCH_LIGHT_MAP: Final = _torch_light_map()

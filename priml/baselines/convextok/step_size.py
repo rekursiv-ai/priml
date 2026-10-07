@@ -31,7 +31,7 @@ def singular_value_probe(size: int) -> Tensor:
       probe: float64 draws, on the CPU.
 
     """
-    out = np.empty(size, dtype=np.float64)
+    out = np.empty(size)
     filled = 0
     for pairs in _polar_pairs():
         take = min(len(pairs), size - filled)
@@ -56,7 +56,8 @@ def initial_step_size(
       max_iterations: Most power-iteration steps.
 
     Returns:
-      step_size: ``0.998 / sigma_max``.
+      step_size: ``0.998 / sigma_max``; ``0.998`` for a zero matrix, whose
+        primal and dual steps decouple, so the unit operator's step is stable.
 
     """
     program = scaled.program
@@ -68,7 +69,8 @@ def initial_step_size(
         sigma_squared = torch.dot(q, z)
         if torch.linalg.vector_norm(z - sigma_squared * q).item() < tolerance:
             break
-    return 0.998 / sigma_squared.sqrt().item()
+    sigma = sigma_squared.sqrt().item()
+    return 0.998 / sigma if sigma > 0 else 0.998
 
 
 def _polar_pairs() -> Iterator[np.ndarray]:
@@ -77,10 +79,8 @@ def _polar_pairs() -> Iterator[np.ndarray]:
     state.seed(1)
     while True:
         # Each attempt takes four 32-bit words: two per canonical double, low word first.
-        words = state.randint(0, 1 << 32, size=4 * 65_536, dtype=np.uint64).astype(
-            np.float64,
-        )
-        words = words.reshape(-1, 2, 2)
+        words = state.randint(1 << 32, size=4 * 65_536)
+        words = words.reshape(words.size // 4, 2, 2)
         canonical = (
             words[..., 0] + words[..., 1] * 4294967296.0
         ) / 18446744073709551616.0
@@ -93,10 +93,9 @@ def _polar_pairs() -> Iterator[np.ndarray]:
         x, y, radius = x[kept], y[kept], radius[kept]
         logs = np.array(
             [math.log(value) for value in cast("list[float]", radius.tolist())],
-            dtype=np.float64,
         )
         scale = np.sqrt(-2.0 * logs / radius)
-        pairs = np.empty(2 * len(radius), dtype=np.float64)
+        pairs = np.empty(2 * len(radius))
         pairs[0::2] = y * scale
         pairs[1::2] = x * scale
         yield pairs

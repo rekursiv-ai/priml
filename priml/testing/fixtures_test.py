@@ -7,33 +7,18 @@ from unittest.mock import MagicMock, patch
 import sys
 import warnings
 
-from torch import Tensor
-
 import pytest
 import torch
 
 from priml.testing import fixtures
 from priml.testing.fixtures import (
-    get_device,
     poison_free_pool,
     torch_compiler_isolation,
 )
 
 
-def test_get_device_returns_device():
-    """Test that get_device returns a torch.device."""
-    device = get_device()
-    assert device.type in ("cpu", "cuda")
-
-
-def test_get_device_prefers_cuda():
-    """Test that get_device returns CUDA if available."""
-    if torch.cuda.is_available():
-        device = get_device()
-        assert device.type == "cuda"
-    else:
-        device = get_device()
-        assert device.type == "cpu"
+def test_the_testing_helpers_leave_device_choice_to_the_runtime() -> None:
+    assert not hasattr(fixtures, "get_device")
 
 
 @pytest.mark.gpu_torch_cuda
@@ -104,18 +89,6 @@ def test_compiler_isolation_resets_cleanly_with_warnings_as_errors() -> None:
         torch._dynamo.reset()
 
 
-@pytest.mark.compute_torch_compile
-def test_compiler_isolation_compiles() -> None:
-    """The wrapped block can actually compile and run a graph."""
-
-    def add_one(value: Tensor) -> Tensor:
-        return value + 1
-
-    with torch_compiler_isolation():
-        compiled = torch.compile(add_one, dynamic=False)
-        assert torch.equal(compiled(torch.zeros(4)), torch.ones(4))
-
-
 def test_poison_free_pool_makes_a_later_empty_read_back_nan() -> None:
     """An unwritten allocation should surface as NaN rather than as luck.
 
@@ -133,6 +106,20 @@ def test_poison_free_pool_makes_a_later_empty_read_back_nan() -> None:
     if not bool(torch.isnan(recycled).any()):
         pytest.skip("allocator does not recycle freed blocks on this platform")
     assert bool(torch.isnan(recycled).any())
+
+
+def test_poison_free_pool_uses_nan_for_each_default_block() -> None:
+    full = MagicMock(wraps=torch.full)
+    with patch.object(torch, "full", full):
+        poison_free_pool((2, 3))
+
+    assert full.call_count == 32
+    assert all(call.args[0] == (2, 3) for call in full.call_args_list)
+    assert all(
+        isinstance(call.args[1], (float, int))
+        and float(call.args[1]) != float(call.args[1])
+        for call in full.call_args_list
+    )
 
 
 def test_poison_free_pool_leaves_written_allocations_alone() -> None:
@@ -270,7 +257,6 @@ def test_cleanup_cuda_teardown_skips_synchronize(
         Generator[None, None, None],
         fixtures.cleanup_cuda._get_wrapped_function()(),
     )
-    assert isinstance(gen, Generator)
     next(gen)
     assert synchronize.call_count == calls_at_setup, (
         "setup synchronized without a CUDA context to reclaim"

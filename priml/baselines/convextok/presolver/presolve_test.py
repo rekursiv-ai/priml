@@ -14,24 +14,37 @@ the compiled code asks for it: that every kernel compiles and still matches PSLP
 and that a kernel keeps a single specialization.
 """
 
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Final, cast
 
 import json
 
+from numpy.typing import NDArray
+
 import numpy as np
 import pytest
 import torch
 
-from priml.baselines.convextok.presolver import core
-from priml.baselines.convextok.presolver.numba_api import Dispatcher
+from priml.baselines.convextok.presolver import bulk, core
+from priml.baselines.convextok.presolver.custom_typings import IBuf
+from priml.baselines.convextok.presolver.numba_api import (
+    Dispatcher,
+    get_num_threads,
+    set_num_threads,
+)
 from priml.baselines.convextok.presolver.presolve import (
     Presolved,
+    _fast,
+    _kernel_array,
+    _positions_overflow,
+    _trivial,
+    new_state,
     presolve,
 )
 from priml.baselines.convextok.program import LinearProgram, build_program
-from priml.lib.custom_json import DictCodec, IntCodec, ListCodec
+from priml.lib.custom_json import convert
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -58,10 +71,33 @@ def test_presolve_and_postsolve_match_pslp_on_fuzz_program(path: Path) -> None:
     _assert_matches_pslp(path)
 
 
+@pytest.fixture
+def two_numba_threads() -> Iterator[None]:
+    """Run the parallel kernels on two threads, leaving torch's thread count alone.
+
+    Numba sizes its pool to every core, and on these few-row programs the
+    parallel kernels then spend their time synchronizing threads: the compiled
+    sweep below took 2.2-4.4 s at 128 threads and 0.13 s at two (measured on a
+    loaded 128-core host). Two still run each ``prange`` concurrently, and the
+    kernels' results do not depend on the count -- the goldens check that.
+    """
+    # Read first: launching Numba's OpenMP pool, which ``get_num_threads`` does,
+    # raises the process's OpenMP thread count to every core, and torch reads
+    # that count as its own. Unrestored, every later test in the worker ran
+    # torch on 128 threads (measured: a 0.6 s CPU rollout test took 42 s).
+    torch_threads = torch.get_num_threads()
+    numba_threads = get_num_threads()
+    set_num_threads(min(2, numba_threads))
+    yield
+    set_num_threads(numba_threads)
+    torch.set_num_threads(torch_threads)
+
+
 # Compiled: the first presolve in a process JIT-compiles every kernel it reaches,
 # about 45 s on x86 with a cold Numba cache, so this is one test, not one per program.
 @pytest.mark.compute_large_fixture
 @pytest.mark.parametrize("kernels", ["compiled"], indirect=True)
+@pytest.mark.usefixtures("two_numba_threads")
 def test_compiled_kernels_match_pslp_on_every_program() -> None:
     """Every kernel compiles, and the compiled presolve still matches PSLP.
 
@@ -76,6 +112,7 @@ def test_compiled_kernels_match_pslp_on_every_program() -> None:
 
 @pytest.mark.compute_large_fixture
 @pytest.mark.parametrize("kernels", ["compiled"], indirect=True)
+@pytest.mark.usefixtures("two_numba_threads")
 def test_index_dtypes_share_one_kernel_specialization() -> None:
     # A second specialization of a cached kernel can segfault a later process.
     program = fixture_program()
@@ -86,7 +123,9 @@ def test_index_dtypes_share_one_kernel_specialization() -> None:
     )
     narrow_result, wide_result = presolve(program, _CPU), presolve(wide, _CPU)
     assert torch.equal(narrow_result.program.values, wide_result.program.values)
-    kernel = core.new_core
+    # ``new_core`` is the Python entry that registers the struct proxies first;
+    # the compiled kernel behind it is ``_new_core``.
+    kernel = core._new_core
     assert isinstance(kernel, Dispatcher)
     assert len(kernel.signatures) == 1
 
@@ -109,6 +148,198 @@ def test_postsolve_rejects_a_point_of_the_wrong_size() -> None:
     wrong = torch.zeros(presolved.program.num_columns + 1, dtype=torch.float64)
     with pytest.raises(ValueError, match="reduced columns"):
         presolved.postsolve(wrong)
+
+
+def test_postsolve_converts_the_primal_to_float64(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    presolved = presolve(fixture_program(), _CPU)
+    seen_dtypes: list[np.dtype[np.float64]] = []
+    postsolve_primal = core.postsolve_primal
+
+    def record_dtype(
+        state: core.Core,
+        primal: NDArray[np.float64],
+        num_columns: int,
+    ) -> NDArray[np.float64]:
+        seen_dtypes.append(primal.dtype)
+        return postsolve_primal(state, primal, num_columns)
+
+    monkeypatch.setattr(core, "postsolve_primal", record_dtype)
+    result = presolved.postsolve(
+        torch.zeros(presolved.program.num_columns, dtype=torch.float32),
+    )
+    assert seen_dtypes == [np.dtype(np.float64)]
+    assert result.dtype == torch.float64
+
+
+def test_kernel_arrays_have_requested_dtype_and_contiguous_layout() -> None:
+    tensor = torch.tensor([[1, 2], [3, 4]], dtype=torch.int64).T
+    result = _kernel_array(tensor, torch.int32)
+    assert result.dtype == np.dtype(np.int32)
+    assert result.flags.c_contiguous
+    assert np.array_equal(result, np.array([[1, 3], [2, 4]], dtype=np.int32))
+
+
+def test_new_state_converts_all_kernel_arrays_to_fixed_dtypes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    program = fixture_program()
+    mistyped = replace(
+        program,
+        values=program.values.float(),
+        col_indices=program.col_indices.long(),
+        crow_indices=program.crow_indices.long(),
+        row_lower=program.row_lower.float(),
+        row_upper=program.row_upper.float(),
+        objective=program.objective.float(),
+        lower=program.lower.float(),
+        upper=program.upper.float(),
+    )
+    observed_dtypes: list[tuple[object, ...]] = []
+    new_core = core.new_core
+
+    def record_new_core(
+        csr: tuple[NDArray[np.float64], NDArray[np.int32], NDArray[np.int32]],
+        n_cols: int,
+        sides: tuple[NDArray[np.float64], NDArray[np.float64]],
+        bounds: tuple[NDArray[np.float64], NDArray[np.float64]],
+        objective: NDArray[np.float64],
+    ) -> core.Core:
+        observed_dtypes.append(
+            tuple(array.dtype for array in (*csr, *sides, *bounds, objective)),
+        )
+        return new_core(csr, n_cols, sides, bounds, objective)
+
+    monkeypatch.setattr(core, "new_core", record_new_core)
+    state = new_state(mistyped, _CPU)
+    assert observed_dtypes == [
+        (
+            np.dtype(np.float64),
+            np.dtype(np.int32),
+            np.dtype(np.int32),
+            np.dtype(np.float64),
+            np.dtype(np.float64),
+            np.dtype(np.float64),
+            np.dtype(np.float64),
+            np.dtype(np.float64),
+        ),
+    ]
+    fields = dict(zip(core.SNAPSHOT_FIELDS, core.snapshot(state), strict=True))
+    for name in ("A_x", "lhs", "rhs", "lb", "ub", "c"):
+        assert np.asarray(fields[name]).dtype == np.dtype(np.float64), name
+    for name in ("A_i", "A_start", "A_end"):
+        assert np.asarray(fields[name]).dtype == np.dtype(np.int32), name
+
+
+def test_position_overflow_check_includes_exact_largest_valid_size() -> None:
+    assert not _positions_overflow(1, 536_870_911, 1)
+    assert _positions_overflow(1, 536_870_911, 2)
+
+
+def test_trivial_phase_finishes_after_singleton_rows_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    _stub_trivial_core(monkeypatch, events)
+    list(_trivial(new_state(fixture_program(), _CPU)))
+    assert events == [
+        "close_bounds",
+        "empty_cols",
+        "simple_dual",
+        "ston_rows",
+        "empty_rows",
+        "empty_cols",
+    ]
+
+
+def test_fast_phase_finishes_cleanup_after_doubleton_pass_stalls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    _stub_trivial_core(monkeypatch, events)
+
+    def record_ston_cols(state: core.Core) -> None:
+        del state
+        events.append("ston_cols")
+
+    def has_doubletons(state: core.Core) -> bool:
+        del state
+        return True
+
+    monkeypatch.setattr(core, "remove_ston_cols", record_ston_cols)
+    monkeypatch.setattr(core, "dton_pending", has_doubletons)
+
+    def doubleton_pass(state: core.Core, max_shift: int) -> int:
+        del state
+        events.append(f"doubleton:{max_shift}")
+        return core.UNCHANGED
+
+    monkeypatch.setattr(core, "remove_dton_eq_rows_pass", doubleton_pass)
+    list(_fast(new_state(fixture_program(), _CPU)))
+    assert events == [
+        "ston_cols",
+        "close_bounds",
+        "empty_cols",
+        "simple_dual",
+        "ston_rows",
+        "empty_rows",
+        "empty_cols",
+        "doubleton:10",
+        "close_bounds",
+        "empty_cols",
+        "simple_dual",
+        "ston_rows",
+        "empty_rows",
+        "empty_cols",
+    ]
+
+
+def test_presolve_forwards_the_requested_device_to_every_sort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transpose_devices: list[object] = []
+    sort_devices: list[object] = []
+    column_flags: list[object] = []
+    transpose_slots = bulk.transpose_slots
+    sort_rows = bulk.sort_rows
+    parallel_hashes = core.parallel_hashes
+
+    def record_transpose_device(
+        cols: NDArray[np.int32],
+        starts: NDArray[np.int32],
+        ends: NDArray[np.int32],
+        n_cols: int,
+        device: torch.device,
+    ) -> tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.int32], int]:
+        transpose_devices.append(device)
+        return transpose_slots(cols, starts, ends, n_cols, device)
+
+    def record_sort_device(
+        active: NDArray[np.int32],
+        sparsity: NDArray[np.int32],
+        coeff: NDArray[np.int32],
+        device: torch.device,
+    ) -> NDArray[np.int32]:
+        sort_devices.append(device)
+        return sort_rows(active, sparsity, coeff, device)
+
+    def record_parallel_hashes(
+        state: core.Core,
+        columns: bool,
+    ) -> tuple[IBuf, IBuf, IBuf]:
+        column_flags.append(columns)
+        return parallel_hashes(state, columns)
+
+    monkeypatch.setattr(bulk, "transpose_slots", record_transpose_device)
+    monkeypatch.setattr(bulk, "sort_rows", record_sort_device)
+    monkeypatch.setattr(core, "parallel_hashes", record_parallel_hashes)
+    presolve(fixture_program(), _CPU)
+    assert transpose_devices == [_CPU]
+    assert len(sort_devices) >= 2
+    assert all(device == _CPU for device in sort_devices)
+    assert set(column_flags) == {False, True}
+    assert all(type(columns) is bool for columns in column_flags)
 
 
 def test_infeasible_program_raises() -> None:
@@ -156,17 +387,13 @@ def fixture_program() -> LinearProgram:
     return build_program(
         dict(
             zip(
-                ListCodec.coerce(pretokens.get("pretokens"), str, default=None),
-                ListCodec.coerce(pretokens.get("frequencies"), int, default=None),
+                convert(pretokens.get("pretokens"), list[str], default=[]),
+                convert(pretokens.get("frequencies"), list[int], default=[]),
                 strict=True,
             ),
         ),
-        ListCodec.coerce(
-            _read_json("candidates.json").get("tokens"),
-            str,
-            default=None,
-        ),
-        budget=IntCodec.coerce(_read_json("corpus.json").get("budget"), default=None),
+        convert(_read_json("candidates.json").get("tokens"), list[str], default=[]),
+        budget=convert(_read_json("corpus.json").get("budget"), int, default=0),
     ).program
 
 
@@ -229,7 +456,39 @@ def _npz(path: Path) -> np.lib.npyio.NpzFile:
 
 def _read_json(name: str) -> dict[str, object]:
     raw = cast(object, json.loads((_TESTDATA / name).read_text()))
-    return dict(DictCodec.coerce(raw, default=None))
+    return dict(convert(raw, dict[str, object]))
+
+
+def _stub_trivial_core(
+    monkeypatch: pytest.MonkeyPatch,
+    events: list[str],
+) -> None:
+    def record_close_bounds(state: core.Core) -> None:
+        del state
+        events.append("close_bounds")
+
+    def record_empty_cols(state: core.Core) -> None:
+        del state
+        events.append("empty_cols")
+
+    def record_simple_dual(state: core.Core) -> None:
+        del state
+        events.append("simple_dual")
+
+    def stop_ston_rows(state: core.Core) -> int:
+        del state
+        events.append("ston_rows")
+        return core.UNCHANGED
+
+    def record_empty_rows(state: core.Core) -> None:
+        del state
+        events.append("empty_rows")
+
+    monkeypatch.setattr(core, "remove_variables_with_close_bounds", record_close_bounds)
+    monkeypatch.setattr(core, "remove_empty_cols", record_empty_cols)
+    monkeypatch.setattr(core, "simple_dual_fix", record_simple_dual)
+    monkeypatch.setattr(core, "remove_ston_rows", stop_ston_rows)
+    monkeypatch.setattr(core, "remove_empty_rows", record_empty_rows)
 
 
 if __name__ == "__main__":

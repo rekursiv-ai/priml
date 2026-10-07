@@ -267,17 +267,28 @@ def test_exploration_never_falls_below_its_floor() -> None:
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
-    [("total_updates", 0), ("decay_fraction", 0.0), ("decay_fraction", 1.5)],
+    ("field", "value", "message"),
+    [
+        ("total_updates", 0, "total_updates must be positive"),
+        ("decay_fraction", 0.0, "decay_fraction must be in (0, 1]"),
+        ("decay_fraction", 1.5, "decay_fraction must be in (0, 1]"),
+    ],
 )
-def test_an_invalid_schedule_is_refused(field: str, value: float) -> None:
+def test_an_invalid_schedule_is_refused(field: str, value: float, message: str) -> None:
     total_updates, decay_fraction = 100, 0.1
     if field == "total_updates":
         total_updates = int(value)
     else:
         decay_fraction = value
-    with pytest.raises(ValueError, match="must"):
+    with pytest.raises(ValueError, check=lambda error: str(error) == message):
         epsilon_at(0, total_updates=total_updates, decay_fraction=decay_fraction)
+
+
+def test_schedule_accepts_one_update_and_full_run_decay() -> None:
+    assert epsilon_at(1, total_updates=1) == pytest.approx(0.005)
+    assert epsilon_at(100, total_updates=100, decay_fraction=1.0) == pytest.approx(
+        0.005,
+    )
 
 
 if __name__ == "__main__":

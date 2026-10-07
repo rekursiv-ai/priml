@@ -6,10 +6,12 @@ from dataclasses import fields
 from typing import TYPE_CHECKING, Final, cast
 
 import functools
+import gc
 import importlib
 import inspect
 import math
 import pathlib
+import weakref
 
 from configgle import Fig
 
@@ -21,6 +23,11 @@ from priml.cost import (
     MEASURES,
     Cost,
     Report,
+    _column_order,
+    _div,
+    _grid,
+    _kind,
+    _si,
     cost,
     elementwise_cost,
     intensity,
@@ -73,14 +80,25 @@ def test_full_key_reads_an_integer_and_a_missing_cell_is_zero() -> None:
 
 @pytest.mark.parametrize("value", [1.5, True, -1])
 def test_cost_rejects_invalid_cells(value: object) -> None:
-    with pytest.raises((TypeError, ValueError), match="cell"):
+    expected = (
+        f"cell must be nonnegative; got {value}."
+        if value == -1
+        else f"cell must be an integer; got {value!r}."
+    )
+    with pytest.raises((TypeError, ValueError)) as exc_info:
         Cost(cells={("flops", "primal", "matmul", BF): cast(int, value)})
+    assert str(exc_info.value) == expected
 
 
 @pytest.mark.parametrize("field", ["params", "params_active", "bytes_state"])
 @pytest.mark.parametrize("value", [1.5, True, -1])
 def test_cost_rejects_invalid_owned_counts(field: str, value: object) -> None:
-    with pytest.raises((TypeError, ValueError), match=field):
+    expected = (
+        f"{field} must be nonnegative; got {value}."
+        if value == -1
+        else f"{field} must be an integer; got {value!r}."
+    )
+    with pytest.raises((TypeError, ValueError)) as exc_info:
         (
             Cost(params=cast(int, value))
             if field == "params"
@@ -88,6 +106,7 @@ def test_cost_rejects_invalid_owned_counts(field: str, value: object) -> None:
             if field == "params_active"
             else Cost(bytes_state=cast(int, value))
         )
+    assert str(exc_info.value) == expected
 
 
 def test_partial_keys_slice_and_drop_the_fixed_leading_axes() -> None:
@@ -115,6 +134,34 @@ def test_an_unknown_axis_value_is_rejected_by_name() -> None:
         _ = _t()["gemm"]
 
 
+def test_an_empty_table_still_rejects_an_unknown_axis_value() -> None:
+    with pytest.raises(KeyError, match="'gemm' is not a measure"):
+        _ = Cost()["gemm"]
+    with pytest.raises(KeyError, match="'gemm' is not a measure"):
+        _ = Report()["gemm"]
+
+
+def test_an_empty_table_answers_by_the_axes_it_was_asked() -> None:
+    assert Cost()["flops", "primal", "matmul", BF] == 0
+    assert Cost()["flops", "primal"] == Cost()
+    assert Report()["primal", "matmul", BF] == 0.0
+    assert Report()["primal"] == Report()
+
+
+def test_one_axis_named_twice_is_rejected() -> None:
+    with pytest.raises(KeyError, match="'adjoint' names the phase axis twice"):
+        _ = _t()["primal", "adjoint"]
+
+
+def test_missing_axis_error_names_the_requested_axis() -> None:
+    partial = Cost(cells={("flops", "primal", "matmul"): 1})
+
+    with pytest.raises(KeyError) as exc_info:
+        _ = partial[torch.float64]
+
+    assert exc_info.value.args == ("torch.float64 names no axis of a 3-axis table.",)
+
+
 def test_a_dtype_may_be_named_by_string_or_alias() -> None:
     t = _t()
     assert t["flops", "primal", "matmul", "bfloat16"] == 60
@@ -126,10 +173,12 @@ def test_a_dtype_may_be_named_by_string_or_alias() -> None:
 def test_cost_has_only_execution_measures() -> None:
     c = Cost(cells={("flops", "primal", "matmul", BF): 60})
     assert MEASURES == ("flops", "bytes")
-    with pytest.raises(KeyError, match="intensity"):
+    with pytest.raises(KeyError, match="intensity") as exc_info:
         _ = c["intensity"]
-    with pytest.raises(ValueError, match="reporting intensity"):
+    assert exc_info.value.args == ("'intensity' is a reporting-only measure",)
+    with pytest.raises(ValueError, match="reporting intensity") as exc_info:
         Cost(cells={("intensity", "primal", "matmul", BF): 1})
+    assert str(exc_info.value) == ("Cost cells cannot contain reporting intensity.")
 
 
 def test_intensity_is_a_separate_float_reporting_table() -> None:
@@ -143,7 +192,6 @@ def test_intensity_is_a_separate_float_reporting_table() -> None:
         },
     )
     ratio = intensity(c)
-    assert isinstance(ratio, Report)
     assert ratio["primal", "matmul", BF] == 15
     assert ratio["matmul", BF].cells == {
         ("primal",): 15.0,
@@ -152,6 +200,13 @@ def test_intensity_is_a_separate_float_reporting_table() -> None:
     assert ratio["primal", "selection", I64] == 0.0
     assert all(isinstance(value, float) for value in ratio.cells.values())
     assert intensity(Cost())["primal", "matmul", BF] == 0.0
+
+
+def test_intensity_of_work_without_traffic_is_infinite() -> None:
+    result = intensity(
+        Cost(cells={("flops", "primal", "sort", BF): 5}),
+    )
+    assert result["primal", "sort", BF] == math.inf
 
 
 def test_only_keeps_one_axis_value_without_dropping_the_axis() -> None:
@@ -176,6 +231,16 @@ def test_relabel_moves_cells_to_another_axis_value() -> None:
     assert frozen["flops", "adjoint", "matmul", BF] == 60
     assert frozen["flops", "adjoint", "selection", I64] == 0
     assert frozen.params == 0
+
+
+def test_empty_cost_only_and_relabel_still_validate_axis_names() -> None:
+    for transform in (Cost.only, Cost.relabel):
+        with pytest.raises(KeyError) as exc_info:
+            transform(Cost(), "gemm")
+
+        assert exc_info.value.args == (
+            "'gemm' is not a measure, phase, kernel, dtype or device.",
+        )
 
 
 def test_sum_totals_every_remaining_cell() -> None:
@@ -218,12 +283,18 @@ def test_cost_add_sums_cells_and_ownership() -> None:
     a = Cost(
         cells={("flops", "primal", "matmul", F32): 1},
         params=3,
+        params_active=2,
         bytes_state=7,
     )
-    b = Cost(cells={("flops", "primal", "matmul", F32): 10}, params=4)
+    b = Cost(
+        cells={("flops", "primal", "matmul", F32): 10},
+        params=4,
+        params_active=3,
+    )
     assert a + b == Cost(
         cells={("flops", "primal", "matmul", F32): 11},
         params=7,
+        params_active=5,
         bytes_state=7,
     )
 
@@ -299,8 +370,11 @@ def test_matmul_cost_dequantizes_once_per_invocation_not_per_row() -> None:
 
 
 def test_matmul_cost_rejects_dequant_without_a_packed_weight() -> None:
-    with pytest.raises(ValueError, match="weight_bytes"):
+    with pytest.raises(ValueError, match="dequant_flops") as exc_info:
         matmul_cost(channels_in=2, channels_out=3, dequant_flops=1)
+    assert str(exc_info.value) == (
+        "dequant_flops needs a packed matrix; set weight_bytes."
+    )
 
 
 def test_packed_weight_moves_decode_toward_the_memory_roofline() -> None:
@@ -343,6 +417,7 @@ def test_elementwise_and_reduction_costs_carry_the_dtype() -> None:
     assert ew["bytes", "primal", "elementwise", BF] == 2 * (4 * 10 + 3)
     assert ew["bytes", "adjoint", "elementwise", BF] == 2 * (4 * 15 + 4 * 3 + 3)
     assert ew["bytes", "adjoint", "reduction", BF] == 2 * (4 * 3 + 3)
+    assert ew.params == ew.params_active == 3
     red = reduction_cost(input_elements=12, output_groups=3, dtype=I64)
     assert red["flops", "primal", "reduction", I64] == 9
     assert red["bytes", "primal", "reduction", I64] == 8 * 15
@@ -378,6 +453,19 @@ def test_matmul_cost_adjoint_is_twice_primal_in_the_matmul_cells() -> None:
     )
 
 
+def test_elementwise_default_channel_count_is_zero() -> None:
+    cost = elementwise_cost(primal=1, adjoint=2, dtype=BF)
+    assert cost["bytes", "primal", "elementwise", BF] == 0
+    assert cost["bytes", "adjoint", "elementwise", BF] == 0
+
+
+def test_elementwise_rejects_zero_rows() -> None:
+    with pytest.raises(ValueError, match="rows must be at least one\\.") as exc_info:
+        elementwise_cost(primal=0, adjoint=0, rows=0)
+
+    assert exc_info.value.args == ("rows must be at least one.",)
+
+
 def test_elementwise_explicit_operand_geometry_is_independent_of_flops() -> None:
     c = elementwise_cost(
         primal=1,
@@ -392,6 +480,13 @@ def test_elementwise_explicit_operand_geometry_is_independent_of_flops() -> None
     assert c["bytes", "primal", "elementwise", BF] == 2 * 3 * 3
     assert c["bytes", "adjoint", "elementwise", BF] == 2 * 3 * 5
     assert c["flops", "primal", "elementwise", BF] == 1
+
+
+def test_traffic_keeps_the_requested_dtype_and_prices_its_itemsize() -> None:
+    result = traffic("primal", "selection", elements=5, dtype=BF, flops=2)
+    assert result["flops", "primal", "selection", BF] == 2
+    assert result["bytes", "primal", "selection", BF] == 10
+    assert result["bytes", "primal", "selection", F32] == 0
 
 
 def test_reduction_empty_group_writes_identity_without_arithmetic() -> None:
@@ -424,10 +519,67 @@ def test_primitives_reject_fractional_geometry(
         primitive(cast(int, cast(object, 1.5)))
 
 
-@pytest.mark.parametrize("rows", [0, -1, math.nan, math.inf])
-def test_matmul_rejects_invalid_row_count(rows: object) -> None:
-    with pytest.raises((TypeError, ValueError), match=r"rows|integer"):
+@pytest.mark.parametrize(
+    ("rows", "expected"),
+    [
+        (0, "rows must be at least one."),
+        (-1, "rows must be at least one."),
+        (math.nan, "rows must be an integer; got nan."),
+        (math.inf, "rows must be an integer; got inf."),
+    ],
+)
+def test_matmul_rejects_invalid_row_count(rows: object, expected: str) -> None:
+    with pytest.raises((TypeError, ValueError)) as exc_info:
         matmul_cost(channels_in=2, channels_out=3, rows=cast(int, rows))
+    assert str(exc_info.value) == expected
+
+
+def test_tile_rejects_each_negative_count_independently() -> None:
+    with pytest.raises(ValueError, match="nonnegative") as exc_info:
+        Cost().tile(-1, copies=0)
+    assert str(exc_info.value) == "repetitions and copies must be nonnegative."
+    with pytest.raises(ValueError, match="nonnegative") as exc_info:
+        Cost().tile(0, copies=-1)
+    assert str(exc_info.value) == "repetitions and copies must be nonnegative."
+
+
+@pytest.mark.parametrize("count", [1.5, True])
+def test_cost_tile_reports_the_invalid_integer_field(count: object) -> None:
+    with pytest.raises(TypeError, match="repetitions") as exc_info:
+        Cost().tile(cast(int, count))
+    assert str(exc_info.value) == (f"repetitions must be an integer; got {count!r}.")
+    with pytest.raises(TypeError, match="copies") as exc_info:
+        Cost().tile(1, copies=cast(int, count))
+    assert str(exc_info.value) == f"copies must be an integer; got {count!r}."
+
+
+def test_empty_cost_and_report_indexing_preserves_scalar_and_slice_shapes() -> None:
+    empty = Cost()
+    assert empty["flops"] == Cost()
+    assert empty["flops", "primal", "matmul"] == Cost()
+    assert empty["flops", "primal", "matmul", BF] == 0
+    report = Report()
+    assert report["h100", BF] == Report()
+    assert report["h100", BF, "intensity"] == 0.0
+
+
+def test_relabel_adds_cells_that_collide_at_the_destination() -> None:
+    source = Cost(
+        cells={
+            ("flops", "primal", "matmul", BF): 2,
+            ("flops", "adjoint", "matmul", BF): 3,
+        },
+    )
+    assert source.relabel("adjoint") == Cost(
+        cells={("flops", "adjoint", "matmul", BF): 5},
+    )
+
+
+def test_report_retains_nan_cells_and_discards_zero_cells() -> None:
+    nan = Report(cells={("h100", BF, "intensity", "matmul"): math.nan})
+    assert len(nan.cells) == 1
+    assert math.isnan(nan.sum())
+    assert Report(cells={("h100", BF, "intensity", "matmul"): 0.0}) == Report()
 
 
 def test_equal_costs_hash_alike_and_zero_cells_do_not_change_the_hash() -> None:
@@ -504,6 +656,181 @@ def test_report_repr_renders_float_reporting_cells() -> None:
     assert "295.2" in text
 
 
+def test_si_formatting_uses_inclusive_decimal_boundaries_and_signs() -> None:
+    assert [_si(value) for value in (1_000, 1_000_000, 1_000_000_000, 1e12)] == [
+        "1K",
+        "1M",
+        "1G",
+        "1T",
+    ]
+    assert _si(-1_000) == "-1K"
+
+
+def test_cost_error_names_for_every_geometry_and_owned_value() -> None:
+    cases = (
+        (lambda: elementwise_cost(primal=-1, adjoint=0), "primal"),
+        (lambda: elementwise_cost(primal=0, adjoint=-1), "adjoint"),
+        (lambda: elementwise_cost(primal=0, adjoint=0, channels=-1), "channels"),
+        (lambda: elementwise_cost(primal=0, adjoint=0, params=-1), "params"),
+        (lambda: elementwise_cost(primal=0, adjoint=0, rows=-1), "rows"),
+        (lambda: elementwise_cost(primal=0, adjoint=0, inputs=-1), "inputs"),
+        (lambda: elementwise_cost(primal=0, adjoint=0, outputs=-1), "outputs"),
+        (
+            lambda: elementwise_cost(primal=0, adjoint=0, adjoint_inputs=-1),
+            "adjoint_inputs",
+        ),
+        (
+            lambda: elementwise_cost(primal=0, adjoint=0, adjoint_outputs=-1),
+            "adjoint_outputs",
+        ),
+        (lambda: matmul_cost(channels_in=-1, channels_out=2), "channels_in"),
+        (lambda: matmul_cost(channels_in=2, channels_out=-1), "channels_out"),
+        (
+            lambda: matmul_cost(channels_in=2, channels_out=2, weight_bytes=-1),
+            "weight_bytes",
+        ),
+        (
+            lambda: matmul_cost(channels_in=2, channels_out=2, dequant_flops=-1),
+            "dequant_flops",
+        ),
+        (lambda: reduction_cost(input_elements=-1), "input_elements"),
+        (lambda: reduction_cost(input_elements=1, output_groups=-1), "output_groups"),
+        (lambda: traffic("primal", "sort", elements=1, flops=-1), "flops"),
+        (lambda: traffic("primal", "sort", elements=-1), "elements"),
+    )
+    for call, name in cases:
+        with pytest.raises(ValueError, match="nonnegative") as exc_info:
+            call()
+        assert str(exc_info.value) == f"{name} must be nonnegative; got -1."
+
+
+def test_tile_zero_repetitions_and_copies_are_independent() -> None:
+    original = Cost(
+        cells={("flops", "primal", "matmul", BF): 7},
+        params=3,
+        params_active=2,
+        bytes_state=5,
+    )
+    assert original.tile(0) == Cost(params=3, params_active=2)
+    assert original.tile(2, copies=0) == Cost(
+        cells={("flops", "primal", "matmul", BF): 14},
+        bytes_state=10,
+    )
+
+
+def test_grid_orders_dtype_columns_by_name_when_item_sizes_tie() -> None:
+    text = repr(
+        Report(
+            cells={
+                ("h100", "intensity", "matmul", F32): 3.0,
+                ("h100", "intensity", "matmul", BF): 2.0,
+            },
+        ),
+    )
+    assert text.splitlines()[0].split() == ["intensity", "intensity"]
+    assert text.splitlines()[1].split() == ["bf16", "f32"]
+
+
+def test_report_sum_totals_all_values_and_empty_report() -> None:
+    assert (
+        Report(
+            cells={
+                ("h100", BF, "intensity", "matmul"): 2.5,
+                ("h100", F32, "intensity", "sort"): 3.5,
+            },
+        ).sum()
+        == 6.0
+    )
+    assert type(Report().sum()) is float
+    assert Report().sum() == 0.0
+
+
+def test_axis_kinds_and_column_orders_are_exact() -> None:
+    assert [_kind(axis) for axis in (BF, "flops", "primal", "matmul", "h100")] == [
+        "dtype",
+        "measure",
+        "phase",
+        "kernel",
+        "device",
+    ]
+    assert _column_order(BF) == (2, "torch.bfloat16")
+    assert _column_order("matmul") == (5, "matmul")
+    assert _column_order("unlisted") == (-1, "unlisted")
+
+
+def test_grid_formats_unmeasured_and_rows_only_tables_exactly() -> None:
+    assert _grid({("left", "right"): 1}) == "     right\nleft     1"
+    assert _grid({("flops", "primal"): 12}) == "       flops\nprimal    12"
+
+
+def test_grid_formats_a_zero_axis_table() -> None:
+    assert _grid({(): 12}) == "12"
+
+
+def test_grid_sorts_unrecognized_labels_before_known_axes() -> None:
+    text = _grid({("zebra", "value"): 2, ("adjoint", "value"): 1})
+    assert [line.split() for line in text.splitlines()] == [
+        ["value"],
+        ["zebra", "2"],
+        ["adjoint", "1"],
+        ["total", "3"],
+    ]
+
+
+def test_grid_derives_each_dtype_intensity_from_its_matching_byte_column() -> None:
+    result = Cost(
+        cells={
+            ("bytes", "primal", "matmul", BF): 2,
+            ("flops", "primal", "matmul", F32): 6,
+            ("bytes", "primal", "matmul", F32): 3,
+        },
+    )
+    lines = [
+        line.split() for line in _grid(result.cells, derive_intensity=True).splitlines()
+    ]
+    assert lines[-1] == ["primal", "matmul", "6", "2", "3", "2"]
+
+
+def test_grid_drops_globally_empty_measure_columns() -> None:
+    text = _grid({("flops", BF): 0, ("bytes", F32): 1})
+    lines = [line.split() for line in text.splitlines()]
+    assert lines[0] == ["bytes"]
+    assert sorted(lines[1:-1]) == [
+        ["torch.bfloat16", "-"],
+        ["torch.float32", "1"],
+    ]
+    assert lines[-1] == ["total", "1"]
+
+
+def test_division_handles_nan_and_signed_zero_denominators() -> None:
+    assert math.isnan(_div(math.nan, 0.0))
+    assert _div(3.0, -0.0) == -math.inf
+    assert _div(-3.0, -0.0) == math.inf
+
+
+def test_report_grid_omits_a_total_for_intensity_but_cost_grid_includes_it() -> None:
+    cells: dict[tuple[object, ...], float] = {
+        ("h100", "intensity", "matmul", BF): 2.0,
+        ("h100", "intensity", "sort", BF): 3.0,
+    }
+    report_lines = repr(Report(cells=cells)).splitlines()
+    assert report_lines[0].split() == ["intensity"]
+    assert all(not line.startswith("total") for line in report_lines[2:])
+    assert (
+        repr(
+            Cost(
+                cells={
+                    ("flops", "primal", "matmul", BF): 2,
+                    ("flops", "adjoint", "matmul", BF): 3,
+                },
+            ),
+        )
+        .splitlines()[-1]
+        .split()[0]
+        == "total"
+    )
+
+
 def test_repr_of_a_slice_drops_the_fixed_axes_and_the_empty_table_says_so() -> None:
     c = Cost(
         cells={
@@ -545,7 +872,6 @@ def test_utilization_without_a_duration_is_intensity_over_the_ridge(
     )
     device: str | Report = peak()["h100"] if use_report else "h100"
     ratio = utilization(c, device=device)
-    assert isinstance(ratio, Report)
     assert ratio["primal", "matmul", BF] == pytest.approx(2)
     assert ratio["adjoint", "sort", F32] == pytest.approx(3.35 / 67)
     assert ratio["primal", "matmul", torch.int32] == math.inf
@@ -566,15 +892,55 @@ def test_utilization_with_a_duration_is_achieved_over_the_roofline_ceiling(
     )
     device: str | Report = peak()["h100"] if use_report else "h100"
     achieved = utilization(c, device=device, duration_sec=2)
-    assert isinstance(achieved, Report)
     assert achieved["primal", "matmul", BF] == pytest.approx(0.5)
     # Sort at intensity 1 is capped at bandwidth, 3.35e12 FLOP/s, not 67e12.
     assert achieved["adjoint", "sort", F32] == pytest.approx(1 / 2 / 3.35e12)
 
 
+def test_utilization_treats_missing_bandwidth_as_zero() -> None:
+    cost = Cost(
+        cells={
+            ("flops", "primal", "elementwise", F32): 2,
+            ("bytes", "primal", "elementwise", F32): 1,
+        },
+    )
+    ceiling = Report(cells={(F32, "flops", "elementwise"): 1.0})
+
+    assert (
+        utilization(cost, device=ceiling, duration_sec=1.0)[
+            "primal",
+            "elementwise",
+            F32,
+        ]
+        == math.inf
+    )
+
+
+def test_utilization_handles_off_roofline_dtypes_and_memory_bound_work() -> None:
+    no_dtype_peak = Cost(
+        cells={("flops", "primal", "matmul", torch.complex64): 10},
+    )
+    assert (
+        utilization(
+            no_dtype_peak,
+            device="h100",
+            duration_sec=2,
+        )["primal", "matmul", torch.complex64]
+        == math.inf
+    )
+
+    memory_bound = Cost(
+        cells={
+            ("flops", "primal", "matmul", BF): 1,
+            ("bytes", "primal", "matmul", BF): 1_000,
+        },
+    )
+    achieved = utilization(memory_bound, device="h100", duration_sec=1)
+    assert achieved["primal", "matmul", BF] == pytest.approx(1 / 3.35e9)
+
+
 def test_peak_prices_matmul_per_dtype_and_every_other_silo_at_the_vector_rate() -> None:
     h100 = peak()["h100"]
-    assert isinstance(h100, Report)
     assert h100[BF, "flops", "matmul"] == 989e12
     assert h100[F32, "flops", "matmul"] == 494e12
     assert h100[BF, "flops", "elementwise"] == h100[F32, "flops", "reduction"] == 67e12
@@ -596,7 +962,8 @@ def test_peak_names_a_form_factor_without_moving_the_bare_name() -> None:
     # The table holds TB/s: 2.039 * 1e12 rounds to 2039000000000.0002, not 2.039e12.
     assert peak()["a100", BF, "bytes", "matmul"] == 2.039 * 1e12
     assert peak()["h100", BF, "bytes", "matmul"] == 3.35e12
-    # The other forms move less memory, and compute is identical across forms.
+    # The other forms move less memory. A100 compute is identical across forms;
+    # the H100 PCIe board clocks lower, so its datasheet rates are lower too.
     assert peak()["a100-40g", BF, "bytes", "matmul"] == 1.555 * 1e12
     assert peak()["a100-80g-pcie", BF, "bytes", "matmul"] == 1.935 * 1e12
     assert peak()["h100-pcie", BF, "bytes", "matmul"] == 2.0e12
@@ -604,14 +971,9 @@ def test_peak_names_a_form_factor_without_moving_the_bare_name() -> None:
         peak()["a100-40g", BF, "flops", "matmul"]
         == peak()["a100", BF, "flops", "matmul"]
     )
-    assert (
-        peak()["h100-pcie", BF, "flops", "matmul"]
-        == peak()["h100", BF, "flops", "matmul"]
-    )
-    assert (
-        peak()["h100-pcie", BF, "flops", "elementwise"]
-        == peak()["h100", BF, "flops", "elementwise"]
-    )
+    assert peak()["h100-pcie", BF, "flops", "matmul"] == 756.5e12
+    assert peak()["h100", BF, "flops", "matmul"] == 989e12
+    assert peak()["h100-pcie", BF, "flops", "elementwise"] == 51e12
 
 
 def test_peak_ridge_moves_with_the_form_factor() -> None:
@@ -620,10 +982,10 @@ def test_peak_ridge_moves_with_the_form_factor() -> None:
     sxm = peak()["h100", BF, "intensity", "matmul"]
     pcie = peak()["h100-pcie", BF, "intensity", "matmul"]
     assert sxm == 989 / 3.35
-    assert pcie == 989 / 2.0
+    assert pcie == 756.5 / 2.0
     # Sudoku exp000's transformer sits at intensity 272.
     assert 272 / sxm - 1 == pytest.approx(-0.07866532, abs=1e-6)
-    assert 272 / pcie - 1 < -0.4
+    assert 272 / pcie - 1 < -0.25
     a100_sxm = peak()["a100", BF, "intensity", "matmul"]
     a100_40g = peak()["a100-40g", BF, "intensity", "matmul"]
     assert a100_40g / a100_sxm == pytest.approx(2.039 / 1.555)
@@ -731,6 +1093,39 @@ def test_a_costed_function_is_a_cost_leaf() -> None:
     assert c.params == 0
 
 
+def test_set_cost_keeps_no_reference_to_the_function() -> None:
+    """The cost travels on the function; no registry outlives it."""
+
+    @set_cost(map_cost(primal=1, adjoint=1))
+    def act(x: torch.Tensor) -> torch.Tensor:
+        return x
+
+    alive = weakref.ref(act)
+    del act
+    gc.collect()
+
+    assert alive() is None
+
+
+def test_map_cost_forwards_every_operand_count() -> None:
+    mapped = map_cost(
+        primal=2,
+        adjoint=3,
+        inputs=2,
+        outputs=4,
+        adjoint_inputs=5,
+        adjoint_outputs=3,
+    )
+    result = mapped(channels=3, dtype=BF)
+    assert result["flops", "primal", "elementwise", BF] == 6
+    assert result["flops", "adjoint", "elementwise", BF] == 9
+    assert result["bytes", "primal", "elementwise", BF] == 2 * 3 * (2 + 4)
+    assert result["bytes", "adjoint", "elementwise", BF] == 2 * 3 * (5 + 3)
+
+    unary = map_cost(primal=2, adjoint=3)(channels=3, dtype=BF)
+    assert unary["bytes", "adjoint", "elementwise", BF] == 2 * 3 * 3
+
+
 def test_a_partial_of_a_costed_function_keeps_its_cost() -> None:
     @set_cost(map_cost(primal=3, adjoint=2))
     def shifted(x: torch.Tensor, *, threshold: float) -> torch.Tensor:
@@ -744,12 +1139,31 @@ def test_a_partial_of_a_costed_function_keeps_its_cost() -> None:
     )
 
 
+def test_cost_prefers_a_cost_method_on_a_partial_over_the_function_registry() -> None:
+    @set_cost(map_cost(primal=1, adjoint=1))
+    def activation(x: torch.Tensor) -> torch.Tensor:
+        return x
+
+    class CostedPartial(functools.partial[torch.Tensor]):
+        def cost(self, **kwargs: object) -> Cost:
+            del kwargs
+            return Cost(params=7)
+
+    bound = CostedPartial(activation)
+    assert cost(bound, channels=3, dtype=BF) == Cost(params=7)
+
+
 def test_an_uncosted_function_is_rejected_by_name() -> None:
     def gelu(x: torch.Tensor) -> torch.Tensor:
         return torch.nn.functional.gelu(x)
 
-    with pytest.raises(TypeError, match="gelu has no cost"):
+    with pytest.raises(TypeError) as exc_info:
         cost(gelu, channels=4, dtype=None)
+
+    assert str(exc_info.value) == (
+        f"{gelu.__qualname__} has no cost(); every slot under a costed container "
+        "must implement HasCost, or be a function decorated with @set_cost."
+    )
 
 
 def test_cost_rejects_a_config_without_a_cost() -> None:

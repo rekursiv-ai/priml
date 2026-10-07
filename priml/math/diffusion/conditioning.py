@@ -33,7 +33,7 @@ def timestep_embedding(t: Tensor, width: int = 256, period: float = 10_000.0) ->
         / half,
     )
     angles = t.float()[:, None] * frequencies[None]
-    result = torch.cat((angles.cos(), angles.sin()), dim=-1)
+    result = torch.cat((angles.cos(), angles.sin()), dim=1)
     if width % 2:
-        result = torch.cat((result, torch.zeros_like(result[:, :1])), dim=-1)
+        result = torch.cat((result, torch.zeros_like(result[:, :1])), dim=1)
     return result

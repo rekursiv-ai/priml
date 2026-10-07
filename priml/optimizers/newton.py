@@ -6,12 +6,11 @@ from functools import partial
 from typing import TYPE_CHECKING, ClassVar, cast, overload, override
 
 from configgle import Fig
-from torch import Tensor
+from torch import Tensor, linalg
 from torch.distributed.tensor import DTensor
 from torch.optim.optimizer import Optimizer
 
 import torch
-import torch.linalg
 
 
 if TYPE_CHECKING:
@@ -204,8 +203,8 @@ class Newton(Optimizer):
             # fallback; other RuntimeErrors are genuine bugs and must surface.
             delta: Tensor
             try:
-                delta = torch.linalg.solve(hessian, -grad_tensor)
-            except torch.linalg.LinAlgError:
+                delta = linalg.solve(hessian, -grad_tensor)
+            except linalg.LinAlgError:
                 delta = -grad_tensor
 
             # Update parameters (outside autograd)

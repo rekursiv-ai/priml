@@ -355,8 +355,8 @@ def _tta_logits(model: TensorFn, media: Tensor) -> Tensor:
     padded = functional.pad(media, (1,) * 4, "reflect")
     return (
         _mirrored(model, media)
-        + _mirrored(model, padded[..., 0:size, 0:size])
-        + _mirrored(model, padded[..., 2 : size + 2, 2 : size + 2])
+        + _mirrored(model, padded[..., :size, :size])
+        + _mirrored(model, padded[..., 2 : 2 + size, 2 : 2 + size])
     ) / 3
 
 

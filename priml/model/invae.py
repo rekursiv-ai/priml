@@ -1,595 +1,351 @@
-"""INVAE architecture from the SpeedrunDiT reference implementation.
+"""INVAE: the convolutional KL autoencoder SpeedrunDiT trains in the latent of.
 
-MIT license and attribution: ``priml/model/IN-VAE-LICENSE``.
-Reference: https://github.com/SwayStar123/REG/blob/invae-sprint-rms-rope-valres-cfm-muon-layerwisescaling/models/invae.py
+The architecture is LDM's ``AutoencoderKL`` as the SpeedrunDiT reference ships
+it; module and attribute names follow that checkpoint, so its ``state_dict``
+loads unchanged. MIT license and attribution: ``priml/model/IN-VAE-LICENSE``.
+
+References:
+  https://github.com/SwayStar123/REG/blob/invae-sprint-rms-rope-valres-cfm-muon-layerwisescaling/models/invae.py
+    SwayStar123. REG, ``models/invae.py``.
+
 """
 
-# Preserve the published checkpoint's module names and third-party signatures.
-# pyright: basic
-# ruff: noqa: ANN001, ANN003, ANN201, D101, D102, D103, N802, ARG002, RUF005, B007, RET504, F841, B006
+from __future__ import annotations
 
 from importlib import import_module
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Protocol, cast, override
+from typing import TYPE_CHECKING, Protocol, cast, override
+
+import math
 
 from torch import Tensor, nn
+from torch.nn import functional
 
-import numpy as np
 import torch
 
 
-def nonlinearity(x):
-    # Swish.
-    return x * torch.sigmoid(x)
-
-
-def Normalize(in_channels, num_groups=32):
-    return torch.nn.GroupNorm(
-        num_groups=num_groups,
-        num_channels=in_channels,
-        eps=1e-6,
-        affine=True,
-    )
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 class Upsample(nn.Module):
-    def __init__(self, in_channels, with_conv):
+    """Double the spatial size by nearest-neighbor, then a 3x3 convolution."""
+
+    def __init__(self, channels: int) -> None:
         super().__init__()
-        self.with_conv = with_conv
-        if self.with_conv:
-            self.conv = torch.nn.Conv2d(
-                in_channels,
-                in_channels,
-                kernel_size=3,
-                stride=1,
-                padding=1,
-            )
+        self.conv = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
 
     @override
-    def forward(self, x):
-        x = torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
-        if self.with_conv:
-            x = self.conv(x)
-        return x
+    def forward(self, x: Tensor) -> Tensor:
+        return self.conv(functional.interpolate(x, scale_factor=2.0, mode="nearest"))
 
 
 class Downsample(nn.Module):
-    def __init__(self, in_channels, with_conv):
+    """Halve the spatial size with a stride-2 3x3 convolution."""
+
+    def __init__(self, channels: int) -> None:
         super().__init__()
-        self.with_conv = with_conv
-        if self.with_conv:
-            # No asymmetric padding in torch conv, must do it ourselves.
-            self.conv = torch.nn.Conv2d(
-                in_channels,
-                in_channels,
-                kernel_size=3,
-                stride=2,
-                padding=0,
-            )
+        self.conv = nn.Conv2d(channels, channels, kernel_size=3, stride=2)
 
     @override
-    def forward(self, x):
-        if self.with_conv:
-            pad = (0, 1, 0, 1)
-            x = torch.nn.functional.pad(x, pad, mode="constant", value=0)
-            x = self.conv(x)
-        else:
-            x = torch.nn.functional.avg_pool2d(x, kernel_size=2, stride=2)
-        return x
+    def forward(self, x: Tensor) -> Tensor:
+        # Padded on the bottom and right only: the checkpoint was trained with
+        # this asymmetric padding, which ``Conv2d(padding=1)`` cannot express.
+        return self.conv(functional.pad(x, (0, 1, 0, 1)))
 
 
 class ResnetBlock(nn.Module):
-    def __init__(
-        self,
-        *,
-        in_channels,
-        out_channels=None,
-        conv_shortcut=False,
-        dropout,
-        temb_channels=512,
-    ):
+    """Two pre-activation GroupNorm-SiLU-conv layers around a residual.
+
+    A 1x1 ``nin_shortcut`` projects the residual when the width changes.
+    """
+
+    def __init__(self, channels_in: int, channels_out: int) -> None:
         super().__init__()
-        self.in_channels = in_channels
-        out_channels = in_channels if out_channels is None else out_channels
-        self.out_channels = out_channels
-        self.use_conv_shortcut = conv_shortcut
-
-        self.norm1 = Normalize(in_channels)
-        self.conv1 = torch.nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-        )
-        if temb_channels > 0:
-            self.temb_proj = torch.nn.Linear(temb_channels, out_channels)
-        self.norm2 = Normalize(out_channels)
-        self.dropout = torch.nn.Dropout(dropout)
-        self.conv2 = torch.nn.Conv2d(
-            out_channels,
-            out_channels,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-        )
-        if self.in_channels != self.out_channels:
-            if self.use_conv_shortcut:
-                self.conv_shortcut = torch.nn.Conv2d(
-                    in_channels,
-                    out_channels,
-                    kernel_size=3,
-                    stride=1,
-                    padding=1,
-                )
-            else:
-                self.nin_shortcut = torch.nn.Conv2d(
-                    in_channels,
-                    out_channels,
-                    kernel_size=1,
-                    stride=1,
-                    padding=0,
-                )
-
-    @override
-    def forward(self, x: Tensor, temb: Tensor | None) -> Tensor:
-        h = x
-        h = self.norm1(h)
-        h = nonlinearity(h)
-        h = self.conv1(h)
-
-        if temb is not None:
-            h = h + self.temb_proj(nonlinearity(temb))[:, :, None, None]
-
-        h = self.norm2(h)
-        h = nonlinearity(h)
-        h = self.dropout(h)
-        h = self.conv2(h)
-
-        if self.in_channels != self.out_channels:
-            if self.use_conv_shortcut:
-                x = self.conv_shortcut(x)
-            else:
-                x = self.nin_shortcut(x)
-
-        return x + h
-
-
-class AttnBlock(nn.Module):
-    def __init__(self, in_channels):
-        super().__init__()
-        self.in_channels = in_channels
-
-        self.norm = Normalize(in_channels)
-        self.q = torch.nn.Conv2d(
-            in_channels,
-            in_channels,
-            kernel_size=1,
-            stride=1,
-            padding=0,
-        )
-        self.k = torch.nn.Conv2d(
-            in_channels,
-            in_channels,
-            kernel_size=1,
-            stride=1,
-            padding=0,
-        )
-        self.v = torch.nn.Conv2d(
-            in_channels,
-            in_channels,
-            kernel_size=1,
-            stride=1,
-            padding=0,
-        )
-        self.proj_out = torch.nn.Conv2d(
-            in_channels,
-            in_channels,
-            kernel_size=1,
-            stride=1,
-            padding=0,
+        self.norm1 = _group_norm(channels_in)
+        self.conv1 = nn.Conv2d(channels_in, channels_out, kernel_size=3, padding=1)
+        self.norm2 = _group_norm(channels_out)
+        self.conv2 = nn.Conv2d(channels_out, channels_out, kernel_size=3, padding=1)
+        self.nin_shortcut = (
+            nn.Conv2d(channels_in, channels_out, kernel_size=1)
+            if channels_in != channels_out
+            else nn.Identity()
         )
 
     @override
     def forward(self, x: Tensor) -> Tensor:
-        h_ = x
-        h_ = self.norm(h_)
-        q = self.q(h_)
-        k = self.k(h_)
-        v = self.v(h_)
+        h = self.conv1(functional.silu(self.norm1(x)))
+        h = self.conv2(functional.silu(self.norm2(h)))
+        return self.nin_shortcut(x) + h
 
-        # Compute attention.
-        b, c, h, w = q.shape
-        q = q.reshape(b, c, h * w)
-        q = q.permute(0, 2, 1)  # b,hw,c.
-        k = k.reshape(b, c, h * w)  # b,c,hw.
-        w_ = torch.bmm(q, k)  # b,hw,hw    w[b,i,j]=sum_c q[b,i,c]k[b,c,j].
-        w_ = w_ * (int(c) ** (-0.5))
-        w_ = torch.nn.functional.softmax(w_, dim=2)
 
-        # Attend to values.
-        v = v.reshape(b, c, h * w)
-        w_ = w_.permute(0, 2, 1)  # b,hw,hw (first hw of k, second of q)
-        h_ = torch.bmm(
-            v,
-            w_,
-        )  # `b`, c,hw (hw of q) h_[b,c,j] = sum_i v[b,c,i] w_[b,i,j].
-        h_ = h_.reshape(b, c, h, w)
+class SpatialSelfAttention(nn.Module):
+    """Single-head self-attention over every spatial position, plus a residual.
 
-        h_ = self.proj_out(h_)
+    The projections are 1x1 convolutions, as the checkpoint stores them.
+    """
 
-        return x + h_
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        self.norm = _group_norm(channels)
+        self.q = nn.Conv2d(channels, channels, kernel_size=1)
+        self.k = nn.Conv2d(channels, channels, kernel_size=1)
+        self.v = nn.Conv2d(channels, channels, kernel_size=1)
+        self.proj_out = nn.Conv2d(channels, channels, kernel_size=1)
+
+    @override
+    def forward(self, x: Tensor) -> Tensor:
+        h = self.norm(x)
+        # [..., C, H, W] -> [..., H*W, C]: positions are the attended sequence.
+        q, k, v = (
+            projection(h).flatten(-2).transpose(-1, -2)
+            for projection in (self.q, self.k, self.v)
+        )
+        attended = functional.scaled_dot_product_attention(q, k, v)
+        return x + self.proj_out(attended.transpose(-1, -2).unflatten(-1, x.shape[-2:]))
 
 
 class Encoder(nn.Module):
+    """Downsample an image to the mean and log-variance of a latent."""
+
     def __init__(
         self,
         *,
-        ch=128,
-        out_ch=3,
-        ch_mult=(1, 1, 2, 2, 4),
-        num_res_blocks=2,
-        attn_resolutions=(16,),
-        dropout=0.0,
-        resamp_with_conv=True,
-        in_channels=3,
-        resolution=256,
-        z_channels=16,
-        double_z=True,
-        **ignore_kwargs,
-    ):
+        channels: int = 128,
+        channel_multipliers: Sequence[int] = (1, 1, 2, 2, 4),
+        blocks_per_stage: int = 2,
+        attention_resolutions: Sequence[int] = (16,),
+        channels_in: int = 3,
+        resolution: int = 256,
+        channels_latent: int = 16,
+    ) -> None:
+        """Build the encoder.
+
+        Args:
+          channels: Width of the first stage; each stage multiplies it.
+          channel_multipliers: Per-stage width multipliers; one stage each.
+          blocks_per_stage: Residual blocks in every stage.
+          attention_resolutions: Spatial sizes whose blocks self-attend.
+          channels_in: Image channels.
+          resolution: Input spatial size the attention sizes refer to.
+          channels_latent: Latent channels; the output holds twice as many,
+            the mean and the log-variance.
+
+        """
         super().__init__()
-        self.ch = ch
-        self.temb_ch = 0
-        self.num_resolutions = len(ch_mult)
-        self.num_res_blocks = num_res_blocks
-        self.resolution = resolution
-        self.in_channels = in_channels
-
-        # Downsampling.
-        self.conv_in = torch.nn.Conv2d(
-            in_channels,
-            self.ch,
+        self.conv_in = nn.Conv2d(channels_in, channels, kernel_size=3, padding=1)
+        self.down: nn.ModuleList[_Stage] = nn.ModuleList()
+        width_in = channels
+        size = resolution
+        for stage, multiplier in enumerate(channel_multipliers):
+            width_out = channels * multiplier
+            level = _Stage()
+            for _ in range(blocks_per_stage):
+                level.block.append(ResnetBlock(width_in, width_out))
+                width_in = width_out
+                if size in attention_resolutions:
+                    level.attn.append(SpatialSelfAttention(width_in))
+            if stage != len(channel_multipliers) - 1:
+                level.downsample = Downsample(width_in)
+                size //= 2
+            self.down.append(level)
+        self.mid = _Middle(width_in)
+        self.norm_out = _group_norm(width_in)
+        self.conv_out = nn.Conv2d(
+            width_in,
+            2 * channels_latent,
             kernel_size=3,
-            stride=1,
-            padding=1,
-        )
-
-        curr_res = resolution
-        in_ch_mult = (1,) + tuple(ch_mult)
-        self.down = nn.ModuleList()
-        block_in = ch
-        for i_level in range(self.num_resolutions):
-            block = nn.ModuleList()
-            attn = nn.ModuleList()
-            block_in = ch * in_ch_mult[i_level]
-            block_out = ch * ch_mult[i_level]
-            for i_block in range(self.num_res_blocks):
-                block.append(
-                    ResnetBlock(
-                        in_channels=block_in,
-                        out_channels=block_out,
-                        temb_channels=self.temb_ch,
-                        dropout=dropout,
-                    ),
-                )
-                block_in = block_out
-                if curr_res in attn_resolutions:
-                    attn.append(AttnBlock(block_in))
-            down = nn.Module()
-            down.block = block
-            down.attn = attn
-            if i_level != self.num_resolutions - 1:
-                down.downsample = Downsample(block_in, resamp_with_conv)
-                curr_res = curr_res // 2
-            self.down.append(down)
-
-        # Middle.
-        self.mid = nn.Module()
-        self.mid.block_1 = ResnetBlock(
-            in_channels=block_in,
-            out_channels=block_in,
-            temb_channels=self.temb_ch,
-            dropout=dropout,
-        )
-        self.mid.attn_1 = AttnBlock(block_in)
-        self.mid.block_2 = ResnetBlock(
-            in_channels=block_in,
-            out_channels=block_in,
-            temb_channels=self.temb_ch,
-            dropout=dropout,
-        )
-
-        # End.
-        self.norm_out = Normalize(block_in)
-        self.conv_out = torch.nn.Conv2d(
-            block_in,
-            2 * z_channels if double_z else z_channels,
-            kernel_size=3,
-            stride=1,
             padding=1,
         )
 
     @override
-    def forward(self, x):
-        # Assert x.shape[2] == x.shape[3] == self.resolution, "{}, {}, {}".format(x.shape[2], x.shape[3], self.resolution)
-
-        # Timestep embedding.
-        temb = None
-
-        # Downsampling.
-        hs = [self.conv_in(x)]
-        for i_level in range(self.num_resolutions):
-            for i_block in range(self.num_res_blocks):
-                h = self.down[i_level].block[i_block](hs[-1], temb)
-                if len(self.down[i_level].attn) > 0:
-                    h = self.down[i_level].attn[i_block](h)
-                hs.append(h)
-            if i_level != self.num_resolutions - 1:
-                hs.append(self.down[i_level].downsample(hs[-1]))
-
-        # Middle.
-        h = hs[-1]
-        h = self.mid.block_1(h, temb)
-        h = self.mid.attn_1(h)
-        h = self.mid.block_2(h, temb)
-
-        # End.
-        h = self.norm_out(h)
-        h = nonlinearity(h)
-        h = self.conv_out(h)
-        return h
+    def forward(self, x: Tensor) -> Tensor:
+        h = self.conv_in(x)
+        for level in self.down:
+            h = level(h)
+        h = self.mid(h)
+        return self.conv_out(functional.silu(self.norm_out(h)))
 
 
 class Decoder(nn.Module):
+    """Upsample a latent back to an image."""
+
     def __init__(
         self,
         *,
-        ch=128,
-        out_ch=3,
-        ch_mult=(1, 1, 2, 2, 4),
-        num_res_blocks=2,
-        attn_resolutions=(16,),
-        dropout=0.0,
-        resamp_with_conv=True,
-        in_channels=3,
-        resolution=256,
-        z_channels=16,
-        give_pre_end=False,
-        **ignore_kwargs,
-    ):
+        channels: int = 128,
+        channels_out: int = 3,
+        channel_multipliers: Sequence[int] = (1, 1, 2, 2, 4),
+        blocks_per_stage: int = 2,
+        attention_resolutions: Sequence[int] = (16,),
+        resolution: int = 256,
+        channels_latent: int = 16,
+    ) -> None:
+        """Build the decoder, the encoder's mirror with one extra block per stage.
+
+        Args:
+          channels: Width of the last stage; each stage multiplies it.
+          channels_out: Image channels.
+          channel_multipliers: Per-stage width multipliers, finest first.
+          blocks_per_stage: The encoder's count; each stage holds one more.
+          attention_resolutions: Spatial sizes whose blocks self-attend.
+          resolution: Output spatial size the attention sizes refer to.
+          channels_latent: Latent channels.
+
+        """
         super().__init__()
-        self.ch = ch
-        self.temb_ch = 0
-        self.num_resolutions = len(ch_mult)
-        self.num_res_blocks = num_res_blocks
-        self.resolution = resolution
-        self.in_channels = in_channels
-        self.give_pre_end = give_pre_end
-
-        # Compute in_ch_mult, block_in and curr_res at lowest res.
-        in_ch_mult = (1,) + tuple(ch_mult)
-        block_in = ch * ch_mult[self.num_resolutions - 1]
-        curr_res = resolution // 2 ** (self.num_resolutions - 1)
-        self.z_shape = (1, z_channels, curr_res, curr_res)
-        # print(
-        #     "Working with z of shape {} = {} dimensions.".format(
-        #         self.z_shape, np.prod(self.z_shape)
-        #     )
-        # )
-
-        # `z` to block_in.
-        self.conv_in = torch.nn.Conv2d(
-            z_channels,
-            block_in,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-        )
-
-        # Middle.
-        self.mid = nn.Module()
-        self.mid.block_1 = ResnetBlock(
-            in_channels=block_in,
-            out_channels=block_in,
-            temb_channels=self.temb_ch,
-            dropout=dropout,
-        )
-        self.mid.attn_1 = AttnBlock(block_in)
-        self.mid.block_2 = ResnetBlock(
-            in_channels=block_in,
-            out_channels=block_in,
-            temb_channels=self.temb_ch,
-            dropout=dropout,
-        )
-
-        # Upsampling.
-        self.last_z_shape: torch.Size | None = None
-        self.up = nn.ModuleList()
-        for i_level in reversed(range(self.num_resolutions)):
-            block = nn.ModuleList()
-            attn = nn.ModuleList()
-            block_out = ch * ch_mult[i_level]
-            for i_block in range(self.num_res_blocks + 1):
-                block.append(
-                    ResnetBlock(
-                        in_channels=block_in,
-                        out_channels=block_out,
-                        temb_channels=self.temb_ch,
-                        dropout=dropout,
-                    ),
-                )
-                block_in = block_out
-                if curr_res in attn_resolutions:
-                    attn.append(AttnBlock(block_in))
-            up = nn.Module()
-            up.block = block
-            up.attn = attn
-            if i_level != 0:
-                up.upsample = Upsample(block_in, resamp_with_conv)
-                curr_res = curr_res * 2
-            self.up.insert(0, up)  # Prepend to get consistent order.
-
-        # End.
-        self.norm_out = Normalize(block_in)
-        self.conv_out = torch.nn.Conv2d(
-            block_in,
-            out_ch,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-        )
+        width_in = channels * channel_multipliers[-1]
+        size = resolution // 2 ** (len(channel_multipliers) - 1)
+        self.conv_in = nn.Conv2d(channels_latent, width_in, kernel_size=3, padding=1)
+        self.mid = _Middle(width_in)
+        stages: list[_Stage] = []
+        for stage in reversed(range(len(channel_multipliers))):
+            width_out = channels * channel_multipliers[stage]
+            level = _Stage()
+            for _ in range(blocks_per_stage + 1):
+                level.block.append(ResnetBlock(width_in, width_out))
+                width_in = width_out
+                if size in attention_resolutions:
+                    level.attn.append(SpatialSelfAttention(width_in))
+            if stage != 0:
+                level.upsample = Upsample(width_in)
+                size *= 2
+            stages.append(level)
+        # Stored finest first, as the checkpoint indexes ``up``, and run coarsest first.
+        self.up: nn.ModuleList[_Stage] = nn.ModuleList(reversed(stages))
+        self.norm_out = _group_norm(width_in)
+        self.conv_out = nn.Conv2d(width_in, channels_out, kernel_size=3, padding=1)
 
     @override
-    def forward(self, z):
-        # Assert z.shape[1:] == self.z_shape[1:].
-        self.last_z_shape = z.shape
-
-        # Timestep embedding.
-        temb = None
-
-        # `z` to block_in.
-        h = self.conv_in(z)
-
-        # Middle.
-        h = self.mid.block_1(h, temb)
-        h = self.mid.attn_1(h)
-        h = self.mid.block_2(h, temb)
-
-        # Upsampling.
-        for i_level in reversed(range(self.num_resolutions)):
-            for i_block in range(self.num_res_blocks + 1):
-                h = self.up[i_level].block[i_block](h, temb)
-                if len(self.up[i_level].attn) > 0:
-                    h = self.up[i_level].attn[i_block](h)
-            if i_level != 0:
-                h = self.up[i_level].upsample(h)
-
-        # End.
-        if self.give_pre_end:
-            return h
-
-        h = self.norm_out(h)
-        h = nonlinearity(h)
-        h = self.conv_out(h)
-        return h
+    def forward(self, z: Tensor) -> Tensor:
+        h = self.mid(self.conv_in(z))
+        for level in reversed(self.up):
+            h = level(h)
+        return self.conv_out(functional.silu(self.norm_out(h)))
 
 
 class DiagonalGaussianDistribution:
-    def __init__(self, parameters, deterministic=False):
-        self.parameters = parameters
-        self.mean, self.logvar = torch.chunk(parameters, 2, dim=1)
-        self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
-        self.deterministic = deterministic
+    """A diagonal Gaussian over latents, from the encoder's moments."""
+
+    def __init__(self, moments: Tensor) -> None:
+        """Split ``moments`` into a mean and a clamped log-variance.
+
+        Args:
+          moments: Mean then log-variance, concatenated on the channel axis
+            ``[..., 2 * C, H, W]``.
+
+        """
+        self.mean, logvar = moments.chunk(2, dim=-3)
+        self.logvar = logvar.clamp(-30.0, 20.0)
         self.std = torch.exp(0.5 * self.logvar)
         self.var = torch.exp(self.logvar)
-        if self.deterministic:
-            self.var = self.std = torch.zeros_like(self.mean).to(
-                device=self.parameters.device,
-            )
 
     def sample(self) -> Tensor:
-        x = self.mean + self.std * torch.randn(
-            self.mean.shape,
-            device=self.parameters.device,
-        )
-        return x
+        """Draw one latent by reparameterization."""
+        return self.mean + self.std * torch.randn_like(self.mean)
 
-    def kl(self, other: "DiagonalGaussianDistribution | None" = None) -> Tensor:
-        if self.deterministic:
-            return torch.Tensor([0.0])
+    def kl(self, other: DiagonalGaussianDistribution | None = None) -> Tensor:
+        """Return KL(self || other) per sample; ``None`` is the unit Gaussian.
+
+        Args:
+          other: The distribution to diverge from.
+
+        Returns:
+          kl: Summed over channels and space, ``[...]``.
+
+        """
         if other is None:
-            return 0.5 * torch.sum(
-                torch.pow(self.mean, 2) + self.var - 1.0 - self.logvar,
-                dim=[1, 2, 3],
+            divergence = self.mean.square() + self.var - 1.0 - self.logvar
+        else:
+            divergence = (
+                (self.mean - other.mean).square() / other.var
+                + self.var / other.var
+                - 1.0
+                - self.logvar
+                + other.logvar
             )
-        return 0.5 * torch.sum(
-            torch.pow(self.mean - other.mean, 2) / other.var
-            + self.var / other.var
-            - 1.0
-            - self.logvar
-            + other.logvar,
-            dim=[1, 2, 3],
-        )
+        return 0.5 * divergence.sum(dim=(-3, -2, -1))
 
-    def nll(
-        self,
-        sample: Tensor,
-        dims: list[int] = [1, 2, 3],
-    ) -> Tensor:
-        if self.deterministic:
-            return torch.Tensor([0.0])
-        logtwopi = np.log(2.0 * np.pi)
-        return 0.5 * torch.sum(
-            logtwopi + self.logvar + torch.pow(sample - self.mean, 2) / self.var,
-            dim=dims,
-        )
+    def nll(self, sample: Tensor, dim: Sequence[int] = (-3, -2, -1)) -> Tensor:
+        """Return the negative log-likelihood of ``sample``, summed over ``dim``.
 
-    def mode(self):
-        return self.mean
+        Args:
+          sample: Latents shaped like the mean.
+          dim: Axes the per-element terms are summed over.
+
+        Returns:
+          nll: ``sample``'s shape with ``dim`` reduced.
+
+        """
+        return 0.5 * torch.sum(
+            math.log(2.0 * math.pi)
+            + self.logvar
+            + (sample - self.mean).square() / self.var,
+            dim=tuple(dim),
+        )
 
 
 class AutoencoderKL(nn.Module):
-    def __init__(self, embed_dim, ch_mult, use_variational=True):
+    """The KL autoencoder: encoder, posterior, decoder."""
+
+    def __init__(
+        self,
+        *,
+        channels_latent: int,
+        channel_multipliers: Sequence[int],
+    ) -> None:
+        """Build the autoencoder.
+
+        Args:
+          channels_latent: Latent channels.
+          channel_multipliers: Per-stage widths; each stage but the last halves
+            the spatial size.
+
+        """
         super().__init__()
-        self.encoder = Encoder(ch_mult=ch_mult, z_channels=embed_dim)
-        self.decoder = Decoder(ch_mult=ch_mult, z_channels=embed_dim)
-        self.use_variational = use_variational
-        mult = 2 if self.use_variational else 1
-        self.quant_conv = torch.nn.Conv2d(2 * embed_dim, mult * embed_dim, 1)
-        self.post_quant_conv = torch.nn.Conv2d(embed_dim, embed_dim, 1)
+        self.encoder = Encoder(
+            channel_multipliers=channel_multipliers,
+            channels_latent=channels_latent,
+        )
+        self.decoder = Decoder(
+            channel_multipliers=channel_multipliers,
+            channels_latent=channels_latent,
+        )
+        self.quant_conv = nn.Conv2d(2 * channels_latent, 2 * channels_latent, 1)
+        self.post_quant_conv = nn.Conv2d(channels_latent, channels_latent, 1)
 
-    def encode(self, x) -> DiagonalGaussianDistribution:
-        h = self.encoder(x)
-        moments = self.quant_conv(h)
-        if not self.use_variational:
-            moments = torch.cat((moments, torch.ones_like(moments)), 1)
-        posterior = DiagonalGaussianDistribution(moments)
-        return posterior
+    def encode(self, x: Tensor) -> DiagonalGaussianDistribution:
+        """Return the posterior over latents for images ``x`` in [-1, 1]."""
+        return DiagonalGaussianDistribution(self.quant_conv(self.encoder(x)))
 
-    def decode(self, z) -> "_DecoderOutput":
-        # NOTE: We wrap the output in a dict to be consistent with the output
-        z = self.post_quant_conv(z)
-        dec = self.decoder(z)
-        return cast("_DecoderOutput", SimpleNamespace(sample=dec))
+    def decode(self, z: Tensor) -> Tensor:
+        """Return images in [-1, 1] for latents ``z``."""
+        return self.decoder(self.post_quant_conv(z))
 
     @override
-    def forward(self, x, return_recon=True):
+    def forward(self, x: Tensor) -> tuple[DiagonalGaussianDistribution, Tensor]:
+        """Encode, sample, and decode.
+
+        Args:
+          x: Images in [-1, 1].
+
+        Returns:
+          posterior: The encoder's distribution over latents.
+          reconstruction: The decoded sample.
+
+        """
         posterior = self.encode(x)
-        z = posterior.sample()
-
-        recon = None
-        if return_recon:
-            recon = self.decode(z).sample
-        return posterior, z, recon
+        return posterior, self.decode(posterior.sample())
 
 
-# Predefined VAE architectures.
-def VAE_F8D4(**kwargs) -> AutoencoderKL:
-    # [B, 4, 32, 32].
-    return AutoencoderKL(
-        embed_dim=4,
-        ch_mult=[1, 2, 4, 4],
-        use_variational=True,
-        **kwargs,
-    )
+def vae_f8d4() -> AutoencoderKL:
+    """Return the 4-channel autoencoder downsampling 8x: ``[B, 4, 32, 32]`` at 256px."""
+    return AutoencoderKL(channels_latent=4, channel_multipliers=(1, 2, 4, 4))
 
 
-def VAE_F16D32(**kwargs) -> AutoencoderKL:
-    # [B, 32, 16, 16] (used in VA-VAE and our model)
-    return AutoencoderKL(
-        embed_dim=32,
-        ch_mult=[1, 1, 2, 2, 4],
-        use_variational=True,
-        **kwargs,
-    )
-
-
-vae_models = {
-    "f8d4": VAE_F8D4,  # [B, 4, 32, 32].
-    "f16d32": VAE_F16D32,  # [B, 32, 16, 16].
-}
+def vae_f16d32() -> AutoencoderKL:
+    """Return the 32-channel autoencoder downsampling 16x: ``[B, 32, 16, 16]``."""
+    return AutoencoderKL(channels_latent=32, channel_multipliers=(1, 1, 2, 2, 4))
 
 
 @torch.no_grad()
@@ -601,7 +357,7 @@ def encode_image(vae: AutoencoderKL, image: Tensor) -> Tensor:
 @torch.no_grad()
 def decode_latents(vae: AutoencoderKL, latents: Tensor) -> Tensor:
     """Decode scaled model latents to float RGB in [0, 1]."""
-    return ((vae.decode(latents / 0.3099).sample + 1) / 2).clamp(0, 1)
+    return ((vae.decode(latents / 0.3099) + 1) / 2).clamp(0, 1)
 
 
 def load_invae(
@@ -625,25 +381,79 @@ def load_invae(
     """
     if checkpoint is None:
         try:
-            hub = import_module("huggingface_hub")
+            hub = cast(_Hub, import_module("huggingface_hub"))
         except ImportError as error:
             raise ImportError(
                 "Install priml[hub] or pass a local INVAE checkpoint path",
             ) from error
-        checkpoint = hub.hf_hub_download(
+        downloaded = hub.hf_hub_download(
             repo_id="REPA-E/e2e-invae",
             filename="e2e-invae-400k.pt",
         )
-    if not isinstance(checkpoint, (str, Path)):
-        raise TypeError("Hugging Face Hub returned an invalid checkpoint path.")
-    vae = VAE_F16D32()
-    state = torch.load(Path(checkpoint), map_location="cpu", weights_only=True)
-    vae.load_state_dict(state)
+        if not isinstance(downloaded, (str, Path)):
+            raise TypeError("Hugging Face Hub returned an invalid checkpoint path.")
+        checkpoint = downloaded
+    vae = vae_f16d32()
+    # torch.load is annotated `-> Any`; weights_only=True guarantees tensors.
+    vae.load_state_dict(
+        cast(
+            dict[str, Tensor],
+            torch.load(Path(checkpoint), map_location="cpu", weights_only=True),
+        ),
+    )
     vae.to(device)
     vae.eval()
     vae.requires_grad_(False)
     return vae
 
 
-class _DecoderOutput(Protocol):
-    sample: Tensor
+def _group_norm(channels: int) -> nn.GroupNorm:
+    """Return the checkpoint's 32-group normalization."""
+    return nn.GroupNorm(num_groups=32, num_channels=channels, eps=1e-6)
+
+
+class _Stage(nn.Module):
+    """One resolution's residual blocks, optional attention, and resampling.
+
+    The attribute names are the checkpoint's: ``block``, ``attn``, and
+    ``downsample`` or ``upsample``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.block: nn.ModuleList[ResnetBlock] = nn.ModuleList()
+        self.attn: nn.ModuleList[SpatialSelfAttention] = nn.ModuleList()
+        self.downsample: Downsample | None = None
+        self.upsample: Upsample | None = None
+
+    @override
+    def forward(self, h: Tensor) -> Tensor:
+        for index, block in enumerate(self.block):
+            h = block(h)
+            if self.attn:
+                h = self.attn[index](h)
+        if self.downsample is not None:
+            h = self.downsample(h)
+        if self.upsample is not None:
+            h = self.upsample(h)
+        return h
+
+
+class _Middle(nn.Module):
+    """Residual block, self-attention, residual block, at the coarsest size."""
+
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        self.block_1 = ResnetBlock(channels, channels)
+        self.attn_1 = SpatialSelfAttention(channels)
+        self.block_2 = ResnetBlock(channels, channels)
+
+    @override
+    def forward(self, h: Tensor) -> Tensor:
+        return self.block_2(self.attn_1(self.block_1(h)))
+
+
+class _Hub(Protocol):
+    """The one ``huggingface_hub`` call the loader makes, imported only on demand."""
+
+    def hf_hub_download(self, *, repo_id: str, filename: str) -> object: ...

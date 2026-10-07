@@ -1,8 +1,9 @@
 """SignSGD optimizer for the per-puzzle sparse embedding.
 
-Single-process port of reference's
-``CastedSparseEmbeddingSignSGD_Distributed`` (`TinyRecursiveModels/
-models/sparse_embedding.py`). Per-row update rule for sparse embedding
+Port of reference's ``CastedSparseEmbeddingSignSGD_Distributed``
+(`TinyRecursiveModels/models/sparse_embedding.py`), including its cross-rank
+all-gather of touched rows when a multi-rank process group is initialized and
+``aggregate_distributed`` is set. Per-row update rule for sparse embedding
 ``weights`` of shape ``[N, D]``:
 
     if row i received gradient this step:
@@ -21,6 +22,8 @@ from collections.abc import Callable, Iterable
 from functools import partial
 from typing import cast, overload, override
 
+import math
+
 from configgle import Fig
 from torch import Tensor
 from torch.optim import Optimizer
@@ -28,7 +31,7 @@ from torch.optim import Optimizer
 import torch
 import torch.distributed as dist
 
-from priml.lib.custom_json import FloatCodec
+from priml.lib.custom_json import convert
 
 
 _ParamLike = Iterable[Tensor] | Iterable[dict[str, object]]
@@ -236,10 +239,12 @@ class SignSGD(Optimizer):
         *,
         aggregate_distributed: bool = True,
     ) -> None:
-        if lr < 0.0:
-            raise ValueError(f"Invalid learning rate: {lr}.")
-        if weight_decay < 0.0:
-            raise ValueError(f"Invalid weight_decay: {weight_decay}.")
+        if not math.isfinite(lr) or lr < 0.0:
+            raise ValueError(f"Learning rate must be finite and nonnegative: {lr}.")
+        if not math.isfinite(weight_decay) or weight_decay < 0.0:
+            raise ValueError(
+                f"Weight decay must be finite and nonnegative: {weight_decay}.",
+            )
         defaults: dict[str, object] = {"lr": lr, "weight_decay": weight_decay}
         super().__init__(params, defaults)
         # Whether the sparse-embedding step all-gathers gradient rows across
@@ -272,8 +277,8 @@ class SignSGD(Optimizer):
 
     def _step_group(self, group: dict[str, object]) -> None:
         """Update every parameter in one group."""
-        lr = FloatCodec.coerce(group["lr"], None)
-        wd = FloatCodec.coerce(group["weight_decay"], None)
+        lr = convert(group["lr"], float)
+        wd = convert(group["weight_decay"], float)
         params = cast(list[Tensor], group["params"])
         if group.get("sparse_embedding", False):
             sparse_parts = _sparse_embedding_parts(params)
@@ -355,8 +360,8 @@ class SignSGD(Optimizer):
         if sparse_parts is None:
             return
         _, _, weights = sparse_parts
-        lr = FloatCodec.coerce(group["lr"], None)
-        wd = FloatCodec.coerce(group["weight_decay"], None)
+        lr = convert(group["lr"], float)
+        wd = convert(group["weight_decay"], float)
         _sparse_embedding_step(
             local_weights_grad,
             local_ids,

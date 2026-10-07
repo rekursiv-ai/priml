@@ -35,7 +35,6 @@ from typing import (
 
 import functools
 import itertools
-import json
 import math
 
 from configgle import Fig
@@ -45,37 +44,15 @@ import numpy as np
 import torch
 
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
-from priml.lib.custom_json import DictCodec, IntCodec
+from priml.lib.custom_json import convert, parse
+from priml.paths import resolve_working_dir
+from priml.runtime import get_device
 
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
     from numpy.typing import NDArray
-
-
-def resolve_working_dir(
-    base_dir: Path | str | None,
-    working_dir: Path | str,
-) -> Path:
-    """Resolve a Config's logical ``working_dir`` against an optional ``base_dir``.
-
-    A ``None`` ``base_dir`` falls back to the fixed ``/opt/scratch`` root, so a
-    standalone dataset/run resolves beneath it; an injected ``base_dir`` (the
-    owner's resolved directory) overrides it. The leading slash of
-    ``working_dir`` is stripped before joining because an absolute right operand
-    would otherwise discard the base (POSIX ``Path`` semantics).
-
-    Args:
-      base_dir: Owner-resolved root, or None for ``/opt/scratch``.
-      working_dir: Logical path beneath the root; a leading slash is dropped.
-
-    Returns:
-      resolved: ``base_dir / working_dir``.
-
-    """
-    base = Path("/opt/scratch") if base_dir is None else Path(base_dir)
-    return base / str(working_dir).lstrip("/")
 
 
 def augment_sudoku(
@@ -107,7 +84,11 @@ def augment_sudoku(
         labels_aug: [B, 81] labels under the same permutation and symmetry.
 
     """
-    n = spec.grid_shape[0]
+    n = math.isqrt(inputs.shape[1])
+    if inputs.shape[1] != n * n:
+        raise ValueError("Expected inputs.shape[1] == n * n.")
+    if spec.grid_shape != (n, n):
+        raise ValueError("Expected spec.grid_shape == (n, n).")
     B = inputs.shape[0]
     device = inputs.device
 
@@ -194,7 +175,7 @@ def load_puzzle_dataset(
     metadata_path = data_path / "dataset.json"
     if not metadata_path.exists():
         raise FileNotFoundError(f"Dataset metadata not found: {metadata_path}")
-    metadata = DictCodec.coerce(cast(object, json.loads(metadata_path.read_text())))
+    metadata = parse(metadata_path.read_text(), _Metadata)
 
     group_path = data_path / "all__group_indices.npy"
     if not group_path.exists():
@@ -216,16 +197,26 @@ def load_puzzle_dataset(
     inputs = torch.from_numpy(np.array(inputs_mmap[:n])).to(torch.int32)
     labels = torch.from_numpy(np.array(labels_mmap[:n])).to(torch.int32)
     if n is not None:
-        group_indices = group_indices[group_indices <= n]
-        if len(group_indices) == 0 or group_indices[-1] != n:
-            group_indices = torch.cat([group_indices, torch.tensor([n])])
+        group_indices = torch.cat(
+            [
+                group_indices[group_indices < n],
+                torch.tensor([n], dtype=group_indices.dtype),
+            ],
+        )
     return {
         "inputs": inputs,
         "labels": labels,
         "group_indices": group_indices,
-        "vocab_size": IntCodec.coerce(metadata.get("vocab_size"), default=None),
-        "seq_len": IntCodec.coerce(metadata.get("seq_len"), default=None),
+        "vocab_size": metadata["vocab_size"],
+        "seq_len": metadata["seq_len"],
     }
+
+
+class _Metadata(TypedDict):
+    """The prepared split's ``dataset.json``."""
+
+    vocab_size: int
+    seq_len: int
 
 
 class PuzzleDataset:
@@ -252,9 +243,9 @@ class PuzzleDataset:
         trainer may inject an explicit root here."""
 
         working_dir: Path | str = "/datasets/sudoku-extreme"
-        """Logical dataset root containing train/ and test/ splits; a relative
-        logical path resolves beneath ``base_dir`` at construction, an explicit
-        absolute path is kept verbatim."""
+        """Dataset root containing train/ and test/ splits. A ``str`` is a
+        logical location resolved beneath ``base_dir`` at finalize; a ``Path``
+        is literal and kept as given."""
 
         batch_size: int = 192
         """Samples per training batch (the reproduction recipe uses 384, set
@@ -263,8 +254,8 @@ class PuzzleDataset:
         eval_batch_size: int | None = None
         """Samples per eval batch; None falls back to batch_size."""
 
-        device: str = "auto"
-        """Device data loads onto; "auto" picks CUDA, else MPS, else CPU."""
+        device: torch.device | str | None = None
+        """Device data loads onto; ``None`` is the loop's."""
 
         augment: bool = False
         """Apply on-the-fly dihedral + digit-permutation augmentation per
@@ -311,7 +302,10 @@ class PuzzleDataset:
         @override
         def finalize(self) -> Self:
             if isinstance(self.working_dir, str):
-                self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
+                self.working_dir = resolve_working_dir(
+                    "/opt/scratch" if self.base_dir is None else self.base_dir,
+                    self.working_dir,
+                )
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
@@ -345,12 +339,11 @@ class PuzzleDataset:
         # Single-writer invariant: snapshot any prior live iterator's epoch
         # before building a fresh one, so re-creation continues the sequence.
         if self._active_train_iter is not None:
-            self._train_epochs = self._active_train_iter._epoch  # noqa: SLF001 -- The dataset must snapshot the iterator's private epoch to preserve shuffle continuity.
+            self._train_epochs = self._active_train_iter.epoch
         iter_obj = _PuzzleBatchIterator(
             dataset_dir=self.dataset_dir,
             device=self.config.device,
             batch_size=self.batch_size,
-            train=True,
             num_instances=self.config.num_instances,
             max_samples=self.config.max_samples,
             seed=self.config.seed,
@@ -402,7 +395,7 @@ class PuzzleDataset:
         # resumes with the NEXT epoch's shuffle rather than replaying the
         # aborted one. Ported behavior; resume parity depends on it.
         epochs = (
-            self._active_train_iter._epoch  # noqa: SLF001 -- Resume state must read the iterator's private epoch before serialization.
+            self._active_train_iter.epoch
             if self._active_train_iter is not None
             else self._train_epochs
         )
@@ -414,7 +407,7 @@ class PuzzleDataset:
         if "train_epochs" in state:
             self._train_epochs = state["train_epochs"]
             if self._active_train_iter is not None:
-                self._active_train_iter._epoch = self._train_epochs  # noqa: SLF001 -- Resume loading must hand the saved epoch back to the live iterator.
+                self._active_train_iter.epoch = self._train_epochs
 
 
 # Ported survivor-rerun semantics: the iterator's tensors and instance bounds are re-
@@ -447,17 +440,6 @@ def _subset_eval_iterator(
     return it
 
 
-def _get_device(device: torch.device | str) -> torch.device:
-    """Resolve "auto" to the best available backend: CUDA > MPS > CPU."""
-    if device != "auto":
-        return torch.device(device)
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
-
-
 class _PuzzleBatchIterator:
     """Iterates over device-resident puzzle data in batches.
 
@@ -472,7 +454,7 @@ class _PuzzleBatchIterator:
     def __init__(
         self,
         dataset_dir: Path,
-        device: torch.device | str,
+        device: torch.device | str | None,
         batch_size: int,
         *,
         train: bool = True,
@@ -499,13 +481,11 @@ class _PuzzleBatchIterator:
         self.vocab_size = self.spec.vocab_size
         self.seq_len = data["seq_len"]
 
-        if num_instances is not None and num_instances < len(instance_bounds) - 1:
-            max_samples = int(instance_bounds[num_instances])
+        if num_instances is not None:
             instance_bounds = instance_bounds[: num_instances + 1]
-        else:
-            max_samples = len(data["inputs"])
+            max_samples = int(instance_bounds[-1])
 
-        self.device = _get_device(device)
+        self.device = get_device(device)
         self.inputs = data["inputs"][:max_samples].to(self.device)
         self.labels = data["labels"][:max_samples].to(self.device)
         self.instance_bounds = instance_bounds.to(self.device)
@@ -524,11 +504,10 @@ class _PuzzleBatchIterator:
         if self.augment and augment_seed is not None:
             self._augment_generator = torch.Generator(device=self.device)
             self._augment_generator.manual_seed(augment_seed)
-        # Number of completed iterations; folded into the seeded generator so
-        # each epoch reshuffles differently yet reproducibly. Seeded from
-        # ``epoch_offset`` on resume so a restored run continues the epoch
-        # sequence instead of replaying the earliest shuffle.
-        self._epoch = epoch_offset
+        self.epoch: int = epoch_offset
+        """Epochs begun; folded into the seeded generator so each epoch
+        reshuffles differently yet reproducibly. Starts at ``epoch_offset`` so
+        a restored run continues the sequence instead of replaying it."""
 
     # When ``seed`` is set, returns a dedicated ``torch.Generator`` seeded by ``seed``
     # folded with the epoch index, so a given epoch's shuffle is deterministic and
@@ -540,32 +519,12 @@ class _PuzzleBatchIterator:
         if self.seed is None:
             return None
         gen = torch.Generator(device=device)
-        gen.manual_seed(self.seed + self._epoch)
+        gen.manual_seed(self.seed + self.epoch)
         return gen
 
     def __iter__(self) -> Iterator[PuzzleBatch]:
-        device = self.instance_bounds.device
-        starts = self.instance_bounds[:-1]
-        sizes = (self.instance_bounds[1:] - starts).long()
-        gen = self._shuffle_generator(device)
-
-        # Two-level shuffle with a pinned draw order (per-instance randperms,
-        # then one global randperm over all samples). This is the internal
-        # bundle-grouped shuffle specialized to bundle size 1 -- the only
-        # size any ported experiment uses -- with an identical RNG draw
-        # sequence and identical resulting order.
-        chunks: list[Tensor] = []
-        for i in range(self.n_instances):
-            s, n = int(starts[i]), int(sizes[i])
-            idx = torch.arange(s, s + n, device=device)
-            if self.shuffle:
-                idx = idx[torch.randperm(n, device=device, generator=gen)]
-            chunks.append(idx)
-        indices = torch.cat(chunks)
-        if self.shuffle:
-            perm = torch.randperm(len(indices), device=device, generator=gen)
-            indices = indices[perm]
-        self._epoch += 1
+        indices = self._order()
+        self.epoch += 1
         n_samples = len(indices)
 
         for i in range(0, n_samples, self.batch_size):
@@ -600,8 +559,37 @@ class _PuzzleBatchIterator:
             }
 
     def __len__(self) -> int:
-        total = sum(
-            int(self.instance_bounds[i + 1] - self.instance_bounds[i])
-            for i in range(self.n_instances)
-        )
+        total = int(self.instance_bounds[-1] - self.instance_bounds[0])
         return math.ceil(total / self.batch_size)
+
+    def _order(self) -> Tensor:
+        """Return this epoch's sample order: disk order, or the two-level shuffle."""
+        device = self.instance_bounds.device
+        if not self.shuffle:
+            return torch.arange(
+                int(self.instance_bounds[0]),
+                int(self.instance_bounds[-1]),
+                device=device,
+            )
+        gen = self._shuffle_generator(device)
+        starts = self.instance_bounds[:-1]
+        # One host sync for every bound, not two per instance.
+        bounds = zip(
+            convert(starts.tolist(), list[int]),
+            convert((self.instance_bounds[1:] - starts).tolist(), list[int]),
+            strict=True,
+        )
+        # Two-level shuffle with a pinned draw order (per-instance randperms,
+        # then one global randperm over all samples). This is the internal
+        # bundle-grouped shuffle specialized to bundle size 1 -- the only
+        # size any ported experiment uses -- with an identical RNG draw
+        # sequence and identical resulting order.
+        indices = torch.cat(
+            [
+                torch.arange(s, s + n, device=device)[
+                    torch.randperm(n, device=device, generator=gen)
+                ]
+                for s, n in bounds
+            ],
+        )
+        return indices[torch.randperm(len(indices), device=device, generator=gen)]

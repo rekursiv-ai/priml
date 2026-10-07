@@ -2,8 +2,9 @@
 
 Thin subclass of :class:`priml.baselines.arcagi1.data.PuzzleData` -- the
 on-disk schema, batching, and iterators are identical (ARC-AGI-2 keeps 30x30
-grids, 10 colors, vocab 12, seq_len 900). Only the staging differs: creating
-the dataset builds the ``arc2concept-aug-1000`` tree (subsets ``training2`` +
+grids, 10 colors, vocab 12, seq_len 900). Only the staging differs, through the
+parent's ``_ensure_tree`` hook: creating the dataset with a positive
+``num_puzzle_identifiers`` builds the ``arc2concept-aug-1000`` tree (subsets ``training2`` +
 ``evaluation2`` + ``concept``, test split ``evaluation2``) instead of the
 ARC-AGI-1 tree, and can additionally stage the S=N spatial-eval expansion of
 an aug-policy variant (the exp005 test-time-augmentation recipe).
@@ -73,42 +74,36 @@ class Arc2PuzzleDataset(PuzzleData):
                 )
             return super().finalize()
 
-    def __init__(self, config: Config) -> None:
-        # Stage the ARC-AGI-2 tree BEFORE the parent constructor runs: the
-        # parent's own ensure step builds ARC-AGI-1 subsets when manifest
-        # files are missing, but our ensure (and the spatial expansion's,
-        # whose manifest covers the copied train split too) leaves a complete
-        # manifest, so the parent's existence-gated ensure no-ops. Gated like
-        # the parent (count 0 = tests/smoke with tiny local data, never the
-        # real build path).
-        if config.num_puzzle_identifiers > 0:
-            if config.spatial_eval_views > 0 and not str(config.source_dataset_dir):
-                raise ValueError(
-                    "spatial_eval_views > 0 requires source_dataset_dir (the base "
-                    "tree the spatial expansion derives from).",
-                )
-            source_dir = Path(
-                config.source_dataset_dir
-                if config.spatial_eval_views > 0
-                else config.working_dir,
+    @override
+    def _ensure_tree(self, config: PuzzleData.Config) -> None:
+        """Stage the ARC-AGI-2 tree, then its spatial expansion when configured."""
+        assert isinstance(config, Arc2PuzzleDataset.Config)
+        if config.spatial_eval_views > 0 and not str(config.source_dataset_dir):
+            raise ValueError(
+                "spatial_eval_views > 0 requires source_dataset_dir (the base "
+                "tree the spatial expansion derives from).",
             )
-            spatial = config.augmentation.spatial
-            ensure_arc2_dataset(
-                target=source_dir,
-                train_scale_weights=spatial.train_scale_weights,
-                translation_prob=spatial.translation_prob,
-                scale_prob=spatial.scale_prob,
-                num_aug=config.augmentation.num_aug,
-                seed=config.augmentation.seed,
-                input_file_prefix=config.input_file_prefix or None,
+        source_dir = Path(
+            config.source_dataset_dir
+            if config.spatial_eval_views > 0
+            else config.working_dir,
+        )
+        spatial = config.augmentation.spatial
+        ensure_arc2_dataset(
+            target=source_dir,
+            train_scale_weights=spatial.train_scale_weights,
+            translation_prob=spatial.translation_prob,
+            scale_prob=spatial.scale_prob,
+            num_aug=config.augmentation.num_aug,
+            seed=config.augmentation.seed,
+            input_file_prefix=config.input_file_prefix or None,
+        )
+        if config.spatial_eval_views > 0:
+            # Pin the expansion to this config's own resolved working_dir so the
+            # build target and the read path cannot diverge (even under a
+            # non-default resource root).
+            ensure_spatial_eval_data(
+                source_dir=source_dir,
+                spatial_views=config.spatial_eval_views,
+                target=Path(config.working_dir),
             )
-            if config.spatial_eval_views > 0:
-                # Pin the expansion to this config's own resolved working_dir so
-                # the build target and the read path cannot diverge (even
-                # under a non-default resource root).
-                ensure_spatial_eval_data(
-                    source_dir=source_dir,
-                    spatial_views=config.spatial_eval_views,
-                    target=Path(config.working_dir),
-                )
-        super().__init__(config)

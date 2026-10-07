@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import hashlib
 import json
@@ -19,7 +19,8 @@ from tokenizers import decoders, models, pre_tokenizers
 import rustbpe
 import tokenizers
 
-from priml.lib.custom_json import DictCodec
+from priml.baselines.nanochat.data import DEFAULT_ENCODE_THREADS
+from priml.lib.custom_json import JSONValue, parse
 from priml.paths import validated_output_path
 
 
@@ -54,19 +55,23 @@ def read_mapping(path: Path) -> dict[str, object]:
       mapping: The decoded object.
 
     """
-    return dict(
-        DictCodec.coerce(cast(object, json.loads(path.read_text())), default=None),
-    )
+    return parse(path.read_text(), dict[str, object])
 
 
-def write_mapping(path: Path, *, value: object) -> None:
+def write_mapping(path: Path, *, value: JSONValue) -> None:
     """Publish deterministic JSON after its complete contents have been written.
 
     Args:
       path: Destination, outside protected inputs.
-      value: JSON-compatible preparation metadata.
+      value: JSON-compatible preparation metadata; every number finite.
+
+    Raises:
+      ValueError: A number is not finite, or the value is circular.
 
     """
+    # Serialized before the destination is touched, so a rejected value leaves
+    # nothing behind.
+    text = json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
     destination = validated_output_path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -75,11 +80,23 @@ def write_mapping(path: Path, *, value: object) -> None:
         delete=False,
         prefix="nanochat-json-",
     ) as output:
-        output.write(
-            json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        )
+        output.write(text)
         staged = Path(output.name)
     staged.replace(destination)
+
+
+def shard_path(directory: Path, *, shard: int) -> Path:
+    """Return the corpus's file for one shard index.
+
+    Args:
+      directory: Directory holding the shards.
+      shard: Source shard index.
+
+    Returns:
+      path: ``directory/shard_NNNNN.parquet``.
+
+    """
+    return directory / f"shard_{shard:05d}.parquet"
 
 
 def document_rows(path: Path, *, shard: int) -> Iterator[tuple[str, str]]:
@@ -93,14 +110,8 @@ def document_rows(path: Path, *, shard: int) -> Iterator[tuple[str, str]]:
       row: Original identity and unmodified text.
 
     """
-    offset = 0
-    for batch in parquet.ParquetFile(path).iter_batches(
-        batch_size=1_024,
-        columns=["text"],
-    ):
-        for text in cast(list[str], batch.column(0).to_pylist()):
-            yield f"{shard}:{offset}", text
-            offset += 1
+    for offset, text in enumerate(_document_texts(path)):
+        yield f"{shard}:{offset}", text
 
 
 def usage_scores(pieces: list[bytes], counts: list[int]) -> list[float]:
@@ -135,7 +146,7 @@ class SamplePreparation:
         """Heldout shard, excluded from vocabulary fitting."""
 
         train_shard_indices: tuple[int, ...] = (*range(7), *range(8, 15))
-        """Ordered training sources; validation shard7 is excluded."""
+        """Ordered training sources; must exclude ``val_shard``."""
 
         rows_per_shard: int = 4_096
         """Number of equal-population midpoint strata in each shard."""
@@ -146,7 +157,9 @@ class SamplePreparation:
     def __init__(self, config: Config) -> None:
         self.config = config
         if config.val_shard in config.train_shard_indices:
-            raise ValueError("The fitting sample must exclude validation shard7.")
+            raise ValueError(
+                f"The fitting sample must exclude validation shard {config.val_shard}.",
+            )
         if config.rows_per_shard <= 0 or config.max_bytes < 4:
             raise ValueError(
                 "Sample size must be positive and windows at least four bytes.",
@@ -158,16 +171,16 @@ class SamplePreparation:
             self.config.working_dir,
             protected=[self.config.raw_dir],
         )
-        output.mkdir(parents=True, exist_ok=False)
+        output.mkdir(parents=True)
         texts: list[str] = []
         for shard in self.config.train_shard_indices:
-            path = self.config.raw_dir / f"shard_{shard:05d}.parquet"
+            path = shard_path(self.config.raw_dir, shard=shard)
             total = parquet.read_metadata(path).num_rows
             count = min(total, self.config.rows_per_shard)
             selected = {
                 (2 * index + 1) * total // (2 * count) for index in range(count)
             }
-            for index, (_, text) in enumerate(document_rows(path, shard=shard)):
+            for index, text in enumerate(_document_texts(path)):
                 if index not in selected:
                     continue
                 raw = text.encode()
@@ -197,10 +210,13 @@ class UnigramPreparation:
         """Model vocabulary including reserved IDs."""
 
         reserved_count: int = 16
-        """IDs appended after ordinary byte pieces; the first is BOS."""
+        """IDs appended after ordinary byte pieces; at least 1, the first is BOS."""
 
         overshoot_learned: float = 1.15
-        """Multiplier applied to learned seed pieces beyond the 256 bytes."""
+        """Multiplier, at least 1, on learned seed pieces beyond the 256 bytes.
+
+        Pruning only removes pieces, so a seed smaller than the vocabulary
+        would leave it short."""
 
         num_passes: int = 2
         """Hard-EM Viterbi recount passes before one-shot pruning."""
@@ -211,16 +227,29 @@ class UnigramPreparation:
         num_threads: int = 8
         """Threads used by the initial tiktoken counting pass."""
 
-        split_pattern: str = r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"
-        """Inherited byte-BPE pretokenization expression."""
+        split_pattern: str = (
+            r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}"""
+            r"""| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
+        )
+        """Regex splitting text before pieces apply; shared with the BPE fit.
+
+        Caps numbers at two digits and keeps a leading space with its word,
+        both of which bound how much the vocabulary spends on rare literals.
+        :data:`SPLIT_PATTERN` reads it from here, so the two fits cannot fork."""
 
         pruning: Callable[[list[bytes], list[int]], list[float]] = usage_scores
         """Injected pruning objective; ties retain the earlier seed piece."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
+        _require_reserved_bos(config.reserved_count)
         if config.vocab_size - config.reserved_count < 256:
             raise ValueError("The ordinary vocabulary must contain every byte.")
+        if math.isnan(config.overshoot_learned) or config.overshoot_learned < 1:
+            raise ValueError(
+                "overshoot_learned must be at least 1, or the seed holds fewer "
+                f"pieces than the vocabulary; got {config.overshoot_learned}.",
+            )
 
     def build(self) -> None:
         """Fit the tokenizer from the selected text and save its piece counts."""
@@ -229,7 +258,7 @@ class UnigramPreparation:
             self.config.working_dir,
             protected=[self.config.sample_dir],
         )
-        output.mkdir(parents=True, exist_ok=False)
+        output.mkdir(parents=True)
         ordinary = self.config.vocab_size - self.config.reserved_count
         trainer = rustbpe.Tokenizer()
         trainer.train_from_iterator(
@@ -269,15 +298,13 @@ class UnigramPreparation:
             counts = [frequencies[index] for index in range(len(pieces))]
             logger.info("Hard-EM pass %d: %d tokens", iteration + 1, sum(counts))
         scores = self.config.pruning(pieces, counts)
-        keep = sorted(
-            [
-                *range(256),
-                *sorted(
-                    range(256, len(pieces)),
-                    key=lambda index: (-scores[index], index),
-                )[: ordinary - 256],
-            ],
-        )
+        keep = _pruned_piece_indices(scores, ordinary=ordinary)
+        # The trainer may stop short of its target on a small corpus.
+        if len(keep) != ordinary:
+            raise ValueError(
+                f"The fitted seed holds {len(pieces)} pieces, too few to prune to "
+                f"{ordinary} ordinary pieces; fit on more text.",
+            )
         model = frequency_model(
             [pieces[index] for index in keep],
             counts=[counts[index] for index in keep],
@@ -288,6 +315,10 @@ class UnigramPreparation:
             output / "counts.npy",
             array([counts[index] for index in keep], dtype="int64"),
         )
+
+
+SPLIT_PATTERN: Final = UnigramPreparation.Config().split_pattern
+"""The default pretokenizer, for the BPE fits that take no config."""
 
 
 def load_sample(directory: Path) -> list[str]:
@@ -352,7 +383,7 @@ def frequency_model(
         for piece, count in zip(pieces, counts, strict=True)
     ]
     model = tokenizers.Tokenizer(
-        models.Unigram(vocab, unk_id=None, byte_fallback=False),
+        models.Unigram(vocab),
     )
     model.pre_tokenizer = pre_tokenizers.Sequence(
         [
@@ -378,7 +409,7 @@ def byte_alphabet() -> dict[int, str]:
 
     """
     values = [*range(33, 127), *range(161, 173), *range(174, 256)]
-    mapping = dict(zip(values, map(chr, values), strict=True))
+    mapping = {value: chr(value) for value in values}
     for value in range(256):
         if value not in mapping:
             mapping[value] = chr(256 + len(mapping) - len(values))
@@ -395,9 +426,10 @@ class ByteLevelTokenizer:
         """Frozen HF tokenizer JSON."""
 
         reserved_count: int = 16
-        """Reserved IDs outside the ordinary tokenizer; first is BOS."""
+        """Reserved IDs outside the ordinary tokenizer; at least 1, first is BOS."""
 
     def __init__(self, config: Config) -> None:
+        _require_reserved_bos(config.reserved_count)
         self.backend = tokenizers.Tokenizer.from_file(str(config.path))
         document = read_mapping(config.path)
         if (
@@ -425,7 +457,7 @@ class ByteLevelTokenizer:
         self,
         texts: list[str],
         *,
-        num_threads: int = 8,
+        num_threads: int = DEFAULT_ENCODE_THREADS,
     ) -> list[list[int]]:
         """Encode unmodified documents and prepend exactly one BOS.
 
@@ -453,3 +485,32 @@ class ByteLevelTokenizer:
                 raise ValueError("Token pieces do not conserve literal UTF-8 bytes.")
             output.append([self.bos_token_id, *ids])
         return output
+
+
+def _require_reserved_bos(reserved_count: int) -> None:
+    """Refuse a layout with no reserved ID for BOS, which takes the first."""
+    if reserved_count < 1:
+        raise ValueError(
+            "reserved_count must be at least 1: the first reserved ID is BOS; "
+            f"got {reserved_count}.",
+        )
+
+
+def _document_texts(path: Path) -> Iterator[str]:
+    for batch in parquet.ParquetFile(path).iter_batches(
+        batch_size=1_024,
+        columns=["text"],
+    ):
+        yield from cast(list[str], batch.column(0).to_pylist())
+
+
+def _pruned_piece_indices(scores: list[float], *, ordinary: int) -> list[int]:
+    return sorted(
+        [
+            *range(256),
+            *sorted(
+                range(256, len(scores)),
+                key=lambda index: (-scores[index], index),
+            )[: ordinary - 256],
+        ],
+    )

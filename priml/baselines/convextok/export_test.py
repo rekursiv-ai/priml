@@ -16,7 +16,7 @@ from tokenizers import pre_tokenizers
 import pytest
 
 from priml.baselines.convextok.export import export_tokenizer
-from priml.lib.custom_json import DictCodec, ListCodec
+from priml.lib.custom_json import convert
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -26,11 +26,7 @@ def test_held_out_text_segments_as_upstream() -> None:
     alphabet = set(pre_tokenizers.ByteLevel.alphabet())
     learned = [
         token
-        for token in ListCodec.coerce(
-            _read_json("vocab.json").get("det"),
-            str,
-            default=None,
-        )
+        for token in convert(_read_json("vocab.json").get("det"), list[str])
         if token not in alphabet
     ]
     corpus = _read_json("corpus.json")
@@ -38,13 +34,12 @@ def test_held_out_text_segments_as_upstream() -> None:
         learned,
         split_pattern=str(corpus.get("split_pattern")),
     )
-    texts = ListCodec.coerce(corpus.get("heldout"), str, default=None)
+    texts = convert(corpus.get("heldout"), list[str])
     golden = [
-        ListCodec.coerce(row, str, default=None)
-        for row in ListCodec.coerce(
+        convert(row, list[str])
+        for row in convert(
             _read_json("heldout_tokens.json").get("tokens"),
-            object,
-            default=None,
+            list[object],
         )
     ]
     assert [
@@ -64,6 +59,16 @@ def test_fewest_pieces_win() -> None:
     assert tokenizer.encode("abc", add_special_tokens=False).tokens == ["abc"]
 
 
+def test_model_scores_and_byte_fallback_are_exact() -> None:
+    tokenizer = export_tokenizer(["ab"], split_pattern=r"\S+")
+    serialized = tokenizer.to_str()
+    assert '"unk_id":null' in serialized
+    assert '"byte_fallback":false' in serialized
+    assert '"use_regex":false' in serialized
+    assert '["ab",-1.0]' in serialized
+    assert '["A",-1.0]' in serialized
+
+
 def test_text_round_trips() -> None:
     tokenizer = export_tokenizer(["ab"], split_pattern=r"\s+|\S+")
     text = "naïve ab\tcafé 🦙"
@@ -73,13 +78,16 @@ def test_text_round_trips() -> None:
 
 
 def test_single_bytes_are_rejected() -> None:
-    with pytest.raises(ValueError, match="byte"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Learned pieces span two or more bytes; single bytes are built in\.$",
+    ):
         export_tokenizer(["a"], split_pattern=r"\S+")
 
 
 def _read_json(name: str) -> dict[str, object]:
     raw = cast(object, json.loads((_CWD / "testdata" / name).read_text()))
-    return dict(DictCodec.coerce(raw, default=None))
+    return dict(convert(raw, dict[str, object]))
 
 
 if __name__ == "__main__":

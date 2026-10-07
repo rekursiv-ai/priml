@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final, cast
+from typing import Final, cast, override
 
 import math
 
 from configgle import Fig
-from configgle.testing import assert_pprint_golden
 from torch import Tensor
 
 import pytest
@@ -21,9 +20,18 @@ from priml.model.attention.rope import (
     RoPE,
     RoPEMixed,
     YarnScaling,
+    _learned_frequency_cost,
+    _split_dim,
+    _yarn_apply,
+    _yarn_correction_dim,
+    _yarn_correction_range,
+    _yarn_mscale,
+    rotate_conjugate,
+    rotation_cost,
 )
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 def _config_id(value: object) -> str | None:
@@ -75,8 +83,8 @@ def test_rope_rotate():
     cos = torch.randn(8, 4, 16)
     sin = torch.randn(8, 4, 16)
     q_rot, k_rot = RoPE.rotate(q, k, cos, sin)
-    assert q_rot.shape == q.shape
-    assert k_rot.shape == k.shape
+    assert torch.equal(q_rot, _rotate_reference(q, cos, sin, False))
+    assert torch.equal(k_rot, _rotate_reference(k, cos, sin, False))
 
 
 def test_rope_rotate_interleave():
@@ -84,8 +92,9 @@ def test_rope_rotate_interleave():
     k = torch.randn(2, 8, 4, 32)
     cos = torch.randn(8, 4, 16)
     sin = torch.randn(8, 4, 16)
-    q_rot, _k_rot = RoPE.rotate(q, k, cos, sin, interleave=True)
-    assert q_rot.shape == q.shape
+    q_rot, k_rot = RoPE.rotate(q, k, cos, sin, interleave=True)
+    assert torch.equal(q_rot, _rotate_reference(q, cos, sin, True))
+    assert torch.equal(k_rot, _rotate_reference(k, cos, sin, True))
 
 
 def _rotate_reference(x: Tensor, cos: Tensor, sin: Tensor, interleave: bool) -> Tensor:
@@ -257,8 +266,16 @@ def test_rope_validate_small_dim():
 
 
 def test_rope_split_dim():
-    assert RoPE._split_dim(128, 3) == [44, 42, 42]
-    assert RoPE._split_dim(64, 2) == [32, 32]
+    assert _split_dim(128, 3) == [44, 42, 42]
+    assert _split_dim(64, 2) == [32, 32]
+    assert _split_dim(6, 3) == [2, 2, 2]
+    assert _split_dim(14, 3) == [6, 4, 4]
+    with pytest.raises(
+        ValueError,
+        match=r"Cannot split dim=4 across 3 axes \(need at least 6\)\.",
+    ) as exc_info:
+        _split_dim(4, 3)
+    assert str(exc_info.value) == "Cannot split dim=4 across 3 axes (need at least 6)."
 
 
 def test_rope_zero_dim_axis():
@@ -351,6 +368,13 @@ def test_yarn_mscale_log_formula():
     m = RoPE.Config(channels_head=32, frequencies=yarn).make()
     expected = 0.1 * math.log(40.0) + 1.0
     assert math.isclose(m._mscale, expected)
+
+
+def test_yarn_softmax_scale_uses_all_dim_correction():
+    yarn = YarnScaling.Config(factor=32.0, mscale_all_dim=2.0)
+    expected_mscale = _yarn_mscale(32.0, 2.0)
+    assert yarn.softmax_scale(4) == pytest.approx(4**-0.5 * expected_mscale**2)
+    assert YarnScaling.Config(factor=32.0).softmax_scale(4) is None
 
 
 def test_yarn_mscale_applied_to_cos_sin():
@@ -962,6 +986,602 @@ def test_rope_mixed_bfb(device: str) -> None:
             dim=-1,
         ),
     )
+
+
+def test_rope_full_width_rotation_does_not_copy_an_empty_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    q = torch.ones(5, 3, 2, 8)
+    factors = torch.ones(5, 3, 2, 4)
+    calls: list[object] = []
+    original_cat = torch.cat
+
+    def cat(tensors: list[Tensor], *, dim: int = 0) -> Tensor:
+        calls.append(dim)
+        return original_cat(tensors, dim=dim)
+
+    monkeypatch.setattr(torch, "cat", cat)
+    RoPE.rotate(q, q, factors, factors)
+    assert calls == [-1, -1]
+
+
+def test_rope_rotate_padding_preserves_factor_dtype_and_pairing() -> None:
+    q = torch.arange(5 * 3 * 2 * 8, dtype=torch.float16).reshape(5, 3, 2, 8)
+    k = q + 1
+    # Padding factors are fixed by the [batch, positions, heads, half-width] contract.
+    cos = torch.full((5, 2, 2, 2), 0.5, dtype=torch.float16)
+    sin = torch.full((5, 2, 2, 2), 0.25, dtype=torch.float16)
+    for interleave in (False, True):
+        q_rot, k_rot = RoPE.rotate(q, k, cos, sin, interleave=interleave)
+        expected_q = torch.cat(
+            [
+                torch.cat(
+                    [
+                        _rotate_reference(q[:, :2, :, :4], cos, sin, interleave),
+                        q[:, :2, :, 4:],
+                    ],
+                    dim=-1,
+                ),
+                q[:, 2:],
+            ],
+            dim=1,
+        )
+        expected_k = torch.cat(
+            [
+                torch.cat(
+                    [
+                        _rotate_reference(k[:, :2, :, :4], cos, sin, interleave),
+                        k[:, :2, :, 4:],
+                    ],
+                    dim=-1,
+                ),
+                k[:, 2:],
+            ],
+            dim=1,
+        )
+        assert torch.equal(q_rot, expected_q)
+        assert torch.equal(k_rot, expected_k)
+        assert q_rot.dtype == q.dtype
+        assert k_rot.dtype == k.dtype
+
+
+def test_rope_padding_factories_preserve_factor_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    q = torch.ones(5, 3, 2, 8, dtype=torch.float16)
+    # Padding factories preserve the factor metadata required by RoPE.rotate.
+    cos = torch.ones(5, 2, 2, 2, dtype=torch.float16)
+    calls: list[tuple[str, object, object]] = []
+    original_ones = torch.ones
+    original_zeros = torch.zeros
+
+    def ones(
+        size: tuple[int, ...],
+        *,
+        dtype: torch.dtype | None = None,
+        device: torch.device | str | None = None,
+    ) -> Tensor:
+        calls.append(("ones", dtype, device))
+        return original_ones(size, dtype=dtype, device=device)
+
+    def zeros(
+        size: tuple[int, ...],
+        *,
+        dtype: torch.dtype | None = None,
+        device: torch.device | str | None = None,
+    ) -> Tensor:
+        calls.append(("zeros", dtype, device))
+        return original_zeros(size, dtype=dtype, device=device)
+
+    monkeypatch.setattr(torch, "ones", ones)
+    monkeypatch.setattr(torch, "zeros", zeros)
+    RoPE.rotate(q, q, cos, cos)
+    assert calls == [
+        ("ones", torch.float16, torch.device("cpu")),
+        ("zeros", torch.float16, torch.device("cpu")),
+    ]
+
+
+def test_rotate_does_not_pad_exact_sequence_or_channel_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    q = torch.ones(5, 3, 2, 8)
+    # The singleton head axis is required for broadcast rotary factors.
+    factors = torch.ones(5, 3, 1, 4)
+
+    def fail_factory(*args: object, **kwargs: object) -> Tensor:
+        del args, kwargs
+        raise AssertionError("identity padding is only needed for shorter tables")
+
+    monkeypatch.setattr(torch, "ones", fail_factory)
+    monkeypatch.setattr(torch, "zeros", fail_factory)
+    RoPE.rotate(q, q, factors, factors)
+
+
+def test_geometric_and_yarn_build_on_requested_meta_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = torch.device("meta")
+    geometric, _ = GeometricFrequencies(GeometricFrequencies.Config())(
+        channels=8,
+        device=device,
+    )
+    arange_calls: list[tuple[object, object]] = []
+    original_arange = torch.arange
+
+    def arange(
+        start: int,
+        end: int | None = None,
+        step: int = 1,
+        *,
+        dtype: torch.dtype | None = None,
+        device: torch.device | str | None = None,
+    ) -> Tensor:
+        arange_calls.append((dtype, device))
+        if end is None:
+            return original_arange(start, dtype=dtype, device=device)
+        return original_arange(start, end, step, dtype=dtype, device=device)
+
+    monkeypatch.setattr(torch, "arange", arange)
+    yarn = YarnScaling(YarnScaling.Config(factor=4.0))
+    scaled, _ = yarn(channels=8, device=device)
+    assert geometric.shape == (4,)
+    assert geometric.dtype == torch.float32
+    assert geometric.device == device
+    assert scaled.shape == (4,)
+    assert scaled.device == device
+    assert (torch.float32, device) in arange_calls
+    collapsed_base = (16 / (2 * math.pi)) ** 2
+    collapsed_config = YarnScaling.Config(
+        factor=4.0,
+        original_max_position_embeddings=16,
+        beta_fast=1.0,
+        beta_slow=1.0,
+        inner=HuggingFaceFrequencies.Config(base=collapsed_base),
+    )
+    collapsed, _ = _yarn_apply(
+        torch.ones(8),
+        collapsed_base,
+        16,
+        YarnScaling(collapsed_config),
+    )
+    assert torch.equal(collapsed, torch.tensor([1.0] * 5 + [0.25] * 3))
+
+
+def test_rope_conjugate_and_rotation_cost_are_exact() -> None:
+    x = torch.tensor([[[[1.0, 2.0, 3.0, 4.0]]]])
+    cos = torch.tensor([[[2.0, 3.0]]])
+    sin = torch.tensor([[[5.0, 7.0]]])
+    assert torch.equal(
+        rotate_conjugate(x, cos=cos, sin=sin),
+        torch.tensor([[[[17.0, 34.0, 1.0, -2.0]]]]),
+    )
+
+    class _WidthAwareConfig(RoPE.Config):
+        @override
+        def rotated_channels(self, channels_head: int) -> int:
+            return channels_head - 2
+
+    result = rotation_cost(
+        _WidthAwareConfig(4),
+        rows=2,
+        dtype=torch.float16,
+        channels_head=4,
+        heads=3,
+    )
+    assert result["flops", "primal", "elementwise"].sum() == 36
+    assert result["flops", "adjoint", "elementwise"].sum() == 36
+    assert result["bytes", "primal", "elementwise"].sum() == 216
+    assert result["bytes", "adjoint", "elementwise"].sum() == 216
+
+
+def test_yarn_formulas_pin_frequency_ramp_and_scale() -> None:
+    expected_dim = 16 * math.log(512 / (2.0 * 2 * math.pi)) / (2 * math.log(100.0))
+    assert math.isclose(_yarn_correction_dim(2.0, 16, 100.0, 512), expected_dim)
+    assert _yarn_correction_range(32.0, 1.0, 64, 10_000.0, 4096) == (10, 23)
+    low, high = _yarn_correction_range(1e30, 1e30, 64, 10_000.0, 4096)
+    assert low == 0
+    assert high < 0
+    low, high = _yarn_correction_range(1e-30, 1e-30, 64, 10_000.0, 4096)
+    assert low > 63
+    assert high == 63
+    assert _yarn_mscale(1.0, 3.0) == 1.0
+    assert _yarn_mscale(0.5, 3.0) == 1.0
+    assert math.isclose(_yarn_mscale(1.5, 2.0), 0.1 * math.log(1.5) * 2.0 + 1.0)
+    assert math.isclose(_yarn_mscale(4.0, 2.0), 0.1 * math.log(4.0) * 2.0 + 1.0)
+    config = YarnScaling.Config(factor=4.0, beta_fast=1.0, beta_slow=1.0)
+    config.original_max_position_embeddings = 4096
+    yarn = YarnScaling(config)
+    inv_freq = torch.tensor([1.0, 0.5, 0.25, 0.125])
+    scaled, mscale = _yarn_apply(inv_freq, 10_000.0, 8, yarn)
+    assert torch.equal(scaled, torch.tensor([1.0, 0.5, 0.25, 0.03125]))
+    assert math.isclose(mscale, 0.1 * math.log(4.0) + 1.0)
+
+
+def test_rope_split_and_recommended_base_values() -> None:
+    assert _split_dim(14, 3) == [6, 4, 4]
+    assert _split_dim(10, 2) == [6, 4]
+    expected = ((1024 - 1) / (2 * math.pi)) ** (64 / (64 - 2))
+    base = RoPE.smallest_recommended_base(64, 1024)
+    small_base = RoPE.smallest_recommended_base(4, 2)
+    assert isinstance(base, float)
+    assert isinstance(small_base, float)
+    assert math.isclose(base, expected)
+    assert math.isclose(small_base, (1 / (2 * math.pi)) ** 2)
+    bases = RoPE.smallest_recommended_base([64, 0], [1024, 32])
+    assert isinstance(bases, tuple)
+    assert isinstance(bases[0], float)
+    assert math.isclose(bases[0], expected)
+    assert bases[1] == 0.0
+    skipped_first = RoPE.smallest_recommended_base([0, 64], [32, 1024])
+    assert isinstance(skipped_first, tuple)
+    assert skipped_first[0] == 0.0
+    assert isinstance(skipped_first[1], float)
+    assert math.isclose(skipped_first[1], expected)
+
+
+def test_yarn_errors_name_invalid_fields_and_base() -> None:
+    cases = (
+        ("factor", 0.0),
+        ("original_max_position_embeddings", 0),
+        ("beta_fast", 0.0),
+        ("beta_slow", 0.0),
+    )
+    for name, value in cases:
+        config = YarnScaling.Config()
+        setattr(config, name, value)
+        with pytest.raises(
+            ValueError,
+            match=f"^{name} must be finite and positive; got {value}\\.$",
+        ):
+            _ = config.make()
+    config = YarnScaling.Config(inner=HuggingFaceFrequencies.Config(base=1.0))
+    with pytest.raises(
+        ValueError,
+        match=r"^base must be finite and greater than 1; got 1\.0\.$",
+    ):
+        _ = config.make()
+
+    class _NoBase:
+        class Config(Fig["_NoBase"]):
+            pass
+
+        def __init__(self, config: Config) -> None:
+            del config
+
+        def __call__(
+            self,
+            *,
+            channels: int,
+            device: torch.device,
+        ) -> tuple[Tensor, float]:
+            del channels, device
+            return torch.ones(2), 1.0
+
+    config = YarnScaling.Config(inner=_NoBase.Config())
+    with pytest.raises(
+        TypeError,
+        match=r"^YarnScaling needs a base to place its ramp, and _NoBase has none\.$",
+    ):
+        _ = config.make()
+
+
+def test_rope_list_frequencies_expand_a_single_explicit_axis() -> None:
+    config = RoPE.Config(
+        [8],
+        frequencies=[HuggingFaceFrequencies.Config(), HuggingFaceFrequencies.Config()],
+    )
+    assert config.make().channels_head == (8, 8)
+
+
+def test_learned_frequency_cost_has_exact_cells() -> None:
+    result = _learned_frequency_cost(
+        rows=3,
+        outputs=5,
+        params=2,
+        dtype=torch.float16,
+    )
+    assert result == Cost(
+        cells={
+            ("flops", "adjoint", "elementwise", torch.float16): 81,
+            ("flops", "adjoint", "reduction", torch.float16): 4,
+            ("bytes", "adjoint", "elementwise", torch.float16): 316,
+            ("bytes", "adjoint", "reduction", torch.float16): 16,
+        },
+        params=2,
+        params_active=2,
+    )
+
+
+def test_rope_mixed_requires_equal_active_widths_for_sum() -> None:
+    config = RoPEMixed.Config([8, 4], num_heads=2, reduction_mode="sum")
+    with pytest.raises(ValueError, match=r"^Sum mode requires uniform dims"):
+        _ = config.make()
+
+
+@pytest.mark.parametrize("num_heads", [4, 8])
+def test_rope_mixed_sum_rejects_widths_equal_only_after_head_division(
+    num_heads: int,
+) -> None:
+    config = RoPEMixed.Config([16, 20], num_heads=num_heads, reduction_mode="sum")
+    with pytest.raises(ValueError, match=r"^Sum mode requires uniform dims"):
+        _ = config.make()
+
+
+def test_rope_mixed_parameters_keep_empty_axes_and_learning_flags() -> None:
+    learned = RoPEMixed.Config([8, 0], num_heads=2, learnable=True).make()
+    assert learned._inv_freqs[0].shape == (2, 4)
+    assert learned._inv_freqs[0].requires_grad
+    assert learned._inv_freqs[1].numel() == 0
+    assert learned._inv_freqs[1].shape == (0,)
+    assert not learned._inv_freqs[1].requires_grad
+
+    frozen = RoPEMixed.Config(8, num_heads=2, learnable=False).make()
+    assert not frozen._inv_freqs[0].requires_grad
+
+    one_channel = RoPEMixed.Config(2, num_heads=2, learnable=True).make()
+    assert one_channel._inv_freqs[0].requires_grad
+
+
+def test_rope_mixed_reset_parameters_scales_every_active_axis() -> None:
+    heads = 2
+    mixed = RoPEMixed.Config([8, 0, 4], num_heads=heads, learnable=True).make()
+    active = [base for base in mixed._base_inv_freqs if base.numel()]
+    torch.manual_seed(194)
+    expected_directions = torch.nn.functional.normalize(
+        torch.nn.init.trunc_normal_(torch.empty(len(active), heads, 1), std=1.0),
+        dim=0,
+    )
+    torch.manual_seed(194)
+    mixed.reset_parameters()
+
+    index = 0
+    for parameter, base in zip(mixed._inv_freqs, mixed._base_inv_freqs, strict=True):
+        if base.numel():
+            assert torch.equal(parameter, base * expected_directions[index])
+            index += 1
+        else:
+            assert parameter.numel() == 0
+    assert index == len(active)
+
+
+def test_rope_mixed_single_head_reset_keeps_base_frequencies() -> None:
+    mixed = RoPEMixed.Config([8, 4], num_heads=1, learnable=True).make()
+    mixed.reset_parameters()
+    for parameter, base in zip(mixed._inv_freqs, mixed._base_inv_freqs, strict=True):
+        assert torch.equal(parameter, base)
+
+
+def test_rope_init_keeps_frequency_tables_on_cpu_under_other_default_device() -> None:
+    with torch.device("meta"):
+        model = RoPE.Config(8).make()
+    assert model.device == torch.device("meta")
+    assert model._inv_freqs[0].device == torch.device("cpu")
+
+
+def test_rope_mixed_builds_its_frequencies_on_the_default_device() -> None:
+    with torch.device("meta"):
+        model = RoPEMixed.Config([4, 6], num_heads=3, learnable=True).make()
+    assert model.device == torch.device("meta")
+    frequencies = (*model.parameters(), *model._base_inv_freqs)
+    assert all(f.device == torch.device("meta") for f in frequencies)
+
+
+def test_rope_moves_frequency_tables_on_the_requested_device() -> None:
+    model = RoPE.Config([0, 8], dtype=torch.float64).make().to(torch.device("meta"))
+    assert model.dtype == torch.float64
+    assert model.device == torch.device("meta")
+    assert model._dtype.shape == (0,)
+    assert "_dtype" not in model.state_dict()
+    assert all(f.device == torch.device("meta") for f in model._inv_freqs)
+    assert model._mscale == 1.0
+
+
+def test_rope_rejects_mismatched_frequency_axis_count() -> None:
+    config = RoPE.Config([8, 8], frequencies=[HuggingFaceFrequencies.Config()])
+    with pytest.raises(
+        ValueError,
+        match=r"^channels_head names 2 axes but frequencies names 1\.$",
+    ):
+        _ = config.make()
+
+
+def test_rope_rejects_zero_base() -> None:
+    config = RoPE.Config(8, frequencies=HuggingFaceFrequencies.Config(base=0.0))
+    with pytest.raises(
+        ValueError,
+        match=r"^base must be finite and greater than 1; got 0\.0\.$",
+    ):
+        _ = config.make()
+
+
+def test_rope_rejects_disagreeing_axis_mscales() -> None:
+    config = RoPE.Config(
+        [8, 8],
+        frequencies=[
+            HuggingFaceFrequencies.Config(),
+            YarnScaling.Config(factor=32.0),
+        ],
+    )
+    with pytest.raises(ValueError, match=r"^frequency tables disagree on mscale \("):
+        _ = config.make()
+
+
+def test_rope_error_messages_are_complete() -> None:
+    with pytest.raises(ValueError, match=r"^Total dim=7 must be even\.$") as odd_dim:
+        _split_dim(7, 2)
+    assert str(odd_dim.value) == "Total dim=7 must be even."
+
+    with pytest.raises(
+        ValueError,
+        match=r"^cos/sin cover 5 positions but q/k have 3; slice the tables to the sequence before rotating\.$",
+    ) as short_rope:
+        RoPE.rotate(
+            torch.ones(4, 3, 2, 8),
+            torch.ones(4, 3, 2, 8),
+            torch.ones(5, 2, 4),
+            torch.ones(5, 2, 4),
+        )
+    assert str(short_rope.value) == (
+        "cos/sin cover 5 positions but q/k have 3; "
+        "slice the tables to the sequence before rotating."
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"^Dim 2 has no recommended base:",
+    ) as no_recommended_base:
+        RoPE.smallest_recommended_base(2, 1024)
+    assert str(no_recommended_base.value) == (
+        "Dim 2 has no recommended base: the lowest frequency's "
+        "period is independent of it. Use at least 4 channels, "
+        "or choose the base directly."
+    )
+
+
+def test_rope_rejects_all_zero_axes_with_full_message() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"^At least one dim must be nonzero, got \(0, 0\)\.$",
+    ) as exc_info:
+        _ = RoPE.Config([0, 0]).make()
+    assert str(exc_info.value) == "At least one dim must be nonzero, got (0, 0)."
+
+
+@pytest.mark.parametrize(
+    "table",
+    [HuggingFaceFrequencies.Config, GeometricFrequencies.Config],
+)
+@pytest.mark.parametrize("base", [0.5, 1.0])
+def test_frequency_base_must_exceed_one(table: type[Fig[object]], base: float) -> None:
+    config = table()
+    config.update(base=base)
+    with pytest.raises(ValueError, match="base"):
+        config.make()
+
+
+@pytest.mark.parametrize("field", ["mscale", "mscale_all_dim"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_yarn_rejects_nonfinite_mscale(field: str, value: float) -> None:
+    config = YarnScaling.Config()
+    if field == "mscale":
+        config.mscale = value
+    else:
+        config.mscale_all_dim = value
+    with pytest.raises(ValueError, match=field):
+        config.make()
+
+
+def test_yarn_rejects_zero_scale_denominator() -> None:
+    config = YarnScaling.Config(factor=math.e, mscale_all_dim=-10.0)
+    with pytest.raises(ValueError, match="denominator"):
+        config.make()
+
+
+def test_rope_sum_rejects_broadcastable_unequal_widths() -> None:
+    with pytest.raises(ValueError, match="uniform"):
+        RoPE.Config([2, 4], reduction_mode="sum").make()
+
+
+@pytest.mark.parametrize("interleave", [False, True])
+def test_rope_rotation_rejects_excess_width(interleave: bool) -> None:
+    query = torch.randn(2, 3, 4, 6)
+    # RoPE.forward emits one shared head: [S, 1, D_rot / 2].
+    factors = torch.ones(3, 1, 5)
+    with pytest.raises(ValueError, match="channels"):
+        RoPE.rotate(query, query, factors, factors, interleave=interleave)
+
+
+def test_rope_factor_dtype_follows_module_cast() -> None:
+    model = RoPE.Config(4).make().to(torch.bfloat16)
+    assert model(torch.arange(3))[0].dtype == torch.bfloat16
+
+
+@pytest.mark.gpu_torch_cuda
+def test_rope_mixed_reset_on_cuda_default_device() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA device")
+    model = RoPEMixed.Config([4, 6], num_heads=3, learnable=True).make().cuda()
+    state_keys = tuple(model.state_dict())
+    count = sum(parameter.numel() for parameter in model.parameters())
+    with torch.device("cuda"):
+        model.reset_parameters()
+    assert all(frequency.device.type == "cuda" for frequency in model._base_inv_freqs)
+    assert all(torch.isfinite(parameter).all() for parameter in model.parameters())
+    assert tuple(model.state_dict()) == state_keys
+    assert sum(parameter.numel() for parameter in model.parameters()) == count
+    assert all("_base_inv_freq" not in key for key in state_keys)
+
+
+def test_rope_mixed_double_keeps_parameter_dtype() -> None:
+    model = RoPEMixed.Config(4, num_heads=3, learnable=True).make().double()
+    assert all(parameter.dtype == torch.float64 for parameter in model.parameters())
+
+
+def test_rope_mixed_materialization_resets_valid_frequencies() -> None:
+    model = RoPEMixed.Config(4, num_heads=3, learnable=True).make().to("meta")
+    model.to_empty(device="cpu")
+    model.reset_parameters()
+    assert all(torch.isfinite(parameter).all() for parameter in model.parameters())
+    assert torch.equal(model._base_inv_freqs[0], RoPE.Config(4).make()._inv_freqs[0])
+
+
+@pytest.mark.parametrize("key", ["rope_parameters", "rope_scaling"])
+@pytest.mark.parametrize("type_key", ["type", "rope_type"])
+def test_yarn_from_hf_reads_either_alias(key: str, type_key: str) -> None:
+    yarn = YarnScaling.Config.from_hf(
+        {key: {type_key: "yarn", "factor": 2.0, "beta_fast": 3.0}},
+    )
+    assert yarn is not None
+    assert (yarn.factor, yarn.beta_fast, yarn.beta_slow) == (2.0, 3.0, 1.0)
+
+
+def test_yarn_from_hf_accepts_matching_aliases() -> None:
+    settings = {"type": "yarn", "factor": 2.0}
+    yarn = YarnScaling.Config.from_hf(
+        {"rope_parameters": settings, "rope_scaling": settings},
+    )
+    assert yarn is not None
+    assert yarn.factor == 2.0
+
+
+def test_yarn_from_hf_rejects_conflicting_aliases() -> None:
+    with pytest.raises(ValueError, match="disagree"):
+        YarnScaling.Config.from_hf(
+            {
+                "rope_parameters": {"type": "yarn", "factor": 2.0},
+                "rope_scaling": {"type": "yarn", "factor": 3.0},
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {},
+        {"rope_parameters": None, "rope_scaling": None},
+        {"rope_parameters": {"rope_theta": 1e6}},
+        {"rope_parameters": {"rope_type": "default", "rope_theta": 1e6}},
+    ],
+)
+def test_yarn_from_hf_is_none_for_an_unscaled_rotary(
+    config: dict[str, object],
+) -> None:
+    assert YarnScaling.Config.from_hf(config) is None
+
+
+@pytest.mark.parametrize(
+    "scaling",
+    [False, [], "yarn", {"type": []}, {"factor": 2.0}, {"type": "yarn"}],
+)
+def test_yarn_from_hf_rejects_malformed_settings(scaling: object) -> None:
+    with pytest.raises(TypeError):
+        YarnScaling.Config.from_hf({"rope_scaling": scaling})
+
+
+def test_yarn_from_hf_rejects_other_scalings() -> None:
+    with pytest.raises(ValueError, match="only yarn"):
+        YarnScaling.Config.from_hf({"rope_scaling": {"type": "linear", "factor": 2.0}})
 
 
 if __name__ == "__main__":

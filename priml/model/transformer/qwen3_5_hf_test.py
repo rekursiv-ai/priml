@@ -138,13 +138,12 @@ def test_padding_mask_and_positions_match_reference_cached_continuation() -> Non
                 use_cache=True,
             ),
         )
-        actual, returned_cache = native.forward_cached(
+        actual = native.forward(
             tokens,
             cache=native_cache,
             attention_mask=padding,
             position_ids=positions,
         )
-        assert returned_cache is native_cache
         assert torch.equal(actual, expected)
 
 
@@ -180,12 +179,11 @@ def test_prepared_causal_mask_matches_reference_prefill_and_cached_continuation(
                 use_cache=True,
             ),
         )
-        actual, returned_cache = native.forward_cached(
+        actual = native.forward(
             chunk,
             cache=native_cache,
             attention_mask=mask,
         )
-        assert returned_cache is native_cache
         assert torch.equal(actual, expected)
 
 
@@ -213,7 +211,7 @@ def test_boolean_prepared_masks_are_rejected_before_prefill_and_cache(
     if cached:
         cache = native.alloc_cache(batch=3, max_seq=5)
         with pytest.raises(TypeError, match="floating additive"):
-            native.forward_cached(tokens, cache=cache, attention_mask=boolean)
+            native.forward(tokens, cache=cache, attention_mask=boolean)
     else:
         with pytest.raises(TypeError, match="floating additive"):
             native(tokens, attention_mask=boolean)

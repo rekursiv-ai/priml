@@ -21,67 +21,27 @@ from priml.baselines.craftax.game.state import EnvState, Mobs
 
 
 def max_health(state: EnvState) -> Tensor:
-    """Health cap, which strength raises.
-
-    Args:
-      state: State.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Health cap, which strength raises, ``[envs]``."""
     return 8 + state.player_strength
 
 
 def max_food(state: EnvState) -> Tensor:
-    """Food cap, which dexterity raises.
-
-    Args:
-      state: State.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Food cap, which dexterity raises, ``[envs]``."""
     return 7 + 2 * state.player_dexterity
 
 
 def max_drink(state: EnvState) -> Tensor:
-    """Water cap, which dexterity raises.
-
-    Args:
-      state: State.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Water cap, which dexterity raises, ``[envs]``."""
     return 7 + 2 * state.player_dexterity
 
 
 def max_energy(state: EnvState) -> Tensor:
-    """Energy cap, which dexterity raises.
-
-    Args:
-      state: State.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Energy cap, which dexterity raises, ``[envs]``."""
     return 7 + 2 * state.player_dexterity
 
 
 def max_mana(state: EnvState) -> Tensor:
-    """Mana cap, which intelligence raises.
-
-    Args:
-      state: State.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Mana cap, which intelligence raises, ``[envs]``."""
     return 6 + 3 * state.player_intelligence
 
 
@@ -106,15 +66,16 @@ def player_damage(state: EnvState) -> Tensor:
     ice = physical * (state.sword_enchantment == 2) * 0.5
     physical = physical * (1 + 0.25 * (state.player_strength - 1))
     scale = 1 + 0.05 * (state.player_intelligence - 1)
-    return torch.stack((physical, fire * scale, ice * scale), dim=-1)
+    return torch.stack((physical, fire * scale, ice * scale), dim=1)
 
 
 def damage_to_player(state: EnvState, damage: Tensor) -> Tensor:
     """Return the damage a hit lands on the player after their armour.
 
-    Each armour piece blocks a tenth of physical damage, and an enchanted
-    piece blocks a fifth of its element. The boss floor multiplies incoming
-    damage, which is what makes the final fight lethal rather than long.
+    Each armour piece blocks a tenth of physical damage per tier -- 10% iron,
+    20% diamond -- and an enchanted piece blocks a fifth of its element. The
+    boss floor multiplies incoming damage, which is what makes the final fight
+    lethal rather than long.
 
     Args:
       state: The current world.
@@ -124,14 +85,18 @@ def damage_to_player(state: EnvState, damage: Tensor) -> Tensor:
       total: Damage actually taken, ``[envs]``.
 
     """
-    defense = torch.stack(
+    pieces = torch.stack(
         (
             state.inventory.armour * 0.1,
             (state.armour_enchantments == 1) * 0.2,
             (state.armour_enchantments == 2) * 0.2,
         ),
         dim=1,
-    ).sum(-1)
+    )
+    # Pairwise, as XLA sums the four pieces when it compiles deterministically
+    # (its GPU autotuner may pick another order per process). A torch ``sum``
+    # picks its own order per device and misses that last bit on ~1.5% of hits.
+    defense = (pieces[..., 0] + pieces[..., 1]) + (pieces[..., 2] + pieces[..., 3])
     scaled = damage * (
         1 + is_fighting_boss(state).float()[:, None] * constants.BOSS_FIGHT_EXTRA_DAMAGE
     )
@@ -149,19 +114,14 @@ def apply_defense(damage: Tensor, defense: Tensor) -> Tensor:
       total: Damage that lands, ``[envs]``.
 
     """
-    return ((1.0 - defense) * damage).sum(-1)
+    landed = (1.0 - defense) * damage
+    # Left to right, as compiled XLA adds the three elements; see
+    # ``damage_to_player`` for why not ``sum``.
+    return (landed[:, 0] + landed[:, 1]) + landed[:, 2]
 
 
 def is_fighting_boss(state: EnvState) -> Tensor:
-    """Whether the player stands on the final floor.
-
-    Args:
-      state: State.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Whether the player stands on the final floor, ``[envs]``."""
     return state.player_level == constants.NUM_LEVELS - 1
 
 
@@ -179,22 +139,14 @@ def is_boss_vulnerable(state: EnvState) -> Tensor:
 
     """
     return (
-        (_on_level(state.melee_mobs.mask, state.player_level).sum(-1) == 0)
-        & (_on_level(state.ranged_mobs.mask, state.player_level).sum(-1) == 0)
+        (_on_level(state.melee_mobs.mask, state.player_level).sum(1) == 0)
+        & (_on_level(state.ranged_mobs.mask, state.player_level).sum(1) == 0)
         & (state.boss_timesteps_to_spawn_this_round <= 0)
     )
 
 
 def has_beaten_boss(state: EnvState) -> Tensor:
-    """Whether the boss has been defeated, which ends the episode in victory.
-
-    Args:
-      state: State.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Whether the boss has been defeated, ending the episode in victory, ``[envs]``."""
     return state.boss_progress >= constants.NUM_LEVELS - 1
 
 
@@ -246,23 +198,14 @@ def in_bounds(position: Tensor) -> Tensor:
 
     """
     extent = constants.on_device(constants.MAP_EXTENT, position.device)
-    return ((position >= 0) & (position < extent)).all(-1)
+    return ((position >= 0) & (position < extent)).all(1)
 
 
 def is_occupied(state: EnvState, position: Tensor) -> Tensor:
-    """Whether a creature or the player already stands at ``position``.
-
-    Args:
-      state: State.
-      position: Position.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Whether a creature or the player already stands at ``[envs, 2]`` ``position``."""
     return gather_tiles(current_mobs(state), position) | (
         state.player_position == position
-    ).all(-1)
+    ).all(1)
 
 
 def can_walk_on(
@@ -311,9 +254,9 @@ def is_near_block(state: EnvState, block: int) -> Tensor:
       near: Whether it is adjacent, ``[envs]``.
 
     """
-    neighbours = state.player_position[:, None, :] + constants.on_device(
-        constants.CLOSE_BLOCKS,
-        state.device,
+    neighbours = torch.add(
+        state.player_position[:, None, :],
+        constants.on_device(constants.CLOSE_BLOCKS, state.device),
     )
     grid = current_map(state)
     found = torch.zeros(state.num_envs, dtype=torch.bool, device=state.device)
@@ -420,12 +363,12 @@ def attack_mob_class(
     positions = _on_level(mobs.position, state.player_level)
     alive = _on_level(mobs.mask, state.player_level)
     present = (positions == position[:, None, :]).all(-1) & alive
-    struck = present.any(-1)
-    target = present.int().argmax(-1)
+    struck = present.any(1)
+    target = present.int().argmax(1)
 
     species = _on_level(mobs.type_id, state.player_level)[rows, target]
     defense = constants.on_device(constants.MOB_DEFENSE, state.device)[
-        state.player_level.long(),
+        species.long(),
         mob_class,
     ]
     landed = apply_defense(damage, defense) * struck

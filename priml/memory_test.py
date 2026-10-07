@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import re
+
 from torch import Tensor
 
 import numpy as np
@@ -11,7 +13,6 @@ import torch
 
 from priml import memory
 from priml.memory import (
-    convert_to_tensor,
     is_private_conversion,
     shares_storage,
     shares_storage_for_compile,
@@ -23,12 +24,12 @@ if TYPE_CHECKING:
 
 
 def test_single_python_scalar():
-    result = convert_to_tensor(42)
+    result = memory.convert_to_tensor(42)
     assert result.item() == 42
 
 
 def test_multiple_python_scalars():
-    result = convert_to_tensor(1, 2.5, True)
+    result = memory.convert_to_tensor(1, 2.5, True)
     assert len(result) == 3
     torch.testing.assert_close(result[0], torch.tensor(1.0))
     torch.testing.assert_close(result[1], torch.tensor(2.5))
@@ -37,14 +38,14 @@ def test_multiple_python_scalars():
 
 def test_numpy_array():
     x = np.array([1, 2, 3], dtype=np.int32)
-    result = convert_to_tensor(x)
+    result = memory.convert_to_tensor(x)
     assert result.dtype == torch.int32
     torch.testing.assert_close(result, torch.tensor([1, 2, 3], dtype=torch.int32))
 
 
 def test_torch_tensor():
     x = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
-    result = convert_to_tensor(x)
+    result = memory.convert_to_tensor(x)
     assert result.dtype == torch.float32
     torch.testing.assert_close(result, x)
 
@@ -74,7 +75,7 @@ def test_type_coercion_precedence(
 ) -> None:
     x = torch.tensor([1], dtype=dtype1)
     y = torch.tensor([2], dtype=dtype2)
-    result = convert_to_tensor(x, y)
+    result = memory.convert_to_tensor(x, y)
     assert result[0].dtype == expected_dtype
     assert result[1].dtype == expected_dtype
 
@@ -82,7 +83,7 @@ def test_type_coercion_precedence(
 def test_explicit_dtype_override():
     x = torch.tensor([1], dtype=torch.int32)
     y = torch.tensor([2.5], dtype=torch.float64)
-    result = convert_to_tensor(x, y, dtype=torch.float32)
+    result = memory.convert_to_tensor(x, y, dtype=torch.float32)
     assert result[0].dtype == torch.float32
     assert result[1].dtype == torch.float32
 
@@ -92,12 +93,12 @@ def test_device_parameter():
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
     x = torch.tensor([1, 2, 3])
-    result = convert_to_tensor(x, device="cuda")
+    result = memory.convert_to_tensor(x, device="cuda")
     assert result[0].device.type == "cuda"
 
 
 def test_dtype_hint_with_python_scalars():
-    result = convert_to_tensor(1, 2, 3, dtype_hint=torch.float64)
+    result = memory.convert_to_tensor(1, 2, 3, dtype_hint=torch.float64)
     assert result[0].dtype == torch.float64
     assert result[1].dtype == torch.float64
     assert result[2].dtype == torch.float64
@@ -105,21 +106,29 @@ def test_dtype_hint_with_python_scalars():
 
 def test_dtype_hint_ignored_when_dtype_present():
     x = torch.tensor([1], dtype=torch.float32)
-    result = convert_to_tensor(x, dtype_hint=torch.float64)
+    result = memory.convert_to_tensor(x, dtype_hint=torch.float64)
     assert result[0].dtype == torch.float32
 
 
 def test_mixed_numpy_and_torch():
     x = np.array([1, 2], dtype=np.float32)
     y = torch.tensor([3, 4], dtype=torch.float64)
-    result = convert_to_tensor(x, y)
+    result = memory.convert_to_tensor(x, y)
     assert result[0].dtype == torch.float64
     assert result[1].dtype == torch.float64
 
 
+def test_numpy_dtype_precedence_is_used_with_torch_inputs():
+    array = np.array([1.0], dtype=np.float64)
+    tensor = torch.tensor([2], dtype=torch.int64)
+    converted_array, converted_tensor = memory.convert_to_tensor(array, tensor)
+    assert converted_array.dtype == torch.float64
+    assert converted_tensor.dtype == torch.float64
+
+
 def test_complex_numbers():
     x = 1 + 2j
-    result = convert_to_tensor(x)
+    result = memory.convert_to_tensor(x)
     assert result.dtype == torch.complex64
     assert result.item() == (1 + 2j)
 
@@ -127,7 +136,7 @@ def test_complex_numbers():
 def test_bfloat16_dtype():
     x = torch.tensor([1.0], dtype=torch.bfloat16)
     y = torch.tensor([2], dtype=torch.int32)
-    result = convert_to_tensor(x, y)
+    result = memory.convert_to_tensor(x, y)
     assert result[0].dtype == torch.bfloat16
     assert result[1].dtype == torch.bfloat16
 
@@ -137,7 +146,7 @@ def test_float8_e5m2_dtype():
         pytest.skip("float8_e5m2 not available in this PyTorch version")
     x = torch.tensor([1.0], dtype=torch.float8_e5m2)
     y = torch.tensor([2], dtype=torch.int32)
-    result = convert_to_tensor(x, y)
+    result = memory.convert_to_tensor(x, y)
     assert result[0].dtype == torch.float8_e5m2
     assert result[1].dtype == torch.float8_e5m2
 
@@ -147,14 +156,14 @@ def test_float8_e4m3fn_dtype():
         pytest.skip("float8_e4m3fn not available in this PyTorch version")
     x = torch.tensor([1.0], dtype=torch.float8_e4m3fn)
     y = torch.tensor([2], dtype=torch.int32)
-    result = convert_to_tensor(x, y)
+    result = memory.convert_to_tensor(x, y)
     assert result[0].dtype == torch.float8_e4m3fn
     assert result[1].dtype == torch.float8_e4m3fn
 
 
 def test_nested_sequence():
     x = [[1, 2], [3, 4]]
-    result = convert_to_tensor(x)
+    result = memory.convert_to_tensor(x)
     assert result.shape == (2, 2)
     torch.testing.assert_close(result, torch.tensor([[1, 2], [3, 4]]))
 
@@ -186,61 +195,164 @@ def test_numpy_dtype_mapping(
         [1, 2, 3],
         dtype=np_dtype,
     )
-    result = convert_to_tensor(x)
+    result = memory.convert_to_tensor(x)
     assert result[0].dtype == expected_torch_dtype
 
 
 def test_bool_dtype():
     x = torch.tensor([True, False], dtype=torch.bool)
     y = torch.tensor([1, 0], dtype=torch.int32)
-    result = convert_to_tensor(x, y)
+    result = memory.convert_to_tensor(x, y)
     assert result[0].dtype == torch.int32
     assert result[1].dtype == torch.int32
 
 
-def test_as_tensors_while_compiling():
+def test_as_tensors_while_compiling(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test convert_to_tensor behavior during compilation (lines 147-149)."""
-    # Simulate compilation context.
-    with patch.object(torch.compiler, "is_compiling", return_value=True):
-        x = torch.tensor([1.0, 2.0])
-        y = torch.tensor([3.0, 4.0])
-        result = convert_to_tensor(x, y)
-        assert len(result) == 2
-        assert isinstance(result[0], Tensor)
-        assert isinstance(result[1], Tensor)
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    x = torch.tensor([1.0, 2.0])
+    y = torch.tensor([3.0, 4.0])
+    result = memory.convert_to_tensor(x, y)
+    assert len(result) == 2
+    assert isinstance(result[0], Tensor)
+    assert isinstance(result[1], Tensor)
 
 
-def test_compile_honors_dtype():
+def test_compile_honors_dtype(monkeypatch: pytest.MonkeyPatch) -> None:
     """Under the compile path, an explicit dtype must be applied, not dropped.
 
     Regression: the compile branch returned inputs unchanged, so eager and
-    traced execution disagreed on output dtype. ``is_compiling`` is patched
-    (rather than invoking ``torch.compile``) to exercise the branch directly.
+    traced execution disagreed on output dtype.
     """
     x = torch.tensor([1.0, 2.0], dtype=torch.float32)
-    eager = convert_to_tensor(x, dtype=torch.float64)
-    with patch.object(torch.compiler, "is_compiling", return_value=True):
-        compiled = convert_to_tensor(x, dtype=torch.float64)
+    eager = memory.convert_to_tensor(x, dtype=torch.float64)
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    compiled = memory.convert_to_tensor(x, dtype=torch.float64)
     assert eager.dtype == torch.float64
     assert compiled.dtype == torch.float64
     torch.testing.assert_close(compiled, eager)
 
 
-def test_compile_honors_device():
+def test_compile_honors_device(monkeypatch: pytest.MonkeyPatch) -> None:
     """Under the compile path, an explicit device must be applied."""
-    with patch.object(torch.compiler, "is_compiling", return_value=True):
-        result = convert_to_tensor(torch.tensor([1.0, 2.0]), device="cpu")
-    assert result.device.type == "cpu"
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    result = memory.convert_to_tensor(torch.tensor([1.0, 2.0]), device="meta")
+    assert result.device.type == "meta"
 
 
-def test_compile_resolves_dtype_when_unspecified():
+def test_compile_passes_dtype_and_device_kwargs_to_torch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    value = torch.tensor([1.0, 2.0])
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    with patch.object(torch, "as_tensor", wraps=torch.as_tensor) as as_tensor:
+        result = memory.convert_to_tensor(value, dtype=torch.float64, device="meta")
+    assert result.dtype == torch.float64
+    assert result.device.type == "meta"
+    assert as_tensor.call_count == 1
+    assert as_tensor.call_args.args[0] is value
+    assert as_tensor.call_args.kwargs == {"dtype": torch.float64, "device": "meta"}
+
+
+def test_eager_honors_device_for_python_scalars():
+    with patch.object(torch, "as_tensor", wraps=torch.as_tensor) as as_tensor:
+        result = memory.convert_to_tensor(1, device="meta")
+    assert result.device.type == "meta"
+    first, second = as_tensor.call_args_list
+    assert first.args == (1,)
+    assert first.kwargs == {"device": "meta"}
+    assert second.args[0] is result
+    assert second.kwargs == {"dtype": torch.int64, "device": "meta"}
+
+
+def test_compile_uses_dtype_hint_for_python_scalars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    with patch.object(torch, "as_tensor", wraps=torch.as_tensor) as as_tensor:
+        result = memory.convert_to_tensor(1, dtype_hint=torch.float64)
+    assert result.dtype == torch.float64
+    assert as_tensor.call_args.kwargs == {"dtype": torch.float64, "device": None}
+
+
+def test_compile_branch_dtype_device_and_return_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    assert torch.compiler.is_compiling()
+    values = torch.tensor([2.0, 3.0], dtype=torch.float64)
+    result = memory.convert_to_tensor(
+        1,
+        values,
+        dtype_hint=torch.float32,
+        device="meta",
+    )
+    assert len(result) == 2
+    scalar, tensor = result
+    assert scalar.dtype is tensor.dtype is torch.float64
+    assert scalar.device.type == tensor.device.type == "meta"
+    assert scalar.shape == torch.Size([])
+    assert tensor.shape == (2,)
+
+
+def test_compile_resolves_dtype_when_unspecified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """No explicit dtype under compile still unifies inputs by precedence."""
     x = torch.tensor([1], dtype=torch.int32)
     y = torch.tensor([2.0], dtype=torch.float64)
-    with patch.object(torch.compiler, "is_compiling", return_value=True):
-        a, b = convert_to_tensor(x, y)
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    a, b = memory.convert_to_tensor(x, y)
     assert a.dtype == torch.float64
     assert b.dtype == torch.float64
+
+
+def test_compile_resolves_dtype_after_a_python_scalar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = torch.tensor([2.0], dtype=torch.float64)
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    with patch.object(torch, "as_tensor", wraps=torch.as_tensor) as as_tensor:
+        scalar, tensor = memory.convert_to_tensor(1, values, device="meta")
+    assert scalar.dtype == tensor.dtype == torch.float64
+    assert scalar.device.type == tensor.device.type == "meta"
+    assert as_tensor.call_count == 2
+    assert as_tensor.call_args_list[0].kwargs == {
+        "dtype": torch.float64,
+        "device": "meta",
+    }
+    assert as_tensor.call_args_list[1].args[0] is values
+    assert as_tensor.call_args_list[1].kwargs == {
+        "dtype": torch.float64,
+        "device": "meta",
+    }
+    assert scalar.shape == torch.Size([])
+    assert memory._resolve_dtype((1, values)) is torch.float64
+
+
+def test_span_from_strides_rejects_mismatched_ranks() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"zip\(\) argument 2 is longer than argument 1",
+    ) as error:
+        memory._span_from_strides(
+            100,
+            (2,),
+            (4, 8),
+            stride_scale=4,
+            item_size=4,
+        )
+    assert error.value.args == ("zip() argument 2 is longer than argument 1",)
+
+
+def test_span_from_strides_keeps_zero_reach_at_zero() -> None:
+    assert memory._span_from_strides(
+        100,
+        (2, 3),
+        (0, 1),
+        stride_scale=4,
+        item_size=4,
+    ) == (100, 112)
 
 
 @pytest.mark.compute_torch_compile
@@ -256,7 +368,7 @@ def test_a_scalar_argument_survives_a_fullgraph_compile() -> None:
 
     @torch.compile(fullgraph=True, backend="eager")
     def scale(x: Tensor) -> Tensor:
-        a, b = convert_to_tensor(x, 2.0)
+        a, b = memory.convert_to_tensor(x, 2.0)
         return a * b
 
     x = torch.tensor([1.0, 2.0])
@@ -266,15 +378,26 @@ def test_a_scalar_argument_survives_a_fullgraph_compile() -> None:
 def test_as_tensors_unrecognized_dtype():
     """``_resolve_dtype`` raises when no precedence entry matches."""
     x = torch.tensor([1.0], dtype=torch.float32)
-    y = torch.tensor([2.0], dtype=torch.float64)
+    message = (
+        "No coercible dtype among {torch.float32}; supported dtypes "
+        "(in precedence order) are (). Variants outside this set "
+        "(e.g. complex32 or ROCm-only float8 types) must be cast explicitly."
+    )
 
     original_precedence = memory._dtype_coercion_precedence
     try:
         memory._dtype_coercion_precedence = ()
-        with pytest.raises(ValueError, match="No coercible dtype"):
-            convert_to_tensor(x, y)
+        with pytest.raises(ValueError, match=re.escape(message)) as error:
+            memory.convert_to_tensor(x)
     finally:
         memory._dtype_coercion_precedence = original_precedence
+    assert str(error.value) == message
+
+
+def test_resolve_dtype_skips_unmapped_numpy_dtype_and_checks_later_inputs() -> None:
+    unsupported = np.array([1.0], dtype=np.longdouble)
+    supported = torch.tensor([2.0], dtype=torch.float64)
+    assert memory._resolve_dtype((unsupported, supported)) is torch.float64
 
 
 def _pairs() -> list[tuple[str, Tensorable, Tensorable, bool]]:
@@ -526,19 +649,40 @@ def test_shares_storage_raises_on_two_interleaved_strided_views() -> None:
     parent = torch.arange(8, dtype=torch.float32)
     arr = np.arange(8, dtype=np.float32)
 
-    with pytest.raises(NotImplementedError, match="interleaved"):
+    message = (
+        "shares_storage cannot decide two interleaved strided values: their "
+        "byte ranges overlap but they may touch no common element. Deciding "
+        "this exactly is NP-complete; compare the dense parents instead, or "
+        "use np.shares_memory on CPU arrays."
+    )
+    with pytest.raises(NotImplementedError) as error:
         _ = shares_storage(parent[::2], parent[1::2])
-    with pytest.raises(NotImplementedError, match="interleaved"):
+    assert str(error.value) == message
+    with pytest.raises(NotImplementedError) as error:
         _ = shares_storage(arr[::2], arr[1::2])
+    assert str(error.value) == message
     # It fires inside the op too, whose body runs eagerly on real tensors.
-    with pytest.raises(NotImplementedError, match="interleaved"):
+    with pytest.raises(NotImplementedError) as error:
         _ = shares_storage_for_compile(parent[::2], parent[1::2])
+    assert str(error.value) == message
 
     assert shares_storage(parent[::2], parent)
     assert shares_storage(parent[1::2], parent)
     # Equal first bytes settle it whatever the strides, so an identical pair
     # must not raise.
     assert shares_storage(parent[::2], parent[::2])
+
+
+def test_is_dense_treats_bufferless_values_as_dense() -> None:
+    assert memory._is_dense([1.0, 2.0])
+
+
+def test_bufferless_and_meta_spans_use_identity() -> None:
+    values = [1.0, 2.0]
+    start, end, device = memory._byte_span(values)
+    assert (start, end, device) == (id(values), id(values) + 1, None)
+    meta = torch.empty(2, 3, device="meta")
+    assert memory._byte_span(meta) == (id(meta), id(meta) + 1, None)
 
 
 def test_shares_storage_sees_through_a_view_offset() -> None:
@@ -566,13 +710,19 @@ def test_is_private_conversion_answers_every_conversion_shape() -> None:
     tensor = torch.tensor([1.0, 2.0])
 
     # Wrapped or handed back: the caller can still see writes.
-    assert not is_private_conversion(convert_to_tensor(array), array)
-    assert not is_private_conversion(convert_to_tensor(tensor), tensor)
+    assert not is_private_conversion(memory.convert_to_tensor(array), array)
+    assert not is_private_conversion(memory.convert_to_tensor(tensor), tensor)
     # Converted or materialized: the buffer is the function's to spend.
-    assert is_private_conversion(convert_to_tensor(array, dtype=torch.float64), array)
-    assert is_private_conversion(convert_to_tensor(tensor, dtype=torch.float64), tensor)
-    assert is_private_conversion(convert_to_tensor([1.0, 2.0]), [1.0, 2.0])
-    assert is_private_conversion(convert_to_tensor(5.0), 5.0)
+    assert is_private_conversion(
+        memory.convert_to_tensor(array, dtype=torch.float64),
+        array,
+    )
+    assert is_private_conversion(
+        memory.convert_to_tensor(tensor, dtype=torch.float64),
+        tensor,
+    )
+    assert is_private_conversion(memory.convert_to_tensor([1.0, 2.0]), [1.0, 2.0])
+    assert is_private_conversion(memory.convert_to_tensor(5.0), 5.0)
 
 
 def test_is_private_conversion_is_wrong_for_a_view_by_construction() -> None:
@@ -608,7 +758,7 @@ def test_is_private_conversion_traces_under_fullgraph_compile() -> None:
     """
 
     def convert_then_check(x: Tensor) -> Tensor:
-        converted = convert_to_tensor(x, dtype=torch.float32)
+        converted = memory.convert_to_tensor(x, dtype=torch.float32)
         return converted * 2.0 if is_private_conversion(converted, x) else converted
 
     x = torch.arange(4, dtype=torch.float16)

@@ -8,9 +8,9 @@ import pytest
 import torch
 
 from priml import hub
-from priml.lib.custom_json import DictCodec, ListCodec
+from priml.lib.custom_json import convert
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.mmdit_graft_test import (
     _assert_transferred,
@@ -35,24 +35,23 @@ def test_one_layer_pretrained_qwen3_graft(tmp_path: Path) -> None:
     )
 
     repo = "Qwen/Qwen3-0.6B"
-    hf_config = AutoConfig.from_pretrained(repo, cache_dir=tmp_path / "hf")
+    hf_config = AutoConfig.from_pretrained(repo)
     hf_config.num_hidden_layers = 1
     # ``PretrainedConfig`` resolves model fields through ``__getattribute__``,
     # so the checker sees no ``layer_types``; read it through ``to_dict``.
-    layer_types = ListCodec.coerce(
-        DictCodec.coerce(hf_config.to_dict())["layer_types"],
-        str,
+    layer_types = convert(
+        convert(hf_config.to_dict(), dict[str, object])["layer_types"],
+        list[str],
     )
     hf_config.layer_types = layer_types[:1]
-    config = Qwen3.Config.from_hf(DictCodec.coerce(hf_config.to_dict()))
+    config = Qwen3.Config.from_hf(convert(hf_config.to_dict(), dict[str, object]))
     assert isinstance(config.block, TransformerBlock.Config)
-    assert isinstance(config.block.attn, SelfAttention.Config)
+    assert isinstance(config.block.attn, Attention.Config)
     config.block.attn.attn_kernel = SdpaNaive.Config()
     pretrained = hub.load_transformers_model(
         repo,
         "AutoModelForCausalLM",
         config=hf_config,
-        cache_dir=tmp_path / "hf",
         dtype=torch.float32,
         attn_implementation="eager",
     )
@@ -109,7 +108,7 @@ def test_full_depth_pretrained_qwen3_graft() -> None:
     graft = Qwen3MMDiTGraft.load(repo, device="cuda", dtype=torch.bfloat16).eval()
     for block in source.blocks:
         assert isinstance(block, TransformerBlock)
-        assert isinstance(block.attn, SelfAttention)
+        assert isinstance(block.attn, Attention)
         block.attn.attn_kernel = SdpaNaive.Config().make()
     for block in graft.blocks:
         block.attn.attn_kernel = SdpaNaive.Config().make()

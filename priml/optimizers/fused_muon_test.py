@@ -9,14 +9,20 @@ reference inside ``host_agnostic_numerics`` so every CPU computes its bits.
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Final, cast
+
+from torch import Tensor
 
 import pytest
 import torch
 
+from priml.optimizers import fused_muon
 from priml.optimizers.fused_muon import (
     FusedMuon,
+    _group_scalars,
     apply_update,
     aspect_scale,
     clip_coefficient,
@@ -30,7 +36,7 @@ from priml.testing.golden import assert_tensor_golden
 
 
 if TYPE_CHECKING:
-    from torch import Tensor
+    from collections.abc import Callable
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -41,10 +47,17 @@ def _parameter(*shape: int, dtype: torch.dtype = torch.bfloat16) -> torch.nn.Par
     return torch.nn.Parameter(torch.randn(*shape, generator=generator).to(dtype))
 
 
+class _KernelLaunch:
+    def __init__(self, run: Callable[..., object]) -> None:
+        self.run = run
+
+    def __getitem__(self, grid: tuple[int, ...]) -> Callable[..., object]:
+        return partial(self.run, grid=grid)
+
+
 def test_the_config_makes_a_constructor_awaiting_parameters() -> None:
     weight = _parameter(4, 2)
     optimizer = FusedMuon.Config().make()([weight])
-    assert isinstance(optimizer, FusedMuon)
     assert optimizer.param_groups[0]["lr"] == 0.015
     assert optimizer.param_groups[0]["momentum"] == 0.95
     assert optimizer.max_grad_norm == 1.5
@@ -308,10 +321,15 @@ def test_a_missing_gradient_is_an_error() -> None:
 
 
 def test_invalid_hyperparameters_are_rejected() -> None:
-    for field_name in ("lr", "momentum", "max_grad_norm", "eps"):
+    for field_name, label in (
+        ("lr", "Learning rate"),
+        ("momentum", "Momentum"),
+        ("max_grad_norm", "Max grad norm"),
+        ("eps", "Epsilon"),
+    ):
         config = FusedMuon.Config()
         setattr(config, field_name, -1.0)
-        with pytest.raises(ValueError, match=f"FusedMuon {field_name}"):
+        with pytest.raises(ValueError, match=f"{label} must be finite"):
             config.make()([_parameter(2, 3)])
 
 
@@ -326,13 +344,148 @@ def test_step_returns_closure_result_and_accepts_tensor_rate() -> None:
     assert optimizer.param_groups[0]["lr"].dtype == torch.float32
 
 
+def test_group_scalars_rounds_python_values_and_preserves_tensor_rate() -> None:
+    tensor_rate = torch.tensor(0.123456789)
+    rate, momentum, eps = _group_scalars(
+        {"lr": tensor_rate, "momentum": 0.123456789, "eps": 0.987654321},
+    )
+
+    assert rate is tensor_rate
+    assert momentum == float(torch.tensor(0.123456789, dtype=torch.float32))
+    assert eps == 0.987654321
+
+
+def test_group_scalars_rounds_float_rate_and_requires_scalar_values() -> None:
+    rate = 0.123456789
+    result = _group_scalars({"lr": rate, "momentum": 0.5, "eps": 1e-7})
+    assert result == (float(torch.tensor(rate, dtype=torch.float32)), 0.5, 1e-7)
+
+    for name in ("lr", "momentum", "eps"):
+        group: dict[str, object] = {
+            "lr": rate,
+            "momentum": 0.5,
+            "eps": 1e-7,
+        }
+        group[name] = None
+        with pytest.raises(TypeError):
+            _group_scalars(group)
+
+
 def test_fused_apply_requires_a_device_rate() -> None:
     parameter = torch.empty(2, 3, dtype=torch.bfloat16)
     master = torch.zeros(2, 3)
     update = torch.ones(2, 3, dtype=torch.bfloat16)
     optimizer = FusedMuon.Config().make()([_parameter(2, 3)])
-    with pytest.raises(TypeError, match="device tensor"):
+    with pytest.raises(TypeError) as error:
         optimizer._apply_cuda(parameter, master, update, lr=0.01, scale=1.0)
+
+    assert str(error.value) == "the fused update reads its rate from a device tensor"
+
+
+def test_cuda_wrappers_execute_their_torch_reference_stages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run_nesterov(
+        *args: object,
+        grid: tuple[int, ...],
+        **kwargs: object,
+    ) -> None:
+        gradient, buffer, update, coefficient, momentum, count = cast(
+            tuple[Tensor, Tensor, Tensor, Tensor, float, int],
+            args,
+        )
+        block = cast(int, kwargs["block"])
+        num_warps = cast(int, kwargs["num_warps"])
+        assert kwargs == {"block": 1024, "num_warps": 4, "test_flag": True}
+        assert grid == ((count + block - 1) // block,)
+        assert (count, block, num_warps) == (gradient.numel(), 1024, 4)
+        update.copy_(
+            nesterov(gradient, buffer, coefficient=coefficient, momentum=momentum),
+        )
+
+    def run_normalize(
+        *args: object,
+        grid: tuple[int, ...],
+        **kwargs: object,
+    ) -> None:
+        matrix, output, norm, eps, count = cast(
+            tuple[Tensor, Tensor, Tensor, float, int],
+            args,
+        )
+        block = cast(int, kwargs["block"])
+        num_warps = cast(int, kwargs["num_warps"])
+        assert kwargs == {"block": 1024, "num_warps": 4, "test_flag": True}
+        assert grid == ((count + block - 1) // block,)
+        assert (count, block, num_warps) == (matrix.numel(), 1024, 4)
+        output.copy_(normalize(matrix, norm=norm, eps=eps))
+
+    def run_apply(
+        *args: object,
+        grid: tuple[int, ...],
+        **kwargs: object,
+    ) -> None:
+        update, master, parameter, lr, scale, count = cast(
+            tuple[Tensor, Tensor, Tensor, Tensor, float, int],
+            args,
+        )
+        block = cast(int, kwargs["block"])
+        num_warps = cast(int, kwargs["num_warps"])
+        scaled = cast(bool, kwargs["scaled"])
+        assert kwargs == {
+            "scaled": scale != 1.0,
+            "block": 1024,
+            "num_warps": 4,
+            "test_flag": True,
+        }
+        assert grid == ((count + block - 1) // block,)
+        assert (count, block, num_warps) == (update.numel(), 1024, 4)
+        assert scaled is (scale != 1.0)
+        apply_update(parameter, master, update, lr=lr, scale=scale)
+
+    def fake_kernels(**helpers: Callable[..., object]) -> SimpleNamespace:
+        del helpers
+        return SimpleNamespace(
+            nesterov=_KernelLaunch(run_nesterov),
+            normalize=_KernelLaunch(run_normalize),
+            apply=_KernelLaunch(run_apply),
+        )
+
+    monkeypatch.setattr(FusedMuon, "launch_options", {"test_flag": True})
+    monkeypatch.setattr(fused_muon, "_kernels", fake_kernels)
+    optimizer = FusedMuon.Config().make()([_parameter(2, 3)])
+
+    gradient = torch.ones(2, 3, dtype=torch.bfloat16)
+    buffer = torch.zeros(2, 3)
+    coefficient = torch.tensor(0.5)
+    expected_buffer = buffer.clone()
+    expected_update = nesterov(
+        gradient,
+        expected_buffer,
+        coefficient=coefficient,
+        momentum=0.5,
+    )
+    actual_update = optimizer._nesterov_cuda(
+        gradient,
+        buffer,
+        coefficient=coefficient,
+        momentum=0.5,
+    )
+    assert torch.equal(actual_update, expected_update)
+    assert torch.equal(buffer, expected_buffer)
+
+    norm = optimizer.norm([actual_update])
+    expected_normalized = normalize(actual_update, norm=norm, eps=1e-7)
+    assert torch.equal(
+        optimizer._normalize_cuda(actual_update, norm=norm, eps=1e-7),
+        expected_normalized,
+    )
+
+    master = torch.zeros(2, 3)
+    parameter = torch.empty(2, 3, dtype=torch.bfloat16)
+    rate = torch.tensor(0.25)
+    optimizer._apply_cuda(parameter, master, actual_update, lr=rate, scale=1.0)
+    assert torch.equal(master, -actual_update.float() * rate)
+    assert torch.equal(parameter, master.bfloat16())
 
 
 def test_the_state_round_trips_fp32_masters_for_bf16_parameters() -> None:

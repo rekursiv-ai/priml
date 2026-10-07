@@ -14,10 +14,12 @@ distant mob is not drawn would make every run depend on GitHub being up.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import hashlib
 import os
+
+from numpy.typing import NDArray
 
 import numpy as np
 import pygame
@@ -71,6 +73,17 @@ def _colour(name: str) -> tuple[int, int, int]:
     return (digest[0] | 0x40, digest[1] | 0x40, digest[2] | 0x41)
 
 
+def _sprite_colour(name: object) -> tuple[int, int, int]:
+    return _colour(cast(str, name))
+
+
+def _pixel(frame: NDArray[np.uint8], row: int, column: int) -> tuple[int, int, int]:
+    row %= constants.OBS_DIM[0] * TILE
+    column %= constants.OBS_DIM[1] * TILE
+    pixel = cast(tuple[int, int, int], frame[row, column])
+    return (pixel[0], pixel[1], pixel[2])
+
+
 def _state(num_envs: int = 1) -> EnvState:
     state = empty_state(num_envs=num_envs, device=torch.device("cpu"))
     state.player_position[:] = torch.tensor([20, 20], dtype=torch.int32)
@@ -94,12 +107,11 @@ def test_a_frame_is_the_players_own_view(renderer: Renderer) -> None:
     # The same 9x11 window the policy reads, so a replay shows what the agent
     # knew rather than what it could not have known.
     rows, columns = constants.OBS_DIM
-    frame = renderer.render(_state())
+    frame = cast(NDArray[np.uint8], renderer.render(_state()))
     assert frame.shape == (rows * TILE, columns * TILE, 3)
     assert frame.dtype == np.uint8
 
 
-@pytest.mark.compute_large_fixture
 def test_each_worker_draws_its_own_world(renderer: Renderer) -> None:
     state = generated_world(num_envs=3, seed=0)
     frames = [renderer.render(state, index=index) for index in range(3)]
@@ -143,7 +155,7 @@ def test_beyond_the_map_edge_is_flat_grey(renderer: Renderer) -> None:
     # Not black and not grass: the edge of the world has to read as an edge.
     state = _state()
     state.player_position[:] = torch.tensor([0, 0], dtype=torch.int32)
-    frame = renderer.render(state)
+    frame = cast(NDArray[np.uint8], renderer.render(state))
     pixel = tuple(
         frame[0, 0],  # pyright: ignore[reportAny] -- numpy indexing is dtype-erased.
     )
@@ -152,30 +164,33 @@ def test_beyond_the_map_edge_is_flat_grey(renderer: Renderer) -> None:
 
 @pytest.mark.compute_large_fixture
 def test_an_unlit_tile_is_black(renderer: Renderer) -> None:
-    # Darkness genuinely hides the world here, exactly as it does in the
-    # observation the agent reads.
+    # Shading is proportional to missing light, so no light at all is black.
     state = _state()
     state.light_map[:] = 0.0
-    frame = renderer.render(state)
+    frame = cast(NDArray[np.uint8], renderer.render(state))
     maximum = int(
         _center(frame).max(),  # pyright: ignore[reportAny] -- numpy reduction is dtype-erased.
     )
     assert maximum == 0
 
 
-@pytest.mark.compute_large_fixture
 def test_night_tints_the_surface_but_not_the_caves(renderer: Renderer) -> None:
     day = _state()
     night = _state()
-    night.light_level[:] = 0.0
-    assert not np.array_equal(renderer.render(day), renderer.render(night))
+    night.light_level[:] = 0.5
+    pixel = (0, 0)
+    day_frame = cast(NDArray[np.uint8], renderer.render(day))
+    night_frame = cast(NDArray[np.uint8], renderer.render(night))
+    assert _pixel(day_frame, *pixel) == _sprite_colour(
+        sprites.BLOCK_SPRITES[int(BlockType.GRASS)],
+    )
+    assert _pixel(night_frame, *pixel) == (46, 69, 158)
 
-    # Underground has its own light; dawn does not reach it.
     cave_day = _state()
     cave_day.player_level[:] = 1
     cave_night = _state()
     cave_night.player_level[:] = 1
-    cave_night.light_level[:] = 0.0
+    cave_night.light_level[:] = 0.5
     assert np.array_equal(renderer.render(cave_day), renderer.render(cave_night))
 
 
@@ -226,7 +241,6 @@ def test_a_dead_creature_is_not_drawn(renderer: Renderer) -> None:
     assert np.array_equal(renderer.render(empty), renderer.render(ghost))
 
 
-@pytest.mark.compute_large_fixture
 def test_the_vulnerable_boss_looks_different(renderer: Renderer) -> None:
     frames: list[np.ndarray] = []
     for vulnerable in (False, True):
@@ -283,29 +297,58 @@ def test_a_real_sprite_downloads_and_loads(tmp_path: Path) -> None:
     )
 
 
-@pytest.mark.compute_large_fixture
-def test_constructing_a_renderer_requests_the_headless_driver(
+def test_default_renderer_has_default_tile_geometry(sprite_dir: Path) -> None:
+    renderer = Renderer(asset_dir=sprite_dir)
+    rows, columns = constants.OBS_DIM
+    assert renderer.block_pixels == 64
+    assert renderer.frame_shape == (rows * 64, columns * 64)
+
+
+def test_rendering_leaves_sdl_and_the_environment_untouched(
     sprite_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A viewer object must not put a window on an operator's screen.
+    """A viewer object must not decide which display a later window gets.
 
-    Checked by reading the request the renderer makes, not by spawning an
-    interpreter to see which driver SDL then bound. The two are the same
-    assertion -- SDL resolves the driver at the FIRST init of any subsystem
-    and honours ``SDL_VIDEODRIVER`` when it does, so a renderer that sets it
-    to ``dummy`` before that init cannot end up on x11 -- and this form costs
-    a dictionary read rather than a fresh torch import.
-
-    The variable is cleared first, because the surrounding suite sets it: left
-    in place the assertion would pass without the renderer doing anything.
+    SDL binds its video driver at the first subsystem init and keeps it for
+    the process, so a renderer that initialized SDL, or exported a driver,
+    would leave a later ``play`` in the same process without a window.
+    Loading, scaling, compositing, and reading back surfaces need neither.
+    The variable is cleared first, because the surrounding suite sets it.
     """
     monkeypatch.delenv("SDL_VIDEODRIVER", raising=False)
-    Renderer(block_pixels=TILE, asset_dir=sprite_dir)
-    assert os.environ["SDL_VIDEODRIVER"] == "dummy"
+    inits: list[str] = []
+    monkeypatch.setattr(pygame, "init", lambda: inits.append("pygame"))
+    monkeypatch.setattr(pygame.display, "init", lambda: inits.append("display"))
+
+    Renderer(block_pixels=TILE, asset_dir=sprite_dir).render(_state())
+
+    assert "SDL_VIDEODRIVER" not in os.environ
+    assert inits == []
 
 
-@pytest.mark.compute_large_fixture
+@pytest.mark.parametrize("view", [(5, 7), (3, 3)])
+def test_the_frame_is_the_configured_view(
+    sprite_dir: Path,
+    view: tuple[int, int],
+) -> None:
+    renderer = Renderer(block_pixels=TILE, asset_dir=sprite_dir, view=view)
+    frame = cast(NDArray[np.uint8], renderer.render(_state()))
+    assert renderer.frame_shape == (view[0] * TILE, view[1] * TILE)
+    assert frame.shape == (*renderer.frame_shape, 3)
+    # The player stands at the centre of the configured view, not of 9x11.
+    center = (view[0] // 2 * TILE, view[1] // 2 * TILE)
+    assert _pixel(frame, *center) == _colour(
+        sprites.PLAYER_SPRITES[3],
+    )
+
+
+@pytest.mark.parametrize("view", [(0, 3), (3, -1)])
+def test_a_degenerate_view_is_refused(sprite_dir: Path, view: tuple[int, int]) -> None:
+    with pytest.raises(ValueError, match=r"^view must be positive in both dimensions$"):
+        Renderer(asset_dir=sprite_dir, view=view)
+
+
 def test_constructing_a_renderer_creates_no_display_surface(
     sprite_dir: Path,
 ) -> None:
@@ -336,7 +379,7 @@ def test_renderer_covers_composition_and_shading_branches(renderer: Renderer) ->
     )
     state.light_map[:, 0, 20, 20] = 0.5
     state.light_level[:] = 0.5
-    frame = renderer.render(state)
+    frame = cast(NDArray[np.uint8], renderer.render(state))
     assert frame.shape == (*renderer.frame_shape, 3)
     assert frame.dtype == np.uint8
 
@@ -348,6 +391,229 @@ def test_renderer_covers_composition_and_shading_branches(renderer: Renderer) ->
 def test_renderer_rejects_an_invalid_worker_index(renderer: Renderer) -> None:
     with pytest.raises(IndexError):
         renderer.render(_state(), index=2)
+
+
+def test_frame_shape_and_tile_size_are_exact(sprite_dir: Path) -> None:
+    renderer = Renderer(block_pixels=3, asset_dir=sprite_dir)
+    rows, columns = constants.OBS_DIM
+    assert renderer.block_pixels == 3
+    assert renderer.frame_shape == (rows * 3, columns * 3)
+
+
+def test_terrain_uses_exact_tile_colours(renderer: Renderer) -> None:
+    state = _state()
+    state.map[:, 0, 20, 21] = int(BlockType.DARKNESS)
+    frame = cast(NDArray[np.uint8], renderer.render(state))
+    center_row, center_column = constants.OBS_DIM[0] // 2, constants.OBS_DIM[1] // 2
+    grass = _pixel(frame, center_row * TILE, (center_column - 1) * TILE)
+    darkness = _pixel(frame, center_row * TILE, (center_column + 1) * TILE)
+    assert tuple(grass) == _sprite_colour(sprites.BLOCK_SPRITES[int(BlockType.GRASS)])
+    assert tuple(darkness) == sprites.DARKNESS_COLOR
+
+
+def test_out_of_bounds_block_uses_the_out_of_bounds_colour(
+    renderer: Renderer,
+) -> None:
+    state = _state()
+    state.map[0, 0, 20, 21] = int(BlockType.OUT_OF_BOUNDS)
+    frame = cast(NDArray[np.uint8], renderer.render(state))
+    center_row, center_column = constants.OBS_DIM[0] // 2, constants.OBS_DIM[1] // 2
+    assert _pixel(frame, center_row * TILE, (center_column + 1) * TILE) == (
+        128,
+        128,
+        128,
+    )
+
+
+def test_creature_visibility_and_position_are_exact(renderer: Renderer) -> None:
+    state = _state()
+    state.melee_mobs.mask[0, 0, 1] = True
+    state.melee_mobs.position[0, 0, 1] = torch.tensor([19, 18], dtype=torch.int32)
+    frame = cast(NDArray[np.uint8], renderer.render(state))
+    rows, columns = constants.OBS_DIM
+    row, column = rows // 2 - 1, columns // 2 - 2
+    species = int(state.melee_mobs.type_id[0, 0, 1])
+    name = sprites.MELEE_SPRITES[species % len(sprites.MELEE_SPRITES)]
+    expected = _colour(name)
+    assert _pixel(frame, row * TILE, column * TILE) == expected
+    grass = _sprite_colour(sprites.BLOCK_SPRITES[int(BlockType.GRASS)])
+    assert _pixel(frame, (row + 1) * TILE, column * TILE) == grass
+
+
+def test_out_of_view_creature_does_not_stop_later_creatures(
+    renderer: Renderer,
+) -> None:
+    state = _state()
+    state.melee_mobs.mask[0, 0, :3] = True
+    state.melee_mobs.position[0, 0, 0] = torch.tensor([15, 21], dtype=torch.int32)
+    state.melee_mobs.position[0, 0, 1] = torch.tensor([20, 30], dtype=torch.int32)
+    state.melee_mobs.position[0, 0, 2] = torch.tensor([20, 21], dtype=torch.int32)
+    name = sprites.MELEE_SPRITES[int(state.melee_mobs.type_id[0, 0, 2])]
+
+    frame = cast(NDArray[np.uint8], renderer.render(state))
+
+    rows, columns = constants.OBS_DIM
+    assert _pixel(frame, (rows // 2) * TILE, (columns // 2 + 1) * TILE) == (
+        _colour(name)
+    )
+
+
+def test_mob_on_the_view_corner_is_visible(renderer: Renderer) -> None:
+    state = _state()
+    state.melee_mobs.mask[0, 0, 0] = True
+    state.melee_mobs.position[0, 0, 0] = torch.tensor([16, 15], dtype=torch.int32)
+    name = sprites.MELEE_SPRITES[int(state.melee_mobs.type_id[0, 0, 0])]
+    frame = cast(NDArray[np.uint8], renderer.render(state))
+    assert _pixel(frame, 0, 0) == _sprite_colour(name)
+
+
+def test_player_direction_and_sleep_sprite_are_exact(
+    renderer: Renderer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for direction, facing in (
+        (Action.LEFT, 0),
+        (Action.RIGHT, 1),
+        (Action.UP, 2),
+        (Action.DOWN, 3),
+        (99, 3),
+    ):
+        state = _state()
+        state.player_direction[:] = int(direction)
+        frame = cast(NDArray[np.uint8], renderer.render(state))
+        rows, columns = constants.OBS_DIM
+        center = (rows // 2 * TILE, columns // 2 * TILE)
+        assert _pixel(frame, center[0], center[1]) == _colour(
+            sprites.PLAYER_SPRITES[facing],
+        )
+
+    asleep = _state()
+    asleep.is_sleeping[:] = True
+    white = pygame.Surface((TILE, TILE))
+    white.fill((255, 255, 255))
+    monkeypatch.setitem(renderer._cache, sprites.PLAYER_SPRITES[-1], white)
+    frame = cast(NDArray[np.uint8], renderer.render(asleep))
+    rows, columns = constants.OBS_DIM
+    center = (rows // 2 * TILE, columns // 2 * TILE)
+    assert _pixel(frame, center[0], center[1]) == (127, 127, 127)
+
+
+def test_renderer_uses_asset_directory_and_caches_sprites(
+    sprite_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetch = assets.fetch
+    requests: list[tuple[str, Path | None]] = []
+
+    def record_fetch(name: str, *, directory: Path | None = None) -> Path:
+        requests.append((name, directory))
+        return fetch(name, directory=directory)
+
+    monkeypatch.setattr(assets, "fetch", record_fetch)
+    renderer = Renderer(block_pixels=TILE, asset_dir=sprite_dir)
+    expected = [(name, sprite_dir) for name in sprites.every_sprite()]
+    assert requests == expected
+    renderer._load(sprites.PLAYER_SPRITES[0])
+    assert requests == expected
+
+
+def test_renderer_draws_map_edge_and_rejects_nonpositive_size(sprite_dir: Path) -> None:
+    renderer = Renderer(block_pixels=TILE, asset_dir=sprite_dir)
+    state = _state()
+    state.player_position[:] = torch.tensor([3, 4], dtype=torch.int32)
+    state.map[0, 0, 0, 0] = int(BlockType.DARKNESS)
+    frame = cast(NDArray[np.uint8], renderer.render(state))
+    assert _pixel(frame, 0, 0) == sprites.OUT_OF_BOUNDS_COLOR
+    assert _pixel(frame, TILE, TILE) == sprites.DARKNESS_COLOR
+    Renderer(block_pixels=1, asset_dir=sprite_dir)
+    with pytest.raises(ValueError, match=r"^block_pixels must be positive$"):
+        Renderer(block_pixels=0, asset_dir=sprite_dir)
+
+
+def test_lower_and_upper_map_edges_are_drawn(renderer: Renderer) -> None:
+    state = _state()
+    state.player_position[:] = torch.tensor([0, 0], dtype=torch.int32)
+    state.map[0, 0, 0, 0] = int(BlockType.DARKNESS)
+    state.light_map[0, 0, 0, 0] = 0.0
+    frame = cast(NDArray[np.uint8], renderer.render(state))
+    rows, columns = constants.OBS_DIM
+    assert _pixel(frame, (rows // 2) * TILE, (columns // 2) * TILE) == (0, 0, 0)
+    assert _pixel(frame, 0, 0) == sprites.OUT_OF_BOUNDS_COLOR
+
+    state = _state()
+    state.player_position[:] = torch.tensor(
+        [state.map.shape[-2] - 1, state.map.shape[-1] - 1],
+        dtype=torch.int32,
+    )
+    state.map[0, 0, -1, -1] = int(BlockType.DARKNESS)
+    state.light_map[0, 0, -1, -1] = 0.0
+    frame = cast(NDArray[np.uint8], renderer.render(state))
+    assert _pixel(frame, (rows // 2) * TILE, (columns // 2) * TILE) == (0, 0, 0)
+    assert _pixel(frame, -1, -1) == sprites.OUT_OF_BOUNDS_COLOR
+
+
+def test_ladder_and_shading_outputs_are_exact(renderer: Renderer) -> None:
+    blocked = _state()
+    blocked.item_map[0, 0, 20, 21] = int(ItemType.LADDER_DOWN)
+    frame_blocked = cast(NDArray[np.uint8], renderer.render(blocked))
+    rows, columns = constants.OBS_DIM
+    row, column = rows // 2, columns // 2 + 1
+    blocked_name = sprites.ITEM_SPRITES[int(ItemType.LADDER_DOWN_BLOCKED)]
+    assert _pixel(frame_blocked, row * TILE, column * TILE) == _colour(blocked_name)
+
+    open_ladder = _state()
+    open_ladder.item_map[0, 0, 20, 21] = int(ItemType.LADDER_DOWN)
+    open_ladder.monsters_killed[0, 0] = constants.MONSTERS_KILLED_TO_CLEAR_LEVEL
+    frame_open = cast(NDArray[np.uint8], renderer.render(open_ladder))
+    open_name = sprites.ITEM_SPRITES[int(ItemType.LADDER_DOWN)]
+    assert _pixel(frame_open, row * TILE, column * TILE) == _colour(open_name)
+
+    dim = _state()
+    dim.light_map[0, 0, 20, 21] = 0.5
+    dimmed = cast(NDArray[np.uint8], renderer.render(dim))
+    grass = _sprite_colour(sprites.BLOCK_SPRITES[int(BlockType.GRASS)])
+    assert _pixel(dimmed, row * TILE, column * TILE) == (46, 61, 126)
+    assert grass == (92, 123, 251)
+
+    dark = _state()
+    dark.light_map[0, 0, 20, 21] = 0.0
+    dark_frame = cast(NDArray[np.uint8], renderer.render(dark))
+    assert _pixel(dark_frame, row * TILE, column * TILE) == (0, 0, 0)
+
+
+def test_one_alpha_level_of_shading_changes_white_by_one(
+    renderer: Renderer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    white = pygame.Surface((TILE, TILE))
+    white.fill((255, 255, 255))
+    monkeypatch.setitem(
+        renderer._cache,
+        sprites.BLOCK_SPRITES[int(BlockType.GRASS)],
+        white,
+    )
+    rows, columns = constants.OBS_DIM
+    tile_pixel = ((rows // 2) * TILE, (columns // 2 + 1) * TILE)
+
+    fully_lit = _state()
+    frame = cast(NDArray[np.uint8], renderer.render(fully_lit))
+    assert _pixel(frame, *tile_pixel) == (255, 255, 255)
+
+    state = _state()
+    state.light_map[0, 0, 20, 21] = 0.996
+    frame = cast(NDArray[np.uint8], renderer.render(state))
+    assert _pixel(frame, *tile_pixel) == (254, 254, 254)
+
+    night = _state()
+    night.light_level[:] = 0.996
+    frame = cast(NDArray[np.uint8], renderer.render(night))
+    assert _pixel(frame, *tile_pixel) == (254, 254, 254)
+
+    cave = _state()
+    cave.player_level[:] = 1
+    cave.light_level[:] = 0.5
+    frame = cast(NDArray[np.uint8], renderer.render(cave))
+    assert _pixel(frame, *tile_pixel) == (255, 255, 255)
 
 
 if __name__ == "__main__":

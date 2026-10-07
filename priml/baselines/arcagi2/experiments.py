@@ -7,6 +7,7 @@ from typing import Final, Self, override
 
 from configgle import Makes
 
+from priml.baselines.arcagi1 import experiments
 from priml.baselines.arcagi1.metric import (
     CanonicalPassK,
     PerOutputPass,
@@ -20,25 +21,24 @@ from priml.baselines.arcagi2.metric import PassK
 from priml.baselines.arcagi2.model import PuzzleEmbedding, RotaryBlock
 from priml.baselines.arcagi2.puzzle_data import Arc2PuzzleDataset
 from priml.baselines.arcagi2.scripts.build_dataset import (
+    ARC2_DATASET_DIR,
     arc2_aug_policy_template,
     arc2_spatial_eval_template,
 )
 from priml.baselines.arcagi2.train_step import ArcDataParallel, ArcTrainStep
 from priml.baselines.arcagi2.warm_start import WarmStart
-from priml.baselines.sudoku.act import ActPool
+from priml.baselines.sudoku.act import AtomicPool
 from priml.baselines.sudoku.embedding import GridEmbedding
 from priml.baselines.sudoku.model import DeepRecurrence
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
+from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.swiglu import SwiGLU
 from priml.runtime import MultiProcess, SingleProcess
 from priml.train.checkpointer import Checkpointer
 from priml.train.parallelism import NoParallel
 from priml.train.tracker import TrackerList
 from priml.train.train_loop import TrainLoop
-
-import priml.baselines.arcagi1.experiments
 
 
 class ArcTrainLoop(
@@ -114,7 +114,7 @@ def exp_smoke() -> ArcTrainLoop:
     config.step.parallelism = NoParallel.Config()
     model = config.step.model
     assert isinstance(model.block, RotaryBlock.Config)
-    assert isinstance(model.block.attn, SelfAttention.Config)
+    assert isinstance(model.block.attn, Attention.Config)
     assert isinstance(model.block.ffn, SwiGLU.Config)
     assert isinstance(model.recurrence, DeepRecurrence.Config)
     assert isinstance(model.prefix, PuzzleEmbedding.Config)
@@ -127,9 +127,9 @@ def exp_smoke() -> ArcTrainLoop:
     model.recurrence.slow_cycles = 1
     model.recurrence.fast_cycles = 1
     model.prefix.batch_size = 2
-    assert isinstance(config.step.act, ActPool.Config)
-    config.step.act.batch_size = 2
-    config.step.act.max_steps = 4
+    assert isinstance(config.step.pool, AtomicPool.Config)
+    config.step.pool.batch_size = 2
+    config.step.pool.max_steps = 4
     config.step.total_train_steps = config.max_steps = 4
     config.step.warmup_steps = 0
     config.step.use_ema = False
@@ -219,7 +219,7 @@ def exp001() -> Arc2TrmTrainLoop:
       cfg: The reference recipe on ARC-AGI-2.
 
     """
-    return _on_arc2(priml.baselines.arcagi1.experiments.exp004(), "exp001")
+    return _on_arc2(experiments.exp004(), "exp001")
 
 
 def exp002() -> Arc2TrmTrainLoop:
@@ -239,7 +239,7 @@ def exp002() -> Arc2TrmTrainLoop:
       cfg: exp001 with the Muon recipe.
 
     """
-    return _on_arc2(priml.baselines.arcagi1.experiments.exp005(), "exp002")
+    return _on_arc2(experiments.exp005(), "exp002")
 
 
 def exp003() -> Arc2TrmTrainLoop:
@@ -258,7 +258,7 @@ def exp003() -> Arc2TrmTrainLoop:
       cfg: exp002 at Muon rate 0.01.
 
     """
-    return _on_arc2(priml.baselines.arcagi1.experiments.exp006(), "exp003")
+    return _on_arc2(experiments.exp006(), "exp003")
 
 
 def exp004() -> Arc2TrmTrainLoop:
@@ -281,7 +281,7 @@ def exp004() -> Arc2TrmTrainLoop:
       cfg: exp002 with the URM model.
 
     """
-    urm = priml.baselines.arcagi1.experiments.exp007()
+    urm = experiments.exp007()
     cfg = exp002()
     cfg.experiment_name = "exp004"
     cfg.step.model = urm.step.model
@@ -314,7 +314,7 @@ def exp005() -> Arc2TrmTrainLoop:
       cfg: exp004 with the augmentation and evaluation recipe.
 
     """
-    cfg = _on_arc2(priml.baselines.arcagi1.experiments.exp007(), "exp005")
+    cfg = _on_arc2(experiments.exp007(), "exp005")
     cfg.dataset.source_dataset_dir = arc2_aug_policy_template(
         translation_prob=0.2,
         scale_prob=0.2,
@@ -408,7 +408,7 @@ def exp007() -> Arc2TrmTrainLoop:
 # kept. Only what the dataset determines moves: its tree, the task-table size, the
 # sample-scale horizon, and the scoring rules ARC-AGI-2 reports.
 def _on_arc2(
-    source: priml.baselines.arcagi1.experiments.TrmTrainLoop,
+    source: experiments.TrmTrainLoop,
     name: str,
 ) -> Arc2TrmTrainLoop:
     """Return an ``arcagi1`` TRM recipe retargeted to ARC-AGI-2."""
@@ -416,7 +416,7 @@ def _on_arc2(
     cfg.update(source, skip_missing=True)
     cfg.step = source.step
     cfg.dataset = Arc2PuzzleDataset.Config().update(source.dataset, skip_missing=True)
-    cfg.dataset.working_dir = "/datasets/arc2concept-aug-1000"
+    cfg.dataset.working_dir = ARC2_DATASET_DIR
     cfg.dataset.epochs_per_iter = 4
     cfg.dataset.num_puzzle_identifiers = NUM_PUZZLE_IDENTIFIERS
     cfg.study_name = "arcagi2"

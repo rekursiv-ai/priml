@@ -70,10 +70,12 @@ def count_substrings(
     counts: dict[str, int] = {}
     for piece, frequency in pretokens:
         size = len(piece)
-        for length in range(2, size + 1):
+        for length in range(2, size):
             for start in range(size - length + 1):
                 token = piece[start : start + length]
                 counts[token] = counts.get(token, 0) + frequency
+        if size >= 2:
+            counts[piece] = counts.get(piece, 0) + frequency
     tables: list[dict[str, int]] = [{} for _ in range(num_partitions)]
     for token, total in counts.items():
         # A process-independent hash: forkserver workers each draw their own

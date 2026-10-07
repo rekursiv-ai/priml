@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from priml.model.passthrough import (
+    PassthroughAttribute,
     ReadPassthroughMixin,
     ReadWritePassthroughMixin,
 )
@@ -33,6 +34,28 @@ class _ReadOnly(ReadPassthroughMixin, passthrough="inner"):
     def __init__(self) -> None:
         self.inner = _Target()
         self.own = 0
+
+
+class _DescribedReadOnly(ReadPassthroughMixin, passthrough="inner"):
+    value: PassthroughAttribute[int] = PassthroughAttribute[int]()
+
+    def __init__(self) -> None:
+        self.inner = _Target(value=7)
+
+
+class _InheritedPassthrough(_ReadOnly):
+    pass
+
+
+class _ParentTarget:
+    def __getattr__(self, name: str) -> object:
+        if name == "inner":
+            return _Target(value=8)
+        raise AttributeError(name)
+
+
+class _ParentResolved(ReadPassthroughMixin, _ParentTarget, passthrough="inner"):
+    pass
 
 
 class _ReadWrite(ReadWritePassthroughMixin, passthrough="inner"):
@@ -83,9 +106,8 @@ class _PassthroughModule(nn.Module):
         return torch.cat((self.read(input), self.read_write(input)))
 
 
-def test_passthrough_text(request: pytest.FixtureRequest) -> None:
+def test_passthrough_text() -> None:
     assert_text_golden(
-        request,
         test_file=__file__,
         name="passthrough",
         rendered=str(_PassthroughModule()),
@@ -108,6 +130,42 @@ def test_read_passthrough_delegates_missing_attributes() -> None:
     assert wrapper.value == 1
     wrapper.own = 2
     assert wrapper.own == 2
+    missing = "missing"
+    with pytest.raises(AttributeError) as error:
+        getattr(wrapper, missing)
+    assert str(error.value) == "_ReadOnly has no attribute 'missing'."
+
+
+def test_passthrough_descriptor_reads_target_and_keeps_class_access() -> None:
+    descriptor = _DescribedReadOnly.value
+    assert descriptor.name == "value"
+    assert _DescribedReadOnly().value == 7
+
+
+def test_passthrough_descriptor_stores_the_assigned_name() -> None:
+    descriptor = PassthroughAttribute[int]()
+    descriptor.__set_name__(object, "selected")
+    assert descriptor.name == "selected"
+
+
+def test_passthrough_setting_can_be_inherited() -> None:
+    class ExplicitPassthrough(ReadPassthroughMixin, passthrough="inner"):
+        pass
+
+    assert ExplicitPassthrough._passthrough == "inner"
+    assert _ReadOnly._passthrough == "inner"
+    assert _InheritedPassthrough._passthrough == "inner"
+    assert _InheritedPassthrough().value == 1
+
+
+def test_passthrough_target_uses_parent_getattr() -> None:
+    assert _ParentResolved().value == 8
+
+
+def test_missing_passthrough_target_preserves_requested_attribute_error() -> None:
+    wrapper = _ReadOnly()
+    with pytest.raises(AttributeError, match="missing"):
+        wrapper._passthrough_target("missing")
 
 
 def test_read_write_passthrough_delegates_existing_attributes() -> None:

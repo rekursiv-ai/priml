@@ -71,8 +71,8 @@ class Cifar10Data:
         drop_last: bool = False
         """Drop a final short training batch instead of yielding it."""
 
-        device: str = "auto"
-        """Device holding the resident tensors ("auto" picks the best)."""
+        device: torch.device | str | None = None
+        """Device holding the resident tensors."""
 
         dtype: torch.dtype = torch.float32
         """Storage dtype for the resident images."""
@@ -217,9 +217,11 @@ def prepare(
         # pulls in PIL and the full dataset registry (~400ms). Every training
         # run calls this function, and the common case -- data already prepared
         # -- returns above without ever needing it.
-        import torchvision.datasets  # noqa: PLC0415 -- The optional torchvision dependency is loaded only when preparing data.
+        from torchvision import (  # noqa: PLC0415 -- The optional torchvision dependency is loaded only when preparing data.
+            datasets,
+        )
 
-        source = torchvision.datasets.CIFAR10(
+        source = datasets.CIFAR10(
             str(destination),
             train=train,
             download=True,
@@ -229,8 +231,7 @@ def prepare(
             inplace=True,
             unit_interval=True,
         )
-        media = (media - torch.tensor(mean).view(1, 3, 1, 1)) / torch.tensor(std).view(
-            1,
+        media = (media - torch.tensor(mean).view(3, 1, 1)) / torch.tensor(std).view(
             3,
             1,
             1,

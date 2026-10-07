@@ -30,7 +30,7 @@ from torch import Tensor
 import numpy as np
 import torch
 
-from priml.lib.custom_json import DictCodec, IntCodec, StrCodec, loads
+from priml.lib.custom_json import convert, loads, parse
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
 from priml.timer import CheckpointableStepTimer
@@ -50,6 +50,9 @@ else:
 
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_ENCODE_THREADS: Final = 8
+"""Default thread count shared by NanoChat token encoders."""
 
 IGNORED_TARGET: Final = -1
 """Target excluded by the loss. Metrics must mask it before byte-table indexing."""
@@ -79,7 +82,7 @@ class TokenEncoder(Protocol):
         self,
         texts: list[str],
         *,
-        num_threads: int = 8,
+        num_threads: int = DEFAULT_ENCODE_THREADS,
     ) -> list[list[int]]:
         """Return one BOS-prefixed token list for each input document."""
         ...
@@ -102,7 +105,7 @@ class NanoChatData:
         """Parquet shard directory, resolved beneath ``base_dir``."""
 
         tokenizer_dir: Path | str = ""
-        """Directory holding the fitted vocabulary; empty is ``<data>/tokenizer``."""
+        """Fitted vocabulary, resolved beneath ``base_dir``; empty is ``<data>/tokenizer``."""
 
         prepared_train_manifest: Path | str = ""
         """Frozen token-row manifest; empty uses online parquet packing."""
@@ -137,11 +140,8 @@ class NanoChatData:
         train_buffer_size: int | None = None
         """Training-only packing buffer; None inherits ``buffer_size``."""
 
-        device: torch.device | str | None = "auto"
-        """Device batches land on.
-
-        ``"auto"`` probes the hardware, ``None`` defers to
-        ``torch.get_default_device()``; see :func:`get_device`."""
+        device: torch.device | str | None = None
+        """Device batches land on; ``None`` is the loop's (see :func:`get_device`)."""
 
         vocab_size: int = -1
         """Expected tokenizer vocabulary size; -1 skips validation at load time."""
@@ -152,8 +152,16 @@ class NanoChatData:
         @override
         def finalize(self) -> Self:
             self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
-            if not self.tokenizer_dir:
-                self.tokenizer_dir = Path(self.working_dir) / "tokenizer"
+            self.tokenizer_dir = (
+                resolve_working_dir(self.base_dir, self.tokenizer_dir)
+                if self.tokenizer_dir
+                else Path(self.working_dir) / "tokenizer"
+            )
+            if self.reference_evaluation is not None:
+                self.reference_evaluation.path = resolve_working_dir(
+                    self.base_dir,
+                    self.reference_evaluation.path,
+                )
             if self.prepared_train_manifest:
                 self.prepared_train_manifest = resolve_working_dir(
                     self.base_dir,
@@ -188,7 +196,10 @@ class NanoChatData:
         if config.train_buffer_size is not None and config.train_buffer_size <= 0:
             raise ValueError("train_buffer_size must be positive.")
         tokens_per_eval_batch = config.eval_batch_size * config.max_seq_len
-        if config.eval_tokens <= 0 or config.eval_tokens % tokens_per_eval_batch:
+        if (
+            config.eval_tokens < tokens_per_eval_batch
+            or config.eval_tokens % tokens_per_eval_batch
+        ):
             raise ValueError(
                 f"eval_tokens={config.eval_tokens} must be positive and a whole "
                 f"number of eval batches of {tokens_per_eval_batch} tokens; "
@@ -268,7 +279,7 @@ class NanoChatData:
         logger.info(
             "nanochat: %d train shards, val shard %d, vocab %d",
             len(self.train_paths),
-            config.num_train_shards,
+            config.val_shard,
             self.tokenizer.vocab_size,
         )
 
@@ -345,25 +356,26 @@ class NanoChatData:
         }
 
     def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
-        """Reject checkpoints whose training stream has already advanced.
+        """Restore the epoch timer, refusing a stream that had advanced.
 
         The packer cannot seek; restarting would replay previously consumed batches.
 
         Args:
-          state_dict: Checkpoint containing the consumed batch count.
+          state_dict: State produced by :meth:`state_dict`.
 
         Raises:
           ValueError: The checkpoint has consumed batches.
 
         """
-        served = cast(NanoChatData.StateDict, state_dict)["batches"]
-        if served:
+        state = cast(NanoChatData.StateDict, state_dict)
+        if state["batches"]:
             raise ValueError(
-                f"this checkpoint had served {served} batches, and the packed "
-                "stream cannot be positioned without re-tokenizing the corpus "
-                "up to that point; resuming would silently replay the start of "
-                "the data. Start a fresh run.",
+                f"this checkpoint had served {state['batches']} batches, and the "
+                "packed stream cannot be positioned without re-tokenizing the "
+                "corpus up to that point; resuming would silently replay the "
+                "start of the data. Start a fresh run.",
             )
+        self.timer_epoch.load_state_dict(state["timer_epoch"])
 
 
 def token_bytes_fingerprint(token_bytes: np.ndarray) -> str:
@@ -429,7 +441,7 @@ class Tokenizer:
         with pickled.open("rb") as file:
             encoding = cast(object, pickle.load(file))  # noqa: S301 -- The artifact is a trusted tokenizer file created by this pipeline.
         assert isinstance(encoding, tiktoken.Encoding)
-        recipe = DictCodec.coerce(loads(recipe_path.read_text()), default=None)
+        recipe = parse(recipe_path.read_text(), dict[str, object])
         for field in ("bos_token", "token_bytes_sha256"):
             if field not in recipe:
                 raise ValueError(
@@ -473,7 +485,7 @@ class Tokenizer:
             )
         tokenizer = cls(
             encoding,
-            bos_token=StrCodec.coerce(recipe["bos_token"], default=None),
+            bos_token=convert(recipe["bos_token"], str),
             token_bytes=raw,
         )
         if raw.shape[0] != tokenizer.vocab_size:
@@ -492,7 +504,7 @@ class Tokenizer:
         self,
         texts: list[str],
         *,
-        num_threads: int = 8,
+        num_threads: int = DEFAULT_ENCODE_THREADS,
     ) -> list[list[int]]:
         """Encode documents, prepending the document-start token to each.
 
@@ -571,38 +583,18 @@ class PackedTokenStream:
 
     def _packed(self) -> Iterator[NanoChatBatch]:
         """Pack and yield batches serially. See :meth:`__iter__`."""
-        pinned = self._pins_host_memory
-        width = self.batch_size * self.max_seq_len
-        staged = torch.empty(
-            2 * width,
-            dtype=torch.long,
-            device="cpu",
-            pin_memory=pinned,
+        staging = _Staging(
+            slots=1,
+            batch_size=self.batch_size,
+            max_seq_len=self.max_seq_len,
+            device=self.device,
+            pinned=self._pins_host_memory,
         )
-        resident = (
-            torch.empty(2 * width, dtype=torch.long, device=self.device)
-            if self.device.type != "cpu"
-            else staged
-        )
-        # Copy into shaped views directly to avoid materializing an extra contiguous
-        # batch.
-        staged_media = staged[:width].view(self.batch_size, self.max_seq_len)
-        staged_label = staged[width:].view(self.batch_size, self.max_seq_len)
-        media = resident[:width].view(self.batch_size, self.max_seq_len)
-        label = resident[width:].view(self.batch_size, self.max_seq_len)
-
         for inputs, targets in self._row_pairs():
-            staged_media.copy_(inputs)
-            staged_label.copy_(targets)
-            if self.device.type != "cpu":
-                resident.copy_(staged, non_blocking=pinned)
+            staging.stage(0, inputs=inputs, targets=targets)
+            staging.upload(0)
             self.served += 1
-            yield {
-                "media": media,
-                "label": label,
-                "token_bytes": self.token_bytes,
-                "valid_count": self.batch_size,
-            }
+            yield self._batch(staging)
 
     # The worker packs and stages into PINNED memory; this thread issues the device copy
     # and yields. Two staging slots, alternating, so the worker fills one while the step
@@ -614,83 +606,85 @@ class PackedTokenStream:
     # 1.5 s/step lives.
     def _prefetched(self) -> Iterator[NanoChatBatch]:
         """Pack into two pinned slots on one worker; issue copies on the consumer."""
-        width = self.batch_size * self.max_seq_len
-        pinned = self._pins_host_memory
-        slots = [
-            torch.empty(2 * width, dtype=torch.long, device="cpu", pin_memory=pinned)
-            for _ in range(2)
-        ]
-        resident = torch.empty(2 * width, dtype=torch.long, device=self.device)
-        media = resident[:width].view(self.batch_size, self.max_seq_len)
-        label = resident[width:].view(self.batch_size, self.max_seq_len)
-
+        staging = _Staging(
+            slots=2,
+            batch_size=self.batch_size,
+            max_seq_len=self.max_seq_len,
+            device=self.device,
+            pinned=self._pins_host_memory,
+        )
         # A one-slot queue limits prefetch to one batch, keeping two staging buffers
         # sufficient.
-        ready: queue.Queue[tuple[int, BaseException | None]] = queue.Queue(maxsize=1)
+        ready: queue.Queue[tuple[int | None, BaseException | None]] = queue.Queue(
+            maxsize=1,
+        )
         done = threading.Event()
-        # Wait on the worker; waiting on the consumer would stall queued device work.
-        copied = [threading.Event() for _ in slots]
-        for event in copied:
+        # Set once the consumer has ISSUED a slot's copy, so the worker's wait on
+        # that copy's fence has a recorded copy to wait for.
+        issued = [threading.Event() for _ in staging.slots]
+        for event in issued:
             event.set()
-        copy_done = [torch.cuda.Event() for _ in slots] if pinned else None
-
-        def pack() -> None:
-            pairs = self._row_pairs()
-            drawn = 0
-            try:
-                while self.max_batches is None or drawn < self.max_batches:
-                    if done.is_set():
-                        return
-                    slot = drawn % len(slots)
-                    # Wait before reusing pinned storage; the asynchronous copy may
-                    # still be reading it.
-                    copied[slot].wait()
-                    copied[slot].clear()
-                    if copy_done is not None:
-                        copy_done[slot].synchronize()
-                    inputs, targets = next(pairs)
-                    staged = slots[slot]
-                    staged[:width].view(self.batch_size, self.max_seq_len).copy_(
-                        inputs,
-                    )
-                    staged[width:].view(self.batch_size, self.max_seq_len).copy_(
-                        targets,
-                    )
-                    ready.put((slot, None))
-                    drawn += 1
-            except BaseException as error:  # noqa: BLE001 -- Dataset iteration contains malformed-record failures per the loader contract.
-                ready.put((-1, error))
-                return
-            ready.put((-1, None))
-
-        worker = threading.Thread(target=pack, name="nanochat-packer", daemon=True)
+        worker = threading.Thread(
+            target=self._pack,
+            kwargs={"staging": staging, "ready": ready, "done": done, "issued": issued},
+            name="nanochat-packer",
+            daemon=True,
+        )
         worker.start()
         try:
             while True:
                 slot, error = ready.get()
                 if error is not None:
                     raise error
-                if slot < 0:
+                if slot is None:
                     return
-                resident.copy_(slots[slot], non_blocking=True)
-                if copy_done is not None:
-                    copy_done[slot].record()
-                copied[slot].set()
+                staging.upload(slot)
+                issued[slot].set()
                 self.served += 1
-                yield {
-                    "media": media,
-                    "label": label,
-                    "token_bytes": self.token_bytes,
-                    "valid_count": self.batch_size,
-                }
+                yield self._batch(staging)
         finally:
             # Release a worker blocked on a slot or full queue when the consumer stops
             # early.
             done.set()
-            for event in copied:
+            for event in issued:
                 event.set()  # Unblock a worker parked on a slot it cannot refill.
             with contextlib.suppress(queue.Empty):
                 ready.get_nowait()
+
+    def _pack(
+        self,
+        *,
+        staging: _Staging,
+        ready: queue.Queue[tuple[int | None, BaseException | None]],
+        done: threading.Event,
+        issued: list[threading.Event],
+    ) -> None:
+        """Fill alternating staging slots on the worker thread."""
+        pairs = self._row_pairs()
+        drawn = 0
+        try:
+            while self.max_batches is None or drawn < self.max_batches:
+                if done.is_set():
+                    return
+                slot = drawn % len(staging.slots)
+                issued[slot].wait()
+                issued[slot].clear()
+                inputs, targets = next(pairs)
+                staging.stage(slot, inputs=inputs, targets=targets)
+                ready.put((slot, None))
+                drawn += 1
+        except BaseException as error:  # noqa: BLE001 -- Dataset iteration contains malformed-record failures per the loader contract.
+            ready.put((None, error))
+            return
+        ready.put((None, None))
+
+    def _batch(self, staging: _Staging) -> NanoChatBatch:
+        return {
+            "media": staging.media,
+            "label": staging.label,
+            "token_bytes": self.token_bytes,
+            "valid_count": self.batch_size,
+        }
 
     def _row_pairs(self) -> Iterator[tuple[Tensor, Tensor]]:
         if self.prepared is not None:
@@ -728,16 +722,69 @@ class PackedTokenStream:
         return self.max_batches
 
 
+class _Staging:
+    """Host staging slots, one device-resident batch, and the copy fences between.
+
+    The one owner of the rule that a pinned slot is not refilled while an
+    asynchronous copy may still read it: every refill waits on the fence its
+    last upload recorded, whichever path packed it.
+    """
+
+    def __init__(
+        self,
+        *,
+        slots: int,
+        batch_size: int,
+        max_seq_len: int,
+        device: torch.device,
+        pinned: bool,
+    ) -> None:
+        width = batch_size * max_seq_len
+        self._shape = (batch_size, max_seq_len)
+        self._width = width
+        self.pinned = pinned
+        self.slots = [
+            torch.empty(2 * width, dtype=torch.long, device="cpu", pin_memory=pinned)
+            for _ in range(slots)
+        ]
+        # A lone host slot already IS the batch on the CPU; more than one must
+        # be copied out, or the consumer would read the slot being refilled.
+        self.resident = (
+            self.slots[0]
+            if slots == 1 and device.type == "cpu"
+            else torch.empty(2 * width, dtype=torch.long, device=device)
+        )
+        self.media = self.resident[:width].view(self._shape)
+        self.label = self.resident[width:].view(self._shape)
+        self._fences = [torch.cuda.Event() for _ in self.slots] if pinned else None
+
+    def stage(self, slot: int, *, inputs: Tensor, targets: Tensor) -> None:
+        """Wait for ``slot``'s last upload, then refill it."""
+        if self._fences is not None:
+            self._fences[slot].synchronize()
+        staged = self.slots[slot]
+        staged[: self._width].view(self._shape).copy_(inputs)
+        staged[self._width :].view(self._shape).copy_(targets)
+
+    def upload(self, slot: int) -> None:
+        """Copy ``slot`` into the resident batch, fencing an asynchronous copy."""
+        if self.resident is self.slots[slot]:
+            return
+        self.resident.copy_(self.slots[slot], non_blocking=self.pinned)
+        if self._fences is not None:
+            self._fences[slot].record()
+
+
 def _pack_row(row: Tensor, buffer: list[list[int]], *, position: int) -> int:
     """Append the largest fitting document, or crop the shortest to fill the row."""
     remaining = row.numel() - position
-    best_index = -1
+    best_index: int | None = None
     best_length = 0
     for index, document in enumerate(buffer):
         if best_length < len(document) <= remaining:
             best_index = index
             best_length = len(document)
-    if best_index >= 0:
+    if best_index is not None:
         document = buffer.pop(best_index)
         row[position : position + len(document)] = torch.tensor(
             document,
@@ -760,19 +807,25 @@ def _pack_row(row: Tensor, buffer: list[list[int]], *, position: int) -> int:
 def _document_batches(paths: list[Path]) -> Iterator[list[str]]:
     """Yield parquet documents in shard order, wrapping after the final shard."""
     while True:
-        productive = False
-        for path in paths:
-            shard = parquet.ParquetFile(path)
-            for group in range(shard.num_row_groups):
-                texts = cast(
-                    list[str],
-                    (shard.read_row_group(group).column("text").to_pylist()),
-                )
-                for start in range(0, len(texts), DOCUMENTS_PER_REFILL):
-                    productive = True
-                    yield texts[start : start + DOCUMENTS_PER_REFILL]
-        if not productive:
+        batches = _pass_batches(paths)
+        first = next(batches, None)
+        if first is None:
             raise ValueError("The online corpus contains no documents.")
+        yield first
+        yield from batches
+
+
+def _pass_batches(paths: list[Path]) -> Iterator[list[str]]:
+    """Yield one corpus pass in shard, row-group, and document order."""
+    for path in paths:
+        shard = parquet.ParquetFile(path)
+        for group in range(shard.num_row_groups):
+            texts = cast(
+                list[str],
+                shard.read_row_group(group).column("text").to_pylist(),
+            )
+            for start in range(0, len(texts), DOCUMENTS_PER_REFILL):
+                yield texts[start : start + DOCUMENTS_PER_REFILL]
 
 
 def _shard_paths(directory: Path, *, indices: range | list[int]) -> list[Path]:
@@ -824,6 +877,10 @@ class PreparedTokenRows:
             shape=(_integer(geometry["total_rows"]), config.max_seq_len + 1),
             dtype=np.dtype(np.uint16),
         )
+        # The same range rule as the evaluation rows below: an id past the table
+        # trains an embedding row the model does not have.
+        if np.any(self.train_rows >= self.vocab_size):
+            raise ValueError("Prepared training contains an out-of-vocabulary token.")
         shape = (_integer(evaluation["rows"]), config.max_seq_len)
         if (
             shape[0] * shape[1] != config.eval_tokens
@@ -928,11 +985,13 @@ class ReferenceEvaluation:
     class Config(Fig["ReferenceEvaluation"]):
         """Locate a prepared evaluation archive."""
 
-        path: Path = Path("/opt/scratch/datasets/nanochat/reference-eval/unigram.npz")
-        """Archive containing token rows, masks, and byte denominators."""
+        path: Path = Path("/datasets/nanochat/reference-eval/unigram.npz")
+        """Archive of token rows, masks, and byte denominators.
+
+        Resolved beneath the dataset's ``base_dir`` like its sibling manifests."""
 
     def __init__(self, config: Config) -> None:
-        loaded = cast(object, np.load(config.path, allow_pickle=False))
+        loaded = cast(object, np.load(config.path))
         assert isinstance(loaded, NpzFile)
         with loaded as archive:
             if str(archive["protocol"]) != "karpathy-reference-bytes-v1":
@@ -984,41 +1043,46 @@ class ReferenceEvaluation:
             }
 
     def _validate(self) -> None:
-        if (
-            self.inputs.ndim != 2
-            or len(self.inputs) == 0
-            or self.inputs.shape != self.targets.shape
-            or self.inputs.shape != self.mask.shape
-            or self.inputs.dtype != np.int64
-            or self.targets.dtype != np.int64
-            or self.mask.dtype != np.bool_
-            or self.batch_size <= 0
-            or self.reference_bytes.shape != (len(self.inputs),)
-            or self.literal_bytes.shape != (len(self.inputs),)
-            or self.reference_bytes.dtype != np.int64
-            or self.literal_bytes.dtype != np.int64
-            or self.token_bytes.shape != (self.vocab_size,)
-            or self.token_bytes.dtype != np.int64
+        if self.inputs.ndim != 2:
+            raise ValueError("Invalid reference evaluation array geometry or dtype.")
+        if any(
+            (
+                len(self.inputs) == 0,
+                self.inputs.shape != self.targets.shape,
+                self.inputs.shape != self.mask.shape,
+                self.inputs.dtype != np.int64,
+                self.targets.dtype != np.int64,
+                self.mask.dtype != np.bool_,
+                self.batch_size <= 0,
+                self.reference_bytes.shape != (len(self.inputs),),
+                self.literal_bytes.shape != (len(self.inputs),),
+                self.reference_bytes.dtype != np.int64,
+                self.literal_bytes.dtype != np.int64,
+                self.token_bytes.shape != (self.vocab_size,),
+                self.token_bytes.dtype != np.int64,
+            ),
         ):
             raise ValueError("Invalid reference evaluation array geometry or dtype.")
-        if (
-            self.bos_token_id < 0
-            or self.bos_token_id >= self.vocab_size
-            or np.any(self.inputs < 0)
-            or np.any(self.inputs >= self.vocab_size)
-            or np.any(self.targets < 0)
-            or np.any(self.targets >= self.vocab_size)
-            or np.any(self.mask & (self.targets >= self.bos_token_id))
-            or np.any(self.reference_bytes < 0)
-            or np.any(self.literal_bytes < 0)
-            or int(self.literal_bytes.sum()) <= 0
-            or int(self.reference_bytes.sum()) <= 0
+        if any(
+            (
+                self.bos_token_id < 0,
+                self.bos_token_id >= self.vocab_size,
+                np.any(self.inputs < 0),
+                np.any(self.inputs >= self.vocab_size),
+                np.any(self.targets < 0),
+                np.any(self.targets >= self.vocab_size),
+                np.any(self.mask & (self.targets >= self.bos_token_id)),
+                np.any(self.reference_bytes < 0),
+                np.any(self.literal_bytes < 0),
+                int(self.literal_bytes.sum()) <= 0,
+                int(self.reference_bytes.sum()) <= 0,
+            ),
         ):
             raise ValueError("Invalid reference targets, scoring mask, or byte counts.")
 
 
 def _array(path: Path, *, shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray:
-    array = cast(object, np.load(path, mmap_mode="r", allow_pickle=False))
+    array = cast(object, np.load(path, mmap_mode="r"))
     assert isinstance(array, np.ndarray)
     if array.shape != shape or array.dtype != dtype or not array.flags.c_contiguous:
         raise ValueError(f"Prepared array geometry/dtype mismatch: {path}.")
@@ -1033,7 +1097,7 @@ def _byte_table(
 ) -> NDArray[np.int64]:
     name = metadata["file"]
     assert isinstance(name, str)
-    array = cast(object, np.load(directory / name, allow_pickle=False))
+    array = cast(object, np.load(directory / name))
     assert isinstance(array, np.ndarray)
     if array.shape != (vocab,) or not np.issubdtype(array.dtype, np.integer):
         raise ValueError("Prepared byte table must contain one integer per token.")
@@ -1041,8 +1105,8 @@ def _byte_table(
 
 
 def _mapping(value: object) -> dict[str, object]:
-    return dict(DictCodec.coerce(value, default=None))
+    return dict(convert(value, dict[str, object]))
 
 
 def _integer(value: object) -> int:
-    return IntCodec.coerce(value, default=None)
+    return convert(value, int)

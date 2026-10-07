@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import cast
+import re
 
 import pytest
 import torch
@@ -686,15 +685,12 @@ def test_calc_resize_dimensions_nan_dimensions():
     """Test CalcResizeDimensions handles NaN dimensions."""
     calc = CalcResizeDimensions.Config().make()
 
-    # Deliberately out-of-contract: `width`/`height` are `int` per `Input`, but
-    # the processor's job is to defend against dirty NaN/inf dimensions, so the
-    # test feeds values the type system (correctly) rejects.
-    samples: list[dict[str, object]] = [
+    samples: list[CalcResizeDimensions.Input] = [
         {"width": float("nan"), "height": 1080},
         {"width": 1920, "height": float("nan")},
     ]
 
-    results = list(calc(cast(Iterator[CalcResizeDimensions.Input], iter(samples))))
+    results = list(calc(iter(samples)))
 
     for result in results:
         assert "filter_reasons" in result
@@ -704,12 +700,12 @@ def test_calc_resize_dimensions_inf_dimensions():
     """Test CalcResizeDimensions handles infinity dimensions."""
     calc = CalcResizeDimensions.Config().make()
 
-    samples: list[dict[str, object]] = [
+    samples: list[CalcResizeDimensions.Input] = [
         {"width": float("inf"), "height": 1080},
         {"width": 1920, "height": float("inf")},
     ]
 
-    results = list(calc(cast(Iterator[CalcResizeDimensions.Input], iter(samples))))
+    results = list(calc(iter(samples)))
 
     for result in results:
         assert "filter_reasons" in result
@@ -723,13 +719,9 @@ def test_calc_resize_dimensions_float_dimensions():
     )
     calc = CalcResizeDimensions(config)
 
-    # Float dimensions should be converted to int. The floats are deliberate:
-    # a sample is parsed data, so it reaches here despite the ``int``
-    # annotation -- which is why the input is cast rather than suppressed, the
-    # same way the sibling test above hands its samples to ``calc``.
-    sample: dict[str, object] = {"width": 1920.5, "height": 1080.7}
-    samples = cast(Iterator[CalcResizeDimensions.Input], iter([sample]))
-    result = next(iter(calc(samples)))
+    # Finite floating-point metadata is accepted and converted to integer output.
+    sample: CalcResizeDimensions.Input = {"width": 1920.5, "height": 1080.7}
+    result = next(iter(calc(iter([sample]))))
 
     assert "target_width" in result
     assert "target_height" in result
@@ -885,6 +877,502 @@ def test_calc_resize_rejects_empty_buckets_and_zero_compression():
         _ = CalcResizeDimensions.Config(aspects=[0]).make()
     with pytest.raises(ValueError, match="compression"):
         _ = CalcResizeDimensions.Config(compression=(1, 0, 16)).make()
+
+
+def test_calc_resize_rejects_an_aspect_that_rounds_a_bucket_side_to_zero():
+    with pytest.raises(ValueError, match="aspects"):
+        _ = CalcResizeDimensions.Config(aspects=[1e6]).make()
+
+
+def test_calc_resize_filters_a_dimension_that_truncates_to_zero() -> None:
+    calc = CalcResizeDimensions.Config().make()
+    sample: CalcResizeDimensions.Input = {"frames": 1, "height": 0.5, "width": 64}
+
+    result = next(iter(calc(iter([sample]))))
+
+    assert result.get("filter_reasons") == [
+        "CalcResizeDimensions:invalid_dimensions:f=1_h=0_w=64",
+    ]
+    assert "target_height" not in result
+
+
+def test_calc_resize_docstring_example_matches_the_defaults() -> None:
+    calc = CalcResizeDimensions.Config().make()
+    sample: CalcResizeDimensions.Input = {"frames": 1, "width": 1920, "height": 1080}
+
+    result = next(iter(calc(iter([sample]))))
+
+    assert (result["target_height"], result["target_width"]) == (192, 304)
+
+
+def test_resize_dimensions_reports_exact_filter_reasons() -> None:
+    calc = CalcResizeDimensions.Config(
+        square_resolutions=[2],
+        aspects=[1.0],
+    ).make()
+    malformed: list[CalcResizeDimensions.Input] = [
+        {"frames": 2, "height": 2},
+        {"frames": 2, "height": float("nan"), "width": 2},
+        {"frames": float("inf"), "height": 2, "width": 2},
+        {"frames": 0, "height": 2, "width": 2},
+    ]
+
+    results = list(calc(iter(malformed)))
+
+    assert [result.get("filter_reasons") for result in results] == [
+        ["CalcResizeDimensions:missing_dimensions"],
+        ["CalcResizeDimensions:nan_dimensions"],
+        ["CalcResizeDimensions:inf_dimensions"],
+        ["CalcResizeDimensions:invalid_dimensions:f=0_h=2_w=2"],
+    ]
+
+
+def test_resize_dimensions_rounds_two_frames_to_temporal_stride() -> None:
+    calc = CalcResizeDimensions.Config(
+        square_resolutions=[2],
+        aspects=[1.0],
+        compression=(3, 2, 2),
+    ).make()
+    sample: CalcResizeDimensions.Input = {"frames": 2, "height": 2, "width": 2}
+
+    result = next(iter(calc(iter([sample]))))
+
+    assert result == {
+        "frames": 2,
+        "height": 2,
+        "width": 2,
+        "target_frames": 3,
+        "target_height": 2,
+        "target_width": 2,
+    }
+
+
+def test_resize_dimensions_accepts_unit_resolution_and_dimensions() -> None:
+    calc = CalcResizeDimensions.Config(
+        square_resolutions=[1],
+        aspects=[1.0],
+        compression=(1, 1, 1),
+    ).make()
+    sample: CalcResizeDimensions.Input = {"frames": 2, "height": 1, "width": 1}
+
+    result = next(iter(calc(iter([sample]))))
+
+    assert result == {
+        "frames": 2,
+        "height": 1,
+        "width": 1,
+        "target_frames": 2,
+        "target_height": 1,
+        "target_width": 1,
+    }
+
+
+def test_resize_dimensions_constructor_error_messages_are_exact() -> None:
+    cases: list[tuple[CalcResizeDimensions.Config, str]] = [
+        (
+            CalcResizeDimensions.Config(square_resolutions=[]),
+            "square_resolutions must name at least one resolution.",
+        ),
+        (
+            CalcResizeDimensions.Config(square_resolutions=[0]),
+            "square_resolutions must be positive.",
+        ),
+        (
+            CalcResizeDimensions.Config(aspects=[]),
+            "aspects must name at least one aspect ratio.",
+        ),
+        (
+            CalcResizeDimensions.Config(aspects=[0]),
+            "aspects must be finite and positive.",
+        ),
+        (
+            CalcResizeDimensions.Config(aspects=[float("inf")]),
+            "aspects must be finite and positive.",
+        ),
+        (
+            CalcResizeDimensions.Config(aspects=[float("nan")]),
+            "aspects must be finite and positive.",
+        ),
+        (
+            CalcResizeDimensions.Config(compression=(1, 2, 0)),
+            "compression strides must be positive; got (1, 2, 0).",
+        ),
+        (
+            CalcResizeDimensions.Config(compression=(1, 2, -2)),
+            "compression strides must be positive; got (1, 2, -2).",
+        ),
+    ]
+
+    for config, message in cases:
+        with pytest.raises(ValueError, match=re.escape(message)) as error:
+            _ = CalcResizeDimensions(config)
+        assert error.value.args == (message,)
+
+
+def test_subsample_frames_singleton_keeps_keyframe_and_continues() -> None:
+    processor = SubsampleFramesViaBisection.Config(max_num_keyframes=2).make()
+    # The one-frame clip is the case under test.
+    singleton = torch.arange(3 * 1 * 2 * 4).reshape(3, 1, 2, 4)
+    clip = torch.arange(3 * 5 * 2 * 4).reshape(3, 5, 2, 4)
+    samples: list[SubsampleFramesViaBisection.Input] = [
+        {"media_tensor": singleton},
+        {"media_tensor": clip},
+    ]
+
+    results = list(processor(iter(samples)))
+
+    assert len(results) == 2
+    assert results[0].get("keyframes") == [0]
+    assert results[0].get("media_tensor") is singleton
+    assert results[1].get("keyframes") == [0, 4]
+    sampled = results[1].get("media_tensor")
+    assert isinstance(sampled, torch.Tensor)
+    assert torch.equal(sampled, clip[:, [0, 4]])
+
+
+def test_subsample_frames_accepts_a_one_frame_limit() -> None:
+    processor = SubsampleFramesViaBisection.Config(max_num_keyframes=1).make()
+    sample: SubsampleFramesViaBisection.Input = {
+        "media_tensor": torch.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5),
+    }
+
+    result = next(iter(processor(iter([sample]))))
+
+    keyframes = result.get("keyframes")
+    assert keyframes == [0]
+    media_tensor = result.get("media_tensor")
+    original_tensor = sample.get("media_tensor")
+    assert isinstance(media_tensor, torch.Tensor)
+    assert isinstance(original_tensor, torch.Tensor)
+    assert torch.equal(media_tensor, original_tensor[:, :1])
+
+
+def test_subsample_frames_rejects_both_nonpositive_limits() -> None:
+    for limit in (0, -2):
+        with pytest.raises(
+            ValueError,
+            match=f"max_num_keyframes must be positive; got {limit}\\.",
+        ):
+            _ = SubsampleFramesViaBisection.Config(
+                max_num_keyframes=limit,
+            ).make()
+
+
+def test_image_shape_statistics_accepts_one_quantile() -> None:
+    stats = ImageShapeStatistics.Config(quantiles=1).make()
+
+    assert stats.quantiles == 1
+
+
+def test_image_shape_statistics_report_ignores_incomplete_statistics(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stats = ImageShapeStatistics.Config().make()
+    stats.pixel_densities.append(4)
+    caplog.set_level("INFO")
+
+    stats.report()
+
+    assert caplog.records == []
+
+
+def test_image_shape_statistics_accepts_unit_dimensions_and_skips_zero() -> None:
+    stats = ImageShapeStatistics.Config(quantiles=2).make()
+    samples: list[ImageShapeStatistics.Input] = [
+        {"width": 0, "height": 2},
+        {"width": 2, "height": 0},
+        {"width": 1, "height": 2},
+        {"width": 2, "height": 1},
+    ]
+
+    results = list(stats(iter(samples)))
+
+    assert results == samples
+    assert stats.pixel_densities == [2, 2]
+    assert stats.effective_resolutions == [1, 1]
+    assert stats.aspect_ratios == [0.5, 2.0]
+
+
+def test_image_shape_statistics_logs_bucket_boundaries_exactly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stats = ImageShapeStatistics.Config(quantiles=2).make()
+    samples: list[ImageShapeStatistics.Input] = [
+        {"width": 1, "height": 1},
+        {"width": 32, "height": 32},
+        {"width": 64, "height": 64},
+        {"width": 100, "height": 64},
+    ]
+    _ = list(stats(iter(samples)))
+    caplog.set_level("INFO")
+
+    stats.report()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "    32: 2 samples (50.0%)" in messages
+    assert "    64: 1 samples (25.0%)" in messages
+    assert "    96: 1 samples (25.0%)" in messages
+    assert not any(message.startswith("    >") for message in messages)
+
+
+def test_image_shape_statistics_includes_aspect_range_endpoints(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stats = ImageShapeStatistics.Config(quantiles=2).make()
+    samples: list[ImageShapeStatistics.Input] = [
+        {"width": 3, "height": 3},
+        {"width": 5, "height": 3},
+    ]
+    _ = list(stats(iter(samples)))
+    caplog.set_level("INFO")
+
+    stats.report()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "    4:5 (0.8000): 0 samples (0.0%)" in messages
+    assert "    1:1 (square) (1.0000): 1 samples (50.0%)" in messages
+    assert "    2:1 (2.0000): 0 samples (0.0%)" in messages
+    assert "    5:3 (1.6667): 1 samples (50.0%)" in messages
+    assert not any(
+        message.startswith(("    2.6:1", "    3:1", "    >")) for message in messages
+    )
+
+
+def test_image_shape_statistics_buckets_small_aspect_at_first_boundary(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stats = ImageShapeStatistics.Config(quantiles=2).make()
+    samples: list[ImageShapeStatistics.Input] = [
+        {"width": 2, "height": 6},
+        {"width": 2, "height": 6},
+    ]
+    _ = list(stats(iter(samples)))
+    caplog.set_level("INFO")
+
+    stats.report()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "    1:3 (0.3333): 2 samples (100.0%)" in messages
+
+
+def test_image_shape_statistics_logs_final_pixel_bucket_percentage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stats = ImageShapeStatistics.Config(quantiles=2).make()
+    samples: list[ImageShapeStatistics.Input] = [
+        {"width": 64, "height": 64},
+        {"width": 280, "height": 280},
+        {"width": 300, "height": 300},
+    ]
+    _ = list(stats(iter(samples)))
+    caplog.set_level("INFO")
+
+    stats.report()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "    >256: 2 samples (66.7%)" in messages
+
+
+def test_image_shape_statistics_logs_final_aspect_bucket_percentage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stats = ImageShapeStatistics.Config(quantiles=2).make()
+    samples: list[ImageShapeStatistics.Input] = [
+        {"width": 3, "height": 3},
+        {"width": 12, "height": 3},
+        {"width": 15, "height": 3},
+    ]
+    _ = list(stats(iter(samples)))
+    caplog.set_level("INFO")
+
+    stats.report()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "    >3:1: 2 samples (66.7%)" in messages
+
+
+def test_image_shape_statistics_reports_exact_quantile_and_bucket_values(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stats = ImageShapeStatistics.Config(quantiles=2).make()
+    samples: list[ImageShapeStatistics.Input] = [
+        {"width": 64, "height": 64},
+        {"width": 128, "height": 64},
+        {"width": 192, "height": 64},
+        {"width": 256, "height": 64},
+    ]
+    _ = list(stats(iter(samples)))
+    caplog.set_level("INFO")
+
+    stats.report()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == [
+        "ImageShapeStatistics: collected 4 samples",
+        "Effective resolution 2-quantiles (round(sqrt(width * height))):",
+        "    0.0%:           64",
+        "   50.0%:          101",
+        "  100.0%:          128",
+        "\nSuggested resolution buckets (for ~uniform coverage):",
+        "  Bucket boundaries and coverage:",
+        "    64: 1 samples (25.0%)",
+        "    96: 1 samples (25.0%)",
+        "    128: 2 samples (50.0%)",
+        "\nAspect ratio 2-quantiles (width / height):",
+        "    0.0%:   1.0000",
+        "   50.0%:   2.5000",
+        "  100.0%:   4.0000",
+        "\nSuggested aspect ratio buckets (for ~uniform coverage):",
+        "  Bucket boundaries and coverage:",
+        "    4:5 (0.8000): 0 samples (0.0%)",
+        "    1:1 (square) (1.0000): 1 samples (25.0%)",
+        "    5:4 (1.2500): 0 samples (0.0%)",
+        "    4:3 (1.3333): 0 samples (0.0%)",
+        "    3:2 (1.5000): 0 samples (0.0%)",
+        "    8:5 (1.6000): 0 samples (0.0%)",
+        "    5:3 (1.6667): 0 samples (0.0%)",
+        "    16:9 (1.7778): 0 samples (0.0%)",
+        "    2:1 (2.0000): 1 samples (25.0%)",
+        "    2.6:1 (2.6000): 0 samples (0.0%)",
+        "    3:1 (3.0000): 1 samples (25.0%)",
+        "    >3:1: 1 samples (25.0%)",
+    ]
+    assert [
+        (record.msg, record.args)
+        for record in caplog.records
+        if record.msg
+        in (
+            "  %5.1f%%: %12.0f",
+            "  %5.1f%%: %8.4f",
+        )
+    ] == [
+        ("  %5.1f%%: %12.0f", (0.0, 64.0)),
+        ("  %5.1f%%: %12.0f", (50.0, 101.0)),
+        ("  %5.1f%%: %12.0f", (100.0, 128.0)),
+        ("  %5.1f%%: %8.4f", (0.0, 1.0)),
+        ("  %5.1f%%: %8.4f", (50.0, 2.5)),
+        ("  %5.1f%%: %8.4f", (100.0, 4.0)),
+    ]
+
+
+def test_image_shape_statistics_reports_every_pixel_reference_boundary(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    references = [
+        32,
+        64,
+        96,
+        128,
+        192,
+        240,
+        256,
+        384,
+        480,
+        512,
+        720,
+        768,
+        960,
+        1024,
+        1440,
+        1536,
+        2048,
+        2160,
+        2880,
+        3072,
+    ]
+    stats = ImageShapeStatistics.Config(quantiles=2).make()
+    samples: list[ImageShapeStatistics.Input] = [
+        {"width": resolution, "height": resolution}
+        for reference in references
+        for resolution in (reference, reference + 1)
+    ]
+    _ = list(stats(iter(samples)))
+    caplog.set_level("INFO")
+
+    stats.report()
+
+    messages = [record.getMessage() for record in caplog.records]
+    bucket_messages = [message for message in messages if "samples (" in message]
+    assert bucket_messages[:21] == [
+        "    32: 1 samples (2.5%)",
+        "    64: 2 samples (5.0%)",
+        "    96: 2 samples (5.0%)",
+        "    128: 2 samples (5.0%)",
+        "    192: 2 samples (5.0%)",
+        "    240: 2 samples (5.0%)",
+        "    256: 2 samples (5.0%)",
+        "    384: 2 samples (5.0%)",
+        "    480: 2 samples (5.0%)",
+        "    512: 2 samples (5.0%)",
+        "    720: 2 samples (5.0%)",
+        "    768: 2 samples (5.0%)",
+        "    960: 2 samples (5.0%)",
+        "    1024: 2 samples (5.0%)",
+        "    1440: 2 samples (5.0%)",
+        "    1536: 2 samples (5.0%)",
+        "    2048: 2 samples (5.0%)",
+        "    2160: 2 samples (5.0%)",
+        "    2880: 2 samples (5.0%)",
+        "    3072: 2 samples (5.0%)",
+        "    >3072: 1 samples (2.5%)",
+    ]
+
+
+def test_image_shape_statistics_reports_every_aspect_reference_boundary(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    dimensions = [
+        (1, 3),
+        (1, 2),
+        (9, 16),
+        (5, 8),
+        (2, 3),
+        (3, 4),
+        (4, 5),
+        (1, 1),
+        (5, 4),
+        (4, 3),
+        (3, 2),
+        (8, 5),
+        (5, 3),
+        (16, 9),
+        (2, 1),
+        (13, 5),
+        (3, 1),
+    ]
+    stats = ImageShapeStatistics.Config(quantiles=2).make()
+    samples: list[ImageShapeStatistics.Input] = [
+        {"width": width, "height": height} for width, height in dimensions
+    ]
+    _ = list(stats(iter(samples)))
+    caplog.set_level("INFO")
+
+    stats.report()
+
+    bucket_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "samples (" in record.getMessage()
+    ]
+    assert bucket_messages[-17:] == [
+        "    1:3 (0.3333): 1 samples (5.9%)",
+        "    1:2 (0.5000): 1 samples (5.9%)",
+        "    9:16 (0.5625): 1 samples (5.9%)",
+        "    5:8 (0.6250): 1 samples (5.9%)",
+        "    2:3 (0.6667): 1 samples (5.9%)",
+        "    3:4 (0.7500): 1 samples (5.9%)",
+        "    4:5 (0.8000): 1 samples (5.9%)",
+        "    1:1 (square) (1.0000): 1 samples (5.9%)",
+        "    5:4 (1.2500): 1 samples (5.9%)",
+        "    4:3 (1.3333): 1 samples (5.9%)",
+        "    3:2 (1.5000): 1 samples (5.9%)",
+        "    8:5 (1.6000): 1 samples (5.9%)",
+        "    5:3 (1.6667): 1 samples (5.9%)",
+        "    16:9 (1.7778): 1 samples (5.9%)",
+        "    2:1 (2.0000): 1 samples (5.9%)",
+        "    2.6:1 (2.6000): 1 samples (5.9%)",
+        "    3:1 (3.0000): 1 samples (5.9%)",
+    ]
 
 
 if __name__ == "__main__":

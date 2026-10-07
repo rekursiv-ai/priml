@@ -28,13 +28,15 @@ from __future__ import annotations
 from functools import cache, partial
 from typing import TYPE_CHECKING, cast, overload, override
 
+import math
+
 from configgle import Fig
 from torch import Tensor
 from torch.optim import Optimizer
 
 import torch
 
-from priml.lib.custom_json import FloatCodec
+from priml.lib.custom_json import convert
 
 
 if TYPE_CHECKING:
@@ -148,14 +150,16 @@ class FusedAdamW(Optimizer):
         weight_decay: float = 0.0,
         compile: bool = True,
     ) -> None:
-        if lr < 0.0:
-            raise ValueError(f"Invalid learning rate: {lr}.")
-        if not all(0.0 <= beta < 1.0 for beta in betas):
-            raise ValueError(f"betas must lie in [0, 1); got {betas}.")
-        if eps < 0.0:
-            raise ValueError(f"Invalid eps: {eps}.")
-        if weight_decay < 0.0:
-            raise ValueError(f"Invalid weight_decay: {weight_decay}.")
+        if not math.isfinite(lr) or lr < 0.0:
+            raise ValueError(f"Learning rate must be finite and nonnegative: {lr}.")
+        if not all(math.isfinite(beta) and 0.0 <= beta < 1.0 for beta in betas):
+            raise ValueError(f"Betas must be finite and lie in [0, 1): {betas}.")
+        if not math.isfinite(eps) or eps < 0.0:
+            raise ValueError(f"Epsilon must be finite and nonnegative: {eps}.")
+        if not math.isfinite(weight_decay) or weight_decay < 0.0:
+            raise ValueError(
+                f"Weight decay must be finite and nonnegative: {weight_decay}.",
+            )
         super().__init__(
             params,
             {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay},
@@ -215,9 +219,9 @@ class FusedAdamW(Optimizer):
         betas = group["betas"]
         assert isinstance(betas, tuple)
         beta1, beta2 = cast(tuple[float, float], betas)
-        lr = FloatCodec.coerce(group["lr"], None)
-        eps = FloatCodec.coerce(group["eps"], None)
-        weight_decay = FloatCodec.coerce(group["weight_decay"], None)
+        lr = convert(group["lr"], float)
+        eps = convert(group["eps"], float)
+        weight_decay = convert(group["weight_decay"], float)
         scalar_values: dict[str, float] = {
             "step": float(state["step"]),
             "lr": lr,

@@ -7,6 +7,8 @@ masks itself: adding ``-inf`` here would change fully masked rows.
 
 from __future__ import annotations
 
+import math
+
 from torch import Tensor
 
 import torch
@@ -59,6 +61,8 @@ def window_sizes(*, num_layers: int, max_seq_len: int, pattern: str) -> list[int
       ValueError: ``pattern`` is empty or holds a symbol other than S and L.
 
     """
+    if num_layers < 1:
+        raise ValueError("num_layers must be positive.")
     windows = [
         layer_window(
             depth_index=((layer, num_layers),),
@@ -108,7 +112,7 @@ def combined_mask(
     if attn_mask is None:
         attn_mask = window_mask(q, k, window=window)
         if attn_mask is None:
-            return None, is_causal
+            return None, is_causal or window >= 0
         # The window mask is already causal.
         return attn_mask, False
     # A window is causal by construction, so either flag folds the same bias.
@@ -139,9 +143,9 @@ def window_mask(q: Tensor, k: Tensor, *, window: int) -> Tensor | None:
     # of history IN ADDITION to the query's own position, so the exclusive form
     # attends to one key fewer per row and is a different model.
     admissible = (offset >= 0) & (offset <= window)
-    return torch.zeros(s, t, dtype=q.dtype, device=q.device).masked_fill(
+    return torch.zeros_like(admissible, dtype=q.dtype).masked_fill(
         ~admissible,
-        float("-inf"),
+        -math.inf,
     )
 
 
@@ -166,10 +170,45 @@ def causal_chunk_mask(q: Tensor, k: Tensor) -> Tensor | None:
     if s == t:
         return None
     allowed = torch.ones(s, t, dtype=torch.bool, device=q.device).tril(diagonal=t - s)
-    return torch.zeros(s, t, dtype=q.dtype, device=q.device).masked_fill(
-        ~allowed,
-        float("-inf"),
-    )
+    return torch.zeros_like(allowed, dtype=q.dtype).masked_fill(~allowed, -math.inf)
+
+
+def segment_mask(
+    cu_seqlens: Tensor,
+    *,
+    rows: int,
+    length: int,
+    window: int = -1,
+) -> Tensor:
+    """Boolean mask admitting each query's own and earlier keys of its segment.
+
+    ``cu_seqlens`` bounds the segments of ``rows`` rows of ``length`` positions,
+    flattened: segment ``i`` is positions ``cu_seqlens[i]`` up to
+    ``cu_seqlens[i + 1]``, and none crosses a row. Unlike this module's additive
+    masks it is boolean, True admitting, which SDPA takes as a per-row mask.
+
+    Args:
+      cu_seqlens: Int32 segment boundaries of the flattened ``[rows·length]``
+        positions, from 0 to ``rows·length``.
+      rows: Rows of the batch.
+      length: Positions per row.
+      window: Previous keys each query may reach, plus itself; -1 for all.
+
+    Returns:
+      mask: Bool ``[rows, length, length]``; True where a query may attend a key.
+
+    """
+    flat = torch.arange(rows * length, device=cu_seqlens.device, dtype=cu_seqlens.dtype)
+    segment = torch.searchsorted(cu_seqlens, flat, right=True).view(rows, length)
+    index = torch.arange(length, device=cu_seqlens.device)
+    # Keep these ops as they are. Under torch.compile the mask fuses into the
+    # attention's kernels, whose fusion, and so a softmax's summation order,
+    # follows how the mask is spelled: an equal mask spelled another way, such
+    # as ``index[:, None] - index[None, :] >= 0``, trains to other bits.
+    admissible = index[:, None] >= index[None, :]
+    if window >= 0:
+        admissible = admissible & (index[:, None] - index[None, :] <= window)
+    return (segment[:, :, None] == segment[:, None, :]) & admissible
 
 
 def _causal_bias(q: Tensor, k: Tensor, *, window: int) -> Tensor:
@@ -180,7 +219,7 @@ def _causal_bias(q: Tensor, k: Tensor, *, window: int) -> Tensor:
     allowed = offset >= 0
     if window >= 0:
         allowed = allowed & (offset <= window)
-    return torch.zeros(s, t, dtype=q.dtype, device=q.device).masked_fill(
+    return torch.zeros(t, dtype=q.dtype, device=q.device).masked_fill(
         ~allowed,
-        float("-inf"),
+        -math.inf,
     )

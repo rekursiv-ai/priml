@@ -57,7 +57,6 @@ def _reference() -> nn.Module:
         linear_conv_kernel_dim=4,
     )
     raw_reference: object = Qwen3_5GatedDeltaNet(config, layer_idx=0)
-    assert isinstance(raw_reference, nn.Module)
     return torch_reference(raw_reference)
 
 
@@ -69,6 +68,13 @@ def _native() -> Qwen35GatedDeltaNet:
     config.channels_k_head = 4
     config.channels_v_head = 3
     return config.make()
+
+
+def _layer_cache(
+    native: Qwen35GatedDeltaNet,
+    state: dict[str, torch.Tensor],
+) -> dict[tuple[tuple[int, int], ...], object]:
+    return {native.depth_index: state}
 
 
 # Native ``proj_*`` attributes against Hugging Face's parameter names.
@@ -122,8 +128,8 @@ def test_delta_cache_continuation_and_serialization(tmp_path: Path) -> None:
         x = torch.randn(2, length, 8)
         expected_output = cast(object, reference(x, cache_params=reference_cache))
         expected = hf_tensor(expected_output)
-        actual, returned = native.forward_cached(x, cache=cache)
-        assert returned is cache
+        layer_cache = _layer_cache(native, cache)
+        actual = native(x, cache=layer_cache)
         assert torch.equal(actual, expected)
         assert reference_layer.conv_states[0] is not None
         assert reference_layer.recurrent_states[0] is not None
@@ -143,9 +149,43 @@ def test_delta_cache_continuation_and_serialization(tmp_path: Path) -> None:
     )
     tensor_cache = cast(dict[str, torch.Tensor], reloaded)
     x = torch.randn(2, 3, 8)
-    expected, _ = native.forward_cached(x, cache=cache)
-    actual, _ = native.forward_cached(x, cache=tensor_cache)
+    expected = native(x, cache=_layer_cache(native, cache))
+    actual = native(x, cache=_layer_cache(native, tensor_cache))
     assert torch.equal(actual, expected)
+
+
+def test_delta_forward_forwards_additional_keyword_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native = _native()
+    cache = native.alloc_kv_cache(batch=2, max_seq=3)
+    calls: list[tuple[torch.Tensor, dict[str, object]]] = []
+
+    def forward_spy(
+        self: Qwen35GatedDeltaNet,
+        x: torch.Tensor,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        del self
+        calls.append((x, kwargs))
+        return x
+
+    monkeypatch.setattr(Qwen35GatedDeltaNet, "forward", forward_spy)
+    x = torch.randn(2, 3, 8)
+    attention_mask = torch.ones(2, 3)
+    layer_cache = _layer_cache(native, cache)
+    output = native(
+        x,
+        cache=layer_cache,
+        attention_mask=attention_mask,
+    )
+    assert output is x
+    assert len(calls) == 1
+    observed_x, forwarded = calls[0]
+    assert observed_x is x
+    assert forwarded.keys() == {"cache", "attention_mask"}
+    assert forwarded["cache"] is layer_cache
+    assert forwarded["attention_mask"] is attention_mask
 
 
 def test_delta_masking_and_arbitrary_batch_shape() -> None:
@@ -176,7 +216,7 @@ def test_delta_rejects_partial_cache_without_mutation(state_name: str) -> None:
     cache = {state_name: torch.randn(2, 3, 4, 5)}
     original = cache[state_name].clone()
     with pytest.raises(TypeError, match="cache must be empty or contain"):
-        native.forward_cached(torch.randn(2, 3, 8), cache=cache)
+        native(torch.randn(2, 3, 8), cache=_layer_cache(native, cache))
     assert cache.keys() == {state_name}
     assert torch.equal(cache[state_name], original)
 
@@ -222,7 +262,7 @@ def test_delta_rejects_incompatible_cache_state_without_mutation(
 ) -> None:
     native = _native()
     cache = native.alloc_kv_cache(batch=2, max_seq=3)
-    native.forward_cached(torch.randn(2, 3, 8), cache=cache)
+    native(torch.randn(2, 3, 8), cache=_layer_cache(native, cache))
     state = cache[state_name]
     if axis is not None:
         cache[state_name] = state.narrow(axis, start=0, length=1).clone()
@@ -241,7 +281,7 @@ def test_delta_rejects_incompatible_cache_state_without_mutation(
         if tensor.device.type != "meta"
     }
     with pytest.raises(ValueError, match="cache state is incompatible with input"):
-        native.forward_cached(torch.randn(2, 3, 8), cache=cache)
+        native(torch.randn(2, 3, 8), cache=_layer_cache(native, cache))
     assert cache.keys() == original.keys()
     for name, tensor in cache.items():
         assert tensor is original[name]
@@ -257,8 +297,8 @@ def test_delta_cache_matches_projection_and_recurrence_dtypes(autocast: bool) ->
     native = _native()
     cache = native.alloc_kv_cache(batch=1, max_seq=2)
     with torch.autocast("cpu", dtype=torch.bfloat16, enabled=autocast):
-        native.forward_cached(torch.randn(2, 3, 8), cache=cache)
-        native.forward_cached(torch.randn(2, 3, 8), cache=cache)
+        native(torch.randn(2, 3, 8), cache=_layer_cache(native, cache))
+        native(torch.randn(2, 3, 8), cache=_layer_cache(native, cache))
     expected_conv_dtype = torch.bfloat16 if autocast else torch.float32
     assert cache["conv_state"].dtype == expected_conv_dtype
     assert cache["recurrent_state"].dtype == torch.float32

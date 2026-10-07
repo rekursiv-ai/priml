@@ -1,9 +1,12 @@
-"""pass@K voting over a puzzle's augmented views.
+"""pass@K voting over each test input's augmented views.
 
-Each ARC puzzle is evaluated many times -- once per augmented view -- and the
-model may answer differently on each. The score is the consensus: group every
-prediction for one puzzle, rank the distinct answers, and count the puzzle
-solved if the true grid is among the top K.
+Each ARC task is evaluated many times -- once per augmented view -- and the
+model may answer differently on each. A view's prepared id names the VIEW, and
+every test input of that view shares it, so the vote cannot be keyed by id:
+:class:`CanonicalPassK` inverts each view to the canonical frame and votes per
+``(task, canonical test input)``. A test input counts solved if its true grid
+is among the top K answers; a task scores the mean over its test inputs, and
+the reported number is the mean over tasks in ``test_puzzles.json``.
 
 Ranking is by vote count, with mean halt confidence breaking ties. Count
 dominates because agreement across independent views is the stronger signal;
@@ -11,11 +14,6 @@ confidence only separates answers that tied.
 
 Predictions are stored as hashes, not grids. A full evaluation is hundreds of
 thousands of 900-cell grids, and only equality between them matters.
-
-:class:`PassK` votes per prepared puzzle id against its label.
-:class:`CanonicalPassK` is the TRM reference evaluator: it inverts each view to
-the canonical frame, votes per canonical test input, and scores against
-``test_puzzles.json``, averaging within a task and then across tasks.
 """
 
 from __future__ import annotations
@@ -36,7 +34,7 @@ from typing import (
     override,
 )
 
-import hashlib
+import json
 import logging
 import re
 import struct
@@ -56,7 +54,7 @@ from priml.baselines.arcagi1.augmentation import (
     grid_hash,
     untranslate_unscale,
 )
-from priml.lib.custom_json import DictCodec, FloatCodec, IntCodec, ListCodec, loads
+from priml.lib.custom_json import convert, parse
 from priml.paths import resolve_working_dir
 from priml.runtime import is_rank_zero
 
@@ -70,149 +68,6 @@ logger = logging.getLogger(__name__)
 type _Preds = dict[str, dict[str, list[tuple[str, float]]]]
 type _SignalRow = tuple[str, str, str, float, float, float, int, int]
 type _StepRow = tuple[int, int, tuple[float, ...], tuple[int, ...]]
-
-
-class PassK:
-    """Consensus accuracy over each puzzle's augmented views.
-
-    Consumes the packed evaluation output the puzzle train step emits: a halt
-    logit in column 0 and the predicted tokens in the last ``grid_len``
-    columns, so any diagnostic columns between them are ignored.
-    """
-
-    class Config(Fig["PassK"]):
-        """Which K values to report, and how a vote is counted."""
-
-        pass_ks: tuple[int, ...] = (1, 2, 5, 10)
-        """Report the true grid appearing in the top K ranked answers.
-
-        pass@1 is the headline -- the model's single best guess. Larger K
-        measures whether the right answer was present but outvoted, which
-        separates a model that cannot solve a task from one that cannot pick
-        its own best attempt."""
-
-        ignore_label_id: int = -100
-        """Label value marking cells excluded from the comparison.
-
-        Padding rows appended to square off a short batch carry it, so they
-        neither count as solved nor as failed."""
-
-    def __init__(self, config: Config) -> None:
-        self.config = config
-        self.reset()
-
-    def reset(self) -> None:
-        """Drop every accumulated vote."""
-        # Puzzle id -> answer hash -> [votes, summed confidence].
-        self._votes: dict[int, dict[str, list[float]]] = {}
-        # Puzzle id -> the true answer's hash.
-        self._truth: dict[int, str] = {}
-
-    def update(self, logits: Tensor, **batch: object) -> None:
-        """Record one batch of predictions as votes.
-
-        Args:
-          logits: Packed model output; column 0 is the halt logit and the last
-            ``grid_len`` columns are the predicted tokens.
-          **batch: Must carry ``label`` and ``puzzle_identifiers``;
-            ``valid_count`` truncates the padded tail when present.
-
-        """
-        label_raw = batch["label"]
-        assert isinstance(label_raw, Tensor)
-        labels = label_raw.detach().to(torch.int64)
-        puzzle_identifiers_raw = batch["puzzle_identifiers"]
-        assert isinstance(puzzle_identifiers_raw, Tensor)
-        identifiers = puzzle_identifiers_raw.detach().to(torch.int64)
-        grid_len = labels.shape[-1]
-        packed = logits.detach()
-        predictions = packed[:, -grid_len:].to(torch.int64)
-        # Confidence in [0, 1] so ties break on a comparable scale.
-        confidence = torch.sigmoid(packed[:, 0].float())
-
-        raw_count = batch.get("valid_count", labels.shape[0])
-        assert isinstance(raw_count, int)
-        valid_count = raw_count
-        labels = labels[:valid_count].to(predictions.device)
-        predictions = predictions[:valid_count]
-        identifiers = identifiers[:valid_count].to(predictions.device)
-        confidence = confidence[:valid_count]
-
-        counted = labels != self.config.ignore_label_id
-        for row in range(predictions.shape[0]):
-            keep = counted[row]
-            if not bool(keep.any()):
-                continue  # An all-ignored row is padding, not a puzzle.
-            puzzle = int(identifiers[row])
-            answer = _digest(predictions[row][keep])
-            truth = _digest(labels[row][keep])
-            self._truth.setdefault(puzzle, truth)
-            tally = self._votes.setdefault(puzzle, {}).setdefault(answer, [0.0, 0.0])
-            tally[0] += 1.0
-            tally[1] += float(confidence[row])
-
-    def compute(self) -> dict[str, float]:
-        """Rank each puzzle's answers and score every K.
-
-        Returns:
-          metrics: Accuracy at each pass@K threshold, keyed as "pass@{k}".
-
-        """
-        solved = dict.fromkeys(self.config.pass_ks, 0)
-        for puzzle, tally in self._votes.items():
-            truth = self._truth[puzzle]
-            # Count first, then mean confidence: agreement across independent
-            # views outranks a single confident view.
-            ranked = sorted(
-                tally.items(),
-                key=lambda item: (item[1][0], item[1][1] / item[1][0]),
-                reverse=True,
-            )
-            for k in self.config.pass_ks:
-                if any(answer == truth for answer, _ in ranked[:k]):
-                    solved[k] += 1
-        counts = torch.tensor(
-            [float(len(self._votes)), *(float(solved[k]) for k in self.config.pass_ks)],
-            dtype=torch.float64,
-        )
-        if dist.is_available() and dist.is_initialized():
-            # NCCL reduces only CUDA tensors; gloo only CPU ones. Move for the
-            # former and come back, so ``.tolist()`` works either way.
-            if dist.get_backend() != "gloo":
-                counts = counts.to(torch.device("cuda", torch.cuda.current_device()))
-            dist.all_reduce(counts, op=dist.ReduceOp.SUM)
-            counts = counts.cpu()
-        total, *hits = [FloatCodec.coerce(count) for count in counts.tolist()]
-        return {
-            f"pass@{k}": hit / max(1.0, total)
-            for k, hit in zip(self.config.pass_ks, hits, strict=True)
-        }
-
-    class StateDict(TypedDict):
-        """Per-puzzle vote tallies and the digest of each puzzle's answer."""
-
-        votes: dict[int, dict[str, list[float]]]
-        truth: dict[int, str]
-
-    def state_dict(self) -> StateDict:
-        """Return the accumulated votes.
-
-        Returns:
-          state: The vote tallies and answer digests, keyed by puzzle.
-
-        """
-        return {"votes": self._votes, "truth": self._truth}
-
-    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
-        """Restore votes produced by :meth:`state_dict`.
-
-        Args:
-          state_dict: State dict.
-
-        """
-        state = cast(PassK.StateDict, state_dict)
-        self._votes = state.get("votes", {})
-        self._truth = state.get("truth", {})
 
 
 class SignalDumpPayload(NamedTuple):
@@ -334,6 +189,14 @@ class CanonicalPassK:
         exclude_tasks: list[str] = field(default_factory=list[str])
         """Tasks dropped before scoring, shrinking every denominator."""
 
+        dump_per_task_path: Path | str = ""
+        """Rank 0 writes every scored task's pass@K table here, hardest first.
+
+        Each task maps to its ``pass@K`` rates, ``had_preds``, and the
+        report-only rankings' rates. Taken verbatim, never joined under
+        ``base_dir``: that root is the shared corpus, not a run directory.
+        Empty writes nothing."""
+
         @override
         def finalize(self) -> Self:
             if (
@@ -356,19 +219,17 @@ class CanonicalPassK:
     @cached_property
     def _identifier_map(self) -> list[str]:
         """``identifiers.json``: index is puzzle id."""
-        return ListCodec.coerce(
-            loads((self._root / "identifiers.json").read_text()),
-            str,
-        )
+        return parse((self._root / "identifiers.json").read_text(), list[str])
 
     @cached_property
     def _test_puzzles(self) -> dict[str, dict[str, object]]:
         """Scored tasks from ``test_puzzles.json``, minus ``exclude_tasks``."""
         excluded = set(self.config.exclude_tasks)
         return {
-            name: DictCodec.coerce(puzzle)
-            for name, puzzle in DictCodec.coerce(
-                loads((self._root / "test_puzzles.json").read_text()),
+            name: convert(puzzle, dict[str, object])
+            for name, puzzle in parse(
+                (self._root / "test_puzzles.json").read_text(),
+                dict[str, object],
             ).items()
             if name not in excluded
         }
@@ -378,11 +239,11 @@ class CanonicalPassK:
         """The id the loader pads with, so the two never desync."""
         meta_path = self._root / "test" / "dataset.json"
         meta = (
-            DictCodec.coerce(loads(meta_path.read_text()))
+            parse(meta_path.read_text(), dict[str, object])
             if meta_path.is_file()
             else {}
         )
-        return IntCodec.coerce(meta.get("blank_identifier_id", 0))
+        return convert(meta.get("blank_identifier_id"), int, default=0)
 
     def reset(self) -> None:
         """Drop every accumulated ballot and dump row."""
@@ -391,7 +252,7 @@ class CanonicalPassK:
         self._dump_rows: list[_SignalRow] = []
         self._dump_grids: dict[str, NDArray[np.uint8]] = {}
         self._dump_steps: list[_StepRow] = []
-        self._dump_enabled = False
+        self._has_signal_dump = False
 
     def update(self, logits: Tensor, **batch: object) -> None:
         """Record one batch of canonical ballots.
@@ -411,49 +272,22 @@ class CanonicalPassK:
             media_len=media.shape[1],
             k_steps=k_steps,
         )
-        dumping = n_header >= 3 or k_steps > 0
-        self._dump_enabled = self._dump_enabled or dumping
+        dumping = n_header >= 3
+        self._has_signal_dump |= dumping
         # float64 before sigmoid, so confident logits do not saturate to 0 or 1.
         q_halt = _floats(out[:, 0].to(torch.float64).sigmoid())
-        preds_t = _uint8_rows(out[:, n_header:].to(torch.int64))
+        preds_t = _uint8_rows(out[:, n_header:])
         raw_q_halt = _floats(out[:, 0].to(torch.float32))
-        if n_header >= 3:
-            raw_logprob = _floats(out[:, 1].to(torch.float32))
-            raw_stability = _floats(out[:, 2].to(torch.float32))
-        else:
-            raw_logprob = raw_stability = [float("nan")] * out.shape[0]
-        steps: list[_StepRow] = []
-        if k_steps > 0:
-            converge = ListCodec.coerce(out[:, 3].to(torch.int64).tolist(), int)
-            nchg = ListCodec.coerce(out[:, 4].to(torch.int64).tolist(), int)
-            qhalt_steps = out[:, 5 : 5 + k_steps].to(torch.float32)
-            correct_steps = out[:, 5 + k_steps : 5 + 2 * k_steps].to(torch.int64)
-            steps = [
-                (
-                    converge[i],
-                    nchg[i],
-                    tuple(_floats(qhalt_steps[i])),
-                    tuple(ListCodec.coerce(correct_steps[i].tolist(), int)),
-                )
-                for i in range(out.shape[0])
-            ]
-        puzzle_ids_t = batch["puzzle_identifiers"]
-        assert isinstance(puzzle_ids_t, Tensor)
-        puzzle_ids = ListCodec.coerce(
-            puzzle_ids_t.detach().cpu().to(torch.int64).tolist(),
-            int,
+        steps = _act_step_rows(out, k_steps)
+        puzzle_ids = convert(
+            _integer_field(batch, "puzzle_identifiers").tolist(),
+            list[int],
         )
-        spatial_tags_t = batch.get("spatial_tags")
-        if spatial_tags_t is None:
-            spatial_tags = [[1, 0, 0]] * len(puzzle_ids)
-        else:
-            assert isinstance(spatial_tags_t, Tensor)
-            spatial_tags = [
-                ListCodec.coerce(row, int)
-                for row in ListCodec.coerce(
-                    spatial_tags_t.detach().cpu().to(torch.int64).tolist(),
-                )
-            ]
+        spatial_tags = (
+            convert(_integer_field(batch, "spatial_tags").tolist(), list[list[int]])
+            if "spatial_tags" in batch
+            else [[1, 0, 0]] * len(puzzle_ids)
+        )
         for i, ident in enumerate(puzzle_ids):
             if ident == self._blank_identifier_id:
                 continue
@@ -498,20 +332,22 @@ class CanonicalPassK:
                 (pred_h, q_halt[i]),
             )
             if dumping:
+                logprob = float(out[i, 1].to(torch.float32))
+                stability = float(out[i, 2].to(torch.float32))
                 self._dump_rows.append(
                     (
                         orig_name,
                         input_h,
                         pred_h,
                         raw_q_halt[i],
-                        raw_logprob[i],
-                        raw_stability[i],
+                        logprob,
+                        stability,
                         n_rows,
                         n_cols,
                     ),
                 )
-                self._dump_grids.setdefault(pred_h, pred_canon.astype(np.uint8))
-                if k_steps > 0:
+                self._dump_grids.setdefault(pred_h, pred_canon)
+                if k_steps:
                     self._dump_steps.append(steps[i])
 
     def compute(self) -> dict[str, object]:
@@ -539,23 +375,35 @@ class CanonicalPassK:
                 },
             )
             empty.update(self._rule_scores([]))
-            if self._dump_enabled:
+            if self._has_signal_dump:
                 empty["extras"] = {"signal_dump": self._signal_dump_payload()}
             return empty
         per_task_pass1: list[tuple[str, float]] = []
+        per_task: dict[str, dict[str, float]] = {}
         task_scores: list[TaskScore] = []
         pass1_idx = pass_ks.index(1) if 1 in pass_ks else None
         n_no_preds = 0
         for name, puzzle in self._test_puzzles.items():
-            pairs = ListCodec.mappings(puzzle.get("test"))
+            pairs = convert(
+                puzzle.get("test", []),
+                list[dict[str, object]],
+            )
             per_test_correct = [0 for _ in pass_ks]
             per_test_report = {
                 rank_name: [0 for _ in pass_ks]
                 for rank_name in _REPORT_ONLY_RANK_SCORERS
             }
-            task_had_preds = False
-            for pair in pairs:
-                input_h = grid_hash(_json_grid(pair["input"], spec=self.config.spec))
+            pair_inputs = [
+                (
+                    pair,
+                    grid_hash(_json_grid(pair["input"], spec=self.config.spec)),
+                )
+                for pair in pairs
+            ]
+            has_predictions = any(
+                preds.get(name, {}).get(input_h) for _, input_h in pair_inputs
+            )
+            for pair, input_h in pair_inputs:
                 label_h = grid_hash(_json_grid(pair["output"], spec=self.config.spec))
                 records = preds.get(name, {}).get(input_h, [])
                 cap = self.config.max_views_per_input
@@ -565,16 +413,18 @@ class CanonicalPassK:
                 p_map: dict[str, list[float]] = {}
                 max_q_of: dict[str, float] = {}
                 for h, q in records:
-                    stat = p_map.setdefault(h, [0.0, 0.0])
-                    stat[0] += 1.0
-                    stat[1] += q
+                    p_map.setdefault(h, []).append(q)
                     max_q_of[h] = max(max_q_of.get(h, 0.0), q)
                 if not p_map:
                     continue
-                task_had_preds = True
-                for stat in p_map.values():
-                    stat[1] /= stat[0]
-                ranked = sorted(p_map.items(), key=lambda kv: kv[1], reverse=True)
+                ranked = sorted(
+                    p_map.items(),
+                    key=lambda item: (
+                        len(item[1]),
+                        sum(item[1]),
+                    ),
+                    reverse=True,
+                )
                 for i, k in enumerate(pass_ks):
                     if any(h == label_h for h, _ in ranked[:k]):
                         per_test_correct[i] += 1
@@ -583,7 +433,11 @@ class CanonicalPassK:
                     report_ranked = sorted(
                         p_map,
                         key=lambda h, s=scorer: (
-                            -s(p_map[h][0], p_map[h][1], max_q_of[h]),
+                            -s(
+                                len(p_map[h]),
+                                sum(p_map[h]) / len(p_map[h]),
+                                max_q_of[h],
+                            ),
                             h,
                         ),
                     )
@@ -594,7 +448,7 @@ class CanonicalPassK:
             task_scores.append(TaskScore(tuple(per_test_correct), n_test))
             if n_test == 0:
                 continue
-            if not task_had_preds:
+            if not has_predictions:
                 n_no_preds += 1
             for i in range(len(pass_ks)):
                 correct[i] += per_test_correct[i] / n_test
@@ -603,6 +457,14 @@ class CanonicalPassK:
                     correct_report_only[rank_name][i] += report_correct[i] / n_test
             if pass1_idx is not None:
                 per_task_pass1.append((name, per_test_correct[pass1_idx] / n_test))
+            row = {
+                f"pass@{k}": per_test_correct[i] / n_test for i, k in enumerate(pass_ks)
+            }
+            row["had_preds"] = float(has_predictions)
+            for rank_name, report_correct in per_test_report.items():
+                for i, k in enumerate(pass_ks):
+                    row[f"{rank_name}@{k}"] = report_correct[i] / n_test
+            per_task[name] = row
         results: dict[str, object] = {
             f"pass@{k}": correct[i] / n_test_puzzles for i, k in enumerate(pass_ks)
         }
@@ -615,14 +477,16 @@ class CanonicalPassK:
             )
         results.update(self._rule_scores(task_scores))
         self._log_per_task(results, per_task_pass1, n_test_puzzles, n_no_preds)
-        if self._dump_enabled:
+        if self.config.dump_per_task_path:
+            self._dump_per_task(per_task)
+        if self._has_signal_dump:
             results["extras"] = {"signal_dump": self._signal_dump_payload()}
         return results
 
     class StateDict(TypedDict):
         """Checkpointed ballots; ``preds`` records are ``[hash, q]`` lists."""
 
-        hmap: NotRequired[dict[str, tuple[int, int]]]
+        hmap: NotRequired[dict[str, list[int]]]
         preds: NotRequired[dict[str, dict[str, list[list[str | float]]]]]
 
     def state_dict(self) -> StateDict:
@@ -633,7 +497,7 @@ class CanonicalPassK:
 
         """
         return {
-            "hmap": dict(self._hmap),
+            "hmap": {name: list(shape) for name, shape in self._hmap.items()},
             "preds": {
                 name: {ih: [[h, q] for h, q in vs] for ih, vs in by_input.items()}
                 for name, by_input in self._preds.items()
@@ -648,10 +512,17 @@ class CanonicalPassK:
 
         """
         state = cast(CanonicalPassK.StateDict, state_dict)
-        self._hmap = DictCodec.coerce(state.get("hmap", {}), tuple)
+        self._hmap = {
+            name: _grid_shape(shape)
+            for name, shape in convert(
+                state.get("hmap"),
+                dict[str, object],
+                default={},
+            ).items()
+        }
         self._preds = {
             name: {
-                ih: [(str(h), FloatCodec.coerce(q)) for h, q in vs]
+                ih: [(str(h), convert(q, float)) for h, q in vs]
                 for ih, vs in by_input.items()
             }
             for name, by_input in state.get("preds", {}).items()
@@ -671,6 +542,24 @@ class CanonicalPassK:
             grids=self._dump_grids,
             steps=self._dump_steps,
             pass_ks=tuple(self.config.pass_ks),
+        )
+
+    # Ascending pass@1 (stable, so ties keep test_puzzles order) puts the hardest tasks
+    # first: the difficulty ranking proxy-subset selection reads.
+    def _dump_per_task(self, per_task: dict[str, dict[str, float]]) -> None:
+        """Write the per-task table to ``dump_per_task_path`` on rank 0."""
+        if not is_rank_zero():
+            return
+        ordered = dict(
+            sorted(per_task.items(), key=lambda item: item[1].get("pass@1", 0.0)),
+        )
+        path = Path(self.config.dump_per_task_path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(ordered, indent=2))
+        logger.info(
+            "[eval] wrote per-task pass@k table (%d tasks) to %s",
+            len(ordered),
+            path,
         )
 
     def _log_per_task(
@@ -712,7 +601,7 @@ class CanonicalPassK:
         device = torch.device("cpu")
         if dist.get_backend() == "nccl":
             device = torch.device("cuda", torch.cuda.current_device())
-        size = torch.tensor([len(payload)], dtype=torch.int64, device=device)
+        size = torch.tensor([len(payload)], device=device)
         sizes = [torch.empty_like(size) for _ in range(dist.get_world_size())]
         dist.all_gather(sizes, size)
         max_size = max(int(size_t.item()) for size_t in sizes)
@@ -726,7 +615,8 @@ class CanonicalPassK:
         recv = [torch.empty_like(send) for _ in sizes]
         dist.all_gather(recv, send)
         merged: _Preds = {}
-        for tensor, size_t in zip(recv, sizes, strict=True):
+        for index, tensor in enumerate(recv):
+            size_t = sizes[index]
             part = decode_preds(bytes(tensor[: int(size_t.item())].cpu().numpy()))
             for name, by_input in part.items():
                 target = merged.setdefault(name, {})
@@ -798,7 +688,7 @@ class SignalDumpTracker:
             payload = SignalDumpPayload(rows=[], grids={}, steps=[], pass_ks=())
         else:
             try:
-                extras_map = DictCodec.coerce(extras, default=None)
+                extras_map = convert(extras, dict[str, object])
             except TypeError as err:
                 raise TypeError(
                     "SignalDumpTracker expected metrics['extras'] to be "
@@ -824,7 +714,7 @@ class SignalDumpTracker:
     def _prune(self) -> None:
         """Delete the oldest step-stamped dumps beyond ``keep_last_n``, on rank 0."""
         template = str(self.config.working_dir)
-        if self.config.keep_last_n < 0 or "{global_step}" not in template:
+        if self.config.keep_last_n == -1 or "{global_step}" not in template:
             return
         if not is_rank_zero():
             return
@@ -942,7 +832,7 @@ def write_signal_dump(
         "pred_grids": pred_grids,
         "pred_n_rows": pred_n_rows,
         "pred_n_cols": pred_n_cols,
-        "pass_ks": np.array(list(payload.pass_ks), dtype=np.int64),
+        "pass_ks": np.array(list(payload.pass_ks)),
     }
     if steps:
         arrays["converge_step"] = np.array([s[0] for s in steps], dtype=np.uint8)
@@ -957,11 +847,11 @@ def write_signal_dump(
     # The stub's ``**kwds: ArrayLike`` collides with ``allow_pickle`` under unpacking.
     cast(Callable[..., object], np.savez_compressed)(path, **arrays)
     logger.info(
-        "[eval] wrote signal dump (%d rows, %d groups, %d preds, %.1f MB) to %s",
+        "[eval] wrote signal dump (%d rows, %d groups, %d preds, %d bytes) to %s",
         n,
         len(group_table),
         n_pred,
-        path.stat().st_size / 1e6,
+        path.stat().st_size,
         path,
     )
 
@@ -1020,7 +910,7 @@ def decode_preds(payload: bytes) -> _Preds:
                 pred_h = payload[offset : offset + 32].hex()
                 (q,) = struct.unpack_from("<d", payload, offset + 32)
                 offset += 40
-                values.append((pred_h, FloatCodec.coerce(q)))
+                values.append((pred_h, convert(q, float)))
             by_input[input_h] = values
         preds[name] = by_input
     return preds
@@ -1028,7 +918,7 @@ def decode_preds(payload: bytes) -> _Preds:
 
 def _read_u32(payload: bytes, offset: int) -> tuple[int, int]:
     (value,) = struct.unpack_from("<I", payload, offset)
-    return IntCodec.coerce(value), offset + 4
+    return convert(value, int), offset + 4
 
 
 def _votes_times_mean_q(count: float, mean_q: float, max_q: float) -> float:
@@ -1048,6 +938,33 @@ _REPORT_ONLY_RANK_SCORERS: dict[str, Callable[[float, float, float], float]] = {
 }
 
 
+def _integer_field(batch: Mapping[str, object], name: str) -> Tensor:
+    """Return ``batch[name]`` on CPU, rejecting a floating tensor by field name."""
+    value = batch[name]
+    assert isinstance(value, Tensor)
+    if value.dtype.is_floating_point:
+        raise TypeError(f"CanonicalPassK expects integer {name}; got {value.dtype}.")
+    return value.detach().cpu()
+
+
+def _act_step_rows(out: Tensor, k_steps: int) -> list[_StepRow]:
+    if k_steps == 0:
+        return []
+    converge = _ints(out[:, 3])
+    n_changes = _ints(out[:, 4])
+    q_halt_steps = out[:, 5 : 5 + k_steps].to(torch.float32)
+    correct_steps = out[:, 5 + k_steps : 5 + 2 * k_steps]
+    return [
+        (
+            converge[index],
+            n_changes[index],
+            tuple(_floats(q_halt_steps[index])),
+            tuple(_ints(correct_steps[index])),
+        )
+        for index in range(out.shape[0])
+    ]
+
+
 def _model_output_header_width(*, out_width: int, media_len: int, k_steps: int) -> int:
     """Return the count of leading non-prediction columns."""
     if k_steps > 0:
@@ -1061,7 +978,7 @@ def _model_output_header_width(*, out_width: int, media_len: int, k_steps: int) 
         return n_header
     n_header = out_width - media_len
     if n_header not in (1, 3):
-        pred_len = out_width - 1 if n_header < 1 else out_width - n_header
+        pred_len = out_width - max(1, n_header)
         raise ValueError(
             f"model_output width {out_width} minus grid length {media_len} = "
             f"header {n_header}; inferred prediction length {pred_len}; expected "
@@ -1077,17 +994,44 @@ def _uint8_rows(values: Tensor) -> list[NDArray[np.uint8]]:
 
 
 def _floats(values: Tensor) -> list[float]:
-    return ListCodec.coerce(values.tolist(), float)
+    return [float(value) for value in values]
+
+
+def _ints(values: Tensor) -> list[int]:
+    return [int(value) for value in values.to(torch.int64)]
 
 
 def _json_grid(value: object, *, spec: ArcSpec) -> NDArray[np.uint8]:
-    rows = [ListCodec.coerce(row, int) for row in ListCodec.coerce(value)]
+    rows = [
+        [_json_cell(cell) for cell in convert(row, list[object])]
+        for row in convert(value, list[object])
+    ]
     return arc_grid_to_np(rows, max_grid=spec.max_grid)
 
 
+def _json_cell(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"ARC grid cell must be an integer color; got {value!r}.")
+    return value
+
+
 def _shape(grid: NDArray[np.uint8]) -> tuple[int, int]:
-    rows, cols = ListCodec.coerce(list(grid.shape), int)
+    rows, cols = cast(tuple[int, int], grid.shape)
     return rows, cols
+
+
+# Tuples are accepted alongside lists: checkpoints written before ``state_dict``
+# emitted lists hold the in-memory tuples, and a JSON round trip yields lists.
+def _grid_shape(value: object) -> tuple[int, int]:
+    """Validate a checkpointed ``(rows, cols)`` pair."""
+    match value:
+        case [int() as rows, int() as cols] if not isinstance(
+            rows,
+            bool,
+        ) and not isinstance(cols, bool):
+            return rows, cols
+        case _:
+            raise TypeError(f"Invalid checkpointed grid shape: {value!r}.")
 
 
 def _hash_bytes(value: str) -> bytes:
@@ -1122,13 +1066,3 @@ def _gather_grids(grids: dict[str, NDArray[np.uint8]]) -> dict[str, NDArray[np.u
         if part is not None:
             merged.update(part)
     return merged
-
-
-# Only equality between grids matters, and an evaluation holds hundreds of thousands of
-# them, so a digest is stored instead of the grid.
-def _digest(grid: Tensor) -> str:
-    """Hash one grid's tokens."""
-    return hashlib.blake2b(
-        grid.to(torch.int16).cpu().numpy().tobytes(),
-        digest_size=16,
-    ).hexdigest()

@@ -10,15 +10,15 @@ ladder stays checkable on any machine.
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import json
 import math
 import pickle
 
 from configgle import PartialConfig
-from configgle.testing import assert_pprint_golden
 from pyarrow import parquet
 
 import numpy as np
@@ -28,21 +28,30 @@ import tiktoken
 import torch
 
 from priml.baselines.nanochat import experiments
-from priml.baselines.nanochat.attention import Flash3Attention
+from priml.baselines.nanochat.attention import CausalAttention
 from priml.baselines.nanochat.data import token_bytes_fingerprint
 from priml.baselines.nanochat.experiments import NanoChatLoop, NgramTrainLoop
 from priml.baselines.nanochat.model import MemoryNanoChatLM
+from priml.baselines.nanochat.ngram import NgramEmbedding
+from priml.baselines.nanochat.optimizers import BiasCorrectedRMSProp
 from priml.baselines.nanochat.train_step import (
     NanoChatTrainStep,
     nanochat_optimizer,
 )
 from priml.cost import cost
 from priml.metrics.bits_per_byte import BitsPerByte
+from priml.model.attention.flash3 import Flash3Attention
 from priml.model.attention.value_gated_attention import ValueGatedAttention
+from priml.model.embedding import Embedding
 from priml.model.narrow_embedding import NarrowEmbedding
+from priml.model.norm import RMSNorm
+from priml.model.swiglu import SwiGLUReluSquared
+from priml.model.transformer.block import TransformerBlock
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.normuon import NorMuon
+from priml.optimizers.parameter_filter import matching
 from priml.runtime import SingleProcess
+from priml.testing.golden import assert_pprint_golden
 from priml.train.checkpointer import Checkpointer
 from priml.train.parallelism import NoParallel
 from priml.train.tracker import (
@@ -120,9 +129,9 @@ def test_hash_configuration_ignores_the_default_device(
     )
 
 
-def test_experiment_ladder_has_twenty_four_rungs() -> None:
-    """Expose all twenty-four numbered experiment factories."""
-    expected = {f"exp{index:03d}" for index in range(24)}
+def test_experiment_ladder_has_twenty_five_rungs() -> None:
+    """Expose all twenty-five numbered experiment factories."""
+    expected = {f"exp{index:03d}" for index in range(25)}
     assert expected == {
         name
         for name in vars(experiments)
@@ -147,6 +156,25 @@ def test_exp023_changes_only_the_prepared_inputs() -> None:
         changed.copy_tree().finalize().serialize()
         == original.copy_tree().finalize().serialize()
     )
+
+
+def test_exp024_changes_only_the_budget() -> None:
+    changed = experiments.exp024()
+    assert changed.max_time == changed.step.train_budget_sec == 300.0
+    original = experiments.exp022()
+    changed.experiment_name = original.experiment_name
+    changed.max_time = original.max_time
+    changed.step.train_budget_sec = original.step.train_budget_sec
+    assert (
+        changed.copy_tree().finalize().serialize()
+        == original.copy_tree().finalize().serialize()
+    )
+
+
+def test_no_experiment_carries_commented_out_config() -> None:
+    """A toggle in a comment is a config that exists in no printed tree."""
+    source = (_CWD / "experiments.py").read_text()
+    assert "Uncomment" not in source
 
 
 @pytest.mark.parametrize(
@@ -345,6 +373,34 @@ def test_exp000_turns_both_mechanisms_on() -> None:
     cfg = experiments.exp000()
     assert _pattern(cfg) == "SSSL"
     assert cfg.step.model.value_embedding_stride == 2
+    assert cfg.step.model.channels_in == 512
+    assert cfg.step.model.num_layers == 8
+    assert cfg.step.model.embedding.dtype == torch.bfloat16
+    assert cfg.step.model.rope.dtype == torch.bfloat16
+    block = cfg.step.model.template
+    assert isinstance(block.norm1, RMSNorm.Config)
+    assert isinstance(block.norm2, RMSNorm.Config)
+    assert isinstance(block.attn, ValueGatedAttention.Config)
+    assert isinstance(block.attn.norm_qk, RMSNorm.Config)
+    for norm in (block.norm1, block.norm2, block.attn.norm_qk):
+        assert norm.eps == torch.finfo(torch.float32).eps
+    assert cfg.step.train_budget_sec == 300.0
+    assert cfg.max_time == 300.0
+    assert cfg.max_time_kind == "train"
+    assert cfg.num_steps_eval == -1
+    assert cfg.num_steps_log == 1
+    assert cfg.early_train_log_steps == 0
+    assert cfg.eval_every_epoch is False
+    assert math.isinf(cfg.max_steps)
+    assert cfg.seed == 42
+    assert isinstance(cfg.runtime, SingleProcess.Config)
+    assert cfg.runtime.device == "cuda"
+    assert cfg.runtime.float32_matmul_precision == "high"
+    assert isinstance(cfg.step.parallelism, NoParallel.Config)
+    assert cfg.step.parallelism.device == "cuda"
+    assert cfg.dataset.device == "cuda"
+    assert isinstance(cfg.checkpointer, Checkpointer.Config)
+    assert cfg.checkpointer.resume is False
 
 
 @pytest.mark.parametrize(
@@ -370,9 +426,9 @@ def test_smoke_keeps_automatic_device_selection() -> None:
 
     assert isinstance(config.step.parallelism, NoParallel.Config)
     assert config.step.parallelism.device is None
-    assert config.dataset.device == "auto"
+    assert config.dataset.device is None
     assert isinstance(config.runtime, SingleProcess.Config)
-    assert config.runtime.device == "auto"
+    assert config.runtime.device is None
 
 
 def test_exp002_removes_only_the_value_embeddings() -> None:
@@ -524,7 +580,7 @@ def test_every_experiments_eval_geometry_is_constructible(
     embedding = model.embedding
     assert isinstance(embedding, NarrowEmbedding.Config)
     embedding.dtype = None
-    model.rope.dtype = None
+    model.rope.dtype = torch.float32
 
     # A corpus at the vocabulary this experiment declares. Two shards, since
     # the validation one is pinned and excluded from training.
@@ -602,6 +658,254 @@ def _prepared(root: Path, *, vocab: int) -> None:
             pa.table({"text": documents}),
             root / f"shard_{shard:05d}.parquet",
         )
+
+
+def test_exp005_and_exp006_pin_the_wider_bigram_recipe() -> None:
+    exp005 = experiments.exp005()
+    assert exp005.working_dir == "/runs/{study_name}/{experiment_name}"
+    assert exp005.step.model.channels_in == 768
+    assert exp005.step.model.num_layers == 5
+    assert exp005.step.rows_per_pass == 256
+    attention = exp005.step.model.template.attn
+    assert isinstance(attention, ValueGatedAttention.Config)
+    assert attention.window == 384
+
+    exp006 = experiments.exp006()
+    embedding = exp006.step.model.embedding
+    assert isinstance(embedding, NgramEmbedding.Config)
+    bigram = embedding.contexts["bigram"]
+    assert isinstance(bigram, NgramEmbedding.Config)
+    assert bigram.multipliers == (1, 257)
+    assert bigram.scale == 0.25
+    assert bigram.channels_in == 1_048_576
+    assert isinstance(bigram.inner, Embedding.Config)
+    assert bigram.inner.init_weight is torch.nn.init.zeros_
+
+
+def test_exp007_splits_bigram_and_trigram_optimization() -> None:
+    config = experiments.exp007()
+    embedding = config.step.model.embedding
+    assert isinstance(embedding, NgramEmbedding.Config)
+    bigram = embedding.contexts["bigram"]
+    trigram = embedding.contexts["trigram"]
+    assert isinstance(bigram, NgramEmbedding.Config)
+    assert isinstance(trigram, NgramEmbedding.Config)
+    assert bigram.multipliers == (1, 1_000_003)
+    assert bigram.scale == 0.25
+    assert bigram.channels_in == 1_048_576
+    assert trigram.multipliers == (1, 257, 66_049)
+    assert trigram.scale == 0.125
+    assert trigram.channels_in == 1_048_576
+    assert isinstance(bigram.inner, Embedding.Config)
+    assert isinstance(trigram.inner, Embedding.Config)
+    assert bigram.inner.init_weight is torch.nn.init.zeros_
+    assert trigram.inner.init_weight is torch.nn.init.zeros_
+
+    optimizer = config.step.optimizer
+    assert isinstance(optimizer, CompositeOptimizer.Config)
+    assert isinstance(optimizer.optimizers[2], PartialConfig)
+    assert isinstance(optimizer.optimizers[1], PartialConfig)
+    assert optimizer.optimizers[2]._kwargs["weight_decay"] == 0.01
+    assert optimizer.optimizers[1]._kwargs["weight_decay"] == 0.0
+    context = optimizer.optimizers[6]
+    assert isinstance(context, PartialConfig)
+    assert cast(float, context._kwargs["weight_decay"]) == 0.01
+    assert optimizer.select[1] == matching("embed.inner")
+    assert optimizer.select[6] == matching(
+        "embed.contexts.bigram.inner",
+        "embed.contexts.trigram.inner",
+    )
+
+
+def test_exp004_keeps_the_reference_recipe_when_switching_train_steps() -> None:
+    config = experiments.exp004()
+    reference = experiments.exp000()
+    assert config.seed == 42
+    assert config.working_dir == "/runs/{study_name}/{experiment_name}"
+    assert config.step.model.channels_in == reference.step.model.channels_in
+    assert config.step.model.num_layers == reference.step.model.num_layers
+    assert config.step.model.value_embedding_stride == 2
+    assert _pattern(config) == "SSSL"
+    assert config.step.train_budget_sec == 525.0
+    assert config.max_time == 525.0
+    assert config.step.rows_per_pass == reference.step.rows_per_pass
+
+
+def test_exp006_keeps_the_inherited_token_embedding() -> None:
+    reference = experiments.exp005().step.model.embedding
+    embedding = experiments.exp006().step.model.embedding
+    assert isinstance(reference, NarrowEmbedding.Config)
+    assert isinstance(embedding, NgramEmbedding.Config)
+    assert embedding.channels_in == reference.channels_in
+    assert embedding.channels_out == reference.channels_out
+    assert embedding.dtype == reference.dtype
+    assert isinstance(embedding.inner, Embedding.Config)
+    assert isinstance(reference.inner, Embedding.Config)
+    assert embedding.inner.channels_in == reference.inner.channels_in
+    assert embedding.inner.channels_out == reference.inner.channels_out
+    assert embedding.inner.dtype == reference.inner.dtype
+    embedding_init = cast(partial[object], embedding.inner.init_weight)
+    reference_init = cast(partial[object], reference.inner.init_weight)
+    assert embedding_init.func is reference_init.func
+    assert embedding_init.keywords == reference_init.keywords
+
+
+def test_exp007_optimizer_adds_matching_bigram_group() -> None:
+    optimizer = experiments.exp007().step.optimizer
+    assert isinstance(optimizer, CompositeOptimizer.Config)
+    assert len(optimizer.select) == len(optimizer.optimizers)
+    assert optimizer.select[6] == matching(
+        "embed.contexts.bigram.inner",
+        "embed.contexts.trigram.inner",
+    )
+    token = optimizer.optimizers[1]
+    context = optimizer.optimizers[-1]
+    assert isinstance(token, PartialConfig)
+    assert isinstance(context, PartialConfig)
+    assert cast(float, context._kwargs["lr"]) == cast(float, token._kwargs["lr"])
+    assert cast(tuple[float, float], context._kwargs["betas"]) == cast(
+        tuple[float, float],
+        token._kwargs["betas"],
+    )
+    assert cast(float, context._kwargs["weight_decay"]) == 0.01
+
+
+def test_exp007_copies_the_token_optimizer_not_the_value_optimizer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = experiments.exp006()
+    optimizer = parent.step.optimizer
+    assert isinstance(optimizer, CompositeOptimizer.Config)
+    token, value = optimizer.optimizers[1:3]
+    assert isinstance(token, PartialConfig)
+    assert isinstance(value, PartialConfig)
+    token.lr = 0.6
+    value.lr = 0.5
+    monkeypatch.setattr(experiments, "exp006", lambda: parent)
+
+    result = experiments.exp007().step.optimizer
+    assert isinstance(result, CompositeOptimizer.Config)
+    context = result.optimizers[-1]
+    assert isinstance(context, PartialConfig)
+    assert cast(float, context._kwargs["lr"]) == 0.6
+
+
+def test_exp009_pins_each_attention_window_and_block_variant() -> None:
+    model = experiments.exp009().copy_tree().finalize().step.model
+    assert isinstance(model.block, list)
+    windows: list[int] = []
+    gated: list[bool] = []
+    expansions: list[float] = []
+    for block in model.block:
+        assert isinstance(block, TransformerBlock.Config)
+        assert isinstance(block.attn, ValueGatedAttention.Config)
+        assert isinstance(block.ffn, SwiGLUReluSquared.Config)
+        windows.append(block.attn.window)
+        gated.append(block.attn.gated)
+        expansions.append(block.ffn.expansion)
+    assert tuple(windows) == (
+        512,
+        512,
+        512,
+        model.max_seq_len,
+        512,
+        512,
+        512,
+        model.max_seq_len,
+    )
+    assert tuple(gated) == (False, True, False, True, False, True, False, True)
+    assert tuple(expansions) == (4.0,) * 8
+
+
+def test_exp009_uses_block_zero_as_its_template(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = experiments.exp008()
+    assert isinstance(parent.step.model.block, list)
+    template, alternate = parent.step.model.block[:2]
+    assert isinstance(template, TransformerBlock.Config)
+    assert isinstance(template.ffn, SwiGLUReluSquared.Config)
+    assert isinstance(alternate, TransformerBlock.Config)
+    assert isinstance(alternate.ffn, SwiGLUReluSquared.Config)
+    template_expansion = template.ffn.expansion
+    alternate.ffn.expansion = 7.0
+    monkeypatch.setattr(experiments, "exp008", lambda: parent)
+
+    model = experiments.exp009().step.model
+    assert isinstance(model.block, list)
+    expansions: list[float] = []
+    for block in model.block:
+        assert isinstance(block, TransformerBlock.Config)
+        assert isinstance(block.ffn, SwiGLUReluSquared.Config)
+        expansions.append(block.ffn.expansion)
+    assert tuple(expansions) == (template_expansion,) * 8
+
+
+def test_exp009_uses_global_attention_only_at_layers_three_and_seven(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = experiments.exp008()
+    parent.step.model.max_seq_len = 1_024
+    monkeypatch.setattr(experiments, "exp008", lambda: parent)
+
+    model = experiments.exp009().step.model
+    assert isinstance(model.block, list)
+    windows: list[int] = []
+    for block in model.block:
+        assert isinstance(block, TransformerBlock.Config)
+        assert isinstance(block.attn, ValueGatedAttention.Config)
+        windows.append(block.attn.window)
+    assert tuple(windows) == (512, 512, 512, 1_024, 512, 512, 512, 1_024)
+
+
+def test_exp013_scales_memory_learning_rates_with_model_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = experiments.exp012()
+    parent.step.model.channels_in = 1_536
+    monkeypatch.setattr(experiments, "exp012", lambda: parent)
+
+    optimizer = experiments.exp013().step.optimizer
+    assert isinstance(optimizer, CompositeOptimizer.Config)
+    for member in optimizer.optimizers[5:7]:
+        assert isinstance(member, BiasCorrectedRMSProp.Config)
+        assert member.lr == 0.6 / (1_536 / 768) ** 0.5
+
+
+def test_exp013_keeps_the_original_mixer_filter_exact() -> None:
+    optimizer = experiments.exp013().step.optimizer
+    assert isinstance(optimizer, CompositeOptimizer.Config)
+    assert optimizer.select[4] == matching("mix.original", "mix.gate_scales")
+
+
+def test_exp014_rejects_a_block_count_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = experiments.exp013()
+    assert isinstance(parent.step.model.block, list)
+    parent.step.model.block.pop()
+    monkeypatch.setattr(experiments, "exp013", lambda: parent)
+
+    with pytest.raises(ValueError, match="zip"):
+        experiments.exp014()
+
+
+def test_exp015_pins_each_attention_window() -> None:
+    model = experiments.exp015().step.model
+    assert isinstance(model.block, list)
+    attention = [block.attn for block in model.block]
+    assert all(isinstance(block, CausalAttention.Config) for block in attention)
+    typed_attention = [cast(CausalAttention.Config, block) for block in attention]
+    assert tuple(block.window for block in typed_attention) == (
+        256,
+        256,
+        256,
+        model.max_seq_len,
+        256,
+        256,
+        256,
+        model.max_seq_len,
+    )
 
 
 def test_the_dataset_inherits_the_models_geometry() -> None:
@@ -688,6 +992,41 @@ def test_the_models_compile_switch_leaves_the_optimizers_alone() -> None:
 @pytest.mark.compute_large_fixture
 def test_exp000_matches_its_golden_config() -> None:
     assert_pprint_golden(test_file=__file__, name="exp000", config=experiments.exp000())
+
+
+@pytest.mark.parametrize(
+    ("name", "factory"),
+    [
+        ("exp001", experiments.exp001),
+        ("exp002", experiments.exp002),
+        ("exp003", experiments.exp003),
+        ("exp004", experiments.exp004),
+        ("exp005", experiments.exp005),
+        ("exp006", experiments.exp006),
+        ("exp007", experiments.exp007),
+        ("exp008", experiments.exp008),
+        ("exp009", experiments.exp009),
+        ("exp010", experiments.exp010),
+        ("exp011", experiments.exp011),
+        ("exp012", experiments.exp012),
+        ("exp013", experiments.exp013),
+        ("exp014", experiments.exp014),
+        ("exp015", experiments.exp015),
+        ("exp016", experiments.exp016),
+        ("exp017", experiments.exp017),
+        ("exp018", experiments.exp018),
+        ("exp019", experiments.exp019),
+        ("exp020", experiments.exp020),
+        ("exp021", experiments.exp021),
+        ("exp023", experiments.exp023),
+        ("exp_smoke", experiments.exp_smoke),
+    ],
+)
+def test_experiment_matches_its_full_config_golden(
+    name: str,
+    factory: Callable[[], NanoChatLoop.Config],
+) -> None:
+    assert_pprint_golden(test_file=__file__, name=name, config=factory())
 
 
 if __name__ == "__main__":

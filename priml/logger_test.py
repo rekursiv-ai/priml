@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from inspect import signature
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import ast
@@ -20,6 +22,30 @@ from priml.logger import (
     replay_buffered_logs,
     setup_logging,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+
+@pytest.fixture(autouse=True)
+def restore_root_logger() -> Iterator[None]:
+    """Undo what ``setup_logging`` does to the process-wide root logger.
+
+    It lowers the level and installs a handler on this test's captured
+    ``sys.stdout``, which pytest closes afterwards; left behind, every later record
+    in the worker fails to write. pytest adds and removes its own capture handlers
+    per phase, so those are left to it.
+    """
+    root = logging.getLogger()
+    level, handlers = root.level, list(root.handlers)
+    yield
+    for handler in list(root.handlers):
+        if handler not in handlers and not type(handler).__module__.startswith(
+            "_pytest",
+        ):
+            root.removeHandler(handler)
+    root.setLevel(level)
 
 
 def test_module_and_public_defs_have_docstrings() -> None:
@@ -72,6 +98,34 @@ class TestTimer:
         assert timer.elapsed >= 0.01
         assert timer.stop > timer.start
 
+    def test_timer_defaults_and_logs_exact_elapsed(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.DEBUG, logger="test.timer.exact")
+        timer = Timer(logger="test.timer.exact", level=logging.DEBUG)
+        assert timer.description == "Timer"
+        assert timer.start == timer.stop == timer.elapsed == 0
+
+        with (
+            patch.object(time, "perf_counter", side_effect=(10.0, 12.34567)),
+            timer,
+        ):
+            pass
+
+        assert timer.start == 10.0
+        assert timer.stop == 12.34567
+        assert timer.elapsed == 2.34567
+        assert caplog.records[-1].getMessage() == "Timer: 2.3457 seconds"
+        assert caplog.records[-1].levelno == logging.DEBUG
+
+    def test_timer_preserves_passed_logger_and_description(self) -> None:
+        target = logging.getLogger("test.timer.object")
+        timer = Timer("custom", logger=target, level=logging.WARNING)
+        assert timer.logger is target
+        assert timer.description == "custom"
+        assert timer.level == logging.WARNING
+
     def test_timer_exception_propagation(self) -> None:
         """Test that exceptions are re-raised (line 53)."""
         with (
@@ -95,11 +149,23 @@ class TestCustomFormatter:
     def test_formatter_initialization_with_config(self) -> None:
         """Test CustomFormatter initialization with Config (lines 87-88)."""
         config = CustomFormatter.Config()
+        config.fmt = "%(message)s"
+        config.datefmt = "%Y"
         formatter = CustomFormatter(config)
 
-        assert formatter.datefmt == config.datefmt
-        # Verify the formatter was initialized with the config.
-        assert hasattr(formatter, "_style")
+        assert formatter.datefmt == "%Y"
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="configured-format",
+            args=(),
+            exc_info=None,
+            func="func",
+        )
+        with patch.object(logger.dist, "is_initialized", return_value=False):
+            assert formatter.format(record) == "configured-format"
 
     def test_formatter_with_distributed_initialized(self) -> None:
         """Test formatter when distributed is initialized (lines 93-96)."""
@@ -296,7 +362,9 @@ class TestSetupLogging:
         root_logger = logging.getLogger()
         root_logger.handlers.clear()
 
-        setup_logging()
+        with pytest.raises(TypeError, match="missing a required argument: 'level'"):
+            signature(setup_logging).bind()
+        setup_logging(level="INFO")
 
         assert len(root_logger.handlers) > 0
         assert root_logger.level == logging.INFO
@@ -314,7 +382,7 @@ class TestSetupLogging:
         assert initial_count > 0
 
         # Setup should clear and add new handlers.
-        setup_logging()
+        setup_logging(level="INFO")
 
         # Stream handler + replay-buffer handler after setup; the dummy is gone.
         assert len(root_logger.handlers) == 2
@@ -326,13 +394,28 @@ class TestSetupLogging:
         root_logger = logging.getLogger()
         root_logger.handlers.clear()
 
-        setup_logging()
+        setup_logging("warning")
 
+        assert root_logger.level == logging.WARNING
+        assert len(root_logger.handlers) == 2
         handler = root_logger.handlers[0]
-        assert handler.level == logging.INFO
+        assert handler.level == logging.WARNING
         assert isinstance(handler, _StdoutStreamHandler)
         assert handler.stream == sys.stdout
         assert isinstance(handler.formatter, CustomFormatter)
+        assert root_logger.handlers[1].level == logging.WARNING
+
+    def test_setup_logging_unknown_level_falls_back_to_info(self) -> None:
+        root_logger = logging.getLogger()
+        root_logger.handlers.clear()
+
+        setup_logging("not-a-level")
+
+        assert root_logger.level == logging.INFO
+        assert [handler.level for handler in root_logger.handlers] == [
+            logging.INFO,
+            logging.INFO,
+        ]
 
     def test_bind_logging_to_current_stdout_retargets_loop_handler(
         self,
@@ -341,7 +424,7 @@ class TestSetupLogging:
         """After W&B wraps stdout, Loop logs must use the wrapped stream."""
         root_logger = logging.getLogger()
         root_logger.handlers.clear()
-        setup_logging()
+        setup_logging(level="INFO")
         wrapped_stdout = io.StringIO()
         monkeypatch.setattr(sys, "stdout", wrapped_stdout)
 
@@ -360,7 +443,7 @@ class TestReplayBufferedLogs:
     ) -> None:
         """Records logged before replay are re-emitted to stdout on replay."""
         logging.getLogger().handlers.clear()
-        setup_logging()
+        setup_logging(level="INFO")
         logging.getLogger("test.replay").info("buffered-line-xyz")
         # The line is already on stdout once (stream handler); capture+clear it
         # so the assertion isolates the replay emission.
@@ -368,13 +451,16 @@ class TestReplayBufferedLogs:
 
         replay_buffered_logs()
 
-        assert "buffered-line-xyz" in capsys.readouterr().out
+        replayed = capsys.readouterr().out
+        assert "buffered-line-xyz" in replayed
+        assert "INFO" in replayed
+        assert "test.replay" in replayed
 
     def test_replay_detaches_buffer_handler(self) -> None:
         """After replay, the buffer handler is removed (idempotent second call)."""
         root = logging.getLogger()
         root.handlers.clear()
-        setup_logging()
+        setup_logging(level="INFO")
         assert len(root.handlers) == 2
 
         replay_buffered_logs()

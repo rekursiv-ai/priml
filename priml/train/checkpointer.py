@@ -66,7 +66,7 @@ else:
 
 from configgle import Fig, Makeable
 
-from priml.lib.custom_json import DictCodec, FloatCodec, IntCodec, StrCodec, loads
+from priml.lib.custom_json import convert, parse, to_builtins
 from priml.paths import resolve_working_dir, validated_output_path
 from priml.runtime import is_rank_zero
 
@@ -184,7 +184,7 @@ class StateDictStorer(Protocol):
         A synchronous backend is a no-op. The single "finish pending writes"
         operation -- called before ``load`` (so a resume sees a just-issued
         write) and once at end of run. Must be reached on every rank in lockstep.
-        Collective: a barrier follows so ranks stay in step.
+        An asynchronous backend coordinates completion across ranks.
         """
         ...
 
@@ -227,7 +227,6 @@ class SyncLocalStateDictStorer:
         """
         start = time.perf_counter()
         if _has_dtensor(state_dict):
-            path.mkdir(parents=True, exist_ok=True)
             _invalidate_distributed_checkpoint(path)
             state_dict_saver.save(state_dict, checkpoint_id=str(path))
             if dist.is_initialized():
@@ -238,21 +237,30 @@ class SyncLocalStateDictStorer:
                     path,
                     time.perf_counter() - start,
                 )
-        elif dist.is_initialized() and dist.get_rank() != 0:
-            dist.barrier()
         else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path = path.with_suffix(path.suffix + ".tmp")
-            torch.save(state_dict, temp_path)
-            temp_path.rename(path)
+            error: list[str | None] = [None]
+            local_error: Exception | None = None
+            if not dist.is_initialized() or is_rank_zero():
+                try:
+                    _write_plain_checkpoint(path, state_dict)
+                except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                    local_error = exc
+                    error[0] = str(exc)
+            if local_error is not None and not dist.is_initialized():
+                raise local_error
+            if dist.is_initialized():
+                dist.broadcast_object_list(error, src=0)
+            if error[0] is not None:
+                raise OSError(f"Checkpoint write failed: {error[0]}")
             if dist.is_initialized():
                 dist.barrier()
-            logger.info(
-                "Saved checkpoint -> %s (%.1f MB, %.2fs).",
-                path,
-                path.stat().st_size / 1024**2,
-                time.perf_counter() - start,
-            )
+            if is_rank_zero():
+                logger.info(
+                    "Saved checkpoint -> %s (%.1f MB, %.2fs).",
+                    path,
+                    path.stat().st_size / 1024**2,
+                    time.perf_counter() - start,
+                )
         after_write()
 
     def read(self, path: Path, into: StateDict) -> StateDict:
@@ -336,13 +344,12 @@ class AsyncLocalStateDictStorer:
         (``write``/``read``/``flush``).
 
         Args:
-          path: Destination directory or file path.
+          path: Destination distributed-checkpoint directory.
           state_dict: Model, optimizer, and other stateful objects to save.
           after_write: Callback after durability (see SyncLocalStateDictStorer).
 
         """
         self._join()
-        path.mkdir(parents=True, exist_ok=True)
         _invalidate_distributed_checkpoint(path)
         # async_save returns either a bare Future or an AsyncSaveResponse; join on
         # the upload (disk-write) future either way.
@@ -391,37 +398,37 @@ class AsyncLocalStateDictStorer:
         """Block until the in-flight write is durable, then run its retention."""
         self._join()
 
-    def has_pending_write(self) -> bool:
-        """Whether a background write is still in flight (for tests/diagnostics).
-
-        Returns:
-          result: The bool.
-
-        """
-        return self._pending is not None
-
     # Called only from all-rank entry points (``write``, ``read``, ``flush``), so the
     # barrier is reached in lockstep. ``after_write`` (retention) runs after the write
     # is durable and before the barrier.
     def _join(self) -> None:
         """Await the in-flight write, run its ``after_write``, barrier -- lockstep."""
+        error: Exception | None = None
         if self._pending is not None:
-            self._pending.result()
-            self._pending = None
+            pending, self._pending = self._pending, None
+            path, self._pending_path = self._pending_path, None
+            after_write, self._after_write = self._after_write, lambda: None
+            try:
+                pending.result()
+            except (RuntimeError, ValueError, TypeError, OSError, LookupError) as exc:
+                error = exc
+            _raise_write_error(error)
             # Telemetry at completion: the async write is durable only now, so
             # duration (dispatch -> join) and on-disk size are measured here, to
             # match the synchronous backend's save logging as closely as async
             # allows.
-            if is_rank_zero() and self._pending_path is not None:
-                logger.info(
-                    "Saved async checkpoint -> %s (%.1f MB, %.2fs).",
-                    self._pending_path,
-                    _dir_size_mb(self._pending_path),
-                    time.perf_counter() - self._pending_start,
-                )
-            self._pending_path = None
-            after_write, self._after_write = self._after_write, lambda: None
-            after_write()
+            try:
+                if is_rank_zero() and path is not None:
+                    logger.info(
+                        "Saved async checkpoint -> %s (%.1f MB, %.2fs).",
+                        path,
+                        _dir_size_mb(path),
+                        time.perf_counter() - self._pending_start,
+                    )
+                after_write()
+            except (RuntimeError, ValueError, TypeError, OSError, LookupError) as exc:
+                error = exc
+            _raise_write_error(error)
         if dist.is_initialized():
             dist.barrier()
 
@@ -454,7 +461,11 @@ def _invalidate_distributed_checkpoint(path: Path) -> None:
     error: list[str | None] = [None]
     if is_rank_zero():
         try:
-            (path / ".metadata").unlink(missing_ok=True)
+            if path.is_file():
+                error[0] = f"Checkpoint format mismatch: {path} is a file."
+            else:
+                path.mkdir(parents=True, exist_ok=True)
+                _clear_distributed_checkpoint(path)
         except OSError as exc:
             error[0] = str(exc)
     if dist.is_initialized():
@@ -462,6 +473,15 @@ def _invalidate_distributed_checkpoint(path: Path) -> None:
     message = error[0]
     if message is not None:
         raise OSError(f"Cannot invalidate checkpoint completion marker: {message}")
+
+
+def _clear_distributed_checkpoint(path: Path) -> None:
+    (path / ".metadata").unlink(missing_ok=True)
+    for entry in path.iterdir():
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
 
 
 # A plain file is complete by existence (atomic rename). A DCP directory is complete
@@ -492,8 +512,8 @@ class Checkpointer:
     """The stepped disk engine: save cadence, resume, overwrite-guard, retention.
 
     Driven per training step against a *target* (any ``CheckpointableProtocol``,
-    in practice the ``TrainLoop``) passed to each call -- the checkpointer holds
-    no run state, only its own config + storer. ``maybe_save`` saves on cadence;
+    in practice the ``TrainLoop``) passed to each call. The checkpointer owns
+    cadence, retention and best-metric state. ``maybe_save`` saves on cadence;
     ``save`` forces an end-of-run save; ``load`` resumes (per config) and guards
     against overwriting existing checkpoints; ``close`` drains a final async
     write. The training loop does no disk work itself -- it calls these.
@@ -622,7 +642,9 @@ class Checkpointer:
             raise ValueError(
                 f"checkpoint filename must not contain a directory: {config.filename!r}",
             )
-        self.checkpoint_dir = Path(config.working_dir)
+        if config.base_dir is None and Path(config.working_dir) == Path("/checkpoints"):
+            raise ValueError("Set base_dir or an explicit checkpoint working_dir.")
+        self.checkpoint_dir = validated_output_path(config.working_dir)
         self.filename = config.filename
         self._filename_pattern = re.compile(
             rf"{re.escape(''.join(prefix))}(?P<step> *\d+){re.escape(''.join(suffix))}",
@@ -631,6 +653,8 @@ class Checkpointer:
         self.keep_last_n = config.keep_last_n
         self.keep_every = config.keep_every
         self.resume = config.resume
+        if config.resume_step < -1:
+            raise ValueError("resume_step must be -1 (latest) or a non-negative step.")
         self.resume_step = config.resume_step
         self.allow_checkpoint_overwrite = config.allow_checkpoint_overwrite
         if config.best_mode not in ("max", "min"):
@@ -796,11 +820,28 @@ class Checkpointer:
         self.storage.flush()  # A just-issued async write must be visible to resume.
         inventory = [c for c in self._list() if c.complete]
         resumed_step = self._resume(target, inventory) if self.resume else None
-        if self.resume:
-            self._restore_best_record(inventory)
         if guard and not self.allow_checkpoint_overwrite:
             self._guard_overwrite(inventory, resumed_step, max_steps)
+        if resumed_step is not None:
+            self._restore_best_record([c for c in inventory if c.step <= resumed_step])
+        elif is_rank_zero():
+            (self.checkpoint_dir / "best.json").unlink(missing_ok=True)
+        if is_rank_zero() and self.checkpoint_dir.exists():
+            for entry in self.checkpoint_dir.iterdir():
+                if (
+                    entry.is_file()
+                    and entry.name.endswith(".tmp")
+                    and (
+                        entry.name == "best.json.tmp"
+                        or self._parse_step(entry.name.removesuffix(".tmp")) is not None
+                    )
+                ):
+                    entry.unlink()
         return resumed_step is not None
+
+    def available_steps(self) -> list[int]:
+        """Return ascending steps of all complete checkpoints on disk."""
+        return sorted(c.step for c in self._list() if c.complete)
 
     def close(self) -> None:
         """Finish any pending async write and its retention. Call once at run end.
@@ -810,9 +851,7 @@ class Checkpointer:
         """
         self.storage.flush()
 
-    # ``resume_step>=0`` requires that exact step (raises if absent); ``resume_step<0``
-    # reverse-indexes the complete checkpoints, returning None on an empty dir (start
-    # fresh).
+    # An absent explicit step raises; latest resumes from an empty directory do not.
     def _resume(
         self,
         target: CheckpointableProtocol,
@@ -876,7 +915,7 @@ class Checkpointer:
         """Persist ``best_step``/``best_value`` beside the checkpoints."""
         if not is_rank_zero():
             return
-        path = validated_output_path(self.checkpoint_dir / "best.json")
+        path = self.checkpoint_dir / "best.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "metric": self.best_metric,
@@ -885,7 +924,7 @@ class Checkpointer:
             "value": self.best_value,
         }
         temp_path = path.with_suffix(".json.tmp")
-        temp_path.write_text(json.dumps(payload))
+        temp_path.write_text(json.dumps(to_builtins(payload)))
         temp_path.replace(path)
 
     # A record naming a checkpoint no longer in the inventory protects nothing
@@ -897,17 +936,17 @@ class Checkpointer:
         path = self.checkpoint_dir / "best.json"
         if not path.is_file():
             return
-        record = DictCodec.coerce(loads(path.read_text()), default=None)
+        record = parse(path.read_text(), dict[str, object])
         if (
-            StrCodec.coerce(record.get("metric")) != self.best_metric
-            or StrCodec.coerce(record.get("mode")) != self.best_mode
+            convert(record.get("metric"), str, default="") != self.best_metric
+            or convert(record.get("mode"), str, default="") != self.best_mode
         ):
             return
-        step = IntCodec.coerce(record.get("step"), default=None)
+        step = convert(record.get("step"), int)
         if all(c.step != step for c in inventory):
             return
         self.best_step = step
-        self.best_value = FloatCodec.coerce(record.get("value"), default=None)
+        self.best_value = convert(record.get("value"), float)
         logger.info(
             "Restored best %s=%s at step %d from %s.",
             self.best_metric,
@@ -931,22 +970,12 @@ class Checkpointer:
         after_write: Callable[[], None] | None = None,
     ) -> None:
         """Serialize ``target`` and write it at ``step``; retention rides the write."""
-        path = validated_output_path(self._path(step))
         self.storage.write(
-            path,
+            self._path(step),
             dict(target.state_dict()),
             after_write=self._prune if after_write is None else after_write,
         )
         self._written_steps.add(step)
-
-    def available_steps(self) -> list[int]:
-        """Ascending steps of all complete checkpoints on disk (for diagnostics).
-
-        Returns:
-          result: The list[int].
-
-        """
-        return sorted(c.step for c in self._list() if c.complete)
 
     # A file and a shard dir share this stem.
     def _path(self, step: int) -> Path:
@@ -977,7 +1006,10 @@ class Checkpointer:
     def _parse_step(self, name: str) -> int | None:
         """Decode a checkpoint step from ``name``; None if it does not match."""
         match = self._filename_pattern.fullmatch(name)
-        return int(match.group("step")) if match is not None else None
+        if match is None:
+            return None
+        step = int(match.group("step"))
+        return step if self._path(step).name == name else None
 
     # Runs as ``storage.write``'s ``after_write`` on every rank, so it self-guards to
     # rank 0 (deletion is rank-0 file I/O; no other rank reads an aged-out checkpoint
@@ -1028,3 +1060,26 @@ def _agreed_across_ranks(verdict: bool) -> bool:
     shared = [verdict]
     dist.broadcast_object_list(shared, src=0)
     return shared[0]
+
+
+def _write_plain_checkpoint(path: Path, state_dict: StateDict) -> None:
+    if path.is_dir():
+        raise IsADirectoryError(f"Checkpoint format mismatch: {path} is a directory.")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    try:
+        torch.save(state_dict, temp_path)
+        temp_path.rename(path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
+def _raise_write_error(error: Exception | None) -> None:
+    if dist.is_initialized():
+        errors: list[str | None] = [None] * dist.get_world_size()
+        dist.all_gather_object(errors, None if error is None else str(error))
+        if any(message is not None for message in errors):
+            raise OSError(f"Checkpoint write failed: {errors}") from error
+    elif error is not None:
+        raise error

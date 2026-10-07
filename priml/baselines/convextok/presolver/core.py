@@ -13,6 +13,7 @@ its own file only, so a caller cached before a callee in another file changed
 would keep running the old callee.
 """
 
+from functools import cache
 from typing import TYPE_CHECKING, Final, Protocol, overload
 
 from numpy.typing import NDArray
@@ -248,33 +249,6 @@ _CORE_FIELDS: Final = (
 CORE_T: Final = CoreType(fields=_CORE_FIELDS)
 
 
-class _MatrixHandle(StructRefProxy):
-    """Python handle on a ``MatrixType``."""
-
-
-class _IVecHandle(StructRefProxy):
-    """Python handle on an ``IVecType``."""
-
-
-class _DVecHandle(StructRefProxy):
-    """Python handle on a ``DVecType``."""
-
-
-class _CoreHandle(StructRefProxy):
-    """Python handle on a ``CoreType``."""
-
-
-def _define_proxies() -> None:
-    """Bind each struct type to its Python handle, as Numba's boxing requires."""
-    define_proxy(_MatrixHandle, MatrixType, [name for name, _ in _MATRIX_FIELDS])
-    define_proxy(_IVecHandle, IVecType, ["data", "len"])
-    define_proxy(_DVecHandle, DVecType, ["data", "len"])
-    define_proxy(_CoreHandle, CoreType, [name for name, _ in _CORE_FIELDS])
-
-
-_define_proxies()
-
-
 class _NewStruct(Protocol):
     """``structref.new``, typed per struct type."""
 
@@ -307,7 +281,6 @@ def a_arrays(s: Core) -> tuple[FBuf, IBuf, IBuf, IBuf, int]:
 # ---------------------------------------------------------------------------
 
 
-@njit(cache=True, error_model="numpy")
 def new_core(
     csr: tuple[FBuf, IBuf, IBuf],
     n_cols: int,
@@ -315,50 +288,9 @@ def new_core(
     bounds: tuple[FBuf, FBuf],
     c: FBuf,
 ) -> Core:
-    """Build PSLP's presolver state for a CSR program with row bounds.
-
-    Args:
-      csr: A as (values, column indices, row pointers).
-      n_cols: Columns of A.
-      sides: Row (lower, upper) sides.
-      bounds: Column (lower, upper) bounds.
-      c: Objective coefficients.
-
-    Returns:
-      s: The state, lacking A's transpose until ``attach_transpose``.
-
-    """
-    ax, ai, ap = csr
-    lhs, rhs = sides
-    lbs, ubs = bounds
-    n_rows = ap.size - 1
-    s = _new(CORE_T)
-    s.lhs, s.rhs, s.c = lhs.copy(), rhs.copy(), c.copy()
-    s.offset = 0.0
-    # Every work array is written before it is read, so none needs zeroing.
-    widest = max(n_rows, n_cols)
-    s.iwork_n_rows = np.empty(n_rows, np.int32)
-    s.iwork1 = np.empty(widest, np.int32)
-    s.iwork2 = np.empty(widest, np.int32)
-    s.map_rows = np.empty(n_rows, np.int32)
-    s.map_cols = np.empty(n_cols, np.int32)
-    s.int_vec = _ivec_new(25)
-    s.A = _matrix_new_no_extra_space(ax, ai, ap, n_rows, n_cols)
-    s.m, s.n = n_rows, n_cols
-    s.row_tags = np.empty(n_rows, np.uint8)
-    _new_row_tags(s.lhs, s.rhs, s.row_tags)
-    s.lb, s.ub = lbs.copy(), ubs.copy()
-    s.col_tags = np.empty(n_cols, np.uint8)
-    _new_col_tags(lbs, ubs, s.col_tags)
-    a = s.A
-    s.act_min = np.zeros(n_rows, np.float64)
-    s.act_max = np.zeros(n_rows, np.float64)
-    s.act_n_inf_min = np.zeros(n_rows, np.int32)
-    s.act_n_inf_max = np.zeros(n_rows, np.int32)
-    s.act_status = np.zeros(n_rows, np.uint8)
-    _new_activities(s)
-    s.row_sizes = np.subtract(a.end[:n_rows], a.start[:n_rows]).astype(np.int32)
-    return s
+    """Build PSLP's presolver state after registering its struct proxies."""
+    _define_proxies()
+    return _new_core(csr, n_cols, sides, bounds, c)
 
 
 @njit(cache=True, error_model="numpy")
@@ -3029,3 +2961,73 @@ def _implied_free_from_below(s: Core, aik: float, row: int, col: int) -> bool:
         elif s.act_n_inf_min[row] == 1 and tag & C_UB_INF:
             implied_lb = (s.rhs[row] - _min_act_tags(s, row)) / aik
     return lb - implied_lb <= 0
+
+
+class _MatrixHandle(StructRefProxy):
+    """Python handle on a ``MatrixType``."""
+
+
+class _IVecHandle(StructRefProxy):
+    """Python handle on an ``IVecType``."""
+
+
+class _DVecHandle(StructRefProxy):
+    """Python handle on a ``DVecType``."""
+
+
+class _CoreHandle(StructRefProxy):
+    """Python handle on a ``CoreType``."""
+
+
+@cache
+def _define_proxies() -> None:
+    """Bind struct types to Python handles immediately before creating state."""
+    for proxy, struct_type, fields in (
+        (_MatrixHandle, MatrixType, [name for name, _ in _MATRIX_FIELDS]),
+        (_IVecHandle, IVecType, ["data", "len"]),
+        (_DVecHandle, DVecType, ["data", "len"]),
+        (_CoreHandle, CoreType, [name for name, _ in _CORE_FIELDS]),
+    ):
+        define_proxy(proxy, struct_type, fields)
+
+
+@njit(cache=True, error_model="numpy")
+def _new_core(
+    csr: tuple[FBuf, IBuf, IBuf],
+    n_cols: int,
+    sides: tuple[FBuf, FBuf],
+    bounds: tuple[FBuf, FBuf],
+    c: FBuf,
+) -> Core:
+    """Build PSLP's presolver state for a CSR program with row bounds."""
+    ax, ai, ap = csr
+    lhs, rhs = sides
+    lbs, ubs = bounds
+    n_rows = ap.size - 1
+    s = _new(CORE_T)
+    s.lhs, s.rhs, s.c = lhs.copy(), rhs.copy(), c.copy()
+    s.offset = 0.0
+    # Every work array is written before it is read, so none needs zeroing.
+    widest = max(n_rows, n_cols)
+    s.iwork_n_rows = np.empty(n_rows, np.int32)
+    s.iwork1 = np.empty(widest, np.int32)
+    s.iwork2 = np.empty(widest, np.int32)
+    s.map_rows = np.empty(n_rows, np.int32)
+    s.map_cols = np.empty(n_cols, np.int32)
+    s.int_vec = _ivec_new(25)
+    s.A = _matrix_new_no_extra_space(ax, ai, ap, n_rows, n_cols)
+    s.m, s.n = n_rows, n_cols
+    s.row_tags = np.empty(n_rows, np.uint8)
+    _new_row_tags(s.lhs, s.rhs, s.row_tags)
+    s.lb, s.ub = lbs.copy(), ubs.copy()
+    s.col_tags = np.empty(n_cols, np.uint8)
+    _new_col_tags(lbs, ubs, s.col_tags)
+    a = s.A
+    s.act_min = np.zeros(n_rows, np.float64)
+    s.act_max = np.zeros(n_rows, np.float64)
+    s.act_n_inf_min = np.zeros(n_rows, np.int32)
+    s.act_n_inf_max = np.zeros(n_rows, np.int32)
+    s.act_status = np.zeros(n_rows, np.uint8)
+    _new_activities(s)
+    s.row_sizes = np.subtract(a.end[:n_rows], a.start[:n_rows]).astype(np.int32)
+    return s

@@ -102,7 +102,7 @@ class TarFileHandle:
         """
         self.path = path
         self.use_mmap = use_mmap
-        self.name = str(path)
+        self.name: str | None = str(path)
         self._closed = False
 
         if use_mmap:
@@ -127,7 +127,6 @@ class TarFileHandle:
             self._local = threading.local()
             self._opened = ExitStack()
             self._opened_lock = threading.Lock()
-            self._index = {}
 
     def getmember(self, name: str) -> tarfile.TarInfo:
         """Get member info by name.
@@ -253,7 +252,7 @@ class TarFileHandle:
     # returns None for them, which is what the protocol documents.
     def _build_index(self) -> None:
         """Build a name -> (data_offset, size, TarInfo) index over every member."""
-        with tarfile.open(self.path, "r") as tar:
+        with tarfile.open(self.path) as tar:
             for member in tar.getmembers():
                 self._index[member.name] = (
                     member.offset_data,
@@ -279,7 +278,7 @@ class TarFileHandle:
             # the handle otherwise), while anything that raises before the
             # transfer completes must still close it.
             with ExitStack() as stack:
-                opened = stack.enter_context(tarfile.open(self.path, "r"))
+                opened = stack.enter_context(tarfile.open(self.path))
                 with self._opened_lock:
                     self._opened.push(stack.pop_all())
             self._local.tarfile = opened
@@ -309,7 +308,7 @@ def _reject_compressed(
 ) -> None:
     """Raise when ``path`` starts with a compressed container's magic bytes."""
     with path.open("rb") as probe:
-        head = probe.read(8)
+        head = probe.read(max(len(prefix) for prefix in magic))
     if any(head.startswith(prefix) for prefix in magic):
         raise ValueError(
             f"{path} is a compressed archive; mmap mode reads members by "

@@ -10,14 +10,18 @@ ladder stays checkable on any machine.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, Self, cast
-
-from configgle.pprinting import pformat
 
 import pytest
 
 from priml.baselines.sudoku import experiments
+from priml.baselines.sudoku.act import (
+    HaltTraining,
+    LearnedStart,
+    SampledMinimum,
+    StreamingPool,
+    ZeroStart,
+)
 from priml.baselines.sudoku.embedding import (
     FactoredPositions,
     GridEmbedding,
@@ -31,9 +35,13 @@ from priml.baselines.sudoku.eval import (
 )
 from priml.baselines.sudoku.trainer import Trainer
 from priml.baselines.sudoku.trm import recipe_block
-from priml.model.attention.self_attention import SelfAttention
+from priml.model.attention.attention import Attention
+from priml.model.init import kaiming_uniform
 from priml.model.mlpmixer import MLPMixerBlock
+from priml.model.norm import RMSNorm
+from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
+from priml.testing.golden import assert_pprint_golden
 
 
 if TYPE_CHECKING:
@@ -44,14 +52,12 @@ if TYPE_CHECKING:
     from priml.baselines.sudoku.experiments import SudokuTrainLoop
 
 
-_CWD: Final = Path(__file__).resolve().parent
-
-
 LADDER: Final[list[tuple[str, Callable[[], SudokuTrainLoop]]]] = [
     ("exp000", experiments.exp000),
     ("exp001", experiments.exp001),
     ("exp002", experiments.exp002),
     ("exp003", experiments.exp003),
+    ("exp015", experiments.exp015),
     ("exp_smoke", experiments.exp_smoke),
 ]
 
@@ -117,7 +123,7 @@ def test_exp001_changes_only_the_block() -> None:
     assert isinstance(base.step.model.block, TransformerBlock.Config)
     assert isinstance(fork.step.model.block, MLPMixerBlock.Config)
     assert fork.step.model.recurrence is base.step.model.recurrence is None
-    assert fork.step.act is base.step.act is None
+    assert fork.step.pool is base.step.pool is None
     assert fork.max_steps == base.max_steps
 
 
@@ -131,7 +137,7 @@ def test_exp002_adds_recurrence_and_its_feedback_channel() -> None:
     base, fork = experiments.exp000(), experiments.exp002()
     assert base.step.model.recurrence is None
     assert fork.step.model.recurrence is not None
-    assert fork.step.act is not None
+    assert fork.step.pool is not None
     assert type(fork.step.model.block) is type(base.step.model.block)
 
     base_embedding = base.step.model.embedding
@@ -145,18 +151,88 @@ def test_exp002_adds_recurrence_and_its_feedback_channel() -> None:
     ]
 
 
+@pytest.mark.parametrize("factory", [experiments.exp002, experiments.exp003])
+def test_the_recurrent_rungs_replay_as_trained(
+    factory: Callable[[], SudokuTrainLoop],
+) -> None:
+    """They trained with no fed-back grid and zero-seeded slots; keep it so."""
+    pool = factory().step.pool
+    assert pool is not None
+    assert pool.feedback is None
+    assert isinstance(pool.start, ZeroStart.Config)
+
+
+def test_exp002_pool_uses_its_trained_halting_and_batch_settings() -> None:
+    pool = experiments.exp002().step.pool
+    assert pool is not None
+    assert pool.batch_size == experiments.exp002().dataset.batch_size
+    assert pool.max_steps == 32
+    assert isinstance(pool.halting, HaltTraining.Config)
+    assert isinstance(pool.halting.exploration, SampledMinimum.Config)
+
+
+def test_exp015_changes_only_the_pool() -> None:
+    """Feedback and the learned start move together; nothing else does."""
+    base, fork = experiments.exp002(), experiments.exp015()
+    assert base.step.pool is not None
+    assert fork.step.pool is not None
+    assert fork.step.pool.feedback is not None
+    assert isinstance(fork.step.pool.start, LearnedStart.Config)
+    fork.step.pool.feedback = base.step.pool.feedback
+    fork.step.pool.start = base.step.pool.start
+    fork.experiment_name = base.experiment_name
+    assert fork.pformat() == base.pformat()
+
+
+def test_exp015_rejects_a_parent_without_an_atomic_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = experiments.exp002()
+    non_atomic_pool = StreamingPool.Config()
+    config.step.pool = non_atomic_pool
+    monkeypatch.setattr(experiments, "exp002", lambda: config)
+
+    with pytest.raises(TypeError) as error:
+        experiments.exp015()
+    assert str(error.value) == (
+        f"exp002's pool is atomic; got {type(non_atomic_pool)}."
+    )
+
+
+def test_the_clue_range_follows_the_vocabulary() -> None:
+    """Clues are every digit token, so a resized vocabulary moves the range."""
+    config = experiments.exp015()
+    config.dataset.spec.vocab_size = 6
+    finalized = config.copy_tree().finalize()
+    assert finalized.step.pool is not None
+    assert finalized.step.pool.feedback is not None
+    assert finalized.step.pool.feedback.givens == (2, 5)
+
+
 def test_exp003_is_exp002_with_the_other_block() -> None:
     base, fork = experiments.exp002(), experiments.exp003()
     assert isinstance(fork.step.model.block, MLPMixerBlock.Config)
-    assert fork.step.act is not None
-    assert base.step.act is not None
-    assert fork.step.act.max_steps == base.step.act.max_steps
+    assert fork.step.pool is not None
+    assert base.step.pool is not None
+    assert fork.step.pool.max_steps == base.step.pool.max_steps
+
+
+def test_mixer_block_pins_both_mixing_paths() -> None:
+    block = experiments._mixer_block()
+    assert block.seq_len == -1
+    assert block.prenorm is False
+    assert isinstance(block.token_mixer, SwiGLU.Config)
+    assert isinstance(block.channel_mixer, SwiGLU.Config)
+    for mixer in (block.token_mixer, block.channel_mixer):
+        assert isinstance(mixer.norm, RMSNorm.Config)
+        assert mixer.init_weight is kaiming_uniform
+        assert mixer.init_weight_out is kaiming_uniform
 
 
 def test_the_pool_is_built_to_the_models_shape() -> None:
     """A pool sized independently of the model would fail only at runtime."""
     config = experiments.exp002().copy_tree().finalize()
-    act = config.step.act
+    act = config.step.pool
     model = config.step.model
     assert act is not None
     assert act.grid_len == model.grid_len
@@ -179,31 +255,21 @@ def test_smoke_is_small_on_every_costly_axis() -> None:
     assert smoke.step.model.num_layers <= base.step.model.num_layers
     assert smoke.dataset.batch_size < base.dataset.batch_size
     assert smoke.dataset.num_train_puzzles is not None
+    assert (
+        smoke.step.model.channels_in,
+        smoke.step.model.num_layers,
+        smoke.dataset.batch_size,
+        smoke.dataset.num_train_puzzles,
+        smoke.dataset.num_eval_puzzles,
+        smoke.max_steps,
+        smoke.step.total_train_steps,
+        smoke.num_steps_eval,
+    ) == (32, 1, 8, 4, 4, 4, 4, 2)
 
 
-def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> None:
-    """Pin the WHOLE finalized ``exp000`` as readable text.
-
-    ``exp000`` is the control every fork is measured against, so a change to
-    it invalidates published numbers. A digest would say only that something
-    moved; this golden says WHICH field, from what, to what.
-    ``hide_default_values=False`` so a field that changes only because a
-    library default changed still shows up here.
-
-    Refresh with ``--golden-overwrite`` after reading the diff.
-    """
-    golden = _CWD / "testdata" / "exp000.txt"
-    rendered = pformat(
-        experiments.exp000().copy_tree().finalize(),
-        hide_default_values=False,
-    )
-    if request.config.getoption("--golden-overwrite", default=False):
-        golden.parent.mkdir(parents=True, exist_ok=True)
-        _ = golden.write_text(rendered + "\n", encoding="utf-8")
-    assert golden.read_text(encoding="utf-8") == rendered + "\n", (
-        "exp000 changed; read the diff, then rerun with --golden-overwrite "
-        "if the change is intended."
-    )
+def test_exp000_matches_its_golden_config() -> None:
+    """Pin the WHOLE finalized ``exp000``: the control every fork is measured against."""
+    assert_pprint_golden(test_file=__file__, name="exp000", config=experiments.exp000())
 
 
 TRM_LADDER: Final = (
@@ -308,6 +374,15 @@ def test_exp006_adds_only_qk_norm_and_the_convergence_horizon() -> None:
     )
 
 
+def test_exp006_pins_its_convergence_horizon() -> None:
+    config = experiments.exp006()
+    assert (config.max_steps, config.total_train_steps, config.num_steps_eval) == (
+        12_000,
+        12_000,
+        500,
+    )
+
+
 def test_exp007_adds_only_the_consolidated_recipe_stack() -> None:
     assert_rung_delta(
         experiments.exp006(),
@@ -376,7 +451,7 @@ def test_exp004_mirrors_the_annealed_baseline() -> None:
     assert (cfg.model.slow_cycles, cfg.model.fast_cycles) == (3, 4)
     assert cfg.model.block is not None
     attn = cfg.model.block.attn
-    assert isinstance(attn, SelfAttention.Config)
+    assert isinstance(attn, Attention.Config)
     assert attn.norm_qk is None
     assert cfg.dataset.augment_digits_only is False
 
@@ -435,6 +510,25 @@ def test_exp013_full_evaluation_locks_with_its_own_committee() -> None:
     assert acceptor.checkpoint_paths == tuple(
         f"/runs/exp013_verifier_s{seed}/checkpoints/step_00004000.pt"
         for seed in range(3)
+    )
+
+
+def test_evaluation_forks_pin_their_run_identity_and_seeds() -> None:
+    exp012 = experiments.exp012()
+    exp013 = experiments.exp013()
+    exp014 = experiments.exp014()
+    assert (exp012.study_name, exp012.generator_names) == (
+        "sudoku",
+        ("exp012_generator",),
+    )
+    assert (exp013.study_name, exp013.generator_names) == (
+        "sudoku",
+        ("exp013_generator",),
+    )
+    assert (exp014.screen, exp014.trigger, exp014.generator_seeds) == (
+        "single_view",
+        "final_only",
+        (44, 45, 46),
     )
 
 

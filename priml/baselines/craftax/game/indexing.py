@@ -178,7 +178,13 @@ def _clamped(positions: Tensor, height: int, width: int) -> tuple[Tensor, Tensor
 def _inside(positions: Tensor, height: int, width: int) -> Tensor:
     """Return whether each position addresses a tile once negatives wrap."""
     low, _, extent = _bounds(height, width, positions.device)
-    return ((positions >= low) & (positions < extent)).all(-1)
+    rows, columns = positions[..., 0], positions[..., 1]
+    return (
+        (rows >= low[0])
+        & (rows < extent[0])
+        & (columns >= low[1])
+        & (columns < extent[1])
+    )
 
 
 @functools.cache

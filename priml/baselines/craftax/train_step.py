@@ -38,7 +38,7 @@ from priml.baselines.craftax.evaluation import (
 from priml.baselines.craftax.game.constants import Action
 from priml.baselines.craftax.game.observation import observation_size
 from priml.baselines.craftax.model import ActorCritic
-from priml.lib.custom_json import ListCodec
+from priml.lib.custom_json import convert
 from priml.loss.policy_gradient import (
     ClippedPolicyLoss,
     categorical_entropy,
@@ -609,9 +609,9 @@ class CraftaxTrainStep(TrainStep):
     def _optimize(self, rate: float) -> dict[str, float | Tensor]:
         """Take every configured pass over the rollout and report the last one."""
         self._update_procedure()
-        policy, value, entropy, approx_kl, clip_fraction, grad_norm = ListCodec.coerce(
+        policy, value, entropy, approx_kl, clip_fraction, grad_norm = convert(
             self._update_scalars.tolist(),
-            float,
+            list[float],
         )
         return {
             "policy_loss": policy,
@@ -696,10 +696,10 @@ class CraftaxTrainStep(TrainStep):
         self._episode_length = self._episode_length + 1
         if bool(done.any()):
             self._finished_returns.extend(
-                ListCodec.coerce(self._episode_return[done].tolist(), float),
+                convert(self._episode_return[done].tolist(), list[float]),
             )
             self._finished_lengths.extend(
-                ListCodec.coerce(self._episode_length[done].tolist(), int),
+                convert(self._episode_length[done].tolist(), list[int]),
             )
             self._episode_return = self._episode_return * ~done
             self._episode_length = self._episode_length * ~done

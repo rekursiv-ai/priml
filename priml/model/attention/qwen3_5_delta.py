@@ -7,9 +7,9 @@ import math
 
 from configgle import Fig, Makeable, Makes
 from torch import Tensor, nn
+from torch.nn import functional
 
 import torch
-import torch.nn.functional
 
 from priml.cost import (
     Cost,
@@ -20,7 +20,7 @@ from priml.math.gated_delta_rule import (
     recurrent_gated_delta_rule,
 )
 from priml.model.attention.gated_delta_net import GatedDeltaNet
-from priml.model.custom_types import TensorModule
+from priml.model.custom_types import LayerCache, TensorModule
 from priml.model.init import InitFn
 from priml.model.norm import RMSNorm
 
@@ -112,13 +112,13 @@ class Qwen35RMSNormGated(nn.Module):
         """
         del kwargs
         dtype = x.dtype
-        x = torch.nn.functional.rms_norm(
+        x = functional.rms_norm(
             x.float(),
             self.weight.shape,
             eps=self.eps,
         )
         x = self.weight * x.to(dtype)
-        return (x * torch.nn.functional.silu(gate.float())).to(dtype)
+        return (x * functional.silu(gate.float())).to(dtype)
 
 
 def _init_decay(weight: Tensor) -> None:
@@ -147,6 +147,10 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
             del rows, dtype
             return Cost()
 
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.depth_index = config.depth_index
+
     @override
     def forward(self, x: Tensor, **kwargs: object) -> Tensor:
         """Apply delta attention, updating caller-owned cache tensors when present.
@@ -161,7 +165,12 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
           output: Hidden states with the same shape as x.
 
         """
-        cache = _validated_cache(kwargs.get("cache"))
+        layer_cache = kwargs.get("cache")
+        if layer_cache is not None:
+            assert isinstance(layer_cache, LayerCache)
+            cache = _validated_cache(layer_cache[self.depth_index])
+        else:
+            cache = None
         attention_mask = kwargs.get("attention_mask")
         if attention_mask is not None and not isinstance(attention_mask, Tensor):
             raise TypeError("attention_mask must be a Tensor or None.")
@@ -189,7 +198,7 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
         query = query.reshape(batch, sequence, -1, self.channels_k_head)
         key = key.reshape(batch, sequence, -1, self.channels_k_head)
         value = value.reshape(batch, sequence, -1, self.channels_v_head)
-        g = -self.A_log.float().exp() * torch.nn.functional.softplus(
+        g = -self.A_log.float().exp() * functional.softplus(
             a.float() + self.dt_bias,
         )
         repeats = self.num_heads_v // self.num_heads_k
@@ -252,27 +261,6 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
         del batch, max_seq, device, dtype
         return {}
 
-    def forward_cached(
-        self,
-        x: Tensor,
-        *,
-        cache: dict[str, Tensor],
-        **kwargs: object,
-    ) -> tuple[Tensor, dict[str, Tensor]]:
-        """Apply a cached chunk and return the same cache object.
-
-        Args:
-          x: Hidden states shaped ``[..., sequence, channels]``.
-          cache: Mutable delta cache updated in place.
-          **kwargs: Messages forwarded to delta attention.
-
-        Returns:
-          output: Hidden states with x's shape.
-          cache: The updated input cache.
-
-        """
-        return self.forward(x, cache=cache, **kwargs), cache
-
     def _validate_cache_state(
         self,
         cache: dict[str, Tensor] | None,
@@ -318,9 +306,9 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
                 if sequence == 1:
                     padding = 0
             elif sequence < kernel_size:
-                qkv = torch.nn.functional.pad(qkv, (kernel_size - sequence, 0))
+                qkv = functional.pad(qkv, (kernel_size - sequence, 0))
             cache["conv_state"] = qkv[..., -kernel_size:].clone()
-        output = torch.nn.functional.conv1d(
+        output = functional.conv1d(
             qkv.to(self.conv1d.weight.dtype),
             weight=self.conv1d.weight,
             bias=self.conv1d.bias,
@@ -333,7 +321,7 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
             # SiLU selects different CPU vector kernels for the extra context.
             # Decode must slice first to reproduce the reference rounding.
             output = output[..., -sequence:]
-        return torch.nn.functional.silu(output)[..., -sequence:].to(qkv.dtype)
+        return functional.silu(output)[..., -sequence:].to(qkv.dtype)
 
 
 def _validated_cache(value: object) -> dict[str, Tensor] | None:

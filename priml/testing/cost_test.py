@@ -10,6 +10,7 @@ from configgle import Makes
 import pytest
 import torch
 
+from priml.model.conv import Conv2d
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
@@ -94,6 +95,17 @@ def test_matmul_bytes_are_checked_against_dispatched_operands() -> None:
         dtype=None,
     )
     assert analytical["bytes", "matmul"].sum() == 4 * 3 * (4 * 8 + 4 * 16 + 8 * 16)
+
+
+def test_a_convolution_matches_torch_exactly() -> None:
+    """The convolution backward FLOP adapter agrees with torch."""
+    assert_cost_matches_torch(
+        Conv2d.Config(3, 2, kernel_size=2, padding="valid"),
+        build_input=lambda: torch.randn(2, 3, 4, 5, requires_grad=True),
+        input_grid=(4, 5),
+        batch_size=2,
+        dtype=None,
+    )
 
 
 def test_measured_traffic_is_reported_per_silo() -> None:

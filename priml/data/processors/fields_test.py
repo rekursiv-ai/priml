@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 
 from priml.data.processors.fields import (
     CopyField,
@@ -10,6 +15,17 @@ from priml.data.processors.fields import (
     FieldSetValues,
     Inline,
 )
+
+
+@runtime_checkable
+class _StringObjectMap(Protocol):
+    def __iter__(self) -> Iterator[str]: ...
+    def __getitem__(self, key: str) -> object: ...
+
+
+@runtime_checkable
+class _ObjectSequence(Protocol):
+    def __iter__(self) -> Iterator[object]: ...
 
 
 # ============================================================================
@@ -256,6 +272,28 @@ def test_field_rename_keys_overwrite_existing():
     assert results[0]["target"] == "new_value"
 
 
+def test_field_rename_keys_glob_is_skipped_wherever_it_appears():
+    remapper = FieldRenameKeys.Config(
+        mappings={"*": None, "keep": "renamed"},
+    ).make()
+
+    sample: dict[str, object] = {"keep": "value", "drop": "other"}
+    result = next(remapper(iter([sample])))
+
+    assert result == {"renamed": "value"}
+
+
+def test_field_rename_keys_glob_is_not_a_literal_source():
+    remapper = FieldRenameKeys.Config(
+        mappings={"*": "wildcard", "keep": "renamed"},
+    ).make()
+
+    sample: FieldRenameKeys.Input = {"*": "literal", "keep": "value"}
+    result = next(remapper(iter([sample])))
+
+    assert result == {"renamed": "value"}
+
+
 def test_field_rename_keys_glob_delete_all_unmapped():
     """Test using '*': None to delete all unmapped fields."""
     remapper = FieldRenameKeys.Config(
@@ -487,8 +525,8 @@ def test_inline_whole_sample():
     """Test Inline with no field_name (transforms whole sample)."""
 
     def add_field(sample: object) -> object:
-        assert isinstance(sample, dict)
-        sample_dict = cast(dict[str, object], sample)
+        assert isinstance(sample, _StringObjectMap)
+        sample_dict = {key: sample[key] for key in sample}
         result = dict[str, object](sample_dict)
         value: object = sample_dict.get("value", 0)
         assert isinstance(value, int)
@@ -583,9 +621,9 @@ def test_inline_field_complex_type():
     """Test Inline transforming complex field types."""
 
     def append_to_list(lst: object) -> object:
-        assert isinstance(lst, list)
+        assert isinstance(lst, _ObjectSequence)
         values: list[int] = []
-        for value in cast(list[object], lst):
+        for value in lst:
             assert isinstance(value, int)
             values.append(value)
         return [*values, 999]

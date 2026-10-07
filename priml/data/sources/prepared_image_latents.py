@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypedDict, cast
+
+import math
 
 import numpy as np
 
-from priml.lib.custom_json import DictCodec, IntCodec, ListCodec, StrCodec, loads
+from priml.lib.custom_json import parse
 
 
 if TYPE_CHECKING:
@@ -30,15 +32,8 @@ def read_labels(manifest: Path) -> dict[str, int]:
       labels: Class labels keyed by normalized latent names.
 
     """
-    payload = DictCodec.coerce(loads(manifest.read_text(encoding="utf-8")))
-    entries = [ListCodec.coerce(entry) for entry in ListCodec.coerce(payload["labels"])]
-    return {
-        StrCodec.coerce(entry[0]).replace("\\", "/"): IntCodec.coerce(
-            entry[1],
-            default=None,
-        )
-        for entry in entries
-    }
+    payload = parse(manifest.read_bytes(), _LabelManifest)
+    return {name.replace("\\", "/"): label for name, label in payload["labels"]}
 
 
 def read_image(path: Path) -> NDArray[np.uint8]:
@@ -53,8 +48,16 @@ def read_image(path: Path) -> NDArray[np.uint8]:
     """
     if path.suffix.lower() == ".npy":
         array = cast("NDArray[np.uint8]", np.load(path))
+        if array.dtype != np.uint8 or array.ndim < 3:
+            raise ValueError(
+                f"Stored image {path} must be uint8 with at least three dimensions.",
+            )
         shape = cast("tuple[int, ...]", array.shape)
-        return array.reshape(-1, *shape[-2:])
+        return array.reshape(math.prod(shape[:-2]), *shape[-2:])
     with Image.open(path) as handle:
         array = np.asarray(handle.convert("RGB"))
     return array.transpose(2, 0, 1)
+
+
+class _LabelManifest(TypedDict):
+    labels: list[tuple[str, int]]

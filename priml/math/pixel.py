@@ -39,7 +39,7 @@ def rgb2float(
     ``unit_interval=True`` to `x.to(float).div(255)`.
 
     Args:
-      x: RGB values in [0, 255]. objectthing ``convert_to_tensor`` accepts, but
+      x: RGB values in [0, 255]. Anything ``convert_to_tensor`` accepts, but
         the RESULT must be floating point: a uint8 tensor -- what a decoder
         emits -- needs ``float_dtype``, since choosing a width for it is a
         memory-versus-precision call this function will not make silently.
@@ -133,7 +133,7 @@ def float2rgb(
     `x.mul(255).round().clamp(0, 255).to(uint8)`.
 
     Args:
-      x: Floats in [-1, 1], or [0, 1] when ``unit_interval`` is set. objectthing
+      x: Floats in [-1, 1], or [0, 1] when ``unit_interval`` is set. Anything
         ``convert_to_tensor`` accepts -- a list or array is materialized here,
         and the resulting private buffer is scaled in place whatever
         ``inplace`` says. Out-of-range values are clamped.
@@ -194,6 +194,11 @@ def float2rgb(
             "Pass float_dtype=, e.g. float2rgb(x, float_dtype=torch.float16).",
         )
 
+    if inplace and x_.requires_grad and x_.is_leaf:
+        raise ValueError(
+            "float2rgb cannot scale in place: x is a leaf requiring grad. "
+            "Pass inplace=False, or detach the tensor first.",
+        )
     # A buffer we minted is nobody else's, so it is scaled in place regardless
     # of what the caller asked.
     inplace = inplace or is_private_conversion(x_, x)
@@ -340,10 +345,6 @@ def compute_video_shapes(
         # for a 90-frame clip. ``pixel_train`` is the stride-aligned answer.
         pixel_full=VideoShape(f, h, w),
     )
-    if any(s <= 0 for s in result.latent):
-        raise ValueError(f"Invalid latent shape {result.latent}.")
-    if any(s <= 0 for s in result.pixel_train):
-        raise ValueError(f"Invalid training pixel shape {result.pixel_train}.")
     if any(s <= 0 for s in result.pixel_full):
         raise ValueError(f"Invalid inference pixel shape {result.pixel_full}.")
 
@@ -363,7 +364,7 @@ def reconstruction_diffs(x: Tensor, y: Tensor, amplification: float = 3) -> Tens
 
     """
     x, y = convert_to_tensor(x, y, dtype=torch.float32)
-    return torch.clamp(amplification * abs(x - y), 0, 255).type(torch.uint8)
+    return torch.clamp(amplification * abs(x - y), min=0, max=255).type(torch.uint8)
 
 
 def patchify(x: Tensorable, patch_size: Iterable[int]) -> Tensor:
@@ -399,13 +400,13 @@ def patchify(x: Tensorable, patch_size: Iterable[int]) -> Tensor:
     # Checked here rather than left to the reshape below: `d // p` discards the
     # remainder, so a ragged dimension fails inside torch with a message naming
     # neither the axis nor the patch size.
-    if any(d % p for d, p in zip(spatial, patch_size, strict=True)):
+    if any(spatial[i] % patch_size[i] for i in range(rank)):
         raise ValueError(
             f"spatial dims {spatial} must each be divisible by {patch_size=}.",
         )
     batch = x.shape[: -rank - 1]
     interleaved = (
-        (d // p, p) for d, p in zip(x.shape[-rank:], patch_size, strict=True)
+        (x.shape[-rank + i] // patch_size[i], patch_size[i]) for i in range(rank)
     )
     interleaved = (v for pair in interleaved for v in pair)
     out = x.reshape(*batch, -1, *interleaved)
@@ -463,12 +464,8 @@ def unpatchify(x: Tensorable, patch_size: Iterable[int]) -> Tensor:
     ]
     out = torch.permute(out, dims=tuple(axis_order))
     restored_dims = (
-        a * b
-        for a, b in zip(
-            out.shape[-2 * rank :: 2],
-            out.shape[-2 * rank + 1 :: 2],
-            strict=True,
-        )
+        out.shape[-2 * rank + 2 * i] * out.shape[-2 * rank + 2 * i + 1]
+        for i in range(rank)
     )
     return out.reshape(*out.shape[: -2 * rank], *restored_dims)
 
@@ -535,6 +532,10 @@ def interpolate(
 
     """
     x = convert_to_tensor(input_)
+    if rank is None and (
+        isinstance(size, int) or isinstance(scale_factor, (int, float))
+    ):
+        rank = x.ndim - 2
     output_rank, mode_, size_, sf_, ac_, rank_ = _process_interpolate_args(
         mode,
         size,
@@ -548,14 +549,11 @@ def interpolate(
     if channels_last:
         x = x.moveaxis(-1, -rank_ - 1)
 
-    if rank_ < output_rank:
-        # Fewer input spatial dims than requested: insert unit axes to lift rank.
-        x = x.reshape(
-            *x.shape[:-rank_],
-            *(1,) * (output_rank - rank_),
-            *x.shape[-rank_:],
-        )
-    elif rank_ > output_rank:
+    # Fewer input spatial dims than requested: insert unit axes to lift rank.
+    insertion_axis = -rank_ - 1 if rank_ else 0
+    for _ in range(max(output_rank - rank_, 0)):
+        x = x.unsqueeze(insertion_axis)
+    if rank_ > output_rank:
         # More input spatial dims than requested: fold the extras via axis reorder.
         x = torch.permute(
             x,
@@ -582,10 +580,10 @@ def interpolate(
         if not size_:
             # Reachable only with a scale factor: the check above already
             # raised when neither was given.
-            if sf_ is None:
-                raise ValueError("Expected sf_ is not None.")
             shape_slice: Sequence[int] = list(x.shape[-rank_:])
-            size_ = tuple(int(o * s) for o, s in zip(shape_slice, sf_, strict=True))
+            size_ = tuple(
+                int(o * s) for o, s in zip(shape_slice, sf_ or (), strict=True)
+            )
         # Dispatched on the LENGTH of the size tuple, which is what each
         # callee's signature names. Selecting the function by ``rank_`` and
         # passing ``size_`` separately let the two disagree, which the
@@ -654,8 +652,8 @@ def decode_jpeg_turbojpeg(
     Args:
       image_bytes: JPEG bytes.
       turbo_jpeg: TurboJPEG decoder instance.
-      height: Requested height (None means decode full size).
-      width: Requested width (None means decode full size).
+      height: Original image height.
+      width: Original image width.
       crop: Crop box (h, w) or (top, left, bottom, right) in pixels.
       channels_first: True → (C, H, W), False → (H, W, C).
       min_height: Floor a scaled crop decode may shrink the region to.
@@ -691,8 +689,8 @@ def decode_webp_libwebp(
 
     Args:
       image_bytes: WebP bytes.
-      height: Requested height (None means decode full size).
-      width: Requested width (None means decode full size).
+      height: Original image height.
+      width: Original image width.
       crop: Crop box (h, w) or (top, left, bottom, right) in pixels.
       channels_first: True → (C, H, W), False → (H, W, C).
 
@@ -719,8 +717,8 @@ def decode_image_pil(
 
     Args:
       image_bytes: Image bytes (any PIL-supported format).
-      height: Requested height (None means decode full size).
-      width: Requested width (None means decode full size).
+      height: Original image height.
+      width: Original image width.
       crop: Crop box (h, w) or (top, left, bottom, right) in pixels.
       channels_format: "rgb" or "rgba" (3 or 4 channels).
       channels_first: True → (C, H, W), False → (H, W, C).
@@ -736,7 +734,7 @@ def decode_image_pil(
 
 
 def _process_interpolate_args(
-    mode: InterpolateMode = "nearest",
+    mode: InterpolateMode,
     size: int | Sequence[int] = (),
     scale_factor: float | Sequence[int | float] = (),
     align_corners: bool = False,

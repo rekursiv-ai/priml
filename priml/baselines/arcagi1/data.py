@@ -4,16 +4,22 @@ The prepared dataset is a three-level hierarchy, which is what makes ARC
 different from a flat dataset::
 
     group  -- one ARC task (a rule)
-      puzzle -- one held-out input for that task
-        example -- one augmented view of that puzzle
+      puzzle -- one augmented VIEW of that task: a color/dihedral transform,
+                plus, in a spatial-eval test split, a spatial one
+        example -- one input/output pair of that view
+
+A view's examples are the task's pairs under one transform: its demonstration
+pairs in ``train``, its held-out test pairs in ``test``. So in the test split
+every test input of a view shares that view's puzzle id; a metric scoring per
+test input must key on the canonical input, not on the id.
 
 On disk::
 
     all__inputs.npy             [n_examples, 900] input tokens
     all__labels.npy             [n_examples, 900] target tokens
-    all__puzzle_indices.npy     [n_puzzles + 1]   example offsets per puzzle
-    all__group_indices.npy      [n_groups + 1]    puzzle offsets per task
-    all__puzzle_identifiers.npy [n_puzzles]       per-puzzle task id
+    all__puzzle_indices.npy     [n_puzzles + 1]   example offsets per view
+    all__group_indices.npy      [n_groups + 1]    view offsets per task
+    all__puzzle_identifiers.npy [n_puzzles]       per-view identifier
     all__spatial_tags.npy       [n_puzzles, 3]    scale and offsets, if spatial
     dataset.json                shape and vocabulary metadata
 
@@ -22,9 +28,9 @@ colors. Grids are padded to 30x30 because ARC grids vary in size and the model
 needs one shape.
 
 Training samples by TASK, not by row: each batch draws a random task, then a
-random puzzle from it, then random augmented views of that puzzle. Sampling
-rows uniformly instead would over-weight tasks that happen to have more
-puzzles, and the benchmark weights every task equally.
+random view of it, then that view's pairs in random order. Sampling rows
+uniformly instead would over-weight tasks that happen to have more views or
+pairs, and the benchmark weights every task equally.
 
 ``scripts/prepare_data.py`` builds the arrays; this module only reads them, so
 constructing a config never touches the network.
@@ -34,7 +40,16 @@ from __future__ import annotations
 
 from dataclasses import field
 from pathlib import Path
-from typing import TYPE_CHECKING, NotRequired, Self, TypedDict, cast, override
+from typing import (
+    TYPE_CHECKING,
+    NotRequired,
+    Protocol,
+    Self,
+    SupportsInt,
+    TypedDict,
+    cast,
+    override,
+)
 
 import itertools
 import logging
@@ -49,7 +64,7 @@ import torch.distributed as dist
 
 from priml.baselines.arcagi1.augmentation import ArcAugmentation, ArcSpec
 from priml.baselines.arcagi1.scripts.build_dataset import ensure_arc_dataset
-from priml.lib.custom_json import DictCodec, IntCodec, ListCodec, loads
+from priml.lib.custom_json import convert, parse
 from priml.math.basic import ceil_div
 from priml.math.seed import salt
 from priml.paths import resolve_working_dir
@@ -62,6 +77,18 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+class _SamplingRng(Protocol):
+    def integers(self, low: int, high: int) -> SupportsInt: ...
+
+    def choice(
+        self,
+        a: int,
+        size: int,
+        *,
+        replace: bool,
+    ) -> NDArray[np.int64]: ...
 
 
 class _Split(TypedDict):
@@ -81,7 +108,7 @@ class _ArcBatches:
         self,
         *,
         dataset_dir: Path,
-        device: torch.device | str,
+        device: torch.device | str | None,
         batch_size: int,
         split: str,
         sample_by_task: bool,
@@ -98,13 +125,8 @@ class _ArcBatches:
         puzzles = data["puzzle_indices"]
         if num_tasks is not None and num_tasks < len(groups) - 1:
             groups = groups[: num_tasks + 1]
-            puzzles = puzzles[
-                : int(groups[-1])  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
-                + 1
-            ]
-            rows = int(
-                puzzles[-1],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
-            )
+            puzzles = puzzles[: _last(groups) + 1]
+            rows = _last(puzzles)
         else:
             rows = len(data["inputs"])
 
@@ -122,6 +144,8 @@ class _ArcBatches:
         ).to(self.device)
         self.groups: NDArray[np.int64] = groups
         self.puzzles: NDArray[np.int64] = puzzles
+        self._group_bounds = _int_list(groups)
+        self._puzzle_bounds = _int_list(puzzles)
         self.identifiers: NDArray[np.int64] = data["puzzle_identifiers"][
             : len(puzzles) - 1
         ]
@@ -152,12 +176,7 @@ class _ArcBatches:
     def __len__(self) -> int:
         """Return the batches in the active or next pass."""
         if not self.sample_by_task:
-            return ceil_div(
-                int(
-                    self.puzzles[-1],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
-                ),
-                self.global_batch_size,
-            )
+            return ceil_div(_last(self.puzzles), self.global_batch_size)
         pass_index = self.passes if self._active_pass is None else self._active_pass
         return sum(1 for _ in self._plan_sampled(pass_index))
 
@@ -193,9 +212,9 @@ class _ArcBatches:
         self._active_pass = state.get("active_pass")
         self._next_batch = state.get("next_batch", 0)
 
-    # Each batch walks a shuffled task order, taking one random puzzle per task and as
-    # many of its augmented views as still fit. A short final batch is dropped: it would
-    # be a partial task rather than a partial epoch.
+    # Each batch walks a shuffled task order, taking one random view per task and as
+    # many of its pairs as still fit. A short final batch is dropped: it would be a
+    # partial task rather than a partial epoch.
     def _iter_sampled(self) -> Iterator[dict[str, object]]:
         """Draw whole tasks, so every task carries the same weight."""
         if self._active_pass is None:
@@ -226,37 +245,28 @@ class _ArcBatches:
         rng = np.random.Generator(
             np.random.Philox(seed=salt("arcagi1_task_sampling", self.seed, pass_index)),
         )
-        order = np.concatenate(
-            [rng.permutation(self.num_tasks) for _ in range(self.epochs_per_iter)],
+        order = _int_list(
+            np.concatenate(
+                [rng.permutation(self.num_tasks) for _ in range(self.epochs_per_iter)],
+            ),
         )
+        groups = self._group_bounds
+        puzzles = self._puzzle_bounds
         cursor = 0
-        while cursor < order.size:
+        while True:
             rows: list[np.ndarray] = []
             puzzle_ids: list[np.ndarray] = []
             filled = 0
-            while cursor < order.size and filled < self.global_batch_size:
-                task = int(
-                    order[cursor],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
-                )
+            while cursor < len(order) and filled < self.global_batch_size:
+                task = order[cursor]
                 cursor += 1
-                lo = int(
-                    self.groups[task],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
-                )
-                hi = int(
-                    self.groups[task + 1],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
-                )
+                lo = groups[task]
+                hi = groups[task + 1]
                 if hi <= lo:
                     continue
                 puzzle = int(rng.integers(lo, hi))
-                start = int(
-                    self.puzzles[puzzle],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
-                )
-                size = (
-                    int(
-                        self.puzzles[puzzle + 1],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
-                    )
-                    - start
-                )
+                start = puzzles[puzzle]
+                size = puzzles[puzzle + 1] - start
                 take = min(size, self.global_batch_size - filled)
                 rows.append(start + rng.choice(size, take, replace=False))
                 puzzle_ids.append(np.full(take, puzzle, dtype=np.int64))
@@ -270,9 +280,7 @@ class _ArcBatches:
 
     def _iter_ordered(self) -> Iterator[dict[str, object]]:
         """Walk every row once, so pass@K sees every ballot."""
-        total = int(
-            self.puzzles[-1],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
-        )
+        total = _last(self.puzzles)
         for start in range(0, total, self.global_batch_size):
             end = min(total, start + self.global_batch_size)
             local_start = min(start + self.rank * self.batch_size, end)
@@ -341,7 +349,7 @@ def _load_split(dataset_dir: Path, *, split: str, mmap: bool = False) -> _Split:
             "`uv --quiet run --frozen python -m "
             "priml.baselines.arcagi1.scripts.prepare_data`.",
         )
-    metadata = DictCodec.coerce(loads(metadata_path.read_text()))
+    metadata = parse(metadata_path.read_text(), dict[str, object])
     logger.info("loading ARC split %r from %s", split, path)
     inputs: Tensor | NDArray[np.generic]
     labels: Tensor | NDArray[np.generic]
@@ -380,7 +388,7 @@ def _load_split(dataset_dir: Path, *, split: str, mmap: bool = False) -> _Split:
         "group_indices": groups,
         "puzzle_identifiers": identifiers,
         "spatial_tags": spatial_tags,
-        "ignore_label_id": IntCodec.coerce(metadata.get("ignore_label_id", 0)),
+        "ignore_label_id": convert(metadata.get("ignore_label_id"), int, default=0),
     }
 
 
@@ -413,7 +421,7 @@ class ArcData:
         base_dir: Path | str | None = None
         """Resource root supplied during parent finalization."""
 
-        working_dir: Path | str = "/datasets/arcagi1"
+        working_dir: Path | str = "/datasets/arc1concept-aug-1000"
         """Directory holding the ``train/`` and ``test/`` splits.
 
         Resolved beneath ``base_dir`` at finalize, so it names a location
@@ -425,8 +433,8 @@ class ArcData:
         eval_batch_size: int | None = None
         """Examples per evaluation batch; ``None`` reuses ``batch_size``."""
 
-        device: str = "auto"
-        """Device holding the resident arrays ("auto" picks the best)."""
+        device: torch.device | str | None = None
+        """Device holding the resident arrays."""
 
         seed: int = 0
         """Seeds the task-sampling stream.
@@ -636,7 +644,7 @@ def load_puzzle_dataset(
     metadata_path = data_path / "dataset.json"
     if not metadata_path.exists():
         raise FileNotFoundError(f"Dataset metadata not found: {metadata_path}")
-    metadata = DictCodec.coerce(loads(metadata_path.read_text()))
+    metadata = parse(metadata_path.read_text(), dict[str, object])
     logger.info("loading ARC dataset split %r from %s", split, data_path)
     inputs = _load_int32(data_path / "all__inputs.npy", mmap=True)
     labels = _load_int32(data_path / "all__labels.npy", mmap=True)
@@ -662,7 +670,9 @@ def load_puzzle_dataset(
         max_samples = min(max_samples, len(inputs))
         inputs = np.array(inputs[:max_samples])
         labels = np.array(labels[:max_samples])
-        puzzle_indices = puzzle_indices[puzzle_indices <= max_samples]
+        puzzle_indices = puzzle_indices[
+            : np.searchsorted(puzzle_indices, max_samples, side="right")
+        ]
         if _last(puzzle_indices) != max_samples:
             puzzle_indices = np.append(
                 puzzle_indices,
@@ -686,10 +696,10 @@ def load_puzzle_dataset(
     return {
         "inputs": inputs,
         "labels": labels,
-        "puzzle_indices": puzzle_indices.astype(np.int64, copy=False),
-        "group_indices": group_indices.astype(np.int64, copy=False),
-        "puzzle_identifiers": puzzle_identifiers.astype(np.int32, copy=False),
-        "spatial_tags": spatial_tags.astype(np.int32, copy=False),
+        "puzzle_indices": np.asarray(puzzle_indices, dtype=np.int64),
+        "group_indices": np.asarray(group_indices, dtype=np.int64),
+        "puzzle_identifiers": np.asarray(puzzle_identifiers, dtype=np.int32),
+        "spatial_tags": np.asarray(spatial_tags, dtype=np.int32),
         "metadata": metadata,
     }
 
@@ -712,7 +722,7 @@ class PuzzleBatches:
         self,
         *,
         dataset_dir: Path,
-        device: torch.device | str,
+        device: torch.device | str | None,
         batch_size: int,
         rank: int,
         num_replicas: int,
@@ -745,9 +755,15 @@ class PuzzleBatches:
         self.group_indices = data["group_indices"]
         self.puzzle_identifiers = data["puzzle_identifiers"]
         self.spatial_tags = data["spatial_tags"]
-        self.ignore_label_id = IntCodec.coerce(self.metadata.get("ignore_label_id"))
-        self.blank_identifier_id = IntCodec.coerce(
+        self.ignore_label_id = convert(
+            self.metadata.get("ignore_label_id"),
+            int,
+            default=0,
+        )
+        self.blank_identifier_id = convert(
             self.metadata.get("blank_identifier_id"),
+            int,
+            default=0,
         )
         # Mixed-source hooks: an explicit remap table wins, else a flat offset moves
         # every non-blank id into this source's disjoint embedding band.
@@ -776,9 +792,14 @@ class PuzzleBatches:
             yield from self._iter_test()
 
     def __len__(self) -> int:
-        """Return the batch count of one iteration."""
+        """Return the evaluation batch count, or a training upper bound.
+
+        Training samples ONE view per task per permutation, so a pass yields
+        far fewer batches than the split has rows; the training value is the
+        row count divided by the global batch, an upper bound the loop never
+        reads (it consumes the iterator until exhausted).
+        """
         if self.train:
-            # Row-driven: a batch packs up to a puzzle's rows per group.
             total_rows = _last(self.puzzle_indices) * self.epochs_per_iter
             return total_rows // max(1, self.global_batch_size)
         return (self.n_examples + self.global_batch_size - 1) // self.global_batch_size
@@ -795,8 +816,6 @@ class PuzzleBatches:
         kept: list[NDArray[np.int64]] = []
         for lo, hi in itertools.pairwise(bounds):
             size = hi - lo
-            if size <= 0:
-                continue
             if size <= max_augs_per_puzzle:
                 kept.append(np.arange(lo, hi, dtype=np.int64))
             else:
@@ -824,18 +843,13 @@ class PuzzleBatches:
         for first, last in itertools.pairwise(_int_list(self.group_indices)):
             lo, hi = puzzles[first], puzzles[last]
             size = hi - lo
-            if size <= 0:
-                continue
-            if size <= max_examples_per_group:
-                kept.append(np.arange(lo, hi, dtype=np.int64))
-            else:
-                offsets = np.linspace(
-                    0,
-                    size - 1,
-                    num=max_examples_per_group,
-                    dtype=np.int64,
-                )
-                kept.append(lo + np.unique(offsets))
+            offsets = np.linspace(
+                0,
+                size - 1,
+                num=min(max(0, size), max_examples_per_group),
+                dtype=np.int64,
+            )
+            kept.append(lo + offsets)
         if not kept:
             return np.empty(0, dtype=np.int64)
         return np.concatenate(kept)
@@ -849,13 +863,16 @@ class PuzzleBatches:
         start = 0
         while start < group_order.size:
             start, ex_idx, puz_idx = self._sample_batch(rng, group_order, start)
-            if ex_idx.size < self.global_batch_size:
-                break
-            local = slice(
-                self.rank * self.batch_size,
-                (self.rank + 1) * self.batch_size,
-            )
-            yield self._collate(ex_idx[local], puz_idx[local], valid=self.batch_size)
+            if ex_idx.size == self.global_batch_size:
+                local = slice(
+                    self.rank * self.batch_size,
+                    (self.rank + 1) * self.batch_size,
+                )
+                yield self._collate(
+                    ex_idx[local],
+                    puz_idx[local],
+                    valid=self.batch_size,
+                )
 
     def _iter_test(self) -> Iterator[PuzzleData.Batch]:
         order = (
@@ -873,7 +890,7 @@ class PuzzleBatches:
 
     def _sample_batch(
         self,
-        rng: np.random.Generator,
+        rng: _SamplingRng,
         group_order: NDArray[np.int64],
         start_index: int,
     ) -> tuple[int, NDArray[np.int64], NDArray[np.int64]]:
@@ -920,14 +937,14 @@ class PuzzleBatches:
             torch.full_like(labels, -100),
             labels,
         )
-        source_ids = np.take(self.puzzle_identifiers, puz_idx).astype(
-            np.int64,
-            copy=False,
+        source_ids = np.asarray(
+            np.take(self.puzzle_identifiers, puz_idx),
+            dtype=np.int64,
         )
         if self.puzzle_identifier_remap is not None:
-            puz_ids = np.take(self.puzzle_identifier_remap, source_ids).astype(
-                np.int64,
-                copy=False,
+            puz_ids = np.asarray(
+                np.take(self.puzzle_identifier_remap, source_ids),
+                dtype=np.int64,
             )
         elif self.puzzle_identifier_offset:
             blank = np.equal(source_ids, self.blank_identifier_id)
@@ -1023,8 +1040,8 @@ class PuzzleData:
         eval_batch_size: int | None = None
         """Examples per evaluation batch per replica; ``None`` reuses ``batch_size``."""
 
-        device: str = "auto"
-        """Device receiving each batch ("auto" picks the best)."""
+        device: torch.device | str | None = None
+        """Device receiving each batch."""
 
         seed: int = 0
         """Base seed for the Philox task sampling and per-puzzle eval subsets."""
@@ -1072,12 +1089,9 @@ class PuzzleData:
             )
         self.dataset_dir = Path(config.working_dir)
         if config.num_puzzle_identifiers > 0:
-            ensure_arc_dataset(
-                target_dir=self.dataset_dir.expanduser(),
-                augmentation=config.augmentation.make(),
-            )
+            self._ensure_tree(config)
             path = self.dataset_dir.expanduser() / "identifiers.json"
-            actual = len(ListCodec.coerce(loads(path.read_text()), str))
+            actual = len(parse(path.read_text(), list[str]))
             if actual != config.num_puzzle_identifiers:
                 raise ValueError(
                     f"expected {config.num_puzzle_identifiers} puzzle identifiers "
@@ -1196,6 +1210,15 @@ class PuzzleData:
         if "timer_epoch" in state:
             self.timer_epoch.load_state_dict(state["timer_epoch"])
 
+    # A dataset over another builder's trees overrides this; its tree's sentinel
+    # records that builder's recipe, which the ARC-AGI-1 ensure would refuse.
+    def _ensure_tree(self, config: Config) -> None:
+        """Stage the ARC-AGI-1 tree at ``dataset_dir`` under ``config``'s recipe."""
+        ensure_arc_dataset(
+            target_dir=self.dataset_dir.expanduser(),
+            augmentation=config.augmentation.make(),
+        )
+
     def _eval_dataloader(
         self,
         *,
@@ -1258,7 +1281,8 @@ def _rows_tensor(
     device: torch.device,
 ) -> Tensor:
     """Copy the selected rows of a memory-mapped array onto ``device``."""
-    return torch.from_numpy(np.asarray(values[rows], dtype=dtype).copy()).to(device)
+    # Fancy indexing already copies out of the mapping, so no second copy is needed.
+    return torch.from_numpy(np.asarray(values[rows], dtype=dtype)).to(device)
 
 
 def _identity_tags(rows: int, *, device: torch.device) -> Tensor:
@@ -1277,4 +1301,4 @@ def _at(values: NDArray[np.integer], index: int) -> int:
 
 
 def _int_list(values: NDArray[np.integer]) -> list[int]:
-    return ListCodec.coerce(cast(object, values.tolist()), int)
+    return convert(cast(object, values.tolist()), list[int])

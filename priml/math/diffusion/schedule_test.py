@@ -82,10 +82,19 @@ def test_variance_preserving_inverse_with_log_sigma() -> None:
 
 
 def test_variance_preserving_inverse_error() -> None:
-    with pytest.raises(ValueError, match=r".*"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Exactly one of sigma, log_sigma must be provided\.$",
+    ) as both:
         log_snr_from_log_sigma_per_variance_preserving(sigma=0.5, log_sigma=-1.0)
-    with pytest.raises(ValueError, match=r".*"):
+    assert both.value.args == ("Exactly one of sigma, log_sigma must be provided.",)
+
+    with pytest.raises(
+        ValueError,
+        match=r"^Exactly one of sigma, log_sigma must be provided\.$",
+    ) as neither:
         log_snr_from_log_sigma_per_variance_preserving()
+    assert neither.value.args == ("Exactly one of sigma, log_sigma must be provided.",)
 
 
 def test_linear_interpolation() -> None:
@@ -112,10 +121,19 @@ def test_rectified_flow_inverse_with_log_sigma() -> None:
 
 
 def test_rectified_flow_inverse_error() -> None:
-    with pytest.raises(ValueError, match=r".*"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Exactly one of sigma, log_sigma must be provided\.$",
+    ) as both:
         log_snr_from_log_sigma_per_rectified_flow(sigma=0.5, log_sigma=-1.0)
-    with pytest.raises(ValueError, match=r".*"):
+    assert both.value.args == ("Exactly one of sigma, log_sigma must be provided.",)
+
+    with pytest.raises(
+        ValueError,
+        match=r"^Exactly one of sigma, log_sigma must be provided\.$",
+    ) as neither:
         log_snr_from_log_sigma_per_rectified_flow()
+    assert neither.value.args == ("Exactly one of sigma, log_sigma must be provided.",)
 
 
 def test_log_snr_from_log_time_per_logtan_basic() -> None:
@@ -131,10 +149,24 @@ def test_log_snr_from_log_time_per_truncnormicdf_basic() -> None:
 
 
 def test_input_conditioning_rectified_flow() -> None:
-    x = torch.randn(3, 2, 4)
-    log_snr = torch.tensor([[[0.0]], [[1.0]], [[-1.0]]])
+    x = torch.tensor(
+        [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[2.0, 4.0, 6.0], [8.0, 10.0, 12.0]]],
+    )
+    log_snr = torch.tensor([[[0.0]], [[1.0]]])
     result = input_conditioning_rectified_flow(x, log_snr)
-    assert result.shape == x.shape
+    log_sigma = log_sigma_from_log_snr_per_rectified_flow(log_snr)
+    log_alpha = compute_log_alpha(log_snr, log_sigma)
+    expected = x * torch.exp(-0.5 * torch.logaddexp(2 * log_alpha, 2 * log_sigma))
+    torch.testing.assert_close(result, expected)
+    assert result.shape == (2, 2, 3)
+
+
+def test_rectified_flow_inverse_error_message() -> None:
+    with pytest.raises(
+        ValueError,
+        match="Exactly one of sigma, log_sigma must be provided\\.",
+    ):
+        log_snr_from_log_sigma_per_rectified_flow()
 
 
 def test_input_conditioning_identity() -> None:

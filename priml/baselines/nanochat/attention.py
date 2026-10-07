@@ -1,33 +1,24 @@
-"""Causal attention, FlashAttention backends, and fused normalization/rotary kernels.
+"""Causal attention and fused normalization/rotary kernels.
 
-FlashAttention-3 uses a pinned, receipt-verified SM90 build. Prepare it once with
-``uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_flash3``;
-training loads the local artifact without network access. FlashAttention-4
-resolves its optional installed backend when the model is constructed.
+The attention kernels themselves are priml's: ``Flash3Attention`` in
+``priml.model.attention.flash3`` and ``Flash4Attention`` in
+``priml.model.attention.flash4``.
 
 Triton parses source annotations as device code. Keep tuple annotations quoted
 and omit future annotations, which makes the formatter remove those quotes.
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import field
-from functools import lru_cache, partial
-from importlib import import_module
-from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, Self, cast, override, runtime_checkable
+from functools import lru_cache
+from typing import TYPE_CHECKING, Protocol, Self, cast, override
 
-import hashlib
-import importlib
-import logging
-import sys
-
-from configgle import Fig, Makeable, Makes
+from configgle import Makeable, Makes
 from torch import Tensor, nn
 
 import torch
 
 from priml.baselines.nanochat.ngram import (
-    HashedNgramTables,
     NgramSource,
     ngram_mix,
 )
@@ -39,10 +30,9 @@ from priml.cost import (
     traffic,
 )
 from priml.kernel import jit_kernel
-from priml.model.attention.kernel import attention_kernel_cost
 from priml.model.attention.rope import rotate_conjugate
 from priml.model.attention.value_gated_attention import ValueGatedAttention
-from priml.model.custom_types import TensorModule, propagate_attr
+from priml.model.custom_types import LayerCache, TensorModule, propagate_attr
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.special import Identity
@@ -180,12 +170,13 @@ class CausalAttention(ValueGatedAttention):
 
     def __init__(self, config: Config) -> None:
         norm = config.norm_qk
-        if config.fused_qk_rope and (
-            not isinstance(norm, RMSNorm.Config)
-            or type(norm) is not RMSNorm.Config
-            or norm.elementwise_affine
-            or norm.eps not in (None, torch.finfo(torch.float32).eps)
-        ):
+        fused_norm_is_valid = (
+            isinstance(norm, RMSNorm.Config)
+            and type(norm) is RMSNorm.Config
+            and not norm.elementwise_affine
+            and norm.eps in (None, torch.finfo(torch.float32).eps)
+        )
+        if config.fused_qk_rope and not fused_norm_is_valid:
             raise ValueError(
                 "fused_qk_rope requires norm_qk to be parameter-free RMSNorm "
                 "with epsilon None or float32 epsilon.",
@@ -200,7 +191,6 @@ class CausalAttention(ValueGatedAttention):
         gate = Linear.Config(
             channels_in=config.gate_channels,
             channels_out=config.num_heads,
-            bias=False,
             init_weight=nn.init.zeros_,
         )
         self.bigram_gate = gate.make() if config.bigram else None
@@ -227,6 +217,7 @@ class CausalAttention(ValueGatedAttention):
         cos_sin: tuple[Tensor, Tensor],
         value_embedding: Tensor | None = None,
         window: int | None = None,
+        cache: LayerCache | None = None,
         **kwargs: object,
     ) -> Tensor:
         """Apply causal attention with normalized rotary queries and keys.
@@ -236,22 +227,23 @@ class CausalAttention(ValueGatedAttention):
           cos_sin: Rotary factors by position and half-channel.
           value_embedding: Optional token-specific attention values.
           window: History distance; None uses the configured attention window.
+          cache: The block's decode cache; must be ``None``.
           **kwargs: Memory values and unconsumed messages for the attention kernel.
 
         Returns:
           output: Projected attention output with the shape of ``x``.
 
+        Raises:
+          TypeError: If ``cache`` is given.
+
         """
-        bigram_value = kwargs.pop("bigram_value", None)
-        trigram_value = kwargs.pop("trigram_value", None)
-        if bigram_value is not None and not isinstance(bigram_value, Tensor):
-            raise ValueError(
-                "Expected bigram_value is None or isinstance(bigram_value, Tensor).",
-            )
-        if trigram_value is not None and not isinstance(trigram_value, Tensor):
-            raise ValueError(
-                "Expected trigram_value is None or isinstance(trigram_value, Tensor).",
-            )
+        # Overrides the base forward whole, so it repeats the base's refusal:
+        # ``cache`` must not reach a kernel that names only its window.
+        if cache is not None:
+            raise TypeError(f"{type(self).__name__} keeps no decode cache.")
+        bigram_value = _optional_message(kwargs, "bigram_value", Tensor)
+        trigram_value = _optional_message(kwargs, "trigram_value", Tensor)
+        fused_tables = _fused_sources(kwargs.pop("fused_tables", None))
         cfg = self.config
         shape = (*x.shape[:-1], cfg.num_heads, cfg.channels_head)
         q, k = self.proj_q(x).view(shape), self.proj_k(x).view(shape)
@@ -279,30 +271,23 @@ class CausalAttention(ValueGatedAttention):
                     gate(x[..., start : start + cfg.gate_channels]),
                 )
                 v = v + weight.unsqueeze(-1) * value.view(shape)
-        fused_tables = kwargs.pop("fused_tables", None)
         if fused_tables is not None:
-            assert isinstance(fused_tables, list)
             logits: list[Tensor] = []
             weights: list[Tensor] = []
             indices: list[Tensor] = []
             sinks: list[Tensor] = []
-            for source in cast(list[object], fused_tables):
-                assert isinstance(source, NgramSource)
-                gate_index, table, hashed = source
-                assert isinstance(table, HashedNgramTables)
+            bitmaps: list[Tensor] = []
+            for gate_index, table, hashed in fused_tables:
                 gate = self.bigram_gate if gate_index == 1 else self.trigram_gate
                 if gate is None:
-                    raise ValueError("Expected gate is not None.")
+                    raise ValueError(
+                        f"fused source {gate_index} has no gate on this attention.",
+                    )
                 start = gate_index * cfg.gate_channels
                 logits.append(gate(x[..., start : start + cfg.gate_channels]))
                 weights.extend(part.weight for part in table.tables)
                 indices.extend(hashed)
                 sinks.extend(table.gradient_sinks)
-            bitmaps: list[Tensor] = []
-            for source in cast(list[object], fused_tables):
-                assert isinstance(source, NgramSource)
-                (_gate_index, table, _hashed) = source
-                assert isinstance(table, HashedNgramTables)
                 bitmaps.extend(table.gradient_bitmaps)
             v = ngram_mix(v.contiguous(), logits, weights, indices, sinks, bitmaps)
         out = self.norm_out(
@@ -416,634 +401,6 @@ def _qk_setup(
     ctx.save_for_backward(*inputs)
 
 
-def _register_qk_autograd[FunctionT: Callable[..., object]](
-    function: FunctionT,
-) -> FunctionT:
-    fused_qk_norm_rope.register_autograd(function, setup_context=_qk_setup)
-    return function
-
-
-logger = logging.getLogger(__name__)
-
-
-class Flash3UnavailableError(RuntimeError):
-    """Raised when the pinned local FlashAttention-3 artifact is unavailable."""
-
-
-class Flash3Interface(Protocol):
-    """FlashAttention interface used by the NanoChat model."""
-
-    __file__: str
-
-    def flash_attn_func(
-        self,
-        q: Tensor,
-        k: Tensor,
-        v: Tensor,
-        *,
-        causal: bool,
-        window_size: tuple[int, int],
-    ) -> Tensor:
-        """Flash attn func."""
-        ...
-
-
-class Flash3Attention:
-    """Windowed causal attention through the pinned FlashAttention-3 kernel.
-
-    Takes ``[B, S, heads, channels_head]`` -- the layout FA3 wants, and the one
-    the model holds before it transposes for SDPA -- and expresses the window
-    as a kernel argument rather than a mask. That is the whole reason this
-    class exists: a mask forces the dispatcher off every flash backend, so the
-    windowed layers would silently run a different kernel than the reference.
-
-    Constructed rather than called as a function so the artifact is resolved
-    ONCE, at model construction, instead of on every layer of every step.
-    """
-
-    class Config(Fig["Flash3Attention"]):
-        """The pinned artifact revision."""
-
-        revision: str = "de87b9b5af06dd9984df595bef90b2eba44b181a"
-        """Qualified parity reference the local build must match.
-
-        A literal rather than a call to :func:`hf_reference_revision`: a config
-        field is the experiment's declaration of what it ran against, and one
-        that reads its value from the library it is pinning would follow that
-        library forward and silently stop pinning anything."""
-
-        @classmethod
-        def cost(
-            cls,
-            *,
-            seq_len: int,
-            batch_size: int = 1,
-            dtype: torch.dtype | None,
-            num_heads: int,
-            channels_head: int,
-            channels_v_head: int = -1,
-            window: int = -1,
-            dropout_p: float = 0.0,
-            rows: int = -1,
-            **kwargs: object,
-        ) -> Cost:
-            """Cost the kernel from the shapes its owner hands it.
-
-            See :func:`attention_kernel_cost` for every argument.
-
-            Args:
-              seq_len: Tokens per sequence.
-              batch_size: Sequences in this invocation.
-              dtype: Activation dtype; ``None`` is torch's default.
-              num_heads: Query heads.
-              channels_head: Width of each query/key head.
-              channels_v_head: Value width; -1 uses the query/key width.
-              window: Previous keys each query reaches, plus itself; negative is unbounded.
-              dropout_p: Attention dropout rate.
-              rows: Query rows sharing K/V; negative uses the modeled key count.
-              **kwargs: The rest of the owner's bus, unread.
-
-            Returns:
-              cost: Whole-invocation cost of the kernel.
-
-            """
-            del kwargs
-            return attention_kernel_cost(
-                seq_len=seq_len,
-                batch_size=batch_size,
-                dtype=dtype,
-                num_heads=num_heads,
-                channels_head=channels_head,
-                channels_v_head=channels_v_head,
-                window=window,
-                dropout_p=dropout_p,
-                rows=rows,
-            )
-
-    def __init__(self, config: Config) -> None:
-        if config.revision != hf_reference_revision():
-            raise ValueError(
-                "revision identifies the qualified parity reference and must "
-                f"remain {hf_reference_revision()}; got {config.revision}.",
-            )
-        capability = torch.cuda.get_device_capability()
-        if capability != (9, 0):
-            raise Flash3UnavailableError(
-                f"The pinned FlashAttention-3 build requires SM90; this device "
-                f"is SM{capability[0]}{capability[1]}. Use exp001 for the "
-                "portable PyTorch attention backend.",
-            )
-        self._flash = load_flash3()
-
-    def __call__(
-        self,
-        q: Tensor,
-        k: Tensor,
-        v: Tensor,
-        *,
-        window: int = -1,
-        **kwargs: object,
-    ) -> Tensor:
-        """Attend over ``window`` previous positions plus self, causally.
-
-        ``window`` defaults to ``-1``: unbounded over the causal prefix.
-        Remaining keyword arguments belong to the open model message bus; this
-        kernel reads only the window it understands.
-
-        """
-        del kwargs
-        return self._flash.flash_attn_func(
-            q,
-            k,
-            v,
-            causal=True,
-            window_size=(window, 0),
-        )
-
-
-def source_revision() -> str:
-    """Return the immutable FA3 source revision.
-
-    Returns:
-      result: The str.
-
-    """
-    return "3da5f873029162763568db56546fee70a779fade"
-
-
-def cutlass_revision() -> str:
-    """Return the CUTLASS submodule revision pinned by the FA3 source.
-
-    Returns:
-      result: The str.
-
-    """
-    return "dc4817921edda44a549197ff3a9dcf5df0636e7b"
-
-
-def hf_reference_revision() -> str:
-    """Return the previously qualified HF binary revision.
-
-    Returns:
-      result: The str.
-
-    """
-    return "de87b9b5af06dd9984df595bef90b2eba44b181a"
-
-
-def artifact_path(
-    *,
-    cache_root: Path = Path("/opt/scratch/caches/nanochat/fa3"),
-) -> Path:
-    """Return the content-addressed local FA3 installation path.
-
-    Args:
-        cache_root: Stable node-local cache root.
-
-    Returns:
-        path: Installation path for the pinned source and runtime combination.
-
-    """
-    identity = (
-        f"{source_revision()}-torch2.9.1-cu128-cxx11-x86_64-nanochat-hdim128-bf16-local"
-    )
-    return cache_root / identity
-
-
-def expected_receipt(
-    *,
-    binary_sha256: str,
-    interface_sha256: str,
-    config_sha256: str,
-) -> dict[str, str]:
-    """Return the READY receipt contents that validate a prepared artifact.
-
-    Args:
-        binary_sha256: SHA-256 hex digest of the installed extension binary.
-        interface_sha256: SHA-256 hex digest of the Python interface.
-        config_sha256: SHA-256 hex digest of the generated kernel configuration.
-
-    Returns:
-        receipt: Field-to-value mapping pinned to the qualified build lane.
-
-    """
-    return {
-        "source_revision": source_revision(),
-        "cutlass_revision": cutlass_revision(),
-        "torch": "2.9.1",
-        "cuda": "12.8",
-        "cxx11_abi": "true",
-        "build_profile": "nanochat-hdim128-bf16-local",
-        "binary_sha256": binary_sha256,
-        "interface_sha256": interface_sha256,
-        "config_sha256": config_sha256,
-    }
-
-
-def receipt_validation_error(
-    receipt: Mapping[str, str],
-    *,
-    expected: Mapping[str, str],
-) -> str:
-    """Return field-level READY receipt mismatch details.
-
-    Args:
-        receipt: Parsed field values from the installed READY receipt.
-        expected: Field values derived from the qualified runtime and files.
-
-    Returns:
-        error: Semicolon-delimited mismatch details, or an empty string.
-
-    """
-    errors: list[str] = []
-    for name, expected_value in expected.items():
-        if name not in receipt:
-            errors.append(f"missing receipt field {name}")
-        elif receipt[name] != expected_value:
-            if name.endswith("_sha256"):
-                errors.append(
-                    f"{name} mismatch: receipt {receipt[name]}, actual {expected_value}",
-                )
-            else:
-                errors.append(
-                    f"{name} mismatch: expected {expected_value}, receipt {receipt[name]}",
-                )
-    errors.extend(
-        f"unexpected receipt field {name}"
-        for name in sorted(receipt.keys() - expected.keys())
-    )
-    return "; ".join(errors)
-
-
-def artifact_validation_error(path: Path) -> str:
-    """Return why a prepared artifact at ``path`` is invalid, or an empty string.
-
-    Args:
-      path: Content-addressed artifact directory.
-
-    Returns:
-      error: Semicolon-delimited details, empty when the artifact validates.
-
-    """
-    if runtime_error := runtime_files_error(path):
-        return runtime_error
-    receipt_path = path / "READY"
-    if not receipt_path.exists():
-        return "missing READY receipt"
-    if not receipt_path.is_file():
-        return f"READY receipt is not a regular file: {receipt_path}"
-    try:
-        receipt_text = receipt_path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return "READY receipt is not valid UTF-8"
-    except OSError as error:
-        return f"could not read READY receipt: {error}"
-    receipt, receipt_error = _parse_receipt(receipt_text)
-    if receipt_error:
-        return receipt_error
-    try:
-        expected = runtime_receipt(path)
-    except OSError as error:
-        return f"could not hash FA3 runtime files: {error}"
-    return receipt_validation_error(receipt, expected=expected)
-
-
-def runtime_files_error(path: Path) -> str:
-    """Return missing or ambiguous runtime-file details, or an empty string.
-
-    Args:
-      path: Artifact directory holding the FA3 runtime files.
-
-    Returns:
-      error: Semicolon-delimited details, empty when every file is present.
-
-    """
-    missing = [
-        name
-        for name in ("flash_attn_interface.py", "flash_attn_config.py")
-        if not (path / name).is_file()
-    ]
-    errors: list[str] = (
-        [f"missing required runtime files: {', '.join(missing)}"] if missing else []
-    )
-    extension_count = sum(
-        extension.is_file() for extension in (path / "flash_attn_3").glob("_C*.so")
-    )
-    if extension_count != 1:
-        errors.append(
-            f"expected exactly one flash_attn_3/_C*.so; found {extension_count}",
-        )
-    return "; ".join(errors)
-
-
-def runtime_receipt(path: Path) -> dict[str, str]:
-    """Return the READY receipt derived from the runtime files at ``path``.
-
-    Args:
-      path: Artifact directory holding the FA3 runtime files.
-
-    Returns:
-      receipt: Field-to-value mapping, hashes included.
-
-    """
-    return expected_receipt(
-        binary_sha256=_sha256(_extension_path(path)),
-        interface_sha256=_sha256(path / "flash_attn_interface.py"),
-        config_sha256=_sha256(path / "flash_attn_config.py"),
-    )
-
-
-def is_prepared(
-    *,
-    cache_root: Path = Path("/opt/scratch/caches/nanochat/fa3"),
-) -> bool:
-    """Report whether the pinned local artifact is complete and intact.
-
-    Args:
-        cache_root: Stable node-local cache root.
-
-    Returns:
-        prepared: Whether the receipt and installed files validate.
-
-    """
-    return not artifact_validation_error(artifact_path(cache_root=cache_root))
-
-
-def load_flash3(
-    *,
-    cache_root: Path = Path("/opt/scratch/caches/nanochat/fa3"),
-) -> Flash3Interface:
-    """Load the prepared FA3 interface without network access.
-
-    Args:
-        cache_root: Stable node-local cache root.
-
-    Returns:
-        interface: Pinned local FlashAttention-3 Python interface.
-
-    Raises:
-        Flash3UnavailableError: The prepared artifact is missing or invalid.
-
-    """
-    prepared = artifact_path(cache_root=cache_root)
-    if validation_error := artifact_validation_error(prepared):
-        raise Flash3UnavailableError(
-            f"Prepared FlashAttention-3 is invalid at {prepared}: "
-            f"{validation_error}. "
-            "Run `uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_flash3` once on this node.",
-        )
-    if module_error := _loaded_module_error("flash_attn_3._C", prepared):
-        raise Flash3UnavailableError(module_error)
-    prepared_str = str(prepared)
-    if prepared_str not in sys.path:
-        sys.path.insert(0, prepared_str)
-    interface = importlib.import_module("flash_attn_interface")
-    for module_name in ("flash_attn_interface", "flash_attn_3._C"):
-        if module_error := _loaded_module_error(module_name, prepared):
-            raise Flash3UnavailableError(module_error)
-    return cast(Flash3Interface, interface)
-
-
-@runtime_checkable
-class _Flash4Interface(Protocol):
-    def flash_attn_func(
-        self,
-        q: Tensor,
-        k: Tensor,
-        v: Tensor,
-        *,
-        causal: bool,
-        window_size: tuple[int | None, int | None],
-        return_lse: bool,
-    ) -> tuple[Tensor, Tensor | None]: ...
-
-    def _flash_attn_bwd(  # noqa: PLR0917 -- The upstream positional-only boundary has six tensors.
-        self,
-        q: Tensor,
-        k: Tensor,
-        v: Tensor,
-        out: Tensor,
-        grad_out: Tensor,
-        lse: Tensor,
-        /,
-        *,
-        causal: bool,
-        window_size_left: int | None,
-        window_size_right: int,
-    ) -> tuple[Tensor, Tensor, Tensor]: ...
-
-
-class _Flash4Context(Protocol):
-    window: int
-    saved_tensors: tuple[Tensor, ...]
-
-    def save_for_backward(self, *tensors: Tensor) -> None: ...
-
-
-class Flash4Attention:
-    """Load FA4 at make time, before compiling the enclosing model."""
-
-    class Config(Fig["Flash4Attention"]):
-        """Select the native CuTe FA4 dispatcher."""
-
-        @classmethod
-        def cost(
-            cls,
-            *,
-            seq_len: int,
-            batch_size: int = 1,
-            dtype: torch.dtype | None,
-            num_heads: int,
-            channels_head: int,
-            channels_v_head: int = -1,
-            window: int = -1,
-            dropout_p: float = 0.0,
-            rows: int = -1,
-            **kwargs: object,
-        ) -> Cost:
-            """Cost the kernel from the shapes its owner hands it.
-
-            See :func:`attention_kernel_cost` for every argument.
-
-            Args:
-              seq_len: Tokens per sequence.
-              batch_size: Sequences in this invocation.
-              dtype: Activation dtype; ``None`` is torch's default.
-              num_heads: Query heads.
-              channels_head: Width of each query/key head.
-              channels_v_head: Value width; -1 uses the query/key width.
-              window: Previous keys each query reaches, plus itself; negative is unbounded.
-              dropout_p: Attention dropout rate.
-              rows: Query rows sharing K/V; negative uses the modeled key count.
-              **kwargs: The rest of the owner's bus, unread.
-
-            Returns:
-              cost: Whole-invocation cost of the kernel.
-
-            """
-            del kwargs
-            return attention_kernel_cost(
-                seq_len=seq_len,
-                batch_size=batch_size,
-                dtype=dtype,
-                num_heads=num_heads,
-                channels_head=channels_head,
-                channels_v_head=channels_v_head,
-                window=window,
-                dropout_p=dropout_p,
-                rows=rows,
-            )
-
-    def __init__(self, config: Config) -> None:
-        del config
-        self._flash4_forward = _make_flash4_ops()
-
-    def __call__(
-        self,
-        q: Tensor,
-        k: Tensor,
-        v: Tensor,
-        *,
-        window: int = -1,
-        **kwargs: object,
-    ) -> Tensor:
-        """Apply causal FA4 attention without changing the projection layout.
-
-        Args:
-            q: Queries shaped ``[B, S, H, D]``.
-            k: Keys with the same shape, dtype, and device.
-            v: Values with the same shape, dtype, and device.
-            window: Inclusive history distance; negative means unbounded.
-            **kwargs: Unconsumed model messages.
-
-        Returns:
-            out: Attention output shaped ``[B, S, H, D]``.
-
-        """
-        del kwargs
-        if window >= q.shape[1]:
-            window = -1
-        return self._flash4_forward(q, k, v, window)[0]
-
-
-@lru_cache(maxsize=1)
-def _make_flash4_ops() -> Callable[
-    [Tensor, Tensor, Tensor, int],
-    tuple[Tensor, Tensor],
-]:
-    module = import_module("flash_attn.cute.interface")
-    if not isinstance(module, _Flash4Interface):
-        raise TypeError("FA4 must provide flash_attn_func and _flash_attn_bwd")
-    forward = torch.library.custom_op(
-        "priml_nanochat::flash4_forward",
-        partial(_flash4_forward, module),
-        mutates_args=(),
-        schema="(Tensor q, Tensor k, Tensor v, int window) -> (Tensor, Tensor)",
-    )
-    backward = torch.library.custom_op(
-        "priml_nanochat::flash4_backward",
-        partial(_flash4_backward_kernel, module),
-        mutates_args=(),
-        schema="(Tensor[] saved, Tensor grad_out, int window) -> (Tensor, Tensor, Tensor)",
-    )
-    forward.register_fake(_flash4_forward_fake)
-    backward.register_fake(_flash4_backward_fake)
-    forward.register_autograd(
-        partial(_flash4_backward, kernel=backward),
-        setup_context=_flash4_setup_context,
-    )
-    return forward
-
-
-def _flash4_forward(
-    module: _Flash4Interface,
-    q: Tensor,
-    k: Tensor,
-    v: Tensor,
-    window: int,
-) -> tuple[Tensor, Tensor]:
-    out, lse = module.flash_attn_func(
-        q,
-        k,
-        v,
-        causal=True,
-        window_size=(None, None) if window < 0 else (window, 0),
-        return_lse=True,
-    )
-    if lse is None:
-        raise ValueError("Expected lse is not None.")
-    return out, lse
-
-
-def _flash4_forward_fake(
-    q: Tensor,
-    k: Tensor,
-    v: Tensor,
-    window: int,
-) -> tuple[Tensor, Tensor]:
-    del k, v, window
-    return torch.empty_like(q, memory_format=torch.contiguous_format), q.new_empty(
-        (q.shape[0], q.shape[2], q.shape[1]),
-        dtype=torch.float32,
-    )
-
-
-def _flash4_setup_context(
-    ctx: _Flash4Context,
-    inputs: tuple[Tensor, Tensor, Tensor, int],
-    output: tuple[Tensor, Tensor],
-) -> None:
-    q, k, v, ctx.window = inputs
-    ctx.save_for_backward(q, k, v, *output)
-
-
-def _flash4_backward(
-    ctx: _Flash4Context,
-    grad_out: Tensor,
-    grad_lse: Tensor | None,
-    *,
-    kernel: Callable[[list[Tensor], Tensor, int], tuple[Tensor, Tensor, Tensor]],
-) -> tuple[Tensor, Tensor, Tensor, None]:
-    del grad_lse
-    return (*kernel(list(ctx.saved_tensors), grad_out, ctx.window), None)
-
-
-def _flash4_backward_kernel(
-    module: _Flash4Interface,
-    saved: list[Tensor],
-    grad_out: Tensor,
-    window: int,
-) -> tuple[Tensor, Tensor, Tensor]:
-    q, k, v, out, lse = saved
-    dq, dk, dv = module._flash_attn_bwd(  # noqa: SLF001 -- FA4 exposes backward only through this entry point.
-        q,
-        k,
-        v,
-        out,
-        grad_out,
-        lse,
-        causal=True,
-        window_size_left=None if window < 0 else window,
-        window_size_right=0,
-    )
-    # Backend normalization can change strides; own the layout declared to AOT.
-    return dq.contiguous(), dk.contiguous(), dv.contiguous()
-
-
-def _flash4_backward_fake(
-    saved: list[Tensor],
-    grad_out: Tensor,
-    window: int,
-) -> tuple[Tensor, Tensor, Tensor]:
-    del grad_out, window
-    q, k, v, _, _ = saved
-    return (
-        torch.empty_like(q, memory_format=torch.contiguous_format),
-        torch.empty_like(k, memory_format=torch.contiguous_format),
-        torch.empty_like(v, memory_format=torch.contiguous_format),
-    )
-
-
 @fused_qk_norm_rope.register_fake
 def _qk_fake(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor) -> "tuple[Tensor, Tensor]":
     del cos, sin
@@ -1066,6 +423,13 @@ def _qk_backward_fake(
         torch.empty_like(q, memory_format=torch.contiguous_format),
         torch.empty_like(k, memory_format=torch.contiguous_format),
     )
+
+
+def _register_qk_autograd[FunctionT: Callable[..., object]](
+    function: FunctionT,
+) -> FunctionT:
+    fused_qk_norm_rope.register_autograd(function, setup_context=_qk_setup)
+    return function
 
 
 @_register_qk_autograd
@@ -1299,64 +663,6 @@ def _qk_norm_rope_bwd_triton(
         language.store(dko_ptr + base + half, dkr2, mask=m)
 
 
-def _parse_receipt(text: str) -> tuple[dict[str, str], str]:
-    """Parse a READY receipt without accepting ambiguous duplicate fields."""
-    receipt: dict[str, str] = {}
-    for line_number, line in enumerate(text.splitlines(), start=1):
-        if "=" not in line:
-            return (
-                {},
-                f"malformed READY receipt line {line_number}; expected name=value",
-            )
-        name, value = line.split("=", maxsplit=1)
-        if not name:
-            return (
-                {},
-                f"malformed READY receipt line {line_number}; field name is empty",
-            )
-        if name in receipt:
-            return {}, f"duplicate receipt field {name}"
-        receipt[name] = value
-    return receipt, ""
-
-
-def _extension_path(path: Path) -> Path:
-    extensions = [
-        extension
-        for extension in (path / "flash_attn_3").glob("_C*.so")
-        if extension.is_file()
-    ]
-    if len(extensions) != 1:
-        raise FileNotFoundError(
-            f"expected exactly one flash_attn_3/_C*.so; found {len(extensions)}",
-        )
-    return extensions[0]
-
-
-def _loaded_module_error(module_name: str, path: Path) -> str:
-    """Return an error when a loaded FA3 module comes from outside ``path``."""
-    module = sys.modules.get(module_name)
-    if module is None:
-        return ""
-    module_path = module.__file__
-    if module_path is None:
-        return f"Loaded {module_name} has no file path."
-    if Path(module_path).resolve().is_relative_to(path.resolve()):
-        return ""
-    return (
-        f"A non-baseline {module_name} was already imported from {module_path}; "
-        f"expected it below {path}."
-    )
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        while chunk := file.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _value_mix_cost(
     *,
     heads: int,
@@ -1391,3 +697,35 @@ def _value_mix_cost(
             phase="adjoint",
         )
     )
+
+
+def _optional_message[T](
+    kwargs: dict[str, object],
+    name: str,
+    kind: type[T],
+) -> T | None:
+    """Pop an optional message, raising TypeError when it is the wrong type."""
+    value = kwargs.pop(name, None)
+    if value is not None and not isinstance(value, kind):
+        raise TypeError(
+            f"{name} must be {kind.__name__} or None; got {type(value).__name__}.",
+        )
+    return value
+
+
+def _fused_sources(value: object) -> list[NgramSource] | None:
+    """Narrow the ``fused_tables`` message, raising TypeError on any other shape."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise TypeError(
+            f"fused_tables must be list or None; got {type(value).__name__}.",
+        )
+    sources: list[NgramSource] = []
+    for source in cast(list[object], value):
+        if not isinstance(source, NgramSource):
+            raise TypeError(
+                f"fused_tables must hold NgramSource; got {type(source).__name__}.",
+            )
+        sources.append(source)
+    return sources

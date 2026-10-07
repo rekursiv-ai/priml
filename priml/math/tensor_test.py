@@ -129,6 +129,42 @@ def test_warmup_primes_the_compiled_kernel_with_a_uint8_image_batch(
     assert seen == [(torch.uint8, (3, 1, 224, 224), torch.float16, torch.float16)]
 
 
+def test_warmup_uses_exact_factory_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, ...]] = []
+
+    def randint(
+        low: int,
+        high: int,
+        size: tuple[int, ...],
+        *,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        calls.append(("randint", low, high, size, dtype))
+        return torch.empty(size, dtype=dtype)
+
+    def randn(*size: int, dtype: torch.dtype) -> Tensor:
+        calls.append(("randn", size, dtype))
+        return torch.empty(size, dtype=dtype)
+
+    monkeypatch.setattr(torch, "randint", randint)
+    monkeypatch.setattr(torch, "randn", randn)
+
+    def compiled(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
+        calls.append(("compiled", x.shape, shift.shape, scale.shape))
+        return x
+
+    monkeypatch.setattr(tensor, "compiled_scale_and_shift", compiled)
+    warmup_compiled_scale_and_shift(dtype_in=torch.int16, dtype_out=torch.float16)
+    assert calls == [
+        ("randint", 0, 255, (3, 1, 224, 224), torch.int16),
+        ("randn", (3, 1, 1, 1), torch.float16),
+        ("randn", (3, 1, 1, 1), torch.float16),
+        ("compiled", (3, 1, 224, 224), (3, 1, 1, 1), (3, 1, 1, 1)),
+    ]
+
+
 def test_as_batch_tensor_add_one_dim():
     """Test as_batch_tensor adds one dimension when below min_ndim."""
     x = torch.zeros(4, 5, 3)
@@ -141,6 +177,17 @@ def test_as_batch_tensor_no_change_at_min():
     x = torch.zeros(2, 4, 5, 3)
     result = as_batch_tensor(x, min_ndim=4, max_ndim=5)
     assert result.shape == (2, 4, 5, 3)
+
+
+def test_as_batch_tensor_uses_default_dimension_bounds() -> None:
+    at_minimum = torch.arange(120).reshape(2, 3, 4, 5)
+    above_maximum = torch.arange(6_720).reshape(2, 3, 4, 5, 7, 8)
+
+    assert as_batch_tensor(at_minimum).shape == (2, 3, 4, 5)
+    result = as_batch_tensor(above_maximum)
+    expected = above_maximum.reshape(6, 4, 5, 7, 8)
+    assert result.shape == (6, 4, 5, 7, 8)
+    assert torch.equal(result, expected)
 
 
 def test_as_batch_tensor_no_change_at_max():
@@ -223,6 +270,16 @@ def test_as_batch_tensor_min_equals_max():
     x = torch.zeros(2, 3, 4)
     result = as_batch_tensor(x, min_ndim=3, max_ndim=3)
     assert result.shape == (2, 3, 4)
+
+
+def test_as_batch_tensor_accepts_documented_ndim_boundaries() -> None:
+    assert as_batch_tensor(torch.ones(2), min_ndim=1, max_ndim=1).shape == (2,)
+    assert as_batch_tensor(torch.ones(2, 3), min_ndim=1, max_ndim=0).shape == (6,)
+
+
+def test_as_batch_tensor_device_meta() -> None:
+    result = as_batch_tensor(torch.ones(2, 3), min_ndim=1, max_ndim=2, device="meta")
+    assert result.device.type == "meta"
 
 
 def test_as_batch_tensor_large_flatten():

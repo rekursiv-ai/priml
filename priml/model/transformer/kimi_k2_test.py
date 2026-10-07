@@ -11,7 +11,6 @@ from unittest.mock import Mock
 import sys
 import warnings
 
-from configgle.testing import assert_pprint_golden
 from torch import Tensor
 
 import pytest
@@ -19,7 +18,7 @@ import torch
 
 from priml import hub
 from priml.lib.absent import ABSENT
-from priml.lib.custom_json import DictCodec
+from priml.lib.custom_json import convert
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.embedding import Embedding
@@ -32,6 +31,7 @@ from priml.model.transformer.kimi_k2 import KimiK2, remap_hf_state_dict
 from priml.model.transformer.transformer import head_is_tied
 from priml.testing.bfb import assert_bfb_against_golden, host_agnostic_numerics
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 if TYPE_CHECKING:
@@ -240,6 +240,61 @@ def _attn(cfg: KimiK2.Config, layer: int = 0) -> MultiHeadLatentAttention.Config
 
 
 class TestConfig:
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("model_type", []),
+            ("norm_topk_prob", "false"),
+            ("tie_word_embeddings", "false"),
+            ("rope_scaling", {"type": "yarn"}),
+            ("rope_scaling", False),
+            ("rope_scaling", []),
+            ("rope_scaling", {"type": [], "factor": 2.0}),
+            ("scoring_func", []),
+            ("rope_theta", None),
+            ("num_experts_per_tok", None),
+            ("n_routed_experts", None),
+        ],
+    )
+    def test_wrongly_typed_hf_fields_rejected(self, field: str, value: object) -> None:
+        with pytest.raises(TypeError):
+            KimiK2.Config.from_hf(hf_config(**{field: value}))
+
+    def test_nonpositive_dense_width_rejected(self) -> None:
+        with pytest.raises(ValueError, match="intermediate_size"):
+            KimiK2.Config.from_hf(hf_config(intermediate_size=0))
+
+    def test_yarn_keeps_base_and_scales_attention(self) -> None:
+        cfg = KimiK2.Config.from_hf(
+            hf_config(
+                rope_scaling={"type": "yarn", "factor": 32.0, "mscale_all_dim": 1.0},
+            ),
+        )
+        attn = _attn(cfg)
+        assert isinstance(attn.rope, RoPE.Config)
+        assert isinstance(attn.rope.frequencies, YarnScaling.Config)
+        assert isinstance(attn.rope.frequencies.inner, HuggingFaceFrequencies.Config)
+        assert attn.rope.frequencies.inner.base == 50_000.0
+        assert attn.softmax_scale == pytest.approx(
+            attn.channels_qk_head**-0.5
+            * (1 + 0.1 * torch.log(torch.tensor(32.0)).item()) ** 2,
+        )
+
+    def test_rope_parameters_alias_preserves_yarn(self) -> None:
+        config = hf_config(
+            rope_parameters={"type": "yarn", "factor": 32.0, "mscale_all_dim": 1.0},
+        )
+        attn = _attn(KimiK2.Config.from_hf(config))
+        assert isinstance(attn.rope, RoPE.Config)
+        assert isinstance(attn.rope.frequencies, YarnScaling.Config)
+        assert attn.rope.frequencies.factor == 32.0
+
+    def test_quantized_checkpoint_rejected(self) -> None:
+        with pytest.raises(ValueError, match="quantization"):
+            KimiK2.Config.from_hf(
+                hf_config(quantization_config={"quant_method": "fp8"}),
+            )
+
     def test_default_router_is_buildable_sigmoid(self) -> None:
         router = _router(KimiK2.Config())
         assert isinstance(router, SigmoidRouter.Config)
@@ -287,12 +342,24 @@ class TestConfig:
         with pytest.raises(ValueError, match="scoring_func"):
             KimiK2.Config.from_hf(hf_config(scoring_func="linear"))
 
-    def test_rope_scaling_without_type_uses_base_frequencies(self):
-        cfg = KimiK2.Config.from_hf(hf_config(rope_scaling={"factor": 2.0}))
+    def test_rope_scaling_without_type_is_rejected(self):
+        with pytest.raises(TypeError):
+            KimiK2.Config.from_hf(hf_config(rope_scaling={"factor": 2.0}))
+
+    def test_rope_type_alias_selects_yarn(self):
+        cfg = KimiK2.Config.from_hf(
+            hf_config(
+                rope_scaling={
+                    "rope_type": "yarn",
+                    "factor": 2.0,
+                    "original_max_position_embeddings": 4096,
+                },
+            ),
+        )
         rope = _attn(cfg).rope
         assert isinstance(rope, RoPE.Config)
-        assert isinstance(rope.frequencies, HuggingFaceFrequencies.Config)
-        assert rope.frequencies.base == 50_000.0
+        assert isinstance(rope.frequencies, YarnScaling.Config)
+        assert rope.frequencies.factor == 2.0
 
     @pytest.mark.parametrize("moe_intermediate_size", [0, -64])
     def test_nonpositive_moe_width_rejected(self, moe_intermediate_size: int):
@@ -323,11 +390,11 @@ class TestConfig:
                 rope_scaling={
                     "type": "yarn",
                     "factor": 32.0,
-                    "original_max_position_embeddings": 4096,
+                    "original_max_position_embeddings": 8192,
                     "beta_fast": 1.0,
-                    "beta_slow": 1.0,
-                    "mscale": 1.0,
-                    "mscale_all_dim": 1.0,
+                    "beta_slow": 3.0,
+                    "mscale": 2.5,
+                    "mscale_all_dim": 4.5,
                 },
             ),
         )
@@ -336,11 +403,51 @@ class TestConfig:
         yarn = rope.frequencies
         assert isinstance(yarn, YarnScaling.Config)
         assert yarn.factor == 32.0
-        assert yarn.original_max_position_embeddings == 4096
+        assert yarn.original_max_position_embeddings == 8192
+        assert yarn.beta_fast == 1.0
+        assert yarn.beta_slow == 3.0
+        assert yarn.mscale == 2.5
+        assert yarn.mscale_all_dim == 4.5
+
+    def test_yarn_scaling_defaults(self):
+        cfg = KimiK2.Config.from_hf(
+            hf_config(
+                rope_scaling={"type": "yarn", "factor": 2.0},
+            ),
+        )
+        rope = _attn(cfg).rope
+        assert isinstance(rope, RoPE.Config)
+        yarn = rope.frequencies
+        assert isinstance(yarn, YarnScaling.Config)
+        assert yarn.original_max_position_embeddings == 4_096
+        assert yarn.beta_fast == 32.0
+        assert yarn.beta_slow == 1.0
+        assert yarn.mscale == 1.0
+        assert yarn.mscale_all_dim == 0.0
 
 
 class TestSlots:
     """The parent holds slots, not copies of its children's vocabulary."""
+
+    def test_layer_accessors_broadcast_one_template(self):
+        cfg = KimiK2.Config.from_hf(hf_config())
+        assert isinstance(cfg.block, TransformerBlock.Config)
+        assert kimi_k2._attn_of(cfg, 1) is cfg.block.attn
+        assert kimi_k2._moe_of(cfg, 1) is cfg.block.ffn
+
+    def test_layer_accessors_use_each_layers_config(self):
+        cfg = KimiK2.Config.from_hf(hf_config()).finalize()
+        assert isinstance(cfg.block, list)
+        second = cfg.block[1]
+        assert isinstance(second, TransformerBlock.Config)
+        assert isinstance(second.attn, MultiHeadLatentAttention.Config)
+        assert isinstance(second.ffn, MoE.Config)
+        assert isinstance(second.ffn.router, Router.Config)
+        second.attn.q_lora_rank = 6
+        second.ffn.router.top_k = 2
+
+        assert kimi_k2._attn_of(cfg, 1).q_lora_rank == 6
+        assert kimi_k2._moe_of(cfg, 1).router.top_k == 2
 
     def test_a_router_edit_survives_finalize(self):
         """Editing the router slot must reach the built MoE layers.
@@ -395,8 +502,7 @@ class TestSlots:
             )
 
     def test_make_returns_kimik2_instance(self):
-        model = KimiK2.Config.from_hf(hf_config()).make()
-        assert isinstance(model, KimiK2)
+        KimiK2.Config.from_hf(hf_config()).make()
 
     def test_architecture_specific_sizing_skips_other_blocks(self):
         cfg = KimiK2.Config.from_hf(hf_config())
@@ -415,6 +521,37 @@ class TestSlots:
 
 
 class TestLoad:
+    @pytest.mark.parametrize(
+        ("torch_dtype", "expected_dtype"),
+        [
+            ("float16", torch.float16),
+            ("float32", torch.float32),
+            (None, torch.bfloat16),
+        ],
+    )
+    def test_load_uses_checkpoint_dtype_without_override(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        torch_dtype: str | None,
+        expected_dtype: torch.dtype,
+    ) -> None:
+        config_dict = hf_config(num_hidden_layers=1)
+        if torch_dtype is None:
+            del config_dict["torch_dtype"]
+        else:
+            config_dict["torch_dtype"] = torch_dtype
+        config = KimiK2.Config.from_hf(config_dict).finalize()
+        monkeypatch.setattr(
+            hub,
+            "load_hf_checkpoint",
+            Mock(return_value=(config_dict, _synth_hf(config))),
+        )
+
+        model = KimiK2.load("moonshotai/tiny-kimi", dtype=None)
+
+        assert isinstance(model.proj_in, Embedding)
+        assert model.proj_in.weight.dtype == expected_dtype
+
     def test_remote_load_uses_hf_config_weights_dtype_and_device(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -431,16 +568,16 @@ class TestLoad:
             load_transformers_model,
         )
 
-        model = KimiK2.load("moonshotai/tiny-kimi", device="cpu", dtype=torch.float32)
+        model = KimiK2.load("moonshotai/tiny-kimi", device="meta", dtype=torch.bfloat16)
 
         assert isinstance(model.proj_in, Embedding)
-        assert model.proj_in.weight.dtype == torch.float32
-        assert model.proj_in.weight.device.type == "cpu"
+        assert model.proj_in.weight.dtype == torch.bfloat16
+        assert model.proj_in.weight.device.type == "meta"
         load_transformers_model.assert_called_once_with(
             "moonshotai/tiny-kimi",
             "AutoModelForCausalLM",
-            dtype=torch.float32,
-            trust_remote_code=True,
+            dtype=torch.bfloat16,
+            trust_remote_code=False,
         )
 
 
@@ -459,9 +596,15 @@ class TestRemap:
         if isinstance(router, SigmoidRouter.Config):
             router.use_correction_bias = correction_bias
         cfg.finalize()
-        remapped = remap_hf_state_dict(_synth_hf(cfg), cfg)
+        hf_state = _synth_hf(cfg)
+        remapped = remap_hf_state_dict(hf_state, cfg)
         bias_key = "blocks.1.ffn.router.e_score_correction_bias"
         assert (bias_key in remapped) == (scoring_func == "sigmoid" and correction_bias)
+        if bias_key in remapped:
+            assert torch.equal(
+                remapped[bias_key],
+                hf_state["model.layers.1.mlp.gate.e_score_correction_bias"],
+            )
         model = cfg.make()
         model.load_state_dict(remapped, strict=True)
         assert model(torch.tensor([[0, 1]])).shape == (1, 2, cfg.channels_out)
@@ -493,38 +636,38 @@ class TestRemap:
         assert "blocks.2.ffn.router.gate.weight" in remapped
         assert "blocks.2.ffn.router.e_score_correction_bias" in remapped
 
-    def test_missing_bias_defaults_zero(self):
-        """HF checkpoints may omit e_score_correction_bias; remap defaults it."""
+    def test_missing_correction_bias_rejected(self) -> None:
         cfg = KimiK2.Config.from_hf(hf_config()).finalize()
         sd = _synth_hf(cfg)
-        for i in range(cfg.first_k_dense_replace, cfg.num_layers):
-            sd.pop(f"model.layers.{i}.mlp.gate.e_score_correction_bias")
-        remapped = remap_hf_state_dict(sd, cfg)
-        for i in range(cfg.first_k_dense_replace, cfg.num_layers):
-            key = f"blocks.{i}.ffn.router.e_score_correction_bias"
-            assert key in remapped
-            assert torch.all(remapped[key] == 0)
+        del sd["model.layers.1.mlp.gate.e_score_correction_bias"]
+        with pytest.raises(KeyError, match="e_score_correction_bias"):
+            remap_hf_state_dict(sd, cfg)
 
-    def test_multiple_shared_experts_keep_their_indices(self):
+    def test_multiple_shared_experts_split_fused_hf_weights(self) -> None:
         cfg = KimiK2.Config.from_hf(hf_config(n_shared_experts=2)).finalize()
         sd = _synth_hf(cfg)
-        expected: dict[str, Tensor] = {}
-        for layer in range(cfg.first_k_dense_replace, cfg.num_layers):
-            prefix = f"model.layers.{layer}.mlp.shared_experts"
-            gate = sd.pop(f"{prefix}.gate_proj.weight")
-            up = sd.pop(f"{prefix}.up_proj.weight")
-            down = sd.pop(f"{prefix}.down_proj.weight")
-            for expert in range(2):
-                sd[f"{prefix}.{expert}.gate_proj.weight"] = gate + expert
-                sd[f"{prefix}.{expert}.up_proj.weight"] = up + expert
-                sd[f"{prefix}.{expert}.down_proj.weight"] = down + expert
-                key = f"blocks.{layer}.ffn.shared_experts.{expert}.up_proj.weight"
-                expected[key] = torch.cat([gate + expert, up + expert], dim=0)
-
+        prefix = "model.layers.1.mlp.shared_experts"
+        width = cfg.channels_hidden_expert
+        gate = torch.randn(2 * width, cfg.channels_in)
+        up = torch.randn(2 * width, cfg.channels_in)
+        down = torch.randn(cfg.channels_in, 2 * width)
+        sd[f"{prefix}.gate_proj.weight"] = gate
+        sd[f"{prefix}.up_proj.weight"] = up
+        sd[f"{prefix}.down_proj.weight"] = down
         remapped = remap_hf_state_dict(sd, cfg)
-
-        for key, value in expected.items():
-            assert torch.equal(remapped[key], value)
+        model = cfg.make()
+        model.load_state_dict(remapped, strict=True)
+        for expert in range(2):
+            start = expert * width
+            key = f"blocks.1.ffn.shared_experts.{expert}"
+            assert torch.equal(
+                remapped[f"{key}.up_proj.weight"],
+                torch.cat([gate[start : start + width], up[start : start + width]]),
+            )
+            assert torch.equal(
+                remapped[f"{key}.down_proj.weight"],
+                down[:, start : start + width],
+            )
 
     @pytest.mark.parametrize("bad_part", ["block", "attention", "ffn"])
     def test_remap_rejects_incompatible_layer_configs(self, bad_part: str):
@@ -540,24 +683,46 @@ class TestRemap:
         else:
             block.ffn = SwiGLU.Config()
             match = "not MoE"
-        if bad_part == "ffn":
-            with pytest.raises(TypeError, match=match):
+        if bad_part in ("block", "ffn"):
+            with pytest.raises(TypeError, match=match) as exc_info:
                 kimi_k2._moe_of(cfg, 0)
-        else:
-            with pytest.raises(TypeError, match=match):
+            expected_message = (
+                "layer 0 is RMSNorm.Config, not a transformer."
+                if bad_part == "block"
+                else "layer 0 FFN is SwiGLU.Config, not MoE."
+            )
+            assert str(exc_info.value) == expected_message
+        if bad_part in ("block", "attention"):
+            with pytest.raises(TypeError, match=match) as exc_info:
                 kimi_k2._attn_of(cfg, 0)
+            expected_message = (
+                "layer 0 is RMSNorm.Config, not a transformer."
+                if bad_part == "block"
+                else "layer 0 attention is RMSNorm.Config, not MLA."
+            )
+            assert str(exc_info.value) == expected_message
 
 
 @pytest.mark.network_huggingface
 @pytest.mark.parametrize("q_lora_rank", [None, 16])
-def test_kimi_k2_matches_hf_deepseek_v3(q_lora_rank: int | None):
+@pytest.mark.parametrize("yarn", [False, True])
+@pytest.mark.parametrize("shared_experts", [1, 2])
+def test_kimi_k2_matches_hf_deepseek_v3(
+    q_lora_rank: int | None,
+    yarn: bool,
+    shared_experts: int,
+):
     """KimiK2 logits must match HF's DeepseekV3ForCausalLM."""
     torch.manual_seed(0)
     # The shims stay installed across the HF forward pass, not just
     # construction: the remote DeepSeek-V3 code reads both symbols at call
     # time, so exiting the block earlier would raise inside ``hf_model(...)``.
     with _install_transformers_compat_shims():
-        hf_model = _build_hf_model(q_lora_rank)
+        hf_model = _build_hf_model(
+            q_lora_rank,
+            yarn=yarn,
+            shared_experts=shared_experts,
+        )
         config = _our_config_from_hf(hf_model, q_lora_rank)
         loop_sd = remap_hf_state_dict(
             _hf_state_dict_with_bias_fill(hf_model, config),
@@ -567,6 +732,26 @@ def test_kimi_k2_matches_hf_deepseek_v3(q_lora_rank: int | None):
         loop_model.load_state_dict(loop_sd, strict=True)
         loop_model = loop_model.to(torch.float32).eval()
 
+        if yarn:
+            reference_rope = hf_model.get_submodule(
+                "model.layers.0.self_attn.rotary_emb",
+            )
+            rope_config = _attn(config).rope
+            assert isinstance(rope_config, RoPE.Config)
+            our_rope = rope_config.make()
+            reference_freq = reference_rope.get_buffer("inv_freq")
+            our_freq = our_rope._inv_freqs[0].squeeze(0)
+            assert torch.equal(reference_freq, our_freq), (
+                f"inv_freq max abs diff: {(reference_freq - our_freq).abs().max().item():.9g}; "
+                f"HF={reference_freq.tolist()}, ours={our_freq.tolist()}"
+            )
+            positions = torch.arange(5)
+            cos, sin = our_rope(positions)
+            for name, ours in (("cos_cached", cos), ("sin_cached", sin)):
+                reference = reference_rope.get_buffer(name)[:5, :4]
+                assert torch.equal(reference, ours.squeeze(-2)), (
+                    f"{name} max abs diff: {(reference - ours.squeeze(-2)).abs().max().item():.9g}"
+                )
         tokens = torch.randint(0, config.channels_out, (2, 5))
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FutureWarning)
@@ -682,7 +867,12 @@ def _install_transformers_compat_shims() -> Generator[None]:
 
 # ``PreTrainedModel``, not ``DeepseekV3ForCausalLM``: ``trust_remote_code`` loads
 # the checkpoint's own module class, which shares the name but not the identity.
-def _build_hf_model(q_lora_rank: int | None) -> PreTrainedModel:
+def _build_hf_model(
+    q_lora_rank: int | None,
+    *,
+    yarn: bool,
+    shared_experts: int,
+) -> PreTrainedModel:
     """Instantiate HF's real ``DeepseekV3ForCausalLM`` at tiny size."""
     pytest.importorskip("transformers")
     from transformers.models.auto.configuration_auto import (  # noqa: PLC0415 -- The optional Transformers dependency is loaded only in these tests.
@@ -707,14 +897,25 @@ def _build_hf_model(q_lora_rank: int | None) -> PreTrainedModel:
     config.moe_intermediate_size = 32
     config.n_routed_experts = 4
     config.num_experts_per_tok = 2
-    config.n_shared_experts = 1
+    config.n_shared_experts = shared_experts
     config.first_k_dense_replace = 1
     config.vocab_size = 64
     config.n_group = 1
     config.topk_group = 1
     config.rope_theta = 50_000.0
     config.max_position_embeddings = 64
-    config.rope_scaling = None
+    config.rope_scaling = (
+        {
+            "type": "yarn",
+            "factor": 32.0,
+            "original_max_position_embeddings": 4,
+            "mscale": 1.0,
+            "mscale_all_dim": 1.0,
+        }
+        if yarn
+        else None
+    )
+    config.quantization_config = None
     config.q_lora_rank = q_lora_rank
     config.torch_dtype = "float32"
     config.use_cache = False
@@ -735,10 +936,9 @@ def _our_config_from_hf(
     q_lora_rank: int | None,
 ) -> KimiK2.Config:
     """Mirror an HF model's config into a ``KimiK2.Config``."""
-    hf_cfg = DictCodec.coerce(hf_model.config.to_dict())
+    hf_cfg = convert(hf_model.config.to_dict(), dict[str, object])
     hf_cfg.setdefault("model_type", "deepseek_v3")
     hf_cfg["q_lora_rank"] = q_lora_rank
-    hf_cfg["rope_scaling"] = None
     hf_cfg["tie_word_embeddings"] = False
     return KimiK2.Config.from_hf(hf_cfg).finalize()
 

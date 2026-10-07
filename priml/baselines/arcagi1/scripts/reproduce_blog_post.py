@@ -41,11 +41,12 @@ from typing import TYPE_CHECKING, Protocol, cast
 import argparse
 import hashlib
 import logging
+import math
 import os
 
-from priml.baselines.arcagi1.act import AtomicPool
 from priml.baselines.arcagi1.experiments import TrmTrainLoop, exp008
 from priml.baselines.arcagi1.model import from_reference_name
+from priml.baselines.sudoku.act import AtomicPool
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.runtime import SingleProcess
 from priml.train.checkpointer import Checkpointer
@@ -69,7 +70,7 @@ def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -115,7 +116,7 @@ def recipe(
     cfg = exp008()
     cfg.experiment_name = "exp008_blog_gx10" if single_gpu else "exp008_blog_8gpu"
     cfg.max_steps = steps
-    cfg.max_time = float("inf")
+    cfg.max_time = math.inf
     cfg.num_steps_eval = -1  # Final scoring uses the trained EMA in memory.
     cfg.eval_warmup_batches = 0
     cfg.tracker = FileTracker.Config()

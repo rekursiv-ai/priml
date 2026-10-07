@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
+import hashlib
 import inspect
 import os
 import random
+import secrets
 
 from torch import Tensor
 from torch.distributed.device_mesh import DeviceMesh
@@ -39,6 +43,15 @@ def test_make_seed_returns_nonzero():
     assert seed < 2**63  # PyTorch / numpy accept 64-bit seeds.
 
 
+def test_make_seed_replaces_zero_entropy_with_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    randbits = MagicMock(return_value=0)
+    monkeypatch.setattr(secrets, "randbits", randbits)
+    assert make_seed() == 1
+    randbits.assert_called_once_with(63)
+
+
 def test_make_seed_distinct_consecutive_calls():
     """Successive calls must differ.
 
@@ -52,6 +65,38 @@ def test_set_seed_with_explicit_value():
     seed = set_seed_local(seed=42)
     assert seed == 42
     assert torch.initial_seed() == salt("torch", 42)
+
+
+def test_set_seed_local_produces_exact_component_draws() -> None:
+    seed_value = 42
+    local_seed = set_seed_local(seed_value)
+
+    expected_torch = torch.Generator().manual_seed(salt("torch", local_seed))
+    expected_numpy = np.random.Generator(np.random.PCG64(salt("numpy", local_seed)))
+    expected_python = random.Random(salt("python", local_seed))  # noqa: S311 -- Deterministic reference stream for the seed contract.
+    expected_legacy = np.random.RandomState(salt("numpy_legacy", local_seed))
+
+    torch.testing.assert_close(
+        torch.rand(4),
+        torch.rand(4, generator=expected_torch),
+        rtol=0,
+        atol=0,
+    )
+    np.testing.assert_array_equal(numpy_rng.random(4), expected_numpy.random(4))
+    assert random.random() == expected_python.random()  # noqa: S311 -- Compare deterministic reference stream.
+    np.testing.assert_array_equal(
+        np.random.random(4),  # noqa: NPY002 -- Check exact legacy-global RNG output.
+        expected_legacy.random_sample(4),
+    )
+
+
+def test_set_seed_local_logs_exact_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    info = MagicMock()
+    monkeypatch.setattr(seed.logger, "info", info)
+    set_seed_local(42)
+    info.assert_called_once_with("Using seed: %d", 42)
 
 
 def test_set_seed_generates_when_none():
@@ -231,6 +276,38 @@ def test_set_seed_distributed_salting_combinations(
     )
 
 
+def test_local_salt_emits_exact_log_messages(caplog: pytest.LogCaptureFixture) -> None:
+    mesh = _mesh_local_rank(3)
+    with caplog.at_level("INFO", logger="priml.math.seed"):
+        mesh_seed = seed._local_salt(
+            base_seed=100,
+            salt_by_rank=True,
+            mesh=cast(DeviceMesh, mesh),
+            global_rank=9,
+        )
+        global_seed = seed._local_salt(
+            base_seed=100,
+            salt_by_rank=True,
+            mesh=None,
+            global_rank=9,
+        )
+        base_seed = seed._local_salt(
+            base_seed=100,
+            salt_by_rank=False,
+            mesh=None,
+            global_rank=9,
+        )
+
+    assert [(record.msg, record.args) for record in caplog.records] == [
+        ("seed=%d salted by (mesh) local_rank=%d; this_seed=%d.", (100, 3, mesh_seed)),
+        ("seed=%d salted by global_rank=%d; this_seed=%d.", (100, 9, global_seed)),
+        ("seed=%d not salted.", (100,)),
+    ]
+    assert mesh_seed == salt("rank", 3, 100)
+    assert global_seed == salt("rank", 9, 100)
+    assert base_seed == 100
+
+
 def test_set_seed_distributed_returns_base_then_local(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -280,6 +357,66 @@ def test_set_seed_distributed_broadcast_carries_user_seed(
     assert int(sink[0].item()) == 999
 
 
+def test_set_seed_distributed_broadcasts_exact_tensor_from_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broadcast = MagicMock(side_effect=_mock_broadcast_fill)
+    _patch_dist(monkeypatch, rank=1, broadcast=broadcast)
+
+    base_seed, local_seed = set_seed_distributed(seed=999, salt_by_rank=False)
+
+    tensor = broadcast.call_args.args[0]
+    assert isinstance(tensor, Tensor)
+    assert tensor.shape == torch.Size([])
+    assert tensor.dtype is torch.long
+    assert tensor.device == torch.device("cpu")
+    assert tensor.item() == 100
+    assert broadcast.call_args.kwargs == {"src": 0}
+    assert (base_seed, local_seed) == (100, 100)
+
+
+def test_set_seed_distributed_constructs_exact_cpu_tensor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tensor_factory = MagicMock(wraps=torch.tensor)
+    zeros_factory = MagicMock(wraps=torch.zeros)
+    monkeypatch.setattr(torch, "tensor", tensor_factory)
+    monkeypatch.setattr(torch, "zeros", zeros_factory)
+    broadcast = MagicMock(side_effect=_mock_broadcast_fill)
+    _patch_dist(monkeypatch, rank=0, broadcast=broadcast)
+
+    assert set_seed_distributed(seed=999, salt_by_rank=False) == (100, 100)
+
+    tensor_factory.assert_called_once_with(
+        999,
+        dtype=torch.long,
+        device=torch.device("cpu"),
+    )
+    zeros_factory.assert_not_called()
+    assert broadcast.call_args.kwargs == {"src": 0}
+
+
+def test_set_seed_distributed_constructs_exact_nonroot_cpu_tensor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tensor_factory = MagicMock(wraps=torch.tensor)
+    zeros_factory = MagicMock(wraps=torch.zeros)
+    monkeypatch.setattr(torch, "tensor", tensor_factory)
+    monkeypatch.setattr(torch, "zeros", zeros_factory)
+    broadcast = MagicMock(side_effect=_mock_broadcast_fill)
+    _patch_dist(monkeypatch, rank=1, broadcast=broadcast)
+
+    assert set_seed_distributed(seed=999, salt_by_rank=False) == (100, 100)
+
+    tensor_factory.assert_not_called()
+    zeros_factory.assert_called_once_with(
+        (),
+        dtype=torch.long,
+        device=torch.device("cpu"),
+    )
+    assert broadcast.call_args.kwargs == {"src": 0}
+
+
 def test_set_seed_distributed_broadcast_tensor_shape_matches_across_ranks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -312,8 +449,16 @@ def test_set_seed_distributed_raises_on_nccl_without_cuda(
     """
     _patch_dist(monkeypatch, rank=0, backend="nccl")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    with pytest.raises(ValueError, match=r"(?i)nccl.*cuda"):
+    with pytest.raises(
+        ValueError,
+        match=r"\ANCCL backend declared but no CUDA devices are available; "
+        r"use gloo for CPU-only distributed training\.\Z",
+    ) as exc_info:
         set_seed_distributed(seed=42, mesh=None, salt_by_rank=False)
+    assert str(exc_info.value) == (
+        "NCCL backend declared but no CUDA devices are available; "
+        "use gloo for CPU-only distributed training."
+    )
 
 
 @pytest.mark.gpu_torch_cuda
@@ -351,8 +496,27 @@ def test_set_seed_distributed_asserts_initialized(
     precondition at the boundary instead.
     """
     _patch_dist(monkeypatch, rank=0, initialized=False)
-    with pytest.raises(ValueError, match=r"(?i)initialized|process group"):
+    with pytest.raises(
+        ValueError,
+        match=r"\Aset_seed_distributed requires an initialized default process group; "
+        r"call dist\.init_process_group\(\.\.\.\) first or use set_seed_local\.\Z",
+    ) as exc_info:
         set_seed_distributed(seed=42, mesh=None, salt_by_rank=False)
+    assert str(exc_info.value) == (
+        "set_seed_distributed requires an initialized default process group; "
+        "call dist.init_process_group(...) first or use set_seed_local."
+    )
+
+
+def test_set_seed_distributed_default_salts_by_global_rank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_dist(monkeypatch, rank=2, broadcast=_mock_broadcast_fill)
+
+    base_seed, local_seed = set_seed_distributed(seed=999)
+
+    assert base_seed == 100
+    assert local_seed == salt("rank", 2, 100)
 
 
 def test_set_seed_distributed_rank_n_does_not_use_user_seed_arg(
@@ -419,6 +583,73 @@ def _record_set_rng_state_all(
         sink.append(list(states))
 
     return capture
+
+
+def test_set_seed_local_seeds_each_cuda_device_without_cuda_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manual_seed = MagicMock()
+    device = MagicMock(side_effect=nullcontext)
+    monkeypatch.setattr(torch, "manual_seed", MagicMock())
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(torch.cuda, "device", device)
+    monkeypatch.setattr(torch.cuda, "manual_seed", manual_seed)
+
+    set_seed_local(seed=42)
+
+    device.assert_has_calls([call(0), call(1)])
+    assert manual_seed.call_args_list == [
+        call(salt("cuda", 0, 42)),
+        call(salt("cuda", 1, 42)),
+    ]
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_set_seed_distributed_constructs_nccl_tensor_on_current_device(
+    monkeypatch: pytest.MonkeyPatch,
+    rank: int,
+) -> None:
+    tensor_factory = MagicMock(return_value=torch.tensor(999))
+    zeros_factory = MagicMock(return_value=torch.tensor(0))
+    monkeypatch.setattr(torch, "tensor", tensor_factory)
+    monkeypatch.setattr(torch, "zeros", zeros_factory)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 1)
+    sink = _patch_dist(
+        monkeypatch,
+        rank=rank,
+        backend="nccl",
+        broadcast=_mock_broadcast_fill if rank else None,
+    )
+
+    expected_seed = 999 if rank == 0 else 100
+    assert set_seed_distributed(seed=999, salt_by_rank=False) == (
+        expected_seed,
+        expected_seed,
+    )
+    assert torch.device("cuda:1") == torch.device("cuda", 1)
+
+    if rank == 0:
+        tensor_factory.assert_called_once_with(
+            999,
+            dtype=torch.long,
+            device=torch.device("cuda", 1),
+        )
+        zeros_factory.assert_not_called()
+    else:
+        tensor_factory.assert_not_called()
+        zeros_factory.assert_called_once_with(
+            (),
+            dtype=torch.long,
+            device=torch.device("cuda", 1),
+        )
+    if rank == 0:
+        assert len(sink) == 1
+        assert sink[0].shape == torch.Size([])
+        assert sink[0].dtype is torch.long
 
 
 def test_set_rng_state_raises_when_cuda_states_exceed_devices(
@@ -516,6 +747,32 @@ def test_set_rng_state_restores_when_count_matches(
 def _fake_device_identity(index: int) -> str:
     """Stand in for the CUDA device probe on a host without CUDA initialized."""
     return f"cuda:{index}"
+
+
+def test_cuda_device_identity_uses_uuid_then_fallback_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    properties = MagicMock()
+    properties.uuid = None
+    properties.pci_bus_id = "0000:03:00.0"
+    get_properties = MagicMock(return_value=properties)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", get_properties)
+
+    assert seed._cuda_device_identity(2) == "0000:03:00.0"
+    get_properties.assert_called_once_with(2)
+    assert properties.uuid is None
+    assert properties.pci_bus_id == "0000:03:00.0"
+
+
+def test_cuda_device_identity_falls_back_to_name_when_attributes_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    properties = SimpleNamespace(name="cpu-test-gpu")
+    get_properties = MagicMock(return_value=properties)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", get_properties)
+
+    assert seed._cuda_device_identity(1) == "cpu-test-gpu"
+    get_properties.assert_called_once_with(1)
 
 
 def test_cuda_entries_are_droppable_by_the_caller(
@@ -668,6 +925,28 @@ def test_enable_determinism_sets_cublas_env_when_unset(
     assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
 
 
+def test_dataloader_worker_init_fn_sets_exact_component_states(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker_id, torch_seed = 4, 0x1_0000_0041
+    monkeypatch.setattr(torch, "initial_seed", lambda: torch_seed)
+    worker_seed = torch_seed % 2**32
+
+    dataloader_worker_init_fn(worker_id)
+
+    expected_python = random.Random(  # noqa: S311 -- Deterministic reference state for the worker-seed contract.
+        salt("python_worker", worker_id, worker_seed),
+    )
+    expected_numpy = np.random.Generator(
+        np.random.PCG64(salt("numpy_worker", worker_id, worker_seed)),
+    )
+    legacy_seed = salt("numpy_legacy_worker", worker_id, worker_seed)
+    expected_legacy = np.random.RandomState(legacy_seed).random_sample(5)
+    assert random.getstate() == expected_python.getstate()
+    assert numpy_rng.bit_generator.state == expected_numpy.bit_generator.state
+    np.testing.assert_array_equal(np.random.random(5), expected_legacy)  # noqa: NPY002 -- Verify the legacy global RNG stream.
+
+
 def test_dataloader_worker_init_fn_decorrelates_numpy_streams() -> None:
     """Module-level ``numpy_rng`` (and ``random`` / legacy ``np.random``) inherits.
 
@@ -702,6 +981,23 @@ def test_dataloader_worker_init_fn_reseeds_legacy_numpy_global() -> None:
     dataloader_worker_init_fn(1)
     c = np.random.rand(3)  # noqa: NPY002 -- The regression test exercises the legacy reseed contract.
     assert not np.array_equal(a, c), "worker 0 and worker 1 must differ"
+
+
+def test_unsupported_backend_warning_has_exact_template_and_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warning = MagicMock()
+    monkeypatch.setattr(seed.logger, "warning", warning)
+
+    seed._warn_unsupported_backend("MPS")
+
+    warning.assert_called_once_with(
+        "%s backend is active but %s RNG state is not captured by "
+        "get_rng_state; checkpoint will not round-trip %s reproducibility.",
+        "MPS",
+        "MPS",
+        "MPS",
+    )
 
 
 def test_get_rng_state_warns_when_mps_backend_active(
@@ -929,7 +1225,13 @@ def test_salt_rejects_objects_with_default_repr() -> None:
     class Opaque:
         pass
 
-    with pytest.raises(TypeError, match=r"(?i)stable repr|primitive"):
+    with pytest.raises(
+        TypeError,
+        match=(
+            r"\Asalt\(\) requires primitive args with stable repr "
+            r"\(str/bytes/int/float/bool/None\); got Opaque\.\Z"
+        ),
+    ):
         salt(Opaque(), 42)
 
 
@@ -943,6 +1245,12 @@ def test_salt_accepts_stable_primitives() -> None:
     salt(b"bytes", 0)
     salt(True, None)
     salt(3.14, 0)
+
+
+def test_salt_returns_exact_31_bit_md5_value() -> None:
+    args = ("torch", 42)
+    expected = int(hashlib.md5(str(args).encode()).hexdigest(), 16) & 0x7FFFFFFF  # noqa: S324 -- Match the deterministic salt contract.
+    assert salt(*args) == expected
 
 
 if __name__ == "__main__":

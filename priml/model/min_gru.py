@@ -53,7 +53,6 @@ from typing import TYPE_CHECKING, ClassVar, Protocol, Self, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
-from torch.nn import functional
 
 import torch
 
@@ -395,7 +394,7 @@ class TorchScan:
           state: The next carry; ``carry`` if given.
 
         """
-        hidden, gate, highway = combined.float().chunk(3, dim=-1)
+        hidden, gate, highway = combined.float().chunk(3, dim=1)
         updated = torch.lerp(state.float(), _candidate(hidden), torch.sigmoid(gate))
         strength = torch.sigmoid(highway)
         outputs = strength * updated + (1 - strength) * inputs.float()
@@ -428,7 +427,7 @@ class TorchScan:
         resets = terminals != 0
         grad_combined = torch.empty_like(combined)
         grad_inputs = torch.empty_like(inputs)
-        dh = torch.zeros_like(states[:, 0], dtype=torch.float32)
+        dh = torch.zeros_like(states[:, 0])
         for time in range(inputs.shape[1] - 1, -1, -1):
             previous = states[:, time].float()
             z = torch.sigmoid(gate[:, time])
@@ -439,7 +438,7 @@ class TorchScan:
             grad_highway = (
                 current * (carry - inputs[:, time].float()) * strength * (1 - strength)
             )
-            grad_inputs[:, time] = (current * (1 - strength)).to(inputs.dtype)
+            grad_inputs[:, time] = current * (1 - strength)
             total = dh + current * strength
             grad_candidate = total * z
             grad_gate = total * (candidate - previous) * z * (1 - z)
@@ -450,8 +449,8 @@ class TorchScan:
             )
             grad_combined[:, time] = torch.cat(
                 (grad_hidden, grad_gate, grad_highway),
-                dim=-1,
-            ).to(combined.dtype)
+                dim=1,
+            )
             dh = torch.where(resets[:, time, None], 0.0, total * (1 - z))
         return ScanBackward(
             grad_combined=grad_combined,
@@ -493,7 +492,7 @@ class TritonScan:
         require_power_of_two(block=config.block, num_warps=config.num_warps)
         self.block = config.block
         self.num_warps = config.num_warps
-        self.reference = TorchScan(TorchScan.Config())
+        self.reference = TorchScan.Config().make()
         """The scan for CUDA tensors the kernels do not take: any neither bf16
         nor fp32."""
 
@@ -581,7 +580,7 @@ class TritonScan:
             outputs,
             next_state,
             count,
-            inputs.shape[-1],
+            inputs.shape[1],
             block=self.block,
             num_warps=self.num_warps,
             **self.launch_options,
@@ -622,7 +621,11 @@ class TritonScan:
         batch, time, width = inputs.shape
         grad_combined = torch.empty_like(combined)
         grad_inputs = torch.empty_like(inputs)
-        grad_initial = torch.empty_like(states[:, 0])
+        grad_initial = torch.empty(
+            (states.shape[0], states.shape[2]),
+            dtype=states.dtype,
+            device=states.device,
+        )
         count = batch * width
         _kernels(**self.helpers).backward[(triton.cdiv(count, self.block),)](
             combined,
@@ -870,17 +873,18 @@ def _scan_affine(decay: Tensor, *, innovation: Tensor, initial: Tensor) -> Tenso
     """Solve ``h_t = decay_t*h_(t-1)+innovation_t`` for every ``t`` at once."""
     time = decay.shape[1]
     coefficient, offset = decay, innovation
-    stride = 1
-    while stride < time:
-        shifted_coefficient = functional.pad(
-            coefficient,
-            (0, 0, stride, 0),
-            value=1.0,
-        )[:, :time]
-        shifted_offset = functional.pad(offset, (0, 0, stride, 0), value=0.0)[:, :time]
+    for exponent in range((time - 1).bit_length()):
+        stride = 1 << exponent
+        shifted_coefficient = torch.cat(
+            (torch.ones_like(coefficient[:, :stride]), coefficient[:, :-stride]),
+            dim=1,
+        )
+        shifted_offset = torch.cat(
+            (torch.zeros_like(offset[:, :stride]), offset[:, :-stride]),
+            dim=1,
+        )
         offset = coefficient * shifted_offset + offset
         coefficient = coefficient * shifted_coefficient
-        stride *= 2
     return coefficient * initial[:, None, :] + offset
 
 

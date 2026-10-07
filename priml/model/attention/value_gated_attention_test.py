@@ -5,8 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final, cast
 
+import math
+
 from configgle import PartialConfig
-from configgle.testing import assert_pprint_golden
 from torch import Tensor
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
@@ -19,10 +20,12 @@ from priml.model.attention.rope import RoPE
 from priml.model.attention.value_gated_attention import (
     SdpaCausal,
     ValueGatedAttention,
+    sdpa_attention,
 )
 from priml.model.norm import RMSNorm
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -72,6 +75,27 @@ def test_value_gated_attention_forwards_the_open_message_bus() -> None:
     attention(torch.randn(2, 4, 16), cos_sin=cos_sin, message=message)
 
     assert messages == [message]
+
+
+def test_value_gated_attention_keeps_the_block_cache_from_its_kernel() -> None:
+    """A block hands every attention ``cache``; a window-only kernel never sees it."""
+    attention = ValueGatedAttention.Config(
+        channels_in=16,
+        num_heads=2,
+        channels_head=8,
+        gate_channels=4,
+        window=4,
+        kernel=PartialConfig(sdpa_attention),
+    ).make()
+    x = torch.randn(2, 4, 16)
+    cos_sin = RoPE.Config(channels_head=8).make()(torch.arange(4))
+
+    assert torch.equal(
+        attention(x, cos_sin=cos_sin, cache=None),
+        attention(x, cos_sin=cos_sin),
+    )
+    with pytest.raises(TypeError, match="ValueGatedAttention keeps no decode cache"):
+        attention(x, cos_sin=cos_sin, cache={})
 
 
 def test_value_gated_attention_preserves_zero_window() -> None:
@@ -308,6 +332,23 @@ def test_value_gated_attention_cost_matches_torch_through_a_naive_kernel() -> No
             value_embedding=x,
         ),
     )
+
+
+@pytest.mark.parametrize("window", [-1, 1])
+def test_sdpa_attention_matches_masked_softmax_over_leading_batch_axes(
+    window: int,
+) -> None:
+    """Heads stay on axis -2 however many batch axes lead; unbounded stays causal."""
+    q, k, v = (torch.randn(2, 3, 5, 6, 4) for _ in range(3))
+    reach = torch.arange(5)[:, None] - torch.arange(5)
+    hidden = reach < 0
+    if window >= 0:
+        hidden |= reach > window
+    scores = torch.einsum("...qhc,...khc->...hqk", q, k) * 4**-0.5
+    weights = scores.masked_fill(hidden, -math.inf).softmax(-1)
+    expected = torch.einsum("...hqk,...khc->...qhc", weights, v)
+
+    torch.testing.assert_close(sdpa_attention(q, k=k, v=v, window=window), expected)
 
 
 def test_sdpa_causal_cost_preserves_explicit_query_rows() -> None:

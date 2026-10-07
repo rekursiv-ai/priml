@@ -2,18 +2,27 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import math
 
 from torch import Tensor
 
+import pytest
 import torch
+import torch.distributed as dist
 
 from priml.math.distributed import (
+    _logsumexp_all_to_all,
+    collective_device,
     logmeanexp_all_to_all,
     logsumexp_all_to_all,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def test_logsumexp_all_to_all():
@@ -133,6 +142,15 @@ def test_logmeanexp_all_to_all_keepdim_false():
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
 
 
+def test_internal_logsumexp_defaults_to_keepdim_false():
+    x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+    result = _logsumexp_all_to_all(x)
+    expected = torch.logsumexp(x, dim=-1, keepdim=False)
+
+    assert result.shape == (2, 3)
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+
+
 def test_logsumexp_all_to_all_distributed():
     """Test logsumexp_all_to_all with mocked distributed (all_gather path)."""
     x = torch.randn(2, 3, 4)
@@ -152,8 +170,9 @@ def test_logsumexp_all_to_all_distributed():
 
         mock_all_gather.side_effect = mock_all_gather_impl
         result = logsumexp_all_to_all(x, dim=-1)
-        assert mock_all_gather.called
-        assert result.shape == (2, 3)
+        expected = torch.logsumexp(x, dim=-1) + math.log(2)
+        mock_all_gather.assert_called_once()
+        assert torch.equal(result, expected)
 
 
 def test_logmeanexp_all_to_all_distributed():
@@ -175,8 +194,76 @@ def test_logmeanexp_all_to_all_distributed():
 
         mock_all_gather.side_effect = mock_all_gather_impl
         result = logmeanexp_all_to_all(x, dim=-1)
-        assert mock_all_gather.called
-        assert result.shape == (2, 3)
+        expected = torch.logsumexp(x, dim=-1) - math.log(4)
+        mock_all_gather.assert_called_once()
+        torch.testing.assert_close(result, expected, rtol=1e-6, atol=1e-7)
+
+
+def test_explicit_world_size_controls_gather_and_mean():
+    """Explicit world size determines both gathered ranks and averaging."""
+    x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+
+    with (
+        patch("torch.distributed.is_initialized", return_value=True),
+        patch("torch.distributed.get_world_size", return_value=2),
+        patch("torch.distributed.all_gather") as mock_all_gather,
+    ):
+
+        def mock_all_gather_impl(
+            gathered: list[Tensor],
+            tensor: Tensor,
+        ) -> None:
+            for rank, output in enumerate(gathered):
+                output.copy_(tensor + rank)
+
+        mock_all_gather.side_effect = mock_all_gather_impl
+        summed = logsumexp_all_to_all(x, dim=-1, world_size=3)
+        expected_sum = torch.logsumexp(
+            torch.stack([torch.logsumexp(x, dim=-1) + rank for rank in range(3)]),
+            dim=0,
+        )
+        torch.testing.assert_close(summed, expected_sum)
+
+        averaged = logmeanexp_all_to_all(x, dim=-1, world_size=3)
+        expected_mean = expected_sum - math.log(x.shape[-1] * 3)
+        torch.testing.assert_close(averaged, expected_mean)
+
+
+def test_collective_device_follows_the_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """NCCL reduces on this rank's CURRENT CUDA device; gloo on the CPU."""
+    group = cast(dist.ProcessGroup, object())
+    backends = {"gloo": torch.device("cpu"), "nccl": torch.device("cuda", 2)}
+    for backend, expected in backends.items():
+        with monkeypatch.context() as patched:
+            patched.setattr(dist, "get_backend", {group: backend}.__getitem__)
+            patched.setattr(torch.cuda, "is_available", lambda: True)
+            patched.setattr(torch.cuda, "current_device", lambda: 2)
+            assert collective_device(group) == expected
+
+
+def test_collective_device_rejects_nccl_without_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dist, "get_backend", {None: "nccl"}.__getitem__)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(ValueError, match=r"^NCCL backend declared but no CUDA"):
+        collective_device()
+
+
+@pytest.mark.parametrize("reduce", [logsumexp_all_to_all, logmeanexp_all_to_all])
+def test_log_reductions_reject_an_empty_dim(
+    reduce: Callable[..., Tensor],
+) -> None:
+    with pytest.raises(ValueError, match="at least one axis"):
+        reduce(torch.zeros(2, 3), dim=())
+
+
+def test_log_reductions_reduce_every_axis_for_none() -> None:
+    x = torch.arange(6.0).reshape(2, 3)
+    torch.testing.assert_close(
+        logsumexp_all_to_all(x, dim=None),
+        torch.logsumexp(x.flatten(), dim=0),
+    )
 
 
 if __name__ == "__main__":

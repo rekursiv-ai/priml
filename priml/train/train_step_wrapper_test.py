@@ -141,7 +141,6 @@ def test_load_strict_false_tolerates_missing_keys() -> None:
     full = _learnable_with()
     state = full.state_dict()
     model_state = state["model"]
-    assert isinstance(model_state, dict)
     del model_state["fc.weight"]  # Simulate a checkpoint lacking this param.
 
     strict = _learnable_with()
@@ -161,7 +160,6 @@ def test_parameter_remap_transforms_before_load() -> None:
     state = source.state_dict()
     # Rename fc.weight -> renamed.weight in the checkpoint; remap puts it back.
     model_state = state["model"]
-    assert isinstance(model_state, dict)
     state["model"] = {"renamed.weight": model_state["fc.weight"]}
 
     def _remap(sd: Mapping[str, Tensor]) -> Mapping[str, Tensor]:
@@ -195,7 +193,6 @@ def test_load_optimizer_false_skips_optimizer_restore() -> None:
     source.optimizer.step()  # Populates Adam state.
     state = source.state_dict()
     model_state = state["model"]
-    assert isinstance(model_state, dict)
     del model_state["fc.weight"]  # Architecture changed.
 
     finetune = _adam_learnable()

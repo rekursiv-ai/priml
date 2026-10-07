@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 
@@ -178,6 +180,35 @@ def test_observation_aligned_advantage_runs_in_the_inputs_dtype(
     assert advantages.dtype == targets.dtype == dtype
 
 
+def test_observation_aligned_advantage_uses_last_axis_for_time() -> None:
+    rewards = torch.arange(24.0).reshape(2, 3, 4)
+    values = torch.arange(24.0, 48.0).reshape(2, 3, 4)
+    dones = torch.zeros(2, 3, 4, dtype=torch.bool)
+    dones[0, 1, 2] = True
+    dones[1, 2, 1] = True
+    expected, _ = generalized_advantage(
+        rewards=rewards[..., 1:].movedim(-1, 0),
+        values=values[..., :-1].movedim(-1, 0),
+        dones=dones[..., 1:].movedim(-1, 0),
+        last_value=values[..., -1],
+        discount=0.7,
+        trace_decay=0.8,
+    )
+    expected = torch.cat(
+        [expected.movedim(0, -1), torch.zeros_like(values[..., -1:])],
+        dim=-1,
+    )
+    advantages, targets = observation_aligned_advantage(
+        rewards=rewards,
+        values=values,
+        dones=dones,
+        discount=0.7,
+        trace_decay=0.8,
+    )
+    assert torch.equal(advantages, expected)
+    assert torch.equal(targets, expected + values)
+
+
 def test_explained_variance_reports_fit_and_constant_targets() -> None:
     values = torch.tensor([1.0, 2.0, 3.0])
     assert float(explained_variance(values, values)) == pytest.approx(1.0)
@@ -228,6 +259,45 @@ def test_q_lambda_stops_at_a_terminal_step() -> None:
     assert targets.tolist() == [[3.0, 4.0, 5.0, 6.0], [7.0, 8.0, 9.0, 10.0]]
 
 
+@pytest.mark.parametrize("bootstrap", [math.nan, math.inf])
+def test_q_lambda_terminal_ignores_a_non_finite_bootstrap(bootstrap: float) -> None:
+    # The state after a terminal belongs to no episode; whatever it holds,
+    # even a non-finite value, must not reach the target.
+    targets = q_lambda_targets(
+        rewards=torch.tensor([[1.0], [2.0]]),
+        q_values=torch.tensor([[[0.0]], [[0.0]], [[bootstrap]]]),
+        dones=torch.tensor([[False], [True]]),
+        discount=0.5,
+        trace_decay=0.5,
+    )
+    # Step 0 carries 1 + 0.5 * 0.5 * (2 - 0).
+    assert targets.tolist() == [[1.5], [2.0]]
+
+
+@pytest.mark.parametrize("bootstrap", [math.nan, math.inf])
+def test_gae_terminal_ignores_a_non_finite_bootstrap(bootstrap: float) -> None:
+    advantages, _ = generalized_advantage(
+        rewards=torch.tensor([[1.0], [2.0]]),
+        values=torch.tensor([[0.4], [0.2]]),
+        dones=torch.tensor([[0.0], [1.0]]),
+        last_value=torch.tensor([bootstrap]),
+        discount=0.5,
+        trace_decay=0.5,
+    )
+    torch.testing.assert_close(advantages, torch.tensor([[1.15], [1.8]]))
+
+
+def test_observation_aligned_terminal_ignores_a_non_finite_bootstrap() -> None:
+    advantages, _ = observation_aligned_advantage(
+        rewards=torch.tensor([[9.0, 1.0, 2.0]]),
+        values=torch.tensor([[0.4, 0.2, math.nan]]),
+        dones=torch.tensor([[False, False, True]]),
+        discount=0.5,
+        trace_decay=0.5,
+    )
+    torch.testing.assert_close(advantages, torch.tensor([[1.15, 1.8, 0.0]]))
+
+
 def test_q_lambda_at_zero_decay_is_the_one_step_target() -> None:
     # The endpoints are what make the mixing factor meaningful, so both are
     # pinned rather than assumed.
@@ -264,10 +334,33 @@ def test_q_lambda_credit_does_not_cross_an_episode_boundary() -> None:
     assert ended[0].tolist() == [1.0, 2.0, 3.0, 4.0]
 
 
+def test_q_lambda_matches_the_full_mixed_terminal_recursion() -> None:
+    rewards = torch.tensor([[2.0, 5.0], [3.0, 7.0], [11.0, 13.0]])
+    q_values = torch.tensor(
+        [
+            [[1.0, 2.0, 3.0], [7.0, 2.0, 1.0]],
+            [[4.0, 5.0, 6.0], [2.0, 8.0, 3.0]],
+            [[9.0, 1.0, 4.0], [6.0, 5.0, 7.0]],
+            [[2.0, 10.0, 3.0], [11.0, 4.0, 8.0]],
+        ],
+    )
+    targets = q_lambda_targets(
+        rewards=rewards,
+        q_values=q_values,
+        dones=torch.tensor([[False, False], [False, True], [False, False]]),
+        discount=0.5,
+        trace_decay=0.5,
+    )
+    assert targets.tolist() == [[5.8125, 8.75], [9.25, 7.0], [16.0, 18.5]]
+
+
 def test_q_lambda_refuses_a_missing_bootstrap_step() -> None:
     # Without the extra Q-value the last transition has nothing to bootstrap
     # from, and silently truncating would bias every target in the rollout.
-    with pytest.raises(ValueError, match="one more Q-value"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Q\(lambda\) requires one more Q-value step than rewards$",
+    ):
         q_lambda_targets(
             rewards=torch.zeros(2, 3),
             q_values=torch.zeros(2, 3, 4),
@@ -278,7 +371,10 @@ def test_q_lambda_refuses_a_missing_bootstrap_step() -> None:
 
 
 def test_q_lambda_refuses_an_empty_sequence() -> None:
-    with pytest.raises(ValueError, match="non-empty"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Q\(lambda\) sequence must be non-empty$",
+    ):
         q_lambda_targets(
             rewards=torch.zeros(0, 3),
             q_values=torch.zeros(2, 3, 4),

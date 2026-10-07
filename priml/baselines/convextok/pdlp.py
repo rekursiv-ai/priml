@@ -3,10 +3,14 @@
 The program is scaled (``scaling``) and the constant step fixed (``step_size``). Each
 iteration then takes a reflected primal-dual step and pulls the result toward the last
 restart point with Halpern weight ``(n + 1) / (n + 2)``, ``n`` iterations after that
-restart. Termination is checked every 10 iterations below 1,000, every 100 below 10,000
-and every 1,000 beyond, and at every 200th iteration, on the unscaled "potential next"
-iterate. The 200th iterations also decide restarts by the fixed-point error, and a
-restart updates the primal weight with cuOpt's PID controller.
+restart. Termination is checked on the unscaled "potential next" iterate at a cadence
+that grows tenfold per decade -- every 10 iterations below 1,000, every 100 below
+10,000, every 1,000 below 100,000, and so on -- and independently at every
+``restart_period``-th iteration. Those major iterations also decide restarts by the
+fixed-point error, and a restart updates the primal weight with cuOpt's PID controller.
+
+PDLP detects optimality only, so an infeasible or unbounded program never converges;
+the finite ``iteration_limit`` is what ends such a solve, with ``optimal`` False.
 
 Everything follows cuOpt's operations. The one departure is summation order, and on
 the device cuOpt fuses multiply-adds where the port rounds twice, so iterates agree to
@@ -46,7 +50,8 @@ class PdlpResult:
       current_primal: Scaled current primal iterate (cuOpt's warm-start state).
       current_dual: Scaled current dual iterate.
       iterations: Iterations taken.
-      optimal: Whether the tolerances were met, rather than the iteration limit.
+      optimal: Whether the tolerances were met; False means the iteration limit
+        stopped the solve, as it must for an infeasible or unbounded program.
       step_size: The constant step size.
       primal_weight: The primal weight at the stop.
 
@@ -63,6 +68,12 @@ class PdlpResult:
     primal_weight: float
 
 
+class _RestartState(NamedTuple):
+    fixed_point_error: float
+    initial_error: float
+    last_trial_error: float | None
+
+
 class Pdlp:
     """Solve a linear program with cuOpt's default PDLP."""
 
@@ -72,14 +83,18 @@ class Pdlp:
         tolerance: float = 1e-4
         """Absolute and relative tolerance on both residuals and the gap."""
 
-        iteration_limit: int | None = None
-        """Stop at the first check at or past this iteration; None runs to optimality."""
+        iteration_limit: int = 100_000
+        """Stop unconverged at the first check at or past this iteration.
+
+        Finite because nothing else ends a solve of an infeasible or unbounded
+        program; the real ConvexTok LP converges in about 5,600 iterations.
+        """
 
         ruiz_iterations: int = 10
         """Ruiz scaling passes."""
 
         restart_period: int = 200
-        """Iterations between restart decisions."""
+        """Iterations between restart decisions; at least one."""
 
         sufficient_reduction: float = 0.2
         """Restart once the fixed-point error falls to this fraction of its first value."""
@@ -103,6 +118,22 @@ class Pdlp:
         """Decay of the controller's integrated error at each restart."""
 
     def __init__(self, config: Config) -> None:
+        if config.restart_period < 1:
+            raise ValueError(
+                f"restart_period must be at least 1; got {config.restart_period}.",
+            )
+        if config.iteration_limit < 0:
+            raise ValueError(
+                f"iteration_limit must be nonnegative; got {config.iteration_limit}.",
+            )
+        if config.ruiz_iterations < 0:
+            raise ValueError(
+                f"ruiz_iterations must be nonnegative; got {config.ruiz_iterations}.",
+            )
+        if math.isnan(config.tolerance) or config.tolerance < 0:
+            raise ValueError(
+                f"tolerance must be nonnegative; got {config.tolerance}.",
+            )
         self.config = config
 
     def __call__(self, program: LinearProgram) -> PdlpResult:
@@ -127,14 +158,15 @@ class Pdlp:
         x = torch.maximum(torch.minimum(zeros_primal, problem.upper), problem.lower)
         y = zeros_dual
         anchor_x, anchor_y = zeros_primal, zeros_dual
-        next_x, next_y, slack = zeros_primal, zeros_dual, zeros_primal
-        fixed_point_error = initial_error = math.nan
-        last_trial_error = math.inf
+        next_x: Tensor = zeros_primal
+        next_y: Tensor = zeros_dual
+        slack: Tensor = zeros_primal
+        restart_state = _RestartState(math.nan, math.nan, None)
         since_restart = 0
         iteration = 0
         while True:
             major = iteration % config.restart_period == 0
-            restarted = False
+            restarted = major and iteration == config.restart_period
             if major or iteration % _check_interval(iteration) == 0:
                 primal, dual, reduced_cost = scaled_to_original(
                     scaled,
@@ -144,11 +176,7 @@ class Pdlp:
                 )
                 check = termination(primal, dual, reduced_cost)
                 optimal = iteration > 1 and check.optimal(config.tolerance)
-                limited = (
-                    config.iteration_limit is not None
-                    and iteration >= config.iteration_limit
-                )
-                if optimal or limited:
+                if optimal or iteration >= config.iteration_limit:
                     return PdlpResult(
                         primal=primal,
                         dual=dual,
@@ -166,22 +194,25 @@ class Pdlp:
                     dual,
                     reduced_cost,
                 )
-                if major:
-                    after_first = iteration > config.restart_period
-                    restarted = iteration == config.restart_period or (
-                        after_first
-                        and (
-                            fixed_point_error
-                            <= config.sufficient_reduction * initial_error
-                            or (
-                                fixed_point_error
-                                <= config.necessary_reduction * initial_error
-                                and fixed_point_error > last_trial_error
-                            )
-                            or since_restart >= config.artificial_restart * iteration
-                        )
+                if major and iteration > config.restart_period:
+                    rising_error = (
+                        restart_state.last_trial_error is not None
+                        and restart_state.fixed_point_error
+                        > restart_state.last_trial_error
                     )
-                    last_trial_error = fixed_point_error
+                    restarted = (
+                        restart_state.fixed_point_error
+                        <= config.sufficient_reduction * restart_state.initial_error
+                        or (
+                            restart_state.fixed_point_error
+                            <= config.necessary_reduction * restart_state.initial_error
+                            and rising_error
+                        )
+                        or since_restart >= config.artificial_restart * iteration
+                    )
+                    restart_state = restart_state._replace(
+                        last_trial_error=restart_state.fixed_point_error,
+                    )
                 if restarted:
                     weight.update(
                         float(torch.dot(next_x - anchor_x, next_x - anchor_x)),
@@ -192,7 +223,6 @@ class Pdlp:
                     x = anchor_x = next_x
                     y = anchor_y = next_y
                     since_restart = 0
-                    last_trial_error = math.inf
 
             primal_step = step / weight.value
             dual_step = step * weight.value
@@ -235,7 +265,15 @@ class Pdlp:
                 )
                 fixed_point_error = max(0.0, movement + 2.0 * interaction * step) ** 0.5
                 if restarted:
-                    initial_error = fixed_point_error
+                    restart_state = _RestartState(
+                        fixed_point_error,
+                        fixed_point_error,
+                        None,
+                    )
+                else:
+                    restart_state = restart_state._replace(
+                        fixed_point_error=fixed_point_error,
+                    )
             halpern = (since_restart + 1) / (since_restart + 2)
             x = updates.halpern(reflected_x, anchor_x, halpern)
             y = updates.halpern(reflected_y, anchor_y, halpern)
@@ -431,7 +469,7 @@ class _PrimalWeight:
 
 
 def _check_interval(iteration: int) -> int:
-    """Return the iterations between termination checks: 10 below 1,000, then tenfold per decade."""
+    """Return the iterations between minor termination checks: 10 below 1,000, then tenfold per decade."""
     interval, threshold = 10, 1000
     while iteration >= threshold:
         interval *= 10

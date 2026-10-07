@@ -16,15 +16,14 @@ from priml.cost import (
     elementwise_cost,
     matmul_cost,
 )
-from priml.model.attention.kvcache import KVCache
-from priml.model.attention.self_attention import SelfAttention
+from priml.model.attention.attention import Attention
 from priml.model.custom_types import (
-    CachedAttention,
     ChannelsIn,
     ChannelsOut,
     DepthIndex,
     HasDepthIndex,
     HeadGeometry,
+    LayerCache,
     TensorModule,
     infer_same_width,
     propagate_attr,
@@ -48,7 +47,7 @@ class OutputGate(nn.Module):
 
         _: KW_ONLY
 
-        inner: Makeable[TensorModule] = field(default_factory=SelfAttention.Config)
+        inner: Makeable[TensorModule] = field(default_factory=Attention.Config)
         """Wrapped attention module config."""
 
         bias: bool = False
@@ -154,62 +153,14 @@ class OutputGate(nn.Module):
         self.inner.reset_parameters()
         self.gate_proj.reset_parameters()
 
-    def alloc_kv_cache(
-        self,
-        *,
-        batch: int | tuple[int, ...],
-        max_seq: int,
-        device: torch.device | str | None = None,
-        dtype: torch.dtype | None = None,
-    ) -> KVCache:
-        """Allocate the wrapped attention's cache.
-
-        Args:
-          batch: Batch size or shape tuple.
-          max_seq: Maximum sequence length.
-          device: Device placement (default: module device).
-          dtype: Tensor dtype (default: module dtype).
-
-        Returns:
-          cache: Empty KV cache ready for generation.
-
-        """
-        inner = cast(CachedAttention[KVCache], self.inner)
-        return inner.alloc_kv_cache(
-            batch=batch,
-            max_seq=max_seq,
-            device=device,
-            dtype=dtype,
-        )
-
     @override
     def forward(
         self,
         x: Tensor,
+        *,
+        cache: LayerCache | None = None,
         **kwargs: object,
     ) -> Tensor:
+        # The wrapped attention owns the cache slot; the gate only forwards it.
         gate = torch.sigmoid(self.gate_proj(x))
-        return self.inner(x, **kwargs) * gate
-
-    def forward_cached(
-        self,
-        x: Tensor,
-        *,
-        cache: KVCache,
-        **kwargs: object,
-    ) -> tuple[Tensor, KVCache]:
-        """Apply the gate while updating the wrapped attention's cache.
-
-        Args:
-          x: X.
-          cache: Cache.
-          **kwargs: Kwargs.
-
-        Returns:
-          result: The tuple[Tensor, KVCache].
-
-        """
-        gate = torch.sigmoid(self.gate_proj(x))
-        inner = cast(CachedAttention[KVCache], self.inner)
-        out, updated = inner.forward_cached(x, cache=cache, **kwargs)
-        return out * gate, updated
+        return self.inner(x, cache=cache, **kwargs) * gate

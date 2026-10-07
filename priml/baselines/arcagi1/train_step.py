@@ -2,8 +2,8 @@
 
 Each call seats incoming puzzles in the pool, runs ONE forward over it, and
 takes one optimizer step. Everything a recipe varies is an injected piece:
-the seating policy and feedback carry (:mod:`~priml.baselines.arcagi1.act`),
-the halt training and its exploration, the token loss and its reduction
+the pool -- its seating, halt training, and feedback carry
+(:mod:`~priml.baselines.sudoku.act`) -- the token loss and its reduction
 (:mod:`~priml.baselines.arcagi1.loss`), the body optimizer, and the EMA.
 The task table, when the model has one, trains through its own sparse SignSGD.
 
@@ -35,7 +35,6 @@ from torch._inductor import config as inductor_config
 
 import torch
 
-from priml.baselines.arcagi1.act import AtomicPool, HaltTraining, TrmPool
 from priml.baselines.arcagi1.loss import (
     CrossEntropyTokens,
     MeanOverActive,
@@ -43,6 +42,7 @@ from priml.baselines.arcagi1.loss import (
     Reduction,
     TokenLoss,
 )
+from priml.baselines.sudoku.act import ActPool, AtomicPool, PoolConfig
 from priml.baselines.sudoku.model import SudokuNet
 from priml.baselines.sudoku.prefix import PrefixStack, SparsePuzzleEmbedding
 from priml.optimizers import AdamATan2, SignSGD, apply_lr_scale, lr_scale
@@ -97,6 +97,13 @@ class EvalSignals:
         return (token_logp * colored).sum(dim=-1) / counts
 
 
+# The pool slot is typed by what it must do, so a streaming pool fits too; ty infers a
+# bare ``AtomicPool.Config`` factory through its ``Makes`` base and rejects it.
+def _atomic_pool() -> PoolConfig:
+    """Return the reference seating."""
+    return AtomicPool.Config()
+
+
 class TrmTrainStep(TrainStep):
     """One pooled ACT step of the reference TRM recipe; see the module docstring."""
 
@@ -134,13 +141,8 @@ class TrmTrainStep(TrainStep):
         dtype_autocast: torch.dtype | None = torch.bfloat16
         """Autocast dtype for forwards; ``None`` runs full precision."""
 
-        pool: Makeable[TrmPool] = field(default_factory=AtomicPool.Config)
-        """Slot seating and the optional feedback carry."""
-
-        halting: HaltTraining.Config | None = field(
-            default_factory=HaltTraining.Config,
-        )
-        """Halt-head training; ``None`` freezes the head and halts at the cap."""
+        pool: PoolConfig = field(default_factory=_atomic_pool)
+        """Slot seating, halt training, and the optional feedback carry."""
 
         token_loss: Makeable[TokenLoss] = field(
             default_factory=CrossEntropyTokens.Config,
@@ -161,6 +163,13 @@ class TrmTrainStep(TrainStep):
 
         ignore_label_id: int = -100
         """Label excluded from the loss and from correctness."""
+
+        eval_halt_weight: float | None = None
+        """Weight of the halt term in the reported evaluation loss.
+
+        ``None`` uses the training halt weight, and 0 when halting is not
+        trained. A recipe that froze its halt head but still reported the
+        halt term at evaluation sets that weight here."""
 
         total_train_steps: int = 36_000
         """Schedule horizon."""
@@ -191,16 +200,15 @@ class TrmTrainStep(TrainStep):
         @override
         def finalize(self) -> Self:
             pool = self.pool
-            if isinstance(pool, TrmPool.Config):
-                pool.grid_len = self.model.grid_len
-                pool.seq_len = self.model.total_seq_len
-                pool.channels_hidden = self.model.channels_in
-                pool.dtype = self.model.dtype
-                if (
-                    isinstance(self.reduction, MeanOverBatch.Config)
-                    and self.reduction.batch_size == -1
-                ):
-                    self.reduction.batch_size = pool.batch_size
+            pool.grid_len = self.model.grid_len
+            pool.seq_len = self.model.total_seq_len
+            pool.channels_hidden = self.model.channels_in
+            pool.dtype = self.model.dtype
+            if (
+                isinstance(self.reduction, MeanOverBatch.Config)
+                and self.reduction.batch_size == -1
+            ):
+                self.reduction.batch_size = pool.batch_size
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
@@ -214,11 +222,8 @@ class TrmTrainStep(TrainStep):
         self.config: TrmTrainStep.Config = config
         if config.warm_start is not None:
             config.warm_start.make()(self.model)
-        self.pool: TrmPool = config.pool.make()
+        self.pool: ActPool = config.pool.make()
         self.pool.to(self.device)
-        self.halting = None if config.halting is None else config.halting.make()
-        if self.halting is not None:
-            self.halting.to(self.device)
         self.token_loss: TokenLoss = config.token_loss.make()
         self.reduction: Reduction = config.reduction.make()
         self.signals = None if config.signals is None else config.signals.make()
@@ -234,7 +239,7 @@ class TrmTrainStep(TrainStep):
     @override
     def build_optimizer(self, model: nn.Module) -> OptimizerProtocol:
         """Freeze an untrained halt head first, so no optimizer claims it."""
-        if self.config.halting is None:
+        if self.config.pool.halting is None:
             for parameter in cast(SudokuNet, model).halt_head.parameters():
                 parameter.requires_grad_(False)
         return super().build_optimizer(model)
@@ -281,16 +286,17 @@ class TrmTrainStep(TrainStep):
             raise TypeError(f"puzzle_identifiers must be a Tensor; got {type(ids)}.")
         pool = self.pool
         active = pool.refill(
-            self.net,
+            self.net.init_latents,
             media=media,
             labels=labels,
             valid_count=valid,
             puzzle_ids=ids,
             ignore_label_id=self.config.ignore_label_id,
         )
+        self._before_forward(active)
         self.model.train()
         if pool.carry is not None:
-            pool.set_feedback(self.net, pool.feedback)
+            self.net.set_feedback(pool.feedback)
         with self._autocast():
             out = self.net(
                 pool.inputs,
@@ -302,15 +308,13 @@ class TrmTrainStep(TrainStep):
         loss, metrics, correctness = self._train_loss(out.logits, out.halt, active)
         if pool.carry is not None:
             with torch.no_grad():
-                changed = pool.advance_feedback(pool.carry, out.logits)
-            if changed is not None:
-                metrics["feedback_corrupt_frac"] = changed
+                metrics["feedback_corrupt_frac"] = pool.advance_feedback(out.logits)
         loss.backward()
         self._update(metrics)
         pool.update_carry(z_slow=out.z_slow, z_fast=out.z_fast, active=active)
         pool.release(
-            self.net,
-            halt=pool.halt_mask(out.halt, halting=self.halting),
+            self.net.init_latents,
+            halt=pool.halt_mask(out.halt),
             active=active,
         )
         halted = pool.halted_this_step()
@@ -404,7 +408,11 @@ class TrmTrainStep(TrainStep):
                     "act_steps": float(self.pool.config.max_steps),
                     "q_continue_loss": 0.0,
                 }
-        total = lm_loss + self._halt_weight() * halt_loss
+        eval_weight = self.config.eval_halt_weight
+        total = (
+            lm_loss
+            + (self._halt_weight() if eval_weight is None else eval_weight) * halt_loss
+        )
         columns = [halt.reshape(rows, 1).float()]
         if self.signals is not None:
             stability = (rollout.stable_run + 1.0) / self.pool.config.max_steps
@@ -457,8 +465,8 @@ class TrmTrainStep(TrainStep):
     def state_dict(self) -> StateDict:
         """Extend the base state; in-flight pool slots are deliberately excluded."""
         state: TrmTrainStep.StateDict = {**super().state_dict()}
-        if self.halting is not None:
-            state["halt_rng"] = self.halting.generator.get_state()
+        if self.pool.halting is not None:
+            state["halt_rng"] = self.pool.halting.generator.get_state()
         if self.pool.carry is not None:
             state["corruption_rng"] = self.pool.carry.generator.get_state()
         if self.sparse_optimizer is not None:
@@ -483,8 +491,8 @@ class TrmTrainStep(TrainStep):
         )
         state = cast(TrmTrainStep.StateDict, state_dict)
         # ``set_state`` accepts only a CPU byte tensor.
-        if self.halting is not None and "halt_rng" in state:
-            self.halting.generator.set_state(state["halt_rng"].cpu())
+        if self.pool.halting is not None and "halt_rng" in state:
+            self.pool.halting.generator.set_state(state["halt_rng"].cpu())
         if self.pool.carry is not None and "corruption_rng" in state:
             self.pool.carry.generator.set_state(state["corruption_rng"].cpu())
         if (
@@ -502,8 +510,15 @@ class TrmTrainStep(TrainStep):
             raise TypeError("A model with a task table needs puzzle_identifiers.")
         return {"puzzle_identifiers": identifiers}
 
+    # Anything built here enters autograd before the forward's graph, so its gradients
+    # accumulate first -- part of the numerics, not just the order of side effects.
+    def _before_forward(self, active: Tensor) -> None:
+        """Run work between seating and the forward; a no-op here."""
+        del active
+
     def _halt_weight(self) -> float:
-        return 0.0 if self.halting is None else self.halting.weight
+        halting = self.pool.halting
+        return 0.0 if halting is None else halting.weight
 
     def _train_loss(
         self,
@@ -521,7 +536,8 @@ class TrmTrainStep(TrainStep):
             "lm_loss": lm_loss.detach(),
             "q_continue_loss": 0.0,
         }
-        if self.halting is None:
+        halting = self.pool.halting
+        if halting is None:
             return lm_loss, metrics, None
         with torch.no_grad():
             valid_mask = labels != ignore
@@ -548,7 +564,7 @@ class TrmTrainStep(TrainStep):
         )
         metrics.update(scored)
         metrics.update({f"active_{k}": v for k, v in scored.items()})
-        loss = lm_loss + self.halting.weight * halt_loss
+        loss = lm_loss + halting.weight * halt_loss
         return loss, metrics, correctness
 
     def _update(self, metrics: dict[str, float | Tensor]) -> None:
@@ -612,7 +628,8 @@ class TrmTrainStep(TrainStep):
         kwargs = self._prefix_kwargs(identifiers)
         rows = media.shape[0]
         z_slow, z_fast = self.net.init_latents(rows)
-        feedback = media if self.pool.carry is not None else None
+        carry = self.pool.carry
+        feedback = media if carry is not None else None
         rollout = _Rollout(rows=rows, device=self.device)
         # Per-step correctness needs labels; ``call_eval`` has none to give.
         trajectory = (
@@ -620,7 +637,7 @@ class TrmTrainStep(TrainStep):
         )
         for index in range(self.pool.config.max_steps):
             if feedback is not None:
-                self.pool.set_feedback(self.net, feedback)
+                self.net.set_feedback(feedback)
             out = self.net(
                 media,
                 z_slow,
@@ -636,8 +653,8 @@ class TrmTrainStep(TrainStep):
                 trajectory_labels=trajectory,
                 ignore_label_id=self.config.ignore_label_id,
             )
-            if feedback is not None:
-                feedback = self.pool.decode_feedback(out.logits, media=media)
+            if carry is not None:
+                feedback = carry.decode(out.logits, media=media)
         return rollout
 
     # Strictly past: the shadow is seeded by the train step AT the boundary,

@@ -22,8 +22,8 @@ from priml.baselines.arcagi2.record_test import assert_matches, load, reduce
 from priml.baselines.arcagi2.train_step_test import training_config
 from priml.baselines.sudoku.embedding import GridEmbedding
 from priml.baselines.sudoku.model import SudokuNet
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
-from priml.model.attention.self_attention import SelfAttention
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.golden import mismatches, rng_fingerprint
@@ -131,7 +131,7 @@ def test_full_model_cost_matches_torch() -> None:
     config = port_model()
     assert isinstance(config.embedding, GridEmbedding.Config)
     assert isinstance(config.block, RotaryBlock.Config)
-    assert isinstance(config.block.attn, SelfAttention.Config)
+    assert isinstance(config.block.attn, Attention.Config)
     assert isinstance(config.prefix, PuzzleEmbedding.Config)
     config.embedding.grid_shape = (3,)
     config.prefix.num_tokens = 2
@@ -153,10 +153,12 @@ def test_full_model_cost_matches_torch() -> None:
 
 def test_rotary_block_factor_branches() -> None:
     config = RotaryBlock.Config(channels_in=4)
-    assert isinstance(config.attn, SelfAttention.Config)
+    assert isinstance(config.attn, Attention.Config)
     config.attn.channels_in = 4
     config.attn.num_heads = 2
     config.attn.channels_head = 2
+    assert config.rope is not None
+    config.rope.channels_head = 2
     block = config.make()
     factors = block.factors(3, device=torch.device("cpu"))
     assert factors is not None

@@ -34,6 +34,8 @@ from priml.model.init import InitFn, call_init, normal, truncated_normal
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from triton import language
     from triton.language.extra.cuda import libdevice
 
@@ -255,6 +257,8 @@ class MultiHotEmbedding(nn.Module):
                     ("bytes", "adjoint", "selection", dt): dt.itemsize
                     * (ids + summed + 2 * gathered + table),
                 },
+                params=table,
+                params_active=fields * self.channels_out,
             )
 
     def __init__(self, config: Config) -> None:
@@ -265,6 +269,15 @@ class MultiHotEmbedding(nn.Module):
 
         """
         super().__init__()
+        if (
+            not config.offsets
+            or config.offsets[0] != 0
+            or any(a >= b for a, b in itertools.pairwise(config.offsets))
+            or config.offsets[-1] >= config.channels_in
+        ):
+            raise ValueError(
+                "offsets must start at 0, increase strictly, and stay below channels_in.",
+            )
         self.weight = nn.Parameter(
             torch.empty(config.channels_in, config.channels_out, dtype=config.dtype),
         )
@@ -273,14 +286,22 @@ class MultiHotEmbedding(nn.Module):
         self.num_scalars = config.num_scalars
         self.field_offsets = config.offsets
         """The offsets on the host: reading the device buffer would sync."""
-        # Annotated as well as registered: ``register_buffer`` types its
-        # result as ``Tensor | Module | None``.
-        self.offsets: Tensor
-        self.register_buffer("offsets", torch.tensor(config.offsets), persistent=False)
+        self.offsets = torch.tensor(config.offsets)
         self.reset_parameters()
+
+    @override
+    def _apply(
+        self,
+        fn: Callable[[Tensor], Tensor],
+        recurse: bool = True,
+    ) -> MultiHotEmbedding:
+        super()._apply(fn, recurse=recurse)
+        self.offsets = fn(self.offsets)
+        return self
 
     def reset_parameters(self) -> None:
         """Draw the table with the config's initializer, undivided by any depth."""
+        self.offsets = torch.tensor(self.field_offsets, device=self.weight.device)
         call_init(self._init_weight, self.weight, depth_index=())
 
     @override
@@ -364,9 +385,13 @@ class MultiHotEmbedding(nn.Module):
             width_block=_power_of_two(width),
             cell_block=_power_of_two(self.num_cells),
             scalar_block=_power_of_two(self.num_scalars),
+            table_rows=self.weight.shape[0],
             num_warps=4,
         )
-        return output.reshape(*input.shape[:-1], output.shape[-1])
+        return output.reshape(
+            *input.shape[:-1],
+            self.num_cells * width + self.num_scalars,
+        )
 
     def backward(self, input: Tensor, grad_output: Tensor) -> Tensor:
         """Return the table's gradient, accumulated in 2^-24 fixed point.
@@ -613,6 +638,7 @@ def _embed_triton(  # noqa: PLR0917 -- The signature is the kernel's positional 
     width_block: language.constexpr,
     cell_block: language.constexpr,
     scalar_block: language.constexpr,
+    table_rows: language.constexpr,
 ) -> None:
     """Embed one packed row per program: sum each cell's rows, copy the scalars."""
     row = language.program_id(0)
@@ -632,9 +658,12 @@ def _embed_triton(  # noqa: PLR0917 -- The signature is the kernel's positional 
         rows = language.load(offsets_ptr + field) + ids.to(language.float32).to(
             language.int32,
         )
+        # A row outside the table reads zero, as the backward skips it: no
+        # device assert, which would need a debug build of every launch.
+        valid = (rows >= 0) & (rows < table_rows)
         entry = language.load(
             table_ptr + rows[:, None] * width + lane[None, :],
-            mask=lanes,
+            mask=lanes & valid[:, None],
             other=0.0,
         )
         total = total + entry.to(language.float32)

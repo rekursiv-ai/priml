@@ -12,6 +12,7 @@ from torch import Tensor
 import pytest
 import torch
 
+from priml.data.pipeline.batching import Batcher, Unbatcher
 from priml.data.pipeline.tensorize import AsTensor, StreamSync
 
 
@@ -242,8 +243,288 @@ class TestAsTensor:
         with pytest.raises(
             TypeError,
             match=r"Field 'pending_tensorizations' exists but is not",
-        ):
+        ) as exc_info:
             list(processor(iter([{"pending_tensorizations": "existing"}])))
+        assert str(exc_info.value) == (
+            "Field 'pending_tensorizations' exists but is not a torch.cuda.Stream "
+            "(got str)"
+        )
+
+    def test_non_blocking_cuda_transfers_the_sample_inside_its_stream(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        entered: list[object] = []
+
+        @contextlib.contextmanager
+        def fake_stream_scope(stream: object) -> Generator[None]:
+            entered.append(stream)
+            yield
+
+        monkeypatch.setattr(torch.cuda, "Stream", _FakeStream)
+        monkeypatch.setattr(torch.cuda, "stream", fake_stream_scope)
+
+        def fake_to(tensor: Tensor, **_: object) -> Tensor:
+            return tensor
+
+        monkeypatch.setattr(torch.Tensor, "to", fake_to)
+        processor = _make_processor(
+            AsTensor.Config(device="cuda", non_blocking=True, include=["label"]),
+        )
+        sample = {"label": [2, 3]}
+
+        result = next(processor(iter([sample])))
+
+        assert isinstance(result["label"], Tensor)
+        assert result["label"].tolist() == [2, 3]
+        assert entered == [result["pending_tensorizations"]]
+
+    def test_non_blocking_cpu_does_not_create_a_cuda_stream(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setattr(torch.cuda, "Stream", _FakeStream)
+        processor = _make_processor(
+            AsTensor.Config(device=None, non_blocking=True, include=["none"]),
+        )
+
+        result = next(processor(iter([{"label": 42}])))
+
+        assert result == {"label": 42}
+        assert "pending_tensorizations" not in result
+
+    def test_config_sets_and_overlap_error_are_exact(self):
+        processor = _make_processor(
+            AsTensor.Config(include=["selected", "other"], exclude=["raw"]),
+        )
+        assert processor.include == {"selected", "other"}
+        assert processor.exclude == {"raw"}
+
+        with pytest.raises(ValueError, match="overlap") as exc_info:
+            _make_processor(
+                AsTensor.Config(include=["shared", "selected"], exclude=["shared"]),
+            )
+        assert str(exc_info.value) == (
+            "'include' and 'exclude' cannot overlap. Overlapping fields: {'shared'}"
+        )
+
+    def test_empty_filters_are_disabled(self):
+        processor = _make_processor(
+            AsTensor.Config(include=[], exclude=[], pin_memory=True),
+        )
+
+        assert processor.include is None
+        assert processor.exclude is None
+        assert processor.pin_memory is True
+        result = next(processor(iter([{"label": [2, 3]}])))
+        assert _tensor(result, "label").tolist() == [2, 3]
+
+    def test_transfer_passes_device_dtype_and_non_blocking(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        calls: list[dict[str, object]] = []
+
+        def record_transfer(
+            tensor: Tensor,
+            *,
+            device: object = None,
+            dtype: object = None,
+            non_blocking: bool = False,
+        ) -> Tensor:
+            calls.append(
+                {"device": device, "dtype": dtype, "non_blocking": non_blocking},
+            )
+            return tensor
+
+        monkeypatch.setattr(torch.Tensor, "to", record_transfer)
+        processor = _make_processor(
+            AsTensor.Config(device="cpu", dtype=torch.float64),
+        )
+        result = next(processor(iter([{"label": [2, 3]}])))
+
+        assert _tensor(result, "label").tolist() == [2, 3]
+        assert calls == [
+            {
+                "device": torch.device("cpu"),
+                "dtype": torch.float64,
+                "non_blocking": False,
+            },
+        ]
+
+    def test_omits_noop_transfer_when_device_and_dtype_are_unset(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        calls: list[object] = []
+
+        def record_transfer(tensor: Tensor, **kwargs: object) -> Tensor:
+            calls.append(kwargs)
+            return tensor
+
+        monkeypatch.setattr(torch.Tensor, "to", record_transfer)
+        processor = _make_processor(AsTensor.Config())
+
+        result = next(processor(iter([{"label": [2, 3]}])))
+
+        assert _tensor(result, "label").tolist() == [2, 3]
+        assert calls == []
+
+    def test_pins_before_cuda_transfer(self, monkeypatch: pytest.MonkeyPatch):
+        pinned: list[Tensor] = []
+        transfers: list[dict[str, object]] = []
+
+        def record_pin(tensor: Tensor) -> Tensor:
+            pinned.append(tensor)
+            return tensor
+
+        def record_transfer(
+            tensor: Tensor,
+            *,
+            device: object = None,
+            dtype: object = None,
+            non_blocking: bool = False,
+        ) -> Tensor:
+            transfers.append(
+                {"device": device, "dtype": dtype, "non_blocking": non_blocking},
+            )
+            return tensor
+
+        monkeypatch.setattr(torch.Tensor, "pin_memory", record_pin)
+        monkeypatch.setattr(torch.Tensor, "to", record_transfer)
+        processor = _make_processor(
+            AsTensor.Config(device="cuda", dtype=torch.float32, pin_memory=True),
+        )
+
+        result = next(processor(iter([{"label": [2, 3]}])))
+
+        label = _tensor(result, "label")
+        assert label.tolist() == [2.0, 3.0]
+        assert pinned == [label]
+        assert transfers == [
+            {
+                "device": torch.device("cuda"),
+                "dtype": torch.float32,
+                "non_blocking": False,
+            },
+        ]
+
+    def test_dtype_only_transfer_and_field_filtering(self):
+        processor = _make_processor(AsTensor.Config(dtype=torch.float64))
+        sample = {
+            "before": [2, 3],
+            "raw": [4, 5],
+            "after": [6, 7],
+        }
+
+        result = next(processor(iter([sample])))
+
+        assert _tensor(result, "before").tolist() == [2.0, 3.0]
+        assert _tensor(result, "before").dtype == torch.float64
+        assert result["raw"] == [4, 5]
+        assert _tensor(result, "after").tolist() == [6.0, 7.0]
+        assert _tensor(result, "after").dtype == torch.float64
+
+    def test_excluded_field_does_not_stop_later_fields(self):
+        processor = _make_processor(
+            AsTensor.Config(device="cpu", exclude=["raw"]),
+        )
+        sample = {"before": [2, 3], "raw": [4, 5], "after": [6, 7]}
+
+        result = next(processor(iter([sample])))
+
+        assert _tensor(result, "before").tolist() == [2, 3]
+        assert result["raw"] == [4, 5]
+        assert _tensor(result, "after").tolist() == [6, 7]
+
+    def test_nested_mapping_does_not_stop_later_fields(self):
+        processor = _make_processor(AsTensor.Config(device="cpu"))
+
+        result = next(
+            processor(iter([{"nested": {"value": [1, 2]}, "later": [3, 4]}])),
+        )
+
+        assert _nested_tensor(result, "nested", "value").tolist() == [1, 2]
+        assert _tensor(result, "later").tolist() == [3, 4]
+
+    def test_include_field_does_not_stop_later_fields(self):
+        processor = _make_processor(
+            AsTensor.Config(device="cpu", include=["after"]),
+        )
+        result = next(
+            processor(iter([{"before": [2, 3], "after": [6, 7]}])),
+        )
+
+        assert result["before"] == [2, 3]
+        assert _tensor(result, "after").tolist() == [6, 7]
+
+    def test_equal_interned_scalars_are_each_tensorized(self):
+        processor = _make_processor(AsTensor.Config(device="cpu"))
+
+        result = next(processor(iter([{"a": 2, "b": 2}])))
+
+        assert _tensor(result, "a").tolist() == 2
+        assert _tensor(result, "b").tolist() == 2
+
+    def test_a_list_shared_with_an_excluded_field_is_still_tensorized(self):
+        processor = _make_processor(AsTensor.Config(device="cpu"))
+        shared = [1, 2]
+
+        result = next(processor(iter([{"raw": [{"label": shared}], "label": shared}])))
+
+        assert _tensor(result, "label").tolist() == [1, 2]
+
+    def test_int_keyed_frame_dicts_are_tensorized(self):
+        processor = _make_processor(AsTensor.Config(device="cpu"))
+
+        result = next(processor(iter([{"x": {0: [1.0], 1: [2.0]}}])))
+
+        nested = result["x"]
+        assert isinstance(nested, dict)
+        values = list(cast(dict[int, object], nested).values())
+        assert all(isinstance(value, Tensor) for value in values)
+        assert [cast(Tensor, value).tolist() for value in values] == [[1.0], [2.0]]
+
+    def test_batcher_astensor_unbatcher_roundtrip(self):
+        samples: list[dict[str, object]] = [
+            {"key": "a", "image": torch.zeros(2, 3), "label": 4, "note": None},
+            {"key": "b", "image": torch.ones(2, 3), "label": 5, "note": None},
+        ]
+        batches = Batcher(
+            Batcher.Config(size=2, field_names=["image", "label", "key"]),
+        )(iter(samples))
+        tensorized = _make_processor(AsTensor.Config(device="cpu"))(batches)
+
+        results = list(Unbatcher(Unbatcher.Config())(tensorized))
+
+        assert [(r["key"], _tensor(r, "label").tolist()) for r in results] == [
+            ("a", 4),
+            ("b", 5),
+        ]
+
+    def test_cpu_target_transfers_block(self, monkeypatch: pytest.MonkeyPatch):
+        calls: list[object] = []
+
+        def record_transfer(tensor: Tensor, **kwargs: object) -> Tensor:
+            calls.append(kwargs["non_blocking"])
+            return tensor
+
+        monkeypatch.setattr(torch.Tensor, "to", record_transfer)
+        processor = _make_processor(AsTensor.Config(device="cpu", non_blocking=True))
+
+        _ = next(processor(iter([{"label": [2, 3]}])))
+
+        assert calls == [False]
+
+    @pytest.mark.gpu_torch_cuda
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_pin_memory_leaves_a_cuda_tensor_alone(self):
+        processor = _make_processor(AsTensor.Config(device="cuda", pin_memory=True))
+        scores = torch.arange(3.0, device="cuda")
+
+        result = next(processor(iter([{"scores": scores}])))
+
+        assert _tensor(result, "scores").tolist() == [0.0, 1.0, 2.0]
 
 
 class TestStreamSync:
@@ -344,8 +625,12 @@ class TestStreamSync:
         with pytest.raises(
             TypeError,
             match=r"Field 'pending_tensorizations' exists but is not a torch\.cuda\.Stream",
-        ):
+        ) as exc_info:
             list(processor(iter([sample])))
+        assert str(exc_info.value) == (
+            "Field 'pending_tensorizations' exists but is not a torch.cuda.Stream "
+            "(got str)"
+        )
 
     def test_string_field_conversion(self):
         """Test that single string field is converted to list."""
@@ -440,6 +725,9 @@ class _Processor(Protocol):
     ) -> Iterator[dict[str, object]]: ...
 
     stream_fields: list[str]
+    include: set[str] | None
+    exclude: set[str] | None
+    pin_memory: bool
 
 
 def _make_processor(

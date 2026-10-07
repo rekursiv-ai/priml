@@ -15,23 +15,16 @@ from torch import Tensor, nn
 import torch
 
 from priml import hub
-from priml.lib.custom_json import (
-    BoolCodec,
-    DictCodec,
-    FloatCodec,
-    IntCodec,
-    ListCodec,
-    StrCodec,
-    loads,
-)
-from priml.model.attention.gated_self_attention import GatedSelfAttention
+from priml.lib.custom_json import convert, loads
+from priml.model.attention.gated_attention import GatedAttention
+from priml.model.attention.kvcache import alloc_layer_cache
 from priml.model.attention.qwen3_5_delta import Qwen35GatedDeltaNet
-from priml.model.attention.rope import HuggingFaceFrequencies, RoPE
+from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.custom_types import (
     ChannelsIn,
+    DepthIndex,
+    LayerCache,
     TensorModule,
-    has_forward_cached,
-    is_cached_attention,
     propagate_attr,
 )
 from priml.model.embedding import Embedding
@@ -76,13 +69,14 @@ class Qwen35(Transformer):
             result.channels_out = _positive(config, name="vocab_size")
             count = _positive(config, name="num_hidden_layers")
             norm = CenteredRMSNorm.Config()
-            norm.eps = FloatCodec.coerce(config.get("rms_norm_eps", 1e-6), default=None)
+            norm.eps = convert(config.get("rms_norm_eps"), float, default=1e-6)
             if not math.isfinite(norm.eps) or norm.eps <= 0:
                 raise ValueError("rms_norm_eps must be finite and positive.")
             result.norm = norm.copy_tree()
-            initializer_range = FloatCodec.coerce(
-                config.get("initializer_range", 0.02),
-                default=None,
+            initializer_range = convert(
+                config.get("initializer_range"),
+                float,
+                default=0.02,
             )
             if not math.isfinite(initializer_range) or initializer_range <= 0:
                 raise ValueError("initializer_range must be finite and positive.")
@@ -94,7 +88,7 @@ class Qwen35(Transformer):
             embedding.channels_in = result.channels_out
             embedding.init_weight = init
             result.proj_in = embedding
-            if BoolCodec.coerce(config.get("tie_word_embeddings", False), default=None):
+            if convert(config.get("tie_word_embeddings"), bool, default=False):
                 head = TiedLinear.Config()
                 head.tied = "proj_in"
                 result.proj_out = head
@@ -189,9 +183,9 @@ class Qwen35(Transformer):
 
         """
         directory = Path(path)
-        metadata = DictCodec.coerce(
+        metadata = convert(
             loads((directory / "config.json").read_text()),
-            default=None,
+            dict[str, object],
         )
         config = cls.Config.from_hf(metadata)
         weights = remap_hf_state_dict(
@@ -201,7 +195,7 @@ class Qwen35(Transformer):
         )
         target_dtype = weights["proj_in.weight"].dtype if dtype is None else dtype
         model = config.make().to(device=device, dtype=target_dtype)
-        model.load_state_dict(weights, strict=True)
+        model.load_state_dict(weights)
         return model
 
     @override
@@ -212,35 +206,47 @@ class Qwen35(Transformer):
 
     @override
     def project_to_logits(self, hidden: Tensor, **kwargs: object) -> Tensor:
-        """Normalize residual stream and apply the pretrained language-model head."""
+        """Normalize the residual stream, then apply the language-model head.
+
+        The final norm lives HERE rather than in :meth:`hidden_states`, so the
+        residual from ``hidden_states`` -- and from ``generate``'s own block
+        loop -- is projected exactly once through it.
+
+        Args:
+          hidden: Pre-norm residual stream [..., sequence, channels_in].
+          **kwargs: Messages forwarded to the output head.
+
+        Returns:
+          output: Logits, or normalized hidden states without an output head.
+
+        """
         return super().project_to_logits(self.norm(hidden), **kwargs)
 
     def hidden_states(
         self,
         x: Tensor,
         *,
-        cache: list[object] | None = None,
+        cache: LayerCache | None = None,
         **kwargs: object,
     ) -> Tensor:
-        """Return normalized text hidden states from token IDs or input embeddings.
+        """Return the residual stream after the last block, before the final norm.
 
         Args:
           x: Integer token IDs [batch, sequence], or floating input embeddings.
-          cache: One cache per block, optionally updated in place.
+          cache: Shared layer cache, each attention's slot updated in place.
           **kwargs: Messages forwarded to native blocks, including positions and a
             2-D padding or prepared floating additive causal 4-D text attention
             mask.
 
         Returns:
-          hidden: Normalized hidden states [batch, sequence, channels_in].
+          hidden: Pre-norm residual [batch, sequence, channels_in]; pass it to
+            :meth:`project_to_logits`, which applies the final norm.
 
         """
         if not x.is_floating_point():
             if self.proj_in is None:
                 raise ValueError("Token IDs require an input embedding.")
             x = self.proj_in(x)
-        if cache is not None and len(cache) != len(self.blocks):
-            raise ValueError("The cache must have one entry per transformer block.")
         attention_mask = _pop_tensor(kwargs, name="attention_mask")
         positions = _pop_tensor(kwargs, name="positions")
         position_ids = _pop_tensor(kwargs, name="position_ids")
@@ -271,20 +277,9 @@ class Qwen35(Transformer):
             # so it is absorbed by **kwargs, but the first one that does would
             # see a different shape than `positions`.
             block_kwargs["position_ids"] = position_ids
-        for index, block in enumerate(self.blocks):
-            if cache is None:
-                x = cast(Tensor, block(x, **block_kwargs))
-            else:
-                if not has_forward_cached(block):
-                    raise TypeError(
-                        "Cached decoding requires blocks with a forward_cached method.",
-                    )
-                x, cache[index] = block.forward_cached(
-                    x,
-                    cache=cache[index],
-                    **block_kwargs,
-                )
-        return self.norm(x)
+        for block in self.blocks:
+            x = cast(Tensor, block(x, cache=cache, **block_kwargs))
+        return x
 
     @override
     def forward(self, x: Tensor, /, **kwargs: object) -> Tensor:
@@ -292,18 +287,19 @@ class Qwen35(Transformer):
 
         Args:
           x: Token IDs or input embeddings.
-          **kwargs: Block messages and an optional native cache list.
+          **kwargs: Block messages and an optional shared layer cache.
 
         Returns:
-          output: Logits, or hidden states when no output projection is present.
+          output: Logits, or normalized hidden states without an output head.
 
         """
         cache = kwargs.pop("cache", None)
-        if cache is not None and not isinstance(cache, list):
-            raise TypeError("cache must be a list or None.")
-        cache = cast(list[object] | None, cache)
-        hidden = self.hidden_states(x, cache=cache, **kwargs)
-        return hidden if self.proj_out is None else self.proj_out(hidden, **kwargs)
+        if cache is not None and not isinstance(cache, LayerCache):
+            raise TypeError("cache must satisfy LayerCache or be None.")
+        return self.project_to_logits(
+            self.hidden_states(x, cache=cache, **kwargs),
+            **kwargs,
+        )
 
     def alloc_cache(
         self,
@@ -312,71 +308,32 @@ class Qwen35(Transformer):
         max_seq: int,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
-    ) -> list[object]:
-        """Allocate one native attention state per block for cached decoding.
+    ) -> dict[DepthIndex, object]:
+        """Allocate shared decode state for every cached attention layer.
 
         Args:
-          batch: Batch size.
-          max_seq: Maximum cache length.
-          device: Cache device; None uses each block's parameter device.
-          dtype: Cache dtype; None uses each block's parameter dtype.
+          batch: Batch size or batch shape.
+          max_seq: Maximum cached sequence length.
+          device: Device for the cache tensors.
+          dtype: Dtype for the cache tensors.
 
         Returns:
-          cache: One attention cache per transformer block.
+          cache: One slot per cached attention, keyed by its depth index.
 
         """
-        caches: list[object] = []
-        for block in self.blocks:
-            try:
-                attention = block.get_submodule("attn")
-            except AttributeError as error:
-                raise TypeError(
-                    "Cached decoding requires blocks with an attn submodule.",
-                ) from error
-            if not is_cached_attention(attention):
-                raise TypeError(
-                    "Cached decoding requires attention with an alloc_kv_cache method.",
-                )
-            caches.append(
-                attention.alloc_kv_cache(
-                    batch=batch,
-                    max_seq=max_seq,
-                    device=device,
-                    dtype=dtype,
-                ),
-            )
-        return caches
-
-    def forward_cached(
-        self,
-        x: Tensor,
-        *,
-        cache: list[object],
-        **kwargs: object,
-    ) -> tuple[Tensor, list[object]]:
-        """Compute logits while updating recurrent, convolution, and KV states.
-
-        Args:
-          x: Token IDs or input embeddings for the new positions.
-          cache: One mutable cache per transformer block.
-          **kwargs: Block messages, including text positions and attention masks.
-
-        Returns:
-          output: Logits or hidden states when no output projection is present.
-          cache: The updated input cache list.
-
-        """
-        hidden = self.hidden_states(x, cache=cache, **kwargs)
-        return (
-            hidden if self.proj_out is None else self.proj_out(hidden, **kwargs),
-            cache,
+        return alloc_layer_cache(
+            self,
+            batch=batch,
+            max_seq=max_seq,
+            device=device,
+            dtype=dtype,
         )
 
 
 def _text_config(config: Mapping[str, object]) -> dict[str, object]:
     model_type = config.get("model_type")
     if model_type == "qwen3_5":
-        result = DictCodec.coerce(config.get("text_config"), default=None)
+        result = convert(config.get("text_config"), dict[str, object])
         if "tie_word_embeddings" in config:
             result["tie_word_embeddings"] = config["tie_word_embeddings"]
     elif model_type == "qwen3_5_text":
@@ -398,7 +355,7 @@ def _text_config(config: Mapping[str, object]) -> dict[str, object]:
 
 
 def _positive(config: Mapping[str, object], *, name: str) -> int:
-    value = IntCodec.coerce(config.get(name), default=None)
+    value = convert(config.get(name), int)
     if value <= 0:
         raise ValueError(f"{name} must be positive.")
     return value
@@ -407,9 +364,10 @@ def _positive(config: Mapping[str, object], *, name: str) -> int:
 def _layer_types(config: Mapping[str, object], *, count: int) -> list[str]:
     raw = config.get("layer_types")
     if raw is None:
-        interval = IntCodec.coerce(
-            config.get("full_attention_interval", 4),
-            default=None,
+        interval = (
+            4
+            if "full_attention_interval" not in config
+            else convert(config["full_attention_interval"], int)
         )
         if interval <= 0:
             raise ValueError("full_attention_interval must be positive.")
@@ -417,18 +375,18 @@ def _layer_types(config: Mapping[str, object], *, count: int) -> list[str]:
             "full_attention" if (i + 1) % interval == 0 else "linear_attention"
             for i in range(count)
         ]
-    layers = ListCodec.coerce(raw, default=None)
+    layers = convert(raw, list[str])
     if len(layers) != count or any(
         layer not in ("full_attention", "linear_attention") for layer in layers
     ):
         raise ValueError(
             "layer_types must name one supported attention type per layer.",
         )
-    return [StrCodec.coerce(layer, default=None) for layer in layers]
+    return layers
 
 
-def _full_attention(config: Mapping[str, object]) -> GatedSelfAttention.Config:
-    attention = GatedSelfAttention.Config()
+def _full_attention(config: Mapping[str, object]) -> GatedAttention.Config:
+    attention = GatedAttention.Config()
     attention.num_heads = _positive(config, name="num_attention_heads")
     attention.num_heads_kv = _positive(config, name="num_key_value_heads")
     if attention.num_heads % attention.num_heads_kv:
@@ -436,35 +394,31 @@ def _full_attention(config: Mapping[str, object]) -> GatedSelfAttention.Config:
             "num_attention_heads must be divisible by num_key_value_heads.",
         )
     attention.channels_head = _positive(config, name="head_dim")
-    attention.bias = BoolCodec.coerce(config.get("attention_bias", False), default=None)
-    attention.dropout = FloatCodec.coerce(
-        config.get("attention_dropout", 0.0),
-        default=None,
-    )
+    attention.bias = convert(config.get("attention_bias"), bool, default=False)
+    attention.dropout = convert(config.get("attention_dropout"), float, default=0.0)
     if (
         not math.isfinite(attention.dropout)
         or attention.dropout < 0
         or attention.dropout >= 1
     ):
         raise ValueError("attention_dropout must be finite and in [0, 1).")
-    params = DictCodec.coerce(config.get("rope_parameters", {}), default=None)
-    if (
-        params.get("rope_type", "default") != "default"
-        or config.get("rope_scaling") is not None
-    ):
+    if YarnScaling.Config.from_hf(config) is not None:
         raise ValueError("Only default text rotary frequencies are supported.")
-    fraction = FloatCodec.coerce(
-        params.get("partial_rotary_factor", config.get("partial_rotary_factor", 0.25)),
-        default=None,
+    params = convert(config.get("rope_parameters"), dict[str, object], default={})
+    fraction = convert(
+        params.get("partial_rotary_factor"),
+        float,
+        default=convert(config.get("partial_rotary_factor"), float, default=0.25),
     )
     if not math.isfinite(fraction) or fraction <= 0 or fraction > 1:
         raise ValueError("partial_rotary_factor must be finite and in (0, 1].")
     width = int(attention.channels_head * fraction)
     if width < 2 or width % 2:
         raise ValueError("The rotary prefix must have a positive even width.")
-    rope_theta = FloatCodec.coerce(
-        params.get("rope_theta", config.get("rope_theta", 10_000_000.0)),
-        default=None,
+    rope_theta = convert(
+        params.get("rope_theta"),
+        float,
+        default=convert(config.get("rope_theta"), float, default=10_000_000.0),
     )
     if not math.isfinite(rope_theta) or rope_theta <= 0:
         raise ValueError("rope_theta must be finite and positive.")
@@ -496,10 +450,10 @@ def _full_attention_mask(attention_mask: Tensor | None, *, x: Tensor) -> Tensor 
         return attention_mask
     if attention_mask.ndim != 2:
         raise ValueError("attention_mask must be a 2-D padding mask or 4-D mask.")
-    keys = attention_mask.shape[-1]
+    keys = attention_mask.shape[1]
     queries = x.shape[-2]
     causal = torch.arange(keys, device=x.device) <= (
-        torch.arange(queries, device=x.device).unsqueeze(-1) + keys - queries
+        torch.arange(queries, device=x.device)[:, None] + keys - queries
     )
     padding = ~attention_mask.to(device=x.device, dtype=torch.bool)
     fill = torch.full(

@@ -17,7 +17,7 @@ MMDiTGraft.Config(
                 │       │       TransformerBlock.Config(
                 │       │               channels_in=8,
                 │       │               channels_out=8,
-                │       │               attn=SelfAttention.Config(
+                │       │               attn=Attention.Config(
                 │       │                       channels_in=8,
                 │       │                       channels_out=8,
                 │       │                       num_heads=4,
@@ -32,7 +32,7 @@ MMDiTGraft.Config(
                 │       │                               frequencies=HuggingFaceFrequencies.Config(
                 │       │                                       base=1000000.0
                 │       │                               ),
-                │       │                               dtype=None
+                │       │                               dtype=torch.float32
                 │       │                       ),
                 │       │                       norm_qk=RMSNorm.Config(
                 │       │                               channels_in=6,
@@ -209,7 +209,7 @@ MMDiTGraft.Config(
                 │               │       │                       frequencies=HuggingFaceFrequencies.Config(
                 │               │       │                               base=1000000.0
                 │               │       │                       ),
-                │               │       │                       dtype=None
+                │               │       │                       dtype=torch.float32
                 │               │       │               ),
                 │               │       │               norm_qk=RMSNorm.Config(
                 │               │       │                       channels_in=6,
@@ -275,7 +275,7 @@ MMDiTGraft.Config(
                 │               │                               frequencies=HuggingFaceFrequencies.Config(
                 │               │                                       base=1000000.0
                 │               │                               ),
-                │               │                               dtype=None
+                │               │                               dtype=torch.float32
                 │               │                       ),
                 │               │                       norm_qk=RMSNorm.Config(
                 │               │                               channels_in=6,

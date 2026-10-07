@@ -55,7 +55,7 @@ from torch.optim import Optimizer
 import torch
 
 from priml.kernel import jit_kernel
-from priml.lib.custom_json import FloatCodec
+from priml.lib.custom_json import convert
 
 
 if TYPE_CHECKING:
@@ -167,14 +167,16 @@ class FusedMuon(Optimizer):
         ns_coefficients: tuple[tuple[float, float, float], ...],
         eps: float,
     ) -> None:
-        for name, value in (
-            ("lr", lr),
-            ("momentum", momentum),
-            ("max_grad_norm", max_grad_norm),
-            ("eps", eps),
-        ):
-            if not math.isfinite(value) or value < 0:
-                raise ValueError(f"FusedMuon {name} must be finite and nonnegative.")
+        if not math.isfinite(lr) or lr < 0.0:
+            raise ValueError(f"Learning rate must be finite and nonnegative: {lr}.")
+        if not math.isfinite(momentum) or momentum < 0.0:
+            raise ValueError(f"Momentum must be finite and nonnegative: {momentum}.")
+        if not math.isfinite(max_grad_norm) or max_grad_norm < 0.0:
+            raise ValueError(
+                f"Max grad norm must be finite and nonnegative: {max_grad_norm}.",
+            )
+        if not math.isfinite(eps) or eps < 0.0:
+            raise ValueError(f"Epsilon must be finite and nonnegative: {eps}.")
         super().__init__(params, {"lr": lr, "momentum": momentum, "eps": eps})
         # The clip and the polynomial are the run's code, not its state, so they
         # stay off the groups a checkpoint serializes and are rebuilt from config
@@ -549,9 +551,9 @@ def _group_scalars(group: dict[str, object]) -> tuple[Tensor | float, float, flo
     # at capture, so a tensor rate passes through unrounded and unconverted.
     rate = group["lr"]
     return (
-        rate if isinstance(rate, Tensor) else _fp32(FloatCodec.coerce(rate, None)),
-        _fp32(FloatCodec.coerce(group["momentum"], None)),
-        FloatCodec.coerce(group["eps"], None),
+        rate if isinstance(rate, Tensor) else _fp32(convert(rate, float)),
+        _fp32(convert(group["momentum"], float)),
+        convert(group["eps"], float),
     )
 
 

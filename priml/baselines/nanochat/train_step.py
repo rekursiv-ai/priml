@@ -32,7 +32,7 @@ from priml.baselines.nanochat.model import (
     ScaledSoftCap,
 )
 from priml.baselines.nanochat.optimizers import BiasCorrectedRMSProp
-from priml.lib.custom_json import FloatCodec
+from priml.lib.custom_json import convert
 from priml.loss.custom_types import LossOutput
 from priml.math.schedules import Schedule, trapezoidal
 from priml.model.softcap import SoftCap
@@ -293,83 +293,6 @@ class NanoChatTrainStep(TrainStep):
 
         @override
         def finalize(self) -> Self:
-            if self.train_budget_sec <= 0 or not math.isfinite(self.train_budget_sec):
-                raise ValueError(
-                    "train_budget_sec must be finite and positive; got "
-                    f"{self.train_budget_sec}.",
-                )
-            if self.budget_warmup_steps < 0:
-                raise ValueError(
-                    "budget_warmup_steps must be nonnegative; got "
-                    f"{self.budget_warmup_steps}.",
-                )
-            if self.momentum_warmup_steps <= 0:
-                raise ValueError(
-                    "momentum_warmup_steps must be positive; got "
-                    f"{self.momentum_warmup_steps}.",
-                )
-            if self.rows_per_pass <= 0:
-                raise ValueError(
-                    f"rows_per_pass must be positive; got {self.rows_per_pass}.",
-                )
-            if self.tokens_per_optimizer_step <= 0:
-                raise ValueError(
-                    "tokens_per_optimizer_step must be positive; got "
-                    f"{self.tokens_per_optimizer_step}.",
-                )
-            # NaN is excluded explicitly, not covered by ``<= 0``: every
-            # comparison against it is False, so a NaN here does not fail --
-            # it silently DISABLES the guard. ``math.isfinite`` is false for
-            # NaN, so clipping would be skipped; ``loss > NaN`` is false, so
-            # divergence would never be detected.
-            if math.isnan(self.gradient_clip_norm) or self.gradient_clip_norm <= 0:
-                raise ValueError(
-                    f"gradient_clip_norm must be positive; got "
-                    f"{self.gradient_clip_norm}. Infinite disables clipping.",
-                )
-            if math.isnan(self.divergence_threshold) or self.divergence_threshold <= 0:
-                raise ValueError(
-                    "divergence_threshold must be positive; got "
-                    f"{self.divergence_threshold}.",
-                )
-            for name, momentum in (
-                ("momentum_start", self.momentum_start),
-                ("momentum_end", self.momentum_end),
-            ):
-                # The schedule writes these straight into the optimizer's
-                # groups every step, past the constructor that would have
-                # rejected them.
-                if math.isnan(momentum) or momentum < 0.0 or momentum >= 1.0:
-                    raise ValueError(
-                        f"{name} must lie in [0, 1); got {momentum}.",
-                    )
-            tokens_per_pass = self.rows_per_pass * self.model.max_seq_len
-            if self.tokens_per_optimizer_step % tokens_per_pass:
-                raise ValueError(
-                    f"tokens_per_optimizer_step={self.tokens_per_optimizer_step} "
-                    f"is not divisible by rows_per_pass * max_seq_len="
-                    f"{tokens_per_pass}, so no whole number of passes reaches "
-                    "the token batch.",
-                )
-            if isinstance(self.loss, BoundedTokenCrossEntropy.Config):
-                head = self.model.lm_head
-                cap = (
-                    abs(head.output_cap)
-                    if isinstance(head, ScaledSoftCap.Config)
-                    else head.cap
-                    if isinstance(head, SoftCap.Config)
-                    else math.inf
-                )
-                if (
-                    not math.isfinite(cap)
-                    or cap <= 0
-                    or cap > self.loss.logit_upper_bound
-                ):
-                    raise ValueError(
-                        "BoundedTokenCrossEntropy requires a symmetric readout "
-                        "bound no larger than logit_upper_bound. Use "
-                        "TokenCrossEntropy for an unbounded readout.",
-                    )
             # Rescaled here, not in the factory: the factory runs before the
             # caller has chosen a width, so a rate baked there is right for one
             # model and wrong for every fork that changes ``channels_in``. The
@@ -382,14 +305,18 @@ class NanoChatTrainStep(TrainStep):
                     # Popped, not read: the flag tells THIS method whether the
                     # rate scales, and the optimizer it is attached to would
                     # reject it as an unexpected keyword.
-                    kwargs = member._kwargs  # noqa: SLF001 -- The training step reuses the model's private timing seam.
-                    scales = kwargs.pop("width_scaled", False)
-                    rate = kwargs.get("lr")
+                    kwargs = member._kwargs  # noqa: SLF001 -- PartialConfig exposes its keywords only as Any-typed dynamic attributes; the dict is the typed view.
+                    if not kwargs.pop("width_scaled", False):
+                        continue
                     # An exempt member steps a per-layer scalar rather than a
                     # projection, and the 1/sqrt(width) rule follows from
                     # fan-in, which a scalar does not have.
-                    if not isinstance(rate, float) or not scales:
-                        continue
+                    rate = kwargs.get("lr")
+                    if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+                        raise TypeError(
+                            "A width_scaled optimizer member needs a numeric lr; "
+                            f"got {rate!r}.",
+                        )
                     # Divide by ``sqrt(width / tuned_at)``, never multiply by
                     # ``sqrt(tuned_at / width)``: the two round differently
                     # (0.6 at width 512 gives ...9535 against ...9533), and
@@ -403,6 +330,7 @@ class NanoChatTrainStep(TrainStep):
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
+        _validate(config)
         super().__init__(config)
         self.config: NanoChatTrainStep.Config = config
         self.accumulate_passes = config.tokens_per_optimizer_step // (
@@ -429,7 +357,7 @@ class NanoChatTrainStep(TrainStep):
         for group in self.optimizer.param_groups:
             group.setdefault(
                 "initial_weight_decay",
-                FloatCodec.coerce(group.get("weight_decay"), 0.0),
+                convert(group.get("weight_decay"), float, default=0.0),
             )
         self.schedule = config.schedule.make()
 
@@ -448,10 +376,9 @@ class NanoChatTrainStep(TrainStep):
         media, label = batch["media"], batch["label"]
         assert isinstance(media, Tensor)
         assert isinstance(label, Tensor)
-        forward = self._compiled_model if self._compiled_model is not None else None
-        if forward is None:
+        if self._compiled_model is None:
             return self._forward(media, label)
-        result = forward(media, label)
+        result = self._compiled_model(media, label)
         assert isinstance(result, Tensor)
         return result
 
@@ -494,6 +421,9 @@ class NanoChatTrainStep(TrainStep):
 
         """
         config = self.config
+        # Charged by the update this pass FEEDS, fixed before the pass can
+        # complete it; see :meth:`charge_budget`, which shares the rule.
+        billed = self._steps_this_process + 1 > config.budget_warmup_steps
         # Drain first, THEN start the clock: queued device work from an
         # evaluation would otherwise be waited for inside this step's timing
         # and charged to the budget. Measured: 422 steps against 836.
@@ -538,11 +468,9 @@ class NanoChatTrainStep(TrainStep):
             self._steps_this_process += 1
         # Charged after the update so a step's own optimizer time counts, and
         # only past warmup so compilation does not consume the budget. Counted
-        # in optimizer STEPS, matching the reference (train.py:576). The
-        # counter is incremented above, so this reads one higher than the
-        # reference's does at the same update -- see ``budget_warmup_steps``,
-        # whose default absorbs the difference.
-        if self._steps_this_process > config.budget_warmup_steps:
+        # in optimizer STEPS, matching the reference (train.py:576), whose
+        # 0-indexed ``step > 10`` is our 1-indexed update ``> 11``.
+        if billed:
             # Drain again, at the same boundary: the backward and the optimizer
             # are queued, not finished, so a CPU-side reading would undercharge
             # the step. ``_pending_passes`` is zeroed by the update above, so
@@ -590,9 +518,8 @@ class NanoChatTrainStep(TrainStep):
         self.model.eval()
         with torch.inference_mode(), self._autocast():
             per_token = self._per_token_loss(batch)
-        raw_count = batch.get("valid_count", per_token.shape[0])
-        assert isinstance(raw_count, int)
-        valid = raw_count
+        valid = batch.get("valid_count", per_token.shape[0])
+        assert isinstance(valid, int)
         return {
             "loss": per_token[:valid].mean().reshape(1),
             "model": per_token,
@@ -689,11 +616,15 @@ class NanoChatTrainStep(TrainStep):
         recipe extra steps the comparison never granted. Measured on a 5090 at
         the shipped geometry: 0.160 of 1.683 s/step, a tenth of the run.
 
+        The batch belongs to the update it will feed -- one past those
+        completed -- so the first billed update pays for its own loading, as
+        the reference's does.
+
         Args:
           seconds: Wall-clock seconds to charge.
 
         """
-        if self._steps_this_process > self.config.budget_warmup_steps:
+        if self._steps_this_process + 1 > self.config.budget_warmup_steps:
             self.elapsed_sec += seconds
 
     def _assert_not_diverged(self) -> None:
@@ -789,6 +720,16 @@ class NgramTrainStep(NanoChatTrainStep):
         """Injected update policy; None preserves the original optimizer schedules."""
 
     def __init__(self, config: Config) -> None:
+        # The injected policy replaces ``_apply_update``, the schedule's only
+        # reader, so a non-default schedule would be printed and never run.
+        if (
+            config.optimizer_update is not None
+            and config.schedule != NanoChatTrainStep.Config().schedule
+        ):
+            raise ValueError(
+                "schedule is ignored when optimizer_update is set; leave it at "
+                "its default and configure the schedule on the update policy.",
+            )
         super().__init__(config)
         self._optimizer_update = (
             config.optimizer_update.make()
@@ -810,55 +751,6 @@ class NgramTrainStep(NanoChatTrainStep):
     def completed_updates(self) -> int:
         """Return the checkpointed optimizer-update count."""
         return self._steps_this_process
-
-    @override
-    def train_step(self, **batch: object) -> TrainStepOutput:
-        """Accumulate gradients and charge the update receiving this batch.
-
-        Args:
-          **batch: Preprocessed media and labels.
-
-        Returns:
-          result: Detached loss, per-token losses and optimizer metrics.
-
-        """
-        update = self._steps_this_process + 1
-        if self._pending_passes == 0:
-            self._synchronize()
-        started = time.perf_counter()
-        self.model.train()
-        with self._autocast():
-            per_token = self._per_token_loss(batch)
-            loss = per_token.mean()
-        (loss / self.accumulate_passes).backward()
-        worst = loss.detach()
-        if self._pending_worst is not None:
-            worst = torch.maximum(worst, self._pending_worst)
-        self._pending_worst = worst
-        self._pending_passes += 1
-        metrics: dict[str, float | Tensor] = {}
-        if self._pending_passes >= self.accumulate_passes:
-            with self.timer_step:
-                metrics = self._apply_update()
-            self._pending_passes = 0
-            self._steps_this_process += 1
-        if update > self.config.budget_warmup_steps:
-            if self._pending_passes == 0:
-                self._synchronize()
-            self.elapsed_sec += time.perf_counter() - started
-        if self._pending_passes == 0:
-            self._assert_not_diverged()
-        return {
-            "loss": loss.detach().reshape(1),
-            "model": per_token.detach(),
-            "metrics": metrics,
-        }
-
-    @override
-    def charge_budget(self, seconds: float) -> None:
-        """Charge loading after warmup using the receiving update's index."""
-        if self._steps_this_process + 1 > self.config.budget_warmup_steps:
-            self.elapsed_sec += seconds
 
     @override
     def _apply_update(self) -> dict[str, float | Tensor]:
@@ -916,9 +808,9 @@ class NgramTrainStep(NanoChatTrainStep):
             for part, sink in zip(table.tables, table.gradient_sinks, strict=True)
         }
         marks = {
-            part.weight: bitmap
+            table.tables[index].weight: bitmap
             for table in (*tables.values(), *trigram_tables.values())
-            for part, bitmap in zip(table.tables, table.gradient_bitmaps, strict=False)
+            for index, bitmap in enumerate(table.gradient_bitmaps)
         }
         assert isinstance(self.optimizer, CompositeOptimizer)
         bound: set[Tensor] = set()
@@ -947,7 +839,7 @@ class ReferenceBitsPerByte:
         """Receive all evaluation accounting through batch metadata."""
 
     def __init__(self, config: Config) -> None:
-        self.config = config
+        del config
         self.reset()
 
     def reset(self) -> None:
@@ -965,7 +857,14 @@ class ReferenceBitsPerByte:
           logits: Per-token losses from the unchanged training-step evaluation API.
           **batch: Prepared mask, denominators, and ordered batch counters.
 
+        Raises:
+          ValueError: More than one process, or the batches arrive out of order.
+
         """
+        # Checked before any work: a sharded evaluation would otherwise run to
+        # completion and fail only at ``compute``.
+        if dist.is_initialized() and dist.get_world_size() != 1:
+            raise ValueError("Exact reference evaluation requires one process.")
         mask = batch["score_mask"]
         index = batch["evaluation_batch"]
         count = batch["evaluation_batches"]
@@ -1001,8 +900,6 @@ class ReferenceBitsPerByte:
         """
         if self.batches != self.expected_batches or self.bytes <= 0:
             raise ValueError("Reference evaluation is incomplete.")
-        if dist.is_initialized() and dist.get_world_size() != 1:
-            raise ValueError("Exact reference evaluation requires one process.")
         return {
             "bpb": self.nats / (math.log(2) * self.bytes),
             "literal_bpb": self.nats / (math.log(2) * self.literal_bytes),
@@ -1099,23 +996,80 @@ class BoundedTokenCrossEntropy:
         }
 
 
+def _validate(config: NanoChatTrainStep.Config) -> None:
+    """Reject scalar settings the recipe cannot run, naming the field."""
+    if config.train_budget_sec <= 0 or not math.isfinite(config.train_budget_sec):
+        raise ValueError(
+            "train_budget_sec must be finite and positive; got "
+            f"{config.train_budget_sec}.",
+        )
+    for name, count, floor in (
+        ("budget_warmup_steps", config.budget_warmup_steps, 0),
+        ("momentum_warmup_steps", config.momentum_warmup_steps, 1),
+        ("rows_per_pass", config.rows_per_pass, 1),
+        ("tokens_per_optimizer_step", config.tokens_per_optimizer_step, 1),
+    ):
+        if count < floor:
+            raise ValueError(f"{name} must be at least {floor}; got {count}.")
+    # NaN is excluded explicitly, not covered by ``<= 0``: every comparison against
+    # it is False, so a NaN here does not fail -- it silently DISABLES the guard.
+    # ``math.isfinite`` is false for NaN, so clipping would be skipped; ``loss >
+    # NaN`` is false, so divergence would never be detected.
+    for name, bound in (
+        ("gradient_clip_norm", config.gradient_clip_norm),
+        ("divergence_threshold", config.divergence_threshold),
+    ):
+        if math.isnan(bound) or bound <= 0:
+            raise ValueError(
+                f"{name} must be positive; got {bound}. Infinite disables it.",
+            )
+    for name, momentum in (
+        ("momentum_start", config.momentum_start),
+        ("momentum_end", config.momentum_end),
+    ):
+        # The schedule writes these straight into the optimizer's groups every
+        # step, past the constructor that would have rejected them.
+        if math.isnan(momentum) or momentum < 0.0 or momentum >= 1.0:
+            raise ValueError(f"{name} must lie in [0, 1); got {momentum}.")
+    tokens_per_pass = config.rows_per_pass * config.model.max_seq_len
+    if config.tokens_per_optimizer_step % tokens_per_pass:
+        raise ValueError(
+            f"tokens_per_optimizer_step={config.tokens_per_optimizer_step} is not "
+            f"divisible by rows_per_pass * max_seq_len={tokens_per_pass}, so no "
+            "whole number of passes reaches the token batch.",
+        )
+    if isinstance(config.loss, BoundedTokenCrossEntropy.Config):
+        head = config.model.lm_head
+        cap = (
+            abs(head.output_cap)
+            if isinstance(head, ScaledSoftCap.Config)
+            else head.cap
+            if isinstance(head, SoftCap.Config)
+            else math.inf
+        )
+        if not math.isfinite(cap) or cap <= 0 or cap > config.loss.logit_upper_bound:
+            raise ValueError(
+                "BoundedTokenCrossEntropy requires a symmetric readout bound no "
+                "larger than logit_upper_bound. Use TokenCrossEntropy for an "
+                "unbounded readout.",
+            )
+
+
 # A composite holds every member's groups in one flat list, so a group's position says
-# nothing about which algorithm owns it.
+# nothing about which algorithm owns it. Keyed by position as well as class: the recipe
+# runs five members of ONE class, and a class-only key keeps just the last.
 def _learning_rates(optimizer: HasParamGroups) -> dict[str, float]:
-    """Return one rate per optimizer member, keyed by its class name."""
+    """Return one rate per optimizer member, keyed ``<index>_<class>``."""
     if not isinstance(optimizer, CompositeOptimizer):
         return {
-            "all": FloatCodec.coerce(
-                cast(object, optimizer.param_groups[0]["lr"]),
-                None,
-            ),
+            "all": convert(cast(object, optimizer.param_groups[0]["lr"]), float),
         }
     return {
-        type(member).__name__.lower(): FloatCodec.coerce(
+        f"{index}_{type(member).__name__.lower()}": convert(
             cast(object, member.param_groups[0]["lr"]),
-            None,
+            float,
         )
-        for member in optimizer.optimizers
+        for index, member in enumerate(optimizer.optimizers)
         if member.param_groups
     }
 

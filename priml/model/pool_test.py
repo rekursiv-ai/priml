@@ -27,6 +27,18 @@ def test_max_pool_counts_values_the_saved_argmax_and_one_routed_gradient(
     assert costed.params == 0
 
 
+def test_avg_pool_cost_tracks_each_cell_in_its_requested_dtype() -> None:
+    dtype = torch.float64
+    costed = avg_pool_cost(channels=3, positions=5, batch_size=2, dtype=dtype)
+    assert costed["flops", "primal", "reduction", dtype] == 24
+    assert costed["bytes", "primal", "reduction", dtype] == 288
+    assert costed["flops", "primal", "elementwise", dtype] == 6
+    assert costed["bytes", "primal", "elementwise", dtype] == 96
+    assert costed["flops", "adjoint", "elementwise", dtype] == 30
+    assert costed["bytes", "adjoint", "elementwise", dtype] == 288
+    assert costed.params == costed.params_active == costed.bytes_state == 0
+
+
 def test_max_pool_accepts_a_per_axis_kernel() -> None:
     square = max_pool_cost(channels=2, kernel_size=3, rows=1, dtype=None)
     assert max_pool_cost(channels=2, kernel_size=(3, 3), rows=1, dtype=None) == square

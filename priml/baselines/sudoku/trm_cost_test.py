@@ -12,8 +12,8 @@ import torch
 from priml.baselines.sudoku.eval import SudokuVerifier
 from priml.baselines.sudoku.trm import TRM
 from priml.cost import cost
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
-from priml.model.attention.self_attention import SelfAttention
 from priml.testing.cost import assert_cost_matches_torch
 
 
@@ -40,7 +40,7 @@ def test_trm_cost_matches_torch() -> None:
         dtype=None,
     ).finalize()
     assert config.block is not None
-    assert isinstance(config.block.attn, SelfAttention.Config)
+    assert isinstance(config.block.attn, Attention.Config)
     config.block.attn.attn_kernel = SdpaNaive.Config()
 
     def run(module: nn.Module, tokens: Tensor) -> Tensor:
@@ -48,8 +48,6 @@ def test_trm_cost_matches_torch() -> None:
         z_slow, z_fast = module.init_z(2)
         out = module(tokens, z_slow, z_fast, torch.tensor([1, 2]), feedback_ids=tokens)
         logits, q_halt = out["logits"], out["q_halt"]
-        assert isinstance(logits, Tensor)
-        assert isinstance(q_halt, Tensor)
         return logits.sum() + q_halt.sum()
 
     assert_cost_matches_torch(

@@ -6,20 +6,22 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, override
 
 import inspect
+import math
 
 from torch import nn
 
 import pytest
 import torch
 
+from priml.model.attention.attention import Attention
 from priml.model.attention.gated_delta_net import GatedDeltaNet
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import RoPE, RoPEMixed
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import DepthIndex, HasResetParameters
 from priml.model.init import (
     call_init,
     dirac,
+    fan_in_truncated_normal,
     kaiming_normal,
     kaiming_uniform,
     mup_output,
@@ -68,9 +70,8 @@ class _InitModule(nn.Module):
         return torch.cat(initialized)
 
 
-def test_init_api_text(request: pytest.FixtureRequest) -> None:
+def test_init_api_text() -> None:
     assert_text_golden(
-        request,
         test_file=__file__,
         name="init",
         rendered="\n".join(
@@ -83,6 +84,7 @@ def test_init_api_text(request: pytest.FixtureRequest) -> None:
                 xavier_normal,
                 normal,
                 truncated_normal,
+                fan_in_truncated_normal,
                 unit_fan_in_uniform,
                 mup_output,
                 dirac,
@@ -105,6 +107,44 @@ def test_call_init_with_depth():
     w = torch.empty(16, 17)
     kaiming_uniform(w, depth_index=((3, 4),))
     assert w.std() > 0
+
+
+@pytest.mark.parametrize(("shape", "expected_std"), [((5,), 1 / 5), ((5, 7), 1 / 7)])
+def test_mup_output_uses_the_last_input_axis(
+    monkeypatch: pytest.MonkeyPatch,
+    shape: tuple[int, ...],
+    expected_std: float,
+) -> None:
+    calls: list[tuple[torch.Tensor, float]] = []
+
+    def normal_(tensor: torch.Tensor, *, std: float) -> torch.Tensor:
+        calls.append((tensor, std))
+        return tensor
+
+    monkeypatch.setattr(nn.init, "normal_", normal_)
+    weight = torch.empty(shape)
+
+    mup_output(weight)
+
+    assert calls == [(weight, expected_std)]
+
+
+def test_unit_fan_in_uniform_uses_both_bounds_and_last_axis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[torch.Tensor, float, float]] = []
+
+    def uniform_(tensor: torch.Tensor, low: float, high: float) -> torch.Tensor:
+        calls.append((tensor, low, high))
+        return tensor
+
+    monkeypatch.setattr(nn.init, "uniform_", uniform_)
+    weight = torch.empty(2, 3, 4)
+
+    unit_fan_in_uniform(weight)
+
+    bound = 3**0.5 * 4**-0.5
+    assert calls == [(weight, -bound, bound)]
 
 
 def test_call_init_passes_a_positional_or_keyword_depth_index() -> None:
@@ -201,6 +241,67 @@ def test_depth_zero_no_scaling():
     assert torch.allclose(w_neg, w_zero)
 
 
+def test_depth_one_scales_by_the_square_root_of_two(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fill_ones(tensor: torch.Tensor, **kwargs: object) -> torch.Tensor:
+        del kwargs
+        return tensor.fill_(1.0)
+
+    monkeypatch.setattr(nn.init, "kaiming_uniform_", fill_ones)
+    weight = torch.empty(2, 3)
+
+    kaiming_uniform(weight, depth_index=((1, 2),))
+
+    torch.testing.assert_close(weight, torch.full_like(weight, 2**-0.5))
+
+
+def test_truncated_normal_variance_correction_passes_closed_form_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[torch.Tensor, float, float, float]] = []
+
+    def trunc_normal_(
+        tensor: torch.Tensor,
+        *,
+        std: float,
+        a: float,
+        b: float,
+    ) -> torch.Tensor:
+        calls.append((tensor, std, a, b))
+        return tensor
+
+    monkeypatch.setattr(nn.init, "trunc_normal_", trunc_normal_)
+    weight = torch.empty(2, 3)
+    requested_std = 0.75
+    lower, upper = -1.25, 2.0
+    sqrt2 = 2.0**0.5
+    z = (math.erf(upper / sqrt2) - math.erf(lower / sqrt2)) / 2.0
+    inv_sqrt_2pi = 1.0 / (2.0 * math.pi) ** 0.5
+    pdf_u = inv_sqrt_2pi * math.exp(-0.5 * upper * upper)
+    pdf_l = inv_sqrt_2pi * math.exp(-0.5 * lower * lower)
+    ratio = (pdf_u - pdf_l) / z
+    corrected_std = (
+        requested_std
+        / (1.0 - (upper * pdf_u - lower * pdf_l) / z - ratio * ratio) ** 0.5
+    )
+
+    truncated_normal(
+        weight,
+        std=requested_std,
+        lower=lower,
+        upper=upper,
+        variance_correction=True,
+    )
+
+    assert len(calls) == 1
+    tensor, std, a, b = calls[0]
+    assert tensor is weight
+    assert std == pytest.approx(corrected_std)
+    assert a == pytest.approx(lower * corrected_std)
+    assert b == pytest.approx(upper * corrected_std)
+
+
 def test_truncated_normal_variance_correction_realizes_requested_std():
     """With correction on, realized std equals the request; off, it undershoots."""
     torch.manual_seed(0)
@@ -234,6 +335,40 @@ def test_truncated_normal_respects_scaled_bounds():
     truncated_normal(w, std=1.0, depth_index=(), variance_correction=True)
 
     assert w.abs().max().item() <= 2.0 * 1.1372
+
+
+@pytest.mark.parametrize("width", [1, 3, 4, 7, 512, 921])
+def test_fan_in_truncated_normal_is_truncated_normal_at_fan_in_std(width: int) -> None:
+    """Each form equals the explicit draw it names, at awkward widths too."""
+    std = width**-0.5
+
+    def drawn(init: Callable[[torch.Tensor], object]) -> torch.Tensor:
+        w = torch.empty(3, width)
+        torch.manual_seed(0)
+        init(w)
+        return w
+
+    assert torch.equal(
+        drawn(fan_in_truncated_normal),
+        drawn(lambda w: truncated_normal(w, std=std)),
+    )
+    assert torch.equal(
+        drawn(lambda w: fan_in_truncated_normal(w, variance_correction=True)),
+        drawn(lambda w: truncated_normal(w, std=std, variance_correction=True)),
+    )
+    assert torch.equal(
+        drawn(lambda w: fan_in_truncated_normal(w, absolute_bounds=True)),
+        drawn(lambda w: nn.init.trunc_normal_(w, std=std)),
+    )
+
+
+def test_fan_in_truncated_normal_ignores_depth() -> None:
+    w0, w3 = torch.empty(5, 6), torch.empty(5, 6)
+    torch.manual_seed(0)
+    fan_in_truncated_normal(w0)
+    torch.manual_seed(0)
+    fan_in_truncated_normal(w3, depth_index=((3, 4),))
+    assert torch.equal(w0, w3)
 
 
 def test_truncated_normal_corrected_zero_std_zeros_tensor():
@@ -372,14 +507,14 @@ def test_reset_parameters_reinitializes_every_param(name: str) -> None:
         "centered_rmsnorm": lambda: CenteredRMSNorm(
             CenteredRMSNorm.Config(channels_in=8),
         ),
-        "self_attention": lambda: SelfAttention.Config(
+        "self_attention": lambda: Attention.Config(
             channels_in=16,
             num_heads=2,
             channels_head=8,
         ).make(),
         "transformer_block": lambda: TransformerBlock.Config(
             channels_in=16,
-            attn=SelfAttention.Config(num_heads=2, channels_head=8),
+            attn=Attention.Config(num_heads=2, channels_head=8),
         ).make(),
         "gated_delta_net": lambda: GatedDeltaNet.Config(
             channels_in=16,

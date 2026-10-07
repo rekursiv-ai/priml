@@ -2,27 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import field
-from importlib.metadata import version
-from pathlib import Path
-from types import ModuleType
-from typing import TYPE_CHECKING, cast, override
+from collections.abc import Callable
+from types import SimpleNamespace
+from typing import cast, override
 
-import sys
-
-from configgle import Fig, PartialConfig
+from configgle import PartialConfig
 from torch import Tensor, nn
 
 import pytest
 import torch
 
+from priml.baselines.nanochat import attention
 from priml.baselines.nanochat.attention import (
     CausalAttention,
-    Flash3Attention,
-    Flash4Attention,
-    _flash4_backward_fake,
-    _flash4_backward_kernel,
-    _flash4_forward,
     _qk_backward,
     _qk_backward_fake,
     _qk_backward_reference,
@@ -31,108 +23,28 @@ from priml.baselines.nanochat.attention import (
     fused_qk_norm_rope,
 )
 from priml.cost import Cost, cost
-from priml.model.attention.kernel import SdpaNaive, attention_kernel_cost
+from priml.model.attention.kernel import SdpaNaive
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.special import Identity
 from priml.testing.cost import assert_cost_matches_torch
 
-import priml.baselines.nanochat.attention
 
+def test_memory_gates_start_at_zero_without_bias() -> None:
+    config = CausalAttention.Config()
+    config.channels_in = 12
+    config.channels_head = 4
+    config.num_heads = 3
+    config.gate_channels = 4
+    config.bigram = True
+    config.trigram = True
 
-if TYPE_CHECKING:
-    from collections.abc import Iterator
+    attention = config.make()
 
-
-class _FlashCostReference(nn.Module):
-    """Qualify Flash analytical configs with PyTorch, never native execution."""
-
-    class Config(Fig["_FlashCostReference"]):
-        estimate: Flash3Attention.Config | Flash4Attention.Config = field(
-            default_factory=Flash3Attention.Config,
-        )
-        """Native configuration whose analytical method is under test."""
-
-        window: int = -1
-        """Previous keys admitted in addition to the current position."""
-
-        def cost(self, **kwargs: object) -> Cost:
-            """Delegate accounting without constructing the native backend."""
-            return cost(self.estimate, window=self.window, **kwargs)
-
-    def __init__(self, config: Config) -> None:
-        super().__init__()
-        self.window = config.window
-        self.reference = SdpaNaive.Config().make()
-
-    @override
-    def forward(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
-        return self.reference(q, k, v, is_causal=True, window=self.window)
-
-
-@pytest.mark.parametrize(
-    "estimate",
-    [Flash3Attention.Config(), Flash4Attention.Config()],
-)
-@pytest.mark.parametrize("window", [-1, 0, 1, 4, 8, 12])
-def test_flash_analytical_cost_matches_torch_reference(
-    estimate: Flash3Attention.Config | Flash4Attention.Config,
-    window: int,
-) -> None:
-    """Exercise real cost bodies; native availability and I/O remain unqualified."""
-    config = _FlashCostReference.Config()
-    config.estimate = estimate
-    config.window = window
-    seq_len = 8 if window < 0 else min(window + 1, 8)
-    # Execute one complete invocation at the concrete local-window shape.
-    assert_cost_matches_torch(
-        config,
-        build_input=lambda: tuple(
-            torch.randn(2, seq_len, 3, 4, requires_grad=True) for _ in range(3)
-        ),
-        seq_len=seq_len,
-        batch_size=2,
-        dtype=None,
-        num_heads=3,
-        channels_head=4,
-    )
-
-
-@pytest.mark.parametrize("config", [Flash3Attention.Config(), Flash4Attention.Config()])
-def test_flash_cost_scales_complete_invocations_by_batch(
-    config: Flash3Attention.Config | Flash4Attention.Config,
-) -> None:
-    single = cost(
-        config,
-        seq_len=8,
-        batch_size=1,
-        dtype=None,
-        num_heads=2,
-        channels_head=4,
-    )
-    batched = cost(
-        config,
-        seq_len=8,
-        batch_size=2,
-        dtype=None,
-        num_heads=2,
-        channels_head=4,
-    )
-    assert batched == single.tile(2)
-    assert batched == attention_kernel_cost(
-        seq_len=8,
-        batch_size=2,
-        dtype=None,
-        num_heads=2,
-        channels_head=4,
-    )
-
-
-def test_flash_backends_belong_to_attention() -> None:
-    for name in ("Flash3Attention", "Flash4Attention"):
-        backend = cast(object, vars(priml.baselines.nanochat.attention)[name])
-        assert isinstance(backend, type)
-        assert backend.__module__ == priml.baselines.nanochat.attention.__name__
+    for gate in (attention.bigram_gate, attention.trigram_gate):
+        assert gate is not None
+        assert torch.equal(gate.weight, torch.zeros_like(gate.weight))
+        assert gate.bias is None
 
 
 def test_head_gate_inherits_full_input_width() -> None:
@@ -168,7 +80,7 @@ def test_causal_attention_reset_initializes_affine_output_norm() -> None:
     assert torch.equal(attention.norm_out.weight, torch.ones(8))
 
 
-@pytest.mark.parametrize("normalization", ["affine", "epsilon", "custom"])
+@pytest.mark.parametrize("normalization", ["affine", "epsilon", "custom", "subclass"])
 def test_fused_attention_rejects_unsupported_normalization(normalization: str) -> None:
     config = CausalAttention.Config()
     config.channels_in = 16
@@ -181,9 +93,21 @@ def test_fused_attention_rejects_unsupported_normalization(normalization: str) -
         norm.elementwise_affine = True
     elif normalization == "epsilon":
         norm.eps = 0.01
+    elif normalization == "subclass":
+
+        class SpecializedRMSNormConfig(RMSNorm.Config):
+            pass
+
+        norm = SpecializedRMSNormConfig()
     config.norm_qk = Identity.Config() if normalization == "custom" else norm
 
-    with pytest.raises(ValueError, match=r"fused_qk_rope.*norm_qk"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^fused_qk_rope requires norm_qk to be parameter-free RMSNorm "
+            r"with epsilon None or float32 epsilon\.$"
+        ),
+    ):
         config.make()
 
 
@@ -220,6 +144,25 @@ def test_causal_attention_forwards_unconsumed_messages() -> None:
     assert output.shape == x.shape
 
 
+def test_causal_attention_keeps_the_block_cache_from_its_kernel() -> None:
+    """A block hands every attention ``cache``; a bus-naming kernel never sees it."""
+    config = CausalAttention.Config()
+    config.channels_in = 18
+    config.channels_head = 6
+    config.gate_channels = 6
+    config.kernel = PartialConfig(_message_kernel)
+    attention = config.make()
+    x = torch.ones(2, 4, 18)
+    # CausalAttention broadcasts rotary values across the head axis.
+    cos_sin = (torch.ones(4, 1, 3), torch.zeros(4, 1, 3))
+
+    output = attention(x, cos_sin=cos_sin, message=123, cache=None)
+
+    assert output.shape == x.shape
+    with pytest.raises(TypeError, match="CausalAttention keeps no decode cache"):
+        attention(x, cos_sin=cos_sin, message=123, cache={})
+
+
 @pytest.mark.parametrize(
     ("gate_channels", "bigram", "trigram", "required_slices"),
     [
@@ -251,7 +194,12 @@ def test_qk_forward_and_backward_match_fp32_math() -> None:
     q = torch.randn(3, 4, 2, 8, requires_grad=True)
     k = torch.randn_like(q, requires_grad=True)
     # fused_qk_norm_rope broadcasts phase across batch and head axes.
-    phase = torch.randn(1, 4, 1, 4)
+    phase = torch.randn(
+        1,
+        4,
+        1,
+        4,
+    )  # fused_qk_norm_rope broadcasts batch and head axes.
     cos, sin = phase.cos(), phase.sin()
     outputs = fused_qk_norm_rope(q, k, cos, sin)
     references: list[torch.Tensor] = []
@@ -270,6 +218,16 @@ def test_qk_forward_and_backward_match_fp32_math() -> None:
     actual_grads = torch.autograd.grad(outputs, (q, k), gradients)
     for actual, expected in zip(actual_grads, expected_grads, strict=True):
         torch.testing.assert_close(actual, expected)
+
+
+def test_qk_reference_uses_positive_epsilon_for_zero_inputs() -> None:
+    q = torch.zeros(2, 3, 4, 8)
+    cos, sin = torch.ones(3, 4), torch.zeros(3, 4)
+
+    q_out, k_out = fused_qk_norm_rope(q, q, cos, sin)
+
+    assert torch.equal(q_out, q)
+    assert torch.equal(k_out, q)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -309,6 +267,7 @@ def test_qk_forward_preserves_reference_bits_and_declared_layout(
     declared = _qk_fake(q, k, cos, sin)
     for result, fake, value in zip(actual, declared, (q, k), strict=True):
         assert torch.equal(result, _qk_reference(value, cos, sin))
+        assert result.dtype == value.dtype
         assert result.is_contiguous()
         assert result.stride() == fake.stride()
 
@@ -349,235 +308,6 @@ def test_cuda_qk_forward_and_backward_match_fp32_math() -> None:
         torch.testing.assert_close(actual, expected)
     for actual, expected in zip(actual_grads, expected_grads, strict=True):
         torch.testing.assert_close(actual, expected)
-
-
-@pytest.fixture
-def external_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[_FakeInterface]:
-    module = _FakeInterface()
-    monkeypatch.setitem(sys.modules, "flash_attn.cute.interface", module)
-    priml.baselines.nanochat.attention._make_flash4_ops.cache_clear()
-    torch.compiler.reset()
-    yield module
-    torch.compiler.reset()
-    priml.baselines.nanochat.attention._make_flash4_ops.cache_clear()
-
-
-def test_optional_dependency_resolves_at_make(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "flash_attn.cute.interface", None)
-    priml.baselines.nanochat.attention._make_flash4_ops.cache_clear()
-    config = Flash4Attention.Config()
-    assert "Flash4Attention" in config.pformat(hide_default_values=False)
-    with pytest.raises(ModuleNotFoundError):
-        config.make()
-
-
-@pytest.mark.parametrize("window", [-1, 0, 1, 5, 16])
-def test_layout_window_tuple_and_gradients(
-    external_module: _FakeInterface,
-    window: int,
-) -> None:
-    attention = Flash4Attention.Config().make()
-    q, k, v = [torch.randn(2, 5, 3, 8, requires_grad=True) for _ in range(3)]
-    output = attention(q, k, v, window=window)
-    torch.testing.assert_close(output, q + 2 * k + 3 * v)
-    output.sum().backward()
-    for tensor, scale in zip((q, k, v), (1, 2, 3), strict=True):
-        torch.testing.assert_close(tensor.grad, torch.full_like(tensor, scale))
-    history = None if window < 0 or window >= q.shape[1] else window
-    assert external_module.windows == [
-        (None, None) if history is None else (history, 0),
-        (history, 0),
-    ]
-
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize(
-    "layout",
-    ["contiguous", "transposed", "aligned", "misaligned"],
-)
-def test_flash4_backward_owns_contiguous_layout(
-    dtype: torch.dtype,
-    layout: str,
-) -> None:
-    """Check the real adapter against pinned allocation, without native execution."""
-    value = torch.arange(192, dtype=dtype).reshape(2, 4, 3, 8)
-    if layout == "transposed":
-        value = value.reshape(2, 4, 8, 3).transpose(-1, -2)
-    elif layout == "aligned":
-        value = value.reshape(2, 3, 4, 8).transpose(1, 2)
-    elif layout == "misaligned":
-        value = torch.arange(193, dtype=dtype)[1:].reshape(2, 3, 4, 8).transpose(1, 2)
-    gradient = torch.randn(value.shape, dtype=dtype)
-    saved = [value, value, value, torch.empty_like(gradient), torch.empty(2, 3, 4)]
-    backend = _LayoutInterface()
-    actual = _flash4_backward_kernel(backend, saved, gradient, -1)
-    declared = _flash4_backward_fake(saved, gradient, -1)
-    for result, fake, reference in zip(
-        actual,
-        declared,
-        backend.gradients,
-        strict=True,
-    ):
-        assert result.stride() == fake.stride()
-        assert result.is_contiguous()
-        assert fake.is_contiguous()
-        assert result.dtype == fake.dtype == dtype
-        assert result.shape == fake.shape == value.shape
-        assert torch.equal(
-            result.view(torch.int16),
-            reference.contiguous().view(torch.int16),
-        )
-        if reference.is_contiguous():
-            assert result is reference
-    assert all(received is value for received in backend.inputs)
-
-
-class _LayoutInterface(ModuleType):
-    """Emulate only FA4 4.0.0b29's input normalization and gradient allocation."""
-
-    def __init__(self) -> None:
-        super().__init__("flash_attn.cute.interface")
-        self.gradients: list[Tensor] = []
-        self.inputs: tuple[Tensor, ...] = ()
-
-    def flash_attn_func(
-        self,
-        q: Tensor,
-        k: Tensor,
-        v: Tensor,
-        *,
-        causal: bool,
-        window_size: tuple[int | None, int | None],
-        return_lse: bool,
-    ) -> tuple[Tensor, Tensor]:
-        del q, k, v, causal, window_size, return_lse
-        raise NotImplementedError
-
-    def _flash_attn_bwd(
-        self,
-        q: Tensor,
-        k: Tensor,
-        v: Tensor,
-        *saved: Tensor,
-        causal: bool,
-        window_size_left: int | None,
-        window_size_right: int,
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        del causal, window_size_left, window_size_right
-        self.inputs = (q, k, v)
-        # CuTe 4.0.0b29: cute_dsl_utils.py:70-99; interface.py:1980,2108-2119.
-        for scale, value in enumerate(self.inputs, start=1):
-            aligned = value.data_ptr() % 16 == 0
-            strides_aligned = value.stride(-1) == 1 and all(
-                stride % (16 // value.element_size()) == 0
-                for stride in value.stride()[:-1]
-            )
-            if not aligned:
-                normalized = value.clone(memory_format=torch.contiguous_format)
-            elif value.is_contiguous() or strides_aligned:
-                normalized = value
-            else:
-                normalized = value.contiguous()
-            self.gradients.append(torch.empty_like(normalized).copy_(saved[1] * scale))
-        return self.gradients[0], self.gradients[1], self.gradients[2]
-
-
-def _invalid_flash4_import(name: str) -> object:
-    del name
-    return object()
-
-
-def test_flash4_host_helpers_validate_backend(monkeypatch: pytest.MonkeyPatch) -> None:
-    backend = _FakeInterface()
-    q = torch.randn(2, 3, 4, 6)
-    output, lse = _flash4_forward(backend, q, q, q, 2)
-    assert output.shape == q.shape
-    assert lse.shape == (2, 4, 3)
-    module = priml.baselines.nanochat.attention
-    module._make_flash4_ops.cache_clear()
-    monkeypatch.setattr(module, "import_module", _invalid_flash4_import)
-    with pytest.raises(TypeError, match="FA4"):
-        module._make_flash4_ops()
-    module._make_flash4_ops.cache_clear()
-
-
-@pytest.mark.gpu_flash_attention
-@pytest.mark.gpu_torch_cuda
-def test_cuda_matches_official_autograd() -> None:
-    if not torch.cuda.is_available():
-        pytest.skip("Requires an SM90 or SM100 CUDA device and flash-attn-4==4.0.0b29.")
-    if torch.cuda.get_device_capability() not in ((9, 0), (10, 0)):
-        pytest.skip("Requires an SM90 or SM100 CUDA device.")
-    assert version("flash-attn-4") == "4.0.0b29"
-    interface = cast(
-        object,
-        __import__("flash_attn.cute.interface", fromlist=["interface"]),
-    )
-    assert isinstance(
-        interface,
-        priml.baselines.nanochat.attention._Flash4Interface,
-    )
-    attention = Flash4Attention.Config().make()
-    torch.manual_seed(42)
-    tensors = [
-        torch.randn(3, 129, 2, 128, device="cuda", dtype=torch.bfloat16)
-        for _ in range(3)
-    ]
-    cotangent = torch.randn_like(tensors[0])
-    reference_inputs = [tensor.detach().requires_grad_() for tensor in tensors]
-    reference, _ = interface.flash_attn_func(
-        *reference_inputs,
-        causal=True,
-        window_size=(64, 0),
-        return_lse=True,
-    )
-    reference.backward(cotangent)
-    inputs = [tensor.detach().requires_grad_() for tensor in tensors]
-    output = attention(*inputs, window=64)
-    output.backward(cotangent)
-    torch.testing.assert_close(output, reference, rtol=0, atol=0)
-    for actual, expected in zip(inputs, reference_inputs, strict=True):
-        assert actual.grad is not None
-        assert expected.grad is not None
-        torch.testing.assert_close(actual.grad, expected.grad, rtol=0, atol=0)
-
-
-class _FakeInterface(ModuleType):
-    def __init__(self) -> None:
-        super().__init__("flash_attn.cute.interface")
-        self.windows: list[tuple[int | None, int | None]] = []
-
-    def flash_attn_func(
-        self,
-        q: Tensor,
-        k: Tensor,
-        v: Tensor,
-        *,
-        causal: bool,
-        window_size: tuple[int | None, int | None],
-        return_lse: bool,
-    ) -> tuple[Tensor, Tensor]:
-        assert causal
-        assert return_lse
-        self.windows.append(window_size)
-        return q + 2 * k + 3 * v, torch.zeros(q.shape[0], q.shape[2], q.shape[1])
-
-    def _flash_attn_bwd(
-        self,
-        q: Tensor,
-        k: Tensor,
-        v: Tensor,
-        *saved: Tensor,
-        causal: bool,
-        window_size_left: int | None,
-        window_size_right: int,
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        output, grad_output, lse = saved
-        assert causal
-        assert q.shape == k.shape == v.shape == output.shape == grad_output.shape
-        assert lse.shape == (q.shape[0], q.shape[2], q.shape[1])
-        self.windows.append((window_size_left, window_size_right))
-        return grad_output.clone(), 2 * grad_output, 3 * grad_output
 
 
 @pytest.mark.parametrize("feature", ["bigram", "trigram", "head_gate", "norm_out"])
@@ -648,6 +378,39 @@ def test_cost_prices_each_causal_attention_extension(feature: str) -> None:
         ].sum() == rows * (5 * heads + (12 if feature == "head_gate" else 24))
 
 
+@pytest.mark.parametrize(
+    ("add", "primal_elements", "primal_flops"),
+    [(False, 165, 105), (True, 225, 135)],
+)
+def test_value_mix_cost_matches_each_elementwise_and_reduction_cell(
+    add: bool,
+    primal_elements: int,
+    primal_flops: int,
+) -> None:
+    dtype = torch.float16
+    rows, heads, channels_head, channels_in = 5, 3, 2, 11
+    result = attention._value_mix_cost(
+        heads=heads,
+        channels_head=channels_head,
+        channels_in=channels_in,
+        rows=rows,
+        dtype=dtype,
+        add=add,
+    )
+    expected = Cost(
+        cells={
+            ("bytes", "primal", "elementwise", dtype): 2 * primal_elements,
+            ("flops", "primal", "elementwise", dtype): primal_flops,
+            ("bytes", "adjoint", "elementwise", dtype): 810,
+            ("flops", "adjoint", "elementwise", dtype): 190,
+            ("bytes", "adjoint", "reduction", dtype): 90,
+            ("flops", "adjoint", "reduction", dtype): 15,
+        },
+    )
+
+    assert result == expected
+
+
 def test_cost_extension_dtype_and_fusion_preserve_the_analytical_algorithm() -> None:
     config = CausalAttention.Config()
     config.channels_in = 12
@@ -698,7 +461,24 @@ def _run_all_attention_gates(module: nn.Module, x: Tensor) -> Tensor:
     )
 
 
-def test_causal_attention_rejects_non_tensor_memories_and_supports_fused_rope() -> None:
+def test_causal_attention_rejects_non_tensor_memories_and_supports_fused_rope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = attention
+    original_fused = module.fused_qk_norm_rope
+    fused_calls = 0
+
+    def track_fused(
+        q: Tensor,
+        k: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        nonlocal fused_calls
+        fused_calls += 1
+        return original_fused(q, k, cos, sin)
+
+    monkeypatch.setattr(module, "fused_qk_norm_rope", track_fused)
     config = CausalAttention.Config()
     config.channels_in = 8
     config.channels_head = 4
@@ -707,16 +487,21 @@ def test_causal_attention_rejects_non_tensor_memories_and_supports_fused_rope() 
     config.kernel = SdpaNaive.Config()
     config.fused_qk_rope = True
     config.norm_qk = RMSNorm.Config(elementwise_affine=False, eps=None)
-    attention = config.make()
+    causal = config.make()
     x = torch.randn(2, 3, 8)
     # Rotary factors use a singleton head axis for production broadcasting.
     cos_sin = (torch.ones(3, 1, 2), torch.zeros(3, 1, 2))
-    with pytest.raises(ValueError, match="bigram_value"):
-        attention(x, cos_sin=cos_sin, bigram_value=3)
-    with pytest.raises(ValueError, match="trigram_value"):
-        attention(x, cos_sin=cos_sin, trigram_value=3)
-    output = attention(x, cos_sin=cos_sin)
+    with pytest.raises(TypeError, match=r"^bigram_value must be Tensor or None"):
+        causal(x, cos_sin=cos_sin, bigram_value=3)
+    with pytest.raises(TypeError, match=r"^trigram_value must be Tensor or None"):
+        causal(x, cos_sin=cos_sin, trigram_value=3)
+    with pytest.raises(TypeError, match=r"^fused_tables must be list or None"):
+        causal(x, cos_sin=cos_sin, fused_tables=(1,))
+    output = causal(x, cos_sin=cos_sin)
     assert output.shape == x.shape
+    assert fused_calls == 1
+    with pytest.raises(TypeError, match=r"^fused_tables must hold NgramSource"):
+        causal(x, cos_sin=cos_sin, fused_tables=[3])
 
     gated = CausalAttention.Config()
     gated.channels_in = 16
@@ -760,161 +545,191 @@ def test_qk_validation_rejects_bad_shapes_and_widths() -> None:
             fused_qk_norm_rope(bad, bad, torch.ones(3, 2), torch.zeros(3, 2))
 
 
-def test_receipt_parser_and_runtime_file_errors(tmp_path: Path) -> None:
-    module = priml.baselines.nanochat.attention
-    assert module._parse_receipt("a=1\na=2")[1] == "duplicate receipt field a"
-    assert "malformed" in module._parse_receipt("broken")[1]
-    assert "empty" in module._parse_receipt("=x")[1]
-    assert "missing required" in module.runtime_files_error(tmp_path)
-    (tmp_path / "flash_attn_interface.py").write_text("x", encoding="utf-8")
-    (tmp_path / "flash_attn_config.py").write_text("x", encoding="utf-8")
-    (tmp_path / "flash_attn_3").mkdir()
-    (tmp_path / "flash_attn_3" / "_C1.so").write_bytes(b"x")
-    assert module.runtime_files_error(tmp_path) == ""
-    assert module._extension_path(tmp_path).name == "_C1.so"
-    assert module._sha256(tmp_path / "flash_attn_config.py")
-
-
-def test_artifact_identity_and_receipt_mismatch_details(tmp_path: Path) -> None:
-    module = priml.baselines.nanochat.attention
-    identity = module.artifact_path(cache_root=tmp_path)
-    assert identity.parent == tmp_path
-    receipt = module.expected_receipt(
-        binary_sha256="bad",
-        interface_sha256="bad",
-        config_sha256="bad",
-    )
-    error = module.receipt_validation_error(
-        receipt,
-        expected={**receipt, "binary_sha256": "good", "torch": "other"},
-    )
-    assert "binary_sha256 mismatch" in error
-    assert "torch mismatch" in error
-
-
-def test_artifact_validation_reports_receipt_and_runtime_failures(
-    tmp_path: Path,
-) -> None:
-    module = priml.baselines.nanochat.attention
-    (tmp_path / "flash_attn_interface.py").write_text("x", encoding="utf-8")
-    (tmp_path / "flash_attn_config.py").write_text("x", encoding="utf-8")
-    (tmp_path / "flash_attn_3").mkdir()
-    (tmp_path / "flash_attn_3" / "_C1.so").write_bytes(b"x")
-    (tmp_path / "READY").write_text("bad", encoding="utf-8")
-    assert "malformed" in module.artifact_validation_error(tmp_path)
-    (tmp_path / "READY").write_bytes(bytes([255]))
-    assert "UTF-8" in module.artifact_validation_error(tmp_path)
-    (tmp_path / "READY").write_text("source_revision=wrong", encoding="utf-8")
-    assert "missing receipt field" in module.artifact_validation_error(tmp_path)
-    with pytest.raises(FileNotFoundError, match="exactly one"):
-        module._extension_path(tmp_path.parent)
-
-
-def test_flash3_dispatches_through_qualified_fake_backend(
+def test_qk_cuda_adapters_launch_with_expected_geometry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FakeFlash:
-        def flash_attn_func(
+    module = attention
+
+    class Launcher:
+        def __init__(self) -> None:
+            self.arguments: dict[str, object] = {}
+
+        def __getitem__(
             self,
-            q: Tensor,
-            k: Tensor,
-            v: Tensor,
-            *,
-            causal: bool,
-            window_size: tuple[int, int],
-        ) -> Tensor:
-            assert causal
-            assert window_size == (2, 0)
-            return q + k + v
+            grid: Callable[[dict[str, int]], tuple[int, ...]],
+        ) -> Callable[..., None]:
+            def launch(**arguments: object) -> None:
+                assert grid({"block": 4}) == (16,)
+                self.arguments = arguments
 
-    module = priml.baselines.nanochat.attention
+            return launch
 
-    def capability() -> tuple[int, int]:
-        return (9, 0)
+    forward, backward = Launcher(), Launcher()
 
-    def load() -> FakeFlash:
-        return FakeFlash()
+    def cdiv(n: int, b: int) -> int:
+        return (n + b - 1) // b
 
-    monkeypatch.setattr(torch.cuda, "get_device_capability", capability)
-    monkeypatch.setattr(module, "load_flash3", load)
-    attention = Flash3Attention(Flash3Attention.Config())
-    q = torch.zeros(2, 3, 4, 6)
-    assert torch.equal(attention(q, q, q, window=2), torch.zeros_like(q))
+    monkeypatch.setattr(module, "triton", SimpleNamespace(cdiv=cdiv))
+    monkeypatch.setattr(module, "_compiled_qk_forward", lambda: forward)
+    monkeypatch.setattr(module, "_compiled_qk_backward", lambda: backward)
+    q = torch.randn(2, 4, 8, 32)[..., ::2]
+    k = torch.randn(2, 4, 8, 16)
+    dq, dk = torch.randn_like(q), torch.randn_like(k)
+    # _qk_forward_cuda consumes phase with a singleton head axis.
+    cos, sin = torch.randn(4, 1, 8), torch.randn(4, 1, 8)
+
+    q_out, k_out = module._qk_forward_cuda(q, k, cos, sin)
+    assert q_out.shape == q.shape
+    assert q_out.is_contiguous()
+    assert k_out.shape == k.shape
+    assert k_out.is_contiguous()
+    assert forward.arguments["n_rows"] == 64
+    assert forward.arguments["geometry"] == (8, 4)
+    forward_constants = cast(tuple[float, int, bool], forward.arguments["constants"])
+    assert forward_constants == (1.1920928955078125e-07, 8, True)
+    assert type(forward_constants[1]) is int
+    forward_buffers = cast(tuple[Tensor, ...], forward.arguments["buffers"])
+    assert forward_buffers[0].is_contiguous()
+    assert forward_buffers[1].is_contiguous()
+
+    q_grad, k_grad = module._qk_backward_cuda(dq, dk, q, k, cos=cos, sin=sin)
+    assert q_grad.shape == q.shape
+    assert q_grad.is_contiguous()
+    assert k_grad.shape == k.shape
+    assert k_grad.is_contiguous()
+    assert backward.arguments["n_rows"] == 64
+    assert backward.arguments["geometry"] == (8, 4)
+    backward_constants = cast(
+        tuple[float, int, bool],
+        backward.arguments["constants"],
+    )
+    assert backward_constants == (1.1920928955078125e-07, 8, True)
+    assert type(backward_constants[1]) is int
+    backward_buffers = cast(tuple[Tensor, ...], backward.arguments["buffers"])
+    assert all(value.is_contiguous() for value in backward_buffers)
 
 
-def test_artifact_missing_ready_and_load_failures(
-    tmp_path: Path,
+def test_qk_triton_kernels_load_masked_rows_and_store_all_outputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    module = priml.baselines.nanochat.attention
-    (tmp_path / "flash_attn_interface.py").write_text("x", encoding="utf-8")
-    (tmp_path / "flash_attn_config.py").write_text("x", encoding="utf-8")
-    (tmp_path / "flash_attn_3").mkdir()
-    (tmp_path / "flash_attn_3" / "_C1.so").write_bytes(b"x")
-    assert module.artifact_validation_error(tmp_path) == "missing READY receipt"
-    (tmp_path / "READY").mkdir()
-    assert "not a regular file" in module.artifact_validation_error(tmp_path)
-    (tmp_path / "READY").rmdir()
-    (tmp_path / "READY").write_text("placeholder", encoding="utf-8")
+    module = attention
 
-    def unreadable(path: Path, **_kwargs: object) -> str:
-        del path
-        raise OSError("no read")
+    class Symbol:
+        def __init__(self, expression: str) -> None:
+            self.expression = expression
 
-    monkeypatch.setattr(Path, "read_text", unreadable)
-    assert "could not read" in module.artifact_validation_error(tmp_path)
-    monkeypatch.undo()
+        @override
+        def __repr__(self) -> str:
+            return self.expression
 
-    def invalid(path: Path) -> str:
-        del path
-        return "bad artifact"
+        def __getitem__(self, key: object) -> Symbol:
+            return Symbol(f"{self.expression}[{key!r}]")
 
-    monkeypatch.setattr(module, "artifact_validation_error", invalid)
-    assert not module.is_prepared(cache_root=tmp_path)
-    with pytest.raises(RuntimeError, match="invalid"):
-        module.load_flash3(cache_root=tmp_path)
+        def to(self, dtype: object) -> Symbol:
+            return Symbol(f"{self.expression}.to({dtype!r})")
 
+        def __add__(self, other: object) -> Symbol:
+            return Symbol(f"({self.expression}+{other!r})")
 
-def test_flash3_rejects_non_sm90_device(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (8, 9))
-    with pytest.raises(RuntimeError, match="requires SM90"):
-        Flash3Attention(Flash3Attention.Config())
+        def __radd__(self, other: object) -> Symbol:
+            return Symbol(f"({other!r}+{self.expression})")
 
+        def __sub__(self, other: object) -> Symbol:
+            return Symbol(f"({self.expression}-{other!r})")
 
-def test_flash3_rejects_unqualified_revision() -> None:
-    with pytest.raises(ValueError, match="revision identifies"):
-        priml.baselines.nanochat.attention.Flash3Attention(
-            Flash3Attention.Config(revision="wrong"),
-        )
+        def __mul__(self, other: object) -> Symbol:
+            return Symbol(f"({self.expression}*{other!r})")
 
+        def __rmul__(self, other: object) -> Symbol:
+            return Symbol(f"({other!r}*{self.expression})")
 
-def test_loaded_module_error_detects_foreign_and_pathless_modules(
-    tmp_path: Path,
-) -> None:
-    module = priml.baselines.nanochat.attention
-    foreign = ModuleType("foreign")
-    foreign.__file__ = str(tmp_path.parent / "foreign.py")
-    sys.modules["foreign"] = foreign
-    try:
-        assert "already imported" in module._loaded_module_error("foreign", tmp_path)
-    finally:
-        del sys.modules["foreign"]
-    pathless = ModuleType("pathless")
-    pathless.__file__ = None
-    sys.modules["pathless"] = pathless
-    try:
-        assert "no file path" in module._loaded_module_error("pathless", tmp_path)
-    finally:
-        del sys.modules["pathless"]
+        def __truediv__(self, other: object) -> Symbol:
+            return Symbol(f"({self.expression}/{other!r})")
 
+        def __floordiv__(self, other: object) -> Symbol:
+            return Symbol(f"({self.expression}//{other!r})")
 
-def test_receipt_validation_reports_missing_and_unexpected_fields() -> None:
-    error = priml.baselines.nanochat.attention.receipt_validation_error(
-        {"extra": "x"},
-        expected={"source": "y"},
+        def __mod__(self, other: object) -> Symbol:
+            return Symbol(f"({self.expression}%{other!r})")
+
+        def __lt__(self, other: object) -> Symbol:
+            return Symbol(f"({self.expression}<{other!r})")
+
+    loads: list[tuple[Tensor, dict[str, object]]] = []
+    stores: list[tuple[Tensor, Symbol, dict[str, object]]] = []
+
+    def load(pointer: Tensor, **kwargs: object) -> Symbol:
+        loads.append((pointer, kwargs))
+        return Symbol(f"load{len(loads)}")
+
+    def store(pointer: Tensor, value: Symbol, **kwargs: object) -> None:
+        stores.append((pointer, value, kwargs))
+
+    def program_id(axis: int) -> Symbol:
+        del axis
+        return Symbol("pid")
+
+    def arange(start: int, stop: int) -> Symbol:
+        return Symbol(f"arange({start},{stop})")
+
+    def sum_symbols(value: Symbol, axis: int) -> Symbol:
+        return Symbol(f"sum({value!r},{axis})")
+
+    language = SimpleNamespace(
+        float32=object(),
+        program_id=program_id,
+        arange=arange,
+        load=load,
+        store=store,
+        sum=sum_symbols,
     )
-    assert "missing receipt field source" in error
-    assert "unexpected receipt field extra" in error
+    monkeypatch.setattr(module, "language", language)
+
+    def rsqrt(value: Symbol) -> Symbol:
+        return Symbol(f"rsqrt({value!r})")
+
+    monkeypatch.setattr(module, "libdevice", SimpleNamespace(rsqrt=rsqrt))
+    pointers = tuple(torch.full((1,), float(index)) for index in range(12))
+
+    forward_kernel = cast(
+        Callable[..., object],
+        module.__dict__["_qk_norm_rope_fwd_triton"],
+    )
+    forward_kernel(
+        buffers=pointers[:6],
+        n_rows=5,
+        geometry=(2, 4),
+        constants=(1.1920928955078125e-07, 4, False),
+        block=4,
+    )
+    assert len(loads) == 6
+    assert all("mask" in kwargs and kwargs["other"] == 0.0 for _, kwargs in loads)
+    assert len(stores) == 4
+    assert all("mask" in kwargs for _, _, kwargs in stores)
+    assert "tensor([0.])" in repr(loads[0][0])
+    assert "tensor([1.])" in repr(loads[2][0])
+    assert "tensor([2.])" in repr(loads[4][0])
+
+    loads.clear()
+    stores.clear()
+    backward_kernel = cast(
+        Callable[..., object],
+        module.__dict__["_qk_norm_rope_bwd_triton"],
+    )
+    backward_kernel(
+        buffers=pointers[:8],
+        n_rows=5,
+        geometry=(2, 4),
+        constants=(1.1920928955078125e-07, 4, False),
+        block=4,
+    )
+    assert len(loads) == 10
+    assert all("mask" in kwargs and kwargs["other"] == 0.0 for _, kwargs in loads)
+    assert len(stores) == 4
+    assert all("mask" in kwargs for _, _, kwargs in stores)
+    assert "tensor([2.])" in repr(loads[0][0])
+    assert "tensor([0.])" in repr(loads[4][0])
+    assert "tensor([4.])" in repr(loads[8][0])
 
 
 if __name__ == "__main__":

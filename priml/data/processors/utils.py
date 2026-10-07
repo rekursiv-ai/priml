@@ -6,13 +6,13 @@ from typing import TYPE_CHECKING, Literal
 
 import math
 
-from PIL import Image as PILImage
+from PIL import Image
 from torch import Tensor
+from torchvision.transforms import functional as tvf
 
 import torch
-import torchvision.transforms.functional as tvf
 
-from priml.math.pixel import float2rgb
+from priml.math.pixel import float2rgb, rgb2float
 
 
 if TYPE_CHECKING:
@@ -48,7 +48,7 @@ def safe_aspect_ratio(height: float, width: float) -> float:
       width: Width value
 
     Returns:
-      aspect_ratio: width / height, or torch.inf if height is zero
+      aspect_ratio: width / height, or math.inf if height is zero
 
     """
     return width / height if height != 0 else math.inf
@@ -81,7 +81,7 @@ def compute_keyframes_as_progressive_bisection(
       >>> compute_keyframes_as_progressive_bisection(10, 3)
       [0, 4, 9]
       >>> compute_keyframes_as_progressive_bisection(10, 5)
-      [0, 2, 4, 7, 9]
+      [0, 2, 4, 6, 9]
 
     """
     num_keyframes = min(num_keyframes, total_frames)
@@ -104,28 +104,19 @@ def compute_keyframes_as_progressive_bisection(
 
     # Continue bisecting until we have enough frames.
     while len(indices) < num_keyframes:
-        # Find the largest gap between consecutive indices.
+        # Find the first largest gap between consecutive indices.
         indices_sorted = sorted(indices)
-        max_gap = 0
-        max_gap_idx = 0
-
-        for i in range(len(indices_sorted) - 1):
-            gap = indices_sorted[i + 1] - indices_sorted[i]
-            if gap > max_gap:
-                max_gap = gap
-                max_gap_idx = i
+        max_gap_idx = max(
+            range(len(indices_sorted) - 1),
+            key=lambda i: indices_sorted[i + 1] - indices_sorted[i],
+        )
 
         # Bisect the largest gap.
         left = indices_sorted[max_gap_idx]
         right = indices_sorted[max_gap_idx + 1]
         mid = (left + right) // 2
 
-        # Only add if mid is different from both endpoints (avoid duplicates)
-        if mid not in {left, right}:
-            indices.append(mid)
-        else:
-            # No more unique frames to add.
-            break
+        indices.append(mid)
 
     return sorted(indices)
 
@@ -213,7 +204,9 @@ def preprocess_images(
     Performs resize and normalize entirely on GPU.
 
     Args:
-        x: Input tensor (N, C, H, W) in float [-1, 1] range, on GPU.
+        x: Input tensor (N, C, H, W): float in [-1, 1], or uint8 in [0, 255],
+           which is lifted to [-1, 1] first -- what ``CropDuringDecodeImage``
+           emits by default.
         size: Target (height, width) for resizing.
         mean: Normalization mean per channel (list or pre-created tensor).
               If None, normalization is skipped.
@@ -238,19 +231,20 @@ def preprocess_images(
         x: Preprocessed tensor (N, C, H, W) in the specified dtype.
 
     """
-    if not torch.is_floating_point(x):
-        raise TypeError(f"Input tensor must be a float type, but got {x.dtype}")
     if x.ndim != 4:
         raise TypeError(f"Input format must be NCHW but {x.shape=}.")
-    if dtype is None:
-        dtype = x.dtype
+    if x.dtype == torch.uint8:
+        x = rgb2float(x, float_dtype=dtype or torch.get_default_dtype())
+    if not torch.is_floating_point(x):
+        raise TypeError(f"Input tensor must be a float type, but got {x.dtype}")
+    dtype = x.dtype if dtype is None else dtype
 
     # Use input dtype for resize (no conversion overhead)
     resize_dtype = dtype
 
     # Resize (skip if already correct size)
     height, width = size
-    if x.shape[-2:] != (height, width):
+    if x.shape[2:] != (height, width):
         if mode == "lanczos":
             if align_corners is not None:
                 raise ValueError(
@@ -261,18 +255,18 @@ def preprocess_images(
             pil_images = image_batch_to_pil_list(x)
             resized_samples: list[Tensor] = []
             for img in pil_images:
-                img_resized = img.resize((width, height), PILImage.Resampling.LANCZOS)
+                img_resized = img.resize((width, height), Image.Resampling.LANCZOS)
                 tensor_resized = tvf.to_tensor(img_resized)
                 resized_samples.append(tensor_resized)
-            x = torch.stack(resized_samples)
-            x = (x * 2.0 - 1.0).to(resize_dtype)
+            # PIL runs on the host; the result goes back where it came from.
+            x = (torch.stack(resized_samples) * 2.0 - 1.0).to(x.device, resize_dtype)
         else:
             # Convert to resize dtype before resize.
             if x.dtype != resize_dtype:
                 x = x.to(resize_dtype)
 
             if mode == "hybrid":
-                source_pixels = x.shape[-2] * x.shape[-1]
+                source_pixels = x.shape[2] * x.shape[3]
                 target_pixels = height * width
                 if target_pixels < source_pixels:
                     interp_mode = "area"  # Downsampling.
@@ -322,14 +316,10 @@ def preprocess_images(
         std_tensor = torch.as_tensor(std, device=x.device, dtype=x.dtype).view(-1, 1, 1)
         x = x / std_tensor
 
-    # Convert to final target dtype if different from current dtype.
-    if x.dtype != dtype:
-        x = x.to(dtype)
-
     return x
 
 
-def image_batch_to_pil_list(x: Tensor) -> list[PILImage.Image]:
+def image_batch_to_pil_list(x: Tensor) -> list[Image.Image]:
     """Convert batch of images to list of PIL Images.
 
     Args:

@@ -15,10 +15,18 @@ requirements drive this module:
 
 from __future__ import annotations
 
+from collections import deque
+from itertools import islice
+from typing import TYPE_CHECKING
+
 import random
 
 
-__all__ = ["shard_and_shuffle"]
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
+
+__all__ = ["interleave_shards", "shard_and_shuffle"]
 
 
 def shard_and_shuffle[T](
@@ -66,3 +74,45 @@ def shard_and_shuffle[T](
     start = worker_id * length // num_workers
     end = (worker_id + 1) * length // num_workers
     return items[start:end]
+
+
+def interleave_shards[S, T](
+    shards: list[S],
+    read: Callable[[S], Iterator[T]],
+    *,
+    num_concurrently_read_shards: int,
+) -> Iterator[T]:
+    """Round-robin over at most ``num_concurrently_read_shards`` open shards.
+
+    A shard opens only when one in flight is exhausted, so at most that many
+    readers hold a file at once, and ``1`` reads the shards in order.
+
+    Args:
+      shards: Shards in read order, already sliced for this worker.
+      read: Opens one shard as an iterator of its items.
+      num_concurrently_read_shards: Readers in flight; at least 1.
+
+    Yields:
+      item: The next item of the next open shard, in round-robin order.
+
+    Raises:
+      ValueError: If ``num_concurrently_read_shards`` is below 1, since no
+        reader would ever open and the stream would be silently empty.
+
+    """
+    if num_concurrently_read_shards < 1:
+        raise ValueError(
+            "num_concurrently_read_shards must be >= 1, got "
+            f"{num_concurrently_read_shards}.",
+        )
+    active = deque(read(shard) for shard in shards[:num_concurrently_read_shards])
+    pending = iter(shards[num_concurrently_read_shards:])
+    while active:
+        reader = active.popleft()
+        try:
+            item = next(reader)
+        except StopIteration:
+            active.extend(read(shard) for shard in islice(pending, 1))
+            continue
+        yield item
+        active.append(reader)

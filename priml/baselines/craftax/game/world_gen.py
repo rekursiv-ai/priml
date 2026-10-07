@@ -39,18 +39,6 @@ from priml.baselines.craftax.game.world_config import (
 )
 
 
-def _day_reciprocal() -> float:
-    exact = 1.0 / constants.DAY_LENGTH
-    nearest = torch.tensor(exact, dtype=torch.float32)
-    if float(nearest) > exact:
-        nearest = torch.nextafter(nearest, torch.zeros_like(nearest))
-    return float(nearest)
-
-
-# XLA GPU lowers traced f32 division to multiplication by a reciprocal rounded
-# toward zero.
-_DAY_RECIPROCAL: Final = _day_reciprocal()
-
 _LAVA_GLOW: Final = torch.tensor([[0.2, 0.7, 0.2], [0.7, 1.0, 0.7], [0.2, 0.7, 0.2]])
 """Light lava casts on its own tile and its eight neighbours."""
 
@@ -153,9 +141,10 @@ def generate_smooth_world(
 
     """
     shape = constants.MAP_SIZE
-    coarse = (shape[0] // 16, shape[1] // 16)
-    stretched = (shape[0] // 8, shape[1] // 2)
-    detailed = (shape[0] // 4, shape[1] // 4)
+    rows, columns = shape
+    coarse = (rows // 16, columns // 16)
+    stretched = (rows // 8, columns // 2)
+    detailed = (rows // 4, columns // 4)
 
     # Water and mountains are pushed away from the spawn so the player never
     # starts walled in or in the sea.
@@ -175,7 +164,9 @@ def generate_smooth_world(
         device=device,
     )
 
-    water = noise(resolution=coarse) + water_clearance - 1.0
+    water_level = noise(resolution=coarse) + water_clearance
+    above_inner_mountain_water_cutoff = water_level > 1.4
+    water = water_level - 1.0
     blocks = torch.where(
         water > config.water_threshold,
         config.sea_block,
@@ -201,7 +192,7 @@ def generate_smooth_world(
         blocks,
     )
     blocks = torch.where(
-        (mountain > 0.85) & (water > 0.4),
+        (mountain > 0.85) & above_inner_mountain_water_cutoff,
         config.inner_mountain_block,
         blocks,
     )
@@ -240,7 +231,7 @@ def generate_smooth_world(
     )
     blocks = scatter_tiles(
         blocks,
-        player_position.expand(num_envs, 2),
+        torch.broadcast_to(player_position, (num_envs, 2)),
         torch.full((num_envs,), config.player_spawn, device=device),
     )
 
@@ -272,7 +263,7 @@ def generate_smooth_world(
             constants.on_device(_LAVA_GLOW, device)[None, None],
             padding=1,
         ).squeeze(1)
-    return blocks.int(), items.int(), light.clamp(0.0, 1.0), down_ladder, up_ladder
+    return blocks.int(), items.int(), light.clamp(max=1.0), down_ladder, up_ladder
 
 
 def generate_dungeon(
@@ -336,19 +327,17 @@ def generate_dungeon(
             room_chunks,
             1,
             generator=generator,
-        ).squeeze(-1)
+        )[:, 0]
         # ``scatter_`` rather than an indexed assignment of 0, which would copy
         # the scalar from the host -- a copy a CUDA graph cannot capture.
         room_chunks.scatter_(1, selected_chunk[:, None], 0.0)
         chunk_position = (
-            torch.stack(
+            torch.column_stack(
                 (selected_chunk % chunks_across, selected_chunk // chunks_across),
-                dim=-1,
             )
             * chunk
         )
         offset = torch.randint(
-            0,
             chunk - smallest,
             (num_envs, 2),
             generator=generator,
@@ -386,7 +375,7 @@ def generate_dungeon(
             included_rooms,
             1,
             generator=generator,
-        ).squeeze(-1)
+        )[:, 0]
         blocks = _carve_corridor(
             blocks,
             source=corners[:, room],
@@ -411,7 +400,7 @@ def generate_dungeon(
             constants.on_device(_ADJACENCY, device)[None, None],
             padding=1,
         ).squeeze(1)
-        > 0.5
+        > 0
     )
     speckle = torch.rand((num_envs, *shape), generator=generator, device=device) < 0.1
     walls = torch.where(speckle, int(BlockType.WALL_MOSS), int(BlockType.WALL))
@@ -459,7 +448,12 @@ def daylight(timestep: Tensor) -> Tensor:
       light: Ambient surface light, same shape.
 
     """
-    phase = (timestep.float() * _DAY_RECIPROCAL) % 1.0 + 0.3
+    # Upstream training compiles ``t / day_length`` with the day length as a
+    # constant, which XLA folds into a multiply by its nearest float32
+    # reciprocal on CPU and CUDA alike; torch rounds this scalar the same way.
+    # A reciprocal rounded toward zero changed the game late in an episode
+    # (5 of 1,024 worlds diverged within 3,000 steps from t = 90,000).
+    phase = (timestep.float() * (1 / constants.DAY_LENGTH)) % 1.0 + 0.3
     return 1.0 - (torch.pi * phase).cos().abs() ** 3
 
 
@@ -485,23 +479,24 @@ def _sample_tile(
     device: torch.device,
 ) -> Tensor:
     """Draw one tile per environment, proportional to ``weights``."""
-    total = weights.sum(-1, keepdim=True)
+    total = weights.sum(weights.ndim - 1, keepdim=True)
     empty = total == 0
     safe = torch.where(empty, torch.ones_like(weights), weights)
-    flat = torch.multinomial(safe, 1, generator=generator).squeeze(-1)
-    flat = torch.where(empty.squeeze(-1), torch.zeros_like(flat), flat)
-    return torch.stack((flat // shape[1], flat % shape[1]), dim=-1).int().to(device)
+    flat = torch.multinomial(safe, 1, generator=generator)[:, 0]
+    flat = torch.where(empty[:, 0], torch.zeros_like(flat), flat)
+    # Not ``torch.unravel_index``: it builds its divisors with ``torch.tensor``, a
+    # host-to-device copy that CUDA graph capture of a restart rejects.
+    return torch.column_stack((flat // shape[1], flat % shape[1])).int().to(device)
 
 
 def _place_room_torches(items: Tensor, *, corner: Tensor, size: Tensor) -> Tensor:
     """Light each room from its four corners."""
     for down, across in ((0, 0), (1, 0), (0, 1), (1, 1)):
-        offset = torch.stack(
+        offset = torch.column_stack(
             (
                 (size[:, 0] - 1) * down,
                 (size[:, 1] - 1) * across,
             ),
-            dim=-1,
         )
         items = scatter_tiles(
             items,
@@ -587,15 +582,17 @@ def _brighten_around(light: Tensor, position: Tensor, *, ambient: float) -> Tens
         + ambient
     )
     row_start = position[:, 0] - 4
-    row_start = torch.where(row_start < 0, light.shape[-2] + row_start, row_start)
-    row_start = row_start.clamp(max=light.shape[-2] - 9)
+    wrap_rows = row_start < 0
+    row_start = row_start.clamp(min=0, max=light.shape[-2] - 9)
+    row_start = torch.where(wrap_rows, row_start + light.shape[-2] - 9, row_start)
     column_start = position[:, 1] - 4
+    wrap_columns = column_start < 0
+    column_start = column_start.clamp(min=0, max=light.shape[-1] - 9)
     column_start = torch.where(
-        column_start < 0,
-        light.shape[-1] + column_start,
+        wrap_columns,
+        column_start + light.shape[-1] - 9,
         column_start,
     )
-    column_start = column_start.clamp(max=light.shape[-1] - 9)
     # The patch is written in ONE indexed assignment, not eighty-one scatters: the
     # loop was more than half of every world generated. The clamps above keep all
     # 81 tiles on the map and distinct, which is what makes a single write equal to

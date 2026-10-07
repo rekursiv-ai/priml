@@ -3,7 +3,7 @@
 
 [project]
 name = "priml"
-version = "0.1.4"
+version = "0.1.5"
 description = "Malleable ML building blocks for training experiments."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -62,8 +62,9 @@ dependencies = [
     # tensor utilities
     "einops",
     "einshape",
-    # config
-    "configgle>=1.3.7",
+    # config; 1.4.1 first ships LateBound and Fig.finalized(), which priml imports
+    "configgle>=1.4.1",
+    "msgspec>=0.22.0",
     # containers
     "wrapt",
     # misc
@@ -218,7 +219,7 @@ markers = [
     "network_together: reaches Together over the network",
     "network_wandb: reaches Weights & Biases over the network",
 ]
-addopts = "-m 'not ci_smoke and not cuda and not integration and not performance and not cluster and not slow' --durations=20 --dist=worksteal"
+addopts = "-m 'not ci_smoke and not cuda and not integration and not performance and not cluster and not slow' --durations=20 --dist=worksteal -p no:py_pglite"
 timeout = 60
 # "error" = treat all warnings as errors (same as -Werror).
 # Using filterwarnings instead of addopts so we can add exceptions.
@@ -326,8 +327,10 @@ extend-safe-fixes = [
     "F841",   # Remove unused local bindings.
     "PT006",  # Use tuple for pytest.mark.parametrize names.
     "PT007",  # Use tuple/list consistently for pytest values.
+    "PT018",  # Split composite assertions.
     "PYI034", # Annotate __enter__/__new__/__iadd__ returns as Self.
     "RET504", # Remove unnecessary local assignment directly before return.
+    "RUF007", # Prefer `itertools.pairwise()` over `zip()` when iterating over successive pairs.
     "SIM102", # Collapse nested if statements.
     "SIM105", # Use contextlib.suppress instead of try-except-pass.
     "TC",     # Type-checking import and annotation rewrites.

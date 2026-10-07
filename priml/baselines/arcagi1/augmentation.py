@@ -22,7 +22,7 @@ from torch import Tensor
 import numpy as np
 import torch
 
-from priml.lib.custom_json import ListCodec
+from priml.lib.custom_json import convert
 
 
 if TYPE_CHECKING:
@@ -105,7 +105,7 @@ class ColorDihedral:
         """
         if not self.config.separator:
             raise ValueError("identifier separator must be filled before sampling.")
-        tid = self.config.transforms[int(rng.integers(0, len(self.config.transforms)))]
+        tid = self.config.transforms[int(rng.integers(len(self.config.transforms)))]
         mapping = np.arange(10, dtype=np.uint8)
         colors = np.array(self.config.colors, dtype=np.uint8)
         mapping[colors] = rng.permutation(colors)
@@ -137,18 +137,23 @@ class ColorDihedral:
         if separator not in name:
             return name, lambda grid: grid
         tid_text, permutation = name.split(separator)[-2:]
-        if len(permutation) != 10 or set(permutation) != set("0123456789"):
-            raise ValueError("Encoded colors must be a permutation of 0..9.")
         tid = int(tid_text.removeprefix("t"))
+        # A negative id would index the inverse table from the end and decode silently.
         if tid < 0 or tid > 7:
             raise ValueError("Encoded transform must be in 0..7.")
+        # A non-bijective suffix would misroute colors and silently miscompare hashes.
+        if len(permutation) != 10 or set(permutation) != set("0123456789"):
+            raise ValueError(
+                f"invalid color-permutation suffix {permutation!r} in identifier "
+                f"{name!r}; expected a permutation of '0123456789'.",
+            )
         inverse_tid = (0, 3, 2, 1, 4, 5, 6, 7)[tid]
         inverse_colors = np.argsort(list(permutation)).astype(np.uint8)
 
         def transform(grid: NDArray[np.uint8]) -> NDArray[np.uint8]:
             return inverse_colors[dihedral_transform(grid, tid=inverse_tid)]
 
-        return name.split(separator, maxsplit=1)[0], transform
+        return name.partition(separator)[0], transform
 
     def augment_tokens(
         self,
@@ -319,8 +324,8 @@ class SpatialAugmentation:
         if training and bernoulli(self.config.translation_prob, rng):
             rows = max(inp.shape[0], out.shape[0]) * scale
             cols = max(inp.shape[1], out.shape[1]) * scale
-            pad_r = int(rng.integers(0, side - rows + 1))
-            pad_c = int(rng.integers(0, side - cols + 1))
+            pad_r = int(rng.integers(side - rows + 1))
+            pad_c = int(rng.integers(side - cols + 1))
         tag = (scale, pad_r, pad_c)
         return self.pack_at(inp, out=out, tag=tag), tag
 
@@ -350,7 +355,7 @@ class SpatialAugmentation:
             raise ValueError(
                 f"grid shape exceeds max_grid={side}: inp={inp.shape}, out={out.shape}.",
             )
-        if scale > 1:
+        if scale != 1:
             inp = cast(
                 np.ndarray[tuple[int, ...], np.dtype[np.uint8]],
                 scale_grid(inp, scale),
@@ -415,8 +420,11 @@ class ArcAugmentation:
         def finalize(self) -> Self:
             """Push the dataset's geometry into its transform and spatial packer."""
             self.spatial.spec = self.spec
-            assert isinstance(self.transform, ColorDihedral.Config)
-            if self.spec is not None and not self.transform.separator:
+            if (
+                self.spec is not None
+                and isinstance(self.transform, ColorDihedral.Config)
+                and not self.transform.separator
+            ):
                 self.transform.separator = self.spec.puzzle_id_separator
             return super().finalize()
 
@@ -445,7 +453,7 @@ def dihedral_transform[T: np.generic](arr: NDArray[T], *, tid: int) -> NDArray[T
     if tid == 0:
         return arr
     if tid == 1:
-        return np.rot90(arr, k=1)
+        return np.rot90(arr)
     if tid == 2:
         return np.rot90(arr, k=2)
     if tid == 3:
@@ -457,7 +465,7 @@ def dihedral_transform[T: np.generic](arr: NDArray[T], *, tid: int) -> NDArray[T
     if tid == 6:
         return arr.T
     if tid == 7:
-        return np.fliplr(np.rot90(arr, k=1))
+        return np.fliplr(np.rot90(arr))
     raise ValueError(f"Invalid dihedral tid={tid}; must be in 0..7.")
 
 
@@ -488,23 +496,7 @@ def inverse_aug(
         inverse dihedral first, then the inverse color permutation.
 
     """
-    separator = spec.puzzle_id_separator
-    if separator not in name:
-        return name, lambda x: x
-    tid_str, perm_str = name.split(separator)[-2:]
-    tid = int(tid_str[1:])
-    # A non-bijective suffix would misroute colors and silently miscompare hashes.
-    if len(perm_str) != 10 or set(perm_str) != set("0123456789"):
-        raise ValueError(
-            f"invalid color-permutation suffix {perm_str!r} in identifier {name!r}; "
-            "expected a permutation of '0123456789'.",
-        )
-    inv_perm = np.argsort(list(perm_str)).astype(np.uint8)
-
-    def _map_grid(grid: NDArray[np.uint8]) -> NDArray[np.uint8]:
-        return inv_perm[inverse_dihedral_transform(grid, tid=tid)]
-
-    return name.split(separator, maxsplit=1)[0], _map_grid
+    return ColorDihedral.Config(separator=spec.puzzle_id_separator).make().inverse(name)
 
 
 def canonicalize_arc_grid(
@@ -530,7 +522,9 @@ def canonicalize_arc_grid(
 
     """
     flat = tokens.detach().to("cpu", torch.uint8).reshape(-1).numpy()
-    tag = ListCodec.coerce(spatial_tags.reshape(-1).tolist(), int)
+    if spatial_tags.dtype.is_floating_point:
+        raise ValueError("spatial tags hold (scale, row, col); got float values.")
+    tag = convert(spatial_tags.reshape(-1).tolist(), list[int])
     if len(tag) != 3:
         raise ValueError(f"spatial tags hold (scale, row, col); got {tag}.")
     scale, pad_r, pad_c = tag
@@ -544,7 +538,7 @@ def canonicalize_arc_grid(
         transform = policy_config.make()
     policy = transform
     original_name, inverse = policy.inverse(name)
-    canonical = np.array(inverse(colors), copy=True)
+    canonical = inverse(colors)
     return original_name, torch.from_numpy(canonical).to(tokens.device)
 
 
@@ -580,16 +574,14 @@ def untranslate_unscale(
     side = square_side(len(flat), who="untranslate_unscale")
     if scale == 1 and pad_r == 0 and pad_c == 0:
         return flat
-    shifted = flat.reshape(side, side)[pad_r:, pad_c:]
-    if scale > 1:
-        shifted = shifted[::scale, ::scale]
+    shifted = flat.reshape(side, side)[pad_r:, pad_c:][::scale, ::scale]
     return np.pad(
         shifted,
         ((0, side - shifted.shape[0]), (0, side - shifted.shape[1])),
     ).flatten()
 
 
-def grid_hash(grid: NDArray[np.uint8]) -> str:
+def grid_hash(grid: NDArray[np.generic]) -> str:
     """Hash a 2D uint8 grid's shape and content."""
     if grid.ndim != 2:
         raise ValueError("Expected grid.ndim == 2.")
@@ -629,6 +621,12 @@ def normalize_scale_weights(
         raise ValueError(
             f"scale weights must include a positive weight: {train_scale_weights}.",
         )
+    # Rescale only on overflow: the result names dataset directories (via
+    # ``scale_weights_slug``), so finite totals must keep their exact quotients.
+    if math.isinf(total):
+        peak = max(normalized.values())
+        normalized = {scale: weight / peak for scale, weight in normalized.items()}
+        total = sum(normalized.values())
     return {scale: weight / total for scale, weight in normalized.items()}
 
 
@@ -701,8 +699,8 @@ def sample_scale_factor(
 
     """
     normalized = normalize_scale_weights(train_scale_weights)
-    inp_rows, inp_cols = ListCodec.coerce(list(inp.shape), int)
-    out_rows, out_cols = ListCodec.coerce(list(out.shape), int)
+    inp_rows, inp_cols = cast(tuple[int, int], inp.shape)
+    out_rows, out_cols = cast(tuple[int, int], out.shape)
     rows, cols = max(inp_rows, out_rows), max(inp_cols, out_cols)
     fitting = [
         (scale, weight)
@@ -711,9 +709,9 @@ def sample_scale_factor(
     ]
     if not fitting or [scale for scale, _ in fitting] == [1]:
         return 1
-    scales = np.array([scale for scale, _ in fitting], dtype=np.int64)
-    weights = np.array([weight for _, weight in fitting], dtype=np.float64)
-    return int(rng.choice(scales, p=weights / weights.sum()))
+    scales = tuple(scale for scale, _ in fitting)
+    weights = tuple(weight for _, weight in fitting)
+    return int(rng.choice(scales, p=np.array(weights) / sum(weights)))
 
 
 def crop_grid(flat: NDArray[np.uint8], *, spec: ArcSpec) -> NDArray[np.uint8]:
@@ -729,7 +727,7 @@ def crop_grid(flat: NDArray[np.uint8], *, spec: ArcSpec) -> NDArray[np.uint8]:
     """
     side = square_side(len(flat), who="crop_grid")
     grid = flat.reshape(side, side)
-    values = ListCodec.coerce(cast(object, flat.tolist()), int)
+    values = cast(list[int], flat.tolist())
     max_area = max_nr = max_nc = 0
     num_c = side
     for num_r in range(1, side + 1):
@@ -751,7 +749,11 @@ def square_side(length: int, *, who: str) -> int:
     return side
 
 
-def arc_grid_to_np(grid: list[list[int]], *, max_grid: int) -> NDArray[np.uint8]:
+def arc_grid_to_np(
+    grid: Sequence[Sequence[int | float]],
+    *,
+    max_grid: int,
+) -> NDArray[np.uint8]:
     """Validate a source color grid before narrowing it to uint8.
 
     Args:
@@ -762,15 +764,16 @@ def arc_grid_to_np(grid: list[list[int]], *, max_grid: int) -> NDArray[np.uint8]
       grid: Validated uint8 array.
 
     """
-    arr = np.array(grid, dtype=np.int64)
+    arr = np.array(grid, dtype=np.float64)
     if arr.ndim != 2:
         raise ValueError("Expected arr.ndim == 2.")
     if arr.shape[0] > max_grid:
         raise ValueError(f"Expected arr.shape[0] <= max_grid={max_grid}.")
     if arr.shape[1] > max_grid:
         raise ValueError(f"Expected arr.shape[1] <= max_grid={max_grid}.")
-    # Checked on the wide dtype, so 256 is rejected rather than wrapping to a color.
-    if not np.all((arr >= 0) & (arr <= 9)):
+    # Checked before any integer cast, so 256 cannot wrap and 9.9 cannot truncate
+    # into a valid color.
+    if not np.all(np.isin(arr, np.arange(10))):
         raise ValueError("ARC grid colors must be in 0..9.")
     return arr.astype(np.uint8)
 

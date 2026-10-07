@@ -16,11 +16,11 @@ from priml.baselines.sudoku.model import (
     GridConfig,
     RecurrenceConfig,
     SudokuNet,
-    corrected_fan_in_normal,
 )
 from priml.baselines.sudoku.prefix import PrefixConfig, SparsePuzzleEmbedding
+from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE
-from priml.model.attention.self_attention import SelfAttention
+from priml.model.init import corrected_fan_in_normal
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
@@ -29,7 +29,7 @@ from priml.model.transformer.block import TransformerBlock
 if TYPE_CHECKING:
     from configgle.custom_types import Makeable
 
-    from priml.model.custom_types import TensorModule
+    from priml.model.custom_types import LayerCache, TensorModule
 
 
 class RotaryBlock(TransformerBlock):
@@ -39,7 +39,7 @@ class RotaryBlock(TransformerBlock):
         """Transformer block and the rotary position encoding it consumes."""
 
         attn: Makeable[TensorModule] = field(
-            default_factory=lambda: SelfAttention.Config(
+            default_factory=lambda: Attention.Config(
                 channels_head=64,
                 init_weight=corrected_fan_in_normal,
             ),
@@ -78,14 +78,20 @@ class RotaryBlock(TransformerBlock):
         self.rope = None if config.rope is None else config.rope.make()
 
     @override
-    def forward(self, x: Tensor, **kwargs: object) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        *,
+        cache: LayerCache | None = None,
+        **kwargs: object,
+    ) -> Tensor:
         """Supply rotary positions unless the caller precomputed them."""
         if kwargs.get("cos_sin") is None:
             factors = self.factors(x.shape[-2], device=x.device)
             if factors is None:
                 raise ValueError("RotaryBlock without a rope needs cos_sin.")
             kwargs["cos_sin"] = factors
-        return super().forward(x, **kwargs)
+        return super().forward(x, cache=cache, **kwargs)
 
     def factors(
         self,

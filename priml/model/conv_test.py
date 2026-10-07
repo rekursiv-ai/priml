@@ -7,7 +7,6 @@ from typing import Final
 
 import math
 
-from configgle.testing import assert_pprint_golden
 from torch.utils.flop_counter import FlopCounterMode
 
 import pytest
@@ -20,6 +19,7 @@ from priml.testing.cost import (
     _TrafficMode,
     assert_cost_matches_torch,
 )
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent

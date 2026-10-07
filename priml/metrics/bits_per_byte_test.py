@@ -14,6 +14,11 @@ def _metric() -> BitsPerByte:
     return BitsPerByte.Config().make()
 
 
+def test_it_retains_its_config() -> None:
+    config = BitsPerByte.Config()
+    assert BitsPerByte(config).config is config
+
+
 def test_it_converts_nats_per_byte_to_bits() -> None:
     """A known loss over a known byte count has one right answer.
 
@@ -104,17 +109,66 @@ def test_padding_rows_leave_both_sums() -> None:
     assert metric.state_dict() == {"nats": pytest.approx(4 * math.log(2)), "bytes": 4}
 
 
+def test_zero_valid_rows_are_allowed_and_leave_empty_state() -> None:
+    metric = _metric()
+    metric.update(
+        torch.ones(2, 3),
+        label=torch.ones(2, 3, dtype=torch.int64),
+        token_bytes=torch.tensor([0, 1, 2]),
+        valid_count=0,
+    )
+    assert metric.state_dict() == {"nats": 0.0, "bytes": 0}
+    with pytest.raises(ValueError, match="no scored tokens"):
+        metric.compute()
+
+
 @pytest.mark.parametrize("valid_count", [-1, 3])
 def test_a_valid_count_outside_the_batch_is_rejected(valid_count: int) -> None:
     """A count past the rows would index the byte table from the back."""
     metric = _metric()
-    with pytest.raises(ValueError, match="outside the batch"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            rf"valid_count {valid_count} is outside the batch's 2 rows; "
+            r"the padding markers it excludes would otherwise index the byte "
+            r"table from the back and be scored\."
+        ),
+    ):
         metric.update(
             torch.zeros(2, 3),
             label=torch.ones(2, 3, dtype=torch.int64),
             token_bytes=torch.tensor([0, 1, 2]),
             valid_count=valid_count,
         )
+
+
+def test_update_converts_labels_and_moves_byte_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conversions: list[tuple[object, ...]] = []
+    original_to = torch.Tensor.to
+
+    def recording_to(
+        tensor: torch.Tensor,
+        *args: torch.dtype | torch.device,
+    ) -> torch.Tensor:
+        conversions.append(args)
+        arg = args[0]
+        if isinstance(arg, torch.dtype):
+            return original_to(tensor, arg)
+        return original_to(tensor, arg)
+
+    monkeypatch.setattr(torch.Tensor, "to", recording_to)
+    metric = _metric()
+    metric.update(
+        # Metric updates intentionally use a two-by-three batch/token matrix.
+        torch.full((2, 3), math.log(2)),
+        label=torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]),
+        token_bytes=torch.tensor([0, 1, 2]),
+    )
+    assert (torch.int64,) in conversions
+    assert (torch.device("cpu"),) in conversions
+    assert metric.state_dict() == {"nats": pytest.approx(6 * math.log(2)), "bytes": 6}
 
 
 def test_compute_sums_across_ranks_before_dividing(
@@ -127,7 +181,8 @@ def test_compute_sums_across_ranks_before_dividing(
     """
 
     def all_reduce(totals: torch.Tensor, op: object) -> None:
-        del op
+        assert totals.dtype == torch.float64
+        assert op is torch.distributed.ReduceOp.SUM
         totals.add_(torch.tensor([3 * math.log(2), 3.0], dtype=torch.float64))
 
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
@@ -140,6 +195,38 @@ def test_compute_sums_across_ranks_before_dividing(
         token_bytes=torch.tensor([0, 1, 2, 4]),
     )
     assert metric.compute()["bpb"] == pytest.approx(1.0)
+
+
+def test_non_gloo_reduction_moves_totals_to_current_cuda_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    real_device = torch.device
+
+    def make_device(*args: object, **kwargs: object) -> torch.device:
+        device_calls.append((args, kwargs))
+        return real_device("cpu")
+
+    def all_reduce(totals: torch.Tensor, op: object) -> None:
+        assert totals.dtype == torch.float64
+        assert op is torch.distributed.ReduceOp.SUM
+        totals.add_(torch.tensor([3 * math.log(2), 3.0], dtype=torch.float64))
+
+    metric = _metric()
+    metric.update(
+        torch.full((2, 3), math.log(2)),
+        label=torch.ones(2, 3, dtype=torch.int64),
+        token_bytes=torch.tensor([0, 1, 2, 4]),
+    )
+    with monkeypatch.context() as scoped:
+        scoped.setattr(torch, "device", make_device)
+        scoped.setattr(torch.cuda, "current_device", lambda: 3)
+        scoped.setattr(torch.distributed, "is_initialized", lambda: True)
+        scoped.setattr(torch.distributed, "get_backend", lambda: "nccl")
+        scoped.setattr(torch.distributed, "all_reduce", all_reduce)
+        assert metric.compute()["bpb"] == pytest.approx(1.0)
+
+    assert device_calls == [(("cuda", 3), {})]
 
 
 def test_a_shape_disagreement_is_rejected() -> None:
@@ -160,7 +247,13 @@ def test_an_empty_eval_refuses_rather_than_scoring_zero() -> None:
     below one batch, a misconfigured split -- would otherwise win every
     comparison it entered, and look like a result rather than a failure.
     """
-    with pytest.raises(ValueError, match="no scored tokens"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"bits per byte has no scored tokens: the evaluation produced "
+            r"no batches carrying byte-bearing targets\."
+        ),
+    ):
         _metric().compute()
 
 

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import Self
 
 import io
 import os
@@ -12,11 +13,23 @@ import threading
 
 import pytest
 
+from priml.data.sources import tarhandle
 from priml.data.sources.tarhandle import TarFileHandle
 
 
-if TYPE_CHECKING:
-    from pathlib import Path
+class _ReadProbe:
+    def __init__(self) -> None:
+        self.read_sizes: list[int] = []
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        del exc_info
+
+    def read(self, size: int = -1) -> bytes:
+        self.read_sizes.append(size)
+        return b"\x1f\x8b" + b"x" * 16
 
 
 def _write_archive(path: Path, payloads: dict[str, bytes]) -> None:
@@ -41,6 +54,7 @@ def test_shared_reader_contract(tmp_path: Path, use_mmap: bool) -> None:
         assert handle.path == path
         assert handle.name == str(path)
         assert handle.use_mmap is use_mmap
+        assert handle._closed is False
         assert f"mode={'mmap' if use_mmap else 'standard'}" in repr(handle)
         for name, payload in payloads.items():
             member = handle.getmember(name)
@@ -62,10 +76,21 @@ def test_missing_members_raise_key_error(tmp_path: Path, use_mmap: bool) -> None
     _write_archive(path, {"present.bin": b"present"})
 
     with TarFileHandle(path, use_mmap=use_mmap) as handle:
-        with pytest.raises(KeyError):
+        with pytest.raises(KeyError) as member_error:
             _ = handle.getmember("missing.bin")
-        with pytest.raises(KeyError):
+        with pytest.raises(KeyError) as extract_error:
             _ = handle.extractfile("missing.bin")
+
+    if use_mmap:
+        assert member_error.value.args == (
+            "Member missing.bin not found in tar archive",
+        )
+        assert extract_error.value.args == (
+            "Member missing.bin not found in tar archive",
+        )
+    else:
+        assert member_error.value.args == ("filename 'missing.bin' not found",)
+        assert extract_error.value.args == ("filename 'missing.bin' not found",)
 
 
 @pytest.mark.parametrize(
@@ -135,8 +160,30 @@ def test_mmap_rejects_compressed_archives(tmp_path: Path) -> None:
         member.size = len(payload)
         archive.addfile(member, io.BytesIO(payload))
 
-    with pytest.raises(ValueError, match="compressed"):
+    with pytest.raises(ValueError, match="compressed") as error:
         _ = TarFileHandle(path, use_mmap=True)
+
+    assert str(error.value) == (
+        f"{path} is a compressed archive; mmap mode reads members by "
+        "uncompressed offset and cannot address it. Pass use_mmap=False."
+    )
+
+
+def test_compression_probe_reads_only_its_longest_magic_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _ReadProbe()
+
+    def open_probe(path: Path, mode: str) -> _ReadProbe:
+        del path, mode
+        return probe
+
+    monkeypatch.setattr(Path, "open", open_probe)
+
+    with pytest.raises(ValueError, match="compressed"):
+        tarhandle._reject_compressed(Path("compressed.tar.gz"))
+
+    assert probe.read_sizes == [5]
 
 
 def test_standard_mode_reads_compressed_archives(tmp_path: Path) -> None:
@@ -186,6 +233,49 @@ def test_standard_close_releases_every_thread_handle(
     assert len(closed) == 4
 
 
+def test_destructor_suppresses_close_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handle = TarFileHandle(tmp_path / "unused.tar", use_mmap=False)
+
+    def fail_close() -> None:
+        raise RuntimeError("close failed")
+
+    monkeypatch.setattr(handle, "close", fail_close)
+
+    handle.__del__()
+
+
+def test_standard_mode_reopen_suppresses_stale_close_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "samples.tar"
+    _write_archive(path, {"sample.bin": b"payload"})
+    handle = TarFileHandle(path, use_mmap=False)
+    monkeypatch.setattr(os, "getpid", lambda: 1_000)
+    stale = handle._get_tarfile()
+    real_close = tarfile.TarFile.close
+    stale_close_attempted = False
+
+    def fail_stale_close(archive: tarfile.TarFile) -> None:
+        nonlocal stale_close_attempted
+        if archive is stale and not stale_close_attempted:
+            stale_close_attempted = True
+            raise OSError("inherited handle")
+        real_close(archive)
+
+    monkeypatch.setattr(tarfile.TarFile, "close", fail_stale_close)
+    monkeypatch.setattr(os, "getpid", lambda: 2_000)
+
+    reopened = handle._get_tarfile()
+
+    assert reopened is not stale
+    assert stale_close_attempted
+    handle.close()
+
+
 def test_standard_mode_reopens_after_fork(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -203,6 +293,7 @@ def test_standard_mode_reopens_after_fork(
     handle = TarFileHandle(path, use_mmap=False)
     monkeypatch.setattr(os, "getpid", lambda: 1_000)
     first = handle._get_tarfile()
+    assert handle._get_tarfile() is first
 
     monkeypatch.setattr(os, "getpid", lambda: 2_000)
     second = handle._get_tarfile()
@@ -210,6 +301,7 @@ def test_standard_mode_reopens_after_fork(
     assert first is not second
     assert id(first) in closed
     handle.close()
+    assert not hasattr(handle._local, "tarfile")
 
 
 if __name__ == "__main__":

@@ -107,9 +107,9 @@ class ExtractedImageNetSource:
 
         if len(filenames) != len(labels):
             raise ValueError(
-                f"Mismatch: {len(filenames)} files but {len(labels)} labels",
+                f"{len(filenames)} validation images but {len(labels)} labels "
+                f"in {labels_file}.",
             )
-
         return dict(zip(filenames, labels, strict=True))
 
     def __iter__(self) -> Iterator[Sample]:
@@ -171,10 +171,3 @@ class ExtractedImageNetSource:
                 "frames": 1,
             }
             yield sample
-
-    def __len__(self) -> int:
-        """Return approximate number of samples."""
-        if self.split == "train":
-            return 1_281_167
-        # Val.
-        return 50_000

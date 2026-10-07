@@ -44,7 +44,7 @@ Cifar10TrainLoop(
                 │       train_budget_sec=inf,
                 │       train_budget_epochs=inf,
                 │       lr_schedule=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.constant at 0xdefacedeface>),
-                │       parallelism=NoParallel.Config(device='auto'),
+                │       parallelism=NoParallel.Config(device=None),
                 │       model_quantization=NoModelQuantization.Config(),
                 │       activation_memoization=DefaultActivationStorage.Config(),
                 │       compile=PartialConfig(<class 'functools.partial'>, <function torch.compile at 0xdefacedeface>, fullgraph=True),
@@ -72,7 +72,7 @@ Cifar10TrainLoop(
                         batch_size=512,
                         eval_batch_size=1_000,
                         drop_last=False,
-                        device='auto',
+                        device=None,
                         dtype=torch.float32
                 ),
                 metrics_train={},
@@ -121,7 +121,7 @@ Cifar10TrainLoop(
                 mesh_dim_model_seed='pp',
                 mesh_dim_data_seed='dp',
                 runtime=SingleProcess.Config(
-                        device='auto',
+                        device=None,
                         deterministic=False,
                         float32_matmul_precision=None
                 )

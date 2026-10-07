@@ -789,6 +789,30 @@ def test_traverse_dict_attr_raises():
     assert ("broken_key",) not in paths
 
 
+def test_equal_interned_atoms_are_each_yielded():
+    results = [
+        (p, v)
+        for p, v in recursively_iterate_over_object_descendants({"a": 2, "b": 2})
+        if p
+    ]
+    assert results == [(("a",), 2), (("b",), 2)]
+
+
+def test_a_container_pruned_on_one_path_is_still_visited_on_another():
+    shared = [1, 2]
+    data = {"raw": shared, "label": shared}
+
+    paths = [
+        p
+        for p, _ in recursively_iterate_over_object_descendants(
+            data,
+            recurse=lambda p, _: p[:1] != ("raw",),
+        )
+    ]
+
+    assert ("label",) in paths
+
+
 def test_could_path_lead_to_pattern_wildcard_no_match():
     """Test could_path_lead_to_pattern returns False for non-matching wildcard."""
     # Path longer than pattern with wildcards, where no ancestor matches.

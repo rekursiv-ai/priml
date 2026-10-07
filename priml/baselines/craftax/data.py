@@ -74,7 +74,7 @@ class EvaluationActor(Protocol):
 class _Cadence:
     """A finite update cadence with a checkpointable cursor."""
 
-    def __init__(self, *, count: int, position: int = 0) -> None:
+    def __init__(self, *, count: int, position: int) -> None:
         self.count = count
         self.position = position
 

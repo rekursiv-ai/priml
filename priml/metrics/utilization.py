@@ -65,7 +65,7 @@ class Utilization(LateBound):
         }
         self.tokens_key = config.tokens_key
         self._model_config: HasCost | None = None
-        self._dtype: torch.dtype | None = None
+        self._dtype: torch.dtype | None
         self._cost_by_shape: dict[tuple[int, int], Cost] = {}
         self.reset()
 

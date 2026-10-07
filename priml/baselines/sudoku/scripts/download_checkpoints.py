@@ -84,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
         run_name = run_name or name
         steps = available_steps(files, name=name, filename=filename)
         if not steps:
-            named = sorted({f.split("/", 1)[0] for f in files if "/step_" in f})
+            named = sorted({f.partition("/")[0] for f in files if "/step_" in f})
             raise SystemExit(
                 f"No {filename!r} checkpoints for {name!r} in {args.repo_id}; "
                 f"available names: {', '.join(named) or 'none'}.",
@@ -187,7 +187,7 @@ class _Flags(Protocol):
 
 def _parse_args(argv: list[str] | None) -> _Flags:
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
     )
     _add_arguments(parser)
     return cast(_Flags, parser.parse_args(argv))

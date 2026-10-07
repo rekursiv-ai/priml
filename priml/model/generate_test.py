@@ -3,24 +3,28 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final, override
+from typing import TYPE_CHECKING, Final, override
 
 from torch import Tensor, nn
 
 import pytest
 import torch
 
-from priml.lib.custom_json import ListCodec
+from priml.lib.custom_json import convert
 from priml.model.attention.kvcache import KVCache
 from priml.model.generate import _sample, _topp_filter, generate
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.golden import assert_text_golden
 
 
+if TYPE_CHECKING:
+    from priml.model.custom_types import LayerCache
+
+
 _CWD: Final = Path(__file__).resolve().parent
 
 
-def test_generate_public_contract(request: pytest.FixtureRequest) -> None:
+def test_generate_public_contract() -> None:
     prompt = torch.tensor([[0, 1]])
     generated = generate(
         model=_Transformer(),
@@ -30,9 +34,8 @@ def test_generate_public_contract(request: pytest.FixtureRequest) -> None:
         eos_token_id=3,
         max_seq_len=6,
     )
-    tokens = [ListCodec.coerce(row, int) for row in generated.tolist()]
+    tokens = [convert(row, list[int]) for row in generated.tolist()]
     assert_text_golden(
-        request,
         test_file=__file__,
         name="generate",
         rendered="\n".join(
@@ -85,6 +88,12 @@ def test_sample_top_p_restores_vocab_order():
     assert probs.argmax(dim=-1).item() == 2
 
 
+def test_topp_filter_disabled_returns_original_logits() -> None:
+    logits = torch.tensor([[1.0, 0.0, 9.0], [0.0, 2.0, 1.0]])
+
+    assert _topp_filter(logits, top_p=1.0) is logits
+
+
 def test_sample_greedy_is_argmax():
     """Temperature 0 returns the argmax token id."""
     logits = torch.tensor([[1.0, 9.0, 0.5]])
@@ -96,6 +105,174 @@ def test_sample_applies_temperature_top_k_and_top_p() -> None:
     logits = torch.tensor([[1.0, 2.0, 9.0]])
     token = _sample(logits, temperature=2.0, top_k=1, top_p=0.5)
     assert token.item() == 2
+
+
+def test_sample_greedy_uses_vocabulary_axis() -> None:
+    logits = torch.tensor(
+        [
+            [
+                [0.0, 1.0, 2.0, 3.0, 9.0],
+                [8.0, 0.0, 1.0, 2.0, 3.0],
+                [0.0, 8.0, 1.0, 2.0, 3.0],
+            ],
+            [
+                [0.0, 1.0, 8.0, 2.0, 3.0],
+                [0.0, 1.0, 2.0, 8.0, 3.0],
+                [0.0, 1.0, 2.0, 3.0, 8.0],
+            ],
+        ],
+    )
+
+    tokens = _sample(logits, temperature=0.0, top_k=0, top_p=1.0)
+
+    assert torch.equal(tokens, torch.tensor([[[4], [0], [1]], [[2], [3], [4]]]))
+
+
+def test_sample_top_k_filters_vocab_and_caps_k(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logits = torch.tensor(
+        [
+            [
+                [0.0, 1.0, 2.0, 3.0, 9.0],
+                [8.0, 0.0, 1.0, 2.0, 3.0],
+                [0.0, 8.0, 1.0, 2.0, 3.0],
+            ],
+            [
+                [0.0, 1.0, 8.0, 2.0, 3.0],
+                [0.0, 1.0, 2.0, 8.0, 3.0],
+                [0.0, 1.0, 2.0, 3.0, 8.0],
+            ],
+        ],
+    )
+    probabilities: list[Tensor] = []
+
+    def capture(probs: Tensor, num_samples: int) -> Tensor:
+        assert num_samples == 1
+        probabilities.append(probs)
+        return probs.argmax(dim=-1, keepdim=True)
+
+    monkeypatch.setattr(torch, "multinomial", capture)
+    tokens = _sample(logits, temperature=1.0, top_k=4, top_p=1.0)
+    assert tokens.shape == (2, 3, 1)
+    assert torch.equal(
+        (probabilities[-1] > 0).sum(dim=-1),
+        torch.full((2, 3), 4),
+    )
+
+    _sample(logits, temperature=1.0, top_k=0, top_p=1.0)
+    assert torch.equal(
+        (probabilities[-1] > 0).sum(dim=-1),
+        torch.full((2, 3), 5),
+    )
+
+    tokens = _sample(logits, temperature=1.0, top_k=1, top_p=1.0)
+    assert torch.equal(tokens, torch.tensor([[[4], [0], [1]], [[2], [3], [4]]]))
+    assert torch.equal(
+        probabilities[-1].sum(dim=-1),
+        torch.ones((2, 3)),
+    )
+
+
+def test_sample_applies_top_p_before_sampling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logits = torch.tensor(
+        [
+            [
+                [5.0, 4.0, 3.0, 2.0, 1.0],
+                [1.0, 5.0, 4.0, 3.0, 2.0],
+                [2.0, 1.0, 5.0, 4.0, 3.0],
+            ],
+            [
+                [3.0, 2.0, 1.0, 5.0, 4.0],
+                [4.0, 3.0, 2.0, 1.0, 5.0],
+                [5.0, 4.0, 3.0, 2.0, 1.0],
+            ],
+        ],
+    )
+    probabilities: list[Tensor] = []
+
+    def capture(probs: Tensor, num_samples: int) -> Tensor:
+        del num_samples
+        probabilities.append(probs)
+        return probs.argmax(dim=-1, keepdim=True)
+
+    monkeypatch.setattr(torch, "multinomial", capture)
+    _sample(logits, temperature=1.0, top_k=0, top_p=0.7)
+
+    assert torch.equal(
+        (probabilities[0] > 0).sum(dim=-1),
+        torch.full((2, 3), 2),
+    )
+
+
+def test_sample_temperature_scales_rank_three_logits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logits = torch.tensor(
+        [[[0.0, 1.0, 3.0], [2.0, 0.0, 1.0]], [[3.0, 2.0, 0.0], [1.0, 4.0, 2.0]]],
+    )
+    probabilities: list[Tensor] = []
+
+    def capture(probs: Tensor, num_samples: int) -> Tensor:
+        del num_samples
+        probabilities.append(probs)
+        return probs.argmax(dim=-1, keepdim=True)
+
+    monkeypatch.setattr(torch, "multinomial", capture)
+    _sample(logits, temperature=2.0, top_k=0, top_p=1.0)
+
+    torch.testing.assert_close(probabilities[0], (logits / 2.0).softmax(dim=-1))
+
+
+def test_topp_filter_uses_rank_three_vocabulary_axis() -> None:
+    logits = torch.tensor(
+        [
+            [
+                [5.0, 4.0, 3.0, 2.0, 1.0],
+                [1.0, 5.0, 4.0, 3.0, 2.0],
+                [2.0, 1.0, 5.0, 4.0, 3.0],
+            ],
+            [
+                [3.0, 2.0, 1.0, 5.0, 4.0],
+                [4.0, 3.0, 2.0, 1.0, 5.0],
+                [5.0, 4.0, 3.0, 2.0, 1.0],
+            ],
+        ],
+    )
+
+    filtered = _topp_filter(logits, top_p=0.7)
+    probs = filtered.softmax(dim=-1)
+
+    assert probs.shape == logits.shape
+    assert torch.equal(probs.argmax(dim=-1), logits.argmax(dim=-1))
+    assert torch.equal((probs > 0).sum(dim=-1), torch.full((2, 3), 2))
+
+
+def test_topp_filter_restores_rank_three_vocabulary_order() -> None:
+    logits = torch.tensor(
+        [
+            [
+                [0.0, 0.1, 0.2, 0.3, 9.0],
+                [8.0, 0.0, 0.1, 0.2, 0.3],
+                [0.0, 8.0, 0.1, 0.2, 0.3],
+            ],
+            [
+                [0.0, 0.1, 8.0, 0.2, 0.3],
+                [0.0, 0.1, 0.2, 8.0, 0.3],
+                [0.0, 0.1, 0.2, 0.3, 8.0],
+            ],
+        ],
+    )
+
+    filtered = _topp_filter(logits, top_p=0.5)
+
+    assert torch.equal(filtered.argmax(dim=-1), logits.argmax(dim=-1))
+    assert torch.equal(
+        torch.isfinite(filtered).sum(dim=-1),
+        torch.ones((2, 3), dtype=torch.long),
+    )
 
 
 def test_sample_float16_filters_excluded_tokens() -> None:
@@ -228,20 +405,20 @@ def test_generate_rejects_prompt_longer_than_cache() -> None:
     assert model.block.attn.cache is None
 
 
-def test_generate_rejects_a_block_without_an_attn_attribute() -> None:
-    with pytest.raises(TypeError, match="attn attribute"):
-        generate(
-            model=_TransformerWithBlock(_NoAttn()),
-            prompt_ids=torch.tensor([[0, 1]]),
-            max_new_tokens=1,
-            max_seq_len=4,
-        )
+def test_generate_allows_a_block_without_a_cached_attention() -> None:
+    result = generate(
+        model=_TransformerWithBlock(_NoAttn()),
+        prompt_ids=torch.tensor([[0, 1]]),
+        max_new_tokens=1,
+        max_seq_len=4,
+    )
+    assert result.shape == (1, 3)
 
 
-def test_generate_rejects_a_block_without_forward_cached() -> None:
-    with pytest.raises(TypeError, match="forward_cached method"):
+def test_generate_rejects_a_block_without_cache_argument() -> None:
+    with pytest.raises(TypeError, match="cache"):
         generate(
-            model=_TransformerWithBlock(_NoForwardCached()),
+            model=_TransformerWithBlock(_NoCacheBlock()),
             prompt_ids=torch.tensor([[0, 1]]),
             max_new_tokens=1,
             max_seq_len=4,
@@ -277,10 +454,24 @@ def test_generate_forwards_cache_metadata_and_stops_at_eos() -> None:
     assert model.block.attn.max_seq == 6
     assert model.block.attn.device == prompt.device
     assert model.block.attn.dtype == model.proj_in.weight.dtype
-    assert model.block.seen_caches == [model.block.attn.cache] * 2
+    assert len(model.block.seen_caches) == 2
+    assert model.block.seen_caches[0] is model.block.seen_caches[1]
     assert len(model.proj_in.inputs) == 2
     assert torch.equal(model.proj_in.inputs[0], prompt)
     assert torch.equal(model.proj_in.inputs[1], torch.tensor([[2]]))
+
+
+@pytest.mark.parametrize("count", [1, 2, 3])
+def test_generation_only_runs_for_logits_it_uses(count: int) -> None:
+    model = _BatchTransformer()
+    generate(
+        model,
+        torch.tensor([[0, 1], [1, 0]]),
+        max_new_tokens=count,
+        temperature=0.0,
+    )
+    assert len(model.block.seen_caches) == count
+    assert model.project_calls == count
 
 
 # The nucleus filter sets out-of-nucleus logits to ``-inf``, which softmaxes to exactly
@@ -310,8 +501,10 @@ class _Lookup:
         return self
 
 
-class _Attention:
-    def __init__(self) -> None:
+class _Attention(nn.Module):
+    def __init__(self, depth_index: tuple[tuple[int, int], ...] = ((0, 1),)) -> None:
+        super().__init__()
+        self.depth_index = depth_index
         self.batch: int | tuple[int, ...] | None = None
         self.max_seq: int | None = None
         self.device: torch.device | str | None = None
@@ -340,62 +533,71 @@ class _Attention:
         )
         return self.cache
 
-    def forward_cached(
+    @override
+    def forward(
         self,
         x: Tensor,
+        /,
         *,
-        cache: KVCache,
+        cache: object,
         **kwargs: object,
-    ) -> tuple[Tensor, KVCache]:
-        del kwargs
-        return x, cache
+    ) -> Tensor:
+        del cache, kwargs
+        return x
 
 
 class _Block(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.attn = _Attention()
-        self.seen_caches: list[KVCache] = []
+        self.seen_caches: list[LayerCache] = []
 
-    def forward_cached(
+    @override
+    def forward(
         self,
         x: Tensor,
         *,
-        cache: KVCache,
+        cache: LayerCache,
         **kwargs: object,
-    ) -> tuple[Tensor, KVCache]:
+    ) -> Tensor:
         del kwargs
         self.seen_caches.append(cache)
-        return x, cache
+        return x
 
 
 class _NoAttn(nn.Module):
-    """A block missing the ``attn`` attribute ``generate`` requires."""
+    """A block holding no cached attention, so the shared cache has no slot."""
 
-    def forward_cached(
+    @override
+    def forward(
         self,
         x: Tensor,
         *,
         cache: object,
         **kwargs: object,
-    ) -> tuple[Tensor, object]:
+    ) -> Tensor:
         del kwargs
-        return x, cache
+        return x
 
 
-class _NoForwardCached(nn.Module):
-    """A block missing the ``forward_cached`` method ``generate`` requires."""
+class _NoCacheBlock(nn.Module):
+    """A block missing the ``cache`` argument ``generate`` requires."""
 
     def __init__(self) -> None:
         super().__init__()
         self.attn = _Attention()
 
+    @override
+    def forward(self, x: Tensor) -> Tensor:
+        return x
 
-class _Transformer:
+
+class _Transformer(nn.Module):
     def __init__(self) -> None:
+        super().__init__()
         self.proj_in = _Lookup()
         self.block = _Block()
-        self.blocks: list[nn.Module] = [self.block]
+        self.blocks = nn.ModuleList([self.block])
         self.project_calls = 0
 
     def project_to_logits(self, hidden: Tensor, /) -> Tensor:
@@ -406,12 +608,13 @@ class _Transformer:
         return logits
 
 
-class _TransformerWithBlock:
+class _TransformerWithBlock(nn.Module):
     """A minimal model wrapping one caller-supplied block."""
 
     def __init__(self, block: nn.Module) -> None:
+        super().__init__()
         self.proj_in = _Lookup()
-        self.blocks: list[nn.Module] = [block]
+        self.blocks = nn.ModuleList([block])
 
     def project_to_logits(self, hidden: Tensor, /) -> Tensor:
         return torch.zeros(*hidden.shape[:-1], 4)

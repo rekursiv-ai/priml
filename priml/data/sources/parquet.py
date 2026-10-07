@@ -8,11 +8,12 @@ which compounds across test and multiprocessing startup.
 
 from __future__ import annotations
 
-from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Self, cast, override
 
 import logging
+import tarfile
 import weakref
 
 
@@ -29,11 +30,9 @@ else:
     pc = lazy_import("pyarrow.compute")  # ~150 ms; only ParquetAndTarSource needs it.
     pq = lazy_import("pyarrow.parquet")  # ~150 ms; only ParquetAndTarSource needs it.
 
-from collections.abc import Callable
-
 from configgle import Fig
 
-from priml.data.sources.sharding import shard_and_shuffle
+from priml.data.sources.sharding import interleave_shards, shard_and_shuffle
 from priml.data.sources.tarhandle import TarFileHandle
 from priml.paths import resolve_working_dir
 
@@ -151,11 +150,18 @@ class ParquetAndTarSource:
         if not self.parquet_files:
             raise ValueError(f"No parquet files found in {self.dataset_dir}")
 
-        # Filter to specific shard IDs if requested.
+        self._shard_indices: dict[Path, int] = {}
+        for path in self.parquet_files:
+            try:
+                self._shard_indices[path] = int(path.stem)
+            except ValueError as error:
+                raise ValueError(
+                    f"Parquet filename stem is not an integer shard index: {path.name}",
+                ) from error
         if config.shard_ids is not None:
             shard_id_set = set(config.shard_ids)
             self.parquet_files = [
-                p for p in self.parquet_files if int(p.stem) in shard_id_set
+                p for p in self.parquet_files if self._shard_indices[p] in shard_id_set
             ]
             if len(self.parquet_files) == 0:
                 raise ValueError(
@@ -181,13 +187,6 @@ class ParquetAndTarSource:
             tar_mode,
         )
 
-    def __len__(self) -> int:
-        """Return this worker's shard count (parquet files), not total samples."""
-        # Slicing is shuffle-invariant in length, so count without shuffling.
-        return len(
-            shard_and_shuffle(self.parquet_files, worker_slice=self.worker_slice),
-        )
-
     def __iter__(self) -> Iterator[dict[str, object]]:
         """Iterate with interleaved parallel file reading and tar handle injection.
 
@@ -208,35 +207,11 @@ class ParquetAndTarSource:
             epoch_seed=self.epoch_seed,
         )
 
-        # Interleave reading from multiple shards for better I/O performance.
-        active_shards: deque[Generator[dict[str, object], None, None]] = deque()
-        shard_iter = iter(parquet_files)
-
-        # Initialize with num_concurrently_read_shards shards.
-        for _ in range(min(self.num_concurrently_read_shards, len(parquet_files))):
-            try:
-                parquet_path = next(shard_iter)
-                active_shards.append(
-                    self._read_parquet_shard_with_tar_handle(parquet_path),
-                )
-            except StopIteration:
-                break
-
-        # Round-robin through active shards.
-        while active_shards:
-            shard = active_shards.popleft()
-            try:
-                yield next(shard)
-                active_shards.append(shard)  # Re-add to end for round-robin.
-            except StopIteration:
-                # This shard is exhausted, try to load a new one.
-                try:
-                    parquet_path = next(shard_iter)
-                    active_shards.append(
-                        self._read_parquet_shard_with_tar_handle(parquet_path),
-                    )
-                except StopIteration:
-                    pass  # No more shards to load.
+        yield from interleave_shards(
+            parquet_files,
+            self._read_parquet_shard_with_tar_handle,
+            num_concurrently_read_shards=self.num_concurrently_read_shards,
+        )
 
     def _read_parquet_shard_with_tar_handle(
         self,
@@ -260,24 +235,27 @@ class ParquetAndTarSource:
             logger.warning("No successful samples in %s, skipping", parquet_path.name)
             return
 
-        # Extract shard index from filename (e.g., "00000000.parquet" -> 0).
-        # A non-numeric stem must not silently collapse to 0: every such shard
-        # would share index 0, colliding tar handles and clobbering samples.
-        try:
-            shard_index = int(parquet_path.stem)
-        except ValueError as e:
+        collisions = {"shard_index", "_tar_handle"}.intersection(table.column_names)
+        if collisions:
             raise ValueError(
-                f"Parquet filename stem is not an integer shard index: "
-                f"{parquet_path.name}",
-            ) from e
-
-        # Get or create cached tar file handle
-        # Use .get() to handle weak references that may have been GC'd.
+                f"Parquet {parquet_path.name} contains reserved sample columns: "
+                f"{sorted(collisions)}",
+            )
+        shard_index = self._shard_indices[parquet_path]
         tar_handle = self._tar_handle_cache.get(shard_index)
-        if tar_handle is None:
-            tar_path: Path = self.tar_path_fn(self.dataset_dir, shard_index)
-            tar_handle = TarFileHandle(tar_path, use_mmap=self.use_mmap)
-            self._tar_handle_cache[shard_index] = tar_handle
+        try:
+            if tar_handle is None:
+                tar_path = self.tar_path_fn(self.dataset_dir, shard_index)
+                if not self.use_mmap:
+                    with tarfile.open(tar_path):
+                        pass
+                tar_handle = TarFileHandle(tar_path, use_mmap=self.use_mmap)
+                self._tar_handle_cache[shard_index] = tar_handle
+        except (OSError, ValueError, tarfile.TarError):
+            if self.fail_on_shard_error:
+                raise
+            logger.exception("Failed to read %s, skipping shard", parquet_path.name)
+            return
 
         # Yield each row as a sample dict with all columns + tar handle.
         columns = table.column_names

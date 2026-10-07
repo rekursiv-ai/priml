@@ -15,7 +15,7 @@ import pytest
 import torch
 
 from priml.baselines.cifar10.model import ConvBlock, ResNet, SpeedNet
-from priml.baselines.cifar10.train_step import Cifar10TrainStep
+from priml.baselines.cifar10.train_step import Cifar10TrainStep, _tta_logits
 from priml.math.schedules import cosine, polynomial
 from priml.optimizers import CompositeOptimizer, Muon, learning_rate
 from priml.optimizers.parameter_filter import complement, excluding
@@ -269,18 +269,49 @@ def test_cutout_zeroes_part_of_the_image() -> None:
     assert (step._augment(media) == 0).any()
 
 
-def test_tta_averages_six_views() -> None:
-    counter = _CountingModel()
-    config = tiny_step()
-    config.use_tta = True
-    step = config.make()
-    # The backing attribute, because ``model`` is a read-only property: it is
-    # declared that way so a subclass can narrow its return type, which a
-    # settable attribute cannot express (``train_step.py:349``).
-    step._model = counter
-    _ = step.call_eval(media=tiny_batch()["media"])
-    # Three crops, each with its mirror.
-    assert counter.calls == 6
+def test_tta_averages_exact_crops_and_mirrors() -> None:
+    class SpatialValues(nn.Module):
+        @override
+        def forward(self, media: Tensor) -> Tensor:
+            return media.flatten(1)
+
+    # _tta_logits uses the image width for both spatial crop axes.
+    media = torch.arange(2 * 3 * 5 * 5, dtype=torch.float32).reshape(2, 3, 5, 5)
+    size = media.shape[-1]
+    padded = torch.nn.functional.pad(media, (1, 1, 1, 1), "reflect")
+    views = (
+        media,
+        padded[..., 0:size, 0:size],
+        padded[..., 2 : size + 2, 2 : size + 2],
+    )
+
+    actual = _tta_logits(SpatialValues(), media)
+    expected = torch.stack(
+        [(view + view.flip(-1)).flatten(1) / 2 for view in views],
+    ).mean(dim=0)
+
+    assert torch.equal(actual, expected)
+
+
+def test_tta_crops_use_width_on_both_axes_for_rectangular_images() -> None:
+    class SpatialSum(nn.Module):
+        @override
+        def forward(self, media: Tensor) -> Tensor:
+            return media.sum(dim=(-2, -1))
+
+    media = torch.arange(2 * 3 * 6 * 4, dtype=torch.float32).reshape(2, 3, 6, 4)
+    size = media.shape[-1]
+    padded = torch.nn.functional.pad(media, (1, 1, 1, 1), "reflect")
+    views = (
+        media,
+        padded[..., 0:size, 0:size],
+        padded[..., 2 : size + 2, 2 : size + 2],
+    )
+    expected = torch.stack(
+        [(view + view.flip(-1)).sum(dim=(-2, -1)) / 2 for view in views],
+    ).mean(dim=0)
+
+    assert torch.equal(_tta_logits(SpatialSum(), media), expected)
 
 
 def test_tta_matches_the_plain_forward_for_a_shift_invariant_model() -> None:

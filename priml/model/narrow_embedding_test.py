@@ -3,17 +3,18 @@
 Regenerate canonical artifacts through pytest so Priml's deterministic setup
 applies::
 
-    BFB_REGENERATE=1 uv --quiet run --frozen pytest priml/model/narrow_embedding_test.py
+    uv --quiet run --frozen pytest priml/model/narrow_embedding_test.py --regenerate-b4b
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Final
+from unittest.mock import patch
 
-from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
 
+import pytest
 import torch
 
 from priml.cost import Cost, cost
@@ -21,6 +22,7 @@ from priml.model.embedding import Embedding
 from priml.model.narrow_embedding import NarrowEmbedding
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -51,11 +53,14 @@ def test_narrow_embedding_forward_and_open_kwargs() -> None:
     assert config.inner.channels_in == -1
 
 
-def test_narrow_embedding_reset_draws_at_float32_then_narrows() -> None:
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_narrow_embedding_reset_draws_at_float32_then_narrows(
+    dtype: torch.dtype,
+) -> None:
     module = NarrowEmbedding.Config(
         channels_in=2,
         channels_out=4,
-        dtype=torch.bfloat16,
+        dtype=dtype,
     ).make()
     expected = Embedding.Config(channels_out=4, channels_in=2).make()
 
@@ -64,8 +69,23 @@ def test_narrow_embedding_reset_draws_at_float32_then_narrows() -> None:
     torch.manual_seed(17)
     expected.reset_parameters()
 
-    assert module.inner.weight.dtype == torch.bfloat16
-    assert torch.equal(module.inner.weight, expected.weight.bfloat16())
+    assert module.inner.weight.dtype == dtype
+    assert torch.equal(module.inner.weight, expected.weight.to(dtype=dtype))
+
+
+def test_narrow_embedding_reset_casts_before_and_after_drawing() -> None:
+    module = NarrowEmbedding.Config(
+        channels_in=2,
+        channels_out=4,
+        dtype=torch.bfloat16,
+    ).make()
+    with patch.object(module.inner, "to", wraps=module.inner.to) as to:
+        module.reset_parameters()
+
+    assert [call.kwargs for call in to.call_args_list] == [
+        {"dtype": torch.float32},
+        {"dtype": torch.bfloat16},
+    ]
 
 
 def _embed_float(module: nn.Module, tokens: Tensor) -> Tensor:

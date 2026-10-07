@@ -14,6 +14,7 @@ from numba.experimental.structref import (
     new,  # pyright: ignore[reportUnknownVariableType] -- Numba is untyped; __init__.pyi types it.
     register,  # pyright: ignore[reportUnknownVariableType] -- Numba is untyped; __init__.pyi types it.
 )
+from numba.np.ufunc.parallel import get_num_threads, set_num_threads
 
 
 __all__ = [
@@ -22,11 +23,13 @@ __all__ = [
     "StructRefProxy",
     "define_proxy",
     "float64",
+    "get_num_threads",
     "int32",
     "int64",
     "new",
     "njit",
     "prange",
     "register",
+    "set_num_threads",
     "uint8",
 ]

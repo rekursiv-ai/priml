@@ -1,8 +1,8 @@
-"""Tests for MMDiT block.
+r"""Tests for MMDiT block.
 
 Regenerate bit-for-bit goldens after an intentional numeric change::
 
-    BFB_REGENERATE=1 uv --quiet run --frozen pytest \
+    uv --quiet run --frozen pytest \ --regenerate-b4b
         priml/model/transformer/mmdit_test.py
 
 Run regeneration through pytest so priml's conftest establishes the required
@@ -14,17 +14,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
-from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
 
 import pytest
 import torch
 
 from priml.cost import Cost, cost
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.rope import RoPE
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer import mmdit
@@ -38,6 +37,7 @@ from priml.testing.bfb import (
     randomize_parameters,
 )
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -262,6 +262,10 @@ def test_reset_parameters():
     m.reset_parameters()
 
 
+def test_reset_parameters_without_adaln():
+    _cfg().make().reset_parameters()
+
+
 def test_attention_inner_width_decoupled_from_residual():
     """Attention inner width (num_heads*channels_head) may differ from residual.
 
@@ -310,7 +314,7 @@ def test_mmdit_block_bfb(device: str) -> None:
 def _native_stream_config() -> TransformerBlock.Config:
     cfg = TransformerBlock.Config()
     cfg.channels_in = 8
-    cfg.attn = SelfAttention.Config()
+    cfg.attn = Attention.Config()
     cfg.attn.num_heads = 2
     cfg.attn.num_heads_kv = 1
     cfg.attn.channels_head = 4
@@ -331,7 +335,7 @@ def test_native_stream_loading_matches_transformer_and_freezes_independently() -
     source = native_cfg.make()
     randomize_parameters(source, seed=7, std=0.2)
     stream = mmdit.MMDiTStream.Config()
-    assert isinstance(native_cfg.attn, SelfAttention.Config)
+    assert isinstance(native_cfg.attn, Attention.Config)
     stream.attn = native_cfg.attn.copy_tree()
     stream.norm1 = native_cfg.norm1.copy_tree()
     stream.norm2 = native_cfg.norm2.copy_tree()

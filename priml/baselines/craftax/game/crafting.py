@@ -261,7 +261,13 @@ def place(state: EnvState, action: Tensor) -> EnvState:
             & (_inventory_tensor(state, material) >= cost)
         )
         if action_kind == Action.PLACE_PLANT:
-            placing = placing & (block == int(BlockType.GRASS))
+            # A plant slot records row and column only; its floor is always
+            # PLANT_LEVEL, where all grass grows.
+            placing = (
+                placing
+                & (block == int(BlockType.GRASS))
+                & (state.player_level == constants.PLANT_LEVEL)
+            )
         state = _write_block(state, target, int(block_kind), placing)
         setattr(
             state.inventory,
@@ -286,7 +292,7 @@ def _craft_armour(
     near_table: Tensor,
     near_furnace: Tensor,
 ) -> EnvState:
-    """Make a full set of armour, which fills all four body slots at once."""
+    """Make one armour piece, upgrading the first body slot below the recipe's tier."""
     recipes = (
         (
             Action.MAKE_IRON_ARMOUR,
@@ -309,11 +315,9 @@ def _craft_armour(
             making = making & near_furnace
         for material, amount in costs.items():
             making = making & (_inventory_tensor(state, material) >= amount)
-        # Armour is made a piece at a time: the recipe fills the first slot
-        # that is not already at this tier.
-        upgradeable = (state.inventory.armour < tier).any(-1)
+        upgradeable = (state.inventory.armour < tier).any(dim=1)
         making = making & upgradeable
-        slot = (state.inventory.armour < tier).int().argmax(-1)
+        slot = (state.inventory.armour < tier).int().argmax(dim=1)
 
         for material, amount in costs.items():
             setattr(
@@ -360,29 +364,36 @@ def _place_torch(state: EnvState, target: Tensor, action: Tensor) -> EnvState:
     # places, and this step runs a few thousand dispatches already.
     #
     # Every torch contributes its glow, clipped where light is already full.
-    offsets = torch.arange(9, device=state.device) - 4
-    squared = offsets[:, None].square() + offsets[None, :].square()
+    radius = 4
+    offsets = torch.arange(2 * radius + 1, device=state.device) - radius
     glow = constants.on_device(constants.TORCH_LIGHT_MAP, state.device)
-    # Match the CPU XLA square-root results used to build upstream's table.
-    for distance, value in (
-        (2, 0.717157244682312),
-        (5, 0.5527863502502441),
-        (8, 0.4343145489692688),
-        (13, 0.2788897156715393),
-        (17, 0.17537885904312134),
-        (20, 0.10557276010513306),
-    ):
-        glow = torch.where(squared == distance, torch.full_like(glow, value), glow)
-    padding = 6
+    # A target one tile off the map (``placing`` is False there) still
+    # indexes the patch, so the pad reaches one tile past the glow radius.
+    padding = radius + 1
     padded_light = torch.nn.functional.pad(
         state.light_map[rows, level],
         (padding, padding, padding, padding),
     )
-    patch_rows = target[:, 0, None, None] + offsets[None, :, None] + padding
-    patch_columns = target[:, 1, None, None] + offsets[None, None, :] + padding
+    patch_rows = (
+        torch.add(
+            target[:, 0, None, None],
+            offsets[None, :, None],
+        )
+        + padding
+    )
+    patch_columns = (
+        torch.add(
+            target[:, 1, None, None],
+            offsets[None, None, :],
+        )
+        + padding
+    )
     env = rows[:, None, None].expand_as(patch_rows)
     current = padded_light[env, patch_rows, patch_columns]
-    brightened = (current + glow).clamp(0.0, 1.0)
+    brightened = torch.maximum(
+        torch.minimum(current + glow, torch.ones_like(current)),
+        torch.zeros_like(current),
+    )
     padded_light[env, patch_rows, patch_columns] = torch.where(
         placing[:, None, None],
         brightened,
@@ -404,9 +415,9 @@ def _place_torch(state: EnvState, target: Tensor, action: Tensor) -> EnvState:
 def _sow_plant(state: EnvState, target: Tensor, placing: Tensor) -> EnvState:
     """Record a sown plant so it can ripen over the coming steps."""
     free = ~state.growing_plants_mask
-    slot = free.int().argmax(-1)
+    slot = free.int().argmax(dim=1)
     rows = batch_rows(state.num_envs, state.device)
-    sowing = placing & free.any(-1)
+    sowing = placing & free.any(dim=1)
     state.growing_plants_positions[rows, slot] = torch.where(
         sowing[:, None],
         target.int(),

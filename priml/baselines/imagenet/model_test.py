@@ -111,11 +111,11 @@ def test_cost_matches_what_torch_dispatches(arch: Callable[..., nn.Module]) -> N
     """Every conv, blur, and head matmul is costed, and every parameter owned."""
     config = TorchvisionResNet.Config()
     config.channels_out = 3
-    config.image_size = (32, 24)
+    config.image_size = (8, 7)
     config.arch = PartialConfig(arch)
     analytical = assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randn(2, 3, 32, 24, requires_grad=True),
+        build_input=lambda: torch.randn(2, 3, 8, 7, requires_grad=True),
         batch_size=2,
         dtype=None,
     )

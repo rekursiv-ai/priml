@@ -359,10 +359,8 @@ def _span_from_strides(
         # derived from ``data_ptr()``, and fails the whole graph rather than
         # breaking out of it.
         reach = (size - 1) * stride * stride_scale
-        if reach < 0:
-            low = low + reach
-        else:
-            high = high + reach
+        low = low + min(reach, 0)
+        high = high + max(reach, 0)
     return (low, high + item_size)
 
 

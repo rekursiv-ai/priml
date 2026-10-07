@@ -16,6 +16,8 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
+from priml.math.distributed import collective_device
+
 
 logger = logging.getLogger(__name__)
 
@@ -252,17 +254,7 @@ def set_seed_distributed(
             "call dist.init_process_group(...) first or use set_seed_local.",
         )
     global_rank = dist.get_rank()
-    # NCCL requires CUDA tensors; gloo accepts CPU. Pick once per call
-    # to keep rank 0 and rank>0 in lockstep on shape, dtype, and device.
-    if dist.get_backend() == "nccl":
-        if not torch.cuda.is_available():
-            raise ValueError(
-                "NCCL backend declared but no CUDA devices are available; "
-                "use gloo for CPU-only distributed training.",
-            )
-        device = torch.device("cuda", torch.cuda.current_device())
-    else:
-        device = torch.device("cpu")
+    device = collective_device()
     if global_rank == 0:
         if seed is None:
             seed = make_seed()

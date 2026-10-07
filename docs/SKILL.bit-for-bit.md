@@ -230,7 +230,7 @@ at the line:
    shape (a standalone block cost rejects a non-square image). The comment
    names that function; the review cites its `file.py:line`. A line number
    in a comment goes stale. Not the test's own helper, not a docstring, not
-   "the API contract", not "decode is one token" when `forward_cached`
+   "the API contract", not "decode is one token" when cached `forward`
    accepts any length.
 2. The shape is the degenerate input of a `pytest.raises`.
 3. The golden was recorded from a reference implementation. Check `git log`
@@ -251,7 +251,7 @@ Every shape edit is a coupled edit. Update in the same change:
 - Expected values, written as arithmetic from the shape
   (`3 * (15 + 23) / 2 / 1_000`, `cache.length == 5 + 3 * 3`), never a float
   pasted from the run (`0.057`). The expression is the specification.
-- Goldens minted by our code: re-mint with `BFB_REGENERATE=1`, then run
+- Goldens minted by our code: re-mint with `--regenerate-b4b`, then run
   without it.
 
 Then rescan: a tie removed on one line must not create one on the next.

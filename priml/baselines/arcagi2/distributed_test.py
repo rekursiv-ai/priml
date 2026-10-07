@@ -36,7 +36,7 @@ from priml.baselines.arcagi2.train_step_test import (
     training_config,
 )
 from priml.baselines.sudoku.embedding import GridEmbedding
-from priml.lib.custom_json import DictCodec
+from priml.lib.custom_json import convert
 from priml.runtime import MultiProcess
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import joined, mismatches, put_steps
@@ -322,7 +322,7 @@ def run_distributed(
             object,
             torch.load(root / f"record_{rank}.pt", weights_only=True),
         )
-        out.append(DictCodec.coerce(loaded, Tensor))
+        out.append(convert(loaded, dict[str, Tensor]))
     return out
 
 
@@ -483,11 +483,14 @@ def test_one_ulp_weight_bites_distributed_golden(
     assert any("param" in line for line in report), "\n".join(report)
 
 
-@pytest.mark.parametrize("grid_len", [3, 900])
-def test_training_geometry_coverage_probe(grid_len: int) -> None:
+# A 900-cell arm (ARC's canvas, vocab 12) took 5-9s and covered no line or branch
+# this one misses (coverage.py, 2026-10-03); a 9-cell grid still repeats the
+# 3-token batch, which is the geometry under test.
+@pytest.mark.parametrize(("grid_len", "vocab"), [(3, 4), (9, 12)])
+def test_training_geometry_coverage_probe(grid_len: int, vocab: int) -> None:
     config = port_training_config(clip=math.inf, fault="none")
     config.parallelism = NoParallel.Config(device="cpu")
-    config.model.vocab_size = 12 if grid_len == 900 else 4
+    config.model.vocab_size = vocab
     assert isinstance(config.model.embedding, GridEmbedding.Config)
     config.model.embedding.grid_shape = (grid_len,)
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
@@ -495,7 +498,7 @@ def test_training_geometry_coverage_probe(grid_len: int) -> None:
         subject = GeometrySubject(config, grid_len)
         record = record_training(subject, rank=0, clip=math.inf)
     assert record["step/loss"].shape[0] == 3
-    assert record["step/model"].shape[-1] == (12 if grid_len == 900 else 4)
+    assert record["step/model"].shape[-1] == vocab
 
 
 if __name__ == "__main__":

@@ -15,13 +15,12 @@ choice not to redistribute is about package weight, not permission.
 
 from __future__ import annotations
 
+from http import client
 from typing import TYPE_CHECKING, cast
+from urllib import error, request
 
 import hashlib
-import http.client
 import os
-import urllib.error
-import urllib.request
 
 from priml.lib.userdirs import cache_dir
 
@@ -68,16 +67,18 @@ def fetch(
     url = url_template.format(revision=revision, name=name)
     try:
         response = cast(
-            http.client.HTTPResponse,
-            urllib.request.urlopen(  # noqa: S310 -- Craftax assets use a fixed public dataset host.
+            client.HTTPResponse,
+            request.urlopen(  # noqa: S310 -- Craftax assets use a fixed public dataset host.
                 url,
                 timeout=30,
             ),
         )
         with response:
             payload = response.read()
-    except (urllib.error.URLError, TimeoutError) as error:
-        raise RuntimeError(f"Could not download the Craftax sprite {name}") from error
+    except (error.URLError, TimeoutError) as download_error:
+        raise RuntimeError(
+            f"Could not download the Craftax sprite {name}",
+        ) from download_error
 
     # Written through a temporary path: an interrupted download must not leave
     # a truncated PNG that every later run treats as cached.

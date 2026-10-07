@@ -8,25 +8,38 @@ from typing import TYPE_CHECKING, Self, TypedDict, cast, override
 
 from configgle import Fig
 
+import numpy as np
+import torch
+import torch.distributed as dist
+
 from priml.baselines.arcagi1.augmentation import ArcAugmentation, ArcSpec
 from priml.baselines.arcagi1.data import ArcData
-from priml.lib.custom_json import DictCodec, IntCodec, ListCodec
+from priml.lib.custom_json import convert
 from priml.paths import resolve_working_dir
 from priml.timer import CheckpointableStepTimer
 
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
+    from typing import Protocol
 
-    import numpy as np
-    import torch
-    import torch.distributed as dist
-else:
-    from wrapt import lazy_import
+    from numpy.typing import NDArray
 
-    np = lazy_import("numpy")
-    torch = lazy_import("torch")
-    dist = lazy_import("torch.distributed")
+    class _PreparedArcSplit(Protocol):
+        inputs: torch.Tensor | NDArray[np.generic]
+        labels: torch.Tensor | NDArray[np.generic]
+        groups: NDArray[np.int64]
+        puzzles: NDArray[np.int64]
+        identifiers: NDArray[np.int64]
+        ignore_label_id: int
+        batch_size: int
+        device: torch.device
+        seed: int
+
+    class _ArcDataSource(Protocol):
+        def train_dataloader(self) -> _PreparedArcSplit: ...
+
+        def eval_dataloader(self) -> _PreparedArcSplit: ...
 
 
 class ArcBatches:
@@ -34,7 +47,7 @@ class ArcBatches:
 
     def __init__(
         self,
-        data: ArcData,
+        data: _ArcDataSource,
         *,
         train: bool,
         epochs_per_iter: int,
@@ -48,8 +61,8 @@ class ArcBatches:
             raise TypeError("ARC2 requires device-resident prepared data")
         self.inputs = prepared.inputs
         self.labels = prepared.labels
-        self.groups = ListCodec.coerce(cast(object, prepared.groups.tolist()), int)
-        self.puzzles = ListCodec.coerce(cast(object, prepared.puzzles.tolist()), int)
+        self.groups = cast(list[int], prepared.groups.tolist())
+        self.puzzles = cast(list[int], prepared.puzzles.tolist())
         self.identifiers = torch.from_numpy(prepared.identifiers).to(prepared.device)
         self.ignore = prepared.ignore_label_id
         self.batch_size = prepared.batch_size
@@ -80,14 +93,9 @@ class ArcBatches:
                 rows = list(
                     range(start, min(start + self.global_batch_size, self.puzzles[-1])),
                 )[local]
-                puzzle_ids = ListCodec.coerce(
-                    cast(
-                        object,
-                        (
-                            np.searchsorted(self.puzzles, rows, side="right") - 1
-                        ).tolist(),
-                    ),
-                    int,
+                puzzle_ids = cast(
+                    list[int],
+                    (np.searchsorted(self.puzzles, rows, side="right") - 1).tolist(),
                 )
                 yield self._batch(rows, puzzle_ids)
             return
@@ -111,7 +119,7 @@ class ArcBatches:
                 for _ in range(self.epochs_per_iter)
             ],
         )
-        tasks = ListCodec.coerce(cast(object, order.tolist()), int)
+        tasks = cast(list[int], order.tolist())
         rows: list[int] = []
         puzzles: list[int] = []
         for task in tasks:
@@ -119,14 +127,9 @@ class ArcBatches:
             start, stop = self.puzzles[puzzle : puzzle + 2]
             take = min(stop - start, self.global_batch_size - len(rows))
             rows.extend(
-                ListCodec.coerce(
-                    cast(
-                        object,
-                        (
-                            start + rng.choice(stop - start, take, replace=False)
-                        ).tolist(),
-                    ),
-                    int,
+                cast(
+                    list[int],
+                    (start + rng.choice(stop - start, take, replace=False)).tolist(),
                 ),
             )
             puzzles.extend([puzzle] * take)
@@ -147,8 +150,8 @@ class ArcBatches:
         )
         identifiers = self.identifiers[puzzles].to(torch.int64)
         valid = len(rows)
-        if valid < self.batch_size:
-            pad = self.batch_size - valid
+        pad = self.batch_size - valid
+        if pad:
             media = torch.cat([media, media.new_zeros(pad, media.shape[1])])
             labels = torch.cat([labels, labels.new_full((pad, labels.shape[1]), -100)])
             identifiers = torch.cat([identifiers, identifiers.new_zeros(pad)])
@@ -181,7 +184,7 @@ class Arc2Data:
         base_dir: Path | str | None = None
         """Resource root supplied by the training loop."""
 
-        working_dir: Path | str = "/datasets/arcagi2/arc2concept-aug-1000"
+        working_dir: Path | str = "/datasets/arc2concept-aug-1000"
         """Shared corpus resolved beneath the training loop's resource root."""
 
         batch_size: int = 256
@@ -190,7 +193,7 @@ class Arc2Data:
         eval_batch_size: int | None = None
         """Evaluation examples per rank; None reuses the training width."""
 
-        device: str = "auto"
+        device: torch.device | str | None = None
         """Device holding the resident arrays."""
 
         seed: int = 0
@@ -227,6 +230,7 @@ class Arc2Data:
         self.timer_epoch = CheckpointableStepTimer()
         self.passes = 0
         self.live: ArcBatches | None = None
+        self._eval: ArcBatches | None = None
         self.active_pass: int | None = None
         self.next_batch = 0
 
@@ -249,8 +253,16 @@ class Arc2Data:
         return self.live
 
     def eval_dataloader(self) -> ArcBatches:
-        """Visit every evaluation row, padding the last batch."""
-        return ArcBatches(self.prepared, train=False, epochs_per_iter=1)
+        """Visit every evaluation row, padding the last batch.
+
+        Returns:
+          stream: Ordered evaluation batches over the split loaded at the
+            first call; later evaluations reuse it instead of re-reading disk.
+
+        """
+        if self._eval is None:
+            self._eval = ArcBatches(self.prepared, train=False, epochs_per_iter=1)
+        return self._eval
 
     class StateDict(TypedDict):
         """Iteration seed and epoch timer for checkpoint replay."""
@@ -285,16 +297,14 @@ class Arc2Data:
           state_dict: Saved global-plan cursor and epoch timer.
 
         """
-        self.passes = IntCodec.coerce(state_dict["passes"], default=None)
+        self.passes = convert(state_dict["passes"], int)
         active_pass = state_dict["active_pass"]
-        self.active_pass = (
-            None if active_pass is None else IntCodec.coerce(active_pass, default=None)
-        )
-        self.next_batch = IntCodec.coerce(state_dict["next_batch"], default=None)
+        self.active_pass = None if active_pass is None else convert(active_pass, int)
+        self.next_batch = convert(state_dict["next_batch"], int)
         if self.live is not None:
             self.live.passes = self.passes
             self.live.active_pass = self.active_pass
             self.live.next_batch = self.next_batch
         self.timer_epoch.load_state_dict(
-            DictCodec.coerce(state_dict["timer_epoch"], default=None),
+            convert(state_dict["timer_epoch"], dict[str, object]),
         )

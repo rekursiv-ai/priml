@@ -1,8 +1,9 @@
 """The symbolic observation: what the agent actually sees.
 
-The view is a 9x11 window centered on the player, one-hot encoded per channel
--- block, item, and one plane per creature class and species -- followed by the
-inventory and the player's condition as scalars. Everything outside the lit
+The view is a window centered on the player, the benchmark's 9x11 unless the
+caller passes another ``view``. Each tile is one-hot encoded per channel --
+block, item, and one plane per creature class and species -- and the window is
+followed by the inventory and the player's condition as scalars. Everything outside the lit
 region is zeroed, so darkness genuinely hides the world rather than merely
 dimming it.
 
@@ -79,7 +80,7 @@ def render(
     """
     return torch.cat(
         (_render_view(state, view=view), _render_player(state)),
-        dim=-1,
+        dim=1,
     )
 
 
@@ -95,7 +96,6 @@ def _render_view(state: EnvState, *, view: tuple[int, int]) -> Tensor:
         mechanics.current_items(state),
         state.player_position,
         view,
-        outside=int(ItemType.NONE),
     )
     planes = torch.cat(
         (
@@ -113,7 +113,6 @@ def _render_view(state: EnvState, *, view: tuple[int, int]) -> Tensor:
             mechanics.current_light(state),
             state.player_position,
             view,
-            outside=0.0,
         )
         > 0.05
     ).float()
@@ -137,9 +136,8 @@ def _render_mobs(state: EnvState, *, view: tuple[int, int]) -> Tensor:
         state.player_projectiles,
     )
     # Plane order matches upstream: melee 0, passive 1.
-    encoded_class = (0, 1, 2, 3, 4)
     index = batch_rows(state.num_envs, state.device)
-    for mobs, plane in zip(classes, encoded_class, strict=True):
+    for plane, mobs in enumerate(classes):
         level = state.player_level.long()
         for slot in range(mobs.mask.shape[-1]):
             alive = mobs.mask[index, level, slot]
@@ -189,7 +187,7 @@ def _render_player(state: EnvState) -> Tensor:
             inventory.torches,
             inventory.arrows,
         ),
-        dim=-1,
+        dim=1,
     ).float()
     tools = torch.stack(
         (
@@ -200,7 +198,7 @@ def _render_player(state: EnvState) -> Tensor:
             state.bow_enchantment.float(),
             inventory.bow.float(),
         ),
-        dim=-1,
+        dim=1,
     )
     meters = torch.stack(
         (
@@ -214,7 +212,7 @@ def _render_player(state: EnvState) -> Tensor:
             state.player_strength.float(),
             state.player_intelligence.float(),
         ),
-        dim=-1,
+        dim=1,
     )
     rows = batch_rows(state.num_envs, state.device)
     condition = torch.stack(
@@ -231,7 +229,7 @@ def _render_player(state: EnvState) -> Tensor:
             ).float(),
             mechanics.is_boss_vulnerable(state).float(),
         ),
-        dim=-1,
+        dim=1,
     )
     return torch.cat(
         (
@@ -247,5 +245,5 @@ def _render_player(state: EnvState) -> Tensor:
             state.armour_enchantments.float(),
             condition,
         ),
-        dim=-1,
+        dim=1,
     )

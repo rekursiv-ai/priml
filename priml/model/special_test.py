@@ -7,18 +7,17 @@ from pathlib import Path
 from typing import Final, override
 
 from configgle import Fig, Makeable
-from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
 
 import pytest
 import torch
 
 from priml.cost import Cost
+from priml.model.attention.attention import Attention
 from priml.model.attention.gated_delta_net import GatedDeltaNet
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.output_gate import OutputGate
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.attention.value_gated_attention import ValueGatedAttention
 from priml.model.custom_types import (
     ChannelsInOut,
@@ -45,6 +44,7 @@ from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.mmdit import MMDiTBlock
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -128,7 +128,7 @@ _SKIP_CONFIG_TYPES: Final = [
     MultiHeadLatentAttention.Config,
     MultiStreamAttention.Config,
     OutputGate.Config,
-    SelfAttention.Config,
+    Attention.Config,
     ValueGatedAttention.Config,
     MLPMixerBlock.Config,
     RMSNorm.Config,
@@ -194,14 +194,14 @@ def test_skip_channels_proxy_inner() -> None:
 
 
 def test_skip_forwards_direct_attributes_and_propagation_to_inner() -> None:
-    config = Skip.Config(inner=SelfAttention.Config())
+    config = Skip.Config(inner=Attention.Config())
 
     config.depth_index = ((3, 5),)
     assert config.depth_index == ((3, 5),)
     propagate_attr(config, "channels_out", 32, protocol=ChannelsOut)
     propagate_attr(config, "depth_index", ((4, 5),), protocol=HasDepthIndex)
 
-    assert isinstance(config.inner, SelfAttention.Config)
+    assert isinstance(config.inner, Attention.Config)
     assert config.inner.channels_out == 32
     assert config.inner.depth_index == ((4, 5),)
     with pytest.raises(AttributeError, match="typo"):

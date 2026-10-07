@@ -27,10 +27,10 @@ from __future__ import annotations
 from http.client import HTTPResponse
 from pathlib import Path
 from typing import Final, Protocol, cast
+from urllib import request
 
 import argparse
 import logging
-import urllib.request
 
 from priml.baselines.imagenet.data import NUM_CLASSES, ImageNetData
 from priml.data.pipeline.dataset import DataPipeline
@@ -59,7 +59,7 @@ def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -120,7 +120,7 @@ def prepare(directory: Path) -> None:
 
 def _download_text(url: str) -> str:
     """Return the body at ``url`` decoded as UTF-8."""
-    response = cast(HTTPResponse, urllib.request.urlopen(url))  # noqa: S310 -- Callers pass a fixed https URL.
+    response = cast(HTTPResponse, request.urlopen(url))  # noqa: S310 -- Callers pass a fixed https URL.
     with response:
         return response.read().decode()
 

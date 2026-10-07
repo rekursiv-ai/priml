@@ -1,0 +1,35 @@
+{
+  "source_commit": "da9e67442b95af76488b8e4e1806cc3185723dd9",
+  "dataset_sha256": "f18de3ad269cef59bb07b5438d79bb3042d3be49bdeecf01c1cd6d29695ee066",
+  "source_sha256": {
+    "models/DLinear.py": "66ca8bfd8452c379ef8779295ee3641340be9bedee9e0c380b0203f4fcf42458",
+    "data_provider/data_loader.py": "62a9e936a03d81b705dd6438780f7f7632e79a4d280125d9cca6046f777f2631",
+    "data_provider/data_factory.py": "98f83b72488ff2cb5364fca2267bc0ab786e5c7aeed5f9f4e625b11cd9bd4c45",
+    "exp/exp_main.py": "19af94ca1fb33e1f7bcf8943d762e964d462f94263808aa980fd9453b3a04649",
+    "exp/exp_basic.py": "6c69badaaf13536a212e2b96975e2d59ebd7b5546550e487ea52249173e10afe",
+    "utils/tools.py": "c62ae3c4e4278381093cecc1fe1ebad6b94da8e4d11c61c16057d7b0f374fc39",
+    "utils/timefeatures.py": "2ad031a425f6f02b88db1918333a30937e41b18f435df90e6bcbb6470427221b"
+  },
+  "source_compatibility_edits": [
+    "utils/tools.py: np.Inf -> np.inf (NumPy 2 spelling)"
+  ],
+  "torch": "2.11.0",
+  "numpy": "2.5.3",
+  "tiny_native_mismatches": 0,
+  "tiny_portable_mismatches": 0,
+  "canonical_three_step_mismatches": 0,
+  "geometry": {
+    "batch": 2,
+    "history": 5,
+    "horizon": 3,
+    "channels": 4,
+    "kernel": 25
+  },
+  "training_steps": 3,
+  "schedule_epochs": [
+    0,
+    1,
+    2
+  ],
+  "mint_environment": "pytest with priml/conftest.py"
+}

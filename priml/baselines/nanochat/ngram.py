@@ -235,13 +235,11 @@ class HashedNgramTables(nn.Module):
 
         @override
         def finalize(self) -> Self:
-            if not self.hash_multipliers or self.channels_out % len(
-                self.hash_multipliers,
-            ):
-                raise ValueError("Hash count must divide the value width.")
-            if len({len(row) for row in self.hash_multipliers}) != 1:
-                raise ValueError("All hashes must have the same n-gram order.")
-            self.table.channels_out = self.channels_out // len(self.hash_multipliers)
+            # ``max`` only so an empty tuple still prints; the build rejects it.
+            self.table.channels_out = self.channels_out // max(
+                len(self.hash_multipliers),
+                1,
+            )
             self.table.channels_in = self.num_embeddings
             bound = (3 / self.channels_out) ** 0.5
             self.table.init_weight = partial(nn.init.uniform_, a=-bound, b=bound)
@@ -310,6 +308,12 @@ class HashedNgramTables(nn.Module):
             )
 
     def __init__(self, config: Config) -> None:
+        if not config.hash_multipliers or config.channels_out % len(
+            config.hash_multipliers,
+        ):
+            raise ValueError("Hash count must divide the value width.")
+        if len({len(row) for row in config.hash_multipliers}) != 1:
+            raise ValueError("All hashes must have the same n-gram order.")
         super().__init__()
         self.hash_multipliers = config.hash_multipliers
         self.num_embeddings = config.num_embeddings
@@ -542,7 +546,7 @@ def _mix_backward(  # noqa: PLR0917 -- The operator schema fixes the positional 
         for bitmap, index in zip(bitmaps, indices, strict=False):
             flat = index.reshape(-1)
             bitmap[flat[flat != -1]] = 1
-    # A list return prevents auto-functionalization of this mutating custom op.
+    # Two tensors, never a list: the second is an empty placeholder for one source.
     return grads[0], grads[1] if len(grads) == 2 else gates[0].new_empty(0)
 
 
@@ -638,10 +642,10 @@ def _mix_forward_cuda(
 ) -> Tensor:
     """Gather and mix up to two factored n-gram sources in one launch."""
     (b, t, h, d) = v.shape
-    half = weights[0].shape[1]
+    half = h * d // 2
     tile = math.gcd(d, half)
     (g, w, i) = (
-        _pad_ngram_sources(gates, 2),
+        gates if len(gates) == 2 else [gates[0], gates[0]],
         _pad_ngram_sources(weights, 4),
         _pad_ngram_sources(indices, 4),
     )
@@ -669,22 +673,18 @@ def _mix_backward_cuda(
 ) -> list[Tensor]:
     """Compute gate gradients, scatter table gradients, and optionally mark rows."""
     (b, t, h, d) = dv.shape
-    half = weights[0].shape[1]
+    half = h * d // 2
     tile = math.gcd(d, half)
     grads = [torch.empty_like(g) for g in gates]
     (g, w, i, s, dg) = (
-        _pad_ngram_sources(gates, 2),
+        gates if len(gates) == 2 else [gates[0], gates[0]],
         _pad_ngram_sources(weights, 4),
         _pad_ngram_sources(indices, 4),
         _pad_ngram_sources(sinks, 4),
-        _pad_ngram_sources(grads, 2),
+        grads if len(grads) == 2 else [grads[0], grads[0]],
     )
     mark = bitmaps is not None
-    bm = (
-        _pad_ngram_sources(list(bitmaps), 4)
-        if bitmaps is not None
-        else _pad_ngram_sources(list(sinks), 4)
-    )
+    bm = _pad_ngram_sources(list(bitmaps), 4) if bitmaps is not None else s
     _compiled_ngram_backward()[triton.cdiv(b * t, 16),](
         buffers=(dv.contiguous(), g[0], g[1], *w, *i, dg[0], dg[1], *s, *bm),
         mark=mark,

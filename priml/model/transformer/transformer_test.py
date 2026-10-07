@@ -9,16 +9,15 @@ from unittest.mock import Mock
 import warnings
 
 from configgle import Fig, PartialConfig
-from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
 
 import pytest
 import torch
 
 from priml.cost import Cost, cost
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.rope import RoPE
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.embedding import Embedding
 from priml.model.generate import generate
 from priml.model.linear import Linear
@@ -27,9 +26,10 @@ from priml.model.sequential import Sequential
 from priml.model.special import TiedLinear
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
-from priml.model.transformer.transformer import Transformer
+from priml.model.transformer.transformer import Transformer, head_is_tied
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 if TYPE_CHECKING:
@@ -56,7 +56,7 @@ def _tiny_config(tie: bool = False) -> Transformer.Config:
         channels_out=128,
         num_layers=2,
         block=TransformerBlock.Config(
-            attn=SelfAttention.Config(
+            attn=Attention.Config(
                 num_heads=4,
                 channels_head=8,
                 causal=True,
@@ -75,7 +75,7 @@ def _canonical_config() -> Transformer.Config:
         channels_out=4,
         num_layers=1,
         block=TransformerBlock.Config(
-            attn=SelfAttention.Config(num_heads=2, channels_head=2, causal=True),
+            attn=Attention.Config(num_heads=2, channels_head=2, causal=True),
             ffn=SwiGLU.Config(channels_hidden=2, round_to=1),
         ),
     )
@@ -133,7 +133,7 @@ def test_model_forwards_the_open_message_bus_to_every_block() -> None:
 
     config = _tiny_config()
     assert isinstance(config.block, TransformerBlock.Config)
-    assert isinstance(config.block.attn, SelfAttention.Config)
+    assert isinstance(config.block.attn, Attention.Config)
     config.block.attn.attn_kernel = PartialConfig(kernel)
     message = object()
 
@@ -178,6 +178,30 @@ def test_forward_shape():
     toks = torch.randint(0, 128, (2, 6))
     out = m(toks)
     assert out.shape == (2, 6, 128)
+
+
+def test_head_is_tied_recognizes_bare_and_composed_tied_heads() -> None:
+    direct = Transformer.Config(proj_out=TiedLinear.Config(tied="proj_in"))
+    composed_list = Transformer.Config(
+        proj_out=Sequential.Config(
+            elements=[
+                RMSNorm.Config(),
+                Linear.Config(),
+                TiedLinear.Config(tied="proj_in"),
+            ],
+        ),
+    )
+    composed_single = Transformer.Config(
+        proj_out=Sequential.Config(elements=TiedLinear.Config(tied="proj_in")),
+    )
+    untied = Transformer.Config(proj_out=_head(tie=False))
+    absent = Transformer.Config(proj_out=None)
+
+    assert head_is_tied(direct)
+    assert head_is_tied(composed_list)
+    assert head_is_tied(composed_single)
+    assert not head_is_tied(untied)
+    assert not head_is_tied(absent)
 
 
 def test_tied_embeddings():
@@ -441,7 +465,7 @@ def test_transformer_cost_matches_torch_through_a_naive_kernel() -> None:
     """
     config = _tiny_config()
     assert isinstance(config.block, TransformerBlock.Config)
-    assert isinstance(config.block.attn, SelfAttention.Config)
+    assert isinstance(config.block.attn, Attention.Config)
     config.block.attn.attn_kernel = SdpaNaive.Config()
 
     def logits_float(module: nn.Module, tokens: Tensor) -> Tensor:
@@ -478,7 +502,7 @@ def test_tied_head_cost_owns_no_parameters_but_pays_the_matmul() -> None:
 def test_transformer_cost_reads_every_block_of_a_list() -> None:
     config = _tiny_config()
     wide = TransformerBlock.Config(
-        attn=SelfAttention.Config(num_heads=8, channels_head=8, causal=True),
+        attn=Attention.Config(num_heads=8, channels_head=8, causal=True),
     )
     assert isinstance(config.block, TransformerBlock.Config)
     config.block = [config.block, wide]

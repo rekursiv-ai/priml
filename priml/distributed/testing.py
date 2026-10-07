@@ -296,7 +296,7 @@ class WorkerPool:
         """Return a port the parent just confirmed it can bind on the wildcard."""
         for _ in range(self._PORT_PICK_ATTEMPTS):
             port = type(self).find_free_port()
-            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe = socket.socket(socket.AF_INET)
             try:
                 # "" is INADDR_ANY -- the address TCPStore listens on. See
                 # ``find_free_port``; probing 127.0.0.1 here would re-admit
@@ -336,7 +336,7 @@ class WorkerPool:
           port: Unbound port on INADDR_ANY, tested for TCPStore collision.
 
         """
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        with socket.socket(socket.AF_INET) as s:
             s.bind(("", 0))
             # getsockname() is `object`; AF_INET always yields (host, port).
             return cast(tuple[str, int], s.getsockname())[1]

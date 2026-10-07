@@ -38,7 +38,7 @@ from configgle import Fig, InlineConfig, Makeable, Makes, PartialConfig
 
 from priml.cost import Cost, matmul_cost
 from priml.data.dummy import DummyDataset
-from priml.lib.custom_json import ListCodec
+from priml.lib.custom_json import convert
 from priml.math.seed import RngState, get_rng_state, salt
 from priml.metrics.binary_accuracy import BinaryAccuracy
 from priml.metrics.topk import TopK
@@ -62,6 +62,7 @@ from priml.train.train_loop import (
     _set_loader_epoch,
 )
 from priml.train.train_step import TrainStep
+from priml.train.train_step_gan import GANTrainStep
 
 
 _RuntimeEvents = list[str]
@@ -161,6 +162,35 @@ class _WarmupDataset:
         del state_dict
 
 
+class _DeviceProbeDataset:
+    """Empty dataset recording its configured device and the one it was built under."""
+
+    class Config(Fig["_DeviceProbeDataset"]):
+        device: torch.device | str | None = None
+        """Where batches are built; ``None`` takes the loop's."""
+
+    def __init__(self, config: Config) -> None:
+        self.device = config.device
+        self.built_under = torch.get_default_device()
+        self.timer_epoch = CheckpointableStepTimer()
+
+    def train_dataloader(self) -> list[dict[str, Tensor]]:
+        """Return no batches."""
+        return []
+
+    def eval_dataloader(self) -> list[dict[str, Tensor]]:
+        """Return no batches."""
+        return []
+
+    def state_dict(self) -> dict[str, object]:
+        """Stateless."""
+        return {}
+
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
+        """Stateless."""
+        del state_dict
+
+
 class _ScopedEvalDataset:
     """Dataset that records bounded versus full eval loader use."""
 
@@ -208,10 +238,11 @@ class _WeightedEvalDataset:
     """Dataset exposing uneven eval batches with valid example counts."""
 
     class Config(Fig["_WeightedEvalDataset"]):
-        pass
+        # A collated batch carries its count as a 0-d tensor, not an int.
+        tensor_counts: bool = False
 
     def __init__(self, config: Config) -> None:
-        del config
+        self.tensor_counts = config.tensor_counts
         self.timer_epoch = CheckpointableStepTimer()
 
     def train_dataloader(self) -> list[dict[str, Tensor]]:
@@ -220,9 +251,10 @@ class _WeightedEvalDataset:
 
     def eval_dataloader(self) -> list[dict[str, object]]:
         """Return eval batches with uneven valid counts."""
+        counts = (torch.tensor(4), torch.tensor(1)) if self.tensor_counts else (4, 1)
         return [
-            {"media": torch.tensor([[1.0]]), "valid_count": 4},
-            {"media": torch.tensor([[0.0]]), "valid_count": 1},
+            {"media": torch.tensor([[1.0]]), "valid_count": counts[0]},
+            {"media": torch.tensor([[0.0]]), "valid_count": counts[1]},
         ]
 
     class StateDict(TypedDict):
@@ -444,6 +476,36 @@ class _ExtrasMetric:
         del state_dict
 
 
+class _DeviceProbeMetric:
+    """Metric with no ``device`` field, recording the device it was built under."""
+
+    class Config(Fig["_DeviceProbeMetric"]):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        del config
+        self.built_under = torch.get_default_device()
+
+    def update(self, logits: Tensor, **batch: object) -> None:
+        """Ignore batches."""
+        del logits, batch
+
+    def compute(self) -> dict[str, object]:
+        """Return nothing."""
+        return {}
+
+    def reset(self) -> None:
+        """Stateless."""
+
+    def state_dict(self) -> dict[str, object]:
+        """Stateless."""
+        return {}
+
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
+        """Stateless."""
+        del state_dict
+
+
 def _cross_entropy(output: Tensor, *, label: Tensor, **_kwargs: object) -> LossOutput:
     """Call cross_entropy with the label extracted from kwargs."""
     return {"loss": torch.nn.functional.cross_entropy(output, label, reduction="none")}
@@ -489,6 +551,7 @@ def test_train_loop_basic():
             device="cpu",
         ),
     )
+    config.runtime = SingleProcess.Config(device="cpu")
     config.metrics_eval = {}
     config.max_steps = 10
     config.num_steps_eval = 5
@@ -527,6 +590,7 @@ def test_train_loop_with_max_epochs():
             device="cpu",
         ),
     )
+    config.runtime = SingleProcess.Config(device="cpu")
     config.max_steps = 1000  # High limit.
     config.max_epochs = 2  # Should stop after 2 epochs (10 steps)
     config.num_steps_eval = 5
@@ -653,6 +717,7 @@ def test_train_loop_comprehensive():
         step_config.parallelism = NoParallel.Config(device="cpu")
         step_config.compile = None
         config = TrainLoop.Config(step=step_config, dataset=_BinaryDataset.Config())
+        config.runtime = SingleProcess.Config(device="cpu")
         config.metrics_eval = {"accuracy": BinaryAccuracy.Config()}
         config.max_steps = 20
         config.num_steps_eval = 10
@@ -689,6 +754,7 @@ def test_train_loop_comprehensive():
         step_config2.parallelism = NoParallel.Config(device="cpu")
         step_config2.compile = None
         config2 = TrainLoop.Config(step=step_config2, dataset=_BinaryDataset.Config())
+        config2.runtime = SingleProcess.Config(device="cpu")
         config2.metrics_eval = {"accuracy": BinaryAccuracy.Config()}
         config2.max_steps = 30
         config2.num_steps_eval = 10
@@ -759,6 +825,7 @@ def test_eval_only_loads_checkpoint_and_skips_training(seeded_checkpoints: Path)
             step=_eval_only_step_config(),
             dataset=_BinaryDataset.Config(),
         )
+        eval_cfg.runtime = SingleProcess.Config(device="cpu")
         eval_cfg.metrics_eval = {"accuracy": BinaryAccuracy.Config()}
         eval_cfg.max_steps = 20
         eval_cfg.num_steps_eval = float("inf")
@@ -805,6 +872,7 @@ def _resume_table_config(checkpoint_dir: Path):
         step=_eval_only_step_config(),
         dataset=_BinaryDataset.Config(),
     )
+    cfg.runtime = SingleProcess.Config(device="cpu")
     cfg.metrics_eval = {}
     cfg.max_steps = 20
     cfg.num_steps_eval = float("inf")
@@ -978,12 +1046,61 @@ def test_a_resume_with_nothing_left_to_do_says_so(
             loop.train()
         assert loop.step.global_step == 20  # Exited cleanly, trained nothing.
         warnings = [
-            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+            record for record in caplog.records if record.levelno >= logging.WARNING
         ]
-        assert any("already completed at step 20" in message for message in warnings), (
-            warnings
+        assert [record.getMessage() for record in warnings] == [
+            (
+                "No training step ran: this experiment already completed at step "
+                f"20 (max_steps=20) in {loop.working_dir}. To train further, raise "
+                "the stop condition; to train again from scratch, fork it with a "
+                "new experiment_name or point working_dir elsewhere."
+            ),
+        ]
+        assert warnings[0].args == (20, 20, loop.working_dir)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [(True, 0, False), (True, 1, True), (False, 1, False)],
+)
+def test_nothing_to_train_warning_requires_rank_zero_and_completed_step(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    case: tuple[bool, int, bool],
+) -> None:
+    rank_zero, global_step, warns = case
+    config = TrainLoop.Config(
+        step=_WeightedEvalStep.Config(),
+        dataset=_WeightedEvalDataset.Config(),
+    )
+    config.checkpointer = None
+    config.max_steps = 9
+    config.base_dir = tmp_path
+    config.working_dir = "/run"
+    loop = config.make()
+    step = loop.step
+    assert isinstance(step, _WeightedEvalStep)
+    step.global_step = global_step
+    monkeypatch.setattr(train_loop, "is_rank_zero", lambda: rank_zero)
+
+    with caplog.at_level(logging.WARNING, logger=train_loop.__name__):
+        loop._warn_nothing_to_train()
+
+    warnings = [
+        record for record in caplog.records if record.levelno >= logging.WARNING
+    ]
+    if warns:
+        assert len(warnings) == 1
+        assert warnings[0].msg == (
+            "No training step ran: this experiment already completed at step "
+            "%d (max_steps=%s) in %s. To train further, raise the stop "
+            "condition; to train again from scratch, fork it with a new "
+            "experiment_name or point working_dir elsewhere."
         )
-        assert any("experiment_name" in message for message in warnings), warnings
+        assert warnings[0].args == (1, 9, tmp_path / "run")
+    else:
+        assert warnings == []
 
 
 def test_fresh_run_refuses_to_overwrite_existing_checkpoints(seeded_checkpoints: Path):
@@ -1047,10 +1164,10 @@ def test_fresh_run_into_off_cadence_dir_is_rejected():
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
         checkpoint_dir.mkdir(parents=True)
-        (checkpoint_dir / "step_5.pt").write_bytes(b"x")  # Off the save cadence.
-
         cfg = _resume_table_config(checkpoint_dir)  # save_every=10 -> 10, 20.
         assert isinstance(cfg.checkpointer, Checkpointer.Config)
+        off_cadence = cfg.checkpointer.filename.format(step=5)
+        (checkpoint_dir / off_cadence).write_bytes(b"x")
         cfg.checkpointer.resume = False
         cfg.checkpointer.allow_checkpoint_overwrite = False
         with pytest.raises(RuntimeError, match="overwrite"):
@@ -1103,10 +1220,11 @@ def test_eval_only_never_trips_overwrite_guard(seeded_checkpoints: Path):
 def test_available_steps_lists_checkpoints():
     """available_steps surfaces the on-disk checkpoint steps for diagnostics."""
     with tempfile.TemporaryDirectory() as temp_dir:
-        ckpt = Checkpointer.Config(working_dir=Path(temp_dir), save_every=10).make()
+        config = Checkpointer.Config(working_dir=Path(temp_dir), save_every=10)
+        ckpt = config.make()
         assert ckpt.available_steps() == []
-        (Path(temp_dir) / "step_10.pt").write_bytes(b"x")
-        (Path(temp_dir) / "step_4000.pt").write_bytes(b"x")
+        for step in (10, 4000):
+            (Path(temp_dir) / config.filename.format(step=step)).write_bytes(b"x")
         assert ckpt.available_steps() == [10, 4000]
 
 
@@ -1149,12 +1267,12 @@ def _make_recording_train_loop_config(
     return config
 
 
-def test_eval_weights_scalar_metrics_by_valid_count() -> None:
+@pytest.mark.parametrize("tensor_counts", [False, True])
+def test_eval_weights_scalar_metrics_by_valid_count(*, tensor_counts: bool) -> None:
     """Eval scalar means weight partial batches by valid example count."""
-    config = TrainLoop.Config(
-        step=_WeightedEvalStep.Config(),
-        dataset=_WeightedEvalDataset.Config(),
-    )
+    dataset = _WeightedEvalDataset.Config()
+    dataset.tensor_counts = tensor_counts
+    config = TrainLoop.Config(step=_WeightedEvalStep.Config(), dataset=dataset)
     config.metrics_eval = {}
     config.checkpointer = None
     config.max_steps = 0
@@ -1556,6 +1674,7 @@ def test_phase_timer_instruments_data_load_and_model_init():
     """PhaseTimer records data_load and model_init phases."""
     torch.manual_seed(42)
     config = TrainLoop.Config()
+    config.runtime = SingleProcess.Config(device="cpu")
     step_config = TrainStep.Config()
     step_config.model = _LinearModel.Config(in_features=2, out_features=2)
     step_config.optimizer = PartialConfig(torch.optim.Adam, lr=0.1)
@@ -1593,6 +1712,7 @@ def _make_step_logging_loop_config(
 ) -> TrainLoop.Config:
     """Minimal CPU loop that logs a per-step loss line on every step."""
     config = TrainLoop.Config()
+    config.runtime = SingleProcess.Config(device="cpu")
     if step_config is None:
         step_config = TrainStep.Config()
     step_config.model = _LinearModel.Config(in_features=2, out_features=2)
@@ -1830,7 +1950,7 @@ def test_logged_train_loss_is_all_reduced_before_rank_zero_gate(
     calls: list[tuple[float, ...]] = []
 
     def all_reduce(tensor: Tensor) -> None:
-        calls.append(tuple(ListCodec.coerce(tensor.tolist(), float)))
+        calls.append(tuple(convert(tensor.tolist(), list[float])))
         tensor.mul_(8)
 
     loop = _make_step_logging_loop_config().make()
@@ -2061,6 +2181,7 @@ def test_phase_timer_disabled_no_overhead():
     """When disabled, no phases recorded."""
     torch.manual_seed(42)
     config = TrainLoop.Config()
+    config.runtime = SingleProcess.Config(device="cpu")
     step_config = TrainStep.Config()
     step_config.model = _LinearModel.Config(in_features=2, out_features=2)
     step_config.optimizer = PartialConfig(torch.optim.Adam, lr=0.1)
@@ -2093,6 +2214,7 @@ def test_phase_timer_passed_to_step():
     """TrainLoop passes timer to step."""
     torch.manual_seed(42)
     config = TrainLoop.Config()
+    config.runtime = SingleProcess.Config(device="cpu")
     step_config = TrainStep.Config()
     step_config.model = _LinearModel.Config(in_features=2, out_features=2)
     step_config.optimizer = PartialConfig(torch.optim.Adam, lr=0.1)
@@ -2116,6 +2238,77 @@ def test_phase_timer_passed_to_step():
     loop = config.make()
     assert isinstance(loop.step, _HasTimer)
     assert loop.step.timer is loop.phase_timer
+
+
+def _gan_loop_config() -> TrainLoop.Config:
+    config = TrainLoop.Config()
+    config.step = GANTrainStep.Config()
+    config.runtime = SingleProcess.Config(device="cpu")
+    config.dataset = _simple_dummy_dataset()
+    config.metrics_eval = {}
+    config.checkpointer = None
+    config.max_steps = 1
+    return config
+
+
+def test_runtime_device_reaches_composite_sub_steps() -> None:
+    """A GAN's sub-steps take the runtime's device, as a plain step does."""
+    loop = _gan_loop_config().make()
+    step = loop.step
+    assert isinstance(step, GANTrainStep)
+    for sub_step in (step.generator, step.discriminator):
+        assert sub_step.device == torch.device("cpu")
+    loop.close()
+
+
+def _device_probe_loop_config(
+    dataset: _DeviceProbeDataset.Config,
+) -> TrainLoop.Config[_WarmupStep.Config, _DeviceProbeDataset.Config]:
+    config = TrainLoop.Config(step=_WarmupStep.Config(), dataset=dataset)
+    config.runtime = SingleProcess.Config(device="meta")
+    config.metrics_eval = {}
+    config.checkpointer = None
+    config.max_steps = 0
+    return config
+
+
+def test_a_child_without_a_device_is_built_on_the_runtimes() -> None:
+    """``None`` is filled from the runtime, and the child is built under it."""
+    loop = _device_probe_loop_config(_DeviceProbeDataset.Config()).make()
+    dataset = loop.dataset
+    assert isinstance(dataset, _DeviceProbeDataset)
+    assert dataset.device == torch.device("meta")
+    assert dataset.built_under == torch.device("meta")
+    loop.close()
+
+
+def test_a_child_device_overrides_the_runtimes() -> None:
+    loop = _device_probe_loop_config(_DeviceProbeDataset.Config(device="cpu")).make()
+    dataset = loop.dataset
+    assert isinstance(dataset, _DeviceProbeDataset)
+    assert dataset.device == "cpu"
+    assert dataset.built_under == torch.device("cpu")
+    loop.close()
+
+
+def test_a_child_without_a_device_field_is_built_on_the_runtimes() -> None:
+    config = _device_probe_loop_config(_DeviceProbeDataset.Config(device="cpu"))
+    config.metrics_eval = {"probe": _DeviceProbeMetric.Config()}
+    loop = config.make()
+    metric = loop.metrics_eval["probe"]
+    assert isinstance(metric, _DeviceProbeMetric)
+    assert metric.built_under == torch.device("meta")
+    loop.close()
+
+
+def test_loop_binds_timers_into_composite_sub_steps() -> None:
+    loop = _gan_loop_config().make()
+    step = loop.step
+    assert isinstance(step, GANTrainStep)
+    for sub_step in (step.generator, step.discriminator):
+        assert sub_step.timer is loop.phase_timer
+        assert sub_step.timer_epoch is loop.dataset.timer_epoch
+    loop.close()
 
 
 # -- Regression tests (Issue#286 trainloop + checkpoint-loop group) ----------
@@ -2151,6 +2344,7 @@ def _make_simple_loop_config(
         step=step_config,
         dataset=dataset if dataset is not None else _simple_dummy_dataset(),
     )
+    config.runtime = SingleProcess.Config(device="cpu")
     config.metrics_eval = {}
     config.checkpointer = Checkpointer.Config(
         base_dir="/",
@@ -2745,6 +2939,7 @@ def test_a_train_metric_publishes_on_the_train_payload() -> None:
     step.parallelism = NoParallel.Config(device="cpu")
     step.compile = None
     config = TrainLoop.Config(step=step, dataset=_simple_dummy_dataset())
+    config.runtime = SingleProcess.Config(device="cpu")
     config.metrics_eval = {}
     config.checkpointer = None
     config.seed = 42
@@ -2898,7 +3093,7 @@ def test_complete_update_still_writes_terminal_checkpoint_and_resumes() -> None:
 def test_train_step_logs_gpu_memory_to_tracker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Train-step tracker logs process CUDA memory peaks when CUDA is available."""
+    """A run on a CUDA device logs that device's memory peaks."""
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
         config.checkpointer = None
@@ -2913,16 +3108,16 @@ def test_train_step_logs_gpu_memory_to_tracker(
 
         def train_step_with_cuda_metrics(**batch: object) -> TrainStepOutput:
             result = original_train_step(**batch)
-            monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+            monkeypatch.setattr(loop.runtime, "device", torch.device("cuda", 1))
             monkeypatch.setattr(
                 torch.cuda,
                 "max_memory_allocated",
-                lambda: 2_000_000_000,
+                _peak_bytes(2_000_000_000, expected=torch.device("cuda", 1)),
             )
             monkeypatch.setattr(
                 torch.cuda,
                 "max_memory_reserved",
-                lambda: 3_000_000_000,
+                _peak_bytes(3_000_000_000, expected=torch.device("cuda", 1)),
             )
             return result
 
@@ -2941,9 +3136,23 @@ def test_train_step_logs_gpu_memory_to_tracker(
     assert train_log["train/gpu_mem_reserved_gb"] == 3.0
 
 
-@pytest.mark.skipif(torch.cuda.is_available(), reason="CPU guard is host-specific")
-def test_train_step_omits_gpu_memory_on_cpu_tracker() -> None:
-    """CPU train-step tracker logs keep running without CUDA memory keys."""
+def _peak_bytes(value: int, *, expected: torch.device) -> Callable[..., int]:
+    def peak(device: torch.device) -> int:
+        assert device == expected
+        return value
+
+    return peak
+
+
+def test_train_step_omits_gpu_memory_on_a_cpu_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CPU run logs no GPU memory, even on a host that has CUDA."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    # The faked CUDA host must stay inert where torch itself probes it: Adam's
+    # step asks whether a CUDA graph is capturing, a real CUDA call that fails
+    # on a host with no GPU (a CPU CI runner).
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
         config.checkpointer = None
@@ -3465,6 +3674,7 @@ def test_eval_only_never_saves_a_best_checkpoint(seeded_checkpoints: Path) -> No
             step=_eval_only_step_config(),
             dataset=_BinaryDataset.Config(),
         )
+        eval_cfg.runtime = SingleProcess.Config(device="cpu")
         eval_cfg.metrics_eval = {"accuracy": BinaryAccuracy.Config()}
         eval_cfg.max_steps = 20
         eval_cfg.num_steps_eval = math.inf
@@ -3511,6 +3721,7 @@ def _make_accum_epoch_loop_config(
 ) -> TrainLoop.Config:
     """Loop whose per-epoch micro-batch count leaves a partial accumulation."""
     config = TrainLoop.Config()
+    config.runtime = SingleProcess.Config(device="cpu")
     step_config = TrainStep.Config()
     step_config.model = _LinearModel.Config(in_features=2, out_features=2)
     step_config.optimizer = PartialConfig(torch.optim.SGD, lr=0.1)
@@ -3761,6 +3972,24 @@ def test_eval_extras_every_eval_forwards_payload_on_cadence_evals() -> None:
     cadence, _ = tracker.metrics_by_step[0]
     assert cadence["eval/metric_score"] == 2.0
     assert cadence["eval/extras"] == {"payload": ("opaque",)}
+
+
+def test_eval_only_forces_one_final_eval_with_extras() -> None:
+    config = _make_extras_publish_config()
+    config.eval_only = True
+    loop = config.make()
+    tracker = loop.tracker
+    assert isinstance(tracker, _RecordingTracker)
+
+    loop.train()
+
+    assert len(tracker.metrics_by_step) == 1
+    payload, step = tracker.metrics_by_step[0]
+    assert step == 0
+    assert payload["eval/metric_score"] == 2.0
+    assert payload["eval/extras"] == {"payload": ("opaque",)}
+    assert {"eval/metric_score", "eval/extras", "eval/time"} <= payload.keys()
+    assert isinstance(payload["eval/time"], float)
 
 
 def test_load_state_dict_can_skip_rng_restore(
@@ -4276,14 +4505,22 @@ def _distributed_flag_broadcast(
 
     def broadcast(flag: Tensor, src: int) -> None:
         assert src == 0
+        assert flag.device == torch.device("cpu"), "gloo reduces CPU tensors only"
         broadcasts.append(float(flag.item()))
         if rank_zero_verdict is not None:
             flag.fill_(rank_zero_verdict)
 
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    # Gloo on a CUDA host: the flag must follow the backend, not the hardware.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_backend", _gloo_backend)
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.distributed, "broadcast", broadcast)
     return broadcasts
+
+
+def _gloo_backend(group: object = None) -> str:
+    del group
+    return "gloo"
 
 
 def test_time_limit_is_synced_on_the_log_cadence_and_latched(
@@ -4390,7 +4627,17 @@ def test_eval_only_without_a_checkpoint_warns_and_scores_fresh_weights(
     with caplog.at_level(logging.WARNING, logger="priml.train.train_loop"):
         loop.train()
 
-    assert any("eval_only at global_step=0" in r.message for r in caplog.records)
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+    ]
+    assert warnings == [
+        (
+            "eval_only at global_step=0: no checkpoint was loaded "
+            "(resume found none). Evaluating the freshly-initialized model."
+        ),
+    ]
     assert tracker.metrics_by_step[0][0]["eval/score"] == 0.8
 
 
@@ -5042,6 +5289,69 @@ def _metric_float(metrics: Mapping[str, object], key: str) -> float:
     """Return a numeric tracker metric, or a failing sentinel when absent."""
     value = metrics.get(key)
     return float(value) if isinstance(value, (int, float)) else -1.0
+
+
+class _GeneratorDataset:
+    """Dataset whose ``train_dataloader`` is a generator: one pass, or endless."""
+
+    class Config(Fig["_GeneratorDataset"], make_with_kwargs=True):
+        endless: bool = False
+
+    def __init__(self, endless: bool = False) -> None:
+        self.timer_epoch = CheckpointableStepTimer()
+        self.endless = endless
+
+    def train_dataloader(self) -> Iterator[dict[str, Tensor]]:
+        """Yield two batches, or batches without end."""
+        count = 0
+        while self.endless or count < 2:
+            count += 1
+            yield {"media": torch.tensor([[1.0, 0.0]]), "label": torch.tensor([0])}
+
+    def eval_dataloader(self) -> list[dict[str, Tensor]]:
+        """Return no eval batches."""
+        return []
+
+    def state_dict(self) -> dict[str, object]:
+        """Stateless."""
+        return {}
+
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
+        """Stateless."""
+        del state_dict
+
+
+def _generator_loop(
+    tmp: Path,
+    *,
+    endless: bool,
+    max_epochs: float,
+) -> TrainLoop:
+    config = _make_simple_loop_config(
+        str(tmp),
+        dataset=_GeneratorDataset.Config(endless=endless),
+    )
+    config.checkpointer = None
+    config.max_steps = 5
+    config.max_epochs = max_epochs
+    config.num_steps_eval = math.inf
+    return config.make()
+
+
+def test_a_one_shot_loader_is_refused_at_its_second_pass(tmp_path: Path) -> None:
+    loop = _generator_loop(tmp_path, endless=False, max_epochs=2)
+    with pytest.raises(TypeError, match=r"^_GeneratorDataset\.train_dataloader\(\)"):
+        loop.train()
+    assert loop.step.global_step == 2
+
+
+def test_an_endless_generator_and_a_single_pass_still_train(tmp_path: Path) -> None:
+    endless = _generator_loop(tmp_path / "endless", endless=True, max_epochs=math.inf)
+    endless.train()
+    assert endless.step.global_step == 5
+    single = _generator_loop(tmp_path / "single", endless=False, max_epochs=1)
+    single.train()
+    assert single.step.global_step == 2
 
 
 class _Stream(torch.utils.data.IterableDataset[int]):

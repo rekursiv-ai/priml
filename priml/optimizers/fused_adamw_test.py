@@ -151,10 +151,21 @@ def test_the_schedule_can_move_the_rate_between_steps() -> None:
         # ``dict[str, object]``, and splatting that loses every argument's type
         # at the call. ``partial`` keeps each keyword checked against the
         # signature, which a lambda would not.
-        (partial(FusedAdamW, lr=-1.0), "learning rate"),
-        (partial(FusedAdamW, betas=(1.0, 0.9)), "betas"),
-        (partial(FusedAdamW, eps=-1e-8), "eps"),
-        (partial(FusedAdamW, weight_decay=-0.1), "weight_decay"),
+        (partial(FusedAdamW, lr=-1.0), "Learning rate must be finite and nonnegative"),
+        (partial(FusedAdamW, betas=(1.0, 0.9)), "Betas must be finite and lie in"),
+        (partial(FusedAdamW, eps=-1e-8), "Epsilon must be finite and nonnegative"),
+        (
+            partial(FusedAdamW, weight_decay=-0.1),
+            "Weight decay must be finite and nonnegative",
+        ),
+        (partial(FusedAdamW, lr=float("nan")), "Learning rate must be finite"),
+        (partial(FusedAdamW, lr=float("inf")), "Learning rate must be finite"),
+        (partial(FusedAdamW, betas=(float("nan"), 0.9)), "Betas must be finite"),
+        (partial(FusedAdamW, betas=(float("inf"), 0.9)), "Betas must be finite"),
+        (partial(FusedAdamW, eps=float("nan")), "Epsilon must be finite"),
+        (partial(FusedAdamW, eps=float("inf")), "Epsilon must be finite"),
+        (partial(FusedAdamW, weight_decay=float("nan")), "Weight decay must be finite"),
+        (partial(FusedAdamW, weight_decay=float("inf")), "Weight decay must be finite"),
     ],
 )
 def test_invalid_hyperparameters_are_refused(

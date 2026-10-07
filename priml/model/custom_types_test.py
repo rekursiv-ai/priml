@@ -13,20 +13,17 @@ from torch import Tensor, nn
 import pytest
 import torch
 
-from priml.model.attention.self_attention import SelfAttention
+from priml.model.attention.attention import Attention
 from priml.model.custom_types import (
     AttentionKernel,
-    CachedAttention,
     ChannelsIn,
     ChannelsOut,
-    HasForwardCached,
     HasResetParameters,
     LatentAttentionKernel,
     LookupTable,
     RotaryFactors,
     TensorModule,
     flatten_depth_index,
-    has_forward_cached,
     has_weight,
     infer_same_width,
     is_cached_attention,
@@ -42,7 +39,7 @@ from priml.testing.golden import assert_text_golden
 _CWD: Final = Path(__file__).resolve().parent
 
 
-def test_custom_types_public_contract(request: pytest.FixtureRequest) -> None:
+def test_custom_types_public_contract() -> None:
     rendered = "\n".join(
         [
             "flatten_depth_index:",
@@ -52,7 +49,6 @@ def test_custom_types_public_contract(request: pytest.FixtureRequest) -> None:
         ],
     )
     assert_text_golden(
-        request,
         test_file=__file__,
         name="custom_types",
         rendered=rendered,
@@ -94,6 +90,7 @@ def test_head_capabilities_are_direct_attributes() -> None:
 
 def test_flatten_depth_index_uses_global_to_local_mixed_radix() -> None:
     assert flatten_depth_index(()) == -1
+    assert flatten_depth_index(((0, 1),)) == 0
     assert flatten_depth_index(((3, 12),)) == 3
     assert flatten_depth_index(((1, 4), (3, 12))) == 15
 
@@ -113,7 +110,7 @@ def test_propagate_settable_field():
 
 
 def test_propagate_width_preserving_field_is_mutable():
-    cfg = SelfAttention.Config(channels_in=64)
+    cfg = Attention.Config(channels_in=64)
     propagate_attr(cfg, "channels_out", 999)
     assert cfg.channels_out == 999
     with pytest.raises(ValueError, match="channels_in=64 must equal channels_out=999"):
@@ -150,8 +147,12 @@ def test_propagate_missing_attr_raises():
     class NoChannels:
         channels_in: int = -1
 
-    with pytest.raises(AttributeError, match="channels_out"):
+    with pytest.raises(AttributeError) as error:
         propagate_attr(NoChannels(), "channels_out", 64, protocol=ChannelsIn)
+    assert str(error.value) == (
+        "NoChannels satisfies ChannelsIn but has no attribute 'channels_out'; "
+        "cannot propagate value 64."
+    )
 
 
 @dataclass(slots=True, kw_only=True)
@@ -180,10 +181,27 @@ def test_infer_same_width_rejects_two_different_widths() -> None:
 
 
 class _CachedStub:
-    """Borrows every cache-protocol stub body, which must be inert."""
+    """Implements every cache-protocol method with inert bodies."""
 
-    forward_cached = HasForwardCached[object].forward_cached
-    alloc_kv_cache = CachedAttention[object].alloc_kv_cache
+    def __call__(
+        self,
+        x: Tensor,
+        /,
+        *,
+        cache: object,
+        **kwargs: object,
+    ) -> None:
+        del x, cache, kwargs
+
+    def alloc_kv_cache(
+        self,
+        *,
+        batch: int | tuple[int, ...],
+        max_seq: int,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        del batch, max_seq, device, dtype
 
 
 class _KernelStub:
@@ -211,31 +229,25 @@ class _LookupStub:
     to = LookupTable.to
 
 
-def test_cache_guards_name_the_erased_cache_type() -> None:
+def test_cache_guard_names_the_erased_cache_type() -> None:
     cached = _CachedStub()
-    assert has_forward_cached(cached)
     assert is_cached_attention(cached)
-    assert not has_forward_cached(object())
     assert not is_cached_attention(object())
-    assert cached.forward_cached(torch.zeros(1), cache=object()) is None
-    assert cached.alloc_kv_cache(batch=1, max_seq=2) is None
+    assert cached(torch.zeros(2), cache={}) is None
+    assert cached.alloc_kv_cache(batch=2, max_seq=3) is None
 
 
 def test_protocol_stub_bodies_are_inert() -> None:
     """A stub hides no behavior: every default body is a no-op returning None."""
     x = torch.zeros(1)
     kernel: AttentionKernel[...] = _KernelStub()
-    assert isinstance(kernel, AttentionKernel)
     assert kernel(x, x, x) is None
     latent: LatentAttentionKernel[...] = _LatentKernelStub()
-    assert isinstance(latent, LatentAttentionKernel)
     assert latent(x, x, x, x) is None
     module: TensorModule = _TensorModuleStub()
-    assert isinstance(module, HasResetParameters)
     assert module(x) is None
     assert module.reset_parameters() is None
     rotary: RotaryFactors = _RotaryStub()
-    assert isinstance(rotary, RotaryFactors)
     assert rotary(x) is None
     assert has_weight(_LookupStub())
     assert _LookupStub().to(dtype=torch.float32) is None

@@ -131,9 +131,13 @@ class DinoV2Teacher(nn.Module):
         patch_grid = config.image_size // 16
         # Match the reference's 224/448-pixel input and resized DINO position table.
         position = self.encoder.pos_embed.detach()
-        source_grid = int((position.shape[1] - 1) ** 0.5)
-        patch = (
-            position[:, 1:].reshape(1, source_grid, source_grid, -1).permute(0, 3, 1, 2)
+        patch_tokens = position[:, 1:]
+        source_grid = int(patch_tokens.shape[1] ** 0.5)
+        patch = patch_tokens.reshape(1, source_grid, source_grid, -1).permute(
+            0,
+            3,
+            1,
+            2,
         )
         patch = functional.interpolate(
             patch,

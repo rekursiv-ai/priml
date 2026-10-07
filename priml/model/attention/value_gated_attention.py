@@ -1,6 +1,6 @@
 """Windowed causal attention with a per-head value-embedding gate.
 
-Two departures from :class:`~priml.model.attention.self_attention.SelfAttention`, both
+Two departures from :class:`~priml.model.attention.attention.Attention`, both
 from the speedrun recipes rather than from taste:
 
 * **A window.** A layer attends to ``window`` previous positions plus itself.
@@ -46,6 +46,7 @@ from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
     DepthIndex,
+    LayerCache,
     TensorModule,
     infer_same_width,
     propagate_attr,
@@ -171,7 +172,7 @@ class ValueGatedAttention(nn.Module):
     """Windowed causal attention with normalized queries/keys and value gating.
 
     Two departures from priml's
-    :class:`~priml.model.attention.self_attention.SelfAttention`, both load-bearing here:
+    :class:`~priml.model.attention.attention.Attention`, both load-bearing here:
 
     * **A window.** A layer attends to ``window`` previous positions plus itself.
       Restricting most layers and leaving a few global keeps attention
@@ -473,6 +474,7 @@ class ValueGatedAttention(nn.Module):
         cos_sin: tuple[Tensor, Tensor],
         value_embedding: Tensor | None = None,
         window: int | None = None,
+        cache: LayerCache | None = None,
         **kwargs: object,
     ) -> Tensor:
         """Attend over this layer's configured window.
@@ -483,12 +485,21 @@ class ValueGatedAttention(nn.Module):
           value_embedding: ``[B, S, num_heads * channels_head]`` added to the
             values through the per-head gate, or ``None`` for this layer.
           window: Attention-window override.
+          cache: The block's decode cache; must be ``None``.
           **kwargs: Open message bus forwarded to the attention kernel.
 
         Returns:
           out: ``[B, S, C]`` attention output.
 
+        Raises:
+          TypeError: If ``cache`` is given.
+
         """
+        # The block addresses ``cache`` to this layer, so it ends here instead of
+        # reaching a kernel that names only its window. With no stored keys, a
+        # decode step would attend to itself alone and return wrong outputs.
+        if cache is not None:
+            raise TypeError(f"{type(self).__name__} keeps no decode cache.")
         config = self.config
         shape = (*x.shape[:-1], config.num_heads, config.channels_head)
         q = self.proj_q(x).view(shape)

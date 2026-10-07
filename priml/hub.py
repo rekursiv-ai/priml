@@ -16,7 +16,7 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.lib.custom_json import DictCodec, loads
+from priml.lib.custom_json import convert, loads
 from priml.lib.userdirs import cache_dir
 
 
@@ -119,8 +119,8 @@ def load_transformers_model(
                    "AutoImageProcessor"). Using string form delays transformers
                    import to avoid CUDA initialization before fork.
       device: Device to load model on (e.g., "cuda", "cpu")
-      dtype: Data type to load model in (e.g., torch.float16). Converted to
-             torch_dtype parameter for from_pretrained().
+      dtype: Data type to load model in (e.g., torch.float16), passed to
+             from_pretrained() as ``dtype``.
       revision: Git revision to use (default: None = latest)
       trust_remote_code: Whether to trust remote code (default: False)
       force_redownload: Force download from internet, skip cache (default: False)
@@ -225,7 +225,6 @@ def resolve_hf_dtype(name: str) -> torch.dtype:
     return {
         "bfloat16": torch.bfloat16,
         "float16": torch.float16,
-        "float32": torch.float32,
     }.get(name, torch.float32)
 
 
@@ -298,10 +297,10 @@ def load_hf_checkpoint(
 
     """
     path = Path(path_or_repo)
-    if path.is_dir() and (path / "config.json").exists():
-        hf_config = DictCodec.coerce(
+    if (path / "config.json").exists():
+        hf_config = convert(
             loads((path / "config.json").read_text()),
-            default=None,
+            dict[str, object],
         )
         return hf_config, load_local_state_dict(path)
     hf_model = load_transformers_model(
@@ -310,6 +309,6 @@ def load_hf_checkpoint(
         dtype=dtype,
         trust_remote_code=trust_remote_code,
     )
-    return DictCodec.coerce(hf_model.config.to_dict(), default=None), {
+    return convert(hf_model.config.to_dict(), dict[str, object]), {
         key: value.detach().cpu() for key, value in hf_model.state_dict().items()
     }

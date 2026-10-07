@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from priml.data import augmentation_gpu
 from priml.data.augmentation_gpu import (
     cutout,
     flip_lr,
@@ -45,16 +46,28 @@ def test_random_crop_content():
         assert bool((images == val).any())
 
 
+def test_random_crop_accepts_crop_equal_to_input_size():
+    # random_crop takes one square crop_size; 4 equals both H and W.
+    images = torch.arange(2 * 3 * 4 * 4).reshape(2, 3, 4, 4)
+    assert torch.equal(random_crop(images, 4), images)
+
+
 def test_random_crop_rejects_width_oversized_crop():
     images = torch.randn(2, 3, 6, 5)
-    with pytest.raises(ValueError, match="exceeds input width"):
+    with pytest.raises(
+        ValueError,
+        match=r"^crop_size=6 exceeds input width W=5; pad before cropping\.$",
+    ):
         random_crop(images, 6)
 
 
 def test_random_crop_rejects_oversized_crop():
     """crop_size larger than the input asserts instead of cropping garbage (M1)."""
     images = torch.randn(2, 3, 4, 5)
-    with pytest.raises(ValueError, match="exceeds input height"):
+    with pytest.raises(
+        ValueError,
+        match=r"^crop_size=5 exceeds input height H=4; pad before cropping\.$",
+    ):
         random_crop(images, 5)
 
 
@@ -97,10 +110,228 @@ def test_pad_crop_flip_with_cutout():
     assert (out == 0).any()  # Cutout should have zeroed some pixels.
 
 
+def test_pad_crop_flip_zero_cutout_skips_cutout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+
+    def record_cutout(images: torch.Tensor, size: int) -> torch.Tensor:
+        calls.append(size)
+        return images
+
+    def fixed_randint(
+        low: int,
+        high: int,
+        size: tuple[int, int, int, int],
+        *,
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        del low, high
+        return torch.zeros(size, dtype=torch.long, device=device)
+
+    monkeypatch.setattr(augmentation_gpu, "cutout", record_cutout)
+    monkeypatch.setattr(torch, "randint", fixed_randint)
+    images = torch.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5)
+
+    out = pad_crop_flip(images, 3, pad=1, flip=False, cutout_size=0)
+
+    assert calls == []
+    padded = torch.nn.functional.pad(images, (1, 1, 1, 1), mode="reflect")
+    assert torch.equal(out, padded[..., :3, :3])
+
+
 def test_pad_crop_flip_contiguous():
     images = torch.randn(2, 3, 4, 5)
     out = pad_crop_flip(images, 3, pad=2)
     assert out.is_contiguous()
+
+
+def test_pad_crop_flip_default_padding(monkeypatch: pytest.MonkeyPatch) -> None:
+    images = torch.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5)
+    calls: list[tuple[int, int, tuple[int, int, int, int]]] = []
+
+    def fixed_randint(
+        low: int,
+        high: int,
+        size: tuple[int, int, int, int],
+        *,
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        assert device == images.device
+        calls.append((low, high, size))
+        return torch.zeros(size, dtype=torch.long, device=device)
+
+    monkeypatch.setattr(torch, "randint", fixed_randint)
+    out = pad_crop_flip(images, 2, flip=False)
+
+    padded = torch.nn.functional.pad(images, (2, 2, 2, 2), mode="reflect")
+    assert calls == [(0, 7, (2, 1, 1, 1)), (0, 7, (2, 1, 1, 1))]
+    assert torch.equal(out, padded[..., :2, :2])
+
+
+def test_pad_crop_flip_false_never_flips(monkeypatch: pytest.MonkeyPatch) -> None:
+    images = torch.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5)
+
+    def fixed_randint(
+        low: int,
+        high: int,
+        size: tuple[int, int, int, int],
+        *,
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        del low, high
+        return torch.zeros(size, dtype=torch.long, device=device)
+
+    def fixed_rand(size: int, *, device: torch.device) -> torch.Tensor:
+        assert size == 2
+        return torch.full((size,), 0.25, device=device)
+
+    monkeypatch.setattr(torch, "randint", fixed_randint)
+    monkeypatch.setattr(torch, "rand", fixed_rand)
+    out = pad_crop_flip(images, 3, pad=1, flip=False)
+
+    padded = torch.nn.functional.pad(images, (1, 1, 1, 1), mode="reflect")
+    assert torch.equal(out, padded[..., :3, :3])
+
+
+def test_cutout_uses_random_top_left_and_clips_at_edges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    starts = iter(
+        (
+            torch.tensor([[[[0]]], [[[2]]]]),
+            torch.tensor([[[[0]]], [[[2]]]]),
+        ),
+    )
+
+    def record_randint(*args: object, **kwargs: object) -> torch.Tensor:
+        calls.append((args, kwargs))
+        return next(starts)
+
+    monkeypatch.setattr(torch, "randint", record_randint)
+    images = torch.ones(2, 3, 4, 5)
+
+    out = cutout(images, 3)
+
+    assert calls == [
+        ((0, 4, (2, 1, 1, 1)), {"device": images.device}),
+        ((0, 5, (2, 1, 1, 1)), {"device": images.device}),
+    ]
+    expected = images.clone()
+    expected[0, :, :3, :3] = 0
+    expected[1, :, 2:, 2:5] = 0
+    assert torch.equal(out, expected)
+
+
+def test_random_crop_uses_each_axis_and_batch_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    offsets = iter((torch.tensor([[[[1]]], [[[0]]]]), torch.tensor([[[[0]]], [[[1]]]])))
+
+    def record_randint(*args: object, **kwargs: object) -> torch.Tensor:
+        calls.append((args, kwargs))
+        return next(offsets)
+
+    monkeypatch.setattr(torch, "randint", record_randint)
+    images = torch.arange(2 * 3 * 5 * 6).reshape(2, 3, 5, 6)
+
+    out = random_crop(images, 3)
+
+    assert calls == [
+        ((0, 3, (2, 1, 1, 1)), {"device": images.device}),
+        ((0, 3, (2, 1, 1, 1)), {"device": images.device}),
+    ]
+    assert torch.equal(out, torch.stack((images[0, :, 1:4, :3], images[1, :, :3, 1:4])))
+
+
+def test_flip_lr_flips_only_selected_images(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fixed_rand(size: int, *, device: torch.device) -> torch.Tensor:
+        assert size == 2
+        assert device == torch.device("cpu")
+        return torch.tensor([0.25, 0.5])
+
+    monkeypatch.setattr(torch, "rand", fixed_rand)
+    images = torch.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5)
+
+    out = flip_lr(images)
+
+    assert torch.equal(out, torch.stack((images[0].flip(-1), images[1])))
+
+
+def test_pad_crop_flip_exact_order_and_zero_cutout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    offsets = iter(
+        (
+            torch.tensor([[[[1]]], [[[0]]]]),
+            torch.tensor([[[[0]]], [[[1]]]]),
+            torch.tensor([[[[0]]], [[[0]]]]),
+            torch.tensor([[[[0]]], [[[0]]]]),
+        ),
+    )
+
+    def fixed_randint(*args: object, **kwargs: object) -> torch.Tensor:
+        del args, kwargs
+        return next(offsets)
+
+    monkeypatch.setattr(torch, "randint", fixed_randint)
+    images = torch.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5)
+
+    out = pad_crop_flip(
+        images,
+        3,
+        pad=1,
+        pad_mode="replicate",
+        flip=True,
+        cutout_size=1,
+    )
+
+    expected = torch.nn.functional.pad(images, (1, 1, 1, 1), mode="replicate")
+    expected = torch.stack((expected[0, :, 1:4, :3], expected[1, :, :3, 1:4]))
+    expected = expected.flip(-1)
+    expected[:, :, :1, :1] = 0
+    assert torch.equal(out, expected)
+    assert out.is_contiguous()
+
+
+def test_augmentation_random_factories_keep_input_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    devices: list[torch.device | None] = []
+    randint = torch.randint
+    rand = torch.rand
+
+    def record_randint(
+        low: int,
+        high: int,
+        size: tuple[int, int, int, int],
+        *,
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        devices.append(device)
+        return randint(low, high, size, device=device)
+
+    def record_rand(
+        size: int,
+        *,
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        devices.append(device)
+        return rand(size, device=device)
+
+    monkeypatch.setattr(torch, "randint", record_randint)
+    monkeypatch.setattr(torch, "rand", record_rand)
+    images = torch.ones(2, 3, 4, 5, device="meta")
+
+    flip_lr(images)
+    random_crop(images, 2)
+    cutout(images, 2)
+
+    assert devices == [images.device] * 5
 
 
 if __name__ == "__main__":

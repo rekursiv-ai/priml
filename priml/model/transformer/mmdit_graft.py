@@ -14,13 +14,13 @@ from priml.cost import (
     Cost,
     cost,
 )
+from priml.model.attention.attention import (
+    Attention,
+    AttentionProjections,
+)
 from priml.model.attention.multi_stream import (
     MultiStreamAttention,
     _validate_native_state,
-)
-from priml.model.attention.self_attention import (
-    AttentionProjections,
-    SelfAttention,
 )
 from priml.model.custom_types import DeepModelConfig, HasResetParameters
 from priml.model.transformer.block import TransformerBlock
@@ -64,7 +64,7 @@ class MMDiTGraft(nn.Module):
                     if not isinstance(layer, TransformerBlock.Config):
                         continue
                     attn = layer.attn
-                    if not isinstance(attn, SelfAttention.Config):
+                    if not isinstance(attn, Attention.Config):
                         continue
                     language = MMDiTStream.Config()
                     language.attn = AttentionProjections.Config().update(
@@ -144,8 +144,8 @@ class MMDiTGraft(nn.Module):
         for layer in source.block:
             if not isinstance(layer, TransformerBlock.Config) or not layer.prenorm:
                 raise ValueError("Grafting requires native prenorm transformer blocks.")
-            if not isinstance(layer.attn, SelfAttention.Config):
-                raise TypeError("Grafting requires native SelfAttention blocks.")
+            if not isinstance(layer.attn, Attention.Config):
+                raise TypeError("Grafting requires native Attention blocks.")
         self.num_streams = len(config.streams) + 1
         self.proj_in = source.proj_in.make() if source.proj_in is not None else None
         self.blocks = nn.ModuleList(block.make() for block in config.block)
@@ -166,10 +166,10 @@ class MMDiTGraft(nn.Module):
         if any(
             not isinstance(block, TransformerBlock)
             or not block.prenorm
-            or not isinstance(block.attn, SelfAttention)
+            or not isinstance(block.attn, Attention)
             for block in source.blocks
         ):
-            raise ValueError("Loading requires native prenorm SelfAttention blocks.")
+            raise ValueError("Loading requires native prenorm Attention blocks.")
         target = self._backbone_view()
         _validate_native_state(target, source=source)
         target.load_state_dict(source.state_dict(), strict=True)
@@ -181,7 +181,7 @@ class MMDiTGraft(nn.Module):
           state_dict: State dict.
 
         """
-        self._backbone_view().load_state_dict(state_dict, strict=True)
+        self._backbone_view().load_state_dict(state_dict)
 
     def freeze_backbone(self, freeze: bool = True) -> None:
         """Freeze or unfreeze only the language stream, embedding, and head.

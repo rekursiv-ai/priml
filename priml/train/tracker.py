@@ -12,6 +12,7 @@ from typing import (
     Protocol,
     cast,
     override,
+    runtime_checkable,
 )
 
 import json
@@ -134,6 +135,7 @@ class FileTracker:
         """Close the tracker; this implementation has no resources."""
 
 
+@runtime_checkable
 class _Writer(Protocol):
     """Minimal scalar-logging writer interface."""
 
@@ -182,7 +184,13 @@ class TensorBoardTracker:
                     "Install with: pip install tensorboard"
                 )
                 raise ImportError(msg) from error
-            writer_cls = cast(_WriterFactory, SummaryWriter)
+
+            def writer_factory(log_dir: str) -> _Writer:
+                writer = SummaryWriter(log_dir)
+                assert isinstance(writer, _Writer)
+                return writer
+
+            writer_cls = writer_factory
         self.writer: _Writer | None = writer_cls(
             str(validated_output_path(config.working_dir)),
         )

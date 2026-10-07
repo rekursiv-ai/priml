@@ -68,7 +68,7 @@ class TopK:
         max_k = min(max(self.k_values), num_classes)
 
         # Get top-k predictions.
-        _, pred_topk = logits.topk(max_k, dim=1)  # [B, max_k].
+        _, pred_topk = logits.topk(max_k)  # [B, max_k].
 
         # Check correctness for each k.
         for k in self.k_values:

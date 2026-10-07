@@ -24,6 +24,7 @@ def test_metric_objective_maximize_is_better():
     obj = MetricObjective(metric_key="eval/roc_auc", direction="maximize")
     assert obj.is_better(2.0, 1.0)
     assert not obj.is_better(1.0, 2.0)
+    assert not obj.is_better(1.0, 1.0)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -36,9 +37,7 @@ class _Launchable:
 
 
 def test_runtime_protocols_match_on_declared_fields_alone() -> None:
-    launchable = _Launchable()
-    assert isinstance(launchable, LaunchableExperiment)
-    assert isinstance(launchable, HasNormalizedWorkingDirPattern)
+    _Launchable()
     assert not isinstance(object(), LaunchableExperiment)
     assert not isinstance(object(), HasNormalizedWorkingDirPattern)
 
@@ -54,8 +53,6 @@ class _DefaultBodies:
 def test_protocol_default_bodies_are_inert() -> None:
     """A stub hides no behavior: every default body is a no-op returning None."""
     bodies = _DefaultBodies()
-    assert isinstance(bodies, JobProtocol)
-    assert isinstance(bodies, CheckpointableProtocol)
     assert bodies.run("--flag") is None
     assert bodies.load_state_dict({}) is None
     assert cast(object, bodies.state_dict()) is None

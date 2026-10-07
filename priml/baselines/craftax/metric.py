@@ -27,7 +27,7 @@ from priml.baselines.craftax.env import CraftaxEnv
 from priml.baselines.craftax.evaluation import evaluation_mode
 from priml.baselines.craftax.game import constants
 from priml.baselines.craftax.restart import RestartOnDemand
-from priml.lib.custom_json import ListCodec
+from priml.lib.custom_json import convert
 from priml.math.numeric import shifted_geometric_mean
 
 
@@ -63,7 +63,7 @@ class CraftaxScore:
         one-hot vector per visible tile, so a different window is a different
         input width and the network cannot read it at all."""
 
-        device: str = "auto"
+        device: torch.device | str | None = None
         """Device the evaluation runs on."""
 
     def __init__(self, config: Config) -> None:
@@ -95,6 +95,9 @@ class CraftaxScore:
           logits: Unused; present to satisfy the metric interface.
           **batch: Must carry ``actor``, an isolated evaluation actor.
 
+        Raises:
+          TypeError: ``actor`` is missing or is not an ``EvaluationActor``.
+
         """
         del logits
         actor = batch.get("actor")
@@ -113,8 +116,8 @@ class CraftaxScore:
         """
         if not self._returns:
             return {"episodes": 0.0}
-        returns = np.asarray(self._returns, dtype=np.float64)
-        rates = np.asarray(self._unlocked, dtype=np.float64).mean(axis=0)
+        returns = np.asarray(self._returns)
+        rates = np.asarray(self._unlocked).mean(axis=0)
         return {
             "normalized_return_pct": float(
                 returns.mean() / constants.REWARD_CEILING * 100.0,
@@ -231,18 +234,17 @@ class CraftaxScore:
                 if bool(transition.done.any()):
                     finished = transition.done
                     self._returns.extend(
-                        ListCodec.coerce(episode_return[finished].tolist(), float),
+                        convert(episode_return[finished].tolist(), list[float]),
                     )
                     self._lengths.extend(
-                        ListCodec.coerce(episode_length[finished].tolist(), int),
+                        convert(episode_length[finished].tolist(), list[int]),
                     )
                     unlocked = torch.stack(
                         [transition.info[name] for name in sorted(transition.info)],
                         dim=-1,
                     )
                     self._unlocked.extend(
-                        ListCodec.coerce(row, float)
-                        for row in unlocked[finished].tolist()
+                        convert(row, list[float]) for row in unlocked[finished].tolist()
                     )
                     episode_return = episode_return * ~finished
                     episode_length = episode_length * ~finished

@@ -94,7 +94,7 @@ practice rather than only by convention.
 Regenerate them only when a numeric change is intended:
 
 ```bash
-BFB_REGENERATE=1 uv --quiet run --frozen pytest priml/baselines/cifar10
+uv --quiet run --frozen pytest priml/baselines/cifar10 --regenerate-b4b
 ```
 
 Doing so means `exp000` has changed, and its recorded result no longer

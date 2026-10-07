@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, TypedDict, cast
 from unittest.mock import Mock, patch
@@ -10,14 +11,19 @@ import multiprocessing as mp
 import tempfile
 
 from configgle import Fig
+from torch.utils import data
 
 import pytest
-import torch.utils.data
 
+from priml.data.pipeline.batching import Batcher
 from priml.data.pipeline.dataset import (
     DataPipeline,
+    _assign_gpu_to_worker,
+    _distributed_shard,
     _DummySource,
     _MultipleWorkerDataset,
+    _passthrough_collate,
+    _pipeline_uses_cuda,
     _SingleWorkerDataset,
     add_filter_reason,
     add_filter_reason_typed,
@@ -242,6 +248,33 @@ def test_multiworker_reshuffles_across_epochs() -> None:
     assert sorted(w0 + w1) == list(range(num_samples))
 
 
+def test_single_worker_starts_at_epoch_zero() -> None:
+    source = ShufflingSliceableSource.Config(num_samples=8)
+    dataset = _SingleWorkerDataset(DataPipeline(DataPipeline.Config(source=source)))
+
+    actual = [int(str(sample["key"]).removeprefix("sample_")) for sample in dataset]
+    assert actual == shard_and_shuffle(
+        list(range(8)),
+        worker_slice=None,
+        shuffle=True,
+        epoch_seed=0,
+    )
+
+
+def test_single_worker_set_epoch_uses_requested_seed() -> None:
+    source = ShufflingSliceableSource.Config(num_samples=8)
+    dataset = _SingleWorkerDataset(DataPipeline(DataPipeline.Config(source=source)))
+    dataset.set_epoch(2)
+
+    actual = [int(str(sample["key"]).removeprefix("sample_")) for sample in dataset]
+    assert actual == shard_and_shuffle(
+        list(range(8)),
+        worker_slice=None,
+        shuffle=True,
+        epoch_seed=2,
+    )
+
+
 def test_single_worker_reshuffles_across_epochs() -> None:
     """#326: num_workers=0 path reshuffles each epoch via set_epoch (no regress)."""
     source = ShufflingSliceableSource.Config(num_samples=20)
@@ -340,6 +373,13 @@ def test_pipeline_with_processor():
 
     assert len(samples) == 5
     assert all(s.get("processed") is True for s in samples)
+
+
+def test_pipeline_does_not_wrap_batching_processors() -> None:
+    config = DataPipeline.Config(processors=[Batcher.Config(size=2)])
+    pipeline = DataPipeline(config)
+
+    assert isinstance(pipeline.processors[0], Batcher)
 
 
 def test_pipeline_with_batcher():
@@ -515,6 +555,54 @@ def test_dummy_source():
     assert len(samples) == 0
 
 
+def test_assign_gpu_to_worker_falls_back_to_cpu(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with (
+        patch("torch.cuda.is_available", return_value=False),
+        caplog.at_level("DEBUG"),
+    ):
+        assert _assign_gpu_to_worker(3) == -1
+
+    assert caplog.records[0].getMessage() == "Worker 3: CUDA not available, using CPU"
+
+
+def test_pipeline_uses_cuda_only_for_nested_cuda_devices() -> None:
+    class Stage:
+        class Config(Fig["Stage"]):
+            device: str = "cpu"
+
+    class Container(DummyProcessor):
+        class Config(DummyProcessor.Config):
+            stage: Stage.Config = field(default_factory=Stage.Config)
+
+    cpu = DataPipeline.Config(
+        processors=[Container.Config(), DummyProcessor.Config()],
+    )
+    cuda_stage = Container.Config(stage=Stage.Config(device="cuda:1"))
+    cuda = DataPipeline.Config(
+        processors=[cuda_stage, DummyProcessor.Config()],
+    )
+
+    assert not _pipeline_uses_cuda(cpu)
+    assert _pipeline_uses_cuda(cuda)
+
+
+def test_pipeline_uses_cuda_handles_cyclic_config_graph() -> None:
+    class Stage:
+        class Config(Fig["Stage"]):
+            device: str = "cuda"
+
+    class Node(DummyProcessor):
+        class Config(DummyProcessor.Config):
+            stage: Stage.Config = field(default_factory=Stage.Config)
+            child: object | None = None
+
+    node = Node.Config(stage=Stage.Config(device="cuda"))
+    node.child = node
+    assert _pipeline_uses_cuda(DataPipeline.Config(processors=[node]))
+
+
 def test_create_loader_no_workers():
     """Test create_loader with num_workers=0."""
     source = DummySource.Config()
@@ -524,21 +612,41 @@ def test_create_loader_no_workers():
 
     loader = pipeline.create_loader(num_workers=0)
 
-    assert loader is not None
     assert loader.num_workers == 0
+    assert loader.prefetch_factor is None
+    assert next(iter(loader)) == {
+        "key": "sample_0",
+        "width": 512,
+        "height": 512,
+        "caption": "Caption 0",
+        "url": "https://example.com/image_0.jpg",
+    }
 
 
 def test_create_loader_with_workers():
     """Test create_loader with num_workers>0."""
-    source = DummySource.Config()
-    source.num_samples = 10
+    source = SliceableSource.Config(num_samples=10)
     config = DataPipeline.Config(source=source)
     pipeline = DataPipeline(config)
 
     loader = pipeline.create_loader(num_workers=2, prefetch_factor=1)
 
-    assert loader is not None
     assert loader.num_workers == 2
+    assert loader.prefetch_factor == 1
+    assert isinstance(loader.dataset, data.IterableDataset)
+
+
+def test_create_loader_with_one_worker() -> None:
+    source = SliceableSource.Config(num_samples=5)
+    pipeline = DataPipeline(DataPipeline.Config(source=source))
+
+    loader = pipeline.create_loader(num_workers=1)
+
+    assert loader.num_workers == 1
+    assert loader.prefetch_factor == 2
+    # Forkserver, the default, starts its server per process: 1.1s against 0.05s.
+    loader.multiprocessing_context = _WORKER_CONTEXT
+    assert [sample["key"] for sample in loader] == [f"sample_{i}" for i in range(5)]
 
 
 def test_create_loader_with_cache():
@@ -551,9 +659,8 @@ def test_create_loader_with_cache():
 
     loader = pipeline.create_loader(num_workers=0)
 
-    assert loader is not None
-    # Should return cached list loader.
     assert loader.num_workers == 0
+    assert [sample["key"] for sample in loader] == [f"sample_{i}" for i in range(5)]
 
 
 def test_worker_dataset_single_worker():
@@ -586,7 +693,7 @@ def test_worker_dataset_with_worker_info():
     config = DataPipeline.Config(source=source)
 
     # Create a DataLoader with workers to test multi-worker scenario.
-    loader = torch.utils.data.DataLoader(
+    loader = data.DataLoader(
         _MultipleWorkerDataset(config),
         num_workers=1,
         multiprocessing_context=_WORKER_CONTEXT,
@@ -614,7 +721,7 @@ def test_worker_dataset_with_sliceable_source():
         source.data_dir = str(data_dir)
         config = DataPipeline.Config(source=source)
 
-        loader = torch.utils.data.DataLoader(
+        loader = data.DataLoader(
             _MultipleWorkerDataset(config),
             num_workers=1,
             multiprocessing_context=_WORKER_CONTEXT,
@@ -632,7 +739,7 @@ def test_worker_dataset_non_sliceable_source_single_worker_ok():
     source.num_samples = 10
     config = DataPipeline.Config(source=source)
 
-    loader = torch.utils.data.DataLoader(
+    loader = data.DataLoader(
         _MultipleWorkerDataset(config),
         num_workers=1,
         multiprocessing_context=_WORKER_CONTEXT,
@@ -648,7 +755,7 @@ def test_worker_dataset_with_nonexistent_data_dir():
     source = SliceableSourceWithBadPath.Config()
     config = DataPipeline.Config(source=source)
 
-    loader = torch.utils.data.DataLoader(
+    loader = data.DataLoader(
         _MultipleWorkerDataset(config),
         num_workers=1,
         multiprocessing_context=_WORKER_CONTEXT,
@@ -680,6 +787,18 @@ def test_add_filter_reason_typed():
     add_filter_reason_typed(sample, "filter1", "reason1")
     assert "filter_reasons" in sample
     assert sample["filter_reasons"] == ["filter1:reason1"]
+
+
+def test_add_filter_reason_normalizes_existing_value_and_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sample: dict[str, object] = {"filter_reasons": ("old", 3)}
+
+    with caplog.at_level("DEBUG"):
+        add_filter_reason(sample, "Resize", "too_small")
+
+    assert sample["filter_reasons"] == ["Resize:too_small"]
+    assert caplog.records[0].getMessage() == "Filter: Resize:too_small"
 
 
 def test_add_filter_reason_skips_after_decode_failed():
@@ -758,7 +877,10 @@ def test_datapipeline_len_raises_for_non_sized_source():
     config = DataPipeline.Config(source=_Unsized.Config())
     pipeline = DataPipeline(config)
 
-    with pytest.raises(TypeError, match="not Sized"):
+    with pytest.raises(
+        TypeError,
+        match=r"^Source _Unsized is not Sized; DataPipeline has no length\.$",
+    ):
         len(pipeline)
 
 
@@ -807,6 +929,22 @@ def _emit_indices(
         return [int(str(s["key"]).removeprefix("sample_")) for s in dataset]
 
 
+def test_multiworker_starts_at_epoch_zero() -> None:
+    source = ShufflingSliceableSource.Config(num_samples=8)
+    dataset = _MultipleWorkerDataset(DataPipeline.Config(source=source))
+    worker_info = Mock(id=0, num_workers=1)
+
+    with patch("torch.utils.data.get_worker_info", return_value=worker_info):
+        actual = [int(str(sample["key"]).removeprefix("sample_")) for sample in dataset]
+
+    assert actual == shard_and_shuffle(
+        list(range(8)),
+        worker_slice=(0, 1),
+        shuffle=True,
+        epoch_seed=0,
+    )
+
+
 def test_distributed_dp_rank_partitions_data_exactly_once() -> None:
     """#317: composing dp rank with worker shard partitions the dataset once.
 
@@ -834,6 +972,31 @@ def test_distributed_dp_rank_partitions_data_exactly_once() -> None:
     assert per_rank[1].isdisjoint(per_rank[2])
 
 
+def test_distributed_shard_reads_dp_mesh_dimension() -> None:
+    dp = Mock()
+    dp.get_local_rank.return_value = 2
+    dp.size.return_value = 5
+    mesh = Mock(mesh_dim_names=("dp",))
+    mesh.__getitem__ = Mock(return_value=dp)
+
+    with patch(
+        "priml.data.pipeline.dataset.global_device_mesh",
+        return_value=mesh,
+    ):
+        assert _distributed_shard() == (2, 5)
+
+    mesh.__getitem__.assert_called_once_with("dp")
+
+
+def test_distributed_shard_ignores_mesh_without_dp_dimension() -> None:
+    mesh = Mock(mesh_dim_names=("tp",))
+    with patch(
+        "priml.data.pipeline.dataset.global_device_mesh",
+        return_value=mesh,
+    ):
+        assert _distributed_shard() == (0, 1)
+
+
 def test_distributed_dp_rank_shards_with_num_workers_zero() -> None:
     """#317: dp sharding applies even with num_workers=0 (no DataLoader workers).
 
@@ -855,6 +1018,118 @@ def test_distributed_dp_rank_shards_with_num_workers_zero() -> None:
         ):
             union.extend(int(str(s["key"]).removeprefix("sample_")) for s in dataset)
     assert sorted(union) == list(range(num_samples))
+
+
+def test_assign_gpu_to_worker_round_robins_outside_distributed_execution(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Use worker-based placement until distributed is initialized."""
+    with (
+        patch("torch.cuda.is_available", return_value=True),
+        patch("torch.cuda.device_count", return_value=4),
+        patch("torch.distributed.is_available", return_value=True),
+        patch("torch.distributed.is_initialized", return_value=False),
+        patch("torch.cuda.current_device", return_value=3) as current_device,
+        patch("torch.cuda.set_device") as set_device,
+        caplog.at_level("INFO"),
+    ):
+        assert _assign_gpu_to_worker(6) == 2
+
+    current_device.assert_not_called()
+    set_device.assert_called_once_with(2)
+    assert caplog.records[-1].getMessage() == (
+        "Worker 6: assigned to GPU 2 (total GPUs: 4)"
+    )
+
+
+def test_assign_gpu_to_worker_uses_rank_device_when_distributed_initialized(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Use the current rank's device after distributed initialization."""
+    with (
+        patch("torch.cuda.is_available", return_value=True),
+        patch("torch.cuda.device_count", return_value=4),
+        patch("torch.distributed.is_available", return_value=True),
+        patch("torch.distributed.is_initialized", return_value=True),
+        patch("torch.cuda.current_device", return_value=3) as current_device,
+        patch("torch.cuda.set_device") as set_device,
+        caplog.at_level("INFO"),
+    ):
+        assert _assign_gpu_to_worker(6) == 3
+
+    current_device.assert_called_once_with()
+    set_device.assert_called_once_with(3)
+    assert caplog.records[-1].getMessage() == (
+        "Worker 6: assigned to GPU 3 (total GPUs: 4)"
+    )
+
+
+def test_assign_gpu_to_worker_handles_forked_cuda_with_diagnostic(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Fall back to CPU with a diagnostic after a forked CUDA runtime error."""
+    error = RuntimeError("Cannot re-initialize CUDA in forked subprocess")
+    with (
+        patch("torch.cuda.is_available", return_value=True),
+        patch("torch.cuda.device_count", return_value=4),
+        patch("torch.distributed.is_available", return_value=False),
+        patch("torch.cuda.current_device", return_value=3),
+        patch("torch.cuda.set_device", side_effect=error) as set_device,
+        caplog.at_level("WARNING"),
+    ):
+        assert _assign_gpu_to_worker(6) == -1
+
+    set_device.assert_called_once_with(2)
+    assert caplog.records[-1].getMessage() == (
+        "Worker 6: CUDA was initialized before fork, cannot assign GPU "
+        "(this is expected in test environments)"
+    )
+
+
+@pytest.mark.parametrize("batch", [[], [{}, {}]])
+def test_passthrough_collate_requires_exactly_one_item(
+    batch: list[dict[str, object]],
+) -> None:
+    """Reject empty and multi-item DataLoader wrappers with the exact message."""
+    with pytest.raises(ValueError, match=r"^Expected len\(batch\) == 1\.$"):
+        _passthrough_collate(batch)
+
+
+def test_pipeline_uses_cuda_after_non_dataclass_config_child() -> None:
+    class Stage:
+        class Config(Fig["Stage"]):
+            device: str = "cpu"
+
+    class Container(DummyProcessor):
+        class Config(DummyProcessor.Config):
+            stage: Stage.Config = field(default_factory=Stage.Config)
+            blocker: object = field(default_factory=object)
+
+    cuda_stage = Container.Config(stage=Stage.Config(device="cuda:1"))
+    nested_without_cuda = Container.Config()
+
+    assert _pipeline_uses_cuda(
+        DataPipeline.Config(processors=[cuda_stage, nested_without_cuda]),
+    )
+
+
+def test_pipeline_without_shortcircuit_keeps_processors() -> None:
+    config = DataPipeline.Config(processors=[DummyProcessor.Config()])
+    config.filters_shortcircuit = False
+
+    pipeline = DataPipeline(config)
+
+    assert len(pipeline.processors) == 1
+    assert isinstance(pipeline.processors[0], DummyProcessor)
+
+
+def test_create_loader_defaults_to_single_process() -> None:
+    pipeline = DataPipeline(DataPipeline.Config(source=DummySource.Config()))
+
+    loader = pipeline.create_loader()
+
+    assert loader.num_workers == 0
+    assert loader.prefetch_factor is None
 
 
 if __name__ == "__main__":

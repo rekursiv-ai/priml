@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import json
 import math
-import os
 import shutil
 
 from torch import Tensor
@@ -52,7 +51,8 @@ from priml.baselines.arcagi1.metric import (
     write_signal_dump,
 )
 from priml.baselines.arcagi1.scripts import build_dataset, build_spatial_eval
-from priml.lib.custom_json import DictCodec, ListCodec, loads
+from priml.lib.custom_json import convert, parse
+from priml.testing import regenerate
 from priml.testing.golden import read_tensors, stored, write_tensors
 
 
@@ -351,7 +351,7 @@ class PortBackend:
         return config.make().sample(name, rng=rng)
 
     def build(self, case: BuildCase, prefix: Path, output: Path) -> None:
-        build_dataset._build_arc_dataset(
+        build_dataset.write_arc_tree(
             input_file_prefix=str(prefix),
             output_dir=output,
             augmentation=_recipe(case, spec=self.spec),
@@ -594,6 +594,8 @@ def leaf(value: object) -> Leaf:
         return stored(torch.from_numpy(np.array(array, copy=True)))
     if isinstance(value, bytes):
         return torch.frombuffer(bytearray(value), dtype=torch.uint8).clone()
+    if isinstance(value, (bool, int, float, np.bool_, np.integer, np.floating)):
+        return torch.tensor(value.item() if isinstance(value, np.generic) else value)
     return value if isinstance(value, str) else repr(value)
 
 
@@ -606,9 +608,19 @@ def put(out: Capture, key: str, *values: object) -> None:
         out[f"{key}/{index}"] = leaf(value)
 
 
-def rng_state(rng: np.random.Generator) -> str:
-    """Keep a generator's position as its canonical JSON state."""
-    return json.dumps(rng.bit_generator.state, sort_keys=True)
+def rng_state(rng: np.random.Generator) -> Tensor:
+    """Keep a PCG64 generator's position: its 128-bit state and increment."""
+    state = convert(rng.bit_generator.state, dict[str, object])
+    words = convert(state["state"], dict[str, int])
+    buffered = (convert(state["has_uint32"], int), convert(state["uinteger"], int))
+    return torch.tensor(
+        [*_u64_words(words["state"]), *_u64_words(words["inc"]), *buffered],
+        dtype=torch.uint64,
+    )
+
+
+def _u64_words(value: int) -> tuple[int, int]:
+    return value >> 64, value & ((1 << 64) - 1)
 
 
 def outcome(fn: Callable[[], object]) -> Leaf:
@@ -626,17 +638,9 @@ def scrub(value: Leaf, path: Path, name: str) -> Leaf:
 
 
 def put_tree(out: Capture, prefix: str, root: Path) -> None:
-    """Keep every file under ``root`` except the ensure completion marker."""
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.name == ".ensure_complete":
-            continue
-        key = f"{prefix}/{path.relative_to(root)}"
-        if path.suffix == ".npy":
-            out[key] = leaf(cast(object, np.load(path)))
-        elif path.suffix == ".json":
-            out[key] = path.read_text(encoding="utf-8")
-        else:
-            out[key] = leaf(path.read_bytes())
+    """Keep every array the builder wrote; its JSON follows from the config."""
+    for path in sorted(root.rglob("*.npy")):
+        out[f"{prefix}/{path.relative_to(root)}"] = leaf(cast(object, np.load(path)))
 
 
 def write_source(prefix: Path, *, with_solutions: bool = True) -> None:
@@ -716,8 +720,8 @@ def capture_grid_ops(b: Backend, tmp: Path) -> Capture:
             put(out, f"scale/{i}/{k}", b.scale_grid(grid, k))
         out[f"hash/{i}"] = b.grid_hash(grid)
         rows = [
-            ListCodec.coerce(row, int)
-            for row in ListCodec.coerce(cast(object, grid.tolist()))
+            convert(row, list[int])
+            for row in convert(cast(object, grid.tolist()), list[object])
         ]
         put(out, f"to_np/{i}", b.to_np(rows))
     rng = np.random.default_rng(3)
@@ -1230,7 +1234,6 @@ def capture_loader(b: Backend, tmp: Path) -> Capture:
                 *(loaded[k] for k in ("inputs", "labels", "puzzle_indices")),
                 *(loaded[k] for k in ("group_indices", "puzzle_identifiers")),
                 loaded["spatial_tags"],
-                loaded["metadata"],
             )
     return out
 
@@ -1275,7 +1278,7 @@ def capture_verify(b: Backend, tmp: Path) -> Capture:
     """Identifier-count verification over an existing tree, match and mismatch."""
     out: Capture = {}
     root = base_tree(b, tmp)
-    count = len(ListCodec.coerce(loads((root / "identifiers.json").read_text())))
+    count = len(parse((root / "identifiers.json").read_text(), list[object]))
     for name, expected in (("match", count), ("mismatch", count + 1)):
         target = tmp / f"verify-{name}"
         if not target.exists():
@@ -1347,12 +1350,12 @@ def put_results(out: Capture, prefix: str, results: Mapping[str, object]) -> Non
     """Keep each scalar result's exact repr, and the signal payload whole."""
     for name, value in results.items():
         if name != "extras":
-            out[f"{prefix}/{name}"] = repr(value)
+            out[f"{prefix}/{name}"] = leaf(value)
             continue
-        raw = DictCodec.coerce(value)["signal_dump"]
+        raw = convert(value, dict[str, object])["signal_dump"]
         assert isinstance(raw, tuple)
-        payload = ListCodec.coerce(list(cast("tuple[object, ...]", raw)))
-        grid_map = DictCodec.coerce(payload[1])
+        payload = convert(list(cast("tuple[object, ...]", raw)), list[object])
+        grid_map = convert(payload[1], dict[str, object])
         put(
             out,
             f"{prefix}/payload",
@@ -1386,22 +1389,19 @@ def assert_payload_implied(payload: object, path: Path) -> None:
     )
     pass_ks = cast("tuple[int, ...]", payload[3])
     with cast("NpzFile", np.load(path)) as npz:
-        groups = ListCodec.coerce(
+        groups = convert(
             cast(object, npz_array(npz, "group_table").tolist()),
-            str,
+            list[str],
         )
-        predictions = ListCodec.coerce(
+        predictions = convert(
             cast(object, npz_array(npz, "pred_table").tolist()),
-            str,
+            list[str],
         )
-        group_ids = ListCodec.coerce(
+        group_ids = convert(
             cast(object, npz_array(npz, "group_id").tolist()),
-            int,
+            list[int],
         )
-        pred_ids = ListCodec.coerce(
-            cast(object, npz_array(npz, "pred_id").tolist()),
-            int,
-        )
+        pred_ids = convert(cast(object, npz_array(npz, "pred_id").tolist()), list[int])
         assert [f"{row[0]}\t{row[1]}" for row in rows] == [
             groups[idx] for idx in group_ids
         ]
@@ -1419,13 +1419,13 @@ def assert_payload_implied(payload: object, path: Path) -> None:
                 equal_nan=True,
             )
         assert set(grids) == set(predictions)
-        pred_rows = ListCodec.coerce(
+        pred_rows = convert(
             cast(object, npz_array(npz, "pred_n_rows").tolist()),
-            int,
+            list[int],
         )
-        pred_cols = ListCodec.coerce(
+        pred_cols = convert(
             cast(object, npz_array(npz, "pred_n_cols").tolist()),
-            int,
+            list[int],
         )
         for index, name in enumerate(predictions):
             assert np.array_equal(
@@ -1438,7 +1438,7 @@ def assert_payload_implied(payload: object, path: Path) -> None:
             )
         assert (
             tuple(
-                ListCodec.coerce(cast(object, npz_array(npz, "pass_ks").tolist()), int),
+                convert(cast(object, npz_array(npz, "pass_ks").tolist()), list[int]),
             )
             == pass_ks
         )
@@ -1499,7 +1499,7 @@ def capture_metric(b: Backend, tmp: Path) -> Capture:
             put_results(out, key, results)
             restored = b.metric({**fields})
             restored.load_state_dict(
-                DictCodec.coerce(loads(json.dumps(metric.state_dict()))),
+                parse(json.dumps(metric.state_dict()), dict[str, object]),
             )
             put(
                 out,
@@ -1509,7 +1509,7 @@ def capture_metric(b: Backend, tmp: Path) -> Capture:
             extras = results.get("extras")
             if extras is not None:
                 path = tmp / f"dump-{key.replace('/', '_')}.npz"
-                payload = DictCodec.coerce(extras)["signal_dump"]
+                payload = convert(extras, dict[str, object])["signal_dump"]
                 b.write_dump(payload, path, 3)
                 put_npz(out, f"{key}/npz", path)
                 assert_payload_implied(payload, path)
@@ -1564,9 +1564,12 @@ def capture_metric(b: Backend, tmp: Path) -> Capture:
     put_results(out, "partial", partial.compute())
     no_tests = tmp / "no-tests-metric"
     shutil.copytree(root, no_tests, ignore=shutil.ignore_patterns("train", "test"))
-    puzzles = DictCodec.coerce(loads((no_tests / "test_puzzles.json").read_text()))
+    puzzles = parse(
+        (no_tests / "test_puzzles.json").read_text(),
+        dict[str, object],
+    )
     first = next(iter(puzzles))
-    puzzles[first] = {**DictCodec.coerce(puzzles[first]), "test": []}
+    puzzles[first] = {**convert(puzzles[first], dict[str, object]), "test": []}
     (no_tests / "test_puzzles.json").write_text(json.dumps(puzzles))
     put_results(out, "no_tests", b.metric({"working_dir": no_tests}).compute())
     out["error/codec_hash"] = outcome(lambda: b.encode({"t": {"short": []}}))
@@ -1661,7 +1664,7 @@ def load_golden() -> dict[str, Capture]:
     rows = record.pop("rows")
     text = record.pop("text")
     text_lengths = record.pop("text_lengths")
-    chunks = text.split(ListCodec.coerce(text_lengths.tolist(), int))
+    chunks = text.split(convert(text_lengths.tolist(), list[int]))
     table: dict[str, Capture] = {}
     for stored_key, value in record.items():
         key, _, dtype = stored_key.partition("@rows.")
@@ -1735,7 +1738,7 @@ def save_golden(table: Mapping[str, Capture], *, spec: ArcSpec) -> None:
 @pytest.fixture(scope="module")
 def golden_fixture(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Capture]:
     """Decode the frozen CAPTURES, minting small inputs from the port on request."""
-    if os.environ.get("BFB_REGENERATE") == "1":
+    if regenerate.b4b():
         spec = ArcSpec()
         spec.max_grid = 4
         backend = PortBackend(spec=spec)

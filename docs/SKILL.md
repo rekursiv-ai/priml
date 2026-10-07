@@ -382,7 +382,7 @@ possible once the child is a slot -- there is otherwise no child to set.
 
 The blessed nouns reserve the names for this (`norm`, `norm_qk`, `norm_out`:
 "normalization slots, named for their position"), and every peer already
-complies -- `TransformerBlock.norm1/norm2`, `SelfAttention.norm_qk/norm_out`,
+complies -- `TransformerBlock.norm1/norm2`, `Attention.norm_qk/norm_out`,
 `MLPMixerBlock.norm_token/norm_channel`, `SwiGLU.norm`. A module that builds a
 child while exposing NO `Makeable` slot has flattened its own subtree.
 
@@ -411,7 +411,7 @@ whether the parent RENAMES one quantity or DERIVES a different one:
 | Forward | Verdict |
 |---|---|
 | `rms_norm_eps` -> `RMSNorm.eps` | Violation: same number, second name. |
-| `num_key_value_heads` -> `SelfAttention.num_heads_kv` | Violation: priml disagreeing with itself. |
+| `num_key_value_heads` -> `Attention.num_heads_kv` | Violation: priml disagreeing with itself. |
 | `vocab_size` -> `Embedding.channels_in`, `Linear.channels_out` | Fine: one value, two ROLES. |
 | `q_lora_rank` -> `Linear.channels_in`, `RMSNorm.channels_in` | Fine: a rank sizes several tensors. |
 
@@ -725,11 +725,11 @@ never by copying the number.
 
 ### Pprint golden tests
 
-Use the public Configgle harness when a config's defaults and finalized
-propagation are part of its tested contract:
+Use priml's pprint harness when a config's defaults and finalized propagation
+are part of its tested contract:
 
 ```python
-from configgle.testing import assert_pprint_golden
+from priml.testing.golden import assert_pprint_golden
 
 
 def test_sandwich_config_pprint() -> None:
@@ -746,13 +746,13 @@ stores `testdata/<name>.txt` beside the test. After an intentional change, read
 the diff, regenerate, inspect the file, then rerun without regeneration:
 
 ```bash
-CONFIGGLE_REGENERATE_GOLDEN=1 uv --quiet run --frozen pytest <test_file>::<test_nodeid>
+uv --quiet run --frozen pytest <test_file>::<test_nodeid> --regenerate-golden
 uv --quiet run --frozen pytest <test_file>::<test_nodeid>
 ```
 
-Import from `configgle.testing`, never through a consumer package's testing
-facade. Do not call `pformat` manually at the callsite; the harness owns the
-full finalized rendering policy.
+Tensor goldens regenerate with `--regenerate-b4b` instead. Do not call
+`pformat` manually at the callsite; the harness owns the full finalized
+rendering policy.
 
 ### Bit-for-bit goldens
 

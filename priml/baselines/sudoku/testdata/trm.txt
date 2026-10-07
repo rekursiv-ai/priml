@@ -1,0 +1,92 @@
+TRM.Config(
+                vocab_size=5,
+                puzzle_grid_shape=(2, 3),
+                channels_in=12,
+                num_layers=1,
+                num_heads=3,
+                slow_cycles=2,
+                fast_cycles=2,
+                q_head_outputs=2,
+                num_puzzle_identifiers=2,
+                puzzle_emb_len=2,
+                puzzle_emb_ndim=12,
+                puzzle_emb_batch_size=2,
+                puzzle_emb_init_std=0.0,
+                pos2d_grid_shape=(2, 3),
+                pos2d_box_shape=(2, 1),
+                pos2d_init_std=1.0,
+                feedback_init_std=0.0,
+                compile=False,
+                dtype=None,
+                block=TransformerBlock.Config(
+                │       channels_in=12,
+                │       channels_out=12,
+                │       attn=Attention.Config(
+                │               channels_in=12,
+                │               channels_out=12,
+                │               num_heads=3,
+                │               channels_head=4,
+                │               num_heads_kv=3,
+                │               bias=False,
+                │               dropout=0.0,
+                │               causal=False,
+                │               rope=None,
+                │               norm_qk=RMSNorm.Config(
+                │                       channels_in=4,
+                │                       channels_out=4,
+                │                       eps=1e-06,
+                │                       elementwise_affine=False,
+                │                       device=None,
+                │                       dtype=None
+                │               ),
+                │               share_qk_norm=True,
+                │               norm_out=None,
+                │               split_qkv_projection=False,
+                │               init_weight=<function priml.baselines.sudoku.trm.trm_truncated_normal_corrected at 0xdefacedeface>,
+                │               depth_index=(),
+                │               attn_kernel=SdpaFused.Config()
+                │       ),
+                │       ffn=SwiGLU.Config(
+                │               channels_in=12,
+                │               channels_out=12,
+                │               channels_hidden=256,
+                │               expansion=2.6666666666666665,
+                │               round_to=256,
+                │               gate=True,
+                │               bias=False,
+                │               split_gate_projection=False,
+                │               norm=RMSNorm.Config(
+                │                       channels_in=256,
+                │                       channels_out=256,
+                │                       eps=1e-06,
+                │                       elementwise_affine=False,
+                │                       device=None,
+                │                       dtype=None
+                │               ),
+                │               act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │               depth_index=(),
+                │               init_weight=<function priml.baselines.sudoku.trm.trm_truncated_normal_corrected at 0xdefacedeface>,
+                │               init_weight_out=<function priml.baselines.sudoku.trm.trm_truncated_normal_corrected at 0xdefacedeface>,
+                │               shard='colwise'
+                │       ),
+                │       norm1=RMSNorm.Config(
+                │               channels_in=12,
+                │               channels_out=12,
+                │               eps=1e-05,
+                │               elementwise_affine=False,
+                │               device=None,
+                │               dtype=None
+                │       ),
+                │       norm2=RMSNorm.Config(
+                │               channels_in=12,
+                │               channels_out=12,
+                │               eps=1e-05,
+                │               elementwise_affine=False,
+                │               device=None,
+                │               dtype=None
+                │       ),
+                │       prenorm=False,
+                │       checkpoint=False,
+                │       depth_index=()
+                )
+        )

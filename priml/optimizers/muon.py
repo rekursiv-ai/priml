@@ -14,7 +14,7 @@ from torch.optim import Optimizer
 
 import torch
 
-from priml.lib.custom_json import BoolCodec, FloatCodec, IntCodec
+from priml.lib.custom_json import convert
 from priml.math.numeric import matrix_signum_via_newtonschulz
 
 
@@ -59,7 +59,7 @@ def adjust_lr_match_rms_adamw(
     Args:
       lr: Base learning rate to scale.
       param: Parameter tensor whose shape determines the scaling factor.
-      ensemble_dims: Trailing axes to fold away (0 = no ensemble axes).
+      ensemble_dims: Leading axes to fold away (0 = no ensemble axes).
 
     Returns:
       result: Scaled learning rate matching AdamW's update norm.
@@ -82,7 +82,7 @@ def adjust_lr_conv_heuristic(
     Args:
       lr: Base learning rate to scale.
       param: Parameter tensor whose norm determines scaling.
-      ensemble_dims: Trailing axes to fold away (0 = no ensemble axes).
+      ensemble_dims: Leading axes to fold away (0 = no ensemble axes).
 
     Returns:
       result: Scaled LR as 0-dim tensor on param's device (avoids sync).
@@ -121,6 +121,10 @@ class Muon(Optimizer):
         :meth:`step` raises on anything lower-rank. This is the algorithm's own
         constraint; a recipe that also wants the classifier head left out
         composes ``excluding(Muon.eligible_tensor, "head")``.
+
+        States the ``ensemble_dims=0`` rule: a selector sees no optimizer
+        config, so a member with ``ensemble_dims=k`` must route only rank
+        ``>= k + 2`` parameters to itself, and :meth:`step` raises otherwise.
 
         Args:
           name: Qualified parameter name, as ``named_parameters`` reports it.
@@ -170,7 +174,10 @@ class Muon(Optimizer):
         """Rescales the step for a parameter's shape; see :data:`AdjustLrFn`."""
 
         ensemble_dims: int = 0
-        """Leading dimensions treated as an ensemble, not as matrix axes."""
+        """Leading dimensions treated as an ensemble, not as matrix axes.
+
+        The next axis is fan-out and the rest fold into fan-in, so a
+        parameter needs rank ``>= ensemble_dims + 2``."""
 
         @override
         def make(self) -> Callable[..., Muon]:
@@ -204,15 +211,25 @@ class Muon(Optimizer):
         reference_numerics: bool = False,
         adjust_lr_fn: AdjustLrFn = adjust_lr_original,
         ensemble_dims: int = 0,
-    ):
-        if lr < 0.0:
-            raise ValueError(f"Invalid learning rate: {lr}")
-        if momentum < 0.0:
-            raise ValueError(f"Invalid momentum: {momentum}")
-        if weight_decay is not None and weight_decay < 0.0:
-            raise ValueError(f"Invalid weight_decay: {weight_decay}")
+    ) -> None:
+        if not math.isfinite(lr) or lr < 0.0:
+            raise ValueError(f"Learning rate must be finite and nonnegative: {lr}.")
+        if not math.isfinite(momentum) or momentum < 0.0 or momentum >= 1.0:
+            raise ValueError(f"Momentum must be finite and lie in [0, 1): {momentum}.")
+        if weight_decay is not None and (
+            not math.isfinite(weight_decay) or weight_decay < 0.0
+        ):
+            raise ValueError(
+                f"Weight decay must be finite and nonnegative: {weight_decay}.",
+            )
         if nesterov and momentum <= 0:
             raise ValueError("Nesterov momentum requires momentum > 0")
+        if not math.isfinite(eps) or eps <= 0.0:
+            raise ValueError(f"Epsilon must be finite and positive: {eps}.")
+        if ns_steps < 1:
+            raise ValueError(f"Invalid ns_steps: {ns_steps}; must be >= 1.")
+        if ensemble_dims < 0:
+            raise ValueError(f"Invalid ensemble_dims: {ensemble_dims}; must be >= 0.")
         # Held on the optimizer, NOT in ``defaults``: every default lands in
         # ``param_groups``, which ``state_dict`` serializes, and a checkpoint
         # written under ``weights_only=True`` cannot carry a function. The rule
@@ -255,31 +272,28 @@ class Muon(Optimizer):
         return loss
 
     def _step_group(self, group: dict[str, object]) -> None:
-        lr = FloatCodec.coerce(group["lr"], None)
+        lr = convert(group["lr"], float)
         weight_decay = (
             None
             if group["weight_decay"] is None
-            else FloatCodec.coerce(group["weight_decay"], None)
+            else convert(group["weight_decay"], float)
         )
-        momentum = FloatCodec.coerce(group["momentum"], None)
-        nesterov = BoolCodec.coerce(group["nesterov"], None)
-        ns_coefficients = group["ns_coefficients"]
-        assert isinstance(ns_coefficients, tuple)
-        ns_coefficients = cast(tuple[float, float, float], ns_coefficients)
-        if len(ns_coefficients) != 3:
-            raise ValueError("Expected len(ns_coefficients) == 3.")
-        eps = FloatCodec.coerce(group["eps"], None)
-        ns_steps = IntCodec.coerce(group["ns_steps"], None)
-        reference_numerics = BoolCodec.coerce(group["reference_numerics"], None)
-        ensemble_dims = IntCodec.coerce(group["ensemble_dims"], None)
+        momentum = convert(group["momentum"], float)
+        nesterov = convert(group["nesterov"], bool)
+        ns_coefficients = convert(group["ns_coefficients"], tuple[float, float, float])
+        eps = convert(group["eps"], float)
+        ns_steps = convert(group["ns_steps"], int)
+        reference_numerics = convert(group["reference_numerics"], bool)
+        ensemble_dims = convert(group["ensemble_dims"], int)
 
         for p in cast(list[Tensor], group["params"]):
             g = p.grad
             if g is None:
                 continue
-            if g.ndim < 2:
+            if g.ndim < ensemble_dims + 2:
                 raise ValueError(
-                    f"Muon requires ndim >= 2, got shape {p.shape}.",
+                    f"Muon requires ndim >= {ensemble_dims + 2} "
+                    f"(ensemble_dims={ensemble_dims}), got shape {p.shape}.",
                 )
 
             state = cast(dict[str, object], self.state[p])

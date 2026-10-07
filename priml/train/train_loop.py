@@ -31,15 +31,15 @@ import sys
 import threading
 import time
 
-from configgle import Fig, Makeable
+from configgle import Fig, Makeable, traverse
 from torch import Tensor
 
 import torch
-import torch.distributed
+import torch.distributed as dist
 
 from priml.data.custom_types import DatasetProtocol
 from priml.data.dummy import DummyDataset
-from priml.lib.custom_json import IntCodec
+from priml.lib.custom_json import convert
 
 
 if TYPE_CHECKING:
@@ -50,6 +50,7 @@ if TYPE_CHECKING:
 from priml.custom_types import (
     HasNormalizedWorkingDirPattern,
 )
+from priml.math.distributed import collective_device
 from priml.math.seed import (
     RngState,
     get_rng_state,
@@ -274,13 +275,6 @@ class TrainLoop:
                     and part.base_dir is None
                 ):
                     part.base_dir = self.working_dir
-            placement = getattr(self.step, "parallelism", None)
-            if (
-                isinstance(self.runtime, _DeclaresDevice)
-                and isinstance(placement, _DeclaresDevice)
-                and placement.device is None
-            ):
-                placement.device = self.runtime.device
             for metric in (*self.metrics_train.values(), *self.metrics_eval.values()):
                 if (
                     not isinstance(metric, HasNormalizedWorkingDirPattern)
@@ -319,6 +313,20 @@ class TrainLoop:
         self._runtime_destroyed = False
         if self._owns_runtime:
             self.runtime.initialize()
+        # Children left at ``device=None`` take the runtime's; every TrainStep in
+        # the tree, so a GAN's sub-steps place where a plain step does.
+        for child in (
+            config.dataset,
+            *config.metrics_train.values(),
+            *config.metrics_eval.values(),
+            getattr(config.step, "parallelism", None),
+            *(
+                match.config.parallelism
+                for match in traverse(config.step, TrainStep.Config, recurse=True)
+            ),
+        ):
+            if isinstance(child, _DeclaresDevice) and child.device is None:
+                child.device = self.runtime.device
 
         self.checkpointer: CheckpointerProtocol | None = None
         self.tracker: TrackerProtocol | None = None
@@ -343,23 +351,30 @@ class TrainLoop:
                 base_seed = set_seed_local(config.seed)
 
             self.phase_timer = config.phase_timer.make()
-            with self.phase_timer.phase("model_init"):
+            with (
+                self.phase_timer.phase("model_init"),
+                torch.device(self.runtime.device),
+            ):
                 self.step = config.step.make()
             if isinstance(self.step, Closeable):
                 self._close_step = self.step.close
             if isinstance(self.step, _HasTimer):
                 self.step.timer = self.phase_timer
-            self.metrics_train = {
-                name: cfg.make() for name, cfg in config.metrics_train.items()
-            }
+            self.metrics_train: dict[str, MetricProtocol] = {}
+            self.metrics_eval: dict[str, MetricProtocol] = {}
+            for metrics, configs in (
+                (self.metrics_train, config.metrics_train),
+                (self.metrics_eval, config.metrics_eval),
+            ):
+                for name, cfg in configs.items():
+                    device = cfg.device if isinstance(cfg, _DeclaresDevice) else None
+                    with torch.device(device or self.runtime.device):
+                        metrics[name] = cfg.make()
             self._requires_device_timing = self.runtime.device.type != "cpu" and any(
                 isinstance(metric, RequiresDeviceTiming)
                 and metric.requires_device_timing
                 for metric in self.metrics_train.values()
             )
-            self.metrics_eval = {
-                name: cfg.make() for name, cfg in config.metrics_eval.items()
-            }
 
             if mesh:
                 data_local_rank = mesh[config.mesh_dim_data_seed].get_local_rank()
@@ -370,7 +385,15 @@ class TrainLoop:
                         salt(config.mesh_dim_data_seed, base_seed),
                     ),
                 )
-            with self.phase_timer.phase("data_load"):
+            device = (
+                config.dataset.device
+                if isinstance(config.dataset, _DeclaresDevice)
+                else None
+            )
+            with (
+                self.phase_timer.phase("data_load"),
+                torch.device(device or self.runtime.device),
+            ):
                 self.dataset = config.dataset.make()
             _bind_dataset_step(self.dataset, self.step)
             # Dataset and step share one checkpointed epoch counter.
@@ -530,10 +553,7 @@ class TrainLoop:
 
     def _save_after_evaluation_error(self, *, is_final: bool) -> None:
         """Attempt the scheduled save without masking an evaluation error."""
-        if (
-            torch.distributed.is_initialized()
-            and torch.distributed.get_world_size() > 1
-        ):
+        if dist.is_initialized() and dist.get_world_size() > 1:
             return
         if self.checkpointer is None:
             return
@@ -574,18 +594,15 @@ class TrainLoop:
         """Whether the ``max_time`` cap has elapsed, agreed by all ranks."""
         if self.max_time == math.inf:
             return False
-        if not torch.distributed.is_initialized():
+        if not dist.is_initialized():
             return self._max_time_elapsed() >= self.max_time
         if self._time_limit_latched:
             return True
         if self.step.global_step % self.num_steps_log != 0:
             return False
         over = is_rank_zero() and self._max_time_elapsed() >= self.max_time
-        flag = torch.tensor(
-            1.0 if over else 0.0,
-            device="cuda" if torch.cuda.is_available() else "cpu",
-        )
-        torch.distributed.broadcast(flag, src=0)
+        flag = torch.tensor(1.0 if over else 0.0, device=collective_device())
+        dist.broadcast(flag, src=0)
         reached = bool(flag.item() > 0.0)
         if reached:
             self._time_limit_latched = True
@@ -636,16 +653,13 @@ class TrainLoop:
         """Whether eval's wall-clock cap elapsed, agreed by all ranks."""
         if self.max_eval_time == math.inf:
             return False
-        if not torch.distributed.is_initialized():
+        if not dist.is_initialized():
             return time.perf_counter() - eval_start > self.max_eval_time
         over = is_rank_zero() and (
             time.perf_counter() - eval_start > self.max_eval_time
         )
-        flag = torch.tensor(
-            1.0 if over else 0.0,
-            device="cuda" if torch.cuda.is_available() else "cpu",
-        )
-        torch.distributed.broadcast(flag, src=0)
+        flag = torch.tensor(1.0 if over else 0.0, device=collective_device())
+        dist.broadcast(flag, src=0)
         return bool(flag.item() > 0.0)
 
     def _check_eval_deadline(self, eval_start: float) -> None:
@@ -768,6 +782,7 @@ class TrainLoop:
                     self._on_epoch_boundary()
                     if self.current_epoch >= self.max_epochs:
                         raise
+                _require_another_pass(self.train_loader, dataset=self.dataset)
                 _set_loader_epoch(self.train_loader, self.current_epoch)
                 self.train_iter = iter(self.train_loader)
         raise RuntimeError("Failed to get next batch after epoch reset")
@@ -859,9 +874,9 @@ class TrainLoop:
                 *(value.mean().detach() for _, value in tensor_metrics),
             ],
         )
-        if torch.distributed.is_initialized():
-            torch.distributed.all_reduce(reduced_values)
-            reduced_values = reduced_values / torch.distributed.get_world_size()
+        if dist.is_initialized():
+            dist.all_reduce(reduced_values)
+            reduced_values = reduced_values / dist.get_world_size()
         # Metric computation may itself be collective.
         train_metrics = self._compute_train_metrics()
         if not is_rank_zero():
@@ -900,11 +915,14 @@ class TrainLoop:
                 **step_metrics,
                 **train_metrics,
             }
-            if torch.cuda.is_available():
+            device = self.runtime.device
+            if device.type == "cuda":
                 metrics["gpu_mem_allocated_gb"] = (
-                    torch.cuda.max_memory_allocated() / 1e9
+                    torch.cuda.max_memory_allocated(device) / 1e9
                 )
-                metrics["gpu_mem_reserved_gb"] = torch.cuda.max_memory_reserved() / 1e9
+                metrics["gpu_mem_reserved_gb"] = (
+                    torch.cuda.max_memory_reserved(device) / 1e9
+                )
             self.tracker.log_metrics(metrics, self.step.global_step, prefix="train/")
 
     def _compute_train_metrics(self) -> dict[str, float]:
@@ -926,8 +944,8 @@ class TrainLoop:
             return
         gc_start = time.perf_counter()
         gc.collect()
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier()
+        if dist.is_initialized():
+            dist.barrier()
         gc_time = time.perf_counter() - gc_start
         logger.info("GC at local_step %s (gc_time=%.3fs)", self.local_step, gc_time)
 
@@ -1126,7 +1144,11 @@ class TrainLoop:
             batch = self.step.preprocess_batch(
                 {str(key): value for key, value in raw_batch.items()},
             )
-            weight = IntCodec.coerce(batch.get("valid_count", 1))
+            # A collated batch carries its count as a 0-d tensor.
+            count = batch.get("valid_count", 1)
+            weight = (
+                int(count.item()) if isinstance(count, Tensor) else convert(count, int)
+            )
             if weight == 0:
                 batch_start = time.perf_counter()
                 continue
@@ -1292,11 +1314,7 @@ def _finish_resources(actions: Iterable[Callable[[], object]]) -> None:
 
 @runtime_checkable
 class _DeclaresDevice(Protocol):
-    """A config naming the device its component uses.
-
-    Both the runtime's and the placement strategy's, so the loop can hand the
-    first's answer to the second without either importing the other.
-    """
+    """A config naming the device its component is built on."""
 
     device: torch.device | str | None
 
@@ -1350,6 +1368,18 @@ def _loader_length(loader: object) -> int:
         return 0
 
 
+# Checked when the second pass would START, not when the loader is built: a stream
+# that never ends never reaches here, so an endless generator stays legal.
+def _require_another_pass(loader: Iterable[object], *, dataset: object) -> None:
+    """Refuse to restart a loader that is its own, now exhausted, iterator."""
+    if isinstance(loader, Iterator) and iter(loader) is loader:
+        raise TypeError(
+            f"{type(dataset).__qualname__}.train_dataloader() returned a one-shot "
+            f"{type(loader).__qualname__}, which has no second pass to start. "
+            "Return a re-iterable, e.g. priml.data.passes.Passes.",
+        )
+
+
 def _set_loader_epoch(loader: object, epoch: int) -> None:
     """Inform the loader's dataset of the current epoch before (re)iteration."""
     dataset = getattr(loader, "dataset", None)
@@ -1359,10 +1389,10 @@ def _set_loader_epoch(loader: object, epoch: int) -> None:
 
 def _barrier_if_distributed(stage: str) -> None:
     """Synchronize ranks after a startup stage that can be rank-skewed."""
-    if not torch.distributed.is_initialized():
+    if not dist.is_initialized():
         return
     logger.info("TrainLoop startup: waiting after %s.", stage)
-    torch.distributed.barrier()
+    dist.barrier()
     logger.info("TrainLoop startup: all ranks passed %s.", stage)
 
 
@@ -1395,8 +1425,8 @@ def _compile_heartbeat(label: str, *, interval_sec: float = 30.0) -> Generator[N
 
 def _current_rank() -> int:
     """Global rank, or 0 when distributed is not initialized."""
-    if torch.distributed.is_initialized():
-        return torch.distributed.get_rank()
+    if dist.is_initialized():
+        return dist.get_rank()
     return 0
 
 

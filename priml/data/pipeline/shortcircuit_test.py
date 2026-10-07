@@ -3,10 +3,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
+import gc
 import threading
-import time
+import weakref
 
 from configgle import Fig
+
+import pytest
 
 from priml.data.pipeline.shortcircuit import (
     FilterStats,
@@ -19,7 +22,11 @@ if TYPE_CHECKING:
 
 
 class MockProcessor:
-    """Mock processor for testing."""
+    """Mock filter: removes ``drop_keys`` and tags the rest with ``add_reason``.
+
+    Both paths record a reason, as the processor contract asks; a tagged
+    sample is filtered, so it too counts as a drop.
+    """
 
     class Config(Fig["MockProcessor"]):
         drop_keys: list[str] | None = None
@@ -36,7 +43,7 @@ class MockProcessor:
         for sample in samples:
             key = sample.get("key")
             if key in self.drop_keys:
-                # Drop this sample (don't yield)
+                sample["filter_reasons"] = ["removed"]
                 continue
             # Add filter reason to passed samples.
             filter_reasons_val = sample.get("filter_reasons")
@@ -47,6 +54,11 @@ class MockProcessor:
             filter_reasons.append(self.add_reason)
             sample["filter_reasons"] = filter_reasons
             yield sample
+
+
+def test_short_circuit_requires_processor_with_exact_error() -> None:
+    with pytest.raises(ValueError, match=r"^Must specify `processor`\.$"):
+        ShortCircuitProcessor(ShortCircuitProcessor.Config(processor=None))
 
 
 class EverySecondProcessor:
@@ -130,21 +142,22 @@ def test_filter_stats_initialization():
     assert stats.drop_reasons == {}
 
 
-def test_filter_stats_should_log():
-    """Test FilterStats._should_log method."""
-    config = FilterStats.Config(log_interval_sec=1.0)
-    stats = FilterStats(config)
+def test_filter_stats_throttle_and_force_logging():
+    stats = FilterStats(FilterStats.Config(log_interval_sec=1.0))
+    with patch("priml.data.pipeline.shortcircuit.time.time", return_value=10.0):
+        stats.last_log_time = 10.0
+        with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+            stats.log_statistics()
+        assert logger_mock.info.call_count == 0
 
-    # Force should log.
-    assert stats._should_log(force=True) is True
+        with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+            stats.log_statistics(force=True)
+        assert logger_mock.info.call_count == 1
 
-    # Before interval.
-    stats.last_log_time = time.time()
-    assert stats._should_log(force=False) is False
-
-    # After interval.
-    stats.last_log_time = time.time() - 2.0
-    assert stats._should_log(force=False) is True
+        stats.last_log_time = 8.0
+        with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+            stats.log_statistics()
+        assert logger_mock.info.call_count == 1
 
 
 def test_filter_stats_public_mutators():
@@ -207,10 +220,14 @@ def test_short_circuit_processor_drop():
     assert result[0]["key"] == "sample1"
     assert result[1]["key"] == "sample3"
 
-    # Check stats.
+    # Check stats: one removed, two tagged; all three were filtered here.
     assert processor.stats.samples_processed == 3
-    assert processor.stats.samples_dropped == 1
-    assert processor.stats.processor_drops["MockProcessor"] == 1
+    assert processor.stats.samples_dropped == 3
+    assert processor.stats.processor_drops["MockProcessor"] == 3
+    assert processor.stats.drop_reasons["MockProcessor"] == {
+        "removed": 1,
+        "test_reason": 2,
+    }
 
 
 def test_short_circuit_processor_skip_filtered():
@@ -237,10 +254,10 @@ def test_short_circuit_processor_skip_filtered():
     assert "already_filtered" in filter_reasons_1
     assert "test_reason" in filter_reasons_2
 
-    # Check stats.
+    # Check stats: the two fed samples were tagged, the skipped one was not fed.
     assert processor.stats.samples_processed == 3
     assert processor.stats.samples_skipped == 1
-    assert processor.stats.samples_dropped == 0
+    assert processor.stats.samples_dropped == 2
 
 
 def test_short_circuit_processor_drop_reasons():
@@ -300,9 +317,9 @@ def test_short_circuit_processor_threading():
     for t in threads:
         t.join()
 
-    # All threads processed 2 samples each.
+    # All threads processed 2 samples each; MockProcessor filters both.
     assert processor.stats.samples_processed == 20
-    assert processor.stats.samples_dropped == 10
+    assert processor.stats.samples_dropped == 20
 
 
 def test_short_circuit_processor_logging():
@@ -320,8 +337,23 @@ def test_short_circuit_processor_logging():
 
         list(processor(iter(samples)))
 
-        # Check debug log was called for dropped sample.
-        assert mock_logger.debug.call_count >= 1
+        assert [call.args for call in mock_logger.debug.call_args_list] == [
+            ("%s: dropped a sample", "MockProcessor"),
+        ] * 2
+
+
+def test_short_circuit_logs_each_skipped_sample():
+    config = ShortCircuitProcessor.Config(processor=MockProcessor.Config())
+    with patch("priml.data.pipeline.shortcircuit.logger") as mock_logger:
+        processor = ShortCircuitProcessor(config)
+        samples: list[dict[str, object]] = [{"key": "k", "filter_reasons": ["old"]}]
+        list(processor(iter(samples)))
+    mock_logger.debug.assert_called_once_with(
+        "%s: skipping filtered sample (key=%s, reasons=%s)",
+        "MockProcessor",
+        "k",
+        ["old"],
+    )
 
 
 def test_short_circuit_processor_custom_stats_config():
@@ -448,6 +480,323 @@ def test_short_circuit_does_not_false_drop_new_dict_passthrough():
         f"new-dict pass-through falsely recorded "
         f"{processor.stats.samples_dropped} drops"
     )
+
+
+class _Sample(dict[str, object]):
+    """A dict that supports weak references, to observe what stays alive."""
+
+
+def test_short_circuit_releases_consumed_samples():
+    """Samples already yielded downstream are not retained by the wrapper.
+
+    Retaining every fed sample held each one's payload (e.g. JPEG bytes) for
+    the whole epoch: ImageNet training grew ~125 KB/image per loader worker.
+    """
+    config = ShortCircuitProcessor.Config(processor=NewDictPassThrough.Config())
+    processor = ShortCircuitProcessor(config)
+    refs: list[weakref.ref[_Sample]] = []
+    outputs = processor(_tracked_samples(4, refs))
+    next(outputs)
+    next(outputs)
+    gc.collect()
+    assert refs[0]() is None
+
+
+def _tracked_samples(
+    count: int,
+    refs: list[weakref.ref[_Sample]],
+) -> Iterator[dict[str, object]]:
+    """Yield fresh samples, recording a weak reference to each."""
+    for index in range(count):
+        sample = _Sample(key=f"s{index}")
+        refs.append(weakref.ref(sample))
+        yield sample
+        del sample
+
+
+class MalformedReasonDropper:
+    """Drop every sample after tagging it with one valid and one invalid reason."""
+
+    class Config(Fig["MalformedReasonDropper"]):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def __call__(
+        self,
+        samples: Iterator[dict[str, object]],
+    ) -> Iterator[dict[str, object]]:
+        for sample in samples:
+            sample["filter_reasons"] = ["blurry", 7]
+        yield from ()
+
+
+def test_short_circuit_records_only_string_drop_reasons():
+    config = ShortCircuitProcessor.Config(processor=MalformedReasonDropper.Config())
+    processor = ShortCircuitProcessor(config)
+    samples: list[dict[str, object]] = [{"key": "a"}, {"key": "b"}]
+    assert list(processor(iter(samples))) == []
+    assert processor.stats.processor_drops == {"MalformedReasonDropper": 2}
+    assert processor.stats.drop_reasons == {"MalformedReasonDropper": {"blurry": 2}}
+
+
+def test_filter_stats_logs_exact_summary_and_throughput() -> None:
+    clock = "priml.data.pipeline.shortcircuit.time.time"
+    with patch(clock, return_value=10.0):
+        stats = FilterStats.Config(log_interval_sec=30.0).make()
+    stats.samples_processed = 7
+    stats.samples_skipped = 2
+    stats.samples_dropped = 1
+    stats.last_processed_count = 3
+
+    with (
+        patch(clock, return_value=12.0),
+        patch("priml.data.pipeline.shortcircuit.logger") as logger_mock,
+    ):
+        stats._log_summary()
+
+    assert logger_mock.info.call_args.args == (
+        (
+            "Pipeline stats: Total=7, Processed=5, Skipped=2 (already filtered), "
+            "Dropped=1 (filtered by any processor), Rate=2.0 samples/sec"
+        ),
+    )
+    assert stats.last_processed_count == 7
+
+    # No time elapsed since the last log: no rate to report.
+    stats.last_processed_count = 3
+    with (
+        patch(clock, return_value=12.0),
+        patch("priml.data.pipeline.shortcircuit.logger") as logger_mock,
+    ):
+        stats._log_summary()
+    assert logger_mock.info.call_args.args == (
+        (
+            "Pipeline stats: Total=7, Processed=5, Skipped=2 (already filtered), "
+            "Dropped=1 (filtered by any processor), Rate=0.0 samples/sec"
+        ),
+    )
+
+    stats.last_processed_count = 3
+    with (
+        patch(clock, return_value=13.0),
+        patch("priml.data.pipeline.shortcircuit.logger") as logger_mock,
+    ):
+        stats._log_summary()
+    assert logger_mock.info.call_args.args == (
+        (
+            "Pipeline stats: Total=7, Processed=5, Skipped=2 (already filtered), "
+            "Dropped=1 (filtered by any processor), Rate=4.0 samples/sec"
+        ),
+    )
+
+
+def test_filter_stats_logs_sorted_top_drop_reasons() -> None:
+    stats = FilterStats(FilterStats.Config(top_n_processors=2))
+    stats.drop_reasons = {
+        "Alpha": {"z": 1, "a": 2},
+        "Beta": {"only": 2},
+        "Gamma": {"ignored": 1},
+    }
+
+    with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+        stats._log_drop_reasons()
+
+    assert [call.args for call in logger_mock.info.call_args_list] == [
+        ("%s drop reasons: %s", "Alpha", "a=2, z=1"),
+        ("%s drop reasons: %s", "Beta", "only=2"),
+    ]
+
+
+def test_filter_stats_logs_sorted_processor_drop_counts() -> None:
+    stats = FilterStats(FilterStats.Config())
+    stats.processor_drops = {"Zeta": 1, "Alpha": 2}
+
+    with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+        stats._log_processor_drops()
+
+    assert logger_mock.info.call_args.args == (
+        "Drops by processor: %s",
+        "Alpha=2, Zeta=1",
+    )
+
+
+def test_filter_stats_throttle_boundary_and_repeated_counts() -> None:
+    stats = FilterStats(FilterStats.Config(log_interval_sec=2.0))
+    stats.record_skipped()
+    stats.record_skipped()
+    with patch("priml.data.pipeline.shortcircuit.time.time", return_value=10.0):
+        stats.last_log_time = 8.0
+        with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+            stats.log_statistics()
+        assert logger_mock.info.call_count == 1
+        assert stats.last_log_time == 10.0
+        assert stats.samples_skipped == 2
+
+        stats.last_log_time = 10.0
+        with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+            stats.log_statistics(force=True)
+        assert logger_mock.info.call_count == 1
+
+
+def test_short_circuit_logs_filtered_sample_and_drop_details() -> None:
+    processor = ShortCircuitProcessor(
+        ShortCircuitProcessor.Config(
+            processor=MockProcessor.Config(drop_keys=["drop"]),
+        ),
+    )
+    samples: list[dict[str, object]] = [
+        {"key": "filtered", "filter_reasons": ["old"]},
+        {"key": "drop"},
+    ]
+
+    with patch("priml.data.pipeline.shortcircuit.logger") as logger_mock:
+        result = list(processor(iter(samples)))
+
+    assert result == [samples[0]]
+    assert [call.args for call in logger_mock.debug.call_args_list] == [
+        (
+            "%s: skipping filtered sample (key=%s, reasons=%s)",
+            "MockProcessor",
+            "filtered",
+            ["old"],
+        ),
+        ("%s: dropped a sample", "MockProcessor"),
+    ]
+    assert processor.stats.samples_processed == 2
+    assert processor.stats.samples_skipped == 1
+    assert processor.stats.samples_dropped == 1
+    assert processor.stats.processor_drops == {"MockProcessor": 1}
+    assert processor.stats.drop_reasons == {"MockProcessor": {"removed": 1}}
+
+
+def test_filter_stats_initial_time_fields_are_initialized() -> None:
+    with patch("priml.data.pipeline.shortcircuit.time.time", return_value=12.5):
+        stats = FilterStats(FilterStats.Config())
+
+    assert stats.last_log_time == 0.0
+    assert stats.start_time == 12.5
+    assert stats.last_processed_count == 0
+
+
+class Annotator:
+    """Filter that annotates and yields, as every real filter does."""
+
+    class Config(Fig["Annotator"]):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def __call__(
+        self,
+        samples: Iterator[dict[str, object]],
+    ) -> Iterator[dict[str, object]]:
+        for sample in samples:
+            if sample["key"] == "short":
+                sample["filter_reasons"] = ["Annotator:short"]
+            yield sample
+
+
+class Pairer:
+    """N->1 stage: one output per two inputs, no filtering."""
+
+    class Config(Fig["Pairer"]):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def __call__(
+        self,
+        samples: Iterator[dict[str, object]],
+    ) -> Iterator[dict[str, object]]:
+        held: list[object] = []
+        for sample in samples:
+            held.append(sample["key"])
+            if len(held) == 2:
+                yield {"keys": held}
+                held = []
+
+
+def test_short_circuit_counts_an_annotated_sample_as_a_drop() -> None:
+    processor = ShortCircuitProcessor(
+        ShortCircuitProcessor.Config(processor=Annotator.Config()),
+    )
+    samples: list[dict[str, object]] = [{"key": "short"}, {"key": "ok"}]
+
+    assert len(list(processor(iter(samples)))) == 2
+    assert processor.stats.samples_dropped == 1
+    assert processor.stats.drop_reasons == {"Annotator": {"Annotator:short": 1}}
+
+
+def test_short_circuit_counts_no_drops_for_an_n_to_1_stage() -> None:
+    processor = ShortCircuitProcessor(
+        ShortCircuitProcessor.Config(processor=Pairer.Config()),
+    )
+    samples: list[dict[str, object]] = [{"key": "a"}, {"key": "b"}]
+
+    assert list(processor(iter(samples))) == [{"keys": ["a", "b"]}]
+    assert processor.stats.samples_dropped == 0
+
+
+def test_short_circuit_attributes_each_drop_to_its_own_reasons() -> None:
+    class Swallower:
+        class Config(Fig["Swallower"]):
+            pass
+
+        def __init__(self, config: Config) -> None:
+            del config
+
+        def __call__(
+            self,
+            samples: Iterator[dict[str, object]],
+        ) -> Iterator[dict[str, object]]:
+            for sample in samples:
+                sample["filter_reasons"] = [f"why:{sample['key']}"]
+            yield from ()
+
+    processor = ShortCircuitProcessor(
+        ShortCircuitProcessor.Config(processor=Swallower.Config()),
+    )
+    samples: list[dict[str, object]] = [{"key": "a"}, {"key": "b"}]
+
+    assert list(processor(iter(samples))) == []
+    assert processor.stats.drop_reasons == {"Swallower": {"why:a": 1, "why:b": 1}}
+
+
+def test_filter_stats_rate_divides_by_elapsed_time() -> None:
+    with patch("priml.data.pipeline.shortcircuit.time.time", return_value=100.0):
+        stats = FilterStats(FilterStats.Config(log_interval_sec=30.0))
+    stats.samples_processed = 50
+    with (
+        patch("priml.data.pipeline.shortcircuit.time.time", return_value=110.0),
+        patch("priml.data.pipeline.shortcircuit.logger") as logger_mock,
+    ):
+        stats.log_statistics(force=True)
+
+    message = logger_mock.info.call_args_list[0].args[0]
+    assert isinstance(message, str)
+    assert "Rate=5.0 samples/sec" in message
+
+
+def test_short_circuit_logs_mid_stream_once_the_interval_passes() -> None:
+    clock = "priml.data.pipeline.shortcircuit.time.time"
+    with patch(clock, return_value=0.0):
+        processor = ShortCircuitProcessor(
+            ShortCircuitProcessor.Config(processor=Annotator.Config()),
+        )
+    samples: list[dict[str, object]] = [{"key": "ok"}, {"key": "ok"}, {"key": "ok"}]
+    outputs = processor(iter(samples))
+
+    with (
+        patch(clock, return_value=100.0),
+        patch("priml.data.pipeline.shortcircuit.logger") as logger_mock,
+    ):
+        _ = next(outputs)
+        _ = next(outputs)
+        assert logger_mock.info.call_count >= 1
 
 
 if __name__ == "__main__":

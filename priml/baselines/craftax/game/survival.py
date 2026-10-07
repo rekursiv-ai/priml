@@ -42,14 +42,15 @@ def move_player(state: EnvState, action: Tensor) -> EnvState:
     """
     step = constants.on_device(constants.DIRECTIONS, state.device)[action.long()]
     proposed = state.player_position + step
-    land = constants.on_device(constants.PLAYER_COLLIDES_WITH, state.device).expand(
-        state.num_envs,
-        3,
+    land = (
+        constants.on_device(constants.PLAYER_COLLIDES_WITH, state.device)
+        .unsqueeze(0)
+        .expand(state.num_envs, 3)
     )
     allowed = mechanics.can_walk_on(state, proposed, land)
     state.player_position = state.player_position + allowed[:, None].int() * step
 
-    is_movement = step.abs().sum(-1) != 0
+    is_movement = step.abs().sum(1) != 0
     state.player_direction = torch.where(
         is_movement,
         action.int(),
@@ -99,8 +100,9 @@ def update_intrinsics(state: EnvState, action: Tensor) -> EnvState:
 
 def _update_sleep_and_rest(state: EnvState, action: Tensor) -> EnvState:
     """Start and end sleeping and resting according to the meters."""
-    starts_sleep = (action == int(Action.SLEEP)) & (
-        state.player_energy < mechanics.max_energy(state)
+    starts_sleep = (action == int(Action.SLEEP)) & torch.lt(
+        state.player_energy,
+        mechanics.max_energy(state),
     )
     state.is_sleeping = state.is_sleeping | starts_sleep
 
@@ -116,13 +118,14 @@ def _update_sleep_and_rest(state: EnvState, action: Tensor) -> EnvState:
         wakes,
     )
 
-    starts_rest = (action == int(Action.REST)) & (
-        state.player_health < mechanics.max_health(state)
+    starts_rest = (action == int(Action.REST)) & torch.lt(
+        state.player_health,
+        mechanics.max_health(state),
     )
     state.is_resting = state.is_resting | starts_rest
     # Resting ends on recovery, but also on an empty stomach: it must not be
     # a way to sit out starvation.
-    stops_rest = state.is_resting & (
+    stops_rest = (
         (state.player_health >= mechanics.max_health(state))
         | (state.player_food <= 0)
         | (state.player_drink <= 0)

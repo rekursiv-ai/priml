@@ -2,30 +2,30 @@
 
 from __future__ import annotations
 
+from importlib import util
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 from unittest.mock import Mock
 
-import importlib.util
 import json
 import os
+import re
 import sys
 
-from configgle.testing import assert_pprint_golden
 from torch import Tensor
 
 import pytest
 import torch
 
 from priml import hub
-from priml.lib.custom_json import IntCodec
+from priml.lib.custom_json import ReadError, convert
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.rope import (
     GeometricFrequencies,
     HuggingFaceFrequencies,
     RoPE,
 )
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.embedding import Embedding
 from priml.model.norm import RMSNorm
 from priml.model.sequential import Sequential
@@ -37,6 +37,7 @@ from priml.model.transformer.qwen3 import Qwen3, remap_hf_state_dict
 from priml.model.transformer.transformer import Transformer, head_is_tied
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 if TYPE_CHECKING:
@@ -135,11 +136,6 @@ def test_qwen3_cost_matches_torch(tie_embeddings: bool) -> None:
 def synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, Tensor]:
     """Build a random-weight state_dict in HF Qwen3 layout."""
     h = cfg.channels_in
-    inter = ffn(cfg).channels_hidden
-    attention = attn(cfg)
-    n_q = attention.num_heads
-    n_kv = attention.num_heads_kv
-    d = attention.channels_head
     sd: dict[str, Tensor] = {
         "model.embed_tokens.weight": torch.randn(cfg.channels_out, h),
         "model.norm.weight": torch.randn(h),
@@ -147,6 +143,11 @@ def synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, Tensor]:
     if not head_is_tied(cfg):
         sd["lm_head.weight"] = torch.randn(cfg.channels_out, h)
     for i in range(cfg.num_layers):
+        inter = ffn(cfg, i).channels_hidden
+        attention = attn(cfg, i)
+        n_q = attention.num_heads
+        n_kv = attention.num_heads_kv
+        d = attention.channels_head
         p = f"model.layers.{i}"
         sd[f"{p}.input_layernorm.weight"] = torch.randn(h)
         sd[f"{p}.post_attention_layernorm.weight"] = torch.randn(h)
@@ -164,12 +165,12 @@ def synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, Tensor]:
 
 # Accepts a template or a finalized per-layer list, so a caller need not know which side
 # of ``finalize`` it is on.
-def attn(cfg: Qwen3.Config, layer: int = 0) -> SelfAttention.Config:
+def attn(cfg: Qwen3.Config, layer: int = 0) -> Attention.Config:
     """One layer's attention -- where the head geometry lives now."""
     block = cfg.block[layer] if isinstance(cfg.block, list) else cfg.block
     assert isinstance(block, TransformerBlock.Config)
     attn = block.attn
-    assert isinstance(attn, SelfAttention.Config)
+    assert isinstance(attn, Attention.Config)
     return attn
 
 
@@ -222,15 +223,14 @@ class TestConfig:
         cfg.pop("head_dim")
         parsed = Qwen3.Config.from_hf(cfg)
         assert attn(parsed).channels_head == (
-            IntCodec.coerce(cfg["hidden_size"])
-            // IntCodec.coerce(cfg["num_attention_heads"])
+            convert(cfg["hidden_size"], int) // convert(cfg["num_attention_heads"], int)
         )
 
     def test_num_key_value_heads_inferred_when_missing(self):
         cfg = hf_config()
         cfg.pop("num_key_value_heads")
         parsed = Qwen3.Config.from_hf(cfg)
-        assert attn(parsed).num_heads_kv == IntCodec.coerce(cfg["num_attention_heads"])
+        assert attn(parsed).num_heads_kv == convert(cfg["num_attention_heads"], int)
 
     @pytest.mark.parametrize("field_name", ["num_key_value_heads", "head_dim"])
     def test_explicit_zero_head_geometry_rejected(self, field_name: str):
@@ -248,13 +248,125 @@ class TestConfig:
         assert isinstance(rope.frequencies, HuggingFaceFrequencies.Config)
         assert rope.frequencies.base == 25_000.0
 
-    def test_malformed_nested_rope_parameters_use_default(self):
-        cfg = hf_config(rope_theta=None, rope_parameters=["not", "an", "object"])
-        parsed = Qwen3.Config.from_hf(cfg)
-        rope = attn(parsed).rope
+    @pytest.mark.parametrize("rope_theta", [None, 1_000_000])
+    def test_malformed_nested_rope_parameters_are_rejected(
+        self,
+        rope_theta: int | None,
+    ) -> None:
+        """A wrongly typed field is caller input, never a silent default."""
+        cfg = hf_config(
+            rope_theta=rope_theta,
+            rope_parameters=["not", "an", "object"],
+        )
+        with pytest.raises(ReadError):
+            Qwen3.Config.from_hf(cfg)
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            (
+                {"rope_scaling": {"rope_type": "yarn", "factor": 4.0}},
+                "Only default rotary frequencies are supported.",
+            ),
+            (
+                {
+                    "rope_parameters": {
+                        "rope_type": "yarn",
+                        "factor": 4.0,
+                        "rope_theta": 1e6,
+                    },
+                },
+                "Only default rotary frequencies are supported.",
+            ),
+            (
+                {"attention_bias": True},
+                "Attention projection biases are unsupported.",
+            ),
+            (
+                {"use_sliding_window": True, "sliding_window": 4096},
+                "Sliding-window attention is unsupported.",
+            ),
+            (
+                {"layer_types": ["full_attention", "sliding_attention"]},
+                "Sliding-window attention is unsupported.",
+            ),
+            (
+                {"hidden_act": "gelu"},
+                "Only the SwiGLU/silu Qwen3 architecture is supported.",
+            ),
+            (
+                {"quantization_config": {"quant_method": "fp8"}},
+                "Quantized checkpoint configurations are unsupported.",
+            ),
+            (
+                {"attention_dropout": 1.0},
+                "attention_dropout must be finite and in [0, 1).",
+            ),
+        ],
+    )
+    def test_unrepresentable_architectures_are_rejected(
+        self,
+        overrides: dict[str, object],
+        message: str,
+    ) -> None:
+        """Each of these would otherwise load a different model than HF's."""
+        with pytest.raises(ValueError, match=re.escape(message)) as error:
+            Qwen3.Config.from_hf(hf_config(**overrides))
+        assert str(error.value) == message
+
+    def test_hf_serialized_default_config_is_accepted(self) -> None:
+        """HF's own ``to_dict`` carries every field the gate inspects."""
+        pytest.importorskip("transformers")
+        from transformers.models.qwen3.configuration_qwen3 import (  # noqa: PLC0415 -- The optional Transformers dependency is loaded only in these tests.
+            Qwen3Config,
+        )
+
+        serialized = Qwen3Config(
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=24,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=8,
+        ).to_dict()
+        cfg = Qwen3.Config.from_hf(serialized)
+        rope = attn(cfg).rope
         assert isinstance(rope, RoPE.Config)
         assert isinstance(rope.frequencies, HuggingFaceFrequencies.Config)
-        assert rope.frequencies.base == 1_000_000.0
+        assert rope.frequencies.base == serialized["rope_parameters"]["rope_theta"]
+
+    def test_hf_defaults_for_inert_fields_are_accepted(self) -> None:
+        """Real checkpoints ship ``sliding_window`` with the window switched off."""
+        cfg = Qwen3.Config.from_hf(
+            hf_config(
+                sliding_window=4096,
+                use_sliding_window=False,
+                attention_bias=False,
+                hidden_act="silu",
+                layer_types=["full_attention", "full_attention"],
+                rope_scaling=None,
+                attention_dropout=0.25,
+            ),
+        )
+        assert attn(cfg).dropout == 0.25
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"tie_word_embeddings": "false"},
+            {"attention_bias": "false"},
+            {"use_sliding_window": 0},
+            {"layer_types": "full_attention"},
+        ],
+    )
+    def test_wrongly_typed_fields_are_rejected(
+        self,
+        overrides: dict[str, object],
+    ) -> None:
+        """``bool("false")`` is True; a typed read refuses it instead."""
+        with pytest.raises(ReadError):
+            Qwen3.Config.from_hf(hf_config(**overrides))
 
     @pytest.mark.parametrize(
         "overrides",
@@ -286,8 +398,26 @@ class TestConfig:
 
     def test_make_returns_qwen3_instance(self):
         """Makes[Qwen3] re-narrows .make() to Qwen3, not Transformer."""
-        model = Qwen3.Config.from_hf(hf_config()).make()
-        assert isinstance(model, Qwen3)
+        Qwen3.Config.from_hf(hf_config()).make()
+
+    def test_attn_of_broadcasts_a_single_block_to_any_layer(self):
+        cfg = Qwen3.Config.from_hf(hf_config())
+        block = cfg.block
+        assert isinstance(block, TransformerBlock.Config)
+        cfg.block = [block]
+
+        assert qwen3._attn_of(cfg, layer=1) is block.attn
+
+    def test_attn_of_selects_the_requested_layer(self):
+        cfg = Qwen3.Config.from_hf(hf_config()).finalize()
+        assert isinstance(cfg.block, list)
+        second = cfg.block[1]
+        assert isinstance(second, TransformerBlock.Config)
+        assert isinstance(second.attn, Attention.Config)
+        second.attn.channels_head = 12
+
+        assert qwen3._attn_of(cfg, layer=1) is second.attn
+        assert qwen3._attn_of(cfg, layer=1).channels_head == 12
 
 
 class TestSlots:
@@ -341,6 +471,47 @@ class TestSlots:
 
 
 class TestLoad:
+    def test_load_defaults_missing_checkpoint_dtype_to_bfloat16(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config_dict = hf_config(num_hidden_layers=1)
+        config_dict.pop("torch_dtype")
+        cfg = Qwen3.Config.from_hf(config_dict).finalize()
+        monkeypatch.setattr(
+            hub,
+            "load_hf_checkpoint",
+            Mock(return_value=(config_dict, synth_hf_state_dict(cfg))),
+        )
+        resolve_dtype = Mock(return_value=torch.bfloat16)
+        monkeypatch.setattr(hub, "resolve_hf_dtype", resolve_dtype)
+
+        model = Qwen3.load("Qwen/tiny-qwen")
+
+        resolve_dtype.assert_called_once_with("bfloat16")
+        assert isinstance(model.proj_in, Embedding)
+        assert model.proj_in.weight.dtype == torch.bfloat16
+
+    def test_load_uses_checkpoint_dtype_when_no_override(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config_dict = hf_config(num_hidden_layers=1, torch_dtype="float32")
+        cfg = Qwen3.Config.from_hf(config_dict).finalize()
+        monkeypatch.setattr(
+            hub,
+            "load_hf_checkpoint",
+            Mock(return_value=(config_dict, synth_hf_state_dict(cfg))),
+        )
+        resolve_dtype = Mock(return_value=torch.float64)
+        monkeypatch.setattr(hub, "resolve_hf_dtype", resolve_dtype)
+
+        model = Qwen3.load("Qwen/tiny-qwen")
+
+        resolve_dtype.assert_called_once_with("float32")
+        assert isinstance(model.proj_in, Embedding)
+        assert model.proj_in.weight.dtype == torch.float64
+
     def test_local_load_reads_config_and_local_weights(
         self,
         tmp_path: Path,
@@ -355,10 +526,52 @@ class TestLoad:
         model = Qwen3.load(tmp_path, device="cpu", dtype=torch.float32)
 
         assert isinstance(model.proj_in, Embedding)
+        assert isinstance(model.proj_in, Embedding)
         assert model.proj_in.weight.dtype == torch.float32
         assert model.num_layers == 1
         assert model.proj_in.weight.shape == (cfg.channels_out, cfg.channels_in)
         load_local_state_dict.assert_called_once_with(tmp_path)
+
+    def test_explicit_load_dtype_and_device_are_applied(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config_dict = hf_config(num_hidden_layers=1)
+        cfg = Qwen3.Config.from_hf(config_dict).finalize()
+        monkeypatch.setattr(
+            hub,
+            "load_hf_checkpoint",
+            Mock(return_value=(config_dict, synth_hf_state_dict(cfg))),
+        )
+
+        model = Qwen3.load("Qwen/tiny-qwen", dtype=torch.float64, device="meta")
+
+        assert isinstance(model.proj_in, Embedding)
+        assert model.proj_in.weight.dtype == torch.float64
+        assert model.proj_in.weight.device.type == "meta"
+
+    def test_load_requires_complete_state_dict(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config_dict = hf_config(num_hidden_layers=1)
+        cfg = Qwen3.Config.from_hf(config_dict).finalize()
+        state_dict = synth_hf_state_dict(cfg)
+        loop_state_dict = remap_hf_state_dict(state_dict, cfg)
+        loop_state_dict["unexpected.weight"] = torch.empty(2, 3)
+        monkeypatch.setattr(
+            hub,
+            "load_hf_checkpoint",
+            Mock(return_value=(config_dict, state_dict)),
+        )
+        monkeypatch.setattr(
+            qwen3,
+            "remap_hf_state_dict",
+            Mock(return_value=loop_state_dict),
+        )
+
+        with pytest.raises(RuntimeError, match=r"unexpected\.weight"):
+            Qwen3.load("Qwen/tiny-qwen")
 
     def test_remote_load_uses_hf_model_config_and_weights(
         self,
@@ -455,7 +668,7 @@ class TestRemap:
         block = model.blocks[0]
         assert isinstance(block, TransformerBlock)
         attn = block.attn
-        assert isinstance(attn, SelfAttention)
+        assert isinstance(attn, Attention)
         q_norm = attn.norm_q
         k_norm = attn.norm_k
         assert isinstance(q_norm, RMSNorm)
@@ -468,6 +681,22 @@ class TestRemap:
         assert torch.equal(q_weight, torch.full_like(q_weight, 2.0))
         assert torch.equal(k_weight, torch.full_like(k_weight, 3.0))
 
+    def test_per_layer_head_geometry_remaps_and_loads_strictly(self) -> None:
+        """Each layer's heads are read off that layer, not off layer 0."""
+        cfg = Qwen3.Config.from_hf(hf_config()).finalize()
+        assert isinstance(cfg.block, list)
+        second = cfg.block[1]
+        assert isinstance(second, TransformerBlock.Config)
+        assert isinstance(second.attn, Attention.Config)
+        second.attn.num_heads_kv = 4
+        model = cfg.make()
+        model.load_state_dict(
+            remap_hf_state_dict(synth_hf_state_dict(cfg), cfg),
+            strict=True,
+        )
+        toks = torch.randint(0, cfg.channels_out, (3, 5))
+        assert model(toks).shape == (3, 5, cfg.channels_out)
+
     @pytest.mark.parametrize("bad_part", ["block", "attention"])
     def test_remap_rejects_incompatible_layer_configs(self, bad_part: str):
         cfg = Qwen3.Config.from_hf(hf_config(num_hidden_layers=1))
@@ -475,12 +704,13 @@ class TestRemap:
         assert isinstance(block, TransformerBlock.Config)
         if bad_part == "block":
             cfg.block = RMSNorm.Config()
-            match = "not a transformer"
+            match = "layer 0 is RMSNorm.Config, not a transformer."
         else:
             block.attn = RMSNorm.Config()
-            match = "not self-attention"
-        with pytest.raises(TypeError, match=match):
+            match = "layer 0 attention is RMSNorm.Config, not self-attention."
+        with pytest.raises(TypeError) as error:
             qwen3.remap_hf_state_dict({}, cfg)
+        assert str(error.value) == match
 
 
 @pytest.mark.compute_torch_compile
@@ -533,13 +763,13 @@ def test_importing_parity_module_preserves_global_determinism(
             algorithms_enabled,
             warn_only=warn_only_enabled,
         )
-        spec = importlib.util.spec_from_file_location(
+        spec = util.spec_from_file_location(
             "_qwen3_hf_import_probe",
             __file__,
         )
         assert spec is not None
         assert spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
+        module = util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
         assert torch.are_deterministic_algorithms_enabled() == algorithms_enabled
@@ -663,7 +893,7 @@ def _qwen3_parity_outputs(tie_embeddings: bool) -> tuple[Tensor, Tensor]:
     assert isinstance(config.block, list)
     for block in config.block:
         assert isinstance(block, TransformerBlock.Config)
-        assert isinstance(block.attn, SelfAttention.Config)
+        assert isinstance(block.attn, Attention.Config)
         assert isinstance(block.ffn, SwiGLU.Config)
         block.attn.split_qkv_projection = True
         block.ffn.split_gate_projection = True
@@ -677,7 +907,7 @@ def _qwen3_parity_outputs(tie_embeddings: bool) -> tuple[Tensor, Tensor]:
     )
     loop_model.eval().to(dtype=torch.float32)
 
-    tokens = torch.randint(0, IntCodec.coerce(cfg_dict["vocab_size"]), (3, 5))
+    tokens = torch.randint(0, convert(cfg_dict["vocab_size"], int), (3, 5))
     with torch.no_grad():
         # ``forward`` rather than ``__call__``: the stub's ``__call__`` cannot
         # bind a ``forward`` taking ``**kwargs: Unpack[...]``, and an eval-mode

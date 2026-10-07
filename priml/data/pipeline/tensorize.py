@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import field
 from typing import TYPE_CHECKING, cast
 
 from configgle import Fig
 from torch import Tensor
 
+import numpy as np
 import torch
-
-from priml.lib.traverse import (
-    recursively_iterate_over_object_descendants,
-)
 
 
 if TYPE_CHECKING:
@@ -28,8 +26,11 @@ __all__ = [
 class AsTensor:
     """Convert values to tensors and transfer to device with optimal transfers.
 
-    Tensorizes non-tensor values (lists, ints, numpy arrays) using torch.as_tensor,
-    then transfers to target device. For optimal bandwidth:
+    Tensorizes numeric values (numbers, numeric lists, numpy arrays) using
+    torch.as_tensor, then transfers to target device. Dicts are descended into,
+    as are lists that mix tensors and numbers; strings and ``None`` are left
+    alone, as is every ``_``-prefixed bookkeeping key (``_batch_size``) and the
+    ``stream_field``. For optimal bandwidth:
     - Preserves source dtype during tensorization
     - Converts dtype on target device (e.g., uint16 → float32 on GPU)
     - Shares memory with numpy arrays when possible
@@ -77,7 +78,8 @@ class AsTensor:
         """If True, pin CPU memory before GPU transfer (faster transfers)."""
 
         non_blocking: bool = False
-        """If True, use async transfers and store/reuse CUDA stream."""
+        """If True, CUDA-bound transfers are async on a stored/reused stream;
+        a CPU target always copies blocking, as nothing would sync it."""
 
         stream_field: str = "pending_tensorizations"
         """Field name for CUDA stream. Creates if missing, reuses if present."""
@@ -107,8 +109,9 @@ class AsTensor:
             - Sample dict with fields to tensorize/transfer
 
         Yields:
-            - Sample dict with tensors on target device
-            - If non_blocking=True, adds/reuses stream_field with torch.cuda.Stream
+          sample: The input sample, its selected fields tensorized on the target
+            device; with ``non_blocking`` and a CUDA target, ``stream_field``
+            holds the ``torch.cuda.Stream`` the copies ran on.
 
         """
         for sample in samples:
@@ -136,67 +139,55 @@ class AsTensor:
             yield sample
 
     def _apply_transfers(self, sample: dict[str, object]) -> None:
-        """Apply tensorization and device transfers."""
-        for path, value in recursively_iterate_over_object_descendants(sample):
-            # Skip if path is empty (root object)
-            if not path:
+        """Tensorize and transfer every selected top-level field in place."""
+        for key, value in sample.items():
+            # ``_``-prefixed keys are pipeline bookkeeping (``_batch_size``, the
+            # batched-field tag); converting them broke the Unbatcher reading
+            # them next.
+            if key.startswith("_") or key == self.stream_field:
                 continue
-
-            # Skip leaves inside a sequence: the enclosing list/tuple is itself
-            # tensorized as a whole, so descending into its elements would
-            # re-tensorize each scalar after the parent was already converted.
-            if isinstance(path[-1], int):
+            if self.include and key not in self.include:
                 continue
-
-            # Filter by include/exclude.
-            field_name = path[0]
-            if self.include and field_name not in self.include:
+            if self.exclude and key in self.exclude:
                 continue
-            if self.exclude and field_name in self.exclude:
-                continue
-            if isinstance(value, (dict, torch.cuda.Stream)):
-                continue
+            sample[key] = self._convert(value)
 
-            # Navigate to parent container.
-            parent: dict[str, object] | list[object] = sample
-            for step in path[:-1]:
-                if isinstance(parent, dict):
-                    assert isinstance(step, str)
-                    child = parent[step]
-                else:
-                    assert isinstance(step, int)
-                    child = parent[step]
-                assert isinstance(child, (dict, list))
-                parent = cast(dict[str, object] | list[object], child)
-            final_key = path[-1]
+    # Walked by container TYPE, not key type: a dict keyed by frame index is still a
+    # dict. A numeric list becomes one tensor; anything else that is not numeric
+    # (strings, ``None``) is returned unchanged.
+    def _convert(self, value: object) -> object:
+        """Return ``value`` with every numeric leaf a transferred tensor."""
+        if isinstance(value, dict):
+            return {
+                k: self._convert(v)
+                for k, v in cast(dict[object, object], value).items()
+            }
+        if isinstance(value, Tensor) or _is_numeric(value):
+            return self._transfer(torch.as_tensor(value))
+        if isinstance(value, list):
+            return [self._convert(v) for v in cast(list[object], value)]
+        if isinstance(value, tuple):
+            return tuple(self._convert(v) for v in cast(tuple[object, ...], value))
+        return value
 
-            # Tensorize and transfer
-            # torch.as_tensor preserves dtype (optimal for uint16→float32 on GPU)
-            # and shares memory with numpy arrays.
-            tensor: Tensor = torch.as_tensor(value)
-
-            # Pin memory before GPU transfer if requested.
-            if (
-                self.pin_memory
-                and self.device is not None
-                and torch.device(self.device).type.startswith("cuda")
-            ):
-                tensor = tensor.pin_memory()
-
-            # Transfer to device and/or convert dtype.
-            if self.device is not None or self.dtype is not None:
-                transferred = tensor.to(
-                    device=self.device,
-                    dtype=self.dtype,
-                    non_blocking=self.non_blocking,
-                )
-            else:
-                transferred = tensor
-            if isinstance(parent, dict):
-                parent[final_key] = transferred
-            else:
-                assert isinstance(final_key, int)
-                parent[final_key] = transferred
+    def _transfer(self, tensor: Tensor) -> Tensor:
+        """Pin and move ``tensor`` as configured; ``as_tensor`` kept its dtype."""
+        target = None if self.device is None else torch.device(self.device)
+        to_cuda = target is not None and target.type == "cuda"
+        # Only a CPU tensor can be pinned: a GPU-resident one (watermark scores
+        # deliberately left for this stage) raised here.
+        if self.pin_memory and to_cuda and tensor.device.type == "cpu":
+            tensor = tensor.pin_memory()
+        if target is None and self.dtype is None:
+            return tensor
+        # A non-blocking copy is only safe to read once a stream is synced;
+        # only a CUDA target gets the stream ``StreamSync`` waits on, so a
+        # copy back to the host blocks.
+        return tensor.to(
+            device=target,
+            dtype=self.dtype,
+            non_blocking=self.non_blocking and to_cuda,
+        )
 
 
 class StreamSync:
@@ -247,7 +238,7 @@ class StreamSync:
             - Sample dict potentially containing stream fields
 
         Yields:
-            - Sample dict with streams synchronized and removed
+          sample: The input sample with its named streams synchronized and removed.
 
         """
         if not self.stream_fields:
@@ -265,3 +256,15 @@ class StreamSync:
                     stream.synchronize()
                     del sample[field_name]
             yield sample
+
+
+def _is_numeric(value: object) -> bool:
+    """Whether ``torch.as_tensor`` takes ``value``: a number, array, or numeric nest."""
+    if isinstance(value, (bool, int, float, np.ndarray, np.number)):
+        return True
+    if isinstance(value, (list, tuple)):
+        items = cast(Sequence[object], value)
+        return bool(items) and all(
+            not isinstance(v, np.ndarray) and _is_numeric(v) for v in items
+        )
+    return False

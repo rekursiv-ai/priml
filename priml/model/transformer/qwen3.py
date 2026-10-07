@@ -10,7 +10,7 @@ HF-shaped arch fields; ``finalize()`` wires them into the inherited
 Qwen3 vs. LLaMA:
   - Explicit ``head_dim`` (not ``hidden_size / num_heads``).
   - Per-head QK-norm -- independent ``q_norm`` and ``k_norm`` RMSNorms
-    (via ``SelfAttention.Config.share_qk_norm=False``).
+    (via ``Attention.Config.share_qk_norm=False``).
   - GQA via ``num_key_value_heads``.
   - No bias on attention or MLP projections.
   - RoPE base ``rope_theta=1_000_000``, HF half-split pairing.
@@ -32,15 +32,17 @@ from dataclasses import KW_ONLY, field
 from functools import partial
 from typing import TYPE_CHECKING, Self, override
 
+import math
+
 from configgle import Makeable, Makes
 from torch import Tensor, nn
 
 import torch
 
 from priml import hub
-from priml.lib.custom_json import DictCodec, FloatCodec, IntCodec
-from priml.model.attention.rope import HuggingFaceFrequencies, RoPE
-from priml.model.attention.self_attention import SelfAttention
+from priml.lib.custom_json import convert
+from priml.model.attention.attention import Attention
+from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsInOutConfig,
@@ -65,7 +67,7 @@ if TYPE_CHECKING:
 # Read off the BLOCK rather than a parent mirror of it: the geometry lives where the
 # layer is built, so a per-layer list and a broadcast template both answer here without
 # this function knowing which it was given.
-def _attn_of(config: Qwen3.Config, layer: int = 0) -> SelfAttention.Config:
+def _attn_of(config: Qwen3.Config, layer: int) -> Attention.Config:
     """Return one layer's attention config."""
     blocks = config.block if isinstance(config.block, list) else [config.block]
     # ``len == 1`` is the pre-finalize broadcast template, which answers for
@@ -75,7 +77,7 @@ def _attn_of(config: Qwen3.Config, layer: int = 0) -> SelfAttention.Config:
     if not isinstance(block, TransformerBlock.Config):
         raise TypeError(f"layer {layer} is {type(block).__name__}, not a transformer.")
     attn = block.attn
-    if not isinstance(attn, SelfAttention.Config):
+    if not isinstance(attn, Attention.Config):
         raise TypeError(
             f"layer {layer} attention is {type(attn).__name__}, not self-attention.",
         )
@@ -123,7 +125,7 @@ class Qwen3(Transformer):
 
         block: ChannelsInOutConfig | list[ChannelsInOutConfig] = field(
             default_factory=lambda: TransformerBlock.Config(
-                attn=SelfAttention.Config(
+                attn=Attention.Config(
                     init_weight=partial(nn.init.normal_, std=0.02),
                     num_heads=16,
                     num_heads_kv=8,
@@ -160,6 +162,10 @@ class Qwen3(Transformer):
             Returns:
               result: Loop Qwen3.Config parsed from HF schema.
 
+            Raises:
+              ValueError: An architecture field is unsupported or invalid.
+              ReadError: A configuration field has the wrong type.
+
             """
             model_type = config.get("model_type")
             if model_type != "qwen3":
@@ -167,32 +173,43 @@ class Qwen3(Transformer):
                     f"Expected model_type='qwen3', got {model_type!r}. "
                     "Qwen3-MoE and earlier Qwen versions need their own loader.",
                 )
+            _reject_unsupported(config)
             # ``transformers`` 4.55+ nests rope params; earlier has rope_theta flat.
+            rope_params = convert(
+                config.get("rope_parameters"),
+                dict[str, object],
+                default={},
+            )
             rope_theta = config.get("rope_theta")
             if rope_theta is None:
-                # Validated rather than cast: this is an HF ``config.json``, so
-                # a malformed field is caller input. Casting produced an
-                # ``AttributeError`` from inside ``.get`` instead.
-                rope_params = DictCodec.coerce(config.get("rope_parameters") or {})
-                rope_theta = FloatCodec.coerce(rope_params.get("rope_theta"), 1e6)
-            channels_in = IntCodec.coerce(config["hidden_size"])
-            num_heads = IntCodec.coerce(config["num_attention_heads"])
+                rope_theta = convert(
+                    rope_params.get("rope_theta"),
+                    float,
+                    default=1e6,
+                    strict=False,
+                )
+            channels_in = convert(config["hidden_size"], int)
+            num_heads = convert(config["num_attention_heads"], int)
             # HF's schema is parsed into the CHILD configs; the parent does
             # not mirror foreign names onto itself. Everything below hangs off
             # the ONE block template, which is where each value lives.
             norm = RMSNorm.Config(elementwise_affine=True)
-            norm.eps = FloatCodec.coerce(config.get("rms_norm_eps", 1e-6), 1e-6)
+            norm.eps = convert(config.get("rms_norm_eps"), float, default=1e-6)
 
             frequencies = HuggingFaceFrequencies.Config()
-            frequencies.base = FloatCodec.coerce(rope_theta, 1e6)
+            frequencies.base = convert(rope_theta, float)
             rope = RoPE.Config()
             rope.frequencies = frequencies
 
-            attn = SelfAttention.Config(bias=False, causal=True, share_qk_norm=False)
+            attn = Attention.Config(bias=False, causal=True, share_qk_norm=False)
+            attn.dropout = convert(config.get("attention_dropout"), float, default=0.0)
+            if not math.isfinite(attn.dropout) or attn.dropout < 0 or attn.dropout >= 1:
+                raise ValueError("attention_dropout must be finite and in [0, 1).")
             attn.num_heads = num_heads
-            num_heads_kv = IntCodec.coerce(
-                config.get("num_key_value_heads", num_heads),
-                num_heads,
+            num_heads_kv = convert(
+                config.get("num_key_value_heads"),
+                int,
+                default=num_heads,
             )
             if num_heads_kv < 1:
                 raise ValueError(
@@ -202,10 +219,11 @@ class Qwen3(Transformer):
             # Qwen3 states the head width, so it need not divide the model
             # width -- the attention's inner width is decoupled from the
             # residual. Falling back to the quotient matches HF's own default.
-            channels_head = IntCodec.coerce(
+            channels_head = convert(
                 config["head_dim"]
                 if "head_dim" in config
                 else channels_in // num_heads,
+                int,
             )
             if channels_head < 1:
                 raise ValueError(f"head_dim must be > 0, got {channels_head}.")
@@ -215,10 +233,7 @@ class Qwen3(Transformer):
 
             init_weight = partial(
                 nn.init.normal_,
-                std=FloatCodec.coerce(
-                    config.get("initializer_range", 0.02),
-                    default=None,
-                ),
+                std=convert(config.get("initializer_range"), float, default=0.02),
             )
             attn.init_weight = init_weight
             block = TransformerBlock.Config(prenorm=True)
@@ -228,20 +243,20 @@ class Qwen3(Transformer):
                 init_weight_out=init_weight,
                 gate=True,
                 bias=False,
-                channels_hidden=IntCodec.coerce(config["intermediate_size"]),
+                channels_hidden=convert(config["intermediate_size"], int),
             )
             block.norm1 = norm.copy_tree()
             block.norm2 = norm.copy_tree()
 
             head: Makeable[TensorModule] = (
                 TiedLinear.Config(tied="proj_in")
-                if bool(config.get("tie_word_embeddings", False))
+                if convert(config.get("tie_word_embeddings"), bool, default=False)
                 else Linear.Config(init_weight=init_weight, shard="vocab")
             )
             return cls(
                 channels_in=channels_in,
-                channels_out=IntCodec.coerce(config["vocab_size"]),
-                num_layers=IntCodec.coerce(config["num_hidden_layers"]),
+                channels_out=convert(config["vocab_size"], int),
+                num_layers=convert(config["num_hidden_layers"], int),
                 proj_in=Embedding.Config(init_weight=init_weight, shard="vocab"),
                 proj_out=Sequential.Config(elements=[norm.copy_tree(), head]),
                 block=block,
@@ -275,7 +290,7 @@ class Qwen3(Transformer):
             if not isinstance(block, TransformerBlock.Config):
                 return
             attn = block.attn
-            if isinstance(attn, SelfAttention.Config):
+            if isinstance(attn, Attention.Config):
                 attn.channels_in = self.channels_in
                 rope = attn.rope
                 if isinstance(rope, RoPE.Config):
@@ -308,7 +323,7 @@ class Qwen3(Transformer):
         hf_config, hf_sd = hub.load_hf_checkpoint(path_or_repo, dtype=dtype)
         config = cls.Config.from_hf(hf_config).finalize()
         model = config.make()
-        model.load_state_dict(remap_hf_state_dict(hf_sd, config), strict=True)
+        model.load_state_dict(remap_hf_state_dict(hf_sd, config))
         model = model.to(
             dtype=dtype
             or hub.resolve_hf_dtype(str(hf_config.get("torch_dtype", "bfloat16"))),
@@ -316,6 +331,25 @@ class Qwen3(Transformer):
         if device is not None:
             model = model.to(device=device)
         return model
+
+
+def _reject_unsupported(config: Mapping[str, object]) -> None:
+    """Raise on an HF field this loader would otherwise silently drop."""
+    if config.get("quantization_config") is not None:
+        raise ValueError("Quantized checkpoint configurations are unsupported.")
+    if convert(config.get("hidden_act"), str, default="silu") != "silu":
+        raise ValueError("Only the SwiGLU/silu Qwen3 architecture is supported.")
+    if convert(config.get("attention_bias"), bool, default=False):
+        raise ValueError("Attention projection biases are unsupported.")
+    # HF ignores ``sliding_window`` unless ``use_sliding_window`` is set, and
+    # Qwen3 checkpoints ship ``sliding_window: 4096`` with it off.
+    layer_types = convert(config.get("layer_types"), list[str], default=[])
+    if convert(config.get("use_sliding_window"), bool, default=False) or any(
+        layer != "full_attention" for layer in layer_types
+    ):
+        raise ValueError("Sliding-window attention is unsupported.")
+    if YarnScaling.Config.from_hf(config) is not None:
+        raise ValueError("Only default rotary frequencies are supported.")
 
 
 def remap_hf_state_dict(
@@ -335,17 +369,19 @@ def remap_hf_state_dict(
 
     """
     h = config.channels_in
-    attn = _attn_of(config)
-    n_q = attn.num_heads
-    n_kv = attn.num_heads_kv
-    d = attn.channels_head
+    # Every layer's geometry is resolved before any weight is read, so a config
+    # the remap cannot serve fails as a config error, not as a missing key.
+    attns = [_attn_of(config, i) for i in range(config.num_layers)]
     out: dict[str, Tensor] = {
         "proj_in.weight": hf_sd["model.embed_tokens.weight"],
         "proj_out.0.weight": hf_sd["model.norm.weight"],
     }
     if not head_is_tied(config):
         out["proj_out.1.weight"] = hf_sd["lm_head.weight"]
-    for i in range(config.num_layers):
+    for i, attn in enumerate(attns):
+        n_q = attn.num_heads
+        n_kv = attn.num_heads_kv
+        d = attn.channels_head
         p, b = f"model.layers.{i}", f"blocks.{i}"
         out[f"{b}.norm1.weight"] = hf_sd[f"{p}.input_layernorm.weight"]
         out[f"{b}.norm2.weight"] = hf_sd[f"{p}.post_attention_layernorm.weight"]
@@ -354,7 +390,7 @@ def remap_hf_state_dict(
         q = hf_sd[f"{p}.self_attn.q_proj.weight"].view(n_q, d, h)
         k = hf_sd[f"{p}.self_attn.k_proj.weight"].view(n_kv, d, h)
         v = hf_sd[f"{p}.self_attn.v_proj.weight"].view(n_kv, d, h)
-        out[f"{b}.attn.proj_qkv.weight"] = torch.cat([q, k, v], dim=0)
+        out[f"{b}.attn.proj_qkv.weight"] = torch.cat([q, k, v])
         out[f"{b}.attn.proj_out.weight"] = hf_sd[f"{p}.self_attn.o_proj.weight"]
         out[f"{b}.attn.norm_q.weight"] = hf_sd[f"{p}.self_attn.q_norm.weight"]
         out[f"{b}.attn.norm_k.weight"] = hf_sd[f"{p}.self_attn.k_norm.weight"]
@@ -362,6 +398,6 @@ def remap_hf_state_dict(
         # ``x.chunk(2, dim=-1)`` inside loop.SwiGLU yields (gate, x).
         gate = hf_sd[f"{p}.mlp.gate_proj.weight"]
         up = hf_sd[f"{p}.mlp.up_proj.weight"]
-        out[f"{b}.ffn.up_proj.weight"] = torch.cat([gate, up], dim=0)
+        out[f"{b}.ffn.up_proj.weight"] = torch.cat([gate, up])
         out[f"{b}.ffn.down_proj.weight"] = hf_sd[f"{p}.mlp.down_proj.weight"]
     return out

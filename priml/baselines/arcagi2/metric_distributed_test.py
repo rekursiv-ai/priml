@@ -15,7 +15,7 @@ import torch
 
 from priml.baselines.arcagi2.metric import PassK
 from priml.baselines.arcagi2.record_test import load, reduce
-from priml.lib.custom_json import DictCodec
+from priml.lib.custom_json import convert
 from priml.testing.golden import mismatches
 
 
@@ -53,6 +53,14 @@ def test_reject_missing_gather(tmp_path: Path, warm_pools: WarmPoolGetter) -> No
     assert "AssertionError: global pass@1" in result
 
 
+def test_frozen_ballot_scores_bite() -> None:
+    """A changed recorded score is reported against the frozen record."""
+    frozen = load("metric_distributed")["majority/rank0"]
+    nudged = {key: value.clone() for key, value in frozen.items()}
+    nudged["pass@1"] = nudged["pass@1"] - 1
+    assert mismatches(frozen, nudged) == ["pass@1: 1/1 differ"]
+
+
 def test_checkpoint_rejects_malformed_ballot() -> None:
     metric = PassK.Config().make()
     with pytest.raises(TypeError):
@@ -76,7 +84,7 @@ class _LocalVotes(PassK):
 
 
 def _local_metric(root: Path) -> PassK:
-    return _LocalVotes(PassK.Config(working_dir=root))
+    return _LocalVotes(PassK.Config(working_dir=root).finalize())
 
 
 def _manifest(root: Path) -> None:
@@ -151,12 +159,12 @@ def test_source_global_ballots(
     frozen = load("metric_distributed")
     for rank in range(2):
         assert (tmp_path / f"metric_{rank}").read_text() == "ok"
-        actual = DictCodec.coerce(
+        actual = convert(
             cast(
                 object,
                 torch.load(tmp_path / f"scores_{rank}.pt", weights_only=True),
             ),
-            Tensor,
+            dict[str, Tensor],
         )
         report = mismatches(frozen[f"{mode}/rank{rank}"], actual)
         assert not report, "\n".join(report)
