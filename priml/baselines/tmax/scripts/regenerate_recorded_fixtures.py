@@ -1,4 +1,3 @@
-# ruff: noqa: INP001 (Fixture tooling that lives beside the artifacts it rewrites.)
 """Rebuild two test fixtures from a published TMax rollout archive.
 
 Both fixtures come from one shard of the ``allenai/tmax-9b`` run. The shard
@@ -26,7 +25,7 @@ to use an archive that is already downloaded.
 Run from the repository root:
 
     uv --quiet run --frozen -- python \
-        priml/baselines/tmax/testdata/regenerate_recorded_fixtures.py
+        priml/baselines/tmax/scripts/regenerate_recorded_fixtures.py
 
 Python 3.14 or newer is required because its standard ``tarfile`` module can
 read zstd archives. The repository environment uses Python 3.14.
@@ -45,7 +44,7 @@ import tempfile
 import urllib.request
 
 
-FIXTURES = Path(__file__).resolve().parent
+FIXTURES = Path(__file__).resolve().parents[1] / "testdata"
 RECORDED_LINE = FIXTURES / "recorded_rollout.jsonl"
 RECORDED_ADVANTAGES = FIXTURES / "recorded_advantages.json"
 
@@ -70,7 +69,7 @@ def _archive(explicit: Path | None) -> Path:
         return explicit
     cache = Path(tempfile.gettempdir()) / "tmax_rollouts_part000.tar.zst"
     if not cache.exists():
-        print(  # noqa: T201 -- A fixture script's product is this report.
+        print(
             f"downloading {ARCHIVE_URL}",
         )
         urllib.request.urlretrieve(ARCHIVE_URL, cache)
@@ -182,18 +181,18 @@ def _advantages_bytes(records: list[dict[str, object]]) -> bytes:
 def _check_or_write(path: Path, rebuilt: bytes, write: bool) -> bool:
     """Compare the rebuilt bytes with the committed fixture, or rewrite it."""
     if path.exists() and path.read_bytes() == rebuilt:
-        print(  # noqa: T201 -- A fixture script's product is this report.
+        print(
             f"{path.name}: identical",
         )
         return True
     if not write:
         state = "missing" if not path.exists() else "differs from the committed fixture"
-        print(  # noqa: T201 -- A fixture script's product is this report.
+        print(
             f"{path.name}: {state}; pass --write to regenerate it",
         )
         return False
     path.write_bytes(rebuilt)
-    print(  # noqa: T201 -- A fixture script's product is this report.
+    print(
         f"{path.name}: rewrote {len(rebuilt)} bytes",
     )
     return True
