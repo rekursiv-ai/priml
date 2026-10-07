@@ -27,7 +27,7 @@ import logging
 
 from priml.baselines.arcagi1 import experiments
 from priml.baselines.arcagi1.scripts.build_dataset import build_arc_dataset
-from priml.lib.custom_json import convert, loads
+from priml.lib.codec import from_plain, loads
 
 
 if TYPE_CHECKING:
@@ -110,11 +110,11 @@ def prepare(
 
 def num_puzzle_identifiers(directory: Path | str) -> int:
     """Read the identifier-table size recorded by a prepared dataset."""
-    metadata = convert(
+    metadata = from_plain(
         loads((Path(directory) / "train" / "dataset.json").read_text()),
         dict[str, object],
     )
-    return convert(metadata.get("num_puzzle_identifiers"), int)
+    return from_plain(metadata.get("num_puzzle_identifiers"), int)
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:

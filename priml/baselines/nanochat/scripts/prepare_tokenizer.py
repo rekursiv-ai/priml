@@ -20,7 +20,7 @@ import rustbpe
 import tokenizers
 
 from priml.baselines.nanochat.data import DEFAULT_ENCODE_THREADS
-from priml.lib.custom_json import JSONValue, parse
+from priml.lib.codec import PlainTree, from_plain, loads
 from priml.paths import validated_output_path
 
 
@@ -55,10 +55,10 @@ def read_mapping(path: Path) -> dict[str, object]:
       mapping: The decoded object.
 
     """
-    return parse(path.read_text(), dict[str, object])
+    return from_plain(loads(path.read_text()), dict[str, object])
 
 
-def write_mapping(path: Path, *, value: JSONValue) -> None:
+def write_mapping(path: Path, *, value: PlainTree) -> None:
     """Publish deterministic JSON after its complete contents have been written.
 
     Args:

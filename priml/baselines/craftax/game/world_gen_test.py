@@ -30,7 +30,7 @@ from priml.baselines.craftax.game.world_gen import (
     generate_smooth_world,
     generate_world,
 )
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:
@@ -684,7 +684,7 @@ def test_the_surface_ladder_starts_open() -> None:
 def test_potion_effects_are_shuffled_independently_per_environment() -> None:
     state = _world(num_envs=8, seed=3)
     for row in state.potion_mapping:
-        assert sorted(convert(row.tolist(), list[int])) == list(range(6))
+        assert sorted(from_plain(row.tolist(), list[int])) == list(range(6))
     assert len({tuple(row.tolist()) for row in state.potion_mapping}) > 1
 
 
@@ -715,7 +715,7 @@ def test_the_overworld_grows_the_blocks_its_recipe_names() -> None:
         generator=torch.Generator().manual_seed(0),
         device=torch.device("cpu"),
     )
-    present = set(convert(blocks.flatten().tolist(), list[int]))
+    present = set(from_plain(blocks.flatten().tolist(), list[int]))
     assert int(BlockType.GRASS) in present
     assert int(BlockType.STONE) in present
     assert int(BlockType.TREE) in present
@@ -798,7 +798,7 @@ def test_a_dungeon_is_rooms_joined_by_corridors() -> None:
         generator=torch.Generator().manual_seed(0),
         device=torch.device("cpu"),
     )
-    present = set(convert(blocks.flatten().tolist(), list[int]))
+    present = set(from_plain(blocks.flatten().tolist(), list[int]))
     assert int(BlockType.PATH) in present
     assert int(BlockType.WALL) in present
     assert int(BlockType.CHEST) in present
@@ -966,7 +966,7 @@ def test_the_sewers_use_their_own_materials() -> None:
         generator=torch.Generator().manual_seed(0),
         device=torch.device("cpu"),
     )
-    present = set(convert(blocks.flatten().tolist(), list[int]))
+    present = set(from_plain(blocks.flatten().tolist(), list[int]))
     assert int(BlockType.ENCHANTMENT_TABLE_ICE) in present
     assert int(BlockType.WATER) in present
 

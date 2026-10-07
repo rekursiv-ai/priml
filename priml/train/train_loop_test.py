@@ -38,7 +38,7 @@ from configgle import Fig, InlineConfig, Makeable, Makes, PartialConfig
 
 from priml.cost import Cost, matmul_cost
 from priml.data.dummy import DummyDataset
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.math.seed import RngState, get_rng_state, salt
 from priml.metrics.binary_accuracy import BinaryAccuracy
 from priml.metrics.topk import TopK
@@ -1950,7 +1950,7 @@ def test_logged_train_loss_is_all_reduced_before_rank_zero_gate(
     calls: list[tuple[float, ...]] = []
 
     def all_reduce(tensor: Tensor) -> None:
-        calls.append(tuple(convert(tensor.tolist(), list[float])))
+        calls.append(tuple(from_plain(tensor.tolist(), list[float])))
         tensor.mul_(8)
 
     loop = _make_step_logging_loop_config().make()

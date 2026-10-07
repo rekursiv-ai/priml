@@ -21,7 +21,7 @@ from priml.baselines.arcagi1.augmentation import (
     grid_hash,
 )
 from priml.baselines.arcagi1.metric import PerOutputPass, StrictPass, TaskScore
-from priml.lib.custom_json import convert, loads, parse
+from priml.lib.codec import from_plain, loads
 from priml.paths import resolve_working_dir
 
 
@@ -74,7 +74,7 @@ class PassK:
     @cached_property
     def identifiers(self) -> list[str]:
         """Prepared identifier table, loaded only when evaluation starts."""
-        return convert(
+        return from_plain(
             loads((self.root / "identifiers.json").read_text()),
             list[str],
         )
@@ -82,17 +82,26 @@ class PassK:
     @cached_property
     def puzzles(self) -> dict[str, object]:
         """Canonical evaluation tasks, including tasks without predictions."""
-        return convert(
+        return from_plain(
             loads((self.root / "test_puzzles.json").read_text()),
             dict[str, object],
         )
 
     @cached_property
     def blank_identifier(self) -> int:
-        """The same padding identifier honored by the prepared loader."""
+        """The same padding identifier honored by the prepared loader.
+
+        Returns:
+          blank_identifier: ``dataset.json``'s ``blank_identifier_id``, else 0.
+
+        """
         path = self.root / "test" / "dataset.json"
-        metadata = parse(path.read_text(), dict[str, object]) if path.is_file() else {}
-        return convert(metadata.get("blank_identifier_id"), int, default=0)
+        metadata = (
+            from_plain(loads(path.read_text()), dict[str, object])
+            if path.is_file()
+            else {}
+        )
+        return from_plain(metadata.get("blank_identifier_id"), int, default=0)
 
     def reset(self) -> None:
         """Discard the previous evaluation's ballots."""
@@ -114,10 +123,10 @@ class PassK:
         header = output.shape[1] - inputs.shape[1]
         if header != 1:
             raise ValueError("Expected one halt column followed by the grid")
-        confidence = convert(output[:, 0].double().sigmoid().tolist(), list[float])
+        confidence = from_plain(output[:, 0].double().sigmoid().tolist(), list[float])
         input_rows = _uint8_rows(inputs)
         prediction_rows = _uint8_rows(output[:, 1:])
-        idents = convert(identifiers.detach().cpu().tolist(), list[int])
+        idents = from_plain(identifiers.detach().cpu().tolist(), list[int])
         for index, ident in enumerate(idents):
             if ident == self.blank_identifier:
                 continue
@@ -145,8 +154,8 @@ class PassK:
         results = {f"{name}@{k}": 0.0 for name in rankings for k in self.config.pass_ks}
         task_scores: list[TaskScore] = []
         for name, raw_puzzle in self.puzzles.items():
-            pairs = convert(
-                convert(raw_puzzle, dict[str, object]).get("test"),
+            pairs = from_plain(
+                from_plain(raw_puzzle, dict[str, object]).get("test"),
                 list[dict[str, object]],
             )
             counts = {
@@ -244,19 +253,21 @@ class PassK:
 
         """
         votes: dict[str, dict[str, list[tuple[str, float]]]] = {}
-        for name, raw_inputs in convert(
+        for name, raw_inputs in from_plain(
             state_dict.get("votes"),
             dict[str, object],
         ).items():
             by_input = votes.setdefault(name, {})
-            for input_hash, raw_records in convert(
+            for input_hash, raw_records in from_plain(
                 raw_inputs,
                 dict[str, object],
             ).items():
                 records: list[tuple[str, float]] = []
-                for raw_record in convert(raw_records, list[list[object]]):
-                    digest, confidence = convert(raw_record, list[object])
-                    records.append((convert(digest, str), convert(confidence, float)))
+                for raw_record in from_plain(raw_records, list[list[object]]):
+                    digest, confidence = from_plain(raw_record, list[object])
+                    records.append(
+                        (from_plain(digest, str), from_plain(confidence, float)),
+                    )
                 by_input[input_hash] = records
         self.votes = votes
 
@@ -279,7 +290,7 @@ class PassK:
     def _json_grid(self, value: object) -> NDArray[np.uint8]:
         """Decode a raw ARC grid from its JSON boundary."""
         return arc_grid_to_np(
-            convert(value, list[list[int]]),
+            from_plain(value, list[list[int]]),
             max_grid=self.spec.max_grid,
         )
 

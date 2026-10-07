@@ -19,7 +19,7 @@ from priml.baselines.arcagi1.train_step import TrmTrainStep
 from priml.baselines.arcagi1.train_step_test import port_config
 from priml.baselines.sudoku.act import AtomicPool
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.lib.testing.cli import assert_help_without_docstring
 from priml.runtime import SingleProcess
 from priml.train.checkpointer import Checkpointer
@@ -260,7 +260,7 @@ def test_main_checks_and_loads_the_pinned_checkpoint(
     assert recipes == [(True, True)]
     assert load_calls == [(checkpoint, "cpu", True)]
     assert len(loaded_states) == 1
-    state = convert(loaded_states[0]["step"], dict[str, object])
+    state = from_plain(loaded_states[0]["step"], dict[str, object])
     assert state["model"] == {}
     assert state["ema"] == {"shadow_params": {}, "global_step": 280_000}
     assert state["timer_step"] == {"global_count": 280_000, "global_sec": 0.0}
@@ -300,8 +300,8 @@ def test_historical_names_land_on_the_recipes_state() -> None:
     ]
     tensors = {name: torch.zeros(1) for name in names}
     archive: dict[str, object] = {"step": {"model": tensors, "ema": tensors}}
-    state = convert(overlay(archive, {"step": {}})["step"], dict[str, object])
-    renamed = convert(state["model"], dict[str, torch.Tensor])
+    state = from_plain(overlay(archive, {"step": {}})["step"], dict[str, object])
+    renamed = from_plain(state["model"], dict[str, torch.Tensor])
     assert set(renamed) <= set(step.model.state_dict())
 
 
@@ -342,11 +342,11 @@ def test_overlay_replaces_exact_state_and_preserves_other_fields() -> None:
             if requested_steps is None
             else overlay(archive, into, steps=requested_steps)
         )
-        state = convert(result["step"], dict[str, object])
-        actual_model = convert(state["model"], dict[str, torch.Tensor])
-        actual_ema = convert(state["ema"], dict[str, object])
-        actual_shadow = convert(actual_ema["shadow_params"], dict[str, torch.Tensor])
-        actual_timer = convert(state["timer_step"], dict[str, object])
+        state = from_plain(result["step"], dict[str, object])
+        actual_model = from_plain(state["model"], dict[str, torch.Tensor])
+        actual_ema = from_plain(state["ema"], dict[str, object])
+        actual_shadow = from_plain(actual_ema["shadow_params"], dict[str, torch.Tensor])
+        actual_timer = from_plain(state["timer_step"], dict[str, object])
         assert result is into
         assert set(actual_model) == set(expected_model)
         assert all(

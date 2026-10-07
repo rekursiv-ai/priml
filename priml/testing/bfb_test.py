@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from priml.distributed.testing import WarmPoolGetter
     from priml.math.custom_types import TensorFn
 
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.model.attention.attention import Attention
 from priml.model.transformer.block import TransformerBlock
 from priml.testing import bfb, regenerate
@@ -1076,7 +1076,7 @@ def test_stale_post_states_reports_then_clears_a_synthetic_golden(
 # annotation.
 def _loaded_golden(path: Path) -> dict[str, dict[str, Tensor]]:
     """Read a golden's two state dicts; a file with none (not a bfb golden) is empty."""
-    raw = convert(
+    raw = from_plain(
         _torch_load(path, map_location="cpu", weights_only=False),
         dict[str, object],
     )
@@ -2069,7 +2069,7 @@ def test_host_agnostic_numerics_loads_float32_checkpoints(tmp_path: Path) -> Non
     path = tmp_path / "state.pt"
     torch.save({"weight": saved}, path)
     with host_agnostic_numerics():
-        loaded = convert(
+        loaded = from_plain(
             _torch_load(path, weights_only=True),
             dict[str, Tensor],
         )

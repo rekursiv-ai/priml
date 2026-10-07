@@ -23,7 +23,7 @@ import shutil
 import tempfile
 
 from priml.baselines.arcagi2.scripts.build_dataset import ARC2_DATASET_DIR
-from priml.lib.custom_json import convert, loads
+from priml.lib.codec import from_plain, loads
 from priml.paths import resolve_working_dir, validated_output_path
 
 
@@ -78,13 +78,13 @@ def main() -> int:
 
 def _files(source: Path) -> list[Path]:
     """Admit the source subset identity and complete prepared-file boundary."""
-    params = convert(
+    params = from_plain(
         loads((source / "_build_params.json").read_text()),
         dict[str, object],
     )
     if (
         params.get("subsets") != ["training2", "evaluation2", "concept"]
-        or convert(params.get("test_set_name"), str) != "evaluation2"
+        or from_plain(params.get("test_set_name"), str) != "evaluation2"
     ):
         raise ValueError("Expected an ARC2 training2/evaluation2/concept build")
     names = [Path("identifiers.json"), Path("test_puzzles.json")]

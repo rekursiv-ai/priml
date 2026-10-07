@@ -26,7 +26,7 @@ from priml.baselines.sudoku.scripts import prepare_data
 from priml.baselines.sudoku.scripts.prepare_data import (
     default_directory,
 )
-from priml.lib.custom_json import parse
+from priml.lib.codec import from_plain, loads
 from priml.lib.testing.cli import assert_help_without_docstring
 from priml.paths import resolve_working_dir
 
@@ -130,7 +130,10 @@ def test_tokens_land_in_the_documented_vocabulary(
     assert inputs.max() <= 10
     unique_labels = cast(list[int], np.unique(labels).tolist())
     assert set(unique_labels) <= set(range(2, 11))  # Solved: no empties.
-    metadata = parse((out / "train" / "dataset.json").read_text(), dict[str, object])
+    metadata = from_plain(
+        loads((out / "train" / "dataset.json").read_text()),
+        dict[str, object],
+    )
     assert (metadata["vocab_size"], metadata["seq_len"]) == (11, 81)
 
 
@@ -324,8 +327,8 @@ def test_a_non_default_spec_is_what_the_build_writes(
         csv_directory=csv_dir,
         spec=spec,
     )
-    metadata = parse(
-        (out / "train" / "dataset.json").read_text(),
+    metadata = from_plain(
+        loads((out / "train" / "dataset.json").read_text()),
         dict[str, object],
     )
     assert metadata["vocab_size"] == 12

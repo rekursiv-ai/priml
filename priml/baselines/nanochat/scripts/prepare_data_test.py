@@ -96,7 +96,7 @@ from priml.baselines.nanochat.scripts.prepare_tokenizer import (
     UnigramPreparation,
     byte_alphabet,
 )
-from priml.lib.custom_json import ReadError, convert, parse
+from priml.lib.codec import ReadError, from_plain, loads
 from priml.paths import validated_output_path
 from priml.train.checkpointer import Checkpointer
 from priml.train.tracker import TrackerList
@@ -107,7 +107,7 @@ _CWD: Final = Path(__file__).resolve().parent
 
 
 def _json_object(path: Path) -> dict[str, object]:
-    return parse(path.read_text(), dict[str, object])
+    return from_plain(loads(path.read_text()), dict[str, object])
 
 
 def _write_shard(root: Path, index: int, documents: list[str]) -> None:
@@ -1710,7 +1710,7 @@ def test_every_replay_archive_counter_has_its_declared_integer_dtype() -> None:
         raw_values: object = factory_call.args[0]
         if not isinstance(raw_values, list):
             continue
-        values = convert(cast(list[object], raw_values), list[object])
+        values = from_plain(cast(list[object], raw_values), list[object])
         if values and all(isinstance(value, int) for value in values):
             integer_list_count += 1
             dtype: object = factory_call.kwargs.get("dtype")
@@ -2267,7 +2267,7 @@ def test_row_preparation_manifests_capture_loader_geometry(tmp_path: Path) -> No
     writes: dict[str, dict[str, object]] = {}
 
     def record_mapping(path: Path, *, value: object) -> None:
-        writes[path.name] = convert(value, dict[str, object])
+        writes[path.name] = from_plain(value, dict[str, object])
 
     with (
         patch(
@@ -2876,7 +2876,7 @@ def test_build_reference_eval_writes_both_archives_and_protects_sources(
             "priml.baselines.nanochat.scripts.prepare_data.load",
             wraps=load,
         ) as load_mock,
-        patch.object(prepare_data, "convert", wraps=convert) as convert_mock,
+        patch.object(prepare_data, "from_plain", wraps=from_plain) as convert_mock,
         patch(
             "priml.baselines.nanochat.scripts.prepare_data.validated_output_path",
             wraps=validated_output_path,
@@ -3216,7 +3216,7 @@ def test_reference_replay_rejects_non_matrix_rows() -> None:
 
 def _text_column(path: Path) -> list[str]:
     values: object = parquet.read_table(path).column("text").to_pylist()
-    return convert(values, list[str])
+    return from_plain(values, list[str])
 
 
 def test_corpus_build_deduplicates_moves_donors_and_preserves_sources(

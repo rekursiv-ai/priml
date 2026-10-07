@@ -36,7 +36,7 @@ from priml.baselines.arcagi2.train_step_test import (
     training_config,
 )
 from priml.baselines.sudoku.embedding import GridEmbedding
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.runtime import MultiProcess
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import joined, mismatches, put_steps
@@ -322,7 +322,7 @@ def run_distributed(
             object,
             torch.load(root / f"record_{rank}.pt", weights_only=True),
         )
-        out.append(convert(loaded, dict[str, Tensor]))
+        out.append(from_plain(loaded, dict[str, Tensor]))
     return out
 
 

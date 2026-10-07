@@ -11,7 +11,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from priml.lib.custom_json import ReadError
+from priml.lib.codec import ReadError
 from priml.optimizers.sign_sgd import (
     SignSGD,
     _is_distributed,

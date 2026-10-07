@@ -14,7 +14,7 @@ from configgle import Fig
 import pytest
 import torch
 
-from priml.lib.custom_json import ReadError
+from priml.lib.codec import ReadError
 from priml.model.attention.attention import Attention
 from priml.model.attention.gated_attention import GatedAttention
 from priml.model.attention.kernel import SdpaNaive

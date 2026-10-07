@@ -38,7 +38,7 @@ from priml.baselines.craftax.evaluation import (
 from priml.baselines.craftax.game.constants import Action
 from priml.baselines.craftax.game.observation import observation_size
 from priml.baselines.craftax.gtrxl import ActorCriticGTrXL
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.loss.policy_gradient import (
     ClippedPolicyLoss,
     categorical_entropy,
@@ -750,10 +750,10 @@ class CraftaxGTrXLTrainStep(TrainStep):
         self._episode_length = self._episode_length + 1
         if bool(done.any()):
             self._finished_returns.extend(
-                convert(self._episode_return[done].tolist(), list[float]),
+                from_plain(self._episode_return[done].tolist(), list[float]),
             )
             self._finished_lengths.extend(
-                convert(self._episode_length[done].tolist(), list[int]),
+                from_plain(self._episode_length[done].tolist(), list[int]),
             )
             self._episode_return = self._episode_return * ~done
             self._episode_length = self._episode_length * ~done

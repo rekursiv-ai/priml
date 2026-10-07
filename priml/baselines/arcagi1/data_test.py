@@ -29,7 +29,7 @@ from priml.baselines.arcagi1.data import (
     load_puzzle_dataset,
     resolve_rank,
 )
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 
 import priml.baselines.arcagi1.data as arc_data
 
@@ -290,7 +290,7 @@ def test_the_skipped_cell_marker_is_remapped(dataset_dir: Path) -> None:
     assert int(_tensor(batch["label"]).min()) >= 2  # Nothing was 0 to remap here.
     # A padded row carries the marker.
     padded = list(_data(dataset_dir, batch_size=7).eval_dataloader())[-1]
-    assert -100 in convert(_tensor(padded["label"])[-1].tolist(), list[int])
+    assert -100 in from_plain(_tensor(padded["label"])[-1].tolist(), list[int])
 
 
 def test_sampling_is_reproducible_and_advances(dataset_dir: Path) -> None:
@@ -718,7 +718,7 @@ def test_load_split_preserves_spatial_sidecar(dataset_dir: Path) -> None:
 
 def test_load_split_defaults_missing_ignore_label(dataset_dir: Path) -> None:
     metadata_path = dataset_dir / "test" / "dataset.json"
-    metadata = convert(
+    metadata = from_plain(
         cast(object, json.loads(metadata_path.read_text())),
         dict[str, object],
     )
@@ -746,7 +746,7 @@ def test_g11_load_split_requests_platform_independent_tag_dtype(
 
 def test_load_split_preserves_nonzero_ignore_label(dataset_dir: Path) -> None:
     metadata_path = dataset_dir / "test" / "dataset.json"
-    metadata = convert(
+    metadata = from_plain(
         cast(object, json.loads(metadata_path.read_text())),
         dict[str, object],
     )

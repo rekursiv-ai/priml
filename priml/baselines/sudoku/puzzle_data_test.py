@@ -23,7 +23,7 @@ from priml.baselines.sudoku.puzzle_data import (
     load_puzzle_dataset,
 )
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
-from priml.lib.custom_json import ReadError, convert, parse
+from priml.lib.codec import ReadError, from_plain, loads
 
 
 def _write(
@@ -620,7 +620,7 @@ def _ordered_first_epoch(root: Path, seed: int) -> list[int]:
         num_instances=2,
         max_samples=6,
     ).make()
-    return convert(
+    return from_plain(
         torch.cat(
             [
                 batch["media"][: batch["valid_count"], 0]
@@ -852,9 +852,9 @@ def test_loader_preserves_mmap_and_metadata_contract(
     np.save(split / "all__labels.npy", source_labels)
 
     load = Mock(wraps=np.load)
-    parse_metadata = Mock(wraps=parse)
+    parse_metadata = Mock(wraps=loads)
     monkeypatch.setattr(np, "load", load)
-    monkeypatch.setattr(puzzle_data, "parse", parse_metadata)
+    monkeypatch.setattr(puzzle_data, "loads", parse_metadata)
 
     data = load_puzzle_dataset(tmp_path, "test", max_samples=5)
 

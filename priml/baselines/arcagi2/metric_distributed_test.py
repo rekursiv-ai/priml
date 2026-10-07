@@ -15,7 +15,7 @@ import torch
 
 from priml.baselines.arcagi2.metric import PassK
 from priml.baselines.arcagi2.record_test import load, reduce
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.testing.golden import mismatches
 
 
@@ -159,7 +159,7 @@ def test_source_global_ballots(
     frozen = load("metric_distributed")
     for rank in range(2):
         assert (tmp_path / f"metric_{rank}").read_text() == "ok"
-        actual = convert(
+        actual = from_plain(
             cast(
                 object,
                 torch.load(tmp_path / f"scores_{rank}.pt", weights_only=True),

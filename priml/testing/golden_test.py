@@ -15,7 +15,7 @@ from configgle.fig import Fig, Maker
 import pytest
 import torch
 
-from priml.lib.custom_json import ReadError
+from priml.lib.codec import ReadError
 from priml.testing import golden, regenerate
 from priml.testing.golden import (
     assert_pprint_golden,

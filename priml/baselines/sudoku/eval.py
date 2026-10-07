@@ -325,7 +325,7 @@ from priml.baselines.sudoku.trainer import (
 )
 from priml.baselines.sudoku.trm import TRM
 from priml.cost import Cost, cost, elementwise_cost, reduction_cost
-from priml.lib.custom_json import ReadError, convert, loads, parse
+from priml.lib.codec import ReadError, from_plain, loads
 from priml.model.attention.kernel import attention_kernel_cost
 from priml.model.embedding import Embedding
 from priml.model.linear import Linear
@@ -3192,7 +3192,7 @@ def _load_harvest(
     if not manifest_path.is_file():
         raise FileNotFoundError(f"harvest manifest not found: {manifest_path}.")
     try:
-        manifest = parse(manifest_path.read_text(), _HarvestManifest)
+        manifest = from_plain(loads(manifest_path.read_text()), _HarvestManifest)
     except (json.JSONDecodeError, ReadError) as error:
         raise ValueError(
             f"invalid harvest manifest {manifest_path}: {error}",
@@ -3572,7 +3572,7 @@ def select_harvest_views(
             )
         generator = torch.Generator().manual_seed(seed + group * 1_000_003)
         selected = torch.randperm(view_count, generator=generator)[:views_per_group]
-        for view in convert(selected.tolist(), list[int]):
+        for view in from_plain(selected.tolist(), list[int]):
             flat_ids.append(group_start + view)
             group_ids.append(group)
             view_ids.append(view)
@@ -4012,8 +4012,8 @@ class Harvest:
                 np.unique(arrays["source_kind"], return_counts=True),
             )
             for kind, count in zip(
-                convert(cast(object, kinds.tolist()), list[int]),
-                convert(cast(object, counts.tolist()), list[int]),
+                from_plain(cast(object, kinds.tolist()), list[int]),
+                from_plain(cast(object, counts.tolist()), list[int]),
                 strict=True,
             ):
                 source_counts[kind] = source_counts.get(kind, 0) + count
@@ -4603,15 +4603,15 @@ class _Weights(TypedDict):
 
 def _checkpoint_payload(path: Path, device: torch.device | str) -> _Weights:
     """Load a checkpoint; return its nested full-state or top-level payload."""
-    state = convert(
+    state = from_plain(
         cast(object, torch.load(path, map_location=device, weights_only=True)),
         dict[str, object],
     )
     nested = state.get("step")
-    payload = convert(nested, dict[str, object]) if nested is not None else state
-    weights: _Weights = {"model": convert(payload["model"], dict[str, Tensor])}
+    payload = from_plain(nested, dict[str, object]) if nested is not None else state
+    weights: _Weights = {"model": from_plain(payload["model"], dict[str, Tensor])}
     if "ema" in payload:
-        weights["ema"] = convert(payload["ema"], dict[str, Tensor])
+        weights["ema"] = from_plain(payload["ema"], dict[str, Tensor])
     return weights
 
 
@@ -5318,7 +5318,7 @@ class SieveEval:
         # The sieve evaluates the ordered prefix, so survivor positions ARE
         # global test indices; mask-filtering an ``arange`` keeps them ascending.
         dataset_cfg.eval_instance_indices = tuple(
-            convert(survivors.to(torch.int64).tolist(), list[int]),
+            from_plain(survivors.to(torch.int64).tolist(), list[int]),
         )
         dataset_cfg.eval_num_instances = None
         model = _eval_model(cfg.model, self._path(cfg.checkpoint_path), self.device)
@@ -5492,7 +5492,7 @@ def _survivor_indices(
     survivors: Tensor,
 ) -> tuple[int, ...]:
     """Global test indices for the disagreement subset."""
-    positions = convert(survivors.tolist(), list[int])
+    positions = from_plain(survivors.tolist(), list[int])
     if base_indices:
         return tuple(base_indices[position] for position in positions)
     return tuple(positions)
@@ -6160,7 +6160,10 @@ class Reproduction:
         progress_path = self._progress_path()
         if progress_path.is_file():
             try:
-                progress = parse(progress_path.read_text(), _ReproductionProgress)
+                progress = from_plain(
+                    loads(progress_path.read_text()),
+                    _ReproductionProgress,
+                )
             except ReadError as error:
                 raise ValueError(
                     f"invalid reproduction progress: {progress_path}.",
@@ -6173,14 +6176,17 @@ class Reproduction:
         if not metrics_path.is_file():
             return {}
         try:
-            metrics = convert(loads(metrics_path.read_text()), dict[str, object])
-            rows = convert(metrics.get("eval/stages"), list[object], default=[])
+            metrics = from_plain(
+                loads(metrics_path.read_text()),
+                dict[str, object],
+            )
+            rows = from_plain(metrics.get("eval/stages"), list[object], default=[])
         except ReadError:
             return {}
         seconds: dict[str, float] = {}
         for row in rows:
             try:
-                stage = convert(row, _StageRow)
+                stage = from_plain(row, _StageRow)
             except ReadError:
                 continue
             seconds[stage["stage"]] = stage["seconds"]
@@ -6221,9 +6227,10 @@ class Reproduction:
             # Reuse is keyed on corpus IDENTITY, not mere existence: a corpus
             # rolled out from a different generator must never silently train
             # this pipeline's committee.
-            recorded = parse(manifest_path.read_text(), _HarvestSource)[
-                "source_checkpoint"
-            ]
+            recorded = from_plain(
+                loads(manifest_path.read_text()),
+                _HarvestSource,
+            )["source_checkpoint"]
             source_checkpoint = harvest.harvest_source_checkpoint
             configured = str(
                 source_checkpoint
@@ -6824,7 +6831,7 @@ class _OuterRun:
         """
         if self._tracker is None or not metrics_path.exists():
             return
-        rows = parse(metrics_path.read_text(), dict[str, object])
+        rows = from_plain(loads(metrics_path.read_text()), dict[str, object])
         if rows:
             self.log(rows, step, prefix=prefix)
 

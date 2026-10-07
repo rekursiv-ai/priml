@@ -7,7 +7,7 @@ from torch import nn
 import pytest
 import torch
 
-from priml.lib.custom_json import ReadError
+from priml.lib.codec import ReadError
 from priml.optimizers.lr import (
     apply_lr_scale,
     clip_grad_norm,

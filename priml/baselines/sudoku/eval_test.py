@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import importlib
 import json
+import re
 
 from torch import Tensor
 
@@ -47,6 +48,7 @@ from priml.baselines.sudoku.eval import (
     VerifierFit,
     View,
     _fill_template,
+    _HarvestShardEntry,
     _load_harvest,
     _outer_run,
     _OuterRun,
@@ -75,7 +77,7 @@ from priml.baselines.sudoku.eval import (
     validate_grid_permutation,
     write_member_dump,
 )
-from priml.lib.custom_json import ReadError
+from priml.lib.codec import ReadError
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import mismatches, read_tensors, stored
@@ -1395,18 +1397,20 @@ def test_load_harvest_rejects_a_malformed_manifest(tmp_path: Path) -> None:
     counts = {"groups_per_shard": 2, "shard_count": 1, "row_count": 1}
     cases: tuple[tuple[str, str], ...] = (
         ("{", "invalid harvest manifest"),
-        ("[]", r"Expected `object`, got `array`"),
+        ("[]", r"expected object for _HarvestManifest, got \[\]"),
         (
             json.dumps({"schema_version": 2, "shards": [], **counts}),
-            r"\$\.schema_version",
+            r"first at \['schema_version'\]: cannot read 2 as typing\.Literal\[1\]",
         ),
         (
             json.dumps({"schema_version": 1, "shards": {}, **counts}),
-            r"\$\.shards",
+            # The export rewrites the module path, so the type names itself here.
+            r"first at \['shards'\]: cannot read \{\} as "
+            + re.escape(repr(list[_HarvestShardEntry])),
         ),
         (
             json.dumps({"schema_version": 1, "shards": [3], **counts}),
-            r"\$\.shards\[0\]",
+            r"first at \['shards', 0\]: expected object for _HarvestShardEntry, got 3",
         ),
         (
             json.dumps({"schema_version": 1, "shards": [entry], **counts}),

@@ -28,7 +28,7 @@ from priml.hub import (
     load_transformers_model,
     resolve_hf_dtype,
 )
-from priml.lib.custom_json import ReadError
+from priml.lib.codec import ReadError
 from priml.lib.userdirs import cache_dir
 
 

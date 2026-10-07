@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from priml.lib.custom_json import ReadError
+from priml.lib.codec import ReadError
 from priml.timer import CheckpointableStepTimer
 
 

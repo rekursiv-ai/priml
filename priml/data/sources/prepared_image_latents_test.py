@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from priml.data.sources.prepared_image_latents import read_image, read_labels
-from priml.lib.custom_json import ReadError
+from priml.lib.codec import ReadError
 
 
 if TYPE_CHECKING:
