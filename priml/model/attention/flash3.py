@@ -105,6 +105,7 @@ class Flash3Attention(nn.Module):
             num_heads: int,
             channels_head: int,
             channels_v_head: int = -1,
+            num_heads_kv: int = -1,
             window: int = -1,
             dropout_p: float = 0.0,
             rows: int = -1,
@@ -119,6 +120,7 @@ class Flash3Attention(nn.Module):
               batch_size: Sequences in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               num_heads: Query heads.
+              num_heads_kv: Key/value heads; -1 mirrors num_heads.
               channels_head: Width of each query/key head.
               channels_v_head: Value width; -1 uses the query/key width.
               window: Previous keys each query reaches, plus itself; negative is unbounded.
@@ -129,6 +131,10 @@ class Flash3Attention(nn.Module):
             Returns:
               cost: Whole-invocation cost of the kernel.
 
+            Raises:
+              ValueError: ``num_heads_kv`` exceeds ``num_heads`` or does not
+                divide it.
+
             """
             del kwargs
             return attention_kernel_cost(
@@ -136,6 +142,7 @@ class Flash3Attention(nn.Module):
                 batch_size=batch_size,
                 dtype=dtype,
                 num_heads=num_heads,
+                num_heads_kv=num_heads_kv,
                 channels_head=channels_head,
                 channels_v_head=channels_v_head,
                 window=window,

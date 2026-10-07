@@ -187,18 +187,28 @@ class LatentAttention(nn.Module):
             Returns:
               cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
+            Raises:
+              ValueError: The kernel's ``num_heads_kv`` is not a divisor of
+                ``num_heads``.
+
             """
             if self.absorb:
                 channels_k = kv_lora_rank + channels_qk_rope_head
                 channels_v = kv_lora_rank
+                # One latent serves every query head, so K and V are each read
+                # once per sequence: the extreme grouped-query case.
+                heads_kv = 1
             else:
                 channels_k, channels_v = channels_head, channels_v_head
+                # Re-expanded, the einsum materializes K and V per head.
+                heads_kv = num_heads
             kernel = cost(
                 self.attn_kernel,
                 seq_len=seq_len,
                 batch_size=batch_size,
                 dtype=dtype,
                 num_heads=num_heads,
+                num_heads_kv=heads_kv,
                 channels_head=channels_k,
                 channels_v_head=channels_v,
                 dropout_p=dropout_p,

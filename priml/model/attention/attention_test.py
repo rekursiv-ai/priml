@@ -11,7 +11,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
-from priml.cost import cost, matmul_cost
+from priml.cost import Cost, cost, matmul_cost
 from priml.model.attention.attention import (
     Attention,
     AttentionProjections,
@@ -1048,6 +1048,39 @@ def test_gqa_cost_caches_only_kv_heads() -> None:
     cost = config.copy_tree().finalize().cost(seq_len=8, batch_size=1, dtype=None)
     assert cost.bytes_state == 4 * 2 * 2 * 4
     assert cost.params == sum(p.numel() for p in config.make().parameters())
+
+
+def test_grouped_heads_cost_one_read_of_k_and_v_per_kv_head() -> None:
+    # End to end through the owner: a grouped module must report fewer K/V
+    # bytes than the same module dense, and its FLOPs must fall too, since the
+    # K and V projections shrink with the KV head count. The exact K/V read
+    # multiplicity is pinned on the kernel in kernel_test, through the same
+    # ``cost(kernel_config, ...)`` dispatch this module uses -- this test is the
+    # guard that the owner still forwards the count at all.
+    channel, context, batch, heads = 16, 32, 1, 4
+
+    def module_cost(kv_head: int) -> Cost:
+        return Attention.Config(
+            channels_in=64,
+            num_heads=heads,
+            num_heads_kv=kv_head,
+            channels_head=channel,
+        ).cost(seq_len=context, batch_size=batch, dtype=torch.bfloat16)
+
+    grouped, dense = module_cost(2), module_cost(heads)
+    assert (
+        grouped["bytes", "primal", "matmul"].sum()
+        < dense["bytes", "primal", "matmul"].sum()
+    )
+    assert (
+        grouped["flops", "primal", "matmul"].sum()
+        < dense["flops", "primal", "matmul"].sum()
+    )
+    # Sharing further keeps helping, monotonically.
+    assert (
+        module_cost(1)["bytes", "primal", "matmul"].sum()
+        < grouped["bytes", "primal", "matmul"].sum()
+    )
 
 
 def test_attention_cost_counts_its_norms_and_rotary() -> None:

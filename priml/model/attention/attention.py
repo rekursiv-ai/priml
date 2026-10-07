@@ -462,6 +462,7 @@ class Attention(AttentionProjections):
                 batch_size=batch_size,
                 dtype=dtype,
                 num_heads=self.num_heads,
+                num_heads_kv=self.num_heads_kv,
                 channels_head=self.channels_head,
                 dropout_p=self.dropout,
                 **kwargs,

@@ -270,6 +270,36 @@ def test_cost_has_no_division_operator() -> None:
     assert "__sub__" not in Cost.__dict__
 
 
+def test_matmul_cost_can_leave_the_operand_read_to_its_caller() -> None:
+    # operand_read=False is the same invocation without the right operand's
+    # traffic, so a caller that reads that operand at another multiplicity can
+    # add it back itself. Cells are addressed on all four axes so the lookup
+    # reads a number rather than a sub-table.
+    without = matmul_cost(
+        channels_in=5,
+        channels_out=7,
+        rows=3,
+        dtype=BF,
+        operand_read=False,
+    )
+    whole = matmul_cost(channels_in=5, channels_out=7, rows=3, dtype=BF)
+
+    operand = 5 * 7 * BF.itemsize
+    primal = ("bytes", "primal", "matmul", BF)
+    adjoint = ("bytes", "adjoint", "matmul", BF)
+    assert whole[primal] - without[primal] == operand
+    # The adjoint moves the operand twice over, matching the primal relation.
+    assert whole[adjoint] - without[adjoint] == 2 * operand
+    # FLOPs and parameter ownership never depend on it.
+    flops = ("flops", "primal", "matmul", BF)
+    assert without[flops] == whole[flops]
+    assert (
+        without["flops", "adjoint", "matmul", BF]
+        == whole["flops", "adjoint", "matmul", BF]
+    )
+    assert without.params == whole.params
+
+
 def test_equality_ignores_explicit_zero_cells() -> None:
     assert Cost(cells={("flops", "primal", "matmul", BF): 0}) == Cost()
 

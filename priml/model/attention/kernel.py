@@ -34,6 +34,7 @@ def attention_kernel_cost(
     num_heads: int,
     channels_head: int,
     channels_v_head: int = -1,
+    num_heads_kv: int = -1,
     window: int = -1,
     dropout_p: float = 0.0,
     rows: int = -1,
@@ -52,6 +53,9 @@ def attention_kernel_cost(
       batch_size: Sequences in this invocation.
       dtype: Activation dtype; ``None`` is torch's default.
       num_heads: Query heads.
+      num_heads_kv: Key/value heads; ``-1`` mirrors ``num_heads``. A smaller
+        count is Grouped-Query Attention, where several query heads share one
+        key and value head.
       channels_head: Width of each query/key head.
       channels_v_head: Value width; -1 uses the query/key width.
       window: Previous keys each query reaches, plus itself; negative is unbounded.
@@ -63,8 +67,13 @@ def attention_kernel_cost(
       cost: Unfused logical tensor I/O and FLOPs, not measured HBM traffic.
         Fused and naive kernels share this algorithmic accounting convention.
 
+    Raises:
+      ValueError: A positive ``num_heads_kv`` exceeds ``num_heads`` or does not
+        divide it, so no whole group of query heads shares one key/value head.
+
     """
     del kwargs
+    _validate_kv_heads(num_heads=num_heads, num_heads_kv=num_heads_kv)
     dt = dtype
     keys = seq_len if window < 0 else min(window + 1, seq_len)
     query_rows = (seq_len if rows < 0 else rows) * batch_size
@@ -77,6 +86,7 @@ def attention_kernel_cost(
         weight=False,
         rows=sequence_rows,
         dtype=dt,
+        operand_read=False,
     ).tile(batch_size)
     values = matmul_cost(
         channels_in=keys,
@@ -84,6 +94,7 @@ def attention_kernel_cost(
         weight=False,
         rows=sequence_rows,
         dtype=dt,
+        operand_read=False,
     ).tile(batch_size)
     # Logical unfused I/O, including scores, even when execution uses fused SDPA.
     # Scale/subtract/exp/divide read two row scalars; VJP reads one row sum.
@@ -115,7 +126,41 @@ def attention_kernel_cost(
         rows=query_rows,
         dtype=dt,
     )
-    return (scores + values + softmax + dropout).tile(num_heads, copies=num_heads)
+    # Grouped-query attention shares K and V across the query heads in a group,
+    # so those operand reads happen once per KV head rather than once per query
+    # head -- charging them per query head overstates them by num_heads /
+    # num_heads_kv. The two products above therefore leave the operand read out
+    # and it is added back here, at the KV head count. The arithmetic stays per
+    # query head: each one really does run its own two products over the whole
+    # context, so FLOPs never move.
+    #
+    # The read those products left out, rebuilt as plain operand traffic: K of
+    # ``channels_head x keys`` and V of ``keys x value_width`` per KV head, per
+    # sequence. The adjoint moves twice the primal, matching ``matmul_cost``'s
+    # own adjoint cell.
+    kv_elements = channels_head * keys + keys * value_width
+    kv_read = (
+        traffic("primal", "matmul", elements=kv_elements, dtype=dt)
+        + traffic("adjoint", "matmul", elements=2 * kv_elements, dtype=dt)
+    ).tile(batch_size)
+    per_head = (scores + values + softmax + dropout).tile(num_heads, copies=num_heads)
+    return per_head + kv_read.tile(_kv_heads(num_heads, num_heads_kv))
+
+
+def _kv_heads(num_heads: int, num_heads_kv: int) -> int:
+    """Key/value heads to charge the shared K/V read at; ``-1`` mirrors queries."""
+    return num_heads if num_heads_kv <= 0 else num_heads_kv
+
+
+def _validate_kv_heads(*, num_heads: int, num_heads_kv: int) -> None:
+    """Reject a KV head count that no whole group of query heads can produce."""
+    if num_heads_kv <= 0:
+        return
+    if num_heads_kv > num_heads or num_heads % num_heads_kv != 0:
+        raise ValueError(
+            f"num_heads={num_heads} must be divisible by num_heads_kv={num_heads_kv}; "
+            "each group of query heads shares exactly one key/value head.",
+        )
 
 
 class SdpaFused(nn.Module):
@@ -139,6 +184,7 @@ class SdpaFused(nn.Module):
             num_heads: int,
             channels_head: int,
             channels_v_head: int = -1,
+            num_heads_kv: int = -1,
             window: int = -1,
             dropout_p: float = 0.0,
             rows: int = -1,
@@ -153,6 +199,7 @@ class SdpaFused(nn.Module):
               batch_size: Sequences in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               num_heads: Query heads.
+              num_heads_kv: Key/value heads; -1 mirrors num_heads.
               channels_head: Width of each query/key head.
               channels_v_head: Value width; -1 uses the query/key width.
               window: Previous keys each query reaches, plus itself; negative is unbounded.
@@ -163,6 +210,10 @@ class SdpaFused(nn.Module):
             Returns:
               cost: Whole-invocation FLOPs and logical tensor bytes.
 
+            Raises:
+              ValueError: ``num_heads_kv`` exceeds ``num_heads`` or does not
+                divide it.
+
             """
             # A dense mask does not remove rows or columns from either product.
             del kwargs, window
@@ -171,6 +222,7 @@ class SdpaFused(nn.Module):
                 batch_size=batch_size,
                 dtype=dtype,
                 num_heads=num_heads,
+                num_heads_kv=num_heads_kv,
                 channels_head=channels_head,
                 channels_v_head=channels_v_head,
                 window=-1,
@@ -238,6 +290,7 @@ class SdpaNaive(nn.Module):
             num_heads: int,
             channels_head: int,
             channels_v_head: int = -1,
+            num_heads_kv: int = -1,
             window: int = -1,
             dropout_p: float = 0.0,
             rows: int = -1,
@@ -252,6 +305,7 @@ class SdpaNaive(nn.Module):
               batch_size: Sequences in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               num_heads: Query heads.
+              num_heads_kv: Key/value heads; -1 mirrors num_heads.
               channels_head: Width of each query/key head.
               channels_v_head: Value width; -1 uses the query/key width.
               window: Previous keys each query reaches, plus itself; negative is unbounded.
@@ -262,6 +316,10 @@ class SdpaNaive(nn.Module):
             Returns:
               cost: Whole-invocation FLOPs and logical tensor bytes.
 
+            Raises:
+              ValueError: ``num_heads_kv`` exceeds ``num_heads`` or does not
+                divide it.
+
             """
             # A dense mask does not remove rows or columns from either product.
             del kwargs, window
@@ -270,6 +328,7 @@ class SdpaNaive(nn.Module):
                 batch_size=batch_size,
                 dtype=dtype,
                 num_heads=num_heads,
+                num_heads_kv=num_heads_kv,
                 channels_head=channels_head,
                 channels_v_head=channels_v_head,
                 window=-1,
@@ -353,6 +412,7 @@ class SdpaVarlen(nn.Module):
             num_heads: int,
             channels_head: int,
             channels_v_head: int = -1,
+            num_heads_kv: int = -1,
             window: int = -1,
             dropout_p: float = 0.0,
             rows: int = -1,
@@ -367,6 +427,7 @@ class SdpaVarlen(nn.Module):
               batch_size: Rows in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               num_heads: Query heads.
+              num_heads_kv: Key/value heads; -1 mirrors num_heads.
               channels_head: Width of each query/key head.
               channels_v_head: Value width; -1 uses the query/key width.
               window: Previous keys each query reaches, plus itself; negative is unbounded.
@@ -377,6 +438,10 @@ class SdpaVarlen(nn.Module):
             Returns:
               cost: Whole-invocation FLOPs and logical tensor bytes.
 
+            Raises:
+              ValueError: ``num_heads_kv`` exceeds ``num_heads`` or does not
+                divide it.
+
             """
             # A dense mask, segments or window, removes no rows or columns.
             del kwargs, window
@@ -385,6 +450,7 @@ class SdpaVarlen(nn.Module):
                 batch_size=batch_size,
                 dtype=dtype,
                 num_heads=num_heads,
+                num_heads_kv=num_heads_kv,
                 channels_head=channels_head,
                 channels_v_head=channels_v_head,
                 window=-1,

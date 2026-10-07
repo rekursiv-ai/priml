@@ -522,6 +522,8 @@ def test_latent_attention_cost_attends_over_the_latent_when_absorbed() -> None:
         seq_len=32,
         dtype=None,
         num_heads=4,
+        # One shared latent: K and V are read once, not once per query head.
+        num_heads_kv=1,
         channels_head=10,
         channels_v_head=6,
     )
@@ -699,6 +701,9 @@ def test_mla_cost_prices_absorbed_projection_intermediates(
         seq_len=8,
         dtype=dtype,
         num_heads=4,
+        # Absorbed, one latent serves every query head, so K and V are each read
+        # once per sequence; re-expanded, they are materialized per head.
+        num_heads_kv=1 if absorb else 4,
         channels_head=16 if absorb else 12,
         channels_v_head=12 if absorb else 16,
     )

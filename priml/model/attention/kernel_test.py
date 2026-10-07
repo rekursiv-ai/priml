@@ -532,6 +532,174 @@ def test_sdpa_varlen_refuses_what_its_segments_cannot_express(
         )
 
 
+@pytest.mark.parametrize("kv_head", [1, 2])
+def test_gqa_kv_traffic_is_charged_once_per_kv_head(kv_head: int) -> None:
+    # Grouped-query attention shares K and V across the query heads in a group,
+    # so the operand reads are counted per KV head while the arithmetic stays
+    # per query head. Charged per query head instead, the reads are overstated
+    # by num_heads / num_heads_kv.
+    #
+    # More than one ratio, because the difference below is the reads the extra
+    # query heads no longer repeat -- ``num_heads - num_heads_kv`` of them, not
+    # ``num_heads_kv``. The two agree only at the halving ratio, so a test
+    # written at one geometry alone pins the wrong identity.
+    head, channel, context, batch = 4, 5, 7, 3
+    itemsize = torch.bfloat16.itemsize
+
+    grouped = attention_kernel_cost(
+        seq_len=context,
+        batch_size=batch,
+        dtype=torch.bfloat16,
+        num_heads=head,
+        num_heads_kv=kv_head,
+        channels_head=channel,
+        rows=1,
+    )
+    dense = attention_kernel_cost(
+        seq_len=context,
+        batch_size=batch,
+        dtype=torch.bfloat16,
+        num_heads=head,
+        num_heads_kv=head,
+        channels_head=channel,
+        rows=1,
+    )
+
+    # Exactly the K and V reads the unshared query heads stop repeating: two
+    # operands, the surplus heads, the sequences, and the context each head
+    # reaches.
+    unshared = 2 * batch * (head - kv_head) * context * channel * itemsize
+    assert (
+        dense["bytes", "primal", "matmul"].sum()
+        - grouped["bytes", "primal", "matmul"].sum()
+        == unshared
+    )
+    # Only the reads move. Every query head still runs its own two products, so
+    # the FLOPs are identical either way.
+    assert grouped["flops", "primal", "matmul"] == dense["flops", "primal", "matmul"]
+
+
+def test_each_kv_head_adds_exactly_one_read_of_k_and_v() -> None:
+    # The KV operand read is ``2 * context * channel`` elements -- K and V --
+    # per KV head per sequence. So consecutive KV counts differ by exactly one
+    # such read, at every ratio rather than only at the halving one.
+    channel, context, batch, heads = 6, 5, 2, 12
+    itemsize = torch.bfloat16.itemsize
+    one_head = batch * 2 * context * channel * itemsize
+
+    def matmul_bytes(kv_head: int) -> int:
+        return attention_kernel_cost(
+            seq_len=context,
+            batch_size=batch,
+            dtype=torch.bfloat16,
+            num_heads=heads,
+            num_heads_kv=kv_head,
+            channels_head=channel,
+            rows=1,
+        )["bytes", "primal", "matmul"].sum()
+
+    for kv_head in (1, 2, 3):
+        # One more KV head is one more read, so the count rises by exactly that.
+        assert matmul_bytes(kv_head + 1) - matmul_bytes(kv_head) == one_head
+
+
+def test_multi_head_attention_is_unchanged_by_the_kv_count() -> None:
+    # -1 mirrors num_heads, and an explicit equal count must agree with it: no
+    # existing caller sees a different number.
+    for head in (2, 4, 8):
+        default = attention_kernel_cost(
+            seq_len=16,
+            dtype=torch.bfloat16,
+            num_heads=head,
+            channels_head=8,
+            rows=1,
+        )
+        explicit = attention_kernel_cost(
+            seq_len=16,
+            dtype=torch.bfloat16,
+            num_heads=head,
+            num_heads_kv=head,
+            channels_head=8,
+            rows=1,
+        )
+        assert default.cells == explicit.cells
+
+
+def test_the_gqa_saving_scales_with_the_grouping_ratio() -> None:
+    # Llama-3-8B shares K/V across 32 query heads in groups of 8, so its KV
+    # reads are a quarter of what a per-query-head count would charge.
+    saved: list[int] = []
+    for kv_head in (8, 16, 32):
+        cost = attention_kernel_cost(
+            seq_len=32,
+            dtype=torch.bfloat16,
+            num_heads=32,
+            num_heads_kv=kv_head,
+            channels_head=16,
+            rows=1,
+        )
+        saved.append(cost["bytes", "primal", "matmul"].sum())
+    assert saved[0] < saved[1] < saved[2]
+    # Bytes fall as the reads are shared further; FLOPs never do.
+    dense = attention_kernel_cost(
+        seq_len=32,
+        dtype=torch.bfloat16,
+        num_heads=32,
+        channels_head=16,
+        rows=1,
+    )
+    assert saved[-1] == dense["bytes", "primal", "matmul"].sum()
+
+
+def test_a_kernel_config_forwards_the_kv_count_to_its_cost() -> None:
+    # The plumbing, not the arithmetic: owners reach the kernel through
+    # ``cost(kernel_config, ...)``, not the free function, so a wrapper that
+    # drops ``num_heads_kv`` makes the whole fix unreachable while every test
+    # of ``attention_kernel_cost`` still passes.
+    def through_config(kernel: object, kv_head: int) -> int:
+        return cost(
+            kernel,
+            seq_len=16,
+            batch_size=1,
+            dtype=torch.bfloat16,
+            num_heads=4,
+            num_heads_kv=kv_head,
+            channels_head=8,
+            rows=1,
+        )["bytes", "primal", "matmul"].sum()
+
+    for kernel in (SdpaFused.Config(), SdpaNaive.Config()):
+        direct = attention_kernel_cost(
+            seq_len=16,
+            batch_size=1,
+            dtype=torch.bfloat16,
+            num_heads=4,
+            num_heads_kv=2,
+            channels_head=8,
+            rows=1,
+        )
+        assert through_config(kernel, 2) == direct["bytes", "primal", "matmul"].sum()
+        # And the count still moves the number through that path.
+        assert through_config(kernel, 1) < through_config(kernel, 4)
+
+
+@pytest.mark.parametrize("kv_head", [3, 5])
+def test_a_kv_count_no_group_of_query_heads_can_produce_is_rejected(
+    kv_head: int,
+) -> None:
+    # 3 does not divide 4 and 5 exceeds it, so neither describes a grouping.
+    with pytest.raises(ValueError, match=r"num_heads_kv"):
+        attention_kernel_cost(
+            seq_len=8,
+            batch_size=1,
+            dtype=torch.bfloat16,
+            num_heads=4,
+            num_heads_kv=kv_head,
+            channels_head=8,
+            rows=1,
+        )
+
+
 def _segment_reference(q: Tensor, k: Tensor, v: Tensor, *, window: int) -> Tensor:
     """Attend inside each segment of ``CU_SEQLENS`` alone, through ``SdpaFused``."""
     flat = [t.flatten(0, 1) for t in (q, k, v)]

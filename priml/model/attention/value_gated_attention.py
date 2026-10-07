@@ -109,6 +109,7 @@ class SdpaCausal:
             num_heads: int,
             channels_head: int,
             channels_v_head: int = -1,
+            num_heads_kv: int = -1,
             window: int = -1,
             dropout_p: float = 0.0,
             rows: int = -1,
@@ -123,6 +124,7 @@ class SdpaCausal:
               batch_size: Sequences in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               num_heads: Query heads.
+              num_heads_kv: Key/value heads; -1 mirrors num_heads.
               channels_head: Width of each query/key head.
               channels_v_head: Value width; -1 uses the query/key width.
               window: Previous keys each query reaches, plus itself; negative is unbounded.
@@ -133,6 +135,10 @@ class SdpaCausal:
             Returns:
               cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
+            Raises:
+              ValueError: ``num_heads_kv`` exceeds ``num_heads`` or does not
+                divide it.
+
             """
             del kwargs, window
             return attention_kernel_cost(
@@ -140,6 +146,7 @@ class SdpaCausal:
                 batch_size=batch_size,
                 dtype=dtype,
                 num_heads=num_heads,
+                num_heads_kv=num_heads_kv,
                 channels_head=channels_head,
                 channels_v_head=channels_v_head,
                 window=-1,
@@ -317,6 +324,10 @@ class ValueGatedAttention(nn.Module):
 
             Returns:
               cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
+
+            Raises:
+              ValueError: ``num_heads_kv`` exceeds ``num_heads`` or does not
+                divide it.
 
             """
             rows = seq_len * batch_size
