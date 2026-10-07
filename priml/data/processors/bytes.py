@@ -249,7 +249,7 @@ class GetBytesFromTarHandle:
         # not filtering. The sample is intact and a sibling reader that claims
         # the format still handles it, so marking it filtered would count a
         # live sample as dropped.
-        fmt = sample.get("format")
+        fmt = sample.get("format", "")
         if fmt and fmt not in self.known_formats:
             return False
         extensions = [fmt] if fmt else self.known_formats
@@ -436,7 +436,9 @@ class CropDuringDecodeImage:
                     add_filter_reason_typed(
                         sample,
                         type(self).__name__,
-                        f"decode_failed: {error}" if error else "decode_failed",
+                        f"decode_failed: {error}"
+                        if error is not None
+                        else "decode_failed",
                     )
                 else:
                     # Add frames dimension: (C, H, W) -> (C, F=1, H, W)
@@ -468,7 +470,7 @@ class CropDuringDecodeImage:
     ) -> (
         tuple[
             bytes,
-            str | None,
+            str,
             int,
             int,
             tuple[int, int] | tuple[int, int, int, int] | None,
@@ -482,7 +484,7 @@ class CropDuringDecodeImage:
         width = sample.get("width")
         target_frames = sample.get("target_frames", 1)
         crop = sample.get("crop")
-        fmt = sample.get("format")
+        fmt = sample.get("format", "")
 
         # No bytes yet is a routing outcome, not a defect: an upstream reader
         # may not have run. Nor is a video: DecodeVideo handles anything with
@@ -506,7 +508,7 @@ class CropDuringDecodeImage:
     def _process_image(
         self,
         image_bytes: bytes,
-        fmt: str | None,
+        fmt: str,
         height: int,
         width: int,
         crop: tuple[int, int] | tuple[int, int, int, int] | None,
@@ -515,13 +517,13 @@ class CropDuringDecodeImage:
     ) -> tuple[Tensor, str | None] | tuple[None, str] | None:
         """Decode and process image bytes with optional crop."""
         # Determine file extensions to try.
-        if fmt and fmt in self.known_formats:
+        if not fmt:
+            extensions = self.known_formats
+        elif fmt in self.known_formats:
             extensions = [fmt]
-        elif fmt:
+        else:
             # Format specified but not in our known set - skip without filtering.
             return None
-        else:
-            extensions = self.known_formats
 
         # The turbojpeg and libwebp paths decode RGB only, so asking for an
         # alpha channel has to fall through to PIL rather than silently
@@ -779,7 +781,7 @@ class DecodeVideo:
         tuple[
             TarFileProtocol | None,
             str,
-            str | None,
+            str,
             int,
             int,
             int,
@@ -798,11 +800,11 @@ class DecodeVideo:
         target_frames = sample.get("target_frames")
         target_height = sample.get("target_height")
         target_width = sample.get("target_width")
-        fmt = sample.get("format")
+        fmt = sample.get("format", "")
 
         # A key addresses a tar member. Once the bytes are already present,
         # neither the address nor an open archive is part of the decode.
-        if not sample.get("media") and (tar_handle is None or key is None):
+        if not sample.get("media", b"") and (tar_handle is None or key is None):
             return None
         # Only multi-frame videos; anything else is routed, not filtered.
         if frames is None or frames <= 1:
@@ -856,7 +858,7 @@ class DecodeVideo:
         self,
         tar_handle: TarFileProtocol | None,
         key: str,
-        fmt: str | None,
+        fmt: str,
         *,
         frames: int,
         height: int,
@@ -890,7 +892,7 @@ class DecodeVideo:
         self,
         tar_handle: TarFileProtocol | None,
         key: str,
-        fmt: str | None,
+        fmt: str,
     ) -> bytes:
         """Return the clip's bytes from the tar, or empty when unavailable."""
         if tar_handle is None:

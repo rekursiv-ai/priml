@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import math
 import random
@@ -197,16 +197,14 @@ def test_random_resized_crop_rejects_a_zero_sized_candidate(
         ratio=(ratio, ratio),
     ).make()
 
+    samples: list[GetRandomResizedCropBoxFromDimensions.Input] = [
+        {"height": 6, "width": 8},
+    ]
     result = next(
         iter(
             processor(
                 iter(
-                    [
-                        cast(
-                            GetRandomResizedCropBoxFromDimensions.Input,
-                            {"height": 6, "width": 8},
-                        ),
-                    ],
+                    samples,
                 ),
             ),
         ),
@@ -236,16 +234,14 @@ def test_random_resized_crop_accepts_a_one_pixel_crop(
         ratio=(1.0, 1.0),
     ).make()
 
+    samples: list[GetRandomResizedCropBoxFromDimensions.Input] = [
+        {"height": 1, "width": 1},
+    ]
     result = next(
         iter(
             processor(
                 iter(
-                    [
-                        cast(
-                            GetRandomResizedCropBoxFromDimensions.Input,
-                            {"height": 1, "width": 1},
-                        ),
-                    ],
+                    samples,
                 ),
             ),
         ),
@@ -288,29 +284,25 @@ def test_center_crop_uses_configured_fraction_of_the_fitted_box() -> None:
 def test_crop_processors_continue_after_samples_missing_dimensions() -> None:
     random_crop = GetRandomResizedCropBoxFromDimensions.Config().make()
     center_crop = GetCenterCropBoxFromDimensions.Config().make()
+    samples: list[GetRandomResizedCropBoxFromDimensions.Input] = [
+        {"height": 50},
+        {"height": 80, "width": 120},
+    ]
     random_results = list(
         random_crop(
             iter(
-                [
-                    cast(GetRandomResizedCropBoxFromDimensions.Input, {"height": 50}),
-                    cast(
-                        GetRandomResizedCropBoxFromDimensions.Input,
-                        {"height": 80, "width": 120},
-                    ),
-                ],
+                samples,
             ),
         ),
     )
+    samples_2: list[GetCenterCropBoxFromDimensions.Input] = [
+        {"width": 50},
+        {"height": 80, "width": 120},
+    ]
     center_results = list(
         center_crop(
             iter(
-                [
-                    cast(GetCenterCropBoxFromDimensions.Input, {"width": 50}),
-                    cast(
-                        GetCenterCropBoxFromDimensions.Input,
-                        {"height": 80, "width": 120},
-                    ),
-                ],
+                samples_2,
             ),
         ),
     )
@@ -529,8 +521,11 @@ def test_normalize_honors_custom_statistics_and_output_dtype() -> None:
     )
     processor = config.make()
     image = torch.arange(120, dtype=torch.uint8).reshape(3, 2, 4, 5)
+    samples: list[Normalize.Input] = [
+        {"media_tensor": image},
+    ]
     normalized = next(
-        iter(processor(iter([cast(Normalize.Input, {"media_tensor": image})]))),
+        iter(processor(iter(samples))),
     )
     # Channel statistics broadcast across the four spatial axes by contract.
     mean = torch.tensor([0.2, 0.4, 0.6], dtype=torch.float64).view(3, 1, 1, 1)
@@ -547,8 +542,11 @@ def test_normalize_keeps_cached_statistics_and_output_on_configured_device() -> 
     processor = config.make()
     image = torch.zeros(3, 2, 4, 5, dtype=torch.uint8)
 
+    samples: list[Normalize.Input] = [
+        {"media_tensor": image},
+    ]
     result = next(
-        iter(processor(iter([cast(Normalize.Input, {"media_tensor": image})]))),
+        iter(processor(iter(samples))),
     )
 
     assert processor.bias.device.type == "meta"

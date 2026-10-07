@@ -872,7 +872,7 @@ def test_datapipeline_len_raises_for_non_sized_source():
             del config
 
         def __iter__(self) -> Iterator[Sample]:
-            yield cast(Sample, {"key": "a"})
+            yield {"key": "a"}
 
     config = DataPipeline.Config(source=_Unsized.Config())
     pipeline = DataPipeline(config)

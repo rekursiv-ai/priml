@@ -158,10 +158,7 @@ class ExtractedImageNetSource:
 
         for image_path in image_files:
             # Get label from validation labels mapping.
-            if self.validation_labels:
-                label = self.validation_labels.get(image_path.name, "unknown")
-            else:
-                label = "unknown"
+            label = (self.validation_labels or {}).get(image_path.name, "unknown")
 
             sample: Sample = {
                 "key": image_path.stem,

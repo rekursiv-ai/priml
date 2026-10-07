@@ -630,7 +630,7 @@ class Attention(AttentionProjections):
             # causal call meant for self-attention reaches this one too.
             if (
                 self.causal
-                or is_causal
+                or is_causal is True
                 or window != -1
                 or self.rope is not None
                 or cos_sin is not None

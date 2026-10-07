@@ -427,7 +427,8 @@ class WandbTracker:
         """Set notes only when the run has no configured notes."""
         if self._run is None or not notes:
             return
-        if not self._run.notes:
+        current = self._run.notes or ""
+        if not current:
             self._run.notes = notes
 
     def close(self) -> None:

@@ -144,9 +144,9 @@ class MultiStreamAttention(nn.Module):
                         ("dropout", self.dropout),
                         ("causal", self.causal),
                         ("rope", self.rope),
-                        ("norm_qk", self.norm_qk),
+                        ("norm_qk", self.norm_qk is not None),
                         ("share_qk_norm", not self.share_qk_norm),
-                        ("norm_out", self.norm_out),
+                        ("norm_out", self.norm_out is not None),
                         ("init_weight", self.init_weight is not kaiming_uniform),
                     )
                     if value
@@ -535,7 +535,7 @@ class MultiStreamAttention(nn.Module):
         N = self.num_streams
         if len(xs) != N:
             raise ValueError(f"Expected {N} streams, got {len(xs)}.")
-        if is_causal and N > 1:
+        if is_causal is True and N > 1:
             raise ValueError("is_causal=True requires num_streams=1.")
         masks = list(attn_mask) if isinstance(attn_mask, Sequence) else [attn_mask] * N
         for name, values in (

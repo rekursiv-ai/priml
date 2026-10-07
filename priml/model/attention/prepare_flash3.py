@@ -211,7 +211,7 @@ def _build_flash3(destination: Path) -> None:
 def _build_environment(environment: Mapping[str, str]) -> dict[str, str]:
     cuda_home = _cuda_home()
     path = str(cuda_home / "bin")
-    if inherited_path := environment.get("PATH"):
+    if inherited_path := environment.get("PATH", ""):
         path = f"{path}{os.pathsep}{inherited_path}"
     return {
         **environment,

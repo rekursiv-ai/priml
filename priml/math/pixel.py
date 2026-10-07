@@ -573,11 +573,16 @@ def interpolate(
     if mode_ == "area-variance-preserving":
         if rank_ not in (2, 3):
             raise NotImplementedError(f"{rank_=} not supported for {mode_=}.")
-        if antialias or ac_ or recompute_scale_factor or (not size_ and not sf_):
+        if (
+            antialias
+            or align_corners
+            or recompute_scale_factor
+            or (size_ is None and sf_ is None)
+        ):
             raise NotImplementedError(
                 f"One or more of: {antialias=}, {ac_=}, {recompute_scale_factor=}, {size_=}, {sf_=} not supported for {mode_=}.",
             )
-        if not size_:
+        if size_ is None:
             # Reachable only with a scale factor: the check above already
             # raised when neither was given.
             shape_slice: Sequence[int] = list(x.shape[-rank_:])
