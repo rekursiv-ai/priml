@@ -14,7 +14,7 @@ import pytest
 
 from priml.baselines.convextok import candidates
 from priml.baselines.convextok.candidates import count_candidates
-from priml.lib.custom_json import convert, loads
+from priml.lib.codec import from_plain, loads
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -25,14 +25,14 @@ def test_candidates_match_upstream_golden() -> None:
     golden = _read_json("candidates.json")
     counts = dict(
         zip(
-            convert(pretokens.get("pretokens"), list[str]),
-            convert(pretokens.get("frequencies"), list[int]),
+            from_plain(pretokens.get("pretokens"), list[str]),
+            from_plain(pretokens.get("frequencies"), list[int]),
             strict=True,
         ),
     )
     candidates = count_candidates(counts)
-    assert list(candidates) == convert(golden.get("tokens"), list[str])
-    assert list(candidates.values()) == convert(golden.get("counts"), list[int])
+    assert list(candidates) == from_plain(golden.get("tokens"), list[str])
+    assert list(candidates.values()) == from_plain(golden.get("counts"), list[int])
 
 
 def test_occurrences_are_weighted_by_pretoken_frequency() -> None:
@@ -158,8 +158,8 @@ def test_worker_processes_match_serial_counts() -> None:
     pretokens = _read_json("pretokens.json")
     counts = dict(
         zip(
-            convert(pretokens.get("pretokens"), list[str]),
-            convert(pretokens.get("frequencies"), list[int]),
+            from_plain(pretokens.get("pretokens"), list[str]),
+            from_plain(pretokens.get("frequencies"), list[int]),
             strict=True,
         ),
     )
@@ -169,7 +169,7 @@ def test_worker_processes_match_serial_counts() -> None:
 
 def _read_json(name: str) -> dict[str, object]:
     return dict(
-        convert(
+        from_plain(
             loads((_CWD / "testdata" / name).read_text()),
             dict[str, object],
         ),

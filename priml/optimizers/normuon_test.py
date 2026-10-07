@@ -10,7 +10,7 @@ from torch import Tensor
 import pytest
 import torch
 
-from priml.lib.custom_json import ReadError
+from priml.lib.codec import ReadError
 from priml.optimizers import normuon
 from priml.optimizers.normuon import NorMuon
 

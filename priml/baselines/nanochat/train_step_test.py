@@ -30,7 +30,7 @@ from priml.baselines.nanochat.train_step import (
     matrix_parameters,
     nanochat_optimizer,
 )
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.math.schedules import trapezoidal
 from priml.model.attention.value_gated_attention import (
     ValueGatedAttention,
@@ -673,9 +673,12 @@ def test_progress_drives_the_learning_rate() -> None:
     against a horizon that does not exist.
     """
     step = _step(train_budget_sec=100.0)
-    initial = convert(cast(object, step.optimizer.param_groups[0]["initial_lr"]), float)
+    initial = from_plain(
+        cast(object, step.optimizer.param_groups[0]["initial_lr"]),
+        float,
+    )
     step.train_step(**_batch())
-    assert convert(
+    assert from_plain(
         cast(object, step.optimizer.param_groups[0]["lr"]),
         float,
     ) == pytest.approx(initial)
@@ -683,7 +686,9 @@ def test_progress_drives_the_learning_rate() -> None:
     # Most of the budget spent: the trapezoid is into its decay.
     step.elapsed_sec = 75.0
     step.train_step(**_batch())
-    assert convert(cast(object, step.optimizer.param_groups[0]["lr"]), float) < initial
+    assert (
+        from_plain(cast(object, step.optimizer.param_groups[0]["lr"]), float) < initial
+    )
 
 
 @pytest.mark.compute_training
@@ -1162,7 +1167,7 @@ def test_an_integer_rate_is_rescaled_with_width() -> None:
     assert isinstance(finalized, CompositeOptimizer.Config)
     (scaled,) = finalized.optimizers
     assert isinstance(scaled, PartialConfig)
-    assert convert(cast(object, scaled.lr), float) == 1 / (192 / 768) ** 0.5
+    assert from_plain(cast(object, scaled.lr), float) == 1 / (192 / 768) ** 0.5
 
 
 def test_a_scaled_member_without_a_numeric_rate_is_refused() -> None:

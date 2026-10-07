@@ -15,7 +15,7 @@ import numpy as np
 import torch
 
 from priml.baselines.etth1.experiments import exp000
-from priml.lib.custom_json import convert, parse
+from priml.lib.codec import from_plain, loads
 from priml.paths import validated_output_path
 
 
@@ -81,10 +81,10 @@ def main() -> int:
     if checkpoint.is_dir():
         selector = checkpoint / "best.json"
         protected.append(selector)
-        best = parse(selector.read_text(), dict[str, object])
-        if convert(best["metric"], str) != "total_loss":
+        best = from_plain(loads(selector.read_text()), dict[str, object])
+        if from_plain(best["metric"], str) != "total_loss":
             raise ValueError("Expected a validation total_loss best-checkpoint record.")
-        checkpoint = checkpoint / f"step_{convert(best['step'], int):08d}.pt"
+        checkpoint = checkpoint / f"step_{from_plain(best['step'], int):08d}.pt"
     protected.append(checkpoint)
     output_path = (
         validated_output_path(
@@ -94,16 +94,16 @@ def main() -> int:
         if flags.output is not None
         else None
     )
-    state = convert(
+    state = from_plain(
         cast(object, torch.load(checkpoint, map_location="cpu", weights_only=True)),
         dict[str, object],
     )
-    step = convert(state["step"], dict[str, object])
+    step = from_plain(state["step"], dict[str, object])
     cfg.dataset.base_dir = None
     cfg.dataset.working_dir = flags.directory
     dataset = cfg.dataset.make()
     model = cfg.step.model.make()
-    model.load_state_dict(convert(step["model"], dict[str, Tensor]))
+    model.load_state_dict(from_plain(step["model"], dict[str, Tensor]))
     torch.set_num_threads(1)
     result: dict[str, object] = {
         "checkpoint": str(checkpoint),
@@ -113,7 +113,7 @@ def main() -> int:
         ).hexdigest(),
         "torch": torch.__version__,
         "numpy": np.__version__,
-        "step": convert(step["timer_step"], dict[str, object])["global_count"],
+        "step": from_plain(step["timer_step"], dict[str, object])["global_count"],
         **evaluate(model, batches=dataset.test_dataloader()),
     }
     rendered = json.dumps(result, indent=2) + "\n"

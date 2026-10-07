@@ -15,7 +15,7 @@ import pytest
 import torch
 
 from priml import runtime
-from priml.lib.custom_json import ReadError
+from priml.lib.codec import ReadError
 from priml.optimizers import lr_scale
 from priml.optimizers.muon import (
     Muon,

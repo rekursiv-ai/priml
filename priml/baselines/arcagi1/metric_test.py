@@ -46,7 +46,7 @@ from priml.baselines.arcagi1.metric import (
     encode_preds,
     write_signal_dump,
 )
-from priml.lib.custom_json import parse
+from priml.lib.codec import from_plain, loads
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -1340,7 +1340,7 @@ def test_canonical_state_round_trip_preserves_ballots(tmp_path: Path) -> None:
     restored = CanonicalPassK.Config(working_dir=tmp_path, pass_ks=(1,)).make()
 
     restored.load_state_dict(
-        parse(json.dumps(source.state_dict()), dict[str, object]),
+        from_plain(loads(json.dumps(source.state_dict())), dict[str, object]),
     )
 
     assert restored.state_dict() == source.state_dict()

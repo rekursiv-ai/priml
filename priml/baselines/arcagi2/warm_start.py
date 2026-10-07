@@ -21,7 +21,7 @@ from configgle import Fig
 
 import torch
 
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:
@@ -81,20 +81,22 @@ class WarmStart:
 
         """
         # A checkpoint this project wrote; its nested step state needs full unpickling.
-        checkpoint = convert(
+        checkpoint = from_plain(
             cast(object, torch.load(self.path, map_location="cpu", weights_only=False)),
             dict[str, object],
         )
-        step = convert(checkpoint["step"], dict[str, object])
-        raw_state = convert(step["model"], dict[str, object])
+        step = from_plain(checkpoint["step"], dict[str, object])
+        raw_state = from_plain(step["model"], dict[str, object])
         state = {
-            name: convert(value, torch.Tensor)
+            name: from_plain(value, torch.Tensor)
             for name, value in raw_state.items()
             if isinstance(value, torch.Tensor)
         }
         ema = step.get("ema")
         if ema:
-            state.update(_ema_shadow(convert(ema, dict[str, object]), path=self.path))
+            state.update(
+                _ema_shadow(from_plain(ema, dict[str, object]), path=self.path),
+            )
         own = model.state_dict()
         own_by_bare = {_bare(name): name for name in own}
         loadable: dict[str, Tensor] = {}
@@ -139,7 +141,7 @@ def _ema_shadow(ema: dict[str, object], *, path: Path) -> dict[str, Tensor]:
     shadow = ema.get("shadow_params", ema.get("shadow_model", ema))
     tensors = {
         name: value
-        for name, value in convert(shadow, dict[str, object]).items()
+        for name, value in from_plain(shadow, dict[str, object]).items()
         if isinstance(value, torch.Tensor)
     }
     if not tensors:

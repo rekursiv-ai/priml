@@ -11,7 +11,7 @@ from torch import Tensor
 import pytest
 import torch
 
-from priml.lib.custom_json import ReadError
+from priml.lib.codec import ReadError
 from priml.optimizers.adam_atan2 import AdamATan2
 
 

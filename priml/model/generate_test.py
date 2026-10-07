@@ -10,7 +10,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.model.attention.kvcache import KVCache
 from priml.model.generate import _sample, _topp_filter, generate
 from priml.testing.bfb import assert_bfb_against_golden
@@ -34,7 +34,7 @@ def test_generate_public_contract() -> None:
         eos_token_id=3,
         max_seq_len=6,
     )
-    tokens = [convert(row, list[int]) for row in generated.tolist()]
+    tokens = [from_plain(row, list[int]) for row in generated.tolist()]
     assert_text_golden(
         test_file=__file__,
         name="generate",

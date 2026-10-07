@@ -15,7 +15,7 @@ from torch import Tensor, nn
 import torch
 
 from priml import hub
-from priml.lib.custom_json import convert, loads
+from priml.lib.codec import from_plain, loads
 from priml.model.attention.gated_attention import GatedAttention
 from priml.model.attention.kvcache import alloc_layer_cache
 from priml.model.attention.qwen3_5_delta import Qwen35GatedDeltaNet
@@ -69,11 +69,11 @@ class Qwen35(Transformer):
             result.channels_out = _positive(config, name="vocab_size")
             count = _positive(config, name="num_hidden_layers")
             norm = CenteredRMSNorm.Config()
-            norm.eps = convert(config.get("rms_norm_eps"), float, default=1e-6)
+            norm.eps = from_plain(config.get("rms_norm_eps"), float, default=1e-6)
             if not math.isfinite(norm.eps) or norm.eps <= 0:
                 raise ValueError("rms_norm_eps must be finite and positive.")
             result.norm = norm.copy_tree()
-            initializer_range = convert(
+            initializer_range = from_plain(
                 config.get("initializer_range"),
                 float,
                 default=0.02,
@@ -88,7 +88,7 @@ class Qwen35(Transformer):
             embedding.channels_in = result.channels_out
             embedding.init_weight = init
             result.proj_in = embedding
-            if convert(config.get("tie_word_embeddings"), bool, default=False):
+            if from_plain(config.get("tie_word_embeddings"), bool, default=False):
                 head = TiedLinear.Config()
                 head.tied = "proj_in"
                 result.proj_out = head
@@ -183,7 +183,7 @@ class Qwen35(Transformer):
 
         """
         directory = Path(path)
-        metadata = convert(
+        metadata = from_plain(
             loads((directory / "config.json").read_text()),
             dict[str, object],
         )
@@ -333,7 +333,7 @@ class Qwen35(Transformer):
 def _text_config(config: Mapping[str, object]) -> dict[str, object]:
     model_type = config.get("model_type")
     if model_type == "qwen3_5":
-        result = convert(config.get("text_config"), dict[str, object])
+        result = from_plain(config.get("text_config"), dict[str, object])
         if "tie_word_embeddings" in config:
             result["tie_word_embeddings"] = config["tie_word_embeddings"]
     elif model_type == "qwen3_5_text":
@@ -355,7 +355,7 @@ def _text_config(config: Mapping[str, object]) -> dict[str, object]:
 
 
 def _positive(config: Mapping[str, object], *, name: str) -> int:
-    value = convert(config.get(name), int)
+    value = from_plain(config.get(name), int)
     if value <= 0:
         raise ValueError(f"{name} must be positive.")
     return value
@@ -367,7 +367,7 @@ def _layer_types(config: Mapping[str, object], *, count: int) -> list[str]:
         interval = (
             4
             if "full_attention_interval" not in config
-            else convert(config["full_attention_interval"], int)
+            else from_plain(config["full_attention_interval"], int)
         )
         if interval <= 0:
             raise ValueError("full_attention_interval must be positive.")
@@ -375,7 +375,7 @@ def _layer_types(config: Mapping[str, object], *, count: int) -> list[str]:
             "full_attention" if (i + 1) % interval == 0 else "linear_attention"
             for i in range(count)
         ]
-    layers = convert(raw, list[str])
+    layers = from_plain(raw, list[str])
     if len(layers) != count or any(
         layer not in ("full_attention", "linear_attention") for layer in layers
     ):
@@ -394,8 +394,8 @@ def _full_attention(config: Mapping[str, object]) -> GatedAttention.Config:
             "num_attention_heads must be divisible by num_key_value_heads.",
         )
     attention.channels_head = _positive(config, name="head_dim")
-    attention.bias = convert(config.get("attention_bias"), bool, default=False)
-    attention.dropout = convert(config.get("attention_dropout"), float, default=0.0)
+    attention.bias = from_plain(config.get("attention_bias"), bool, default=False)
+    attention.dropout = from_plain(config.get("attention_dropout"), float, default=0.0)
     if (
         not math.isfinite(attention.dropout)
         or attention.dropout < 0
@@ -404,21 +404,21 @@ def _full_attention(config: Mapping[str, object]) -> GatedAttention.Config:
         raise ValueError("attention_dropout must be finite and in [0, 1).")
     if YarnScaling.Config.from_hf(config) is not None:
         raise ValueError("Only default text rotary frequencies are supported.")
-    params = convert(config.get("rope_parameters"), dict[str, object], default={})
-    fraction = convert(
+    params = from_plain(config.get("rope_parameters"), dict[str, object], default={})
+    fraction = from_plain(
         params.get("partial_rotary_factor"),
         float,
-        default=convert(config.get("partial_rotary_factor"), float, default=0.25),
+        default=from_plain(config.get("partial_rotary_factor"), float, default=0.25),
     )
     if not math.isfinite(fraction) or fraction <= 0 or fraction > 1:
         raise ValueError("partial_rotary_factor must be finite and in (0, 1].")
     width = int(attention.channels_head * fraction)
     if width < 2 or width % 2:
         raise ValueError("The rotary prefix must have a positive even width.")
-    rope_theta = convert(
+    rope_theta = from_plain(
         params.get("rope_theta"),
         float,
-        default=convert(config.get("rope_theta"), float, default=10_000_000.0),
+        default=from_plain(config.get("rope_theta"), float, default=10_000_000.0),
     )
     if not math.isfinite(rope_theta) or rope_theta <= 0:
         raise ValueError("rope_theta must be finite and positive.")

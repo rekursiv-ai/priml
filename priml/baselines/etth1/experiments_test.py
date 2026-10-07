@@ -14,7 +14,7 @@ from priml.baselines.etth1.checkpointer import Etth1Checkpointer
 from priml.baselines.etth1.data_test import fixture_config
 from priml.baselines.etth1.experiments import dlinear_type1, exp000, exp_smoke
 from priml.baselines.etth1.train_step import Etth1TrainLoop, Etth1TrainStep
-from priml.lib.custom_json import convert, parse
+from priml.lib.codec import from_plain, loads
 from priml.testing.golden import assert_pprint_golden, mismatches
 
 
@@ -134,15 +134,15 @@ def test_mid_epoch_resume_replays_exact_next_update(tmp_path: Path) -> None:
     resumed = cfg.make()
     try:
         resumed.load_state_dict(
-            convert(
+            from_plain(
                 cast(object, torch.load(checkpoint, weights_only=True)),
                 dict[str, object],
             ),
         )
         actual_batch = resumed._get_next_batch()
         assert not mismatches(
-            convert(batch, dict[str, Tensor]),
-            convert(actual_batch, dict[str, Tensor]),
+            from_plain(batch, dict[str, Tensor]),
+            from_plain(actual_batch, dict[str, Tensor]),
         )
         resumed._do_train_step(actual_batch)
         assert isinstance(resumed.step, Etth1TrainStep)
@@ -223,8 +223,8 @@ def test_restore_into_running_loop_rewinds_iterator(tmp_path: Path) -> None:
         loop.load_state_dict(state)
         actual = loop._get_next_batch()
         assert not mismatches(
-            convert(expected, dict[str, Tensor]),
-            convert(actual, dict[str, Tensor]),
+            from_plain(expected, dict[str, Tensor]),
+            from_plain(actual, dict[str, Tensor]),
         )
         loop._do_train_step(actual)
         assert not mismatches(expected_weights, loop.step.model.state_dict())
@@ -254,12 +254,12 @@ def test_terminal_step_saves_validated_checkpoint(tmp_path: Path, resume: bool) 
     assert len(loop.validation_losses) == 1
     assert loop.step.global_step == 5
     assert loop.current_epoch == 1
-    selector = parse(
-        (tmp_path / "checkpoints" / "best.json").read_text(),
+    selector = from_plain(
+        loads((tmp_path / "checkpoints" / "best.json").read_text()),
         dict[str, object],
     )
     assert selector["step"] == 5
-    saved = convert(
+    saved = from_plain(
         cast(
             object,
             torch.load(

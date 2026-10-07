@@ -43,7 +43,7 @@ from priml.baselines.arcagi1.scripts.build_dataset import (
     ensure_arc_dataset,
 )
 from priml.data.ensure import DataSpec, EnsureResult
-from priml.lib.custom_json import ReadError, convert, parse
+from priml.lib.codec import ReadError, from_plain, loads
 
 
 if TYPE_CHECKING:
@@ -257,14 +257,14 @@ def test_missing_solution_files_fill_dummy_outputs_and_log_context(
 
     warnings = [record.getMessage() for record in caplog.records]
     assert warnings == ["evaluation solutions not found, filling with dummy"]
-    test_puzzles = parse(
-        (target / "test_puzzles.json").read_text(),
+    test_puzzles = from_plain(
+        loads((target / "test_puzzles.json").read_text()),
         dict[str, object],
     )
     outputs = [
-        convert(
-            convert(
-                convert(puzzle, dict[str, object])["test"],
+        from_plain(
+            from_plain(
+                from_plain(puzzle, dict[str, object])["test"],
                 list[object],
             )[0],
             dict[str, object],
@@ -648,8 +648,8 @@ def test_build_uses_explicit_destination_and_source(
         spec=ArcSpec(max_grid=5),
     )
     assert _load_array(custom_target / "train" / "all__inputs.npy").shape == (24, 25)
-    custom_metadata = parse(
-        (custom_target / "train" / "dataset.json").read_text(),
+    custom_metadata = from_plain(
+        loads((custom_target / "train" / "dataset.json").read_text()),
         dict[str, object],
     )
     assert custom_metadata["seq_len"] == 25
@@ -731,14 +731,14 @@ def test_spatial_eval_reuses_puzzle_id_and_canonical_answer(
     indices = _array(test_dir / "all__puzzle_indices.npy")
     ids = _array(test_dir / "all__puzzle_identifiers.npy")
     group_indices = _array(test_dir / "all__group_indices.npy")
-    names = parse((target / "identifiers.json").read_text(), list[str])
+    names = from_plain(loads((target / "identifiers.json").read_text()), list[str])
     assert len(ids) == len(tags) == 6
     assert _ints(indices) == list(range(7))
     assert _ints(group_indices) == [0, 2, 4, 6]
     assert not (target / "train" / "all__spatial_tags.npy").exists()
     assert _load_array(test_dir / "all__spatial_tags.npy").dtype == np.int32
-    assert parse(
-        (test_dir / "dataset.json").read_text(),
+    assert from_plain(
+        loads((test_dir / "dataset.json").read_text()),
         dict[str, object],
     ) == {
         "pad_id": 0,
@@ -793,7 +793,7 @@ def test_augmented_views_are_grouped_with_their_source(
     assert 0 in train_inputs[:, 0]
     ids = _ints(_array(target / "train" / "all__puzzle_identifiers.npy"))
     groups = _ints(_array(target / "train" / "all__group_indices.npy"))
-    names = parse((target / "identifiers.json").read_text(), list[str])
+    names = from_plain(loads((target / "identifiers.json").read_text()), list[str])
     assert groups == list(range(0, 28, 3))
     assert len(ids) == 27
     for start in range(0, len(ids), 3):
@@ -872,13 +872,13 @@ def test_plain_build_writes_no_spatial_tags(
     )
     assert _ints(_array(target / "test" / "all__puzzle_indices.npy")) == [0, 1, 2, 3]
     assert _ints(_array(target / "test" / "all__group_indices.npy")) == [0, 1, 2, 3]
-    test_puzzles = parse(
-        (target / "test_puzzles.json").read_text(),
+    test_puzzles = from_plain(
+        loads((target / "test_puzzles.json").read_text()),
         dict[str, object],
     )
     assert set(test_puzzles) == {f"evaluation-{index}" for index in range(3)}
-    identifiers = parse(
-        (target / "identifiers.json").read_text(),
+    identifiers = from_plain(
+        loads((target / "identifiers.json").read_text()),
         list[str],
     )
     assert identifiers[0] == "<blank>"
@@ -896,8 +896,8 @@ def test_plain_build_writes_no_spatial_tags(
     }
     assert _array(target / "train" / "all__inputs.npy").shape == (24, 900)
     assert _array(target / "test" / "all__inputs.npy").shape == (3, 900)
-    assert parse(
-        (target / "train" / "dataset.json").read_text(),
+    assert from_plain(
+        loads((target / "train" / "dataset.json").read_text()),
         dict[str, object],
     ) == {
         "pad_id": 0,
@@ -911,8 +911,8 @@ def test_plain_build_writes_no_spatial_tags(
         "total_puzzles": 9,
         "sets": ["all"],
     }
-    assert parse(
-        (target / "test" / "dataset.json").read_text(),
+    assert from_plain(
+        loads((target / "test" / "dataset.json").read_text()),
         dict[str, object],
     ) == {
         "pad_id": 0,
@@ -979,8 +979,8 @@ def test_ensure_arc_dataset_uses_rank_zero_callback_and_caches_result(
         is result
     )
     assert names == ["ensure_arc_dataset"]
-    assert parse(
-        (target / build_dataset.RECIPE_FILE).read_text(),
+    assert from_plain(
+        loads((target / build_dataset.RECIPE_FILE).read_text()),
         dict[str, object],
     ) == (build_dataset.arc_recipe(augmentation, input_file_prefix="source"))
 
@@ -1063,7 +1063,10 @@ def test_a_vendored_build_stamps_the_pinned_source_not_its_clone_path(
         augmentation=augmentation,
     )
 
-    stamped = parse((target / build_dataset.RECIPE_FILE).read_text(), dict[str, object])
+    stamped = from_plain(
+        loads((target / build_dataset.RECIPE_FILE).read_text()),
+        dict[str, object],
+    )
     assert stamped["source"] == (
         f"{build_dataset.SOURCE_URL}@{build_dataset.SOURCE_REVISION}"
     )

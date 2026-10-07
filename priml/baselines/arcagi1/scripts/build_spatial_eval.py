@@ -31,7 +31,7 @@ from priml.baselines.arcagi1.scripts.build_dataset import (
 )
 from priml.data.distributed_build import run_rank_zero_build
 from priml.data.ensure import DataSpec, EnsureResult, FileSpec, ensure_data
-from priml.lib.custom_json import convert, loads, parse
+from priml.lib.codec import from_plain, loads
 from priml.paths import resolve_working_dir, validated_output_path
 
 
@@ -208,7 +208,7 @@ def build_spatial_eval(
     puzzle_indices = _int_list(_load(src_test / "all__puzzle_indices.npy"))
     group_indices = _int_list(_load(src_test / "all__group_indices.npy"))
     puzzle_ids = _int_list(_load(src_test / "all__puzzle_identifiers.npy"))
-    identifiers = convert(
+    identifiers = from_plain(
         loads((source_dir / "identifiers.json").read_text()),
         list[str],
     )
@@ -322,24 +322,31 @@ def _spatial_recipe(
 ) -> dict[str, object]:
     """Return every input that changes an expansion's bytes, as JSON."""
     source_recipe = source_dir / RECIPE_FILE
-    return parse(
-        json.dumps(
-            {
-                "builder": "spatial_eval",
-                "source": str(source_dir),
-                "source_recipe": (
-                    parse(source_recipe.read_text(), dict[str, object])
-                    if source_recipe.is_file()
-                    else None
-                ),
-                "spatial_views": spatial_views,
-                "scale_weights": [
-                    [scale, weight]
-                    for scale, weight in normalize_scale_weights(scale_weights).items()
-                ],
-                "seed": seed,
-                "spec": dataclasses.asdict(spec),
-            },
+    return from_plain(
+        loads(
+            json.dumps(
+                {
+                    "builder": "spatial_eval",
+                    "source": str(source_dir),
+                    "source_recipe": (
+                        from_plain(
+                            loads(source_recipe.read_text()),
+                            dict[str, object],
+                        )
+                        if source_recipe.is_file()
+                        else None
+                    ),
+                    "spatial_views": spatial_views,
+                    "scale_weights": [
+                        [scale, weight]
+                        for scale, weight in normalize_scale_weights(
+                            scale_weights,
+                        ).items()
+                    ],
+                    "seed": seed,
+                    "spec": dataclasses.asdict(spec),
+                },
+            ),
         ),
         dict[str, object],
     )
@@ -464,7 +471,7 @@ def _copy_dataset_json(
     num_examples: int = 0,
 ) -> None:
     """Copy a split's ``dataset.json``, restating the counts the expansion changed."""
-    meta = convert(
+    meta = from_plain(
         loads((source / "dataset.json").read_text()),
         dict[str, object],
     )

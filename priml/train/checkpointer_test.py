@@ -25,7 +25,7 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.train import checkpointer
 from priml.train.checkpointer import (
     AsyncLocalStateDictStorer,
@@ -1468,7 +1468,7 @@ def test_plain_read_preserves_cpu_rng_state(
         ),
     }
 
-    rng_state = convert(loaded["rng"], dict[str, object])
+    rng_state = from_plain(loaded["rng"], dict[str, object])
     restored = rng_state["torch"]
     assert isinstance(restored, Tensor)
     assert restored.device.type == "cpu", (
@@ -1994,9 +1994,9 @@ def _resume_worker(result_dir: str, mesh: DeviceMesh) -> None:
         merged = target.loaded
         if merged is not None:
             reload_model.load_state_dict(
-                convert(merged["model"], dict[str, object]),
+                from_plain(merged["model"], dict[str, object]),
             )
-            reload_opt.load_state_dict(convert(merged["opt"], dict[str, object]))
+            reload_opt.load_state_dict(from_plain(merged["opt"], dict[str, object]))
         weight = _full_tensor(next(reload_model.parameters()))
         exp_avg = _full_tensor(_first_exp_avg(reload_opt))
         ok = (
@@ -2046,7 +2046,7 @@ def _world1_load_worker(ckpt_dir: str, result_dir: str, mesh: DeviceMesh) -> Non
         loaded = ckpt.load(target, max_steps=1e9, guard=False)
         merged = target.loaded
         if merged is not None:
-            model.load_state_dict(convert(merged["model"], dict[str, object]))
+            model.load_state_dict(from_plain(merged["model"], dict[str, object]))
         full = _full_tensor(next(model.parameters()))
         ref = cast(object, torch.load(Path(result_dir) / "full.pt"))
         assert isinstance(ref, Tensor)

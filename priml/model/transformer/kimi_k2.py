@@ -51,7 +51,7 @@ from torch import Tensor, nn
 import torch
 
 from priml import hub
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.custom_types import (
@@ -204,13 +204,13 @@ class KimiK2(Transformer):
                 raise ValueError(
                     "Unsupported quantization_config; load dequantized weights.",
                 )
-            model_type = convert(config.get("model_type"), str)
+            model_type = from_plain(config.get("model_type"), str)
             if model_type not in _VALID_MODEL_TYPES:
                 raise ValueError(
                     f"Expected model_type in {sorted(_VALID_MODEL_TYPES)}, "
                     f"got {model_type!r}.",
                 )
-            scoring_func = convert(config.get("scoring_func", "sigmoid"), str)
+            scoring_func = from_plain(config.get("scoring_func", "sigmoid"), str)
             if scoring_func not in ("softmax", "sigmoid"):
                 raise ValueError(
                     f"Expected scoring_func in ('softmax', 'sigmoid'), "
@@ -219,12 +219,12 @@ class KimiK2(Transformer):
             # HF's schema is parsed into the CHILD configs; the parent does
             # not mirror foreign names onto itself. Everything below hangs off
             # the ONE block template, which is where each value lives.
-            eps = convert(config.get("rms_norm_eps", 1e-6), float)
+            eps = from_plain(config.get("rms_norm_eps", 1e-6), float)
             norm = RMSNorm.Config(elementwise_affine=True)
             norm.eps = eps
 
             frequencies = HuggingFaceFrequencies.Config()
-            frequencies.base = convert(config.get("rope_theta", 10_000.0), float)
+            frequencies.base = from_plain(config.get("rope_theta", 10_000.0), float)
             rope = RoPE.Config()
             yarn = YarnScaling.Config.from_hf(config)
             if yarn is not None:
@@ -233,29 +233,29 @@ class KimiK2(Transformer):
 
             init_weight = partial(
                 nn.init.normal_,
-                std=convert(config.get("initializer_range", 0.02), float),
+                std=from_plain(config.get("initializer_range", 0.02), float),
             )
             attn = MultiHeadLatentAttention.Config(
                 bias=False,
                 causal=True,
                 init_weight=init_weight,
             )
-            attn.num_heads = convert(config["num_attention_heads"], int)
-            attn.channels_qk_nope_head = convert(
+            attn.num_heads = from_plain(config["num_attention_heads"], int)
+            attn.channels_qk_nope_head = from_plain(
                 config.get("qk_nope_head_dim", 128),
                 int,
             )
-            attn.channels_qk_rope_head = convert(
+            attn.channels_qk_rope_head = from_plain(
                 config.get("qk_rope_head_dim", 64),
                 int,
             )
-            attn.channels_v_head = convert(config.get("v_head_dim", 128), int)
+            attn.channels_v_head = from_plain(config.get("v_head_dim", 128), int)
             attn.q_lora_rank = (
-                convert(config["q_lora_rank"], int)
+                from_plain(config["q_lora_rank"], int)
                 if config.get("q_lora_rank") is not None
                 else None
             )
-            attn.kv_lora_rank = convert(config.get("kv_lora_rank", 512), int)
+            attn.kv_lora_rank = from_plain(config.get("kv_lora_rank", 512), int)
             attn.rope = rope
             if yarn is not None:
                 softmax_scale = yarn.softmax_scale(attn.channels_qk_head)
@@ -269,15 +269,15 @@ class KimiK2(Transformer):
                 if scoring_func == "sigmoid"
                 else SoftmaxRouter.Config()
             )
-            router.top_k = convert(config.get("num_experts_per_tok", 8), int)
-            router.norm_topk_prob = convert(config.get("norm_topk_prob", True), bool)
+            router.top_k = from_plain(config.get("num_experts_per_tok", 8), int)
+            router.norm_topk_prob = from_plain(config.get("norm_topk_prob", True), bool)
             if isinstance(router, SigmoidRouter.Config):
-                router.routed_scaling_factor = convert(
+                router.routed_scaling_factor = from_plain(
                     config.get("routed_scaling_factor", 1.0),
                     float,
                 )
-                router.n_group = convert(config.get("n_group", 1), int)
-                router.topk_group = convert(config.get("topk_group", 1), int)
+                router.n_group = from_plain(config.get("n_group", 1), int)
+                router.topk_group = from_plain(config.get("topk_group", 1), int)
 
             moe = MoE.Config(
                 expert=SwiGLU.Config(
@@ -290,8 +290,8 @@ class KimiK2(Transformer):
                 ),
             )
             moe.router = router
-            moe.num_shared_experts = convert(config.get("n_shared_experts", 0), int)
-            router.num_experts = convert(config.get("n_routed_experts", 256), int)
+            moe.num_shared_experts = from_plain(config.get("n_shared_experts", 0), int)
+            router.num_experts = from_plain(config.get("n_routed_experts", 256), int)
 
             block = TransformerBlock.Config(prenorm=True)
             block.attn = attn
@@ -304,7 +304,7 @@ class KimiK2(Transformer):
             # ``moe_intermediate_size: 0``, which then built every expert at the
             # 18432-wide dense size and only surfaced as a shape mismatch when
             # the checkpoint failed to load.
-            channels_hidden_expert = convert(
+            channels_hidden_expert = from_plain(
                 config.get("moe_intermediate_size", config["intermediate_size"]),
                 int,
             )
@@ -313,23 +313,23 @@ class KimiK2(Transformer):
                     f"moe_intermediate_size must be > 0, got {channels_hidden_expert}.",
                 )
 
-            channels_hidden_dense = convert(config.get("intermediate_size"), int)
+            channels_hidden_dense = from_plain(config.get("intermediate_size"), int)
             if channels_hidden_dense < 1:
                 raise ValueError("intermediate_size must be positive.")
             head: Makeable[TensorModule] = (
                 TiedLinear.Config(tied="proj_in")
-                if convert(config.get("tie_word_embeddings", False), bool)
+                if from_plain(config.get("tie_word_embeddings", False), bool)
                 else Linear.Config(init_weight=init_weight, shard="vocab")
             )
             return cls(
-                channels_in=convert(config["hidden_size"], int),
-                channels_out=convert(config["vocab_size"], int),
-                num_layers=convert(config["num_hidden_layers"], int),
+                channels_in=from_plain(config["hidden_size"], int),
+                channels_out=from_plain(config["vocab_size"], int),
+                num_layers=from_plain(config["num_hidden_layers"], int),
                 proj_in=Embedding.Config(init_weight=init_weight, shard="vocab"),
                 proj_out=Sequential.Config(elements=[norm.copy_tree(), head]),
                 channels_hidden_dense=channels_hidden_dense,
                 channels_hidden_expert=channels_hidden_expert,
-                first_k_dense_replace=convert(
+                first_k_dense_replace=from_plain(
                     config.get("first_k_dense_replace", 3),
                     int,
                 ),

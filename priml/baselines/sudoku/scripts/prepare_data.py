@@ -51,7 +51,7 @@ import tempfile
 import numpy as np
 
 from priml.baselines.sudoku.data import SudokuData
-from priml.lib.custom_json import parse, to_builtins
+from priml.lib.codec import from_plain, loads, mutable
 from priml.paths import validated_output_path
 from priml.train.train_loop import TrainLoop
 
@@ -225,7 +225,7 @@ def _build_split(
             np.array(bounds, dtype=np.int32),
         )
         # Written last: its presence is what marks the split complete.
-        marker.write_text(json.dumps(to_builtins(asdict(build))))
+        marker.write_text(json.dumps(mutable(asdict(build))))
     finally:
         if downloaded is not None:
             downloaded.unlink(missing_ok=True)
@@ -239,8 +239,8 @@ def _build_split(
 
 def _check_existing(marker: Path, *, build: _Build) -> None:
     """Refuse a split whose recorded build parameters differ from ``build``."""
-    recorded = parse(marker.read_text(), dict[str, object])
-    expected = cast(dict[str, object], to_builtins(asdict(build)))
+    recorded = from_plain(loads(marker.read_text()), dict[str, object])
+    expected = mutable(asdict(build))
     if recorded != expected:
         raise ValueError(
             f"{marker.parent} was built with {recorded}, not the requested "

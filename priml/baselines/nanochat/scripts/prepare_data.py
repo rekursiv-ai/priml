@@ -159,7 +159,7 @@ from priml.baselines.nanochat.scripts.prepare_tokenizer import (
     shard_path,
     write_mapping,
 )
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.paths import validated_output_path
 from priml.train.checkpointer import Checkpointer
 from priml.train.tracker import FileTracker, TrackerList
@@ -1437,7 +1437,7 @@ def build_reference_eval(
             targets=targets,
             reference=reference,
             tokenizer=tokenizer,
-            batch_size=convert(manifest["eval_batch_size"], int),
+            batch_size=from_plain(manifest["eval_batch_size"], int),
             reserved_count=reserved_count,
         )
         with (destination / f"{name}.npz").open("xb") as stream:

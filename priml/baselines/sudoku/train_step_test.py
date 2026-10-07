@@ -19,7 +19,7 @@ from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
 from priml.baselines.sudoku.model import DeepRecurrence
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.baselines.sudoku.train_step import SudokuTrainStep
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.train.parallelism import NoParallel
 
 
@@ -333,7 +333,7 @@ def test_horizon_must_be_positive() -> None:
 
 
 def _parameters(group: dict[str, object]) -> list[torch.Tensor]:
-    return convert(group["params"], list[torch.Tensor])
+    return from_plain(group["params"], list[torch.Tensor])
 
 
 if __name__ == "__main__":

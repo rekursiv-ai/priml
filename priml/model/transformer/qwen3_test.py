@@ -18,7 +18,7 @@ import pytest
 import torch
 
 from priml import hub
-from priml.lib.custom_json import ReadError, convert
+from priml.lib.codec import ReadError, from_plain
 from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.rope import (
@@ -223,14 +223,15 @@ class TestConfig:
         cfg.pop("head_dim")
         parsed = Qwen3.Config.from_hf(cfg)
         assert attn(parsed).channels_head == (
-            convert(cfg["hidden_size"], int) // convert(cfg["num_attention_heads"], int)
+            from_plain(cfg["hidden_size"], int)
+            // from_plain(cfg["num_attention_heads"], int)
         )
 
     def test_num_key_value_heads_inferred_when_missing(self):
         cfg = hf_config()
         cfg.pop("num_key_value_heads")
         parsed = Qwen3.Config.from_hf(cfg)
-        assert attn(parsed).num_heads_kv == convert(cfg["num_attention_heads"], int)
+        assert attn(parsed).num_heads_kv == from_plain(cfg["num_attention_heads"], int)
 
     @pytest.mark.parametrize("field_name", ["num_key_value_heads", "head_dim"])
     def test_explicit_zero_head_geometry_rejected(self, field_name: str):
@@ -907,7 +908,7 @@ def _qwen3_parity_outputs(tie_embeddings: bool) -> tuple[Tensor, Tensor]:
     )
     loop_model.eval().to(dtype=torch.float32)
 
-    tokens = torch.randint(0, convert(cfg_dict["vocab_size"], int), (3, 5))
+    tokens = torch.randint(0, from_plain(cfg_dict["vocab_size"], int), (3, 5))
     with torch.no_grad():
         # ``forward`` rather than ``__call__``: the stub's ``__call__`` cannot
         # bind a ``forward`` taking ``**kwargs: Unpack[...]``, and an eval-mode

@@ -21,7 +21,7 @@ from priml.baselines.convextok.pretokens import (
     count_pretokens,
     merge_counts,
 )
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:
@@ -88,10 +88,10 @@ def test_default_chunk_size_counts_ten_thousand_documents(
 def test_counts_match_upstream_golden() -> None:
     corpus = _read_json("corpus.json")
     golden = _read_json("pretokens.json")
-    texts = convert(corpus.get("texts"), list[str])
+    texts = from_plain(corpus.get("texts"), list[str])
     counts = count_pretokens(texts, split_pattern=_split_pattern())
-    assert list(counts) == convert(golden.get("pretokens"), list[str])
-    assert list(counts.values()) == convert(
+    assert list(counts) == from_plain(golden.get("pretokens"), list[str])
+    assert list(counts.values()) == from_plain(
         golden.get("frequencies"),
         list[int],
     )
@@ -125,7 +125,7 @@ def test_bytes_map_to_the_byte_level_alphabet() -> None:
 @pytest.mark.cli_python_subprocess
 def test_worker_processes_match_serial_counts() -> None:
     corpus = _read_json("corpus.json")
-    texts = convert(corpus.get("texts"), list[str])
+    texts = from_plain(corpus.get("texts"), list[str])
     serial = count_pretokens(texts, split_pattern=_split_pattern())
     parallel = count_pretokens(
         texts,
@@ -138,12 +138,12 @@ def test_worker_processes_match_serial_counts() -> None:
 
 def _read_json(name: str) -> dict[str, object]:
     raw = cast(object, json.loads((_CWD / "testdata" / name).read_text()))
-    return dict(convert(raw, dict[str, object]))
+    return dict(from_plain(raw, dict[str, object]))
 
 
 def _split_pattern() -> str:
     """Upstream's nanochat regular expression, as recorded when the goldens were minted."""
-    return convert(_read_json("corpus.json").get("split_pattern"), str)
+    return from_plain(_read_json("corpus.json").get("split_pattern"), str)
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ from priml.baselines.convextok.program import (
     build_program,
     token_edges,
 )
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -41,13 +41,13 @@ def test_program_matches_upstream_golden() -> None:
     built = build_program(
         dict(
             zip(
-                convert(pretokens.get("pretokens"), list[str]),
-                convert(pretokens.get("frequencies"), list[int]),
+                from_plain(pretokens.get("pretokens"), list[str]),
+                from_plain(pretokens.get("frequencies"), list[int]),
                 strict=True,
             ),
         ),
-        convert(candidates.get("tokens"), list[str]),
-        budget=convert(corpus.get("budget"), int),
+        from_plain(candidates.get("tokens"), list[str]),
+        budget=from_plain(corpus.get("budget"), int),
     )
     program = built.program
     with _npz("program.npz") as golden:
@@ -286,7 +286,7 @@ def _npz(name: str) -> np.lib.npyio.NpzFile:
 
 def _read_json(name: str) -> dict[str, object]:
     raw = cast(object, json.loads((_CWD / "testdata" / name).read_text()))
-    return dict(convert(raw, dict[str, object]))
+    return dict(from_plain(raw, dict[str, object]))
 
 
 if __name__ == "__main__":

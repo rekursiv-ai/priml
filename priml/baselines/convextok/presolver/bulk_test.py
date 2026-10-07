@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import torch
 
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:
@@ -235,7 +235,7 @@ def test_transpose_slots_matches_pslp_layout() -> None:
 
 
 def _ints(values: NDArray[np.int32] | NDArray[np.int64]) -> list[int]:
-    return convert(cast(object, values.tolist()), list[int])
+    return from_plain(cast(object, values.tolist()), list[int])
 
 
 def _pslp_insertion_sort(rows: list[int], sp: list[int], ch: list[int]) -> list[int]:

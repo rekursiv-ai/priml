@@ -39,7 +39,7 @@ import torch.distributed as dist
 
 from priml.data.custom_types import DatasetProtocol
 from priml.data.dummy import DummyDataset
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:
@@ -1147,7 +1147,9 @@ class TrainLoop:
             # A collated batch carries its count as a 0-d tensor.
             count = batch.get("valid_count", 1)
             weight = (
-                int(count.item()) if isinstance(count, Tensor) else convert(count, int)
+                int(count.item())
+                if isinstance(count, Tensor)
+                else from_plain(count, int)
             )
             if weight == 0:
                 batch_start = time.perf_counter()

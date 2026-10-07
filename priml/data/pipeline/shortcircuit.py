@@ -15,7 +15,7 @@ import time
 from configgle import Fig, Makeable
 
 from priml.data.custom_types import Processor
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:
@@ -262,5 +262,5 @@ class ShortCircuitProcessor:
 
 def _reasons(sample: dict[str, object]) -> list[str]:
     """Return the string ``filter_reasons`` of ``sample``."""
-    reasons = convert(sample.get("filter_reasons"), list[object], default=[])
+    reasons = from_plain(sample.get("filter_reasons"), list[object], default=[])
     return [reason for reason in reasons if isinstance(reason, str)]

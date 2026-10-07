@@ -136,7 +136,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 
 import torch
 
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.testing import regenerate
 from priml.testing.golden import pack, tensor_bits_equal, unpack
 
@@ -607,7 +607,7 @@ def stale_post_states(paths: Iterable[Path]) -> list[Path]:
         if not isinstance(loaded, dict):
             continue
         typed_loaded = cast(dict[str, object], loaded)
-        raw = convert(typed_loaded, dict[str, object])
+        raw = from_plain(typed_loaded, dict[str, object])
         if "post_state" not in raw or "state_dict" not in raw:
             continue
         payload = load_golden(path)
@@ -853,7 +853,7 @@ def _ints(values: object) -> list[int]:
         return []
     typed_values = cast(list[object] | tuple[object, ...], values)
     return [
-        convert(value, int)
+        from_plain(value, int)
         for value in typed_values
         if isinstance(value, int) and not isinstance(value, bool)
     ]

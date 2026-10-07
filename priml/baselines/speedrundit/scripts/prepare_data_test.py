@@ -17,7 +17,7 @@ from priml.baselines.speedrundit.data import PairedImageLatentDataset
 from priml.baselines.speedrundit.scripts import prepare_data
 from priml.data.processors.labels import ImagenetSynsetToIndex
 from priml.data.sources.extracted_imagenet import ExtractedImageNetSource
-from priml.lib.custom_json import convert, loads
+from priml.lib.codec import from_plain, loads
 
 
 if TYPE_CHECKING:
@@ -381,7 +381,7 @@ def test_preparer_writes_paired_source_layout(
         assert prepared_image.getpixel((128, 128)) == (128, 128, 128)
     latent = cast("NDArray[np.float32]", np.load(latent_path))
     assert latent.shape == (1, 32, 16, 16)
-    manifest = convert(
+    manifest = from_plain(
         loads((output / "vae-in/dataset.json").read_text()),
         dict[str, object],
     )

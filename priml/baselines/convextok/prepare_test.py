@@ -33,7 +33,7 @@ from priml.baselines.convextok.pretokens import count_pretokens
 from priml.baselines.convextok.program import LinearProgram
 from priml.baselines.nanochat.scripts.prepare_data import donor_unigram16k
 from priml.baselines.nanochat.scripts.prepare_tokenizer import document_rows
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.paths import validated_output_path
 
 
@@ -52,16 +52,16 @@ def test_fixture_corpus_yields_upstream_tokenizer(tmp_path: Path) -> None:
     learned = _learned_pieces(tokenizer)
     alphabet = set(pre_tokenizers.ByteLevel.alphabet())
     golden = set(
-        convert(_read_json("vocab.json").get("det"), list[str]),
+        from_plain(_read_json("vocab.json").get("det"), list[str]),
     )
     assert learned == golden - alphabet
     held_out = [
         tokenizer.encode(text, add_special_tokens=False).tokens
-        for text in convert(corpus.get("heldout"), list[str])
+        for text in from_plain(corpus.get("heldout"), list[str])
     ]
     assert held_out == [
-        convert(row, list[str])
-        for row in convert(
+        from_plain(row, list[str])
+        for row in from_plain(
             _read_json("heldout_tokens.json").get("tokens"),
             list[object],
         )
@@ -144,11 +144,11 @@ def test_any_solver_fills_the_solver_slot(
     config.make().build()
 
     tokenizer = Tokenizer.from_file(str(config.working_dir / "tokenizer.json"))
-    candidates = convert(
+    candidates = from_plain(
         _read_json("candidates.json").get("tokens"),
         list[str],
     )
-    budget = convert(_read_json("corpus.json").get("budget"), int)
+    budget = from_plain(_read_json("corpus.json").get("budget"), int)
     assert _learned_pieces(tokenizer) == set(candidates[:budget])
     assert shards == [(config.raw_dir / "shard_00000.parquet", 0)]
     assert solver_devices == [torch.device("meta")]
@@ -277,7 +277,7 @@ def fixture_config(tmp_path: Path) -> ConvexTokPreparation.Config:
     raw.mkdir()
     parquet.write_table(
         pa.table(
-            {"text": convert(corpus.get("texts"), list[str])},
+            {"text": from_plain(corpus.get("texts"), list[str])},
         ),
         raw / "shard_00000.parquet",
     )
@@ -285,7 +285,7 @@ def fixture_config(tmp_path: Path) -> ConvexTokPreparation.Config:
     config.raw_dir = raw
     config.shard_indices = [0]
     config.working_dir = tmp_path / "convextok"
-    config.vocab_size = convert(corpus.get("vocab_size"), int)
+    config.vocab_size = from_plain(corpus.get("vocab_size"), int)
     config.num_workers = 1
     config.device = "cpu"
     return config
@@ -300,7 +300,7 @@ def _learned_pieces(tokenizer: Tokenizer) -> set[str | None]:
 
 def _read_json(name: str) -> dict[str, object]:
     raw = cast(object, json.loads((_CWD / "testdata" / name).read_text()))
-    return dict(convert(raw, dict[str, object]))
+    return dict(from_plain(raw, dict[str, object]))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

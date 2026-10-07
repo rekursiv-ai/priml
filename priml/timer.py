@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Self, TypedDict, cast
 
 import time
 
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:
@@ -124,7 +124,7 @@ class CheckpointableStepTimer:
         state = cast(CheckpointableStepTimer.StateDict, state_dict)
         # Only an int count and an int-or-float seconds total are valid; a
         # string, bool, or fractional count is corruption, so the read raises.
-        self.global_count = convert(state["global_count"], int)
-        self.global_sec = convert(state["global_sec"], float)
+        self.global_count = from_plain(state["global_count"], int)
+        self.global_sec = from_plain(state["global_sec"], float)
         self.local_count = 0
         self.local_sec = 0.0

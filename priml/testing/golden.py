@@ -22,7 +22,7 @@ from torch import Tensor
 
 import torch
 
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.testing import regenerate
 
 
@@ -201,8 +201,10 @@ def unpack(packed: object) -> dict[str, Tensor]:
       TypeError: ``packed`` is not an index and its per-dtype tensors.
 
     """
-    payload = convert(packed, dict[str, Tensor])
-    if _INDEX not in payload or len(payload) != len(convert(packed, dict[str, Tensor])):
+    payload = from_plain(packed, dict[str, Tensor])
+    if _INDEX not in payload or len(payload) != len(
+        from_plain(packed, dict[str, Tensor]),
+    ):
         raise TypeError("Not a record written by pack.")
     index = zlib.decompress(payload.pop(_INDEX).numpy().tobytes()).decode()
     offsets = dict.fromkeys(payload, 0)

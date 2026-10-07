@@ -66,7 +66,7 @@ else:
 
 from configgle import Fig, Makeable
 
-from priml.lib.custom_json import convert, parse, to_builtins
+from priml.lib.codec import from_plain, loads, to_plain
 from priml.paths import resolve_working_dir, validated_output_path
 from priml.runtime import is_rank_zero
 
@@ -924,7 +924,7 @@ class Checkpointer:
             "value": self.best_value,
         }
         temp_path = path.with_suffix(".json.tmp")
-        temp_path.write_text(json.dumps(to_builtins(payload)))
+        temp_path.write_text(json.dumps(to_plain(payload)))
         temp_path.replace(path)
 
     # A record naming a checkpoint no longer in the inventory protects nothing
@@ -936,17 +936,17 @@ class Checkpointer:
         path = self.checkpoint_dir / "best.json"
         if not path.is_file():
             return
-        record = parse(path.read_text(), dict[str, object])
+        record = from_plain(loads(path.read_text()), dict[str, object])
         if (
-            convert(record.get("metric"), str, default="") != self.best_metric
-            or convert(record.get("mode"), str, default="") != self.best_mode
+            from_plain(record.get("metric"), str, default="") != self.best_metric
+            or from_plain(record.get("mode"), str, default="") != self.best_mode
         ):
             return
-        step = convert(record.get("step"), int)
+        step = from_plain(record.get("step"), int)
         if all(c.step != step for c in inventory):
             return
         self.best_step = step
-        self.best_value = convert(record.get("value"), float)
+        self.best_value = from_plain(record.get("value"), float)
         logger.info(
             "Restored best %s=%s at step %d from %s.",
             self.best_metric,

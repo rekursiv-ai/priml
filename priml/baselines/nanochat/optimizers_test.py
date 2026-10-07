@@ -16,7 +16,7 @@ import pytest
 import torch
 
 from priml.baselines.nanochat import optimizers
-from priml.lib.custom_json import ReadError, convert
+from priml.lib.codec import ReadError, from_plain
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.normuon import NorMuon
 
@@ -177,7 +177,7 @@ def test_rowwise_checkpoint_preserves_state_precision_and_next_update(
         elif isinstance(value, dict):
             for key, scalar in cast(dict[str, object], value).items():
                 assert isinstance(scalar, torch.Tensor)
-                after_scalars = convert(after[name], dict[str, Tensor])
+                after_scalars = from_plain(after[name], dict[str, Tensor])
                 assert after_scalars[key].dtype == scalar.dtype, key
                 assert torch.equal(after_scalars[key], scalar), key
     sink.mul_(0.37)
@@ -271,7 +271,7 @@ def test_ffn_multiplier_changes_both_rectangular_projections() -> None:
     config.optimizer.compile = False
     optimizer = config.make()(parameters)
     rates = {
-        tuple(cast("list[Tensor]", group["params"])[0].shape): convert(
+        tuple(cast("list[Tensor]", group["params"])[0].shape): from_plain(
             cast(object, group["lr"]),
             float,
         )
@@ -506,7 +506,7 @@ def test_sparse_rmsprop_initializes_exact_row_state_and_errors() -> None:
         "sparse_scratch",
         "sparse_scalars",
     }
-    sparse_scalars = convert(state["sparse_scalars"], dict[str, Tensor])
+    sparse_scalars = from_plain(state["sparse_scalars"], dict[str, Tensor])
     assert set(sparse_scalars) == {"step", "lr", "beta2", "eps"}
     assert all(
         value.shape == () and value.dtype == torch.float32
@@ -843,7 +843,7 @@ def test_sparse_state_allocations_follow_parameter_device_and_dtype() -> None:
 
     group = cast(dict[str, object], optimizer.param_groups[0])
     assert tensor_factory.call_args == call(
-        convert(group["beta2"], float),
+        from_plain(group["beta2"], float),
         dtype=torch.float32,
     )
     expected = {
@@ -856,7 +856,7 @@ def test_sparse_state_allocations_follow_parameter_device_and_dtype() -> None:
         assert value.shape == shape, name
         assert value.dtype == dtype, name
         assert value.device.type == "meta", name
-    scalars = convert(state["sparse_scalars"], dict[str, Tensor])
+    scalars = from_plain(state["sparse_scalars"], dict[str, Tensor])
     assert all(value.device.type == "meta" for value in scalars.values())
 
 

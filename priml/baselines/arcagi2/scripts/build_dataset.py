@@ -55,7 +55,7 @@ from priml.baselines.arcagi1.scripts.build_dataset import (
 )
 from priml.baselines.arcagi1.scripts.build_spatial_eval import spatial_eval_slug
 from priml.data.distributed_build import run_rank_zero_build
-from priml.lib.custom_json import parse
+from priml.lib.codec import from_plain, loads
 from priml.paths import resolve_working_dir
 
 
@@ -155,7 +155,7 @@ def arc2_spatial_eval_template(
 def arc2_num_puzzle_identifiers(dataset_dir: Path) -> int:
     """Return ``len(identifiers.json)`` for a built ARC-AGI-2 tree."""
     path = Path(dataset_dir).expanduser() / "identifiers.json"
-    return len(parse(path.read_text(), list[str]))
+    return len(from_plain(loads(path.read_text()), list[str]))
 
 
 def ensure_arc2_dataset(
@@ -404,7 +404,7 @@ def _params_match(root: Path, want: dict[str, object]) -> bool:
     if not path.is_file():
         return False
     try:
-        got = parse(path.read_text(), dict[str, object])
+        got = from_plain(loads(path.read_text()), dict[str, object])
     except (json.JSONDecodeError, TypeError):
         return False
     if got != want:

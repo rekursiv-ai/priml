@@ -22,7 +22,7 @@ from torch import Tensor
 import torch
 import torch.distributed as dist
 
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:
@@ -108,7 +108,7 @@ class GridAccuracy:
             dist.all_reduce(counts, op=dist.ReduceOp.SUM)
             counts = counts.cpu()
         solved, puzzles, cells_correct, cells = [
-            convert(count, float) for count in counts.tolist()
+            from_plain(count, float) for count in counts.tolist()
         ]
         return {
             "exact": solved / max(1.0, puzzles),
@@ -157,9 +157,9 @@ def _read_count(state: Mapping[str, object], key: str) -> int:
         return 0
     value = state[key]
     if isinstance(value, str):
-        return convert(value, int, strict=False)
+        return from_plain(value, int, strict=False)
     if isinstance(value, float):
-        converted = convert(value, float)
+        converted = from_plain(value, float)
         if converted.is_integer():
             return int(converted)
-    return convert(value, int)
+    return from_plain(value, int)

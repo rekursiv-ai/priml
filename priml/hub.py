@@ -16,7 +16,7 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.lib.custom_json import convert, loads
+from priml.lib.codec import from_plain, loads
 from priml.lib.userdirs import cache_dir
 
 
@@ -298,7 +298,7 @@ def load_hf_checkpoint(
     """
     path = Path(path_or_repo)
     if (path / "config.json").exists():
-        hf_config = convert(
+        hf_config = from_plain(
             loads((path / "config.json").read_text()),
             dict[str, object],
         )
@@ -309,6 +309,6 @@ def load_hf_checkpoint(
         dtype=dtype,
         trust_remote_code=trust_remote_code,
     )
-    return convert(hf_model.config.to_dict(), dict[str, object]), {
+    return from_plain(hf_model.config.to_dict(), dict[str, object]), {
         key: value.detach().cpu() for key, value in hf_model.state_dict().items()
     }

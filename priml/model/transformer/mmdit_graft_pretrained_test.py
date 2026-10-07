@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from priml import hub
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.transformer.block import TransformerBlock
@@ -39,12 +39,12 @@ def test_one_layer_pretrained_qwen3_graft(tmp_path: Path) -> None:
     hf_config.num_hidden_layers = 1
     # ``PretrainedConfig`` resolves model fields through ``__getattribute__``,
     # so the checker sees no ``layer_types``; read it through ``to_dict``.
-    layer_types = convert(
-        convert(hf_config.to_dict(), dict[str, object])["layer_types"],
+    layer_types = from_plain(
+        from_plain(hf_config.to_dict(), dict[str, object])["layer_types"],
         list[str],
     )
     hf_config.layer_types = layer_types[:1]
-    config = Qwen3.Config.from_hf(convert(hf_config.to_dict(), dict[str, object]))
+    config = Qwen3.Config.from_hf(from_plain(hf_config.to_dict(), dict[str, object]))
     assert isinstance(config.block, TransformerBlock.Config)
     assert isinstance(config.block.attn, Attention.Config)
     config.block.attn.attn_kernel = SdpaNaive.Config()

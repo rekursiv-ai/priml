@@ -8,7 +8,7 @@ import math
 
 import numpy as np
 
-from priml.lib.custom_json import parse
+from priml.lib.codec import from_plain, loads
 
 
 if TYPE_CHECKING:
@@ -32,7 +32,7 @@ def read_labels(manifest: Path) -> dict[str, int]:
       labels: Class labels keyed by normalized latent names.
 
     """
-    payload = parse(manifest.read_bytes(), _LabelManifest)
+    payload = from_plain(loads(manifest.read_bytes()), _LabelManifest)
     return {name.replace("\\", "/"): label for name, label in payload["labels"]}
 
 

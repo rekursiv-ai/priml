@@ -26,7 +26,7 @@ from torch.optim import Optimizer, optimizer
 import torch
 
 from priml.kernel import jit_kernel
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.normuon import NorMuon
 from priml.train.custom_types import OptimizerProtocol
@@ -213,13 +213,13 @@ class BiasCorrectedRMSProp(Optimizer):
                     self._sparse_step(parameter, gradient, state, group)
                     continue
                 self.scalars["step"].fill_(step_count)
-                self.scalars["lr"].fill_(convert(group_values["lr"], float))
+                self.scalars["lr"].fill_(from_plain(group_values["lr"], float))
                 self.scalars["beta2"].fill_(
-                    convert(group_values["beta2"], float),
+                    from_plain(group_values["beta2"], float),
                 )
-                self.scalars["eps"].fill_(convert(group_values["eps"], float))
+                self.scalars["eps"].fill_(from_plain(group_values["eps"], float))
                 self.scalars["weight_decay"].fill_(
-                    convert(group_values["weight_decay"], float),
+                    from_plain(group_values["weight_decay"], float),
                 )
                 self.update(
                     parameter,
@@ -244,7 +244,7 @@ class BiasCorrectedRMSProp(Optimizer):
                 "sparse_rows is set but this table has no dirty bitmap; refusing to "
                 "fall back to the dense path and report it as a sparse step",
             )
-        weight_decay = convert(group["weight_decay"], float)
+        weight_decay = from_plain(group["weight_decay"], float)
         if weight_decay != 0.0:
             raise ValueError(
                 f"sparse_rows does not implement decoupled decay; group carries "
@@ -291,14 +291,14 @@ class BiasCorrectedRMSProp(Optimizer):
             }
         # Round before the bias correction; using the Python float changes updates.
         beta2 = float(
-            torch.tensor(convert(group["beta2"], float), dtype=torch.float32),
+            torch.tensor(from_plain(group["beta2"], float), dtype=torch.float32),
         )
         scalars = cast("dict[str, Tensor]", state["sparse_scalars"])
         for name, value in (
             ("step", float(cast(int, state["step"]))),
-            ("lr", convert(group["lr"], float)),
+            ("lr", from_plain(group["lr"], float)),
             ("beta2", beta2),
-            ("eps", convert(group["eps"], float)),
+            ("eps", from_plain(group["eps"], float)),
         ):
             scalars[name].fill_(value)
         sparse_rmsprop_rows(

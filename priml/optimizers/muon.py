@@ -14,7 +14,7 @@ from torch.optim import Optimizer
 
 import torch
 
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.math.numeric import matrix_signum_via_newtonschulz
 
 
@@ -272,19 +272,22 @@ class Muon(Optimizer):
         return loss
 
     def _step_group(self, group: dict[str, object]) -> None:
-        lr = convert(group["lr"], float)
+        lr = from_plain(group["lr"], float)
         weight_decay = (
             None
             if group["weight_decay"] is None
-            else convert(group["weight_decay"], float)
+            else from_plain(group["weight_decay"], float)
         )
-        momentum = convert(group["momentum"], float)
-        nesterov = convert(group["nesterov"], bool)
-        ns_coefficients = convert(group["ns_coefficients"], tuple[float, float, float])
-        eps = convert(group["eps"], float)
-        ns_steps = convert(group["ns_steps"], int)
-        reference_numerics = convert(group["reference_numerics"], bool)
-        ensemble_dims = convert(group["ensemble_dims"], int)
+        momentum = from_plain(group["momentum"], float)
+        nesterov = from_plain(group["nesterov"], bool)
+        ns_coefficients = from_plain(
+            group["ns_coefficients"],
+            tuple[float, float, float],
+        )
+        eps = from_plain(group["eps"], float)
+        ns_steps = from_plain(group["ns_steps"], int)
+        reference_numerics = from_plain(group["reference_numerics"], bool)
+        ensemble_dims = from_plain(group["ensemble_dims"], int)
 
         for p in cast(list[Tensor], group["params"]):
             g = p.grad

@@ -51,7 +51,7 @@ from torch.optim import Optimizer
 
 import torch
 
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:
@@ -359,10 +359,10 @@ class NorMuon(Optimizer):
         second_moments = torch.stack([s["second_moment"] for s in states])
         stacked_grads = torch.stack([_gradient(p) for p in params])
         stacked_params = torch.stack(list(params))
-        momentum = convert(group["momentum"], float)
-        lr = convert(group["lr"], float)
-        weight_decay = convert(group["weight_decay"], float)
-        beta2 = convert(group["beta2"], float)
+        momentum = from_plain(group["momentum"], float)
+        lr = from_plain(group["lr"], float)
+        weight_decay = from_plain(group["weight_decay"], float)
+        beta2 = from_plain(group["beta2"], float)
         for name, value in (
             ("momentum", momentum),
             # A tall matrix's orthogonal update has more rows than it has

@@ -54,7 +54,7 @@ from priml.baselines.arcagi1.augmentation import (
     grid_hash,
     untranslate_unscale,
 )
-from priml.lib.custom_json import convert, parse
+from priml.lib.codec import from_plain, loads
 from priml.paths import resolve_working_dir
 from priml.runtime import is_rank_zero
 
@@ -219,16 +219,19 @@ class CanonicalPassK:
     @cached_property
     def _identifier_map(self) -> list[str]:
         """``identifiers.json``: index is puzzle id."""
-        return parse((self._root / "identifiers.json").read_text(), list[str])
+        return from_plain(
+            loads((self._root / "identifiers.json").read_text()),
+            list[str],
+        )
 
     @cached_property
     def _test_puzzles(self) -> dict[str, dict[str, object]]:
         """Scored tasks from ``test_puzzles.json``, minus ``exclude_tasks``."""
         excluded = set(self.config.exclude_tasks)
         return {
-            name: convert(puzzle, dict[str, object])
-            for name, puzzle in parse(
-                (self._root / "test_puzzles.json").read_text(),
+            name: from_plain(puzzle, dict[str, object])
+            for name, puzzle in from_plain(
+                loads((self._root / "test_puzzles.json").read_text()),
                 dict[str, object],
             ).items()
             if name not in excluded
@@ -239,11 +242,11 @@ class CanonicalPassK:
         """The id the loader pads with, so the two never desync."""
         meta_path = self._root / "test" / "dataset.json"
         meta = (
-            parse(meta_path.read_text(), dict[str, object])
+            from_plain(loads(meta_path.read_text()), dict[str, object])
             if meta_path.is_file()
             else {}
         )
-        return convert(meta.get("blank_identifier_id"), int, default=0)
+        return from_plain(meta.get("blank_identifier_id"), int, default=0)
 
     def reset(self) -> None:
         """Drop every accumulated ballot and dump row."""
@@ -279,12 +282,12 @@ class CanonicalPassK:
         preds_t = _uint8_rows(out[:, n_header:])
         raw_q_halt = _floats(out[:, 0].to(torch.float32))
         steps = _act_step_rows(out, k_steps)
-        puzzle_ids = convert(
+        puzzle_ids = from_plain(
             _integer_field(batch, "puzzle_identifiers").tolist(),
             list[int],
         )
         spatial_tags = (
-            convert(_integer_field(batch, "spatial_tags").tolist(), list[list[int]])
+            from_plain(_integer_field(batch, "spatial_tags").tolist(), list[list[int]])
             if "spatial_tags" in batch
             else [[1, 0, 0]] * len(puzzle_ids)
         )
@@ -384,7 +387,7 @@ class CanonicalPassK:
         pass1_idx = pass_ks.index(1) if 1 in pass_ks else None
         n_no_preds = 0
         for name, puzzle in self._test_puzzles.items():
-            pairs = convert(
+            pairs = from_plain(
                 puzzle.get("test", []),
                 list[dict[str, object]],
             )
@@ -514,7 +517,7 @@ class CanonicalPassK:
         state = cast(CanonicalPassK.StateDict, state_dict)
         self._hmap = {
             name: _grid_shape(shape)
-            for name, shape in convert(
+            for name, shape in from_plain(
                 state.get("hmap"),
                 dict[str, object],
                 default={},
@@ -522,7 +525,7 @@ class CanonicalPassK:
         }
         self._preds = {
             name: {
-                ih: [(str(h), convert(q, float)) for h, q in vs]
+                ih: [(str(h), from_plain(q, float)) for h, q in vs]
                 for ih, vs in by_input.items()
             }
             for name, by_input in state.get("preds", {}).items()
@@ -688,7 +691,7 @@ class SignalDumpTracker:
             payload = SignalDumpPayload(rows=[], grids={}, steps=[], pass_ks=())
         else:
             try:
-                extras_map = convert(extras, dict[str, object])
+                extras_map = from_plain(extras, dict[str, object])
             except TypeError as err:
                 raise TypeError(
                     "SignalDumpTracker expected metrics['extras'] to be "
@@ -910,7 +913,7 @@ def decode_preds(payload: bytes) -> _Preds:
                 pred_h = payload[offset : offset + 32].hex()
                 (q,) = struct.unpack_from("<d", payload, offset + 32)
                 offset += 40
-                values.append((pred_h, convert(q, float)))
+                values.append((pred_h, from_plain(q, float)))
             by_input[input_h] = values
         preds[name] = by_input
     return preds
@@ -918,7 +921,7 @@ def decode_preds(payload: bytes) -> _Preds:
 
 def _read_u32(payload: bytes, offset: int) -> tuple[int, int]:
     (value,) = struct.unpack_from("<I", payload, offset)
-    return convert(value, int), offset + 4
+    return from_plain(value, int), offset + 4
 
 
 def _votes_times_mean_q(count: float, mean_q: float, max_q: float) -> float:
@@ -1003,8 +1006,8 @@ def _ints(values: Tensor) -> list[int]:
 
 def _json_grid(value: object, *, spec: ArcSpec) -> NDArray[np.uint8]:
     rows = [
-        [_json_cell(cell) for cell in convert(row, list[object])]
-        for row in convert(value, list[object])
+        [_json_cell(cell) for cell in from_plain(row, list[object])]
+        for row in from_plain(value, list[object])
     ]
     return arc_grid_to_np(rows, max_grid=spec.max_grid)
 

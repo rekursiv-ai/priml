@@ -55,7 +55,7 @@ from torch.optim import Optimizer
 import torch
 
 from priml.kernel import jit_kernel
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:
@@ -551,9 +551,9 @@ def _group_scalars(group: dict[str, object]) -> tuple[Tensor | float, float, flo
     # at capture, so a tensor rate passes through unrounded and unconverted.
     rate = group["lr"]
     return (
-        rate if isinstance(rate, Tensor) else _fp32(convert(rate, float)),
-        _fp32(convert(group["momentum"], float)),
-        convert(group["eps"], float),
+        rate if isinstance(rate, Tensor) else _fp32(from_plain(rate, float)),
+        _fp32(from_plain(group["momentum"], float)),
+        from_plain(group["eps"], float),
     )
 
 

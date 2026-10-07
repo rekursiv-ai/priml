@@ -43,7 +43,7 @@ from priml.baselines.arcagi1.augmentation import (
 )
 from priml.data.distributed_build import run_rank_zero_build
 from priml.data.ensure import DataSpec, EnsureResult, FileSpec, ensure_data
-from priml.lib.custom_json import convert, parse
+from priml.lib.codec import from_plain, loads
 from priml.paths import resolve_working_dir
 
 
@@ -165,15 +165,17 @@ def arc_recipe(
       recipe: JSON-ready mapping, compared verbatim against a tree's sentinel.
 
     """
-    return parse(
-        json.dumps(
-            {
-                "builder": "arc",
-                "source": input_file_prefix or f"{SOURCE_URL}@{SOURCE_REVISION}",
-                "subsets": list(subsets),
-                "test_set_name": test_set_name,
-                "augmentation": dataclasses.asdict(augmentation.config),
-            },
+    return from_plain(
+        loads(
+            json.dumps(
+                {
+                    "builder": "arc",
+                    "source": input_file_prefix or f"{SOURCE_URL}@{SOURCE_REVISION}",
+                    "subsets": list(subsets),
+                    "test_set_name": test_set_name,
+                    "augmentation": dataclasses.asdict(augmentation.config),
+                },
+            ),
         ),
         dict[str, object],
     )
@@ -200,7 +202,7 @@ def check_recipe(target_dir: Path, recipe: Mapping[str, object]) -> None:
                 _stamp_command(path, recipe),
             )
         return
-    stamped = parse(path.read_text(), dict[str, object])
+    stamped = from_plain(loads(path.read_text()), dict[str, object])
     if stamped != recipe:
         raise ValueError(
             f"{target_dir} was built by a different recipe than requested; "
@@ -505,25 +507,32 @@ def write_arc_tree(
     train_dest = ("train", "all")
     test_dest = ("test", "all")
     for subset_name in subsets:
-        raw_puzzles = parse(
-            Path(f"{input_file_prefix}_{subset_name}_challenges.json").read_text(),
+        raw_puzzles = from_plain(
+            loads(
+                Path(f"{input_file_prefix}_{subset_name}_challenges.json").read_text(),
+            ),
             dict[str, object],
         )
         puzzles = {
             pid: {
                 key: [
-                    convert(example, dict[str, object])
-                    for example in convert(examples, list[object])
+                    from_plain(example, dict[str, object])
+                    for example in from_plain(examples, list[object])
                 ]
-                for key, examples in convert(puzzle, dict[str, object]).items()
+                for key, examples in from_plain(puzzle, dict[str, object]).items()
             }
             for pid, puzzle in raw_puzzles.items()
         }
         solutions = Path(f"{input_file_prefix}_{subset_name}_solutions.json")
         if solutions.is_file():
-            raw_solutions = parse(solutions.read_text(), dict[str, object])
+            raw_solutions = from_plain(
+                loads(solutions.read_text()),
+                dict[str, object],
+            )
             for pid, puzzle in puzzles.items():
-                for index, grid in enumerate(convert(raw_solutions[pid], list[object])):
+                for index, grid in enumerate(
+                    from_plain(raw_solutions[pid], list[object]),
+                ):
                     puzzle["test"][index]["output"] = _int_grid(grid)
         else:
             logger.warning("%s solutions not found, filling with dummy", subset_name)
@@ -781,7 +790,7 @@ def _puzzle_group_hash(group: Mapping[tuple[str, str], _Puzzle]) -> str:
 
 
 def _int_grid(value: object) -> list[list[int]]:
-    return [convert(row, list[int]) for row in convert(value, list[object])]
+    return [from_plain(row, list[int]) for row in from_plain(value, list[object])]
 
 
 class _ArcBuild:

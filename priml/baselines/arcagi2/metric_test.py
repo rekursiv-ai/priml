@@ -16,7 +16,7 @@ import torch
 from priml.baselines.arcagi1.augmentation import dihedral_transform, grid_hash
 from priml.baselines.arcagi2.metric import PassK
 from priml.baselines.arcagi2.record_test import assert_matches, reduce
-from priml.lib.custom_json import ReadError
+from priml.lib.codec import ReadError
 
 
 if TYPE_CHECKING:

@@ -21,12 +21,7 @@ import pytest
 import torch
 
 from priml.cost import map_cost, set_cost
-from priml.lib.custom_json import (
-    DecodeCapabilities,
-    decode_graph,
-    encode_graph,
-    resolve_import,
-)
+from priml.lib.codec import from_plain, to_plain
 from priml.model.init import kaiming_uniform, unit_fan_in_uniform
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import (
@@ -48,11 +43,8 @@ _CWD: Final = Path(__file__).resolve().parent
 
 
 def test_costed_activation_round_trips_as_an_imported_function() -> None:
-    encoded = encode_graph(silu)
-    decoded = decode_graph(
-        encoded,
-        capabilities=DecodeCapabilities(resolve=resolve_import),
-    )
+    encoded = to_plain(silu)
+    decoded = from_plain(encoded, object, allow_imports=True)
 
     assert decoded is silu
 

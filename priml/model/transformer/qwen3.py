@@ -40,7 +40,7 @@ from torch import Tensor, nn
 import torch
 
 from priml import hub
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.model.attention.attention import Attention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.custom_types import (
@@ -175,38 +175,42 @@ class Qwen3(Transformer):
                 )
             _reject_unsupported(config)
             # ``transformers`` 4.55+ nests rope params; earlier has rope_theta flat.
-            rope_params = convert(
+            rope_params = from_plain(
                 config.get("rope_parameters"),
                 dict[str, object],
                 default={},
             )
             rope_theta = config.get("rope_theta")
             if rope_theta is None:
-                rope_theta = convert(
+                rope_theta = from_plain(
                     rope_params.get("rope_theta"),
                     float,
                     default=1e6,
                     strict=False,
                 )
-            channels_in = convert(config["hidden_size"], int)
-            num_heads = convert(config["num_attention_heads"], int)
+            channels_in = from_plain(config["hidden_size"], int)
+            num_heads = from_plain(config["num_attention_heads"], int)
             # HF's schema is parsed into the CHILD configs; the parent does
             # not mirror foreign names onto itself. Everything below hangs off
             # the ONE block template, which is where each value lives.
             norm = RMSNorm.Config(elementwise_affine=True)
-            norm.eps = convert(config.get("rms_norm_eps"), float, default=1e-6)
+            norm.eps = from_plain(config.get("rms_norm_eps"), float, default=1e-6)
 
             frequencies = HuggingFaceFrequencies.Config()
-            frequencies.base = convert(rope_theta, float)
+            frequencies.base = from_plain(rope_theta, float)
             rope = RoPE.Config()
             rope.frequencies = frequencies
 
             attn = Attention.Config(bias=False, causal=True, share_qk_norm=False)
-            attn.dropout = convert(config.get("attention_dropout"), float, default=0.0)
+            attn.dropout = from_plain(
+                config.get("attention_dropout"),
+                float,
+                default=0.0,
+            )
             if not math.isfinite(attn.dropout) or attn.dropout < 0 or attn.dropout >= 1:
                 raise ValueError("attention_dropout must be finite and in [0, 1).")
             attn.num_heads = num_heads
-            num_heads_kv = convert(
+            num_heads_kv = from_plain(
                 config.get("num_key_value_heads"),
                 int,
                 default=num_heads,
@@ -219,7 +223,7 @@ class Qwen3(Transformer):
             # Qwen3 states the head width, so it need not divide the model
             # width -- the attention's inner width is decoupled from the
             # residual. Falling back to the quotient matches HF's own default.
-            channels_head = convert(
+            channels_head = from_plain(
                 config["head_dim"]
                 if "head_dim" in config
                 else channels_in // num_heads,
@@ -233,7 +237,7 @@ class Qwen3(Transformer):
 
             init_weight = partial(
                 nn.init.normal_,
-                std=convert(config.get("initializer_range"), float, default=0.02),
+                std=from_plain(config.get("initializer_range"), float, default=0.02),
             )
             attn.init_weight = init_weight
             block = TransformerBlock.Config(prenorm=True)
@@ -243,20 +247,20 @@ class Qwen3(Transformer):
                 init_weight_out=init_weight,
                 gate=True,
                 bias=False,
-                channels_hidden=convert(config["intermediate_size"], int),
+                channels_hidden=from_plain(config["intermediate_size"], int),
             )
             block.norm1 = norm.copy_tree()
             block.norm2 = norm.copy_tree()
 
             head: Makeable[TensorModule] = (
                 TiedLinear.Config(tied="proj_in")
-                if convert(config.get("tie_word_embeddings"), bool, default=False)
+                if from_plain(config.get("tie_word_embeddings"), bool, default=False)
                 else Linear.Config(init_weight=init_weight, shard="vocab")
             )
             return cls(
                 channels_in=channels_in,
-                channels_out=convert(config["vocab_size"], int),
-                num_layers=convert(config["num_hidden_layers"], int),
+                channels_out=from_plain(config["vocab_size"], int),
+                num_layers=from_plain(config["num_hidden_layers"], int),
                 proj_in=Embedding.Config(init_weight=init_weight, shard="vocab"),
                 proj_out=Sequential.Config(elements=[norm.copy_tree(), head]),
                 block=block,
@@ -337,14 +341,14 @@ def _reject_unsupported(config: Mapping[str, object]) -> None:
     """Raise on an HF field this loader would otherwise silently drop."""
     if config.get("quantization_config") is not None:
         raise ValueError("Quantized checkpoint configurations are unsupported.")
-    if convert(config.get("hidden_act"), str, default="silu") != "silu":
+    if from_plain(config.get("hidden_act"), str, default="silu") != "silu":
         raise ValueError("Only the SwiGLU/silu Qwen3 architecture is supported.")
-    if convert(config.get("attention_bias"), bool, default=False):
+    if from_plain(config.get("attention_bias"), bool, default=False):
         raise ValueError("Attention projection biases are unsupported.")
     # HF ignores ``sliding_window`` unless ``use_sliding_window`` is set, and
     # Qwen3 checkpoints ship ``sliding_window: 4096`` with it off.
-    layer_types = convert(config.get("layer_types"), list[str], default=[])
-    if convert(config.get("use_sliding_window"), bool, default=False) or any(
+    layer_types = from_plain(config.get("layer_types"), list[str], default=[])
+    if from_plain(config.get("use_sliding_window"), bool, default=False) or any(
         layer != "full_attention" for layer in layer_types
     ):
         raise ValueError("Sliding-window attention is unsupported.")

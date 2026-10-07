@@ -14,7 +14,7 @@ import pytest
 from priml.baselines.arcagi1.augmentation import ArcSpec
 from priml.baselines.arcagi1.scripts import build_spatial_eval
 from priml.data.ensure import EnsureResult
-from priml.lib.custom_json import ReadError, parse
+from priml.lib.codec import ReadError, from_plain, loads
 
 
 if TYPE_CHECKING:
@@ -418,7 +418,10 @@ def test_expanded_metadata_counts_the_expanded_puzzles(tmp_path: Path) -> None:
         scale_weights={2: 1.0},
         spec=spec,
     )
-    meta = parse((target / "test" / "dataset.json").read_text(), dict[str, object])
+    meta = from_plain(
+        loads((target / "test" / "dataset.json").read_text()),
+        dict[str, object],
+    )
     ids = _load_int_array(target / "test" / "all__puzzle_identifiers.npy")
     rows = len(_load_int_array(target / "test" / "all__inputs.npy"))
     assert meta["total_puzzles"] == len(ids) == 4

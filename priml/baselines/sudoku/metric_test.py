@@ -9,7 +9,7 @@ import torch
 import torch.distributed as dist
 
 from priml.baselines.sudoku.metric import GridAccuracy
-from priml.lib.custom_json import ReadError
+from priml.lib.codec import ReadError
 
 
 def _packed(predictions: Tensor, prefix: int = 1) -> Tensor:

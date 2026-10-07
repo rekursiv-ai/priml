@@ -44,7 +44,7 @@ import numpy as np
 import torch
 
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
-from priml.lib.custom_json import convert, parse
+from priml.lib.codec import from_plain, loads
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
 
@@ -175,7 +175,7 @@ def load_puzzle_dataset(
     metadata_path = data_path / "dataset.json"
     if not metadata_path.exists():
         raise FileNotFoundError(f"Dataset metadata not found: {metadata_path}")
-    metadata = parse(metadata_path.read_text(), _Metadata)
+    metadata = from_plain(loads(metadata_path.read_text()), _Metadata)
 
     group_path = data_path / "all__group_indices.npy"
     if not group_path.exists():
@@ -575,8 +575,8 @@ class _PuzzleBatchIterator:
         starts = self.instance_bounds[:-1]
         # One host sync for every bound, not two per instance.
         bounds = zip(
-            convert(starts.tolist(), list[int]),
-            convert((self.instance_bounds[1:] - starts).tolist(), list[int]),
+            from_plain(starts.tolist(), list[int]),
+            from_plain((self.instance_bounds[1:] - starts).tolist(), list[int]),
             strict=True,
         )
         # Two-level shuffle with a pinned draw order (per-instance randperms,

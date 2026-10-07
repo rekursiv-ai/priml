@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from priml.baselines.arcagi1.scripts import prepare_data
-from priml.lib.custom_json import convert
+from priml.lib.codec import from_plain
 from priml.lib.testing.cli import assert_help_without_docstring
 
 
@@ -70,7 +70,7 @@ def test_exp007_prepares_the_spatial_views_its_directory_names(tmp_path: Path) -
         "NDArray[np.int32]",
         np.load(target / "test" / "all__spatial_tags.npy"),
     )
-    tags = convert(cast(object, loaded.tolist()), list[list[int]])
+    tags = from_plain(cast(object, loaded.tolist()), list[list[int]])
     assert any(tag != [1, 0, 0] for tag in tags)
 
 
