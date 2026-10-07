@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from typing import Final
 
-from configgle.testing import assert_pprint_golden
 from torch.utils.flop_counter import FlopCounterMode
 
 import pytest
@@ -16,6 +15,7 @@ import torch
 
 from priml.cost import peak
 from priml.inference.kv_cache import KVCacheGeometry
+from priml.testing.golden import assert_pprint_golden
 
 
 NUM_LAYERS: Final = 3
