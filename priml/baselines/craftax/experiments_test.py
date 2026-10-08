@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 import inspect
 import math
+import re
 import threading
 import warnings
 
@@ -172,6 +173,23 @@ def test_every_experiment_is_ported() -> None:
         if name.startswith("exp") and function.__module__ == experiments.__name__
     }
     assert {factory.__name__ for factory in _PORTED} == defined
+
+
+def test_the_readme_links_every_experiment_to_its_factory() -> None:
+    """Every factory has a results row, linked to the module that defines it.
+
+    The links name no line: the export re-sorts the imports into separate
+    third-party and first-party blocks, so the public module's line numbers
+    differ from this one's.
+    """
+    readme = (
+        Path(experiments.__file__).with_name("README.md").read_text(encoding="utf-8")
+    )
+    linked = set(re.findall(r"\[`(exp\d+)`\]\(experiments\.py\)", readme))
+    assert linked == {
+        factory.__name__ for factory in _PORTED if factory is not exp_smoke
+    }
+    assert "experiments.py#L" not in readme
 
 
 @pytest.mark.parametrize("factory", _PORTED)
