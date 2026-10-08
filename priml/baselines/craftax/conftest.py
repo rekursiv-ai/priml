@@ -1,73 +1,72 @@
-"""Native Craftax test helpers and optional-reference availability."""
+"""Compile the game's Numba kernels once per session, before any test starts.
+
+A kernel compiles on its first call unless Numba's cache holds it
+(``game/jit.py``), so with a cold cache the first test to reach one paid the
+compile inside its own 60 s timeout: ``ghosts/build_test.py``'s fixtures took
+over 60 s on a 4-CPU GitHub runner. These hooks run ``kernel_cache.py`` in a
+child process first. The child only fills the cache, so its compile time counts
+against no test's timeout and its lines against no coverage report. Every test
+process then loads the kernels from that cache.
+
+Where it runs follows where pytest loads this file. A run whose arguments name a
+path under this package loads it at startup in every process: the xdist
+controller, or a serial run, compiles before any worker starts. A run that
+reaches this package only by collecting it, as a bare ``pytest -n 2`` does,
+loads it in each worker, and each compiles before its first test.
+"""
 
 from __future__ import annotations
 
-from importlib import util
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
-import copy
-import functools
-import importlib
 import os
+import subprocess
+import sys
 
-import numpy as np
 import pytest
-import torch
 
-from priml.baselines.craftax.game import world_gen
-
-
-if TYPE_CHECKING:
-    from types import ModuleType
-
-    from priml.baselines.craftax.game.state import EnvState
+from priml.lib.codec import from_plain
 
 
-os.environ.setdefault("JAX_PLATFORMS", "cpu")  # noqa: TID251 -- test-only backend setting, not a provisioned cache path.
-os.environ.setdefault("SDL_VIDEODRIVER", "dummy")  # noqa: TID251 -- test-only display setting, not a provisioned cache path.
-
-_REFERENCE_PROBES: Final = (
-    "craftax.craftax.constants",
-    "craftax.craftax_classic.envs.craftax_state",
-)
+_SEEN_AT_START: Final = pytest.StashKey[bool]()
+"""Set once this conftest saw the session start: its kernels are compiled."""
 
 
-def _reference_is_installed() -> bool:
-    """Whether every reference root used by native tests is importable."""
-    try:
-        return all(util.find_spec(name) is not None for name in _REFERENCE_PROBES)
-    except ModuleNotFoundError:
-        return False
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Compile on the xdist controller or a serial run that loaded this file at startup."""
+    session.config.stash[_SEEN_AT_START] = True
+    if "PYTEST_XDIST_WORKER" not in os.environ:
+        _compile(session.config)
 
 
-HAS_CRAFTAX: Final = _reference_is_installed()
-requires_craftax: Final = pytest.mark.skipif(
-    not HAS_CRAFTAX,
-    reason="requires the optional craftax dependency group",
-)
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """Compile in a process that loaded this file only while collecting."""
+    if not session.config.stash.get(_SEEN_AT_START, False):
+        _compile(session.config)
 
 
-@functools.cache
-def reference(module: str) -> ModuleType:
-    """Import a module of the optional reference implementation by name."""
-    return importlib.import_module(f"craftax.{module}")
-
-
-@functools.cache
-def _generated(num_envs: int, seed: int) -> EnvState:
-    """Generate one world and keep it for the process."""
-    return world_gen.generate_world(
-        num_envs=num_envs,
-        generator=torch.Generator().manual_seed(seed),
-        device=torch.device("cpu"),
+def _compile(config: pytest.Config) -> None:
+    """Run ``compile_kernels`` in a child process; report a failure, not raise it."""
+    if from_plain(config.getoption("collectonly"), bool):
+        return
+    # Without ``COVERAGE_PROCESS_*`` coverage's .pth cannot start in the child,
+    # so the lines it runs are not counted as tested.
+    ran = subprocess.run(
+        [sys.executable, "-m", "priml.baselines.craftax.kernel_cache"],
+        cwd=config.rootpath,
+        env={
+            name: value
+            for name, value in os.environ.items()
+            if not name.startswith("COVERAGE_PROCESS_")
+        },
+        capture_output=True,
+        text=True,
+        check=False,
     )
-
-
-def generated_world(*, num_envs: int = 1, seed: int = 0) -> EnvState:
-    """Return a freshly-copied generated world, generating each shape once."""
-    return copy.deepcopy(_generated(num_envs, seed))
-
-
-def as_tensor(array: object) -> torch.Tensor:
-    """Copy a reference array into a writable tensor."""
-    return torch.from_numpy(np.array(array))
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    if ran.returncode and isinstance(reporter, pytest.TerminalReporter):
+        reporter.write_line(
+            "craftax: compiling the kernels before the tests failed; each test "
+            f"compiles what it calls.\n{ran.stderr[-2_000:]}",
+            yellow=True,
+        )

@@ -1,0 +1,82 @@
+# from-scratch: the policy's own init under torch seed 0
+epoch 0001 learning_rate 0x3951b717 0.00019999999494757503
+epoch 0001 policy_loss 0xba0e8a40 -0.0005437470972537994
+epoch 0001 value_loss 0x38887378 6.506493082270026e-05
+epoch 0001 entropy 0x4070b780 3.761199951171875
+epoch 0001 total_loss 0xbd1c2715 -0.03812320902943611
+epoch 0001 old_approx_kl 0xb8bc6200 -8.982792496681213e-05
+epoch 0001 approx_kl 0x34b88000 3.4365803003311157e-07
+epoch 0001 clipfrac 0x00000000 0.0
+epoch 0001 importance 0x3f8002f4 1.0000901222229004
+epoch 0001 weight proj_in.weight torch.float32 (8, 8268) 572263fa1253155fd53a0b00189863038d3058e0e0a1ef214a49fa18e1b67808
+epoch 0001 weight proj_in.bias torch.float32 (8,) 9d723278e52ec2f04d4182d58e76a48da79d17e75b67346ba6f6e411f7b784f4
+epoch 0001 weight cell.weight_ih torch.float32 (24, 8) a93fe9ddf8c4715bb8174951b446ecd2d536241b2d96f01addae67bbb37dd59e
+epoch 0001 weight cell.weight_hh torch.float32 (24, 8) 0d02d8de590dd61576c330c1631d0c0dd52bd3ba79c49db0ebefcafa4bca4287
+epoch 0001 weight cell.bias_ih torch.float32 (24,) d35bb0a243e85b72d2cb2fe4742066923963b91b2a84a2fc2b72483968bc620e
+epoch 0001 weight cell.bias_hh torch.float32 (24,) 9e652bad7abdba5b93e6b12c394f12ac4a3c30b0542060077f8cfd6329c7c3c8
+epoch 0001 weight actor.0.weight torch.float32 (8, 8) 111af06b15e3e0fd65bea03f4ec986ae4efc08e18055e4033f66c5d52136766f
+epoch 0001 weight actor.0.bias torch.float32 (8,) 757be5778ed757e8770a113a9bcabc98c0234ebbe7f07a9073edc5b670e141f4
+epoch 0001 weight actor.1.weight torch.float32 (8, 8) 8710acc4a5d01ddf6bf9ef141ac9e9723f8ee0a3f91b8f2e99c58f6ac858d06f
+epoch 0001 weight actor.1.bias torch.float32 (8,) 3d53c541827e39032e36398e208177597f369c24f0d5468bada15d752dd2c270
+epoch 0001 weight actor.2.weight torch.float32 (43, 8) 6806f9407a06a60a6d29b9c00325b1c8a4182cbff3111abde905aceb281e7a1b
+epoch 0001 weight actor.2.bias torch.float32 (43,) 5254225e43a18d34fa07cea22889aed33193b95cf9d45e38dd5db0eb94a775d7
+epoch 0001 weight critic.0.weight torch.float32 (8, 8) 9e4e424155abe2d21fcdfd2bfee09e1d99555fb8b210be417cd64c204c480b6b
+epoch 0001 weight critic.0.bias torch.float32 (8,) 4bb2bf52b00356367297e0cefee22c87b46876283a9645c6a8702939b52f4aa7
+epoch 0001 weight critic.1.weight torch.float32 (8, 8) 8fc16938dd52aee65f27dd0e491288edecbeee990789d8b1bc4c362b337433ff
+epoch 0001 weight critic.1.bias torch.float32 (8,) 0e8446e46cb6bf9d7d084a9882ae87c17804b49e8f6b9f7bdc5d5c895c692da1
+epoch 0001 weight critic.2.weight torch.float32 (1, 8) d0f07c9794b66579395e232d06631002b7911822f77aa21ff65314b67f278d53
+epoch 0001 weight critic.2.bias torch.float32 (1,) 07abff2c37ba2b27351a15893388876b2a32caa7414d015f501620a7d09781b0
+epoch 0002 learning_rate 0x390bcf65 0.00013333333481568843
+epoch 0002 policy_loss 0xb9715878 -0.0002301650820299983
+epoch 0002 value_loss 0x380ebec5 3.403310620342381e-05
+epoch 0002 entropy 0x4070b77f 3.761199712753296
+epoch 0002 total_loss 0xbd1aee8a -0.037825144827365875
+epoch 0002 old_approx_kl 0xb9372100 -0.000174645334482193
+epoch 0002 approx_kl 0x33cc0000 9.499490261077881e-08
+epoch 0002 clipfrac 0x00000000 0.0
+epoch 0002 importance 0x3f8005ba 1.0001747608184814
+epoch 0002 weight proj_in.weight torch.float32 (8, 8268) 753172511aa37e581d268435d039ae854c860115ca20a88ad68cfc26cbeec5b0
+epoch 0002 weight proj_in.bias torch.float32 (8,) 0574c4b7073c4c3d0d0bae86846e102ec11cf534a340584681761a5ed98dd85d
+epoch 0002 weight cell.weight_ih torch.float32 (24, 8) 678c8efe4593ddd4cc455c7cfb2c11ff0ce47fa1acd99250b2e9acf323da73a7
+epoch 0002 weight cell.weight_hh torch.float32 (24, 8) 0489ed67b5f75e67f9d7981c4ae87369d15f161199a1134c05c63762e317f2db
+epoch 0002 weight cell.bias_ih torch.float32 (24,) 2be5da912e3491db1bc8b2f161ba6ab440298718b365afe38d1aaf059766a34e
+epoch 0002 weight cell.bias_hh torch.float32 (24,) 1a8353f232baac7b703b8fb0392e37941df87acb2fb575eea1cd0318967cb438
+epoch 0002 weight actor.0.weight torch.float32 (8, 8) 1a96baba340a5e7f7bdadccfb93c6429be15e06c566e593264bb0d7389ce0691
+epoch 0002 weight actor.0.bias torch.float32 (8,) feb0f7a3667f7ae9de6735d2ca975e236c60f67bd61001c2d873d5be2e455d04
+epoch 0002 weight actor.1.weight torch.float32 (8, 8) c6f0eafb1d14d99b6d9b9a775b1b1c03bd5b255fe69cdfece9bba78f119fa76f
+epoch 0002 weight actor.1.bias torch.float32 (8,) 1cc4a5ffd9793df689752791d8fcc839dc21813d5af9c4bb610f72a18f0eabaa
+epoch 0002 weight actor.2.weight torch.float32 (43, 8) c01e957c54df077d6c8535352b3c8f3e4a48a1b891adaafa901a5cb1e319b02e
+epoch 0002 weight actor.2.bias torch.float32 (43,) 9f381dee522f24392d233255e1da6f8a18e2b57b30e67a0b0f0a51a24f24b971
+epoch 0002 weight critic.0.weight torch.float32 (8, 8) 256744734ccbba359fc1035f8a2f176ed5517f2cb248fd96aea2b5264a54f6eb
+epoch 0002 weight critic.0.bias torch.float32 (8,) 8a38a79beb33ac0d9d80fa22665103f51ffd11fffc8e6a10daa52480db04a151
+epoch 0002 weight critic.1.weight torch.float32 (8, 8) 3578c432d12e3057a01e10efb0de346f05132308305cb3a799f1ae201280363b
+epoch 0002 weight critic.1.bias torch.float32 (8,) a72736f38894de0afc6710b19f48664b5b7dd5e53e080c3b3de52f6f0dc7c37d
+epoch 0002 weight critic.2.weight torch.float32 (1, 8) a9e053e6c18f4579ef92278386caa6533d5f6fdbfb4279dd5bb00fbedda4eac2
+epoch 0002 weight critic.2.bias torch.float32 (1,) f9429f98dfa50aac107867942207714969a31c467d656a23f45b3d3016894bb0
+epoch 0003 learning_rate 0x388bcf65 6.666666740784422e-05
+epoch 0003 policy_loss 0xb89bf06c -7.435758016072214e-05
+epoch 0003 value_loss 0x35703b64 8.949339189712191e-07
+epoch 0003 entropy 0x4070b77e 3.761199474334717
+epoch 0003 total_loss 0xbd1a5c88 -0.037685900926589966
+epoch 0003 old_approx_kl 0xb8a0be00 -7.664784789085388e-05
+epoch 0003 approx_kl 0x31800000 3.725290298461914e-09
+epoch 0003 clipfrac 0x00000000 0.0
+epoch 0003 importance 0x3f800282 1.0000765323638916
+epoch 0003 weight proj_in.weight torch.float32 (8, 8268) f708816c8d1fa6b18b865e9ffc4a51143cca27d2bde1eecd5e74a42001bf7bff
+epoch 0003 weight proj_in.bias torch.float32 (8,) 9dbe4ef5b768d1c2ae80cd16202ecf1d88b2b47d0feb52f2a805449847208017
+epoch 0003 weight cell.weight_ih torch.float32 (24, 8) 28bdb281478e6b9011d4161145a8c17808346342f900b0e49e99426a5cd433dd
+epoch 0003 weight cell.weight_hh torch.float32 (24, 8) dd3263c1e02d60e8b48e59f8b3136ebc8b4eee4f95f70ed3ebc98d9c55c83956
+epoch 0003 weight cell.bias_ih torch.float32 (24,) 4e8375a3d0e555831a9bb7f3503dc86cf6e0b9f9ebd86a4caa24880b90bdd288
+epoch 0003 weight cell.bias_hh torch.float32 (24,) 9278b02d05b18afe3d06839afe298803e5595d04dfbf3363b82acfdd19033ad1
+epoch 0003 weight actor.0.weight torch.float32 (8, 8) e9d3ffdc9dea5d178e5982fd7103cd202a19c740cb974ed55870ee84b9e0df22
+epoch 0003 weight actor.0.bias torch.float32 (8,) 0c67e219aa56b10fd335acde27c050dc4c32ee30f572ee1b1fa39812f5294f63
+epoch 0003 weight actor.1.weight torch.float32 (8, 8) f19cad152dd736cef7037e1c220ef0d60cc640b88d866c08211d3b32ccd81d8d
+epoch 0003 weight actor.1.bias torch.float32 (8,) 6850a7bbd43ab4793d22239e808f7530a0bc457da67e7c4bc982fdd7ec47963e
+epoch 0003 weight actor.2.weight torch.float32 (43, 8) 653464607c5a1f6b40dcec55c89bf9bf377d8964f097365618411e1d4f43add3
+epoch 0003 weight actor.2.bias torch.float32 (43,) 2c5d29b877161784854bfc62418a746aee16d06d3acd5a1efff629a96713a57b
+epoch 0003 weight critic.0.weight torch.float32 (8, 8) c8f73c220f85bdd52393d8503d8d82c9d133e5c2c5867cc78532f702c2ce1608
+epoch 0003 weight critic.0.bias torch.float32 (8,) 8e0eb08655e59265fb2dfba084694f0372ccfb40f69f79a1e8551e0fa1b7dfbd
+epoch 0003 weight critic.1.weight torch.float32 (8, 8) 12a58a4abc9149c68ec15166336ed336e8319c0933dece965e2fc570a512feca
+epoch 0003 weight critic.1.bias torch.float32 (8,) 4532330ad3e7d0756220284097fb11ed4c34d972c2b788caca15610e34d4582c
+epoch 0003 weight critic.2.weight torch.float32 (1, 8) 9cec071c19b0c8d8d4546053d4f4b81445f640fd2fae27b9403ee924064de35b
+epoch 0003 weight critic.2.bias torch.float32 (1,) e9798ca37ddf7b5cf36dac9233de71456f629263669d302ce2e580915cc9fca3

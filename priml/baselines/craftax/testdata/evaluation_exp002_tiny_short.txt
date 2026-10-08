@@ -1,0 +1,17 @@
+# from-scratch: the policy's own init under torch seed 0
+perf 0x3a90fdbc 0.0011061946861445904
+achievement_rate 0x3b74898d 0.0037313431967049837
+episode_length 0x40800000 4.0
+floor_0_overworld 0x3f800000 1.0
+floor_1_dungeon 0x00000000 0.0
+floor_2_gnomish_mines 0x00000000 0.0
+floor_3_sewers 0x00000000 0.0
+floor_4_vault 0x00000000 0.0
+floor_5_troll_mines 0x00000000 0.0
+floor_6_fire_realm 0x00000000 0.0
+floor_7_ice_realm 0x00000000 0.0
+floor_8_graveyard 0x00000000 0.0
+n 0x40800000 4.0
+floor_9_finish 0x00000000 0.0
+rollouts 0x3f800000 1.0
+logs |V328 (4,) 4ede9c87ed35e265dd88314909e4f757d4aa4a2c4c488ee862ce8f52cb1756b9

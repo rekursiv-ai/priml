@@ -1,0 +1,341 @@
+{
+ "source": "offsetof/sizeof of Inventory, Mobs, State and Log from craftax.h at PufferLib 6ffa5b10, compiled with clang -std=gnu11 on macOS arm64 (natural alignment; identical on x86-64, spike OFFSETS on the Xeon agree)",
+ "sizeof": {
+  "State": 80248,
+  "Inventory": 96,
+  "Mobs": 64,
+  "Log": 328
+ },
+ "Inventory": {
+  "wood": [
+   0,
+   4
+  ],
+  "stone": [
+   4,
+   4
+  ],
+  "coal": [
+   8,
+   4
+  ],
+  "iron": [
+   12,
+   4
+  ],
+  "diamond": [
+   16,
+   4
+  ],
+  "sapling": [
+   20,
+   4
+  ],
+  "pickaxe": [
+   24,
+   4
+  ],
+  "sword": [
+   28,
+   4
+  ],
+  "bow": [
+   32,
+   4
+  ],
+  "arrows": [
+   36,
+   4
+  ],
+  "armour": [
+   40,
+   16
+  ],
+  "torches": [
+   56,
+   4
+  ],
+  "ruby": [
+   60,
+   4
+  ],
+  "sapphire": [
+   64,
+   4
+  ],
+  "potions": [
+   68,
+   24
+  ],
+  "books": [
+   92,
+   4
+  ]
+ },
+ "Mobs": {
+  "position": [
+   0,
+   24
+  ],
+  "health": [
+   24,
+   12
+  ],
+  "mask": [
+   36,
+   3
+  ],
+  "attack_cooldown": [
+   40,
+   12
+  ],
+  "type_id": [
+   52,
+   12
+  ]
+ },
+ "State": {
+  "map": [
+   0,
+   20736
+  ],
+  "item_map": [
+   20736,
+   20736
+  ],
+  "light_map": [
+   41472,
+   20736
+  ],
+  "mob_bits": [
+   62208,
+   3456
+  ],
+  "spawn_land": [
+   65664,
+   3456
+  ],
+  "spawn_grave": [
+   69120,
+   3456
+  ],
+  "spawn_water": [
+   72576,
+   3456
+  ],
+  "down_ladders": [
+   76032,
+   72
+  ],
+  "up_ladders": [
+   76104,
+   72
+  ],
+  "chests_opened": [
+   76176,
+   36
+  ],
+  "monsters_killed": [
+   76212,
+   36
+  ],
+  "player_position": [
+   76248,
+   8
+  ],
+  "player_level": [
+   76256,
+   4
+  ],
+  "player_direction": [
+   76260,
+   4
+  ],
+  "player_health": [
+   76264,
+   4
+  ],
+  "player_food": [
+   76268,
+   4
+  ],
+  "player_drink": [
+   76272,
+   4
+  ],
+  "player_energy": [
+   76276,
+   4
+  ],
+  "player_mana": [
+   76280,
+   4
+  ],
+  "is_sleeping": [
+   76284,
+   4
+  ],
+  "is_resting": [
+   76288,
+   4
+  ],
+  "player_recover": [
+   76292,
+   4
+  ],
+  "player_hunger": [
+   76296,
+   4
+  ],
+  "player_thirst": [
+   76300,
+   4
+  ],
+  "player_fatigue": [
+   76304,
+   4
+  ],
+  "player_recover_mana": [
+   76308,
+   4
+  ],
+  "player_xp": [
+   76312,
+   4
+  ],
+  "player_dexterity": [
+   76316,
+   4
+  ],
+  "player_strength": [
+   76320,
+   4
+  ],
+  "player_intelligence": [
+   76324,
+   4
+  ],
+  "inventory": [
+   76328,
+   96
+  ],
+  "melee_mobs": [
+   76424,
+   576
+  ],
+  "passive_mobs": [
+   77000,
+   576
+  ],
+  "ranged_mobs": [
+   77576,
+   576
+  ],
+  "mob_projectiles": [
+   78152,
+   576
+  ],
+  "mob_projectile_dirs": [
+   78728,
+   216
+  ],
+  "player_projectiles": [
+   78944,
+   576
+  ],
+  "player_projectile_directions": [
+   79520,
+   216
+  ],
+  "growing_plants_pos": [
+   79736,
+   80
+  ],
+  "growing_plants_age": [
+   79816,
+   40
+  ],
+  "growing_plants_mask": [
+   79856,
+   40
+  ],
+  "potion_mapping": [
+   79896,
+   24
+  ],
+  "learned_spells": [
+   79920,
+   8
+  ],
+  "sword_enchantment": [
+   79928,
+   4
+  ],
+  "bow_enchantment": [
+   79932,
+   4
+  ],
+  "armour_enchantments": [
+   79936,
+   16
+  ],
+  "boss_progress": [
+   79952,
+   4
+  ],
+  "boss_timestep_to_spawn_this_round": [
+   79956,
+   4
+  ],
+  "light_level": [
+   79960,
+   4
+  ],
+  "achievements": [
+   79964,
+   268
+  ],
+  "state_rng": [
+   80232,
+   8
+  ],
+  "timestep": [
+   80240,
+   4
+  ]
+ },
+ "Log": {
+  "perf": [
+   0,
+   4
+  ],
+  "achievement_rate": [
+   4,
+   4
+  ],
+  "score": [
+   8,
+   4
+  ],
+  "episode_return": [
+   12,
+   4
+  ],
+  "episode_length": [
+   16,
+   4
+  ],
+  "floors": [
+   20,
+   36
+  ],
+  "achievements": [
+   56,
+   268
+  ],
+  "n": [
+   324,
+   4
+  ]
+ }
+}

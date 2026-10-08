@@ -1,214 +1,113 @@
-"""The dataset seam for an environment that generates its own data.
+"""The dataset seam for a trainer whose environment generates its own data.
 
-On-policy learning has no corpus: the next batch is whatever the current
-policy does next, so there is nothing to load and nothing to shuffle. What the
-training loop needs from a dataset is a cadence -- something to iterate that
-says "take another step" -- and that is all this provides.
-
-The training step owns the environment and the rollout. This hands it the
-loop's tick, and receives the step through ``bind_step`` so an evaluation pass
-can score the policy that is actually training.
+On-policy learning has no corpus: each epoch's data is whatever the policy does
+next, and the train step owns the environments that produce it. What the
+training loop needs from a dataset is a cadence -- a tick per epoch -- and, at
+evaluation, what a fresh evaluation of the policy being trained played.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import (
-    TYPE_CHECKING,
-    NotRequired,
-    Protocol,
-    TypedDict,
-    cast,
-    runtime_checkable,
-)
+from typing import TYPE_CHECKING, TypedDict, cast
+
+import itertools
 
 from configgle import Fig
 
+from priml.baselines.craftax.evaluation import MakesEvaluator
 from priml.timer import CheckpointableStepTimer
 
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
-    from torch import Tensor, nn
-
-    import torch
-
     from priml.train.custom_types import TrainStepProtocol
 
 
-@runtime_checkable
-class EvaluationActor(Protocol):
-    """Own evaluation state and choose actions with algorithm semantics."""
-
-    @property
-    def model(self) -> nn.Module:
-        """Model."""
-        ...
-
-    @property
-    def observation_size(self) -> int:
-        """Observation size."""
-        ...
-
-    @property
-    def device(self) -> torch.device:
-        """Device."""
-        ...
-
-    def reset(self, *, num_envs: int, device: torch.device) -> None:
-        """Reset accumulated state."""
-        ...
-
-    def act(
-        self,
-        observation: Tensor,
-        previous_done: Tensor,
-        *,
-        generator: torch.Generator,
-    ) -> Tensor:
-        """Act."""
-        ...
-
-
-class _Cadence:
-    """A finite update cadence with a checkpointable cursor."""
-
-    def __init__(self, *, count: int, position: int) -> None:
-        self.count = count
-        self.position = position
-
-    def __iter__(self) -> Iterator[dict[str, object]]:
-        for index in range(self.position, self.count):
-            self.position = index + 1
-            yield {"valid_count": 1}
-        self.position = 0
-
-
 class CraftaxRollouts:
-    """A cadence of updates, one batch per training step.
+    """An endless cadence, one empty tick per training step; an eval plays one evaluation.
 
-    Each yielded batch is empty: the data lives in the environment the train
-    step owns. The count of batches is what sets the epoch length.
+    Each tick is empty: the data lives in the environments the train step owns.
+    The ticks never run out, since the run's length is the loop's
+    ``max_steps`` (and the step's ``train_budget_steps``), so the whole run is
+    one loop epoch and nothing epoch-driven interrupts it. A tick has no
+    content and no position to resume.
     """
 
     class Config(Fig["CraftaxRollouts"]):
-        """How many updates make an epoch."""
-
-        updates_per_epoch: int = 1_000
-        """Training steps between epoch boundaries.
-
-        Only the epoch-driven parts of the loop see this -- the run's real
-        budget is its step count. Set it large enough that epoch bookkeeping
-        does not interrupt a run."""
-
-        eval_batches: int = 1
-        """Evaluation passes per eval; each scores one fresh rollout."""
+        """Nothing to configure: the step owns the data and its budget."""
 
     def __init__(self, config: Config) -> None:
-        """Store the cadence.
-
-        Args:
-          config: Epoch and evaluation lengths.
-
-        Raises:
-          ValueError: A count is not positive.
-
-        """
-        if config.updates_per_epoch <= 0 or config.eval_batches <= 0:
-            raise ValueError("Rollout cadence must be positive")
+        """Start the cadence."""
         self.config = config
         self.timer_epoch = CheckpointableStepTimer()
-        """Passes over the cadence; ticked by the loop when it runs out."""
-
+        """Passes over the cadence; the loop ticks it when a pass runs out, which
+        an endless one never does."""
         self._step: TrainStepProtocol | None = None
-        self._live_train: _Cadence | None = None
-        self._pending_train_position = 0
 
     def bind_step(self, step: TrainStepProtocol) -> None:
-        """Receive the training step whose policy generates the data.
-
-        Called once by the training loop before the first batch is drawn.
+        """Receive the train step whose policy plays the evaluations.
 
         Args:
-          step: The step that owns the environment and the policy.
+          step: The step that owns the environments and the policy.
 
         """
         self._step = step
 
-    def train_dataloader(self) -> _Cadence:
-        """Yield one tick per update in an epoch.
-
-        Returns:
-          stream: Cadence with position tracking across epoch batches.
-
-        """
-        stream = _Cadence(
-            count=self.config.updates_per_epoch,
-            position=self._pending_train_position,
-        )
-        self._pending_train_position = 0
-        self._live_train = stream
-        return stream
+    def train_dataloader(self) -> Iterator[dict[str, object]]:
+        """Return the cadence: one empty tick per training step, without end."""
+        return ({"valid_count": 1} for _ in itertools.count())
 
     def eval_dataloader(self) -> Iterator[dict[str, object]]:
-        """Yield evaluation ticks carrying one isolated stateful actor.
+        """Yield one batch: what a fresh evaluation of the policy played.
+
+        One, because an evaluation starts afresh from its seeds and plays
+        deterministically: a second would replay the first, and the score keeps
+        the last. The evaluation is built, played and closed as the loop draws
+        the batch, so the batch holds no environments.
 
         Returns:
-          result: Iterator of eval batch dicts, one per evaluation step.
+          batches: One batch, whose ``played`` is an ``evaluation.Played``.
+
+        Raises:
+          TypeError: No bound step can build an evaluator.
 
         """
-        if not isinstance(self._step, _SupportsEvaluationActor):
-            raise TypeError("Evaluation requires a bound training step with an actor.")
-        batch: dict[str, object] = {
-            "valid_count": 1,
-            "metric_only": True,
-            "actor": self._step.make_evaluation_actor(),
-        }
-        return iter([dict(batch) for _ in range(self.config.eval_batches)])
+        step = self._step
+        if not isinstance(step, MakesEvaluator):
+            raise TypeError("evaluation requires a bound step with make_evaluator()")
+        return _evaluation(step)
 
     class StateDict(TypedDict):
-        """Checkpointed cadence: the cursor and the pass count."""
+        """The pass count."""
 
-        train_position: int
-        timer_epoch: NotRequired[CheckpointableStepTimer.StateDict]
+        timer_epoch: CheckpointableStepTimer.StateDict
 
     def state_dict(self) -> StateDict:
-        """Return the pass count and active cadence position.
+        """Return the pass count.
 
         Returns:
-          result: Dict with train_position and epoch timer state.
+          state: ``timer_epoch``.
 
         """
-        position = (
-            self._live_train.position
-            if self._live_train is not None
-            else self._pending_train_position
-        )
-        return {
-            "train_position": position,
-            "timer_epoch": self.timer_epoch.state_dict(),
-        }
+        return {"timer_epoch": self.timer_epoch.state_dict()}
 
     def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
-        """Restore the pass count and active cadence position.
+        """Restore the pass count.
 
         Args:
-          state_dict: Dict from a prior state_dict call for resuming.
+          state_dict: What :meth:`state_dict` returned.
 
         """
         state = cast(CraftaxRollouts.StateDict, state_dict)
-        if "timer_epoch" in state:
-            self.timer_epoch.load_state_dict(state["timer_epoch"])
-        position = state.get("train_position", 0)
-        self._pending_train_position = position
-        if self._live_train is not None:
-            self._live_train.position = position
-            self._pending_train_position = 0
+        self.timer_epoch.load_state_dict(state["timer_epoch"])
 
 
-@runtime_checkable
-class _SupportsEvaluationActor(Protocol):
-    """A training step that can isolate a fresh evaluation actor."""
-
-    def make_evaluation_actor(self) -> EvaluationActor: ...
+def _evaluation(step: MakesEvaluator) -> Iterator[dict[str, object]]:
+    """Play one fresh evaluation when the batch is drawn."""
+    evaluator = step.make_evaluator()
+    try:
+        played = evaluator.play()
+    finally:
+        evaluator.close()
+    yield {"valid_count": 1, "metric_only": True, "played": played}

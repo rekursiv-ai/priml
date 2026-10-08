@@ -1,1085 +1,1040 @@
-"""Tests for the batched, auto-resetting environment."""
+"""Tests for the vectorized environment's buffer contract and its helper threads."""
 
 from __future__ import annotations
 
-from types import MethodType
-from typing import TYPE_CHECKING, cast
-from unittest import mock
+from typing import TYPE_CHECKING
 
-import copy
+import hashlib
+import math
+import platform
+import sys
+import threading
+import time
 
-from torch import Tensor
+from llvmlite import ir
+from numba import njit
+from numba.core.registry import cpu_target
 
+import numba.core.types as nbtypes
+import numpy as np
 import pytest
 import torch
 
-from priml.baselines.craftax.conftest import generated_world
-from priml.baselines.craftax.env import CraftaxEnv, _achievement_info, _Stepper
-from priml.baselines.craftax.game import constants, observation, world_gen
-from priml.baselines.craftax.game.state import EnvState, empty_state
-from priml.baselines.craftax.restart import (
-    RestartFromReserve,
-    RestartOnDemand,
+from priml.baselines.craftax.env import (
+    ROW,
+    SERVE_STOPPED,
+    CraftaxEnv,
+    FreshWorlds,
+    StallCap,
+    WorldPool,
+    _atomic_load_signature,
+    _atomic_store_signature,
+    _emit_atomic_load,
+    _emit_atomic_store,
+    _emit_pause,
+    _emit_ticks,
+    _pause_signature,
+    _ticks_signature,
+    clock_numba,
+    lead_numba,
+    ticks_per_second,
 )
-from priml.data.environment import BatchedEnvironmentProtocol
+from priml.baselines.craftax.game.jit import jit
+from priml.baselines.craftax.game.rng import rand_r_numba
+from priml.baselines.craftax.game.state import (
+    ACTION_OBS_SIZE,
+    NUM_BLOCK_TYPES,
+    OBS_SIZE,
+    STATE_DTYPE,
+    STATS_DTYPE,
+    SYMBOLIC_OBS_SIZE,
+    SYMBOLIC_TILE_CHANNELS,
+    TRAINING_STATS_DTYPE,
+)
+from priml.baselines.craftax.game.step import Rules
+from priml.baselines.craftax.game.testing import ir_builder
+from priml.baselines.craftax.game.world_gen import (
+    DUNGEON_LEVEL_CONFIGS,
+    SMOOTH_LEVEL_CONFIGS,
+)
+from priml.baselines.craftax.learners.practice import FrontierPractice
+from priml.baselines.craftax.testing import (
+    assert_golden,
+    digest,
+    env_digests,
+    masked_random_actions_numba,
+)
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
-    from configgle import Makeable
+    from numba.core.base import BaseContext
+    from numba.core.typing.templates import Signature
 
-    from priml.baselines.craftax.restart import RestartPolicy
-
-
-def _env(
-    num_envs: int = 4,
-    seed: int = 0,
-    reset_ratio: int = 1,
-    view: tuple[int, int] = (9, 11),
-) -> CraftaxEnv:
-    config = CraftaxEnv.Config()
-    config.view = view
-    config.num_envs = num_envs
-    config.device = "cpu"
-    config.seed = seed
-    # One world per worker by default: most tests here assert on WHICH world a
-    # restarted worker got, and sharing would make that ambiguous.
-    config.optimistic_reset_ratio = reset_ratio
-    # On demand, because these tests count the worlds each step generates.
-    config.restart = RestartOnDemand.Config()
-    return config.make()
+    from priml.baselines.craftax.game.state import Array1, Array2
 
 
-def test_a_restored_state_replays_the_same_transition() -> None:
-    config = CraftaxEnv.Config()
-    config.num_envs = 2
-    config.device = "cpu"
-    config.view = (3, 5)
-    config.optimistic_reset_ratio = 1
-    env = config.make()
-    observation = env.reset()
-    assert observation.shape == (2, env.observation_size)
-    state = copy.deepcopy(env.state_dict())
-    assert set(state) == {"generator", "num_envs", "state", "pool", "restart"}
-    assert len(state["state"]) > 0
-    assert "pool" in state
-    assert "restart" in state
-    assert len(state["pool"]) > 0
-    assert state["restart"] == {"cursor": None}
-    actions = torch.tensor([3, 5])
-    transition = env.step(actions)
-    assert transition.observation.shape == observation.shape
-    assert transition.reward.shape == (2,)
-    env.load_state_dict(state)
-    replay = env.step(actions)
-    assert torch.equal(replay.observation, transition.observation)
-    assert torch.equal(replay.reward, transition.reward)
+def _env(num_envs: int = 8, num_buffers: int = 2, num_worlds: int = 3) -> CraftaxEnv:
+    cfg = CraftaxEnv.Config()
+    cfg.num_envs = num_envs
+    cfg.num_buffers = num_buffers
+    cfg.restart = _pool(num_worlds)
+    return cfg.make()
 
 
-def _actions(env: CraftaxEnv, count: int, seed: int = 0) -> Tensor:
-    generator = torch.Generator().manual_seed(seed)
-    return torch.randint(0, env.num_actions, (count,), generator=generator)
+def _pool(num_worlds: int) -> WorldPool.Config:
+    config = WorldPool.Config()
+    config.num_worlds = num_worlds
+    return config
 
 
 @pytest.mark.compute_large_fixture
-def test_it_satisfies_the_environment_protocol() -> None:
-    assert isinstance(_env(), BatchedEnvironmentProtocol)
-
-
-@pytest.mark.compute_large_fixture
-def test_it_declares_the_published_geometry() -> None:
+def test_buffer_attributes_have_the_contracted_shapes_and_dtypes() -> None:
     env = _env()
-    assert env.num_actions == 43
-    assert env.observation_size == 8_268
-    assert env.reward_ceiling == 226.0
+    assert env.observations.shape == (8, 843)
+    assert env.observations.dtype == torch.float32
+    assert env.action_mask.shape == (8, 43)
+    assert env.action_mask.dtype == torch.uint8
+    assert env.rewards.shape == (8,)
+    assert env.rewards.dtype == torch.float32
+    assert env.terminals.shape == (8,)
+    assert env.terminals.dtype == torch.float32
+    assert env.actions.shape == (8, 1)
+    assert env.actions.dtype == torch.float32
 
 
 @pytest.mark.compute_large_fixture
-def test_reset_returns_one_observation_per_worker() -> None:
+def test_buffers_are_contiguous_host_tensors_pinned_where_cuda_exists() -> None:
     env = _env()
-    rendered = env.reset()
-    assert rendered.shape == (4, observation.observation_size())
-    assert bool(torch.isfinite(rendered).all())
+    for buffer in (
+        env.observations,
+        env.action_mask,
+        env.rewards,
+        env.terminals,
+        env.actions,
+    ):
+        assert buffer.device.type == "cpu"
+        assert buffer.is_contiguous()
+        assert buffer.is_pinned() == torch.cuda.is_available()
 
 
 @pytest.mark.compute_large_fixture
-def test_reset_can_change_the_batch_size() -> None:
+def test_buffers_stay_on_the_host_when_built_under_another_default_device() -> None:
+    """The loop builds its step under the runtime's device; the C writes host rows."""
+    with torch.device("meta"):
+        env = _env()
+    for buffer in (
+        env.observations,
+        env.action_mask,
+        env.rewards,
+        env.terminals,
+        env.actions,
+        env.save_slots,
+        env.restore_slots,
+    ):
+        assert buffer.device.type == "cpu"
+
+
+@pytest.mark.compute_large_fixture
+def test_mask_starts_all_ones_and_the_rest_zero() -> None:
     env = _env()
-    assert env.reset(7).shape == (7, observation.observation_size())
+    assert torch.equal(env.action_mask, torch.ones(8, 43, dtype=torch.uint8))
+    assert not env.observations.any()
+    assert not env.rewards.any()
+    assert not env.terminals.any()
+    assert not env.actions.any()
 
 
 @pytest.mark.compute_large_fixture
-def test_stepping_returns_a_full_transition() -> None:
-    env = _env()
-    env.reset()
-    transition = env.step(_actions(env, 4))
-    assert transition.observation.shape == (4, observation.observation_size())
-    assert transition.reward.shape == (4,)
-    assert transition.done.shape == (4,)
-    assert transition.done.dtype == torch.bool
-    assert len(transition.info) == len(constants.Achievement)
-
-
-def test_environment_passes_configured_device_to_generator() -> None:
-    config = CraftaxEnv.Config()
-    config.num_envs = 2
-    config.device = "cpu"
-    config.seed = 17
-    original_generator = torch.Generator
-    devices: list[object] = []
-    device_names: list[str] = []
-
-    def generator(*, device: torch.device) -> torch.Generator:
-        devices.append(device)
-        return original_generator(device=device)
-
-    def resolve(device_name: str) -> torch.device:
-        device_names.append(device_name)
-        return torch.device("cpu")
-
-    with (
-        mock.patch.object(torch, "Generator", generator),
-        mock.patch("priml.baselines.craftax.env.get_device", resolve),
-    ):
-        env = CraftaxEnv(config)
-
-    assert device_names == ["cpu"]
-    assert devices == [torch.device("cpu")]
-    assert env._generator.initial_seed() == 17
-
-
-def test_reading_the_world_before_reset_is_refused() -> None:
-    with pytest.raises(
-        RuntimeError,
-        match=r"^CraftaxEnv must reset before it can be read$",
-    ):
-        _ = _env().state
-
-
-def test_achievement_info_names_and_selects_each_column() -> None:
-    values = torch.arange(3 * len(constants.Achievement)).reshape(
-        3,
-        len(constants.Achievement),
-    )
-    info = _achievement_info(values)
-    assert list(info) == [
-        f"Achievements/{achievement.name.lower()}"
-        for achievement in constants.Achievement
-    ]
-    assert all(
-        torch.equal(info[f"Achievements/{achievement.name.lower()}"], values[:, index])
-        for index, achievement in enumerate(constants.Achievement)
-    )
+def test_state_arrays_follow_the_configured_sizes() -> None:
+    env = _env(num_envs=6, num_buffers=3, num_worlds=5)
+    assert env.states.dtype == STATE_DTYPE
+    assert env.states.shape == (6,)
+    assert env.pool.shape == (5,)
+    assert env.stats.dtype == STATS_DTYPE
+    assert env.stats.shape == (6,)
+    assert np.equal(env.stats["first_undefined_step"], -1).all()
+    assert env.rngs.dtype == np.uint32
+    assert env.rngs.tolist() == [0, 1, 2, 3, 4, 5]
 
 
 @pytest.mark.compute_large_fixture
-def test_the_same_seed_replays_the_same_episode() -> None:
-    def rollout() -> list[float]:
-        env = _env(seed=5)
-        env.reset()
-        return [
-            float(env.step(_actions(env, 4, index)).reward.sum()) for index in range(12)
-        ]
-
-    assert rollout() == rollout()
+def test_seed_is_an_offset_added_to_the_env_index() -> None:
+    cfg = CraftaxEnv.Config()
+    cfg.num_envs = 4
+    cfg.num_buffers = 1
+    cfg.restart = _pool(1)
+    cfg.seed = 100
+    assert cfg.make().rngs.tolist() == [100, 101, 102, 103]
 
 
 @pytest.mark.compute_large_fixture
-def test_different_seeds_give_different_worlds() -> None:
-    assert not torch.equal(_env(seed=1).reset(), _env(seed=2).reset())
-
-
-@pytest.mark.compute_large_fixture
-def test_a_finished_worker_restarts_without_disturbing_the_others() -> None:
-    # This is what lets a rollout stay rectangular: the batch never shrinks
-    # and the surviving workers keep their episodes.
-    env = _env()
-    env.reset()
-    env.state.player_health[1] = 0.0
-    env.state.timestep[:] = 25
-    survivor = env.state.map[0].clone()
-
-    transition = env.step(_actions(env, 4))
-
-    assert transition.done.tolist() == [False, True, False, False]
-    assert int(env.state.timestep[1]) == 0
-    assert int(env.state.timestep[0]) == 26
-    assert torch.equal(env.state.map[0], survivor)
-
-
-@pytest.mark.compute_large_fixture
-def test_a_restarted_worker_gets_a_fresh_world() -> None:
-    env = _env()
-    env.reset()
-    doomed = env.state.map[1].clone()
-    env.state.player_health[1] = 0.0
-    env.step(_actions(env, 4))
-    assert not torch.equal(env.state.map[1], doomed)
-
-
-@pytest.mark.compute_large_fixture
-def test_the_observation_after_a_restart_is_the_new_episode() -> None:
-    # The terminal observation is deliberately not visible: the learner sees
-    # where the next episode begins.
-    env = _env()
-    env.reset()
-    env.state.player_health[1] = 0.0
-    transition = env.step(_actions(env, 4))
-    assert torch.equal(transition.observation[1], observation.render(env.state)[1])
-
-
-@pytest.mark.compute_large_fixture
-def test_achievements_are_reported_only_when_an_episode_ends() -> None:
-    env = _env()
-    env.reset()
-    env.state.achievements[:, int(constants.Achievement.COLLECT_WOOD)] = True
-
-    quiet = env.step(_actions(env, 4))
-    assert float(quiet.info["Achievements/collect_wood"].sum()) == 0.0
-
-    env.state.achievements[:, int(constants.Achievement.COLLECT_WOOD)] = True
-    env.state.player_health[0] = 0.0
-    ending = env.step(_actions(env, 4))
-    assert ending.info["Achievements/collect_wood"].tolist() == [100.0, 0.0, 0.0, 0.0]
-
-
-@pytest.mark.compute_large_fixture
-def test_an_episode_ends_when_the_step_limit_is_reached() -> None:
-    env = _env()
-    env.reset()
-    env.state.timestep[:] = constants.MAX_TIMESTEPS - 1
-    assert env.step(_actions(env, 4)).done.all()
-
-
-@pytest.mark.compute_large_fixture
-def test_a_long_rollout_stays_finite_and_rectangular() -> None:
-    """Many steps in sequence keep the shape and stay numerically sane.
-
-    A small view, because what is under test is that the rollout does not
-    drift -- the batch never ragged, no value ever NaN. Neither property is a
-    function of how many tiles the player can see, and the full 9x11 window
-    makes every one of these steps render 8,268 floats to check that.
-    """
-    env = _env(view=(3, 5))
-    env.reset()
-    width = observation.observation_size((3, 5))
-    for index in range(24):
-        transition = env.step(_actions(env, 4, index))
-        assert transition.observation.shape == (4, width)
-        assert bool(torch.isfinite(transition.observation).all())
-        assert bool(torch.isfinite(transition.reward).all())
-
-
-@pytest.mark.compute_large_fixture
-def test_a_checkpoint_resumes_the_identical_episode() -> None:
-    env = _env(seed=9)
-    env.reset()
-    for index in range(5):
-        env.step(_actions(env, 4, index))
-    saved = {
-        key: value.clone() if isinstance(value, Tensor) else value
-        for key, value in env.state_dict().items()
-    }
-    expected = [
-        float(env.step(_actions(env, 4, 100 + i)).reward.sum()) for i in range(4)
-    ]
-
-    resumed = _env(seed=9)
-    resumed.load_state_dict(saved)
-    actual = [
-        float(resumed.step(_actions(resumed, 4, 100 + i)).reward.sum())
-        for i in range(4)
-    ]
-
-    assert actual == expected
-
-
-def test_transition_preserves_terminal_state_and_achievement_info() -> None:
-    env = _env(num_envs=4, view=(3, 5))
-    worlds = {count: generated_world(num_envs=count) for count in (2, 4)}
-
-    generated_counts: list[int] = []
-
-    def generate_world(
-        *,
-        num_envs: int,
-        generator: torch.Generator | None = None,
-        device: torch.device,
-    ) -> EnvState:
-        del generator, device
-        generated_counts.append(num_envs)
-        return worlds[num_envs]
-
-    with mock.patch.object(world_gen, "generate_world", generate_world):
-        env.reset()
-        env.state.achievements[:, int(constants.Achievement.COLLECT_WOOD)] = True
-        env.state.player_health[:2] = 0.0
-        transition = env.step(_actions(env, 4))
-        assert transition.done.tolist() == [True, True, False, False]
-        assert transition.info["Achievements/collect_wood"].tolist() == [
-            100.0,
-            100.0,
-            0.0,
-            0.0,
-        ]
-        assert transition.terminal_state.achievements[
-            :,
-            int(constants.Achievement.COLLECT_WOOD),
-        ].tolist() == [True, True, True, True]
-        assert transition.terminal_state.player_health[:2].le(0.0).all()
-        assert torch.equal(env.state.map[:2], worlds[2].map)
-        assert torch.equal(env.state.map[2:], transition.terminal_state.map[2:])
-        cached_procedure = env._live_stepper()._generate_by_count[2]
-        env.state.player_health[:2] = 0.0
-        repeated = env.step(_actions(env, 4))
-
-    assert generated_counts == [4, 2, 2]
-    assert env._live_stepper()._generate_by_count[2] is cached_procedure
-    assert repeated.done.tolist() == [True, True, False, False]
-
-
-def test_a_checkpoint_taken_before_reset_restores_cleanly() -> None:
-    env = _env()
-    saved = env.state_dict()
-    assert set(saved) == {"generator", "num_envs", "state"}
-    assert saved["state"] == {}
-    restored = _env()
-    restored.load_state_dict(saved)
-    assert restored.reset().shape == (4, observation.observation_size())
-
-
-@pytest.mark.parametrize("missing", ["pool", "restart"])
-def test_checkpoint_missing_one_restart_field_falls_back_to_spent_pool(
-    missing: str,
-) -> None:
-    env = _env(num_envs=2, view=(3, 5))
-    env.reset()
-    saved = copy.deepcopy(dict(env.state_dict()))
-    del saved[missing]
-
-    restored = _env(num_envs=2, view=(3, 5))
-    world = generated_world(num_envs=2)
-    with mock.patch.object(world_gen, "generate_world", return_value=world):
-        restored.load_state_dict(saved)
-
-    assert restored.state.num_envs == 2
-    restored_state = restored.state_dict()
-    assert "restart" in restored_state
-    assert restored_state["restart"] == {"cursor": None}
-
-
-def _worlds(env: CraftaxEnv) -> int:
-    """Count how many distinct worlds the batch currently holds."""
-    return len({tuple(env.state.map[i].flatten()[:32].tolist()) for i in range(4)})
-
-
-@pytest.mark.compute_large_fixture
-def test_optimistic_reset_shares_one_world_across_several_workers() -> None:
-    """The throughput treatment: generate few worlds, deal them to many.
-
-    Generating a world is the most expensive thing this environment does and
-    a step that ends no episode throws every generated world away. The ratio
-    is how many workers one fresh world serves.
-    """
-    env = _env(reset_ratio=4)
-    env.reset()
-    env.state.player_health[:] = 0.0
-    env.step(_actions(env, 4))
-    assert _worlds(env) == 1
-
-
-@pytest.mark.compute_large_fixture
-def test_a_ratio_of_one_gives_every_worker_its_own_world() -> None:
-    # The correlation the ratio buys is opt-out, not mandatory.
-    env = _env(reset_ratio=1)
-    env.reset()
-    env.state.player_health[:] = 0.0
-    env.step(_actions(env, 4))
-    assert _worlds(env) == 4
-
-
-@pytest.mark.compute_large_fixture
-def test_optimistic_reset_still_restarts_every_finished_worker() -> None:
-    # Sharing worlds must not mean skipping a restart: the point is cheapness,
-    # not fewer resets.
-    env = _env(reset_ratio=4)
-    env.reset()
-    env.state.timestep[:] = 40
-    env.state.player_health[:] = 0.0
-    env.step(_actions(env, 4))
-    assert env.state.timestep.tolist() == [0, 0, 0, 0]
-
-
-@pytest.mark.compute_large_fixture
-def test_optimistic_reset_leaves_living_workers_alone() -> None:
-    env = _env(reset_ratio=4)
-    env.reset()
-    survivor = env.state.map[0].clone()
-    env.state.player_health[1] = 0.0
-    transition = env.step(_actions(env, 4))
-    assert transition.done.tolist() == [False, True, False, False]
-    assert torch.equal(env.state.map[0], survivor)
-
-
-@pytest.mark.compute_large_fixture
-def test_only_as_many_worlds_are_generated_as_are_needed() -> None:
-    """One finished worker costs one world, not a whole pool.
-
-    Generation scales with batch size -- 25 ms for one world, 182 ms for
-    sixty-four -- so paying the pool's full price on a step that ended a
-    single episode is the waste this avoids. The reference must pick a static
-    shape and compile it; an eager port can just count.
-    """
-    env = _env(num_envs=4, reset_ratio=2)
-    env.reset()
-    generated: list[int] = []
-    original = world_gen.generate_world
-
-    def spy(
-        *,
-        num_envs: int,
-        generator: torch.Generator | None = None,
-        device: torch.device,
-    ) -> EnvState:
-        generated.append(num_envs)
-        return original(num_envs=num_envs, generator=generator, device=device)
-
-    env.state.player_health[:] = 9.0
-    env.state.player_health[0] = 0.0
-    with mock.patch.object(world_gen, "generate_world", spy):
-        env.step(_actions(env, 4))
-    assert generated == [1]
-
-
-@pytest.mark.compute_large_fixture
-def test_the_pool_caps_how_many_worlds_one_step_generates() -> None:
-    # The ratio is a ceiling: sixteen workers finishing together must not
-    # generate sixteen worlds when the ratio allows two.
-    env = _env(num_envs=4, reset_ratio=2)
-    env.reset()
-    generated: list[int] = []
-    original = world_gen.generate_world
-
-    def spy(
-        *,
-        num_envs: int,
-        generator: torch.Generator | None = None,
-        device: torch.device,
-    ) -> EnvState:
-        generated.append(num_envs)
-        return original(num_envs=num_envs, generator=generator, device=device)
-
-    env.state.player_health[:] = 0.0
-    with mock.patch.object(world_gen, "generate_world", spy):
-        env.step(_actions(env, 4))
-    assert generated == [2]
-
-
-@pytest.mark.compute_large_fixture
-def test_a_degenerate_reset_ratio_is_refused() -> None:
-    config = CraftaxEnv.Config()
-    config.optimistic_reset_ratio = 0
-    with pytest.raises(ValueError, match="positive"):
-        config.make()
-
-
-def test_reset_uses_the_current_batch_and_environment_generator() -> None:
-    env = _env(num_envs=3, view=(3, 5))
-    worlds = {num_envs: generated_world(num_envs=num_envs) for num_envs in (3, 5)}
-    calls: list[tuple[int, torch.Generator | None, torch.device]] = []
-
-    def generate_world(
-        *,
-        num_envs: int,
-        generator: torch.Generator | None = None,
-        device: torch.device,
-    ) -> EnvState:
-        calls.append((num_envs, generator, device))
-        return worlds[num_envs]
-
-    with mock.patch.object(world_gen, "generate_world", generate_world):
-        initial = env.reset()
-        resized = env.reset(5)
-
-    assert initial.shape == (3, observation.observation_size((3, 5)))
-    assert resized.shape == (5, observation.observation_size((3, 5)))
-    assert calls == [
-        (3, env._generator, torch.device("cpu")),
-        (5, env._generator, torch.device("cpu")),
-    ]
-    assert env.state.num_envs == 5
-
-
-def test_an_empty_batch_is_refused() -> None:
-    config = CraftaxEnv.Config()
-    config.num_envs = 0
-    with pytest.raises(ValueError, match="positive"):
-        config.make()
-
-
-def test_an_empty_view_is_refused() -> None:
-    config = CraftaxEnv.Config()
-    config.view = (0, 11)
-    with pytest.raises(
-        ValueError,
-        match=r"^view must be positive in both dimensions$",
-    ):
-        config.make()
-
-
-def test_single_environment_batch_is_valid_before_reset() -> None:
-    config = CraftaxEnv.Config()
-    config.num_envs = 1
-    config.device = "cpu"
-    assert config.make()._num_envs == 1
-
-
-def test_single_tile_view_dimension_is_valid_before_reset() -> None:
-    config = CraftaxEnv.Config()
-    config.view = (1, 2)
-    config.device = "cpu"
-    assert config.make().observation_size == observation.observation_size((1, 2))
-
-
-def test_every_nonpositive_batch_dimension_is_refused() -> None:
-    for num_envs in (-1, 0):
-        config = CraftaxEnv.Config()
-        config.num_envs = num_envs
-        with pytest.raises(ValueError, match=r"^num_envs must be positive$"):
-            config.make()
-
-
-def test_every_nonpositive_reset_ratio_is_refused() -> None:
-    for ratio in (-1, 0):
-        config = CraftaxEnv.Config()
-        config.optimistic_reset_ratio = ratio
-        with pytest.raises(
-            ValueError,
-            match=r"^optimistic_reset_ratio must be positive$",
-        ):
-            config.make()
-
-
-@pytest.mark.compute_large_fixture
-def test_a_reserve_generates_a_whole_pool_then_deals_from_it() -> None:
-    env = _reserve_env()
-    env.reset()
-    spy = _GenerationSpy()
-    env.state.player_health[0] = 0.0
-    with mock.patch.object(world_gen, "generate_world", spy):
-        env.step(_actions(env, 4))
-    first = env.state.map[0].clone()
-    env.state.player_health[1] = 0.0
-    with mock.patch.object(world_gen, "generate_world", spy):
-        env.step(_actions(env, 4, 1))
-    assert spy.generated == [4]
-    # The second worker took the NEXT world of the pool, not the first again.
-    assert not torch.equal(env.state.map[1], first)
-    assert int(env.state.timestep[1]) == 0
-
-
-@pytest.mark.compute_large_fixture
-def test_a_reserve_refills_when_too_few_worlds_remain() -> None:
-    env = _reserve_env()
-    env.reset()
-    spy = _GenerationSpy()
-    env.state.player_health[:3] = 0.0
-    with mock.patch.object(world_gen, "generate_world", spy):
-        env.step(_actions(env, 4))
-    env.state.player_health[1:3] = 0.0
-    with mock.patch.object(world_gen, "generate_world", spy):
-        env.step(_actions(env, 4, 1))
-    assert spy.generated == [4, 4]
-
-
-@pytest.mark.compute_large_fixture
-def test_a_checkpoint_resumes_the_identical_episode_from_a_reserve() -> None:
-    # The pool's unused worlds and where dealing stopped are part of the world:
-    # a resumed run must hand the next finished worker the same fresh world.
-    env = _reserve_env(seed=9)
-    env.reset()
-    env.state.player_health[0] = 0.0
-    env.step(_actions(env, 4))
-    saved = copy.deepcopy(env.state_dict())
-    env.state.player_health[2] = 0.0
-    expected = env.step(_actions(env, 4, 1)).observation
-
-    resumed = _reserve_env(seed=9)
-    resumed.load_state_dict(saved)
-    resumed.state.player_health[2] = 0.0
-    assert torch.equal(resumed.step(_actions(resumed, 4, 1)).observation, expected)
-
-
-@pytest.mark.gpu_torch_cuda
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize("restart", [RestartOnDemand.Config, RestartFromReserve.Config])
-@pytest.mark.compute_large_fixture
-def test_cuda_graphs_step_bit_for_bit_like_eager(
-    restart: Callable[[], Makeable[RestartPolicy]],
-) -> None:
-    envs: list[CraftaxEnv] = []
-    for graphs in (False, True):
-        config = CraftaxEnv.Config()
-        config.num_envs = 16
-        config.device = "cuda"
-        config.optimistic_reset_ratio = 4
-        config.restart = restart()
-        config.cuda_graphs = graphs
-        envs.append(config.make())
-    eager, graphed = envs
-    assert torch.equal(eager.reset(), graphed.reset())
-    generator = torch.Generator(device="cuda").manual_seed(1)
-    for index in range(24):
-        actions = torch.randint(0, 43, (16,), generator=generator, device="cuda")
-        for env in envs:
-            env.state.player_health[index % 16] = 0.0
-            env.state.player_health[(5 * index) % 16] = 0.0
-        a, b = eager.step(actions), graphed.step(actions)
-        assert torch.equal(a.observation, b.observation), index
-        assert torch.equal(a.reward, b.reward), index
-        assert torch.equal(a.done, b.done), index
-    for name, value in eager.state.state_dict().items():
-        assert torch.equal(value, graphed.state.state_dict()[name]), name
-
-
-@pytest.mark.parametrize("restart", [RestartOnDemand.Config, RestartFromReserve.Config])
-def test_a_step_writes_only_into_the_memory_a_graph_replays(
-    restart: Callable[[], Makeable[RestartPolicy]],
-) -> None:
-    """Capture's first rule, checked without a GPU: no step rebinds a buffer.
-
-    A replayed graph addresses the memory it was captured against, so a buffer
-    the step REBINDS -- the world, the pool, a reward or deal scalar -- goes
-    unseen by every replay. ``test_cuda_graphs_step_bit_for_bit_like_eager``
-    sees that only on a GPU; here every tensor the step machinery holds must
-    keep its address across steps that restart, generate, and deal.
-    """
-    config = CraftaxEnv.Config()
-    config.view = (3, 5)
-    config.num_envs = 4
-    config.device = "cpu"
-    config.optimistic_reset_ratio = 2
-    config.restart = restart()
-    env = config.make()
-    # Generated before the patch, which would otherwise answer the cache's own call.
-    generated_world()
-    with mock.patch.object(world_gen, "generate_world", _cached_world):
-        env.reset()
-        stepper = env._live_stepper()
-        addresses = _tensor_addresses(stepper)
-        for index in range(2):
-            env.state.player_health[index] = 0.0
-            assert bool(env.step(_actions(env, 4, index)).done[index])
-    assert _tensor_addresses(stepper) == addresses
-
-
-def test_stepper_allocates_exact_cpu_buffers() -> None:
-    world = generated_world(num_envs=3)
-    original_zeros, original_ones = torch.zeros, torch.ones
-    allocations: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
-
-    def zeros(
-        size: int | tuple[int, ...],
-        *,
-        dtype: torch.dtype | None = None,
-        device: torch.device | None = None,
-    ) -> Tensor:
-        recorded: dict[str, object] = {}
-        if dtype is not None:
-            recorded["dtype"] = dtype
-        if device is not None:
-            recorded["device"] = device
-        allocations.append(("zeros", (size,), recorded))
-        return original_zeros(size, dtype=dtype, device=device)
-
-    def ones(
-        size: int | tuple[int, ...],
-        *,
-        dtype: torch.dtype | None = None,
-        device: torch.device | None = None,
-    ) -> Tensor:
-        recorded: dict[str, object] = {}
-        if dtype is not None:
-            recorded["dtype"] = dtype
-        if device is not None:
-            recorded["device"] = device
-        allocations.append(("ones", (size,), recorded))
-        return original_ones(size, dtype=dtype, device=device)
-
-    with (
-        mock.patch.object(torch, "zeros", zeros),
-        mock.patch.object(torch, "ones", ones),
-    ):
-        stepper = _Stepper(
-            world,
-            generator=torch.Generator().manual_seed(2),
-            pool_size=2,
-            restart=RestartOnDemand.Config().make(),
-            view=(3, 5),
-            cuda_graphs=False,
-        )
-
-    action_allocation = max(
-        index
-        for index, allocation in enumerate(allocations)
-        if allocation == ("zeros", (3,), {"dtype": torch.int64, "device": world.device})
-    )
-    assert allocations[action_allocation : action_allocation + 7] == [
-        ("zeros", (3,), {"dtype": torch.int64, "device": world.device}),
-        ("zeros", (3,), {"device": world.device}),
-        ("zeros", (3,), {"dtype": torch.bool, "device": world.device}),
-        (
-            "zeros",
-            ((3, len(constants.Achievement)),),
-            {"device": world.device},
-        ),
-        ("zeros", ((),), {"dtype": torch.int64, "device": world.device}),
-        ("zeros", ((),), {"dtype": torch.int64, "device": world.device}),
-        ("ones", ((),), {"dtype": torch.int64, "device": world.device}),
-    ]
-    assert stepper._generator.initial_seed() == 2
-    assert stepper._cuda_graphs is False
-    assert isinstance(stepper._advance, MethodType)
-    assert stepper._advance.__self__ is stepper
-
-    def procedure() -> None:
-        pass
-
-    generator = torch.Generator().manual_seed(3)
-    stepper._cuda_graphs = True
-    with mock.patch(
-        "priml.baselines.craftax.env.CudaGraphed",
-        return_value=procedure,
-    ) as cuda_graphed:
-        assert stepper._procedure(procedure, (generator,)) is procedure
-    cuda_graphed.assert_called_once_with(procedure, generators=(generator,))
-    stepper._cuda_graphs = False
-    assert stepper._procedure(procedure, ()) is procedure
-
-
-def test_reward_ceiling_is_the_published_achievement_total() -> None:
-    env = _env(num_envs=1, view=(3, 5))
-
-    assert env.reward_ceiling == 226.0
-
-
-@pytest.mark.parametrize(("enabled", "expected"), [(True, True), (False, False)])
-def test_cuda_graphs_require_the_exact_cuda_device_type(
-    enabled: bool,
-    expected: bool,
-) -> None:
-    config = CraftaxEnv.Config()
-    config.num_envs = 1
-    config.view = (3, 5)
-    config.device = "cuda"
-    config.cuda_graphs = enabled
-    generator = torch.Generator()
-
-    with (
-        mock.patch(
-            "priml.baselines.craftax.env.get_device",
-            return_value=torch.device("cuda"),
-        ),
-        mock.patch.object(torch, "Generator", return_value=generator) as factory,
-    ):
-        env = CraftaxEnv(config)
-
-    factory.assert_called_once_with(device=torch.device("cuda"))
-    assert env._device == torch.device("cuda")
-    assert env._cuda_graphs is expected
-
-
-def test_loading_an_empty_checkpoint_clears_an_initialized_stepper() -> None:
-    env = _env(num_envs=1, view=(3, 5))
-    checkpoint = env.state_dict()
-    env.reset()
-
-    env.load_state_dict(checkpoint)
-
-    with pytest.raises(
-        RuntimeError,
-        match=r"^CraftaxEnv must reset before it can be read$",
-    ):
-        _ = env.state
-
-
-def test_reserve_checkpoint_restores_existing_stepper_and_pool_exactly() -> None:
-    source = _reserve_env(seed=9)
-    source.reset()
-    source.state.player_health[0] = 0.0
-    source.step(_actions(source, 4, seed=1))
-    checkpoint = copy.deepcopy(source.state_dict())
-    assert "restart" in checkpoint
-    assert "pool" in checkpoint
-    assert checkpoint["restart"] == {"cursor": 1}
-
-    target = _reserve_env(seed=10)
-    target.reset()
-    with mock.patch.object(
-        world_gen,
-        "generate_world",
-        side_effect=AssertionError("same-sized restore must keep live buffers"),
-    ):
-        target.load_state_dict(checkpoint)
-
-    restored = target.state_dict()
-    assert "restart" in restored
-    assert "pool" in restored
-    assert restored["num_envs"] == checkpoint["num_envs"]
-    assert torch.equal(restored["generator"], checkpoint["generator"])
-    assert restored["restart"] == checkpoint["restart"]
-    assert restored["state"].keys() == checkpoint["state"].keys()
-    assert all(
-        torch.equal(restored["state"][key], checkpoint["state"][key])
-        for key in checkpoint["state"]
-    )
-    assert restored["pool"].keys() == checkpoint["pool"].keys()
-    assert all(
-        torch.equal(restored["pool"][key], checkpoint["pool"][key])
-        for key in checkpoint["pool"]
-    )
-
-
-@pytest.mark.parametrize("missing", ["pool", "restart"])
-def test_incomplete_reserve_checkpoint_resets_its_cursor(missing: str) -> None:
-    source = _reserve_env(seed=9)
-    source.reset()
-    source.state.player_health[0] = 0.0
-    source.step(_actions(source, 4, seed=1))
-    checkpoint: dict[str, object] = copy.deepcopy(dict(source.state_dict()))
-    del checkpoint[missing]
-
-    restored = _reserve_env(seed=10)
-    restored.load_state_dict(checkpoint)
-    state = restored.state_dict()
-
-    assert "restart" in state
-    assert state["restart"] == {"cursor": None}
-
-
-def test_reset_preserves_generator_and_uses_one_world_pool_minimum() -> None:
-    env = _env(num_envs=1, reset_ratio=16, view=(3, 5))
-
-    env.reset()
-
-    stepper = env._live_stepper()
-    assert stepper._generator is env._generator
-    assert stepper.pool.num_envs == 1
-    assert stepper._cuda_graphs is False
-
-
-def test_stepper_allocations_and_capture_keep_their_devices_and_generators() -> None:
-    world = generated_world(num_envs=2)
-    generator = torch.Generator().manual_seed(17)
-    allocations: list[tuple[int, torch.device | None]] = []
-    captured: list[tuple[torch.Generator, ...] | None] = []
-
-    def allocate_state(
-        *,
-        num_envs: int,
-        device: torch.device | None,
-    ) -> EnvState:
-        allocations.append((num_envs, device))
-        return empty_state(
-            num_envs=num_envs,
-            device=device if device is not None else world.device,
-        )
-
-    def capture(
-        procedure: Callable[[], None],
-        *,
-        generators: tuple[torch.Generator, ...] | None,
-    ) -> Callable[[], None]:
-        captured.append(generators)
-        return procedure
-
-    with (
-        mock.patch("priml.baselines.craftax.env.empty_state", allocate_state),
-        mock.patch("priml.baselines.craftax.env.CudaGraphed", capture),
-    ):
-        _Stepper(
-            world,
-            generator=generator,
-            pool_size=2,
-            restart=RestartOnDemand.Config().make(),
-            view=(3, 5),
-            cuda_graphs=True,
-        )
-
-    assert allocations == [(2, world.device), (2, world.device)]
-    assert captured == [(generator,), ()]
-
-
-def test_advance_eager_passes_the_environment_generator() -> None:
-    world = generated_world(num_envs=2)
-    generator = torch.Generator().manual_seed(19)
-    stepper = _Stepper(
-        world,
-        generator=generator,
-        pool_size=1,
-        restart=RestartOnDemand.Config().make(),
-        view=(3, 5),
-        cuda_graphs=False,
-    )
-    used_generators: list[torch.Generator | None] = []
-
-    def advance(
-        state: EnvState,
-        actions: Tensor,
-        *,
-        generator: torch.Generator | None = None,
-    ) -> tuple[EnvState, Tensor]:
-        del actions
-        used_generators.append(generator)
-        return state, torch.zeros(world.num_envs)
-
-    with (
-        mock.patch("priml.baselines.craftax.game.step.step", advance),
-        mock.patch(
-            "priml.baselines.craftax.game.step.is_done",
-            return_value=torch.zeros(world.num_envs, dtype=torch.bool),
-        ),
-    ):
-        stepper._advance_eager()
-
-    assert used_generators == [generator]
-
-
-def test_commit_eager_deals_wrapped_pool_rows_in_done_order() -> None:
-    world = generated_world(num_envs=4)
-    reached = generated_world(num_envs=4, seed=1)
-    pool = generated_world(num_envs=3, seed=2)
-    stepper = _Stepper(
-        world,
-        generator=torch.Generator().manual_seed(23),
-        pool_size=3,
-        restart=RestartOnDemand.Config().make(),
-        view=(3, 5),
-        cuda_graphs=False,
-    )
-    stepper.state.timestep.copy_(torch.tensor([10, 11, 12, 13], dtype=torch.int32))
-    reached.timestep.copy_(torch.tensor([20, 21, 22, 23], dtype=torch.int32))
-    pool.timestep.copy_(torch.tensor([100, 101, 102], dtype=torch.int32))
-    stepper.reached.copy_(reached)
-    stepper.pool.copy_(pool)
-    stepper._done.copy_(torch.tensor([True, False, True, True]))
-    stepper._deal_offset.fill_(2)
-    stepper._deal_modulus.fill_(3)
-
-    stepper._commit_eager()
-
-    assert stepper.state.timestep.tolist() == [102, 21, 100, 101]
-
-
-def test_boolean_prefix_sum_matches_the_explicit_integer_cast() -> None:
-    done = torch.tensor([True, False, True, True])
-
-    explicit = done.to(torch.int64).cumsum(0)
-    implicit = done.cumsum(0)
-
-    assert explicit.dtype is torch.int64
-    assert implicit.dtype is torch.int64
-    assert torch.equal(implicit, explicit)
-
-
-def test_generate_caches_graph_and_preserves_generator_and_device() -> None:
-    world = generated_world(num_envs=2)
-    generator = torch.Generator().manual_seed(29)
-    stepper = _Stepper(
-        world,
-        generator=generator,
-        pool_size=2,
-        restart=RestartOnDemand.Config().make(),
-        view=(3, 5),
-        cuda_graphs=False,
-    )
-    stepper._cuda_graphs = True
-    fresh = generated_world(num_envs=1, seed=31)
-    captured: list[tuple[torch.Generator, ...] | None] = []
-    generated: list[tuple[int, torch.Generator | None, torch.device | None]] = []
-
-    def capture(
-        procedure: Callable[[], None],
-        *,
-        generators: tuple[torch.Generator, ...] | None,
-    ) -> Callable[[], None]:
-        captured.append(generators)
-        return procedure
-
-    def generate_world(
-        *,
-        num_envs: int,
-        generator: torch.Generator | None = None,
-        device: torch.device | None = None,
-    ) -> EnvState:
-        generated.append((num_envs, generator, device))
-        return fresh
-
-    with (
-        mock.patch("priml.baselines.craftax.env.CudaGraphed", capture),
-        mock.patch.object(world_gen, "generate_world", generate_world),
-    ):
-        stepper._generate(1)
-        cached = stepper._generate_by_count[1]
-        stepper._generate(1)
-
-    assert captured == [(generator,)]
-    assert stepper._generate_by_count[1] is cached
-    assert generated == [(1, generator, world.device), (1, generator, world.device)]
-
-
-def _cached_world(
-    *,
+def test_buffer_slices_tile_the_rows_in_order() -> None:
+    env = _env(num_envs=8, num_buffers=2)
+    assert env.envs_per_buffer == 4
+    assert env.buffer_slice(0) == slice(0, 4)
+    assert env.buffer_slice(1) == slice(4, 8)
+    assert env.observations[env.buffer_slice(1)].shape == (4, 843)
+
+
+@pytest.mark.parametrize(
+    ("num_envs", "num_buffers", "num_worlds", "threads", "max_timesteps"),
+    [
+        (7, 2, 3, 1, 10),
+        (0, 1, 3, 1, 10),
+        (8, 0, 3, 1, 10),
+        (8, 2, 0, 1, 10),
+        (8, 2, 3, 0, 10),
+        (8, 2, 3, 1, 0),
+    ],
+)
+def test_invalid_sizes_are_rejected(
     num_envs: int,
-    generator: torch.Generator | None = None,
-    device: torch.device,
-) -> EnvState:
-    """Stand in for world generation with copies of one world generated once."""
-    del generator, device
-    return generated_world().take(torch.zeros(num_envs, dtype=torch.int64))
+    num_buffers: int,
+    num_worlds: int,
+    threads: int,
+    max_timesteps: int,
+) -> None:
+    cfg = CraftaxEnv.Config()
+    cfg.num_envs = num_envs
+    cfg.num_buffers = num_buffers
+    cfg.restart = _pool(num_worlds)
+    cfg.threads_per_buffer = threads
+    cfg.rules.max_timesteps = max_timesteps
+    with pytest.raises(ValueError, match="must be"):
+        cfg.make()
 
 
-def _tensor_addresses(holder: object) -> dict[str, int]:
-    """Map every tensor ``holder`` keeps, directly or in a world, to its address."""
-    addresses: dict[str, int] = {}
-    for name, value in cast("dict[str, object]", vars(holder)).items():
-        if isinstance(value, Tensor):
-            addresses[name] = value.data_ptr()
-        elif isinstance(value, EnvState):
-            for field, tensor in value.state_dict().items():
-                addresses[f"{name}.{field}"] = tensor.data_ptr()
-    return addresses
+def _original_rules_env() -> CraftaxEnv:
+    """Return 4 environments on fresh worlds with every rule of original Craftax set."""
+    cfg = CraftaxEnv.Config()
+    cfg.num_envs = 4
+    cfg.num_buffers = 2
+    # One thread: a helper would compile the step with every option on for two
+    # more kernels (serve, follow), and these tests are about the rules.
+    cfg.threads_per_buffer = 1
+    cfg.restart = FreshWorlds.Config()
+    rules = cfg.rules
+    rules.original_reward = True
+    rules.collapse_sleep = False
+    rules.action_mask = False
+    rules.end_on_boss_defeat = True
+    rules.max_timesteps = 7
+    rules.symbolic_observation = True
+    return cfg.make()
 
 
-def _reserve_env(*, seed: int = 0) -> CraftaxEnv:
-    """Four workers sharing a pool of four worlds dealt from a reserve."""
+def test_the_config_passes_the_rules_to_the_step() -> None:
+    # A unit test because construction compiles no step kernel. A reset here
+    # would compile the step for these rules, 64 s on a cold cache (measured on
+    # the EPYC); the next test plays it.
+    env = _original_rules_env()
+    assert env._batch.rules == Rules(
+        original_reward=True,
+        collapse_sleep=False,
+        action_mask=False,
+        end_on_boss_defeat=True,
+        max_timesteps=7,
+        fresh_worlds=True,
+        symbolic_observation=True,
+    )
+    assert env.pool.shape == (1,)
+    assert env.pool.tobytes() == bytes(STATE_DTYPE.itemsize)
+    assert env.observations.shape == (4, SYMBOLIC_OBS_SIZE)
+    env.close()
+
+
+@pytest.mark.compute_large_fixture
+def test_the_original_rules_reset_into_the_unmasked_symbolic_view_and_step() -> None:
+    env = _original_rules_env()
+    env.reset()
+    assert env.action_mask.all()
+    # Every lit tile is one-hot in block, item and the visible flag.
+    tiles = env.observations[:, : 99 * SYMBOLIC_TILE_CHANNELS].reshape(
+        4,
+        99,
+        -1,
+    )
+    lit = tiles[:, :, -1] == 1
+    assert lit.any()
+    assert (tiles[:, :, :NUM_BLOCK_TYPES].sum(-1)[lit] == 1).all()
+    env.step_buffer(0)
+    env.close()
+
+
+@pytest.mark.compute_large_fixture
+def test_the_default_config_plays_the_default_rules() -> None:
+    # Apart from the options test, so each pays one compile: together, the step
+    # with every option on and this pool's world generator took 57 s of the
+    # timeout's 60 on a cold cache (measured on the Xeon).
+    env = _env()
+    assert env._batch.rules == Rules()
+    env.close()
+
+
+@pytest.mark.compute_large_fixture
+def test_reset_writes_first_observations_and_clears_the_step_outputs() -> None:
+    env = _env(num_envs=4, num_buffers=2, num_worlds=5)
+    env.reset()
+    assert env.states[0:1].tobytes() != bytes(80_248)
+    assert (env.observations[:, 792:] != 0).any()
+    assert env.action_mask[:, 0].tolist() == [1, 1, 1, 1]
+    assert not env.rewards.any()
+    assert not env.terminals.any()
+    env.close()
+
+
+@pytest.mark.compute_large_fixture
+@pytest.mark.parametrize(
+    ("threads", "spin_seconds"),
+    [(1, 0.005), (2, 0.005), (3, 0.005), (3, 0.0), (66, 0.0)],
+    ids=["1", "2", "3", "3-sleeping-helpers", "66-sleeping-helpers"],
+)
+def test_stepping_a_buffer_gives_the_same_bits_at_every_thread_count(
+    threads: int,
+    spin_seconds: float,
+) -> None:
+    # With no spin budget every helper parks after each share, so every step
+    # also takes the wake path.
+    def run(threads: int) -> tuple[bytes, np.ndarray, np.ndarray]:
+        cfg = CraftaxEnv.Config()
+        cfg.num_envs = 12
+        cfg.num_buffers = 2
+        cfg.restart = _pool(4)
+        cfg.threads_per_buffer = threads
+        cfg.spin_seconds = spin_seconds
+        env = cfg.make()
+        env.reset()
+        draws = np.random.default_rng(0)
+        for _ in range(8):
+            for buffer in range(2):
+                rows = env.buffer_slice(buffer)
+                legal = env.action_mask[rows].numpy()
+                start, stop, _ = rows.indices(env.num_envs)
+                choice = draws.integers(0, 43, size=stop - start)
+                env.actions[rows, 0] = torch.from_numpy(
+                    np.where(
+                        legal[np.arange(len(legal)), choice],
+                        choice,
+                        0,
+                    ).astype(np.float32),
+                )
+                env.step_buffer(buffer)
+        result = (
+            env.states.tobytes(),
+            env.observations.numpy().copy(),
+            env.rewards.numpy().copy(),
+        )
+        env.close()
+        return result
+
+    reference = run(1)
+    actual = run(threads)
+    assert actual[0] == reference[0]
+    assert np.array_equal(actual[1], reference[1])
+    assert np.array_equal(actual[2], reference[2])
+
+
+@jit
+def _pick_actions(
+    masks: Array2[int],
+    actions: Array2[np.float32],
+    start: int,
+    stop: int,
+    calls: Array1[int],
+) -> int:
+    """Stand in for a rollout's prepare: write a legal action per row, count the call."""
+    calls[0] += 1
+    for i in range(start, stop):
+        choice = (calls[0] * 7 + i * 13) % 43
+        actions[i, 0] = np.float32(choice if masks[i, choice] else 0)
+    return 0
+
+
+@jit
+def _fail_third_call(calls: Array1[int]) -> int:
+    calls[0] += 1
+    return 7 if calls[0] == 3 else 0
+
+
+@pytest.mark.compute_large_fixture
+@pytest.mark.parametrize(
+    ("threads", "spin_seconds"),
+    [(1, 0.005), (2, 0.005), (3, 0.0)],
+    ids=["1", "2", "3-sleeping-helpers"],
+)
+def test_run_buffer_matches_preparing_and_stepping_from_python(
+    threads: int,
+    spin_seconds: float,
+) -> None:
+    def make() -> CraftaxEnv:
+        cfg = CraftaxEnv.Config()
+        cfg.num_envs = 12
+        cfg.num_buffers = 2
+        cfg.restart = _pool(4)
+        cfg.threads_per_buffer = threads
+        cfg.spin_seconds = spin_seconds
+        env = cfg.make()
+        env.reset()
+        return env
+
+    looped, ran = make(), make()
+    for buffer in range(2):
+        start, stop, _ = looped.buffer_slice(buffer).indices(looped.num_envs)
+        calls = np.zeros(1, dtype=np.int64)
+        for _ in range(8):
+            _pick_actions(
+                looped.action_mask.numpy(), looped.actions.numpy(), start, stop, calls,
+            )  # fmt: skip
+            looped.step_buffer(buffer)
+        calls = np.zeros(1, dtype=np.int64)
+        ran.run_buffer(
+            buffer,
+            8,
+            _pick_actions,
+            (
+                ran.action_mask.numpy(),
+                ran.actions.numpy(),
+                start,
+                stop,
+                calls,
+            ),
+        )
+        assert calls[0] == 8
+    assert ran.states.tobytes() == looped.states.tobytes()
+    assert ran.stats.tobytes() == looped.stats.tobytes()
+    assert torch.equal(ran.observations, looped.observations)
+    assert torch.equal(ran.action_mask, looped.action_mask)
+    assert torch.equal(ran.rewards, looped.rewards)
+    assert torch.equal(ran.terminals, looped.terminals)
+    looped.close()
+    ran.close()
+
+
+@pytest.mark.compute_large_fixture
+def test_run_buffer_stops_at_a_failed_prepare_after_the_steps_before_it() -> None:
+    env = _env()
+    env.reset()
+    calls = np.zeros(1, dtype=np.int64)
+    with pytest.raises(RuntimeError, match="returned 7"):
+        env.run_buffer(0, 8, _fail_third_call, (calls,))
+    assert calls[0] == 3
+    rows = env.buffer_slice(0)
+    assert env.stats["steps"][rows].tolist() == [2] * len(
+        range(*rows.indices(env.num_envs)),
+    )
+    env.close()
+
+
+@pytest.mark.compute_large_fixture
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_a_failed_helper_makes_the_step_raise_instead_of_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(*args: object) -> int:
+        del args
+        raise ValueError("a broken helper")
+
+    monkeypatch.setattr("priml.baselines.craftax.env.serve_numba", broken)
+    env = _env()
+    env.reset()
+    with pytest.raises(RuntimeError, match="helper thread failed"):
+        env.step_buffer(0)
+    env.close()
+
+
+@pytest.mark.compute_large_fixture
+def test_a_closed_environment_refuses_to_step() -> None:
+    env = _env()
+    env.reset()
+    env.step_buffer(0)
+    env.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        env.step_buffer(0)
+
+
+@pytest.mark.compute_large_fixture
+def test_a_share_posted_after_its_helper_stopped_is_not_waited_for() -> None:
+    # As when close() lands between a step posting its ticket and the helper
+    # reading it: the helper leaves serve without doing the share.
+    env = _env()
+    env.reset()
+    env.step_buffer(0)
+    team = env._teams[0]
+    env.close()
+    status = lead_numba(
+        env._batch,
+        env.pool,
+        team._archive,
+        team._control,
+        team._ticket + 1,
+        team._bounds,
+    )
+    assert status < 0
+
+
+@pytest.mark.compute_large_fixture
+def test_the_spin_budget_spans_spin_seconds_of_the_cycle_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A fresh dispatcher: its first call compiles, as a process's first clock
+    # read loads the kernel, which a budget measured across it must not count.
+    # The rate is measured once per process, so this test measures it anew.
+    fresh_clock = njit(nogil=True)(clock_numba.py_func)
+    monkeypatch.setattr("priml.baselines.craftax.env.clock_numba", fresh_clock)
+    ticks_per_second.cache_clear()
+    budgets: list[int] = []
+
+    def record(
+        batch: object,
+        pool: object,
+        control: object,
+        row: int,
+        budget: int,
+    ) -> int:
+        del batch, pool, control, row
+        budgets.append(budget)
+        return SERVE_STOPPED
+
+    monkeypatch.setattr("priml.baselines.craftax.env.serve_numba", record)
+    cfg = CraftaxEnv.Config()
+    cfg.num_envs = 2
+    cfg.num_buffers = 1
+    cfg.restart = FreshWorlds.Config()
+    cfg.spin_seconds = 0.005
+    cfg.make().close()
+    # The reference rate, with the clock's kernel compiled by now.
+    started, started_ticks = time.perf_counter(), fresh_clock()
+    time.sleep(0.05)
+    rate = (fresh_clock() - started_ticks) / (time.perf_counter() - started)
+    assert budgets == [pytest.approx(cfg.spin_seconds * rate, rel=0.2)]
+
+
+@pytest.mark.compute_large_fixture
+@pytest.mark.parametrize("threads", [2, 3, 4, 5, 8])
+def test_each_helper_row_of_the_control_array_is_its_own_cache_block(
+    threads: int,
+) -> None:
+    # 128 bytes: Apple's cache line, and the pair of 64-byte lines Intel's
+    # adjacent-line prefetcher fetches together.
+    cfg = CraftaxEnv.Config()
+    cfg.num_envs = 8
+    cfg.num_buffers = 1
+    cfg.restart = _pool(1)
+    cfg.threads_per_buffer = threads
+    env = cfg.make()
+    control = env._teams[0]._control
+    assert ROW * control.itemsize == 128
+    assert control.ctypes.data % 128 == 0
+    env.close()
+
+
+@pytest.mark.compute_large_fixture
+def test_a_helper_that_cannot_start_stops_the_helpers_before_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started: list[threading.Thread] = []
+    start = threading.Thread.start
+
+    def start_one(thread: threading.Thread) -> None:
+        if started:
+            raise RuntimeError("can't start new thread")
+        started.append(thread)
+        start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", start_one)
+    cfg = CraftaxEnv.Config()
+    cfg.num_envs = 6
+    cfg.num_buffers = 1
+    cfg.restart = _pool(1)
+    cfg.threads_per_buffer = 3
+    with pytest.raises(RuntimeError, match="start new thread"):
+        cfg.make()
+    started[0].join(timeout=10)
+    assert not started[0].is_alive()
+
+
+def test_atomic_load_types_a_contiguous_int64_vector_as_a_word_load() -> None:
+    vector = nbtypes.Array(nbtypes.int64, 1, "C")
+    assert _atomic_load_signature(None, vector, nbtypes.intp) == (
+        nbtypes.int64(vector, nbtypes.intp),
+        _emit_atomic_load,
+    )
+
+
+@pytest.mark.parametrize(
+    "array",
+    [
+        nbtypes.Array(nbtypes.int32, 1, "C"),
+        nbtypes.Array(nbtypes.int64, 2, "C"),
+        nbtypes.Array(nbtypes.int64, 1, "A"),
+        nbtypes.int64,
+    ],
+    ids=["int32", "matrix", "strided", "scalar"],
+)
+def test_atomic_load_types_nothing_but_a_contiguous_int64_vector(
+    array: nbtypes.Type,
+) -> None:
+    # None tells Numba this overload does not apply, so it rejects the call.
+    assert _atomic_load_signature(None, array, nbtypes.intp) is None
+
+
+def test_the_store_the_pause_and_the_clock_type_their_calls() -> None:
+    vector = nbtypes.Array(nbtypes.int64, 1, "C")
+    assert _atomic_store_signature(None, vector, nbtypes.intp, nbtypes.int64) == (
+        nbtypes.void(vector, nbtypes.intp, nbtypes.int64),
+        _emit_atomic_store,
+    )
+    scalar = nbtypes.int64
+    assert _atomic_store_signature(None, scalar, nbtypes.intp, scalar) is None
+    assert _pause_signature(None) == (nbtypes.void(), _emit_pause)
+    assert _ticks_signature(None) == (nbtypes.int64(), _emit_ticks)
+
+
+@pytest.mark.parametrize(
+    ("emit", "emitted"),
+    [
+        (_emit_atomic_load, "load atomic i64"),
+        (_emit_atomic_store, "store atomic i64"),
+        (_emit_ticks, 'call i64 @"llvm.readcyclecounter"()'),
+    ],
+    ids=["load", "store", "ticks"],
+)
+def test_each_word_intrinsic_emits_its_instruction(
+    emit: Callable[
+        [BaseContext, ir.IRBuilder, Signature, Sequence[ir.Value]],
+        ir.Value,
+    ],
+    emitted: str,
+) -> None:
+    builder, args = _vector_builder()
+    emit(cpu_target.target_context, builder, nbtypes.void(), args)
+    assert emitted in str(builder.module)
+
+
+@pytest.mark.parametrize(
+    ("machine", "hint"),
+    [
+        ("arm64", 'call void @"llvm.aarch64.hint"(i32 1)'),
+        ("x86_64", 'call void @"llvm.x86.sse2.pause"()'),
+    ],
+)
+def test_the_pause_emits_the_platforms_spin_wait_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    machine: str,
+    hint: str,
+) -> None:
+    monkeypatch.setattr(platform, "machine", lambda: machine)
+    builder, args = _vector_builder()
+    _emit_pause(cpu_target.target_context, builder, nbtypes.void(), args)
+    assert hint in str(builder.module)
+
+
+def _vector_builder() -> tuple[ir.IRBuilder, tuple[ir.Argument, ...]]:
+    """Return a builder over ``(vector, index, value)``, the vector as Numba's array."""
+    word = ir.IntType(64)
+    byte = ir.IntType(8).as_pointer()
+    # ``ArrayModel``'s fields: meminfo, parent, nitems, itemsize, data, shape, strides.
+    vector = ir.LiteralStructType(
+        [byte, byte, word, word, word.as_pointer(), word, word],
+    )
+    return ir_builder(vector, word, word)
+
+
+def test_the_pool_builds_world_k_from_seed_k_with_the_shipped_level_configs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pool hands ``build_pool_numba`` its rows, their bytes and the shipped configs.
+
+    The worlds are ``build_pool_numba``'s, which ``world_gen_test`` holds to seed-by-seed
+    generation; compiling it here would cost seconds on a cold cache.
+    """
+    monkeypatch.setattr(
+        "priml.baselines.craftax.env.build_pool_numba",
+        _stamp_seeds,
+    )
+    pool = _pool(3).make().pool()
+    assert pool.dtype == STATE_DTYPE
+    assert pool.shape == (3,)
+    assert pool.view(np.uint8).reshape(3, -1)[:, 0].tolist() == [0, 1, 2]
+
+
+def _stamp_seeds(
+    pool: np.ndarray,
+    pool_bytes: np.ndarray,
+    smooth_configs: np.ndarray,
+    dungeon_configs: np.ndarray,
+    first_seed: int,
+) -> None:
+    """Stand in for ``build_pool_numba``: write each row's seed into its first byte."""
+    assert smooth_configs is SMOOTH_LEVEL_CONFIGS
+    assert dungeon_configs is DUNGEON_LEVEL_CONFIGS
+    assert pool_bytes.shape == (len(pool), STATE_DTYPE.itemsize)
+    pool_bytes[:, 0] = first_seed + np.arange(len(pool))
+
+
+@pytest.mark.compute_large_fixture
+def test_the_state_dict_restores_every_array_a_step_reads() -> None:
+    """A loaded state dict puts the env back where it was saved, bit for bit."""
+    env = _env(num_envs=4, num_buffers=2, num_worlds=3)
+    try:
+        env.reset()
+        streams = np.uint32(0x9E37_79B9) ^ np.arange(1, 5, dtype=np.uint32)
+        _play(env, streams, steps=2)
+        saved = {name: value.clone() for name, value in env.state_dict().items()}
+        expected = env_digests(env)
+        _play(env, streams, steps=3)
+        assert env_digests(env) != expected
+        env.load_state_dict(saved)
+        assert env_digests(env) == expected
+    finally:
+        env.close()
+
+
+def _play(env: CraftaxEnv, streams: np.ndarray, *, steps: int) -> None:
+    """Step every buffer ``steps`` times on the oracle traces' action stream."""
+    for _ in range(steps):
+        masked_random_actions_numba(
+            streams,
+            env.action_mask.numpy(),
+            env.actions.numpy(),
+        )
+        for buffer in range(env.num_buffers):
+            env.step_buffer(buffer)
+
+
+def test_defaults_are_exp000() -> None:
+    cfg = CraftaxEnv.Config()
+    assert (cfg.num_envs, cfg.num_buffers, cfg.threads_per_buffer) == (2048, 4, 2)
+    assert cfg.restart == _pool(8192)
+    assert cfg.rules.make() == Rules()
+    assert cfg.stall_cap is None
+    assert cfg.practice is None
+    assert cfg.observation_size == OBS_SIZE
+
+
+def test_the_previous_action_widens_the_packed_observation_by_one() -> None:
+    cfg = CraftaxEnv.Config()
+    cfg.rules.previous_action = True
+    assert cfg.observation_size == ACTION_OBS_SIZE
+    assert cfg.rules.make() == Rules(previous_action=True)
+    cfg.rules.symbolic_observation = True
+    with pytest.raises(ValueError, match="symbolic"):
+        CraftaxEnv.check(cfg)
+
+
+def test_practice_refuses_donors_beyond_the_last_buffer() -> None:
+    cfg = CraftaxEnv.Config()
+    cfg.num_envs = 8
+    cfg.num_buffers = 2
+    practice = cfg.practice = FrontierPractice.Config()
+    practice.num_donors = 4
+    CraftaxEnv.check(cfg)
+    practice.num_donors = 5
+    with pytest.raises(ValueError, match="last buffer"):
+        CraftaxEnv.check(cfg)
+
+
+def test_a_stall_cap_compiles_its_limit_and_permille_into_the_rules() -> None:
+    cap = StallCap.Config().make()
+    assert (cap.stall_limit, cap.uncapped_permille) == (10_000, 5)
+    assert cap.rules(Rules()) == Rules(stall_limit=10_000, uncapped_permille=5)
+
+
+@pytest.mark.parametrize(
+    ("stall_limit", "uncapped_fraction", "permille"),
+    [(1, 0.0, 0), (2**31 - 1, 1.0, 1000), (10, 0.25, 250)],
+)
+def test_a_stall_cap_takes_every_limit_and_share_its_step_can_play(
+    stall_limit: int,
+    uncapped_fraction: float,
+    permille: int,
+) -> None:
+    config = StallCap.Config()
+    config.stall_limit = stall_limit
+    config.uncapped_fraction = uncapped_fraction
+    cap = config.make()
+    assert (cap.stall_limit, cap.uncapped_permille) == (stall_limit, permille)
+
+
+@pytest.mark.parametrize(
+    ("stall_limit", "uncapped_fraction", "match"),
+    [
+        (0, 0.005, r"^stall_limit must be positive"),
+        # The step's clock is int32: 2**31 would wrap and end every episode at once.
+        (2**31, 0.005, r"^stall_limit must fit the step's int32 clock"),
+        (
+            10,
+            0.0005,
+            r"^uncapped_fraction must be a whole number of thousandths in \[0, 1\]",
+        ),
+        (
+            10,
+            -0.001,
+            r"^uncapped_fraction must be a whole number of thousandths in \[0, 1\]",
+        ),
+        (
+            10,
+            1.001,
+            r"^uncapped_fraction must be a whole number of thousandths in \[0, 1\]",
+        ),
+        (
+            10,
+            math.nan,
+            r"^uncapped_fraction must be a whole number of thousandths in \[0, 1\]",
+        ),
+        (
+            10,
+            math.inf,
+            r"^uncapped_fraction must be a whole number of thousandths in \[0, 1\]",
+        ),
+        (
+            10,
+            -math.inf,
+            r"^uncapped_fraction must be a whole number of thousandths in \[0, 1\]",
+        ),
+    ],
+)
+def test_a_stall_cap_refuses_what_its_draw_cannot_play(
+    stall_limit: int,
+    uncapped_fraction: float,
+    match: str,
+) -> None:
+    config = StallCap.Config()
+    config.stall_limit = stall_limit
+    config.uncapped_fraction = uncapped_fraction
+    with pytest.raises(ValueError, match=match):
+        config.make()
+
+
+def _options_env(threads: int = 1, *, fresh_worlds: bool = False) -> CraftaxEnv:
+    """Return 8 environments in 2 buffers with every training option on, reset."""
+    cfg = CraftaxEnv.Config()
+    cfg.num_envs = 8
+    cfg.num_buffers = 2
+    cfg.threads_per_buffer = threads
+    cfg.restart = FreshWorlds.Config() if fresh_worlds else _pool(4)
+    cfg.rules.previous_action = True
+    cap = cfg.stall_cap = StallCap.Config()
+    cap.stall_limit = 20
+    cap.uncapped_fraction = 0.25
+    # One point per level, so a random player's first achievements save.
+    practice = cfg.practice = FrontierPractice.Config()
+    practice.num_donors = 3
+    practice.num_levels = 4
+    practice.level_width = 1.0
+    practice.entries_per_level = 2
+    practice.entries_per_world = 1
+    env = cfg.make()
+    env.reset()
+    return env
+
+
+def _practise(env: CraftaxEnv, streams: np.ndarray, *, rollouts: int) -> list[str]:
+    """Play ``rollouts`` of 8 steps, preparing before each; digest every array after it."""
+    lines: list[str] = []
+    for _ in range(rollouts):
+        env.prepare_rollout()
+        _play(env, streams, steps=8)
+        lines += [f"{name} {digest(value)}" for name, value in env.state_dict().items()]
+    return lines
+
+
+@pytest.mark.compute_large_fixture
+def test_without_practice_its_plumbing_is_inert() -> None:
+    env = _env(num_envs=4, num_buffers=2, num_worlds=3)
+    try:
+        assert env.carry_slots == 0
+        assert env.save_rows == slice(0, 0)
+        assert env.practice is None
+        for slots in (env.save_slots, env.restore_slots):
+            assert slots.dtype == torch.int32
+            assert slots.tolist() == [-1] * 4
+            assert slots.is_pinned() == torch.cuda.is_available()
+        env.reset()
+        before = env_digests(env)
+        env.prepare_rollout()
+        assert env_digests(env) == before
+        assert env.practice_metrics() == {}
+        assert env.stats.dtype == STATS_DTYPE
+        assert list(env.state_dict()) == [
+            "states",
+            "rngs",
+            "stats",
+            "observations",
+            "action_mask",
+            "rewards",
+            "terminals",
+            "actions",
+        ]
+    finally:
+        env.close()
+
+
+@pytest.mark.compute_large_fixture
+def test_the_escape_streams_are_seeded_once_and_draw_once_per_reset() -> None:
+    env = _options_env()
+    try:
+        assert env.stats.dtype == TRAINING_STATS_DTYPE
+        # The rows that can save: the three donors, the last buffer's last rows.
+        assert env.save_rows == slice(5, 8)
+        assert env.carry_slots == 8
+        drawn = np.arange(8, dtype=np.uint32) ^ np.uint32(0x9E37_79B9)
+        for _ in range(2):
+            for i in range(8):
+                rand_r_numba(drawn[i : i + 1])
+            assert env.stats["escape"][:, 0].tolist() == drawn.tolist()
+            env.reset()
+    finally:
+        env.close()
+
+
+@pytest.mark.compute_large_fixture
+@pytest.mark.parametrize("fresh_worlds", [False, True])
+def test_practice_plays_the_same_bits_at_every_thread_count(fresh_worlds: bool) -> None:
+    """Donors save in row order after each step's shares join, whoever stepped them.
+
+    In fresh worlds too (exp109), where every reset generates the world that
+    donors save from.
+    """
+    runs: list[list[str]] = []
+    for threads in (1, 3):
+        env = _options_env(threads, fresh_worlds=fresh_worlds)
+        try:
+            streams = np.uint32(0x9E37_79B9) ^ np.arange(1, 9, dtype=np.uint32)
+            runs.append(_practise(env, streams, rollouts=6))
+            practice = env.practice
+            assert practice is not None
+            assert practice.archive.sizes.sum() > 0
+            assert practice.controller["restores"] > 0
+        finally:
+            env.close()
+    assert runs[0] == runs[1]
+
+
+@pytest.mark.compute_large_fixture
+def test_practice_resumes_bit_identically_from_the_state_dict() -> None:
+    env = _options_env()
+    try:
+        streams = np.uint32(0x9E37_79B9) ^ np.arange(1, 9, dtype=np.uint32)
+        _practise(env, streams, rollouts=3)
+        saved = {name: value.clone() for name, value in env.state_dict().items()}
+        resumed_streams = streams.copy()
+        expected = _practise(env, streams, rollouts=3)
+        env.load_state_dict(saved)
+        assert _practise(env, resumed_streams, rollouts=3) == expected
+    finally:
+        env.close()
+
+
+@pytest.mark.compute_large_fixture
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason=(
+        "libm differs from glibc's in the last bit; golden is glibc x86-64. "
+        "At 64 environments macOS's play departed from it at steps 77-127"
+    ),
+)
+@pytest.mark.skipif(
+    sys.platform == "linux" and platform.machine() != "x86_64",
+    reason="golden is glibc x86-64; glibc 2.35 and 2.39 play it alike, this CPU is unmeasured",
+)
+@pytest.mark.parametrize(
+    ("name", "rules", "fresh"),
+    [
+        ("exp000", {}, False),
+        (
+            "exp002",
+            {
+                "original_reward": True,
+                "end_on_boss_defeat": True,
+                "collapse_sleep": False,
+                "action_mask": False,
+                "symbolic_observation": True,
+            },
+            True,
+        ),
+        ("original_reward", {"original_reward": True}, False),
+        ("tick_sleep", {"collapse_sleep": False}, False),
+        ("no_action_mask", {"action_mask": False}, False),
+        ("fresh_worlds", {}, True),
+        ("symbolic", {"symbolic_observation": True}, False),
+    ],
+)
+def test_the_environments_play_their_golden(
+    name: str,
+    rules: dict[str, bool],
+    fresh: bool,
+) -> None:
+    """exp000's and exp002's environments, and each original option alone, frozen.
+
+    Each plays from seed 0 -- 2,048 environments in 2 buffers of 2 threads,
+    2,048 pool worlds unless fresh -- for 256 steps: past the first episode
+    ends (from step ~30) and their resets, and into the night, whose light the
+    spawns and the view read. Fewer environments miss defects that the 2,048
+    on 8,192 worlds caught (measured): mining coal yields 2, a strength
+    level-up adds 2, a hostile kill feeds, a move off the map wraps. Goldens
+    red, of 7, with each planted:
+
+        environments   coal   strength   hostile kill   edge wrap
+        64             0      0          0              0
+        512            4      4          1              0
+        1,024          4      4          2              0
+        2,048          5      1          5              3
+
+    The actions are the oracle traces' xorshift stream over the last step's
+    mask. The golden holds the pool, every array after the reset, a digest of
+    every array after each step, and every array at the end, all as digests,
+    so its size does not grow with the environments. exp002's options are ``docs/differences.md``'s D1, D2, D4, D5,
+    D6 and D8; D2 alone is left out, since no random player reaches the
+    necromancer, so its golden would be exp000's.
+    """
     config = CraftaxEnv.Config()
-    config.view = (3, 5)
-    config.num_envs = 4
-    config.device = "cpu"
-    config.seed = seed
-    config.optimistic_reset_ratio = 1
-    config.restart = RestartFromReserve.Config()
-    return config.make()
+    config.num_envs = 2_048
+    config.num_buffers = 2
+    for field_name, value in rules.items():
+        setattr(config.rules, field_name, value)
+    config.restart = FreshWorlds.Config() if fresh else _pool(2_048)
+    env = config.make()
+    try:
+        lines = [f"pool {digest(env.pool.view(np.uint8))}"]
+        env.reset()
+        lines += [f"reset {entry}" for entry in env_digests(env)]
+        streams = np.uint32(0x9E37_79B9) ^ np.arange(
+            1,
+            env.num_envs + 1,
+            dtype=np.uint32,
+        )
+        for step in range(1, 257):
+            masked_random_actions_numba(
+                streams,
+                env.action_mask.numpy(),
+                env.actions.numpy(),
+            )
+            for buffer in range(env.num_buffers):
+                env.step_buffer(buffer)
+            lines.append(f"step {step:04d} {_step_digest(env)}")
+        lines += [f"final {entry}" for entry in env_digests(env)]
+    finally:
+        env.close()
+    assert_golden(test_file=__file__, name=f"env_{name}", lines=lines)
 
 
-class _GenerationSpy:
-    """Records the batch size of every world generation, then performs it."""
-
-    def __init__(self) -> None:
-        self.generated: list[int] = []
-        self._generate = world_gen.generate_world
-
-    def __call__(
-        self,
-        *,
-        num_envs: int,
-        generator: torch.Generator | None = None,
-        device: torch.device,
-    ) -> EnvState:
-        self.generated.append(num_envs)
-        return self._generate(num_envs=num_envs, generator=generator, device=device)
+def _step_digest(env: CraftaxEnv) -> str:
+    """Return 16 hex digits of the sha256 of the worlds, streams, stats and buffers."""
+    hasher = hashlib.sha256()
+    for array in (
+        env.states.view(np.uint8),
+        env.rngs,
+        env.stats.view(np.uint8),
+        env.observations.numpy(),
+        env.action_mask.numpy(),
+        env.rewards.numpy(),
+        env.terminals.numpy(),
+    ):
+        hasher.update(np.ascontiguousarray(array))
+    return hasher.hexdigest()[:16]
 
 
 if __name__ == "__main__":

@@ -1,251 +1,344 @@
-"""Shared evaluation contracts for every Craftax trainer."""
+"""Tests for the evaluation trainer: fresh, isolated, deterministic, and its stop.
+
+Goldens freeze whole evaluations of the tiny pipeline, played and then
+scored, the same bits on every CPU: exp000's recipe from portable seed-73
+weights, over three rollouts and over one, and exp002's from its own init.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
-from typing import Final, cast
+from typing import TYPE_CHECKING
 
-import copy
-
-from torch import Tensor
-
+import numpy as np
 import pytest
 import torch
 
-from priml.baselines.craftax.evaluation import (
-    evaluation_mode,
-    evaluation_transaction,
+from priml.baselines.craftax.env import StallCap
+from priml.baselines.craftax.evaluation import Evaluation
+from priml.baselines.craftax.game.state import LOG_DTYPE
+from priml.baselines.craftax.learners.practice import FrontierPractice
+from priml.baselines.craftax.lib.arrays import typed
+from priml.baselines.craftax.metric import CraftaxScore
+from priml.baselines.craftax.model import MinGRUPolicy
+from priml.baselines.craftax.rollout import Rollout, TorchPhiloxSampler
+from priml.baselines.craftax.testing import (
+    assert_golden,
+    digest,
+    fill_portable,
+    fp32,
+    host_agnostic_pipeline,
+    smoke_feature,
+    tiny_env,
+    tiny_exp002_step,
+    tiny_policy,
+    tiny_train_step,
 )
-from priml.baselines.craftax.gtrxl_train_step import CraftaxGTrXLTrainStep
-from priml.baselines.craftax.pqn_train_step import CraftaxPQNTrainStep
-from priml.baselines.craftax.rnn_train_step import CraftaxRNNTrainStep
-from priml.baselines.craftax.train_step import CraftaxTrainStep
-from priml.train.parallelism import NoParallel
+from priml.model.linear import Linear
 
 
-type CraftaxStep = (
-    CraftaxTrainStep | CraftaxRNNTrainStep | CraftaxPQNTrainStep | CraftaxGTrXLTrainStep
-)
+if TYPE_CHECKING:
+    from torch import Tensor
+
+    from priml.baselines.craftax.model import Policy
+    from priml.baselines.craftax.world_model.feature import (
+        FeatureEngine,
+        WorldModelFeature,
+    )
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _Case:
-    name: str
-    build: Callable[[], CraftaxStep]
-    fields: tuple[str, ...]
+_HORIZON = 3
 
 
-def _ppo() -> CraftaxStep:
-    config = CraftaxTrainStep.Config()
-    config.parallelism = NoParallel.Config(device="cpu")
-    config.env.device = "cpu"
+def _config() -> Evaluation.Config:
+    config = Evaluation.Config()
+    config.env = tiny_env()
+    config.sampler = TorchPhiloxSampler.Config()
+    rollout = config.rollout = Rollout.Config()
+    rollout.num_slots = 1
+    rollout.horizon = _HORIZON
+    return config
+
+
+def _evaluation(policy: MinGRUPolicy) -> Evaluation:
+    return Evaluation(_config(), policy=policy, device=torch.device("cpu"))
+
+
+@pytest.fixture
+def policy() -> MinGRUPolicy:
+    torch.manual_seed(0)
+    return tiny_policy().make()
+
+
+@pytest.mark.compute_large_fixture
+def test_an_evaluation_is_an_evaluator(policy: MinGRUPolicy) -> None:
+    evaluation = _evaluation(policy)
+    evaluation.close()
+
+
+@pytest.mark.compute_large_fixture
+def test_an_evaluation_leaves_the_training_environment_untouched(
+    policy: MinGRUPolicy,
+) -> None:
+    training = tiny_env().make()
+    training.reset()
+    training.step_buffer(0)
+    # Through uint8: a structured copy moves the fields but not the padding
+    # between them, so its bytes would differ from the original's.
+    states, rngs = training.states.view(np.uint8).copy(), training.rngs.copy()
+
+    evaluation = _evaluation(policy)
+    evaluation.reset()
+    evaluation.collect()
+
+    assert np.array_equal(training.states.view(np.uint8), states)
+    assert np.array_equal(training.rngs, rngs)
+    evaluation.close()
+    training.close()
+
+
+@pytest.mark.compute_large_fixture
+def test_fresh_evaluations_replay_identically(policy: MinGRUPolicy) -> None:
+    first, second = _evaluation(policy), _evaluation(policy)
+    for evaluation in (first, second):
+        evaluation.reset()
+        evaluation.collect()
+
+    assert first.env.states.tobytes() == second.env.states.tobytes()
+    assert first.logs.tobytes() == second.logs.tobytes()
+    first.close()
+    second.close()
+
+
+@pytest.mark.compute_large_fixture
+def test_collect_steps_every_environment_one_horizon(policy: MinGRUPolicy) -> None:
+    evaluation = _evaluation(policy)
+    evaluation.reset()
+    evaluation.collect()
+
+    assert np.equal(evaluation.env.stats["steps"], _HORIZON).all()
+    assert evaluation.gameplay_seconds > 0
+    evaluation.close()
+
+
+@pytest.mark.compute_large_fixture
+def test_reset_wipes_the_logs_and_the_clock(policy: MinGRUPolicy) -> None:
+    evaluation = _evaluation(policy)
+    evaluation.collect()
+    evaluation.env.stats["log"]["n"] = 5.0
+    evaluation.env.stats["log"]["perf"] = 1.0
+
+    evaluation.reset()
+
+    assert evaluation.logs.tobytes() == np.zeros(4, dtype=LOG_DTYPE).tobytes()
+    assert evaluation.gameplay_seconds == 0.0
+    evaluation.close()
+
+
+@pytest.mark.compute_large_fixture
+def test_a_reset_evaluation_plays_as_a_fresh_one(policy: MinGRUPolicy) -> None:
+    """``reset`` restarts the environments, streams and carry, not only the logs."""
+    reused, fresh = _evaluation(policy), _evaluation(policy)
+    reused.collect()
+    reused.reset()
+    assert np.equal(reused.env.stats["steps"], 0).all()
+    for evaluation in (reused, fresh):
+        evaluation.collect()
+    assert reused.env.states.tobytes() == fresh.env.states.tobytes()
+    assert reused.logs.tobytes() == fresh.logs.tobytes()
+    assert torch.equal(
+        reused._rollout.slots[0].actions,
+        fresh._rollout.slots[0].actions,
+    )
+    reused.close()
+    fresh.close()
+
+
+@pytest.mark.compute_large_fixture
+def test_play_stops_at_the_first_rollout_reaching_the_episode_count(
+    policy: MinGRUPolicy,
+) -> None:
+    """Whole rollouts from a fresh start, stopping as soon as the count is reached."""
+    config = _config()
+    env = config.env = tiny_env()
+    env.rules.max_timesteps = 4
+    probe = Evaluation(config, policy=policy, device=torch.device("cpu"))
+    try:
+        probe.reset()
+        probe.collect()
+        after_one = int(np.sum(typed(probe.logs["n"], np.float32)))
+        probe.collect()
+        after_two = int(np.sum(typed(probe.logs["n"], np.float32)))
+    finally:
+        probe.close()
+    assert after_one < after_two
+    config.num_episodes = after_two
+    evaluation = Evaluation(config, policy=policy, device=torch.device("cpu"))
+    try:
+        evaluation.collect()
+        played = evaluation.play()
+        again = evaluation.play()
+    finally:
+        evaluation.close()
+    assert played.rollouts == 2
+    assert int(np.sum(typed(played.logs["n"], np.float32))) == after_two
+    assert played.gameplay_seconds > 0
+    # Each play starts afresh, whatever ran before it.
+    assert again.rollouts == played.rollouts
+    assert again.logs.tobytes() == played.logs.tobytes()
+
+
+def test_an_evaluation_needs_every_part_set(policy: MinGRUPolicy) -> None:
+    """Only a train step's finalize fills the unset parts; built alone, it refuses."""
+    with pytest.raises(ValueError, match="env, sampler and rollout"):
+        Evaluation(Evaluation.Config(), policy=policy, device=torch.device("cpu"))
+
+
+@pytest.mark.parametrize("option", ["stall_cap", "practice"])
+def test_an_evaluation_refuses_a_training_only_option(option: str) -> None:
+    """Scored episodes are natural and uncapped, as the recipe's evaluator plays them."""
+    config = _config()
+    assert config.env is not None
+    Evaluation.check(config)
+    if option == "stall_cap":
+        config.env.stall_cap = StallCap.Config()
+    else:
+        practice = config.env.practice = FrontierPractice.Config()
+        practice.num_donors = 2
+    with pytest.raises(ValueError, match="training-only"):
+        Evaluation.check(config)
+
+
+@pytest.mark.compute_large_fixture
+def test_with_a_feature_an_evaluation_holds_one_history_per_environment_of_its_own() -> (
+    None
+):
+    """Its engines' rows are its own env's, whatever training's, and closing frees them.
+
+    So a recipe whose training caches fill the device evaluates on fewer
+    environments: here 2, in 2 buffers, against :func:`tiny_env`'s 4.
+    """
+    source = _RecordingFeature(smoke_feature().make())
+    config = _config()
+    assert config.env is not None
     config.env.num_envs = 2
-    config.rollout_steps = 2
-    config.num_epochs = 1
-    config.num_minibatches = 1
-    config.total_train_steps = 10
-    config.model.channels_in = 4
-    config.model.num_layers = 1
-    return config.make()
+    policy_config = tiny_policy()
+    proj = policy_config.proj_feature = Linear.Config()
+    proj.channels_in = source.width
+    torch.manual_seed(0)
+    evaluation = Evaluation(
+        config,
+        policy=policy_config.make(),
+        device=torch.device("cpu"),
+        feature=source,
+    )
+    try:
+        evaluation.collect()
+        assert all(engine.keys.numel() for engine in source.engines)
+    finally:
+        evaluation.close()
+    assert [len(engine.length) for engine in source.engines] == [1, 1]
+    assert not any(engine.keys.numel() for engine in source.engines)
 
 
-def _rnn() -> CraftaxStep:
-    config = CraftaxRNNTrainStep.Config()
-    config.parallelism = NoParallel.Config(device="cpu")
-    config.env.device = "cpu"
-    config.env.num_envs = 2
-    config.env.optimistic_reset_ratio = 1
-    config.env.view = (3, 3)
-    config.rollout_steps = 2
-    config.num_epochs = 1
-    config.num_minibatches = 1
-    config.total_train_steps = 10
-    config.model.channels_in = 4
-    return config.make()
+# Each golden plays the game, whose Numba kernels a runner without their cache
+# compiles inside the first one: 55-60 s in CI, against the default tier's 60 s.
+@pytest.mark.compute_large_fixture
+@pytest.mark.parametrize(("name", "episodes"), [("tiny", 10), ("tiny_short", 4)])
+def test_exp000s_evaluations_from_portable_weights_match_their_goldens(
+    name: str,
+    episodes: int,
+) -> None:
+    """The tiny pipeline's evaluation, and a short one, from portable seed-73 weights.
+
+    Frozen on every host. exp000's recipe in its torch forms, its evaluation
+    config as the step's finalize fills it, with episodes cut at 4 ticks so
+    they finish: whole rollouts until ``episodes`` finish, three of them for
+    the full one, one for the short.
+    """
+    config = tiny_train_step().copy_tree().finalize()
+    with host_agnostic_pipeline():
+        policy = config.model.make()
+        assert isinstance(policy, MinGRUPolicy)
+        fill_portable(policy, seed=73)
+        lines = _score_entries(config.evaluation, policy, episodes=episodes)
+    assert_golden(
+        test_file=__file__,
+        name=f"evaluation_{name}",
+        lines=lines,
+    )
 
 
-def _pqn() -> CraftaxStep:
-    config = CraftaxPQNTrainStep.Config()
-    config.parallelism = NoParallel.Config(device="cpu")
-    config.env.device = "cpu"
-    config.env.num_envs = 2
-    config.env.optimistic_reset_ratio = 1
-    config.env.view = (3, 3)
-    config.rollout_steps = 2
-    config.num_epochs = 1
-    config.num_minibatches = 1
-    config.total_train_steps = 10
-    config.model.channels_in = 4
-    return config.make()
+@pytest.mark.compute_large_fixture
+def test_exp002s_short_evaluation_matches_its_golden() -> None:
+    """exp002's evaluation at test size, of the policy's own init under torch seed 0.
+
+    Frozen on every host. From scratch, so the golden moves with the init's
+    draws: their order, their distributions, or torch's generator.
+    """
+    config = tiny_exp002_step().copy_tree().finalize()
+    with host_agnostic_pipeline():
+        torch.manual_seed(0)
+        policy = config.model.make()
+        lines = ["# from-scratch: the policy's own init under torch seed 0"]
+        lines += _score_entries(config.evaluation, policy, episodes=4)
+    assert_golden(
+        test_file=__file__,
+        name="evaluation_exp002_tiny_short",
+        lines=lines,
+    )
 
 
-def _gtrxl() -> CraftaxStep:
-    config = CraftaxGTrXLTrainStep.Config()
-    config.parallelism = NoParallel.Config(device="cpu")
-    config.env.device = "cpu"
-    config.env.num_envs = 2
-    config.rollout_steps = 4
-    config.gradient_window = 2
-    config.num_epochs = 1
-    config.num_minibatches = 1
-    config.total_train_steps = 10
-    config.model.embed_dim = 4
-    config.model.num_heads = 1
-    config.model.num_layers = 1
-    config.model.qkv_dim = 4
-    config.model.channels_in = 4
-    config.model.memory_length = 2
-    return config.make()
+class _RecordingFeature:
+    """A world model's feature source that keeps every engine it makes."""
+
+    def __init__(self, source: WorldModelFeature) -> None:
+        self.source = source
+        self.width = source.width
+        self.hook_interval = source.hook_interval
+        self.joint = source.joint
+        self.context_decisions = source.context_decisions
+        self.engines: list[FeatureEngine] = []
+
+    def make_engine(self, *, rows: int, device: torch.device) -> FeatureEngine:
+        """Make the source's engine and keep it."""
+        engine = self.source.make_engine(rows=rows, device=device)
+        self.engines.append(engine)
+        return engine
+
+    def history_archive(
+        self,
+        entries: int,
+        *,
+        device: torch.device,
+    ) -> dict[str, Tensor] | None:
+        """Return the source's archive of practice histories."""
+        return self.source.history_archive(entries, device=device)
 
 
-_CASES: Final = (
-    _Case(
-        name="ppo",
-        build=_ppo,
-        fields=(
-            "_observation",
-            "_done",
-            "_episode_return",
-            "_episode_length",
-            "_finished_returns",
-            "_finished_lengths",
-        ),
-    ),
-    _Case(
-        name="rnn",
-        build=_rnn,
-        fields=(
-            "_observation",
-            "_state",
-            "_previous_done",
-            "_episode_return",
-            "_episode_length",
-            "_finished_returns",
-            "_finished_lengths",
-        ),
-    ),
-    _Case(
-        name="pqn",
-        build=_pqn,
-        fields=(
-            "_observation",
-            "_state",
-            "_previous_action",
-            "_previous_done",
-            "_episode_return",
-            "_episode_length",
-            "_finished_returns",
-            "_finished_lengths",
-        ),
-    ),
-    _Case(
-        name="gtrxl",
-        build=_gtrxl,
-        fields=(
-            "_observation",
-            "_memory",
-            "_valid_length",
-            "_previous_done",
-            "_episode_return",
-            "_episode_length",
-            "_finished_returns",
-            "_finished_lengths",
-        ),
-    ),
-)
-
-
-def _snapshot(step: CraftaxStep, fields: tuple[str, ...]) -> dict[str, object]:
-    field_values: dict[str, object] = {}
-    for name in fields:
-        value: object = getattr(step, name)  # pyright: ignore[reportAny] -- fields are recorded as opaque state.
-        field_values[name] = copy.deepcopy(value)
-    return {
-        "state_dict": copy.deepcopy(step.state_dict()),
-        "fields": field_values,
-        "training": step.model.training,
-    }
-
-
-def _assert_tree_equal(left: object, right: object, path: str = "root") -> None:
-    if isinstance(left, Tensor):
-        assert isinstance(right, Tensor), f"{path}: {type(right).__name__}"
-        assert torch.equal(left, right), f"{path}: tensors differ"
-        return
-    if isinstance(left, dict):
-        assert isinstance(right, dict), f"{path}: {type(right).__name__}"
-        left_dict = cast(dict[object, object], left)
-        right_dict = cast(dict[object, object], right)
-        assert left_dict.keys() == right_dict.keys(), f"{path}: keys differ"
-        for key in left_dict:
-            _assert_tree_equal(left_dict[key], right_dict[key], f"{path}.{key}")
-        return
-    if isinstance(left, Sequence) and not isinstance(left, (str, bytes)):
-        assert isinstance(right, Sequence), f"{path}: {type(right).__name__}"
-        assert len(left) == len(right), f"{path}: lengths differ"
-        for index, (left_item, right_item) in enumerate(zip(left, right, strict=True)):
-            _assert_tree_equal(left_item, right_item, f"{path}[{index}]")
-        return
-    assert left == right, f"{path}: {left!r} != {right!r}"
-
-
-def _seed_finished_banks(step: CraftaxStep) -> None:
-    step._finished_returns.append(123.0)
-    step._finished_lengths.append(456)
-
-
-@pytest.mark.parametrize("case", _CASES, ids=[case.name for case in _CASES])
-@pytest.mark.compute_training
-def test_eval_loss_preserves_complete_training_lifecycle(case: _Case) -> None:
-    step = case.build()
-    step.train_step()
-    _seed_finished_banks(step)
-    step.model.eval()
-    before = _snapshot(step, case.fields)
-
-    step.eval_loss()
-
-    _assert_tree_equal(before, _snapshot(step, case.fields))
-
-
-@pytest.mark.parametrize("case", _CASES, ids=[case.name for case in _CASES])
-@pytest.mark.compute_training
-def test_checkpoint_round_trips_complete_training_lifecycle(case: _Case) -> None:
-    step = case.build()
-    step.train_step()
-    _seed_finished_banks(step)
-    if isinstance(step, CraftaxTrainStep):
-        step._done.fill_(True)
-    before = _snapshot(step, case.fields)
-    saved = copy.deepcopy(step.state_dict())
-
-    resumed = case.build()
-    resumed.load_state_dict(saved)
-
-    _assert_tree_equal(before, _snapshot(resumed, case.fields))
-
-
-def test_evaluation_restores_training_mode_and_state() -> None:
-    model = torch.nn.BatchNorm1d(2)
-    model.train()
-    state = model.state_dict()
-    with evaluation_mode(model):
-        assert not model.training
-    assert model.training
-
-    def restore(saved: dict[str, Tensor]) -> None:
-        model.load_state_dict(saved)
-
-    with evaluation_transaction(model=model, save=model.state_dict, restore=restore):
-        model.eval()
-        running_mean = model.running_mean
-        assert running_mean is not None
-        running_mean.add_(1)
-    assert model.training
-    restored = model.running_mean
-    assert restored is not None
-    assert torch.equal(restored, state["running_mean"])
+# Every metric but the wall time, as fp32; then every environment's log.
+def _score_entries(
+    config: Evaluation.Config,
+    policy: Policy,
+    *,
+    episodes: int,
+) -> list[str]:
+    """Play and score ``policy`` as training's final evaluation does; digest the result."""
+    assert config.env is not None
+    config.env.rules.max_timesteps = 4
+    config.num_episodes = episodes
+    evaluation = Evaluation(config, policy=policy, device=torch.device("cpu"))
+    try:
+        played = evaluation.play()
+    finally:
+        evaluation.close()
+    score = CraftaxScore.Config().make()
+    score.update(played=played)
+    lines: list[str] = []
+    for key, value in score.compute().items():
+        assert isinstance(value, float)
+        if key != "gameplay_seconds":
+            lines += [f"{key} {fp32(value)}"]
+    return [*lines, f"logs {digest(played.logs)}"]
 
 
 if __name__ == "__main__":

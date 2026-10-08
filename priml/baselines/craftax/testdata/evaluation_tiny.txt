@@ -1,0 +1,16 @@
+perf 0x3a415250 0.0007374631240963936
+achievement_rate 0x3b23065e 0.002487562131136656
+episode_length 0x40800000 4.0
+floor_0_overworld 0x3f800000 1.0
+floor_1_dungeon 0x00000000 0.0
+floor_2_gnomish_mines 0x00000000 0.0
+floor_3_sewers 0x00000000 0.0
+floor_4_vault 0x00000000 0.0
+floor_5_troll_mines 0x00000000 0.0
+floor_6_fire_realm 0x00000000 0.0
+floor_7_ice_realm 0x00000000 0.0
+floor_8_graveyard 0x00000000 0.0
+n 0x41400000 12.0
+floor_9_finish 0x00000000 0.0
+rollouts 0x40400000 3.0
+logs |V328 (4,) bcfd65880071bebb5de2a632fe1e8ec5077e6e2d992563abeeca4d47401cde7d
