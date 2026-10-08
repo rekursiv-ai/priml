@@ -6046,7 +6046,7 @@ class Reproduction:
                 if (
                     first_dev == 0
                     and exact == cfg.dev_screen_count
-                    and (false_accepts is None or false_accepts == 0)
+                    and (false_accepts or 0) == 0
                 ):
                     first_dev = boundary
                     outer.log(
