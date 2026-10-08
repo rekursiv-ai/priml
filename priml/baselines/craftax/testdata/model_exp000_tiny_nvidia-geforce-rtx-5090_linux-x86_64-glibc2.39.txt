@@ -1,0 +1,15 @@
+step 0 decoded torch.bfloat16 (3, 44) f7320659699bf851e349d4040b7cbf603155bd2abd51355d564441a5b250fb51
+step 0 carry torch.bfloat16 (2, 3, 8) a76a4d4b47b1bc1dd6b4aa023af7cb9c79c031efe64f8c3739358c351538760a
+step 1 decoded torch.bfloat16 (3, 44) 48f512268165ff14122ce687075873dfa5a2c8fcf350a195a44d6aead58a4ac5
+step 1 carry torch.bfloat16 (2, 3, 8) 89ac79c37ca0d6275aab0d39d9f360e50eb37ecb0cb9822c8352fae9185241a9
+step 2 decoded torch.bfloat16 (3, 44) 29ce2d14f8bc5c356bdeecb71cd8b1e214784e098de41d9f9176a6e52516ae93
+step 2 carry torch.bfloat16 (2, 3, 8) 13df53d073e12daf5c1ec90bb61f52c4fe70a4d1e1cd8e73fec4cfaf9a17c066
+step 3 decoded torch.bfloat16 (3, 44) b88a701b5d514d74fb448fa3779e0d0f674f802d3cce7d19491c4aefeee96cf1
+step 3 carry torch.bfloat16 (2, 3, 8) 0545cfcc8fd5692d5ae72b260ebd1717ad77d3ee3fcc2f7a2e507187a92176a4
+sequence decoded torch.bfloat16 (3, 4, 44) 3eacc961212afd5f93a2eeb981f2b683ae18c57f750c7378baaad28ebabf60fc
+sequence final torch.bfloat16 (2, 3, 8) 0545cfcc8fd5692d5ae72b260ebd1717ad77d3ee3fcc2f7a2e507187a92176a4
+gradient embedding.weight torch.bfloat16 (154, 16) bfe396998e2e480e2e8259509e1ba065b55d6332e708d6df54d21858d819e1d1
+gradient proj_in.weight torch.bfloat16 (8, 1635) a4619434fcf7fcbf05902857a37a40893e97e2a8622fbb66d80ed9be9aa1697b
+gradient proj_out.weight torch.bfloat16 (44, 8) d62f430a5ae3b0fce7ddd10007c346c1f4a2cf619ebc8865eeaa59d200d0b9b2
+gradient blocks.0.proj_gates.weight torch.bfloat16 (24, 8) d3580c81d77c1f040ef28c4b14284b4d94cfa0f094cfab06d96fa9502d67bf5b
+gradient blocks.1.proj_gates.weight torch.bfloat16 (24, 8) 5193a71351b51d325fd62a6dae67d55f47e45956bf835a0bac6d3d47960cbaf5

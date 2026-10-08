@@ -1,372 +1,169 @@
-"""Tests for the evaluation score."""
+"""Tests for the score: PufferLib's fp32 aggregation of an evaluation's logs."""
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
-import math
-
+import numpy as np
 import pytest
-import torch
 
-from priml.baselines.craftax.game import constants
-from priml.baselines.craftax.metric import CraftaxScore, crafter_score_pct
-from priml.baselines.craftax.model import ActorCritic
-from priml.metrics.custom_types import MetricProtocol
-
-
-def _score(**overrides: object) -> CraftaxScore:
-    config = CraftaxScore.Config()
-    config.num_envs = 2
-    config.steps = 5
-    config.device = "cpu"
-    config.seed = 3
-    for name, value in overrides.items():
-        setattr(config, name, value)
-    return config.make()
+from priml.baselines.craftax.evaluation import Played
+from priml.baselines.craftax.game.state import LOG_DTYPE, Achievement
+from priml.baselines.craftax.metric import (
+    LOG_FIELDS,
+    CraftaxScore,
+    aggregate_logs,
+    log_metrics,
+    report_metrics,
+)
 
 
-def _policy() -> ActorCritic:
-    config = ActorCritic.Config()
-    config.channels_in = 8
-    config.num_layers = 1
-    return config.make()
+def _logs(rows: list[list[float]]) -> np.ndarray:
+    """Build ``LOG_DTYPE`` records from rows of ``LOG_FIELDS`` floats."""
+    fields = np.zeros((len(rows), LOG_FIELDS), dtype=np.float32)
+    for index, row in enumerate(rows):
+        fields[index, : len(row)] = row
+    return fields.view(LOG_DTYPE).reshape(len(rows))
 
 
-class _Actor:
-    def __init__(self, policy: ActorCritic) -> None:
-        self.model = policy
-        layer = policy.policy[0]
-        assert isinstance(layer, torch.nn.Linear)
-        self.observation_size = layer.in_features
-        self.device = next(policy.parameters()).device
-        self.reset_count = 0
-        self.previous_dones: list[torch.Tensor] = []
-        self.draws: list[float] = []
-
-    def reset(self, *, num_envs: int, device: torch.device) -> None:
-        del num_envs, device
-        self.reset_count += 1
-        self.previous_dones = []
-
-    def act(
-        self,
-        observation: torch.Tensor,
-        previous_done: torch.Tensor,
-        *,
-        generator: torch.Generator,
-    ) -> torch.Tensor:
-        self.previous_dones.append(previous_done.clone())
-        self.draws.append(float(torch.rand((), generator=generator)))
-        logits, _ = self.model(observation)
-        return torch.multinomial(
-            logits.softmax(-1),
-            1,
-            generator=generator,
-        ).squeeze(-1)
+def _with_n(perf: float, n: float) -> list[float]:
+    """Build a row whose ``perf`` and ``n`` are set; every other field is zero."""
+    row = [0.0] * LOG_FIELDS
+    row[0] = perf
+    row[-1] = n
+    return row
 
 
-def _actor() -> _Actor:
-    return _Actor(_policy())
+def test_log_fields_are_pufferlibs_log_nf() -> None:
+    # 5 scalars, 9 floors, 67 achievements, n.
+    assert LOG_FIELDS == 82
 
 
-def _episodes(count: int, *, unlocked: list[float] | None = None) -> dict[str, object]:
-    """Build a saved state holding ``count`` identical episodes."""
-    row = unlocked or [0.0] * len(constants.Achievement)
-    return {
-        "returns": [11.3] * count,
-        "lengths": [7] * count,
-        "unlocked": [list(row) for _ in range(count)],
-        "rollout_index": 0,
-    }
+def test_the_sum_runs_in_environment_order_as_pufferlib_does() -> None:
+    # fp32 addition is not associative: 1e8 + 1 + 1 ... rounds each 1 away when
+    # added in order, while a pairwise sum adds the ones together first.
+    perfs = [1e8] + [1.0] * 15
+    logs = _logs([_with_n(perf, 1.0) for perf in perfs])
+
+    mean = aggregate_logs(logs)
+
+    sequential = np.float32(0.0)
+    for perf in perfs:
+        sequential = np.float32(sequential + np.float32(perf))
+    pairwise = np.sum(np.asarray(perfs, dtype=np.float32))
+    assert sequential != pairwise
+    assert mean[0] == np.float32(sequential / np.float32(len(perfs)))
 
 
-def test_a_score_rollout_counts_one_episode_per_env(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(constants, "MAX_TIMESTEPS", 2)
-    score = _score(steps=2)
-    score.update(torch.zeros(2, 43), actor=_actor())
-    values = score.compute()
-    assert values["episodes"] == 2.0
-    assert score.state_dict()["rollout_index"] == 1
-    score.reset()
-    assert score.compute() == {"episodes": 0.0}
+def test_every_field_is_the_fp32_sum_of_the_rows_in_environment_order() -> None:
+    # Values over seven orders of magnitude, so a sum in any other order, or
+    # a pairwise one, lands on other bits in most fields.
+    generator = np.random.default_rng(0)
+    fields = generator.standard_normal((2_048, LOG_FIELDS)).astype(np.float32)
+    scales = np.array([1e-3, 1.0, 1e4], dtype=np.float32)
+    fields *= generator.choice(scales, fields.shape)
+    fields[:, -1] = generator.integers(0, 3, len(fields))
+    sequential = np.zeros(LOG_FIELDS, dtype=np.float32)
+    kept = fields[np.not_equal(fields[:, -1], 0)]
+    for i in range(len(kept)):
+        sequential += kept[i, :]
 
+    mean = aggregate_logs(fields.view(LOG_DTYPE).reshape(len(fields)))
 
-def test_it_satisfies_the_metric_protocol() -> None:
-    assert isinstance(_score(), MetricProtocol)
-
-
-def test_a_metric_that_saw_nothing_reports_no_episodes() -> None:
-    # Not zero score: no episode finished, so there is nothing to average and
-    # publishing a 0% would read as a policy that failed rather than as an
-    # evaluation that has not happened.
-    assert _score().compute() == {"episodes": 0.0}
-
-
-def test_the_normalized_return_is_a_fraction_of_the_available_reward() -> None:
-    score = _score()
-    score.load_state_dict(_episodes(4))
-    computed = score.compute()
-    assert computed["mean_return"] == pytest.approx(11.3)
-    assert computed["normalized_return_pct"] == pytest.approx(
-        11.3 / constants.REWARD_CEILING * 100.0,
+    count = np.float32(sequential.item(-1))
+    assert np.array_equal(
+        mean[:-1].view(np.uint32),
+        (sequential / count)[:-1].view(np.uint32),
     )
-    assert computed["episodes"] == 4.0
-    assert computed["episode_length"] == pytest.approx(7.0)
+    assert mean[-1] == count
 
 
-def test_the_achievement_rate_is_the_mean_over_achievements() -> None:
-    rates = [0.0] * len(constants.Achievement)
-    rates[0] = 100.0
-    rates[1] = 50.0
-    score = _score()
-    score.load_state_dict(_episodes(2, unlocked=rates))
-    expected = 150.0 / len(constants.Achievement)
-    assert score.compute()["achievements_pct"] == pytest.approx(expected)
+def test_environments_without_a_finished_episode_are_skipped() -> None:
+    # PufferLib's log_accum reads nothing from a log whose n is zero.
+    logs = _logs([_with_n(0.5, 1.0), _with_n(9.0, 0.0), _with_n(0.25, 1.0)])
+
+    mean = aggregate_logs(logs)
+
+    assert mean[0] == np.float32(0.75) / np.float32(2.0)
+    assert mean[-1] == 2.0
 
 
-def test_a_uniform_success_rate_scores_itself() -> None:
-    # The geometric mean of identical values is that value, so the score is
-    # readable on the same scale as the per-achievement rates.
-    assert crafter_score_pct(torch.full((5,), 12.0).numpy()) == pytest.approx(12.0)
+def test_n_is_reported_as_the_count_not_divided_by_itself() -> None:
+    mean = aggregate_logs(_logs([_with_n(1.0, 3.0), _with_n(2.0, 4.0)]))
+
+    assert mean[-1] == 7.0
+    assert log_metrics(mean)["n"] == 7.0
 
 
-def test_one_unreached_achievement_does_not_annihilate_the_score() -> None:
-    # Computed in log space: a plain geometric mean would return exactly zero
-    # for any policy with a single achievement it never unlocks, which is
-    # every policy anyone has trained.
-    rates = torch.tensor([0.0, 50.0, 50.0, 50.0]).numpy()
-    assert crafter_score_pct(rates) > 0.0
+def test_no_finished_episode_gives_zeros() -> None:
+    assert not aggregate_logs(_logs([_with_n(0.0, 0.0)] * 3)).any()
 
 
-def test_breadth_beats_depth() -> None:
-    # The property the Crafter score exists to express: unlocking several
-    # achievements sometimes must beat farming one, at equal mean rate.
-    broad = torch.tensor([25.0, 25.0, 25.0, 25.0]).numpy()
-    narrow = torch.tensor([100.0, 0.0, 0.0, 0.0]).numpy()
-    assert crafter_score_pct(broad) > crafter_score_pct(narrow)
+def test_the_report_leaves_out_the_keys_that_repeat_perf() -> None:
+    mean = aggregate_logs(_logs([_with_n(0.5, 2.0), _with_n(0.25, 1.0)]))
+
+    reported, logged = report_metrics(mean), log_metrics(mean)
+
+    assert set(logged) - set(reported) == {"score", "episode_return"}
+    assert set(reported) - set(logged) == {"floor_9_finish"}
+    assert all(
+        reported[name] == value for name, value in logged.items() if name in reported
+    )
 
 
-def test_reset_forgets_every_episode() -> None:
-    score = _score()
-    score.load_state_dict(_episodes(3))
-    score.reset()
-    assert score.compute() == {"episodes": 0.0}
+@pytest.mark.parametrize("wins", [(0.0, 0.0), (1.0, 0.0), (1.0, 2.0), (2.0, 3.0)])
+def test_finish_rate_counts_boss_defeats_over_completed_episodes(
+    wins: tuple[float, float],
+) -> None:
+    logs = _logs([_with_n(1.0, 2.0), _with_n(1.0, 3.0), _with_n(0.0, 0.0)])
+    logs["achievements"][0, Achievement.DEFEAT_NECROMANCER] = wins[0]
+    logs["achievements"][1, Achievement.DEFEAT_NECROMANCER] = wins[1]
+    logs["achievements"][2, Achievement.DEFEAT_NECROMANCER] = 100.0
+    logs["achievements"][:, Achievement.DAMAGE_NECROMANCER] = [2.0, 3.0, 100.0]
+    score = CraftaxScore.Config().make()
+
+    score.update(played=Played(logs=logs, rollouts=1, gameplay_seconds=1.0))
+    metrics = score.compute()
+
+    assert metrics["floor_9_finish"] == float(np.float32(sum(wins)) / np.float32(5.0))
+    assert metrics["n"] == 5.0
 
 
-def test_a_checkpoint_round_trips() -> None:
-    score = _score()
-    score.load_state_dict(_episodes(2))
-    expected = score.compute()
+def test_no_completed_episodes_has_zero_finish_rate() -> None:
+    assert (
+        report_metrics(aggregate_logs(_logs([_with_n(0.0, 0.0)])))["floor_9_finish"]
+        == 0.0
+    )
 
-    restored = _score()
+
+def test_the_score_is_the_mean_of_the_played_logs() -> None:
+    logs = _logs([_with_n(0.5, 1.0), _with_n(9.0, 0.0), _with_n(0.25, 3.0)])
+    score = CraftaxScore.Config().make()
+
+    score.update(played=Played(logs=logs, rollouts=3, gameplay_seconds=1.5))
+    metrics = score.compute()
+
+    assert metrics["perf"] == np.float32(0.75) / np.float32(4.0)
+    assert metrics["n"] == 4.0
+    assert metrics["rollouts"] == 3.0
+    assert metrics["gameplay_seconds"] == 1.5
+    assert "score" not in metrics
+    assert "episode_return" not in metrics
+
+
+def test_the_score_round_trips_its_state() -> None:
+    score = CraftaxScore.Config().make()
+    played = Played(logs=_logs([_with_n(1.0, 1.0)]), rollouts=1, gameplay_seconds=1.0)
+    played.logs["achievements"][0, Achievement.DEFEAT_NECROMANCER] = 1.0
+    score.update(played=played)
+
+    restored = CraftaxScore.Config().make()
     restored.load_state_dict(score.state_dict())
-    assert restored.compute() == expected
+
+    assert restored.compute() == score.compute()
 
 
-def test_a_saved_state_is_a_copy() -> None:
-    # The loop checkpoints this dict; if it aliased the live lists, a later
-    # episode would silently appear inside an already-written checkpoint.
-    score = _score()
-    score.load_state_dict(_episodes(1))
-    saved = score.state_dict()
-    score.load_state_dict(_episodes(5))
-    assert len(saved["returns"]) == 1
-
-
-def test_a_batch_without_an_actor_is_refused() -> None:
-    with pytest.raises(TypeError) as error:
-        _score().update(torch.zeros(2, 43))
-    assert str(error.value) == "CraftaxScore requires an EvaluationActor batch entry."
-
-
-@pytest.mark.compute_large_fixture
-def test_playing_a_short_horizon_banks_nothing() -> None:
-    # A truncated episode has an incomplete return, so counting it would drag
-    # the mean toward zero by an amount set by the horizon, not the policy.
-    score = _score(steps=2)
-    score.update(torch.zeros(2, 43), actor=_actor())
-    assert score.compute() == {"episodes": 0.0}
-
-
-@pytest.mark.compute_large_fixture
-def test_playing_banks_the_episodes_that_finish(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Shortening the episode limit is what makes a real rollout finish inside
-    # a test; everything else about the play is the published evaluation.
-    monkeypatch.setattr(constants, "MAX_TIMESTEPS", 2)
-    score = _score(steps=5)
-    score.update(torch.zeros(2, 43), actor=_actor())
-    computed = score.compute()
-    assert computed["episodes"] == 4.0
-    assert computed["episode_length"] == pytest.approx(2.0)
-    score_pct = computed["score_pct"]
-    normalized_return_pct = computed["normalized_return_pct"]
-    assert isinstance(score_pct, float)
-    assert isinstance(normalized_return_pct, float)
-    assert math.isfinite(score_pct)
-    assert math.isfinite(normalized_return_pct)
-
-
-@pytest.mark.compute_large_fixture
-def test_the_same_seed_scores_the_same_episodes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(constants, "MAX_TIMESTEPS", 2)
-    policy = _policy()
-
-    def played() -> dict[str, object]:
-        score = _score(steps=5)
-        score.update(torch.zeros(2, 43), actor=_Actor(policy))
-        return score.compute()
-
-    assert played() == played()
-
-
-@pytest.mark.compute_large_fixture
-def test_repeated_batches_use_independent_evaluation_streams() -> None:
-    score = _score(steps=1)
-    actor = _actor()
-
-    score.update(torch.zeros(2, 43), actor=actor)
-    score.update(torch.zeros(2, 43), actor=actor)
-
-    assert len(actor.draws) == 2
-    assert actor.draws[0] != actor.draws[1]
-
-
-@pytest.mark.compute_large_fixture
-def test_view_mismatch_is_rejected_at_the_actor_boundary() -> None:
-    actor = _actor()
-    actor.observation_size += 1
-
-    with pytest.raises(ValueError, match="observation_size"):
-        _score(steps=1).update(torch.zeros(2, 43), actor=actor)
-
-
-@pytest.mark.compute_large_fixture
-def test_device_mismatch_is_rejected_at_the_actor_boundary() -> None:
-    # A device object needs no backend to construct, so the mismatch is
-    # checkable on a CPU-only host.
-    actor = _actor()
-    actor.device = torch.device("meta")
-
-    with pytest.raises(ValueError, match="device"):
-        _score(steps=1).update(torch.zeros(2, 43), actor=actor)
-
-
-@pytest.mark.compute_large_fixture
-def test_a_device_named_without_its_index_is_the_same_device() -> None:
-    # A training step on "cuda" names the device without an index while the
-    # evaluation's tensors report "cuda:0"; the CPU spelling of the same pair.
-    actor = _actor()
-    actor.device = torch.device("cpu", 0)
-    score = _score(steps=1)
-    score.update(torch.zeros(2, 43), actor=actor)
-    assert actor.reset_count == 1
-
-
-@pytest.mark.compute_large_fixture
-def test_evaluation_switches_model_mode_once_per_rollout() -> None:
-    score = _score(steps=5)
-    actor = _actor()
-
-    with patch.object(actor.model, "train", wraps=actor.model.train) as train:
-        score.update(torch.zeros(2, 43), actor=actor)
-
-    assert train.call_count == 2
-
-
-@pytest.mark.compute_large_fixture
-def test_two_plays_accumulate(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The loop resets once per eval and updates once per batch, so several
-    # passes must add episodes rather than replace them.
-    monkeypatch.setattr(constants, "MAX_TIMESTEPS", 2)
-    score = _score(steps=5)
-    actor = _actor()
-    score.update(torch.zeros(2, 43), actor=actor)
-    score.update(torch.zeros(2, 43), actor=actor)
-    assert actor.reset_count == 2
-    assert score.compute()["episodes"] == 8.0
-
-
-@pytest.mark.parametrize("field", ["num_envs", "steps"])
-def test_an_empty_evaluation_is_refused(field: str) -> None:
-    with pytest.raises(
-        ValueError,
-        match="Evaluation geometry must be positive",
-    ) as error:
-        _score(**{field: 0})
-    assert str(error.value) == "Evaluation geometry must be positive"
-
-
-def test_one_environment_and_one_step_are_valid() -> None:
-    score = _score(num_envs=1, steps=1)
-    assert score.compute() == {"episodes": 0.0}
-
-
-def test_compute_reports_each_field_from_all_episodes() -> None:
-    rates = [0.0] * len(constants.Achievement)
-    rates[0] = 25.0
-    rates[1] = 75.0
-    score = _score()
-    score.load_state_dict(
-        {
-            "returns": [10.0, 20.0],
-            "lengths": [4, 8],
-            "unlocked": [rates, [0.0] * len(rates)],
-            "rollout_index": 3,
-        },
-    )
-
-    computed = score.compute()
-
-    assert computed.keys() == {
-        "normalized_return_pct",
-        "score_pct",
-        "mean_return",
-        "achievements_pct",
-        "episodes",
-        "episode_length",
-    }
-    assert computed["mean_return"] == 15.0
-    assert computed["normalized_return_pct"] == 15.0 / constants.REWARD_CEILING * 100
-    assert computed["achievements_pct"] == 50.0 / len(rates)
-    assert computed["episode_length"] == 6.0
-    assert computed["episodes"] == 2.0
-    assert computed["score_pct"] == pytest.approx(
-        crafter_score_pct(torch.tensor(rates, dtype=torch.float64).numpy() / 2),
-    )
-
-
-def test_load_state_dict_restores_rollout_index_and_coerces_rates() -> None:
-    score = _score()
-    score.load_state_dict(
-        {
-            "returns": [12],
-            "lengths": [3],
-            "unlocked": [[1, 0] + [0] * (len(constants.Achievement) - 2)],
-            "rollout_index": 7,
-        },
-    )
-    saved = score.state_dict()
-    saved["unlocked"][0][0] = 99.0
-    assert score.state_dict() == {
-        "returns": [12],
-        "lengths": [3],
-        "unlocked": [[1.0, 0.0] + [0.0] * (len(constants.Achievement) - 2)],
-        "rollout_index": 7,
-    }
-    score.reset()
-    assert score.state_dict() == {
-        "returns": [],
-        "lengths": [],
-        "unlocked": [],
-        "rollout_index": 0,
-    }
+def test_the_score_requires_a_played_evaluation() -> None:
+    with pytest.raises(TypeError, match="played"):
+        CraftaxScore.Config().make().update(played=object())
 
 
 if __name__ == "__main__":

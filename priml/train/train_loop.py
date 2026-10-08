@@ -1236,7 +1236,7 @@ class TrainLoop:
         return results
 
     def run(self, *args: str) -> None:
-        """Run training (entry point for experimental.lib.launch).
+        """Run training (the entry point ``priml.launch`` calls).
 
         Args:
           *args: Args.

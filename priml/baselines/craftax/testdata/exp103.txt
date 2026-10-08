@@ -1,0 +1,492 @@
+CraftaxTrainLoop(
+                study_name='craftax',
+                experiment_name='exp103',
+                base_dir='/opt/scratch',
+                working_dir=PosixPath('/opt/scratch/runs/craftax/exp103'),
+                doc='',
+                step=CraftaxTrainStep.Config(
+                │       model=MinGRUPolicy.Config(
+                │       │       embedding=BoardEncoder.Config(
+                │       │       │       cells=MultiHotEmbedding.Config(
+                │       │       │               channels_in=154,
+                │       │       │               channels_out=16,
+                │       │       │               offsets=(0, 64, 72, 74, 90, 106, 122, 138),
+                │       │       │               num_cells=99,
+                │       │       │               num_scalars=51,
+                │       │       │               dtype=None,
+                │       │       │               init_weight=functools.partial(<function priml.model.init.normal at 0xdefacedeface>, std=1.0)
+                │       │       │       ),
+                │       │       │       status=ActionConditionedStatus.Config(
+                │       │       │               channels_in=51,
+                │       │       │               embedding=Embedding.Config(
+                │       │       │                       channels_in=44,
+                │       │       │                       channels_out=32,
+                │       │       │                       padding_idx=None,
+                │       │       │                       device=None,
+                │       │       │                       dtype=None,
+                │       │       │                       shard=None,
+                │       │       │                       depth_index=(),
+                │       │       │                       init_weight=functools.partial(<function priml.model.init.normal at 0xdefacedeface>, std=1.0)
+                │       │       │               ),
+                │       │       │               block=MLP.Config(
+                │       │       │                       channels_in=83,
+                │       │       │                       channels_out=51,
+                │       │       │                       channels_hidden=192,
+                │       │       │                       proj_in=Linear.Config(
+                │       │       │                               channels_in=83,
+                │       │       │                               channels_out=192,
+                │       │       │                               bias=False,
+                │       │       │                               depth_index=(),
+                │       │       │                               device=None,
+                │       │       │                               dtype=None,
+                │       │       │                               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │       │                               shard=None
+                │       │       │                       ),
+                │       │       │                       activation=<function torch.nn.functional.silu at 0xdefacedeface>,
+                │       │       │                       proj_out=Linear.Config(
+                │       │       │                               channels_in=192,
+                │       │       │                               channels_out=51,
+                │       │       │                               bias=False,
+                │       │       │                               depth_index=(),
+                │       │       │                               device=None,
+                │       │       │                               dtype=None,
+                │       │       │                               init_weight=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │       │                               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │       │                               shard=None
+                │       │       │                       )
+                │       │       │               ),
+                │       │       │               num_layers=2
+                │       │       │       ),
+                │       │       │       board=BoardCNN.Config(
+                │       │       │       │       channels_in=16,
+                │       │       │       │       channels_condition=51,
+                │       │       │       │       grid=(9, 11),
+                │       │       │       │       block=DepthwiseResidual.Config(
+                │       │       │       │               channels_in=16,
+                │       │       │       │               depthwise=Conv2d.Config(
+                │       │       │       │                       channels_in=16,
+                │       │       │       │                       channels_out=16,
+                │       │       │       │                       kernel_size=3,
+                │       │       │       │                       stride=1,
+                │       │       │       │                       padding='same',
+                │       │       │       │                       dilation=1,
+                │       │       │       │                       groups=16,
+                │       │       │       │                       bias=False,
+                │       │       │       │                       depth_index=(),
+                │       │       │       │                       device=None,
+                │       │       │       │                       dtype=None,
+                │       │       │       │                       init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │       │                       init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>
+                │       │       │       │               ),
+                │       │       │       │               activation=<function torch.nn.functional.silu at 0xdefacedeface>,
+                │       │       │       │               pointwise=Conv2d.Config(
+                │       │       │       │                       channels_in=16,
+                │       │       │       │                       channels_out=16,
+                │       │       │       │                       kernel_size=1,
+                │       │       │       │                       stride=1,
+                │       │       │       │                       padding='same',
+                │       │       │       │                       dilation=1,
+                │       │       │       │                       groups=1,
+                │       │       │       │                       bias=False,
+                │       │       │       │                       depth_index=(),
+                │       │       │       │                       device=None,
+                │       │       │       │                       dtype=None,
+                │       │       │       │                       init_weight=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │       │       │                       init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>
+                │       │       │       │               )
+                │       │       │       │       ),
+                │       │       │       │       num_layers=2,
+                │       │       │       │       spatial=FilmBranch.Config(
+                │       │       │       │       │       channels_in=16,
+                │       │       │       │       │       channels_hidden=128,
+                │       │       │       │       │       channels_condition=51,
+                │       │       │       │       │       proj_in=Conv2d.Config(
+                │       │       │       │       │               channels_in=16,
+                │       │       │       │       │               channels_out=128,
+                │       │       │       │       │               kernel_size=1,
+                │       │       │       │       │               stride=1,
+                │       │       │       │       │               padding='same',
+                │       │       │       │       │               dilation=1,
+                │       │       │       │       │               groups=1,
+                │       │       │       │       │               bias=False,
+                │       │       │       │       │               depth_index=(),
+                │       │       │       │       │               device=None,
+                │       │       │       │       │               dtype=None,
+                │       │       │       │       │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │       │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>
+                │       │       │       │       │       ),
+                │       │       │       │       │       proj_condition=Linear.Config(
+                │       │       │       │       │               channels_in=51,
+                │       │       │       │       │               channels_out=256,
+                │       │       │       │       │               bias=False,
+                │       │       │       │       │               depth_index=(),
+                │       │       │       │       │               device=None,
+                │       │       │       │       │               dtype=None,
+                │       │       │       │       │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │       │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │       │       │       │               shard=None
+                │       │       │       │       │       ),
+                │       │       │       │       │       depthwise=Conv2d.Config(
+                │       │       │       │       │               channels_in=128,
+                │       │       │       │       │               channels_out=128,
+                │       │       │       │       │               kernel_size=3,
+                │       │       │       │       │               stride=1,
+                │       │       │       │       │               padding='same',
+                │       │       │       │       │               dilation=1,
+                │       │       │       │       │               groups=128,
+                │       │       │       │       │               bias=False,
+                │       │       │       │       │               depth_index=(),
+                │       │       │       │       │               device=None,
+                │       │       │       │       │               dtype=None,
+                │       │       │       │       │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │       │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>
+                │       │       │       │       │       ),
+                │       │       │       │       │       activation=<function torch.nn.functional.silu at 0xdefacedeface>,
+                │       │       │       │       │       proj_out=Conv2d.Config(
+                │       │       │       │       │               channels_in=128,
+                │       │       │       │       │               channels_out=16,
+                │       │       │       │       │               kernel_size=1,
+                │       │       │       │       │               stride=1,
+                │       │       │       │       │               padding='same',
+                │       │       │       │       │               dilation=1,
+                │       │       │       │       │               groups=1,
+                │       │       │       │       │               bias=False,
+                │       │       │       │       │               depth_index=(),
+                │       │       │       │       │               device=None,
+                │       │       │       │       │               dtype=None,
+                │       │       │       │       │               init_weight=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │       │       │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>
+                │       │       │       │       │       )
+                │       │       │       │       ),
+                │       │       │       │       multiscale=MultiscaleMix.Config(
+                │       │       │       │               channels_in=16,
+                │       │       │       │               channels_hidden=32,
+                │       │       │       │               kernel_size=3,
+                │       │       │       │               proj_in=Conv2d.Config(
+                │       │       │       │                       channels_in=48,
+                │       │       │       │                       channels_out=32,
+                │       │       │       │                       kernel_size=1,
+                │       │       │       │                       stride=1,
+                │       │       │       │                       padding='same',
+                │       │       │       │                       dilation=1,
+                │       │       │       │                       groups=1,
+                │       │       │       │                       bias=False,
+                │       │       │       │                       depth_index=(),
+                │       │       │       │                       device=None,
+                │       │       │       │                       dtype=None,
+                │       │       │       │                       init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │       │                       init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>
+                │       │       │       │               ),
+                │       │       │       │               activation=<function torch.nn.functional.silu at 0xdefacedeface>,
+                │       │       │       │               proj_out=Conv2d.Config(
+                │       │       │       │                       channels_in=32,
+                │       │       │       │                       channels_out=16,
+                │       │       │       │                       kernel_size=1,
+                │       │       │       │                       stride=1,
+                │       │       │       │                       padding='same',
+                │       │       │       │                       dilation=1,
+                │       │       │       │                       groups=1,
+                │       │       │       │                       bias=False,
+                │       │       │       │                       depth_index=(),
+                │       │       │       │                       device=None,
+                │       │       │       │                       dtype=None,
+                │       │       │       │                       init_weight=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │       │       │                       init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>
+                │       │       │       │               )
+                │       │       │       │       )
+                │       │       │       )
+                │       │       ),
+                │       │       proj_in=Linear.Config(
+                │       │               channels_in=1_635,
+                │       │               channels_out=1_024,
+                │       │               bias=False,
+                │       │               depth_index=(),
+                │       │               device=None,
+                │       │               dtype=None,
+                │       │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │               shard=None
+                │       │       ),
+                │       │       block=MinGRUBlock.Config(
+                │       │               channels_hidden=1_024,
+                │       │               proj_gates=Linear.Config(
+                │       │                       channels_in=1_024,
+                │       │                       channels_out=3_072,
+                │       │                       bias=False,
+                │       │                       depth_index=(),
+                │       │                       device=None,
+                │       │                       dtype=None,
+                │       │                       init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │                       init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │                       shard=None
+                │       │               ),
+                │       │               scan=TritonScan.Config(
+                │       │                       block=256,
+                │       │                       num_warps=8
+                │       │               ),
+                │       │               dtype=None
+                │       │       ),
+                │       │       num_layers=4,
+                │       │       channels_hidden=1_024,
+                │       │       num_actions=43,
+                │       │       proj_out=Linear.Config(
+                │       │               channels_in=1_024,
+                │       │               channels_out=44,
+                │       │               bias=False,
+                │       │               depth_index=(),
+                │       │               device=None,
+                │       │               dtype=None,
+                │       │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │               shard=None
+                │       │       ),
+                │       │       dtype=torch.bfloat16,
+                │       │       state_dtype=torch.float32,
+                │       │       output_dtype=torch.float32,
+                │       │       injection=MLP.Config(
+                │       │               channels_in=1_024,
+                │       │               channels_out=1_024,
+                │       │               channels_hidden=128,
+                │       │               proj_in=Linear.Config(
+                │       │                       channels_in=1_024,
+                │       │                       channels_out=128,
+                │       │                       bias=False,
+                │       │                       depth_index=(),
+                │       │                       device=None,
+                │       │                       dtype=None,
+                │       │                       init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │                       init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │                       shard=None
+                │       │               ),
+                │       │               activation=<function torch.nn.functional.silu at 0xdefacedeface>,
+                │       │               proj_out=Linear.Config(
+                │       │                       channels_in=128,
+                │       │                       channels_out=1_024,
+                │       │                       bias=False,
+                │       │                       depth_index=(),
+                │       │                       device=None,
+                │       │                       dtype=None,
+                │       │                       init_weight=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │                       init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │                       shard=None
+                │       │               )
+                │       │       ),
+                │       │       auxiliary=FeasibilityLoss.Config(
+                │       │               channels_in=1_024,
+                │       │               channels_out=43,
+                │       │               proj_out=Linear.Config(
+                │       │                       channels_in=1_024,
+                │       │                       channels_out=43,
+                │       │                       bias=False,
+                │       │                       depth_index=(),
+                │       │                       device=None,
+                │       │                       dtype=None,
+                │       │                       init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │                       init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │                       shard=None
+                │       │               ),
+                │       │               observation_size=843,
+                │       │               coefficient=0.1
+                │       │       ),
+                │       │       proj_feature=None
+                │       ),
+                │       optimizer=FusedMuon.Config(
+                │               lr=0.001182217733003199,
+                │               momentum=0.930526733,
+                │               max_grad_norm=0.818616688,
+                │               ns_coefficients=(
+                │                       (4.0848, -6.8946, 2.927),
+                │                       (3.9505, -6.3029, 2.6377),
+                │                       (3.7418, -5.5913, 2.3037),
+                │                       (2.8769, -3.1427, 1.2046),
+                │                       (2.8366, -3.0525, 1.2012)
+                │               ),
+                │               eps=1e-07
+                │       ),
+                │       schedule=ProgressSchedule.Config(
+                │               curve=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.one_cycle at 0xdefacedeface>, warmup_fraction=0.0125, initial=0.0)
+                │       ),
+                │       learner=AgentWindows.Config(
+                │               objective=TritonPPO.Config(
+                │                       discount=0.999414682,
+                │                       trace_decay=0.801190972,
+                │                       clip_epsilon=0.226401091,
+                │                       value_clip_epsilon=0.2,
+                │                       value_coefficient=0.5,
+                │                       entropy_coefficient=0.000213571053,
+                │                       block=256,
+                │                       num_warps=8
+                │               ),
+                │               minibatch_size=32_768,
+                │               replay_ratio=1.17263889,
+                │               auxiliary=BranchImitation.Config(
+                │                       rows=64,
+                │                       capacity=32,
+                │                       coefficient=0.01
+                │               )
+                │       ),
+                │       env=CraftaxEnv.Config(
+                │               num_envs=2_048,
+                │               num_buffers=4,
+                │               threads_per_buffer=2,
+                │               seed=0,
+                │               rules=GameRules.Config(
+                │                       original_reward=False,
+                │                       collapse_sleep=True,
+                │                       action_mask=True,
+                │                       end_on_boss_defeat=True,
+                │                       max_timesteps=100_000,
+                │                       symbolic_observation=False,
+                │                       previous_action=True
+                │               ),
+                │               restart=WorldPool.Config(num_worlds=8192),
+                │               spin_seconds=0.005,
+                │               stall_cap=StallCap.Config(
+                │                       stall_limit=10_000,
+                │                       uncapped_fraction=0.005
+                │               ),
+                │               practice=FrontierPractice.Config(
+                │                       fraction=0.2,
+                │                       num_donors=64,
+                │                       level_width=8.0,
+                │                       num_levels=32,
+                │                       entries_per_level=32,
+                │                       entries_per_world=4,
+                │                       reach_decay=0.999,
+                │                       seed=1_973
+                │               )
+                │       ),
+                │       sampler=PhiloxSampler.Config(seed=73, block=256, num_warps=8),
+                │       rollout=Rollout.Config(
+                │               num_slots=2,
+                │               horizon=256,
+                │               bootstrap=False,
+                │               dtype=torch.float32
+                │       ),
+                │       feature=None,
+                │       feature_training=None,
+                │       evaluation=Evaluation.Config(
+                │               env=CraftaxEnv.Config(
+                │                       num_envs=2_048,
+                │                       num_buffers=4,
+                │                       threads_per_buffer=2,
+                │                       seed=0,
+                │                       rules=GameRules.Config(
+                │                               original_reward=False,
+                │                               collapse_sleep=True,
+                │                               action_mask=True,
+                │                               end_on_boss_defeat=True,
+                │                               max_timesteps=100_000,
+                │                               symbolic_observation=False,
+                │                               previous_action=True
+                │                       ),
+                │                       restart=WorldPool.Config(num_worlds=8192),
+                │                       spin_seconds=0.005,
+                │                       stall_cap=None,
+                │                       practice=None
+                │               ),
+                │               sampler=PhiloxSampler.Config(
+                │                       seed=73,
+                │                       block=256,
+                │                       num_warps=8
+                │               ),
+                │               rollout=Rollout.Config(
+                │                       num_slots=1,
+                │                       horizon=256,
+                │                       bootstrap=False,
+                │                       dtype=torch.float32
+                │               ),
+                │               num_episodes=10_000
+                │       ),
+                │       checkpoint=None,
+                │       reward_scale=0.125,
+                │       reward_clip=inf,
+                │       train_budget_steps=38_146,
+                │       parallelism=NoParallel.Config(device=None)
+                ),
+                dataset=CraftaxRollouts.Config(),
+                metrics_train={},
+                metrics_eval={'craftax': CraftaxScore.Config()},
+                checkpointer=Checkpointer.Config(
+                        base_dir=PosixPath('/opt/scratch/runs/craftax/exp103'),
+                        working_dir=PosixPath('/opt/scratch/runs/craftax/exp103/checkpoints'),
+                        filename='step_{step:08d}.pt',
+                        save_every=200,
+                        keep_last_n=2,
+                        keep_every=0,
+                        storer=SyncLocalStateDictStorer.Config(),
+                        resume=True,
+                        resume_step=-1,
+                        allow_checkpoint_overwrite=False,
+                        best_metric='',
+                        best_mode='max'
+                ),
+                profiler=None,
+                phase_timer=PhaseTimer.Config(
+                        enabled=False,
+                        torch_profile=False,
+                        base_dir=PosixPath('/opt/scratch/runs/craftax/exp103'),
+                        working_dir=PosixPath('/opt/scratch/runs/craftax/exp103/profiling'),
+                        heartbeat_interval_sec=20.0,
+                        fault_dump_interval_sec=40.0,
+                        cuda_events=False
+                ),
+                tracker=TrackerList.Config(
+                        trackers={       'metrics': FileTracker.Config(
+                                        base_dir=PosixPath('/opt/scratch/runs/craftax/exp103'),
+                                        working_dir=PosixPath('/opt/scratch/runs/craftax/exp103/metrics.json'),
+                                        capture_prefix='eval/'
+                                ),
+                                'wandb': AsyncTracker.Config(
+                                        tracker=WandbTracker.Config(
+                                                project='craftax',
+                                                name='exp103',
+                                                run_id='',
+                                                group='exp103',
+                                                mode='online',
+                                                base_dir=PosixPath('/opt/scratch/runs/craftax/exp103'),
+                                                working_dir=PosixPath('/opt/scratch/runs/craftax/exp103/wandb'),
+                                                capture_console=True,
+                                                replay_startup_logs=False,
+                                                allow_startup_failure=True,
+                                                ingestion=WandbIngestion(
+                                                        init_timeout_sec=30.0,
+                                                        service_wait_sec=30.0,
+                                                        flush_interval_sec=15.0,
+                                                        system_metrics=True,
+                                                        system_metrics_interval_sec=60.0
+                                                ),
+                                                metric_step_metrics={},
+                                                run_config={},
+                                                notes=''
+                                        ),
+                                        enabled=True
+                                )},
+                        base_dir=PosixPath('/opt/scratch/runs/craftax/exp103'),
+                        working_dir=PosixPath('/opt/scratch/runs/craftax/exp103')
+                ),
+                max_steps=38_146,
+                max_epochs=inf,
+                max_time=inf,
+                max_time_kind='wall',
+                max_eval_time=inf,
+                eval_stop_on_time_limit=False,
+                num_steps_eval=1_907,
+                num_steps_log=10,
+                early_train_log_steps=100,
+                eval_every_epoch=True,
+                eval_extras_every_eval=False,
+                eval_warmup_batches=0,
+                eval_only=False,
+                restore_rng_state=True,
+                seed=73,
+                num_steps_garbage_collect=inf,
+                mesh_dim_model_seed='pp',
+                mesh_dim_data_seed='dp',
+                runtime=SingleProcess.Config(
+                        device=None,
+                        deterministic=False,
+                        float32_matmul_precision=None
+                )
+        )

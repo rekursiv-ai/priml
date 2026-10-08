@@ -25,9 +25,8 @@ The sharding plan is the configgle config tree — not a separate registry.
 - TP was a dead stub: `TensorParallel.__call__` required
   `model.apply_tensor_parallel_plan(mesh)`; zero models implemented it
   (verified by grep).
-- The coordinator initially recommended staging TP to `experimental/`; the
-  owner corrected: **fix TP, make models mesh-native.** This doc reverses the
-  staging.
+- Staging TP outside priml was proposed first; the decision was instead:
+  **fix TP, make models mesh-native.** This doc reverses the staging.
 - Mesh dim `tp` is already plumbed in `runtime.py` (`mesh_topology`); the
   infrastructure is ready, only the consumers are missing.
 
@@ -84,7 +83,7 @@ code, no naming dependency.
 
 ## The generic applier
 
-One function in `lib/train` (un-staged from `experimental/parallelism/`):
+One function in `lib/train` (no longer staged outside priml):
 
 ```python
 def apply_tensor_parallel(model: nn.Module, mesh: DeviceMesh) -> nn.Module:
@@ -231,7 +230,7 @@ optimizer-DTensor, checkpoint-DCP.
 
 None blocking. Confirm: (a) custom-layer-provides-own-style rule acceptable;
 (b) child partition above; (c) whether to extract the cross-imported
-`TRMTrainStep` from `experimental/sudoku` to `lib` (separate decision).
+`TRMTrainStep` from the sudoku experiment to `lib` (separate decision).
 
 ## Estimate
 

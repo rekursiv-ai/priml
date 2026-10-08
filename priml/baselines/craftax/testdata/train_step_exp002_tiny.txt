@@ -1,0 +1,40 @@
+# from-scratch: the policy's own init under torch seed 0
+epoch 0001 learning_rate 0x3b9af4a5 0.004728870932012796
+epoch 0001 policy_loss 0x38455000 4.704296588897705e-05
+epoch 0001 value_loss 0x3cd0c620 0.025485098361968994
+epoch 0001 entropy 0x406ffa8a 3.749666690826416
+epoch 0001 total_loss 0x3c9e5b41 0.019330622628331184
+epoch 0001 old_approx_kl 0xbb02f940 -0.001998499035835266
+epoch 0001 approx_kl 0x376c9000 1.4100223779678345e-05
+epoch 0001 clipfrac 0x00000000 0.0
+epoch 0001 importance 0x3f8041f3 1.0020126104354858
+epoch 0001 master proj_in.weight torch.float32 (8, 8268) 68bac134ee2ac4489f0ed89630627de06608366b20990753b512794ad2e2d82b
+epoch 0001 master proj_out.weight torch.float32 (44, 8) 0b45af818582d3d018b194f7058d43cd7a504ce7aa92c8e38daf8b0990ee4cf5
+epoch 0001 master blocks.0.proj_gates.weight torch.float32 (24, 8) 7e7cd4e07fcfa2eb9996aed78165d1071f060827f35eee8ede362a29b963c33b
+epoch 0001 master blocks.1.proj_gates.weight torch.float32 (24, 8) 1f99e48dac6ed5ee6d564c374be980f1a4432f468343cc7a114e2f35e5df8bbc
+epoch 0002 learning_rate 0x3b686ef8 0.003546653315424919
+epoch 0002 policy_loss 0xbd6d251b -0.05789671465754509
+epoch 0002 value_loss 0x3cfb3040 0.0306626558303833
+epoch 0002 entropy 0x406f86d5 3.7426044940948486
+epoch 0002 total_loss 0xbd0d70ab -0.03453127667307854
+epoch 0002 old_approx_kl 0x3a7c4b00 0.0009624212980270386
+epoch 0002 approx_kl 0x3865e400 5.481019616127014e-05
+epoch 0002 clipfrac 0x00000000 0.0
+epoch 0002 importance 0x3f7fc485 0.9990924000740051
+epoch 0002 master proj_in.weight torch.float32 (8, 8268) 88d14266fd81f9e1ea19fa73160bb0b52850629eceb2350597c0ad2df2ea998e
+epoch 0002 master proj_out.weight torch.float32 (44, 8) 80380097e4b9cc81fcaeef70d8b45a0db2ae64799cead91f99ce9260edd2c549
+epoch 0002 master blocks.0.proj_gates.weight torch.float32 (24, 8) 60983be8316f1ada2ff5e12f6adeb18d15eb43c68ccac4fecc759bb2cffd8382
+epoch 0002 master blocks.1.proj_gates.weight torch.float32 (24, 8) 8f005cae854fcad82cadb3a9fd769cb4a75c021163d3be28e17693ea3d46b72e
+epoch 0003 learning_rate 0x3a9af4a5 0.001182217733003199
+epoch 0003 policy_loss 0xb8ab9c00 -8.18297266960144e-05
+epoch 0003 value_loss 0x37180000 9.059906005859375e-06
+epoch 0003 entropy 0x406f854d 3.742511034011841
+epoch 0003 total_loss 0xba651bec -0.0008739817421883345
+epoch 0003 old_approx_kl 0x3a952f00 0.0011381804943084717
+epoch 0003 approx_kl 0x3829f800 4.05237078666687e-05
+epoch 0003 clipfrac 0x00000000 0.0
+epoch 0003 importance 0x3f7fb810 0.9989023208618164
+epoch 0003 master proj_in.weight torch.float32 (8, 8268) 896c4a9bb73b610735848a1167e1e48310e6f73c3e92c7faba1d1bccbda02afc
+epoch 0003 master proj_out.weight torch.float32 (44, 8) bfc60e9f825c200b5742a40b50ccee85c957b1a7a62a8d50a046cd451af68eea
+epoch 0003 master blocks.0.proj_gates.weight torch.float32 (24, 8) f57e7d3d6fabdcc3ac4d7df0eccf351c7ba63fb937450c68af24f2a381ff8ea3
+epoch 0003 master blocks.1.proj_gates.weight torch.float32 (24, 8) 4210aa95729637d55818d05bd3f48682663886955373c0ebbc374940e838036c

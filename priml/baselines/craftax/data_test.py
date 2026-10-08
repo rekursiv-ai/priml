@@ -1,205 +1,88 @@
-"""Tests for the rollout cadence."""
+"""Tests for the cadence: endless ticks, the checkpoint, and the evaluation batches."""
 
 from __future__ import annotations
 
-from importlib import util
 from typing import cast
 
-import pytest
-import torch
+import itertools
 
-from priml.baselines.craftax import conftest
+import numpy as np
+import pytest
+
 from priml.baselines.craftax.data import CraftaxRollouts
-from priml.data.custom_types import DatasetProtocol
+from priml.baselines.craftax.evaluation import Played
+from priml.baselines.craftax.game.state import LOG_DTYPE
 from priml.train.custom_types import TrainStepProtocol
 
 
-def _rollouts(**overrides: int) -> CraftaxRollouts:
-    config = CraftaxRollouts.Config()
-    config.updates_per_epoch = 3
-    config.eval_batches = 2
-    for name, value in overrides.items():
-        setattr(config, name, value)
-    return config.make()
+def _rollouts() -> CraftaxRollouts:
+    return CraftaxRollouts.Config().make()
 
 
-def test_it_satisfies_the_dataset_protocol() -> None:
-    assert isinstance(_rollouts(), DatasetProtocol)
+def test_the_cadence_ticks_once_per_training_step_without_end() -> None:
+    """More than exp003's 15,258 epochs: the loop's ``max_steps`` ends a run."""
+    ticks = list(itertools.islice(_rollouts().train_dataloader(), 20_000))
+
+    assert len(ticks) == 20_000
+    assert all(tick == {"valid_count": 1} for tick in ticks)
+    # Fresh dicts, so a consumer that edits one edits no other tick.
+    assert ticks[0] is not ticks[1]
 
 
-def test_an_epoch_is_as_long_as_configured() -> None:
-    assert len(list(_rollouts().train_dataloader())) == 3
-
-
-def test_an_evaluation_runs_the_configured_passes() -> None:
+def test_a_checkpoint_carries_the_pass_count_alone() -> None:
     rollouts = _rollouts()
-    rollouts.bind_step(cast(TrainStepProtocol, _Step()))
-    assert len(list(rollouts.eval_dataloader())) == 2
+    rollouts.timer_epoch.global_count = 3
+    resumed = _rollouts()
+    resumed.load_state_dict(rollouts.state_dict())
+
+    assert list(rollouts.state_dict()) == ["timer_epoch"]
+    assert resumed.timer_epoch.global_count == 3
 
 
-def test_each_evaluation_tick_has_the_metric_only_batch_contract() -> None:
-    rollouts = _rollouts()
-    step = _Step()
-    rollouts.bind_step(cast(TrainStepProtocol, step))
-    batch = next(iter(rollouts.eval_dataloader()))
-    assert batch.keys() == {"valid_count", "metric_only", "actor"}
-    assert batch["valid_count"] == 1
-    assert batch["metric_only"] is True
-    assert batch["actor"] is step.actors[0]
+class _Evaluator:
+    def __init__(self, played: Played) -> None:
+        self.played = played
+        self.closed = False
 
+    def play(self) -> Played:
+        return self.played
 
-def test_the_step_can_be_bound() -> None:
-    rollouts = _rollouts()
-    marker = object()
-    rollouts.bind_step(cast(TrainStepProtocol, marker))
-    assert rollouts._step is marker
-
-
-def test_an_evaluation_batch_carries_a_fresh_actor() -> None:
-    rollouts = _rollouts()
-    step = _Step()
-    rollouts.bind_step(cast(TrainStepProtocol, step))
-
-    batches = list(rollouts.eval_dataloader())
-
-    assert len(step.actors) == 1
-    assert all(batch["actor"] is step.actors[0] for batch in batches)
-
-
-def test_an_unbound_dataset_refuses_evaluation() -> None:
-    rollouts = _rollouts()
-    assert rollouts._step is None
-    with pytest.raises(TypeError) as error:
-        list(rollouts.eval_dataloader())
-    assert error.value.args == (
-        "Evaluation requires a bound training step with an actor.",
-    )
-
-
-def test_training_batches_carry_no_actor() -> None:
-    # The step already owns its network; sending it back would invite a
-    # training path that reads the model from the batch instead.
-    rollouts = _rollouts()
-    rollouts.bind_step(cast(TrainStepProtocol, _Step()))
-    for batch in rollouts.train_dataloader():
-        assert "actor" not in batch
+    def close(self) -> None:
+        self.closed = True
 
 
 class _Step:
-    """A stand-in training step carrying only the field the dataset reads.
-
-    Cast at each call site rather than implementing the whole training-step
-    protocol: ``bind_step`` stores what it is given and the dataset reads one
-    attribute off it, so the rest of the protocol is not exercised here.
-    """
+    """Hands out one evaluator per call, as a train step's ``make_evaluator`` does."""
 
     def __init__(self) -> None:
-        self.model = torch.nn.Linear(2, 3)
-        self.actors: list[object] = []
+        self.made: list[_Evaluator] = []
 
-    def make_evaluation_actor(self) -> object:
-        actor = object()
-        self.actors.append(actor)
-        return actor
+    def make_evaluator(self) -> _Evaluator:
+        evaluator = _Evaluator(
+            Played(logs=np.zeros(1, dtype=LOG_DTYPE), rollouts=1, gameplay_seconds=0.0),
+        )
+        self.made.append(evaluator)
+        return evaluator
 
 
-def test_it_carries_the_pass_count() -> None:
+def test_an_eval_is_one_fresh_evaluation_played_and_closed() -> None:
     rollouts = _rollouts()
-    rollouts.timer_epoch.global_count = 2
-    restored = _rollouts()
-    restored.load_state_dict(rollouts.state_dict())
-    assert restored.timer_epoch.global_count == 2
-    rollouts.load_state_dict({"anything": 1})
+    step = _Step()
+    rollouts.bind_step(cast(TrainStepProtocol, step))
+
+    loader = rollouts.eval_dataloader()
+    assert step.made == []
+    batches = list(loader)
+
+    assert len(batches) == len(step.made) == 1
+    assert batches[0]["played"] is step.made[0].played
+    assert batches[0]["metric_only"] is True
+    assert step.made[0].closed
 
 
-def test_loading_into_an_active_iterator_updates_its_cursor() -> None:
-    rollouts = _rollouts()
-    iterator = rollouts.train_dataloader()
-    next(iter(iterator))
-    rollouts.load_state_dict({"train_position": 2})
-    assert list(iterator) == [{"valid_count": 1}]
-
-
-def test_loading_into_an_active_iterator_leaves_the_next_stream_fresh() -> None:
-    rollouts = _rollouts()
-    rollouts.train_dataloader()
-    rollouts.load_state_dict({"train_position": 2})
-
-    assert len(list(rollouts.train_dataloader())) == 3
-
-
-def test_loading_an_empty_state_restarts_an_active_iterator() -> None:
-    rollouts = _rollouts()
-    iterator = rollouts.train_dataloader()
-    next(iter(iterator))
-
-    rollouts.load_state_dict({})
-
-    assert list(iterator) == [{"valid_count": 1}] * 3
-
-
-def test_exhausting_an_active_iterator_resets_its_cursor() -> None:
-    rollouts = _rollouts()
-    iterator = rollouts.train_dataloader()
-    assert len(list(iterator)) == 3
-    assert rollouts._live_train is iterator
-    assert iterator.position == 0
-
-
-def test_native_test_helpers_cover_optional_paths(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def missing_spec(name: str, package: str | None = None) -> None:
-        del package
-        raise ModuleNotFoundError(name)
-
-    monkeypatch.setattr(util, "find_spec", missing_spec)
-    assert not conftest._reference_is_installed()
-    with pytest.raises(ModuleNotFoundError):
-        conftest.reference("missing_module")
-    assert conftest.generated_world(num_envs=2, seed=2).num_envs == 2
-    assert conftest.as_tensor([1, 2]).tolist() == [1, 2]
-
-
-def test_checkpoint_resumes_the_unfinished_cadence() -> None:
-    rollouts = _rollouts()
-    loader = rollouts.train_dataloader()
-    iterator = iter(loader)
-    next(iterator)
-    state = rollouts.state_dict()
-    expected = list(iterator)
-
-    restored = _rollouts()
-    restored.load_state_dict(state)
-    observed = list(restored.train_dataloader())
-
-    assert observed == expected
-
-
-def test_a_fresh_iterator_is_returned_each_epoch() -> None:
-    rollouts = _rollouts()
-    assert len(list(rollouts.train_dataloader())) == 3
-    assert len(list(rollouts.train_dataloader())) == 3
-
-
-@pytest.mark.parametrize("field", ["updates_per_epoch", "eval_batches"])
-def test_an_empty_cadence_is_refused(field: str) -> None:
-    with pytest.raises(
-        ValueError,
-        match=r"^Rollout cadence must be positive$",
-    ) as error:
-        _rollouts(**{field: 0})
-    assert error.value.args == ("Rollout cadence must be positive",)
-
-
-@pytest.mark.parametrize("field", ["updates_per_epoch", "eval_batches"])
-def test_a_single_item_cadence_is_valid(field: str) -> None:
-    rollouts = _rollouts(**{field: 1})
-    if field == "updates_per_epoch":
-        assert len(list(rollouts.train_dataloader())) == 1
-    else:
-        rollouts.bind_step(cast(TrainStepProtocol, _Step()))
-        assert len(list(rollouts.eval_dataloader())) == 1
+def test_evaluation_without_a_bound_step_fails_loudly() -> None:
+    with pytest.raises(TypeError, match="make_evaluator"):
+        _rollouts().eval_dataloader()
 
 
 if __name__ == "__main__":

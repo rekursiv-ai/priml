@@ -47,8 +47,13 @@ dependencies = [
     # analysis
     "numpy>=2.1",
     "scipy",
-    # ConvexTok's presolver.
+    # ConvexTok's presolver and Craftax's CPU env; Craftax's Numba intrinsics
+    # build LLVM IR with llvmlite directly.
     "numba>=0.67",
+    "llvmlite",
+    # Craftax's world-model archives. The stdlib `compression.zstd` is
+    # 3.14-only; the package validates on 3.12.
+    "zstandard>=0.25.0",
     # nlp
     "rustbpe>=0.1.0",
     "tiktoken>=0.12.0",
@@ -269,6 +274,12 @@ do_not_mutate_patterns = [
 ]
 
 [tool.coverage.run]
+# sys.monitoring, the default from Python 3.14 on. 3.12's default, ctrace,
+# traces every line a test runs, Numba's pure-Python compiler included: a cold
+# compile of priml's Craftax kernels took 68 s under it, 49 s under sysmon and
+# 43 s untraced, past the 60 s test timeout. COVERAGE_CORE still overrides it,
+# as the testmon hooks' ctrace does.
+core = "sysmon"
 omit = [
     "*_test.py",
     "test_*.py",
@@ -290,6 +301,11 @@ exclude_lines = [
     # tracer cannot see lines a GPU test executed; the kernel is tested by
     # its ``gpu_triton`` caller, not by line coverage.
     "^def \\w+_triton\\(",
+    # Convention: a ``_numba``-suffixed def is a body Numba compiles from
+    # its bytecode to machine code. The Python bytecode never runs, so the
+    # tracer cannot see lines a test executed; the kernel is tested by its
+    # callers' results, not by line coverage.
+    "^def \\w+_numba\\(",
 ]
 fail_under = 95
 show_missing = true

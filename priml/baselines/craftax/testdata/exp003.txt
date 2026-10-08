@@ -1,0 +1,229 @@
+CraftaxTrainLoop(
+                study_name='craftax',
+                experiment_name='exp003',
+                base_dir='/opt/scratch',
+                working_dir=PosixPath('/opt/scratch/runs/craftax/exp003'),
+                doc='',
+                step=CraftaxTrainStep.Config(
+                │       model=ActorCritic.Config(
+                │       │       observation_size=8_268,
+                │       │       num_actions=43,
+                │       │       channels_hidden=512,
+                │       │       num_layers=3,
+                │       │       activation=<built-in method tanh of type object at 0xdefacedeface>,
+                │       │       proj_in=Linear.Config(
+                │       │               channels_in=8_268,
+                │       │               channels_out=512,
+                │       │               bias=True,
+                │       │               depth_index=(),
+                │       │               device=None,
+                │       │               dtype=None,
+                │       │               init_weight=functools.partial(<function torch.nn.init.orthogonal_ at 0xdefacedeface>, gain=1.4142135623730951),
+                │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │               shard=None
+                │       │       ),
+                │       │       proj_hidden=Linear.Config(
+                │       │               channels_in=512,
+                │       │               channels_out=512,
+                │       │               bias=True,
+                │       │               depth_index=(),
+                │       │               device=None,
+                │       │               dtype=None,
+                │       │               init_weight=functools.partial(<function torch.nn.init.orthogonal_ at 0xdefacedeface>, gain=1.4142135623730951),
+                │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │               shard=None
+                │       │       ),
+                │       │       proj_policy=Linear.Config(
+                │       │               channels_in=512,
+                │       │               channels_out=43,
+                │       │               bias=True,
+                │       │               depth_index=(),
+                │       │               device=None,
+                │       │               dtype=None,
+                │       │               init_weight=functools.partial(<function torch.nn.init.orthogonal_ at 0xdefacedeface>, gain=0.01),
+                │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │               shard=None
+                │       │       ),
+                │       │       proj_value=Linear.Config(
+                │       │               channels_in=512,
+                │       │               channels_out=1,
+                │       │               bias=True,
+                │       │               depth_index=(),
+                │       │               device=None,
+                │       │               dtype=None,
+                │       │               init_weight=functools.partial(<function torch.nn.init.orthogonal_ at 0xdefacedeface>, gain=1.0),
+                │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                │       │               shard=None
+                │       │       ),
+                │       │       dtype=torch.float32
+                │       ),
+                │       optimizer=PartialConfig(<class 'functools.partial'>, <class 'priml.baselines.craftax.lib.adam.ClippedAdam'>, lr=0.0002, eps=1e-05, max_grad_norm=1.0),
+                │       schedule=ProgressSchedule.Config(
+                │               curve=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.linear at 0xdefacedeface>)
+                │       ),
+                │       learner=ShuffledTransitions.Config(
+                │               num_passes=4,
+                │               num_minibatches=8,
+                │               discount=0.99,
+                │               trace_decay=0.8,
+                │               clip_epsilon=0.2,
+                │               value_coefficient=0.5,
+                │               entropy_coefficient=0.01,
+                │               seed=42
+                │       ),
+                │       env=CraftaxEnv.Config(
+                │               num_envs=1_024,
+                │               num_buffers=8,
+                │               threads_per_buffer=2,
+                │               seed=42,
+                │               rules=GameRules.Config(
+                │                       original_reward=True,
+                │                       collapse_sleep=False,
+                │                       action_mask=False,
+                │                       end_on_boss_defeat=True,
+                │                       max_timesteps=100_000,
+                │                       symbolic_observation=True,
+                │                       previous_action=False
+                │               ),
+                │               restart=FreshWorlds.Config(),
+                │               spin_seconds=0.005,
+                │               stall_cap=None,
+                │               practice=None
+                │       ),
+                │       sampler=ExactPhiloxSampler.Config(
+                │               seed=42,
+                │               block=256,
+                │               num_warps=8
+                │       ),
+                │       rollout=Rollout.Config(
+                │               num_slots=1,
+                │               horizon=64,
+                │               bootstrap=True,
+                │               dtype=torch.float32
+                │       ),
+                │       feature=None,
+                │       feature_training=None,
+                │       evaluation=Evaluation.Config(
+                │               env=CraftaxEnv.Config(
+                │                       num_envs=1_024,
+                │                       num_buffers=8,
+                │                       threads_per_buffer=2,
+                │                       seed=42,
+                │                       rules=GameRules.Config(
+                │                               original_reward=True,
+                │                               collapse_sleep=False,
+                │                               action_mask=False,
+                │                               end_on_boss_defeat=True,
+                │                               max_timesteps=100_000,
+                │                               symbolic_observation=True,
+                │                               previous_action=False
+                │                       ),
+                │                       restart=FreshWorlds.Config(),
+                │                       spin_seconds=0.005,
+                │                       stall_cap=None,
+                │                       practice=None
+                │               ),
+                │               sampler=ExactPhiloxSampler.Config(
+                │                       seed=42,
+                │                       block=256,
+                │                       num_warps=8
+                │               ),
+                │               rollout=Rollout.Config(
+                │                       num_slots=1,
+                │                       horizon=64,
+                │                       bootstrap=False,
+                │                       dtype=torch.float32
+                │               ),
+                │               num_episodes=10_000
+                │       ),
+                │       checkpoint=None,
+                │       reward_scale=1.0,
+                │       reward_clip=inf,
+                │       train_budget_steps=15_258,
+                │       parallelism=NoParallel.Config(device=None)
+                ),
+                dataset=CraftaxRollouts.Config(),
+                metrics_train={},
+                metrics_eval={'craftax': CraftaxScore.Config()},
+                checkpointer=Checkpointer.Config(
+                        base_dir=PosixPath('/opt/scratch/runs/craftax/exp003'),
+                        working_dir=PosixPath('/opt/scratch/runs/craftax/exp003/checkpoints'),
+                        filename='step_{step:08d}.pt',
+                        save_every=200,
+                        keep_last_n=2,
+                        keep_every=0,
+                        storer=SyncLocalStateDictStorer.Config(),
+                        resume=True,
+                        resume_step=-1,
+                        allow_checkpoint_overwrite=False,
+                        best_metric='',
+                        best_mode='max'
+                ),
+                profiler=None,
+                phase_timer=PhaseTimer.Config(
+                        enabled=False,
+                        torch_profile=False,
+                        base_dir=PosixPath('/opt/scratch/runs/craftax/exp003'),
+                        working_dir=PosixPath('/opt/scratch/runs/craftax/exp003/profiling'),
+                        heartbeat_interval_sec=20.0,
+                        fault_dump_interval_sec=40.0,
+                        cuda_events=False
+                ),
+                tracker=TrackerList.Config(
+                        trackers={       'metrics': FileTracker.Config(
+                                        base_dir=PosixPath('/opt/scratch/runs/craftax/exp003'),
+                                        working_dir=PosixPath('/opt/scratch/runs/craftax/exp003/metrics.json'),
+                                        capture_prefix='eval/'
+                                ),
+                                'wandb': AsyncTracker.Config(
+                                        tracker=WandbTracker.Config(
+                                                project='craftax',
+                                                name='exp003',
+                                                run_id='',
+                                                group='',
+                                                mode='online',
+                                                base_dir=PosixPath('/opt/scratch/runs/craftax/exp003'),
+                                                working_dir=PosixPath('/opt/scratch/runs/craftax/exp003/wandb'),
+                                                capture_console=True,
+                                                replay_startup_logs=False,
+                                                allow_startup_failure=True,
+                                                ingestion=WandbIngestion(
+                                                        init_timeout_sec=30.0,
+                                                        service_wait_sec=30.0,
+                                                        flush_interval_sec=15.0,
+                                                        system_metrics=True,
+                                                        system_metrics_interval_sec=60.0
+                                                ),
+                                                metric_step_metrics={},
+                                                run_config={},
+                                                notes=''
+                                        ),
+                                        enabled=True
+                                )},
+                        base_dir=PosixPath('/opt/scratch/runs/craftax/exp003'),
+                        working_dir=PosixPath('/opt/scratch/runs/craftax/exp003')
+                ),
+                max_steps=15_258,
+                max_epochs=inf,
+                max_time=inf,
+                max_time_kind='wall',
+                max_eval_time=inf,
+                eval_stop_on_time_limit=False,
+                num_steps_eval=-1,
+                num_steps_log=10,
+                early_train_log_steps=100,
+                eval_every_epoch=True,
+                eval_extras_every_eval=False,
+                eval_warmup_batches=0,
+                eval_only=False,
+                restore_rng_state=True,
+                seed=42,
+                num_steps_garbage_collect=inf,
+                mesh_dim_model_seed='pp',
+                mesh_dim_data_seed='dp',
+                runtime=SingleProcess.Config(
+                        device=None,
+                        deterministic=False,
+                        float32_matmul_precision='high'
+                )
+        )

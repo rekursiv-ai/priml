@@ -1,274 +1,215 @@
-"""The score: how well a policy plays, measured over whole episodes.
+"""The score, as PufferLib reports it.
 
-Two numbers matter. Normalized return is mean episodic reward as a percentage
-of the 226 available, and is the figure the published baselines report. The
-Crafter score is the geometric mean of the per-achievement success rates,
-which rewards breadth instead: a policy that unlocks twenty achievements
-sometimes scores better than one that farms a single lucrative one.
+``perf`` is the achievement return as a fraction of the 226 available,
+averaged over every episode that finished during evaluation. PufferLib plays
+whole rollouts until at least ``num_episodes`` have finished
+(``evaluation.Evaluation.play``), then reports the mean of each field of the
+environments' episode logs; this module is that reduction.
 
-Both are computed only from episodes that finished inside the evaluation
-horizon. A truncated episode has an incomplete return, so counting it would
-drag the mean toward zero by an amount that depends on the horizon rather than
-on the policy.
+The mean is PufferLib's arithmetic, not merely its definition: each
+environment's fp32 log is added in environment order, skipping environments
+that finished no episode, and every field is then divided by the episode count
+(``pufferl.cu:922-937, 954-966, 1363-1383``). fp32 addition is not associative,
+so a pairwise sum of the same logs lands on different bits.
+
+References:
+    https://github.com/PufferAI/PufferLib
+        Suarez. PufferLib (MIT license), ``src/pufferl.cu``, pin ``6ffa5b10``.
+
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Final, TypedDict, cast
 
 from configgle import Fig
-from torch import Tensor
 
 import numpy as np
-import torch
 
-from priml.baselines.craftax.data import EvaluationActor
-from priml.baselines.craftax.env import CraftaxEnv
-from priml.baselines.craftax.evaluation import evaluation_mode
-from priml.baselines.craftax.game import constants
-from priml.baselines.craftax.restart import RestartOnDemand
-from priml.lib.codec import from_plain
-from priml.math.numeric import shifted_geometric_mean
+from priml.baselines.craftax.evaluation import Played
+from priml.baselines.craftax.game.state import (
+    LOG_DTYPE,
+    Achievement,
+    env_log,
+)
 
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from priml.math.custom_types import Tensorable
+    from numpy.typing import NDArray
+    from torch import Tensor
+
+
+LOG_FIELDS: Final = LOG_DTYPE.itemsize // np.dtype(np.float32).itemsize
+"""fp32 values in one episode log: PufferLib's ``LOG_NF``."""
+
+FLOOR_NAMES: Final = (
+    "floor_0_overworld",
+    "floor_1_dungeon",
+    "floor_2_gnomish_mines",
+    "floor_3_sewers",
+    "floor_4_vault",
+    "floor_5_troll_mines",
+    "floor_6_fire_realm",
+    "floor_7_ice_realm",
+    "floor_8_graveyard",
+)
+"""PufferLib's ``puf_log`` names for the floors field, in order."""
+
+
+def aggregate_logs(logs: NDArray[np.void]) -> NDArray[np.float32]:
+    """Return PufferLib's mean of per-environment episode logs, bit for bit.
+
+    Args:
+      logs: ``LOG_DTYPE [num_envs]``.
+
+    Returns:
+      mean: fp32 ``[LOG_FIELDS]``: every field summed in environment order over
+        the environments with ``n != 0``, then divided by the summed ``n``. The
+        last entry holds the summed ``n`` itself, as PufferLib reports it, rather
+        than ``n / n``. All zeros when no episode finished.
+
+    """
+    fields = np.ascontiguousarray(logs).view(np.float32).reshape(len(logs), LOG_FIELDS)
+    # NumPy walks this row-major array in memory order, adding a row at a time
+    # into one fp32 sum per field: environment order. A copy that makes each
+    # field's values contiguous is summed pairwise and rounds differently.
+    total = np.sum(fields[np.not_equal(fields[:, -1], 0)], axis=0, dtype=np.float32)
+    count = np.float32(total.item(-1))
+    if count > 0:
+        mean = total / count
+        mean[-1] = count
+        return mean
+    return total
+
+
+def log_metrics(mean: NDArray[np.float32]) -> dict[str, float]:
+    """Name an :func:`aggregate_logs` result with PufferLib's ``puf_log`` keys.
+
+    Args:
+      mean: fp32 ``[LOG_FIELDS]`` from :func:`aggregate_logs`.
+
+    Returns:
+      metrics: ``perf``, ``achievement_rate``, ``score``, ``episode_return``,
+        ``episode_length``, one key per floor, and ``n``.
+
+    """
+    record = env_log(mean.view(LOG_DTYPE), 0)
+    metrics = {
+        "perf": float(record.perf),
+        "achievement_rate": float(record.achievement_rate),
+        "score": float(record.score),
+        "episode_return": float(record.episode_return),
+        "episode_length": float(record.episode_length),
+    }
+    metrics.update(
+        {
+            name: float(value)
+            for name, value in zip(FLOOR_NAMES, record.floors, strict=True)
+        },
+    )
+    metrics["n"] = float(record.n)
+    return metrics
+
+
+def report_metrics(mean: NDArray[np.float32]) -> dict[str, float]:
+    """Name an :func:`aggregate_logs` result as the port reports it: without repeats.
+
+    ``score`` and ``episode_return`` both sum the achievement rewards an episode
+    unlocked (``game/step.py``), under every rule set: ``perf`` times 226. Only
+    ``perf`` is reported. ``floor_9_finish`` is the fraction of completed
+    episodes that defeated the Necromancer, as the recipe runs' progression key counts.
+
+    Args:
+      mean: fp32 ``[LOG_FIELDS]`` from :func:`aggregate_logs`.
+
+    Returns:
+      metrics: :func:`log_metrics` without ``score`` and ``episode_return``,
+        plus ``floor_9_finish`` from the averaged boss-defeat achievement.
+
+    """
+    metrics = {
+        name: value
+        for name, value in log_metrics(mean).items()
+        if name not in ("score", "episode_return")
+    }
+    metrics["floor_9_finish"] = float(
+        env_log(mean.view(LOG_DTYPE), 0).achievements[Achievement.DEFEAT_NECROMANCER],
+    )
+    return metrics
 
 
 class CraftaxScore:
-    """Play fixed-length episodes and report the benchmark's metrics."""
+    """PufferLib's score of an evaluation: the mean of its episode logs."""
 
     class Config(Fig["CraftaxScore"]):
-        """Evaluation geometry.
-
-        These fields define the score. Two runs are comparable only when
-        their evaluation seed, worker count, and horizon all match.
-        """
-
-        num_envs: int = 64
-        """Parallel workers the policy is evaluated across."""
-
-        steps: int = 10_000
-        """Steps each worker takes."""
-
-        seed: int = 42
-        """Seed for the evaluation worlds and the action sampling."""
-
-        view: tuple[int, int] = (9, 11)
-        """Tiles the evaluated policy can see, ``(rows, columns)``.
-
-        Must match the view the policy TRAINED on: the observation is one
-        one-hot vector per visible tile, so a different window is a different
-        input width and the network cannot read it at all."""
-
-        device: torch.device | str | None = None
-        """Device the evaluation runs on."""
+        """Nothing to configure: the evaluation decides what is played."""
 
     def __init__(self, config: Config) -> None:
         """Prepare an empty score.
 
         Args:
-          config: Evaluation geometry.
-
-        Raises:
-          ValueError: The geometry is not positive.
+          config: Empty.
 
         """
-        if config.num_envs <= 0 or config.steps <= 0:
-            raise ValueError("Evaluation geometry must be positive")
-        self.config = config
-        self._returns: list[float] = []
-        self._lengths: list[int] = []
-        self._unlocked: list[list[float]] = []
-        self._rollout_index = 0
+        del config
+        self._metrics: dict[str, float] = {}
 
-    def update(self, logits: Tensor, **batch: object) -> None:
-        """Score the bound policy over a complete evaluation rollout.
-
-        The metric plays its own episodes rather than reading the batch: a
-        score is a property of the policy acting from fresh worlds, not of
-        whatever transitions training happened to visit.
+    def update(self, logits: Tensor | None = None, **batch: object) -> None:
+        """Reduce one evaluation's logs to the score.
 
         Args:
           logits: Unused; present to satisfy the metric interface.
-          **batch: Must carry ``actor``, an isolated evaluation actor.
+          **batch: Must carry ``played``, what an evaluation played.
 
         Raises:
-          TypeError: ``actor`` is missing or is not an ``EvaluationActor``.
+          TypeError: The batch carries no played evaluation.
 
         """
         del logits
-        actor = batch.get("actor")
-        if not isinstance(actor, EvaluationActor):
-            raise TypeError("CraftaxScore requires an EvaluationActor batch entry.")
-        self._play(actor)
+        played = batch.get("played")
+        if not isinstance(played, Played):
+            raise TypeError("CraftaxScore requires a played evaluation batch entry")
+        self._metrics = report_metrics(aggregate_logs(played.logs))
+        self._metrics["rollouts"] = float(played.rollouts)
+        self._metrics["gameplay_seconds"] = played.gameplay_seconds
 
     def compute(self) -> dict[str, object]:
-        """Summarize every episode seen since the last reset.
+        """Return the last evaluation's metrics.
 
         Returns:
-          metrics: ``normalized_return_pct`` is the headline; ``score_pct``
-            is the geometric achievement score; the rest describe the
-            distribution behind them.
+          metrics: PufferLib's ``env/*`` means without repeats
+            (:func:`report_metrics`; ``perf`` is the headline), the episode
+            count ``n``, the rollouts played, and gameplay seconds.
 
         """
-        if not self._returns:
-            return {"episodes": 0.0}
-        returns = np.asarray(self._returns)
-        rates = np.asarray(self._unlocked).mean(axis=0)
-        return {
-            "normalized_return_pct": float(
-                returns.mean() / constants.REWARD_CEILING * 100.0,
-            ),
-            "score_pct": crafter_score_pct(rates),
-            "mean_return": float(returns.mean()),
-            "achievements_pct": float(rates.mean()),
-            "episodes": float(len(returns)),
-            "episode_length": float(np.mean(self._lengths)),
-        }
+        return dict(self._metrics)
 
     def reset(self) -> None:
-        """Forget every episode seen so far."""
-        self._returns = []
-        self._lengths = []
-        self._unlocked = []
-        self._rollout_index = 0
+        """Forget the last evaluation."""
+        self._metrics = {}
 
     class StateDict(TypedDict):
-        """Every finished episode seen so far, plus the next rollout's seed offset."""
+        """The last evaluation's metrics."""
 
-        returns: list[float]
-        lengths: list[int]
-        unlocked: list[list[float]]
-        rollout_index: int
+        metrics: dict[str, float]
 
     def state_dict(self) -> StateDict:
-        """Return the accumulated episodes.
+        """Return the last evaluation's metrics.
 
         Returns:
-          state: Dict with returns, lengths, unlocked, and rollout_index.
+          state: The metrics dict.
 
         """
-        return {
-            "returns": list(self._returns),
-            "lengths": list(self._lengths),
-            "unlocked": [list(row) for row in self._unlocked],
-            "rollout_index": self._rollout_index,
-        }
+        return {"metrics": dict(self._metrics)}
 
     def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
-        """Restore episodes saved by :meth:`state_dict`.
+        """Restore metrics saved by :meth:`state_dict`.
 
         Args:
           state_dict: State dict.
 
         """
         state = cast(CraftaxScore.StateDict, state_dict)
-        self._returns = list(state["returns"])
-        self._lengths = list(state["lengths"])
-        # A checkpoint reader may hand the rates back as ints; the rows are
-        # averaged as floats, so each is coerced on the way in.
-        self._unlocked = [[float(value) for value in row] for row in state["unlocked"]]
-        self._rollout_index = state["rollout_index"]
-
-    @torch.no_grad()
-    def _play(self, actor: EvaluationActor) -> None:
-        """Run the fixed evaluation rollout, banking finished episodes."""
-        config = CraftaxEnv.Config()
-        config.num_envs = self.config.num_envs
-        config.device = self.config.device
-        config.seed = self.config.seed + self._rollout_index
-        config.view = self.config.view
-        # Which worlds a score is measured in is part of what the score means,
-        # so they are drawn on demand as they were for every recorded score,
-        # whatever the training environment's default.
-        config.restart = RestartOnDemand.Config()
-        env = config.make()
-
-        observation = env.reset()
-        if observation.shape[-1] != actor.observation_size:
-            raise ValueError(
-                f"Evaluation observation_size={observation.shape[-1]} does not match "
-                f"actor observation_size={actor.observation_size}.",
-            )
-        # Compared where each lands, not as written: a training step on "cuda"
-        # names the current device without its index, while a tensor always
-        # reports one ("cuda:0"), so the literal comparison refused every
-        # evaluation on a GPU.
-        if observation.device != torch.empty(0, device=actor.device).device:
-            raise ValueError(
-                f"Evaluation device={observation.device} does not match "
-                f"actor device={actor.device}.",
-            )
-        generator = torch.Generator(device=observation.device)
-        generator.manual_seed(self.config.seed + self._rollout_index)
-        self._rollout_index += 1
-        actor.reset(num_envs=self.config.num_envs, device=observation.device)
-        previous_done = torch.zeros(
-            self.config.num_envs,
-            dtype=torch.bool,
-            device=observation.device,
-        )
-        episode_return = torch.zeros(self.config.num_envs, device=observation.device)
-        episode_length = torch.zeros(
-            self.config.num_envs,
-            dtype=torch.int64,
-            device=observation.device,
-        )
-
-        with evaluation_mode(actor.model):
-            for _ in range(self.config.steps):
-                action = actor.act(
-                    observation,
-                    previous_done,
-                    generator=generator,
-                )
-                transition = env.step(action)
-                observation = transition.observation
-                previous_done = transition.done
-                episode_return = episode_return + transition.reward
-                episode_length = episode_length + 1
-
-                if bool(transition.done.any()):
-                    finished = transition.done
-                    self._returns.extend(
-                        from_plain(episode_return[finished].tolist(), list[float]),
-                    )
-                    self._lengths.extend(
-                        from_plain(episode_length[finished].tolist(), list[int]),
-                    )
-                    unlocked = torch.stack(
-                        [transition.info[name] for name in sorted(transition.info)],
-                        dim=-1,
-                    )
-                    self._unlocked.extend(
-                        from_plain(row, list[float])
-                        for row in unlocked[finished].tolist()
-                    )
-                    episode_return = episode_return * ~finished
-                    episode_length = episode_length * ~finished
-
-
-def crafter_score_pct(success_rates_pct: Tensorable) -> float:
-    """Aggregate per-achievement success rates the way Crafter does.
-
-    The shifted geometric mean ``exp(mean(log(1 + s))) - 1``: a plain geometric
-    mean is zero whenever any rate is zero, and the shift is what keeps one
-    never-unlocked achievement from annihilating the score. Breadth is what
-    this rewards: unlocking many achievements rarely beats unlocking one
-    reliably.
-
-    Args:
-      success_rates_pct: Per-achievement success percentages.
-
-    Returns:
-      score_pct: The aggregate score, in percent.
-
-    References:
-      https://arxiv.org/abs/2109.06780
-        Hafner 2021. Benchmarking the spectrum of agent capabilities.
-
-    """
-    return float(shifted_geometric_mean(success_rates_pct))
+        self._metrics = {name: float(value) for name, value in state["metrics"].items()}

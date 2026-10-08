@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Craftax · saved games</title>
+<style>
+:root{color-scheme:light;--ink:#172734;--muted:#576b77;--line:#cad7dc;--blue:#126f8a;--green:#14765b;--paper:#f5f3ec}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.45 system-ui,-apple-system,sans-serif}main{max-width:1320px;margin:auto;padding:26px 24px 50px}a{color:#126f8a}header{display:flex;justify-content:space-between;gap:20px;align-items:start}h1{font-size:clamp(28px,4vw,43px);line-height:1.08;margin:0 0 10px;letter-spacing:-.035em}h2{font-size:19px;margin:0 0 12px}p{margin:8px 0}.eyebrow{color:var(--blue);font-size:13px;font-weight:750;text-transform:uppercase;letter-spacing:.11em}.lede{max-width:950px;color:#314651;font-size:18px}.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:24px 0}.card,.panel{background:white;border:1px solid var(--line);border-radius:11px}.card{padding:14px 17px}.card strong{display:block;font-size:25px;font-variant-numeric:tabular-nums}.card span{font-size:13px;color:var(--muted)}.layout{display:grid;grid-template-columns:minmax(530px,1.65fr) minmax(295px,1fr);gap:16px}.panel{padding:18px}.game-wrap{background:#070d11;border:7px solid #182d36;border-radius:7px;max-width:672px}.game-wrap canvas{display:block;width:100%;height:auto;image-rendering:pixelated}.controls{display:flex;flex-wrap:wrap;gap:7px;margin:15px 0 10px}button,select{font:inherit;padding:8px 11px;border:1px solid #89a3af;border-radius:6px;background:white;color:var(--ink);cursor:pointer}button:hover,select:hover{border-color:var(--blue);background:#f3f9fb}button.primary{background:var(--blue);color:white;border-color:var(--blue)}button:disabled{opacity:.45;cursor:not-allowed}#seek{width:100%;accent-color:var(--blue)}.line{display:flex;justify-content:space-between;gap:12px;color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}.badge{display:inline-block;border-radius:40px;background:#e3f4ea;color:#17654e;padding:5px 10px;font-weight:700;font-size:13px}.badge.neutral{background:#e9f1f4;color:#416371}.value{font-size:22px;font-weight:680;font-variant-numeric:tabular-nums}.detail{font-variant-numeric:tabular-nums}.detail dt{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em}.detail dd{margin:3px 0 13px;font-weight:600}#events{width:100%}#score-chart{width:100%;height:auto;display:block;cursor:crosshair;background:#f9fbfb;border:1px solid var(--line);border-radius:6px}.caption{font-size:13px;color:var(--muted)}.download{margin-top:15px;padding-top:13px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}.download a{margin-right:10px}#status{min-height:23px;color:var(--muted)}@media(max-width:880px){.layout{grid-template-columns:1fr}.cards{grid-template-columns:repeat(2,1fr)}}@media(max-width:540px){main{padding:17px 13px}.cards{gap:7px}.card{padding:10px}.card strong{font-size:20px}.panel{padding:13px}}
+.resources{display:grid;grid-template-columns:1fr 1fr;gap:9px 13px;margin:14px 0 17px}.resource-head{display:flex;justify-content:space-between;gap:6px;font-size:13px;font-weight:650}.resource-head span:last-child{font-variant-numeric:tabular-nums;color:var(--muted)}.meter{height:10px;background:#e8edf0;border-radius:20px;overflow:hidden;margin-top:3px}.meter-fill{height:100%;border-radius:20px;transition:width .08s linear}.inv-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));grid-auto-rows:36px;gap:4px;height:196px;overflow-y:auto;align-content:start;scrollbar-gutter:stable}.inv-item{position:relative;border:1px solid #d8e3e5;background:#f8fbfb;border-radius:5px;height:36px;min-width:0;padding:2px 2px 1px;text-align:center;overflow:hidden}.item-icon{height:16px;width:16px;margin:0 auto;background-image:url('sprites.png');background-size:256px 128px;image-rendering:pixelated}.item-count{position:absolute;right:1px;top:1px;font-size:9px;line-height:1;font-weight:800;background:#fff;border-radius:3px;padding:1px 2px}.item-label{font-size:9px;color:#465c66;line-height:12px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hud-section{border-top:1px solid var(--line);padding-top:13px;margin-top:13px}aside>.hud-section:first-child{border-top:0;padding-top:0;margin-top:0}aside>#moment{margin-top:18px}#game-picker{max-width:100%}
+.tabs{display:flex;gap:6px;margin-bottom:10px}.tabs button{font-weight:700;border-radius:7px}.tabs button.active{background:#143d4d;color:#fff;border-color:#143d4d}.view-explain{font-size:13px;color:var(--muted);margin:0 0 10px}.action-choice{display:inline-block;background:#eef6f8;border:1px solid #b7d2da;border-radius:6px;padding:5px 8px}.action-choice.previous{background:#f4f1e8;border-color:#d7cbb7}.action-note{font-size:12px;color:var(--muted);margin-top:0}
+.jump-controls{margin:14px 0;padding:10px;background:#f6fafb;border:1px solid var(--line);border-radius:7px}.jump-controls button{margin:2px}.jump-controls select{width:100%}.download{line-height:1.8}
+.map-legend{display:none;flex-wrap:wrap;gap:8px 15px;margin:0 0 12px;padding:10px 12px;background:#f5f9fa;border:1px solid var(--line);border-radius:7px;font-size:12px}.map-legend.visible{display:flex}.legend-item{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}.legend-mark{display:inline-block;flex:none;width:16px;height:16px;border-radius:50%;border:2px solid #62747d;background-image:url('sprites.png');background-size:256px 128px;image-rendering:pixelated}.legend-mark.player{border-color:#fff;box-shadow:0 0 0 1px #62747d;background-position:-112px -32px}.legend-mark.health{width:17px;height:5px;border:1px solid #182d36;border-radius:1px;background:#42b65a}.legend-mark.crop{width:17px;height:13px;border:2px solid #79d6e8;border-radius:0;background:none}.legend-mark.route{width:17px;height:13px;border:0;border-radius:0;background:linear-gradient(90deg,rgba(255,206,87,.18),#ffce57)}.legend-mark.melee{border-color:#ef5350;background-position:0 -80px}.legend-mark.passive{border-color:#8bc34a;background-position:-128px -80px}.legend-mark.ranged{border-color:#ff9800;background-position:-176px -80px}.legend-mark.enemy-projectile{border-color:#ce93d8;background-position:-48px -96px}.legend-mark.player-projectile{border-color:#4dd0e1;background-position:-64px -96px}.map-tools{display:none;align-items:center;gap:9px;margin:-2px 0 10px;font-size:13px}.map-tools.visible{display:flex}.map-tools select{padding:4px 7px;font-size:13px}.heat-note{display:none;margin:-3px 0 10px;font-size:12px;color:var(--muted)}.heat-note.visible{display:block}
+.resource-key{display:flex;flex-wrap:wrap;gap:3px 10px;margin:0 0 8px;font-size:11px;color:var(--muted)}.resource-key span{display:inline-flex;align-items:center;gap:4px}.resource-key i{display:inline-block;width:12px;height:3px;background:var(--series);border-radius:2px}#resources-chart{width:100%;height:auto;display:block;cursor:crosshair;background:#f9fbfb;border:1px solid var(--line);border-radius:6px}
+#inventory>p{grid-column:1/-1;margin:0;color:var(--muted);font-size:13px;align-self:start}
+.boards{display:flex;flex-wrap:wrap;gap:10px}.board{margin:0;flex:1 1 260px;min-width:0}.board figcaption{font-size:13px;font-weight:700;color:var(--muted);margin:0 0 4px}
+</style>
+</head>
+<body>
+<main>
+<header><div><div class="eyebrow" id="eyebrow">Exact game replay</div><h1><!-- PAGE_TITLE -->Saved Craftax games</h1><p class="lede" id="game-description">Choose a game to inspect every recorded decision and board state.</p><label for="game-picker">Game </label><select id="game-picker" aria-label="Choose game"></select><p class="caption"><!-- PAGE_NOTE --></p></div></header>
+<div class="cards"><div class="card"><strong id="card-actions">—</strong><span>recorded actions</span></div><div class="card"><strong id="card-ticks">—</strong><span>last game tick</span></div><div class="card"><strong id="card-score">—</strong><span id="card-score-label">selected game reward</span></div><div class="card"><strong id="card-mean">—</strong><span id="card-mean-label">checkpoint average reward</span></div></div>
+<div class="layout">
+<section class="panel"><div class="tabs"><button id="policy-tab">Policy view</button><button id="map-tab" class="active">Full-map view</button></div><p id="view-explain" class="view-explain">The full 48×48 simulator map. Colored halos identify entity classes, sprites show their types, and shading indicates darkness.</p><div id="map-tools" class="map-tools visible"><label for="heat-mode">Heatmap</label><select id="heat-mode"><option value="off">Off</option><option value="movement">Movement</option><option value="interactions">Interactions</option><option value="both" selected>Both</option></select></div><p id="heat-note" class="heat-note visible">Cumulative on this floor through the selected action. Green shows tile entries. Orange darkens with repeated DO, place, shoot, and cast attempts at the player position.</p><div id="map-legend" class="map-legend visible" aria-label="Full-map legend"><span class="legend-item"><span class="legend-mark player"></span>Player</span><span class="legend-item"><span class="legend-mark health"></span>Health / maximum</span><span class="legend-item"><span class="legend-mark crop"></span>Policy view boundary</span><span class="legend-item"><span class="legend-mark melee"></span>Melee enemy</span><span class="legend-item"><span class="legend-mark passive"></span>Passive creature</span><span class="legend-item"><span class="legend-mark ranged"></span>Ranged enemy</span><span class="legend-item"><span class="legend-mark enemy-projectile"></span>Enemy projectile</span><span class="legend-item"><span class="legend-mark player-projectile"></span>Player projectile</span><span class="legend-item"><span class="legend-mark route"></span>Recent route (80 moves)</span></div><div class="boards"><figure class="board"><figcaption id="game-caption" hidden>Model</figcaption><div class="game-wrap"><canvas id="game" width="528" height="432" aria-label="Rendered Craftax board"></canvas></div></figure><figure class="board" id="reference-board" hidden><figcaption>Real, same actions</figcaption><div class="game-wrap"><canvas id="reference" width="528" height="432" aria-label="Real board under the same actions"></canvas></div></figure></div><p id="compare-note" class="view-explain" hidden>Magenta outlines mark cells where the model and the real frame differ. Red outlines mark cells no real game frame can hold; yellow, cells a person overrode.</p><div class="controls"><button id="restart">Restart</button><button id="previous" title="Previous action">−1</button><button id="play" class="primary">Play</button><button id="next" title="Next action">+1</button><button id="skip" title="Skip 100 actions">+100</button><label>Speed <select id="speed"><option value="2">2 actions/s</option><option value="5">5 actions/s</option><option value="10">10 actions/s</option><option value="30" selected>30 actions/s</option><option value="100">100 actions/s</option><option value="250">250 actions/s</option><option value="1000">1,000 actions/s</option></select></label></div><input id="seek" type="range" min="0" max="0" value="0" aria-label="Seek to action"><div class="line"><span>Reset</span><span id="position">—</span><span id="end-label">End</span></div><div class="jump-controls"><h2>Navigation</h2><button id="prev-floor">Previous floor</button> <button id="next-floor">Next floor</button> <button id="next-reward">Next reward</button> <button id="first-divergence" hidden>First divergence</button><p><label for="events">Jump to milestone</label><br><select id="events"><option value="0">Reset</option></select></p></div><p id="status">Loading exact replay…</p><div class="hud-section"><h2>Cumulative reward</h2><canvas id="score-chart" width="700" height="190" aria-label="Cumulative achievement points versus actions"></canvas><p class="caption">Click the chart or drag the action slider to seek. Playback may skip rendering intermediate frames at high speed.</p><p class="download" id="provenance"></p></div><div class="hud-section"><h2>Player resources over time</h2><div class="resource-key"><span><i style="--series:#42b65a"></i>Health</span><span><i style="--series:#438ed0"></i>Mana</span><span><i style="--series:#d5a43e"></i>Food</span><span><i style="--series:#4cabc5"></i>Drink</span><span><i style="--series:#ad79d6"></i>Energy</span></div><canvas id="resources-chart" width="700" height="190" aria-label="Health, mana, food, drink, and energy versus actions, each as percent of maximum"></canvas><p class="caption">Each line is a percentage of its maximum at that step. Click to jump to an action.</p></div></section>
+<aside class="panel"><div class="hud-section"><h2>Player status</h2><div class="resources" id="resources"></div></div><div class="hud-section"><h2>Inventory and spells</h2><div id="inventory" class="inv-grid" aria-label="Inventory items"></div></div><div class="hud-section" id="model-panel" hidden><h2>Model annotations</h2><dl class="detail"><dt>Frame source</dt><dd id="model-source">—</dd><dt>Action source</dt><dd id="model-action">—</dd><dt>Generated reward</dt><dd id="model-reward">—</dd><dt>Episode end</dt><dd id="model-done">—</dd><dt>Invalid cells</dt><dd id="model-invalid">—</dd><dt>Overridden slots</dt><dd id="model-overrides">—</dd><dt>First divergent frame</dt><dd id="model-divergence">—</dd></dl></div><h2 id="moment">Reset</h2><p><span id="badge" class="badge neutral">On the journey</span></p><dl class="detail"><dt>Floor</dt><dd id="floor">—</dd><dt>Game tick</dt><dd id="tick">—</dd><dt>Last action played</dt><dd id="last-action"><span class="action-choice previous">—</span></dd><dt>Next selected policy action</dt><dd id="action"><span class="action-choice">—</span></dd><dd class="action-note" id="action-note">Recorded choice; action probabilities were not captured.</dd><dt>Achievement points</dt><dd id="score">—</dd><dt>Health and mana</dt><dd id="vitals">—</dd><dt>Achievements earned</dt><dd id="achievements">—</dd><dt>Player position</dt><dd id="player-position">—</dd></dl></aside>
+</div>
+
+</main>
+<script>/* CRAFTAX_GAMES_PAYLOAD */</script>
+<script src="hud.js"></script>
+<script src="model.js"></script>
+<script>
+'use strict';
+const names=['NOOP','LEFT','RIGHT','UP','DOWN','DO','SLEEP','PLACE_STONE','PLACE_TABLE','PLACE_FURNACE','PLACE_PLANT','MAKE_WOOD_PICKAXE','MAKE_STONE_PICKAXE','MAKE_IRON_PICKAXE','MAKE_WOOD_SWORD','MAKE_STONE_SWORD','MAKE_IRON_SWORD','REST','DESCEND','ASCEND','MAKE_DIAMOND_PICKAXE','MAKE_DIAMOND_SWORD','MAKE_IRON_ARMOUR','MAKE_DIAMOND_ARMOUR','SHOOT_ARROW','MAKE_ARROW','CAST_FIREBALL','CAST_ICEBALL','PLACE_TORCH','DRINK_POTION_RED','DRINK_POTION_GREEN','DRINK_POTION_BLUE','DRINK_POTION_PINK','DRINK_POTION_CYAN','DRINK_POTION_YELLOW','READ_BOOK','ENCHANT_SWORD','ENCHANT_ARMOUR','MAKE_TORCH','LEVEL_UP_DEXTERITY','LEVEL_UP_STRENGTH','LEVEL_UP_INTELLIGENCE','ENCHANT_BOW'];
+const floors=['Overworld','Dungeon','Gnomish Mines','Sewers','Vault','Troll Mines','Fire Realm','Ice Realm','Graveyard'];
+const $=id=>document.getElementById(id);
+const RECORD=7858;let COUNT=0,END=0,currentGame=null;
+const sprites=new Image();sprites.src='sprites.png';let tokens=null,referenceTokens=null,notes=null,divergence=-1;
+const isModel=()=>currentGame?.kind==='model';
+let bytes,view,healthView=null,index=0,playing=false,lastTime=0,carry=0,changes=[],rewards=[],viewMode='map',heatMode='both',resourcePlot=null,loadVersion=0;
+const at=(i,offset)=>i*RECORD+offset;
+const u8=(i,offset)=>view.getUint8(at(i,offset));
+const u16=(i,offset)=>view.getUint16(at(i,offset),true);
+const u32=(i,offset)=>view.getUint32(at(i,offset),true);
+const f32=(i,offset)=>view.getFloat32(at(i,offset),true);
+function drawCells(canvas,source,base,direction,sleeping){canvas.height=432;const ctx=canvas.getContext('2d');drawWindow(ctx,sprites,source,base,direction,sleeping,48);return ctx}
+function cellFlags(cells){const flags=new Uint8Array(99);for(const cell of cells??[])if(cell<99)flags[cell]=1;return flags}
+function outline(ctx,flags,color,inset){ctx.strokeStyle=color;ctx.lineWidth=3;for(let cell=0;cell<99;cell++)if(flags[cell])ctx.strokeRect((cell%11)*48+inset,Math.floor(cell/11)*48+inset,48-2*inset,48-2*inset)}
+function renderReference(i){
+  const canvas=$('reference');
+  if(i>=referenceTokens.length/TOKEN_RECORD){const ctx=canvas.getContext('2d');ctx.fillStyle='#070d11';ctx.fillRect(0,0,528,432);ctx.fillStyle='#c9d6dc';ctx.font='20px system-ui';ctx.fillText('The real episode has no frame here.',24,216);return null}
+  const differs=cellDiff(tokens,i*TOKEN_RECORD,referenceTokens,i*TOKEN_RECORD);
+  outline(drawCells(canvas,referenceTokens,i*TOKEN_RECORD,tokenDirection(referenceTokens,i),tokenAux(referenceTokens,i,44)),differs,'#e040fb',2);
+  return differs;
+}
+function renderBoard(i){const ctx=drawCells($('game'),bytes,at(i,34),u8(i,17),u8(i,18));if(!isModel()||!notes)return;const differs=referenceTokens?renderReference(i):null;if(differs)outline(ctx,differs,'#e040fb',2);outline(ctx,cellFlags(notes.invalid[i]),'#ff3b30',6);outline(ctx,cellFlags((notes.overrides[i]??[]).filter(slot=>slot<99)),'#ffd60a',10)}
+function renderModel(){
+  if(!isModel()||!notes)return;
+  const end=index===END,decided=!end&&index<notes.actionMarks.length;
+  $('model-source').textContent=frameSourceText(notes.frameSource[index]);
+  $('model-action').textContent=decided?notes.actionMarks[index]:'—';
+  $('model-reward').textContent=decided?`${notes.reward[index]} · probability ${probabilityText(notes.rewardProb[index])}`:'—';
+  $('model-done').textContent=decided?`${notes.done[index]?'ended':'continued'} · p(end) ${probabilityText(notes.doneProb[index])}`:'—';
+  const invalid=notes.invalid[index]??[];
+  $('model-invalid').textContent=invalid.length?`${invalid.length}: cells ${invalid.slice(0,12).join(', ')}${invalid.length>12?', …':''}`:'none';
+  $('model-overrides').textContent=(notes.overrides[index]??[]).join(', ')||'none';
+  $('model-divergence').textContent=!referenceTokens?'no real episode attached':divergence<0?'none in the shared frames':`frame of decision ${divergence+1}, after decision ${divergence}`;
+}
+function setModelMode(model){
+  $('map-tab').hidden=model;
+  if(model&&viewMode!=='policy')setView('policy');
+  $('model-panel').hidden=!model;
+  for(const id of ['reference-board','game-caption','compare-note'])$(id).hidden=!referenceTokens;
+  $('first-divergence').hidden=divergence<0;
+  $('eyebrow').textContent=model?'World-model generation · source: model':'Exact game replay';
+  $('action-note').textContent=model?'Action source and the model\'s probabilities are under Model annotations.':'Recorded choice; action probabilities were not captured.';
+  $('view-explain').textContent=viewExplain();
+}
+function mapSprite(klass,type){
+  if(klass===0)return 80+type;
+  if(klass===1)return 88+type;
+  if(klass===2)return 91+type;
+  return [50,99,100,101,50,102,100,101][type]??50;
+}
+function drawSmallSprite(ctx,id,row,col){
+  ctx.drawImage(sprites,(id%16)*16,Math.floor(id/16)*16,16,16,col*11+1,row*11+1,9,9);
+}
+function drawMapTile(ctx,id,row,col){
+  ctx.drawImage(sprites,(id%16)*16,Math.floor(id/16)*16,16,16,col*11,row*11,11,11);
+}
+function drawHealthBar(ctx,row,col,current,maximum){
+  if(!(maximum>0))return;
+  const x=col*11,y=Math.max(0,row*11-4),fraction=Math.max(0,Math.min(1,current/maximum));
+  ctx.fillStyle='#0b171c';ctx.fillRect(x-1,y,13,4);
+  ctx.fillStyle=fraction>.5?'#42b65a':fraction>.25?'#e4ac38':'#e65252';
+  ctx.fillRect(x,y+1,Math.round(11*fraction),2);
+}
+const interactionActions=new Set([5,7,8,9,10,24,26,27,28]);
+function renderHeatmap(i,ctx,floor){
+  if(heatMode==='off')return;
+  const movement=new Uint16Array(48*48),interactions=new Uint16Array(48*48);
+  for(let j=0;j<=i;j++){
+    if(u8(j,13)!==floor)continue;
+    const row=u8(j,15),col=u8(j,16),cell=row*48+col;
+    if(j===0||u8(j-1,13)!==floor||u8(j-1,15)!==row||u8(j-1,16)!==col)movement[cell]++;
+    if(j<i&&interactionActions.has(u8(j,12)))interactions[cell]++;
+  }
+  const maxMoves=Math.max(...movement);
+  if((heatMode==='movement'||heatMode==='both')&&maxMoves){
+    for(let cell=0;cell<movement.length;cell++){
+      if(!movement[cell])continue;
+      const alpha=.07+.36*Math.sqrt(Math.log1p(movement[cell])/Math.log1p(maxMoves));
+      ctx.fillStyle='rgba(34,212,139,'+alpha.toFixed(3)+')';
+      ctx.fillRect((cell%48)*11,Math.floor(cell/48)*11,11,11);
+    }
+  }
+  if(heatMode==='interactions'||heatMode==='both'){
+    for(let cell=0;cell<interactions.length;cell++){
+      const count=interactions[cell];if(!count)continue;
+      const intensity=Math.min(1,Math.log2(1+count)/4);
+      const red=Math.round(255-110*intensity),green=Math.round(206-145*intensity),blue=Math.round(95-90*intensity);
+      const alpha=.25+.55*intensity;
+      ctx.fillStyle='rgba('+red+','+green+','+blue+','+alpha.toFixed(3)+')';
+      ctx.fillRect((cell%48)*11,Math.floor(cell/48)*11,11,11);
+    }
+  }
+}
+function renderTrail(i,ctx,floor){
+  const points=[];
+  let lastRow=-1,lastCol=-1;
+  for(let j=i;j>=0&&points.length<81;j--){
+    if(u8(j,13)!==floor)break;
+    const row=u8(j,15),col=u8(j,16);
+    if(row!==lastRow||col!==lastCol){points.push([row,col]);lastRow=row;lastCol=col}
+  }
+  points.reverse();
+  for(let n=1;n<points.length;n++){
+    const [a,b]=[points[n-1],points[n]];
+    if(Math.abs(a[0]-b[0])+Math.abs(a[1]-b[1])>1)continue;
+    const alpha=.10+.70*n/points.length;
+    ctx.strokeStyle='rgba(255,206,87,'+alpha.toFixed(3)+')';
+    ctx.lineWidth=2.5;ctx.beginPath();
+    ctx.moveTo(a[1]*11+5.5,a[0]*11+5.5);
+    ctx.lineTo(b[1]*11+5.5,b[0]*11+5.5);ctx.stroke();
+  }
+}
+function renderMap(i){
+  const canvas=$('game');canvas.height=528;
+  const ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=false;
+  ctx.fillStyle='#070d11';ctx.fillRect(0,0,528,528);
+  const base=at(i,885);
+  for(let row=0;row<48;row++)for(let col=0;col<48;col++){
+    const b=base+(row*48+col)*3,block=bytes[b],item=bytes[b+1],light=bytes[b+2];
+    if(block)drawMapTile(ctx,block,row,col);
+    if(item)drawMapTile(ctx,itemSprite(item),row,col);
+    if(light<255){ctx.fillStyle='rgba(0,0,0,'+((255-light)/600)+')';ctx.fillRect(col*11,row*11,11,11)}
+  }
+  const floor=u8(i,13);
+  renderHeatmap(i,ctx,floor);renderTrail(i,ctx,floor);
+  const count=u8(i,7797),mobBase=at(i,7798);
+  for(let m=0;m<count;m++){
+    const b=mobBase+m*4,klass=bytes[b],type=bytes[b+1],row=bytes[b+2],col=bytes[b+3];
+    ctx.fillStyle=['#ef5350','#8bc34a','#ff9800','#ce93d8','#4dd0e1'][klass]||'#fff';
+    ctx.beginPath();ctx.arc(col*11+5.5,row*11+5.5,5.2,0,Math.PI*2);ctx.fill();
+    drawSmallSprite(ctx,mapSprite(klass,type),row,col);
+    if(klass<3&&healthView){
+      const healthOffset=(i*30+m)*4;
+      drawHealthBar(ctx,row,col,healthView.getFloat32(healthOffset,true),healthView.getFloat32(healthOffset+60,true));
+    }
+  }
+  const row=u8(i,15),col=u8(i,16),direction=u8(i,17);
+  ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(col*11+5.5,row*11+5.5,5.2,0,Math.PI*2);ctx.fill();
+  drawSmallSprite(ctx,u8(i,18)?41:[39,40,38,37][Math.max(0,Math.min(3,direction-1))],row,col);
+  drawHealthBar(ctx,row,col,f32(i,22),u8(i,826));
+  ctx.strokeStyle='#79d6e8';ctx.lineWidth=2;ctx.strokeRect((col-5)*11,(row-4)*11,121,99);
+}
+function render(){if(!view)return;const end=index===END,action=u8(index,12),floor=u8(index,13),score=end?u16(index,20):index?u16(index-1,20):0;if(viewMode==='policy')renderBoard(index);else renderMap(index);renderHud(index);$('seek').value=index;$('position').textContent=end?'Final board':`Action ${index+1} of ${END.toLocaleString()}`;$('moment').textContent=end?'Final recorded state':`Decision ${index+1}`;$('badge').textContent=end?currentGame.endLabel:floor>=6?floors[floor]:'On the journey';$('badge').className='badge'+(end?'':' neutral');$('floor').textContent=`${floors[floor]??'Unknown'} · floor ${floor}`;const absent=new Set(currentGame.absent??[]);$('tick').textContent=absent.has('tick')?'absent from model frames':end?u32(index,4).toLocaleString():`${u32(index,4).toLocaleString()} → ${u32(index,8).toLocaleString()}`;$('last-action').textContent=index?(names[u8(index-1,12)]??'Unknown'):'— reset —';$('action').textContent=end?'No next recorded action':names[action]||`Action ${action}`;$('score').textContent=end?`${score} / 226`:`${score} → ${u16(index,20)} / 226`;$('vitals').textContent=`HP ${f32(index,22).toFixed(1)}${end?'':` → ${f32(index,26).toFixed(1)}`} · mana ${view.getInt16(at(index,30),true)}`;$('player-position').textContent=absent.has('position')?'absent from model frames':`row ${u8(index,15)}, column ${u8(index,16)}`;renderModel();drawChart();drawResourcesChart()}
+function seek(i){index=Math.max(0,Math.min(END,i));render()}
+function stop(){playing=false;$('play').textContent='Play'}
+function animate(time){if(!playing)return;if(!lastTime)lastTime=time;carry+=(time-lastTime)*Number($('speed').value)/1000;lastTime=time;if(carry>=1){const delta=Math.floor(carry);carry-=delta;seek(index+delta)}if(index>=END){stop();return}requestAnimationFrame(animate)}
+function drawChart(){if(!view)return;const c=$('score-chart'),ctx=c.getContext('2d'),w=c.width,h=c.height,pad=28;ctx.clearRect(0,0,w,h);ctx.fillStyle='#f9fbfb';ctx.fillRect(0,0,w,h);ctx.strokeStyle='#d6e2e5';ctx.lineWidth=1;for(let score=0;score<=225;score+=50){const y=h-pad-(score/225)*(h-2*pad);ctx.beginPath();ctx.moveTo(pad,y);ctx.lineTo(w-pad,y);ctx.stroke();ctx.fillStyle='#61717a';ctx.font='12px system-ui';ctx.fillText(String(score),2,y+4)}ctx.strokeStyle='#16849a';ctx.lineWidth=2;ctx.beginPath();for(let i=0;i<COUNT;i++){const x=pad+i/END*(w-2*pad),s=u16(i,20),y=h-pad-s/225*(h-2*pad);if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y)}ctx.stroke();for(const i of changes){const x=pad+i/END*(w-2*pad);ctx.fillStyle='rgba(196,92,40,.65)';ctx.fillRect(x,pad,2,h-2*pad)}if(divergence>=0&&isModel()){const x=pad+divergence/Math.max(1,END)*(w-2*pad);ctx.fillStyle='rgba(224,64,251,.8)';ctx.fillRect(x-1,pad,3,h-2*pad);ctx.fillText('first divergence',Math.min(x+5,w-100),h-8)}const marker=pad+index/END*(w-2*pad);ctx.strokeStyle='#112a34';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(marker,0);ctx.lineTo(marker,h);ctx.stroke();ctx.fillStyle='#112a34';ctx.fillText(`action ${index.toLocaleString()}`,Math.min(marker+6,w-110),17)}
+function drawResourcesChart(){
+  if(!view)return;
+  const canvas=$('resources-chart'),ctx=canvas.getContext('2d'),w=canvas.width,h=canvas.height,pad=28;
+  if(!resourcePlot){
+    resourcePlot=document.createElement('canvas');resourcePlot.width=w;resourcePlot.height=h;
+    const plot=resourcePlot.getContext('2d');
+    plot.fillStyle='#f9fbfb';plot.fillRect(0,0,w,h);
+    plot.lineWidth=1;plot.font='12px system-ui';
+    for(let pct=0;pct<=100;pct+=25){
+      const y=h-pad-pct/100*(h-2*pad);
+      plot.strokeStyle='#d6e2e5';plot.beginPath();plot.moveTo(pad,y);plot.lineTo(w-pad,y);plot.stroke();
+      plot.fillStyle='#61717a';plot.fillText(pct+'%',2,y+4);
+    }
+    const series=[
+      ['#42b65a',i=>f32(i,22)/Math.max(1,u8(i,826))],
+      ['#438ed0',i=>view.getInt16(at(i,30),true)/Math.max(1,u8(i,827))],
+      ['#d5a43e',i=>u8(i,829)/Math.max(1,u8(i,828))],
+      ['#4cabc5',i=>u8(i,830)/Math.max(1,u8(i,828))],
+      ['#ad79d6',i=>u8(i,831)/Math.max(1,u8(i,828))],
+    ];
+    for(const [color,value] of series){
+      plot.strokeStyle=color;plot.lineWidth=1.4;plot.beginPath();
+      for(let i=0;i<COUNT;i++){
+        const x=pad+i/END*(w-2*pad),y=h-pad-Math.max(0,Math.min(1,value(i)))*(h-2*pad);
+        if(i===0)plot.moveTo(x,y);else plot.lineTo(x,y);
+      }
+      plot.stroke();
+    }
+  }
+  ctx.clearRect(0,0,w,h);ctx.drawImage(resourcePlot,0,0);
+  const marker=pad+index/END*(w-2*pad);
+  ctx.strokeStyle='#112a34';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(marker,0);ctx.lineTo(marker,h);ctx.stroke();
+}
+function milestones(){let lastFloor=u8(0,13),lastScore=0;for(let i=0;i<END;i++){const floor=u8(i,13),score=u16(i,20);if(floor!==lastFloor){changes.push(i);$('events').add(new Option(`Action ${i+1}: enter ${floors[floor]??'floor '+floor}`,i));lastFloor=floor}if(score>lastScore){rewards.push(i);if(score>=200||score-lastScore>=8)$('events').add(new Option(`Action ${i+1}: +${score-lastScore} points (${score}/226)`,i));lastScore=score}}$('events').add(new Option(isModel()?'Final frame':`Final state: tick ${u32(END,4).toLocaleString()}`,END))}
+async function decompress(encoded){const binary=atob(encoded),compressed=new Uint8Array(binary.length);for(let i=0;i<binary.length;i++)compressed[i]=binary.charCodeAt(i);const stream=new Blob([compressed]).stream().pipeThrough(new DecompressionStream('gzip'));return new Uint8Array(await new Response(stream).arrayBuffer())}
+async function loadGame(game){
+  const version=++loadVersion;
+  stop();view=null;bytes=null;healthView=null;tokens=null;referenceTokens=null;notes=null;divergence=-1;currentGame=game;index=0;changes=[];rewards=[];resourcePlot=null;lastInventory='';
+  $('status').textContent=`Loading ${game.title}…`;
+  try{
+    const nextBytes=await decompress(game.gzip);
+    const nextHealth=game.healthGzip?await decompress(game.healthGzip):null;
+    const nextTokens=game.tokensGzip?await decompress(game.tokensGzip):null;
+    const nextReference=game.referenceGzip?await decompress(game.referenceGzip):null;
+    if(version!==loadVersion)return;
+    tokens=nextTokens;referenceTokens=nextReference;notes=game.annotations??null;divergence=firstDivergence(tokens,referenceTokens);
+    bytes=nextBytes;COUNT=game.frames;END=COUNT-1;
+    if(COUNT<2||bytes.length!==COUNT*RECORD)throw Error(`Invalid frame byte count: ${bytes.length}`);
+    view=new DataView(bytes.buffer);
+    if(nextHealth){
+      if(nextHealth.length!==COUNT*120)throw Error('Invalid entity-health byte count');
+      healthView=new DataView(nextHealth.buffer);
+    }
+    if(u8(END,12)!==255||u32(END,4)!==game.tick||u16(END,20)!==game.score)throw Error('Final frame metadata mismatch');
+    $('seek').max=END;$('events').replaceChildren(new Option('Reset',0));
+    $('game-description').textContent=game.description;
+    $('card-actions').textContent=END.toLocaleString();
+    $('card-ticks').textContent=game.tick.toLocaleString();
+    $('card-score').textContent=`${game.score} / 226`;
+    $('card-score-label').textContent=`selected game reward · ${(100*game.score/226).toFixed(2)}%`;
+    if(Number.isFinite(game.meanScore)&&Number.isFinite(game.meanReturnPct)){
+      $('card-mean').textContent=`${game.meanScore.toFixed(2)} / 226`;
+      $('card-mean-label').textContent=`checkpoint average · ${game.meanReturnPct.toFixed(2)}%`;
+    }else{
+      $('card-mean').textContent='—';
+      $('card-mean-label').textContent='checkpoint average unavailable';
+    }
+    $('end-label').textContent=game.endLabel;
+    $('provenance').textContent=game.provenance;
+    setModelMode(isModel());
+    if(isModel())$('card-ticks').textContent='absent';
+    milestones();
+    $('status').textContent=isModel()?`Loaded ${END.toLocaleString()} generated decisions. Use the timeline to inspect any step.`:`Loaded ${END.toLocaleString()} exact actions. Use the timeline to inspect any step.`;
+    render();
+  }catch(error){
+    if(version!==loadVersion)return;
+    view=null;$('status').textContent=`Could not load replay: ${error.message}`;console.error(error);
+  }
+}
+function initialize(){
+  const games=window.CRAFTAX_GAMES;
+  if(!Array.isArray(games)||!games.length)throw Error('No games embedded');
+  for(const [i,game] of games.entries())$('game-picker').add(new Option(game.title,i));
+  $('game-picker').onchange=()=>loadGame(games[Number($('game-picker').value)]);
+  const selected=window.CRAFTAX_DEFAULT_GAME??0;
+  if(!Number.isInteger(selected)||selected<0||selected>=games.length)throw Error('Invalid default game');
+  $('game-picker').value=String(selected);
+  loadGame(games[selected]);
+}
+function viewExplain(){return viewMode==='map'?'The full 48×48 simulator map. Colored halos identify entity classes, sprites show their types, and shading indicates darkness.':isModel()?'The 9×11 board decoded from the model\'s tokens. The simulator map, ticks, and hidden mobs are absent from model frames.':'The exact 9×11 board observed by the policy before its next action.'}
+function setView(mode){viewMode=mode;const map=mode==='map';$('map-tab').classList.toggle('active',map);$('policy-tab').classList.toggle('active',!map);$('map-legend').classList.toggle('visible',map);$('map-tools').classList.toggle('visible',map);$('heat-note').classList.toggle('visible',map&&heatMode!=='off');$('view-explain').textContent=viewExplain();render()}
+$('policy-tab').onclick=()=>setView('policy');$('map-tab').onclick=()=>setView('map');$('first-divergence').onclick=()=>{stop();seek(divergence)};$('heat-mode').onchange=event=>{heatMode=event.target.value;$('heat-note').classList.toggle('visible',heatMode!=='off'&&viewMode==='map');render()};$('restart').onclick=()=>{stop();seek(0)};$('previous').onclick=()=>{stop();seek(index-1)};$('next').onclick=()=>{stop();seek(index+1)};$('skip').onclick=()=>{stop();seek(index+100)};$('play').onclick=()=>{if(playing){stop();return}if(index>=END)seek(0);playing=true;lastTime=0;carry=0;$('play').textContent='Pause';requestAnimationFrame(animate)};$('seek').oninput=event=>{stop();seek(Number(event.target.value))};$('prev-floor').onclick=()=>{stop();seek([...changes].reverse().find(i=>i<index)??0)};$('next-floor').onclick=()=>{stop();seek(changes.find(i=>i>index)??END)};$('next-reward').onclick=()=>{stop();seek(rewards.find(i=>i>index)??END)};$('events').onchange=event=>{stop();seek(Number(event.target.value))};$('resources-chart').onclick=event=>{const rect=event.currentTarget.getBoundingClientRect(),fraction=(event.clientX-rect.left)/rect.width;stop();seek(Math.round(fraction*END))};$('score-chart').onclick=event=>{const rect=event.currentTarget.getBoundingClientRect(),fraction=(event.clientX-rect.left)/rect.width;stop();seek(Math.round(fraction*END))};document.addEventListener('keydown',event=>{if(event.target.closest('input,select,button'))return;if(event.key==='ArrowRight'){stop();seek(index+1)}else if(event.key==='ArrowLeft'){stop();seek(index-1)}else if(event.key===' '){event.preventDefault();$('play').click()}});
+sprites.decode().then(initialize).catch(error=>{$('status').textContent=`Sprite sheet failed: ${error.message}`});
+</script>
+</body>
+</html>

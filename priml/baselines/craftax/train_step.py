@@ -1,784 +1,1636 @@
-"""Proximal policy optimization over the Craftax environment.
+"""One learner minibatch, as PufferLib's ``train_epoch_gpu`` runs it.
 
-One training step is a whole PPO update: collect a fixed rollout with the
-current policy, score it with generalized advantage estimation, then take
-several optimization passes over shuffled minibatches of that same rollout.
-Reusing the data is what makes PPO sample-efficient, and the clipped objective
-is what keeps the reuse from moving the policy somewhere the data no longer
-describes.
+The rollout arrives time-major, ``[horizon, agents, ...]``; the learner
+reads it agent-major, ``[agents, horizon, ...]``, with rewards scaled, then
+clamped to ``[-1, 1]`` (``pufferl.cu:1472-1489``). Each of the epoch's minibatches is
+``rows`` consecutive agents starting at ``(index * rows) mod agents``, so the
+18 minibatches of ``exp000`` wrap past the 16 that cover the 2,048 agents
+once. Every minibatch starts its recurrence from the carry the rollout began
+with, never from another minibatch's (``pufferl.cu:1511-1552``).
 
-The step owns the environment rather than receiving batches, because on-policy
-data cannot be prepared in advance: the next observation depends on the action
-this policy just chose.
+``score_minibatch`` is the forward and the learning rule; ``learn_minibatch``
+adds autograd's backward from the rule's total. :class:`AgentWindows` is
+PufferLib's epoch: those minibatches, an optimizer step after each, and an
+optional :class:`Auxiliary` loss that the first minibatch adds to its
+backward. It fills the step's ``learner`` slot, which another epoch can fill
+instead (``update.ShuffledTransitions``). ``CraftaxTrainStep`` is the epoch pipeline
+around it: with two rollout slots, the asynchronous rollout one epoch ahead of
+the learner; with one, a rollout collected with the current weights before
+each epoch learns from it. With ``feature_training`` the learner also trains
+the world model behind a feature: each window recomputes its features from
+the stored contexts with the learner's copy of the weights
+(``world_model.context``), and each epoch's rollout reads the copy published
+into the feature's source before it starts, its rows' histories rebuilt
+under it.
 
-On a GPU the policy's action step and the whole update -- every epoch, every
-minibatch, every optimizer step -- are replayed as CUDA graphs (``cuda_graph``),
-so an update costs one launch instead of Python per minibatch. What a graph
-reads and writes must keep its memory, which is why the rollout, the policy's
-outputs, and the update's results live in buffers allocated once and
-overwritten in place.
+References:
+    https://github.com/PufferAI/PufferLib
+        Suarez. PufferLib (MIT license), ``src/pufferl.cu``, pin ``6ffa5b10``.
+
 """
 
 from __future__ import annotations
 
-from dataclasses import field
-from typing import TYPE_CHECKING, Self, cast, override
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import ExitStack, nullcontext
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import (
+    TYPE_CHECKING,
+    Protocol,
+    Self,
+    TypedDict,
+    cast,
+    override,
+    runtime_checkable,
+)
 
-from configgle import Makes, PartialConfig
+import math
+import struct
+import time
+
+from configgle import Fig, Makeable, PartialConfig
 from torch import Tensor
 
+import numpy as np
 import torch
 
-from priml.baselines.craftax.cuda_graph import CudaGraphed
 from priml.baselines.craftax.env import CraftaxEnv
-from priml.baselines.craftax.evaluation import (
-    evaluation_mode,
-    evaluation_transaction,
+from priml.baselines.craftax.evaluation import Evaluation
+from priml.baselines.craftax.game.state import LOG_DTYPE
+from priml.baselines.craftax.metric import (
+    LOG_FIELDS,
+    aggregate_logs,
+    report_metrics,
 )
-from priml.baselines.craftax.game.constants import Action
-from priml.baselines.craftax.game.observation import observation_size
-from priml.baselines.craftax.model import ActorCritic
+from priml.baselines.craftax.model import (
+    MinGRUPolicy,
+    Policy,
+    PolicyConfig,
+)
+from priml.baselines.craftax.rollout import (
+    CAPTURE_LOCK,
+    FeatureSource,
+    PhiloxSampler,
+    Rollout,
+    Sampler,
+)
+from priml.baselines.craftax.world_model.context import (
+    ContextReplay,
+    Contexts,
+    JointWorldModel,
+)
+from priml.baselines.craftax.world_model.feature import WorldModelFeature
 from priml.lib.codec import from_plain
-from priml.loss.policy_gradient import (
-    ClippedPolicyLoss,
-    categorical_entropy,
-    clipped_policy_loss,
-)
-from priml.math.advantage import explained_variance, generalized_advantage
-from priml.math.schedules import linear
-from priml.train.train_step import TrainStep
+from priml.loss.policy_gradient import PPO, TorchPPO
+from priml.loss.policy_gradient_kernel import TritonPPO
+from priml.math.schedules import Schedule, cosine
+from priml.model.min_gru import TritonScan
+from priml.optimizers.fused_muon import FusedMuon
+from priml.optimizers.lr import remember_initial_lrs
+from priml.timer import CheckpointableStepTimer
+from priml.train.parallelism import NoParallel
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Mapping, Sequence
+    from typing_extensions import TypeIs
 
-    from priml.baselines.craftax.data import EvaluationActor
+    from torch.optim.optimizer import StateDict as OptimizerState
+
+    from priml.baselines.craftax.rollout import RolloutStorage
     from priml.train.custom_types import TrainStepOutput
 
 
-class Rollout:
-    """One batch of experience, held time-major as ``[steps, envs, ...]``.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LearnerRollout:
+    """A rollout in the learner's layout: agent-major, rewards scaled and clamped.
 
-    Time-major is the natural layout for the backward advantage recursion,
-    and flattening it for optimization is a reshape rather than a transpose.
+    Each tensor keeps its :class:`RolloutStorage` dtype.
+
+    Attributes:
+      observations: ``[agents, horizon, observation_size]``.
+      actions: ``[agents, horizon]`` fp32.
+      logprobs: ``[agents, horizon]``.
+      rewards: ``[agents, horizon]``, scaled and clamped.
+      terminals: ``[agents, horizon]``.
+      values: ``[agents, horizon]``.
+      action_mask: ``[agents, horizon, num_actions]``.
+      initial_states: ``[layers, agents, width]``, the carry at step 0.
+      branch_starts: ``[agents]`` uint8, 1 where step 0 is a practice restore.
+      features: ``[agents, horizon, width]``, the feature each step's actor
+        read; None without a feature.
+      contexts: Each step's world-model context, agent-major: what a
+        learner that trains the feature's world model recomputes the
+        features from; None otherwise.
+
     """
 
-    __slots__ = (
-        "action",
-        "advantage",
-        "done",
-        "log_prob",
-        "observation",
-        "reward",
-        "target",
-        "value",
-    )
-
-    def __init__(
-        self,
-        *,
-        observation: Tensor,
-        action: Tensor,
-        log_prob: Tensor,
-        value: Tensor,
-        reward: Tensor,
-        done: Tensor,
-        advantage: Tensor,
-        target: Tensor,
-    ) -> None:
-        self.observation = observation
-        self.action = action
-        self.log_prob = log_prob
-        self.value = value
-        self.reward = reward
-        self.done = done
-        self.advantage = advantage
-        self.target = target
+    observations: Tensor
+    actions: Tensor
+    logprobs: Tensor
+    rewards: Tensor
+    terminals: Tensor
+    values: Tensor
+    action_mask: Tensor
+    initial_states: Tensor
+    branch_starts: Tensor
+    features: Tensor | None = None
+    contexts: Contexts | None = None
 
     @classmethod
-    def zeros(
+    def from_time_major(  # noqa: PLR0917 -- One argument per rollout buffer, as PufferLib stores them.
         cls,
+        observations: Tensor,
+        actions: Tensor,
+        logprobs: Tensor,
+        rewards: Tensor,
+        terminals: Tensor,
+        values: Tensor,
+        action_mask: Tensor,
+        initial_states: Tensor,
+        branch_starts: Tensor,
         *,
-        steps: int,
-        envs: int,
-        observation_size: int,
-        device: torch.device,
-    ) -> Self:
-        """Allocate a rollout to fill one step at a time, reused every update.
+        reward_scale: float,
+        reward_clip: float,
+        features: Tensor | None = None,
+        contexts: Contexts | None = None,
+    ) -> LearnerRollout:
+        """Transpose the time-major buffers; scale, then clamp, the rewards.
 
         Args:
-          steps: Environment steps per worker.
-          envs: Parallel workers.
-          observation_size: Width of one observation.
-          device: Device the rollout lives on.
+          observations: ``[horizon, agents, observation_size]``.
+          actions: ``[horizon, agents]``.
+          logprobs: ``[horizon, agents]``.
+          rewards: ``[horizon, agents]``.
+          terminals: ``[horizon, agents]``.
+          values: ``[horizon, agents]``.
+          action_mask: ``[horizon, agents, num_actions]``.
+          initial_states: ``[layers, agents, width]``; already agent-major.
+          branch_starts: ``[agents]``; already agent-indexed.
+          reward_scale: Rewards are multiplied by it first.
+          reward_clip: Then clamped to ``[-reward_clip, reward_clip]``.
+          features: ``[horizon, agents, width]``; None without a feature.
+          contexts: Each step's world-model context, already agent-major;
+            None unless the learner trains the feature's world model.
 
         Returns:
-          rollout: Zero-filled storage.
+          rollout: The agent-major copy.
 
         """
-        shape = (steps, envs)
         return cls(
-            observation=torch.zeros((*shape, observation_size), device=device),
-            action=torch.zeros(shape, dtype=torch.int64, device=device),
-            log_prob=torch.zeros(shape, device=device),
-            value=torch.zeros(shape, device=device),
-            reward=torch.zeros(shape, device=device),
-            done=torch.zeros(shape, dtype=torch.bool, device=device),
-            advantage=torch.zeros(shape, device=device),
-            target=torch.zeros(shape, device=device),
+            observations=observations.transpose(0, 1).contiguous(),
+            actions=actions.transpose(0, 1).contiguous(),
+            logprobs=logprobs.transpose(0, 1).contiguous(),
+            # Contiguous first: the product and the clamp keep their input's
+            # strides. In bf16 the clamp is PufferLib's fp32 clamp then store:
+            # rounding is monotone, so the two commute.
+            rewards=(rewards.transpose(0, 1).contiguous() * reward_scale).clamp(
+                -reward_clip,
+                reward_clip,
+            ),
+            terminals=terminals.transpose(0, 1).contiguous(),
+            values=values.transpose(0, 1).contiguous(),
+            action_mask=action_mask.transpose(0, 1).contiguous(),
+            initial_states=initial_states,
+            branch_starts=branch_starts,
+            features=None
+            if features is None
+            else features.transpose(0, 1).contiguous(),
+            contexts=contexts,
         )
 
-    def minibatches(
-        self,
-        *,
-        count: int,
-        generator: torch.Generator | None = None,
-    ) -> Iterator[dict[str, Tensor]]:
-        """Shuffle every transition and yield ``count`` equal minibatches.
-
-        Transitions are shuffled across BOTH time and environment: the value
-        target already carries the temporal structure, so the optimizer sees
-        each transition as an independent sample.
+    def minibatch(self, offset: int, rows: int) -> LearnerRollout:
+        """Return the views of ``rows`` agents from ``offset``.
 
         Args:
-          count: Minibatches per pass.
-          generator: Source of randomness for the shuffle.
+          offset: The first agent.
+          rows: Agents per minibatch.
 
-        Yields:
-          minibatch: Flat tensors for one optimization step.
+        Returns:
+          minibatch: Views into this rollout, so nothing is copied.
 
         """
-        flat = {
-            "observation": self.observation.flatten(0, 1),
-            "action": self.action.flatten(),
-            "log_prob": self.log_prob.flatten(),
-            "value": self.value.flatten(),
-            "advantage": self.advantage.flatten(),
-            "target": self.target.flatten(),
-        }
-        order = torch.randperm(
-            flat["action"].shape[0],
-            generator=generator,
-            device=flat["action"].device,
+        return LearnerRollout(
+            observations=self.observations[offset : offset + rows],
+            actions=self.actions[offset : offset + rows],
+            logprobs=self.logprobs[offset : offset + rows],
+            rewards=self.rewards[offset : offset + rows],
+            terminals=self.terminals[offset : offset + rows],
+            values=self.values[offset : offset + rows],
+            action_mask=self.action_mask[offset : offset + rows],
+            initial_states=self.initial_states[:, offset : offset + rows],
+            branch_starts=self.branch_starts[offset : offset + rows],
+            features=None
+            if self.features is None
+            else self.features[offset : offset + rows],
+            contexts=None
+            if self.contexts is None
+            else self.contexts.rows(offset, rows),
         )
-        for chunk in order.chunk(count):
-            yield {name: value[chunk] for name, value in flat.items()}
 
 
-class CraftaxTrainStep(TrainStep):
-    """Model, environment, and optimizer for one PPO experiment."""
+def minibatch_offsets(*, agents: int, rows: int, count: int) -> list[int]:
+    """Return PufferLib's minibatch starts: ``(index * rows) mod agents``.
 
-    class Config(
-        Makes["CraftaxTrainStep"],
-        TrainStep.Config[ActorCritic.Config],
-        kw_only=True,
-    ):
-        """Model, environment, and the PPO hyperparameters."""
+    Args:
+      agents: Agents in the rollout.
+      rows: Agents per minibatch; PufferLib's ``minibatch_size / horizon``.
+      count: Minibatches per epoch; PufferLib's ``int(replay_ratio * agents *
+        horizon / minibatch_size)``.
 
-        # ---- Inherited slots, re-defaulted for this recipe. ----
+    Returns:
+      offsets: One per minibatch, in learning order.
 
-        model: ActorCritic.Config = field(default_factory=ActorCritic.Config)
-        """Policy and value network."""
+    """
+    return [(index * rows) % agents for index in range(count)]
 
-        # ---- This recipe's own. ----
+
+def minibatch_count(
+    *,
+    agents: int,
+    horizon: int,
+    minibatch_size: int,
+    replay_ratio: float,
+) -> int:
+    """Return PufferLib's minibatch count, truncated as its ``int`` arithmetic is.
+
+    Args:
+      agents: Agents in the rollout.
+      horizon: Steps per rollout.
+      minibatch_size: Transitions per minibatch.
+      replay_ratio: Passes over the rollout; 1.17 gives 18 of 16.
+
+    Returns:
+      count: ``int(replay_ratio * agents * horizon / minibatch_size)``.
+
+    """
+    return int(replay_ratio * (agents * horizon) / minibatch_size)
+
+
+def score_minibatch(
+    policy: Policy,
+    objective: PPO,
+    minibatch: LearnerRollout,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Run one minibatch's forward and learning rule.
+
+    Args:
+      policy: The live policy.
+      objective: The learning rule, with its coefficients.
+      minibatch: ``rows`` agents of the rollout.
+
+    Returns:
+      total: The rule's total plus the policy's auxiliary loss, 0-dim;
+        autograd differentiates it when the policy's parameters require
+        gradients and grad mode is on.
+      losses: ``[8]`` fp32, the rule's summed terms.
+      auxiliary_loss: 0-dim fp32, the policy's own loss inside ``total``.
+
+    """
+    decoded, _, auxiliary_loss = policy.forward_sequence(
+        minibatch.observations,
+        minibatch.initial_states,
+        minibatch.terminals,
+        actions=minibatch.actions,
+        features=minibatch.features,
+    )
+    total, losses = objective(
+        decoded,
+        actions=minibatch.actions,
+        action_mask=minibatch.action_mask,
+        old_logprobs=minibatch.logprobs,
+        rewards=minibatch.rewards,
+        terminals=minibatch.terminals,
+        values=minibatch.values,
+    )
+    return total + auxiliary_loss, losses, auxiliary_loss
+
+
+def learn_minibatch(
+    policy: Policy,
+    objective: PPO,
+    minibatch: LearnerRollout,
+    *,
+    extra_loss: Tensor | None = None,
+) -> tuple[Tensor, Tensor]:
+    """Run one minibatch's forward, learning rule and backward.
+
+    Autograd adds each weight's gradient to its ``grad``, which is the
+    gradient itself when the ``grad`` is None, as ``zero_grad`` leaves it.
+
+    Args:
+      policy: The live policy.
+      objective: The learning rule, with its coefficients.
+      minibatch: ``rows`` agents of the rollout.
+      extra_loss: A 0-dim loss from outside the minibatch, added to its total
+        before the one backward; None adds nothing.
+
+    Returns:
+      losses: ``[8]`` fp32, the summed terms.
+      auxiliary_loss: 0-dim fp32, the policy's own loss, detached.
+
+    """
+    total, losses, auxiliary_loss = score_minibatch(policy, objective, minibatch)
+    (total if extra_loss is None else total + extra_loss).backward()
+    return losses, auxiliary_loss.detach()
+
+
+def learn_joint_minibatch(
+    policy: Policy,
+    objective: PPO,
+    minibatch: LearnerRollout,
+    world_model: JointWorldModel,
+    *,
+    extra_loss: Tensor | None = None,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Learn one minibatch whose features the trained world model computes now.
+
+    The two-phase gradient of ``world_model.context``: the features are
+    recomputed from the minibatch's contexts without a graph, the policy's
+    backward (:func:`learn_minibatch`) reads them as a leaf and leaves their
+    gradient there, and the world model's backward takes it into its weights.
+    Every gradient is added to its weight's ``grad``, as autograd adds it.
+
+    Args:
+      policy: The live policy.
+      objective: The learning rule, with its coefficients.
+      minibatch: ``rows`` agents of the rollout, with their contexts; the
+        stored features are only compared with.
+      world_model: The trained copy of the feature's world model.
+      extra_loss: A 0-dim loss from outside the minibatch, added to the
+        policy's total before its backward; None adds nothing.
+
+    Returns:
+      losses: ``[8]`` fp32, the summed terms.
+      auxiliary_loss: 0-dim fp32, the policy's own loss, detached.
+      feature_gap: 0-dim fp32, ``|F - F_stored| / |F_stored|`` over the
+        window: the recomputed features against those the actor read,
+        rounding alone when the actor ran the same weights.
+
+    Raises:
+      ValueError: The minibatch carries no contexts or no stored features,
+        or the policy's loss does not read the features.
+
+    """
+    stored = minibatch.features
+    if minibatch.contexts is None:
+        raise ValueError(
+            "training the feature's world model needs each step's stored context",
+        )
+    if stored is None:
+        raise ValueError(
+            "training the feature's world model compares the features it "
+            "recomputes with the stored ones, and none are stored",
+        )
+    replay = world_model.forward(minibatch.contexts)
+    difference = (replay.features.float() - stored.float()).norm()
+    feature_gap = difference / stored.float().norm()
+    features = replay.features.detach().requires_grad_()
+    losses, auxiliary_loss = learn_minibatch(
+        policy,
+        objective,
+        replace(minibatch, features=features),
+        extra_loss=extra_loss,
+    )
+    gradient = features.grad
+    if gradient is None:
+        raise ValueError(
+            "the policy's loss does not read the features, so the world model "
+            "has no gradient to learn from",
+        )
+    world_model.backward(replay, gradient)
+    return losses, auxiliary_loss, feature_gap
+
+
+class Learner(Protocol):
+    """How one epoch learns from its rollout: its rule, minibatches and optimizer steps."""
+
+    def prepare(self, config: CraftaxTrainStep.Config) -> None:
+        """Check the step's recipe against this learner and take its geometry.
+
+        The step calls it before it builds its policy, optimizer or
+        environments, so a recipe the learner cannot run fails at once.
+
+        Args:
+          config: The step's recipe: its environments, rollout and horizon.
+
+        """
+        ...
+
+    def begin_epoch(self, step: CraftaxTrainStep, epoch: int) -> None:
+        """Do epoch ``epoch``'s host work, before its minibatches run.
+
+        The minibatches may run as a replayed CUDA graph, so anything that
+        must change between epochs is written here, into tensors they read.
+
+        Args:
+          step: The train step, for its geometry and device.
+          epoch: The epoch's index, counted across resumes.
+
+        """
+        ...
+
+    def __call__(
+        self,
+        step: CraftaxTrainStep,
+        rollout: LearnerRollout,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """Run the epoch's minibatches on ``step``'s policy and optimizer.
+
+        Args:
+          step: The train step: its policy, optimizer, objective and geometry.
+          rollout: The epoch's rollout, agent-major.
+
+        Returns:
+          losses: ``[8]`` fp32, the mean of the minibatches' terms.
+          metrics: Any further 0-dim values the epoch reports, by name.
+
+        """
+        ...
+
+    def loss(
+        self,
+        step: CraftaxTrainStep,
+        rollout: LearnerRollout,
+    ) -> tuple[Tensor, Tensor]:
+        """Score the rollout's first minibatch by the learner's rule, without updating.
+
+        Args:
+          step: The train step: its policy and geometry.
+          rollout: The rollout, agent-major.
+
+        Returns:
+          total: The minibatch's total loss, 0-dim.
+          losses: ``[8]`` fp32, its terms.
+
+        """
+        ...
+
+    def state_dict(self) -> dict[str, Tensor]:
+        """Return what the learner carries from epoch to epoch; the live tensors."""
+        ...
+
+    def load_state_dict(self, state: Mapping[str, Tensor]) -> None:
+        """Restore a :meth:`state_dict`, copying into any tensor a graph addresses."""
+        ...
+
+
+class Auxiliary(Protocol):
+    """A loss beside the learning rule's, fed each epoch's rollout.
+
+    :class:`AgentWindows` calls :meth:`ingest` then :meth:`loss` once per
+    epoch, before its first window, and adds the loss to that window's
+    backward. Both run inside the epoch's CUDA graph, so they keep static
+    shapes, keep their state in device tensors and never read one back to the
+    host.
+    """
+
+    def prepare(self, config: CraftaxTrainStep.Config) -> None:
+        """Check the step's recipe against this loss, before anything is built."""
+        ...
+
+    def ingest(self, rollout: LearnerRollout) -> None:
+        """Take in what the loss learns from out of the epoch's rollout."""
+        ...
+
+    def loss(self, policy: Policy) -> tuple[Tensor, dict[str, Tensor]]:
+        """Return the loss for the first window, 0-dim fp32, and metrics by name."""
+        ...
+
+    def state_dict(self) -> dict[str, Tensor]:
+        """Return the state a resumed run needs; the live tensors."""
+        ...
+
+    def load_state_dict(self, state: Mapping[str, Tensor]) -> None:
+        """Restore a :meth:`state_dict`."""
+        ...
+
+
+class AgentWindows:
+    """PufferLib's epoch: windows of whole agents, each scored by its objective.
+
+    The windows are ``rows`` consecutive agents from ``(index * rows) mod
+    agents`` (:func:`minibatch_offsets`), the whole horizon each; an optimizer
+    step follows each window's ``learn_minibatch``. An :class:`Auxiliary`
+    ingests the epoch's rollout first, and its loss joins the first window's
+    backward. When the step trains its feature's world model (``step.joint``),
+    each window learns by :func:`learn_joint_minibatch` instead, from features
+    recomputed with the weights of the moment.
+    """
+
+    class Config(Fig["AgentWindows"]):
+        """The learning rule, the size and count of the windows, and an auxiliary loss."""
+
+        objective: Makeable[PPO] = field(default_factory=TritonPPO.Config)
+        """The learning rule and its coefficients, which score each window."""
+
+        minibatch_size: int = 8_192
+        """Transitions per window, whole agents' horizons; PufferLib's
+        ``train.minibatch_size``."""
+
+        replay_ratio: float = 1.0
+        """Windows per epoch as a fraction of the rollout's size; PufferLib's
+        ``train.replay_ratio``."""
+
+        auxiliary: Makeable[Auxiliary] | None = None
+        """A loss the first window adds to its backward, fed each epoch's
+        rollout; None learns the rule alone."""
+
+    def __init__(self, config: Config) -> None:
+        """Build the rule and the auxiliary loss.
+
+        Args:
+          config: The rule, the windows' size and count, and the auxiliary.
+
+        Raises:
+          ValueError: ``replay_ratio`` is not positive and finite, or the
+            rule or the auxiliary refuses a coefficient.
+
+        """
+        replay_ratio = config.replay_ratio
+        if math.isnan(replay_ratio) or math.isinf(replay_ratio) or replay_ratio <= 0:
+            raise ValueError(
+                f"replay_ratio must be positive and finite, not {replay_ratio}",
+            )
+        self.config = config
+        self.objective = config.objective.make()
+        self.auxiliary = None if config.auxiliary is None else config.auxiliary.make()
+        self.rows = 0
+        """Agents per window, from :meth:`prepare`."""
+        self.offsets: list[int] = []
+        """Each window's first agent, in learning order, from :meth:`prepare`."""
+
+    def prepare(self, config: CraftaxTrainStep.Config) -> None:
+        """Place the windows on the step's rollout.
+
+        Args:
+          config: The step's recipe.
+
+        Raises:
+          ValueError: The windows do not tile the rollout, the ratio leaves
+            none, or the rule or the auxiliary cannot learn from the rollout.
+
+        """
+        horizon = config.rollout.horizon
+        agents = config.env.num_envs
+        size = self.config.minibatch_size
+        if size <= 0 or size % horizon:
+            raise ValueError(
+                "minibatch_size must be a positive multiple of the horizon",
+            )
+        rows = size // horizon
+        # PufferLib reads ``rows`` agents from each start unwrapped, past the rollout's
+        # end when they do not tile it (``pufferl.cu:1512-1520``).
+        if agents % rows:
+            msg = f"a minibatch of {rows} agents must tile the {agents} environments"
+            raise ValueError(msg)
+        count = minibatch_count(
+            agents=agents,
+            horizon=horizon,
+            minibatch_size=size,
+            replay_ratio=self.config.replay_ratio,
+        )
+        if count < 1:
+            raise ValueError(
+                f"replay_ratio {self.config.replay_ratio} leaves no minibatch per epoch",
+            )
+        self.objective.check_horizon(horizon)
+        if self.auxiliary is not None:
+            self.auxiliary.prepare(config)
+        self.rows = rows
+        self.offsets = minibatch_offsets(agents=agents, rows=rows, count=count)
+
+    def begin_epoch(self, step: CraftaxTrainStep, epoch: int) -> None:
+        """Nothing to prepare: the windows are the same every epoch."""
+        del step, epoch
+
+    def __call__(
+        self,
+        step: CraftaxTrainStep,
+        rollout: LearnerRollout,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """Learn from each window, then step.
+
+        Args:
+          step: The train step: its policy, optimizer and device.
+          rollout: The epoch's rollout, agent-major.
+
+        Returns:
+          losses: ``[8]`` fp32, the windows' mean terms.
+          metrics: ``auxiliary_loss``, the windows' mean of the policy's own
+            loss, and the auxiliary's metrics; when the step trains its
+            feature's world model, ``joint/feature_gap``, the first window's
+            (:func:`learn_joint_minibatch`).
+
+        """
+        total = torch.zeros(
+            len(TorchPPO.Config.LOSS_NAMES),
+            dtype=torch.float32,
+            device=step.device,
+        )
+        policy_auxiliary = torch.zeros((), dtype=torch.float32, device=step.device)
+        extra_loss: Tensor | None = None
+        metrics: dict[str, Tensor] = {}
+        if self.auxiliary is not None:
+            self.auxiliary.ingest(rollout)
+            extra_loss, metrics = self.auxiliary.loss(step.model)
+        for offset in self.offsets:
+            # None, not zeros: the backward then hands each weight its gradient
+            # as computed, with no add onto a zeroed buffer.
+            step.optimizer.zero_grad(set_to_none=True)
+            minibatch = rollout.minibatch(offset, self.rows)
+            if step.joint is None:
+                losses, auxiliary_loss = learn_minibatch(
+                    step.model,
+                    self.objective,
+                    minibatch,
+                    extra_loss=extra_loss,
+                )
+            else:
+                losses, auxiliary_loss, feature_gap = learn_joint_minibatch(
+                    step.model,
+                    self.objective,
+                    minibatch,
+                    step.joint,
+                    extra_loss=extra_loss,
+                )
+                # The first window learns from the epoch's starting weights; the
+                # later ones from weights its own steps have moved.
+                metrics.setdefault("joint/feature_gap", feature_gap)
+            # The first window alone learns the auxiliary's loss.
+            extra_loss = None
+            total += losses
+            policy_auxiliary += auxiliary_loss
+            step.optimizer.step()
+        count = len(self.offsets)
+        return total / count, {"auxiliary_loss": policy_auxiliary / count, **metrics}
+
+    def loss(
+        self,
+        step: CraftaxTrainStep,
+        rollout: LearnerRollout,
+    ) -> tuple[Tensor, Tensor]:
+        """Score the first window by the rule without the backward or the auxiliary.
+
+        A step that trains its feature's world model scores the features its
+        current weights compute, as its windows learn from them.
+
+        Args:
+          step: The train step: its policy, and the world model it trains.
+          rollout: The rollout, agent-major.
+
+        Returns:
+          total: The window's total, the policy's own loss included, 0-dim.
+          losses: ``[8]`` fp32, the rule's terms.
+
+        Raises:
+          ValueError: The step trains its world model but the rollout
+            carries no contexts.
+
+        """
+        minibatch = rollout.minibatch(self.offsets[0], self.rows)
+        if step.joint is not None:
+            if minibatch.contexts is None:
+                raise ValueError(
+                    "training the feature's world model needs each step's stored "
+                    "context",
+                )
+            features = step.joint.forward(minibatch.contexts).features
+            minibatch = replace(minibatch, features=features)
+        total, losses, _ = score_minibatch(step.model, self.objective, minibatch)
+        return total, losses
+
+    def state_dict(self) -> dict[str, Tensor]:
+        """Return the auxiliary's state; the windows keep none."""
+        return {} if self.auxiliary is None else self.auxiliary.state_dict()
+
+    def load_state_dict(self, state: Mapping[str, Tensor]) -> None:
+        """Restore the auxiliary's state.
+
+        Args:
+          state: What :meth:`state_dict` returned.
+
+        Raises:
+          ValueError: There is state but no auxiliary to take it: the
+            checkpoint is another recipe's.
+
+        """
+        if self.auxiliary is not None:
+            self.auxiliary.load_state_dict(state)
+        elif state:
+            msg = f"windows without an auxiliary carry no state, not {sorted(state)}"
+            raise ValueError(msg)
+
+
+class RateSchedule(Protocol):
+    """An epoch's learning rate, from the rate the optimizer was configured with."""
+
+    def __call__(self, base: float, *, step: int, total_steps: int) -> float:
+        """Return the rate for epoch ``step`` of ``total_steps``."""
+        ...
+
+
+class ProgressSchedule:
+    """One of priml's progress schedules, scaling the configured rate each epoch."""
+
+    class Config(Fig["ProgressSchedule"]):
+        """The curve."""
+
+        curve: Makeable[Schedule[float]] = field(
+            default_factory=lambda: PartialConfig(cosine),
+        )
+        """Maps the run's progress, ``step / total_steps``, to the rate's multiplier."""
+
+    def __init__(self, config: Config) -> None:
+        self.curve = config.curve.make()
+
+    def __call__(self, base: float, *, step: int, total_steps: int) -> float:
+        """Return ``base`` times the curve at ``step / total_steps``."""
+        return base * self.curve(step / total_steps)
+
+
+def cosine_annealing_fp32(
+    base: float,
+    minimum: float,
+    step: int,
+    total_steps: int,
+) -> float:
+    """Return PufferLib's cosine-annealed rate at ``step``, in its fp32 arithmetic.
+
+    ``u = step / total_steps`` in double and ``cos(pi * u)`` from the
+    platform's libm, rounded to fp32; the rest is fp32, in this order:
+    ``minimum + (0.5 * (base - minimum)) * (1 + cos)``, as PufferLib's C holds
+    its rates as ``float``. It exists only to match PufferLib's bits: a
+    :class:`ProgressSchedule` over priml's ``cosine`` computes in double and
+    multiplies once, and lands on a different fp32 rate at 2,836 of exp000's
+    6,663 epoch boundaries, the first at epoch 5.
+
+    Args:
+      base: The rate at step 0; rounded to fp32 first.
+      minimum: The rate at ``total_steps``; rounded to fp32 first.
+      step: The current step.
+      total_steps: The step at which the rate reaches ``minimum``.
+
+    Returns:
+      lr: The fp32 rate, exact as a Python float.
+
+    References:
+      https://github.com/PufferAI/PufferLib
+        Suarez. PufferLib (MIT license), ``cosine_annealing`` in
+        ``src/pufferl.cu``, pin ``6ffa5b10``.
+
+    """
+    cosine_fp32 = _fp32(math.cos(math.pi * (step / total_steps)))
+    span = _fp32(_fp32(base) - _fp32(minimum))
+    return _fp32(_fp32(minimum) + _fp32(_fp32(0.5 * span) * _fp32(1.0 + cosine_fp32)))
+
+
+@runtime_checkable
+class MasterWeights(Protocol):
+    """An optimizer that steps fp32 masters behind lower-precision parameters."""
+
+    @property
+    def master_weights(self) -> list[Tensor]:
+        """The live masters, one per parameter in its groups' order."""
+        ...
+
+
+def load_masters(
+    model: Policy,
+    optimizer: torch.optim.Optimizer,
+    path: Path,
+    *,
+    others: Sequence[Tensor] = (),
+) -> None:
+    """Start a policy and its optimizer from a ``state_dict`` of fp32 masters.
+
+    The parameters take the masters rounded to their dtype; the optimizer's
+    masters take them exactly, in place, before its first step.
+
+    Args:
+      model: The policy, on its device.
+      optimizer: Its optimizer, which keeps fp32 masters.
+      path: The masters by parameter name, as ``torch.save`` wrote them.
+      others: Parameters the optimizer holds beside the policy's, a trained
+        world model's, which keep the masters they start from.
+
+    Raises:
+      TypeError: The optimizer keeps no masters (:class:`MasterWeights`).
+      ValueError: The optimizer holds a parameter that is neither the
+        policy's nor among ``others``.
+
+    """
+    if not isinstance(optimizer, MasterWeights):
+        raise TypeError(
+            "a checkpoint of fp32 masters needs an optimizer that keeps "
+            "masters (MasterWeights)",
+        )
+    masters = cast(
+        "dict[str, Tensor]",
+        torch.load(path, weights_only=True, map_location="cpu"),
+    )
+    model.load_state_dict(masters)
+    names = {id(weight): name for name, weight in model.named_parameters()}
+    kept = {id(weight) for weight in others}
+    with torch.no_grad():
+        # ``master_weights`` follows the optimizer's own group order.
+        for parameter, master in zip(
+            (
+                parameter
+                for group in optimizer.param_groups
+                for parameter in cast("list[Tensor]", group["params"])
+            ),
+            optimizer.master_weights,
+            strict=True,
+        ):
+            name = names.get(id(parameter))
+            if name is not None:
+                master.copy_(masters[name])
+            elif id(parameter) not in kept:
+                raise ValueError(
+                    "the optimizer holds a parameter the policy does not name "
+                    "and no other owner claims",
+                )
+
+
+def _fused_muon() -> Makeable[Callable[..., torch.optim.Optimizer]]:
+    """Return :class:`FusedMuon` at PufferLib's ``default.ini`` values."""
+    return FusedMuon.Config()
+
+
+def _triton_policy() -> MinGRUPolicy.Config:
+    """Return the policy config with the Triton scan, the production choice."""
+    config = MinGRUPolicy.Config()
+    config.block.scan = TritonScan.Config()
+    return config
+
+
+class CraftaxTrainStep:
+    """PufferLib's training loop, one ``train_step`` per epoch (``pufferl.cu:3071``).
+
+    The rollout runs one epoch AHEAD of the learner: a boot rollout fills slot
+    0 with the initial weights; each epoch then starts the next rollout into
+    the other slot (from a copy of the learner's current weights that the
+    step graphs own, ``rollout_start``, ``pufferl.cu:2457``), trains on the
+    slot collected during the previous epoch, and waits for the rollout
+    before the slots swap. The learner therefore always trains on data one
+    epoch stale, and the last epoch does not prefetch. With one slot there is
+    nothing to prefetch into: each epoch collects its rollout with the current
+    weights, then learns from it, as synchronous PPO does. Per epoch the
+    learning rate is the schedule's over ``train_budget_steps``, and ``learner``
+    runs the minibatches and their optimizer steps.
+
+    It implements the training loop's step protocol directly rather than
+    extending priml's supervised ``TrainStep``. It replaces that step's update
+    whole, so the supervised knobs -- the loss, the rate multiplier, clipping,
+    accumulation, autocast, compile, EMA -- would be fields nothing reads.
+    """
+
+    class Config(Fig["CraftaxTrainStep"]):
+        """The policy, its optimizer and schedule, the environments and the learning rule."""
+
+        model: PolicyConfig = field(default_factory=_triton_policy)
+        """The learner's policy; the rollout runs a copy of its weights."""
+
+        optimizer: Makeable[Callable[..., torch.optim.Optimizer]] = field(
+            default_factory=_fused_muon,
+        )
+        """Builds the optimizer from the policy's ``parameters()``, in their
+        order. Each group's ``lr`` is the schedule's base; the step replaces it
+        with a device tensor refilled every epoch, so a captured learner graph
+        reads the rate live."""
+
+        schedule: Makeable[RateSchedule] = field(
+            default_factory=ProgressSchedule.Config,
+        )
+        """Each epoch's rate over ``train_budget_steps``; priml's cosine to zero
+        unless set."""
+
+        learner: Makeable[Learner] = field(default_factory=AgentWindows.Config)
+        """How each epoch learns from its rollout -- its rule, minibatches and
+        optimizer steps: PufferLib's windows of whole agents unless set."""
 
         env: CraftaxEnv.Config = field(default_factory=CraftaxEnv.Config)
-        """Environment the rollout is collected from."""
+        """The training environments."""
 
-        rollout_steps: int = 16
-        """Environment steps per worker in one update."""
+        sampler: Makeable[Sampler] = field(default_factory=PhiloxSampler.Config)
+        """The action streams."""
 
-        num_epochs: int = 4
-        """Optimization passes over each rollout."""
+        rollout: Rollout.Config = field(default_factory=Rollout.Config)
+        """The two slots and the horizon."""
 
-        num_minibatches: int = 8
-        """Minibatches per pass."""
+        feature: Makeable[FeatureSource] | None = None
+        """A per-step feature the actor computes from each observation and its
+        history and hands the policy beside it, e.g. a world model's state;
+        the rollout stores it for the learner, and the evaluation reads the
+        same source. Frozen unless ``feature_training`` trains it; None
+        computes none."""
 
-        learning_rate: float = 3e-4
-        """Initial Adam learning rate."""
+        feature_training: ContextReplay.Config | None = None
+        """Train the feature's world model with the policy. The learner trains a
+        copy of its weights, which join the optimizer after the policy's in one
+        group, so every matrix steps under the same rule, rate and global clip;
+        each window recomputes its features from the stored contexts with the
+        copy (``world_model.context``), and the learner runs eagerly. Each
+        rollout and evaluation reads the copy, published into the source; a
+        rollout after the learner has trained it first rebuilds its rows'
+        histories under it. ``finalize`` makes the feature ``joint`` exactly
+        when this is set, so its rollouts store what the learner recomputes
+        the features from, and only then. A
+        ``BranchImitation`` auxiliary still reads the stored features,
+        detached, so its loss trains the policy alone. None keeps the feature
+        frozen."""
 
-        anneal_learning_rate: bool = True
-        """Decay the rate linearly to zero across the run."""
+        evaluation: Evaluation.Config = field(default_factory=Evaluation.Config)
+        """The fresh trainer an evaluation plays in; ``finalize`` fills the
+        parts it leaves unset from training's."""
 
-        total_train_steps: int = 244
-        """Updates in the run; the schedule horizon."""
+        checkpoint: Path | str | None = None
+        """A ``state_dict`` of fp32 masters to start from: loaded into the
+        parameters, rounded to their dtype, and exactly into the optimizer's
+        masters, so the optimizer must keep them (:class:`MasterWeights`)."""
 
-        discount: float = 0.99
-        """Reward discount factor."""
+        reward_scale: float = 1.0
+        """The learner's rewards are the stored ones times this, before the
+        clamp; the environments, their returns and the evaluation keep theirs.
+        It multiplies the rollout's stored dtype, so bf16 storage rounds twice
+        unless it is a power of two."""
 
-        trace_decay: float = 0.8
-        """Advantage-estimation trace decay."""
+        reward_clip: float = 1.0
+        """Rewards are clamped to ``[-reward_clip, reward_clip]`` for the learner;
+        ``math.inf`` leaves them as they are."""
 
-        clip_epsilon: float = 0.2
-        """Trust-region half-width, for both the ratio and the value."""
+        train_budget_steps: float = math.inf
+        """Epochs the run trains, the schedule's horizon and the last prefetch;
+        it must be set, since the pipeline needs to know when to stop."""
 
-        entropy_coefficient: float = 0.01
-        """Weight on the entropy bonus that keeps the policy exploring."""
-
-        value_coefficient: float = 0.5
-        """Weight on the value-regression term."""
-
-        max_grad_norm: float = 1.0
-        """Global gradient-norm clip."""
-
-        seed: int = 0
-        """Seed for action sampling and minibatch shuffling."""
-
-        cuda_graphs: bool = True
-        """Replay the action step and the whole update as CUDA graphs on a GPU.
-
-        The graphed update runs Adam in its capturable form, which keeps the
-        step count and learning rate on the device and rounds differently from
-        the eager optimizer in the last bit: a run with this on does not
-        reproduce one with it off bit for bit. Off, and on a CPU, the update
-        runs eagerly with the eager optimizer."""
+        parallelism: NoParallel.Config = field(default_factory=NoParallel.Config)
+        """The one device the policy, the rollout and the learner run on."""
 
         @override
         def finalize(self) -> Self:
-            # The environment renders the observations the model consumes and
-            # names the actions it scores, so the two must agree. Deriving the
-            # geometry here means an experiment that changes the environment
-            # cannot forget to resize the network.
-            self.model.observation_size = observation_size(self.env.view)
-            self.model.num_actions = len(Action)
+            if isinstance(self.feature, WorldModelFeature.Config):
+                # The learner recomputes the features from what a joint
+                # source's rollout stores, and publishes into its model; a
+                # joint source no learner trains would store it for nothing.
+                self.feature.joint = self.feature_training is not None
+            if self.evaluation.env is None:
+                # The evaluation plays training's rules, less its training-only
+                # options: no stall cap and no practice.
+                env = self.evaluation.env = self.env.copy_tree()
+                env.stall_cap = None
+                env.practice = None
+            if self.evaluation.sampler is None:
+                self.evaluation.sampler = self.sampler.copy_tree()
+            if self.evaluation.rollout is None:
+                rollout = self.evaluation.rollout = self.rollout.copy_tree()
+                rollout.num_slots = 1
+                rollout.bootstrap = False
             return super().finalize()
 
-    config: Config
+    # A base, not ``NotRequired``: under postponed annotations ``TypedDict``
+    # counts a ``NotRequired`` key among the required ones, and a checkpoint
+    # of a frozen feature would be refused as missing it.
+    class _Parts(TypedDict):
+        """What every checkpoint of the step carries."""
+
+        model: dict[str, Tensor]
+        optimizer: OptimizerState
+        learner: dict[str, Tensor]
+        timer_step: CheckpointableStepTimer.StateDict
+        env: dict[str, Tensor]
+        rollout: dict[str, Tensor]
+        ready: int
+        booted: bool
+
+    class StateDict(_Parts, total=False):
+        """The learner's checkpoint and the pipeline's; see :meth:`CraftaxTrainStep.state_dict`."""
+
+        world_model: dict[str, Tensor]
+        """The trained world model's weights, when the step trains one."""
 
     def __init__(self, config: Config) -> None:
-        """Build the model, environment, and optimizer.
+        """Build the learner, its optimizer, the environments, the actor and the rollout.
+
+        Every setting is checked before the policy, the optimizer and the
+        environments are built: the recipe's scalars, the geometry, the
+        observation width the env writes and the policy reads, the
+        evaluation, and the learner's own recipe.
 
         Args:
-          config: Model, environment, and PPO settings.
+          config: The recipe.
 
         Raises:
-          ValueError: A geometry or coefficient is invalid.
+          ValueError: A setting is out of range, the geometry does not tile,
+            the run has no epoch count, the evaluation's config would be
+            refused, the policy's first stage does not read the env's layout,
+            a feature is asked of the symbolic view, ``feature_training``
+            has no world-model feature to train or no ``AgentWindows`` to
+            learn with, or the learner refuses the recipe.
+          TypeError: A checkpoint is set but the optimizer keeps no masters.
 
         """
-        if config.rollout_steps <= 0 or config.num_epochs <= 0:
-            raise ValueError("PPO rollout geometry must be positive")
-        if config.num_minibatches <= 0:
-            raise ValueError("PPO must have at least one minibatch")
-        if config.total_train_steps <= 0:
-            raise ValueError("total_train_steps must be positive")
-        if config.discount < 0.0 or config.discount > 1.0:
-            raise ValueError("discount must be between zero and one")
-        if config.trace_decay < 0.0 or config.trace_decay > 1.0:
-            raise ValueError("trace_decay must be between zero and one")
-        if config.clip_epsilon <= 0.0:
-            raise ValueError("clip_epsilon must be positive")
-
-        # The recipe's own optimizer, put into the base's slot before the base
-        # reads it, so there is one optimizer rather than an inherited AdamW
-        # discarded for this one. ``learning_rate`` stays the field an
-        # experiment sets; the base records it as each group's ``initial_lr``.
-        config.optimizer = PartialConfig(
-            torch.optim.Adam,
-            lr=config.learning_rate,
-            eps=1e-5,
-        )
-        # Weight initialization draws from the global stream, so the seed has
-        # to reach it for a run to be reproducible from its config alone. The
-        # stream is restored afterwards, leaving whatever the caller had --
-        # which is why the base's build is bracketed rather than followed by a
-        # second, seeded one.
-        saved_rng = torch.get_rng_state()
-        torch.manual_seed(config.seed)
-        try:
-            super().__init__(config)
-        finally:
-            torch.set_rng_state(saved_rng)
+        _check_recipe(config)
         self.config = config
+        self.learner = config.learner.make()
+        self.learner.prepare(config)
+        self.device: torch.device = config.parallelism.make().device
+        self.model = config.model.make().to(self.device)
+        self.schedule = config.schedule.make()
+        self.total_steps = int(config.train_budget_steps)
+        self.timer_step = CheckpointableStepTimer()
+        """Epochs trained: how many, and how long the learner took."""
         self.env = config.env.make()
-        self._generator = torch.Generator(device=self.device)
-        self._generator.manual_seed(config.seed)
-        self._observation: Tensor = self.env.reset()
-        self._done = torch.zeros(
-            self._observation.shape[0],
-            dtype=torch.bool,
+        self.env.reset()
+        self._logs_read = _log_sums(self.env)
+        """The env's episode-log sums at the last report; each epoch reports the change."""
+        self.actor = config.model.make().to(self.device)
+        """The rollout's copy of the weights; the step graphs address its parameters."""
+        self.feature = None if config.feature is None else config.feature.make()
+        """The actor's per-step feature, which the evaluation shares; None without one."""
+        self.rollout = Rollout(
+            config.rollout,
+            policy=self.actor,
+            sampler=config.sampler.make(),
+            env=self.env,
             device=self.device,
+            feature=self.feature,
         )
-        self._episode_return = torch.zeros(
-            self._observation.shape[0],
-            device=self.device,
+        self.joint = _joint_world_model(config, self.feature)
+        """The learner's trained copy of the feature's world model; None while
+        the feature is frozen."""
+        # After the rollout, whose engines put the source's world model on the
+        # device in the actor's dtype: a trained copy joins the optimizer from there.
+        self.optimizer: torch.optim.Optimizer = config.optimizer.make()(
+            [
+                *self.model.parameters(),
+                *([] if self.joint is None else self.joint.parameters()),
+            ],
         )
-        self._episode_length = torch.zeros(
-            self._observation.shape[0],
-            dtype=torch.int64,
-            device=self.device,
-        )
-        self._finished_returns: list[float] = []
-        self._finished_lengths: list[int] = []
-
-        workers = self._observation.shape[0]
-        self._rollout = Rollout.zeros(
-            steps=config.rollout_steps,
-            envs=workers,
-            observation_size=self._observation.shape[1],
-            device=self.device,
-        )
-        # What the procedures read and store; see ``_act`` and ``_update``.
-        self._policy_input = torch.zeros_like(self._observation)
-        self._action = torch.zeros(workers, dtype=torch.int64, device=self.device)
-        self._log_prob = torch.zeros(workers, device=self.device)
-        self._value = torch.zeros(workers, device=self.device)
-        self._update_scalars = torch.zeros(6, device=self.device)
-        self._update_loss = torch.zeros((), device=self.device)
-        self._update_logits = torch.zeros(0, device=self.device)
-
-        self._cuda_graphs = config.cuda_graphs and self.device.type == "cuda"
-        if self._cuda_graphs:
-            _make_capturable(
-                self._adam.param_groups,
-                self._adam.state,
-                self.device,
+        # The schedule's base: each group's configured rate, before any epoch
+        # overwrites ``lr``.
+        remember_initial_lrs([self.optimizer])
+        if config.checkpoint is not None:
+            load_masters(
+                self.model,
+                self.optimizer,
+                Path(config.checkpoint),
+                others=[] if self.joint is None else self.joint.parameters(),
             )
-        self._act_procedure = self._procedure(self._act)
-        self._update_procedure = self._procedure(self._update)
+        self.ready = 0
+        self.write = 1
+        self._booted = False
+        self._prefetch = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rollout")
+        self._pending: Future[RolloutStorage] | None = None
+        self._rollout_started = 0.0
+        self.rollout_seconds = 0.0
+        """Wall time of the last rollout, from its launch to its completion."""
+        self.rebuild_seconds = 0.0
+        """Wall time of the rebuild of the actor's feature histories before the
+        last rollout; 0 when it needed none."""
+        self._stale = False
+        """Whether the learner has trained the world model since the actor's
+        feature histories were last built."""
+        cuda = self.device.type == "cuda"
+        self._stream = torch.cuda.Stream(device=self.device) if cuda else None
+        """The learner's stream: its first epoch warms it, the captures run on it."""
+        self._rates = [
+            torch.zeros((), dtype=torch.float32, device=self.device)
+            for _ in self.optimizer.param_groups
+        ]
+        """Each group's rate as the optimizer reads it, refilled before every epoch."""
+        self._graphs: dict[int, _LearnerGraph] = {}
+        self._pool = torch.cuda.graph_pool_handle() if cuda else None
+        """The learner graphs' shared memory pool: they never replay at once."""
+        self._warm = False
 
     @property
-    @override
-    def model(self) -> ActorCritic:
-        """The policy this step trains, at its declared class."""
-        model = self._model
-        assert isinstance(model, ActorCritic)
-        return model
+    def global_step(self) -> int:
+        """Epochs trained across the whole run, resumes included."""
+        return self.timer_step.global_count
 
-    @property
-    def steps_per_update(self) -> int:
-        """Environment interactions consumed by one update."""
-        workers = int(self._observation.shape[0])
-        return workers * int(self.config.rollout_steps)
-
-    @property
-    @override
-    def progress_learning_schedule(self) -> float:
-        """Fraction of ``total_train_steps`` spent, in ``[0, 1]``."""
-        spent = self.global_step / self.config.total_train_steps
-        return 1.0 if spent > 1.0 else float(spent)
-
-    @override
     def preprocess_batch(self, batch: dict[str, object]) -> dict[str, object]:
-        """Pass the loop's batch through: the rollout is collected here."""
+        """Pass the loop's tick through: the data comes from the environments."""
         return batch
 
-    @override
     def train_step(self, **batch: object) -> TrainStepOutput:
-        """Collect a rollout and optimize on it.
+        """Run one epoch: prefetch the next rollout, learn from the ready slot.
 
         Args:
-          **batch: Ignored; the data comes from the environment.
+          **batch: Ignored; the loop's tick.
 
         Returns:
-          result: The final minibatch's loss and logits, with the update's
-            scalar diagnostics.
+          result: The epoch's mean loss terms (``TorchPPO.Config.LOSS_NAMES``) as ``model``,
+            the total as ``loss``; the metrics add the rate, the timings, the
+            learner's own metrics and the environments' practice metrics.
+
+        Raises:
+          RuntimeError: The run's epochs are spent.
 
         """
         del batch
-        rollout = self.collect()
-        rate = self._set_learning_rate()
-        # The timer brackets the update, so ``global_step`` and the budget
-        # clock advance exactly as they do for every other recipe -- one
-        # tick per PPO update, however many optimizer calls it makes.
-        with self.timer_step:
-            metrics: dict[str, float | Tensor] = self._optimize(rate)
-
+        if self.global_step >= self.total_steps:
+            msg = (
+                f"the run's {self.total_steps} epochs are spent: past "
+                "train_budget_steps every epoch would relearn the last rollout"
+            )
+            raise RuntimeError(msg)
+        synchronous = self.config.rollout.num_slots == 1
+        if not synchronous:
+            self._boot()
+        started = time.perf_counter()
+        if synchronous:
+            # One slot leaves nothing to prefetch into: this epoch's rollout is
+            # collected now, with the weights the epoch then trains.
+            self._rollout_start(self.ready)
+            self._rollout_finish()
+        # A synchronous rollout is ``rollout_seconds``'; a prefetch's launch is
+        # the learner's, as it always was.
+        learning = time.perf_counter() if synchronous else started
+        prefetch = not synchronous and self.global_step + 1 < self.total_steps
+        if prefetch:
+            self._rollout_start(self.write)
+        learner_stream = (
+            nullcontext() if self._stream is None else torch.cuda.stream(self._stream)
+        )
+        with self.timer_step, learner_stream:
+            losses, learner_metrics, learning_rate = self._train_epoch(self.ready)
+            if self._stream is not None:
+                # The learner's own stream only: a device-wide sync would wait
+                # for the rollout in flight and report the epoch instead.
+                self._stream.synchronize()
+            learner_seconds = time.perf_counter() - learning
+        if prefetch:
+            self._rollout_finish()
+            self.ready, self.write = self.write, self.ready
+        metrics: dict[str, float | Tensor] = {
+            name: losses[index] for index, name in enumerate(TorchPPO.Config.LOSS_NAMES)
+        }
+        metrics["learning_rate"] = learning_rate
+        # PufferLib's own key: transitions trained so far (``pufferl.cu`` logs it).
+        metrics["agent_steps"] = float(
+            self.global_step * self.env.num_envs * self.config.rollout.horizon,
+        )
+        # PufferLib's epoch wall is its rollout's: the learner hides under the
+        # next rollout. These three say whether the port's does.
+        epoch_seconds = time.perf_counter() - started
+        metrics["epoch_seconds"] = epoch_seconds
+        # PufferLib's SPS: the epoch's transitions over its wall.
+        metrics["transitions_per_second"] = (
+            self.env.num_envs * self.config.rollout.horizon / epoch_seconds
+        )
+        metrics["learner_seconds"] = learner_seconds
+        # The last pipelined epoch starts no rollout, so it has none to time.
+        metrics["rollout_seconds"] = (
+            self.rollout_seconds if prefetch or synchronous else 0.0
+        )
+        if self.joint is not None:
+            # The rebuild before the rollout, outside its wall.
+            metrics["rebuild_seconds"] = (
+                self.rebuild_seconds if prefetch or synchronous else 0.0
+            )
+        metrics.update(learner_metrics)
+        # Read with no rollout in flight: the last one has finished above.
+        metrics.update(self.env.practice_metrics())
+        metrics.update(self.rollout.feature_metrics())
         metrics.update(self._episode_metrics())
-        metrics["explained_variance"] = float(
-            explained_variance(rollout.value.flatten(), rollout.target.flatten()),
-        )
-        loss = metrics.pop("_loss_tensor")
-        logits = metrics.pop("_logits")
-        assert isinstance(loss, Tensor)
-        assert isinstance(logits, Tensor)
-        return {"loss": loss, "model": logits, "metrics": metrics}
+        return {
+            "loss": losses[TorchPPO.Config.LOSS_NAMES.index("total_loss")],
+            "model": losses,
+            "metrics": metrics,
+        }
 
-    @torch.no_grad()
-    def collect(self) -> Rollout:
-        """Run the current policy for a fixed number of steps.
-
-        Returns:
-          rollout: The collected experience, already scored with advantages.
-            The step's own storage, overwritten by the next collection.
-
-        """
-        rollout = self._rollout
-        for step in range(self.config.rollout_steps):
-            self._policy_input.copy_(self._observation)
-            self._act_procedure()
-            rollout.observation[step].copy_(self._observation)
-            rollout.action[step].copy_(self._action)
-            rollout.log_prob[step].copy_(self._log_prob)
-            rollout.value[step].copy_(self._value)
-
-            transition = self.env.step(self._action)
-            self._observation = transition.observation
-            self._done = transition.done
-            rollout.reward[step].copy_(transition.reward)
-            rollout.done[step].copy_(transition.done)
-            self._record_episodes(transition.reward, transition.done)
-
-        _, last_value = self.model(self._observation)
-        advantage, target = generalized_advantage(
-            rewards=rollout.reward,
-            values=rollout.value,
-            dones=rollout.done,
-            last_value=last_value,
-            discount=self.config.discount,
-            trace_decay=self.config.trace_decay,
-        )
-        rollout.advantage.copy_(advantage)
-        rollout.target.copy_(target)
-        return rollout
-
-    @override
     def train_loss(self, **batch: object) -> TrainStepOutput:
-        """Score a rollout without optimizing.
+        """Score the ready slot's first minibatch by the learner's rule, without updating.
 
         Args:
-          **batch: Ignored; the data comes from the environment.
+          **batch: Ignored.
 
         Returns:
-          result: The loss and logits of one freshly collected rollout.
+          result: The minibatch's loss terms; the total as ``loss``.
 
         """
         del batch
-        rollout = self.collect()
-        minibatch = next(rollout.minibatches(count=1, generator=self._generator))
-        loss, logits, _terms = self._loss(minibatch)
-        return {"loss": loss.detach(), "model": logits.detach()}
+        self._boot()
+        with torch.no_grad():
+            total, losses = self.learner.loss(
+                self,
+                self._learner_rollout(self.rollout.slots[self.ready]),
+            )
+        return {"loss": total, "model": losses}
 
-    @override
     def eval_loss(self, **batch: object) -> TrainStepOutput:
-        """Score a rollout in evaluation mode, leaving training state intact.
-
-        On-policy scoring has to interact with the world -- there is no held
-        out batch to read -- so this collects a rollout like ``train_loss``.
-        What it must not do is KEEP the consequences: ``collect`` advances
-        ``_observation``/``_done`` and banks finished episodes, so an eval
-        pass silently moved the world the next update trains from and folded
-        its own episodes into the return/length averages reported as training
-        progress. Snapshot and restore both.
+        """Score as :meth:`train_loss`; the policy has no evaluation mode.
 
         Args:
-          **batch: Ignored; the data comes from the environment.
+          **batch: Ignored.
 
         Returns:
-          result: The loss and logits of one freshly collected rollout.
+          result: As :meth:`train_loss`.
 
         """
-        with evaluation_transaction(
-            model=self.model,
-            save=self.state_dict,
-            restore=self.load_state_dict,
-        ):
-            return self.train_loss(**batch)
+        return self.train_loss(**batch)
 
-    @override
-    def call_eval(self, *args: object, **batch: object) -> Tensor:
-        """Return action logits for a batch of observations.
+    def call_eval(self, *args: object, **kwargs: object) -> Tensor:
+        """Score observations from a zero carry.
 
         Args:
-          *args: Unused; the base signature admits positionals.
-          **batch: Batch fields; only ``observation`` is scored.
+          *args: The observations, positionally.
+          **kwargs: Or as ``observation``.
 
         Returns:
-          logits: Unnormalized action scores.
+          logits: ``[batch, num_actions]``.
 
         """
-        if args:
-            raise ValueError("Expected not args.")
-        observation = batch["observation"]
+        observation = args[0] if args else kwargs["observation"]
         assert isinstance(observation, Tensor)
-        with evaluation_mode(self.model), torch.no_grad():
-            logits, _ = self.model.forward(observation)
-        return logits
+        batch = observation.shape[0]
+        with torch.no_grad():
+            decoded, _ = self.model.forward_fused(
+                observation.to(self.device),
+                self.model.initial_state(batch, device=self.device),
+                None,
+            )
+        return decoded[:, :-1]
 
-    def make_evaluation_actor(self) -> EvaluationActor:
-        """Build a stateless sampling actor over the live policy.
+    def make_evaluator(self) -> Evaluation:
+        """Build a fresh evaluation trainer around the learner's weights.
 
         Returns:
-          result: The EvaluationActor.
+          evaluation: New environments, streams and carry; the policy and the
+            feature source's weights shared, the source holding the learner's
+            trained world model when it trains one. No learner reads the
+            evaluation's rollout, so a joint source's is frozen: it keeps no
+            frames and stores no learner's inputs.
 
         """
-        return _EvaluationActor(
-            self.model,
-            observation_size=self.env.observation_size,
+        feature = self.feature
+        if self.joint is not None:
+            self.joint.publish()
+            assert isinstance(feature, WorldModelFeature)
+            feature = feature.frozen()
+        return Evaluation(
+            self.config.evaluation,
+            policy=self.model,
             device=self.device,
+            feature=feature,
         )
 
-    @override
     def on_epoch_end(self) -> None:
         """Nothing to flush: every update completes within one step."""
 
-    class StateDict(TrainStep.StateDict):
-        """The base state plus the environment, its generator, and the rollout cursor."""
-
-        env: CraftaxEnv.StateDict
-        generator: Tensor
-        observation: Tensor
-        done: Tensor
-        episode_return: Tensor
-        episode_length: Tensor
-        finished_returns: list[float]
-        finished_lengths: list[int]
-
-    @override
     def state_dict(self) -> StateDict:
-        """Return model, optimizer, environment, and counters."""
-        return {
-            **super().state_dict(),
+        """Return the learner's checkpoint and the pipeline's, for a bit-equal resume.
+
+        Between two ``train_step`` calls no rollout is in flight. The ready
+        slot holds the rollout the next epoch learns from, collected with the
+        previous epoch's weights, and the environments, carries and streams
+        are where that rollout left them; all of it is saved, so a resumed run
+        continues as if never stopped. The tensors are the live ones, not
+        copies: a checkpointer snapshots what it is handed.
+
+        Returns:
+          state: ``model``, ``optimizer``, ``learner`` (what it carries across
+            epochs) and the epoch count; ``env`` (worlds, ``rand_r`` streams,
+            episode logs and the five buffers), ``rollout`` (carries, draw
+            counts and the ready slot), ``ready`` and ``booted``; and
+            ``world_model``, the trained weights, when the step trains its
+            feature's world model.
+
+        """
+        state: CraftaxTrainStep.StateDict = {
+            "model": self.model.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "learner": self.learner.state_dict(),
+            "timer_step": self.timer_step.state_dict(),
             "env": self.env.state_dict(),
-            "generator": self._generator.get_state(),
-            "observation": self._observation,
-            "done": self._done,
-            "episode_return": self._episode_return,
-            "episode_length": self._episode_length,
-            "finished_returns": list(self._finished_returns),
-            "finished_lengths": list(self._finished_lengths),
+            "rollout": self.rollout.state_dict(slot=self.ready),
+            "ready": self.ready,
+            "booted": self._booted,
         }
+        if self.joint is not None:
+            state["world_model"] = self.joint.weights()
+        return state
 
-    @override
-    def load_state_dict(
-        self,
-        state_dict: Mapping[str, object],
-        *,
-        strict: bool = True,
-        load_optimizer: bool = True,
-        remap: Callable[[Mapping[str, Tensor]], Mapping[str, Tensor]] | None = None,
-    ) -> None:
-        """Restore everything :meth:`state_dict` saved."""
-        super().load_state_dict(
-            state_dict,
-            strict=strict,
-            load_optimizer=load_optimizer,
-            remap=remap,
-        )
-        state = cast(CraftaxTrainStep.StateDict, state_dict)
-        self.env.load_state_dict(state["env"])
-        self._generator.set_state(state["generator"])
-        self._observation = state["observation"]
-        self._done = state["done"]
-        self._episode_return = state["episode_return"]
-        self._episode_length = state["episode_length"]
-        self._finished_returns = list(state["finished_returns"])
-        self._finished_lengths = list(state["finished_lengths"])
-        if self._cuda_graphs:
-            # Loading replaced the optimizer's state tensors, which the captured
-            # update still addresses, so it is captured afresh.
-            _make_capturable(
-                self._adam.param_groups,
-                self._adam.state,
-                self.device,
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
+        """Restore a :meth:`state_dict`: the learner's, then the pipeline's.
+
+        Args:
+          state_dict: What :meth:`state_dict` returned.
+
+        Raises:
+          ValueError: A part the checkpoint should carry is missing, or it
+            carries a trained world model and the step trains none, or the
+            reverse.
+
+        """
+        if not _is_step_state(state_dict):
+            missing = CraftaxTrainStep.StateDict.__required_keys__ - state_dict.keys()
+            msg = f"not a train step's checkpoint: {sorted(missing)} are missing"
+            raise ValueError(msg)
+        weights = state_dict.get("world_model")
+        if (weights is None) != (self.joint is None):
+            raise ValueError(
+                "a trained world model's weights load into a step that trains "
+                "one, and only there",
             )
-            self._update_procedure = self._procedure(self._update)
+        self.model.load_state_dict(state_dict["model"])
+        self.optimizer.load_state_dict(state_dict["optimizer"])
+        self.learner.load_state_dict(state_dict["learner"])
+        if self._graphs:
+            # The load puts new tensors in the optimizer's state, and a captured
+            # learner epoch addresses the old ones, so it would train on from the
+            # state it was captured over. The next epochs capture afresh, in a new
+            # pool: the old one is released with its last graph, and capturing
+            # into it again fails torch's allocator assert.
+            self._graphs.clear()
+            self._pool = torch.cuda.graph_pool_handle()
+        self.timer_step.load_state_dict(state_dict["timer_step"])
+        self.env.load_state_dict(state_dict["env"])
+        self._logs_read = _log_sums(self.env)
+        self.ready = state_dict["ready"]
+        self.write = 1 - self.ready
+        self.rollout.load_state_dict(state_dict["rollout"], slot=self.ready)
+        self._booted = state_dict["booted"]
+        if self.joint is not None and weights is not None:
+            self.joint.load_weights(weights)
+            # The source takes them now, as the next rollout's would: an
+            # evaluation before it then reads the loaded weights. The
+            # rollout's rows begin windows, so no history needs a rebuild.
+            self.joint.publish()
+            self._stale = False
+        if self._stream is not None:
+            # The learner reads the restored slot on its own stream.
+            self._stream.wait_stream(torch.cuda.current_stream(self.device))
 
-    @property
-    def _adam(self) -> torch.optim.Adam:
-        """The optimizer, at the class ``__init__`` builds it as."""
-        optimizer = self.optimizer
-        assert isinstance(optimizer, torch.optim.Adam)
-        return optimizer
+    def close(self) -> None:
+        """Wait for a rollout in flight, then stop every thread.
 
-    def _procedure(self, procedure: Callable[[], None]) -> Callable[[], None]:
-        """Return ``procedure``, replayed as a CUDA graph when graphs are on."""
-        if self._cuda_graphs:
-            return CudaGraphed(procedure, generators=(self._generator,))
-        return procedure
+        Each teardown runs even when one before it raised -- a failed rollout
+        re-raises here -- and a second call is a no-op.
+        """
+        with ExitStack() as teardown:
+            teardown.callback(self.env.close)
+            teardown.callback(self._prefetch.shutdown)
+            teardown.callback(self.rollout.close)
+            if self._pending is not None:
+                self._rollout_finish()
 
-    # A CUDA-graph procedure: reads ``_policy_input``, stores the step's outputs.
-    def _act(self) -> None:
-        """Sample every worker's action from the current policy."""
-        logits, value = self.model(self._policy_input)
-        log_probs_all = logits.log_softmax(-1)
-        # Sampled through the step's own generator rather than
-        # ``Categorical.sample``, which draws from the global stream: a run must
-        # replay from its seed regardless of what else in the process has
-        # consumed randomness.
-        action = torch.multinomial(
-            log_probs_all.exp(),
-            1,
-            generator=self._generator,
-        ).squeeze(-1)
-        # Stored rather than copied into buffers: a tensor made during capture
-        # lives in the graph's memory, and every replay refills it.
-        self._action = action
-        self._log_prob = log_probs_all.gather(-1, action[:, None])[:, 0]
-        self._value = value
-
-    def _optimize(self, rate: float) -> dict[str, float | Tensor]:
-        """Take every configured pass over the rollout and report the last one."""
-        self._update_procedure()
-        policy, value, entropy, approx_kl, clip_fraction, grad_norm = from_plain(
-            self._update_scalars.tolist(),
-            list[float],
-        )
-        return {
-            "policy_loss": policy,
-            "value_loss": value,
-            "entropy": entropy,
-            "approx_kl": approx_kl,
-            "clip_fraction": clip_fraction,
-            "grad_norm": grad_norm,
-            "learning_rate": rate,
-            "_loss_tensor": self._update_loss.clone(),
-            "_logits": self._update_logits.clone(),
-        }
-
-    # A CUDA-graph procedure: reads the rollout, stores the last minibatch's results.
-    def _update(self) -> None:
-        """Take every configured pass over the stored rollout."""
-        for _ in range(self.config.num_epochs):
-            for minibatch in self._rollout.minibatches(
-                count=self.config.num_minibatches,
-                generator=self._generator,
-            ):
-                loss, logits, terms = self._loss(minibatch)
-                self.optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    self.config.max_grad_norm,
-                )
-                self.optimizer.step()
-                # Kept on the device, not read out per minibatch: each read is a
-                # host sync, and only the last minibatch's are reported.
-                self._update_scalars = torch.stack(
-                    (
-                        terms.policy,
-                        terms.value,
-                        terms.entropy,
-                        terms.approx_kl,
-                        terms.clip_fraction,
-                        grad_norm,
-                    ),
-                ).detach()
-                self._update_loss = loss.detach()
-                self._update_logits = logits.detach()
-
-    def _loss(
-        self,
-        minibatch: dict[str, Tensor],
-    ) -> tuple[Tensor, Tensor, ClippedPolicyLoss]:
-        """Evaluate the clipped objective on one minibatch."""
-        logits, value = self.model(minibatch["observation"])
-        log_probs = logits.log_softmax(-1)
-        chosen = log_probs.gather(-1, minibatch["action"][:, None].long())[:, 0]
-        terms = clipped_policy_loss(
-            log_probs=chosen,
-            behavior_log_probs=minibatch["log_prob"],
-            advantages=minibatch["advantage"],
-            values=value,
-            behavior_values=minibatch["value"],
-            targets=minibatch["target"],
-            entropy=categorical_entropy(log_probs),
-            clip_epsilon=self.config.clip_epsilon,
-        )
-        loss = (
-            terms.policy
-            + self.config.value_coefficient * terms.value
-            - self.config.entropy_coefficient * terms.entropy
-        )
-        return loss, logits, terms
-
-    def _set_learning_rate(self) -> float:
-        """Anneal the rate linearly across the configured horizon, returning it."""
-        rate = self.config.learning_rate
-        if self.config.anneal_learning_rate:
-            rate *= linear(self.progress_learning_schedule)
-        for group in self.optimizer.param_groups:
-            _write_rate(group, rate)
-        return rate
-
-    def _record_episodes(self, reward: Tensor, done: Tensor) -> None:
-        """Accumulate per-worker returns and bank the finished ones."""
-        self._episode_return = self._episode_return + reward
-        self._episode_length = self._episode_length + 1
-        if bool(done.any()):
-            self._finished_returns.extend(
-                from_plain(self._episode_return[done].tolist(), list[float]),
-            )
-            self._finished_lengths.extend(
-                from_plain(self._episode_length[done].tolist(), list[int]),
-            )
-            self._episode_return = self._episode_return * ~done
-            self._episode_length = self._episode_length * ~done
-
+    # Nothing clears the training env's logs, which are running fp32 sums, so each
+    # report differences them, in float64, against the sums it last read; with no
+    # episode finished since, it reports nothing. Practice branches never reach the
+    # logs, so these are natural episodes only.
     def _episode_metrics(self) -> dict[str, float]:
-        """Summarize the episodes that finished during this update."""
-        if not self._finished_returns:
-            return {"episodes": 0.0}
-        returns = self._finished_returns
-        lengths = self._finished_lengths
-        metrics = {
-            "episodes": float(len(returns)),
-            "episode_return": sum(returns) / len(returns),
-            "episode_length": sum(lengths) / len(lengths),
-            "normalized_return_pct": (
-                sum(returns) / len(returns) / self.env.reward_ceiling * 100.0
-            ),
-        }
-        self._finished_returns = []
-        self._finished_lengths = []
-        return metrics
+        """Return :func:`report_metrics` as ``env/*``, over the episodes finished since the last report."""
+        sums = _log_sums(self.env)
+        change = (sums - self._logs_read).astype(np.float32)
+        self._logs_read = sums
+        mean = aggregate_logs(change.view(LOG_DTYPE).reshape(-1))
+        if mean[-1] <= 0:
+            return {}
+        return {f"env/{name}": value for name, value in report_metrics(mean).items()}
+
+    def _boot(self) -> None:
+        """Fill slot 0 with the initial weights, once (``pufferl.cu:3071``)."""
+        if self._booted:
+            return
+        self._rollout_start(0)
+        self._rollout_finish()
+        self.ready, self.write = 0, 1
+        self._booted = True
+
+    def _rollout_start(self, slot: int) -> None:
+        """Ready the environments, copy the learner's weights to the actor, launch."""
+        # Between rollouts, the boot's included: practice restores its rows here.
+        self.env.prepare_rollout()
+        with torch.no_grad():
+            for actor, learner in zip(
+                self.actor.parameters(),
+                self.model.parameters(),
+                strict=True,
+            ):
+                actor.copy_(learner)
+        if self.joint is not None:
+            self.joint.publish()
+        rebuilding, self._stale = self._stale, False
+        started = time.perf_counter()
+        if rebuilding:
+            self.rollout.rebuild_features()
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        # Timed through the one wait, which also lands the copies above: theirs
+        # is a fraction of a millisecond beside a rebuild's seconds.
+        self.rebuild_seconds = time.perf_counter() - started if rebuilding else 0.0
+        self._rollout_started = time.perf_counter()
+        self._pending = self._prefetch.submit(self.rollout.collect, slot)
+
+    def _rollout_finish(self) -> None:
+        """Wait for the rollout in flight; it is no longer in flight even if it raised."""
+        pending, self._pending = self._pending, None
+        if pending is None:
+            raise RuntimeError("no rollout is in flight")
+        pending.result()
+        self.rollout_seconds = time.perf_counter() - self._rollout_started
+
+    def _learner_rollout(self, storage: RolloutStorage) -> LearnerRollout:
+        return LearnerRollout.from_time_major(
+            storage.observations,
+            storage.actions,
+            storage.logprobs,
+            storage.rewards,
+            storage.terminals,
+            storage.values,
+            storage.action_mask,
+            storage.initial_states,
+            storage.branch_starts,
+            reward_scale=self.config.reward_scale,
+            reward_clip=self.config.reward_clip,
+            features=storage.features,
+            contexts=None if self.joint is None else _stored_contexts(storage),
+        )
+
+    # On CUDA the process's first epoch runs eagerly on the learner stream, which
+    # compiles every kernel and sizes cuBLAS's workspace there. Each slot's next epoch
+    # is captured whole, autograd's backward and the optimizer included, as PufferLib
+    # captures its learner (``pufferl.cu:1606-1626``), and every later one replays
+    # that graph. Eager, the learner thread spent half a second per epoch issuing
+    # launches with the GIL held (measured), longer than the rollout it should hide
+    # under, and the rollout's threads waited on it. The rate reaches the optimizer as a
+    # device tensor refilled before each launch, as PufferLib copies its ``lr`` to the
+    # device.
+    def _train_epoch(self, slot: int) -> tuple[Tensor, dict[str, Tensor], float]:
+        """PufferLib's ``train_impl``: the rate for the epoch, then every minibatch."""
+        self.learner.begin_epoch(self, self.global_step)
+        learning_rate = 0.0
+        for group, rate in zip(self.optimizer.param_groups, self._rates, strict=True):
+            # ``initial_lr`` is the configured rate, recorded before any epoch.
+            learning_rate = self.schedule(
+                from_plain(cast("object", group["initial_lr"]), float),
+                step=self.global_step,
+                total_steps=self.total_steps,
+            )
+            rate.fill_(learning_rate)
+            group["lr"] = rate
+        storage = self.rollout.slots[slot]
+        # A learner that trains the world model runs eagerly: its replay reads
+        # each window's contexts to the host to plan its passes, whose count
+        # and shapes change from epoch to epoch.
+        if self._stream is None or not self._warm or self.joint is not None:
+            losses, metrics = self._learn_epoch(storage)
+            self._warm = True
+            self._stale = self.joint is not None
+            return losses, metrics, learning_rate
+        if slot not in self._graphs:
+            graph = torch.cuda.CUDAGraph()
+            with (
+                CAPTURE_LOCK,
+                torch.cuda.graph(
+                    graph,
+                    pool=self._pool,
+                    stream=self._stream,
+                    capture_error_mode="thread_local",
+                ),
+            ):
+                losses, metrics = self._learn_epoch(storage)
+            self._graphs[slot] = _LearnerGraph(
+                graph=graph,
+                losses=losses,
+                metrics=metrics,
+            )
+        learner = self._graphs[slot]
+        learner.graph.replay()
+        # Copies: the next replay rewrites the graph's own outputs.
+        return (
+            learner.losses.clone(),
+            {name: value.clone() for name, value in learner.metrics.items()},
+            learning_rate,
+        )
+
+    def _learn_epoch(self, storage: RolloutStorage) -> tuple[Tensor, dict[str, Tensor]]:
+        """Run the learner's minibatches and optimizer steps; return the mean terms."""
+        return self.learner(self, self._learner_rollout(storage))
 
 
-# A captured update reads its rate from device memory, so the rate is written into
-# that memory; rebinding the group's entry would go unseen by the replay.
-def _write_rate(group: dict[str, object], rate: float) -> None:
-    """Set one parameter group's learning rate, in place where it is a tensor."""
-    current = group["lr"]
-    if isinstance(current, Tensor):
-        current.fill_(rate)
-    else:
-        group["lr"] = rate
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _LearnerGraph:
+    """One slot's captured learner epoch and the loss terms and metrics it writes."""
+
+    graph: torch.cuda.CUDAGraph
+    losses: Tensor
+    metrics: dict[str, Tensor]
 
 
-# ``torch.optim.Adam`` reads both flags per group at every step, so flipping them before
-# the first step -- or after a checkpoint restored an eager run's -- is enough.
-def _make_capturable(
-    param_groups: list[dict[str, object]],
-    state: Mapping[Tensor, dict[str, object]],
-    device: torch.device,
-) -> None:
-    """Keep Adam's step counts and learning rates on the device, as capture needs."""
-    for group in param_groups:
-        group["capturable"] = True
-        group["lr"] = torch.as_tensor(group["lr"], device=device)
-    for per_parameter in state.values():
-        step = per_parameter.get("step")
-        if isinstance(step, Tensor):
-            per_parameter["step"] = step.to(device=device, dtype=torch.float32)
+# Numpy, not torch: the logs are the Numba step's structured records, read in place.
+def _log_sums(env: CraftaxEnv) -> np.ndarray:
+    """Return every environment's episode-log fields as float64 ``[num_envs, LOG_FIELDS]``."""
+    logs = np.ascontiguousarray(env.stats["log"])
+    return logs.view(np.float32).reshape(len(logs), LOG_FIELDS).astype(np.float64)
 
 
-class _EvaluationActor:
-    """Sample a feed-forward policy without owning recurrent state."""
+def _check_recipe(config: CraftaxTrainStep.Config) -> None:
+    """Refuse a recipe the pipeline would run wrongly, before anything is built."""
+    if not math.isfinite(config.train_budget_steps) or config.train_budget_steps <= 0:
+        raise ValueError(
+            "train_budget_steps is the epoch count; it must be finite and positive",
+        )
+    scale = config.reward_scale
+    if math.isnan(scale) or math.isinf(scale) or scale <= 0:
+        raise ValueError(f"reward_scale must be positive and finite, not {scale}")
+    if math.isnan(config.reward_clip) or config.reward_clip <= 0:
+        raise ValueError(f"reward_clip must be positive, not {config.reward_clip}")
+    if config.rollout.num_slots not in {1, 2}:
+        raise ValueError(
+            "the pipeline prefetches into a second slot or collects into its "
+            f"only one; num_slots must be 1 or 2, not {config.rollout.num_slots}",
+        )
+    if config.rollout.horizon <= 0:
+        raise ValueError(f"horizon must be positive, not {config.rollout.horizon}")
+    width, expected = config.env.observation_size, config.model.observation_size
+    if width != expected:
+        msg = f"the env writes {width}-float observations; the policy reads {expected}"
+        raise ValueError(msg)
+    if config.feature is not None and config.env.rules.symbolic_observation:
+        raise ValueError(
+            "a feature reads the packed observation: the symbolic view is refused",
+        )
+    if config.feature_training is not None:
+        if not isinstance(config.feature, WorldModelFeature.Config):
+            raise ValueError(
+                "feature_training trains a world-model feature's weights, and "
+                "the step reads no such feature",
+            )
+        if not isinstance(config.learner, AgentWindows.Config):
+            raise ValueError(
+                "feature_training recomputes the features of whole agents' "
+                "windows: the learner must be AgentWindows",
+            )
+    Evaluation.check(config.evaluation)
 
-    def __init__(
-        self,
-        model: ActorCritic,
-        *,
-        observation_size: int,
-        device: torch.device,
-    ) -> None:
-        self.model = model
-        self.observation_size = observation_size
-        self.device = device
 
-    def reset(self, *, num_envs: int, device: torch.device) -> None:
-        del num_envs, device
+def _joint_world_model(
+    config: CraftaxTrainStep.Config,
+    feature: FeatureSource | None,
+) -> JointWorldModel | None:
+    """Copy the feature's world model for the learner to train; None keeps it frozen."""
+    if config.feature_training is None:
+        return None
+    # ``_check_recipe`` refused any other feature.
+    assert isinstance(config.feature, WorldModelFeature.Config)
+    assert isinstance(feature, WorldModelFeature)
+    # Under the capture lock, which the rollout holds while it compiles and
+    # captures: a compiled replay kernel called during another thread's compile
+    # raises (measured in a smoke run), and a compiler that synchronizes the device
+    # would break a step graph being captured.
+    return JointWorldModel(
+        feature.model,
+        layers=config.feature.layers,
+        replay=config.feature_training.make(),
+        guard=CAPTURE_LOCK,
+    )
 
-    def act(
-        self,
-        observation: Tensor,
-        previous_done: Tensor,
-        *,
-        generator: torch.Generator,
-    ) -> Tensor:
-        del previous_done
-        logits, _ = self.model(observation)
-        return torch.multinomial(
-            logits.softmax(-1),
-            1,
-            generator=generator,
-        ).squeeze(-1)
+
+def _stored_contexts(storage: RolloutStorage) -> Contexts | None:
+    """Return the contexts a joint rollout stored, agent-major; None if it stored none."""
+    cells, aux = storage.frame_cells, storage.frame_aux
+    previous, lengths = storage.previous_actions, storage.context_decisions
+    anchored = storage.context_anchored
+    prefix_cells, prefix_aux = storage.prefix_cells, storage.prefix_aux
+    prefix_previous, prefix_count = (
+        storage.prefix_previous_actions,
+        storage.prefix_decisions,
+    )
+    if (
+        cells is None
+        or aux is None
+        or previous is None
+        or lengths is None
+        or anchored is None
+        or prefix_cells is None
+        or prefix_aux is None
+        or prefix_previous is None
+        or prefix_count is None
+    ):
+        return None
+    return Contexts(
+        cells=cells.transpose(0, 1).contiguous(),
+        aux=aux.transpose(0, 1).contiguous(),
+        previous_actions=previous.transpose(0, 1).contiguous(),
+        lengths=lengths.transpose(0, 1).contiguous(),
+        anchored=anchored.transpose(0, 1).contiguous(),
+        prefix_cells=prefix_cells,
+        prefix_aux=prefix_aux,
+        prefix_previous_actions=prefix_previous,
+        prefix_counts=prefix_count,
+    )
+
+
+def _is_step_state(state: Mapping[str, object]) -> TypeIs[CraftaxTrainStep.StateDict]:
+    """Whether ``state`` has every part a train step's checkpoint carries."""
+    return CraftaxTrainStep.StateDict.__required_keys__ <= state.keys()
+
+
+def _fp32(value: float) -> float:
+    """Round to the nearest fp32; on fp32 operands this is fp32 arithmetic."""
+    return struct.unpack("<f", struct.pack("<f", value))[0]

@@ -1,0 +1,56 @@
+epoch 0001 learning_rate 0x3b9af4a5 0.004728870932012796
+epoch 0001 policy_loss 0xbc8594dc -0.016306333243846893
+epoch 0001 value_loss 0x3ccdc2a0 0.025117218494415283
+epoch 0001 entropy 0x3fe85f1e 1.8154027462005615
+epoch 0001 total_loss 0x3b4b3090 0.003100428730249405
+epoch 0001 old_approx_kl 0x3a7b9e80 0.0009598508477210999
+epoch 0001 approx_kl 0x373d9000 1.1298805475234985e-05
+epoch 0001 clipfrac 0x00000000 0.0
+epoch 0001 importance 0x3f7fc1d6 0.9990514516830444
+epoch 0001 master embedding.weight torch.float32 (154, 16) 3c71e56aaeebb11d8b4af81a04e31694038afa2eb73145076c273779b4b46fb2
+epoch 0001 master proj_in.weight torch.float32 (8, 1635) 49ac9498b4fbc0057f02222a1b6ca2faa475e725d795108afb967028aaab2d61
+epoch 0001 master proj_out.weight torch.float32 (44, 8) 60a049db3c0def9ef4c34a5c2c17072ec0f5cca7a42b79e126b9e77d5409ac6b
+epoch 0001 master blocks.0.proj_gates.weight torch.float32 (24, 8) fb55dff3e2e94e750b1fede0efe4bae5ffe37bc57275b5592e7f1e96681a6685
+epoch 0001 master blocks.1.proj_gates.weight torch.float32 (24, 8) b1ea0ecca930d455d37a61e8f85059c97ed9adedb0423760016adf8d7dc9d814
+epoch 0002 learning_rate 0x3b84434f 0.0040363441221416
+epoch 0002 policy_loss 0xbb18a486 -0.0023291422985494137
+epoch 0002 value_loss 0x383e8000 4.5418739318847656e-05
+epoch 0002 entropy 0x3ff24cf6 1.8929736614227295
+epoch 0002 total_loss 0xbb30cac5 -0.0026976328808814287
+epoch 0002 old_approx_kl 0xba725c80 -0.0009245350956916809
+epoch 0002 approx_kl 0x38e62800 0.00010974705219268799
+epoch 0002 clipfrac 0x00000000 0.0
+epoch 0002 importance 0x3f8021e4 1.0010342597961426
+epoch 0002 master embedding.weight torch.float32 (154, 16) 73cebb0ac59a767ddbb091e3f3a01d7fdd2fb0d8053f3f78f09ad6ea640e6a1f
+epoch 0002 master proj_in.weight torch.float32 (8, 1635) 0097a497cca52c9aad6eb8722d2b959f8e73f949edb01f41143867735dc05a4d
+epoch 0002 master proj_out.weight torch.float32 (44, 8) 45a6242c0f5b451199d33f3a7091aadab0a12feaebb2935b9feedca62b3bed78
+epoch 0002 master blocks.0.proj_gates.weight torch.float32 (24, 8) 912d28442d9f5f3a1e5c54678b61f08a2a15d62a14a9641dd19a007773e4a5ca
+epoch 0002 master blocks.1.proj_gates.weight torch.float32 (24, 8) 54f34f2be3862d719c196d334409e5972d930b9c2c3a295aebfe31e239bdf31a
+epoch 0003 learning_rate 0x3b1af4a5 0.002364435466006398
+epoch 0003 policy_loss 0x3b224746 0.0024761720560491085
+epoch 0003 value_loss 0x37080000 8.106231689453125e-06
+epoch 0003 entropy 0x3ffb553e 1.9635388851165771
+epoch 0003 total_loss 0x3b0736d8 0.0020632054656744003
+epoch 0003 old_approx_kl 0xbbd50500 -0.006500840187072754
+epoch 0003 approx_kl 0x39c1e580 0.0003698281943798065
+epoch 0003 clipfrac 0x00000000 0.0
+epoch 0003 importance 0x3f80e123 1.0068706274032593
+epoch 0003 master embedding.weight torch.float32 (154, 16) edb5dbdccd597c8fbc38fff28d4e7d728df8dd8788ed5792c180dd995fd8645e
+epoch 0003 master proj_in.weight torch.float32 (8, 1635) 6da5393a695cd6745f187bd1072ec0062a7be477f9acb11c969714261c7c601c
+epoch 0003 master proj_out.weight torch.float32 (44, 8) bad34d01ed6769592a15b2ab1b9f8020296efb83ebb27df3fd8899ec308c45a0
+epoch 0003 master blocks.0.proj_gates.weight torch.float32 (24, 8) 0f8c0f7922ec82507647524f26f09cb1c24101b686138a5b93591e7b82f0501f
+epoch 0003 master blocks.1.proj_gates.weight torch.float32 (24, 8) c22905c4f0191ef039a8cfd38459cd804c6de053a2c90b838a2fdaf58137e114
+epoch 0004 learning_rate 0x3a358ab6 0.0006925271591171622
+epoch 0004 policy_loss 0x3988c41e 0.00026086060097441077
+epoch 0004 value_loss 0x37a40000 1.9550323486328125e-05
+epoch 0004 entropy 0x3ffb5132 1.9634153842926025
+epoch 0004 total_loss 0xb9160290 -0.0001430606935173273
+epoch 0004 old_approx_kl 0xb9a18d00 -0.00030813366174697876
+epoch 0004 approx_kl 0x384f0800 4.936009645462036e-05
+epoch 0004 clipfrac 0x00000000 0.0
+epoch 0004 importance 0x3f800bb7 1.0003575086593628
+epoch 0004 master embedding.weight torch.float32 (154, 16) 9aca1683c44002ca4690ff4778bd9b74a86cda335471263b988d58d85936b381
+epoch 0004 master proj_in.weight torch.float32 (8, 1635) 7194f76929fefe7e2bbafdff68fad5013bc624d15e65450d57d14a8baef567ef
+epoch 0004 master proj_out.weight torch.float32 (44, 8) f67af1bd90261c820b5ac9cd888aff66e7fb18c53f487370f9b4dc77049c8791
+epoch 0004 master blocks.0.proj_gates.weight torch.float32 (24, 8) 02847fdb12f5da7abfdb753693a09c4fef330fac70134fed46da6e51e4115852
+epoch 0004 master blocks.1.proj_gates.weight torch.float32 (24, 8) 278546ca383c22a95f855b36a48e391362a787f2a7676c8b2ef6aac08abcb4bd

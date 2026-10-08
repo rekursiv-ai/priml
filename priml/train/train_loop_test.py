@@ -1045,18 +1045,26 @@ def test_a_resume_with_nothing_left_to_do_says_so(
         with caplog.at_level(logging.WARNING, logger=train_loop.__name__):
             loop.train()
         assert loop.step.global_step == 20  # Exited cleanly, trained nothing.
-        warnings = [
-            record for record in caplog.records if record.levelno >= logging.WARNING
+        # ``make`` resumed, so the checkpointer's warning comes first. Only these
+        # two loggers: on Apple silicon the seed module also warns about MPS RNG.
+        resumed, finished = [
+            record
+            for record in caplog.records
+            if record.levelno >= logging.WARNING
+            and record.name in {Checkpointer.__module__, train_loop.__name__}
         ]
-        assert [record.getMessage() for record in warnings] == [
-            (
-                "No training step ran: this experiment already completed at step "
-                f"20 (max_steps=20) in {loop.working_dir}. To train further, raise "
-                "the stop condition; to train again from scratch, fork it with a "
-                "new experiment_name or point working_dir elsewhere."
-            ),
-        ]
-        assert warnings[0].args == (20, 20, loop.working_dir)
+        assert resumed.name == Checkpointer.__module__
+        assert resumed.getMessage().startswith(
+            f"Resuming from checkpoint {checkpoint_dir}",
+        )
+        assert " at step 20 " in resumed.getMessage()
+        assert finished.getMessage() == (
+            "No training step ran: this experiment already completed at step "
+            f"20 (max_steps=20) in {loop.working_dir}. To train further, raise "
+            "the stop condition; to train again from scratch, fork it with a "
+            "new experiment_name or point working_dir elsewhere."
+        )
+        assert finished.args == (20, 20, loop.working_dir)
 
 
 @pytest.mark.parametrize(
