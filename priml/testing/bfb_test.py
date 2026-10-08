@@ -23,7 +23,7 @@ import torch.distributed as dist
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from torch._ops import OpOverload
     from torch.distributed.device_mesh import DeviceMesh
@@ -122,6 +122,20 @@ def isolate_regenerate_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     locally.
     """
     regenerate.override(monkeypatch, b4b=False)
+
+
+@pytest.fixture(autouse=True)
+def deterministic_algorithms_unchanged() -> Iterator[None]:
+    """Fail a test that leaves deterministic algorithms toggled for the next one."""
+    before = (
+        torch.are_deterministic_algorithms_enabled(),
+        torch.is_deterministic_algorithms_warn_only_enabled(),
+    )
+    yield
+    assert (
+        torch.are_deterministic_algorithms_enabled(),
+        torch.is_deterministic_algorithms_warn_only_enabled(),
+    ) == before
 
 
 def _build_min_linear() -> nn.Linear:
@@ -3814,13 +3828,19 @@ def test_replay_golden_moves_saved_input_to_module_device(
     def run(module: nn.Module, value: Tensor) -> Tensor:
         return cast(Tensor, module(value))
 
-    _replay_golden(
-        golden_path=path,
-        build_module=SmallModule,
-        build_input=lambda: torch.arange(6.0).reshape(2, 3),
-        seed=17,
-        run=run,
-    )
+    # `_replay_golden` enables deterministic algorithms; its public callers
+    # restore them, so a direct call must too or later tests inherit it.
+    original = _capture_torch_process_state()
+    try:
+        _replay_golden(
+            golden_path=path,
+            build_module=SmallModule,
+            build_input=lambda: torch.arange(6.0).reshape(2, 3),
+            seed=17,
+            run=run,
+        )
+    finally:
+        _restore_torch_process_state(original)
     assert devices == ["cpu"]
 
 
