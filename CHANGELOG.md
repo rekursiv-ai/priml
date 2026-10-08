@@ -3,6 +3,59 @@
 All notable priml changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.1.6 - 2026-10-07
+
+### Added
+
+- `priml.data.passes.Passes` wraps a function that draws one pass of
+  batches, so a training loader iterates afresh at every epoch boundary
+  instead of handing back an exhausted generator.
+- `priml.runtime.best_device()` returns the best accelerator this process
+  can use, else CPU.
+- `priml.testing.golden.assert_pprint_golden(test_file=..., name=...,
+  config=...)` compares a config's full finalized pprint with a
+  test-local golden, with an optional `normalize`; it replaces
+  `configgle.testing.assert_pprint_golden`. `priml.testing.regenerate`
+  adds the `--regenerate-golden` pytest option.
+- ARC evaluation can write ranked per-task pass@k JSON.
+- An ETTh1 DLinear forecasting baseline (`priml.baselines.etth1`).
+
+### Changed
+
+- **Breaking:** runtime `device` defaults to `None`, which selects the best
+  usable accelerator, else CPU. The `"auto"` spelling is gone:
+  `get_device("auto")` now raises. `get_device(None)` returns the device
+  being built under (`torch.get_default_device()`).
+- A CUDA build on a machine with no usable GPU resolves the default device
+  to CPU instead of failing on its first allocation. Processors and model
+  loaders default to their build-time device; explicitly configured
+  devices are kept.
+- **Breaking:** `RoPE`'s `dtype` defaults to `torch.float32` (was `None`).
+  Fixed frequencies stay float32 through module casts; learned frequencies
+  follow the module dtype. Numerics are unchanged.
+- **Breaking:** the vendored `priml.lib.custom_json` is replaced by
+  `priml.lib.codec`. Dataset metadata, manifests and training checkpoints
+  are read with its typed parser.
+- Reductions normalize their axes and reject invalid dimensions; dataset
+  recipes, resume state, model configs and optimizer inputs are validated
+  up front.
+- Development: the bundled typeshed patch and pytest options are updated, and
+  a worker-count helper is vendored as `priml.lib.worker_count`. Runtime
+  dependencies and the supported Python versions (3.12+) are unchanged.
+
+### Fixed
+
+- Transformer mixers are no longer passed an absent cache.
+- A missing false-accept count is treated as zero during evaluation.
+- Fixes to attention, sampling, metrics, image processing, checkpoint
+  handling, and parallel data and distributed workflows.
+
+### Removed
+
+- **Breaking:** `priml.testing.fixtures.get_device`; use
+  `priml.runtime.best_device()`.
+- `Checkpointer.has_pending_write`.
+
 ## 0.1.5 - 2026-10-03
 
 ### Changed
