@@ -479,6 +479,65 @@ def test_free_summary_counts_first_episodes_that_ended_without_a_death() -> None
     assert summary["first_episode_ended"] == 1
 
 
+def test_free_choices_are_the_typical_longest_deepest_and_dying_episodes() -> None:
+    # Lengths 3..20, median 10; the dying ones' median 6. Ties: the longest
+    # with the higher reward, whatever a shorter one's; the deepest that lasted
+    # longer.
+    features = [
+        _features(5, floors=1),
+        _features(9, reward=5.0),
+        _features(20, reward=1.0),
+        _features(20, reward=3.0),
+        _features(10, floors=3),
+        _features(11, floors=3),
+        _features(3, died=True),
+        _features(6, died=True),
+        _features(12, died=True),
+    ]
+    chosen = {"typical": 4, "longest": 3, "deepest_floor": 5}
+    assert dream_eval._free_choices(features) == {**chosen, "death": 7}
+    assert dream_eval._free_choices(features[:6]) == chosen
+
+
+def test_holm_marks_the_tests_its_step_down_puts_below_alpha() -> None:
+    # Sorted, 1/64, 0.025 and 0.04 scale by 3, 2 and 1 to 0.046875, 0.05 and
+    # 0.04, then rise to 0.05: only the first is below alpha. No p, no mark.
+    tests: list[tuple[str, dict[str, PlainTree]]] = [
+        ("a", {"p_value": 0.04}),
+        ("b", {"p_value": 1 / 64}),
+        ("c", {"p_value": None}),
+        ("d", {"p_value": 0.025}),
+    ]
+    assert dream_eval._holm(tests, alpha=0.05) == ["b"]
+    marks = [(e.get("p_holm"), e.get("distinguishable")) for _, e in tests]
+    assert marks == [(0.05, False), (0.046875, True), (None, None), (0.05, False)]
+
+
+def _features(
+    length: int,
+    *,
+    floors: int = 2,
+    reward: float = 0.0,
+    died: bool = False,
+) -> dream_eval.Features:
+    """Return the features of an episode of ``length`` decisions over its first ``floors``."""
+    floor_first = torch.full((9,), -1, dtype=torch.long)
+    floor_first[:floors] = torch.arange(floors)
+    empty = torch.zeros(0)
+    return dream_eval.Features(
+        length=length,
+        died=died,
+        reward=reward,
+        floor_first=floor_first,
+        returns=empty,
+        actions=empty,
+        aux=empty,
+        events=empty,
+        checks=empty,
+        health_delta=empty,
+    )
+
+
 def test_main_samples_in_float32_off_cuda(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

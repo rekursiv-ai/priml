@@ -25,6 +25,7 @@ from numba.np.numpy_support import from_dtype
 import numpy as np
 import pytest
 
+from priml.baselines.craftax.eager import eager
 from priml.baselines.craftax.game import step
 from priml.baselines.craftax.game.observation import (
     compute_observations_numba,
@@ -54,7 +55,6 @@ from priml.baselines.craftax.game.state import (
     training_stats,
 )
 from priml.baselines.craftax.game.testing import (
-    eager_kernels,
     generate_small_world,
     ir_builder,
     small_worlds,
@@ -62,7 +62,7 @@ from priml.baselines.craftax.game.testing import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from numba.core.dispatcher import Dispatcher
 
@@ -70,9 +70,10 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture(autouse=True)
-def eager(monkeypatch: pytest.MonkeyPatch) -> None:
+def kernels(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Run the step as Python: a compile costs seconds, these worlds milliseconds."""
-    eager_kernels(monkeypatch)
+    with eager(monkeypatch=monkeypatch):
+        yield
 
 
 def _batch(

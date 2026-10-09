@@ -52,12 +52,13 @@ def test_unlocked_at_finds_the_first_state_that_holds_the_achievement(
     # The state before decision ``d`` holds the achievement from ``unlock`` on;
     # the final state, after the last decision, is the episode's length.
     probed: list[int] = []
+    record = _record(_LENGTH)
+    asked = (record, Achievement.COLLECT_WOOD.value)
     monkeypatch.setattr(
         endings,
         "_holds",
-        partial(_holds_from, unlock=unlock, probed=probed),
+        partial(_holds_from, unlock=unlock, probed=probed, asked=asked),
     )
-    record = _record(_LENGTH)
     assert unlocked_at(record, achievement=Achievement.COLLECT_WOOD, after=0) == unlock
     assert len(probed) <= 2 * _LENGTH.bit_length()
     assert all(0 < d < _LENGTH for d in probed)
@@ -67,12 +68,13 @@ def test_unlocked_at_searches_only_from_its_first_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     probed: list[int] = []
+    record = _record(_LENGTH)
     monkeypatch.setattr(
         endings,
         "_holds",
-        partial(_holds_from, unlock=700, probed=probed),
+        partial(_holds_from, unlock=700, probed=probed, asked=(record, 0)),
     )
-    assert unlocked_at(_record(_LENGTH), achievement=0, after=600) == 700
+    assert unlocked_at(record, achievement=0, after=600) == 700
     assert min(probed) > 600
 
 
@@ -198,6 +200,7 @@ _UNLOCKED: Final = 77
 """The decision the stand-in search reports for every win."""
 
 
+# Each probe asks of ``asked``, the record and the achievement searched.
 def _holds_from(
     record: Replayable,
     *,
@@ -205,9 +208,11 @@ def _holds_from(
     decision: int,
     unlock: int,
     probed: list[int],
+    asked: tuple[Replayable, int],
 ) -> bool:
     """Stand in for ``endings._holds``: whether ``decision`` is at or past ``unlock``."""
-    del record, achievement
+    assert record is asked[0]
+    assert achievement == asked[1]
     probed.append(decision)
     return decision >= unlock
 

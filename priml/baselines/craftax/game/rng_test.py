@@ -1,6 +1,6 @@
 """Tests that the port's ``rand_r`` stream is glibc's, draw for draw.
 
-The kernels run as their Python source (``testing.eager_kernels``): their
+The kernels run as their Python source (``craftax.eager``): their
 arithmetic is uint32 masked in uint64 and single float32 roundings, which
 Python's numpy scalars compute bit for bit as the compiled kernels do, and
 ``env_test``'s goldens hold the compiled stream. The jitted helper calls the
@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
+from priml.baselines.craftax.eager import eager
 from priml.baselines.craftax.game.jit import jit
 from priml.baselines.craftax.game.rng import (
     F32_PER_DRAW,
@@ -27,11 +28,12 @@ from priml.baselines.craftax.game.rng import (
     rng_f32_numba,
     rng_int_numba,
 )
-from priml.baselines.craftax.game.testing import eager_kernels
 from priml.baselines.craftax.scripts import mint_goldens
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from numpy.typing import NDArray
 
     from priml.baselines.craftax.game.state import Array1, Array2
@@ -46,9 +48,10 @@ the draw so a wrong constant cannot pass silently.
 
 
 @pytest.fixture(autouse=True)
-def eager(monkeypatch: pytest.MonkeyPatch) -> None:
+def kernels(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Run the draws as Python: a compile costs seconds, a draw microseconds."""
-    eager_kernels(monkeypatch)
+    with eager(monkeypatch=monkeypatch):
+        yield
 
 
 @jit

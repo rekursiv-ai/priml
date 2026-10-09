@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from typing import TYPE_CHECKING, NamedTuple, cast
+from typing import TYPE_CHECKING, Final, NamedTuple, Protocol, cast
 
-import ctypes
+import sys
 
 from numba.core.dispatcher import Dispatcher
 
@@ -34,13 +34,21 @@ from priml.baselines.craftax.game.state import (
     new_stats,
 )
 from priml.baselines.craftax.game.step import Rules, play_numba
-from priml.baselines.craftax.lib.arrays import typed
+from priml.baselines.craftax.lib.arrays import ints, typed
+from priml.baselines.craftax.scripts import mint_goldens
 from priml.baselines.craftax.world_model import replay
+from priml.baselines.craftax.world_model.capture import step as capture_step
 from priml.baselines.craftax.world_model.capture.seeds import splitmix64
 
 
 if TYPE_CHECKING:
-    from priml.baselines.craftax.game.state import EnvState
+    from priml.baselines.craftax.game.state import EnvState, Records
+
+
+class _Cell(Protocol):
+    """A record of :data:`_CELL`."""
+
+    x: int
 
 
 def test_kernels_run_as_python_inside_and_compiled_again_after() -> None:
@@ -74,52 +82,137 @@ def test_the_python_hash_is_the_kernels(data: bytes) -> None:
     with np.errstate(over="ignore"):
         expected = replay.fnv1a_numba.py_func(array)
     with eager():
+        assert replay.fnv1a_numba is capture_step.fnv1a_numba is eager_module._fnv1a
         assert replay.fnv1a_numba(array) == expected
     assert eager_module._fnv1a(array) == expected
 
 
-def test_the_bit_counts_are_the_builtins() -> None:
+def test_the_python_hash_refuses_elements_wider_than_a_byte() -> None:
+    # The kernel hashes one byte an element; the bytes of wider ones hash apart.
+    with pytest.raises(TypeError, match="uint8"):
+        eager_module._fnv1a(np.zeros(2, np.uint16))
+
+
+class _Counted(NamedTuple):
+    """A named tuple of arrays, as a ``Batch`` is."""
+
+    states: np.ndarray
+    counts: np.ndarray
+
+
+@jit.jit
+def _uncompiled(x: int) -> int:
+    return x + 1
+
+
+@jit.jit
+def _calls_uncompiled(x: int) -> int:
+    return _uncompiled(x) * 2
+
+
+@jit.jit
+def _tick(pair: _Counted, row: int) -> int:
+    """Advance one record's clock through its attribute; count the call."""
+    states = cast("Records[EnvState]", pair.states)
+    states[row].timestep += 1
+    pair.counts[0] += 1
+    return int(states[row].timestep)
+
+
+@jit.jit
+def _first_timestep(states: Records[EnvState]) -> int:
+    return _timestep_of(states[0])
+
+
+@jit.jit
+def _timestep_of(state: EnvState) -> int:
+    return int(state.timestep)
+
+
+def _stand_in_target() -> str:
+    return "compiled"
+
+
+def test_a_kernel_and_its_callees_run_as_python_then_compiled_again() -> None:
+    kernel = _calls_uncompiled
     with eager():
-        assert [jit.popcount(np.uint64(v)) for v in (0, 1, 0b1011, 2**64 - 1)] == [
-            0,
-            1,
-            3,
-            64,
-        ]
-        assert [jit.trailing_zeros(np.uint64(v)) for v in (1, 8, 2**63, 0)] == [
-            0,
-            3,
-            63,
-            64,
-        ]
+        assert _calls_uncompiled(3) == 8
+        assert _calls_uncompiled is not kernel
+    assert _calls_uncompiled is kernel
+    # Neither compiled: the callee ran as Python too.
+    assert not kernel.signatures
+    assert not _uncompiled.signatures
+
+
+def test_a_kernel_a_test_replaced_comes_back_compiled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The test's replacement is undone first, then the Python kernel it replaced."""
+    kernel = _uncompiled
+    with monkeypatch.context() as patch, eager(monkeypatch=patch):
+        patch.setattr(sys.modules[__name__], "_uncompiled", _stand_in_target)
+        assert _uncompiled is _stand_in_target
+    assert _uncompiled is kernel
+
+
+def test_a_kernel_reads_plain_arrays_as_records_and_writes_through() -> None:
+    pair = _Counted(new_states(2), np.zeros(1, dtype=np.int64))
+    with eager():
+        assert _tick(pair, 1) == 1
+        assert _tick(pair, 1) == 2
+    assert typed(pair.states["timestep"], np.int32).tolist() == [0, 2]
+    assert pair.counts.tolist() == [2]
+    assert not _tick.signatures
+
+
+def test_a_stand_in_by_name_is_handed_records_not_their_views() -> None:
+    held: list[type] = []
+
+    def timestep_of(state: object) -> int:
+        held.append(type(state))
+        return 7
+
+    with eager(_timestep_of=timestep_of):
+        assert _first_timestep(new_states(1)) == 7
+    assert held == [np.record]
+
+
+def test_the_intrinsics_and_the_libm_stand_in_and_a_name_adds_one() -> None:
+    # jit_test's anchor 64, where glibc's and macOS's libms agree.
+    angle = np.float32(
+        np.array([0x3FC9_D9B5], dtype=np.uint32).view(np.float32).item(0),
+    )
+    expected = mint_goldens.light_levels_libm([7, 100_000])
+    stats = env_stats(new_stats(1), 0)
+    with eager(_stand_in_target=lambda: "eager"):
+        assert _stand_in_target() == "eager"
+        assert jit.popcount(np.uint64(0b1011)) == 3
+        assert jit.popcount(np.uint64(2**64 - 1)) == 64
+        assert jit.trailing_zeros(np.uint64(0b1000)) == 3
+        assert jit.trailing_zeros(np.uint64(0)) == 64
         assert jit.prefetch(object(), 7) is None
-
-
-def test_cosf_sinf_and_powf_are_the_platform_libms_float32_calls() -> None:
-    libm = ctypes.CDLL(None)
-    for name in ("cosf", "sinf", "powf"):
-        getattr(libm, name).restype = ctypes.c_float
-    x, y = ctypes.c_float(0.3), ctypes.c_float(3.0)
-    expected = [
-        np.float32(cast("float", libm.cosf(x))),
-        np.float32(cast("float", libm.sinf(x))),
-        np.float32(cast("float", libm.powf(x, y))),
-    ]
-    with eager():
-        assert jit.cosf is not np.cos
-        at, power = np.float32(x.value), np.float32(y.value)
-        got = [jit.cosf(at), jit.sinf(at), jit.powf(at, power)]
-    assert got == expected
-    assert all(type(value) is np.float32 for value in got)
-    assert jit.cosf is np.cos
-
-
-def test_the_daylight_table_reads_the_light_of_each_timestep() -> None:
-    with eager():
+        assert step._training(stats) is stats
         table = rules.daylight_table()
         assert table.shape == (rules.DAYLIGHT_TIMESTEPS,)
-        for timestep in (0, 1, 299, DEFAULT_MAX_TIMESTEPS):
-            assert table[np.int64(timestep)] == rules.daylight_numba(timestep)
+        light = np.array([table[7], table[100_000]])
+        # numpy's float32 calls may round apart from the libm's, but not at the anchor.
+        assert {jit.cosf, jit.sinf, jit.powf}.isdisjoint({np.cos, np.sin, np.power})
+        libm = np.array(
+            [
+                jit.cosf(angle),
+                jit.sinf(angle),
+                jit.powf(np.float32(1.25), np.float32(3.0)),
+            ],
+        )
+    assert _stand_in_target() == "compiled"
+    assert jit.cosf is np.cos
+    assert light.dtype == libm.dtype == np.float32
+    assert light.view(np.uint32).tolist() == expected.view(np.uint32).tolist()
+    assert libm.view(np.uint32).tolist() == [
+        0xBBC9_DA0A,
+        0x3F7F_FEC2,
+        np.float32(1.953125).view(np.uint32),
+    ]
 
 
 def test_a_structured_argument_reaches_the_kernel_as_records() -> None:
@@ -181,6 +274,27 @@ def test_a_world_stand_in_replaces_world_generation_and_its_seed_shows() -> None
     assert len(episode.actions) == 2
 
 
+def test_a_block_inside_another_plays_its_own_world_then_the_outer_ones() -> None:
+    late = DEFAULT_MAX_TIMESTEPS - 2
+    clocks: list[int] = []
+    with eager(world=tiny_world):
+        for _ in range(2):
+            with eager(world=partial(tiny_world, timestep=late)):
+                # The hash's stand-in, not the outer stand-in's kernel run as Python.
+                assert replay.fnv1a_numba is eager_module._fnv1a
+                clocks.append(_clock())
+            assert not isinstance(rules.daylight_numba, Dispatcher)
+            clocks.append(_clock())
+    assert isinstance(rules.daylight_numba, Dispatcher)
+    assert clocks == [late, 0, late, 0]
+
+
+def _clock() -> int:
+    """Return the clock of world 1's State at its reset."""
+    states, _ = replay.reset_world(1)
+    return int(env_state(states, 0).timestep)
+
+
 class _Pair(NamedTuple):
     states: object
     size: int
@@ -198,6 +312,9 @@ def test_a_records_fields_read_and_write_through_to_its_array() -> None:
     assert np.asarray(fields.map) is blocks
     assert (fields.player_level, env_state(states, 0).player_level) == (3, 3)
     assert typed(states["map"], np.uint8)[0, 1, 2, 3] == BlockType.WATER
+    # Python code a kernel hands its record reads and writes fields by name.
+    viewed["timestep"] = 9
+    assert (viewed["timestep"], env_state(states, 0).timestep) == (9, 9)
     plain = _Pair(states=1, size=2)
     assert eager_module._viewed(plain) is plain
 
@@ -221,6 +338,18 @@ def test_a_structured_arrays_records_read_once_and_write_back() -> None:
     assert len(records) == 2
     assert records.dtype == states.dtype
     assert len(cast("np.ndarray", records[0:1])) == 1
+    # Any other index is the array's own: a record of a grid of them.
+    grid = eager_module._viewed(new_states(4).reshape(2, 2))
+    assert isinstance(grid, eager_module._Records)
+    assert type(grid[1, 0]) is np.record
+    # A plain tuple's plain arrays read as recarrays, its records as records.
+    counts = np.zeros(2)
+    held = eager_module._viewed((states, counts))
+    assert type(held) is tuple
+    records, plain = cast("tuple[object, np.ndarray]", held)
+    assert isinstance(records, eager_module._Records)
+    assert type(plain) is np.recarray
+    assert np.shares_memory(plain, counts)
 
 
 def test_kernels_handed_one_array_in_a_block_share_its_records_till_it_ends() -> None:
@@ -229,6 +358,38 @@ def test_kernels_handed_one_array_in_a_block_share_its_records_till_it_ends() ->
         records = eager_module._viewed(states)
         assert eager_module._viewed(states) is records
     assert eager_module._viewed(states) is not records
+
+
+_CELL: Final = np.dtype([("x", np.int64)])
+"""A record of one field, for views made and freed call by call."""
+
+
+class _Two(NamedTuple):
+    """Two arrays of bytes, each viewed as records in turn, as a ``Batch``'s are."""
+
+    first: np.ndarray
+    second: np.ndarray
+
+
+@jit.jit
+def _stamp(cells: Records[_Cell], value: int) -> None:
+    cells[0].x = value
+
+
+@jit.jit
+def _stamp_both(two: _Two) -> None:
+    _stamp(cast("Records[_Cell]", two.first.view(_CELL)), 1)
+    _stamp(cast("Records[_Cell]", two.second.view(_CELL)), 2)
+
+
+def test_a_temporary_view_handed_to_a_kernel_is_never_taken_for_another() -> None:
+    # The first view is freed once its call returns, and the second may take
+    # its ``id``, as the step's views of a batch's observations do.
+    two = _Two(np.zeros(8, np.uint8), np.zeros(8, np.uint8))
+    with eager():
+        for _ in range(3):
+            _stamp_both(two)
+    assert [ints(t.view(np.int64))[0] for t in (two.first, two.second)] == [1, 2]
 
 
 def test_a_scripted_record_replays_to_its_hashes_and_stats_are_their_record() -> None:

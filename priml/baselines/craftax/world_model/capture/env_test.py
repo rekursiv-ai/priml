@@ -20,6 +20,7 @@ from priml.baselines.craftax.eager import eager, tiny_world
 from priml.baselines.craftax.game import step
 from priml.baselines.craftax.game.state import (
     DEFAULT_MAX_TIMESTEPS,
+    Action,
     env_state,
     env_stats,
 )
@@ -127,9 +128,25 @@ def test_an_action_outside_the_schema_stops_recording(
     env.step_buffer(0)
     assert "outside 0-42" in env.failure
     assert env.receipt(0) is None
+    # The stopped row holds nothing; the other its first decision.
+    assert (env.decisions(0), env.returned(0), env.decisions(1)) == (0, 0.0, 1)
     assert env.in_flight() == 1
     _play(env, decisions=_DECISIONS)
     assert env.finished()
+    # Its episode over, the other holds none either, though its count stays.
+    assert env.decisions(1) == 0
+
+
+def test_a_recording_row_reads_its_decisions_and_achievement_return(
+    short: None,
+) -> None:
+    # The tiny world's tree stands above the start: facing it, DO collects wood.
+    del short
+    env = CaptureEnv(CaptureEnv.Config(num_envs=1), schedule=Schedule(budget=10**9))
+    for action in (Action.UP, Action.DO):
+        env.actions[0, 0] = float(action.value)
+        env.step_buffer(0)
+    assert (env.decisions(0), env.returned(0)) == (2, 1.0)
 
 
 def test_random_play_records_what_replay_record_records(short: None) -> None:

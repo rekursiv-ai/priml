@@ -2,7 +2,7 @@
 
 The noise is checked against a scalar float32 transcription of the C, and the
 recipes against ``constants.h``'s tables. Each stage runs as its Python source
-(``testing.eager_kernels``) on a field or a floor: a whole world takes seconds
+(``craftax.eager``) on a field or a floor: a whole world takes seconds
 as Python, so the invariants of whole compiled worlds -- every floor's spawn
 block, its ladders, the spawn bitsets, a pool equal to worlds generated one
 at a time -- are checked on the worlds ``env_test``'s goldens generate, and
@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 import pytest
 
+from priml.baselines.craftax.eager import eager
 from priml.baselines.craftax.game import world_gen
 from priml.baselines.craftax.game.jit import cosf, jit, sinf
 from priml.baselines.craftax.game.rng import F32_PER_DRAW, rand_r_numba
@@ -34,7 +35,6 @@ from priml.baselines.craftax.game.state import (
     env_state,
     new_states,
 )
-from priml.baselines.craftax.game.testing import eager_kernels
 from priml.baselines.craftax.game.world_gen import (
     DUNGEON_CONFIG_DTYPE,
     DUNGEON_FLOOR_ORDER,
@@ -51,6 +51,8 @@ from priml.baselines.craftax.scripts import mint_goldens
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from numpy.typing import NDArray
 
     from priml.baselines.craftax.game.state import Array1, EnvState, Records
@@ -61,15 +63,16 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture(autouse=True)
-def eager(monkeypatch: pytest.MonkeyPatch) -> None:
+def kernels(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Run generation as Python: a compile costs seconds, one floor milliseconds."""
-    eager_kernels(monkeypatch)
+    with eager(monkeypatch=monkeypatch):
+        yield
 
 
 @jit
 def _cos_sin(angle: np.float32) -> tuple[np.float32, np.float32]:
     # The kernel's trig, so the transcription's angles go through the same calls:
-    # the platform libm's, as Python here (``eager_kernels``). The trig golden in
+    # the platform libm's, as Python here (``craftax.eager``). The trig golden in
     # jit_test.py is what pins the libm itself.
     return np.float32(cosf(angle)), np.float32(sinf(angle))
 

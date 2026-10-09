@@ -8,6 +8,7 @@ episodes in moments.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import shutil
@@ -50,7 +51,6 @@ from priml.lib.codec import from_plain
 
 if TYPE_CHECKING:
     from collections.abc import Generator
-    from pathlib import Path
 
     import numpy as np
 
@@ -84,6 +84,14 @@ def cpu_host(monkeypatch: pytest.MonkeyPatch) -> None:
 def tiny() -> Generator[None]:
     with eager(world=_world):
         yield
+
+
+def test_a_workers_shards_live_under_its_split_arm_and_index() -> None:
+    root = Path("archive")
+    assert shard_directory(root, split=TRAIN, arm=1, worker=2) == root / "train/arm1/w2"
+    assert (
+        shard_directory(root, split=VALIDATION, arm=3, worker=0) == root / "val/arm3/w0"
+    )
 
 
 def test_a_worker_publishes_replayable_shards_of_both_splits(tmp_path: Path) -> None:
