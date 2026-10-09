@@ -1,16 +1,14 @@
-"""Tests for the observations: the symbolic layout against JAX's renderer, and compilation."""
+"""Tests for the observations: the symbolic layout against JAX's renderer, and its slots."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import numba.core.types as nbtypes
 import numpy as np
 import pytest
 
-from priml.baselines.craftax.game import step
+from priml.baselines.craftax.game import observation
 from priml.baselines.craftax.game.observation import (
-    _write_mob_obs_numba,
     compute_observations_numba,
     compute_symbolic_observations_numba,
 )
@@ -18,33 +16,43 @@ from priml.baselines.craftax.game.state import (
     ATN_DIM,
     INVENTORY_OBS_SIZE,
     MAP_SIZE,
+    MAX_RANGED_MOBS,
+    MOB_SLOTS,
     NUM_BLOCK_TYPES,
     NUM_ITEM_TYPES,
     NUM_MOB_TYPES,
     OBS_COLS,
     OBS_ROWS,
     OBS_SIZE,
-    STATE_DTYPE,
     SYMBOLIC_OBS_SIZE,
     SYMBOLIC_TILE_CHANNELS,
     VISIBLE_LIGHT_THRESHOLD,
-    Action,
     env_state,
     new_states,
-    new_stats,
 )
-from priml.baselines.craftax.game.testing import kernel_llvm
-from priml.baselines.craftax.game.world_gen import (
-    DUNGEON_LEVEL_CONFIGS,
-    SMOOTH_LEVEL_CONFIGS,
-    build_pool_numba,
-)
+from priml.baselines.craftax.game.testing import eager_kernels, small_worlds
+from priml.baselines.craftax.lib.arrays import typed
 
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
-    from priml.baselines.craftax.game.state import EnvState
+    from priml.baselines.craftax.game.state import Array1, EnvState, Mobs
+
+
+_CREATURES = (
+    "melee_mobs",
+    "passive_mobs",
+    "ranged_mobs",
+    "mob_projectiles",
+    "player_projectiles",
+)
+
+
+@pytest.fixture(autouse=True)
+def eager(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the views as Python: a compile costs seconds, one view milliseconds."""
+    eager_kernels(monkeypatch)
 
 
 # The C's light rule (a uint8 light above 12, D10) and its creature rule (live, in view
@@ -94,67 +102,108 @@ def _reference_map(state: EnvState) -> NDArray[np.float32]:
     return view.reshape(-1)
 
 
-@pytest.mark.compute_large_fixture
-def test_the_symbolic_view_is_jaxs_one_hot_and_the_scalars_match_the_packed_ones() -> (
-    None
-):
-    pool = new_states(4)
-    build_pool_numba(
-        pool,
-        pool.view(np.uint8).reshape(4, STATE_DTYPE.itemsize),
-        SMOOTH_LEVEL_CONFIGS,
-        DUNGEON_LEVEL_CONFIGS,
-        0,
-    )
-    batch = step.Batch(
-        pool.copy(),
-        np.arange(4, dtype=np.uint32),
-        new_stats(4),
-        np.zeros((4, 1), dtype=np.float32),  # ``Batch.actions``: ``[num_envs, 1]``.
-        np.zeros((4, OBS_SIZE), dtype=np.float32),
-        np.ones((4, ATN_DIM), dtype=np.uint8),
-        np.zeros(4, dtype=np.float32),
-        np.zeros(4, dtype=np.float32),
-    )
-    draws = np.random.default_rng(0)
+@pytest.mark.parametrize(
+    ("seed", "row", "col", "level"),
+    [(0, 2, 3, 0), (1, MAP_SIZE - 3, MAP_SIZE - 2, 2), (2, 24, 25, 8)],
+    ids=["top-left", "bottom-right", "middle"],
+)
+def test_the_symbolic_view_is_jaxs_one_hot_and_the_scalars_match_the_packed_ones(
+    seed: int,
+    row: int,
+    col: int,
+    level: int,
+) -> None:
+    """Random blocks, items, light and creatures around a player, clipped by the map's edge."""
+    states = _random_world(seed, row=row, col=col, level=level)
+    state = env_state(states, 0)
     packed = np.zeros(OBS_SIZE, dtype=np.float32)
     symbolic = np.zeros(SYMBOLIC_OBS_SIZE, dtype=np.float32)
     packed_mask = np.zeros(ATN_DIM, dtype=np.uint8)
     symbolic_mask = np.zeros(ATN_DIM, dtype=np.uint8)
-    checked_mobs = 0
-    for _ in range(300):
-        batch.actions[:, 0] = draws.integers(Action.LEFT, Action.DO + 1, size=4)
-        step.step_range_numba(batch, pool, 0, 4)
-        for i in range(4):
-            state = env_state(batch.states, i)
-            compute_observations_numba(state, packed, packed_mask)
-            compute_symbolic_observations_numba(state, symbolic, symbolic_mask)
-            map_size = symbolic.size - INVENTORY_OBS_SIZE
-            np.testing.assert_array_equal(
-                symbolic[:map_size], _reference_map(state),
-            )  # fmt: skip
-            np.testing.assert_array_equal(
-                symbolic[map_size:], packed[-INVENTORY_OBS_SIZE :],
-            )  # fmt: skip
-            np.testing.assert_array_equal(symbolic_mask, packed_mask)
-            checked_mobs += int(symbolic[:map_size].reshape(99, -1)[:, 42:82].sum())
-    assert checked_mobs > 0
+    compute_observations_numba(state, packed, packed_mask)
+    compute_symbolic_observations_numba(state, symbolic, symbolic_mask)
+    map_size = symbolic.size - INVENTORY_OBS_SIZE
+    np.testing.assert_array_equal(symbolic[:map_size], _reference_map(state))
+    np.testing.assert_array_equal(
+        symbolic[map_size:], packed[-INVENTORY_OBS_SIZE :],
+    )  # fmt: skip
+    np.testing.assert_array_equal(symbolic_mask, packed_mask)
+    tiles = symbolic[:map_size].reshape(OBS_ROWS * OBS_COLS, -1)
+    # Lit tiles, dark ones, and live creatures in view: the cases the view tells apart.
+    assert 0 < tiles[:, -1].sum() < OBS_ROWS * OBS_COLS
+    assert tiles[:, NUM_BLOCK_TYPES + NUM_ITEM_TYPES : -1].sum() > 0
 
 
-@pytest.mark.compute_large_fixture
-def test_the_observation_passes_its_slot_counts_as_plain_int64s() -> None:
-    # A literal slot count compiles a copy of _write_mob_obs per value, which
-    # LLVM then leaves out of line in the step (measured on the Xeon).
-    states = new_states(1)
+def test_the_observation_passes_its_slot_counts_as_plain_int64s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A literal slot count compiles a copy of the creature writer per value.
+
+    LLVM then left those copies out of line in the step (measured on the
+    Xeon). Numba types a module constant as a literal, so each count goes
+    through ``unliteral``, an ``np.int64`` as the Python runs.
+    """
+    counts: list[object] = []
+    write = observation._write_mob_obs_numba
+
+    def record(
+        obs: Array1[np.float32],
+        state: EnvState,
+        mobs: Mobs,
+        slots: int,
+        mob_class: int,
+    ) -> None:
+        counts.append(slots)
+        write(obs, state, mobs, slots, mob_class)
+
+    monkeypatch.setattr(observation, "_write_mob_obs_numba", record)
     compute_observations_numba(
-        env_state(states, 0),
+        env_state(small_worlds(1), 0),
         np.zeros(OBS_SIZE, dtype=np.float32),
         np.zeros(ATN_DIM, dtype=np.uint8),
     )
-    kernel_llvm(compute_observations_numba)
-    assert {signature[3] for signature in _write_mob_obs_numba.signatures} == {
-        nbtypes.int64,
-    }
+    assert [type(count) for count in counts] == [np.int64] * len(_CREATURES)
+    assert counts == [3, 3, 2, 3, 3]
+
+
+# Every block, item and light level, inventory counts below 10, and each creature slot
+# live or not, of a random species, within 7 tiles of the player: some in view, some
+# past its edge, some on dark tiles.
+def _random_world(seed: int, *, row: int, col: int, level: int) -> NDArray[np.void]:
+    """Return a world whose floor ``level`` is random within 7 tiles of the player."""
+    draws = np.random.default_rng(seed)
+    states = new_states(1)
+    shape = (MAP_SIZE, MAP_SIZE)
+    typed(states["map"], np.uint8)[0, level] = draws.integers(0, NUM_BLOCK_TYPES, shape)
+    items = typed(states["item_map"], np.uint8)
+    items[0, level] = draws.integers(0, NUM_ITEM_TYPES, shape)
+    light = typed(states["light_map"], np.uint8)
+    light[0, level] = draws.integers(0, 256, shape)
+    # Both sides of the threshold, next to the player.
+    light[0, level, row, col] = VISIBLE_LIGHT_THRESHOLD
+    light[0, level, row, col - 1] = VISIBLE_LIGHT_THRESHOLD + 1
+    state = env_state(states, 0)
+    state.player_level = level
+    state.player_position[0] = row
+    state.player_position[1] = col
+    player = np.array([row, col])
+    for name in _CREATURES:
+        offsets = draws.integers(-7, 8, (MOB_SLOTS, 2))
+        positions = typed(states[name]["position"], np.int32)
+        positions[0, level] = np.clip(offsets + player, 0, MAP_SIZE - 1)
+        typed(states[name]["mask"], np.uint8)[0, level] = draws.integers(
+            0,
+            2,
+            MOB_SLOTS,
+        )
+        species = typed(states[name]["type_id"], np.int32)
+        species[0, level] = draws.integers(0, NUM_MOB_TYPES, MOB_SLOTS)
+    # A ranged creature has two slots; the third is never live.
+    typed(states["ranged_mobs"]["mask"], np.uint8)[0, level, MAX_RANGED_MOBS:] = 0
+    for name in ("wood", "stone", "coal", "iron", "diamond", "sapling", "torches"):
+        typed(states["inventory"][name], np.int32)[0] = draws.integers(0, 10)
+    state.player_health = np.float32(draws.integers(1, 10))
+    return states
 
 
 if __name__ == "__main__":

@@ -1,28 +1,177 @@
-"""Tests that a kernel's inspected code is the code that runs."""
+"""Tests that kernels run as Python as they compile, and that inspected code runs."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple, cast
+
+import sys
 
 from llvmlite import ir
 
 import numpy as np
 import pytest
 
-from priml.baselines.craftax.game import testing
-from priml.baselines.craftax.game.jit import jit, jit_parallel
+from priml.baselines.craftax.game import rules, step, testing
+from priml.baselines.craftax.game.jit import (
+    cosf,
+    jit,
+    jit_parallel,
+    popcount,
+    powf,
+    prefetch,
+    sinf,
+    trailing_zeros,
+)
+from priml.baselines.craftax.game.rules import LAND_BLOCKS
+from priml.baselines.craftax.game.state import (
+    MAP_SIZE,
+    STATE_DTYPE,
+    Action,
+    BlockType,
+    env_stats,
+    new_states,
+    new_stats,
+)
 from priml.baselines.craftax.game.testing import (
     _inspectable,
     _kernel_llvm,
+    eager_kernels,
     ir_builder,
     kernel_llvm,
+    small_worlds,
 )
+from priml.baselines.craftax.lib.arrays import typed
+from priml.baselines.craftax.scripts import mint_goldens
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from numba.core.dispatcher import Dispatcher
+
+    from priml.baselines.craftax.game.state import EnvState, Records
+
+
+class _Pair(NamedTuple):
+    """A named tuple of arrays, as a ``Batch`` is."""
+
+    states: np.ndarray
+    counts: np.ndarray
+
+
+@jit
+def _uncompiled(x: int) -> int:
+    return x + 1
+
+
+@jit
+def _calls_uncompiled(x: int) -> int:
+    return _uncompiled(x) * 2
+
+
+@jit
+def _tick(pair: _Pair, row: int) -> int:
+    """Advance one record's clock through its attribute; count the call."""
+    states = cast("Records[EnvState]", pair.states)
+    states[row].timestep += 1
+    pair.counts[0] += 1
+    return int(states[row].timestep)
+
+
+def _stand_in_target() -> str:
+    return "compiled"
+
+
+def test_eager_kernels_run_a_kernel_and_its_callees_as_python_then_restore_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel = _calls_uncompiled
+    with monkeypatch.context() as patch:
+        eager_kernels(patch)
+        assert _calls_uncompiled(3) == 8
+        assert _calls_uncompiled is not kernel
+    assert _calls_uncompiled is kernel
+    # Neither compiled: the callee ran as Python too.
+    assert not kernel.signatures
+    assert not _uncompiled.signatures
+
+
+def test_a_kernel_a_test_replaced_comes_back_compiled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The test's replacement is undone first, then the Python kernel it replaced."""
+    kernel = _uncompiled
+    with monkeypatch.context() as patch:
+        eager_kernels(patch)
+        patch.setattr(sys.modules[__name__], "_uncompiled", _stand_in_target)
+        assert _uncompiled is _stand_in_target
+    assert _uncompiled is kernel
+
+
+def test_eager_kernels_read_plain_arrays_as_records_and_write_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pair = _Pair(new_states(2), np.zeros(1, dtype=np.int64))
+    with monkeypatch.context() as patch:
+        eager_kernels(patch)
+        assert _tick(pair, 1) == 1
+        assert _tick(pair, 1) == 2
+    assert pair.states["timestep"].tolist() == [0, 2]
+    assert pair.counts.tolist() == [2]
+    assert not _tick.signatures
+
+
+def test_eager_kernels_stand_in_for_the_intrinsics_and_the_libm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # jit_test's anchor 64, where glibc's and macOS's libms agree.
+    angle = np.float32(
+        np.array([0x3FC9_D9B5], dtype=np.uint32).view(np.float32).item(0),
+    )
+    expected = mint_goldens.light_levels_libm([7, 100_000])
+    stats = env_stats(new_stats(1), 0)
+    with monkeypatch.context() as patch:
+        eager_kernels(patch, _stand_in_target=lambda: "eager")
+        assert _stand_in_target() == "eager"
+        assert popcount(np.uint64(0b1011)) == 3
+        assert trailing_zeros(np.uint64(0b1000)) == 3
+        assert trailing_zeros(np.uint64(0)) == 64
+        assert prefetch(object(), 7) is None
+        assert step._training(stats) is stats
+        table = rules.daylight_table()
+        assert table.shape == (rules.DAYLIGHT_TIMESTEPS,)
+        light = np.array([table[7], table[100_000]])
+        libm = np.array(
+            [cosf(angle), sinf(angle), powf(np.float32(1.25), np.float32(3.0))],
+        )
+    assert _stand_in_target() == "compiled"
+    assert light.dtype == libm.dtype == np.float32
+    assert light.view(np.uint32).tolist() == expected.view(np.uint32).tolist()
+    assert libm.view(np.uint32).tolist() == [
+        0xBBC9_DA0A,
+        0x3F7F_FEC2,
+        np.float32(1.953125).view(np.uint32),
+    ]
+
+
+def test_small_worlds_are_playable_quiet_and_told_apart_by_their_marker() -> None:
+    worlds = small_worlds(3)
+    assert worlds.dtype == STATE_DTYPE
+    centre = MAP_SIZE // 2
+    maps = typed(worlds["map"], np.uint8)
+    assert [maps.item(k, 0, 0, k) for k in range(3)] == [BlockType.STONE] * 3
+    assert np.equal(maps[:, 0, centre, centre], BlockType.SAND).all()
+    assert not LAND_BLOCKS[BlockType.SAND]
+    assert not typed(worlds["spawn_land"], np.uint64).any()
+    assert np.equal(typed(worlds["light_map"], np.uint8)[:, 0], 255).all()
+    assert np.equal(typed(worlds["player_position"], np.int32), centre).all()
+    assert np.equal(typed(worlds["player_direction"], np.int32), Action.UP).all()
+    assert np.equal(typed(worlds["player_health"], np.float32), 9.0).all()
+    ranged = typed(worlds["ranged_mobs"]["health"], np.float32)
+    assert np.array_equal(ranged[:, 0], np.tile([1.0, 1.0, 0.0], (3, 1)))
+    potions = typed(worlds["potion_mapping"], np.int32)
+    assert np.array_equal(potions, np.tile(np.arange(6), (3, 1)))
+    assert len({worlds[k : k + 1].tobytes() for k in range(3)}) == 3
 
 
 @jit

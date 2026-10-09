@@ -1,11 +1,12 @@
-"""Tests for world generation: the noise, the floor recipes, and the worlds they build.
+"""Tests for world generation: the noise, the floor recipes, and the stages that build a world.
 
 The noise is checked against a scalar float32 transcription of the C, and the
-recipes against ``constants.h``'s tables. Generation is random, so most world
-tests assert what every world must satisfy -- the player stands on the spawn
-block, the ladders sit on items, the potion shuffle is a permutation, the
-spawn bitsets describe the map -- and the bit-exact checks of whole worlds are
-the parity tests.
+recipes against ``constants.h``'s tables. Each stage runs as its Python source
+(``testing.eager_kernels``) on a field or a floor: a whole world takes seconds
+as Python, so the invariants of whole compiled worlds -- every floor's spawn
+block, its ladders, the spawn bitsets, a pool equal to worlds generated one
+at a time -- are checked on the worlds ``env_test``'s goldens generate, and
+the bit-exact checks of whole worlds are those goldens and the parity tests.
 """
 
 from __future__ import annotations
@@ -15,13 +16,17 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 import pytest
 
+from priml.baselines.craftax.game import world_gen
 from priml.baselines.craftax.game.jit import cosf, jit, sinf
-from priml.baselines.craftax.game.rng import F32_PER_DRAW
+from priml.baselines.craftax.game.rng import F32_PER_DRAW, rand_r_numba
 from priml.baselines.craftax.game.rules import daylight_numba
 from priml.baselines.craftax.game.state import (
     BOSS_SPAWN_TURNS,
+    MAP_SIZE,
     NOISE_PI2,
     NOISE_SQRT2,
+    NUM_BLOCK_TYPES,
+    NUM_LEVELS,
     STATE_DTYPE,
     Action,
     BlockType,
@@ -29,10 +34,7 @@ from priml.baselines.craftax.game.state import (
     env_state,
     new_states,
 )
-from priml.baselines.craftax.game.testing import (
-    FMA_MNEMONIC,
-    kernel_inspection,
-)
+from priml.baselines.craftax.game.testing import eager_kernels
 from priml.baselines.craftax.game.world_gen import (
     DUNGEON_CONFIG_DTYPE,
     DUNGEON_FLOOR_ORDER,
@@ -43,7 +45,6 @@ from priml.baselines.craftax.game.world_gen import (
     SMOOTH_LEVEL_CONFIGS,
     build_pool_numba,
     generate_fractal_numba,
-    generate_world_numba,
 )
 from priml.baselines.craftax.lib.arrays import typed
 from priml.baselines.craftax.scripts import mint_goldens
@@ -52,19 +53,24 @@ from priml.baselines.craftax.scripts import mint_goldens
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
-    from priml.baselines.craftax.game.world_gen import SmoothGenConfig
+    from priml.baselines.craftax.game.state import Array1, EnvState, Records
+    from priml.baselines.craftax.game.world_gen import (
+        DungeonConfig,
+        SmoothGenConfig,
+    )
 
 
-_LAND = (BlockType.GRASS, BlockType.PATH, BlockType.FIRE_GRASS, BlockType.ICE_GRASS)
-_GRAVES = (BlockType.GRAVE, BlockType.GRAVE2, BlockType.GRAVE3)
+@pytest.fixture(autouse=True)
+def eager(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run generation as Python: a compile costs seconds, one floor milliseconds."""
+    eager_kernels(monkeypatch)
 
 
 @jit
 def _cos_sin(angle: np.float32) -> tuple[np.float32, np.float32]:
-    # The kernel computes both of an angle, which LLVM merges into one sincos
-    # call; the transcription must take its trig from that same call, since
-    # Darwin's sincos and its separate cosf differ by an ulp on rare inputs.
-    # The trig golden in jit_test.py is what pins the libm itself.
+    # The kernel's trig, so the transcription's angles go through the same calls:
+    # the platform libm's, as Python here (``eager_kernels``). The trig golden in
+    # jit_test.py is what pins the libm itself.
     return np.float32(cosf(angle)), np.float32(sinf(angle))
 
 
@@ -83,18 +89,15 @@ def _reference_fractal(
     next_state = seed
     for _ in range(3):
         next_state = (next_state * 1_103_515_245 + 12_345) & 0xFFFF_FFFF
-
-    def angle_at(index: int) -> np.float32:
-        local = (angle_seed ^ ((index * 747_796_405) & 0xFFFF_FFFF)) & 0xFFFF_FFFF
-        local = (local + 2_891_336_453) & 0xFFFF_FFFF
-        draw = mint_goldens.glibc_rand_r(np.array([local], np.uint32), 1).item(0, 0)
-        return np.float32(NOISE_PI2 * (np.float32(draw) * F32_PER_DRAW))
-
+    width = res_cols + 1
+    gradients = {
+        index: _cos_sin(_lattice_angle(angle_seed, index))
+        for index in range((res_rows + 1) * width)
+    }
     one = np.float32(1.0)
     out = np.zeros((rows, cols), dtype=np.float32)
     cell_rows = rows // res_rows
     cell_cols = cols // res_cols
-    width = res_cols + 1
     for row in range(rows):
         grad_row = row // cell_rows
         local_row = np.float32(
@@ -117,8 +120,7 @@ def _reference_fractal(
             gy: dict[tuple[int, int], np.float32] = {}
             for dr in range(2):
                 for dc in range(2):
-                    angle = angle_at((grad_row + dr) * width + (grad_col + dc))
-                    cos, sin = _cos_sin(angle)
+                    cos, sin = gradients[(grad_row + dr) * width + (grad_col + dc)]
                     gx[dr, dc] = np.float32(cos)
                     gy[dr, dc] = np.float32(sin)
             n00 = np.float32(local_row * gx[0, 0] + local_col * gy[0, 0])
@@ -139,26 +141,33 @@ def _reference_fractal(
     return ((out - low) / scale).astype(np.float32), next_state
 
 
-@pytest.mark.compute_large_fixture
+def _lattice_angle(angle_seed: int, index: int) -> np.float32:
+    """Return the gradient angle at lattice ``index``: ``rng_f32_at`` transcribed."""
+    local = (angle_seed ^ ((index * 747_796_405) & 0xFFFF_FFFF)) & 0xFFFF_FFFF
+    local = (local + 2_891_336_453) & 0xFFFF_FFFF
+    draw = mint_goldens.glibc_rand_r(np.array([local], np.uint32), 1).item(0, 0)
+    return np.float32(NOISE_PI2 * (np.float32(draw) * F32_PER_DRAW))
+
+
+# A lattice cell two rows by three columns: every interpolation weight a cell has
+# that is neither 0 nor 1 appears, at a fraction of a 48 x 48 floor's cost.
 @pytest.mark.parametrize(("res_rows", "res_cols"), [(3, 3), (6, 24), (12, 12)])
 def test_one_octave_matches_the_scalar_transcription(
     res_rows: int,
     res_cols: int,
 ) -> None:
     rng = np.array([2024], dtype=np.uint32)
-    # ``generate_fractal_numba`` fills one floor's field; Craftax's floors are 48 x 48.
-    out = np.empty((48, 48), dtype=np.float32)
+    rows, cols = 2 * res_rows, 3 * res_cols
+    out = np.empty((rows, cols), dtype=np.float32)
     generate_fractal_numba(rng, res_rows, res_cols, out)
-    expected, next_state = _reference_fractal(2024, 48, 48, res_rows, res_cols)
+    expected, next_state = _reference_fractal(2024, rows, cols, res_rows, res_cols)
     assert np.array_equal(out.view(np.uint32), expected.view(np.uint32))
     assert rng.item(0) == next_state
 
 
-@pytest.mark.compute_large_fixture
 def test_the_field_spans_the_unit_interval_and_depends_on_the_seed() -> None:
-    # ``generate_fractal_numba`` fills one floor's field; Craftax's floors are 48 x 48.
-    first = np.empty((48, 48), dtype=np.float32)
-    second = np.empty((48, 48), dtype=np.float32)
+    first = np.empty((6, 9), dtype=np.float32)
+    second = np.empty((6, 9), dtype=np.float32)
     generate_fractal_numba(np.array([1], np.uint32), 3, 3, first)
     generate_fractal_numba(np.array([2], np.uint32), 3, 3, second)
     assert first.min() == 0.0
@@ -166,27 +175,14 @@ def test_the_field_spans_the_unit_interval_and_depends_on_the_seed() -> None:
     assert not np.array_equal(first, second)
 
 
-@pytest.mark.compute_large_fixture
 def test_the_octaves_consume_exactly_one_draw_each() -> None:
-    # ``generate_fractal_numba`` fills one floor's field; Craftax's floors are 48 x 48.
-    out = np.empty((48, 48), dtype=np.float32)
+    out = np.empty((6, 9), dtype=np.float32)
     rng = np.array([7], dtype=np.uint32)
     generate_fractal_numba(rng, 3, 3, out)
     state = 7
     for _ in range(3 * OCTAVES):
         state = (state * 1_103_515_245 + 12_345) & 0xFFFF_FFFF
     assert rng.item(0) == state
-
-
-@pytest.mark.compute_large_fixture
-def test_noise_kernel_emits_no_fma_and_no_float64() -> None:
-    # ``generate_fractal_numba`` fills one floor's field; Craftax's floors are 48 x 48.
-    out = np.empty((48, 48), dtype=np.float32)
-    generate_fractal_numba(np.array([1], np.uint32), 3, 3, out)
-    assembly, body = kernel_inspection(generate_fractal_numba)
-    assert not FMA_MNEMONIC.search(assembly)
-    assert "double" not in body
-    assert "fpext" not in body
 
 
 def test_every_floor_is_generated_exactly_once() -> None:
@@ -201,6 +197,7 @@ def test_every_floor_is_generated_exactly_once() -> None:
 def test_overworld_row_matches_constants_h() -> None:
     overworld = _config(0)
     assert overworld.default_block == BlockType.GRASS
+    assert overworld.player_spawn == BlockType.GRASS
     assert list(overworld.ores) == [
         BlockType.COAL,
         BlockType.IRON,
@@ -270,113 +267,71 @@ def test_dungeon_rows_match_constants_h() -> None:
     ]
 
 
-def _world(seed: int) -> NDArray[np.void]:
+def test_a_dungeon_floor_is_lit_walled_by_darkness_and_laddered_on_its_paths() -> None:
     states = new_states(1)
-    generate_world_numba(
+    level = DUNGEON_FLOOR_ORDER[0]
+    world_gen._generate_dungeon_level_numba(
         env_state(states, 0),
-        np.array([seed], dtype=np.uint32),
-        SMOOTH_LEVEL_CONFIGS,
-        DUNGEON_LEVEL_CONFIGS,
+        np.array([11], dtype=np.uint32),
+        level,
+        _dungeon_config(0),
     )
-    return states
-
-
-def _config(index: int) -> SmoothGenConfig:
-    return cast("SmoothGenConfig", SMOOTH_LEVEL_CONFIGS.view(np.recarray)[index])
-
-
-def _bits(rows: NDArray[np.uint64]) -> NDArray[np.bool]:
-    """Expand ``uint64 [levels, rows]`` bit rows into ``bool [levels, rows, 64]``."""
-    shifts = np.arange(64, dtype=np.uint64)
-    return ((rows[..., None] >> shifts) & np.uint64(1)).astype(bool)
-
-
-@pytest.mark.compute_large_fixture
-def test_the_player_starts_at_the_center_on_the_spawn_block() -> None:
-    states = _world(0)
     state = env_state(states, 0)
-    assert list(state.player_position) == [24, 24]
+    assert np.equal(typed(states["light_map"], np.uint8)[0, level, ...], 255).all()
+    grid = typed(states["map"], np.uint8)[0, level, ...]
+    counts = np.bincount(grid.ravel(), minlength=NUM_BLOCK_TYPES)
+    for block in (BlockType.DARKNESS, BlockType.PATH, BlockType.CHEST):
+        assert counts[block] > 0, block
+    torches = np.equal(
+        typed(states["item_map"], np.uint8)[0, level, ...],
+        ItemType.TORCH,
+    )
+    assert np.count_nonzero(torches) >= 8
+    down = state.down_ladders[level]
+    up = state.up_ladders[level]
+    assert state.item_map[level, down[0], down[1]] == ItemType.LADDER_DOWN
+    assert state.item_map[level, up[0], up[1]] == ItemType.LADDER_UP
+    assert state.map[level, down[0], down[1]] == BlockType.PATH
+    # Every other floor is untouched.
+    others = [floor for floor in range(NUM_LEVELS) if floor != level]
+    assert not typed(states["map"], np.uint8)[0, others, ...].any()
+
+
+def test_the_player_creatures_and_potions_start_as_the_c_initializes_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refreshed: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(world_gen, "refresh_spawn_cell_numba", _recorder(refreshed))
+    states = new_states(1)
+    states["spawn_land"] = np.uint64(0xFFFF)
+    state = env_state(states, 0)
+    rng = np.array([21], dtype=np.uint32)
+    world_gen._init_mobs_and_player_numba(state, rng)
+    assert list(state.player_position) == [MAP_SIZE // 2, MAP_SIZE // 2]
     assert state.player_level == 0
     assert state.player_direction == Action.UP
-    assert state.map[0, 24, 24] == BlockType.GRASS
-    assert state.map[8, 24, 24] == BlockType.NECROMANCER
     assert state.player_health == 9.0
-    assert (state.player_food, state.player_drink, state.player_energy) == (
-        9,
-        9,
-        9,
-    )
+    meters = (state.player_food, state.player_drink, state.player_energy)
+    assert meters == (9, 9, 9)
     assert state.player_mana == 9
+    attributes = (
+        state.player_dexterity,
+        state.player_strength,
+        state.player_intelligence,
+    )
+    assert attributes == (1, 1, 1)
     assert list(state.monsters_killed) == [10, *[0] * 8]
     assert state.boss_timestep_to_spawn_this_round == BOSS_SPAWN_TURNS
     assert state.timestep == 0
-
-
-@pytest.mark.compute_large_fixture
-def test_ladders_sit_on_the_ladder_items_where_the_floor_has_them() -> None:
-    states = _world(3)
-    state = env_state(states, 0)
-    for i, level in enumerate(SMOOTH_FLOOR_ORDER):
-        config = _config(i)
-        down = state.down_ladders[level]
-        up = state.up_ladders[level]
-        assert state.item_map[level, down[0], down[1]] == (
-            ItemType.LADDER_DOWN if config.ladder_down else ItemType.NONE
-        )
-        assert state.item_map[level, up[0], up[1]] == (
-            ItemType.LADDER_UP if config.ladder_up else ItemType.NONE
-        )
-    for level in DUNGEON_FLOOR_ORDER:
-        down = state.down_ladders[level]
-        up = state.up_ladders[level]
-        assert state.item_map[level, down[0], down[1]] == ItemType.LADDER_DOWN
-        assert state.item_map[level, up[0], up[1]] == ItemType.LADDER_UP
-        assert state.map[level, down[0], down[1]] == BlockType.PATH
-
-
-@pytest.mark.compute_large_fixture
-def test_dungeons_are_fully_lit_and_walled_by_darkness() -> None:
-    states = _world(11)
-    for level in DUNGEON_FLOOR_ORDER:
-        assert np.equal(typed(states["light_map"], np.uint8)[0, level, ...], 255).all()
-        blocks = set(map(int, np.unique(typed(states["map"], np.uint8)[0, level, ...])))
-        assert BlockType.DARKNESS in blocks
-        assert BlockType.PATH in blocks
-        assert BlockType.CHEST in blocks
-        assert (
-            np.count_nonzero(
-                np.equal(
-                    typed(states["item_map"], np.uint8)[0, level, ...],
-                    ItemType.TORCH,
-                ),
-            )
-            >= 8
-        )
-
-
-@pytest.mark.compute_large_fixture
-def test_spawn_bitsets_describe_the_map() -> None:
-    states = _world(5)
-    grid = typed(states["map"], np.uint8)[0, ...]
-    assert np.array_equal(
-        _bits(typed(states["spawn_land"], np.uint64)[0, ...])[..., :48],
-        np.isin(grid, _LAND),
-    )
-    assert np.array_equal(
-        _bits(typed(states["spawn_grave"], np.uint64)[0, ...])[..., :48],
-        np.isin(grid, _GRAVES),
-    )
-    assert np.array_equal(
-        _bits(typed(states["spawn_water"], np.uint64)[0, ...])[..., :48],
-        np.equal(grid, BlockType.WATER),
-    )
-    assert not _bits(typed(states["spawn_land"], np.uint64)[0, ...])[..., 48:].any()
-    assert not typed(states["mob_bits"], np.uint64).any()
-
-
-@pytest.mark.compute_large_fixture
-def test_mob_slots_and_projectiles_start_as_the_c_initializes_them() -> None:
-    states = _world(9)
+    assert state.light_level == daylight_numba(0)
+    # The potion shuffle: five draws, a permutation.
+    assert sorted(state.potion_mapping) == list(range(6))
+    assert list(state.potion_mapping) != list(range(6))
+    assert list(state.learned_spells) == [0, 0]
+    drawn = np.array([21], dtype=np.uint32)
+    for _ in range(5):
+        rand_r_numba(drawn)
+    assert rng[0] == drawn[0]
     for kind in ("melee_mobs", "passive_mobs", "mob_projectiles", "player_projectiles"):
         assert np.equal(typed(states[kind]["health"], np.float32), 1.0).all(), kind
         assert not typed(states[kind]["mask"], np.uint8).any(), kind
@@ -385,61 +340,75 @@ def test_mob_slots_and_projectiles_start_as_the_c_initializes_them() -> None:
     assert np.equal(ranged[0, :, 2], 0.0).all()
     assert np.equal(typed(states["mob_projectile_dirs"], np.int32), 1).all()
     assert np.equal(typed(states["player_projectile_directions"], np.int32), 1).all()
+    # The bitsets are cleared, then every cell of every floor refreshed, in order.
+    assert not typed(states["spawn_land"], np.uint64).any()
+    assert refreshed == [
+        (level, row, col)
+        for level in range(NUM_LEVELS)
+        for row in range(MAP_SIZE)
+        for col in range(MAP_SIZE)
+    ]
 
 
-@pytest.mark.compute_large_fixture
-def test_the_potion_shuffle_is_a_permutation_and_the_first_light_is_daylight_zero() -> (
-    None
-):
-    states = _world(21)
-    state = env_state(states, 0)
-    assert sorted(state.potion_mapping) == list(range(6))
-    assert list(state.learned_spells) == [0, 0]
-    assert state.light_level == daylight_numba(0)
+def test_the_pool_generates_world_k_from_seed_k_into_a_zeroed_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each row is zeroed, as the C's ``calloc``, then generated from its own seed.
 
-
-@pytest.mark.compute_large_fixture
-def test_the_same_seed_reproduces_the_same_world_and_seeds_differ() -> None:
-    assert _world(5).tobytes() == _world(5).tobytes()
-    assert _world(5).tobytes() != _world(6).tobytes()
-
-
-@pytest.mark.compute_large_fixture
-def test_the_parallel_pool_equals_worlds_generated_one_at_a_time() -> None:
-    pool = new_states(6)
-    build_pool_numba(
-        pool,
-        pool.view(np.uint8).reshape(6, STATE_DTYPE.itemsize),
-        SMOOTH_LEVEL_CONFIGS,
-        DUNGEON_LEVEL_CONFIGS,
-        100,
-    )
-    for k in range(6):
-        assert pool[k : k + 1].tobytes() == _world(100 + k).tobytes(), k
-
-
-@pytest.mark.compute_large_fixture
-def test_the_pool_zeroes_a_dirty_row_first() -> None:
-    pool = new_states(2)
+    The generator stands in as a record of its stream's seed and of what the
+    row held, so the pool's side is checked here; generation itself is the
+    stages' tests' and ``env_test``'s goldens', which also hold the compiled,
+    parallel pool equal to worlds generated one at a time.
+    """
+    monkeypatch.setattr(world_gen, "generate_world_numba", _stamp_world)
+    pool = new_states(3)
     pool["timestep"] = 99
     pool["achievements"] = 1
     build_pool_numba(
         pool,
-        pool.view(np.uint8).reshape(2, STATE_DTYPE.itemsize),
+        pool.view(np.uint8).reshape(3, STATE_DTYPE.itemsize),
         SMOOTH_LEVEL_CONFIGS,
         DUNGEON_LEVEL_CONFIGS,
-        0,
+        100,
     )
-    assert pool[1:2].tobytes() == _world(1).tobytes()
+    assert typed(pool["timestep"], np.int32).tolist() == [100, 101, 102]
+    assert not typed(pool["achievements"], np.int32).any()
+    rest = new_states(1)
+    for k in range(3):
+        rest["timestep"] = 100 + k
+        assert pool[k : k + 1].tobytes() == rest.tobytes(), k
 
 
-@pytest.mark.compute_large_fixture
-def test_world_gen_kernels_emit_no_fma_and_no_float64() -> None:
-    _world(1)
-    assembly, body = kernel_inspection(generate_world_numba)
-    assert not FMA_MNEMONIC.search(assembly)
-    assert "double" not in body
-    assert "fpext" not in body
+def _config(index: int) -> SmoothGenConfig:
+    return cast("SmoothGenConfig", SMOOTH_LEVEL_CONFIGS.view(np.recarray)[index])
+
+
+def _dungeon_config(index: int) -> DungeonConfig:
+    return cast("DungeonConfig", DUNGEON_LEVEL_CONFIGS.view(np.recarray)[index])
+
+
+def _recorder(cells: list[tuple[int, int, int]]) -> object:
+    """Return a stand-in for ``refresh_spawn_cell_numba`` that records each cell."""
+
+    def refresh(state: EnvState, level: int, row: int, col: int) -> None:
+        del state
+        cells.append((level, row, col))
+
+    return refresh
+
+
+# Any byte the row still held from before would survive into the pool, where the test
+# finds it.
+def _stamp_world(
+    state: EnvState,
+    rng: Array1[np.uint32],
+    smooth_configs: Records[SmoothGenConfig],
+    dungeon_configs: Records[DungeonConfig],
+) -> None:
+    """Stand in for ``generate_world_numba``: write the stream's seed as the clock."""
+    assert smooth_configs.shape == SMOOTH_LEVEL_CONFIGS.shape
+    assert dungeon_configs.shape == DUNGEON_LEVEL_CONFIGS.shape
+    state.timestep = int(rng[0])
 
 
 if __name__ == "__main__":
