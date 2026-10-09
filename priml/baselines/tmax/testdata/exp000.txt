@@ -1,0 +1,1858 @@
+TMaxTrainLoop(
+                study_name='tmax',
+                experiment_name='exp000',
+                base_dir='/opt/scratch',
+                working_dir=PosixPath('/opt/scratch/runs/tmax/exp000'),
+                doc='',
+                step=TMaxDPPOTrainStep.Config(
+                │       model=Qwen35.Config(
+                │       │       channels_in=2_560,
+                │       │       channels_out=248_320,
+                │       │       num_layers=32,
+                │       │       proj_in=Embedding.Config(
+                │       │               channels_in=248_320,
+                │       │               channels_out=2_560,
+                │       │               padding_idx=None,
+                │       │               device=None,
+                │       │               dtype=None,
+                │       │               shard=None,
+                │       │               depth_index=(),
+                │       │               init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02)
+                │       │       ),
+                │       │       block=[
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((0, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((0, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((0, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((1, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((1, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((1, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((2, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((2, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((2, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=GatedSelfAttention.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads=16,
+                │       │       │                       num_heads_kv=4,
+                │       │       │                       channels_head=256,
+                │       │       │                       bias=False,
+                │       │       │                       dropout=0.0,
+                │       │       │                       norm_qk=CenteredRMSNorm.Config(
+                │       │       │                               channels_in=256,
+                │       │       │                               channels_out=256,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       rope=RoPE.Config(
+                │       │       │                               channels_head=64,
+                │       │       │                               reduction_mode='cat',
+                │       │       │                               frequencies=HuggingFaceFrequencies.Config(
+                │       │       │                                       base=10000000.0
+                │       │       │                               ),
+                │       │       │                               dtype=None
+                │       │       │                       ),
+                │       │       │                       attn_kernel=SdpaFused.Config(),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       depth_index=((3, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((3, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((3, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((4, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((4, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((4, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((5, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((5, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((5, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((6, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((6, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((6, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=GatedSelfAttention.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads=16,
+                │       │       │                       num_heads_kv=4,
+                │       │       │                       channels_head=256,
+                │       │       │                       bias=False,
+                │       │       │                       dropout=0.0,
+                │       │       │                       norm_qk=CenteredRMSNorm.Config(
+                │       │       │                               channels_in=256,
+                │       │       │                               channels_out=256,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       rope=RoPE.Config(
+                │       │       │                               channels_head=64,
+                │       │       │                               reduction_mode='cat',
+                │       │       │                               frequencies=HuggingFaceFrequencies.Config(
+                │       │       │                                       base=10000000.0
+                │       │       │                               ),
+                │       │       │                               dtype=None
+                │       │       │                       ),
+                │       │       │                       attn_kernel=SdpaFused.Config(),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       depth_index=((7, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((7, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((7, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((8, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((8, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((8, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((9, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((9, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((9, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((10, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((10, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((10, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=GatedSelfAttention.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads=16,
+                │       │       │                       num_heads_kv=4,
+                │       │       │                       channels_head=256,
+                │       │       │                       bias=False,
+                │       │       │                       dropout=0.0,
+                │       │       │                       norm_qk=CenteredRMSNorm.Config(
+                │       │       │                               channels_in=256,
+                │       │       │                               channels_out=256,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       rope=RoPE.Config(
+                │       │       │                               channels_head=64,
+                │       │       │                               reduction_mode='cat',
+                │       │       │                               frequencies=HuggingFaceFrequencies.Config(
+                │       │       │                                       base=10000000.0
+                │       │       │                               ),
+                │       │       │                               dtype=None
+                │       │       │                       ),
+                │       │       │                       attn_kernel=SdpaFused.Config(),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       depth_index=((11, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((11, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((11, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((12, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((12, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((12, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((13, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((13, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((13, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((14, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((14, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((14, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=GatedSelfAttention.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads=16,
+                │       │       │                       num_heads_kv=4,
+                │       │       │                       channels_head=256,
+                │       │       │                       bias=False,
+                │       │       │                       dropout=0.0,
+                │       │       │                       norm_qk=CenteredRMSNorm.Config(
+                │       │       │                               channels_in=256,
+                │       │       │                               channels_out=256,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       rope=RoPE.Config(
+                │       │       │                               channels_head=64,
+                │       │       │                               reduction_mode='cat',
+                │       │       │                               frequencies=HuggingFaceFrequencies.Config(
+                │       │       │                                       base=10000000.0
+                │       │       │                               ),
+                │       │       │                               dtype=None
+                │       │       │                       ),
+                │       │       │                       attn_kernel=SdpaFused.Config(),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       depth_index=((15, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((15, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((15, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((16, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((16, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((16, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((17, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((17, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((17, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((18, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((18, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((18, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=GatedSelfAttention.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads=16,
+                │       │       │                       num_heads_kv=4,
+                │       │       │                       channels_head=256,
+                │       │       │                       bias=False,
+                │       │       │                       dropout=0.0,
+                │       │       │                       norm_qk=CenteredRMSNorm.Config(
+                │       │       │                               channels_in=256,
+                │       │       │                               channels_out=256,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       rope=RoPE.Config(
+                │       │       │                               channels_head=64,
+                │       │       │                               reduction_mode='cat',
+                │       │       │                               frequencies=HuggingFaceFrequencies.Config(
+                │       │       │                                       base=10000000.0
+                │       │       │                               ),
+                │       │       │                               dtype=None
+                │       │       │                       ),
+                │       │       │                       attn_kernel=SdpaFused.Config(),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       depth_index=((19, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((19, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((19, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((20, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((20, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((20, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((21, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((21, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((21, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((22, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((22, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((22, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=GatedSelfAttention.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads=16,
+                │       │       │                       num_heads_kv=4,
+                │       │       │                       channels_head=256,
+                │       │       │                       bias=False,
+                │       │       │                       dropout=0.0,
+                │       │       │                       norm_qk=CenteredRMSNorm.Config(
+                │       │       │                               channels_in=256,
+                │       │       │                               channels_out=256,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       rope=RoPE.Config(
+                │       │       │                               channels_head=64,
+                │       │       │                               reduction_mode='cat',
+                │       │       │                               frequencies=HuggingFaceFrequencies.Config(
+                │       │       │                                       base=10000000.0
+                │       │       │                               ),
+                │       │       │                               dtype=None
+                │       │       │                       ),
+                │       │       │                       attn_kernel=SdpaFused.Config(),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       depth_index=((23, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((23, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((23, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((24, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((24, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((24, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((25, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((25, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((25, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((26, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((26, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((26, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=GatedSelfAttention.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads=16,
+                │       │       │                       num_heads_kv=4,
+                │       │       │                       channels_head=256,
+                │       │       │                       bias=False,
+                │       │       │                       dropout=0.0,
+                │       │       │                       norm_qk=CenteredRMSNorm.Config(
+                │       │       │                               channels_in=256,
+                │       │       │                               channels_out=256,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       rope=RoPE.Config(
+                │       │       │                               channels_head=64,
+                │       │       │                               reduction_mode='cat',
+                │       │       │                               frequencies=HuggingFaceFrequencies.Config(
+                │       │       │                                       base=10000000.0
+                │       │       │                               ),
+                │       │       │                               dtype=None
+                │       │       │                       ),
+                │       │       │                       attn_kernel=SdpaFused.Config(),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       depth_index=((27, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((27, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((27, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((28, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((28, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((28, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((29, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((29, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((29, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=Qwen35GatedDeltaNet.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads_k=16,
+                │       │       │                       num_heads_v=32,
+                │       │       │                       channels_k_head=128,
+                │       │       │                       channels_v_head=128,
+                │       │       │                       conv_kernel_size=4,
+                │       │       │                       norm=Qwen35RMSNormGated.Config(
+                │       │       │                               channels_in=128,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │       │       │                       init_decay=<function priml.model.attention.qwen3_5_delta._init_decay at 0xdefacedeface>,
+                │       │       │                       depth_index=((30, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((30, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((30, 32),)
+                │       │       │       ),
+                │       │       │       TransformerBlock.Config(
+                │       │       │               channels_in=2_560,
+                │       │       │               channels_out=2_560,
+                │       │       │               attn=GatedSelfAttention.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       num_heads=16,
+                │       │       │                       num_heads_kv=4,
+                │       │       │                       channels_head=256,
+                │       │       │                       bias=False,
+                │       │       │                       dropout=0.0,
+                │       │       │                       norm_qk=CenteredRMSNorm.Config(
+                │       │       │                               channels_in=256,
+                │       │       │                               channels_out=256,
+                │       │       │                               eps=1e-06
+                │       │       │                       ),
+                │       │       │                       rope=RoPE.Config(
+                │       │       │                               channels_head=64,
+                │       │       │                               reduction_mode='cat',
+                │       │       │                               frequencies=HuggingFaceFrequencies.Config(
+                │       │       │                                       base=10000000.0
+                │       │       │                               ),
+                │       │       │                               dtype=None
+                │       │       │                       ),
+                │       │       │                       attn_kernel=SdpaFused.Config(),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       depth_index=((31, 32),)
+                │       │       │               ),
+                │       │       │               ffn=SwiGLU.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       channels_hidden=9_216,
+                │       │       │                       expansion=2.6666666666666665,
+                │       │       │                       round_to=256,
+                │       │       │                       gate=True,
+                │       │       │                       bias=False,
+                │       │       │                       split_gate_projection=True,
+                │       │       │                       norm=None,
+                │       │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
+                │       │       │                       depth_index=((31, 32),),
+                │       │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                │       │       │                       shard='colwise'
+                │       │       │               ),
+                │       │       │               norm1=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               norm2=CenteredRMSNorm.Config(
+                │       │       │                       channels_in=2_560,
+                │       │       │                       channels_out=2_560,
+                │       │       │                       eps=1e-06
+                │       │       │               ),
+                │       │       │               prenorm=True,
+                │       │       │               checkpoint=False,
+                │       │       │               depth_index=((31, 32),)
+                │       │       │       )
+                │       │       ],
+                │       │       proj_out=TiedLinear.Config(
+                │       │               channels_in=2_560,
+                │       │               channels_out=248_320,
+                │       │               tied='proj_in',
+                │       │               transpose=True
+                │       │       ),
+                │       │       norm=CenteredRMSNorm.Config(
+                │       │               channels_in=2_560,
+                │       │               channels_out=2_560,
+                │       │               eps=1e-06
+                │       │       )
+                │       ),
+                │       optimizer=PartialConfig(<class 'functools.partial'>, <class 'torch.optim.adamw.AdamW'>, lr=1e-06, betas=(0.9, 0.999), weight_decay=0.0),
+                │       loss=SimpleLoss.Config(
+                │               loss_fn=<function priml.loss.simple_loss.bce_with_logits at 0xdefacedeface>,
+                │               target_key='label',
+                │               kwargs={'reduction': 'none'},
+                │               channels_out=-1
+                │       ),
+                │       accumulate_grad_batches=1,
+                │       drop_partial_accumulation_on_epoch_end=True,
+                │       train_budget_steps=500,
+                │       train_budget_sec=inf,
+                │       train_budget_epochs=inf,
+                │       lr_schedule=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.constant at 0xdefacedeface>),
+                │       parallelism=FullySharded.Config(
+                │               mesh_dim='dp',
+                │               reshard_after_forward=True,
+                │               mp_param_dtype=torch.bfloat16,
+                │               mp_reduce_dtype=None,
+                │               mp_output_dtype=None
+                │       ),
+                │       model_quantization=NoModelQuantization.Config(),
+                │       activation_memoization=SelectiveActivationCheckpointing.Config(
+                │               module_types=(
+                │                       <class 'priml.model.transformer.block.TransformerBlock'>
+                │               ,),
+                │               checkpoint_fraction=1.0,
+                │               reentrant=False
+                │       ),
+                │       compile=None,
+                │       ema=NoEMA.Config(),
+                │       gradient_clip_norm=1.0,
+                │       skip_step_on_nonfinite_grad=False,
+                │       device_init='eager',
+                │       dtype_autocast=None,
+                │       autocast_cache_enabled=False,
+                │       model_path=PosixPath('/opt/scratch/models/Qwen3.5-4B'),
+                │       base_dir=PosixPath('/opt/scratch/runs/tmax/exp000'),
+                │       working_dir=PosixPath('/opt/scratch/runs/tmax/exp000'),
+                │       export_dir=PosixPath('/opt/scratch/runs/tmax/exp000/export'),
+                │       divergence_type='tv',
+                │       divergence_threshold=0.1,
+                │       temperature=1.0,
+                │       head_chunk_size=2_048,
+                │       fp32_head=True,
+                │       pad_token_id=248_044
+                ),
+                dataset=LiveTMaxRolloutData.Config(
+                │       base_dir=PosixPath('/opt/scratch/runs/tmax/exp000'),
+                │       working_dir=PosixPath('/opt/scratch/runs/tmax/exp000/rollouts'),
+                │       tool_mask_path=None,
+                │       records_per_update=256,
+                │       num_samples_per_prompt=32,
+                │       advantage_normalization='centered',
+                │       pack_length=67_584,
+                │       pad_token_id=248_044,
+                │       mask_tool_use=True,
+                │       filter_zero_std_samples=True,
+                │       active_sampling=True,
+                │       min_num_batches=1,
+                │       eval_records=0,
+                │       runner=RunnerConfig(
+                │               base_dir='/opt/scratch',
+                │               working_dir=PosixPath('/opt/scratch/runs/tmax/exp000'),
+                │               checkpoint=PosixPath('/opt/scratch/models/Qwen3.5-4B'),
+                │               output_dir=PosixPath('/opt/scratch/runs/tmax/exp000/rollouts'),
+                │               upstream_root=PosixPath('/opt/scratch/datasets/tmax/upstream/tmax'),
+                │               run_name='tmax',
+                │               dataset_repo='allenai/tmax-15k-open-instruct',
+                │               dataset_path=PosixPath('/opt/scratch/datasets/tmax/tmax-15k-open-instruct/data/train-00000-of-00001.parquet'),
+                │               task_data_dir=PosixPath('/opt/scratch/datasets/tmax/tmax-15k-open-instruct/task-data.tar.gz.extracted'),
+                │               dataset_split='train',
+                │               num_updates=500,
+                │               start_step=0,
+                │               num_prompts=8,
+                │               samples_per_prompt=32,
+                │               max_prompt_tokens=2_048,
+                │               response_length=65_536,
+                │               per_turn_max_tokens=16_384,
+                │               max_steps=64,
+                │               seed=42,
+                │               temperature=1.0,
+                │               top_p=1.0,
+                │               num_engines=16,
+                │               tensor_parallel_size=1,
+                │               pool_size=512,
+                │               active_sampling=True,
+                │               filter_zero_std_samples=True,
+                │               async_steps=4,
+                │               inflight_updates=True,
+                │               enable_prefix_caching=True,
+                │               gdn_prefill_backend='triton',
+                │               lm_head_fp32=True,
+                │               gpu_memory_utilization=0.9,
+                │               enforce_eager=False,
+                │               system_prompt_override_file=None,
+                │               verification_reward=1.0,
+                │               ray_runtime=RayRuntimePolicy(
+                │                       swerl_reset_failure_zero_reward='1',
+                │                       vllm_use_v1='1',
+                │                       vllm_allow_insecure_serialization='1',
+                │                       vllm_disable_compile_cache='1',
+                │                       nccl_cumem_enable='0'
+                │               )
+                │       )
+                ),
+                metrics_train={},
+                metrics_eval={},
+                checkpointer=Checkpointer.Config(
+                        base_dir=PosixPath('/opt/scratch/runs/tmax/exp000'),
+                        working_dir=PosixPath('/opt/scratch/runs/tmax/exp000/checkpoints'),
+                        filename='step_{step:08d}.pt',
+                        save_every=10,
+                        keep_last_n=3,
+                        keep_every=50,
+                        storer=SyncLocalStateDictStorer.Config(),
+                        resume=True,
+                        resume_step=-1,
+                        allow_checkpoint_overwrite=False,
+                        best_metric='',
+                        best_mode='max'
+                ),
+                profiler=None,
+                phase_timer=PhaseTimer.Config(
+                        enabled=False,
+                        torch_profile=False,
+                        base_dir=PosixPath('/opt/scratch/runs/tmax/exp000'),
+                        working_dir=PosixPath('/opt/scratch/runs/tmax/exp000/profiling'),
+                        heartbeat_interval_sec=20.0,
+                        fault_dump_interval_sec=40.0,
+                        cuda_events=False
+                ),
+                tracker=None,
+                max_steps=inf,
+                max_epochs=1,
+                max_time=inf,
+                max_time_kind='wall',
+                max_eval_time=inf,
+                eval_stop_on_time_limit=False,
+                num_steps_eval=0,
+                num_steps_log=10,
+                early_train_log_steps=100,
+                eval_every_epoch=False,
+                eval_extras_every_eval=False,
+                eval_warmup_batches=0,
+                eval_only=False,
+                restore_rng_state=True,
+                seed=42,
+                num_steps_garbage_collect=inf,
+                mesh_dim_model_seed='pp',
+                mesh_dim_data_seed='dp',
+                runtime=MultiProcess.Config(
+                        device='auto',
+                        deterministic=False,
+                        float32_matmul_precision=None,
+                        backend=None,
+                        process_group_timeout_sec=72_000,
+                        mesh_topology={'dp': -1, 'pp': 1, 'tp': 1}
+                )
+        )
