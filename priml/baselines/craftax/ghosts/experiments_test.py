@@ -1,4 +1,8 @@
-"""Tests for the ghost-overlay captures: the tiers, the pilots and one episode per row."""
+"""Tests for the ghost-overlay captures: the tiers, the pilots and their settings.
+
+A budget of one decision recording one episode per environment, each on its
+world, is the capture env's doing, tested in ``capture/env_test.py``.
+"""
 
 from __future__ import annotations
 
@@ -10,18 +14,9 @@ import pytest
 from priml.baselines.craftax.ghosts import experiments
 from priml.baselines.craftax.lib.compat import ExactScan
 from priml.baselines.craftax.model import MinGRUPolicy
-from priml.baselines.craftax.world_model.archive import (
-    read_manifest,
-    read_summaries,
-)
 from priml.baselines.craftax.world_model.capture.source import (
     PolicySource,
-    RandomSource,
 )
-from priml.baselines.craftax.world_model.capture.verify import (
-    verify_shard,
-)
-from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:
@@ -125,44 +120,6 @@ def test_the_boss_tier_is_arm_3_of_the_captures_with_the_fine_tunes_numerics() -
     assert isinstance(model, MinGRUPolicy.Config)
     assert model.state_dtype == model.output_dtype == model.dtype
     assert isinstance(model.block.scan, ExactScan.Config)
-
-
-# A pilot's worker with random play on four of its rows: four random-play
-# episodes captured, encoded, published and replayed again.
-def test_a_tier_records_one_episode_per_environment_on_its_world(
-    tmp_path: Path,
-) -> None:
-    config = experiments.pilot_high()
-    config.root = tmp_path
-    config.run_root = tmp_path / "runs"
-    config.poll_seconds = 0.0
-    env = _source(config).env
-    env.num_envs = 4
-    env.num_buffers = 2
-    random = config.source = RandomSource.Config()
-    random.env = env
-    report = config.make().capture()
-    assert report.episodes == 4
-    rows: list[tuple[int, int, int]] = []
-    for manifest in tmp_path.glob("*/arm2/w0/MANIFEST.jsonl"):
-        for line in read_manifest(manifest.parent):
-            verdict = verify_shard(
-                manifest.parent,
-                line,
-                fraction=1.0,
-                seed=0,
-                name=line.shard,
-            )
-            assert verdict.mismatch == ""
-            rows += [
-                (
-                    from_plain(s.summary["episode"], int),
-                    from_plain(s.summary["environment"], int),
-                    s.receipt.world_seed,
-                )
-                for s in read_summaries(manifest.parent, line)
-            ]
-    assert sorted(rows) == [(i, i, i) for i in range(4)]
 
 
 def _source(config: CaptureWorker.Config) -> PolicySource.Config:

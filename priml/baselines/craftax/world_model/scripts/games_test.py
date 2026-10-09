@@ -1,12 +1,20 @@
-"""Check ranking an archive's games and saving one as an exact game or policy view."""
+"""Check ranking an archive's games and saving one as an exact game or policy view.
 
-from pathlib import Path
+The episodes are random play of the game's kernels as Python (``eager``) on
+tiny worlds whose clocks run out after a few decisions.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Final
 
 import dataclasses
 import sys
 
 import pytest
 
+from priml.baselines.craftax.eager import eager, tiny_world
+from priml.baselines.craftax.game.state import DEFAULT_MAX_TIMESTEPS
 from priml.baselines.craftax.world_model import replay
 from priml.baselines.craftax.world_model.archive import (
     Episode,
@@ -21,6 +29,31 @@ from priml.baselines.craftax.world_model.viewer.exact import (
 from priml.lib.codec import from_plain, loads
 
 
+if TYPE_CHECKING:
+    from collections.abc import Generator
+    from pathlib import Path
+
+    import numpy as np
+
+    from priml.baselines.craftax.game.state import Array1, EnvState
+
+
+_LENGTHS: Final = {4: 2, 7: 1, 2: 3}
+"""Decisions an episode of each world seed plays before its clock runs out."""
+
+
+def _world(state: EnvState, rng: Array1[np.uint32]) -> None:
+    """Fill the tiny world, its clock running out after its seed's decisions."""
+    tiny_world(state, rng, timestep=DEFAULT_MAX_TIMESTEPS - _LENGTHS[int(rng[0])])
+
+
+@pytest.fixture(autouse=True)
+def tiny() -> Generator[None]:
+    """Run the game's kernels as Python on the tiny worlds."""
+    with eager(world=_world):
+        yield
+
+
 @pytest.fixture(scope="module")
 def archive(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Return an archive of five episodes, three complete, one truncated, one a branch.
@@ -28,10 +61,11 @@ def archive(tmp_path_factory: pytest.TempPathFactory) -> Path:
     The complete ones return 5, 9 and 9 points, the second 9 in fewer decisions.
     """
     root = tmp_path_factory.mktemp("archive")
-    short, shorter, longer = (
-        replay.record(world_seed=seed, sampling_seed=1, max_decisions=500)
-        for seed in (4, 7, 2)
-    )
+    with eager(world=_world):
+        short, shorter, longer = (
+            replay.record(world_seed=seed, sampling_seed=1, max_decisions=500)
+            for seed in _LENGTHS
+        )
     assert len(shorter.actions) < len(short.actions) < len(longer.actions)
     train, val = root / "train" / "arm0" / "w0", root / "val" / "arm0" / "w0"
     for directory in (train, val):
@@ -58,7 +92,7 @@ def test_rank_takes_the_highest_return_then_the_fewest_decisions(archive: Path) 
     assert ranking.best == games.Candidate(
         episode="train/arm0/w0/shard-000000/1",
         score=9.0,
-        decisions=25,
+        decisions=1,
     )
     assert (ranking.complete, ranking.mean_score) == (3, (5.0 + 9.0 + 9.0) / 3)
 
@@ -95,7 +129,7 @@ def test_save_writes_the_best_game_beside_the_archive_average(
     manifest = read_manifest((output / "manifest.json").read_text(), Manifest)
     assert (manifest.title, manifest.actions, manifest.end_label) == (
         "Best game",
-        25,
+        1,
         "Episode end",
     )
     assert manifest.mean_score == (5.0 + 9.0 + 9.0) / 3
@@ -111,10 +145,10 @@ def test_save_takes_a_named_episode_and_a_prefix(
     output = tmp_path / "prefix"
     episode = "val/arm0/w0/shard-000000/0"
     argv = ["games.py", "save", str(archive), str(output), "--episode", episode]
-    monkeypatch.setattr(sys, "argv", [*argv, "--limit", "20"])
+    monkeypatch.setattr(sys, "argv", [*argv, "--limit", "2"])
     assert games.main() == 0
     manifest = read_manifest((output / "manifest.json").read_text(), Manifest)
-    assert (manifest.title, manifest.actions) == (episode, 20)
+    assert (manifest.title, manifest.actions) == (episode, 2)
     assert manifest.end_label == "End of recording"
 
 
@@ -126,14 +160,14 @@ def test_panel_writes_a_named_prefix_as_a_policy_view_bundle(
     output = tmp_path / "panel"
     episode = "val/arm0/w0/shard-000000/0"
     argv = ["games.py", "panel", str(archive), str(output), "--episode", episode]
-    monkeypatch.setattr(sys, "argv", [*argv, "--limit", "20"])
+    monkeypatch.setattr(sys, "argv", [*argv, "--limit", "2"])
     assert games.main() == 0
     manifest = read_manifest(
         (output / "manifest.json").read_text(),
         policy_view.Manifest,
     )
     assert (manifest.decisions, manifest.archive, manifest.episode) == (
-        20,
+        2,
         str(archive),
         episode,
     )

@@ -1,6 +1,13 @@
-"""Check policy-view bundles: exact frames cut before their map with their facings, and their manifest."""
+"""Check policy-view bundles: exact frames cut before their map with their facings, and their manifest.
 
+The episode is ``testing``'s: four decisions of the game, played as Python
+(``eager``) on the tiny world, a nine-tick sleep among them; a bundle keeps a
+prefix of three.
+"""
+
+from collections.abc import Generator
 from pathlib import Path
+from typing import Final
 
 import gzip
 import hashlib
@@ -8,11 +15,12 @@ import hashlib
 import numpy as np
 import pytest
 
+from priml.baselines.craftax.eager import eager
 from priml.baselines.craftax.game import jit
 from priml.baselines.craftax.game.jit import package_digest, platform_key
 from priml.baselines.craftax.lib.arrays import int_rows
-from priml.baselines.craftax.world_model import replay
-from priml.baselines.craftax.world_model.archive import Episode
+from priml.baselines.craftax.world_model.archive import Record
+from priml.baselines.craftax.world_model.viewer import testing
 from priml.baselines.craftax.world_model.viewer.exact import (
     Replayed,
     frame_dtype,
@@ -26,27 +34,37 @@ from priml.baselines.craftax.world_model.viewer.policy_view import (
 )
 
 
-@pytest.fixture(scope="module")
-def episode() -> Episode:
-    """Return a 404-decision random-play episode, of which bundles keep a prefix."""
-    return replay.record(world_seed=4, sampling_seed=2, max_decisions=1_000)
+_PREFIX: Final = len(testing.SCRIPT) - 1
 
 
 @pytest.fixture(scope="module")
-def prefix(episode: Episode) -> Replayed:
-    return replay_episode(episode, limit=300)
+def record() -> Record:
+    with eager(world=testing.world):
+        return testing.record()
+
+
+@pytest.fixture(scope="module")
+def prefix(record: Record) -> Replayed:
+    with eager(world=testing.world):
+        return replay_episode(record, limit=_PREFIX)
+
+
+@pytest.fixture(autouse=True)
+def tiny() -> Generator[None]:
+    with eager(world=testing.world):
+        yield
 
 
 def test_a_bundle_keeps_every_frame_up_to_its_map_and_its_facings(
     tmp_path: Path,
-    episode: Episode,
+    record: Record,
     prefix: Replayed,
 ) -> None:
     output = tmp_path / "view"
     manifest = write_bundle(
         prefix,
         output,
-        record=episode,
+        record=record,
         archive=tmp_path,
         episode="val/arm0/w0/shard-000000/3",
     )
@@ -59,8 +77,8 @@ def test_a_bundle_keeps_every_frame_up_to_its_map_and_its_facings(
     assert fields["map"][1] == 885
     assert manifest.record_bytes == 885 + 99
     assert manifest.schema_name == "craftax-policy-view/v2"
-    frames = prefix.frames.view(np.uint8).reshape(301, 7_858)
-    records = np.frombuffer(raw, np.uint8).reshape(301, 984)
+    frames = prefix.frames.view(np.uint8).reshape(_PREFIX + 1, 7_858)
+    records = np.frombuffer(raw, np.uint8).reshape(_PREFIX + 1, 984)
     assert records[:, :885].tobytes() == frames[:, :885].tobytes()
     assert records[:, 885:].tobytes() == prefix.facings.tobytes()
     assert (manifest.frames_sha256, manifest.gzip_sha256) == (
@@ -69,20 +87,21 @@ def test_a_bundle_keeps_every_frame_up_to_its_map_and_its_facings(
     )
     assert read_manifest((output / "manifest.json").read_text(), Manifest) == (manifest)
     with pytest.raises(FileExistsError):
-        write_bundle(prefix, output, record=episode, archive=tmp_path, episode="")
+        write_bundle(prefix, output, record=record, archive=tmp_path, episode="")
 
 
 def test_a_bundle_with_sleep_frames_cuts_them_alike_and_indexes_them(
     tmp_path: Path,
-    episode: Episode,
+    record: Record,
+    prefix: Replayed,
 ) -> None:
-    slept = replay_episode(episode, limit=300, sleep_stride=4)
+    slept = replay_episode(record, limit=_PREFIX, sleep_stride=4)
     assert len(slept.sleeps)
     output = tmp_path / "view"
     manifest = write_bundle(
         slept,
         output,
-        record=episode,
+        record=record,
         archive=tmp_path,
         episode="val/arm0/w0/shard-000000/3",
         sleep_stride=4,
@@ -104,9 +123,9 @@ def test_a_bundle_with_sleep_frames_cuts_them_alike_and_indexes_them(
     )
     # Without sleep frames the bundle is as before.
     plain = write_bundle(
-        replay_episode(episode, limit=300),
+        prefix,
         tmp_path / "plain",
-        record=episode,
+        record=record,
         archive=tmp_path,
         episode="val/arm0/w0/shard-000000/3",
     )
@@ -116,19 +135,19 @@ def test_a_bundle_with_sleep_frames_cuts_them_alike_and_indexes_them(
 
 def test_the_manifest_names_the_record_the_build_and_the_end(
     tmp_path: Path,
-    episode: Episode,
+    record: Record,
     prefix: Replayed,
 ) -> None:
     manifest = write_bundle(
         prefix,
         tmp_path / "view",
-        record=episode,
+        record=record,
         archive=tmp_path,
         episode="val/arm0/w0/shard-000000/3",
     )
-    receipt = episode.receipt
+    receipt = record.receipt
     assert manifest.schema_name == "craftax-policy-view/v2"
-    assert (manifest.decisions, manifest.record_decisions) == (300, 404)
+    assert (manifest.decisions, manifest.record_decisions) == (_PREFIX, _PREFIX + 1)
     assert (manifest.archive, manifest.episode) == (
         str(tmp_path),
         "val/arm0/w0/shard-000000/3",
@@ -138,11 +157,11 @@ def test_the_manifest_names_the_record_the_build_and_the_end(
     assert (manifest.arm, manifest.split) == (receipt.arm, receipt.split)
     assert (
         manifest.actions_sha256
-        == hashlib.sha256(episode.actions.numpy().tobytes()).hexdigest()
+        == hashlib.sha256(record.actions.numpy().tobytes()).hexdigest()
     )
     assert (
         manifest.hashes_sha256
-        == hashlib.sha256(episode.hashes.numpy().tobytes()).hexdigest()
+        == hashlib.sha256(record.hashes.numpy().tobytes()).hexdigest()
     )
     assert manifest.game == package_digest(Path(jit.__file__).parent)
     assert manifest.platform == platform_key()

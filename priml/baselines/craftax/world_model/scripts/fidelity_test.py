@@ -3,10 +3,12 @@
 from collections.abc import Sequence
 from contextlib import nullcontext
 from pathlib import Path
-from typing import cast
+from types import SimpleNamespace
+from typing import Final, cast
 
 import dataclasses
 import functools
+import hashlib
 import json
 import math
 import sys
@@ -27,19 +29,25 @@ from priml.baselines.craftax.world_model.batch import (
     pack_windows,
 )
 from priml.baselines.craftax.world_model.dream import Rollout
-from priml.baselines.craftax.world_model.engine import Engine, Prefix
-from priml.baselines.craftax.world_model.experiments import exp_smoke
+from priml.baselines.craftax.world_model.engine import (
+    Engine,
+    Prefix,
+)
 from priml.baselines.craftax.world_model.metric import MODALITIES
-from priml.baselines.craftax.world_model.model import WorldModelLogits
+from priml.baselines.craftax.world_model.model import WorldModel, WorldModelLogits
 from priml.baselines.craftax.world_model.schema import craftax_schema
 from priml.baselines.craftax.world_model.scripts import fidelity
 from priml.baselines.craftax.world_model.scripts.dream_eval import (
+    Source,
     Step,
     choose_windows,
     read_source,
-    rollout,
-    sampling_engine,
     window,
+)
+from priml.baselines.craftax.world_model.scripts.dream_eval_test import (
+    dreamed,
+    stand_in_engine,
+    without_decoding,
 )
 from priml.baselines.craftax.world_model.snapshots_test import (
     replay_twin,
@@ -49,7 +57,7 @@ from priml.baselines.craftax.world_model.testing import (
     small_schema,
     tiny_model,
 )
-from priml.lib.codec import from_plain, loads
+from priml.lib.codec import PlainTree, ReadError, from_plain, loads
 
 
 FIELDS = craftax_schema().scalar_names
@@ -196,8 +204,8 @@ def test_teacher_forced_pools_spans_into_rates_and_bits_per_byte(
     model = tiny_model(craftax_schema())
     sources = fidelity.validation_sources(validation_corpus(tmp_path, lengths=(9, 12)))
     spans = [
-        fidelity.Span(source=sources[0], start=2, targets=3),
-        fidelity.Span(source=sources[1], start=0, targets=4),
+        fidelity.Span(source=sources[0], start=2, targets=2),
+        fidelity.Span(source=sources[1], start=0, targets=3),
     ]
     result = fidelity.teacher_forced(
         model,
@@ -207,8 +215,8 @@ def test_teacher_forced_pools_spans_into_rates_and_bits_per_byte(
         resamples=16,
         generator=torch.Generator().manual_seed(0),
     )
-    assert from_plain(result["decisions"], int) == 7
-    assert from_plain(result["frames"], int) == 7
+    assert from_plain(result["decisions"], int) == 5
+    assert from_plain(result["frames"], int) == 5
     sums = [
         fidelity.score_span(
             model,
@@ -223,27 +231,27 @@ def test_teacher_forced_pools_spans_into_rates_and_bits_per_byte(
     modality = {name: sum(_column(s, name) for s in sums) for name in MODALITIES}
     total = sum(modality.values())
     nats = from_plain(result["nats_per_decision"], dict[str, object])
-    assert from_plain(nats["value"], float) == pytest.approx(total / 7)
+    assert from_plain(nats["value"], float) == pytest.approx(total / 5)
     bpb = from_plain(result["bpb"], dict[str, object])
     # 4 bytes of action, reward, and done per decision, 894 per frame.
-    expected = total / (math.log(2) * (4 * 7 + 894 * 7))
+    expected = total / (math.log(2) * (4 * 5 + 894 * 5))
     assert from_plain(bpb["value"], float) == pytest.approx(expected)
     assert list(from_plain(result["hud_fields"], dict[str, object])) == list(FIELDS)
     per_span = [
         from_plain(r, dict[str, object])
         for r in from_plain(result["per_span"], list[object])
     ]
-    assert [r["targets"] for r in per_span] == [3, 4]
+    assert [r["targets"] for r in per_span] == [2, 3]
     assert [r["episode_decisions"] for r in per_span] == [9, 12]
     assert sum(
         from_plain(r["nats_per_decision"], float) * t
-        for r, t in zip(per_span, (3, 4), strict=True)
+        for r, t in zip(per_span, (2, 3), strict=True)
     ) == pytest.approx(total)
     # Each span's modalities, so two reports can be compared span by span.
     for name in MODALITIES:
         assert sum(
             from_plain(from_plain(r["modalities"], dict[str, object])[name], float) * t
-            for r, t in zip(per_span, (3, 4), strict=True)
+            for r, t in zip(per_span, (2, 3), strict=True)
         ) == pytest.approx(modality[name]), name
 
 
@@ -598,12 +606,15 @@ def test_hud_dynamics_count_changes_over_the_transitions_both_hold() -> None:
         assert entry["value"] == 0.0, side
 
 
-@pytest.mark.compute_large_fixture
-def test_dreams_rate_every_count_per_thousand_decisions(tmp_path: Path) -> None:
+def test_dreams_rate_every_count_per_thousand_decisions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    without_decoding(monkeypatch, fidelity)
     corpus = validation_corpus(tmp_path, lengths=(9, 12, 10, 14, 11, 13), deaths=True)
     sources = fidelity.validation_sources(corpus)
-    engine, step = sampling_engine(
-        tiny_model(craftax_schema()),
+    engine, step = stand_in_engine(
+        tiny_model(small_schema()),
         rows=2,
         t_max=16,
         seed=0,
@@ -630,10 +641,11 @@ def test_dreams_rate_every_count_per_thousand_decisions(tmp_path: Path) -> None:
     assert again["real_names"] == names
 
 
-@pytest.mark.compute_large_fixture
 def test_continuations_score_model_and_frozen_on_the_same_windows(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    without_decoding(monkeypatch, fidelity)
     corpus = validation_corpus(tmp_path, lengths=(9, 12, 10, 14), deaths=True)
     windows = choose_windows(
         fidelity.validation_sources(corpus),
@@ -642,10 +654,10 @@ def test_continuations_score_model_and_frozen_on_the_same_windows(
         decisions=3,
         generator=torch.Generator().manual_seed(0),
     )
-    engine, step = sampling_engine(
-        tiny_model(craftax_schema()),
+    engine, step = stand_in_engine(
+        tiny_model(small_schema()),
         rows=4,
-        t_max=32,
+        t_max=16,
         seed=0,
     )
     settings = fidelity.Settings(rows=4, prefix=2, continuation=3, resamples=8)
@@ -662,7 +674,6 @@ def test_continuations_score_model_and_frozen_on_the_same_windows(
     assert from_plain(frozen, float) > 0
 
 
-@pytest.mark.compute_large_fixture
 def test_continuations_force_the_recorded_actions_then_noop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -677,7 +688,7 @@ def test_continuations_force_the_recorded_actions_then_noop(
         actions: torch.Tensor,
     ) -> Rollout:
         forced.append(actions.clone())
-        return rollout(
+        return dreamed(
             engine,
             step,
             decisions=decisions,
@@ -685,6 +696,7 @@ def test_continuations_force_the_recorded_actions_then_noop(
             actions=actions,
         )
 
+    without_decoding(monkeypatch, fidelity)
     monkeypatch.setattr(fidelity, "rollout", spy)
     segment = random_segment(craftax_schema(), 6, seed=4, terminal=True)
     # Three real decisions follow the prefix, then the episode ends.
@@ -696,10 +708,10 @@ def test_continuations_force_the_recorded_actions_then_noop(
         kind="k",
         name="e",
     )
-    engine, step = sampling_engine(
-        tiny_model(craftax_schema()),
+    engine, step = stand_in_engine(
+        tiny_model(small_schema()),
         rows=2,
-        t_max=32,
+        t_max=16,
         seed=0,
     )
     settings = fidelity.Settings(rows=2, prefix=2, continuation=5, resamples=8)
@@ -711,6 +723,15 @@ def test_continuations_force_the_recorded_actions_then_noop(
     assert forced[0][1].tolist() == [-1] * 5
 
 
+def test_a_path_reads_the_number_at_its_keys_none_past_a_gap() -> None:
+    report = {"a": {"b": 1.5, "c": None}, "d": 2}
+    assert fidelity._at(report, "a", "b") == 1.5
+    assert fidelity._at(report, "a", "c") is None
+    assert fidelity._at(report, "a", "c", "e") is None
+    with pytest.raises(ReadError, match="holding 'e'"):
+        fidelity._at(report, "d", "e")
+
+
 def test_flatten_keeps_numbers_under_slash_joined_keys() -> None:
     flat = fidelity.flatten(
         {"a": {"b": 1.0, "c": [1, 2], "d": None, "e": {"f": 2}, "g": True}},
@@ -718,8 +739,11 @@ def test_flatten_keeps_numbers_under_slash_joined_keys() -> None:
     assert flat == {"a/b": 1.0, "a/e/f": 2.0}
 
 
-@pytest.mark.compute_large_fixture
-def test_measure_reports_every_part_on_a_tiny_model(tmp_path: Path) -> None:
+def test_measure_reports_every_part_on_a_tiny_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    without_decoding(monkeypatch, fidelity)
     corpus = validation_corpus(
         tmp_path,
         lengths=(9, 12, 10, 14),
@@ -732,19 +756,19 @@ def test_measure_reports_every_part_on_a_tiny_model(tmp_path: Path) -> None:
         t_g=16,
         s_max=4,
         settings=fidelity.Settings(
-            spans=3,
-            targets=3,
-            rows=4,
+            spans=2,
+            targets=2,
+            rows=2,
             decisions=4,
-            real_episodes=4,
+            real_episodes=2,
             prefix=2,
             continuation=3,
-            resamples=16,
+            resamples=4,
         ),
         precision=nullcontext(),
     )
     nll = from_plain(report["teacher_forced"], dict[str, object])
-    assert from_plain(nll["decisions"], int) == 9
+    assert from_plain(nll["decisions"], int) == 4
     real = from_plain(
         from_plain(report["dreams"], dict[str, object])["real"],
         dict[str, object],
@@ -770,7 +794,16 @@ def test_measure_reports_every_part_on_a_tiny_model(tmp_path: Path) -> None:
     assert at("frozen", "board_mismatch", "1", "value") == 0.0
     assert from_plain(at("model", "board_mismatch", "1", "value"), float) > 0
     assert summary["continuation/ended/1"] == at("model", "ended", "1")
-    assert len(from_plain(continuation["windows"], list[object])) == 4
+    assert summary["continuation/board_mismatch/1/n"] == at(
+        "model",
+        "board_mismatch",
+        "1",
+        "n",
+    )
+    assert set(summary) >= {f"dream/{name}" for name in fidelity.HEADLINE}
+    for stat in ("decrements_per_1000", "increments_per_1000", "abs_error_1"):
+        assert f"continuation/food/{stat}/model" in summary, stat
+    assert len(from_plain(continuation["windows"], list[object])) == 2
     json.dumps(report)
 
 
@@ -796,24 +829,48 @@ def test_measure_refuses_episodes_too_short_to_continue(tmp_path: Path) -> None:
         )
 
 
-@pytest.mark.compute_large_fixture
-def test_main_writes_the_report_of_a_smoke_checkpoint(
+def test_main_writes_the_report_of_the_runs_measurement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = exp_smoke()
-    root = tmp_path / str(config.dataset.working_dir).lstrip("/")
-    validation_corpus(
-        root,
-        lengths=(12, 17, 22),
-        deaths=True,
-        still=True,
-        corpus=Path(str(config.dataset.corpus)),
+    corpus = validation_corpus(tmp_path, lengths=(12, 17, 22))
+    model = tiny_model(small_schema())
+    config = SimpleNamespace(
+        dataset=SimpleNamespace(corpus=str(corpus), t_g=16, s_max=4),
+        step=SimpleNamespace(dtype_autocast=None),
     )
-    model = config.step.model.make()
-    checkpoint = tmp_path / "runs" / "smoke" / "checkpoints" / "step_00000004.pt"
-    checkpoint.parent.mkdir(parents=True)
-    torch.save({"step": {"model": model.state_dict()}}, checkpoint)
+    measured: list[tuple[int, int, int, fidelity.Settings]] = []
+
+    def load_trained(
+        experiment: str,
+        checkpoint: Path,
+        *,
+        overrides: Sequence[str],
+        device: torch.device,
+    ) -> tuple[WorldModel, object]:
+        assert (experiment, checkpoint, device) == (SMOKE, path, torch.device("cpu"))
+        assert list(overrides) == ["base_dir=/b"]
+        return model, config
+
+    def measure(
+        given: WorldModel,
+        *,
+        sources: Sequence[Source],
+        t_g: int,
+        s_max: int,
+        settings: fidelity.Settings,
+        precision: object,
+    ) -> dict[str, PlainTree]:
+        assert given is model
+        del precision
+        measured.append((len(sources), t_g, s_max, settings))
+        return {"summary": {"nll/nats_per_decision": 1.5}, "teacher_forced": {}}
+
+    monkeypatch.setattr(fidelity, "load_trained", load_trained)
+    monkeypatch.setattr(fidelity, "measure", measure)
+    path = tmp_path / "runs" / "smoke" / "checkpoints" / "step_00000004.pt"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"checkpoint")
     output = tmp_path / "fidelity" / "smoke.json"
     settings = ["--spans", "2", "--targets", "4", "--rows", "2", "--decisions", "3"]
     settings += ["--real-episodes", "2", "--prefix", "2", "--continuation", "3"]
@@ -822,40 +879,39 @@ def test_main_writes_the_report_of_a_smoke_checkpoint(
         "argv",
         [
             "fidelity.py",
-            str(checkpoint),
-            *(
-                "--experiment",
-                "priml.baselines.craftax.world_model.experiments.exp_smoke",
-            ),
-            *("--override", f"base_dir={tmp_path}", "--device", "cpu"),
-            *("--resamples", "8", "--output", str(output)),
-            *settings,
+            str(path),
+            *("--experiment", SMOKE, "--override", "base_dir=/b", "--device", "cpu"),
+            *("--resamples", "8", "--output", str(output), *settings),
         ],
     )
     assert fidelity.main() == 0
+    # Every validation episode of the run's corpus, at its window.
+    assert measured == [
+        (
+            3,
+            16,
+            4,
+            dataclasses.replace(
+                fidelity.Settings(),
+                spans=2,
+                targets=4,
+                rows=2,
+                decisions=3,
+                real_episodes=2,
+                prefix=2,
+                continuation=3,
+                resamples=8,
+            ),
+        ),
+    ]
     report = from_plain(loads(output.read_text()), dict[str, object])
     assert report["schema"] == fidelity.SCHEMA
+    assert report["summary"] == {"nll/nats_per_decision": 1.5}
     provenance = from_plain(report["provenance"], dict[str, object])
     assert provenance["tag"] == "smoke-step_00000004"
-    assert from_plain(provenance["overrides"], list[str]) == [f"base_dir={tmp_path}"]
-    summary = from_plain(report["summary"], dict[str, object])
-    nats = from_plain(
-        from_plain(report["teacher_forced"], dict[str, object])["nats_per_decision"],
-        dict[str, object],
-    )
-    assert summary["nll/nats_per_decision"] == nats["value"]
-    assert set(summary) >= {f"dream/{name}" for name in fidelity.HEADLINE}
-    for stat in ("decrements_per_1000", "increments_per_1000", "abs_error_1"):
-        assert f"continuation/food/{stat}/model" in summary, stat
-    at = functools.partial(fidelity._at, report, "continuations")
-    # The real boards never change, so only the model's differ from them.
-    assert at("frozen", "board_mismatch", "1", "value") == 0.0
-    assert summary["continuation/board_mismatch/1/n"] == at(
-        "model",
-        "board_mismatch",
-        "1",
-        "n",
-    )
+    assert from_plain(provenance["overrides"], list[str]) == ["base_dir=/b"]
+    assert provenance["checkpoint_sha256"] == hashlib.sha256(b"checkpoint").hexdigest()
+    assert (provenance["corpus"], provenance["validation_episodes"]) == (str(corpus), 3)
 
 
 def test_main_rejects_an_existing_output(
@@ -871,6 +927,10 @@ def test_main_rejects_an_existing_output(
     )
     with pytest.raises(FileExistsError):
         fidelity.main()
+
+
+SMOKE: Final = "priml.baselines.craftax.world_model.experiments.exp_smoke"
+"""The experiment the stand-in loader is asked for."""
 
 
 def _column(sums: torch.Tensor, name: str) -> float:

@@ -1,5 +1,13 @@
-"""Check exact game bundles: an episode's frames, creature health, hash checks, and files."""
+"""Check exact game bundles: an episode's frames, creature health, hash checks, and files.
 
+The episode is ``testing``'s: four decisions of the game, played as Python
+(``eager``) on the tiny world, a nine-tick sleep among them. How a long
+record's stride hashes are checked is tested on a stand-in replay that hands
+back chosen hashes, since a stride hash needs 256 decisions.
+"""
+
+from collections.abc import Callable, Generator, Sequence
+from functools import partial
 from pathlib import Path
 from typing import Final
 
@@ -13,6 +21,7 @@ import numpy as np
 import pytest
 import torch
 
+from priml.baselines.craftax.eager import eager, tiny_world
 from priml.baselines.craftax.game.mobs import (
     MELEE_HEALTH,
     PASSIVE_HEALTH,
@@ -22,15 +31,13 @@ from priml.baselines.craftax.game.state import (
     MAX_ACHIEVEMENT_RETURN,
     Action,
     env_state,
-    env_stats,
     new_stats,
 )
-from priml.baselines.craftax.game.step import Rules, play_numba
 from priml.baselines.craftax.lib.arrays import int_rows, ints, typed
 from priml.baselines.craftax.world_model import replay
-from priml.baselines.craftax.world_model.archive import Episode
+from priml.baselines.craftax.world_model.archive import Episode, Receipt
 from priml.baselines.craftax.world_model.schema import craftax_schema
-from priml.baselines.craftax.world_model.viewer import exact
+from priml.baselines.craftax.world_model.viewer import exact, testing
 from priml.baselines.craftax.world_model.viewer.exact import (
     Manifest,
     Replayed,
@@ -47,64 +54,25 @@ from priml.baselines.craftax.world_model.viewer.exact import (
 
 _CWD: Final = Path(__file__).resolve().parent
 
+_DECISIONS: Final = len(testing.SCRIPT)
+
 
 @pytest.fixture(scope="module")
 def episode() -> Episode:
-    """Return a 404-decision random-play episode: two stride hashes and a final one."""
-    return replay.record(world_seed=4, sampling_seed=2, max_decisions=1_000)
+    with eager(world=testing.world):
+        return testing.episode()
 
 
 @pytest.fixture(scope="module")
 def played(episode: Episode) -> Replayed:
-    return replay_episode(episode)
+    with eager(world=testing.world):
+        return replay_episode(episode)
 
 
-def test_each_sleep_gives_a_frame_every_stride_ticks_it_sleeps_through(
-    episode: Episode,
-    played: Replayed,
-) -> None:
-    slept = replay_episode(episode, sleep_stride=4)
-    # The decision frames do not change, and only a sleep's step adds frames.
-    assert slept.frames.tobytes() == played.frames.tobytes()
-    assert (len(played.sleeps), len(played.sleep_frames)) == (0, 0)
-    actions = episode.actions.numpy()
-    assert len(slept.sleeps) >= 3
-    sleeps = int_rows(slept.sleeps)
-    assert all(actions[d] == Action.SLEEP.value for d, _, _ in sleeps)
-    counts = [(ticks - 1) // 4 for _, ticks, _ in sleeps]
-    assert slept.sleeps[:, 2].tolist() == np.cumsum([0, *counts[:-1]]).tolist()
-    assert len(slept.sleep_frames) == len(slept.sleep_health) == sum(counts)
-    assert slept.sleep_facings.shape == (sum(counts), 99)
-    frames = slept.sleep_frames
-    assert frames["sleeping"].all()
-    for (decision, _, first), count in zip(sleeps, counts, strict=True):
-        own = frames[first : first + count]
-        before = read_frame(slept.frames, decision).tick_before
-        # A frame after the 4th tick, the 8th, ...: the world's tick counts them.
-        assert own["tick_before"].tolist() == [
-            before + 4 * k for k in range(1, count + 1)
-        ]
-        assert np.equal(own["step"], decision).all()
-        assert np.equal(own["row"], read_frame(slept.frames, decision).row).all()
-
-
-def test_a_sleep_whose_ticks_end_elsewhere_is_refused(episode: Episode) -> None:
-    states, rng = replay.load(replay.initial(episode).state)
-    stats = new_stats(1)
-    actions = ints(episode.actions.numpy())
-    first = actions.index(Action.SLEEP.value)
-    for action in actions[:first]:
-        play_numba(env_state(states, 0), rng, env_stats(stats, 0), action, Rules())
-    # The world before the sleep is not where its ticks end.
-    with pytest.raises(ValueError, match="ends off its collapsed step"):
-        exact._sleep_frames(
-            states.copy(),
-            rng.copy(),
-            stats.copy(),
-            action=Action.SLEEP.value,
-            stride=4,
-            after=(states, rng),
-        )
+@pytest.fixture(autouse=True)
+def tiny() -> Generator[None]:
+    with eager(world=testing.world):
+        yield
 
 
 def test_the_facings_hold_each_projectile_shown_in_view_by_its_cell() -> None:
@@ -112,7 +80,6 @@ def test_the_facings_hold_each_projectile_shown_in_view_by_its_cell() -> None:
     state = env_state(states, 0)
     level = state.player_level
     row, col = state.player_position
-    typed(states["light_map"], np.uint8)[0, level, :, :] = 255
     # Two arrows of the player's and an enemy's arrow in view, and one out of it.
     arrows, enemy = state.player_projectiles[level], state.mob_projectiles[level]
     arrow_directions = state.player_projectile_directions
@@ -159,25 +126,26 @@ def test_every_decision_has_a_frame_and_the_last_board_follows(
     played: Replayed,
 ) -> None:
     frames = played.frames
-    decisions = len(episode.actions)
-    assert decisions == 404
-    assert len(frames) == len(played.health) == decisions + 1
-    assert played.facings.shape == (decisions + 1, 99)
-    assert frames["step"].tolist() == list(range(decisions + 1))
-    assert frames["action"].tolist() == [*episode.actions.tolist(), 255]
-    assert frames["terminal"].tolist() == [0] * (decisions - 1) + [1, 1]
+    assert len(frames) == len(played.health) == _DECISIONS + 1
+    assert played.facings.shape == (_DECISIONS + 1, 99)
+    assert frames["step"].tolist() == list(range(_DECISIONS + 1))
+    assert frames["action"].tolist() == [*testing.SCRIPT, 255]
+    assert frames["terminal"].tolist() == [0] * (_DECISIONS - 1) + [1, 1]
     assert played.ended
     # A decision's after-values are the next frame's before-values.
     for name in ("tick", "floor", "health", "mana"):
         after, before = frames[f"{name}_after"], frames[f"{name}_before"]
         assert np.array_equal(after[:-1], before[1:])
         assert after[-1] == before[-1]
-    # Random play crafts no armour, so its rewards are the achievements it
-    # unlocks, and -1 at its death.
+    # The sleep's step plays every tick of it.
+    ticks = ints(np.diff(typed(frames["tick_before"], np.uint32)))
+    assert ticks == [1, testing.SLEEP_TICKS, 1, 1]
+    # The rewards are the achievements unlocked: waking up is one.
     unlocked = episode.reward.clamp(min=0).cumsum(0).tolist()
     assert frames["score"].tolist() == [*unlocked, unlocked[-1]]
+    assert int(episode.reward.clamp(min=0).sum()) > 0
     hashes = episode.hashes.numpy().view(np.uint64)
-    assert np.array_equal(played.hashes[[255, -1]], hashes[1:])
+    assert played.hashes[-1] == hashes[-1]
 
 
 def test_frames_hold_what_the_policy_saw(episode: Episode, played: Replayed) -> None:
@@ -203,6 +171,64 @@ def test_frames_hold_what_the_policy_saw(episode: Episode, played: Replayed) -> 
     ]
     assert np.array_equal(frames["direction"], facing.argmax(-1) + 1)
     assert np.array_equal(frames["health_max"], 8 + aux[:, names.index("strength")])
+
+
+def test_a_sleep_gives_a_frame_every_stride_ticks_it_sleeps_through(
+    episode: Episode,
+    played: Replayed,
+) -> None:
+    slept = replay_episode(episode, sleep_stride=4)
+    # The decision frames do not change, and only a sleep's step adds frames.
+    assert slept.frames.tobytes() == played.frames.tobytes()
+    assert (len(played.sleeps), len(played.sleep_frames)) == (0, 0)
+    decision = testing.SCRIPT.index(Action.SLEEP)
+    count = (testing.SLEEP_TICKS - 1) // 4
+    assert int_rows(slept.sleeps) == [(decision, testing.SLEEP_TICKS, 0)]
+    assert len(slept.sleep_frames) == len(slept.sleep_health) == count
+    assert slept.sleep_facings.shape == (count, 99)
+    frames = slept.sleep_frames
+    assert frames["sleeping"].all()
+    before = read_frame(slept.frames, decision).tick_before
+    # A frame after the 4th tick, the 8th: the world's tick counts them.
+    assert frames["tick_before"].tolist() == [before + 4 * k for k in (1, 2)]
+    assert np.equal(frames["step"], decision).all()
+    assert np.equal(frames["row"], read_frame(slept.frames, decision).row).all()
+    # The penned cow is among the creatures each sleep frame lists.
+    for frame in range(count):
+        listed = int_rows(
+            typed(frames["mobs"], np.uint8)[frame, : 4 * frames["mob_count"][frame]]
+            .reshape(-1, 4)
+            .astype(np.int64),
+        )
+        assert (1, 0, *testing.COW) in listed
+
+
+def test_a_sleep_whose_ticks_end_elsewhere_is_refused(episode: Episode) -> None:
+    states, rng = replay.load(replay.initial(episode).state)
+    stats = new_stats(1)
+    # The world before the sleep is not where its ticks end.
+    with pytest.raises(ValueError, match="ends off its collapsed step"):
+        exact._sleep_frames(
+            states.copy(),
+            rng.copy(),
+            stats.copy(),
+            action=Action.SLEEP.value,
+            stride=4,
+            after=(states, rng),
+        )
+
+
+def test_a_sleep_that_ticks_apart_from_its_step_is_refused(
+    episode: Episode,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        exact,
+        "_sleep_frames",
+        partial(_one_tick_more, exact._sleep_frames),
+    )
+    with pytest.raises(ValueError, match="one at a time, not its step's"):
+        replay_episode(episode, sleep_stride=4)
 
 
 def test_the_map_and_creatures_are_the_players_floor(played: Replayed) -> None:
@@ -240,20 +266,22 @@ def test_the_map_and_creatures_are_the_players_floor(played: Replayed) -> None:
 
 
 def test_a_prefix_ends_where_it_is_cut(episode: Episode, played: Replayed) -> None:
-    prefix = replay_episode(episode, limit=300)
-    assert len(prefix.frames) == 301
-    assert prefix.frames[:-1].tobytes() == played.frames[:300].tobytes()
+    cut = _DECISIONS - 1
+    prefix = replay_episode(episode, limit=cut)
+    assert len(prefix.frames) == cut + 1
+    assert prefix.frames[:-1].tobytes() == played.frames[:cut].tobytes()
     assert not prefix.ended
     final = read_frame(prefix.frames, -1)
-    assert (final.step, final.action, final.terminal) == (300, 255, 0)
+    assert (final.step, final.action, final.terminal) == (cut, 255, 0)
     for name in ("tick_before", "health_before", "observation", "map", "mobs"):
-        assert np.array_equal(prefix.frames[-1:][name], played.frames[300:301][name]), (
-            name
-        )
-    assert prefix.health[-1:].tobytes() == played.health[300:301].tobytes()
+        assert np.array_equal(
+            prefix.frames[-1:][name],
+            played.frames[cut : cut + 1][name],
+        ), name
+    assert prefix.health[-1:].tobytes() == played.health[cut : cut + 1].tobytes()
 
 
-@pytest.mark.parametrize("index", [0, 1, -1])
+@pytest.mark.parametrize("index", [0, -1])
 def test_a_recorded_hash_the_replay_misses_is_refused(
     episode: Episode,
     index: int,
@@ -264,10 +292,45 @@ def test_a_recorded_hash_the_replay_misses_is_refused(
         replay_episode(dataclasses.replace(episode, hashes=hashes))
 
 
+@pytest.mark.parametrize(
+    ("index", "limit", "message"),
+    [
+        (0, None, "hash 0"),
+        (1, None, "hash 1"),
+        (2, None, "hash 2"),
+        (1, 299, "hash 1"),
+        (2, 299, ""),
+        (1, 255, ""),
+    ],
+)
+def test_a_long_records_stride_hashes_are_checked_up_to_its_cut(
+    monkeypatch: pytest.MonkeyPatch,
+    index: int,
+    limit: int | None,
+    message: str,
+) -> None:
+    # 300 decisions: a hash before decision 0, one before 256 and one after the
+    # last. The stand-in replay's State hash after decision ``t`` is ``t + 7``.
+    monkeypatch.setattr(exact, "replay_frames", _stand_in_replay)
+    with eager(world=tiny_world):
+        states, _ = replay.reset_world(1)
+        initial = int(replay.fnv1a_numba(states.view(np.uint8)))
+        record = _long_record(initial)
+        hashes = record.hashes.clone()
+        hashes[index] ^= 1
+        damaged = dataclasses.replace(record, hashes=hashes)
+        assert replay_episode(record, limit=limit).hashes[-1] == (limit or 300) + 6
+        if message:
+            with pytest.raises(ValueError, match=message):
+                replay_episode(damaged, limit=limit)
+        else:
+            replay_episode(damaged, limit=limit)
+
+
 def test_an_episode_that_ends_before_its_last_action_is_refused(
     episode: Episode,
 ) -> None:
-    with pytest.raises(ValueError, match="ended at decision 403"):
+    with pytest.raises(ValueError, match=f"ended at decision {_DECISIONS - 1}"):
         replay_frames(
             *replay.load(replay.initial(episode).state),
             actions=np.append(episode.actions.numpy(), 0),
@@ -281,7 +344,7 @@ def test_a_complete_record_must_end_at_its_last_decision(
     played: Replayed,
 ) -> None:
     with pytest.raises(ValueError, match="did not end at its last decision"):
-        replay_episode(_cut(episode, played, decisions=300))
+        replay_episode(_cut(episode, played, decisions=_DECISIONS - 1))
 
 
 def test_a_truncated_record_must_not_end(episode: Episode) -> None:
@@ -293,9 +356,10 @@ def test_a_truncated_record_replays_to_its_cut(
     episode: Episode,
     played: Replayed,
 ) -> None:
-    record = dataclasses.replace(_cut(episode, played, decisions=300), truncated=True)
+    cut = _DECISIONS - 1
+    record = dataclasses.replace(_cut(episode, played, decisions=cut), truncated=True)
     truncated = replay_episode(record)
-    assert truncated.frames[:-1].tobytes() == played.frames[:300].tobytes()
+    assert truncated.frames[:-1].tobytes() == played.frames[:cut].tobytes()
     assert not truncated.ended
 
 
@@ -316,10 +380,10 @@ def test_a_bundle_holds_frames_health_and_their_digests(
     manifest = read_manifest((output / "manifest.json").read_text(), Manifest)
     final = read_frame(played.frames, -1)
     assert manifest.schema_name == "craftax-exact-game/v1"
-    assert (manifest.frames, manifest.actions) == (405, 404)
+    assert (manifest.frames, manifest.actions) == (_DECISIONS + 1, _DECISIONS)
     assert (manifest.tick, manifest.score) == (final.tick_before, final.score)
     assert manifest.achievements == final.achievements > 0
-    assert manifest.description == "404 recorded actions"
+    assert manifest.description == f"{_DECISIONS} recorded actions"
     assert manifest.end_label == "Episode end"
     assert manifest.mean_score == 12.5
     assert manifest.mean_return_pct == 100 * 12.5 / float(MAX_ACHIEVEMENT_RETURN)
@@ -357,6 +421,21 @@ def test_viewer_builder_accepts_an_exact_bundle(
     assert "Health payload hash mismatch" in broken.stderr
 
 
+def _one_tick_more(
+    play: Callable[..., tuple[int, Sequence[object]]],
+    states: np.ndarray,
+    rng: np.ndarray,
+    stats: np.ndarray,
+    *,
+    action: int,
+    stride: int,
+    after: tuple[np.ndarray, np.ndarray],
+) -> tuple[int, Sequence[object]]:
+    """Stand in for ``exact._sleep_frames``: one tick more than it played, no frames."""
+    ticks, _ = play(states, rng, stats, action=action, stride=stride, after=after)
+    return ticks + 1, []
+
+
 def _cut(episode: Episode, played: Replayed, *, decisions: int) -> Episode:
     """Return ``episode``'s record cut after ``decisions``, its last hash the State then."""
     last = played.hashes[decisions - 1 : decisions].view(np.int64)
@@ -365,6 +444,52 @@ def _cut(episode: Episode, played: Replayed, *, decisions: int) -> Episode:
         episode,
         actions=episode.actions[:decisions],
         hashes=torch.cat([episode.hashes[:kept], torch.from_numpy(last)]),
+    )
+
+
+def _long_record(initial: int) -> Episode:
+    """Return a 300-decision record of world 1 whose hashes the stand-in replay gives."""
+    hashes = np.array([initial, 256 + 6, 300 + 6], np.uint64)
+    empty = torch.empty(0)
+    return Episode(
+        receipt=Receipt(
+            world_seed=1,
+            sampling_seed=0,
+            initial_state_hash=initial,
+            arm=0,
+            split=0,
+        ),
+        actions=torch.zeros(300, dtype=torch.uint8),
+        hashes=torch.from_numpy(hashes.view(np.int64)),
+        cells=empty,
+        aux=empty,
+        reward=empty,
+        done=empty,
+        summary={},
+    )
+
+
+def _stand_in_replay(
+    states: np.ndarray,
+    rng: np.ndarray,
+    *,
+    actions: np.ndarray,
+    sleep_stride: int | None = None,
+) -> Replayed:
+    """Stand in for ``replay_frames``: after decision ``t`` the State hash is ``t + 7``."""
+    del states, rng, sleep_stride
+    decisions = len(ints(actions))
+    empty = np.zeros(0, frame_dtype())
+    return Replayed(
+        frames=empty,
+        health=np.zeros(0, health_dtype()),
+        hashes=np.arange(decisions, dtype=np.uint64) + 7,
+        ended=decisions == 300,
+        facings=np.zeros((0, 99), np.uint8),
+        sleeps=np.zeros((0, 3), np.int64),
+        sleep_frames=empty,
+        sleep_health=np.zeros(0, health_dtype()),
+        sleep_facings=np.zeros((0, 99), np.uint8),
     )
 
 

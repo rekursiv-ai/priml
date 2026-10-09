@@ -17,6 +17,9 @@ from priml.baselines.craftax.world_model.scripts import (
     fidelity,
     fidelity_compare,
 )
+from priml.baselines.craftax.world_model.scripts.dream_eval_test import (
+    without_decoding,
+)
 from priml.baselines.craftax.world_model.scripts.fidelity_test import (
     validation_corpus,
 )
@@ -112,25 +115,26 @@ def test_compare_rejects_reports_scored_on_different_data() -> None:
         _compare(base, [ended])
 
 
-@pytest.mark.compute_large_fixture
 def test_compare_finds_no_difference_between_copies_of_a_measured_report(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    corpus = validation_corpus(tmp_path, lengths=(9, 12, 10, 14), deaths=True)
+    without_decoding(monkeypatch, fidelity)
+    corpus = validation_corpus(tmp_path, lengths=(9, 12), deaths=True)
     measured = fidelity.measure(
         tiny_model(craftax_schema()),
         sources=fidelity.validation_sources(corpus),
         t_g=16,
         s_max=4,
         settings=fidelity.Settings(
-            spans=3,
+            spans=1,
             targets=3,
-            rows=4,
+            rows=1,
             decisions=4,
-            real_episodes=4,
+            real_episodes=1,
             prefix=2,
             continuation=3,
-            resamples=16,
+            resamples=4,
         ),
         precision=nullcontext(),
     )

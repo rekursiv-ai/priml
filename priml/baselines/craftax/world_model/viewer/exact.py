@@ -92,7 +92,7 @@ from priml.baselines.craftax.game.state import (
 from priml.baselines.craftax.game.step import Rules, observe_numba, play_numba
 from priml.baselines.craftax.lib.arrays import Shaped, ints
 from priml.baselines.craftax.world_model import replay
-from priml.lib.codec import MutablePlainTree, from_plain, loads
+from priml.lib.codec import MutablePlainTree, from_plain, loads, mutable
 from priml.paths import validated_output_path
 
 
@@ -216,8 +216,9 @@ def manifest_json(manifest: DataclassInstance) -> str:
       text: The file's contents.
 
     """
-    fields = from_plain(dataclasses.asdict(manifest), dict[str, MutablePlainTree])
-    renamed = _renamed(fields, _wire_name)
+    # ``mutable`` checks each leaf is plain: ``from_plain`` would try every member
+    # of the tree's union at every node, 5 ms a model bundle's manifest.
+    renamed = _renamed(mutable(dataclasses.asdict(manifest)), _wire_name)
     return json.dumps(renamed, indent=2, ensure_ascii=False) + "\n"
 
 

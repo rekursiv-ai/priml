@@ -1,9 +1,12 @@
 """Check stratum assignment, run-length spans, and the per-shard index cache."""
 
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import cast
+from types import SimpleNamespace
+from typing import Self, cast
 
 import dataclasses
+import pickle
 import stat
 
 import pytest
@@ -32,6 +35,10 @@ from priml.baselines.craftax.world_model.index import (
     shard_key,
     trace_strata,
 )
+
+
+type _Built = tuple[int, object, tuple[object, ...]]
+"""A pool's worker count, initializer and its arguments."""
 
 
 def _episode(floors: list[int], *, died: bool, split: int = 0) -> Episode:
@@ -218,11 +225,17 @@ def test_map_chunks_splits_at_episode_boundaries_in_order(tmp_path: Path) -> Non
     ]
 
 
-@pytest.mark.cli_python_subprocess
-def test_map_chunks_in_a_process_pool_equals_inline(tmp_path: Path) -> None:
+def test_map_chunks_in_a_process_pool_equals_inline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built = inline_pools(monkeypatch)
     line = write_shard(tmp_path, index=0, episodes=_mixed(), provenance={})
     inline = map_chunks(tmp_path, line, build_index, workers=1, chunk_decisions=1)
+    assert not built
     pooled = map_chunks(tmp_path, line, build_index, workers=2, chunk_decisions=1)
+    # One torch thread per worker process: the pool is the parallelism.
+    assert built == [(2, torch.set_num_threads, (1,))]
     assert len(pooled) == 4
     for left, right in zip(pooled, inline, strict=True):
         _assert_same_index(left, right)
@@ -286,6 +299,44 @@ def test_replay_shard_index_equals_the_frame_shard_index(tmp_path: Path) -> None
 
 def _decisions(episodes: list[Episode]) -> list[int]:
     return [len(e.actions) for e in episodes]
+
+
+def inline_pools(monkeypatch: pytest.MonkeyPatch) -> list[_Built]:
+    """Run ``index``'s process pools in this process; return each pool's settings as built.
+
+    A task's function and chunk make the round trip through pickle a worker
+    process makes them, so an unpicklable one fails as it would in a pool.
+    """
+    built: list[_Built] = []
+
+    def pool(
+        *,
+        max_workers: int,
+        initializer: object,
+        initargs: tuple[object, ...],
+    ) -> _InlinePool:
+        built.append((max_workers, initializer, initargs))
+        return _InlinePool()
+
+    monkeypatch.setattr(
+        "priml.baselines.craftax.world_model.index.futures",
+        SimpleNamespace(ProcessPoolExecutor=pool),
+    )
+    return built
+
+
+class _InlinePool:
+    """Stand in for a process pool: each task pickled, unpickled and run here, in order."""
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        del exc_info
+
+    def map[T, R](self, function: Callable[[T], R], items: Iterable[T]) -> list[R]:
+        work = cast("Callable[[T], R]", pickle.loads(pickle.dumps(function)))
+        return [work(cast("T", pickle.loads(pickle.dumps(item)))) for item in items]
 
 
 if __name__ == "__main__":

@@ -1,7 +1,9 @@
 """Tests for the replay verifier: true shards pass, damage halts capture, and it waits.
 
 Shards are written from ``replay.record`` episodes into a capture worker's
-directory layout. ``run`` is driven by ``_Timeline``, a fake clock that plays
+directory layout: random play on tiny worlds whose clock runs out three
+decisions after the reset, or six on a world of odd seed, its kernels run as
+Python (``eager``). ``run`` is driven by ``_Timeline``, a fake clock that plays
 the launch's workers right after chosen polls, so waiting and timing out take
 no wall time.
 """
@@ -15,7 +17,10 @@ import copy
 import dataclasses
 
 import pytest
+import torch
 
+from priml.baselines.craftax.eager import eager, tiny_world
+from priml.baselines.craftax.game.state import DEFAULT_MAX_TIMESTEPS
 from priml.baselines.craftax.world_model import replay
 from priml.baselines.craftax.world_model.archive import (
     Episode,
@@ -46,24 +51,43 @@ from priml.baselines.craftax.world_model.capture.worker import (
 from priml.baselines.craftax.world_model.index import floor_trace
 from priml.baselines.craftax.world_model.snapshots import (
     snapshot_episode,
+    verify_snapshots,
 )
+from priml.lib import zstd_compat
 from priml.lib.codec import from_plain, loads
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
     from pathlib import Path
+
+    import numpy as np
+
+    from priml.baselines.craftax.game.state import Array1, EnvState
+    from priml.baselines.craftax.world_model.archive import Record
+
+
+def _world(state: EnvState, rng: Array1[np.uint32]) -> None:
+    """Fill the tiny world, its clock running out after 3 decisions, 6 on an odd seed."""
+    tiny_world(state, rng, timestep=DEFAULT_MAX_TIMESTEPS - 3 * (1 + int(rng[0]) % 2))
 
 
 @pytest.fixture(scope="module")
 def recorded() -> list[Episode]:
-    """Return three random-play episodes, the first two longer than 256 decisions."""
-    episodes = [
-        replay.record(world_seed=seed, sampling_seed=seed, max_decisions=2_000)
-        for seed in (10, 12, 5)
-    ]
-    assert [len(e.actions) > 256 for e in episodes] == [True, True, False]
+    """Return three random-play episodes, the second the longest."""
+    with eager(world=_world):
+        episodes = [
+            replay.record(world_seed=seed, sampling_seed=seed, max_decisions=6)
+            for seed in (10, 13, 4)
+        ]
+    assert [len(e.actions) for e in episodes] == [3, 6, 3]
     return episodes
+
+
+@pytest.fixture(autouse=True)
+def tiny() -> Generator[None]:
+    with eager(world=_world):
+        yield
 
 
 @pytest.fixture
@@ -125,6 +149,7 @@ def test_a_mutated_action_halts_capture(
     recorded: list[Episode],
 ) -> None:
     actions = recorded[1].actions.flip(0).contiguous()
+    assert not torch.equal(actions, recorded[1].actions)
     mutated = dataclasses.replace(recorded[1], actions=actions)
     _publish(verifier.config.root, [recorded[0], mutated])
     with pytest.raises(
@@ -206,23 +231,55 @@ def test_damage_outside_the_sampled_episodes_halts_capture(
 def test_a_true_replay_shard_passes(
     verifier: ReplayVerifier,
     recorded: list[Episode],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    strides: list[int] = []
+    monkeypatch.setattr(
+        verify,
+        "verify_snapshots",
+        partial(_noting_stride, verify_snapshots, strides),
+    )
     _publish_replay(verifier.config.root, recorded, strides=[256] * 3)
     (verdict,) = verifier.poll_once()
     assert verdict.episodes == [0, 1, 2]
     assert not verdict.mismatch
+    # Each episode is checked at the shard's own stride.
+    assert strides == [256] * 3
 
 
 def test_a_replay_shard_whose_snapshots_miss_the_replay_halts_capture(
     verifier: ReplayVerifier,
     recorded: list[Episode],
 ) -> None:
-    # Stored at a stride of 512, the episode holds no snapshot where the
-    # shard's stride of 256 says it holds one.
-    _publish_replay(verifier.config.root, recorded[:1], strides=[512])
+    # The episode is shorter than the stride of 256, so its replay yields no
+    # snapshot, but it stores one.
+    directory = shard_directory(verifier.config.root, split=TRAIN, arm=0, worker=0)
+    directory.mkdir(parents=True)
+    episode = recorded[0]
+    spurious = zstd_compat.compress(bytes(replay.SNAPSHOT_BYTES))
+    write_replay_shard(
+        directory,
+        index=0,
+        episodes=[
+            ReplayEpisode(
+                receipt=episode.receipt,
+                actions=episode.actions,
+                hashes=episode.hashes,
+                snapshots=spurious,
+                floors=floor_trace(
+                    aux=episode.aux,
+                    reward=episode.reward,
+                    done=episode.done,
+                ),
+                summary=episode.summary,
+            ),
+        ],
+        stride=256,
+        provenance={},
+    )
     with pytest.raises(
         ReplayMismatchError,
-        match=f"world seed {recorded[0].receipt.world_seed}: .*snapshots differ",
+        match=f"world seed {episode.receipt.world_seed}: .*snapshots differ",
     ):
         verifier.poll_once()
 
@@ -454,6 +511,19 @@ def _finish(root: Path, episodes: list[Episode], *workers: int) -> None:
     _publish(root, episodes, worker=workers[0])
     for worker in workers:
         mark_complete(root, launch="launch-1", arm=0, worker=worker, decisions=0)
+
+
+def _noting_stride(
+    check: Callable[..., None],
+    strides: list[int],
+    record: Record,
+    stored: bytes,
+    *,
+    stride: int,
+) -> None:
+    """Run ``verify_snapshots``, first noting the stride it checks at."""
+    strides.append(stride)
+    check(record, stored, stride=stride)
 
 
 if __name__ == "__main__":
