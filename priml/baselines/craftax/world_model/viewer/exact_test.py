@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.craftax.eager import eager, tiny_world
+from priml.baselines.craftax.eager import eager, scripted, tiny_world
 from priml.baselines.craftax.game.mobs import (
     MELEE_HEALTH,
     PASSIVE_HEALTH,
@@ -30,6 +30,8 @@ from priml.baselines.craftax.game.mobs import (
 from priml.baselines.craftax.game.state import (
     MAX_ACHIEVEMENT_RETURN,
     Action,
+    Array1,
+    EnvState,
     env_state,
     new_stats,
 )
@@ -229,6 +231,26 @@ def test_a_sleep_that_ticks_apart_from_its_step_is_refused(
     )
     with pytest.raises(ValueError, match="one at a time, not its step's"):
         replay_episode(episode, sleep_stride=4)
+
+
+def _wounded(state: EnvState, rng: Array1[np.uint32]) -> None:
+    """Fill the tiny world, the player a point short of full health, six ticks from healing."""
+    tiny_world(state, rng)
+    state.player_health = np.float32(8.0)
+    state.player_recover = np.float32(20.0)
+
+
+def test_a_rest_plays_its_ticks_but_takes_no_sleep_frames() -> None:
+    with eager(world=_wounded):
+        rest = scripted(
+            [Action.REST.value, Action.NOOP.value],
+            world_seed=4,
+            truncated=True,
+        )
+        rested = replay_episode(rest, sleep_stride=4)
+    # The rest's step played several ticks, as a sleep's does.
+    assert ints(np.diff(typed(rested.frames["tick_before"], np.uint32)))[0] > 4
+    assert (len(rested.sleeps), len(rested.sleep_frames)) == (0, 0)
 
 
 def test_the_map_and_creatures_are_the_players_floor(played: Replayed) -> None:

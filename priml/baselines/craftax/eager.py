@@ -49,6 +49,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
 from functools import cache, lru_cache, partial
+from types import FunctionType
 from typing import TYPE_CHECKING, Final, Protocol, SupportsFloat, SupportsIndex, cast
 from unittest import mock
 
@@ -78,33 +79,54 @@ from priml.baselines.craftax.game.state import (
 from priml.baselines.craftax.game.step import Rules
 from priml.baselines.craftax.game.world_gen import generate_world_numba
 from priml.baselines.craftax.lib.arrays import ints, typed
-from priml.baselines.craftax.world_model import replay
-from priml.baselines.craftax.world_model.archive import Receipt, Record
-from priml.baselines.craftax.world_model.capture import step as capture_step
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
 
-    from numpy.typing import NDArray
+    from numpy.typing import ArrayLike, NDArray
 
+    import pytest
     import torch
 
     from priml.baselines.craftax.game.state import Array1, EnvState
+    from priml.baselines.craftax.world_model import archive, replay
 else:
     from wrapt import lazy_import
 
+    # The world model's modules load torch, which a game test never needs: the
+    # root ``cleanup_cuda`` fixture asks CUDA for its devices once torch is in.
+    archive = lazy_import("priml.baselines.craftax.world_model.archive")
+    replay = lazy_import("priml.baselines.craftax.world_model.replay")
     torch = lazy_import("torch")
 
 
 _PACKAGE: Final = __name__.rpartition(".")[0]
 """``priml.baselines.craftax``: the modules whose kernels go eager."""
 
-_SEEN: Final[dict[int, _Records]] = {}
-"""Each structured array handed to a kernel in the block, by ``id``, as its view.
+_HASHES: Final = frozenset(
+    {
+        (f"{_PACKAGE}.world_model.replay", "fnv1a_numba"),
+        (f"{_PACKAGE}.world_model.capture.step", "fnv1a_numba"),
+    },
+)
+"""The FNV-1a kernels, by the module and name that define them."""
 
-The view holds the array, so no other array takes its ``id`` before the block
-ends and the table empties.
+_INSTALLED: Final[dict[tuple[str, str], tuple[object, object]]] = {}
+"""Each open block's stand-in and the kernel it replaced, by module and name.
+
+A block opened inside another stands in for that kernel, not for the outer
+block's stand-in: its ``world``, say, is the world, where the outer one's
+would stay. Each entry is the outer block's again when the inner one ends.
+"""
+
+_SEEN: Final[dict[int, tuple[np.ndarray, _Records]]] = {}
+"""Each structured array handed to a kernel in the block, by ``id``, and its view.
+
+The table holds the array itself, so no other array takes its ``id`` before
+the block ends and the table empties: the view holds only the memory's owner,
+and a kernel's temporary view (``batch.observations.view(...)``) would free
+its ``id`` for the next one.
 """
 
 LADDER_DOWN: Final = (MAP_SIZE // 2, MAP_SIZE // 2 + 2)
@@ -122,18 +144,35 @@ _DAYLIGHT: Final = rules.daylight_numba.py_func
 def eager(
     *,
     world: Callable[[EnvState, Array1[np.uint32]], None] | None = None,
+    monkeypatch: pytest.MonkeyPatch | None = None,
+    **named: Callable[..., object],
 ) -> Generator[None]:
     """Run every kernel of this package as Python while the block runs.
+
+    With ``monkeypatch``, the kernels are patched through it and stay patched
+    until it undoes them, at the test's end. It undoes the test's own patches
+    first, so a kernel the test replaced inside the block is restored to the
+    Python kernel and then compiled again. Restored at the block's end, as
+    without ``monkeypatch``, that kernel would be put back as the Python one
+    once the test's patch was undone.
+
+    A block opened inside another stands in for the kernels themselves, with
+    its own ``world`` and ``named``, and the outer block's are back when it ends.
 
     Args:
       world: Fills a zeroed State from its world stream, in place of world
         generation; None generates worlds by the recipe, in Python.
+      monkeypatch: A test's, to patch through; None patches for the block.
+      **named: Python stand-ins by the name modules bind them to, for an
+        intrinsic outside the game or for a kernel: each is handed the
+        records and arrays its caller holds, not their views.
 
     Yields:
-      None: The block runs eagerly; on exit every kernel is compiled again.
+      None: The block runs eagerly; on exit every kernel is compiled again,
+        or with ``monkeypatch`` when it undoes its patches.
 
     """
-    stand_ins = _stand_ins()
+    stand_ins = dict(_stand_ins())
     if world is not None:
         stand_ins[id(generate_world_numba)] = _generator(world)
     with ExitStack() as stack:
@@ -142,14 +181,32 @@ def eager(
                 continue
             members = cast("dict[str, object]", vars(module))
             for attribute, value in list(members.items()):
-                stand_in = stand_ins.get(id(value))
+                key = (name, attribute)
+                outer = _INSTALLED.get(key)
+                original = (
+                    outer[1] if outer is not None and outer[0] is value else value
+                )
+                stand_in = (
+                    _plainly(named[attribute])
+                    if attribute in named
+                    else stand_ins.get(id(original))
+                )
                 # ``isinstance`` would import the module a ``lazy_import`` proxy
                 # stands for: an optional dependency this host may lack.
-                if stand_in is None and issubclass(type(value), Dispatcher):
-                    kernel = cast("Dispatcher[Callable[..., object]]", value)
-                    stand_in = _recarrays(kernel.py_func)
-                if stand_in is not None:
+                if stand_in is None and issubclass(type(original), Dispatcher):
+                    kernel = cast("Dispatcher[Callable[..., object]]", original)
+                    stand_in = _python(kernel.py_func)
+                if stand_in is None:
+                    continue
+                _INSTALLED[key] = (stand_in, original)
+                if outer is None:
+                    stack.callback(_INSTALLED.pop, key)
+                else:
+                    stack.callback(_INSTALLED.__setitem__, key, outer)
+                if monkeypatch is None:
                     stack.enter_context(mock.patch.object(module, attribute, stand_in))
+                else:
+                    monkeypatch.setattr(module, attribute, stand_in)
         stack.callback(_SEEN.clear)
         yield
 
@@ -226,7 +283,7 @@ def scripted(
     world_seed: int,
     sampling_seed: int = 0,
     truncated: bool = False,
-) -> Record:
+) -> archive.Record:
     """Play ``actions`` from the reset of ``world_seed``; return their record.
 
     Inside :func:`eager`, a record of a few chosen decisions of a tiny world.
@@ -251,8 +308,8 @@ def scripted(
             hashes.append(int(replay.fnv1a_numba(states.view(np.uint8))))
         step.play_numba(env_state(states, 0), rng, env_stats(stats, 0), action, Rules())
     hashes.append(int(replay.fnv1a_numba(states.view(np.uint8))))
-    return Record(
-        receipt=Receipt(
+    return archive.Record(
+        receipt=archive.Receipt(
             world_seed=world_seed,
             sampling_seed=sampling_seed,
             initial_state_hash=hashes[0],
@@ -275,6 +332,10 @@ class _Daylight:
         return _DAYLIGHT(int(timestep))
 
 
+# Made at the first block's entry, before it patches a kernel: so the ids
+# are the kernels', where a block opened inside another would read the
+# outer block's stand-ins off the modules.
+@cache
 def _stand_ins() -> dict[int, Callable[..., object]]:
     """Return each intrinsic's and fast kernel's Python stand-in, by its object's id."""
     table = _Daylight()
@@ -288,8 +349,6 @@ def _stand_ins() -> dict[int, Callable[..., object]]:
         id(jit.prefetch): _prefetch,
         id(rules.daylight_table): lambda: table,
         id(step._training): _record,  # noqa: SLF001 -- The intrinsic the step calls; its stand-in is the identity it compiles to.
-        id(replay.fnv1a_numba): _fnv1a,
-        id(capture_step.fnv1a_numba): _fnv1a,
     }
 
 
@@ -354,9 +413,10 @@ def _record[T](stats: T) -> T:
     return stats
 
 
-def _fnv1a(data: NDArray[np.uint8]) -> np.uint64:
+def _fnv1a(data: NDArray[np.generic]) -> np.uint64:
     """Return ``replay.fnv1a_numba``'s hash of ``data``, in Python ints."""
-    return np.uint64(_fnv1a_bytes(data.tobytes()))
+    # The kernel reads one byte an element: an array of any other kind is a bug.
+    return np.uint64(_fnv1a_bytes(typed(data, np.uint8).tobytes()))
 
 
 # A replay hashes one State several times over: the reset world before decision 0
@@ -394,6 +454,18 @@ class _Ignoring(threading.local):
 
 _IGNORING: Final = _Ignoring()
 """Each thread's own: whether its numpy errors are already ignored."""
+
+
+def _python(kernel: Callable[..., object]) -> Callable[..., object]:
+    """Return a kernel's Python stand-in: :func:`_fnv1a` for a hash, else its source."""
+    # Known by where they are defined: importing the world model's modules for
+    # the kernels' ids would load torch into every game test.
+    if (
+        isinstance(kernel, FunctionType)
+        and (kernel.__module__, kernel.__name__) in _HASHES
+    ):
+        return _fnv1a
+    return _recarrays(kernel)
 
 
 def _recarrays(kernel: Callable[..., object]) -> Callable[..., object]:
@@ -461,6 +533,14 @@ class _Fields:
         """Return the record as numpy reads it."""
         return cast("np.record", self._array[self._index])
 
+    def __getitem__(self, name: str) -> object:
+        """Return field ``name`` as the record's indexing reads it, for Python code."""
+        return cast("object", self.record()[name])
+
+    def __setitem__(self, name: str, value: ArrayLike) -> None:
+        """Write field ``name`` through the record, as its indexing writes it."""
+        self.record()[name] = value
+
 
 @cache
 def _fields_type(dtype: np.dtype[np.void]) -> type[_Fields]:
@@ -495,10 +575,10 @@ def _fields_of(record: np.record) -> _Fields:
 
 def _records_of(array: np.ndarray) -> _Records:
     """Return a structured array's :class:`_Records`, the one made first in the block."""
-    records = _SEEN.get(id(array))
-    if records is None:
-        records = _SEEN[id(array)] = _Records(array.view(np.recarray))
-    return records
+    seen = _SEEN.get(id(array))
+    if seen is None:
+        seen = _SEEN[id(array)] = (array, _Records(array.view(np.recarray)))
+    return seen[1]
 
 
 class _Records:
@@ -513,9 +593,9 @@ class _Records:
         self.array = array
         self.records: dict[int, _Fields] = {}
 
-    def __getitem__(self, index: SupportsIndex | slice) -> object:
-        """Return record ``index`` as its :class:`_Fields`; a slice as the array's."""
-        if isinstance(index, slice):
+    def __getitem__(self, index: SupportsIndex | slice | tuple[int, ...]) -> object:
+        """Return record ``index`` as its :class:`_Fields`; else the array's item."""
+        if isinstance(index, slice | tuple):
             return cast("object", self.array[index])
         key = operator.index(index)
         if key not in self.records:
@@ -542,6 +622,39 @@ record: most arguments, numbers and enums.
 """
 
 
+def _plainly(function: Callable[..., object]) -> Callable[..., object]:
+    """Return ``function`` handed each record view's record or array, as Python holds it."""
+
+    def call(*arguments: object) -> object:
+        return function(*map(_plain, arguments))
+
+    return call
+
+
+def _plain(value: object) -> object:
+    """Return a :class:`_Fields`' record, a :class:`_Records`' array, else ``value``."""
+    if isinstance(value, _Fields):
+        return value.record()
+    if isinstance(value, _Records):
+        return value.array
+    return value
+
+
+# A kernel views a batch's plain array as records (``batch.rngs.view(RNG_RECORD)``) and
+# reads a record's fields as attributes: a recarray's view keeps its class, so its
+# records do. A plain array handed alone stays an ndarray, which a kernel indexes at C
+# speed.
+def _member(value: object) -> object:
+    """Return a NamedTuple member as :func:`_viewed` does, a plain array as a recarray."""
+    if (
+        isinstance(value, np.ndarray)
+        and type(value) is np.ndarray
+        and value.dtype.names is None
+    ):
+        return value.view(np.recarray)
+    return _viewed(value)
+
+
 def _viewed(value: object) -> object:
     """Return a structured array as :class:`_Records`, a record as :class:`_Fields`."""
     kind = type(value)
@@ -556,7 +669,9 @@ def _viewed(value: object) -> object:
         _PASSED.add(kind)
         return value
     members = cast("tuple[object, ...]", value)
-    fields = [_viewed(member) for member in members]
+    fields = [_member(member) for member in members]
     if all(a is b for a, b in zip(fields, members, strict=True)):
         return members
+    if kind is tuple:
+        return tuple(fields)
     return cast("Callable[..., object]", kind)(*fields)

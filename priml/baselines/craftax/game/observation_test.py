@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
+from priml.baselines.craftax.eager import eager
 from priml.baselines.craftax.game import observation
 from priml.baselines.craftax.game.observation import (
     compute_observations_numba,
@@ -30,11 +31,13 @@ from priml.baselines.craftax.game.state import (
     env_state,
     new_states,
 )
-from priml.baselines.craftax.game.testing import eager_kernels, small_worlds
+from priml.baselines.craftax.game.testing import small_worlds
 from priml.baselines.craftax.lib.arrays import typed
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from numpy.typing import NDArray
 
     from priml.baselines.craftax.game.state import Array1, EnvState, Mobs
@@ -50,9 +53,10 @@ _CREATURES = (
 
 
 @pytest.fixture(autouse=True)
-def eager(monkeypatch: pytest.MonkeyPatch) -> None:
+def kernels(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Run the views as Python: a compile costs seconds, one view milliseconds."""
-    eager_kernels(monkeypatch)
+    with eager(monkeypatch=monkeypatch):
+        yield
 
 
 # The C's light rule (a uint8 light above 12, D10) and its creature rule (live, in view

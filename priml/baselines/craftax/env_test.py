@@ -1,7 +1,7 @@
 """Tests for the vectorized environment's buffer contract and its helper threads.
 
 Every test but the goldens runs the env's kernels as their Python source
-(``game.testing.eager_kernels``) on small hand-built worlds: a compile costs
+(``craftax.eager``) on small hand-built worlds: a compile costs
 seconds, these worlds milliseconds. The goldens run the machine code, the one
 check that the compiled kernels play exp000's and exp002's environments bit
 for bit, and that those kernels compute in float32 without fused
@@ -28,6 +28,7 @@ import numpy as np
 import pytest
 import torch
 
+from priml.baselines.craftax.eager import eager
 from priml.baselines.craftax.env import (
     ROW,
     SERVE_STOPPED,
@@ -70,7 +71,6 @@ from priml.baselines.craftax.game.step import Rules
 from priml.baselines.craftax.game.testing import (
     _kernel_llvm,
     build_small_pool,
-    eager_kernels,
     generate_small_world,
     ir_builder,
 )
@@ -126,8 +126,8 @@ def kernels(
         yield
         return
     ticks_per_second.cache_clear()
-    eager_kernels(
-        monkeypatch,
+    with eager(
+        monkeypatch=monkeypatch,
         atomic_load=_atomic_load,
         atomic_store=_atomic_store,
         pause=_pause,
@@ -135,8 +135,8 @@ def kernels(
         build_pool_numba=build_small_pool,
         generate_world_numba=generate_small_world,
         world_hash_numba=_world_hash,
-    )
-    yield
+    ):
+        yield
     ticks_per_second.cache_clear()
 
 
