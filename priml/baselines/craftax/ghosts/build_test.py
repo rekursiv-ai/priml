@@ -1,8 +1,13 @@
-"""Check the site's files: sets in nested groups, timelines, the manifest, and captures."""
+"""Check the site's files: sets in nested groups, timelines, the manifest, and captures.
+
+The ghosts are built by hand, so each set's rule meets known lengths and
+outcomes, and the world is the tiny one ``eager`` generates; extraction and
+world generation have their own tests.
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import dataclasses
 import gzip
@@ -12,8 +17,13 @@ import zlib
 
 import numpy as np
 import pytest
+import torch
 
-from priml.baselines.craftax.game.state import env_state
+from priml.baselines.craftax.eager import eager, tiny_world
+from priml.baselines.craftax.game.state import (
+    NUM_LEVELS,
+    env_state,
+)
 from priml.baselines.craftax.ghosts import build
 from priml.baselines.craftax.ghosts.build import (
     TierGhosts,
@@ -23,7 +33,6 @@ from priml.baselines.craftax.ghosts.build import (
 from priml.baselines.craftax.ghosts.extract import (
     TIMELINE,
     Ghost,
-    extract,
 )
 from priml.baselines.craftax.ghosts.layout import (
     EpisodeEntry,
@@ -45,10 +54,12 @@ from priml.baselines.craftax.ghosts.sets import (
     keep_runs,
     quiet_segments,
 )
+from priml.baselines.craftax.ghosts.testing import made_ghost
 from priml.baselines.craftax.lib.arrays import ints
 from priml.baselines.craftax.world_model import replay
 from priml.baselines.craftax.world_model.archive import (
     Episode,
+    Receipt,
     write_shard,
 )
 from priml.baselines.craftax.world_model.capture.seeds import (
@@ -62,122 +73,86 @@ from priml.lib.codec import from_plain, loads
 
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
     from pathlib import Path
 
+    from priml.baselines.craftax.world_model.archive import Record
 
-_WORLD = 1
-_SHORT = 180
+
+_WORLD: Final = 1
+_SHORT: Final = 180
+_RULE: Final = TimeRule(steps=60, levels=((1, 2), (0, 1), (0, 0)))
+
+
+# Its creatures stand in row ``ordinal``, so groups and windows that mix ghosts up show;
+# an odd ordinal has an escape row and reaches floor 1. Each sleep of ``k`` ticks has
+# ``(k - 1) // 4`` samples of one creature, and its first sample a ripe plant.
+_GHOSTS: Final = (
+    made_ghost(0, decisions=150, outcome="death"),
+    made_ghost(1, decisions=300, outcome="timeout"),
+    made_ghost(2, decisions=120, outcome="death"),
+)
+"""The main capture: two deaths within ``_SHORT`` decisions and a timeout past it."""
+
+_WON: Final = (
+    made_ghost(0, decisions=90, outcome="win", sleeps=((43, 13), (77, 3))),
+    made_ghost(1, decisions=50, outcome="win"),
+    made_ghost(2, decisions=100, outcome="death"),
+)
+"""A tier that wins: a win with a sleep of 3 samples, a win short enough to pin, a death."""
 
 
 @pytest.fixture(scope="module")
-def episodes() -> list[Episode]:
-    return [
-        replay.record(world_seed=_WORLD, sampling_seed=seed, max_decisions=20_000)
-        for seed in (1, 2, 3)
-    ]
-
-
-@pytest.fixture(scope="module")
-def ghosts(episodes: list[Episode]) -> list[Ghost]:
-    return [extract(episode, ordinal=i) for i, episode in enumerate(episodes)]
-
-
-@pytest.fixture(scope="module")
-def site(
-    tmp_path_factory: pytest.TempPathFactory,
-    ghosts: list[Ghost],
-) -> tuple[Path, Manifest]:
+def site(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Manifest]:
     out = tmp_path_factory.mktemp("site") / "data"
-    pool = Pool(root="r", capped=False, provenance={"k": "v"}, ghosts=tuple(ghosts))
-    tier = TierGhosts(name="a", arm=0, pools=(pool,))
-    manifest = write_site(
-        out,
-        tiers=[tier],
-        counts=(1, 3),
-        short_decisions=_SHORT,
-        window=64,
-    )
+    pool = Pool(root="r", capped=False, provenance={"k": "v"}, ghosts=_GHOSTS)
+    with eager(world=tiny_world):
+        manifest = write_site(
+            out,
+            tiers=[TierGhosts(name="a", arm=0, pools=(pool,))],
+            counts=(1, 3),
+            short_decisions=_SHORT,
+            window=64,
+        )
     return out, manifest
 
 
-@pytest.fixture(scope="module")
-def archive(
-    tmp_path_factory: pytest.TempPathFactory,
-    episodes: list[Episode],
-    ghosts: list[Ghost],
-) -> Path:
-    root = tmp_path_factory.mktemp("capture")
-    summaries = [
-        {
-            "episode": ghost.ordinal,
-            "death": int(ghost.outcome == "death"),
-            "timeout": int(ghost.outcome == "timeout"),
-            "return": float(ghost.achievement_return),
-        }
-        for ghost in ghosts
-    ]
-    for split, chosen in ((TRAIN, (2, 0)), (VALIDATION, (1,))):
-        directory = shard_directory(root, split=split, arm=1, worker=0)
-        directory.mkdir(parents=True)
-        write_shard(
-            directory,
-            index=0,
-            episodes=[
-                dataclasses.replace(episodes[i], summary=summaries[i]) for i in chosen
-            ],
-            provenance={"checkpoint": "c"},
-        )
-    return root
+@pytest.fixture
+def tiny() -> Generator[None]:
+    with eager(world=tiny_world):
+        yield
 
 
 def test_each_set_holds_its_episodes_in_nested_groups(
     site: tuple[Path, Manifest],
-    ghosts: list[Ghost],
 ) -> None:
     out, manifest = site
     (tier,) = manifest.tiers
     every, short = tier.sets
-    short_ghosts = [g for g in ghosts if g.decisions <= _SHORT]
     assert (every.name, every.counts) == ("all", (1, 3))
-    assert short.name == "short"
-    assert short.counts == (
-        *(c for c in (1,) if c < len(short_ghosts)),
-        len(short_ghosts),
-    )
+    assert (short.name, short.counts) == ("short", (1, 2))
     assert [g.path for g in every.groups] == ["a/all/g0", "a/all/g1"]
-    for episode_set, members in ((every, ghosts), (short, short_ghosts)):
+    assert [g.windows for g in every.groups] == [3, 5]
+    for episode_set, members in ((every, _GHOSTS), (short, _GHOSTS[::2])):
         indices = [
             entry.ordinal
             for group in episode_set.groups
-            for entry in _check_group(out / group.path, group.first, ghosts)
+            for entry in _check_group(out / group.path, group.first)
         ]
         assert indices == [g.ordinal for g in members]
-
-
-@pytest.fixture(scope="module")
-def won(episodes: list[Episode], ghosts: list[Ghost]) -> list[Ghost]:
-    """Replay the episodes, won at the first achievement two of them unlock."""
-    firsts = [set(ints(g.events.achievements[:, 1])) for g in ghosts]
-    achievement = min(
-        a for a in firsts[0] | firsts[1] | firsts[2] if sum(a in f for f in firsts) >= 2
-    )
-    return [extract(e, ordinal=i, win=achievement) for i, e in enumerate(episodes)]
 
 
 @pytest.mark.parametrize("pin", [False, True])
 def test_a_tier_that_wins_gets_a_wins_set_of_time_mapped_wins(
     tmp_path: Path,
-    won: list[Ghost],
+    tiny: None,
     pin: bool,
 ) -> None:
-    winners = [g for g in won if g.outcome == "win"]
-    assert len(winners) >= 2
-    pinned = min(reversed(winners), key=lambda g: g.decisions) if pin else None
-    rule = TimeRule(
-        steps=pinned.decisions if pinned else 60,
-        levels=((1, 2), (0, 1), (0, 0)),
-    )
-    pool = Pool(root="r", capped=False, provenance={"k": "v"}, ghosts=tuple(won))
+    del tiny
+    winners = [g for g in _WON if g.outcome == "win"]
+    pinned = winners[0] if pin else None
+    rule = dataclasses.replace(_RULE, steps=pinned.decisions) if pinned else _RULE
+    pool = Pool(root="r", capped=False, provenance={"k": "v"}, ghosts=_WON)
     manifest = write_site(
         tmp_path / "data",
         tiers=[
@@ -195,10 +170,8 @@ def test_a_tier_that_wins_gets_a_wins_set_of_time_mapped_wins(
     )
     every, short, wins = manifest.tiers[0].sets
     assert (every.time_map, short.time_map) == (None, None)
-    if pinned:
-        winners = [pinned, *(g for g in winners if g is not pinned)]
     assert wins.name == "wins"
-    assert wins.counts == (*(c for c in (1, 3) if c < len(winners)), len(winners))
+    assert wins.counts == (1, 2)
     assert wins.timelines == ()
     lengths: list[int] = []
     for group in wins.groups:
@@ -235,12 +208,13 @@ def test_a_tier_that_wins_gets_a_wins_set_of_time_mapped_wins(
 
 def test_an_unbroken_set_plays_every_decision_of_each_win_that_fits(
     tmp_path: Path,
-    won: list[Ghost],
+    tiny: None,
 ) -> None:
-    winners = [g for g in won if g.outcome == "win"]
+    del tiny
+    winners = [g for g in _WON if g.outcome == "win"]
     pinned = winners[-1]
     steps = max(g.decisions for g in winners)
-    pool = Pool(root="r", capped=False, provenance={"k": "v"}, ghosts=tuple(won))
+    pool = Pool(root="r", capped=False, provenance={"k": "v"}, ghosts=_WON)
     manifest = write_site(
         tmp_path / "data",
         tiers=[
@@ -249,14 +223,14 @@ def test_an_unbroken_set_plays_every_decision_of_each_win_that_fits(
         counts=(1, 3),
         short_decisions=_SHORT,
         window=64,
-        time_rule=TimeRule(steps=60),
+        time_rule=_RULE,
         whole_wins=(3, steps),
     )
     *_, wins, unbroken = manifest.tiers[0].sets
     assert (wins.name, unbroken.name) == ("wins", "unbroken")
     time_map = unbroken.time_map
     assert time_map is not None
-    assert unbroken.episodes == min(3, len(winners))
+    assert unbroken.episodes == len(winners)
     assert (time_map.unbroken, time_map.whole, time_map.rule.steps) == (
         0,
         unbroken.episodes,
@@ -285,19 +259,18 @@ def test_an_unbroken_set_plays_every_decision_of_each_win_that_fits(
 
 def test_a_time_mapped_set_also_maps_the_view_that_shows_sleep(
     tmp_path: Path,
-    won: list[Ghost],
+    tiny: None,
 ) -> None:
-    winners = [g for g in won if g.outcome == "win"]
-    assert any(len(g.sleeps) for g in winners)
-    pool = Pool(root="r", capped=False, provenance={"k": "v"}, ghosts=tuple(won))
-    rule = TimeRule(steps=60, levels=((1, 2), (0, 1), (0, 0)))
+    del tiny
+    winners = [g for g in _WON if g.outcome == "win"]
+    pool = Pool(root="r", capped=False, provenance={"k": "v"}, ghosts=_WON)
     manifest = write_site(
         tmp_path / "data",
         tiers=[TierGhosts(name="w", arm=0, pools=(pool,))],
         counts=(1, 3),
         short_decisions=_SHORT,
         window=64,
-        time_rule=rule,
+        time_rule=_RULE,
     )
     assert manifest.sleep_stride == 4
     *_, wins = manifest.tiers[0].sets
@@ -320,6 +293,7 @@ def test_a_time_mapped_set_also_maps_the_view_that_shows_sleep(
         ):
             np.testing.assert_array_equal(slept.sleeps, ghost.sleeps)
             np.testing.assert_array_equal(slept.samples, ghost.sleep_samples)
+            np.testing.assert_array_equal(slept.changes, ghost.sleep_changes)
             assert slept.creatures == ghost.sleep_creatures
             # Every sleep is kept, and the view adds a step per sample.
             shown = set(ints(displayed(runs)))
@@ -330,14 +304,16 @@ def test_a_time_mapped_set_also_maps_the_view_that_shows_sleep(
         sum(lengths),
         sum(len(g.sleep_samples) - 1 for g in winners),
     )
+    assert sleep_map.samples == 3
 
 
 def test_a_pinned_win_too_long_to_play_unbroken_fails_the_build(
     tmp_path: Path,
-    won: list[Ghost],
+    tiny: None,
 ) -> None:
-    pinned = next(g for g in won if g.outcome == "win")
-    pool = Pool(root="r", capped=False, provenance={"k": "v"}, ghosts=tuple(won))
+    del tiny
+    pinned = _WON[0]
+    pool = Pool(root="r", capped=False, provenance={"k": "v"}, ghosts=_WON)
     with pytest.raises(ValueError, match="cannot play unbroken"):
         write_site(
             tmp_path / "data",
@@ -358,16 +334,17 @@ def test_a_pinned_win_too_long_to_play_unbroken_fails_the_build(
 
 def test_timelines_sum_the_shown_episodes_activity(
     site: tuple[Path, Manifest],
-    ghosts: list[Ghost],
 ) -> None:
     out, manifest = site
     every = manifest.tiers[0].sets[0]
     assert [t.count for t in every.timelines] == [1, 3]
+    # Quiet runs collapse: more than one kept range.
+    assert min(t.segments for t in every.timelines) > 1
     for timeline in every.timelines:
         active, segments = read_timeline(
             gzip.decompress((out / timeline.path).read_bytes()),
         )
-        shown = ghosts[: timeline.count]
+        shown = _GHOSTS[: timeline.count]
         expected, live, decisive = activity(shown)
         np.testing.assert_array_equal(active, expected)
         np.testing.assert_array_equal(
@@ -405,7 +382,9 @@ def test_the_manifest_names_every_file_with_its_size_and_digest(
 
 def test_the_world_file_is_the_reset_world_and_the_start_its_player(
     site: tuple[Path, Manifest],
+    tiny: None,
 ) -> None:
+    del tiny
     out, manifest = site
     world = read_world(gzip.decompress((out / "world.bin.gz").read_bytes()))
     state = env_state(replay.reset_world(_WORLD)[0], 0)
@@ -429,35 +408,33 @@ def test_a_file_gzips_to_one_header_on_every_python(
     assert build._gzip(b"ghosts") == packed
 
 
-def test_stats_and_composition_count_each_set(
-    site: tuple[Path, Manifest],
-    ghosts: list[Ghost],
-) -> None:
+def test_stats_and_composition_count_each_set(site: tuple[Path, Manifest]) -> None:
     _, manifest = site
     every, short = manifest.tiers[0].sets
     first, both = every.stats
     assert (first.count, both.count) == (1, 3)
-    assert both.mean_return == np.mean([g.achievement_return for g in ghosts])
-    assert both.reached[0] == 3
-    assert sum(both.deaths) == sum(g.outcome == "death" for g in ghosts)
-    assert first.deaths[ghosts[0].end[0]] == (ghosts[0].outcome == "death")
-    assert both.escapes == 0
+    assert both.mean_return == np.mean([g.achievement_return for g in _GHOSTS])
+    assert both.mean_decisions == np.mean([g.decisions for g in _GHOSTS])
+    assert both.reached == (3, 1, *[0] * (NUM_LEVELS - 2))
+    assert both.deaths == (2, *[0] * (NUM_LEVELS - 1))
+    assert first.deaths[0] == 1
+    assert (both.timeouts, both.wins, both.escapes) == (1, 0, 1)
     assert (every.composition.run, every.composition.qualified) == (3, 3)
-    lengths = [g.decisions for g in ghosts if g.decisions <= _SHORT]
-    assert short.composition.qualified == len(lengths)
-    assert short.composition.death_decisions == (min(lengths), max(lengths))
+    assert short.composition.qualified == 2
+    assert short.composition.death_decisions == (120, 150)
 
 
 def test_a_site_needs_one_world_enough_ghosts_and_a_new_directory(
     tmp_path: Path,
-    ghosts: list[Ghost],
     site: tuple[Path, Manifest],
+    tiny: None,
 ) -> None:
-    other = dataclasses.replace(ghosts[0], world_seed=_WORLD + 1)
+    del tiny
+    other = dataclasses.replace(_GHOSTS[0], world_seed=_WORLD + 1)
     for tier_ghosts, counts, capped in (
-        ((*ghosts, other), (1, 4), False),
-        (tuple(ghosts), (1, 4), False),
-        (tuple(ghosts), (1, 3), True),
+        ((*_GHOSTS, other), (1, 4), False),
+        (_GHOSTS, (1, 4), False),
+        (_GHOSTS, (1, 3), True),
     ):
         pool = Pool(root="r", capped=capped, provenance={}, ghosts=tier_ghosts)
         with pytest.raises(ValueError, match="one world"):
@@ -466,7 +443,7 @@ def test_a_site_needs_one_world_enough_ghosts_and_a_new_directory(
                 tiers=[TierGhosts(name="a", arm=0, pools=(pool,))],
                 counts=counts,
             )
-    pool = Pool(root="r", capped=False, provenance={}, ghosts=tuple(ghosts))
+    pool = Pool(root="r", capped=False, provenance={}, ghosts=_GHOSTS)
     with pytest.raises(FileExistsError):
         write_site(
             site[0],
@@ -476,31 +453,53 @@ def test_a_site_needs_one_world_enough_ghosts_and_a_new_directory(
         )
 
 
-def test_a_capture_merges_both_splits_by_ordinal(
-    archive: Path,
-    ghosts: list[Ghost],
-) -> None:
+@pytest.fixture
+def archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Return a capture of the main ghosts' records, extraction looking each one up.
+
+    The train split holds ordinals 2 and 0, the validation split 1. Each
+    record's actions are its ordinal plus one, so a ghost read back shows
+    which record it came from.
+    """
+    monkeypatch.setattr(build, "extract", _extracted)
+    root = tmp_path / "capture"
+    for split, chosen in ((TRAIN, (2, 0)), (VALIDATION, (1,))):
+        directory = shard_directory(root, split=split, arm=1, worker=0)
+        directory.mkdir(parents=True)
+        write_shard(
+            directory,
+            index=0,
+            episodes=[_episode(_GHOSTS[i], split=split) for i in chosen],
+            provenance={"checkpoint": "c"},
+        )
+    return root
+
+
+def test_a_capture_merges_both_splits_by_ordinal(archive: Path) -> None:
     pool = read_pool(archive, arm=1, capped=True, workers=2)
     assert (pool.provenance, pool.capped) == ({"checkpoint": "c"}, True)
     assert [g.ordinal for g in pool.ghosts] == [0, 1, 2]
-    assert [g.players for g in pool.ghosts] == [g.players for g in ghosts]
+    assert [g.players for g in pool.ghosts] == [
+        bytes([g.ordinal + 1]) * g.decisions for g in _GHOSTS
+    ]
     kept = read_pool(archive, arm=1, capped=False, workers=2, worlds=(_WORLD,))
-    assert [g.players for g in kept.ghosts] == [g.players for g in ghosts]
+    assert [g.players for g in kept.ghosts] == [g.players for g in pool.ghosts]
     with pytest.raises(ValueError, match="holds 0 episodes"):
         read_pool(archive, arm=1, capped=False, workers=2, worlds=(_WORLD + 1,))
 
 
 def test_a_summary_that_disagrees_with_the_replay_fails(
     tmp_path: Path,
-    episodes: list[Episode],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(build, "extract", _extracted)
     directory = shard_directory(tmp_path, split=TRAIN, arm=0, worker=0)
     directory.mkdir(parents=True)
-    summary = {"episode": 0, "death": 0, "timeout": 1, "return": 0.0}
+    claimed = dataclasses.replace(_GHOSTS[0], outcome="timeout")
     write_shard(
         directory,
         index=0,
-        episodes=[dataclasses.replace(episodes[0], summary=summary)],
+        episodes=[_episode(claimed, split=TRAIN)],
         provenance={},
     )
     with pytest.raises(ValueError, match="its summary says"):
@@ -510,9 +509,11 @@ def test_a_summary_that_disagrees_with_the_replay_fails(
 def test_the_command_line_builds_a_site(
     archive: Path,
     tmp_path: Path,
+    tiny: None,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    del tiny
     out = tmp_path / "site"
     argv = [
         *("build.py", str(archive), str(out), "--tier", "t=1", "--counts", "2,3"),
@@ -543,11 +544,42 @@ def test_the_command_line_refuses_an_unbroken_win_of_a_tier_not_built(
     assert not (tmp_path / "site").exists()
 
 
-def _check_group(
-    directory: Path,
-    first: int,
-    ghosts: list[Ghost],
-) -> tuple[EpisodeEntry, ...]:
+def _extracted(record: Record, *, ordinal: int, stride: int) -> Ghost:
+    """Stand in for ``extract``: the main ghost of ``ordinal``, its players the record's."""
+    assert stride == 4
+    return dataclasses.replace(
+        _GHOSTS[ordinal],
+        players=record.actions.numpy().tobytes(),
+    )
+
+
+def _episode(ghost: Ghost, *, split: int) -> Episode:
+    """Return a captured episode of ``ghost``'s length, its summary saying how it ended."""
+    decisions = ghost.decisions
+    return Episode(
+        receipt=Receipt(
+            world_seed=ghost.world_seed,
+            sampling_seed=ghost.sampling_seed,
+            initial_state_hash=0,
+            arm=1,
+            split=split,
+        ),
+        actions=torch.full((decisions,), ghost.ordinal + 1, dtype=torch.uint8),
+        hashes=torch.zeros(-(-decisions // 256) + 1, dtype=torch.int64),
+        cells=torch.zeros(decisions, 99, 8, dtype=torch.uint8),
+        aux=torch.zeros(decisions, 51, dtype=torch.int16),
+        reward=torch.zeros(decisions, dtype=torch.int16),
+        done=torch.zeros(decisions, dtype=torch.bool),
+        summary={
+            "episode": ghost.ordinal,
+            "death": int(ghost.outcome == "death"),
+            "timeout": int(ghost.outcome == "timeout"),
+            "return": float(ghost.achievement_return),
+        },
+    )
+
+
+def _check_group(directory: Path, first: int) -> tuple[EpisodeEntry, ...]:
     """Check one group's files against its ghosts; return its entries."""
     entries = from_plain(
         loads((directory / "episodes.json").read_text()),
@@ -563,7 +595,7 @@ def _check_group(
         )
     ]
     for i, entry in enumerate(entries):
-        ghost = ghosts[entry.ordinal]
+        ghost = _GHOSTS[entry.ordinal]
         assert (entry.index, entry.source) == (first + i, 0)
         assert players[entry.players : entry.players + entry.decisions] == ghost.players
         for table, span, own in (
@@ -577,6 +609,10 @@ def _check_group(
             ghost.outcome,
             ghost.end,
             ghost.decisions,
+        )
+        assert (entry.sampling_seed, entry.floor_first) == (
+            str(ghost.sampling_seed),
+            ghost.floor_first,
         )
     return entries
 

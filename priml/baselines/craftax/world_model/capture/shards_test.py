@@ -1,8 +1,14 @@
-"""Tests for the shard writer: reference bytes, publication order, and the buffer."""
+"""Tests for the shard writer: reference bytes, publication order, and the buffer.
+
+Every episode is random play on a tiny world whose clock runs out two
+decisions after the reset, its kernels run as Python (``eager``) on the
+recorder's thread and the writer's encoders alike.
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from functools import partial
+from typing import TYPE_CHECKING, Final
 
 import dataclasses
 import functools
@@ -12,6 +18,8 @@ import time
 import pytest
 import torch
 
+from priml.baselines.craftax.eager import eager, tiny_world
+from priml.baselines.craftax.game.state import DEFAULT_MAX_TIMESTEPS
 from priml.baselines.craftax.world_model import replay
 from priml.baselines.craftax.world_model.archive import (
     read_manifest,
@@ -41,14 +49,16 @@ if TYPE_CHECKING:
     )
 
 
+_DECISIONS: Final = 1
+"""Decisions an episode plays before its clock runs out."""
+
+
 def _recorded(ordinal: int) -> Episode:
     """Return a random-play episode, with its frames, whose summary names ``ordinal``."""
-    # ``record`` zeroes frames for ``max_decisions`` up front: the timeout's
-    # 100,000 took 25 ms an episode, and these end within a few hundred.
     episode = replay.record(
         world_seed=100_000_000 + ordinal,
         sampling_seed=ordinal,
-        max_decisions=2_000,
+        max_decisions=_DECISIONS,
     )
     return dataclasses.replace(
         episode,
@@ -59,7 +69,11 @@ def _recorded(ordinal: int) -> Episode:
 
 def _episode(ordinal: int) -> Captured:
     """Return ``_recorded(ordinal)`` as capture hands it over."""
-    episode = _recorded(ordinal)
+    return _captured(_recorded(ordinal))
+
+
+def _captured(episode: Episode) -> Captured:
+    """Return a recorded episode as capture hands it over."""
     return Captured(
         receipt=episode.receipt,
         actions=episode.actions,
@@ -67,6 +81,12 @@ def _episode(ordinal: int) -> Captured:
         floors=floor_trace(aux=episode.aux, reward=episode.reward, done=episode.done),
         summary=episode.summary,
     )
+
+
+@pytest.fixture(autouse=True)
+def tiny() -> Iterator[None]:
+    with eager(world=partial(tiny_world, timestep=DEFAULT_MAX_TIMESTEPS - _DECISIONS)):
+        yield
 
 
 @pytest.fixture
@@ -105,8 +125,8 @@ def gate(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[int, threading.Event]
 
 
 def test_files_equal_the_reference_writer(tmp_path: Path, writer: ShardWriter) -> None:
-    recorded = [_recorded(ordinal) for ordinal in range(3)]
-    episodes = [_episode(ordinal) for ordinal in range(3)]
+    recorded = [_recorded(ordinal) for ordinal in range(2)]
+    episodes = [_captured(episode) for episode in recorded]
     reference, written = tmp_path / "reference", tmp_path / "written"
     reference.mkdir()
     written.mkdir()

@@ -12,6 +12,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 import pytest
 import torch
 
+from priml.baselines.craftax.eager import eager, tiny_world
 from priml.baselines.craftax.world_model.codec import (
     decode,
     encode,
@@ -85,7 +86,11 @@ def test_decode_reproduces_the_games_floats_bit_for_bit() -> None:
 
 
 def test_played_observations_encode_to_the_states_token_frames() -> None:
-    played = played_frames(world_seed=11, decisions=40)
+    # The game's kernels as Python on the tiny world: its sixteen random
+    # decisions show what a frame of play holds, the synthetic frames the rest.
+    with eager(world=tiny_world):
+        played = played_frames(world_seed=11, decisions=16)
+    assert len(played.observations) == 16
     got_cells, got_aux = encode(played.observations)
     assert torch.equal(got_cells, played.cells)
     assert torch.equal(got_aux, played.aux)

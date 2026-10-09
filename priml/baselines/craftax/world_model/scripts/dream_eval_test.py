@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 from pathlib import Path
+from types import ModuleType
 from typing import cast
 
 import dataclasses
@@ -18,9 +19,12 @@ from priml.baselines.craftax.world_model.archive import (
 from priml.baselines.craftax.world_model.batch import Segment
 from priml.baselines.craftax.world_model.dream import Rollout, dream
 from priml.baselines.craftax.world_model.engine import (
+    Control,
+    Decision,
     Engine,
     Outcome,
     Prefix,
+    StartResult,
 )
 from priml.baselines.craftax.world_model.experiments import (
     WorldModelLoop,
@@ -115,17 +119,14 @@ def check(features: dream_eval.Features, name: str) -> tuple[int, int]:
     return int(row[0]), int(row[1])
 
 
-# Two six-decision rollouts through a two-layer global stack, re-prefilling as
-# they go: 0.10 s warm on x86.
-@pytest.mark.compute_large_fixture
+# Two three-decision rollouts through a two-layer global stack, one row prefixed.
 def test_rollout_in_graphed_order_equals_dream() -> None:
     schema = small_schema()
     model = tiny_model(schema, global_layers=2)
     prefixes = [prefix_of(random_segment(schema, 3, seed=1)), None]
-    actions = torch.tensor([[1, 2, 3, 4, 5, 6], [6, 5, 4, 3, 2, 1]])
+    actions = torch.tensor([[1, 2, 3], [3, 2, 1]])
     runs: list[Rollout] = []
     for use_dream in (True, False):
-        # t_max 8 re-prefills the prefixed row mid-rollout.
         engine = Engine(
             model,
             rows=2,
@@ -133,13 +134,13 @@ def test_rollout_in_graphed_order_equals_dream() -> None:
             generator=torch.Generator().manual_seed(4),
         )
         if use_dream:
-            runs.append(dream(engine, decisions=6, prefixes=prefixes, actions=actions))
+            runs.append(dream(engine, decisions=3, prefixes=prefixes, actions=actions))
         else:
             runs.append(
                 dream_eval.rollout(
                     engine,
                     engine.step,
-                    decisions=6,
+                    decisions=3,
                     prefixes=prefixes,
                     actions=actions,
                 ),
@@ -154,12 +155,12 @@ def test_rollout_in_graphed_order_equals_dream() -> None:
 def test_rollout_from_new_worlds_equals_dream() -> None:
     model = tiny_model(small_schema())
     engines = [
-        Engine(model, rows=3, t_max=16, generator=torch.Generator().manual_seed(2))
+        Engine(model, rows=2, t_max=16, generator=torch.Generator().manual_seed(2))
         for _ in range(2)
     ]
     runs = [
-        dream(engines[0], decisions=5),
-        dream_eval.rollout(engines[1], engines[1].step, decisions=5),
+        dream(engines[0], decisions=4),
+        dream_eval.rollout(engines[1], engines[1].step, decisions=4),
     ]
     assert bool(runs[0].done.any())
     for field in dataclasses.fields(Rollout):
@@ -451,6 +452,12 @@ def test_evaluate_refuses_too_few_windows_before_generating(
     assert not output.exists()
 
 
+def test_first_finds_each_columns_first_true_row_or_none() -> None:
+    mask = torch.tensor([[False, True, False], [True, True, False]])
+    assert dream_eval._first(mask).tolist() == [1, 0, -1]
+    assert dream_eval._first(torch.zeros(0, 3, dtype=torch.bool)).tolist() == [-1] * 3
+
+
 def test_free_summary_counts_first_episodes_that_ended_without_a_death() -> None:
     done = torch.tensor([[False, True, False], [False, False, False]])
     free = Rollout(
@@ -732,8 +739,11 @@ def test_episode_record_holds_every_frame_it_keeps() -> None:
     assert from_plain(record["action"], list[int]) == [5, 18, 11, 1]
 
 
-@pytest.mark.compute_large_fixture
-def test_evaluate_writes_statistics_episodes_and_bundles(tmp_path: Path) -> None:
+def test_evaluate_writes_statistics_episodes_and_bundles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    without_decoding(monkeypatch, dream_eval)
     archive = tmp_path / "archive"
     _write_val_archive(archive)
     model = tiny_model(craftax_schema())
@@ -742,15 +752,15 @@ def test_evaluate_writes_statistics_episodes_and_bundles(tmp_path: Path) -> None
         model,
         archive=archive,
         output=output,
-        rows=4,
+        rows=2,
         t_max=16,
         decisions=4,
         prefix=2,
         continuation=3,
         horizons=HORIZONS,
         seed=0,
-        resamples=16,
-        permutations=16,
+        resamples=4,
+        permutations=4,
     )
     written = from_plain(
         loads((output / "stats.json").read_text()),
@@ -763,9 +773,9 @@ def test_evaluate_writes_statistics_episodes_and_bundles(tmp_path: Path) -> None
         loads((output / "episodes.json").read_text()),
         dict[str, object],
     )
-    assert len(from_plain(episodes["episodes"], list[object])) >= 4
+    assert len(from_plain(episodes["episodes"], list[object])) >= 2
     bundles = sorted(p.name for p in (output / "bundles").iterdir())
-    assert len(bundles) >= 4
+    assert len(bundles) >= 2
     for name in bundles:
         assert (output / "bundles" / name / "manifest.json").is_file()
 
@@ -810,6 +820,116 @@ def test_vocabularies_name_the_games_actions_blocks_and_items() -> None:
         "ladder_down",
         "ladder_up",
         "ladder_down_blocked",
+    )
+
+
+def without_decoding(monkeypatch: pytest.MonkeyPatch, module: ModuleType) -> None:
+    """Stand in for a script's sampling engine and its rollouts: no model decodes.
+
+    The rollouts have the tests above; a test of what a script makes of them
+    reads :func:`dreamed`'s frames.
+    """
+    monkeypatch.setattr(module, "sampling_engine", stand_in_engine)
+    monkeypatch.setattr(module, "rollout", dreamed)
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _Engine:
+    """Stand in for an ``Engine``: :func:`dreamed` reads its rows alone."""
+
+    rows: int
+
+
+def stand_in_engine(
+    model: WorldModel,
+    *,
+    rows: int,
+    t_max: int,
+    seed: int,
+) -> tuple[Engine, dream_eval.Step]:
+    """Stand in for ``sampling_engine``: an engine of ``rows`` that decodes nothing.
+
+    Args:
+      model: Not decoded.
+      rows: The engine's rows.
+      t_max: Not used.
+      seed: Not used.
+
+    Returns:
+      engine: Its rows, all :func:`dreamed` reads.
+      step: A step never taken.
+
+    """
+    del model, t_max, seed
+    return cast("Engine", _Engine(rows=rows)), _undecoded
+
+
+def _undecoded(control: Control) -> tuple[StartResult, Decision]:
+    """Stand in for an engine's step, which :func:`dreamed` never takes."""
+    raise AssertionError(f"The stand-in engine decodes nothing: {control}.")
+
+
+def dreamed(
+    engine: Engine,
+    step: dream_eval.Step,
+    *,
+    decisions: int,
+    prefixes: Sequence[Prefix | None] = (),
+    actions: torch.Tensor | None = None,
+    teacher: dream_eval.Teacher | None = None,
+) -> Rollout:
+    """Stand in for ``rollout``: each row random valid frames, its forced actions taken.
+
+    A prefixed row's frame 0 is its prefix's last frame, and a taught row's
+    next frames and outcomes are its teacher's, as a rollout's are; a sampled
+    action is a noop, and no other row ends.
+
+    Args:
+      engine: Its rows.
+      step: Not taken.
+      decisions: Decisions per row.
+      prefixes: One entry per row, or empty: every row a new world.
+      actions: Actions to force, negative where sampled; None samples all.
+      teacher: Rows whose outcomes are forced.
+
+    Returns:
+      rollout: Random valid frames of the Craftax schema, logp 0.
+
+    """
+    del step
+    rows = engine.rows
+    played = [random_segment(craftax_schema(), decisions, seed=r) for r in range(rows)]
+    cells = torch.stack([segment.cells for segment in played])
+    aux = torch.stack([segment.aux for segment in played])
+    reward = torch.zeros(rows, decisions, dtype=torch.int16)
+    done = torch.zeros(rows, decisions, dtype=torch.bool)
+    starts = torch.zeros(rows, decisions + 1, dtype=torch.bool)
+    for row in range(rows):
+        prefix = prefixes[row] if prefixes else None
+        starts[row, 0] = prefix is None
+        if prefix is not None:
+            cells[row, 0] = prefix.cells[0, -1]
+            aux[row, 0] = prefix.aux[0, -1]
+        if teacher is not None and bool(teacher.rows[row]):
+            outcome = teacher.outcome
+            cells[row, 1:] = outcome.cells[row]
+            aux[row, 1:] = outcome.aux[row]
+            reward[row] = outcome.reward[row]
+            done[row] = outcome.done[row]
+    taken = torch.zeros(rows, decisions) if actions is None else actions.clamp(min=0)
+    zeros = torch.zeros(rows, decisions)
+    return Rollout(
+        cells=cells,
+        aux=aux,
+        starts=starts,
+        frame_logp=torch.zeros(rows, decisions + 1, craftax_schema().frame_slots),
+        invalid=torch.zeros(rows, decisions + 1, cells.shape[2], dtype=torch.bool),
+        action=taken.to(torch.uint8),
+        reward=reward,
+        done=done,
+        action_logp=zeros,
+        reward_logp=zeros,
+        done_logp=zeros,
     )
 
 

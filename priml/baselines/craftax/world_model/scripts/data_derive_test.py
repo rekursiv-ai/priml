@@ -1,5 +1,6 @@
 """Check that derived corpora draw whole or capped episodes in the mixture shares."""
 
+from functools import partial
 from pathlib import Path
 
 import dataclasses
@@ -8,6 +9,9 @@ import sys
 import pytest
 import torch
 
+from priml.baselines.craftax.eager import eager, scripted, tiny_world
+from priml.baselines.craftax.game.state import DEFAULT_MAX_TIMESTEPS
+from priml.baselines.craftax.lib.arrays import ints
 from priml.baselines.craftax.world_model import replay
 from priml.baselines.craftax.world_model.archive import (
     Episode,
@@ -64,38 +68,57 @@ def test_each_arm_takes_its_share_of_whole_episodes_from_every_shard(
     assert all(line.decisions - 12 < 25 for line in lines[:-1])
 
 
+_DECISIONS = 6
+"""Decisions the recorded episode plays before the tiny world's clock runs out."""
+
+_BRANCH = 3
+"""Where the branch leaves the recorded episode."""
+
+
 @pytest.fixture(scope="module")
 def recorded() -> list[Episode]:
-    """Return a 333-decision random-play episode and a 77-decision branch of it."""
+    """Return a six-decision random-play episode and a three-decision branch of it.
+
+    The game's kernels run as Python (``eager``) on the tiny world.
+    """
     floors = [{"reached": 0, "decisions": 0, "kills": 0}] * FLOORS
-    parent = dataclasses.replace(
-        replay.record(world_seed=12, sampling_seed=12, max_decisions=1_000),
-        summary={"floors": [{"reached": 1, "decisions": 333, "kills": 3}, *floors[1:]]},
-    )
-    # The parent's suffix from decision 256, started from its state there.
-    branch = dataclasses.replace(
-        parent,
-        receipt=dataclasses.replace(
-            parent.receipt,
-            sampling_seed=1,
-            initial_state_hash=int(parent.hashes[1]) % (1 << 64),
-        ),
-        actions=parent.actions[256:],
-        hashes=parent.hashes[1:],
-        cells=parent.cells[256:],
-        aux=parent.aux[256:],
-        reward=parent.reward[256:],
-        done=parent.done[256:],
-        summary={**parent.summary, "branch": {"decision": 256}},
-        origin=replay.origin(parent, decision=256),
-    )
-    assert [len(e.actions) for e in (parent, branch)] == [333, 77]
+    with eager(world=partial(tiny_world, timestep=DEFAULT_MAX_TIMESTEPS - _DECISIONS)):
+        played = replay.record(world_seed=12, sampling_seed=12, max_decisions=1_000)
+        parent = dataclasses.replace(
+            played,
+            summary={
+                "floors": [
+                    {"reached": 1, "decisions": _DECISIONS, "kills": 3},
+                    *floors[1:],
+                ],
+            },
+        )
+        # The state before the branch's first decision, by playing to it.
+        before = scripted(ints(parent.actions[:_BRANCH].numpy()), world_seed=12)
+        branch = dataclasses.replace(
+            parent,
+            receipt=dataclasses.replace(
+                parent.receipt,
+                sampling_seed=1,
+                initial_state_hash=int(before.hashes[-1]),
+            ),
+            actions=parent.actions[_BRANCH:],
+            hashes=torch.cat([before.hashes[-1:], parent.hashes[-1:]]),
+            cells=parent.cells[_BRANCH:],
+            aux=parent.aux[_BRANCH:],
+            reward=parent.reward[_BRANCH:],
+            done=parent.done[_BRANCH:],
+            summary={**parent.summary, "branch": {"decision": _BRANCH}},
+            origin=replay.origin(parent, decision=_BRANCH),
+        )
+        assert replay.verify(branch) == replay.MATCHED
+    assert [len(e.actions) for e in (parent, branch)] == [_DECISIONS, 3]
     return [parent, branch]
 
 
-# A cap of 50 cuts both episodes, replaying each prefix, the branch's from its
-# origin; one of 256 cuts the parent alone, whose record holds that hash.
-@pytest.mark.parametrize("cap", [50, 256])
+# A cap of 2 cuts both episodes, replaying each prefix, the branch's from its
+# origin; one of 4 cuts the parent alone.
+@pytest.mark.parametrize("cap", [2, 4])
 def test_a_capped_episode_keeps_its_prefix_and_replays_as_truncated(
     tmp_path: Path,
     recorded: list[Episode],
@@ -104,24 +127,25 @@ def test_a_capped_episode_keeps_its_prefix_and_replays_as_truncated(
     directory = shard_directory(tmp_path / "src", split=TRAIN, arm=0, worker=0)
     directory.mkdir(parents=True)
     write_shard(directory, index=0, episodes=recorded, provenance={})
-    entries = data_derive.derive(
-        [tmp_path / "src"],
-        tmp_path / "out",
-        decisions=sum(min(len(e.actions), cap) for e in recorded),
-        shares=(1, 0, 0, 0),
-        max_decisions=cap,
-        seed=0,
-        shard_decisions=1_000,
-    )
+    with eager(world=partial(tiny_world, timestep=DEFAULT_MAX_TIMESTEPS - _DECISIONS)):
+        entries = data_derive.derive(
+            [tmp_path / "src"],
+            tmp_path / "out",
+            decisions=sum(min(len(e.actions), cap) for e in recorded),
+            shares=(1, 0, 0, 0),
+            max_decisions=cap,
+            seed=0,
+            shard_decisions=1_000,
+        )
+        derived = _episodes(entries)[0]
+        verified = [replay.verify(episode) for episode in derived]
+    assert verified == [replay.MATCHED] * 2
     originals = {e.receipt.sampling_seed: e for e in recorded}
-    derived = _episodes(entries)[0]
-    assert len(derived) == 2
     for episode in derived:
         original = originals[episode.receipt.sampling_seed]
         kept = min(len(original.actions), cap)
         assert torch.equal(episode.actions, original.actions[:kept])
         assert torch.equal(episode.cells, original.cells[:kept])
-        assert replay.verify(episode) == replay.MATCHED
         assert episode.truncated == (kept < len(original.actions))
         if episode.truncated:
             assert not episode.done.any()
@@ -134,6 +158,37 @@ def test_a_capped_episode_keeps_its_prefix_and_replays_as_truncated(
             assert [f["decisions"] for f in floors] == visits
             assert [f["reached"] for f in floors] == [int(n > 0) for n in visits]
             assert floors[0]["kills"] == 3
+
+
+def test_a_cap_at_a_multiple_of_256_ends_at_the_hash_the_episode_holds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unplayed(*args: object, **kwargs: object) -> bytes:
+        del args, kwargs
+        raise AssertionError("A cap at a held hash replays nothing.")
+
+    monkeypatch.setattr(replay, "origin", unplayed)
+    directory = shard_directory(tmp_path / "src", split=TRAIN, arm=0, worker=0)
+    directory.mkdir(parents=True)
+    whole = dataclasses.replace(
+        _episode(300, seed=1, arm=0, split=TRAIN),
+        hashes=torch.tensor([10, 20, 30]),
+    )
+    write_shard(directory, index=0, episodes=[whole], provenance={})
+    entries = data_derive.derive(
+        [tmp_path / "src"],
+        tmp_path / "out",
+        decisions=256,
+        shares=(1, 0, 0, 0),
+        max_decisions=256,
+        seed=0,
+        shard_decisions=1_000,
+    )
+    (cut,) = _episodes(entries)[0]
+    # The hash before decision 0, then the one before 256, after the last kept.
+    assert cut.hashes.tolist() == [10, 20]
+    assert (len(cut.actions), cut.truncated) == (256, True)
 
 
 def test_an_archive_root_pools_every_published_training_episode(
@@ -344,8 +399,9 @@ def _episode(decisions: int, *, seed: int, arm: int, split: int) -> Episode:
     """Build an episode that ends in a terminal decision, frames numbered."""
     done = torch.zeros(decisions, dtype=torch.bool)
     done[-1] = True
+    numbers = (torch.arange(decisions) % 256).to(torch.uint8)
     cells = torch.zeros(decisions, 99, 8, dtype=torch.uint8)
-    cells[:, 0, 0] = torch.arange(decisions, dtype=torch.uint8)
+    cells[:, 0, 0] = numbers
     aux = torch.ones(decisions, 51, dtype=torch.int16)
     # Three decisions on floor 0, the rest on floor 1.
     aux[:, 48] = (torch.arange(decisions) >= 3).to(torch.int16)
@@ -362,7 +418,7 @@ def _episode(decisions: int, *, seed: int, arm: int, split: int) -> Episode:
             arm=arm,
             split=split,
         ),
-        actions=torch.arange(decisions, dtype=torch.uint8),
+        actions=numbers,
         hashes=torch.zeros((decisions + 255) // 256 + 1, dtype=torch.int64),
         cells=cells,
         aux=aux,

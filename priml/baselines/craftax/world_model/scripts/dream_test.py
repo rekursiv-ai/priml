@@ -2,7 +2,7 @@
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import cast
+from typing import ClassVar, cast
 
 import sys
 
@@ -20,11 +20,13 @@ from priml.baselines.craftax.world_model.capture.seeds import (
     TRAIN,
     VALIDATION,
 )
+from priml.baselines.craftax.world_model.dream import Rollout
 from priml.baselines.craftax.world_model.experiments import (
     WorldModelLoop,
     exp_smoke,
 )
 from priml.baselines.craftax.world_model.model import WorldModel
+from priml.baselines.craftax.world_model.schema import craftax_schema
 from priml.baselines.craftax.world_model.scripts import dream
 from priml.baselines.craftax.world_model.testing import (
     small_schema,
@@ -73,12 +75,14 @@ def test_main_refuses_a_corpus_without_reference_episodes(
     assert not output.exists()
 
 
-@pytest.mark.compute_large_fixture
 def test_main_writes_a_report_and_viewer_bundles(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _checkpoint(tmp_path / "step.pt")
+    monkeypatch.setattr(dream, "load_world_model", _tiny_trained)
+    monkeypatch.setattr(dream, "Engine", _Engine)
+    monkeypatch.setattr(_Engine, "built", [])
+    monkeypatch.setattr(dream, "dream", _dreamed)
     output = tmp_path / "out"
     monkeypatch.setattr(
         sys,
@@ -94,6 +98,8 @@ def test_main_writes_a_report_and_viewer_bundles(
         ],
     )
     assert dream.main() == 0
+    # The engine's rows and window are the flags' and the run's, its model float32.
+    assert _Engine.built == [(2, exp_smoke().dataset.t_g, torch.float32)]
     report = from_plain(
         loads((output / "report.json").read_text()),
         dict[str, object],
@@ -126,6 +132,44 @@ def test_main_writes_a_report_and_viewer_bundles(
     # D + 1 frames the wrong row stride.
     assert cells.untyped_storage().nbytes() == cells.nbytes
     assert samples["real"]["length"].shape == (1,)
+
+
+class _Engine:
+    """Stand in for ``Engine``: note its rows, window, and model's dtype."""
+
+    built: ClassVar[list[tuple[int, int, torch.dtype]]] = []
+
+    def __init__(
+        self,
+        model: WorldModel,
+        *,
+        rows: int,
+        t_max: int,
+        generator: torch.Generator,
+    ) -> None:
+        del generator
+        _Engine.built.append((rows, t_max, next(model.parameters()).dtype))
+        self.rows = rows
+
+
+def _dreamed(engine: _Engine, *, decisions: int) -> Rollout:
+    """Stand in for ``dream``: each row an episode of NOOPs over blank frames."""
+    rows, frames = engine.rows, decisions + 1
+    starts = torch.zeros(rows, frames, dtype=torch.bool)
+    starts[:, 0] = True
+    return Rollout(
+        cells=torch.zeros(rows, frames, 99, 8, dtype=torch.uint8),
+        aux=torch.ones(rows, frames, 51, dtype=torch.int16),
+        starts=starts,
+        frame_logp=torch.zeros(rows, frames, craftax_schema().frame_slots),
+        invalid=torch.zeros(rows, frames, 99, dtype=torch.bool),
+        action=torch.zeros(rows, decisions, dtype=torch.uint8),
+        reward=torch.zeros(rows, decisions, dtype=torch.int16),
+        done=torch.zeros(rows, decisions, dtype=torch.bool),
+        action_logp=torch.zeros(rows, decisions),
+        reward_logp=torch.zeros(rows, decisions),
+        done_logp=torch.zeros(rows, decisions),
+    )
 
 
 def _episode(decisions: int, *, split: int, arm: int, world_seed: int) -> Episode:
@@ -170,15 +214,6 @@ def _corpus(root: Path) -> Path:
     path = root / "corpora" / "test.json"
     write_corpus(path, entries=entries)
     return path
-
-
-def _checkpoint(path: Path) -> WorldModel:
-    """Save a smoke-size model as ``TrainLoop.state_dict`` nests it; return it."""
-    torch.manual_seed(1)
-    model = exp_smoke().step.model.make()
-    assert isinstance(model, WorldModel)
-    torch.save({"step": {"model": model.state_dict()}, "rng": {}}, path)
-    return model
 
 
 def _tiny_trained(

@@ -1,8 +1,11 @@
 """Check that gather publishes exactly the source's published shards, safely."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import os
+import shutil
+import subprocess
 import sys
 
 import pytest
@@ -32,26 +35,64 @@ from priml.baselines.craftax.world_model.capture.worker import (
 from priml.baselines.craftax.world_model.scripts import gather
 
 
-pytestmark = pytest.mark.cli_rsync
+@pytest.fixture(autouse=True)
+def rsyncs(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], list[str]]]:
+    """Run each rsync command ``gather`` makes in this process.
 
-
-@pytest.fixture
-def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Stand in for ssh: drop the host and run the command through a shell.
+    The stand-in copies as rsync does what these commands ask: a host's root
+    is this host's directory; a recursive copy takes the files its
+    ``--include`` filters name, and nothing else (``--exclude=*``); a
+    ``--files-from`` copy takes the files listed and fails on a missing one;
+    and without ``--checksum`` a destination file of the source's size and
+    time is left as it is, as rsync's quick check leaves it.
 
     Returns:
-      log: File holding each remote command, one per line.
+      rsyncs: Each command, in order, and the files it copied.
 
     """
-    rsh = tmp_path / "rsh"
-    rsh.write_text(
-        '#!/bin/sh\nshift\nprintf "%s\\n" "$*" >> "$RSH_LOG"\nexec sh -c "$*"\n',
+    made: list[tuple[list[str], list[str]]] = []
+
+    def run(command: list[str], *, check: bool) -> subprocess.CompletedProcess[bytes]:
+        assert check
+        made.append((command, _rsync(command)))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(gather, "subprocess", SimpleNamespace(run=run))
+    return made
+
+
+def _rsync(command: list[str]) -> list[str]:
+    """Copy what one rsync command of ``gather``'s asks for; return the files copied."""
+    assert command[0] == "rsync"
+    *options, source, destination = command[1:]
+    origin, target = (
+        Path(root.split(":", 1)[1] if gather._is_remote(root) else root)
+        for root in (source, destination)
     )
-    rsh.chmod(0o755)
-    log = tmp_path / "rsh.log"
-    monkeypatch.setenv("RSYNC_RSH", str(rsh))
-    monkeypatch.setenv("RSH_LOG", str(log))
-    return log
+    listings = [o.removeprefix("--files-from=") for o in options if "files-from" in o]
+    if listings:
+        (listing,) = listings
+        names = Path(listing).read_text().splitlines()
+    else:
+        assert "--recursive" in options
+        assert options[-1] == "--exclude=*"
+        filters = [o.removeprefix("--include=/") for o in options if "include" in o]
+        names = [n for n in filters if not n.endswith("/") and (origin / n).is_file()]
+    copied: list[str] = []
+    for name in names:
+        held, copy = origin / name, target / name
+        if not held.is_file():
+            raise subprocess.CalledProcessError(23, command)
+        same = copy.is_file() and (
+            (copy.stat().st_size, copy.stat().st_mtime_ns)
+            == (held.stat().st_size, held.stat().st_mtime_ns)
+        )
+        if same and "--checksum" not in options:
+            continue
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(held, copy)
+        copied.append(name)
+    return copied
 
 
 @pytest.mark.parametrize(
@@ -60,11 +101,9 @@ def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 )
 def test_published_shards_of_both_splits_are_published_alone(
     tmp_path: Path,
-    remote: Path,
     source_host: str,
     destination_host: str,
 ) -> None:
-    del remote
     source, destination = tmp_path / "source", tmp_path / "destination"
     _publish(source, decisions=3)
     _publish(source, decisions=4)
@@ -156,10 +195,8 @@ def test_another_capture_of_a_worker_is_refused_before_any_copy(
 @pytest.mark.parametrize("destination_host", ["", "node:"])
 def test_a_shard_that_mismatches_its_line_is_never_published(
     tmp_path: Path,
-    remote: Path,
     destination_host: str,
 ) -> None:
-    del remote
     source, destination = tmp_path / "source", tmp_path / "destination"
     _publish(source, decisions=3)
     original = shard_directory(source, split=TRAIN, arm=1, worker=0)
@@ -172,16 +209,35 @@ def test_a_shard_that_mismatches_its_line_is_never_published(
 
 def test_a_remote_destination_is_synced_before_its_manifest_is_published(
     tmp_path: Path,
-    remote: Path,
+    rsyncs: list[tuple[list[str], list[str]]],
 ) -> None:
     source, destination = tmp_path / "source", tmp_path / "destination"
     _publish(source, decisions=3)
     destination.mkdir()
     gather.gather(str(source), f"node:{destination}", workers=[(1, 0)])
-    commands = remote.read_text().splitlines()
-    synced = [i for i, command in enumerate(commands) if command.startswith("sync")]
-    assert synced == [len(commands) - 1]
+    # The remote rsync runs ``sync`` first, on the last copy alone: the manifests'.
+    synced = [i for i, (command, _) in enumerate(rsyncs) if _SYNC in command]
+    assert synced == [len(rsyncs) - 1]
+    assert rsyncs[-1][1] == ["train/arm1/w0/MANIFEST.jsonl"]
     assert (destination / "train" / "arm1" / "w0" / "MANIFEST.jsonl").exists()
+
+
+def test_rsync_compares_contents_and_keeps_partial_copies_aside(
+    rsyncs: list[tuple[list[str], list[str]]],
+) -> None:
+    gather._rsync("--recursive", "--include=/HALT.json", "--exclude=*", "a/", "b/")
+    assert [command for command, _ in rsyncs] == [
+        [
+            "rsync",
+            "--checksum",
+            "--partial-dir=.rsync-partial",
+            "--recursive",
+            "--include=/HALT.json",
+            "--exclude=*",
+            "a/",
+            "b/",
+        ],
+    ]
 
 
 def test_a_halted_source_is_refused(tmp_path: Path) -> None:
@@ -255,6 +311,10 @@ def test_replay_shards_are_gathered_with_every_file_they_hold(tmp_path: Path) ->
     )
     assert (copied / "shard-000001.frames.zst").exists()
     assert not (copied / "shard-000000.frames.zst").exists()
+
+
+_SYNC = "--rsync-path=sync && rsync"
+"""The option that runs ``sync`` on the remote host before its rsync."""
 
 
 def _publish(

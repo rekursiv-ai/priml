@@ -204,38 +204,30 @@ def test_a_corpus_of_replay_shards_reports_as_its_frames(
 ) -> None:
     frames, replay = tmp_path / "frames", tmp_path / "replay"
     _archive(frames)
-    coverage_report.build_report(
-        frames,
-        corpus="small",
-        freeze=True,
-        cache_dir=frames / "index",
-        workers=1,
-    )
-    replay_twin(frames, replay, monkeypatch)
     results = [
         coverage_report.build_report(
-            root,
+            frames,
             corpus="small",
-            freeze=False,
-            cache_dir=root / "index",
+            freeze=True,
+            cache_dir=frames / "index",
             workers=1,
-        )
-        for root in (frames, replay)
+        ),
     ]
-    for result in results:
-        for key in ("corpus", "seconds", "bytes_per_decision"):
-            result.pop(key)
-    assert results[0] == results[1]
-    rates = from_plain(
+    replay_twin(frames, replay, monkeypatch)
+    results.append(
         coverage_report.build_report(
             replay,
             corpus="small",
             freeze=False,
             cache_dir=replay / "index",
             workers=1,
-        )["bytes_per_decision"],
-        dict[str, object],
+        ),
     )
+    rates = from_plain(results[1]["bytes_per_decision"], dict[str, object])
+    for result in results:
+        for key in ("corpus", "seconds", "bytes_per_decision"):
+            result.pop(key)
+    assert results[0] == results[1]
     snap = sum(p.stat().st_size for p in replay.rglob("shard-*.snap.zst"))
     assert sorted(rates) == ["bin", "meta", "snap"]
     assert from_plain(rates["snap"], float) == snap / 14

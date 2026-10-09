@@ -25,6 +25,7 @@ from priml.baselines.craftax.world_model.coverage import (
     transition_signatures,
 )
 from priml.baselines.craftax.world_model.index import FLOOR_AUX
+from priml.baselines.craftax.world_model.index_test import inline_pools
 from priml.baselines.craftax.world_model.snapshots_test import (
     replay_twin,
 )
@@ -339,25 +340,46 @@ def test_report_lists_rare_and_never_observed_values() -> None:
     assert _values(floor, "never", "floor") == list(range(1, 9))
 
 
+# Read straight from the report: its JSON round trip, which ``_loose`` tests, walks
+# every floor's value lists.
+def _checks(
+    parts: list[Coverage],
+    *,
+    min_train_reach: int = 1,
+    min_count: int = 0,
+    max_new_rate: float = 2.0,
+) -> dict[str, bool]:
+    """Return the loose report's checks and its verdict as ``sufficient``."""
+    result = report(
+        parts,
+        min_train_reach=min_train_reach,
+        min_val_reach=0,
+        min_count=min_count,
+        max_unseen_mass=2.0,
+        max_new_rate=max_new_rate,
+        increment_decisions=1,
+    )
+    checks = from_plain(result["checks"], dict[str, bool])
+    return {**checks, "sufficient": from_plain(result["sufficient"], bool)}
+
+
 def test_report_sufficiency_checks() -> None:
     parts = [count_shard([_signature_episode([1, 1, 1, 1], floor=f)]) for f in range(9)]
-    loose = _loose(parts, min_count=0)
-    assert loose["checks"] == {"reach": True, "values": True, "missing_mass": True}
-    assert loose["sufficient"] is True
-    unreached = _loose(parts, min_train_reach=2, min_count=0)
-    assert unreached["checks"] == {
+    assert _checks(parts) == {
+        "reach": True,
+        "values": True,
+        "missing_mass": True,
+        "sufficient": True,
+    }
+    assert _checks(parts, min_train_reach=2) == {
         "reach": False,
         "values": True,
         "missing_mass": True,
+        "sufficient": False,
     }
-    assert unreached["sufficient"] is False
-    assert (
-        from_plain(_loose(parts, min_count=5)["checks"], dict[str, bool])["values"]
-        is False
-    )
+    assert _checks(parts, min_count=5)["values"] is False
     # The increment is floor 8's shard, whose one signature is new: rate 1.0.
-    saturating = _loose(parts, min_count=0, max_new_rate=1.0)["checks"]
-    assert from_plain(saturating, dict[str, bool])["missing_mass"] is False
+    assert _checks(parts, max_new_rate=1.0)["missing_mass"] is False
 
 
 def test_load_coverage_builds_once_then_reads_the_cache(tmp_path: Path) -> None:
@@ -421,10 +443,11 @@ def test_a_replay_shard_counts_as_its_frames(
     _assert_same(coverage, count_shard(episodes))
 
 
-@pytest.mark.cli_python_subprocess
 def test_coverage_in_a_process_pool_equals_counting_the_whole_shard(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    built = inline_pools(monkeypatch)
     episodes = [_varied(9, seed=4), _varied(6, seed=5, split=1), _varied(7, seed=6)]
     line = write_shard(tmp_path, index=0, episodes=episodes, provenance={})
     pooled = load_coverage(
@@ -434,6 +457,7 @@ def test_coverage_in_a_process_pool_equals_counting_the_whole_shard(
         workers=2,
         chunk_decisions=1,
     )
+    assert [workers for workers, _, _ in built] == [2]
     _assert_same(pooled, count_shard(episodes))
 
 

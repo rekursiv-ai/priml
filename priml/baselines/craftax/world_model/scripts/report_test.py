@@ -2,12 +2,15 @@
 
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import argparse
 import json
 import math
 import sys
+
+from configgle import PartialConfig
 
 import pytest
 import torch
@@ -19,17 +22,18 @@ from priml.baselines.craftax.world_model.archive import (
     write_corpus,
     write_shard,
 )
+from priml.baselines.craftax.world_model.batch import PackedBatch
+from priml.baselines.craftax.world_model.data import StratifiedWindows
 from priml.baselines.craftax.world_model.experiments import exp_smoke
 from priml.baselines.craftax.world_model.metric import MODALITIES
 from priml.baselines.craftax.world_model.model import WorldModel
 from priml.baselines.craftax.world_model.schema import craftax_schema
 from priml.baselines.craftax.world_model.scripts import (
+    baselines,
+    data_eval,
     dream,
     engine_checks,
     report,
-)
-from priml.baselines.craftax.world_model.train_step import (
-    WorldModelTrainStep,
 )
 from priml.lib.codec import from_plain, loads
 
@@ -37,39 +41,33 @@ from priml.lib.codec import from_plain, loads
 SMOKE: str = "priml.baselines.craftax.world_model.experiments.exp_smoke"
 
 
-@pytest.mark.compute_large_fixture
-def test_validation_metric_is_the_loops_own_evaluation(tmp_path: Path) -> None:
+def test_validation_metric_scores_a_seeds_windows_with_the_steps_scorer(
+    tmp_path: Path,
+) -> None:
     _smoke_corpus(tmp_path)
     config = exp_smoke()
     config.base_dir = tmp_path
-    torch.manual_seed(0)
-    loop = config.make()
-    expected = {
-        f"val/{key.removeprefix('val_')}": value
-        for key, value in loop.eval().items()
-        if key.startswith("val_")
-    }
-    step = loop.step
-    assert isinstance(step, WorldModelTrainStep)
-    model = step.model
-    assert isinstance(model, WorldModel)
+    config.step.target_nll_fn = PartialConfig(_action_nll)
+    validation = config.dataset.validation
+    assert isinstance(validation, StratifiedWindows.Config)
+    validation.batches = 1
     finalized = config.copy_tree().finalize()
-    metrics = report.validation_metric(
-        model,
-        finalized,
-        device=torch.device("cpu"),
-        sampler_seed=0,
+    model = cast("WorldModel", torch.nn.Linear(1, 1))
+    metrics, other = (
+        report.validation_metric(
+            model,
+            finalized,
+            device=torch.device("cpu"),
+            sampler_seed=seed,
+        )
+        for seed in (0, 1)
     )
-    assert metrics == expected
-    assert "val/zstd19_bpb" in metrics
+    assert all(key.startswith("val/") for key in metrics)
+    # The natural mix's weights and the zstd reference, as the loop's ``val``.
+    assert {"val/nats_per_decision_natural", "val/zstd19_bpb"} <= set(metrics)
     # Another seed's windows are other decisions.
-    other = report.validation_metric(
-        model,
-        finalized,
-        device=torch.device("cpu"),
-        sampler_seed=1,
-    )
     assert other["val/bpb"] != metrics["val/bpb"]
+    assert finalized.dataset.sampler_seed == exp_smoke().dataset.sampler_seed
 
 
 def test_summarize_reads_every_step_and_spreads_over_checkpoints(
@@ -253,12 +251,52 @@ def test_children_pass_flags_their_scripts_parse(
     assert (dreams.rows, dreams.decisions, dreams.seed) == (256, 4_000, 0)
 
 
-@pytest.mark.compute_large_fixture
 def test_main_scores_a_checkpoint_and_writes_the_summary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    checkpoint = _smoke_checkpoint(tmp_path)
+    checkpoint = _checkpoint(tmp_path, monkeypatch)
+    tiled: list[tuple[Path, int, int, int, int, int]] = []
+
+    def tiles(
+        model: WorldModel,
+        corpus: Path,
+        *,
+        t_g: int,
+        s_max: int,
+        count: int,
+        seed: int,
+        cached_decisions: int,
+    ) -> tuple[dict[str, object], int]:
+        assert model is _MODEL
+        tiled.append((corpus, t_g, s_max, count, seed, cached_decisions))
+        return _tiles(5.0), 9
+
+    def baseline(
+        model: WorldModel,
+        config: object,
+        *,
+        device: torch.device,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        assert (model, config, device) == (_MODEL, _CONFIG, torch.device("cpu"))
+        return _baselines(beats=True), {"batches": 2}
+
+    windows: list[int] = []
+
+    def matrix(
+        model: WorldModel,
+        config: object,
+        *,
+        device: torch.device,
+        sampler_seed: int,
+    ) -> dict[str, object]:
+        assert (model, config, device) == (_MODEL, _CONFIG, torch.device("cpu"))
+        windows.append(sampler_seed)
+        return _in_loop(4.0 + sampler_seed)
+
+    monkeypatch.setattr(data_eval, "evaluate", tiles)
+    monkeypatch.setattr(baselines, "evaluate", baseline)
+    monkeypatch.setattr(report, "validation_metric", matrix)
     output = tmp_path / "report"
     _argv(
         monkeypatch,
@@ -284,12 +322,29 @@ def test_main_scores_a_checkpoint_and_writes_the_summary(
         "summary.json",
         "report.md",
     }
+    # Tiles of the run's corpus at its window, the flags' count and seed.
+    assert tiled == [(Path("corpora/smoke.json"), 32, 4, 4, 0, 7)]
+    assert windows == [0, 1]
+    tiles_run = from_plain(
+        from_plain(
+            loads((output / "data-eval-s0.json").read_text()),
+            dict[str, object],
+        )["run"],
+        dict[str, object],
+    )
+    assert from_plain(tiles_run["overrides"], list[str]) == [
+        f"base_dir={tmp_path}",
+        "dataset.sampler_seed=0",
+    ]
+    assert (tiles_run["tiles_available"], tiles_run["t_g"]) == (9, 32)
     summary = from_plain(
         loads((output / "summary.json").read_text()),
         dict[str, object],
     )
     sigma = from_plain(summary["sigma"], dict[str, object])
     assert set(sigma) >= {"own_windows", "same_windows", "common_natural_tiles"}
+    own = _spread(sigma, "own_windows")
+    assert own["values"] == [4.0]
 
 
 @pytest.mark.cli_python_subprocess
@@ -298,7 +353,7 @@ def test_a_failed_child_is_named_and_the_summary_still_written(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    checkpoint = _smoke_checkpoint(tmp_path)
+    checkpoint = _checkpoint(tmp_path, monkeypatch)
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     (scripts / "engine_checks.py").write_text("raise SystemExit(3)\n")
@@ -355,13 +410,50 @@ def _argv(
     )
 
 
-def _smoke_checkpoint(root: Path) -> Path:
-    """Publish ``exp_smoke``'s corpus and save a fresh model; return its checkpoint."""
-    _smoke_corpus(root)
-    torch.manual_seed(0)
+_MODEL = cast("WorldModel", torch.nn.Linear(1, 1))
+"""The model the stand-in loader returns."""
+
+_CONFIG = SimpleNamespace(
+    dataset=SimpleNamespace(
+        corpus="corpora/smoke.json",
+        t_g=32,
+        s_max=4,
+        cached_decisions=7,
+    ),
+    step=SimpleNamespace(dtype_autocast=None),
+)
+"""The experiment config the stand-in loader returns, as much as the steps read."""
+
+
+def _checkpoint(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Write an empty checkpoint the stand-in for ``load_trained`` loads; return it."""
     path = root / "step.pt"
-    torch.save({"step": {"model": exp_smoke().step.model.make().state_dict()}}, path)
+    path.write_bytes(b"")
+
+    def load_trained(
+        experiment: str,
+        checkpoint: Path,
+        *,
+        overrides: Sequence[str],
+        device: torch.device,
+    ) -> tuple[WorldModel, object]:
+        assert (experiment, checkpoint, device) == (SMOKE, path, torch.device("cpu"))
+        assert overrides[-1].startswith("dataset.sampler_seed=")
+        return _MODEL, _CONFIG
+
+    monkeypatch.setattr(report, "load_trained", load_trained)
     return path
+
+
+def _action_nll(model: torch.nn.Module, media: object) -> torch.Tensor:
+    """Stand in for ``craftax_target_nll``: each record's slots a tenth nat per action."""
+    del model
+    assert isinstance(media, PackedBatch)
+    assert torch.is_inference_mode_enabled()
+    schema = craftax_schema()
+    width = 1 + len(schema.prefix_names) + schema.frame_slots
+    actions = media.action.flatten()[media.job_at.long()].float()
+    return ((actions[:, None] + 1) / 10).expand(-1, width).flatten()
 
 
 def _smoke_corpus(root: Path) -> None:

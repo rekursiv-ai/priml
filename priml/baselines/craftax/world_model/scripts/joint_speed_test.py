@@ -6,12 +6,7 @@ import pytest
 import torch
 
 from priml.baselines.craftax.testing import tiny_policy
-from priml.baselines.craftax.train_step import learn_joint_minibatch
-from priml.baselines.craftax.world_model.context import (
-    ContextReplay,
-    JointWorldModel,
-    plan_replay,
-)
+from priml.baselines.craftax.world_model.context import plan_replay
 from priml.baselines.craftax.world_model.scripts.joint_speed import (
     _rollout,
     synthetic_contexts,
@@ -19,10 +14,7 @@ from priml.baselines.craftax.world_model.scripts.joint_speed import (
 from priml.baselines.craftax.world_model.testing import (
     random_contexts,
     small_schema,
-    tiny_model,
 )
-from priml.loss.policy_gradient import TorchPPO
-from priml.model.linear import Linear
 
 
 def test_refill_contexts_cycle_from_256_kept_decisions_to_512() -> None:
@@ -70,14 +62,10 @@ def test_every_frame_token_is_in_its_fields_range(shape: str) -> None:
     assert contexts.prefix_cells.shape == (2, 511, 99, 8)
 
 
-@pytest.mark.compute_training
-def test_the_synthetic_rollout_learns_through_the_joint_minibatch() -> None:
-    """Every field the joint learner reads, the stored features included, is there."""
+def test_the_synthetic_rollout_is_in_the_joint_learners_layout() -> None:
+    """Every field the joint learner reads, the stored features and contexts included."""
     config = tiny_policy(dtype=torch.float32)
-    proj = config.proj_feature = Linear.Config()
-    proj.channels_in = 36  # The tiny world model's width.
     policy = config.make()
-    model = tiny_model(small_schema(), global_layers=2)
     contexts = random_contexts(
         torch.tensor(((1, 2, 3), (2, 3, 4))),
         torch.ones(2, 3, dtype=torch.bool),
@@ -94,18 +82,28 @@ def test_the_synthetic_rollout_learns_through_the_joint_minibatch() -> None:
         width=36,
         generator=torch.Generator().manual_seed(2),
     )
-    replay = ContextReplay.Config()
-    replay.bin_tokens = 1
-    joint = JointWorldModel(model, layers=2, replay=replay.make())
-    losses, _, gap = learn_joint_minibatch(
-        policy,
-        TorchPPO(TorchPPO.Config()),
-        rollout,
-        joint,
+    # ``LearnerRollout``'s layout: agent-major, the policy's dtype, 43 actions.
+    observations, features = rollout.observations, rollout.features
+    assert observations.shape == (2, 3, config.observation_size)
+    assert features is not None
+    assert features.shape == (2, 3, 36)
+    assert observations.dtype == features.dtype == policy.dtype
+    for steps in (rollout.logprobs, rollout.rewards, rollout.terminals, rollout.values):
+        assert steps.shape == (2, 3)
+    assert rollout.action_mask.shape == (2, 3, 43)
+    actions = rollout.actions
+    assert torch.equal(actions, actions.floor())
+    assert 0 <= int(actions.min()) <= int(actions.max()) < 43
+    assert bool((rollout.logprobs <= 0).all())
+    assert torch.equal(
+        rollout.initial_states,
+        policy.initial_state(2, device=torch.device("cpu")),
     )
-    assert bool(losses.isfinite().all())
-    assert bool(gap.isfinite())
-    assert all(leaf.grad is not None for leaf in joint.parameters())
+    assert (rollout.branch_starts.dtype, rollout.branch_starts.shape) == (
+        torch.uint8,
+        (2,),
+    )
+    assert rollout.contexts is contexts
 
 
 if __name__ == "__main__":

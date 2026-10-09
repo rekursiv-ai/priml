@@ -838,6 +838,12 @@ def _player_byte_numba(  # noqa: PLR0917 -- Numba nopython rejects keyword-only 
 @jit
 def _diff_floor_numba(state: EnvState, trace: _TraceView, t: int, floor: int) -> None:
     """Record decision ``t``'s block and item changes on ``floor`` and track them."""
+    # Most decisions change no cell: one comparison of the floor, not a scan.
+    if np.array_equal(state.map[floor], trace.block[floor]) and np.array_equal(
+        state.item_map[floor],
+        trace.item[floor],
+    ):
+        return
     n = trace.counts[_MAP]
     for row in range(MAP_SIZE):
         for col in range(MAP_SIZE):
@@ -863,15 +869,10 @@ def _diff_floor_numba(state: EnvState, trace: _TraceView, t: int, floor: int) ->
 @jit
 def _same_maps_numba(state: EnvState, trace: _TraceView) -> bool:
     """Whether the tracked blocks and items equal the State's on every floor."""
-    for floor in range(NUM_LEVELS):
-        for row in range(MAP_SIZE):
-            for col in range(MAP_SIZE):
-                if (
-                    state.map[floor, row, col] != trace.block[floor, row, col]
-                    or state.item_map[floor, row, col] != trace.item[floor, row, col]
-                ):
-                    return False
-    return True
+    return np.array_equal(state.map, trace.block) and np.array_equal(
+        state.item_map,
+        trace.item,
+    )
 
 
 @jit

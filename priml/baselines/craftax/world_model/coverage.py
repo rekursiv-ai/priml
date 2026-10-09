@@ -50,14 +50,17 @@ from typing import Final
 
 import dataclasses
 
+from numpy.typing import NDArray
 from torch import Tensor
 
+import numpy as np
 import torch
 
 from priml.baselines.craftax.game.state import (
     NUM_ACHIEVEMENTS,
     OBS_TILE_CHANNELS,
 )
+from priml.baselines.craftax.lib.arrays import ints, typed
 from priml.baselines.craftax.world_model.archive import (
     Episode,
     ManifestLine,
@@ -306,9 +309,10 @@ def report(
         rare: dict[str, PlainTree] = {}
         never: dict[str, PlainTree] = {}
         for name, seen in _value_counts(total, floor) if transitions else ():
-            rare[name] = _ints(((seen > 0) & (seen < min_count)).nonzero()[:, 0])
-            never[name] = _ints((seen == 0).nonzero()[:, 0])
-            rare_values += int(((seen > 0) & (seen < min_count)).sum())
+            scarce = (seen > 0) & (seen < min_count)
+            rare[name] = ints(np.flatnonzero(scarce))
+            never[name] = ints(np.flatnonzero(np.equal(seen, 0)))
+            rare_values += int(np.count_nonzero(scarce))
         if unseen is not None:
             rate = new_rates[floor]
             mass_passes &= unseen < max_unseen_mass
@@ -349,15 +353,19 @@ def report(
     }
 
 
-def _value_counts(total: Coverage, floor: int) -> list[tuple[str, Tensor]]:
+# `numpy`, not torch: a report reads some 500 short count vectors, each in a few
+# operations that take a microsecond in numpy and several in torch.
+def _value_counts(total: Coverage, floor: int) -> list[tuple[str, NDArray[np.int64]]]:
     """Return each cell field's and aux field's counts over its valid values."""
     schema = craftax_schema()
+    cells = typed(total.cells[floor].numpy(), np.int64)
+    aux = typed(total.aux[floor].numpy(), np.int64)
     fields = [
-        (field.name, total.cells[floor, row, : field.valid])
+        (field.name, cells[row, : field.valid])
         for row, field in enumerate(schema.cell_fields)
     ]
     fields += [
-        (name, total.aux[floor, row, low - number_id(0) : high - number_id(0) + 1])
+        (name, aux[row, low - number_id(0) : high - number_id(0) + 1])
         for row, (name, (low, high)) in enumerate(
             zip(schema.scalar_names, schema.scalar_ranges, strict=True),
         )
@@ -443,4 +451,4 @@ def _unique_rows(rows: Tensor, weights: Tensor) -> tuple[Tensor, Tensor]:
 
 def _ints(tensor: Tensor) -> list[int]:
     """Return an integer tensor's values as a list of ints."""
-    return from_plain(tensor.tolist(), list[int])
+    return ints(tensor.numpy())

@@ -19,7 +19,7 @@ For the blog post, see [Our recipes](#our-recipes-exp100-exp113).
 - [Speed](#speed)
 - [Tests](#tests)
 - [Files](#files)
-- [Attribution](#attribution)
+- [Acknowledgements](#acknowledgements)
 
 ## Run the baseline
 
@@ -216,7 +216,11 @@ differ.
 `isolation_test.py` checks that the port imports no other baseline and that
 every public name is read inside the package.
 
-## Attribution
+## Acknowledgements
+
+We thank [PufferAI](https://puffer.ai) and Joseph Suarez for
+[PufferLib][pufferlib]. This package ports its Craftax environment and trainer,
+and its recipe and speed are the bar the port was built to match.
 
 This is a port. The game and the recipe are other people's work:
 
@@ -232,8 +236,7 @@ This is a port. The game and the recipe are other people's work:
   actor-critic `exp003` restates, commit `7ce36fa`.
   [MichaelTMatthews/Craftax_Baselines][craftax-baselines] (MIT)
 
-All three are MIT-licensed, which permits this port; the notices above are
-those licenses' attribution requirement.
+All three are MIT-licensed, which permits this port.
 
 [pufferlib]: https://github.com/PufferAI/PufferLib
 [pufferlib-5.0]: https://github.com/PufferAI/PufferLib/releases/tag/5.0-experiments

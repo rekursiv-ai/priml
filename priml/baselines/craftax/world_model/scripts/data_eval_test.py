@@ -1,6 +1,8 @@
 """Check that validation tiles score each decision once and the report splits NLL."""
 
 from pathlib import Path
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 import sys
 
@@ -14,9 +16,9 @@ from priml.baselines.craftax.world_model.archive import (
     write_corpus,
     write_shard,
 )
-from priml.baselines.craftax.world_model.batch import pack
+from priml.baselines.craftax.world_model.batch import PackedBatch, pack
 from priml.baselines.craftax.world_model.data import EpisodeCache, window
-from priml.baselines.craftax.world_model.experiments import exp_smoke
+from priml.baselines.craftax.world_model.schema import craftax_schema
 from priml.baselines.craftax.world_model.scripts import (
     data_eval,
     data_stats,
@@ -24,7 +26,11 @@ from priml.baselines.craftax.world_model.scripts import (
 from priml.baselines.craftax.world_model.snapshots_test import (
     replay_twin,
 )
-from priml.lib.codec import from_plain, loads
+from priml.lib.codec import PlainTree, from_plain, loads
+
+
+if TYPE_CHECKING:
+    from priml.baselines.craftax.world_model.model import WorldModel
 
 
 SMOKE: str = "priml.baselines.craftax.world_model.experiments.exp_smoke"
@@ -62,15 +68,12 @@ def test_tiles_score_every_action_and_first_frame_exactly_once(
     assert len(lengths) <= starts <= 2 * len(lengths)
 
 
-@pytest.mark.compute_large_fixture
-def test_main_reports_natural_metrics_strata_and_classes(
+def test_evaluate_reports_natural_metrics_strata_and_classes(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    scored: None,
 ) -> None:
-    _smoke_archive(tmp_path)
-    output = tmp_path / "eval.json"
-    _run(tmp_path, monkeypatch, output=output)
-    result = from_plain(loads(output.read_text()), dict[str, object])
+    del scored
+    result = _evaluate(_smoke_archive(tmp_path) / "corpora" / "smoke.json")
     metric = from_plain(result["metric"], dict[str, object])
     assert from_plain(metric["bpb"], float) > 0
     assert "zstd19_bpb" not in metric
@@ -98,27 +101,92 @@ def test_main_reports_natural_metrics_strata_and_classes(
     assert sum(shares) == pytest.approx(1)
 
 
-@pytest.mark.compute_large_fixture
 def test_a_replay_corpus_scores_as_its_frames(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    scored: None,
 ) -> None:
+    del scored
     archive = _smoke_archive(tmp_path)
     replay_twin(archive, tmp_path / "replay", monkeypatch)
-    results: list[dict[str, object]] = []
-    for root in (archive, tmp_path / "replay"):
-        output = tmp_path / root.name / "eval.json"
-        _run(
-            tmp_path,
-            monkeypatch,
-            output=output,
-            corpus=root / "corpora" / "smoke.json",
-        )
-        result = from_plain(loads(output.read_text()), dict[str, object])
-        del result["run"]
-        results.append(result)
+    results = [
+        _evaluate(root / "corpora" / "smoke.json")
+        for root in (archive, tmp_path / "replay")
+    ]
     assert from_plain(results[0]["decisions"], int) == 42
     assert results[0] == results[1]
+
+
+@pytest.mark.parametrize(
+    ("flags", "corpus", "t_g"),
+    [((), "corpora/smoke.json", 32), (("--corpus=c.json", "--t-g=8"), "c.json", 8)],
+)
+def test_main_scores_the_runs_corpus_and_writes_the_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    flags: tuple[str, ...],
+    corpus: str,
+    t_g: int,
+) -> None:
+    model = torch.nn.Linear(1, 1)
+    dataset = SimpleNamespace(
+        corpus="corpora/smoke.json",
+        t_g=32,
+        s_max=4,
+        cached_decisions=77,
+    )
+    config = SimpleNamespace(dataset=dataset, step=SimpleNamespace(dtype_autocast=None))
+    loaded: list[tuple[str, Path, list[str]]] = []
+    evaluated: list[tuple[Path, int, int, int, int]] = []
+
+    def load_trained(
+        experiment: str,
+        checkpoint: Path,
+        *,
+        overrides: list[str],
+        device: torch.device,
+    ) -> tuple[torch.nn.Module, object]:
+        assert device == torch.device("cpu")
+        loaded.append((experiment, checkpoint, overrides))
+        return model, config
+
+    def evaluate(
+        given: torch.nn.Module,
+        scored: Path,
+        *,
+        t_g: int,
+        s_max: int,
+        count: int,
+        seed: int,
+        cached_decisions: int,
+    ) -> tuple[dict[str, PlainTree], int]:
+        assert (given, cached_decisions) == (model, 77)
+        evaluated.append((scored, t_g, s_max, count, seed))
+        return {"tiles": count}, 9
+
+    monkeypatch.setattr(data_eval, "load_trained", load_trained)
+    monkeypatch.setattr(data_eval, "evaluate", evaluate)
+    output = tmp_path / "out" / "eval.json"
+    argv = ["data_eval.py", str(tmp_path / "step.pt"), "--experiment", SMOKE]
+    argv += ["--override", "base_dir=/b", "--device", "cpu", *flags]
+    argv += ["--tiles", "5", "--seed", "3", "--output", str(output)]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert data_eval.main() == 0
+    assert loaded == [(SMOKE, tmp_path / "step.pt", ["base_dir=/b"])]
+    assert evaluated == [(Path(corpus), t_g, 4, 5, 3)]
+    result = from_plain(loads(output.read_text()), dict[str, object])
+    run = from_plain(result.pop("run"), dict[str, object])
+    assert result == {"tiles": 5}
+    assert from_plain(run.pop("seconds"), float) >= 0
+    assert run == {
+        "checkpoint": str(tmp_path / "step.pt"),
+        "experiment": SMOKE,
+        "overrides": ["base_dir=/b"],
+        "corpus": corpus,
+        "t_g": t_g,
+        "seed": 3,
+        "tiles_available": 9,
+    }
 
 
 def test_frame_ids_ignore_light_and_repeats_look_back_a_window() -> None:
@@ -142,35 +210,39 @@ def test_frame_ids_ignore_light_and_repeats_look_back_a_window() -> None:
     assert data_stats.repeats(spaced, window=3).tolist() == [False, False, False, True]
 
 
-def _run(
-    root: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    output: Path,
-    corpus: Path | None = None,
-) -> None:
-    """Score a fresh ``exp_smoke`` model's checkpoint with ``data_eval.main``."""
-    torch.manual_seed(0)
-    model = exp_smoke().step.model.make()
-    torch.save({"step": {"model": model.state_dict()}}, root / "step.pt")
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "data_eval.py",
-            str(root / "step.pt"),
-            *("--experiment", SMOKE),
-            *("--override", f"base_dir={root}", "--device", "cpu"),
-            *(("--corpus", str(corpus)) if corpus else ()),
-            *("--tiles", "100", "--output", str(output)),
-        ],
+@pytest.fixture
+def scored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Score each tile with :func:`_nll` in place of a model's."""
+    monkeypatch.setattr(data_eval, "craftax_target_nll", _nll)
+
+
+# The model's own NLL has its tests; the report's sums need only some.
+def _nll(model: torch.nn.Module, media: object) -> torch.Tensor:
+    """Stand in for ``craftax_target_nll``: each job's record, a rising NLL per slot."""
+    del model
+    assert isinstance(media, PackedBatch)
+    schema = craftax_schema()
+    width = 1 + len(schema.prefix_names) + schema.frame_slots
+    return torch.linspace(0.1, 1.0, len(media.job_at) * width)
+
+
+def _evaluate(corpus: Path) -> dict[str, object]:
+    """Score 100 tiles of ``corpus`` as ``exp_smoke`` would: 32 positions, 4 segments."""
+    report, _ = data_eval.evaluate(
+        cast("WorldModel", torch.nn.Linear(1, 1)),
+        corpus,
+        t_g=32,
+        s_max=4,
+        count=100,
+        seed=0,
+        cached_decisions=10_000,
     )
-    assert data_eval.main() == 0
+    return from_plain(report, dict[str, object])
 
 
 def _smoke_archive(root: Path) -> Path:
-    """Publish ``exp_smoke``'s corpus: one training and one validation shard."""
-    archive = root / str(exp_smoke().dataset.working_dir).lstrip("/")
+    """Publish a corpus of one training and one validation shard; return its root."""
+    archive = root / "archive"
     train = _publish(archive, [_episode(40, offset=100, split=0)], split=0)
     val = _publish(
         archive,
