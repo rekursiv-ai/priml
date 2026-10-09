@@ -1,10 +1,12 @@
 """Check Craftax bits per byte, its per-target NLL, and the zstd reference."""
 
 from collections.abc import Mapping
+from functools import cache
 from pathlib import Path
+from typing import Final
 
+import copy
 import math
-import multiprocessing
 
 from configgle import Fig
 
@@ -35,7 +37,8 @@ from priml.baselines.craftax.world_model.model import (
     FrameEncoder,
     WorldModel,
 )
-from priml.baselines.craftax.world_model.schema import craftax_schema
+from priml.baselines.craftax.world_model.schema import FrameSchema, craftax_schema
+from priml.baselines.craftax.world_model.testing import small_schema, tiny_model
 from priml.lib import zstd_compat
 from priml.lib.codec import from_plain
 from priml.model.swiglu import SwiGLU
@@ -51,8 +54,18 @@ WINDOW: tuple[int, int] = (1, 7)
 """One packed window's ``[B, t_g]``: ``update`` takes a stratum and a weight per
 position, and ``_one_episode`` packs one window of 7."""
 
+_METRIC_DIST: Final = "priml.baselines.craftax.world_model.metric.dist"
+"""The collective the metric's sums cross ranks through, as ``monkeypatch`` names it."""
+
 
 def _tiny_model() -> WorldModel:
+    """Return a copy of the tiny model seeded 0."""
+    return copy.deepcopy(_seeded_tiny_model())
+
+
+# Building the model takes 20 ms, copying it 3 ms; each test gets its own copy.
+@cache
+def _seeded_tiny_model() -> WorldModel:
     config = WorldModel.Config()
     config.encoder.channels_in = 16
     config.decoder.channels_in = 16
@@ -71,6 +84,16 @@ def _tiny_model() -> WorldModel:
     return config.make()
 
 
+def _small_model() -> WorldModel:
+    """Return a copy of the tiny model over the cut schema: 9 local slots, not 152."""
+    return copy.deepcopy(_seeded_small_model())
+
+
+@cache
+def _seeded_small_model() -> WorldModel:
+    return tiny_model(small_schema())
+
+
 def _shrink_stack(stack: Transformer.Config) -> None:
     stack.num_layers = 1
     block = stack.block
@@ -79,12 +102,24 @@ def _shrink_stack(stack: Transformer.Config) -> None:
     block.ffn.channels_hidden = 32
 
 
-def _segment(decisions: int, *, frames: int, starts: bool, terminal: bool) -> Segment:
-    schema = craftax_schema()
+def _segment(
+    decisions: int,
+    *,
+    frames: int,
+    starts: bool,
+    terminal: bool,
+    schema: FrameSchema | None = None,
+) -> Segment:
+    schema = schema or craftax_schema()
     generator = torch.Generator().manual_seed(decisions + 10 * frames)
     cells = torch.stack(
         [
-            torch.randint(0, field.valid, (frames, 99), generator=generator)
+            torch.randint(
+                0,
+                field.valid,
+                (frames, schema.cell_slots),
+                generator=generator,
+            )
             for field in schema.cell_fields
         ],
         dim=-1,
@@ -108,15 +143,15 @@ def _segment(decisions: int, *, frames: int, starts: bool, terminal: bool) -> Se
     )
 
 
-def _batch() -> PackedBatch:
+def _batch(schema: FrameSchema | None = None) -> PackedBatch:
     """Two windows: a start, a terminal, a mid-episode cut, and padding."""
     return pack_windows(
         [
             [
-                _segment(3, frames=3, starts=True, terminal=True),
-                _segment(4, frames=5, starts=True, terminal=False),
+                _segment(3, frames=3, starts=True, terminal=True, schema=schema),
+                _segment(4, frames=5, starts=True, terminal=False, schema=schema),
             ],
-            [_segment(2, frames=3, starts=False, terminal=False)],
+            [_segment(2, frames=3, starts=False, terminal=False, schema=schema)],
         ],
         t_g=16,
         s_max=4,
@@ -135,24 +170,27 @@ def _ones(batch: PackedBatch) -> torch.Tensor:
     return torch.ones(len(batch.job_at) * RECORD)
 
 
+# The model-scoring checks run over the cut schema, whose records lay out as the full
+# one's: the action, reward and done, then each cell and scalar.
 def test_craftax_target_nll_is_the_models_scored_terms_per_job() -> None:
-    model = _tiny_model()
-    batch = _batch()
+    schema = small_schema()
+    model, batch = _small_model(), _batch(schema)
     with torch.no_grad():
-        record = craftax_target_nll(model, batch).view(len(batch.job_at), RECORD)
+        record = craftax_target_nll(model, batch).view(len(batch.job_at), -1)
         loss = model(batch)
+    board = 3 + schema.cell_slots
+    assert record.shape[1] == 1 + schema.local_slots
     assert torch.allclose(record[:, 0].sum(), loss.nll["action"])
     assert torch.allclose(record[:, 1].sum(), loss.nll["reward"])
     assert torch.allclose(record[:, 2].sum(), loss.nll["done"])
-    assert torch.allclose(record[:, 3:102].sum(), loss.nll["board"])
-    assert torch.allclose(record[:, 102:].sum(), loss.nll["hud"])
+    assert torch.allclose(record[:, 3:board].sum(), loss.nll["board"])
+    assert torch.allclose(record[:, board:].sum(), loss.nll["hud"])
 
 
 def test_each_job_records_the_nll_of_its_own_action() -> None:
-    model = _tiny_model()
-    batch = _batch()
+    model, batch = _small_model(), _batch(small_schema())
     with torch.no_grad():
-        record = craftax_target_nll(model, batch).view(len(batch.job_at), RECORD)
+        record = craftax_target_nll(model, batch).view(len(batch.job_at), -1)
         logits = model.logits(batch).action.flatten(0, 1)
     acts = ~batch.job_is_start
     at = batch.job_at[acts].long()
@@ -163,8 +201,8 @@ def test_each_job_records_the_nll_of_its_own_action() -> None:
 
 
 def test_records_are_exactly_the_targets_the_loss_scores() -> None:
-    model = _tiny_model()
-    batch = _batch()
+    schema = small_schema()
+    model, batch = _small_model(), _batch(schema)
     with torch.no_grad():
         terms = model.target_terms(batch, model.logits(batch))
     acts = ~batch.job_is_start
@@ -175,8 +213,9 @@ def test_records_are_exactly_the_targets_the_loss_scores() -> None:
     assert torch.equal(terms["reward"][1], acts)
     assert torch.equal(terms["done"][1], acts)
     has_next = batch.job_next >= 0
-    assert torch.equal(terms["board"][1], has_next[:, None].expand(-1, 99))
-    assert torch.equal(terms["hud"][1], has_next[:, None].expand(-1, 51))
+    board, hud = schema.cell_slots, len(schema.scalar_ranges)
+    assert torch.equal(terms["board"][1], has_next[:, None].expand(-1, board))
+    assert torch.equal(terms["hud"][1], has_next[:, None].expand(-1, hud))
 
 
 def test_a_full_decision_is_898_bytes() -> None:
@@ -453,24 +492,33 @@ def test_empty_evaluation_raises() -> None:
         CraftaxBitsPerByte.Config().make().compute()
 
 
-@pytest.mark.compute_distributed
-def test_ranks_sum_before_dividing(tmp_path: Path) -> None:
-    context = multiprocessing.get_context("spawn")
-    ranks = [
-        context.Process(target=_check_rank_sums, args=(rank, 2, str(tmp_path / "s")))
-        for rank in range(2)
-    ]
-    try:
-        for process in ranks:
-            process.start()
-        for process in ranks:
-            process.join(timeout=120)
-            assert process.exitcode == 0
-    finally:
-        for process in ranks:
-            if process.is_alive():
-                process.kill()
-                process.join()
+def test_ranks_sum_before_dividing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two ranks each score one batch; each reports what one process scoring both does.
+
+    In one process: each rank's sums are first recorded as it hands them to the
+    collective, then each computes against the other's.
+    """
+    batches = [_one_episode(), _one_episode(terminal=True)]
+    strata = [torch.zeros(WINDOW).long(), torch.full(WINDOW, 5)]
+    natural = torch.arange(1, 28, dtype=torch.float64)
+    together = _scored(batches, strata, natural=natural)
+    expected = together.compute()
+    sent: list[torch.Tensor] = []
+    for rank in range(2):
+        collective = _PeerRank(peer=None)
+        monkeypatch.setattr(_METRIC_DIST, collective)
+        _scored([batches[rank]], [strata[rank]], natural=natural).compute()
+        assert collective.sent is not None
+        sent.append(collective.sent)
+    for rank in range(2):
+        monkeypatch.setattr(_METRIC_DIST, _PeerRank(peer=sent[1 - rank]))
+        result = _scored([batches[rank]], [strata[rank]], natural=natural).compute()
+        assert result.keys() == expected.keys()
+        for key, value in expected.items():
+            assert result[key] == pytest.approx(value), key
+        assert result["zstd19_bpb"] == pytest.approx(
+            _zstd_bpb(*(canonical_records(batch) for batch in batches)),
+        )
 
 
 class _Recorder:
@@ -556,36 +604,51 @@ def test_series_hand_their_directory_to_a_tracker_beneath_an_async_wrapper(
     assert Path(final.tracker.working_dir) == tmp_path / "metrics.json"
 
 
-def _check_rank_sums(rank: int, world: int, store: str) -> None:
-    """Score one batch per rank and compare with one process scoring both."""
-    batches = [_one_episode(), _one_episode(terminal=True)]
-    strata = [torch.zeros(WINDOW).long(), torch.full(WINDOW, 5)]
-    natural = torch.arange(1, 28, dtype=torch.float64)
-    together = CraftaxBitsPerByte.Config().make()
-    together.natural_decisions = natural
+def _scored(
+    batches: list[PackedBatch],
+    strata: list[torch.Tensor],
+    *,
+    natural: torch.Tensor,
+) -> CraftaxBitsPerByte:
+    """Return a metric that scored two nats per record column of each batch."""
+    scored = CraftaxBitsPerByte.Config().make()
+    scored.natural_decisions = natural
     for batch, stratum in zip(batches, strata, strict=True):
-        together.update(_ones(batch) * 2.0, media=batch, stratum=stratum)
-    expected = together.compute()
-    dist.init_process_group(
-        "gloo",
-        init_method=f"file://{store}",
-        rank=rank,
-        world_size=world,
-    )
-    try:
-        metric = CraftaxBitsPerByte.Config().make()
-        metric.natural_decisions = natural
-        batch = batches[rank]
-        metric.update(_ones(batch) * 2.0, media=batch, stratum=strata[rank])
-        result = metric.compute()
-    finally:
-        dist.destroy_process_group()
-    assert result.keys() == expected.keys()
-    for key, value in expected.items():
-        assert result[key] == pytest.approx(value), key
-    assert result["zstd19_bpb"] == pytest.approx(
-        _zstd_bpb(*(canonical_records(batch) for batch in batches)),
-    )
+        scored.update(_ones(batch) * 2.0, media=batch, stratum=stratum)
+    return scored
+
+
+class _PeerRank:
+    """``torch.distributed`` as one rank of two sees it, in one process.
+
+    ``all_reduce`` records what this rank sends, then adds ``peer``, what the
+    other rank sent, if given.
+    """
+
+    ReduceOp = dist.ReduceOp
+
+    def __init__(self, *, peer: torch.Tensor | None) -> None:
+        self.peer = peer
+        self.sent: torch.Tensor | None = None
+
+    def is_available(self) -> bool:
+        """Report the collective as built in."""
+        return True
+
+    def is_initialized(self) -> bool:
+        """Report the group of two as initialized."""
+        return True
+
+    def get_backend(self) -> str:
+        """Return gloo's name, so the sums stay on the CPU."""
+        return "gloo"
+
+    def all_reduce(self, tensor: torch.Tensor, op: object = dist.ReduceOp.SUM) -> None:
+        """Sum ``tensor`` in place with the peer's, as the collective would."""
+        assert op == dist.ReduceOp.SUM, op
+        self.sent = tensor.clone()
+        if self.peer is not None:
+            tensor.add_(self.peer)
 
 
 def _zstd_bpb(*micro_batches: bytes) -> float:

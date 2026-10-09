@@ -335,27 +335,29 @@ def test_the_first_window_alone_learns_the_auxiliary_loss() -> None:
     assert all(torch.equal(a, b) for a, b in zip(alone[1], joined[1], strict=True))
 
 
-@pytest.mark.compute_training
 def test_a_resumed_run_with_imitation_equals_an_uninterrupted_one() -> None:
-    """Three epochs straight against a checkpoint after the first and two more.
+    """Epoch 1's checkpoint, loaded into the step after epoch 2: epoch 2 runs again.
 
-    Every row of the slot an epoch learns from starts a branch, so the archive
-    fills, overflows and is replayed; the archive and its cursor must be saved
-    for the resumed epochs to match.
+    Every row of the slot an epoch learns from starts a branch, so epoch 1's 3
+    branches overflow the archive of 2 and epoch 2's replay it; the archive
+    and its cursor must be saved for epoch 2 to match. Rollouts of 2 steps.
     """
     config = _imitation_step()
-    straight = _make(config)
+    config.rollout.horizon = 2
+    windows = config.learner
+    assert isinstance(windows, AgentWindows.Config)
+    windows.minibatch_size = 2 * config.env.num_envs
+    config.train_budget_steps = 2
+    step = _make(config)
     try:
-        _train(straight)
+        _train(step)
         saved = io.BytesIO()
-        torch.save(straight.state_dict(), saved)
-        expected = [_train(straight) for _ in range(2)]
-        expected_state = straight.learner.state_dict()
-    finally:
-        straight.close()
-    resumed = _make(config)
-    try:
-        resumed.load_state_dict(
+        torch.save(step.state_dict(), saved)
+        expected = [_train(step)]
+        expected_state = {
+            name: value.clone() for name, value in step.learner.state_dict().items()
+        }
+        step.load_state_dict(
             from_plain(
                 cast(
                     "object",
@@ -364,10 +366,10 @@ def test_a_resumed_run_with_imitation_equals_an_uninterrupted_one() -> None:
                 dict[str, object],
             ),
         )
-        actual = [_train(resumed) for _ in range(2)]
-        actual_state = resumed.learner.state_dict()
+        actual = [_train(step)]
+        actual_state = step.learner.state_dict()
     finally:
-        resumed.close()
+        step.close()
     for ours, theirs in zip(actual, expected, strict=True):
         assert all(torch.equal(a, b) for a, b in zip(ours, theirs, strict=True))
     assert actual_state.keys() == expected_state.keys()

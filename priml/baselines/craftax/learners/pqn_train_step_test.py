@@ -1,11 +1,11 @@
 """Tests for the Q-learning train step, at exp006's recipe and a tiny geometry.
 
-The geometry: 12 environments in 2 buffers, rollouts of 2 steps, minibatches
-of 3 trajectories, a network 5 wide; the recipe's 4 passes of 4 minibatches
-and its schedules stay. Most tests train on ``testing.FakeEnv``'s random
-transitions, which need no game; those marked ``compute_training`` step the
-real game by exp006's rules. The golden runs inside ``host_agnostic_pipeline``,
-so its bits hold on every CPU.
+The geometry: 12 environments in 2 buffers, rollouts of 2 steps, 2 passes of
+2 minibatches of 6 trajectories, not the recipe's 4 of 4, a network 5 wide;
+the recipe's schedules stay. Most tests train on ``testing.FakeEnv``'s random
+transitions, which need no game; the rest step the real game's 4
+environments by exp006's rules. The golden runs inside
+``host_agnostic_pipeline``, so its bits hold on every CPU.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from priml.baselines.craftax.learners.pqn_train_step import (
     CraftaxPQNTrainLoop,
     CraftaxPQNTrainStep,
 )
-from priml.baselines.craftax.policies.pqn import EpsilonGreedy
+from priml.baselines.craftax.policies.pqn import EpsilonGreedy, GreedySampler
 from priml.baselines.craftax.rollout import PhiloxSampler, TorchPhiloxSampler
 from priml.baselines.craftax.testing import (
     FakeEnv,
@@ -162,11 +162,11 @@ def _config(*, game: bool = False) -> CraftaxPQNTrainStep.Config:
         assert isinstance(parent, CraftaxEnv.Config)
         env.rules = parent.rules
         env.restart = parent.restart
-        env.num_envs = ENVS
         config.env = env
     else:
         config.env = _Scripted.Config()
     config.model.channels_hidden = 5
+    config.num_epochs = config.num_minibatches = 2
     config.rollout.horizon = HORIZON
     sampler = config.sampler
     assert isinstance(sampler, EpsilonGreedy.Config)
@@ -205,7 +205,7 @@ def test_a_step_optimizes_and_reports_its_diagnostics() -> None:
     with _step() as step:
         result = step.train_step()
         assert math.isfinite(float(result["loss"]))
-        assert result["model"].shape == (ENVS // 4, HORIZON, ACTIONS)
+        assert result["model"].shape == (ENVS // 2, HORIZON, ACTIONS)
         metrics = result.get("metrics", {})
         for name in (
             "q_loss",
@@ -243,7 +243,7 @@ def test_each_pass_visits_every_minibatch() -> None:
         optimizer = step.optimizer
         with patch.object(optimizer, "step", wraps=optimizer.step) as stepped:
             step.train_step()
-        assert stepped.call_count == 4 * 4
+        assert stepped.call_count == 2 * 2
 
 
 def test_a_step_changes_the_network() -> None:
@@ -279,7 +279,7 @@ def test_it_keeps_no_replay_buffer() -> None:
 def test_the_targets_are_built_once_before_optimizing() -> None:
     """Recomputing them per pass would chase a value already moved.
 
-    The rollout carries its targets, so all 16 minibatches regress toward the
+    The rollout carries its targets, so all 4 minibatches regress toward the
     numbers ``collect`` built.
     """
     with _step() as step:
@@ -412,8 +412,8 @@ def test_collection_does_not_update_the_running_statistics() -> None:
         step.collect()
         assert int(step.model.normalize.steps) == 0
         step.train_step()
-        # The learner's 16 minibatches each fold in their window, once.
-        assert int(step.model.normalize.steps) == 4 * 4
+        # The learner's 4 minibatches each fold in their window, once.
+        assert int(step.model.normalize.steps) == 2 * 2
         assert not step.model.training
 
 
@@ -623,30 +623,41 @@ def test_the_loop_names_its_wandb_run_after_the_experiment() -> None:
     assert isinstance(config.copy_tree().finalize().tracker, FileTracker.Config)
 
 
-@pytest.mark.compute_training
 def test_finished_episodes_are_reported_once() -> None:
     with _step(_config(game=True)) as step:
         env = step.env
         assert isinstance(env, CraftaxEnv)
         env.states["player_health"][:] = 0.0
         metrics = step.train_step().get("metrics", {})
-        assert float(metrics["env/n"]) == ENVS
+        assert float(metrics["env/n"]) == env.num_envs
         later = step.train_step().get("metrics", {})
-        assert float(later.get("env/n", 0.0)) < ENVS
+        assert float(later.get("env/n", 0.0)) < env.num_envs
 
 
-@pytest.mark.compute_training
 def test_an_evaluation_plays_greedily_and_changes_nothing_training_reads() -> None:
+    """A rollout of the evaluation's own 4 environments between two updates.
+
+    The second update is the one a run without it takes. Training steps
+    ``FakeEnv``'s transitions; the evaluation plays the game, greedily.
+    """
+
     def train(*, evaluate: bool) -> dict[str, Tensor]:
-        with _step(_config(game=True)) as step:
+        config = _config()
+        config.evaluation.env = tiny_env()
+        with _step(config) as step:
             step.train_step()
             if evaluate:
                 evaluation = step.make_evaluator()
                 try:
-                    played = evaluation.play()
+                    assert isinstance(
+                        step.config.evaluation.sampler,
+                        GreedySampler.Config,
+                    )
+                    evaluation.reset()
+                    evaluation.collect()
+                    assert evaluation.gameplay_seconds > 0
                 finally:
                     evaluation.close()
-                assert played.rollouts > 0
             step.train_step()
             return {
                 name: value.clone() for name, value in step.model.state_dict().items()
@@ -658,26 +669,28 @@ def test_an_evaluation_plays_greedily_and_changes_nothing_training_reads() -> No
         assert torch.equal(value, evaluated[name]), name
 
 
-@pytest.mark.compute_training
-def test_the_tiny_steps_updates_match_their_golden() -> None:
-    """exp006's step at test size from torch seed 0, every update frozen on every host.
+def test_the_tiny_steps_update_matches_its_golden() -> None:
+    """exp006's step at test size from torch seed 0, its first update frozen on every host.
 
     The whole update on the real game by exp006's rules: the epsilon-greedy
-    rollout, the rescore and its targets, the 16 minibatches, RAdam behind the
-    clip, the linear rate, the running normalization. Each update's targets,
-    rate, exploration and loss, then the final weights and statistics.
+    rollout, the rescore and its targets, one minibatch of every
+    environment, RAdam behind the clip, the linear rate, the running
+    normalization. The update's targets, rate, exploration and loss, then
+    the weights and statistics. One update of one minibatch: the
+    schedules' later values and the epochs' and minibatches' loops are the
+    unit tests'.
     """
-    lines: list[str] = []
-    with host_agnostic_pipeline(), _step(_config(game=True)) as step:
-        for update in range(1, UPDATES + 1):
-            result = step.train_step()
-            metrics = result.get("metrics", {})
-            lines += [
-                f"update {update:04d} targets {digest(step.targets[-1])}",
-                f"update {update:04d} learning_rate {fp32(metrics['learning_rate'])}",
-                f"update {update:04d} epsilon {fp32(metrics['epsilon'])}",
-                f"update {update:04d} loss {fp32(result['loss'])}",
-            ]
+    config = _config(game=True)
+    config.num_epochs = config.num_minibatches = 1
+    with host_agnostic_pipeline(), _step(config) as step:
+        result = step.train_step()
+        metrics = result.get("metrics", {})
+        lines = [
+            f"update 0001 targets {digest(step.targets[-1])}",
+            f"update 0001 learning_rate {fp32(metrics['learning_rate'])}",
+            f"update 0001 epsilon {fp32(metrics['epsilon'])}",
+            f"update 0001 loss {fp32(result['loss'])}",
+        ]
         lines += [
             f"final {name} {digest(value)}"
             for name, value in step.model.state_dict().items()

@@ -1,28 +1,28 @@
-slot 0 carry torch.bfloat16 (2, 4, 8) 25f570d46cd3b540f4b80efc9c8434db4cac31231a53a06e44ed8d0c3503cfbc
-slot 0 draws torch.int64 (4,) 38df89b71e6aa2b361da02c1960692788be8f78764a50866b24f7c7710cb0dbe
-slot 0 observations torch.bfloat16 (4, 4, 843) cab16d044054f76a589fc848e0cf5462d6fbf9b0f74d45d603cb6a188bc95200
-slot 0 actions torch.float32 (4, 4) 662a9da31e43bbfcc062f5809ae6ecaa12f04d26846380b98a7f9d23ab4f587e
-slot 0 logprobs torch.bfloat16 (4, 4) d397bdb1bf97a53a6627c0ce507575222b86c4b6d450570f1da114da8802c19c
-slot 0 values torch.bfloat16 (4, 4) 4fdf9552f3486b365f43c85ceef23e8509dcb4c7316e9e89178c211f9b769a15
-slot 0 rewards torch.bfloat16 (4, 4) 36fdd9232953cd8625f3f4851c80877f40a72d006377804dac66438ea39a7a47
-slot 0 terminals torch.bfloat16 (4, 4) 66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925
-slot 0 action_mask torch.bfloat16 (4, 4, 43) b01ce91223cbdc34f55e9cf97f6a128b44116d622abad480064914324ee1dfe1
+slot 0 carry torch.bfloat16 (2, 4, 8) a2edf5bad1fd6ba677e9bb395ed75a54141061ca369270f7db7503368bceae94
+slot 0 draws torch.int64 (4,) 57e4d1a3e55577e929c7d374d3aeb7a4a287507c0748bc3c35d8ac881347a369
+slot 0 observations torch.bfloat16 (2, 4, 843) 2a20fde58041ec1568ef6d9132d7ac4120fed337dcdc6b30dca88242b6d99de7
+slot 0 actions torch.float32 (2, 4) d45b8aba684a9fd2fb3992aa1255f97c938bccdce78022c7db79d141d287fb2f
+slot 0 logprobs torch.bfloat16 (2, 4) 9d2e1e848544a12b893275b719bf608036a20bad7f68e8faba2e9f82525ad641
+slot 0 values torch.bfloat16 (2, 4) 4dab4e6ecfd495ee8a5fc58d2b88067c57e8b9145cce0cc0137706f03e02f691
+slot 0 rewards torch.bfloat16 (2, 4) 7ab8f6c26e4f9862c95a18c8e5c50403eeb64d8869fbbf9a7a6397d9a63b7b0e
+slot 0 terminals torch.bfloat16 (2, 4) 374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb
+slot 0 action_mask torch.bfloat16 (2, 4, 43) 84bd54223e5ad0703711d31c3cdc824c1ce87e7e757ae978ff70604c72f35b36
 slot 0 initial_states torch.bfloat16 (2, 4, 8) 38723a2e5e8a17aa7950dc008209944e898f69a7bd10a23c839d341e935fd5ca
-slot 1 carry torch.bfloat16 (2, 4, 8) 3fbf8ef89ec14df82fda3ca69418a54853b617b17d69499d0f78c3cb27880d4a
-slot 1 draws torch.int64 (4,) b089e5e6a53d86005506fd7a674056fa52c67817c3d4e7bdf610fe22ec061fe5
-slot 1 observations torch.bfloat16 (4, 4, 843) cd8081e4a21d0a7ab3b269d7fcf75881de14426dec0bbaf7a6f861df800613be
-slot 1 actions torch.float32 (4, 4) 346240bf473ded1fb20be58025355c6b3e4cd45eaf31e701f36be32d696876bf
-slot 1 logprobs torch.bfloat16 (4, 4) 3059b06eea09158182d38c8c0cf41867074241cfc7374a00f03397ce2c706ab9
-slot 1 values torch.bfloat16 (4, 4) 661276918dde990114465afaa3924c4dec1be9f98e786dbca798057094e6573e
-slot 1 rewards torch.bfloat16 (4, 4) 66b7057e198043f4acfb86f84717e34610811559714e63c9484bde10fb7cbe06
-slot 1 terminals torch.bfloat16 (4, 4) 66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925
-slot 1 action_mask torch.bfloat16 (4, 4, 43) 677915c5a0b631298687799ef9b3b73ce858bbe5a7e1ad069b553f989bac95be
-slot 1 initial_states torch.bfloat16 (2, 4, 8) 25f570d46cd3b540f4b80efc9c8434db4cac31231a53a06e44ed8d0c3503cfbc
-states |u1 (320992,) 45cdc62ad60d52986235c08bfaaa421fed2d5fda9987cef34e33681130466b0d
-rngs <u4 (4,) a7e805d20e6bc4f3204cd94d96e67ff126cb2ff122d9f47158090293bb8a7210
-stats |u1 (1424,) 512780dafda93c585513b45ededc04d76077835b42895b809b06b43e410c04b5
-observations torch.float32 (4, 843) 26b596ee6cda51c1206123e2d64c6b106cba0af3f634852c7d8db3e702751ded
-action_mask torch.uint8 (4, 43) 89b9ff978c991a37109be528d7bd683248b6fbe243efcd64e26fcf759faa0b38
-rewards torch.float32 (4,) 7472a1a3ade1c12f2ffe2837ae401d69022dc0504bcf8274b4f49b9ad8b248c4
+slot 1 carry torch.bfloat16 (2, 4, 8) 25f570d46cd3b540f4b80efc9c8434db4cac31231a53a06e44ed8d0c3503cfbc
+slot 1 draws torch.int64 (4,) 38df89b71e6aa2b361da02c1960692788be8f78764a50866b24f7c7710cb0dbe
+slot 1 observations torch.bfloat16 (2, 4, 843) de527badb0ca7c77ad5d9d2ff056007343acdcd874f3d30ec608cf863c888fac
+slot 1 actions torch.float32 (2, 4) 0d1c3defea040cd114c81a9bd5f6dd59623599943da3fb10177766a155157a34
+slot 1 logprobs torch.bfloat16 (2, 4) 80ce71844fe0bc52d2a0c6382ae5bff05dea5e15f22c4939d3b0f7fa56c6e46d
+slot 1 values torch.bfloat16 (2, 4) d559b499d5c4e7d2c49344cca78fbe653cc05974da79b2ea9376a2a18d8f80fa
+slot 1 rewards torch.bfloat16 (2, 4) 374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb
+slot 1 terminals torch.bfloat16 (2, 4) 374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb
+slot 1 action_mask torch.bfloat16 (2, 4, 43) 540218d3adfb001ce89bd2580819a7956ea810cfeabb4df62632fa0e0bf716d9
+slot 1 initial_states torch.bfloat16 (2, 4, 8) a2edf5bad1fd6ba677e9bb395ed75a54141061ca369270f7db7503368bceae94
+states |u1 (320992,) 61b12ae06ab750d21acfd3c4bc31fe3ec577956e9610d99446156cd2ea50b82c
+rngs <u4 (4,) 4e2e9c953a0259e4003f37eb57e44c8650fd297a2aac9671b270e9b20cb2740f
+stats |u1 (1424,) 4a14730ac355d207cc70382dfa1c6386091c36d9d5666991796298fe4a05d3fd
+observations torch.float32 (4, 843) 15e8e9f0e0d43ef3b216490884a6c70b705a9ea8bdb522bddc206ee93122294f
+action_mask torch.uint8 (4, 43) a115ff43dd0cfd27ec64285cd5ea17a3c194baaca0ce93d366dd7d06a31d38d3
+rewards torch.float32 (4,) 6855960ee428276148fc8745625c44bde7ae835a9e2fa181cc917af9bcad0d6a
 terminals torch.float32 (4,) 374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb
-actions torch.float32 (4, 1) 2d83341b58f97c71fa8e06483809a0977d9383559ab1df8748a22f380b1ad8f9
+actions torch.float32 (4, 1) 5944e6ecb837cab7d36db247a1f06d158719bb8ed511c1a353d2e45dc72089c4

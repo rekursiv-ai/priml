@@ -76,6 +76,7 @@ from priml.baselines.craftax.world_model.codec import decode
 from priml.baselines.craftax.world_model.feature import (
     DonorHistory,
     FeatureEngine,
+    Refill,
     Sliding,
     WorldModelFeature,
 )
@@ -437,6 +438,69 @@ def test_a_bootstrap_row_holds_what_the_last_step_led_to() -> None:
     rollout.close()
 
 
+class _RecordingSampler(TorchPhiloxSampler):
+    """The torch sampler, keeping each step's draws."""
+
+    def __init__(self, config: TorchPhiloxSampler.Config) -> None:
+        super().__init__(config)
+        self.sampled: list[Sampled] = []
+
+    @override
+    def __call__(
+        self,
+        decoded: Tensor,
+        action_mask: Tensor,
+        draws: Tensor,
+        *,
+        buffer: int,
+        dtype: torch.dtype | None = None,
+    ) -> Sampled:
+        sampled = super().__call__(
+            decoded,
+            action_mask,
+            draws,
+            buffer=buffer,
+            dtype=dtype,
+        )
+        self.sampled.append(sampled)
+        return sampled
+
+
+def test_a_one_buffer_rollout_stores_its_steps_under_the_host_agnostic_pipeline() -> (
+    None
+):
+    """Each row holds the step's draws, where one buffer's rows span the whole slot.
+
+    Those rows' slice is ``alias``, which the harness upcast to a copy, so every
+    store landed in the copy and the slot kept zeros.
+    """
+    torch.manual_seed(0)
+    policy = tiny_policy().make()
+    env = FakeEnv.make(num_envs=4, num_buffers=1, seed=0)
+    config = Rollout.Config()
+    config.num_slots = 1
+    config.horizon = 3
+    sampler = _RecordingSampler(TorchPhiloxSampler.Config())
+    rollout = Rollout(
+        config,
+        policy=policy,
+        sampler=sampler,
+        env=env,
+        device=torch.device("cpu"),
+    )
+    try:
+        with host_agnostic_pipeline():
+            storage = rollout.collect(0)
+    finally:
+        rollout.close()
+    assert len(sampler.sampled) == 3
+    for step, sampled in enumerate(sampler.sampled):
+        assert torch.equal(storage.logprobs[step], sampled.logprobs), step
+        assert torch.equal(storage.values[step], sampled.values), step
+        assert torch.equal(storage.actions[step], sampled.actions), step
+    assert bool((storage.logprobs < 0).all())
+
+
 class _EndingEnv(FakeEnv):
     """A fake env whose every step also ends the episode of each buffer's first row."""
 
@@ -608,13 +672,15 @@ def test_the_tiny_pipelines_first_two_rollouts_match_their_golden() -> None:
 
     exp000's recipe in its torch forms (the scan, the Philox sampler at seed
     73, a bf16 carry and bf16 storage), from portable seed-73 weights, plays 4
-    real environments in 2 buffers for two horizons of 4 into the two slots,
+    real environments in 2 buffers for two horizons of 2 into the two slots,
     as training's boot rollout and first prefetch do before the learner moves
     a weight. The golden holds every slot tensor with the carries and draw
     counts after each rollout, then the environments.
     """
+    config = tiny_train_step()
+    config.rollout.horizon = 2
     with host_agnostic_pipeline():
-        lines = _rollout_entries(tiny_train_step(), device=torch.device("cpu"))
+        lines = _rollout_entries(config, device=torch.device("cpu"))
     assert_golden(test_file=__file__, name="rollout_tiny", lines=lines)
 
 
@@ -1285,8 +1351,16 @@ def test_a_feature_steps_on_the_upload_and_the_store_holds_what_the_policy_read(
 
 
 def test_the_learners_window_over_the_store_scores_what_the_actor_scored() -> None:
-    """A frozen world model's feature: the learner re-reads exactly the actor's input."""
+    """A frozen world model's feature: the learner re-reads exactly the actor's input.
+
+    Rows of 8 positions, re-prefilled from their last 2 decisions, in blocks of 2
+    steps: ``feature_test`` holds the engine to the training forward at any size.
+    """
     config = _world_model_feature()
+    history = config.history = Refill.Config()
+    history.t_max = 8
+    history.keep = 2
+    config.hook_interval = 2
     source = config.make()
     policy_config = tiny_policy()
     proj = policy_config.proj_feature = Linear.Config()
@@ -1295,9 +1369,9 @@ def test_the_learners_window_over_the_store_scores_what_the_actor_scored() -> No
     policy = policy_config.make()
     env = _FramedEnv.make(num_envs=8, num_buffers=2, seed=15)
     rollout_config = Rollout.Config()
-    # Three blocks: by the third, the rows that ran 8 steps without a reset
-    # have filled their 16 positions and re-prefill.
-    rollout_config.horizon = 12
+    # Three blocks: by the third, the rows that ran 4 steps without a reset
+    # have filled their 8 positions and re-prefill.
+    rollout_config.horizon = 6
     rollout = Rollout(
         rollout_config,
         policy=policy,
@@ -1842,30 +1916,63 @@ def _featured(*, horizon: int, hook: int) -> tuple[Rollout, FakeEnv, MinGRUPolic
 def _world_model_feature() -> WorldModelFeature.Config:
     """Return the smoke feature hooked every 4 steps: rows re-prefill within a block."""
     config = smoke_feature()
+    config.weights = _SmokeWeights.Config()
     config.hook_interval = 4
     return config
 
 
-# One buffer of 6 rows, whose rows 5 and 4 save entries 2 and 4 in the first rollout;
+class _SmokeWeights:
+    """``smoke_feature``'s world model, built once a process and copied for each source.
+
+    The build finalizes ``exp_smoke``'s whole config and draws its ~300 weights:
+    30 ms on x86, a third of a test that makes a source. ``feature_test`` checks
+    ``InitialWeights`` itself.
+    """
+
+    class Config(Fig["_SmokeWeights"]):
+        """Nothing to configure: the weights are ``smoke_feature``'s."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def __call__(self) -> WorldModel:
+        """Return a copy of the model, at the seeded init and in eval mode."""
+        return copy.deepcopy(_smoke_model())
+
+
+@functools.cache
+def _smoke_model() -> WorldModel:
+    """Build ``smoke_feature``'s world model."""
+    return smoke_feature().weights.make()()
+
+
+# One buffer of 4 rows, whose rows 3 and 2 save entries 2 and 4 in the first rollout;
 # the feature is float32, and the policy, so the store holds the features unrounded.
+# Rows of 8 positions re-prefilled from 2 decisions, or windows of 4, in blocks of 2
+# steps over rollouts of 3: each training forward reads the full schema's frames.
 def _joint_rollout(
     device: str,
     *,
     sliding: bool,
 ) -> tuple[Rollout, _PractisingEnv, WorldModelFeature]:
-    """Return a joint feature's practising rollout: 2 of 6 rows save histories."""
+    """Return a joint feature's practising rollout: 2 of 4 rows save histories."""
     config = _world_model_feature()
     if sliding:
         window = config.history = Sliding.Config()
         window.decisions = 4
+    else:
+        refill = config.history = Refill.Config()
+        refill.t_max = 8
+        refill.keep = 2
+    config.hook_interval = 2
     config.practice = DonorHistory.Config()
     config.joint = True
     source = config.make()
     env = _PractisingEnv(
-        _FramedEnv.make(num_envs=6, num_buffers=1, seed=22),
+        _FramedEnv.make(num_envs=4, num_buffers=1, seed=22),
         carry_slots=5,
-        save_rows=slice(4, 6),
-        saves={(0, 0): {5: 2}, (0, 2): {4: 4}},
+        save_rows=slice(2, 4),
+        saves={(0, 0): {3: 2}, (0, 2): {2: 4}},
     )
     policy_config = tiny_policy(dtype=torch.float32)
     proj = policy_config.proj_feature = Linear.Config()
@@ -1873,7 +1980,7 @@ def _joint_rollout(
     torch.manual_seed(23)
     policy = policy_config.make().to(device)
     rollout_config = Rollout.Config()
-    rollout_config.horizon = 6
+    rollout_config.horizon = 3
     sampler = PhiloxSampler if device == "cuda" else TorchPhiloxSampler
     rollout = Rollout(
         rollout_config,

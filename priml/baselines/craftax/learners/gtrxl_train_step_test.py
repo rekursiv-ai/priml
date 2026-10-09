@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 from unittest.mock import patch
 
-import io
+import copy
 import math
 
 from configgle import PartialConfig
@@ -16,6 +16,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
+from priml.baselines.craftax.env import WorldPool
 from priml.baselines.craftax.game.state import ATN_DIM, OBS_SIZE
 from priml.baselines.craftax.learners.gtrxl_train_step import TrajectoryWindows
 from priml.baselines.craftax.lib.adam import ClippedAdam
@@ -32,7 +33,6 @@ from priml.baselines.craftax.testing import (
     tiny_train_step,
 )
 from priml.baselines.craftax.train_step import CraftaxTrainStep, LearnerRollout
-from priml.lib.codec import from_plain
 from priml.loss.policy_gradient import TorchPPO
 from priml.testing.bfb import assert_bfb_against_golden
 
@@ -120,7 +120,6 @@ def test_the_advantage_is_gae_bootstrapped_from_the_row_after() -> None:
     )
 
 
-@pytest.mark.compute_training
 def test_each_window_starts_from_the_carry_the_actor_read() -> None:
     """The replay rebuilds, before any update, the memory the rollout's actor read.
 
@@ -128,14 +127,17 @@ def test_each_window_starts_from_the_carry_the_actor_read() -> None:
     float64 and rounds once to float32, so the actor's two-environment buffers
     and the replay's four-environment batch round alike although their GEMMs
     differ in shape. On a GPU the shapes select different TF32 kernels, which
-    agree only to their rounding.
+    agree only to their rounding. Rollouts of 2 steps and windows of 1: each
+    op costs 80 us in those numerics on x86.
     """
     policy = _policy(observation_size=OBS_SIZE, num_actions=ATN_DIM).make()
     env = FakeEnv.make(num_envs=4, num_buffers=2, seed=0)
     config = Rollout.Config()
     config.num_slots = 1
-    config.horizon = HORIZON
+    config.horizon = 2
     config.bootstrap = True
+    windows = TrajectoryWindows.Config()
+    windows.window = 1
     with host_agnostic_pipeline():
         rollout = Rollout(
             config,
@@ -150,11 +152,11 @@ def test_each_window_starts_from_the_carry_the_actor_read() -> None:
                 storage = rollout.collect(0)
         finally:
             rollout.close()
-        carries = _learner().carries(policy, _learner_rollout(storage))
+        carries = windows.make().carries(policy, _learner_rollout(storage))
     read = [spy.seen[graph.state.data_ptr()] for graph in rollout.graphs[0]]
-    assert [len(steps) for steps in read] == [HORIZON + 1] * 2
+    assert [len(steps) for steps in read] == [config.horizon + 1] * 2
     assert torch.equal(carries[0], storage.initial_states)
-    assert torch.equal(carries[1], torch.cat([steps[WINDOW] for steps in read], dim=1))
+    assert torch.equal(carries[1], torch.cat([steps[1] for steps in read], dim=1))
     assert carries[1][..., -1].any()
 
 
@@ -232,9 +234,13 @@ def test_the_windows_keep_no_state_and_refuse_anothers() -> None:
         learner.load_state_dict({"order": torch.zeros(2)})
 
 
-@pytest.mark.compute_training
 def test_one_epoch_matches_its_bfb_golden() -> None:
-    """The replay, the advantages, two passes of two minibatches and Adam's steps."""
+    """The replay, the advantages, one minibatch of every window and Adam's step.
+
+    One pass of one minibatch, not the recipe's four of eight: in host-agnostic
+    numerics each Adam step is a third of the test on x86, and the passes' and
+    minibatches' loops are the unit tests'.
+    """
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="gtrxl_windows_tiny",
@@ -244,14 +250,25 @@ def test_one_epoch_matches_its_bfb_golden() -> None:
     )
 
 
-@pytest.mark.compute_training
 def test_a_step_learning_from_trajectory_windows_resumes_exactly() -> None:
-    """Three epochs straight against a checkpoint after the first and two more.
+    """Epoch 1's checkpoint, loaded into the step after epoch 2: epoch 2 runs again.
 
     The checkpoint holds the rollout's carry, so the resumed actor reads the
     memory the uninterrupted one did, and the learner replays it alike.
+    Rollouts of one window, learned in one minibatch, from a pool of one
+    world: the windows' carries, the passes and the minibatches are the tests'
+    above.
     """
-    _assert_resumes_exactly(_tiny_step_config())
+    config = _tiny_step_config()
+    config.rollout.horizon = WINDOW
+    config.train_budget_steps = 2
+    learner = config.learner
+    assert isinstance(learner, TrajectoryWindows.Config)
+    learner.num_passes = learner.num_minibatches = 1
+    pool = config.env.restart
+    assert isinstance(pool, WorldPool.Config)
+    pool.num_worlds = 1
+    _assert_resumes_exactly(config)
 
 
 @pytest.mark.gpu_triton
@@ -311,15 +328,18 @@ class _WindowSpy:
         return self.forward(observations, state, episode_start, **kwargs)
 
 
+# One layer and one-layer towers, not the recipe's two: Adam's steps over each parameter
+# are most of an epoch in host-agnostic numerics, and ``gtrxl_test`` stacks the layers.
 def _policy(
     *,
     observation_size: int = OBSERVATION_SIZE,
     num_actions: int = NUM_ACTIONS,
 ) -> GTrXLPolicy.Config:
-    """Return the policy at test size: 2 layers of 6, 2 heads of 3, 5 rows, towers of 7."""
+    """Return the policy at test size: 1 layer of 6, 2 heads of 3, 5 rows, towers of 1 x 7."""
     config = GTrXLPolicy.Config()
     config.observation_size = observation_size
     config.num_actions = num_actions
+    config.num_layers = config.decoder.num_layers = 1
     config.channels_hidden = 6
     config.memory_length = MEMORY
     config.block.heads = 2
@@ -328,10 +348,10 @@ def _policy(
     return config
 
 
-def _learner(*, num_minibatches: int = 2) -> TrajectoryWindows:
-    """Return two passes of windows of 2 over the tiny step, prepared."""
+def _learner(*, num_minibatches: int = 2, num_passes: int = 2) -> TrajectoryWindows:
+    """Return passes, two by default, of windows of 2 over the tiny step, prepared."""
     config = TrajectoryWindows.Config()
-    config.num_passes = 2
+    config.num_passes = num_passes
     config.num_minibatches = num_minibatches
     config.window = WINDOW
     learner = config.make()
@@ -354,35 +374,24 @@ def _tiny_step_config() -> CraftaxTrainStep.Config:
     return config
 
 
+# Loaded into the step that moved on, the checkpoint must overwrite all it changed.
 def _assert_resumes_exactly(config: CraftaxTrainStep.Config) -> None:
-    """Train an epoch, checkpoint, and check the rest replays bit for bit from it."""
+    """Train an epoch, checkpoint, train on; reload and check the rest replays bit for bit."""
     epochs = int(config.train_budget_steps) - 1
     torch.manual_seed(0)
-    straight = config.make()
+    step = config.make()
     try:
-        straight.train_step()
-        saved = io.BytesIO()
-        torch.save(straight.state_dict(), saved)
-        expected = [straight.train_step()["model"] for _ in range(epochs)]
-        expected += [p.detach().clone() for p in straight.model.parameters()]
+        step.train_step()
+        # A copy, not a file: ``train_step_test`` reads a step's state back through
+        # ``torch.load``, whose unpickler took a sixth of this test on x86.
+        saved = copy.deepcopy(step.state_dict())
+        expected = [step.train_step()["model"] for _ in range(epochs)]
+        expected += [p.detach().clone() for p in step.model.parameters()]
+        step.load_state_dict(saved)
+        actual = [step.train_step()["model"] for _ in range(epochs)]
+        actual += list(step.model.parameters())
     finally:
-        straight.close()
-    torch.manual_seed(0)
-    resumed = config.make()
-    try:
-        resumed.load_state_dict(
-            from_plain(
-                cast(
-                    "object",
-                    torch.load(io.BytesIO(saved.getvalue()), weights_only=True),
-                ),
-                dict[str, object],
-            ),
-        )
-        actual = [resumed.train_step()["model"] for _ in range(epochs)]
-        actual += list(resumed.model.parameters())
-    finally:
-        resumed.close()
+        step.close()
     assert all(torch.equal(a, b) for a, b in zip(actual, expected, strict=True))
     assert bool(torch.isfinite(torch.stack(actual[:epochs])).all())
 
@@ -409,7 +418,7 @@ def _rollout_fields(*, seed: int) -> dict[str, Tensor]:
     """Draw a rollout's tensors, its step-0 carry two rows deep for some agents."""
     generator = torch.Generator().manual_seed(seed)
     rows = HORIZON + 1
-    carry = torch.randn(MEMORY, AGENTS, 2 * 6 + 1, generator=generator)
+    carry = torch.randn(MEMORY, AGENTS, 6 + 1, generator=generator)
     written = torch.arange(MEMORY)[:, None] >= MEMORY - 2 * (torch.arange(AGENTS) % 2)
     carry = torch.where(written[..., None], carry, 0.0)
     carry[..., -1] = written.float()
@@ -489,7 +498,7 @@ def _learn(module: nn.Module, inputs: dict[str, Tensor]) -> Tensor:
     assert isinstance(module, GTrXLPolicy)
     optimizer = ClippedAdam(module.parameters(), lr=1e-2, eps=1e-5, max_grad_norm=1.0)
     step = _Step(model=module, optimizer=optimizer, device=torch.device("cpu"))
-    learner = _learner()
+    learner = _learner(num_minibatches=1, num_passes=1)
     learner.begin_epoch(step, 0)
     losses, _ = learner(step, _as_rollout(inputs))
     return losses

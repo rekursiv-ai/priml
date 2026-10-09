@@ -8,7 +8,7 @@ each window out by hand from its segments, as the design's sequence
 
 from collections.abc import Callable, Sequence
 from functools import partial
-from typing import cast
+from typing import Final, cast
 
 import dataclasses
 
@@ -41,22 +41,30 @@ from priml.baselines.craftax.world_model.model import (
 )
 from priml.baselines.craftax.world_model.schema import (
     action_id,
-    craftax_schema,
     done_id,
     number_id,
 )
-from priml.baselines.craftax.world_model.testing import naive_attention
+from priml.baselines.craftax.world_model.testing import (
+    naive_attention,
+    small_schema,
+)
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.transformer import Transformer
 from priml.testing.cost import assert_cost_matches_torch
 
 
+SCHEMA: Final = small_schema()
+"""The cut schema: frames of 3 cells and 4 scalars, 7 slots, not the full 150."""
+
 T_G = 10
 """Global positions per test window."""
 
-CONTEXT = flat_positions(T_G)
+CONTEXT = flat_positions(T_G, frame_slots=SCHEMA.frame_slots)
 """Flat positions per test window: the most a window of ``T_G`` can need."""
+
+FRAME, JOB = SCHEMA.frame_slots, HEAD + SCHEMA.frame_slots
+"""A frame's flat positions, and a job's that generates one."""
 
 
 def _shrink_global(stack: Transformer.Config) -> None:
@@ -67,9 +75,9 @@ def _shrink_global(stack: Transformer.Config) -> None:
     assert isinstance(block, TransformerBlock.Config)
     assert isinstance(block.attn, VarlenAttention.Config)
     assert isinstance(block.ffn, SwiGLU.Config)
-    # A flat window is ~900 positions under SdpaVarlen's dense mask, whose cost
-    # grows with the heads: the design's 9:3 made every forward 4x slower here,
-    # and the layout these tests check does not depend on the head count.
+    # SdpaVarlen's dense mask costs more with every head: over the full schema's
+    # ~900 positions the design's 9:3 made each forward 4x slower, and the
+    # layout these tests check does not depend on the head count.
     block.attn.num_heads = 2
     block.attn.num_heads_kv = 1
     block.attn.channels_head = 4
@@ -78,6 +86,7 @@ def _shrink_global(stack: Transformer.Config) -> None:
 
 def _flat(context: int = CONTEXT) -> FlatModel:
     config = FlatModel.Config()
+    config.schema = SCHEMA
     config.context = context
     _shrink_global(config.lm.transformer)
     torch.manual_seed(0)
@@ -86,6 +95,7 @@ def _flat(context: int = CONTEXT) -> FlatModel:
 
 def _world() -> WorldModel:
     config = WorldModel.Config()
+    config.schema = SCHEMA
     config.encoder.channels_in = config.decoder.channels_in = 16
     assert isinstance(config.encoder, FrameEncoder.Config)
     for stack in (config.encoder.stack, config.decoder.stack):
@@ -99,19 +109,23 @@ def _world() -> WorldModel:
 
 
 def _segment(decisions: int, *, frames: int, starts: bool, terminal: bool) -> Segment:
-    schema = craftax_schema()
     generator = torch.Generator().manual_seed(decisions + 10 * frames + starts)
     cells = torch.stack(
         [
-            torch.randint(0, field.valid, (frames, 99), generator=generator)
-            for field in schema.cell_fields
+            torch.randint(
+                0,
+                field.valid,
+                (frames, SCHEMA.cell_slots),
+                generator=generator,
+            )
+            for field in SCHEMA.cell_fields
         ],
         dim=-1,
     )
     aux = torch.stack(
         [
             torch.randint(low - 155, high - 154, (frames,), generator=generator)
-            for low, high in schema.scalar_ranges
+            for low, high in SCHEMA.scalar_ranges
         ],
         dim=-1,
     )
@@ -144,19 +158,30 @@ def _batch(windows: Sequence[Sequence[Segment]] | None = None) -> PackedBatch:
 
 def test_layout_places_each_job_after_the_frame_it_reads() -> None:
     layout = flat_layout(_batch(), context=CONTEXT)
-    # Window 0: a start (153), an act (153), a terminal act (3); then a start
-    # and two acts, the last one generating the appended third frame. Window 1
-    # opens with its first frame (150), which no job generates.
+    # Window 0: a start (a job), an act (a job), a terminal act (a head); then a
+    # start and two acts, the last one generating the appended third frame.
+    # Window 1 opens with its first frame, which no job generates.
+    second = 2 * JOB + HEAD
     assert layout.job_row.tolist() == [0] * 6 + [1] * 2
-    assert layout.job_start.tolist() == [0, 153, 306, 309, 462, 615, 150, 303]
+    assert layout.job_start.tolist() == [
+        *(0, JOB, 2 * JOB),
+        *(second, second + JOB, second + 2 * JOB),
+        *(FRAME, FRAME + JOB),
+    ]
     assert layout.frame_row.tolist() == [0] * 5 + [1] * 3
-    assert layout.frame_start.tolist() == [3, 156, 312, 465, 618, 0, 153, 306]
+    assert layout.frame_start.tolist() == [
+        *(HEAD, JOB + HEAD),
+        *(second + HEAD, second + JOB + HEAD, second + 2 * JOB + HEAD),
+        *(0, FRAME + HEAD, FRAME + JOB + HEAD),
+    ]
     # Window 0's last segment runs to the end of its window: the pad is its tail.
-    window_0 = [0, 309, CONTEXT, CONTEXT, CONTEXT]
-    window_1 = [CONTEXT + 456, 2 * CONTEXT, 2 * CONTEXT, 2 * CONTEXT]
+    window_0 = [0, second, CONTEXT, CONTEXT, CONTEXT]
+    used = FRAME + 2 * JOB
+    window_1 = [CONTEXT + used, 2 * CONTEXT, 2 * CONTEXT, 2 * CONTEXT]
     assert layout.cu_seqlens.tolist() == [*window_0, *window_1]
-    assert layout.positions[0, [0, 308, 309, 310]].tolist() == [0, 308, 0, 1]
-    assert layout.positions[1, [0, 455, 456]].tolist() == [0, 455, 0]
+    positions = [0, second - 1, second, second + 1]
+    assert layout.positions[0, positions].tolist() == [0, second - 1, 0, 1]
+    assert layout.positions[1, [0, used - 1, used]].tolist() == [0, used - 1, 0]
     assert layout.fits.tolist() == [True, True]
 
 
@@ -196,7 +221,12 @@ def test_logits_match_the_plans_sequence_laid_out_by_hand(
 
 @pytest.mark.parametrize(
     ("field", "job", "slot"),
-    [("reward", 1, 0), ("done", 1, 1), ("cells", 1, 2 + 40), ("aux", 1, 2 + 99 + 7)],
+    [
+        ("reward", 1, 0),
+        ("done", 1, 1),
+        ("cells", 1, 2 + 1),
+        ("aux", 1, 2 + SCHEMA.cell_slots + 2),
+    ],
 )
 def test_no_target_is_predicted_from_itself(field: str, job: int, slot: int) -> None:
     model = _flat()
@@ -232,7 +262,12 @@ def test_targets_are_scored_as_the_world_model_scores_them() -> None:
     generator = torch.Generator().manual_seed(1)
     logits = WorldModelLogits(
         action=torch.randn(*batch.kind.shape, 43, generator=generator),
-        local=torch.randn(len(batch.job_at), 152, 461, generator=generator),
+        local=torch.randn(
+            len(batch.job_at),
+            SCHEMA.local_slots,
+            SCHEMA.vocab_size,
+            generator=generator,
+        ),
     )
     ours, theirs = flat.target_terms(batch, logits), world.target_terms(batch, logits)
     assert ours.keys() == theirs.keys()
@@ -289,9 +324,9 @@ def test_the_bound_is_reached_by_an_even_and_an_odd_window() -> None:
         s_max=1,
     )
     for batch in (even, odd):
-        t_g = batch.kind.shape[-1]
-        assert flat_layout(batch, context=flat_positions(t_g)).fits.all()
-        assert not flat_layout(batch, context=flat_positions(t_g) - 1).fits.any()
+        bound = flat_positions(batch.kind.shape[-1], frame_slots=FRAME)
+        assert flat_layout(batch, context=bound).fits.all()
+        assert not flat_layout(batch, context=bound - 1).fits.any()
 
 
 def test_a_window_past_the_bound_scores_nan_not_fewer_targets() -> None:
@@ -300,7 +335,7 @@ def test_a_window_past_the_bound_scores_nan_not_fewer_targets() -> None:
     short = _segment(1, frames=2, starts=True, terminal=False)
     windows = [[short, short], [_segment(3, frames=4, starts=True, terminal=False)]]
     batch = pack_windows(windows, t_g=6, s_max=2)
-    model = _flat(context=flat_positions(6))
+    model = _flat(context=flat_positions(6, frame_slots=FRAME))
     with torch.no_grad():
         logits = model.logits(batch)
         loss = model(batch)
@@ -311,7 +346,7 @@ def test_a_window_past_the_bound_scores_nan_not_fewer_targets() -> None:
 
 
 def test_a_window_longer_than_the_context_raises() -> None:
-    model = _flat(context=flat_positions(T_G) - 1)
+    model = _flat(context=CONTEXT - 1)
     with pytest.raises(ValueError, match="does not fit"):
         model.logits(_batch())
 
@@ -341,6 +376,7 @@ def test_cost_counts_every_matmul_but_attention() -> None:
 
 def test_the_config_cost_prices_the_products_torch_runs() -> None:
     config = FlatModel.Config()
+    config.schema = SCHEMA
     config.context = CONTEXT
     _shrink_global(config.lm.transformer)
     naive_attention(config.lm.transformer.block)
@@ -392,7 +428,8 @@ def _perturb(batch: PackedBatch, *, field: str, job: int, slot: int) -> PackedBa
         cells[following, slot - 2, 0] = (cells[following, slot - 2, 0] + 1) % 37
         return dataclasses.replace(batch, cells=cells)
     aux = batch.aux.clone()
-    aux[following, slot - 2 - 99] = (aux[following, slot - 2 - 99] + 1) % 100
+    index = slot - 2 - SCHEMA.cell_slots
+    aux[following, index] = (aux[following, index] + 1) % 100
     return dataclasses.replace(batch, aux=aux)
 
 

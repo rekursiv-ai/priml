@@ -43,11 +43,13 @@ from priml.baselines.craftax.world_model.model import (
     to_autocast_dtype,
 )
 from priml.baselines.craftax.world_model.schema import (
-    craftax_schema,
     done_id,
     number_id,
 )
-from priml.baselines.craftax.world_model.testing import naive_attention
+from priml.baselines.craftax.world_model.testing import (
+    naive_attention,
+    small_schema,
+)
 from priml.cost import cost
 from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE
@@ -81,8 +83,11 @@ def _tiny_local(stack: Transformer.Config) -> None:
     block.ffn.channels_hidden = 32
 
 
+# The cut schema keeps every cell field and the reward and done prefix, and cuts a
+# job's 152 local positions to 9: Craftax's 99 cells and 51 scalars cost the time.
 def _tiny_world_model_config() -> WorldModel.Config:
     config = WorldModel.Config()
+    config.schema = small_schema()
     config.encoder.channels_in = 16
     config.decoder.channels_in = 16
     assert isinstance(config.encoder, FrameEncoder.Config)
@@ -123,11 +128,16 @@ def _segment(
     seed: int,
 ) -> Segment:
     """Return a segment of valid random tokens."""
-    schema = craftax_schema()
+    schema = small_schema()
     generator = torch.Generator().manual_seed(seed)
     cells = torch.stack(
         [
-            torch.randint(0, field.valid, (frames, 99), generator=generator)
+            torch.randint(
+                0,
+                field.valid,
+                (frames, schema.cell_slots),
+                generator=generator,
+            )
             for field in schema.cell_fields
         ],
         dim=-1,
@@ -154,6 +164,12 @@ def _segment(
 # ``windows=1`` keeps the first alone, for tests that run a model several times.
 def _batch(*, windows: int = 2) -> PackedBatch:
     """Two windows: a terminal episode then a new one; mid-episode then a cut start."""
+    return copy.deepcopy(_packed(windows))
+
+
+# Packing takes 10 ms and nearly every test here packs; each gets its own copy.
+@cache
+def _packed(windows: int) -> PackedBatch:
     first = [
         _segment(3, frames=3, starts=True, terminal=True, seed=1),
         _segment(4, frames=5, starts=True, terminal=False, seed=2),
@@ -191,19 +207,17 @@ def test_language_model_is_causal_and_segment_isolated() -> None:
     torch.testing.assert_close(alone[0], base[0, 4:])
 
 
-# A forward and backward pass over both windows, every gradient checked:
-# 0.10 s warm on x86.
-@pytest.mark.compute_training
 def test_world_model_forward_backward_counts_and_finite_losses() -> None:
     model = _tiny_world_model()
     batch = _batch()
     loss = model(batch)
     act_jobs = int((~batch.job_is_start).sum())
     framed_jobs = int((batch.job_next >= 0).sum())
+    schema = small_schema()
     assert float(loss.count["action"]) == 12
     assert float(loss.count["reward"]) == act_jobs == float(loss.count["done"])
-    assert float(loss.count["board"]) == 99 * framed_jobs
-    assert float(loss.count["hud"]) == 51 * framed_jobs
+    assert float(loss.count["board"]) == schema.cell_slots * framed_jobs
+    assert float(loss.count["hud"]) == len(schema.scalar_ranges) * framed_jobs
     assert (act_jobs, framed_jobs) == (12, 14)
     assert bool(loss.loss.isfinite())
     assert float(loss.z_loss.detach()) > 0
@@ -221,12 +235,13 @@ def test_target_terms_are_the_terms_the_loss_sums() -> None:
         loss = model.loss(batch, logits)
         terms = model.target_terms(batch, logits)
     jobs = len(batch.job_at)
+    schema = small_schema()
     shapes = {
         "action": batch.kind.shape,
         "reward": (jobs,),
         "done": (jobs,),
-        "board": (jobs, 99),
-        "hud": (jobs, 51),
+        "board": (jobs, schema.cell_slots),
+        "hud": (jobs, len(schema.scalar_ranges)),
     }
     assert terms.keys() == shapes.keys() == loss.nll.keys()
     for name, (value, scored) in terms.items():
@@ -257,11 +272,11 @@ def test_frame_slots_sum_cell_fields_then_append_scalars() -> None:
     model = _tiny_world_model()
     batch = _batch()
     slots = model.frame_slots(batch.cells, batch.aux)
-    schema = craftax_schema()
+    schema = small_schema()
     assert slots.shape == (len(batch.cells), schema.frame_slots, 16)
     weight = model.table.weight
     offsets = torch.tensor([field.offset for field in schema.cell_fields])
-    frame, cell, scalar = 2, 5, 3
+    frame, cell, scalar = 2, 1, 3
     torch.testing.assert_close(
         slots[frame, cell],
         weight[batch.cells[frame, cell].long() + offsets].sum(0),
@@ -293,11 +308,8 @@ def test_multi_hot_board_embeds_frames_like_the_summed_gathers() -> None:
     assert gathers == [2, 1]
 
 
-# Two models' forward and backward passes, every gradient compared: 0.20 s
-# warm on x86.
-@pytest.mark.compute_training
 def test_multi_hot_board_keeps_the_loss_and_gradients() -> None:
-    batch = _batch()
+    batch = _batch(windows=1)
     config = _tiny_world_model_config()
     config.embed_board = multi_hot_board
     torch.manual_seed(0)
@@ -386,14 +398,14 @@ def test_world_model_later_frame_never_changes_earlier_logits() -> None:
     frame = int(batch.job_next[job])
     obs_of_frame = int((batch.frame_of[0] == frame).nonzero()[0, 0])
     cells = batch.cells.clone()
-    cells[frame, 5, 0] = (cells[frame, 5, 0] + 1) % 37
+    cells[frame, 2, 0] = (cells[frame, 2, 0] + 1) % 37
     changed = _replace(batch, cells=cells)
     with torch.no_grad():
         base = model.logits(batch)
         moved = model.logits(changed)
-    # Local slot 7 is cell 5; its tokens are first an INPUT at position 8.
-    torch.testing.assert_close(moved.local[: job + 1, :8], base.local[: job + 1, :8])
-    assert not torch.allclose(moved.local[job, 8:], base.local[job, 8:])
+    # Local slot 4 is cell 2; its tokens are first an INPUT at position 5.
+    torch.testing.assert_close(moved.local[: job + 1, :5], base.local[: job + 1, :5])
+    assert not torch.allclose(moved.local[job, 5:], base.local[job, 5:])
     torch.testing.assert_close(
         moved.action[0, :obs_of_frame],
         base.action[0, :obs_of_frame],
@@ -419,17 +431,16 @@ def test_world_model_later_action_never_changes_earlier_logits() -> None:
     assert not torch.allclose(moved.local[earlier_jobs], base.local[earlier_jobs])
 
 
-# The design's own sizes are the subject: 312M parameters built on the meta
-# device, 0.43 s warm on x86.
-@pytest.mark.compute_large_fixture
 def test_plan_sizes_match_the_plan_parameter_counts() -> None:
-    with torch.device("meta"):
-        model = WorldModel.Config().make()
-    assert isinstance(model.encoder, FrameEncoder)
+    """The design's own sizes are the subject: each stack's blocks, at full width."""
+    default = WorldModel.Config()
+    config = default.copy_tree().finalize()
+    assert isinstance(default.encoder, FrameEncoder.Config)
+    assert isinstance(config.encoder, FrameEncoder.Config)
     counts = {
-        "global": _blocks(model.transformer),
-        "encoder": _blocks(model.encoder.stack),
-        "decoder": _blocks(model.decoder.stack),
+        "global": _blocks(default.transformer, config.transformer),
+        "encoder": _blocks(default.encoder.stack, config.encoder.stack),
+        "decoder": _blocks(default.decoder.stack, config.decoder.stack),
     }
     assert abs(counts["global"] / 283e6 - 1) < 0.005, counts
     assert abs(counts["encoder"] / 12.4e6 - 1) < 0.01, counts
@@ -489,11 +500,8 @@ def test_decoder_block_checkpoints_only_when_a_backward_can_run(grad: bool) -> N
     assert spy.call_count == int(grad)
 
 
-# Two models' forward and backward passes, one recomputing every local block:
-# 0.38 s warm on x86.
-@pytest.mark.compute_training
 def test_checkpointed_local_blocks_recompute_with_equal_loss_and_gradients() -> None:
-    batch = _batch()
+    batch = _batch(windows=1)
     stored = _two_layer_local_model(checkpoint=False)
     recomputed = _two_layer_local_model(checkpoint=True)
     stored_calls = _count_local_calls(stored)
@@ -509,11 +517,8 @@ def test_checkpointed_local_blocks_recompute_with_equal_loss_and_gradients() -> 
         torch.testing.assert_close(grads_recomputed[name], grad, rtol=0, atol=0)
 
 
-# Two recomputing models' forward and backward passes, every aten op counted:
-# 0.43 s warm on x86.
-@pytest.mark.compute_training
 def test_recompute_keeping_attention_reruns_all_but_the_attention_kernels() -> None:
-    batch = _batch()
+    batch = _batch(windows=1)
     plain = _two_layer_local_model(checkpoint=True)
     kept = _two_layer_local_model(checkpoint=True, keeps_attention=True)
     calls, calls_kept = _count_local_calls(plain), _count_local_calls(kept)
@@ -534,16 +539,19 @@ def test_recompute_keeping_attention_reruns_all_but_the_attention_kernels() -> N
 
 
 @pytest.mark.compute_torch_compile
+@pytest.mark.gpu_torch_cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 @pytest.mark.parametrize("keeps_attention", [False, True])
 def test_checkpointed_local_blocks_compile_fullgraph_to_the_eager_gradients(
     keeps_attention: bool,
 ) -> None:
-    batch = _batch()
-    stored = _two_layer_local_model(checkpoint=False)
+    device = torch.device("cuda")
+    batch = _batch().to(device)
+    stored = _two_layer_local_model(checkpoint=False).to(device)
     recomputed = _two_layer_local_model(
         checkpoint=True,
         keeps_attention=keeps_attention,
-    )
+    ).to(device)
     torch.compiler.reset()
     try:
         compiled = torch.compile(recomputed, fullgraph=True, backend="aot_eager")
@@ -562,23 +570,24 @@ def test_checkpointed_local_blocks_compile_fullgraph_to_the_eager_gradients(
         )
 
 
+# The eager world model is the cached build's copy: its reset draws every value anew.
 @pytest.mark.parametrize(
-    "build",
+    ("build", "eager_model"),
     [
-        # The world model's init on the meta device dispatches each of its
-        # draws through the device context: built twice, 0.10 s warm on x86.
-        pytest.param(_tiny_world_model_config, marks=pytest.mark.compute_large_fixture),
-        _tiny_language_model_config,
+        (_tiny_world_model_config, _tiny_world_model),
+        (_tiny_language_model_config, lambda: _tiny_language_model_config().make()),
     ],
+    ids=["world_model", "language_model"],
 )
 def test_meta_materialization_matches_eager_reset_bit_for_bit(
     build: Callable[[], WorldModel.Config | GlobalLanguageModel.Config],
+    eager_model: Callable[[], WorldModel | GlobalLanguageModel],
 ) -> None:
     with torch.device("meta"):
         meta = build().make()
     torch.manual_seed(1)
     materialize_meta(meta, torch.device("cpu"))
-    eager = build().make()
+    eager = eager_model()
     torch.manual_seed(1)
     eager.reset_parameters()
     expected = dict(named_meta_state(eager))
@@ -868,7 +877,7 @@ def test_the_board_embeddings_cost_a_lookup_or_a_one_sided_product() -> None:
 
 def _oracle_local(batch: PackedBatch, *, frames: Tensor) -> Tensor:
     """Return local logits spiking on each job's prefix and on ``frames``' tokens."""
-    schema = craftax_schema()
+    schema = small_schema()
     prefix = len(schema.prefix_names)
     board_end = prefix + schema.cell_slots
     jobs = torch.arange(len(frames))
@@ -890,6 +899,15 @@ def _two_layer_local_model(
     keeps_attention: bool = False,
 ) -> WorldModel:
     """Return a tiny model with 2-block local stacks, all checkpointed or none."""
+    return copy.deepcopy(_seeded_two_layer_local_model(checkpoint, keeps_attention))
+
+
+# As ``_seeded_tiny_world_model``: each test gets its own copy of one build.
+@cache
+def _seeded_two_layer_local_model(
+    checkpoint: bool,
+    keeps_attention: bool,
+) -> WorldModel:
     config = _tiny_world_model_config()
     assert isinstance(config.encoder, FrameEncoder.Config)
     for stack in (config.encoder.stack, config.decoder.stack):
@@ -998,10 +1016,17 @@ def _loss_and_grads(
     return loss.loss.detach(), grads
 
 
-def _blocks(stack: torch.nn.Module) -> int:
-    """Return the parameter count of a stack's blocks."""
-    assert isinstance(stack, Transformer)
-    return sum(p.numel() for p in stack.blocks.parameters())
+# The whole 312M-parameter model takes 0.4 s to build even on the meta device.
+# The default stack broadcasts one template, so its blocks differ only in their depth
+# index, which sizes nothing.
+def _blocks(default: Transformer.Config, stack: Transformer.Config) -> int:
+    """Return a stack's block parameters: one block on the meta device, times its depth."""
+    assert not isinstance(default.block, list)
+    assert isinstance(stack.block, list)
+    with torch.device("meta"):
+        block = stack.block[0].make()
+    assert isinstance(block, nn.Module)
+    return stack.num_layers * sum(p.numel() for p in block.parameters())
 
 
 def _replace(batch: PackedBatch, **tensors: Tensor) -> PackedBatch:

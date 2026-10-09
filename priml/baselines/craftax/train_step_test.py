@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future
 from dataclasses import fields, replace
+from functools import cache
 from typing import TYPE_CHECKING, cast, override
 
 import copy
@@ -28,7 +29,7 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.craftax.env import StallCap
+from priml.baselines.craftax.env import StallCap, WorldPool
 from priml.baselines.craftax.experiments import exp000
 from priml.baselines.craftax.game.state import ATN_DIM, OBS_SIZE
 from priml.baselines.craftax.learners.imitation import BranchImitation
@@ -102,6 +103,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from priml.baselines.craftax.rollout import RolloutStorage
+    from priml.baselines.craftax.world_model.model import WorldModel
     from priml.train.custom_types import TrainStepOutput
 
 
@@ -336,19 +338,29 @@ def test_an_extra_loss_joins_the_minibatchs_one_backward() -> None:
 
 def _train_step(config: CraftaxTrainStep.Config | None = None) -> CraftaxTrainStep:
     if config is None:
-        config = tiny_train_step()
+        config = _quick(tiny_train_step())
     torch.manual_seed(0)
     return config.make()
 
 
-@pytest.mark.compute_training
+# An epoch of the tiny pipeline at a horizon of 4 in two windows took 25 ms on x86;
+# here 15 ms. The windows' tiling is checked by its own tests.
+def _quick(config: CraftaxTrainStep.Config) -> CraftaxTrainStep.Config:
+    """Cut a tiny step's rollouts to 2 steps, learned as one window of every agent."""
+    config.rollout.horizon = 2
+    windows = config.learner
+    assert isinstance(windows, AgentWindows.Config)
+    windows.minibatch_size = 2 * config.env.num_envs
+    return config
+
+
 def test_the_pipeline_boots_then_prefetches_one_rollout_ahead_of_the_learner() -> None:
     step = _train_step()
     try:
         # The training loop drives it through the step protocol alone.
         initial = [p.detach().clone() for p in step.model.parameters()]
         assert isinstance(step.learner, AgentWindows)
-        assert step.learner.offsets == [0, 2]
+        assert step.learner.offsets == [0]
         first = step.train_step()
         # Boot and epoch 0 both collected with the initial weights, which the
         # actor still holds; the learner has moved on, and the slots swapped.
@@ -362,7 +374,7 @@ def test_the_pipeline_boots_then_prefetches_one_rollout_ahead_of_the_learner() -
         assert first["model"].shape == (len(TorchPPO.Config.LOSS_NAMES),)
         assert "metrics" in first
         assert "learning_rate" in first["metrics"]
-        assert first["metrics"]["agent_steps"] == 1 * 4 * 4
+        assert first["metrics"]["agent_steps"] == 1 * 4 * 2
         step.train_step()
         # Epoch 1 copied the epoch-0 update into the actor before its rollout.
         assert (step.global_step, step.ready, step.write) == (2, 0, 1)
@@ -387,7 +399,6 @@ def test_the_pipeline_boots_then_prefetches_one_rollout_ahead_of_the_learner() -
         step.close()
 
 
-@pytest.mark.compute_training
 def test_the_envs_are_readied_before_every_rollout_and_report_practice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -450,15 +461,7 @@ def test_a_resumed_step_reports_only_the_episodes_after_the_resume() -> None:
         source.env.stats["log"]["perf"][:2] = (0.5, 1.5)
         saved = io.BytesIO()
         torch.save(source.state_dict(), saved)
-        target.load_state_dict(
-            from_plain(
-                cast(
-                    "object",
-                    torch.load(io.BytesIO(saved.getvalue()), weights_only=True),
-                ),
-                dict[str, object],
-            ),
-        )
+        target.load_state_dict(_read(saved))
         resumed = target._episode_metrics()
         target.env.stats["log"]["n"][0] += 1.0
         target.env.stats["log"]["perf"][0] += 0.25
@@ -490,42 +493,62 @@ def _masters_and_momentum(step: CraftaxTrainStep) -> list[Tensor]:
     return [value.clone() for value in (*muon.master_weights, *muon.momentum_buffers)]
 
 
-@pytest.mark.compute_training
-def test_a_resumed_run_equals_an_uninterrupted_one() -> None:
-    """Three straight epochs against a checkpoint after the first and two more (CKPT-1).
+# Closing waits for the rollout the last epoch prefetched into the ready slot.
+def _prefetched(step: CraftaxTrainStep) -> list[Tensor]:
+    """Return a closed step's ready slot: the rollout its last epoch prefetched."""
+    return _slot(step, step.ready)
 
-    The resumed step's first epoch prefetches a rollout from the saved
-    environments, streams and carries, and learns from the saved slot; its
-    second learns from that rollout. Each saved part is needed: without the
-    slot the first epoch differs, without the rest the second does.
+
+# The carries and draw counts are the buffers' running state, not the slot's: they
+# move on as the next rollout starts.
+def _slot(step: CraftaxTrainStep, slot: int) -> list[Tensor]:
+    """Return a copy of one slot's rollout: what it stores, the carries at its start."""
+    return [
+        value.clone()
+        for name, value in step.rollout.state_dict(slot=slot).items()
+        if name not in {"carry", "draws"}
+    ]
+
+
+def _read(saved: io.BytesIO) -> dict[str, object]:
+    """Read back a step's state as the checkpointer's plain ``torch.save`` wrote it."""
+    return from_plain(
+        cast("object", torch.load(io.BytesIO(saved.getvalue()), weights_only=True)),
+        dict[str, object],
+    )
+
+
+def test_a_resumed_run_equals_an_uninterrupted_one() -> None:
+    """Two straight epochs against a checkpoint after the first and one more (CKPT-1).
+
+    The resumed step's epoch learns from the saved slot and prefetches a
+    rollout from the saved environments, streams and carries. Each saved part
+    is needed: without the slot its losses and Muon's state differ, without
+    the rest the rollout it prefetched does. Same-host numerics: the golden
+    above holds the bits.
     """
-    config = tiny_train_step()
+    config = _quick(tiny_train_step())
+    config.train_budget_steps = 3
     straight = _train_step(config)
     try:
         straight.train_step()
         # As the checkpointer writes a plain checkpoint, to be read back below.
         saved = io.BytesIO()
         torch.save(straight.state_dict(), saved)
-        expected = [straight.train_step()["model"] for _ in range(2)]
-        expected += _masters_and_momentum(straight)
+        loss = straight.train_step()["model"]
     finally:
         straight.close()
+    expected = [loss, *_masters_and_momentum(straight), *_prefetched(straight)]
     resumed = _train_step(config)
     try:
-        resumed.load_state_dict(
-            from_plain(
-                cast(
-                    "object",
-                    torch.load(io.BytesIO(saved.getvalue()), weights_only=True),
-                ),
-                dict[str, object],
-            ),
-        )
-        actual = [resumed.train_step()["model"] for _ in range(2)]
-        actual += _masters_and_momentum(resumed)
+        resumed.load_state_dict(_read(saved))
+        loss = resumed.train_step()["model"]
     finally:
         resumed.close()
-    assert all(torch.equal(a, b) for a, b in zip(actual, expected, strict=True))
+    actual = [loss, *_masters_and_momentum(resumed), *_prefetched(resumed)]
+    assert len(actual) == len(expected)
+    for index, (ours, theirs) in enumerate(zip(actual, expected, strict=True)):
+        assert torch.equal(ours, theirs), index
 
 
 def test_a_loaded_state_restores_every_part_of_the_step() -> None:
@@ -562,15 +585,7 @@ def test_a_loaded_state_restores_every_part_of_the_step() -> None:
         source.ready, source.write, source._booted = 1, 0, True
         saved = io.BytesIO()
         torch.save(source.state_dict(), saved)
-        target.load_state_dict(
-            from_plain(
-                cast(
-                    "object",
-                    torch.load(io.BytesIO(saved.getvalue()), weights_only=True),
-                ),
-                dict[str, object],
-            ),
-        )
+        target.load_state_dict(_read(saved))
         for ours, theirs in zip(
             target.model.parameters(),
             source.model.parameters(),
@@ -718,16 +733,15 @@ def test_the_step_refuses_an_evaluation_it_could_not_play(
         config.make()
 
 
-@pytest.mark.compute_training
 def test_a_world_model_feature_trains_through_the_pipeline_and_its_evaluation() -> None:
     """The learner reads the stored features; the evaluation steps engines of its own."""
-    config = tiny_train_step()
-    config.feature = smoke_feature()
+    config = _quick(tiny_train_step())
+    config.train_budget_steps = 2
+    config.feature = _smoke_feature()
     model = config.model
     assert isinstance(model, MinGRUPolicy.Config)
     proj = model.proj_feature = Linear.Config()
     proj.channels_in = 36
-    config.evaluation.num_episodes = 1
     step = _train_step(config.copy_tree().finalize())
     try:
         # The policy refuses a window without its feature, so an epoch that
@@ -740,8 +754,13 @@ def test_a_world_model_feature_trains_through_the_pipeline_and_its_evaluation() 
         assert step.train_loss()["model"].isfinite().all()
         evaluator = step.make_evaluator()
         try:
-            played = evaluator.play()
-            assert played.rollouts >= 1
+            evaluator.collect()
+            engines = evaluator._rollout.engines
+            assert engines
+            assert all(
+                isinstance(engine, FeatureEngine) and engine.keys.numel()
+                for engine in engines
+            )
         finally:
             evaluator.close()
         assert step.feature is not None
@@ -757,7 +776,7 @@ def test_a_world_model_feature_trains_through_the_pipeline_and_its_evaluation() 
 def test_a_feature_is_refused_the_symbolic_view() -> None:
     """Refused before anything is built, the world model's weights included."""
     config = tiny_train_step()
-    config.feature = smoke_feature()
+    config.feature = _smoke_feature()
     config.env.rules.symbolic_observation = True
     model = config.model = MinGRUPolicy.Config()
     model.embedding = DenseObservation.Config()
@@ -768,7 +787,7 @@ def test_a_feature_is_refused_the_symbolic_view() -> None:
 def test_the_step_accepts_a_feature_with_practice() -> None:
     """The recipe check passes practice restores beside a feature: the rollout owns their history."""
     config = tiny_train_step()
-    config.feature = smoke_feature()
+    config.feature = _smoke_feature()
     config.env.practice = FrontierPractice.Config()
     _check_recipe(config)
 
@@ -905,36 +924,45 @@ def test_a_joint_steps_evaluation_shares_its_weights_and_stores_nothing() -> Non
         step.close()
 
 
-@pytest.mark.compute_training
 def test_a_joint_epoch_trains_both_and_its_checkpoint_carries_the_world_model() -> None:
-    """The windows learn from contexts; a resumed step holds the same weights and state.
+    """The windows learn from contexts; reloaded after it moves on, the step holds them.
 
-    The rollout is the boot's; its contexts are drawn, as the store will hold
-    them. The source the actor reads keeps its weights until a publication,
-    and a load publishes.
+    The rollout is drawn, its contexts as the store will hold them, rather than
+    played: the actor's side is ``rollout_test``'s. The source the actor reads
+    keeps its weights until a publication, and a load publishes: after the
+    step's trained weights, their publication and Muon's state all move, the
+    checkpoint brings back each.
     """
-    source, target = _joint_step(), _joint_step()
-    frozen = _train_step()
+    step = _joint_step()
     try:
-        joint = source.joint
+        joint = step.joint
         assert joint is not None
-        source._boot()
-        rollout = replace(
-            source._learner_rollout(source.rollout.slots[source.ready]),
+        model = step.config.model
+        assert isinstance(model, MinGRUPolicy.Config)
+        agents, horizon = step.env.num_envs, step.config.rollout.horizon
+        features = torch.randn(
+            horizon,
+            agents,
+            36,
+            generator=torch.Generator().manual_seed(6),
+        )
+        rollout = LearnerRollout.from_time_major(
+            *_rollout(model, agents=agents, horizon=horizon),
+            reward_scale=1.0,
+            reward_clip=1.0,
+            features=features.bfloat16(),
             contexts=random_contexts(
-                torch.tensor(((2, 3, 4, 1), (1, 2, 3, 4), (3, 3, 3, 3), (1, 2, 1, 2))),
-                torch.tensor(
-                    ((0, 0, 0, 1), (1, 1, 1, 1), (0, 0, 0, 0), (1, 1, 1, 1)),
-                ).bool(),
+                torch.tensor(((2, 3, 4, 1), (1, 2, 1, 2))),
+                torch.tensor(((0, 0, 0, 1), (1, 1, 1, 1))).bool(),
                 schema=craftax_schema(),
                 slots=3,
-                counts=torch.tensor((1, 0, 2, 0)),
+                counts=torch.tensor((1, 0)),
                 seed=5,
             ),
         )
         before = {name: weight.clone() for name, weight in joint.weights().items()}
-        policy = [parameter.detach().clone() for parameter in source.model.parameters()]
-        losses, _ = source.learner(source, rollout)
+        policy = [parameter.detach().clone() for parameter in step.model.parameters()]
+        losses, _ = step.learner(step, rollout)
         assert bool(losses.isfinite().all())
         assert not all(
             torch.equal(weight, before[name])
@@ -942,41 +970,48 @@ def test_a_joint_epoch_trains_both_and_its_checkpoint_carries_the_world_model() 
         )
         assert not all(
             torch.equal(parameter, old)
-            for parameter, old in zip(source.model.parameters(), policy, strict=True)
+            for parameter, old in zip(step.model.parameters(), policy, strict=True)
         )
         for name, weight in before.items():
             assert torch.equal(joint.source.get_parameter(name), weight), name
-        total, _ = source.learner.loss(source, rollout)
+        total, _ = step.learner.loss(step, rollout)
         assert bool(total.isfinite())
         with pytest.raises(ValueError, match="stored context"):
-            source.learner(source, replace(rollout, contexts=None))
+            step.learner(step, replace(rollout, contexts=None))
         saved = io.BytesIO()
-        torch.save(source.state_dict(), saved)
-        state = from_plain(
-            cast("object", torch.load(io.BytesIO(saved.getvalue()), weights_only=True)),
-            dict[str, object],
-        )
-        target.load_state_dict(state)
-        assert target.joint is not None
-        for (name, ours), theirs in zip(
-            target.joint.weights().items(),
-            joint.weights().values(),
-            strict=True,
-        ):
-            assert torch.equal(ours, theirs), name
-            assert torch.equal(target.joint.source.get_parameter(name), theirs), name
-        for ours, theirs in zip(
-            _masters_and_momentum(target),
-            _masters_and_momentum(source),
-            strict=True,
-        ):
+        torch.save(step.state_dict(), saved)
+        trained = {name: weight.clone() for name, weight in joint.weights().items()}
+        optimizer = _masters_and_momentum(step)
+        muon = step.optimizer
+        assert isinstance(muon, FusedMuon)
+        with torch.no_grad():
+            for value in (
+                *joint.parameters(),
+                *joint.source.parameters(),
+                *muon.master_weights,
+                *muon.momentum_buffers,
+            ):
+                value.add_(1)
+        step.load_state_dict(_read(saved))
+        for name, weight in joint.weights().items():
+            assert torch.equal(weight, trained[name]), name
+            assert torch.equal(joint.source.get_parameter(name), trained[name]), name
+        for ours, theirs in zip(_masters_and_momentum(step), optimizer, strict=True):
             assert torch.equal(ours, theirs)
-        with pytest.raises(ValueError, match="only there"):
-            frozen.load_state_dict(state)
-        with pytest.raises(ValueError, match="only there"):
-            target.load_state_dict(frozen.state_dict())
     finally:
-        for step in (source, target, frozen):
+        step.close()
+
+
+def test_a_joint_and_a_frozen_step_refuse_each_others_checkpoints() -> None:
+    """The trained world model is in the one checkpoint and not the other."""
+    joint, frozen = _joint_step(), _train_step()
+    try:
+        with pytest.raises(ValueError, match="only there"):
+            frozen.load_state_dict(joint.state_dict())
+        with pytest.raises(ValueError, match="only there"):
+            joint.load_state_dict(frozen.state_dict())
+    finally:
+        for step in (joint, frozen):
             step.close()
 
 
@@ -1005,21 +1040,26 @@ class _AgreementWindows(AgentWindows):
         return super().__call__(step, rollout)
 
 
-@pytest.mark.compute_training
 @pytest.mark.parametrize("history", ["refill", "sliding"])
 def test_a_joint_learner_replays_the_features_its_actor_read_at_the_same_weights(
     history: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every epoch's stored contexts replay to the stored features, after rebuilds.
+    """Every epoch's stored contexts replay to the stored features, after a rebuild.
 
     One slot, so each epoch learns from a rollout of the weights it starts
     with: published into the source, the actor's histories rebuilt under them
-    from the second epoch on. Within ``feature_test``'s 2e-6 of the engine's
+    for the second epoch. Within ``feature_test``'s 2e-6 of the engine's
     training forward, in float32 with masked attention, for both histories.
+    Two agents, one a buffer, from a pool of one world: each replays the full
+    schema's frames.
     """
     config = tiny_train_step()
-    feature = config.feature = smoke_feature()
+    config.env.num_envs = 2
+    _one_world(config)
+    config = _quick(config)
+    config.train_budget_steps = 2
+    feature = config.feature = _smoke_feature()
     if history == "sliding":
         window = feature.history = Sliding.Config()
         window.decisions = 4
@@ -1046,18 +1086,18 @@ def test_a_joint_learner_replays_the_features_its_actor_read_at_the_same_weights
             lambda: (calls.append(step.global_step), rebuild())[1],
         )
         before = {name: w.clone() for name, w in step.joint.weights().items()}
-        results = [step.train_step() for _ in range(3)]
+        results = [step.train_step() for _ in range(2)]
         learner = step.learner
         assert isinstance(learner, _AgreementWindows)
-        assert len(learner.gaps) == 3
+        assert len(learner.gaps) == 2
         assert max(learner.gaps) <= 2e-6, learner.gaps
         reported = [float(r.get("metrics", {})["joint/feature_gap"]) for r in results]
         assert max(reported) <= 1e-5, reported
-        # A rebuild before every rollout after the first epoch's learning.
-        assert calls == [1, 2]
+        # A rebuild before the rollout after the first epoch's learning.
+        assert calls == [1]
         rebuilds = [float(r.get("metrics", {})["rebuild_seconds"]) for r in results]
         assert rebuilds[0] == 0.0
-        assert min(rebuilds[1:]) > 0
+        assert rebuilds[1] > 0
         assert not all(
             torch.equal(weight, before[name])
             for name, weight in step.joint.weights().items()
@@ -1069,7 +1109,7 @@ def test_a_joint_learner_replays_the_features_its_actor_read_at_the_same_weights
 def test_a_feature_is_joint_exactly_when_the_learner_trains_it() -> None:
     """A joint feature no learner trains would store inputs nothing reads."""
     config = tiny_train_step()
-    config.feature = smoke_feature()
+    config.feature = _smoke_feature()
     config.feature.joint = True
     frozen = config.copy_tree().finalize().feature
     assert isinstance(frozen, WorldModelFeature.Config)
@@ -1105,7 +1145,7 @@ def test_feature_training_needs_a_world_model_feature_and_whole_windows(
     config = tiny_train_step()
     config.feature_training = ContextReplay.Config()
     if missing == "windows":
-        config.feature = smoke_feature()
+        config.feature = _smoke_feature()
         config.learner = ShuffledTransitions.Config()
     match = "learner must be AgentWindows" if missing == "windows" else "reads no such"
     with pytest.raises(ValueError, match=match):
@@ -1113,9 +1153,11 @@ def test_feature_training_needs_a_world_model_feature_and_whole_windows(
 
 
 def _joint_step() -> CraftaxTrainStep:
-    """Return the tiny step training the smoke world model's feature with its policy."""
+    """Return the tiny step on 2 agents, training the smoke world model's feature with its policy."""
     config = tiny_train_step()
-    config.feature = smoke_feature()
+    config.env.num_envs = 2
+    _one_world(config)
+    config.feature = _smoke_feature()
     model = config.model
     assert isinstance(model, MinGRUPolicy.Config)
     proj = model.proj_feature = Linear.Config()
@@ -1124,10 +1166,54 @@ def _joint_step() -> CraftaxTrainStep:
     return _train_step(config)
 
 
+# A pool's world takes 0.7 ms to generate on x86; these steps' tests read none apart.
+def _one_world(config: CraftaxTrainStep.Config) -> None:
+    """Shrink the step's world pool to one world."""
+    pool = config.env.restart
+    assert isinstance(pool, WorldPool.Config)
+    pool.num_worlds = 1
+
+
+def _smoke_feature() -> WorldModelFeature.Config:
+    """Return ``smoke_feature`` whose weights are copies of one build of its model."""
+    config = smoke_feature()
+    config.weights = _SmokeWeights.Config()
+    return config
+
+
+class _SmokeWeights:
+    """``smoke_feature``'s world model, built once a process and copied for each source.
+
+    The build finalizes ``exp_smoke``'s whole config and draws its ~300 weights:
+    30 ms on x86, a third of a test that makes a source. ``feature_test`` checks
+    ``InitialWeights`` itself.
+    """
+
+    class Config(Fig["_SmokeWeights"]):
+        """Nothing to configure: the weights are ``smoke_feature``'s."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def __call__(self) -> WorldModel:
+        """Return a copy of the model, at the seeded init and in eval mode."""
+        return copy.deepcopy(_smoke_model())
+
+
+@cache
+def _smoke_model() -> WorldModel:
+    """Build ``smoke_feature``'s world model."""
+    return smoke_feature().weights.make()()
+
+
+# The default micro-batches, 16,384 tokens of passes and 512 frames, are padded full:
+# at these sizes nearly all of a replay's work.
 def _small_bins() -> ContextReplay.Config:
-    """Return the replay with bins as wide as the longest pass, as tiny windows want."""
+    """Return the replay in micro-batches as small as tiny windows want."""
     config = ContextReplay.Config()
     config.bin_tokens = 1
+    config.pass_tokens = 26
+    config.frames_per_batch = 5
     return config
 
 
@@ -1232,10 +1318,9 @@ def test_the_step_has_no_field_it_would_ignore(name: str) -> None:
         setattr(config, name, None)
 
 
-@pytest.mark.compute_training
 def test_the_step_anneals_by_its_schedule_slot() -> None:
     """The rate each epoch comes from ``schedule``, called with the configured rate."""
-    config = tiny_train_step()
+    config = _quick(tiny_train_step())
     config.schedule = PartialConfig(_half_rate)
     step = _train_step(config)
     try:
@@ -1290,10 +1375,9 @@ def test_each_epoch_refills_the_one_rate_tensor_the_optimizer_reads(
     assert read[0] is read[1]
 
 
-@pytest.mark.compute_training
 def test_the_default_precision_learns_from_fp32_storage_and_an_fp32_carry() -> None:
     """The class defaults' precision end to end: fp32 carries, values and rollout rows."""
-    config = tiny_train_step()
+    config = _quick(tiny_train_step())
     model = config.model
     assert isinstance(model, MinGRUPolicy.Config)
     model.state_dtype = model.output_dtype = config.rollout.dtype = torch.float32
@@ -1311,10 +1395,9 @@ def test_the_default_precision_learns_from_fp32_storage_and_an_fp32_carry() -> N
     assert bool(torch.isfinite(result["model"]).all())
 
 
-@pytest.mark.compute_training
 def test_the_step_trains_with_an_optimizer_other_than_fused_muon() -> None:
     """The optimizer slot takes any optimizer the learner can drive (CFG-8)."""
-    config = tiny_train_step()
+    config = _quick(tiny_train_step())
     config.optimizer = PartialConfig(torch.optim.SGD, lr=0.1)
     step = _train_step(config)
     try:
@@ -1455,7 +1538,6 @@ class _FreshnessLearner:
         return self.windows(step, rollout)
 
 
-@pytest.mark.compute_training
 @pytest.mark.parametrize(("num_slots", "fresh"), [(1, True), (2, False)])
 def test_one_slot_learns_from_a_rollout_of_the_weights_it_updates(
     num_slots: int,
@@ -1467,7 +1549,7 @@ def test_one_slot_learns_from_a_rollout_of_the_weights_it_updates(
     weights'; a single slot's is always the weights the epoch starts from, and
     every epoch times its rollout.
     """
-    config = tiny_train_step()
+    config = _quick(tiny_train_step())
     config.model = _LinearPolicy.Config()
     config.learner = _FreshnessLearner.Config()
     # The fp32 policy's values, stored unrounded, so a fresh rollout's match it.
@@ -1548,64 +1630,53 @@ def _half_rate(base: float, *, step: int, total_steps: int) -> float:
     return base / 2
 
 
-@pytest.mark.compute_training
-def test_the_tiny_steps_epochs_match_their_golden(
-    tmp_path: Path,
-) -> None:
-    """The tiny step from portable seed-73 masters, every epoch frozen on every host.
+def test_the_tiny_steps_epoch_matches_its_golden(tmp_path: Path) -> None:
+    """The tiny step's epoch from portable seed-73 masters, frozen on every host.
 
-    The whole pipeline in its torch forms: the boot rollout, each epoch's
-    prefetch, the learner's two minibatches and Muon. exp000's fp32 cosine
-    spans the four epochs, so they walk it from the base rate down to its
-    last step before zero. Each epoch's rate, mean losses and masters.
+    The whole pipeline in its torch forms: the boot rollout, the learner's
+    window of every agent, Muon, and exp000's fp32 cosine at its base rate:
+    the epoch's rate, mean losses and masters. One epoch of two-step rollouts,
+    as host-agnostic numerics cost the pipeline 0.1 s an epoch on x86; the
+    rollouts the epochs after it learn from are ``rollout_test``'s golden, and
+    a resume and a reload are the tests above and below.
     """
+    config = _quick(tiny_train_step())
+    config.train_budget_steps = 1
     with host_agnostic_pipeline():
-        lines = _train_out(_portable_step(tmp_path))
+        lines = _train_out(_from_portable_masters(config, tmp_path))
     assert_golden(test_file=__file__, name="train_step_tiny", lines=lines)
 
 
-@pytest.mark.compute_training
-def test_the_tiny_step_resumed_after_epoch_2_trains_as_its_golden(
-    tmp_path: Path,
-) -> None:
-    """Two epochs, a checkpoint through ``torch.save``, a new step, two more.
-
-    Epochs 3 and 4 of the resumed run must be the uninterrupted golden's.
-    """
-    golden = read_golden(test_file=__file__, name="train_step_tiny")
-    with host_agnostic_pipeline():
-        first = _portable_step(tmp_path)
-        try:
-            for _ in range(2):
-                first.train_step()
-            torch.save(first.state_dict(), tmp_path / "checkpoint.pt")
-        finally:
-            first.close()
-        lines = _train_out(
-            _portable_step(tmp_path),
-            checkpoint=tmp_path / "checkpoint.pt",
-        )
-    assert lines == _after_epoch_2(golden)
-
-
-@pytest.mark.compute_training
-def test_a_checkpoint_loaded_after_two_more_epochs_trains_as_the_golden(
-    tmp_path: Path,
-) -> None:
-    """Epoch 2's checkpoint, loaded into the step that went on to epoch 4, then 3 and 4.
+def test_a_checkpoint_loaded_into_a_step_that_moved_on_trains_as_it_did() -> None:
+    """Epoch 1's checkpoint, loaded into the step after epoch 3: epoch 2 runs again.
 
     The load lands on a step whose optimizer state, slots, carries and
-    environments have all moved on; epochs 3 and 4 must still be the
-    uninterrupted golden's. On the GPU the load also drops captured learner
-    epochs, which the GPU test below pins.
+    environments have all moved on; the epoch after it must be epoch 2 as it
+    ran: its losses, Muon's state, and the rollout it prefetched. On the GPU
+    the load also drops captured learner epochs, which the GPU test below pins.
     """
-    golden = read_golden(test_file=__file__, name="train_step_tiny")
-    with host_agnostic_pipeline():
-        lines = _reloaded_epochs(
-            _portable_step(tmp_path),
-            tmp_path / "checkpoint.pt",
-        )
-    assert lines == _after_epoch_2(golden)
+    config = _quick(tiny_train_step())
+    config.train_budget_steps = 4
+    step = _train_step(config)
+    try:
+        step.train_step()
+        saved = io.BytesIO()
+        torch.save(step.state_dict(), saved)
+        expected: list[Tensor] = [step.train_step()["model"]]
+        expected += _masters_and_momentum(step)
+        prefetched = step.ready
+        # The third epoch learns from the second's rollout, so it is whole by now.
+        step.train_step()
+        expected += _slot(step, prefetched)
+        step.load_state_dict(_read(saved))
+        actual: list[Tensor] = [step.train_step()["model"]]
+        actual += _masters_and_momentum(step)
+    finally:
+        step.close()
+    actual += _prefetched(step)
+    assert len(actual) == len(expected)
+    for index, (ours, theirs) in enumerate(zip(actual, expected, strict=True)):
+        assert torch.equal(ours, theirs), index
 
 
 @pytest.mark.gpu_triton
@@ -1654,16 +1725,18 @@ def test_a_checkpoint_loaded_after_the_capture_trains_as_the_golden(
     assert lines == _after_epoch_2(golden)
 
 
-@pytest.mark.compute_training
-def test_exp002s_first_three_epochs_match_their_golden() -> None:
+def test_exp002s_epoch_matches_its_golden() -> None:
     """exp002 at test size from the policy's own init under torch seed 0, frozen.
 
     From scratch, so the golden moves with the init's draws: their order,
     their distributions, or torch's generator. The env plays exp002's rules
-    in fresh worlds and writes the dense symbolic view.
+    in fresh worlds and writes the dense symbolic view. One epoch of two-step
+    rollouts, as the tiny step's golden above.
     """
+    config = _quick(tiny_exp002_step())
+    config.train_budget_steps = 1
     with host_agnostic_pipeline():
-        step = _train_step(tiny_exp002_step())
+        step = _train_step(config)
         lines = ["# from-scratch: the policy's own init under torch seed 0"]
         lines += _train_out(step)
     assert_golden(
@@ -1725,13 +1798,6 @@ def test_exp000s_learning_rates_match_their_golden() -> None:
         f"epoch {epoch} {fp32(rates.item(epoch))}" for epoch in (0, 1, 5, 3331, 6661)
     ]
     assert_golden(test_file=__file__, name="muon_exp000_rates", lines=lines)
-
-
-def _portable_step(tmp_path: Path) -> CraftaxTrainStep:
-    """Build the tiny step from portable seed-73 masters, its cosine four epochs long."""
-    config = tiny_train_step()
-    config.train_budget_steps = 4
-    return _from_portable_masters(config, tmp_path)
 
 
 # The step loads them as exp000 does, from its ``checkpoint``.

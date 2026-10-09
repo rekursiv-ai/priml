@@ -15,7 +15,7 @@ and one row's reset leaves the other rows' features bit for bit (G3a, G3b).
 
 from __future__ import annotations
 
-from functools import partial
+from functools import cache, partial
 from typing import TYPE_CHECKING, Final
 
 import copy
@@ -394,6 +394,8 @@ def test_ensure_room_plans_the_rows_that_can_slide_in_whole_chunks() -> None:
 
 
 @pytest.mark.compute_torch_compile
+@pytest.mark.gpu_torch_cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_a_sliding_engine_compiles_one_fallback_shape_whatever_its_capacity() -> None:
     """Fallbacks of 1, 2, 4 and 8 rows and a restore fit a budget of three shapes.
 
@@ -402,52 +404,40 @@ def test_a_sliding_engine_compiles_one_fallback_shape_whatever_its_capacity() ->
     joint learner share its budget; past it, a full-graph compile raises.
     """
     config = _sliding_config()
-    sliding = config.history
-    assert isinstance(sliding, Sliding.Config)
-    sliding.fallback_rows = 4
     config.compile = PartialConfig(
         torch.compile,
         backend="eager",
         fullgraph=True,
         dynamic=False,
     )
-    rows = 8
-    cells, aux, actions = _frames(rows, 1)
-    obs, zeros = decode(cells[:, 0], aux[:, 0]), torch.zeros(rows)
-    archive = (
-        DonorHistory.Config()
-        .make()
-        .archive(
-            entries=1,
-            ring=DECISIONS,
-            width=36,
-            frames=False,
-            dtype=torch.float32,
-            device=torch.device("cpu"),
-        )
-    )
     torch.compiler.reset()
     try:
         with torch._dynamo.config.patch(recompile_limit=3):
-            engine = _engine(config.make(), rows=rows)
-            for able in (1, 2, 4, 8):
-                engine.needs_start.fill_(value=False)
-                engine.count.fill_(1)
-                engine.length.fill_(2)
-                engine.count[:able] = DECISIONS
-                engine.length[:able] = 2 * DECISIONS
-                engine.ensure_room(1)
-                engine(obs, zeros, actions[:, 0].float())
-            engine.save_history(
-                archive,
-                torch.tensor([0]),
-                slice(rows - 1, rows),
-                previous_action=zeros[:1],
-                fresh=zeros[:1],
-            )
-            engine.restore_history(archive, torch.tensor([0] + [-1] * (rows - 1)))
+            _fall_back_then_restore(config, device=torch.device("cuda"))
     finally:
         torch.compiler.reset()
+
+
+def test_a_sliding_engine_runs_each_kernel_at_three_shapes_whatever_its_capacity() -> (
+    None
+):
+    """The test above's budget, eagerly: each kernel sees three input shapes at most.
+
+    A compiled kernel compiles once per shape, so a fallback chunk sized by how
+    many rows fall back would compile once per count and overrun the budget.
+    """
+    config = _sliding_config()
+    config.compile = _ShapeRecordingCompile.Config()
+    kernels = _fall_back_then_restore(config, device=torch.device("cpu")).kernels
+    shapes: dict[str, set[tuple[torch.Size, ...]]] = {}
+    for name, kernel in (
+        ("pre", kernels.pre),
+        ("post", kernels.post),
+        ("encode", kernels.encode),
+    ):
+        assert isinstance(kernel, _ShapeRecording), name
+        shapes[name] = kernel.shapes
+    assert all(1 <= len(seen) <= 3 for seen in shapes.values()), shapes
 
 
 def test_a_joint_restore_encodes_the_restored_rows_frames_alone() -> None:
@@ -530,7 +520,7 @@ def test_a_restored_row_reads_its_donors_history_or_a_fresh_window(
     the same block boundaries, the restore's among them.
     """
     used = sliding_source if sliding else source
-    steps = 10
+    steps = 9
     cells, aux, actions = _frames(2, steps)
     own_cells, own_aux, own_actions = _frames(3, steps, seed=7)
     obs, own_obs = decode(cells, aux), decode(own_cells, own_aux)
@@ -679,9 +669,10 @@ def test_after_new_weights_a_rebuilt_engine_reads_every_context_under_them(
     row 2's next step begins one.
     """
     config = _sliding_config() if sliding else _config(layers=2)
+    config.weights = _TwoLayerWeights.Config()
     config.joint = True
     source = config.make()
-    rows, steps, changed = 3, 10, 7
+    rows, steps, changed = 3, 9, 7
     cells, aux, actions = _frames(rows, steps)
     engine = _engine(source, rows=rows)
     assert engine.ring == (DECISIONS if sliding else T_MAX // 2)
@@ -711,7 +702,12 @@ def test_after_new_weights_a_rebuilt_engine_reads_every_context_under_them(
         ]
         for row in range(rows)
     ]
-    for model, times in ((old, range(changed)), (source.model, range(changed, steps))):
+    # Earlier steps are each the old weights' forward, as the tests above check; the
+    # last of them, then every step after the rebuild, whose contexts reach before it.
+    for model, times in (
+        (old, range(changed - 1, changed)),
+        (source.model, range(changed, steps)),
+    ):
         want = context_features(
             model,
             layers=2,
@@ -1050,6 +1046,29 @@ def _config(*, layers: int) -> WorldModelFeature.Config:
     return config
 
 
+class _TwoLayerWeights:
+    """``_config``'s two-layer smoke model, built once a process and copied for each source.
+
+    For a source whose weights a test moves; the others share a fixture's.
+    """
+
+    class Config(Fig["_TwoLayerWeights"]):
+        """Nothing to configure: the weights are ``_config``'s."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def __call__(self) -> WorldModel:
+        """Return a copy of the model, at the seeded init and in eval mode."""
+        return copy.deepcopy(_two_layer_model())
+
+
+@cache
+def _two_layer_model() -> WorldModel:
+    """Build ``_config``'s two-layer smoke model."""
+    return _config(layers=2).weights.make()()
+
+
 def _make_source(
     *,
     layers: int,
@@ -1207,6 +1226,85 @@ class _CountingCompile:
     def __call__(self, function: Callable[..., object]) -> Callable[..., object]:
         """Return ``function``, counted."""
         return _CountedCalls(function)
+
+
+class _ShapeRecording:
+    """A function, and the input shapes it was called at: a compiled kernel's graphs."""
+
+    def __init__(self, function: Callable[..., object]) -> None:
+        self.function = function
+        self.shapes: set[tuple[torch.Size, ...]] = set()
+
+    def __call__(self, *args: object) -> object:
+        """Record the shapes of the tensor arguments, then make the call."""
+        self.shapes.add(
+            tuple(arg.shape for arg in args if isinstance(arg, torch.Tensor)),
+        )
+        return self.function(*args)
+
+
+class _ShapeRecordingCompile:
+    """A ``compile`` slot that records each kernel's input shapes rather than compiling it."""
+
+    class Config(Fig["_ShapeRecordingCompile"]):
+        """No options."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def __call__(self, function: Callable[..., object]) -> Callable[..., object]:
+        """Return ``function``, recording."""
+        return _ShapeRecording(function)
+
+
+# Eight rows, fallback chunks of four: 1, 2, 4 and then all 8 rows fall back in turn.
+def _fall_back_then_restore(
+    config: WorldModelFeature.Config,
+    *,
+    device: torch.device,
+) -> WorldModelFeature:
+    """Step a ``Sliding`` source's engine past each fallback count, then save and restore."""
+    sliding = config.history
+    assert isinstance(sliding, Sliding.Config)
+    sliding.fallback_rows = 4
+    source = config.make()
+    rows = 8
+    cells, aux, actions = _frames(rows, 1)
+    obs = decode(cells[:, 0], aux[:, 0]).to(device)
+    zeros = torch.zeros(rows, device=device)
+    archive = (
+        DonorHistory.Config()
+        .make()
+        .archive(
+            entries=1,
+            ring=DECISIONS,
+            width=36,
+            frames=False,
+            dtype=torch.float32,
+            device=device,
+        )
+    )
+    engine = source.make_engine(rows=rows, device=device)
+    for able in (1, 2, 4, 8):
+        engine.needs_start.fill_(value=False)
+        engine.count.fill_(1)
+        engine.length.fill_(2)
+        engine.count[:able] = DECISIONS
+        engine.length[:able] = 2 * DECISIONS
+        engine.ensure_room(1)
+        engine(obs, zeros, actions[:, 0].float().to(device))
+    engine.save_history(
+        archive,
+        torch.tensor([0], device=device),
+        slice(rows - 1, rows),
+        previous_action=zeros[:1],
+        fresh=zeros[:1],
+    )
+    engine.restore_history(
+        archive,
+        torch.tensor([0] + [-1] * (rows - 1), device=device),
+    )
+    return source
 
 
 def _led_to(actions: Tensor, t: int) -> Tensor:

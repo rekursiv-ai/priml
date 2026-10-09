@@ -10,7 +10,6 @@ from torch import Tensor
 import pytest
 import torch
 
-from priml.baselines.craftax.world_model.codec import decode
 from priml.baselines.craftax.world_model.dream import (
     Rollout,
     dream,
@@ -41,10 +40,10 @@ def test_dream_from_start_records_every_frame_and_decision() -> None:
         t_max=8,
         generator=torch.Generator().manual_seed(0),
     )
-    rollout = dream(engine, decisions=6)
-    assert rollout.cells.shape == (2, 7, 3, 8)
-    assert rollout.aux.shape == (2, 7, 4)
-    assert rollout.action.shape == rollout.reward.shape == rollout.done.shape == (2, 6)
+    rollout = dream(engine, decisions=3)
+    assert rollout.cells.shape == (2, 4, 3, 8)
+    assert rollout.aux.shape == (2, 4, 4)
+    assert rollout.action.shape == rollout.reward.shape == rollout.done.shape == (2, 3)
     assert bool(rollout.starts[:, 0].all())
     # A frame begins an episode exactly when the decision before it ended one.
     assert torch.equal(rollout.starts[:, 1:], rollout.done)
@@ -52,7 +51,7 @@ def test_dream_from_start_records_every_frame_and_decision() -> None:
     for logp in (rollout.action_logp, rollout.reward_logp, rollout.done_logp):
         assert bool((logp <= 0).all())
     assert bool((rollout.frame_logp < 0).all())
-    assert rollout.invalid.shape == (2, 7, 3)
+    assert rollout.invalid.shape == (2, 4, 3)
 
 
 def test_dream_from_per_row_prefixes_follows_recorded_actions() -> None:
@@ -64,8 +63,8 @@ def test_dream_from_per_row_prefixes_follows_recorded_actions() -> None:
         prefix_of(random_segment(schema, 1, seed=2, starts=False)),
     ]
     engine = Engine(model, rows=3, t_max=16, generator=torch.Generator().manual_seed(1))
-    actions = torch.tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
-    rollout = dream(engine, decisions=3, prefixes=prefixes, actions=actions)
+    actions = torch.tensor([[1, 2], [4, 5], [7, 8]])
+    rollout = dream(engine, decisions=2, prefixes=prefixes, actions=actions)
     assert torch.equal(rollout.action.long(), actions)
     assert rollout.starts[:, 0].tolist() == [False, True, False]
     assert bool((rollout.frame_logp[1, 0] < 0).all())
@@ -103,10 +102,10 @@ def test_dream_runs_a_start_job_only_after_an_episode_ends(
         return start(control)
 
     monkeypatch.setattr(engine, "start", spy)
-    rollout = dream(engine, decisions=6)
+    rollout = dream(engine, decisions=3)
     ended = int(rollout.done[0].sum())
     # This seed ends some episodes and continues others, so both paths run.
-    assert 0 < ended < 6
+    assert 0 < ended < 3
     assert len(calls) == 1 + ended
     assert all(bool(needs.all()) for needs in calls)
     assert torch.equal(rollout.starts[:, 1:], rollout.done)
@@ -130,10 +129,10 @@ def test_dream_rows_do_not_depend_on_another_rows_episode_ends(
             "control",
             functools.partial(row_zero_done, engine.control, done=done),
         )
-        rollouts.append(dream(engine, decisions=4))
+        rollouts.append(dream(engine, decisions=2))
     # Row 0 begins an episode after every decision in one run and never in the other.
-    assert rollouts[0].done[0].tolist() == [False] * 4
-    assert rollouts[1].done[0].tolist() == [True] * 4
+    assert rollouts[0].done[0].tolist() == [False] * 2
+    assert rollouts[1].done[0].tolist() == [True] * 2
     for field in dataclasses.fields(Rollout):
         one, two = (
             cast("torch.Tensor", getattr(rollout, field.name))[1]
@@ -198,12 +197,21 @@ def test_dream_reprefills_a_full_row_from_its_recorded_decisions(
     assert torch.equal(kept.actions[0], actions[count - keep : count])
 
 
-# The policy reads whole Craftax observations, so three frames of the full
-# 152-slot schema are sampled slot by slot for two rows: 0.18 s warm on x86.
-@pytest.mark.compute_large_fixture
-def test_dream_feeds_a_policy_decoded_observations() -> None:
+def test_dream_feeds_a_policy_decoded_observations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The policy reads each decision's current frames, decoded; its actions are taken.
+
+    Over the cut schema, which the codec cannot decode, so a stand-in decoder
+    flattens each frame (``codec_test`` checks the codec): the full schema's 152
+    slots a frame, each sampled in turn, took 0.73 s on x86.
+    """
+    monkeypatch.setattr(
+        "priml.baselines.craftax.world_model.dream.decode",
+        _flattened,
+    )
     engine = Engine(
-        tiny_model(craftax_schema()),
+        tiny_model(small_schema()),
         rows=2,
         t_max=8,
         generator=torch.Generator().manual_seed(2),
@@ -216,10 +224,8 @@ def test_dream_feeds_a_policy_decoded_observations() -> None:
 
     rollout = dream(engine, decisions=2, actions=policy)
     assert len(seen) == 2
-    assert seen[0].shape == (2, 843)
-    assert seen[0].dtype == torch.float32
     for step, observation in enumerate(seen):
-        expected = decode(rollout.cells[:, step], rollout.aux[:, step])
+        expected = _flattened(rollout.cells[:, step], rollout.aux[:, step])
         assert torch.equal(observation, expected)
     assert rollout.action.tolist() == [[7, 7], [9, 9]]
 
@@ -242,6 +248,11 @@ def test_invalid_cells_flag_what_no_observation_holds() -> None:
         True,
         False,
     ]
+
+
+def _flattened(cells: Tensor, aux: Tensor) -> Tensor:
+    """Stand in for the codec's ``decode``: each row's cell and aux tokens, as floats."""
+    return torch.cat([cells.flatten(1), aux], dim=-1).float()
 
 
 if __name__ == "__main__":

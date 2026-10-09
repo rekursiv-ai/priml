@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
@@ -376,15 +377,17 @@ def portable_uniform(
 
 
 def forward_parameters(policy: nn.Module) -> list[tuple[str, nn.Parameter]]:
-    """Name a MinGRU policy's weights in forward order, the order the goldens drew them in.
+    """Name a policy's weights, a MinGRU's in forward order, the order the goldens drew them in.
 
     The first stage's, ``proj_in``'s, each block's, then ``proj_out``'s, then
     the optional slots' (each block's injection, the auxiliary loss): not
     ``parameters()``, which puts ``proj_out`` before the blocks, as the optimizer
-    takes them.
+    takes them. Every other weight follows in ``named_parameters()`` order: a
+    MinGRU's ``proj_feature``, and all of another policy's (the GRU's cell and
+    heads, the actor-critic's towers), so none keeps its init.
 
     Args:
-      policy: A MinGRU policy.
+      policy: Any policy.
 
     Returns:
       parameters: ``(name, parameter)`` pairs, every weight once.
@@ -399,14 +402,19 @@ def forward_parameters(policy: nn.Module) -> list[tuple[str, nn.Parameter]]:
         "injections.",
         "auxiliary.",
     )
-    return [
+    staged = [
         (name, parameter)
         for stage in stages
         for name, parameter in named
         if name.startswith(stage)
     ]
+    seen = {name for name, _ in staged}
+    return [*staged, *((name, p) for name, p in named if name not in seen)]
 
 
+# Every parameter, not a MinGRU's stages alone: an init left in place draws ``randn``
+# (an orthogonal init's QR input), whose bits differ by host, so the GRU's golden
+# differed between macOS and x86 while its cell and heads kept theirs.
 def fill_portable(model: nn.Module, *, seed: int) -> None:
     """Fill synthetic uniform test weights with :func:`portable_uniform`.
 
@@ -415,7 +423,7 @@ def fill_portable(model: nn.Module, *, seed: int) -> None:
     to the parameter dtype, in :func:`forward_parameters` order.
 
     Args:
-      model: The MinGRU policy whose parameters are overwritten.
+      model: The policy whose every parameter is overwritten.
       seed: The draws' seed.
 
     """
@@ -575,7 +583,10 @@ def assert_golden(
     path = _golden_path(test_file=test_file, name=name, host=host)
     overwrite = regenerate.golden()
     if not overwrite and path.exists():
+        # pragma: no mutate start -- "UTF-8" names the same codec, and the
+        # default is UTF-8 on every host the suite runs on.
         expected = path.read_text(encoding="utf-8").splitlines()
+        # pragma: no mutate end
         if expected != list(lines):
             diff = difflib.unified_diff(expected, lines, "golden", "now", lineterm="")
             raise AssertionError(f"{path.stem} changed:\n" + "\n".join(diff))
@@ -675,18 +686,17 @@ class FakeEnv:
         """
         # Pinned where CUDA is, as ``CraftaxEnv``'s: a captured step graph
         # copies to and from these rows asynchronously.
-        pinned = torch.cuda.is_available()
+        # pragma: no mutate start -- pinning exists only with CUDA; on a CPU host
+        # every variant allocates the same rows, and the GPU tests copy from them.
+        zeros = partial(torch.zeros, pin_memory=torch.cuda.is_available())
+        ones = partial(torch.ones, pin_memory=torch.cuda.is_available())
+        # pragma: no mutate end
         env = cls(
-            observations=torch.zeros(num_envs, OBS_SIZE, pin_memory=pinned),
-            action_mask=torch.ones(
-                num_envs,
-                ATN_DIM,
-                dtype=torch.uint8,
-                pin_memory=pinned,
-            ),
-            rewards=torch.zeros(num_envs, pin_memory=pinned),
-            terminals=torch.zeros(num_envs, pin_memory=pinned),
-            actions=torch.zeros(num_envs, 1, pin_memory=pinned),
+            observations=zeros(num_envs, OBS_SIZE),
+            action_mask=ones(num_envs, ATN_DIM, dtype=torch.uint8),
+            rewards=zeros(num_envs),
+            terminals=zeros(num_envs),
+            actions=zeros(num_envs, 1),
             num_envs=num_envs,
             num_buffers=num_buffers,
             generators=[

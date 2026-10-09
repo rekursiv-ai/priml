@@ -4,8 +4,6 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
 
-import multiprocessing
-
 from configgle import PartialConfig
 from torch import nn
 from torch._dynamo.exc import Unsupported
@@ -17,6 +15,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
+from priml.baselines.craftax.world_model import train_step
 from priml.baselines.craftax.world_model.attention import VarlenAttention
 from priml.baselines.craftax.world_model.batch import (
     PackedBatch,
@@ -31,7 +30,7 @@ from priml.baselines.craftax.world_model.model import (
     gathered_board,
     multi_hot_board,
 )
-from priml.baselines.craftax.world_model.schema import craftax_schema
+from priml.baselines.craftax.world_model.testing import small_schema
 from priml.baselines.craftax.world_model.train_step import (
     ForwardCost,
     WorldModelTrainStep,
@@ -48,7 +47,10 @@ from priml.train.custom_types import TrainStepOutput
 from priml.train.parallelism import NoParallel
 
 
+# The cut schema's 3 cells and 4 scalars, against Craftax's 99 and 51, cut a job's
+# local positions from 152 to 9; the step runs the same code at either size.
 def _tiny_model(config: WorldModel.Config) -> None:
+    config.schema = small_schema()
     config.encoder.channels_in = 16
     config.decoder.channels_in = 16
     assert isinstance(config.encoder, FrameEncoder.Config)
@@ -93,11 +95,16 @@ def _step_config() -> WorldModelTrainStep.Config:
 
 
 def _segment(decisions: int, *, frames: int, starts: bool, seed: int) -> Segment:
-    schema = craftax_schema()
+    schema = small_schema()
     generator = torch.Generator().manual_seed(seed)
     cells = torch.stack(
         [
-            torch.randint(0, field.valid, (frames, 99), generator=generator)
+            torch.randint(
+                0,
+                field.valid,
+                (frames, schema.cell_slots),
+                generator=generator,
+            )
             for field in schema.cell_fields
         ],
         dim=-1,
@@ -206,12 +213,12 @@ def test_optimizer_splits_matrices_from_tables_and_scales() -> None:
         assert muon["ensemble_dims"] == ensemble
 
 
-@pytest.mark.compute_training
 def test_training_lowers_the_loss_and_reports_nanochat_series() -> None:
     torch.manual_seed(0)
     step = _step_config().make()
     batch = next(_batches())
-    results = [step.train_step(**batch) for _ in range(6)]
+    updates = 4
+    results = [step.train_step(**batch) for _ in range(updates)]
     assert float(results[-1]["loss"]) < float(results[0]["loss"])
     metrics = _metrics(results[-1])
     assert set(metrics) == {
@@ -227,12 +234,12 @@ def test_training_lowers_the_loss_and_reports_nanochat_series() -> None:
         "total_training_time",
     }
     assert step.gradient_clip_norm == 1.0
-    assert metrics["lrm"] == pytest.approx(wsd(5 / 10, warmup=0.1, decay=0.1))
+    progress = (updates - 1) / step.config.train_budget_steps
+    assert metrics["lrm"] == pytest.approx(wsd(progress, warmup=0.1, decay=0.1))
     flops = 3 * world_model_cost(step.model, batch["media"]).flops
-    assert metrics["total_training_flops"] == pytest.approx(6 * flops)
+    assert metrics["total_training_flops"] == pytest.approx(updates * flops)
 
 
-@pytest.mark.compute_training
 def test_loss_is_nanochats_debiased_ema_of_the_objective() -> None:
     step = _step_config().make()
     batches = _batches()
@@ -246,7 +253,6 @@ def test_loss_is_nanochats_debiased_ema_of_the_objective() -> None:
         assert float(_metrics(result)["loss"]) == pytest.approx(debiased)
 
 
-@pytest.mark.compute_training
 def test_loss_debiases_by_this_process_updates_after_a_resume() -> None:
     trained = _step_config().make()
     batches = _batches()
@@ -262,7 +268,6 @@ def test_loss_debiases_by_this_process_updates_after_a_resume() -> None:
     assert float(_metrics(result)["loss"]) == pytest.approx(float(result["model"]))
 
 
-@pytest.mark.compute_training
 def test_window_loss_is_the_mean_of_its_micro_batches() -> None:
     config = _step_config()
     config.accumulate_grad_batches = 2
@@ -274,7 +279,6 @@ def test_window_loss_is_the_mean_of_its_micro_batches() -> None:
     assert float(_metrics(second)["loss"]) == pytest.approx(mean)
 
 
-@pytest.mark.compute_training
 def test_accumulation_divides_each_micro_batch_gradient() -> None:
     batch = next(_batches())
     torch.manual_seed(0)
@@ -302,7 +306,6 @@ def test_throughput_divides_the_window_by_its_time() -> None:
     assert metrics["total_training_flops"] == pytest.approx(3 * cost.flops)
 
 
-@pytest.mark.compute_training
 def test_throughput_counts_every_micro_batch_of_the_window() -> None:
     config = _step_config()
     config.accumulate_grad_batches = 2
@@ -320,7 +323,6 @@ def test_throughput_counts_every_micro_batch_of_the_window() -> None:
     assert metrics["total_training_flops"] == pytest.approx(flops)
 
 
-@pytest.mark.compute_training
 def test_total_training_time_excludes_the_first_update() -> None:
     step = _step_config().make()
     batches = _batches()
@@ -330,7 +332,6 @@ def test_total_training_time_excludes_the_first_update() -> None:
     assert updates[2]["total_training_time"] == pytest.approx(later)
 
 
-@pytest.mark.compute_training
 def test_clip_fraction_is_the_share_of_clipped_updates() -> None:
     step = _step_config().make()
     batches = _batches()
@@ -342,7 +343,6 @@ def test_clip_fraction_is_the_share_of_clipped_updates() -> None:
     assert fractions == pytest.approx([0.0, 1 / 2, 2 / 3])
 
 
-@pytest.mark.compute_training
 def test_max_attention_logit_is_the_largest_of_the_window() -> None:
     config = _step_config()
     config.accumulate_grad_batches = 2
@@ -351,7 +351,7 @@ def test_max_attention_logit_is_the_largest_of_the_window() -> None:
     assert isinstance(model, WorldModel)
     largest: list[float] = []
     results: list[TrainStepOutput] = []
-    for seed in (3, 0):
+    for seed in (0, 3):
         results.append(step.train_step(media=_batch(seed)))
         largest.append(float(model.transformer.max_attention_logit()))
     # The first micro-batch holds the maximum, so reporting the last forward's
@@ -360,14 +360,13 @@ def test_max_attention_logit_is_the_largest_of_the_window() -> None:
     assert float(_metrics(results[1])["max_attention_logit"]) == max(largest)
 
 
-@pytest.mark.compute_training
 def test_max_attention_logit_restarts_each_update() -> None:
     step = _step_config().make()
     model = step.model
     assert isinstance(model, WorldModel)
     largest: list[float] = []
     reported: list[float] = []
-    for seed in (3, 0):
+    for seed in (0, 3):
         metrics = _metrics(step.train_step(media=_batch(seed)))
         reported.append(float(metrics["max_attention_logit"]))
         largest.append(float(model.transformer.max_attention_logit()))
@@ -425,7 +424,6 @@ def test_eval_loss_restores_the_models_mode() -> None:
     assert step.model.training
 
 
-@pytest.mark.compute_training
 def test_state_dict_keeps_the_cumulative_series() -> None:
     step = _step_config().make()
     batches = _batches()
@@ -446,7 +444,8 @@ def test_cost_counts_every_matmul_but_attention() -> None:
     with FlopCounterMode(display=False) as counter:
         model(batch)
     assert world_model_cost(model, batch).flops == _matmul_flops(counter)
-    assert world_model_cost(model, batch).positions == 16 + 152 * len(batch.job_at)
+    local = small_schema().local_slots
+    assert world_model_cost(model, batch).positions == 16 + local * len(batch.job_at)
 
 
 def test_cost_does_not_change_with_how_the_frame_embedding_runs() -> None:
@@ -464,10 +463,55 @@ def test_eval_uses_bfloat16_autocast_by_default() -> None:
     assert isinstance(WorldModelTrainStep.Config().target_nll_fn, PartialConfig)
 
 
+def test_a_train_step_marks_each_frame_and_job_axis_dynamic() -> None:
+    """Every tensor indexed by frame or job is marked, so one graph serves any count.
+
+    The GPU test below compiles the step once over three counts; this pins what
+    makes it so, eagerly: each tensor whose first axis counts the batch's frames
+    or jobs, and no other, is marked dynamic on that axis.
+    """
+    batch = _counted_batch(3)
+    frames, jobs = len(batch.aux), len(batch.job_at)
+    assert len(batch.kind) not in {frames, jobs}
+    _step_config().make().train_step(media=batch)
+    tensors = {
+        name: value
+        for name in PackedBatch.__dataclass_fields__
+        if isinstance(value := cast("object", getattr(batch, name)), torch.Tensor)
+    }
+    counted = {
+        name
+        for name, value in tensors.items()
+        if value.ndim > 0 and len(value) in {frames, jobs}
+    }
+    marked = {
+        name
+        for name, value in tensors.items()
+        if cast("object", getattr(value, "_dynamo_weak_dynamic_indices", None)) == {0}
+    }
+    assert marked == counted
+    assert {"cells", "aux", "job_at", "job_is_start"} <= marked
+
+
+def test_compile_forward_compiles_the_forward_in_place() -> None:
+    """The module itself comes back, its ``forward`` replaced; nothing traces yet."""
+    model = nn.Linear(4, 2)
+    assert "forward" not in vars(model)
+    counter = CompileCounter()
+    compiled = compile_forward(model, backend=counter)
+    assert compiled is model
+    # The instance's own ``forward`` shadows the class's; ``__call__`` runs it.
+    assert "forward" in vars(model)
+    assert counter.frame_count == 0
+
+
 @pytest.mark.compute_torch_compile
+@pytest.mark.gpu_torch_cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_training_compiles_once_whatever_the_frame_and_job_counts() -> None:
     counter = CompileCounter()
     config = _step_config()
+    config.parallelism = NoParallel.Config(device="cuda")
     config.compile = PartialConfig(torch.compile, backend=counter, fullgraph=True)
     step = config.make()
     batches = [_counted_batch(decisions) for decisions in (3, 5, 6)]
@@ -475,7 +519,7 @@ def test_training_compiles_once_whatever_the_frame_and_job_counts() -> None:
     torch.compiler.reset()
     try:
         for batch in batches:
-            step.train_step(media=batch)
+            step.train_step(media=batch.to(torch.device("cuda")))
     finally:
         torch.compiler.reset()
     assert counter.frame_count == 1
@@ -500,21 +544,25 @@ def single_rank_group(tmp_path: Path) -> Iterator[None]:
 # hooks, this fails and the default compile slot serves data parallel too.
 @pytest.mark.usefixtures("single_rank_group")
 @pytest.mark.compute_torch_compile
+@pytest.mark.gpu_torch_cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_fullgraph_compile_of_a_replicated_module_fails_in_its_hooks() -> None:
-    model = replicate(nn.Linear(4, 2))
+    model = replicate(nn.Linear(4, 2).cuda())
     torch.compiler.reset()
     try:
         compiled = torch.compile(model, fullgraph=True, backend="eager")
         with pytest.raises(Unsupported):
-            compiled(torch.ones(3, 4))
+            compiled(torch.ones(3, 4, device="cuda"))
     finally:
         torch.compiler.reset()
 
 
 @pytest.mark.usefixtures("single_rank_group")
 @pytest.mark.compute_torch_compile
+@pytest.mark.gpu_torch_cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_compile_forward_trains_a_replicated_module_under_fullgraph() -> None:
-    model = replicate(nn.Linear(4, 2))
+    model = replicate(nn.Linear(4, 2).cuda())
     assert isinstance(model, nn.Linear)
     counter = CompileCounter()
     compile_slot = PartialConfig(compile_forward, fullgraph=True, backend=counter)
@@ -522,53 +570,64 @@ def test_compile_forward_trains_a_replicated_module_under_fullgraph() -> None:
     try:
         compiled = compile_slot.make()(model)
         assert isinstance(compiled, nn.Linear)
-        compiled(torch.ones(3, 4)).sum().backward()
+        compiled(torch.ones(3, 4, device="cuda")).sum().backward()
     finally:
         torch.compiler.reset()
     assert compiled is model
     assert counter.frame_count == 1
     assert model.weight.grad is not None
-    torch.testing.assert_close(model.weight.grad, torch.full((2, 4), 3.0))
+    torch.testing.assert_close(
+        model.weight.grad,
+        torch.full((2, 4), 3.0, device="cuda"),
+    )
 
 
 @pytest.mark.usefixtures("single_rank_group")
 @pytest.mark.compute_torch_compile
+@pytest.mark.gpu_torch_cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_compile_forward_keeps_one_graph_across_gradient_buckets() -> None:
     # Two 1 MB layers fill two gradient buckets; Dynamo's DDP optimizer would
     # compile one graph per bucket.
-    model = replicate(nn.Sequential(nn.Linear(512, 512), nn.Linear(512, 512)))
+    model = replicate(
+        nn.Sequential(nn.Linear(512, 512), nn.Linear(512, 512)).cuda(),
+    )
     counter = CompileCounter()
     torch.compiler.reset()
     try:
         compiled = compile_forward(model, backend=counter)
         assert isinstance(compiled, nn.Sequential)
-        compiled(torch.ones(3, 512)).sum().backward()
+        compiled(torch.ones(3, 512, device="cuda")).sum().backward()
     finally:
         torch.compiler.reset()
     assert counter.frame_count == 1
 
 
-@pytest.mark.compute_distributed
-def test_series_aggregate_over_ranks(tmp_path: Path) -> None:
-    context = multiprocessing.get_context("spawn")
-    ranks = [
-        context.Process(
-            target=_check_world_series,
-            args=(rank, 2, str(tmp_path / "store")),
-        )
-        for rank in range(2)
-    ]
-    try:
-        for process in ranks:
-            process.start()
-        for process in ranks:
-            process.join(timeout=120)
-            assert process.exitcode == 0
-    finally:
-        for process in ranks:
-            if process.is_alive():
-                process.kill()
-                process.join()
+def test_series_aggregate_over_ranks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """As rank 0 of 2, whose peer's attention logit spikes to 4 times its own.
+
+    The rates and FLOPs count every rank's positions; the maximum logit is the
+    global one on every rank, which the loop's average over ranks then keeps.
+    """
+    config = _step_config()
+    config.device_peak_flops = 1e9
+    step = config.make()
+    model = step.model
+    assert isinstance(model, WorldModel)
+    peer = _PeerRank(scale=4.0)
+    monkeypatch.setattr(train_step, "dist", peer)
+    batch = next(_batches())
+    metrics = _metrics(step.train_step(**batch))
+    cost = world_model_cost(step.model, batch["media"])
+    dt = float(metrics["dt"])
+    assert float(metrics["tok_per_sec"]) == pytest.approx(2 * cost.positions / dt)
+    assert float(metrics["mfu"]) == pytest.approx(3 * cost.flops / dt / 1e9)
+    assert metrics["total_training_flops"] == pytest.approx(2 * 3 * cost.flops)
+    local = float(model.transformer.max_attention_logit())
+    reported = metrics["max_attention_logit"]
+    assert isinstance(reported, torch.Tensor)
+    assert peer.reduced == [dist.ReduceOp.MAX]
+    assert float(reported) == pytest.approx(4 * local)
 
 
 def _metrics(result: TrainStepOutput) -> dict[str, float | torch.Tensor]:
@@ -598,48 +657,32 @@ def _matmul_flops(counter: FlopCounterMode) -> int:
     return total - probe
 
 
-def _check_world_series(rank: int, world: int, store: str) -> None:
-    """Train one update as ``rank`` of ``world`` and check the global series."""
-    dist.init_process_group(
-        "gloo",
-        init_method=f"file://{store}",
-        rank=rank,
-        world_size=world,
-    )
-    try:
-        config = _step_config()
-        config.device_peak_flops = 1e9
-        step = config.make()
-        model = step.model
-        assert isinstance(model, WorldModel)
-        if rank == 1:
-            # A larger query-norm scale multiplies every logit: a spike on one rank.
-            with torch.no_grad():
-                for name, parameter in model.transformer.named_parameters():
-                    if "norm_q" in name:
-                        parameter.mul_(4)
-        batch = next(_batches())
-        metrics = _metrics(step.train_step(**batch))
-        cost = world_model_cost(step.model, batch["media"])
-        dt = float(metrics["dt"])
-        assert float(metrics["tok_per_sec"]) == pytest.approx(
-            world * cost.positions / dt,
-        )
-        assert float(metrics["mfu"]) == pytest.approx(3 * cost.flops / dt / 1e9)
-        assert metrics["total_training_flops"] == pytest.approx(world * 3 * cost.flops)
-        local = torch.zeros(world)
-        local[rank] = model.transformer.max_attention_logit()
-        dist.all_reduce(local)
-        assert float(local[1]) > 2 * float(local[0])
-        reported = metrics["max_attention_logit"]
-        assert isinstance(reported, torch.Tensor)
-        # What ``TrainLoop._do_train_step`` logs: every tensor metric averaged
-        # over ranks.
-        logged = reported.clone()
-        dist.all_reduce(logged)
-        assert float(logged / world) == float(local.max())
-    finally:
-        dist.destroy_process_group()
+class _PeerRank:
+    """``torch.distributed`` as rank 0 of 2 sees it: the peer holds ``scale`` times its tensor."""
+
+    ReduceOp = dist.ReduceOp
+
+    def __init__(self, *, scale: float) -> None:
+        self.scale = scale
+        self.reduced: list[object] = []
+
+    def is_initialized(self) -> bool:
+        """Report the group of two as initialized."""
+        return True
+
+    def get_world_size(self) -> int:
+        """Return the two ranks."""
+        return 2
+
+    def all_reduce(self, tensor: torch.Tensor, op: object = dist.ReduceOp.SUM) -> None:
+        """Combine ``tensor`` in place with the peer's, as the collective would."""
+        self.reduced.append(op)
+        peer = tensor * self.scale
+        if op == dist.ReduceOp.MAX:
+            torch.maximum(tensor, peer, out=tensor)
+        else:
+            assert op == dist.ReduceOp.SUM, op
+            tensor.add_(peer)
 
 
 if __name__ == "__main__":

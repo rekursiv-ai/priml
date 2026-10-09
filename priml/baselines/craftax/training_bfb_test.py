@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import pytest
 import torch
 
 from priml.baselines.craftax.testing import tiny_train_step
+from priml.baselines.craftax.train_step import AgentWindows
 from priml.optimizers.fused_muon import FusedMuon
 
 
@@ -21,11 +21,6 @@ if TYPE_CHECKING:
 
     from priml.baselines.craftax.train_step import CraftaxTrainStep
 
-# Both tests build a CraftaxEnv and train it. A cold Numba cache compiles the
-# step kernels first: 12.2 s on an M-series Mac (measured 2026-09-26) and 34-55 s
-# on the cluster's Xeon (game/step.py), against the unit tier's 60 s timeout.
-pytestmark = pytest.mark.compute_training
-
 
 def _masters(step: CraftaxTrainStep) -> list[Tensor]:
     optimizer = step.optimizer
@@ -33,10 +28,15 @@ def _masters(step: CraftaxTrainStep) -> list[Tensor]:
     return [master.clone() for master in optimizer.master_weights]
 
 
+# Rollouts of 2 steps, one window of every agent: the epoch's parts are the train
+# step's tests'. The evaluation plays one rollout from its reset, as ``play`` begins.
 def _train(*, evaluate_between: bool) -> list[Tensor]:
-    """Run two of the tiny pipeline's three epochs; return the masters."""
+    """Run two of the tiny pipeline's epochs; return the masters."""
     config = tiny_train_step()
-    config.evaluation.num_episodes = 1
+    config.rollout.horizon = 2
+    windows = config.learner
+    assert isinstance(windows, AgentWindows.Config)
+    windows.minibatch_size = 2 * config.env.num_envs
     torch.manual_seed(0)
     step = config.make()
     try:
@@ -44,7 +44,8 @@ def _train(*, evaluate_between: bool) -> list[Tensor]:
         if evaluate_between:
             evaluation = step.make_evaluator()
             try:
-                evaluation.play()
+                evaluation.reset()
+                evaluation.collect()
             finally:
                 evaluation.close()
         step.train_step()

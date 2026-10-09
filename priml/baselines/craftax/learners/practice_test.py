@@ -18,10 +18,17 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.craftax.env import CraftaxEnv, WorldPool
-from priml.baselines.craftax.game.state import TRAINING_STATS_DTYPE
+from priml.baselines.craftax.game.state import (
+    ATN_DIM,
+    OBS_SIZE,
+    TRAINING_STATS_DTYPE,
+    Archive,
+    new_states,
+    new_stats,
+)
+from priml.baselines.craftax.game.step import Batch
 from priml.baselines.craftax.learners.practice import FrontierPractice
-from priml.baselines.craftax.lib.arrays import ints
+from priml.baselines.craftax.lib.arrays import typed
 
 
 NUM_ENVS: Final = 8
@@ -267,72 +274,86 @@ def test_the_state_dict_is_every_array_as_live_bytes() -> None:
     assert practice.controller["restores"] == 3
 
 
-def _env() -> CraftaxEnv:
-    """Return two buffers of four, the last two rows donors, reset."""
-    cfg = CraftaxEnv.Config()
-    cfg.num_envs = NUM_ENVS
-    cfg.num_buffers = NUM_ENVS // ENVS_PER_BUFFER
-    cfg.threads_per_buffer = 1
-    pool = cfg.restart = WorldPool.Config()
-    pool.num_worlds = 2
-    cfg.practice = _config()
-    env = cfg.make()
-    env.reset()
-    return env
+class _Restores:
+    """Stand in for ``restore_rows_numba``: record each call's count, draw levels 1, 2, ...
+
+    The draws and the restores are ``game/archive_test``'s; here only what the
+    controller hands the kernel and keeps of its answer.
+    """
+
+    def __init__(self) -> None:
+        self.selected: list[int] = []
+
+    def __call__(self, batch: Batch, archive: Archive, selected: int) -> int:
+        """Record ``selected``; return the levels' sum, ``1 + 2 + ... + selected``."""
+        assert batch.stats.dtype == TRAINING_STATS_DTYPE
+        assert archive.save_slots.tolist() == [-1] * NUM_ENVS
+        self.selected.append(selected)
+        return selected * (selected + 1) // 2
 
 
-@pytest.mark.compute_large_fixture
-def test_the_controller_sizes_each_rollout_toward_the_fraction() -> None:
+def _batch() -> Batch:
+    """Return the environments' arrays as practice's training step keeps them, zeroed."""
+    return Batch(
+        states=new_states(NUM_ENVS),
+        rngs=np.zeros(NUM_ENVS, dtype=np.uint32),
+        stats=new_stats(NUM_ENVS, TRAINING_STATS_DTYPE),
+        actions=np.zeros((NUM_ENVS, 1), dtype=np.float32),
+        observations=np.zeros((NUM_ENVS, OBS_SIZE), dtype=np.float32),
+        masks=np.zeros((NUM_ENVS, ATN_DIM), dtype=np.uint8),
+        rewards=np.zeros(NUM_ENVS, dtype=np.float32),
+        terminals=np.zeros(NUM_ENVS, dtype=np.float32),
+    )
+
+
+def test_prepare_sizes_each_rollout_toward_the_fraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The deficit over a branch's mean length, capped at ``ceil(N * fraction)``."""
-    env = _env()
-    practice = env.practice
-    assert practice is not None
+    restores = _Restores()
+    monkeypatch.setattr(
+        "priml.baselines.craftax.learners.practice.restore_rows_numba",
+        restores,
+    )
+    practice = _practice(_config())
     kept = practice.archive
-    try:
-        # Before any step the horizon is unknown, and the archive is empty.
-        env.prepare_rollout()
-        assert practice.metrics()["practice/selected"] == 0.0
-        kept.states[2:5] = env.states[:3]
-        kept.stats[2:5] = env.stats[:3]
-        kept.sizes[:] = [0, 2, 1, 0]
-        kept.save_slots[6] = 3
-        # One rollout of 4 steps: duration 4, deficit (32 + 32) / 4 = 16, so
-        # 16 / 4 = 4 rows, capped at min(8 - 2, ceil(8 / 4)) = 2.
-        kept.counts[:] = [16, 16]
-        env.prepare_rollout()
-        assert practice.metrics()["practice/selected"] == 2.0
-        assert kept.save_slots.tolist() == [-1] * NUM_ENVS
-        restored = ints(kept.restore_slots)
-        assert all(slot in {2, 3, 4} for slot in restored[:2])
-        assert restored[2:] == [-1] * 6
-        assert env.stats["branch"].tolist() == [1, 1, 0, 0, 0, 0, 0, 0]
-        assert practice.metrics()["practice/sample_level_mean"] in {1.0, 1.5, 2.0}
-        # 20 branch steps over 2 restores last 10, clamped to the horizon 4;
-        # the deficit 96 / 4 - 20 = 4 takes one row.
-        kept.counts[:] = [32, 32]
-        env.stats["branch_steps"][:2] = 10
-        env.prepare_rollout()
-        assert practice.metrics()["practice/selected"] == 1.0
-        # Past the target, the deficit is negative: no row.
-        kept.counts[:] = [48, 48]
-        env.stats["branch_steps"][:2] = 20
-        env.prepare_rollout()
-        metrics = practice.metrics()
-        assert metrics["practice/selected"] == 0.0
-        assert metrics["practice/fraction"] == 40 / 96
-        assert metrics["practice/populated_levels"] == 2.0
-        assert metrics["practice/archive_entries"] == 3.0
-        assert metrics["practice/sample_level_mean"] == 0.0
-        assert kept.restore_slots.tolist() == [-1] * NUM_ENVS
-        assert practice.controller.tolist()[:4] == (3, 96, 40, 4)
-        # All practice: the cap is every row but the donors, min(8 - 2, 8) = 6.
-        practice.fraction = 1.0
-        kept.counts[:] = [64, 64]
-        env.prepare_rollout()
-        assert practice.metrics()["practice/selected"] == 6.0
-        assert kept.restore_slots.tolist()[6:] == [-1, -1]
-    finally:
-        env.close()
+    batch = _batch()
+    branch_steps = typed(batch.stats["branch_steps"], np.int64)
+    # Before any step the horizon is unknown, and the archive is empty.
+    practice.prepare(batch)
+    assert practice.metrics()["practice/selected"] == 0.0
+    kept.sizes[:] = [0, 2, 1, 0]
+    kept.save_slots[6] = 3
+    # One rollout of 4 steps: duration 4, deficit (32 + 32) / 4 = 16, so
+    # 16 / 4 = 4 rows, capped at min(8 - 2, ceil(8 / 4)) = 2.
+    kept.counts[:] = [16, 16]
+    practice.prepare(batch)
+    assert practice.metrics()["practice/selected"] == 2.0
+    assert practice.metrics()["practice/sample_level_mean"] == 1.5
+    # 20 branch steps over 2 restores last 10, clamped to the horizon 4;
+    # the deficit 96 / 4 - 20 = 4 takes one row.
+    kept.counts[:] = [32, 32]
+    branch_steps[:2] = 10
+    practice.prepare(batch)
+    assert practice.metrics()["practice/selected"] == 1.0
+    # Past the target, the deficit is negative: no row.
+    kept.counts[:] = [48, 48]
+    branch_steps[:2] = 20
+    practice.prepare(batch)
+    assert practice.metrics() == {
+        "practice/fraction": 40 / 96,
+        "practice/populated_levels": 2.0,
+        "practice/archive_entries": 3.0,
+        "practice/sample_level_mean": 0.0,
+        "practice/selected": 0.0,
+    }
+    assert practice.controller.tolist()[:4] == (3, 96, 40, 4)
+    # All practice: the cap is every row but the donors, min(8 - 2, 8) = 6.
+    practice.fraction = 1.0
+    kept.counts[:] = [64, 64]
+    practice.prepare(batch)
+    assert practice.metrics()["practice/selected"] == 6.0
+    assert restores.selected == [0, 2, 1, 0, 6]
 
 
 if __name__ == "__main__":

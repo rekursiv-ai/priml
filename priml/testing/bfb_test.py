@@ -566,6 +566,48 @@ def test_write_back_maps_a_listed_result_onto_the_original() -> None:
     assert torch.equal(original, torch.full((2,), 0.5))
 
 
+# Each write goes through a view op the allowlist lacked: ``x[:, :n]`` over a whole
+# dimension issues ``alias``, a rollout of one buffer's every store.
+_VIEW_WRITES: Final[dict[str, Callable[[Tensor], object]]] = {
+    "alias": lambda base: base[:, : base.shape[1]].index_copy_(
+        0,
+        torch.tensor([1]),
+        torch.full((1, base.shape[1]), -2.5),
+    ),
+    "diagonal": lambda base: base.diagonal().copy_(torch.tensor([1.5, -2.5, 3.5])),
+    "unfold": lambda base: base.unfold(1, 2, 2).mul_(-3.0),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_VIEW_WRITES))
+def test_a_write_through_a_view_reaches_its_base(name: str) -> None:
+    """A view runs natively, so writes through it land in the base, not a copy.
+
+    Upcast, ``alias`` returned a narrowed float64 copy: an ``index_copy_`` into
+    a one-buffer rollout's storage wrote that copy and the storage kept zeros.
+    """
+    base = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    expected = base.clone()
+    _VIEW_WRITES[name](expected)
+    with host_agnostic_numerics():
+        _VIEW_WRITES[name](base)
+    assert torch.equal(base, expected)
+
+
+def test_every_view_op_runs_natively_and_aliases_its_input() -> None:
+    """The schema, not the allowlist, names the views: a new one cannot fall through."""
+    base = torch.zeros(3, 4)
+    with host_agnostic_numerics():
+        views = [
+            cast(Tensor, torch.ops.aten.alias(base)),
+            base.diagonal(),
+            base.unfold(1, 2, 2),
+            base[:, :4],
+        ]
+    assert all(view.data_ptr() == base.data_ptr() for view in views)
+    assert all(view.dtype == torch.float32 for view in views)
+
+
 def test_bfb_files_do_not_use_typing_any() -> None:
     paths = [
         _THIS,

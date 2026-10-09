@@ -10,9 +10,7 @@ from torch import Tensor
 import pytest
 import torch
 
-from priml.baselines.craftax.world_model.codec import decode
 from priml.baselines.craftax.world_model.engine import Engine
-from priml.baselines.craftax.world_model.schema import craftax_schema
 from priml.baselines.craftax.world_model.session import (
     Mark,
     Session,
@@ -76,19 +74,22 @@ def test_override_changes_the_frame_the_model_encodes_and_marks_it() -> None:
     assert float(logp[0]) < 0
 
 
-# The policy reads whole Craftax observations, so three frames of the full
-# 152-slot schema are sampled slot by slot: 0.17 s warm on x86.
-@pytest.mark.compute_large_fixture
-def test_policy_autoplay_reads_the_current_overridden_frame() -> None:
-    engine = Engine(
-        tiny_model(craftax_schema()),
-        rows=1,
-        t_max=16,
-        generator=torch.Generator().manual_seed(4),
+def test_policy_autoplay_reads_the_current_overridden_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The policy reads each decision's current frame, overrides in, decoded.
+
+    Over the cut schema, which the codec cannot decode, so a stand-in decoder
+    flattens the frame (``codec_test`` checks the codec): the full schema's 152
+    slots a frame, each sampled in turn, took 0.66 s on x86.
+    """
+    monkeypatch.setattr(
+        "priml.baselines.craftax.world_model.session.decode",
+        _flattened,
     )
-    session = Session(engine, row=0)
+    session = Session(_engine(seed=4), row=0)
     session.prefill()
-    session.override(99 + 22, 7)
+    session.override(small_schema().cell_slots + 2, 7)
     seen: list[Tensor] = []
 
     def policy(observation: Tensor) -> Tensor:
@@ -97,12 +98,12 @@ def test_policy_autoplay_reads_the_current_overridden_frame() -> None:
 
     session.autoplay(2, policy=policy)
     stream = session.stream()
-    assert int(stream.aux[0, 22]) == 7
+    assert int(stream.aux[0, 2]) == 7
     assert len(seen) == 2
     for step, observation in enumerate(seen):
         assert torch.equal(
             observation,
-            decode(stream.cells[step, None], stream.aux[step, None]),
+            _flattened(stream.cells[step, None], stream.aux[step, None]),
         )
     assert stream.action.tolist() == [6, 6]
     assert bool((stream.decision_marks[:, 0] == Mark.FORCED).all())
@@ -153,7 +154,7 @@ def test_saved_session_reloads_to_identical_tokens(tmp_path: Path) -> None:
     session.prefill()
     session.act(3)
     session.override(0, 2)
-    session.autoplay(4)
+    session.autoplay(2)
     session.stream().save(tmp_path / "session.pt")
     loaded = Stream.load(tmp_path / "session.pt")
     # The random model ends episodes often; the reload must cross a boundary.
@@ -192,10 +193,10 @@ def test_one_rows_episode_ends_leave_another_sessions_samples_unchanged(
             "control",
             functools.partial(row_zero_done, engine.control, done=done),
         )
-        for _ in range(3):
+        for _ in range(2):
             first.act(1)
             second.act(2)
-        assert first.stream().done.tolist() == [done] * 3
+        assert first.stream().done.tolist() == [done] * 2
         streams.append(second.stream())
     for field in dataclasses.fields(Stream):
         one, two = (torch.as_tensor(getattr(stream, field.name)) for stream in streams)
@@ -217,6 +218,11 @@ def test_branch_copies_the_row_and_its_stream() -> None:
     assert branch.stream().action.tolist()[-1] == 4
     assert session.stream().action.shape == (1,)
     assert int(state.length[0]) == length
+
+
+def _flattened(cells: Tensor, aux: Tensor) -> Tensor:
+    """Stand in for the codec's ``decode``: each row's cell and aux tokens, as floats."""
+    return torch.cat([cells.flatten(1), aux], dim=-1).float()
 
 
 if __name__ == "__main__":
