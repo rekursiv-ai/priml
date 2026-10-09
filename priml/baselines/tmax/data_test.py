@@ -19,12 +19,14 @@ import torch
 
 from priml import runtime
 from priml.baselines.tmax import data as data_module
-from priml.baselines.tmax.data import TMaxRolloutData, _read_masks
+from priml.baselines.tmax.data import TMaxRolloutData, _read_masks, _row_mapping
 from priml.baselines.tmax.rollouts import (
     RolloutRecord,
     pack_rollouts,
     read_rollout_records,
 )
+from priml.baselines.tmax.train_step import TMaxDPPOTrainStep, tiny_qwen35_config
+from priml.train.parallelism import FullySharded, NoParallel
 
 
 if TYPE_CHECKING:
@@ -488,6 +490,171 @@ def test_row_shards_are_padded_to_equal_collective_counts(
     assert [row.query_responses.tolist() for row in sliced[:2]] == [[1, 16], [1, 17]]
     assert not sliced[2].response_mask.any()
     assert not sliced[2].advantages.any()
+
+
+def test_shards_make_the_same_number_of_segment_forwards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Equal row counts alone do not equalize FSDP model calls."""
+    records = [
+        RolloutRecord(
+            step=0,
+            sample_idx=index,
+            prompt_idx=index // 2,
+            prompt_tokens=(1,),
+            response_tokens=(2,) * (length - 1),
+            logprobs=(-0.2,) * (length - 1),
+            reward=float(index % 2),
+            finish_reason="stop",
+            tool_mask=(1,) * (length - 1),
+        )
+        for index, length in enumerate((2, 2, 2, 6))
+    ]
+    rows = pack_rollouts(
+        records,
+        advantages=torch.tensor([1.0, -1.0, 1.0, -1.0]),
+        pack_length=6,
+        pad_token_id=0,
+        min_num_batches=2,
+    )
+    assert [row.packed_seq_lens for row in rows] == [(2, 2, 2), (6,)]
+    shards = []
+    for rank in (0, 1):
+        monkeypatch.setattr(
+            data_module, "data_parallel_shape", lambda rank=rank: (rank, 2)
+        )
+        shards.append(_smoke().make()._shard_rows(rows))
+
+    assert [len(shard) for shard in shards] == [1, 1]
+    assert [
+        sum(length >= 2 for length in shard[0].packed_seq_lens) for shard in shards
+    ] == [3, 3]
+    for original, shard in zip(rows, shards, strict=True):
+        size = len(original.query_responses)
+        torch.testing.assert_close(
+            shard[0].query_responses[:size], original.query_responses
+        )
+        torch.testing.assert_close(
+            shard[0].response_mask[:size], original.response_mask
+        )
+        assert not shard[0].response_mask[size:].any()
+        assert not shard[0].advantages[size:].any()
+
+    config = TMaxDPPOTrainStep.Config()
+    config.model = tiny_qwen35_config()
+    config.parallelism = NoParallel.Config(device="cpu")
+    config.dtype_autocast = None
+    step = config.make()
+    token_count = 8.0
+    original_loss = step.train_loss(
+        rows=tuple(_row_mapping(row) for row in rows),
+        response_token_count=token_count,
+    )["loss"]
+    sharded_loss = sum(
+        (
+            step.train_loss(
+                rows=tuple(_row_mapping(row) for row in shard),
+                response_token_count=token_count,
+            )["loss"]
+            for shard in shards
+        ),
+        torch.zeros_like(original_loss),
+    )
+    torch.testing.assert_close(sharded_loss, original_loss, rtol=1e-6, atol=1e-7)
+
+
+def test_single_token_row_can_pad_an_fsdp_forward(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rank with no scorable real segment still joins the other rank."""
+    records = [
+        RolloutRecord(
+            step=0,
+            sample_idx=index,
+            prompt_idx=0,
+            prompt_tokens=(1,),
+            response_tokens=(2,) if index == 0 else (),
+            logprobs=(-0.2,) if index == 0 else (),
+            reward=float(index),
+            finish_reason="stop",
+            tool_mask=(1,) if index == 0 else (),
+        )
+        for index in range(2)
+    ]
+    rows = pack_rollouts(
+        records,
+        advantages=torch.tensor([1.0, -1.0]),
+        pack_length=2,
+        pad_token_id=0,
+        min_num_batches=2,
+    )
+    assert [row.packed_seq_lens for row in rows] == [(2,), (1,)]
+    monkeypatch.setattr(data_module, "data_parallel_shape", lambda: (1, 2))
+    padded = _smoke().make()._shard_rows(rows)[0]
+    assert padded.packed_seq_lens == (1, 2)
+    assert padded.query_responses.tolist() == [1, 1, 1]
+    assert not padded.response_mask.any()
+
+
+def _uneven_segment_fsdp_worker(result_dir: str, mesh: DeviceMesh) -> None:
+    """Run one real FSDP update with three segments on rank 0 and one on rank 1."""
+    rank = mesh.get_rank()
+    try:
+        runtime._device_mesh = mesh
+        torch.manual_seed(0)
+        config = TMaxDPPOTrainStep.Config()
+        config.model = tiny_qwen35_config()
+        config.parallelism = FullySharded.Config()
+        config.dtype_autocast = None
+        step = config.make()
+        data_config = TMaxRolloutData.Config()
+        data_config.working_dir = SMOKE_FIXTURE
+        data_config.records_per_update = 4
+        data_config.num_samples_per_prompt = 2
+        data_config.mask_tool_use = False
+        data_config.pack_length = 6
+        records = [
+            RolloutRecord(
+                step=0,
+                sample_idx=index,
+                prompt_idx=index // 2,
+                prompt_tokens=(1,),
+                response_tokens=(2,) * (length - 1),
+                logprobs=(-0.2,) * (length - 1),
+                reward=float(index % 2),
+                finish_reason="stop",
+                tool_mask=(1,) * (length - 1),
+            )
+            for index, length in enumerate((2, 2, 2, 6))
+        ]
+        batch = data_config.make().pack_update(records)
+        result = step.train_step(**step.preprocess_batch(batch))
+        ok = (
+            batch["response_token_count"] == 8
+            and step.global_step == 1
+            and bool(torch.isfinite(result["loss"]))
+        )
+        Path(result_dir, f"rank_{rank}").write_text("ok" if ok else "mismatch")
+    except Exception as error:  # noqa: BLE001 -- Serialize worker failures.
+        Path(result_dir, f"rank_{rank}").write_text(f"FAIL:{error!r}")
+    finally:
+        runtime._device_mesh = None
+
+
+@pytest.mark.compute_distributed
+def test_uneven_segments_complete_two_rank_fsdp_update(
+    warm_pools: WarmPoolGetter,
+) -> None:
+    """Uneven packing must not stall FSDP's per-segment collectives."""
+    pool = warm_pools({"dp": 2})
+    with tempfile.TemporaryDirectory() as result_dir:
+        pool(functools.partial(_uneven_segment_fsdp_worker, result_dir))
+        results = {
+            path.name: path.read_text()
+            for path in Path(result_dir).iterdir()
+            if path.is_file()
+        }
+    assert results == {"rank_0": "ok", "rank_1": "ok"}, results
 
 
 def test_shard_rows_refuses_a_world_it_cannot_cover(

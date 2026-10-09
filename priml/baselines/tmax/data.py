@@ -17,6 +17,8 @@ import json
 
 from configgle import Fig
 
+import torch
+
 from priml.baselines.tmax.rollouts import (
     AdvantageNormalization,
     PackedRow,
@@ -370,10 +372,9 @@ class TMaxRolloutData:
         """Slice this rank's contiguous share of the update's packed rows.
 
         Contiguous, like upstream's worker split
-        (``data_loader.prepare_collated_data_for_workers``). Every rank gets
-        the same row count because FSDP runs collectives in each forward.
-        Padding rows carry no loss, so they even out the count without
-        adding gradient.
+        (``data_loader.prepare_collated_data_for_workers``). Both row counts
+        and scored segment counts must match: FSDP runs a collective for
+        each segment's forward pass. Padding adds no loss.
         """
         if self._dp_world <= 1:
             return rows
@@ -385,13 +386,22 @@ class TMaxRolloutData:
                 f"{self._dp_world}; raise records_per_update or min_num_batches.",
             )
         base, extra = divmod(len(rows), self._dp_world)
-        start = self._dp_rank * base + min(self._dp_rank, extra)
-        stop = start + base + (1 if self._dp_rank < extra else 0)
-        local = rows[start:stop]
         rows_per_rank = base + (1 if extra else 0)
-        while len(local) < rows_per_rank:
-            local.append(_zero_loss_row(local[0]))
-        return local
+        shards = []
+        for rank in range(self._dp_world):
+            start = rank * base + min(rank, extra)
+            stop = start + base + (1 if rank < extra else 0)
+            shard = rows[start:stop]
+            while len(shard) < rows_per_rank:
+                shard.append(_zero_loss_row(shard[0]))
+            shards.append(shard)
+        return [
+            _pad_scoring_segments(
+                row,
+                max(_scoring_segments(shard[index]) for shard in shards),
+            )
+            for index, row in enumerate(shards[self._dp_rank])
+        ]
 
     def _pad_token_id(self) -> int:
         """Resolve the packing pad id: explicit, the bound step's, then 0."""
@@ -471,6 +481,68 @@ def _zero_loss_row(row: PackedRow) -> PackedRow:
         response_mask=row.response_mask.new_zeros(row.response_mask.shape),
         advantages=row.advantages.new_zeros(row.advantages.shape),
         num_actions=0,
+    )
+
+
+def _scoring_segments(row: PackedRow) -> int:
+    """Count segments long enough to call the model for next-token scoring."""
+    return sum(length >= 2 for length in row.packed_seq_lens)
+
+
+def _pad_scoring_segments(row: PackedRow, count: int) -> PackedRow:
+    """Add two-token, no-loss segments until this row makes ``count`` forwards."""
+    missing = count - _scoring_segments(row)
+    if not missing:
+        return row
+    source = row.query_responses[:1]
+    if len(source) != 1:
+        raise ValueError("An empty packed row cannot pad FSDP scoring.")
+    segment = int(row.attention_mask[-1])
+    return replace(
+        row,
+        query_responses=torch.cat((row.query_responses, source.repeat(2 * missing))),
+        attention_mask=torch.cat(
+            (
+                row.attention_mask,
+                row.attention_mask.new_tensor(
+                    [
+                        segment + index
+                        for index in range(1, missing + 1)
+                        for _ in range(2)
+                    ],
+                ),
+            ),
+        ),
+        position_ids=torch.cat(
+            (row.position_ids, row.position_ids.new_tensor([0, 1] * missing)),
+        ),
+        response_mask=torch.cat(
+            (row.response_mask, row.response_mask.new_zeros(2 * missing)),
+        ),
+        prompt_mask=torch.cat(
+            (row.prompt_mask, row.prompt_mask.new_ones(2 * missing)),
+        ),
+        rollout_sample_ids=torch.cat(
+            (
+                row.rollout_sample_ids,
+                row.rollout_sample_ids.new_full((2 * missing,), -1),
+            ),
+        ),
+        model_steps=torch.cat(
+            (row.model_steps, row.model_steps.new_full((2 * missing,), -1)),
+        ),
+        vllm_logprobs=torch.cat(
+            (
+                row.vllm_logprobs,
+                row.vllm_logprobs.new_full((2 * missing,), float("nan")),
+            ),
+        ),
+        advantages=torch.cat(
+            (row.advantages, row.advantages.new_zeros(2 * missing)),
+        ),
+        dones=torch.cat((row.dones, row.dones.new_zeros(2 * missing))),
+        packed_seq_lens=row.packed_seq_lens + (2,) * missing,
+        original_responses=row.original_responses + ((),) * missing,
     )
 
 
