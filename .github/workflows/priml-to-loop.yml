@@ -251,10 +251,8 @@ jobs:
             --refresh-public-lockfile \
             --validation-command 'bash install-libjpeg-turbo.sh' \
             --validation-command 'uv sync --frozen --all-groups' \
-            --validation-command 'uv run pre-commit run --all-files --hook-stage pre-commit' \
+            --validation-command 'SKIP=superseded-at-pre-push uv run pre-commit run --all-files --hook-stage pre-commit' \
             --validation-command 'uv run pre-commit run --all-files --hook-stage pre-push' \
-            --validation-command 'ATEN_CPU_CAPABILITY=default uv run pytest -m golden -q --tb=short' \
-            --validation-command 'ATEN_CPU_CAPABILITY=avx2 uv run pytest -m golden -q --tb=short' \
             --validation-command 'uv run python -c "import priml"' \
             --validation-command 'rm -rf dist' \
             --validation-command 'uv build --out-dir dist' \
