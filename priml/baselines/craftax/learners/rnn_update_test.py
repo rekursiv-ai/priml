@@ -485,8 +485,8 @@ def test_exp005s_epoch_matches_its_golden() -> None:
     assert_golden(test_file=__file__, name="train_step_exp005_tiny", lines=lines)
 
 
-# ``testing.fill_portable`` fills MinGRU's stages alone; the GRU's cell and heads would
-# keep their init, whose ``randn`` differs by host (SLEEF's ``log`` under AVX2).
+# The GRU's cell and heads init from ``randn``, whose bits differ by host (SLEEF's
+# ``log`` under AVX2), so the golden starts from portable draws instead.
 def _fill_portable(model: ActorCriticRNN) -> None:
     """Overwrite every weight with ``U(+-1/sqrt(fan_in))`` drawn the same on any host."""
     generator = torch.Generator().manual_seed(73)
