@@ -173,9 +173,11 @@ absorbs it. Two consequences:
 
 ### No host-keyed or device-keyed goldens
 
-A golden runs on any CPU and passes under `ATEN_CPU_CAPABILITY=default`,
-`avx2`, and native. A golden keyed on host, vendor, or GPU model skips
-everywhere it was not minted, so it tests nothing there; do not write one.
+A golden runs on any CPU: the float64 upcast, not a fixed set of ATen
+kernels, decides its bits. Each golden runs once, in the pre-push tier that
+holds it, on the runner's native x86 kernels; add no per-ISA lane. A golden
+keyed on host, vendor, or GPU model skips everywhere it was not minted, so it
+tests nothing there; do not write one.
 Put everything that computes -- model construction included, since
 initializers draw through ISA-dependent kernels -- inside
 `host_agnostic_numerics()`. A stack the upcast cannot reach (JAX/XLA, a
@@ -327,7 +329,8 @@ model by size only (next section) -- never drop an item from class 2 or 3.
 
 ### Scope and names
 
-- Golden only the nexus experiments. A derivative recipe gets no golden.
+- Golden only a project's baselines, its best results, and the ablations its
+  write-ups cite. Every other recipe gets no golden.
 - Test a component in the baseline that owns it. A sudoku mechanism is unit
   tested in `sudoku/`, not replayed through an ARC recipe.
 - Name goldens by priml convention: `testdata/<expNNN>[_<precision>].pt`, or

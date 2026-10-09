@@ -209,7 +209,7 @@ differ.
 | `lib/` | PufferLib's kernel arithmetic, Adam, typed array reads, cost helpers |
 | `world_model/` | The world model, its full loop and the frozen feature; its own README |
 | `ghosts/` | The blog post's ghost overlay; `ghosts/FORMAT.md` |
-| `scripts/` | Golden minting and the joint world-model smoke |
+| `scripts/` | The references the game's kernels are checked against, and the joint world-model smoke |
 | `testdata/` | Goldens |
 | `docs/differences.md` | Every way PufferLib differs from original Craftax |
 
