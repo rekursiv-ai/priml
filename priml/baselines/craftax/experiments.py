@@ -320,7 +320,7 @@ def exp002() -> CraftaxTrainLoop:
       fresh worlds make every episode new. The six options are one treatment,
       not six: the question is the benchmark as published, and no subset of
       them is that benchmark. Each option's own effect on the environment is
-      frozen separately (``env_test.py``'s goldens).
+      a unit test of ``game/step_test.py``.
 
     References:
       https://github.com/MichaelTMatthews/Craftax (Craftax-Symbolic-v1)

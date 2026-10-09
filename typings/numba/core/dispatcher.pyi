@@ -8,9 +8,18 @@ _F_co = TypeVar("_F_co", bound=Callable[..., object], covariant=True)
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
+class _CodeLibrary:
+    # The optimized LLVM module callers link, compiled now or loaded from the cache.
+    def _get_module_for_linking(self) -> object: ...
+
+class _CompileResult:
+    library: _CodeLibrary
+
 class Dispatcher(Generic[_F_co]):
     # The keyword arguments the decorator compiled with, `nopython` included.
     targetoptions: dict[str, object]
+    # Each compiled signature's result, by argument types.
+    overloads: dict[tuple[Type, ...], _CompileResult]
     @property
     def py_func(self) -> _F_co: ...
     @property

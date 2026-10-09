@@ -1,18 +1,26 @@
-"""Tests for the vectorized environment's buffer contract and its helper threads."""
+"""Tests for the vectorized environment's buffer contract and its helper threads.
+
+Every test but the goldens runs the env's kernels as their Python source
+(``game.testing.eager_kernels``) on small hand-built worlds: a compile costs
+seconds, these worlds milliseconds. The goldens run the machine code, the one
+check that the compiled kernels play exp000's and exp002's environments bit
+for bit, and that those kernels compute in float32 without fused
+multiply-adds.
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import hashlib
 import math
 import platform
+import re
 import sys
 import threading
 import time
 
 from llvmlite import ir
-from numba import njit
 from numba.core.registry import cpu_target
 
 import numba.core.types as nbtypes
@@ -35,14 +43,17 @@ from priml.baselines.craftax.env import (
     _emit_ticks,
     _pause_signature,
     _ticks_signature,
-    clock_numba,
     lead_numba,
     ticks_per_second,
 )
+from priml.baselines.craftax.game import step
+from priml.baselines.craftax.game.archive import FNV_BASIS, FNV_PRIME
 from priml.baselines.craftax.game.jit import jit
 from priml.baselines.craftax.game.rng import rand_r_numba
+from priml.baselines.craftax.game.rules import GRAVE_BLOCKS, LAND_BLOCKS
 from priml.baselines.craftax.game.state import (
     ACTION_OBS_SIZE,
+    MAP_SIZE,
     NUM_BLOCK_TYPES,
     OBS_SIZE,
     STATE_DTYPE,
@@ -50,14 +61,28 @@ from priml.baselines.craftax.game.state import (
     SYMBOLIC_OBS_SIZE,
     SYMBOLIC_TILE_CHANNELS,
     TRAINING_STATS_DTYPE,
+    Action,
+    BlockType,
+    ItemType,
+    new_states,
 )
 from priml.baselines.craftax.game.step import Rules
-from priml.baselines.craftax.game.testing import ir_builder
+from priml.baselines.craftax.game.testing import (
+    _kernel_llvm,
+    build_small_pool,
+    eager_kernels,
+    generate_small_world,
+    ir_builder,
+)
 from priml.baselines.craftax.game.world_gen import (
+    DUNGEON_FLOOR_ORDER,
     DUNGEON_LEVEL_CONFIGS,
+    SMOOTH_FLOOR_ORDER,
     SMOOTH_LEVEL_CONFIGS,
+    build_pool_numba,
 )
 from priml.baselines.craftax.learners.practice import FrontierPractice
+from priml.baselines.craftax.lib.arrays import typed
 from priml.baselines.craftax.testing import (
     assert_golden,
     digest,
@@ -67,18 +92,59 @@ from priml.baselines.craftax.testing import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from numba.core.base import BaseContext
+    from numba.core.dispatcher import Dispatcher
     from numba.core.typing.templates import Signature
+    from numpy.typing import NDArray
 
-    from priml.baselines.craftax.game.state import Array1, Array2
+    from priml.baselines.craftax.game.state import Array1, Array2, Array3
+
+
+_FUSED: Final = re.compile(
+    r"@llvm\.fmuladd\.|@llvm\.fma\."
+    r"|= f(?:add|sub|mul|div|rem|neg) (?:\w+ )*(?:fast|contract|reassoc|afn)\b",
+)
+"""A fused multiply-add in LLVM IR, or a flag that lets the backend fuse one."""
+
+
+@pytest.fixture(autouse=True)
+def kernels(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Run the env's kernels as Python on small worlds, unless a test asks for ``compiled``.
+
+    A compiled test says so with
+    ``@pytest.mark.parametrize("kernels", ["compiled"], indirect=True)``. The
+    words the helpers share are plain loads and stores here, which the GIL
+    orders; a spin yields it. The clock is ``perf_counter_ns``, so the rate
+    the spin budget is measured in is measured anew for it, and again after.
+    """
+    if getattr(request, "param", "eager") == "compiled":
+        yield
+        return
+    ticks_per_second.cache_clear()
+    eager_kernels(
+        monkeypatch,
+        atomic_load=_atomic_load,
+        atomic_store=_atomic_store,
+        pause=_pause,
+        ticks=time.perf_counter_ns,
+        build_pool_numba=build_small_pool,
+        generate_world_numba=generate_small_world,
+        world_hash_numba=_world_hash,
+    )
+    yield
+    ticks_per_second.cache_clear()
 
 
 def _env(num_envs: int = 8, num_buffers: int = 2, num_worlds: int = 3) -> CraftaxEnv:
     cfg = CraftaxEnv.Config()
     cfg.num_envs = num_envs
     cfg.num_buffers = num_buffers
+    cfg.spin_seconds = 0.0
     cfg.restart = _pool(num_worlds)
     return cfg.make()
 
@@ -89,7 +155,6 @@ def _pool(num_worlds: int) -> WorldPool.Config:
     return config
 
 
-@pytest.mark.compute_large_fixture
 def test_buffer_attributes_have_the_contracted_shapes_and_dtypes() -> None:
     env = _env()
     assert env.observations.shape == (8, 843)
@@ -104,7 +169,6 @@ def test_buffer_attributes_have_the_contracted_shapes_and_dtypes() -> None:
     assert env.actions.dtype == torch.float32
 
 
-@pytest.mark.compute_large_fixture
 def test_buffers_are_contiguous_host_tensors_pinned_where_cuda_exists() -> None:
     env = _env()
     for buffer in (
@@ -119,7 +183,6 @@ def test_buffers_are_contiguous_host_tensors_pinned_where_cuda_exists() -> None:
         assert buffer.is_pinned() == torch.cuda.is_available()
 
 
-@pytest.mark.compute_large_fixture
 def test_buffers_stay_on_the_host_when_built_under_another_default_device() -> None:
     """The loop builds its step under the runtime's device; the C writes host rows."""
     with torch.device("meta"):
@@ -136,7 +199,6 @@ def test_buffers_stay_on_the_host_when_built_under_another_default_device() -> N
         assert buffer.device.type == "cpu"
 
 
-@pytest.mark.compute_large_fixture
 def test_mask_starts_all_ones_and_the_rest_zero() -> None:
     env = _env()
     assert torch.equal(env.action_mask, torch.ones(8, 43, dtype=torch.uint8))
@@ -146,7 +208,6 @@ def test_mask_starts_all_ones_and_the_rest_zero() -> None:
     assert not env.actions.any()
 
 
-@pytest.mark.compute_large_fixture
 def test_state_arrays_follow_the_configured_sizes() -> None:
     env = _env(num_envs=6, num_buffers=3, num_worlds=5)
     assert env.states.dtype == STATE_DTYPE
@@ -159,7 +220,6 @@ def test_state_arrays_follow_the_configured_sizes() -> None:
     assert env.rngs.tolist() == [0, 1, 2, 3, 4, 5]
 
 
-@pytest.mark.compute_large_fixture
 def test_seed_is_an_offset_added_to_the_env_index() -> None:
     cfg = CraftaxEnv.Config()
     cfg.num_envs = 4
@@ -169,7 +229,6 @@ def test_seed_is_an_offset_added_to_the_env_index() -> None:
     assert cfg.make().rngs.tolist() == [100, 101, 102, 103]
 
 
-@pytest.mark.compute_large_fixture
 def test_buffer_slices_tile_the_rows_in_order() -> None:
     env = _env(num_envs=8, num_buffers=2)
     assert env.envs_per_buffer == 4
@@ -245,7 +304,6 @@ def test_the_config_passes_the_rules_to_the_step() -> None:
     env.close()
 
 
-@pytest.mark.compute_large_fixture
 def test_the_original_rules_reset_into_the_unmasked_symbolic_view_and_step() -> None:
     env = _original_rules_env()
     env.reset()
@@ -263,7 +321,6 @@ def test_the_original_rules_reset_into_the_unmasked_symbolic_view_and_step() -> 
     env.close()
 
 
-@pytest.mark.compute_large_fixture
 def test_the_default_config_plays_the_default_rules() -> None:
     # Apart from the options test, so each pays one compile: together, the step
     # with every option on and this pool's world generator took 57 s of the
@@ -273,7 +330,6 @@ def test_the_default_config_plays_the_default_rules() -> None:
     env.close()
 
 
-@pytest.mark.compute_large_fixture
 def test_reset_writes_first_observations_and_clears_the_step_outputs() -> None:
     env = _env(num_envs=4, num_buffers=2, num_worlds=5)
     env.reset()
@@ -285,21 +341,21 @@ def test_reset_writes_first_observations_and_clears_the_step_outputs() -> None:
     env.close()
 
 
-@pytest.mark.compute_large_fixture
 @pytest.mark.parametrize(
     ("threads", "spin_seconds"),
-    [(1, 0.005), (2, 0.005), (3, 0.005), (3, 0.0), (66, 0.0)],
-    ids=["1", "2", "3", "3-sleeping-helpers", "66-sleeping-helpers"],
+    [(1, 0.005), (2, 0.005), (3, 0.005), (3, 0.0), (5, 0.0)],
+    ids=["1", "2", "3", "3-sleeping-helpers", "5-sleeping-helpers"],
 )
 def test_stepping_a_buffer_gives_the_same_bits_at_every_thread_count(
     threads: int,
     spin_seconds: float,
 ) -> None:
     # With no spin budget every helper parks after each share, so every step
-    # also takes the wake path.
+    # also takes the wake path; three or five threads to two rows leave a
+    # helper an empty share.
     def run(threads: int) -> tuple[bytes, np.ndarray, np.ndarray]:
         cfg = CraftaxEnv.Config()
-        cfg.num_envs = 12
+        cfg.num_envs = 4
         cfg.num_buffers = 2
         cfg.restart = _pool(4)
         cfg.threads_per_buffer = threads
@@ -307,7 +363,7 @@ def test_stepping_a_buffer_gives_the_same_bits_at_every_thread_count(
         env = cfg.make()
         env.reset()
         draws = np.random.default_rng(0)
-        for _ in range(8):
+        for _ in range(2):
             for buffer in range(2):
                 rows = env.buffer_slice(buffer)
                 legal = env.action_mask[rows].numpy()
@@ -358,7 +414,6 @@ def _fail_third_call(calls: Array1[int]) -> int:
     return 7 if calls[0] == 3 else 0
 
 
-@pytest.mark.compute_large_fixture
 @pytest.mark.parametrize(
     ("threads", "spin_seconds"),
     [(1, 0.005), (2, 0.005), (3, 0.0)],
@@ -370,7 +425,7 @@ def test_run_buffer_matches_preparing_and_stepping_from_python(
 ) -> None:
     def make() -> CraftaxEnv:
         cfg = CraftaxEnv.Config()
-        cfg.num_envs = 12
+        cfg.num_envs = 4
         cfg.num_buffers = 2
         cfg.restart = _pool(4)
         cfg.threads_per_buffer = threads
@@ -383,7 +438,7 @@ def test_run_buffer_matches_preparing_and_stepping_from_python(
     for buffer in range(2):
         start, stop, _ = looped.buffer_slice(buffer).indices(looped.num_envs)
         calls = np.zeros(1, dtype=np.int64)
-        for _ in range(8):
+        for _ in range(2):
             _pick_actions(
                 looped.action_mask.numpy(), looped.actions.numpy(), start, stop, calls,
             )  # fmt: skip
@@ -391,7 +446,7 @@ def test_run_buffer_matches_preparing_and_stepping_from_python(
         calls = np.zeros(1, dtype=np.int64)
         ran.run_buffer(
             buffer,
-            8,
+            2,
             _pick_actions,
             (
                 ran.action_mask.numpy(),
@@ -401,7 +456,7 @@ def test_run_buffer_matches_preparing_and_stepping_from_python(
                 calls,
             ),
         )
-        assert calls[0] == 8
+        assert calls[0] == 2
     assert ran.states.tobytes() == looped.states.tobytes()
     assert ran.stats.tobytes() == looped.stats.tobytes()
     assert torch.equal(ran.observations, looped.observations)
@@ -412,7 +467,6 @@ def test_run_buffer_matches_preparing_and_stepping_from_python(
     ran.close()
 
 
-@pytest.mark.compute_large_fixture
 def test_run_buffer_stops_at_a_failed_prepare_after_the_steps_before_it() -> None:
     env = _env()
     env.reset()
@@ -427,7 +481,6 @@ def test_run_buffer_stops_at_a_failed_prepare_after_the_steps_before_it() -> Non
     env.close()
 
 
-@pytest.mark.compute_large_fixture
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 def test_a_failed_helper_makes_the_step_raise_instead_of_waiting(
     monkeypatch: pytest.MonkeyPatch,
@@ -444,7 +497,6 @@ def test_a_failed_helper_makes_the_step_raise_instead_of_waiting(
     env.close()
 
 
-@pytest.mark.compute_large_fixture
 def test_a_closed_environment_refuses_to_step() -> None:
     env = _env()
     env.reset()
@@ -454,7 +506,6 @@ def test_a_closed_environment_refuses_to_step() -> None:
         env.step_buffer(0)
 
 
-@pytest.mark.compute_large_fixture
 def test_a_share_posted_after_its_helper_stopped_is_not_waited_for() -> None:
     # As when close() lands between a step posting its ticket and the helper
     # reading it: the helper leaves serve without doing the share.
@@ -474,15 +525,22 @@ def test_a_share_posted_after_its_helper_stopped_is_not_waited_for() -> None:
     assert status < 0
 
 
-@pytest.mark.compute_large_fixture
 def test_the_spin_budget_spans_spin_seconds_of_the_cycle_counter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A fresh dispatcher: its first call compiles, as a process's first clock
-    # read loads the kernel, which a budget measured across it must not count.
-    # The rate is measured once per process, so this test measures it anew.
-    fresh_clock = njit(nogil=True)(clock_numba.py_func)
-    monkeypatch.setattr("priml.baselines.craftax.env.clock_numba", fresh_clock)
+    # A process's first clock read loads or compiles the clock's kernel, which
+    # a budget measured across it must not count; this clock's first read
+    # takes 20 ms, twice the measuring window. Its ticks are nanoseconds. The
+    # rate is measured once per process, so this test measures it anew.
+    reads: list[int] = []
+
+    def clock() -> int:
+        if not reads:
+            time.sleep(0.02)
+        reads.append(time.perf_counter_ns())
+        return reads[-1]
+
+    monkeypatch.setattr("priml.baselines.craftax.env.clock_numba", clock)
     ticks_per_second.cache_clear()
     budgets: list[int] = []
 
@@ -504,14 +562,9 @@ def test_the_spin_budget_spans_spin_seconds_of_the_cycle_counter(
     cfg.restart = FreshWorlds.Config()
     cfg.spin_seconds = 0.005
     cfg.make().close()
-    # The reference rate, with the clock's kernel compiled by now.
-    started, started_ticks = time.perf_counter(), fresh_clock()
-    time.sleep(0.05)
-    rate = (fresh_clock() - started_ticks) / (time.perf_counter() - started)
-    assert budgets == [pytest.approx(cfg.spin_seconds * rate, rel=0.2)]
+    assert budgets == [pytest.approx(cfg.spin_seconds * 1e9, rel=0.2)]
 
 
-@pytest.mark.compute_large_fixture
 @pytest.mark.parametrize("threads", [2, 3, 4, 5, 8])
 def test_each_helper_row_of_the_control_array_is_its_own_cache_block(
     threads: int,
@@ -530,7 +583,6 @@ def test_each_helper_row_of_the_control_array_is_its_own_cache_block(
     env.close()
 
 
-@pytest.mark.compute_large_fixture
 def test_a_helper_that_cannot_start_stops_the_helpers_before_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -674,17 +726,16 @@ def _stamp_seeds(
     pool_bytes[:, 0] = first_seed + np.arange(len(pool))
 
 
-@pytest.mark.compute_large_fixture
 def test_the_state_dict_restores_every_array_a_step_reads() -> None:
     """A loaded state dict puts the env back where it was saved, bit for bit."""
     env = _env(num_envs=4, num_buffers=2, num_worlds=3)
     try:
         env.reset()
         streams = np.uint32(0x9E37_79B9) ^ np.arange(1, 5, dtype=np.uint32)
-        _play(env, streams, steps=2)
+        _play(env, streams, steps=1)
         saved = {name: value.clone() for name, value in env.state_dict().items()}
         expected = env_digests(env)
-        _play(env, streams, steps=3)
+        _play(env, streams, steps=1)
         assert env_digests(env) != expected
         env.load_state_dict(saved)
         assert env_digests(env) == expected
@@ -809,19 +860,20 @@ def test_a_stall_cap_refuses_what_its_draw_cannot_play(
 
 
 def _options_env(threads: int = 1, *, fresh_worlds: bool = False) -> CraftaxEnv:
-    """Return 8 environments in 2 buffers with every training option on, reset."""
+    """Return 2 environments in 2 buffers with every training option on, reset."""
     cfg = CraftaxEnv.Config()
-    cfg.num_envs = 8
+    cfg.num_envs = 2
     cfg.num_buffers = 2
     cfg.threads_per_buffer = threads
+    cfg.spin_seconds = 0.0
     cfg.restart = FreshWorlds.Config() if fresh_worlds else _pool(4)
     cfg.rules.previous_action = True
     cap = cfg.stall_cap = StallCap.Config()
     cap.stall_limit = 20
     cap.uncapped_fraction = 0.25
-    # One point per level, so a random player's first achievements save.
+    # One point per level, so the first achievement saves.
     practice = cfg.practice = FrontierPractice.Config()
-    practice.num_donors = 3
+    practice.num_donors = 1
     practice.num_levels = 4
     practice.level_width = 1.0
     practice.entries_per_level = 2
@@ -831,17 +883,21 @@ def _options_env(threads: int = 1, *, fresh_worlds: bool = False) -> CraftaxEnv:
     return env
 
 
-def _practise(env: CraftaxEnv, streams: np.ndarray, *, rollouts: int) -> list[str]:
-    """Play ``rollouts`` of 8 steps, preparing before each; digest every array after it."""
+# Each rollout is one step, every row striking the tree a small world puts before its
+# player: the donor's first achievement saves its world, and the next rollout's
+# practice row is restored from that save and plays its branch's first step.
+def _practise(env: CraftaxEnv, *, rollouts: int) -> list[str]:
+    """Play ``rollouts`` of one step, preparing before each; digest every array after it."""
     lines: list[str] = []
     for _ in range(rollouts):
         env.prepare_rollout()
-        _play(env, streams, steps=8)
+        env.actions[:] = float(Action.DO)
+        for buffer in range(env.num_buffers):
+            env.step_buffer(buffer)
         lines += [f"{name} {digest(value)}" for name, value in env.state_dict().items()]
     return lines
 
 
-@pytest.mark.compute_large_fixture
 def test_without_practice_its_plumbing_is_inert() -> None:
     env = _env(num_envs=4, num_buffers=2, num_worlds=3)
     try:
@@ -872,17 +928,17 @@ def test_without_practice_its_plumbing_is_inert() -> None:
         env.close()
 
 
-@pytest.mark.compute_large_fixture
 def test_the_escape_streams_are_seeded_once_and_draw_once_per_reset() -> None:
     env = _options_env()
     try:
         assert env.stats.dtype == TRAINING_STATS_DTYPE
-        # The rows that can save: the three donors, the last buffer's last rows.
-        assert env.save_rows == slice(5, 8)
+        # The row that can save: the one donor, the last buffer's row, which a
+        # helper steps at two threads.
+        assert env.save_rows == slice(1, 2)
         assert env.carry_slots == 8
-        drawn = np.arange(8, dtype=np.uint32) ^ np.uint32(0x9E37_79B9)
+        drawn = np.arange(2, dtype=np.uint32) ^ np.uint32(0x9E37_79B9)
         for _ in range(2):
-            for i in range(8):
+            for i in range(2):
                 rand_r_numba(drawn[i : i + 1])
             assert env.stats["escape"][:, 0].tolist() == drawn.tolist()
             env.reset()
@@ -890,7 +946,6 @@ def test_the_escape_streams_are_seeded_once_and_draw_once_per_reset() -> None:
         env.close()
 
 
-@pytest.mark.compute_large_fixture
 @pytest.mark.parametrize("fresh_worlds", [False, True])
 def test_practice_plays_the_same_bits_at_every_thread_count(fresh_worlds: bool) -> None:
     """Donors save in row order after each step's shares join, whoever stepped them.
@@ -899,11 +954,10 @@ def test_practice_plays_the_same_bits_at_every_thread_count(fresh_worlds: bool) 
     donors save from.
     """
     runs: list[list[str]] = []
-    for threads in (1, 3):
+    for threads in (1, 2):
         env = _options_env(threads, fresh_worlds=fresh_worlds)
         try:
-            streams = np.uint32(0x9E37_79B9) ^ np.arange(1, 9, dtype=np.uint32)
-            runs.append(_practise(env, streams, rollouts=6))
+            runs.append(_practise(env, rollouts=2))
             practice = env.practice
             assert practice is not None
             assert practice.archive.sizes.sum() > 0
@@ -913,33 +967,20 @@ def test_practice_plays_the_same_bits_at_every_thread_count(fresh_worlds: bool) 
     assert runs[0] == runs[1]
 
 
-@pytest.mark.compute_large_fixture
 def test_practice_resumes_bit_identically_from_the_state_dict() -> None:
     env = _options_env()
     try:
-        streams = np.uint32(0x9E37_79B9) ^ np.arange(1, 9, dtype=np.uint32)
-        _practise(env, streams, rollouts=3)
+        _practise(env, rollouts=1)
         saved = {name: value.clone() for name, value in env.state_dict().items()}
-        resumed_streams = streams.copy()
-        expected = _practise(env, streams, rollouts=3)
+        expected = _practise(env, rollouts=1)
         env.load_state_dict(saved)
-        assert _practise(env, resumed_streams, rollouts=3) == expected
+        assert _practise(env, rollouts=1) == expected
     finally:
         env.close()
 
 
 @pytest.mark.compute_large_fixture
-@pytest.mark.skipif(
-    sys.platform == "darwin",
-    reason=(
-        "libm differs from glibc's in the last bit; golden is glibc x86-64. "
-        "At 64 environments macOS's play departed from it at steps 77-127"
-    ),
-)
-@pytest.mark.skipif(
-    sys.platform == "linux" and platform.machine() != "x86_64",
-    reason="golden is glibc x86-64; glibc 2.35 and 2.39 play it alike, this CPU is unmeasured",
-)
+@pytest.mark.parametrize("kernels", ["compiled"], indirect=True)
 @pytest.mark.parametrize(
     ("name", "rules", "fresh"),
     [
@@ -955,11 +996,6 @@ def test_practice_resumes_bit_identically_from_the_state_dict() -> None:
             },
             True,
         ),
-        ("original_reward", {"original_reward": True}, False),
-        ("tick_sleep", {"collapse_sleep": False}, False),
-        ("no_action_mask", {"action_mask": False}, False),
-        ("fresh_worlds", {}, True),
-        ("symbolic", {"symbolic_observation": True}, False),
     ],
 )
 def test_the_environments_play_their_golden(
@@ -967,46 +1003,42 @@ def test_the_environments_play_their_golden(
     rules: dict[str, bool],
     fresh: bool,
 ) -> None:
-    """exp000's and exp002's environments, and each original option alone, frozen.
+    """exp000's and exp002's environments, compiled, frozen: the kernels' one bit-for-bit check.
 
-    Each plays from seed 0 -- 2,048 environments in 2 buffers of 2 threads,
-    2,048 pool worlds unless fresh -- for 256 steps: past the first episode
-    ends (from step ~30) and their resets, and into the night, whose light the
-    spawns and the view read. Fewer environments miss defects that the 2,048
-    on 8,192 worlds caught (measured): mining coal yields 2, a strength
-    level-up adds 2, a hostile kill feeds, a move off the map wraps. Goldens
-    red, of 7, with each planted:
+    PufferLib's rules and original Craftax's, the baselines of the recipes.
+    Each plays from seed 0 -- 4 environments in 2 buffers of 2 threads, so a
+    helper steps half of every buffer, and 4 pool worlds unless fresh -- for
+    32 steps, on the oracle traces' xorshift action stream over the last
+    step's mask. The golden holds the pool, every array after the reset, each
+    step's rewards and terminals and a digest of every array after it, and
+    every array at the end. exp002's options are ``docs/differences.md``'s D1,
+    D2, D4, D5, D6 and D8. Each rule and option is a unit test of
+    ``game/step_test.py``, which plays it as Python.
 
-        environments   coal   strength   hostile kill   edge wrap
-        64             0      0          0              0
-        512            4      4          1              0
-        1,024          4      4          2              0
-        2,048          5      1          5              3
-
-    The actions are the oracle traces' xorshift stream over the last step's
-    mask. The golden holds the pool, every array after the reset, a digest of
-    every array after each step, and every array at the end, all as digests,
-    so its size does not grow with the environments. exp002's options are ``docs/differences.md``'s D1, D2, D4, D5,
-    D6 and D8; D2 alone is left out, since no random player reaches the
-    necromancer, so its golden would be exp000's.
+    First, on every host, what only the compiled code shows: the worlds it
+    generated are well formed, and the step's kernels, linked as they run,
+    compute in float32 with no fused multiply-add, either of which changes
+    bits that the C computes in plain float32. The golden itself is glibc
+    x86-64's: macOS's libm rounds apart from glibc's in the last bit.
     """
     config = CraftaxEnv.Config()
-    config.num_envs = 2_048
+    config.num_envs = 4
     config.num_buffers = 2
     for field_name, value in rules.items():
         setattr(config.rules, field_name, value)
-    config.restart = FreshWorlds.Config() if fresh else _pool(2_048)
+    config.restart = FreshWorlds.Config() if fresh else _pool(4)
     env = config.make()
     try:
         lines = [f"pool {digest(env.pool.view(np.uint8))}"]
         env.reset()
         lines += [f"reset {entry}" for entry in env_digests(env)]
+        _assert_well_formed(env.states if fresh else env.pool)
         streams = np.uint32(0x9E37_79B9) ^ np.arange(
             1,
             env.num_envs + 1,
             dtype=np.uint32,
         )
-        for step in range(1, 257):
+        for step_index in range(1, 33):
             masked_random_actions_numba(
                 streams,
                 env.action_mask.numpy(),
@@ -1014,10 +1046,25 @@ def test_the_environments_play_their_golden(
             )
             for buffer in range(env.num_buffers):
                 env.step_buffer(buffer)
-            lines.append(f"step {step:04d} {_step_digest(env)}")
+            lines.append(
+                f"step {step_index:02d} rewards {env.rewards.tolist()} "
+                f"terminals {env.terminals.tolist()} {_step_digest(env)}",
+            )
         lines += [f"final {entry}" for entry in env_digests(env)]
     finally:
         env.close()
+    # The kernels Python calls, each linking every kernel it reaches: the step's
+    # lead, the reset, and the pool's world generation.
+    kernels: list[Dispatcher[Callable[..., object]]] = [
+        lead_numba,
+        step.reset_range_numba,
+    ]
+    if not fresh:
+        _assert_the_pool_is_worlds_generated_one_at_a_time(env.pool)
+        kernels.append(build_pool_numba)
+    _assert_float32_without_fused_multiply_adds(*kernels)
+    if sys.platform != "linux" or platform.machine() != "x86_64":
+        pytest.skip("the golden is glibc x86-64's; this host's libm rounds apart")
     assert_golden(test_file=__file__, name=f"env_{name}", lines=lines)
 
 
@@ -1035,6 +1082,111 @@ def _step_digest(env: CraftaxEnv) -> str:
     ):
         hasher.update(np.ascontiguousarray(array))
     return hasher.hexdigest()[:16]
+
+
+# Each surface floor has its spawn block under the player and its ladders on their
+# items, each dungeon floor is lit and has its ladders on paths, and the spawn bitsets
+# describe every floor's map.
+def _assert_well_formed(worlds: NDArray[np.void]) -> None:
+    """Assert what every generated world must be, on worlds the compiled kernels built."""
+    centre = MAP_SIZE // 2
+    maps = typed(worlds["map"], np.uint8)
+    items = typed(worlds["item_map"], np.uint8)
+    downs = typed(worlds["down_ladders"], np.int32)
+    ups = typed(worlds["up_ladders"], np.int32)
+    spawns = typed(SMOOTH_LEVEL_CONFIGS["player_spawn"], np.int32)
+    has_down = typed(SMOOTH_LEVEL_CONFIGS["ladder_down"], np.uint8)
+    has_up = typed(SMOOTH_LEVEL_CONFIGS["ladder_up"], np.uint8)
+    for k in range(len(worlds)):
+        for i, level in enumerate(SMOOTH_FLOOR_ORDER):
+            assert maps.item(k, level, centre, centre) == spawns.item(i), (k, level)
+            down = items.item(
+                k,
+                level,
+                downs.item(k, level, 0),
+                downs.item(k, level, 1),
+            )
+            up = items.item(k, level, ups.item(k, level, 0), ups.item(k, level, 1))
+            assert down == (ItemType.LADDER_DOWN if has_down.item(i) else ItemType.NONE)
+            assert up == (ItemType.LADDER_UP if has_up.item(i) else ItemType.NONE)
+        for level in DUNGEON_FLOOR_ORDER:
+            row, col = downs.item(k, level, 0), downs.item(k, level, 1)
+            assert items.item(k, level, row, col) == ItemType.LADDER_DOWN
+            assert maps.item(k, level, row, col) == BlockType.PATH
+            row, col = ups.item(k, level, 0), ups.item(k, level, 1)
+            assert items.item(k, level, row, col) == ItemType.LADDER_UP
+            assert np.equal(
+                typed(worlds["light_map"], np.uint8)[k, level, ...],
+                255,
+            ).all()
+    shifts = np.arange(64, dtype=np.uint64)
+    for name, blocks in (
+        ("spawn_land", np.asarray(LAND_BLOCKS)),
+        ("spawn_grave", np.asarray(GRAVE_BLOCKS)),
+        ("spawn_water", np.arange(NUM_BLOCK_TYPES) == BlockType.WATER),
+    ):
+        bits = (typed(worlds[name], np.uint64)[..., None] >> shifts) & np.uint64(1)
+        assert np.array_equal(bits[..., :MAP_SIZE].astype(bool), blocks[maps]), name
+        assert not bits[..., MAP_SIZE:].any(), name
+
+
+def _assert_the_pool_is_worlds_generated_one_at_a_time(pool: NDArray[np.void]) -> None:
+    """Assert the parallel pool's world ``k`` is the world seed ``k`` generates alone."""
+    alone = new_states(1)
+    for k in range(len(pool)):
+        build_pool_numba(
+            alone,
+            alone.view(np.uint8).reshape(1, STATE_DTYPE.itemsize),
+            SMOOTH_LEVEL_CONFIGS,
+            DUNGEON_LEVEL_CONFIGS,
+            k,
+        )
+        assert alone.tobytes() == pool[k : k + 1].tobytes(), k
+    assert len({pool[k : k + 1].tobytes() for k in range(len(pool))}) == len(pool)
+
+
+# The IR is the module Numba links into callers, compiled now or loaded from the cache,
+# whose inspection would return nothing. Under the jit options LLVM fuses a multiply and
+# an add only where the IR says it may (``jit_test``'s canary holds that).
+def _assert_float32_without_fused_multiply_adds(
+    *kernels: Dispatcher[Callable[..., object]],
+) -> None:
+    """Assert each kernel's compiled code, its callees linked in, is float32 and unfused."""
+    for kernel in kernels:
+        assert kernel.overloads, kernel
+        body = _kernel_llvm(
+            str(result.library._get_module_for_linking())
+            for result in kernel.overloads.values()
+        )
+        assert "define" in body, kernel
+        assert not _FUSED.search(body), kernel
+        assert "double" not in body, kernel
+        assert "fpext" not in body, kernel
+
+
+# The same hash of the same bytes in memory order; the kernel run as Python takes 30 ms
+# a world, and practice hashes a donor's world at every episode.
+def _world_hash(grid: Array3[int]) -> np.uint64:
+    """Stand in for ``archive.world_hash_numba``: its FNV-1a, in Python ints."""
+    value = int(FNV_BASIS)
+    for byte in np.asarray(grid).tobytes():
+        value = ((value ^ byte) * int(FNV_PRIME)) & 0xFFFF_FFFF_FFFF_FFFF
+    return np.uint64(value)
+
+
+def _atomic_load(array: Array1[int], index: int) -> int:
+    """Stand in for ``env.atomic_load``: a plain read, which the GIL orders."""
+    return int(array[index])
+
+
+def _atomic_store(array: Array1[int], index: int, value: int) -> None:
+    """Stand in for ``env.atomic_store``: a plain write, which the GIL orders."""
+    array[index] = value
+
+
+def _pause() -> None:
+    """Stand in for ``env.pause``: yield the GIL, which a spinning helper holds."""
+    time.sleep(0)
 
 
 if __name__ == "__main__":

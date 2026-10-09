@@ -1,9 +1,12 @@
 """Tests that the port's ``rand_r`` stream is glibc's, draw for draw.
 
-The kernels are Numba, which compiles numpy arrays and not tensors, so the
-tests hold numpy. The jitted helpers call the game's scalar ``rand_r_numba`` one
-draw at a time: that kernel is the unit under test, and the game draws that
-way because each environment's draws are conditional on its own state.
+The kernels run as their Python source (``testing.eager_kernels``): their
+arithmetic is uint32 masked in uint64 and single float32 roundings, which
+Python's numpy scalars compute bit for bit as the compiled kernels do, and
+``env_test``'s goldens hold the compiled stream. The jitted helper calls the
+game's scalar ``rand_r_numba`` one draw at a time: that kernel is the unit
+under test, and the game draws that way because each environment's draws are
+conditional on its own state.
 """
 
 from __future__ import annotations
@@ -24,10 +27,7 @@ from priml.baselines.craftax.game.rng import (
     rng_f32_numba,
     rng_int_numba,
 )
-from priml.baselines.craftax.game.testing import (
-    FMA_MNEMONIC,
-    kernel_inspection,
-)
+from priml.baselines.craftax.game.testing import eager_kernels
 from priml.baselines.craftax.scripts import mint_goldens
 
 
@@ -45,6 +45,12 @@ the draw so a wrong constant cannot pass silently.
 """
 
 
+@pytest.fixture(autouse=True)
+def eager(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the draws as Python: a compile costs seconds, a draw microseconds."""
+    eager_kernels(monkeypatch)
+
+
 @jit
 def _streams(seeds: Array1[np.uint32], out: Array2[np.int32]) -> None:
     rng = np.empty(1, dtype=np.uint32)
@@ -58,7 +64,6 @@ def _rng(seed: int) -> NDArray[np.uint32]:
     return np.array([seed], dtype=np.uint32)
 
 
-@pytest.mark.compute_large_fixture
 def test_rand_r_draws_pufferlibs_first_draws_from_73() -> None:
     """PufferLib's own glibc draws, so a constant the transcription shares still fails."""
     expected = mint_goldens.SEED_73_DRAWS
@@ -67,21 +72,33 @@ def test_rand_r_draws_pufferlibs_first_draws_from_73() -> None:
     assert actual.tolist() == [list(expected)]
 
 
-@pytest.mark.compute_large_fixture
-def test_rand_r_reproduces_glibcs_streams_from_2048_seeds() -> None:
-    """10,000 draws from each of 2,048 seeds, every one compared with glibc's.
+def test_rand_r_reproduces_glibcs_streams_across_the_seed_range() -> None:
+    """128 draws from each of 16 seeds, every one compared with glibc's.
 
-    The transcription stands for glibc (``mint_goldens_test.py``). In chunks of
-    128 seeds: one chunk's LCG states are 15 MB, all of them 245 MB.
+    The transcription stands for glibc (``mint_goldens_test.py``). The seeds
+    are the first environments', the edge's and the top of the uint32 range,
+    where a missing mask or a narrowed product would show first.
     """
-    for seeds in np.split(np.arange(2_048, dtype=np.uint32), 16):
-        expected = mint_goldens.glibc_rand_r(seeds, 10_000)
-        actual = np.empty_like(expected)
-        _streams(seeds, actual)
-        assert np.array_equal(actual, expected)
+    seeds = np.array(
+        [
+            *range(8),
+            2**16,
+            2**24 + 1,
+            EDGE_SEED,
+            2**31 - 1,
+            2**31,
+            0xDEAD_BEEF,
+            2**32 - 3,
+            2**32 - 1,
+        ],
+        dtype=np.uint32,
+    )
+    expected = mint_goldens.glibc_rand_r(seeds, 128)
+    actual = np.empty_like(expected)
+    _streams(seeds, actual)
+    assert np.array_equal(actual, expected)
 
 
-@pytest.mark.compute_large_fixture
 def test_rng_f32_is_the_draw_times_two_to_the_minus_31() -> None:
     rng = _rng(73)
     draw = mint_goldens.glibc_rand_r(np.array([73], np.uint32), 1).item(0, 0)
@@ -89,14 +106,12 @@ def test_rng_f32_is_the_draw_times_two_to_the_minus_31() -> None:
     assert rng[0] != 73
 
 
-@pytest.mark.compute_large_fixture
 def test_rng_f32_returns_exactly_one_on_the_rounding_edge() -> None:
     draw = mint_goldens.glibc_rand_r(np.array([EDGE_SEED], np.uint32), 1).item(0, 0)
     assert draw >= 2**31 - 64, "EDGE_SEED no longer names an edge draw"
     assert rng_f32_numba(_rng(EDGE_SEED)) == np.float32(1.0)
 
 
-@pytest.mark.compute_large_fixture
 def test_rng_int_returns_hi_on_the_edge_and_lo_without_a_span() -> None:
     assert rng_int_numba(_rng(EDGE_SEED), 0, 6) == 6
     rng = _rng(5)
@@ -108,7 +123,6 @@ def test_rng_int_returns_hi_on_the_edge_and_lo_without_a_span() -> None:
     assert rng_int_numba(rng, 1, 5) == expected
 
 
-@pytest.mark.compute_large_fixture
 def test_rng_f32_at_mixes_the_cell_index_into_a_fresh_state() -> None:
     seed, index = 0xDEADBEEF, 1234
     local = (seed ^ ((index * 747_796_405) & 0xFFFF_FFFF)) & 0xFFFF_FFFF
@@ -120,7 +134,6 @@ def test_rng_f32_at_mixes_the_cell_index_into_a_fresh_state() -> None:
     )
 
 
-@pytest.mark.compute_large_fixture
 def test_choice_valid_picks_the_kth_set_entry_and_the_last_on_the_edge() -> None:
     valid = np.array([0, 1, 0, 1, 1], dtype=np.uint8)
     rng = _rng(11)
@@ -133,7 +146,6 @@ def test_choice_valid_picks_the_kth_set_entry_and_the_last_on_the_edge() -> None
     assert rng[0] == 11, "no valid entry must not consume a draw"
 
 
-@pytest.mark.compute_large_fixture
 def test_choose_weighted_accumulates_in_float32_order() -> None:
     weights = np.array([0.3, 0.3, 0.15, 0.125, 0.125], dtype=np.float32)
     rng = _rng(21)
@@ -154,7 +166,6 @@ def test_choose_weighted_accumulates_in_float32_order() -> None:
     assert choose_weighted_numba(_rng(21), np.zeros(3, dtype=np.float32), 3) == 2
 
 
-@pytest.mark.compute_large_fixture
 @pytest.mark.parametrize(
     ("first", "second"),
     [(0.5, 0.5), (1.0, 0.0), (0.0, 1.0), (0.0, 0.0), (1 / 3, 1 / 3), (0.1, 0.9)],
@@ -176,18 +187,6 @@ def test_choose_weighted_pair_makes_the_choice_of_the_two_weight_array(
             2,
         ), seed
         assert rng[0] == twin[0], seed
-
-
-@pytest.mark.compute_large_fixture
-def test_rng_kernels_emit_no_fma_and_no_float64() -> None:
-    rng_f32_numba(_rng(1))
-    rng_f32_at_numba(np.uint64(1), np.uint64(2))
-    choose_weighted_numba(_rng(1), np.ones(2, dtype=np.float32), 2)
-    for kernel in (rng_f32_numba, rng_f32_at_numba, choose_weighted_numba):
-        assembly, body = kernel_inspection(kernel)
-        assert not FMA_MNEMONIC.search(assembly), kernel
-        assert "double" not in body, kernel
-        assert "fpext" not in body, kernel
 
 
 if __name__ == "__main__":

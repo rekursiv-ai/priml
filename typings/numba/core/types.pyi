@@ -20,6 +20,7 @@ class Float(Number):
     bitwidth: int
 
 class NoneType(Type): ...
+class Boolean(Type): ...
 
 class Record(Type):
     size: int
@@ -42,6 +43,8 @@ class Array(Type):
 class StructRef(Type):
     def __init__(self, fields: Sequence[tuple[str, Type]]) -> None: ...
 
+boolean: Boolean
+none: NoneType
 int32: Integer
 int64: Integer
 intp: Integer
