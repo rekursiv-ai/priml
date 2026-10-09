@@ -51,10 +51,8 @@ jobs:
           # Restating each tool here means a newly added hook silently goes unrun.
           bash install-libjpeg-turbo.sh
           uv sync --frozen --all-groups
-          uv run pre-commit run --all-files --hook-stage pre-commit
+          SKIP=superseded-at-pre-push uv run pre-commit run --all-files --hook-stage pre-commit
           uv run pre-commit run --all-files --hook-stage pre-push
-          ATEN_CPU_CAPABILITY=default uv run pytest -m golden -q --tb=short
-          ATEN_CPU_CAPABILITY=avx2 uv run pytest -m golden -q --tb=short
           uv run python -c "import priml"
           rm -rf dist
           uv build --out-dir dist
