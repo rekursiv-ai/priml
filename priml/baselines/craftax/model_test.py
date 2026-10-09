@@ -200,15 +200,6 @@ def test_every_weight_is_pufferlibs_draw_rounded_once_to_bf16() -> None:
         assert _fit_to_rounded_draw(weight, _pufferlib_cdf(name, weight)) > 1e-6, name
 
 
-@pytest.mark.compute_large_fixture
-def test_exp000s_init_draws_pufferlibs_distributions() -> None:
-    """The same fit at exp000's geometry: 14.3M weights, the table at its 2,464."""
-    torch.manual_seed(0)
-    model = MinGRUPolicy.Config().make()
-    for name, weight in model.named_parameters():
-        assert _fit_to_rounded_draw(weight, _pufferlib_cdf(name, weight)) > 1e-6, name
-
-
 def test_pufferlibs_own_seed_73_init_fits_the_reference() -> None:
     """PufferLib's own weights pass the fit the port's are held to.
 

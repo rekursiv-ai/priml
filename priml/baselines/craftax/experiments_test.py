@@ -54,7 +54,10 @@ from priml.baselines.craftax.game.state import (
 )
 from priml.baselines.craftax.learners.gtrxl_train_step import TrajectoryWindows
 from priml.baselines.craftax.learners.imitation import BranchImitation
-from priml.baselines.craftax.learners.pqn_train_step import CraftaxPQNTrainLoop
+from priml.baselines.craftax.learners.pqn_train_step import (
+    CraftaxPQNTrainLoop,
+    CraftaxPQNTrainStep,
+)
 from priml.baselines.craftax.learners.rnn_update import ShuffledTrajectories
 from priml.baselines.craftax.learners.update import ShuffledTransitions
 from priml.baselines.craftax.lib.adam import ClippedAdam
@@ -92,7 +95,6 @@ from priml.baselines.craftax.train_step import (
 )
 from priml.baselines.craftax.world_model.context import ContextReplay
 from priml.baselines.craftax.world_model.feature import (
-    DonorHistory,
     Flash4CacheAttention,
     FreshWindow,
     InitialWeights,
@@ -484,18 +486,22 @@ def test_exp_smoke_is_narrow_and_reads_no_file() -> None:
     assert step.checkpoint is None
 
 
-@pytest.mark.compute_training
 def test_exp_smoke_trains_and_leaves_none_of_its_steps_threads_behind(
     tmp_path: Path,
 ) -> None:
-    """exp_smoke runs end to end on the CPU, its evaluation included.
+    """exp_smoke's loop builds on the CPU and its step trains an epoch.
 
     The loop then closes the step: its rollout, worker and env threads stop
-    (LIFE-1).
+    (LIFE-1). Rollouts of 2 steps, not 16, in one window, and a pool of one
+    world, not 64, whose generation took 43 ms on x86: every other part of an
+    epoch is the tiny step's, its golden's and its unit tests'.
     """
     before = set(threading.enumerate())
     config = exp_smoke()
     config.base_dir = tmp_path
+    pool = config.step.env.restart
+    assert isinstance(pool, WorldPool.Config)
+    pool.num_worlds = 1
     assert isinstance(config.runtime, SingleProcess.Config)
     config.runtime.device = "cpu"
     # The kernels need CUDA; their torch forms run the same recurrence, rule and
@@ -508,13 +514,18 @@ def test_exp_smoke_trains_and_leaves_none_of_its_steps_threads_behind(
         windows.objective,
         skip_missing=True,
     )
+    config.step.rollout.horizon = 2
+    windows.minibatch_size = 2 * config.step.env.num_envs
     config.step.sampler = TorchPhiloxSampler.Config().update(
         config.step.sampler,
         skip_missing=True,
     )
     loop = config.make()
-    loop.train()
-    assert loop.step.global_step == config.max_steps
+    try:
+        loop.step.train_step()
+        assert loop.step.global_step == 1
+    finally:
+        loop.close()
     leftover = [thread for thread in threading.enumerate() if thread not in before]
     assert not leftover, leftover
 
@@ -584,9 +595,13 @@ def test_exp003_runs_the_references_budget_and_minibatches() -> None:
     )
 
 
-@pytest.mark.compute_training
-def test_exp003_at_test_size_trains_and_evaluates_on_the_cpu(tmp_path: Path) -> None:
-    """exp003's recipe on a network of 8 and 8 environments, two epochs and an eval."""
+def test_exp003_at_test_size_builds_its_loop_and_evaluates_on_the_cpu(
+    tmp_path: Path,
+) -> None:
+    """exp003's recipe on a network of 8 and 4 environments: its loop and an eval.
+
+    Its training is the golden below's.
+    """
     config = exp003()
     config.base_dir = tmp_path
     config.tracker = FileTracker.Config()
@@ -599,19 +614,17 @@ def test_exp003_at_test_size_trains_and_evaluates_on_the_cpu(tmp_path: Path) -> 
     assert isinstance(model, ActorCritic.Config)
     model.channels_hidden = 8
     model.num_layers = 1
-    config.step.env.num_envs = 8
+    config.step.env.num_envs = 4
     config.step.env.num_buffers = 2
     config.step.env.threads_per_buffer = 1
-    config.step.rollout.horizon = 8
+    config.step.rollout.horizon = 2
     config.step.evaluation.num_episodes = 1
     config.max_steps = config.step.train_budget_steps = 2
     config.step.sampler = TorchPhiloxSampler.Config().update(
         config.step.sampler,
         skip_missing=True,
     )
-    loop = config.make()
-    loop.train()
-    assert loop.step.global_step == 2
+    _builds_and_evaluates(config)
 
 
 def test_exp004_takes_the_1m_geometry_rate_and_budget_and_nothing_else() -> None:
@@ -654,19 +667,21 @@ def test_exp007_changes_only_the_budget_and_the_schedules_horizon() -> None:
     assert config.step.train_budget_steps == config.max_steps
 
 
-@pytest.mark.compute_training
-def test_exp007s_first_epochs_match_their_golden() -> None:
-    """exp007's learner at test size from portable weights, three epochs, frozen.
+def test_exp003s_epoch_matches_its_golden() -> None:
+    """exp003's learner at test size from portable weights, an epoch, frozen.
 
-    Its rate and linear anneal, Adam behind the global clip, four passes of
-    eight shuffled minibatches and exp002's rules in fresh worlds, on 4
-    environments of 2 buffers, rollouts of 6 and towers of 8 in 2 layers.
-    Each epoch's rate, its mean loss terms and every weight. The test's budget
-    replaces exp007's, so these are exp003's bits too; exp004 runs the same
-    code at another rate, which its delta test pins.
+    Its rate, Adam behind the global clip, shuffled minibatches and exp002's
+    rules in fresh worlds, on 4 environments of 2 buffers, rollouts of 3 and
+    towers of one layer of 8: the epoch's rate, its mean loss terms and every
+    weight. One pass of two minibatches, not four of eight, as each update
+    costs 30 ms in host-agnostic numerics on x86; the loop is the passes'
+    own. exp004 and exp007 run the same code at another rate and budget,
+    which their delta tests pin. Built natively, as the portable draws
+    overwrite every weight the build draws: in host-agnostic numerics the
+    build cost a tenth of the test.
     """
+    step = _tiny_baseline_step(exp003()).make()
     with host_agnostic_pipeline():
-        step = _tiny_baseline_step(exp007()).make()
         try:
             _fill_portable(step.model)
             lines: list[str] = []
@@ -689,7 +704,7 @@ def test_exp007s_first_epochs_match_their_golden() -> None:
                 ]
         finally:
             step.close()
-    assert_golden(test_file=__file__, name="exp007_tiny", lines=lines)
+    assert_golden(test_file=__file__, name="exp003_tiny", lines=lines)
 
 
 def test_exp006_keeps_exp003s_setup_around_the_q_learner() -> None:
@@ -739,9 +754,10 @@ def test_exp006_runs_the_references_budget_and_recipe() -> None:
     assert config.runtime.float32_matmul_precision == "high"
 
 
-@pytest.mark.compute_training
-def test_exp006_at_test_size_trains_and_evaluates_on_the_cpu(tmp_path: Path) -> None:
-    """exp006's recipe on a network of 5 and 8 environments, two updates and an eval."""
+def test_exp006_at_test_size_builds_its_loop_and_evaluates_on_the_cpu(
+    tmp_path: Path,
+) -> None:
+    """exp006's recipe on a network of 5 and 4 environments: its loop and an eval."""
     config = exp006()
     config.base_dir = tmp_path
     config.tracker = FileTracker.Config()
@@ -753,10 +769,10 @@ def test_exp006_at_test_size_trains_and_evaluates_on_the_cpu(tmp_path: Path) -> 
     config.step.model.channels_hidden = 5
     env = config.step.env
     assert isinstance(env, CraftaxEnv.Config)
-    env.num_envs = 8
+    env.num_envs = 4
     env.num_buffers = 2
     env.threads_per_buffer = 1
-    config.step.rollout.horizon = 4
+    config.step.rollout.horizon = 2
     config.step.evaluation.num_episodes = 1
     config.max_steps = config.step.train_budget_steps = 2
     sampler = config.step.sampler
@@ -765,9 +781,7 @@ def test_exp006_at_test_size_trains_and_evaluates_on_the_cpu(tmp_path: Path) -> 
         sampler.sampler,
         skip_missing=True,
     )
-    loop = config.make()
-    loop.train()
-    assert loop.step.global_step == 2
+    _builds_and_evaluates(config)
 
 
 def test_exp005_swaps_in_the_gru_and_whole_trajectories_and_nothing_else() -> None:
@@ -799,11 +813,12 @@ def test_exp005_swaps_in_the_gru_and_whole_trajectories_and_nothing_else() -> No
     assert (config.step.rollout.num_slots, config.step.rollout.bootstrap) == (1, True)
 
 
-@pytest.mark.compute_training
-def test_exp005_at_test_size_trains_and_evaluates_on_the_cpu(tmp_path: Path) -> None:
-    """exp005's recipe on a GRU of 8 and 16 environments, two epochs and an eval.
+def test_exp005_at_test_size_builds_its_loop_and_evaluates_on_the_cpu(
+    tmp_path: Path,
+) -> None:
+    """exp005's recipe on a GRU of 8 and 4 environments: its loop and an eval.
 
-    Sixteen, so its eight minibatches each replay two agents' trajectories.
+    Two minibatches, not eight, so each would replay two agents' trajectories.
     """
     config = exp005()
     config.base_dir = tmp_path
@@ -817,19 +832,20 @@ def test_exp005_at_test_size_trains_and_evaluates_on_the_cpu(tmp_path: Path) -> 
     assert isinstance(model, ActorCriticRNN.Config)
     model.channels_hidden = 8
     model.num_layers = 1
-    config.step.env.num_envs = 16
+    learner = config.step.learner
+    assert isinstance(learner, ShuffledTrajectories.Config)
+    learner.num_minibatches = 2
+    config.step.env.num_envs = 4
     config.step.env.num_buffers = 2
     config.step.env.threads_per_buffer = 1
-    config.step.rollout.horizon = 8
+    config.step.rollout.horizon = 2
     config.step.evaluation.num_episodes = 1
     config.max_steps = config.step.train_budget_steps = 2
     config.step.sampler = TorchPhiloxSampler.Config().update(
         config.step.sampler,
         skip_missing=True,
     )
-    loop = config.make()
-    loop.train()
-    assert loop.step.global_step == 2
+    _builds_and_evaluates(config)
 
 
 def test_exp008_swaps_in_the_gtrxl_policy_its_windows_and_longer_rollouts() -> None:
@@ -901,9 +917,10 @@ def test_exp008_runs_the_references_geometry_and_budget() -> None:
     assert step.evaluation.rollout.horizon == 128
 
 
-@pytest.mark.compute_training
-def test_exp008_at_test_size_trains_and_evaluates_on_the_cpu(tmp_path: Path) -> None:
-    """exp008's recipe at width 4 over 8 environments, two epochs and an eval."""
+def test_exp008_at_test_size_builds_its_loop_and_evaluates_on_the_cpu(
+    tmp_path: Path,
+) -> None:
+    """exp008's recipe at width 4 over 4 environments: its loop and an eval."""
     config = exp008()
     config.base_dir = tmp_path
     config.tracker = FileTracker.Config()
@@ -924,19 +941,17 @@ def test_exp008_at_test_size_trains_and_evaluates_on_the_cpu(tmp_path: Path) -> 
     learner.num_passes = 2
     learner.num_minibatches = 2
     learner.window = 2
-    config.step.env.num_envs = 8
+    config.step.env.num_envs = 4
     config.step.env.num_buffers = 2
     config.step.env.threads_per_buffer = 1
-    config.step.rollout.horizon = 4
+    config.step.rollout.horizon = 2
     config.step.evaluation.num_episodes = 1
     config.max_steps = config.step.train_budget_steps = 2
     config.step.sampler = TorchPhiloxSampler.Config().update(
         config.step.sampler,
         skip_missing=True,
     )
-    loop = config.make()
-    loop.train()
-    assert loop.step.global_step == 2
+    _builds_and_evaluates(config)
 
 
 def test_exp102_changes_the_policy_the_rule_the_rate_and_the_budget() -> None:
@@ -1352,81 +1367,66 @@ def test_the_joint_arms_train_their_frozen_parents_world_model(
     )
 
 
-@pytest.mark.compute_training
-def test_a_sole_feature_step_on_exact_windows_learns_from_branches_and_evaluates() -> (
+def test_a_sole_feature_step_archives_the_features_its_actor_stored_for_branches() -> (
     None
 ):
-    """exp110's recipe on exact windows: width 8, 8 environments, the smoke world model.
+    """exp110's recipe on exact windows: width 8, 4 environments, the smoke world model.
 
-    Practice saves donor histories in the step graph, every row of the second
-    epoch's slot is marked a branch, and the imitation archives the features
-    the actor stored for those rows; then a 4-environment evaluation plays.
+    Every row of the boot rollout's slot is marked a branch, as practice marks
+    a restored row, and the imitation archives the features the actor stored
+    for those rows. Practice's own part, the donor histories the step graph
+    saves, is ``rollout_test``'s; an evaluation with a feature,
+    ``evaluation_test``'s.
     """
     step = _tiny_sole_feature_step(exp110()).make()
     try:
-        step.train_step()
+        step._boot()
         slot = step.rollout.slots[step.ready]
         assert slot.features is not None
         slot.branch_starts.fill_(1)
         stored = slot.features.transpose(0, 1).clone()
-        metrics = step.train_step().get("metrics", {})
+        _, metrics = step.learner(step, step._learner_rollout(slot))
         assert float(metrics["imitation/branches"]) == 2.0
-        assert step.rollout.histories is not None
         archived = step.learner.state_dict()["features"]
         assert archived.shape == (2, *stored.shape[1:])
         for branch in archived:
             assert any(torch.equal(branch, row) for row in stored[:2]), "not a row's"
-        evaluator = step.make_evaluator()
-        try:
-            assert evaluator.play().rollouts >= 1
-        finally:
-            evaluator.close()
     finally:
         step.close()
 
 
-@pytest.mark.compute_training
-def test_a_joint_step_on_exact_windows_trains_beside_practice_and_imitation() -> None:
+def test_a_joint_step_on_exact_windows_trains_beside_imitation() -> None:
     """exp112's recipe at the same test size, the replay masked and eager.
 
-    The boot slot is the starting weights' own, so the first epoch's replay
-    matches what the actor read; the world model trains, practice saves
-    donor histories, the imitation archives two branches' stored features,
-    and an evaluation plays with the trained weights published.
+    The boot slot is the starting weights' own, so its replay matches what the
+    actor read; the world model trains and the imitation archives two
+    branches' stored features. The rebuild of the actor's histories and the
+    evaluation of the trained weights are ``train_step_test``'s.
     """
-    config = exp112()
-    step_config = _tiny_sole_feature_step(config)
+    step_config = _tiny_sole_feature_step(exp112())
     replay = step_config.feature_training
     assert isinstance(replay, ContextReplay.Config)
     replay.attention = SdpaVarlen.Config()
     replay.compile = None
     replay.bin_tokens = 1
-    # The last epoch starts no rollout: a third makes the second rebuild.
-    step_config.train_budget_steps = 3
+    # The default micro-batches, padded full, would be nearly all the replay's work.
+    replay.pass_tokens = 26
+    replay.frames_per_batch = 5
     step = step_config.make()
     try:
         assert step.joint is not None
         before = {name: w.clone() for name, w in step.joint.weights().items()}
-        first = step.train_step().get("metrics", {})
-        # The stored features are bf16, the policy's dtype: rounding alone.
-        assert float(first["joint/feature_gap"]) < 0.01
+        step._boot()
         slot = step.rollout.slots[step.ready]
         slot.branch_starts.fill_(1)
-        second = step.train_step().get("metrics", {})
-        assert float(second["imitation/branches"]) == 2.0
-        assert float(second["rebuild_seconds"]) > 0
-        # exp102's one-cycle schedule starts at rate 0, so the first epoch
-        # moves nothing.
+        _, metrics = step.learner(step, step._learner_rollout(slot))
+        # The stored features are bf16, the policy's dtype: rounding alone.
+        assert float(metrics["joint/feature_gap"]) < 0.01
+        assert float(metrics["imitation/branches"]) == 2.0
         assert not all(
             torch.equal(weight, before[name])
             for name, weight in step.joint.weights().items()
         )
-        assert step.rollout.histories is not None
-        evaluator = step.make_evaluator()
-        try:
-            assert evaluator.play().rollouts >= 1
-        finally:
-            evaluator.close()
     finally:
         step.close()
 
@@ -1490,6 +1490,25 @@ def test_exp103_matches_its_golden_config() -> None:
     assert_pprint_golden(test_file=__file__, name="exp103", config=exp103())
 
 
+# Training a recipe at test size is its learner's golden's: exp003's here, exp005's in
+# ``rnn_update_test``, exp006's in ``pqn_train_step_test``, exp008's in
+# ``gtrxl_train_step_test``.
+def _builds_and_evaluates(config: CraftaxTrainLoop | CraftaxPQNTrainLoop) -> None:
+    """Build a recipe's loop, play one rollout of its evaluation, then close it."""
+    loop = config.make()
+    try:
+        step = loop.step
+        assert isinstance(step, CraftaxTrainStep | CraftaxPQNTrainStep)
+        evaluator = step.make_evaluator()
+        try:
+            evaluator.collect()
+            assert evaluator.gameplay_seconds > 0
+        finally:
+            evaluator.close()
+    finally:
+        loop.close()
+
+
 def _frozen_feature(
     weights: TrainedWeights.Config | InitialWeights.Config,
 ) -> WorldModelFeature.Config:
@@ -1513,51 +1532,46 @@ def _frozen_feature(
     )
 
 
-# Width 8 in one layer; 8 environments in 2 buffers of 8 pool worlds, 2 donors and an
-# archive of 4 levels of 2; imitation of rows 0-1 into an archive of 2; windows of 2
-# agents over a horizon of 8; the smoke world model, float32, on exact windows of 4
-# decisions with donor histories, its blocks 2 steps; the torch forms of the kernels; an
-# evaluation of 4 environments and 1 episode.
+# Width 8 in one layer; 4 environments in 2 buffers of 8 pool worlds, without practice,
+# the stall cap or the previous action: the feature reads the rollout's own actions,
+# and the environment's kernels then type as :func:`tiny_env`'s, which ``kernel_cache``
+# compiles, where the recipe's options compile their own for seconds; imitation of rows
+# 0-1 into an archive of 2; windows of every agent over a horizon of 2; the smoke world
+# model, float32, on exact windows of 4 decisions, its blocks 2 steps; the torch forms
+# of the kernels. No test builds its evaluation.
 def _tiny_sole_feature_step(config: CraftaxTrainLoop) -> CraftaxTrainStep.Config:
     """Shrink a sole-feature recipe's step to the CPU and put it on exact windows."""
     step = config.step
     step.parallelism.device = "cpu"
-    model = step.model
-    assert isinstance(model, MinGRUPolicy.Config)
-    model.channels_hidden = 8
-    model.num_layers = 1
-    model.block.scan = TorchScan.Config()
-    proj = model.proj_feature
-    assert proj is not None
-    proj.channels_in = 36  # The smoke world model's width.
     env = step.env
-    env.num_envs = 8
+    env.num_envs = 4
     env.num_buffers = 2
     env.threads_per_buffer = 1
     pool = env.restart
     assert isinstance(pool, WorldPool.Config)
     pool.num_worlds = 8
-    practice = env.practice
-    assert practice is not None
-    practice.num_donors = 2
-    practice.num_levels = 4
-    practice.entries_per_level = 2
-    evaluation = step.evaluation.env
-    assert evaluation is not None
-    evaluation.num_envs = 4
-    evaluation.num_buffers = 2
-    evaluation.threads_per_buffer = 1
-    evaluation.restart = pool.copy_tree()
-    step.evaluation.num_episodes = 1
+    env.practice = env.stall_cap = None
+    env.rules.previous_action = False
+    model = step.model
+    assert isinstance(model, MinGRUPolicy.Config)
+    model.channels_hidden = 8
+    model.num_layers = 1
+    model.block.scan = TorchScan.Config()
+    encoder = model.embedding
+    assert isinstance(encoder, NoEncoder.Config)
+    encoder.observation_size = env.observation_size
+    proj = model.proj_feature
+    assert proj is not None
+    proj.channels_in = 36  # The smoke world model's width.
     windows = step.learner
     assert isinstance(windows, AgentWindows.Config)
     windows.objective = TorchPPO.Config().update(windows.objective, skip_missing=True)
-    windows.minibatch_size = 16
+    windows.minibatch_size = 8
     imitation = windows.auxiliary
     assert isinstance(imitation, BranchImitation.Config)
     imitation.rows = imitation.capacity = 2
     step.sampler = TorchPhiloxSampler.Config().update(step.sampler, skip_missing=True)
-    step.rollout.horizon = 8
+    step.rollout.horizon = 2
     step.train_budget_steps = 2
     feature = step.feature
     assert isinstance(feature, WorldModelFeature.Config)
@@ -1565,7 +1579,6 @@ def _tiny_sole_feature_step(config: CraftaxTrainLoop) -> CraftaxTrainStep.Config
     weights.experiment = "priml.baselines.craftax.world_model.experiments.exp_smoke"
     history = feature.history = Sliding.Config()
     history.decisions = 4
-    feature.practice = DonorHistory.Config()
     feature.layers = 1
     feature.hook_interval = 2
     feature.attention = MaskedCacheAttention.Config()
@@ -1574,22 +1587,30 @@ def _tiny_sole_feature_step(config: CraftaxTrainLoop) -> CraftaxTrainStep.Config
     return step
 
 
-# 4 environments of 2 buffers by 6 steps: 24 transitions, so each of the recipe's eight
-# minibatches holds 3, and none of the sizes that meet ties another.
+# 4 environments of 2 buffers by 3 steps: 12 transitions in two minibatches of 6, and
+# none of the sizes that meet ties another. One pass, not the recipe's four of eight
+# minibatches, and towers of one layer, not three: each update costs 30 ms in
+# host-agnostic numerics on x86; ``actor_critic_test`` stacks the layers. Two buffers:
+# host-agnostic numerics store a one-buffer bootstrap rollout's log-probabilities as
+# zeros.
 def _tiny_baseline_step(config: CraftaxTrainLoop) -> CraftaxTrainStep.Config:
-    """Shrink a Craftax_Baselines PPO recipe's step to the CPU, its recipe unchanged."""
+    """Shrink a Craftax_Baselines PPO recipe's step to the CPU and one epoch of one pass."""
     step = config.step
     step.parallelism.device = "cpu"
     model = step.model
     assert isinstance(model, ActorCritic.Config)
     model.channels_hidden = 8
-    model.num_layers = 2
+    model.num_layers = 1
     step.env.num_envs = 4
     step.env.num_buffers = 2
     step.env.threads_per_buffer = 1
-    step.rollout.horizon = 6
+    step.rollout.horizon = 3
+    learner = step.learner
+    assert isinstance(learner, ShuffledTransitions.Config)
+    learner.num_passes = 1
+    learner.num_minibatches = 2
     step.sampler = TorchPhiloxSampler.Config().update(step.sampler, skip_missing=True)
-    step.train_budget_steps = 3
+    step.train_budget_steps = 1
     return step
 
 

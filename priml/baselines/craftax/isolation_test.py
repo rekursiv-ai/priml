@@ -16,6 +16,7 @@ took 110-140 ms per test on an M-series Mac, over the unit tier's 100 ms.
 from __future__ import annotations
 
 from collections import Counter
+from functools import cache
 from pathlib import Path
 from typing import Final
 
@@ -26,12 +27,20 @@ _CWD: Final = Path(__file__).resolve().parent
 
 _PACKAGE: Final = "priml.baselines.craftax"
 
+# Unrolled loops, each a run of one character class to its closing quote: the lazy
+# ``[\s\S]*?`` and the per-character alternation they replace match the same.
 _STRING: Final = (
-    r"""(?:""\"[\s\S]*?""\"|'''[\s\S]*?'''|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')"""
+    r'''(?:"""[^"]*(?:"(?!"")[^"]*)*"""|'''
+    r"""'''[^']*(?:'(?!'')[^']*)*'''|"""
+    r""""[^"\\\n]*(?:\\.[^"\\\n]*)*"|"""
+    r"""'[^'\\\n]*(?:\\.[^'\\\n]*)*')"""
 )
 
+# Every match starts with ``#``, a quote or a prefix letter; the lookahead says so, and
+# re then skips to those characters: 40 ms over the package rather than 100 on a Mac.
 _PROSE: Final = re.compile(
-    rf"(?P<fstring>(?<!\w)[rR]?[fF][rR]?{_STRING})|#[^\n]*|(?<!\w)[rRbBuU]*{_STRING}",
+    rf"(?=[#'\"rRbBuUfF])"
+    rf"(?:(?P<fstring>(?<!\w)[rR]?[fF][rR]?{_STRING})|#[^\n]*|(?<!\w)[rRbBuU]*{_STRING})",
 )
 """Comments and string literals, docstrings included; an f-string is its own group."""
 
@@ -69,7 +78,8 @@ def test_the_port_imports_only_what_priml_ships() -> None:
 def test_every_public_name_is_read_inside_the_package() -> None:
     """A name only the parity checks read belongs with them; one nobody reads is dead."""
     sources = _sources()
-    words = {path: Counter(re.findall(r"\w+", code)) for path, code in sources.items()}
+    # A definition is one occurrence: a name read nowhere else occurs once in all.
+    occurrences = Counter(_words(" ".join(sources.values())))
     unread = [
         f"{path.relative_to(_CWD)}: {name}"
         for path, code in sources.items()
@@ -77,14 +87,14 @@ def test_every_public_name_is_read_inside_the_package() -> None:
         for name in _public_names(code)
         # Pytest calls a conftest's hooks by name.
         if not (path.name == "conftest.py" and name.startswith("pytest_"))
-        # The definition is one occurrence in its own module.
-        and words[path][name] < 2
-        and not any(name in other for key, other in words.items() if key != path)
+        and occurrences[name] < 2
     ]
 
     assert unread == []
 
 
+# Both tests read them; whichever runs first blanks them.
+@cache
 def _sources() -> dict[Path, str]:
     """Return every source of the package, as :func:`_code`."""
     return {
@@ -96,6 +106,16 @@ def _sources() -> dict[Path, str]:
 def _code(source: str) -> str:
     """Blank ``source``'s comments and strings; an f-string stays, for its fields."""
     return _PROSE.sub(lambda match: match.group("fstring") or " ", source)
+
+
+# Every character ``\w`` does not match becomes a space, which ``split`` drops: the
+# runs ``re.findall(r"\w+", code)`` returns, in a fifth of its time. Blanked code is
+# ASCII as a rule, so its table is ASCII's; other code's lists the characters it holds.
+def _words(code: str) -> list[str]:
+    """Return the runs of word characters in ``code``, in order."""
+    chars = map(chr, range(128)) if code.isascii() else set(code)
+    spaces = {ord(char): " " for char in chars if not (char.isalnum() or char == "_")}
+    return code.translate(spaces).split()
 
 
 def _imports(code: str) -> list[str]:

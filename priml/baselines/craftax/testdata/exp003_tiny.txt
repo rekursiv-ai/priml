@@ -1,0 +1,17 @@
+epoch 0001 learning_rate 0x3951b717 0.00019999999494757503
+epoch 0001 policy_loss 0x3bca692b 0.006177087780088186
+epoch 0001 value_loss 0x3d285b66 0.04110278934240341
+epoch 0001 entropy 0x407003c3 3.750229597091675
+epoch 0001 total_loss 0xbc3084a4 -0.010773811489343643
+epoch 0001 old_approx_kl 0xbb6a1b00 -0.0035721659660339355
+epoch 0001 approx_kl 0x39dcb2ab 0.00042094787932001054
+epoch 0001 clipfrac 0x00000000 0.0
+epoch 0001 importance 0x3f8082d8 1.003993034362793
+epoch 0001 parameter actor.0.weight torch.float32 (8, 8268) ac312ac0883cfab041c7fa505eff316c2ce0ff7ac712dc17662572e323359b1a
+epoch 0001 parameter actor.0.bias torch.float32 (8,) a85483c9becbf279232d5ad0298b4e869b0b8be2fc7c1e32afc0acb0e3345c5c
+epoch 0001 parameter actor.1.weight torch.float32 (43, 8) f7430db45a3daed35cff34fe1b6ad1df055ad6233ef63e99bbc3bce5e8846a42
+epoch 0001 parameter actor.1.bias torch.float32 (43,) c5640974cddb270ff9f77100ca018eb30405ced13aec1e09044af077c6a107e1
+epoch 0001 parameter critic.0.weight torch.float32 (8, 8268) e7841c474b3f78956f495d9cc99e5e6e28c6a6ec0ba4281ee80b8baebd187a59
+epoch 0001 parameter critic.0.bias torch.float32 (8,) 7bf8efcceb969676adc94af3f86b79a4041770909c4140715efd5d3c006f9e18
+epoch 0001 parameter critic.1.weight torch.float32 (1, 8) 2f65598099d93991c51cf14e4bcab5959843233c9d2436f9894788dcfa6369c4
+epoch 0001 parameter critic.1.bias torch.float32 (1,) e6109819400044462f3214531e3a0527177f6d726511ab249dd78a3c4da6b2aa

@@ -7,6 +7,7 @@ deliberate. ``exp_smoke`` trains end to end on a synthetic corpus written with
 checkpointer are exercised together.
 """
 
+from dataclasses import fields, is_dataclass
 from functools import partial
 from pathlib import Path
 from typing import (
@@ -15,8 +16,9 @@ from typing import (
     cast,
 )
 
-from configgle import PartialConfig
-from configgle.fig import Maker
+import re
+
+from configgle import InlineConfig, PartialConfig
 
 import pytest
 import torch
@@ -31,6 +33,7 @@ from priml.baselines.craftax.world_model.archive import (
 )
 from priml.baselines.craftax.world_model.attention import VarlenAttention
 from priml.baselines.craftax.world_model.batch import (
+    PackedBatch,
     Segment,
     pack_windows,
 )
@@ -81,17 +84,23 @@ from priml.baselines.craftax.world_model.model import (
     to_autocast_dtype,
 )
 from priml.baselines.craftax.world_model.schema import craftax_schema
+from priml.baselines.craftax.world_model.testing import (
+    random_segment,
+    small_schema,
+)
 from priml.baselines.craftax.world_model.train_step import (
     WorldModelTrainStep,
     compile_forward,
     muon_adamw,
 )
+from priml.cost import cost
 from priml.lib.codec import from_plain
 from priml.math.schedules import warmup
 from priml.model.attention.attention import Attention
 from priml.model.attention.flash4 import Flash4Varlen
 from priml.model.attention.kernel import SdpaVarlen
 from priml.model.custom_types import ChannelsInOutConfig
+from priml.model.linear import Linear
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.transformer import Transformer
@@ -100,6 +109,7 @@ from priml.runtime import MultiProcess, SingleProcess
 from priml.testing.golden import assert_pprint_golden
 from priml.train.activation import DefaultActivationStorage
 from priml.train.checkpointer import Checkpointer
+from priml.train.custom_types import TrainStepOutput
 from priml.train.parallelism import DataParallel, NoParallel
 from priml.train.tracker import (
     AsyncTracker,
@@ -137,6 +147,9 @@ ALL_EXPERIMENTS: Final[list[_Experiment]] = [
     exp020,
     exp_smoke,
 ]
+
+_ADDRESS: Final = re.compile(r" at 0x[0-9a-f]+")
+"""A memory address in a repr: a function or object built anew by each factory call."""
 
 
 def test_the_loop_binds_its_step_and_dataset() -> None:
@@ -243,7 +256,6 @@ def test_exp000_logs_nanochat_series_to_files_and_wandb() -> None:
     assert isinstance(wandb.tracker, WandbTracker.Config)
 
 
-@pytest.mark.compute_large_fixture
 def test_exp001_is_exp000_accumulated_on_one_gpu() -> None:
     cfg = exp001()
     windows = cfg.dataset.windows
@@ -260,7 +272,7 @@ def test_exp001_is_exp000_accumulated_on_one_gpu() -> None:
     _blocks(expected)["decoder"].checkpoint = True
     assert windows * cfg.step.accumulate_grad_batches == 8
     assert windows * _stratified(cfg).batches == 64
-    assert _render(cfg) == _render(expected)
+    _assert_same(cfg, expected)
 
 
 def test_a_loop_refuses_a_sampler_keyed_unlike_its_accumulation() -> None:
@@ -279,7 +291,6 @@ def test_exp001_recomputes_each_local_decoder_block_in_backward() -> None:
     assert _recomputed(exp001()) == {"decoder"}
 
 
-@pytest.mark.compute_large_fixture
 def test_exp002_doubles_the_window_at_equal_decisions_per_update() -> None:
     cfg, parent = exp002(), exp001()
     windows = cfg.dataset.windows
@@ -291,7 +302,7 @@ def test_exp002_doubles_the_window_at_equal_decisions_per_update() -> None:
     expected.dataset.micro_batches_per_step = 4 // windows
     _stratified(expected).batches = 32 // windows
     _blocks(expected)["encoder"].checkpoint = True
-    assert _render(cfg) == _render(expected)
+    _assert_same(cfg, expected)
     for per_update, per_evaluation, config in (
         (4 * 16_384, 32 * 16_384, cfg),
         (8 * 8_192, 64 * 8_192, parent),
@@ -308,7 +319,6 @@ def test_exp002_recomputes_every_encoder_and_decoder_block() -> None:
     assert _recomputed(exp002()) == {"encoder", "decoder"}
 
 
-@pytest.mark.compute_large_fixture
 def test_exp010_is_exp002_with_its_speed_settings_and_natural_validation() -> None:
     cfg = exp010()
     expected = exp002()
@@ -326,7 +336,7 @@ def test_exp010_is_exp002_with_its_speed_settings_and_natural_validation() -> No
     model.encoder.cast_stream = model.decoder.cast_stream = to_autocast_dtype
     expected.dataset.count_multiple = 64
     expected.dataset.validation = EvalSpans.Config()
-    assert _render(cfg) == _render(expected)
+    _assert_same(cfg, expected)
 
 
 def test_exp010_recomputes_local_blocks_0_to_2_only() -> None:
@@ -343,7 +353,6 @@ def test_exp010_recomputes_local_blocks_0_to_2_only() -> None:
         assert flags == [local and depth < 3 for depth in range(stack.num_layers)]
 
 
-@pytest.mark.compute_large_fixture
 def test_exp011_is_exp010_with_the_three_speed_settings() -> None:
     expected = exp010()
     expected.experiment_name = "exp011"
@@ -362,7 +371,7 @@ def test_exp011_is_exp010_with_the_three_speed_settings() -> None:
     assert isinstance(global_block, TransformerBlock.Config)
     assert isinstance(global_block.ffn, SwiGLU.Config)
     global_block.ffn.split_gate_projection = True
-    assert _render(exp011()) == _render(expected)
+    _assert_same(exp011(), expected)
 
 
 def test_exp011_splits_every_gate_and_keeps_every_local_attention() -> None:
@@ -381,14 +390,13 @@ def test_exp011_splits_every_gate_and_keeps_every_local_attention() -> None:
         assert block.recompute_policy is keep_attention
 
 
-@pytest.mark.compute_large_fixture
 def test_exp012_is_exp011_at_half_the_decisions_per_update() -> None:
     expected = exp011()
     expected.experiment_name = "exp012"
     expected.step.accumulate_grad_batches = 2
     expected.dataset.micro_batches_per_step = 2
     expected.max_steps = expected.step.train_budget_steps = 3_051
-    assert _render(exp012()) == _render(expected)
+    _assert_same(exp012(), expected)
 
 
 def test_exp012_trains_exp010s_decisions_and_warms_up_over_the_same_ones() -> None:
@@ -410,7 +418,6 @@ def test_exp012_trains_exp010s_decisions_and_warms_up_over_the_same_ones() -> No
         assert from_plain(cast("object", schedule.warmup), float) == 0.1
 
 
-@pytest.mark.compute_large_fixture
 def test_exp013_is_exp012_at_one_window_per_update() -> None:
     expected = exp012()
     expected.experiment_name = "exp013"
@@ -418,7 +425,7 @@ def test_exp013_is_exp012_at_one_window_per_update() -> None:
     expected.dataset.micro_batches_per_step = 1
     expected.max_steps = expected.step.train_budget_steps = 6_103
     expected.num_steps_eval = 500
-    assert _render(exp013()) == _render(expected)
+    _assert_same(exp013(), expected)
 
 
 def test_exp013_trains_and_validates_on_exp012s_decisions() -> None:
@@ -439,7 +446,6 @@ def test_exp013_trains_and_validates_on_exp012s_decisions() -> None:
     assert from_plain(cast("object", schedule.warmup), float) == 0.1
 
 
-@pytest.mark.compute_large_fixture
 def test_exp015_is_exp014_with_the_grid_encoder() -> None:
     expected = exp014()
     expected.experiment_name = "exp015"
@@ -447,7 +453,7 @@ def test_exp015_is_exp014_with_the_grid_encoder() -> None:
     assert isinstance(model, WorldModel.Config)
     model.encoder = GridConvEncoder.Config()
     expected.step.optimizer = muon_adamw(adamw_only=("depthwise",))
-    assert _render(exp015()) == _render(expected)
+    _assert_same(exp015(), expected)
 
 
 def test_exp015_trains_depthwise_kernels_with_adamw_and_matrices_with_muon() -> None:
@@ -464,7 +470,6 @@ def test_exp015_trains_depthwise_kernels_with_adamw_and_matrices_with_muon() -> 
     assert muon("encoder.film", names["encoder.film"])
 
 
-@pytest.mark.compute_large_fixture
 def test_exp014_is_exp013_on_the_converted_replay_shards() -> None:
     fork = exp014()
     assert str(fork.dataset.working_dir).endswith(
@@ -476,13 +481,12 @@ def test_exp014_is_exp013_on_the_converted_replay_shards() -> None:
     expected.dataset.working_dir = (
         "/datasets/craftax/world-model-reference/archive-v1-replay"
     )
-    assert _render(fork) == _render(expected)
-    assert _render(fork) != _render(exp013())
+    _assert_same(fork, expected)
+    assert _flat(fork) != _flat(exp013())
 
 
-@pytest.mark.compute_large_fixture
 def test_exp020_scales_every_module_of_exp013_five_fold() -> None:
-    sizes = [_module_sizes(config) for config in (exp013(), exp020())]
+    sizes = [_module_sizes(_finalized_model(config)) for config in (exp013(), exp020())]
     for name in ("encoder", "transformer", "decoder", "total"):
         assert sizes[1][name] / sizes[0][name] == pytest.approx(5, rel=0.01), name
     assert sizes[1]["total"] == 1_566_925_312
@@ -568,7 +572,6 @@ def test_exp020_keeps_resumable_and_archival_checkpoints() -> None:
     assert checkpoints.keep_every > checkpoints.save_every
 
 
-@pytest.mark.compute_large_fixture
 def test_exp020_is_exp013_five_fold_on_one_eight_gpu_node() -> None:
     expected = exp013()
     expected.experiment_name = "exp020"
@@ -617,7 +620,7 @@ def test_exp020_is_exp013_five_fold_on_one_eight_gpu_node() -> None:
     checkpoints.keep_last_n = 2
     checkpoints.keep_every = 4 * 3_600
     _wandb(expected).group = "scaleup"
-    assert _render(exp020()) == _render(expected)
+    _assert_same(exp020(), expected)
 
 
 @pytest.mark.parametrize(
@@ -652,7 +655,7 @@ def test_exp003_runs_exp001s_stack_and_recipe_on_every_slot() -> None:
     model, hierarchy = cfg.step.model, parent.step.model
     assert isinstance(model, FlatModel.Config)
     assert isinstance(hierarchy, WorldModel.Config)
-    assert _render(model.lm.transformer) == _render(hierarchy.transformer)
+    _assert_same(model.lm.transformer, hierarchy.transformer)
     # The step differs from exp001's only in the model, its cost, the batch
     # accumulation, and the schedule's horizon.
     expected = parent.step
@@ -663,7 +666,7 @@ def test_exp003_runs_exp001s_stack_and_recipe_on_every_slot() -> None:
     schedule = expected.lr_schedule
     assert isinstance(schedule, PartialConfig)
     schedule.warmup = 2_000 / cfg.max_steps
-    assert _render(cfg.step) == _render(expected)
+    _assert_same(cfg.step, expected)
     # exp000's update: 8 windows of 8,192 positions, here flat ones, each the
     # longest window of global positions whose flat form fits.
     assert cfg.dataset.windows * cfg.step.accumulate_grad_batches == 8
@@ -679,15 +682,12 @@ def test_exp003_runs_exp001s_stack_and_recipe_on_every_slot() -> None:
     assert cfg.max_steps == cfg.step.train_budget_steps
 
 
-@pytest.mark.compute_large_fixture
 def test_exp003_update_flops_are_what_flat_cost_counts() -> None:
     cfg = exp003()
     model_config = cfg.step.model
     assert isinstance(model_config, FlatModel.Config)
     # The kernel counts no matmul FLOPs, and FA4 has no macOS build.
     _attention(model_config.lm.transformer).attn_kernel = SdpaVarlen.Config()
-    with torch.device("meta"):
-        model = model_config.make()
     # A window that opens an episode holds 53 jobs; mid-episode ones hold 52.
     t_g = cfg.dataset.t_g
     episode = _episode(t_g // 2, seed=0, split=0)
@@ -700,11 +700,22 @@ def test_exp003_update_flops_are_what_flat_cost_counts() -> None:
         starts_episode=True,
     )
     batch = pack_windows([[segment]] * cfg.dataset.windows, t_g=t_g, s_max=1)
-    update = 3 * flat_cost(model, batch).flops
+    # The stack's blocks are copies of one template, so the count is linear in its
+    # depth: one block and two, on the meta device, give it, where building all
+    # of them, even there, takes 0.2 s.
+    stack = model_config.lm.transformer
+    assert not isinstance(stack.block, list)
+    flops: list[float] = []
+    for layers in (1, 2):
+        shallow = model_config.copy_tree()
+        shallow.lm.transformer.num_layers = layers
+        with torch.device("meta"):
+            flops.append(flat_cost(shallow.make(), batch).flops)
+    per_block = flops[1] - flops[0]
+    update = 3 * (flops[0] + (stack.num_layers - 1) * per_block)
     assert update == pytest.approx(FLAT_UPDATE_FLOPS, rel=1e-4)
 
 
-@pytest.mark.compute_large_fixture
 def test_exp004_is_exp001_on_exp003s_corpus_for_exp003s_flops() -> None:
     cfg, flat = exp004(), exp003()
     expected = exp001()
@@ -713,16 +724,15 @@ def test_exp004_is_exp001_on_exp003s_corpus_for_exp003s_flops() -> None:
     expected.dataset.corpus = flat.dataset.corpus
     expected.dataset.cached_decisions = flat.dataset.cached_decisions
     expected.max_steps = expected.step.train_budget_steps = cfg.max_steps
-    assert _render(cfg) == _render(expected)
+    _assert_same(cfg, expected)
     spent = cfg.max_steps * EXP001_UPDATE_FLOPS
     assert abs(spent - flat.max_steps * FLAT_UPDATE_FLOPS) <= EXP001_UPDATE_FLOPS / 2
 
 
-@pytest.mark.compute_large_fixture
 def test_exp005_scores_exp004s_weights_on_exp003s_micro_batches() -> None:
     scored, trained, flat = exp005(), exp004(), exp003()
     assert scored.eval_only
-    assert _render(scored.step) == _render(trained.step)
+    _assert_same(scored.step, trained.step)
     # Every field a validation micro-batch is drawn from matches exp003's.
     for name in (
         "working_dir",
@@ -747,32 +757,25 @@ def test_exp005_scores_exp004s_weights_on_exp003s_micro_batches() -> None:
     assert reads.working_dir != wrote.working_dir
 
 
-@pytest.mark.compute_training
 def test_exp003_trains_and_scores_a_packed_batch() -> None:
+    """Over the cut schema, frames of 7 slots, not the full 150: ``flat_test``'s layout."""
     cfg = exp003()
-    t_g = 10
+    t_g = 4
     model = cfg.step.model
     assert isinstance(model, FlatModel.Config)
-    model.context = flat_positions(t_g)
+    schema = model.schema = small_schema()
+    model.context = flat_positions(t_g, frame_slots=schema.frame_slots)
     _shrink_global(model.lm.transformer)
     _run_on_cpu(cfg.step)
     torch.manual_seed(0)
     step = cfg.step.make()
-    episodes = [_episode(12, seed=seed, split=0) for seed in (0, 1)]
-    segments = [
-        Segment(
-            cells=e.cells,
-            aux=e.aux,
-            actions=e.actions,
-            reward=e.reward,
-            done=e.done,
-            starts_episode=True,
-        )
-        for e in episodes
-    ]
+    segments = [random_segment(schema, 12, seed=seed) for seed in (0, 1)]
     batch = pack_windows([[segment] for segment in segments], t_g=t_g, s_max=1)
     assert step.train_step(media=batch).get("metrics")
-    metric = cfg.metrics_eval["val"].make()
+    bits = cfg.metrics_eval["val"]
+    assert isinstance(bits, CraftaxBitsPerByte.Config)
+    bits.schema = schema
+    metric = bits.make()
     stratum = torch.zeros(batch.kind.shape, dtype=torch.long)
     metric.update(step.eval_loss(media=batch)["model"], media=batch, stratum=stratum)
     # Near-uniform predictions: well above zero bits and below eight per byte.
@@ -787,68 +790,46 @@ def test_module_docstring_lists_every_experiment() -> None:
         assert factory.__name__ in documented
 
 
-@pytest.mark.compute_training
-def test_exp_smoke_trains_on_a_synthetic_corpus(tmp_path: Path) -> None:
-    cfg = exp_smoke()
-    cfg.base_dir = tmp_path
-    root = tmp_path / "datasets" / "craftax" / "world-model" / "smoke"
-    _write_corpus(root, corpus=Path(str(cfg.dataset.corpus)))
-    loop = cfg.make()
-    loop.train()
-    assert loop.step.global_step == cfg.max_steps
-    assert (tmp_path / "runs" / "craftax-world-model" / "exp_smoke").is_dir()
+def test_exp_smoke_reads_its_corpus_and_scores_validations_natural_mix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loop hands the validation split's natural decisions to its metric.
+
+    Then its evaluation reports the natural metrics; it runs under its study.
+    """
+    loop = _wired_smoke(exp_smoke(), tmp_path, monkeypatch=monkeypatch)
+    assert loop.working_dir == tmp_path / "runs" / "craftax-world-model" / "exp_smoke"
     metric, dataset = loop.metrics_eval["val"], loop.dataset
     assert isinstance(metric, CraftaxBitsPerByte)
     assert isinstance(dataset, ReplayStream)
     counts = dataset.eval_sampler.counts
     assert counts.sum() == 12 + 17 + 22
     assert torch.equal(metric.natural_decisions, counts.double())
+    assert not loop.metrics_train_split
     evaluation = loop.eval()
     assert {"val_bpb_natural", "val_nats_per_decision_natural"} <= evaluation.keys()
 
 
-@pytest.mark.compute_training
-def test_exp_smoke_trains_and_scores_padded_counts_and_eval_spans(
-    tmp_path: Path,
-) -> None:
-    cfg = exp_smoke()
-    cfg.base_dir = tmp_path
-    cfg.dataset.count_multiple = 8
-    cfg.dataset.validation = EvalSpans.Config(spans=6, span_decisions=8)
-    root = tmp_path / "datasets" / "craftax" / "world-model" / "smoke"
-    _write_corpus(root, corpus=Path(str(cfg.dataset.corpus)))
-    loop = cfg.make()
-    loop.train()
-    assert loop.step.global_step == cfg.max_steps
-    evaluation = loop.eval()
-    # Random weights score near-uniform bytes; every validation episode is 12
-    # to 22 decisions, so the spans cover some of each whole.
-    bpb, natural = evaluation["val_bpb"], evaluation["val_bpb_natural"]
-    assert isinstance(bpb, float)
-    assert 0.5 < bpb < 8
-    assert natural == pytest.approx(bpb, rel=0.2)
-
-
-@pytest.mark.compute_training
 def test_every_evaluation_scores_the_training_splits_spans_beside_validation(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Validation, then the training split's spans in its own natural mix, prefixed.
+
+    Over padded counts; the two splits differ by their decisions alone.
+    """
     cfg = exp_smoke()
-    cfg.base_dir = tmp_path
+    cfg.dataset.count_multiple = 8
     cfg.dataset.validation = EvalSpans.Config(spans=6, span_decisions=8)
     cfg.dataset.train_spans = EvalSpans.Config(spans=6, span_decisions=8)
-    root = tmp_path / "datasets" / "craftax" / "world-model" / "smoke"
-    _write_corpus(root, corpus=Path(str(cfg.dataset.corpus)))
-    loop = cfg.make()
+    loop = _wired_smoke(cfg, tmp_path, monkeypatch=monkeypatch)
     evaluation = loop.eval()
-    # Random weights score both splits near-uniformly, each in its own natural
-    # mix: the training metric reads the training split's counts.
     natural = evaluation["val_bpb_natural"]
     fitted_natural = evaluation["train_split_val_bpb_natural"]
     assert isinstance(natural, float)
     assert isinstance(fitted_natural, float)
-    assert 0.5 < natural < 8
-    assert 0.5 < fitted_natural < 8
+    assert natural != fitted_natural
     assert evaluation["train_split_val_bpb"] != evaluation["val_bpb"]
     dataset, fitted = loop.dataset, loop.metrics_train_split["val"]
     assert isinstance(dataset, ReplayStream)
@@ -856,6 +837,41 @@ def test_every_evaluation_scores_the_training_splits_spans_beside_validation(
     assert torch.equal(fitted.natural_decisions, dataset.train_sampler.counts.double())
     assert loop.metrics_eval["val"] is not fitted
     assert loop.eval().keys() == evaluation.keys()
+
+
+# The model's forward, the step, the stream and the metric are each checked in their
+# own tests; what these check is how the loop wires them. So a linear map, under SGD,
+# stands in for the model, which the loop builds and never runs, and ``_action_nats``
+# for its scorer: building exp_smoke's model and running it took 0.4 s.
+def _wired_smoke(
+    cfg: WorldModelLoop.Config,
+    tmp_path: Path,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+) -> WorldModelLoop:
+    """Build ``cfg``'s loop over a synthetic corpus, with stand-ins for the model."""
+    cfg.base_dir = tmp_path
+    cfg.step.model = Linear.Config(channels_in=2, channels_out=3)
+    cfg.step.optimizer = PartialConfig(torch.optim.SGD, lr=0.1)
+    root = tmp_path / "datasets" / "craftax" / "world-model" / "smoke"
+    _write_corpus(root, corpus=Path(str(cfg.dataset.corpus)))
+    loop = cfg.make()
+    assert isinstance(loop, WorldModelLoop)
+    monkeypatch.setattr(loop.step, "eval_loss", _action_nats)
+    return loop
+
+
+# Each job's record is its action, then its local slots (``metric.canonical_records``).
+# Stands in for the step's ``eval_loss``, whose model output the metric reads: one NLL
+# per record column.
+def _action_nats(**batch: object) -> TrainStepOutput:
+    """Charge every record column of each job its decision's action id plus one, in nats."""
+    media = batch["media"]
+    assert isinstance(media, PackedBatch)
+    actions = media.action.flatten()[media.job_at.long()].float()
+    columns = 1 + craftax_schema().local_slots
+    nll = (1 + actions)[:, None].expand(-1, columns).flatten()
+    return {"loss": nll.sum().reshape(1), "model": nll}
 
 
 def _blocks(
@@ -888,24 +904,37 @@ def _wandb(config: WorldModelLoop.Config) -> WandbTracker.Config:
     return wandb.tracker
 
 
-def _module_sizes(config: WorldModelLoop.Config) -> dict[str, int]:
-    """Count the instantiated model's parameters per module, on the meta device."""
-    model_config = config.step.model.copy_tree()
-    assert isinstance(model_config, WorldModel.Config)
-    # FA4 imports only on Linux; the kernel holds no parameters.
-    _attention(model_config.transformer).attn_kernel = SdpaVarlen.Config()
-    with torch.device("meta"):
-        model = model_config.finalize().make()
-    assert isinstance(model.encoder, FrameEncoder)
-    sizes: dict[str, int] = {
-        name: sum(p.numel() for p in module.parameters())
-        for name, module in (
-            ("encoder", model.encoder),
-            ("transformer", model.transformer),
-            ("decoder", model.decoder),
-        )
+# Each config's ``cost`` owns its parameters, which ``assert_cost_matches_torch``
+# checks against the built module at test size (``model_test``); counted here at
+# full size from the configs, as building them, even on the meta device, takes
+# 0.3-0.5 s a model.
+def _module_sizes(model: WorldModel.Config) -> dict[str, int]:
+    """Count a finalized model's parameters per module from its config."""
+    return {
+        "encoder": cost(model.encoder, batch_size=1, dtype=None).params,
+        "transformer": model.transformer.cost(
+            seq_len=1,
+            batch_size=1,
+            dtype=None,
+        ).params,
+        "decoder": model.decoder.cost(batch_size=1, dtype=None, memory_len=1).params,
+        "total": model.cost(
+            seq_len=1,
+            batch_size=1,
+            frames=1,
+            jobs=1,
+            dtype=None,
+        ).params,
     }
-    return sizes | {"total": sum(p.numel() for p in model.parameters())}
+
+
+def _finalized_model(config: WorldModelLoop.Config) -> WorldModel.Config:
+    """Return a loop's world model config, finalized, its global kernel SDPA's."""
+    model = config.step.model.copy_tree()
+    assert isinstance(model, WorldModel.Config)
+    # FA4 imports only on Linux; the kernel holds no parameters.
+    _attention(model.transformer).attn_kernel = SdpaVarlen.Config()
+    return model.finalize()
 
 
 def _recomputed(config: WorldModelLoop.Config) -> set[str]:
@@ -926,11 +955,46 @@ def _stratified(config: WorldModelLoop.Config) -> StratifiedWindows.Config:
     return validation
 
 
-def _render(config: Maker[object]) -> str:
-    """Return the whole config as its factory left it, every field shown."""
-    # Finalizing first expands every schema table and takes ~1.8 s a render;
-    # propagation is a function of these fields, so it cannot hide a delta.
-    return config.pformat(finalize=False, hide_default_values=False)
+def _assert_same(config: object, expected: object) -> None:
+    """Assert two configs, as their factories left them, hold equal values at every field."""
+    got, want = _flat(config), _flat(expected)
+    differ = {
+        path: (got.get(path), want.get(path))
+        for path in sorted(got.keys() | want.keys())
+        if got.get(path) != want.get(path)
+    }
+    assert not differ, differ
+
+
+# Not ``pformat``: configgle's printer tokenizes what it renders, 30-110 ms a world
+# model's config, where these fields compare in 1 ms. Unfinalized, as finalizing
+# expands every schema table; propagation is a function of these fields, so it
+# cannot hide a delta.
+def _flat(config: object, path: str = "") -> dict[str, str]:
+    """Return every field of a config tree by its path, each leaf as its repr."""
+    children: list[tuple[str, object]] = []
+    if isinstance(config, InlineConfig):
+        label = repr(cast("InlineConfig[object]", config))
+    elif is_dataclass(config) and not isinstance(config, type):
+        label = type(config).__qualname__
+        children = [
+            (f".{entry.name}", cast("object", getattr(config, entry.name)))
+            for entry in fields(config)
+        ]
+    elif isinstance(config, list | tuple):
+        items = cast("list[object] | tuple[object, ...]", config)
+        label = f"{type(items).__name__} of {len(items)}"
+        children = [(f"[{index}]", item) for index, item in enumerate(items)]
+    elif isinstance(config, dict):
+        entries = cast("dict[object, object]", config)
+        label = f"dict of {sorted(map(repr, entries))}"
+        children = [(f"[{key!r}]", item) for key, item in entries.items()]
+    else:
+        label = repr(config)
+    flat: dict[str, str] = {path: _ADDRESS.sub("", label)}
+    for suffix, child in children:
+        flat |= _flat(child, path + suffix)
+    return flat
 
 
 def _shrink_global(stack: Transformer.Config) -> None:

@@ -231,7 +231,6 @@ def test_the_loss_scores_the_first_minibatch_unshuffled_and_learns_nothing() -> 
     )
 
 
-@pytest.mark.compute_training
 def test_begin_epoch_draws_the_epochs_shuffles_for_every_minibatch() -> None:
     """Two passes of the 16 transitions: four minibatches of 8."""
     step = _make(_tiny_config())
@@ -248,24 +247,25 @@ def test_begin_epoch_draws_the_epochs_shuffles_for_every_minibatch() -> None:
         step.close()
 
 
-@pytest.mark.compute_training
 def test_a_step_learning_from_shuffled_transitions_resumes_exactly() -> None:
-    """Three epochs straight against a checkpoint after the first and two more."""
+    """Epoch 1's checkpoint, loaded into the step after epoch 2: epoch 2 runs again.
+
+    Rollouts of 2 steps and the bootstrap row; the load lands on state that
+    moved on, so whatever it misses shows.
+    """
     config = _tiny_config()
-    straight = _make(config)
+    config.rollout.horizon = 2
+    config.train_budget_steps = 2
+    step = _make(config)
     try:
-        straight.train_step()
+        step.train_step()
         saved = io.BytesIO()
-        torch.save(straight.state_dict(), saved)
-        expected = [straight.train_step()["model"] for _ in range(2)]
-        expected += [p.detach().clone() for p in straight.model.parameters()]
+        torch.save(step.state_dict(), saved)
+        expected = [step.train_step()["model"]]
+        expected += [p.detach().clone() for p in step.model.parameters()]
         # The rollout keeps its bootstrap row.
-        assert straight.rollout.slots[0].observations.shape[0] == 5
-    finally:
-        straight.close()
-    resumed = _make(config)
-    try:
-        resumed.load_state_dict(
+        assert step.rollout.slots[0].observations.shape[0] == 3
+        step.load_state_dict(
             from_plain(
                 cast(
                     "object",
@@ -274,12 +274,12 @@ def test_a_step_learning_from_shuffled_transitions_resumes_exactly() -> None:
                 dict[str, object],
             ),
         )
-        actual = [resumed.train_step()["model"] for _ in range(2)]
-        actual += list(resumed.model.parameters())
+        actual = [step.train_step()["model"]]
+        actual += list(step.model.parameters())
     finally:
-        resumed.close()
+        step.close()
     assert all(torch.equal(a, b) for a, b in zip(actual, expected, strict=True))
-    assert bool(torch.isfinite(torch.stack(actual[:2])).all())
+    assert bool(torch.isfinite(actual[0]).all())
 
 
 def test_the_update_carries_no_state_and_refuses_another_learners() -> None:

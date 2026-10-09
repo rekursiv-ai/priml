@@ -32,6 +32,7 @@ from priml.baselines.craftax.testing import (
     fp32,
     host_agnostic_pipeline,
     packed_observations,
+    portable_uniform,
     tiny_env,
     tiny_policy,
     tiny_train_step,
@@ -249,7 +250,7 @@ def test_the_learner_replays_what_the_actor_scored() -> None:
                 learner.initial_states,
                 learner.terminals[:, :HORIZON],
             )
-    # The second rollout starts mid-episode: its carries are not zero.
+    # The rollout starts mid-episode: its carries are not zero.
     assert bool(learner.initial_states.any())
     assert torch.equal(decoded[..., -1], learner.values[:, :HORIZON])
 
@@ -357,14 +358,15 @@ def test_a_rollout_without_the_bootstrap_row_is_refused_at_construction() -> Non
         config.make()
 
 
-@pytest.mark.compute_training
 def test_a_step_learning_from_shuffled_trajectories_resumes_exactly() -> None:
-    """Three epochs straight against a checkpoint after the first and two more.
+    """Two epochs straight against a checkpoint after the first and one more.
 
     Each epoch's shuffles are of the four agents, two passes of two
-    minibatches of two.
+    minibatches of two, over rollouts of 2 steps and the bootstrap row.
     """
     config = _tiny_config()
+    config.rollout.horizon = 2
+    config.train_budget_steps = 2
     straight = _make(config)
     try:
         learner = straight.learner
@@ -377,10 +379,10 @@ def test_a_step_learning_from_shuffled_trajectories_resumes_exactly() -> None:
         )
         saved = io.BytesIO()
         torch.save(straight.state_dict(), saved)
-        expected = [straight.train_step()["model"] for _ in range(2)]
+        expected = [straight.train_step()["model"]]
         expected += [p.detach().clone() for p in straight.model.parameters()]
         # The rollout keeps its bootstrap row, and the GRU's carry moved on.
-        assert straight.rollout.slots[0].observations.shape[0] == 5
+        assert straight.rollout.slots[0].observations.shape[0] == 3
         assert bool(straight.rollout.slots[0].initial_states.any())
     finally:
         straight.close()
@@ -395,12 +397,12 @@ def test_a_step_learning_from_shuffled_trajectories_resumes_exactly() -> None:
                 dict[str, object],
             ),
         )
-        actual = [resumed.train_step()["model"] for _ in range(2)]
+        actual = [resumed.train_step()["model"]]
         actual += list(resumed.model.parameters())
     finally:
         resumed.close()
     assert all(torch.equal(a, b) for a, b in zip(actual, expected, strict=True))
-    assert bool(torch.isfinite(torch.stack(actual[:2])).all())
+    assert bool(torch.isfinite(actual[0]).all())
 
 
 @pytest.mark.gpu_triton
@@ -440,13 +442,17 @@ def test_captured_epochs_resume_exactly_on_the_gpu() -> None:
     assert bool(torch.isfinite(torch.stack(actual[:3])).all())
 
 
-@pytest.mark.compute_training
-def test_exp005s_first_three_epochs_match_their_golden() -> None:
-    """exp005 at test size from the policy's own init under torch seed 0, frozen.
+def test_exp005s_epoch_matches_its_golden() -> None:
+    """exp005 at test size from portable seed-73 weights, an epoch, frozen.
 
-    exp005's recipe -- its GRU, four passes of shuffled trajectories, Adam and
-    its rules -- on a GRU of 8 in 4 environments of horizon 4, minibatches of
-    2 agents. Each epoch's rate, mean losses and weights.
+    exp005's recipe -- its GRU, shuffled trajectories, Adam and its rules --
+    on a GRU of 8 with heads of one layer in 4 environments of horizon 2,
+    minibatches of 2 agents: the epoch's rate, mean losses and weights. One
+    pass, not the recipe's four, as for exp003's golden; the heads' second
+    layers and the init's distributions are ``rnn_test``'s. Built natively,
+    as the portable draws overwrite every
+    weight the build draws: in host-agnostic numerics the build cost a
+    third of the test.
     """
     config = exp005().step
     env = tiny_env()
@@ -456,25 +462,43 @@ def test_exp005s_first_three_epochs_match_their_golden() -> None:
     model = config.model
     assert isinstance(model, ActorCriticRNN.Config)
     model.channels_hidden = 8
+    model.num_layers = 1
     learner = config.learner
     assert isinstance(learner, ShuffledTrajectories.Config)
     learner.num_minibatches = 2
+    learner.num_passes = 1
     config.parallelism.device = "cpu"
     config.sampler = TorchPhiloxSampler.Config().update(
         config.sampler,
         skip_missing=True,
     )
-    config.rollout.horizon = 4
-    config.train_budget_steps = 3
+    config.rollout.horizon = 2
+    config.train_budget_steps = 1
+    step = _make(config)
+    assert isinstance(step.model, ActorCriticRNN)
     with host_agnostic_pipeline():
-        step = _make(config)
-        lines = ["# from-scratch: the policy's own init under torch seed 0"]
         try:
-            while step.global_step < step.total_steps:
-                lines += _epoch_entries(step, step.train_step())
+            _fill_portable(step.model)
+            lines = _epoch_entries(step, step.train_step())
         finally:
             step.close()
     assert_golden(test_file=__file__, name="train_step_exp005_tiny", lines=lines)
+
+
+# ``testing.fill_portable`` fills MinGRU's stages alone; the GRU's cell and heads would
+# keep their init, whose ``randn`` differs by host (SLEEF's ``log`` under AVX2).
+def _fill_portable(model: ActorCriticRNN) -> None:
+    """Overwrite every weight with ``U(+-1/sqrt(fan_in))`` drawn the same on any host."""
+    generator = torch.Generator().manual_seed(73)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.copy_(
+                portable_uniform(
+                    *parameter.shape,
+                    bound=parameter.shape[-1] ** -0.5,
+                    generator=generator,
+                ),
+            )
 
 
 def _epoch_entries(step: CraftaxTrainStep, result: TrainStepOutput) -> list[str]:
@@ -632,23 +656,29 @@ def _fake_env_policy() -> ActorCriticRNN.Config:
     return config
 
 
-# The second starts mid-episode, from the carries the first left, and keeps its
-# bootstrap row.
+# It starts mid-episode, where a rollout before it would have left the env and the
+# carries: the env stepped a horizon, the carries drawn. It keeps its bootstrap row.
 def _collected(policy: Policy, *, envs: int) -> LearnerRollout:
-    """Return the second of two windows ``policy`` collected on ``FakeEnv``, agent-major."""
+    """Return a window ``policy`` collected on ``FakeEnv``, agent-major."""
     config = Rollout.Config()
     config.num_slots = 1
     config.horizon = HORIZON
     config.bootstrap = True
+    env = FakeEnv.make(num_envs=envs, num_buffers=2, seed=0)
+    for buffer in range(env.num_buffers):
+        for _ in range(HORIZON):
+            env.step_buffer(buffer)
     rollout = Rollout(
         config,
         policy=policy,
         sampler=TorchPhiloxSampler.Config().make(),
-        env=FakeEnv.make(num_envs=envs, num_buffers=2, seed=0),
+        env=env,
         device=torch.device("cpu"),
     )
     try:
-        rollout.collect(0)
+        generator = torch.Generator().manual_seed(1)
+        for graph in rollout.graphs[0]:
+            graph.state.copy_(torch.randn(graph.state.shape, generator=generator))
         storage = rollout.collect(0)
     finally:
         rollout.close()

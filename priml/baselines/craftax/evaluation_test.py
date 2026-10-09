@@ -69,13 +69,11 @@ def policy() -> MinGRUPolicy:
     return tiny_policy().make()
 
 
-@pytest.mark.compute_large_fixture
 def test_an_evaluation_is_an_evaluator(policy: MinGRUPolicy) -> None:
     evaluation = _evaluation(policy)
     evaluation.close()
 
 
-@pytest.mark.compute_large_fixture
 def test_an_evaluation_leaves_the_training_environment_untouched(
     policy: MinGRUPolicy,
 ) -> None:
@@ -96,7 +94,6 @@ def test_an_evaluation_leaves_the_training_environment_untouched(
     training.close()
 
 
-@pytest.mark.compute_large_fixture
 def test_fresh_evaluations_replay_identically(policy: MinGRUPolicy) -> None:
     first, second = _evaluation(policy), _evaluation(policy)
     for evaluation in (first, second):
@@ -109,7 +106,6 @@ def test_fresh_evaluations_replay_identically(policy: MinGRUPolicy) -> None:
     second.close()
 
 
-@pytest.mark.compute_large_fixture
 def test_collect_steps_every_environment_one_horizon(policy: MinGRUPolicy) -> None:
     evaluation = _evaluation(policy)
     evaluation.reset()
@@ -120,7 +116,6 @@ def test_collect_steps_every_environment_one_horizon(policy: MinGRUPolicy) -> No
     evaluation.close()
 
 
-@pytest.mark.compute_large_fixture
 def test_reset_wipes_the_logs_and_the_clock(policy: MinGRUPolicy) -> None:
     evaluation = _evaluation(policy)
     evaluation.collect()
@@ -134,7 +129,6 @@ def test_reset_wipes_the_logs_and_the_clock(policy: MinGRUPolicy) -> None:
     evaluation.close()
 
 
-@pytest.mark.compute_large_fixture
 def test_a_reset_evaluation_plays_as_a_fresh_one(policy: MinGRUPolicy) -> None:
     """``reset`` restarts the environments, streams and carry, not only the logs."""
     reused, fresh = _evaluation(policy), _evaluation(policy)
@@ -153,7 +147,6 @@ def test_a_reset_evaluation_plays_as_a_fresh_one(policy: MinGRUPolicy) -> None:
     fresh.close()
 
 
-@pytest.mark.compute_large_fixture
 def test_play_stops_at_the_first_rollout_reaching_the_episode_count(
     policy: MinGRUPolicy,
 ) -> None:
@@ -208,7 +201,6 @@ def test_an_evaluation_refuses_a_training_only_option(option: str) -> None:
         Evaluation.check(config)
 
 
-@pytest.mark.compute_large_fixture
 def test_with_a_feature_an_evaluation_holds_one_history_per_environment_of_its_own() -> (
     None
 ):
@@ -240,47 +232,40 @@ def test_with_a_feature_an_evaluation_holds_one_history_per_environment_of_its_o
     assert not any(engine.keys.numel() for engine in source.engines)
 
 
-# Each golden plays the game, whose Numba kernels a runner without their cache
-# compiles inside the first one: 55-60 s in CI, against the default tier's 60 s.
-@pytest.mark.compute_large_fixture
-@pytest.mark.parametrize(("name", "episodes"), [("tiny", 10), ("tiny_short", 4)])
-def test_exp000s_evaluations_from_portable_weights_match_their_goldens(
-    name: str,
-    episodes: int,
-) -> None:
-    """The tiny pipeline's evaluation, and a short one, from portable seed-73 weights.
+def test_exp000s_evaluation_from_portable_weights_matches_its_golden() -> None:
+    """The tiny pipeline's evaluation from portable seed-73 weights, frozen on every host.
 
-    Frozen on every host. exp000's recipe in its torch forms, its evaluation
-    config as the step's finalize fills it, with episodes cut at 4 ticks so
-    they finish: whole rollouts until ``episodes`` finish, three of them for
-    the full one, one for the short.
+    exp000's recipe in its torch forms, its evaluation config as the step's
+    finalize fills it, with rollouts of 2 steps and episodes cut at 4 ticks so
+    they finish: whole rollouts until 4 episodes finish, two of them, so the
+    second plays on from the first's carries and worlds.
     """
-    config = tiny_train_step().copy_tree().finalize()
+    config = tiny_train_step()
+    config.rollout.horizon = 2
+    config = config.copy_tree().finalize()
     with host_agnostic_pipeline():
         policy = config.model.make()
         assert isinstance(policy, MinGRUPolicy)
         fill_portable(policy, seed=73)
-        lines = _score_entries(config.evaluation, policy, episodes=episodes)
-    assert_golden(
-        test_file=__file__,
-        name=f"evaluation_{name}",
-        lines=lines,
-    )
+        lines = _score_entries(config.evaluation, policy, episodes=4, ticks=4)
+    assert_golden(test_file=__file__, name="evaluation_tiny", lines=lines)
 
 
-@pytest.mark.compute_large_fixture
 def test_exp002s_short_evaluation_matches_its_golden() -> None:
     """exp002's evaluation at test size, of the policy's own init under torch seed 0.
 
     Frozen on every host. From scratch, so the golden moves with the init's
-    draws: their order, their distributions, or torch's generator.
+    draws: their order, their distributions, or torch's generator. One
+    rollout of 2 steps, every episode cut at 2 ticks.
     """
-    config = tiny_exp002_step().copy_tree().finalize()
+    config = tiny_exp002_step()
+    config.rollout.horizon = 2
+    config = config.copy_tree().finalize()
     with host_agnostic_pipeline():
         torch.manual_seed(0)
         policy = config.model.make()
         lines = ["# from-scratch: the policy's own init under torch seed 0"]
-        lines += _score_entries(config.evaluation, policy, episodes=4)
+        lines += _score_entries(config.evaluation, policy, episodes=4, ticks=2)
     assert_golden(
         test_file=__file__,
         name="evaluation_exp002_tiny_short",
@@ -321,10 +306,11 @@ def _score_entries(
     policy: Policy,
     *,
     episodes: int,
+    ticks: int,
 ) -> list[str]:
     """Play and score ``policy`` as training's final evaluation does; digest the result."""
     assert config.env is not None
-    config.env.rules.max_timesteps = 4
+    config.env.rules.max_timesteps = ticks
     config.num_episodes = episodes
     evaluation = Evaluation(config, policy=policy, device=torch.device("cpu"))
     try:

@@ -27,7 +27,7 @@ from typing import (
 import copy
 import dataclasses
 
-from configgle import PartialConfig
+from configgle import Fig, PartialConfig
 from torch import nn
 from torch._dynamo.config import patch
 
@@ -42,7 +42,12 @@ from priml.baselines.craftax.world_model.context import (
     feature_parameter_names,
     plan_replay,
 )
-from priml.baselines.craftax.world_model.feature import InitialWeights
+from priml.baselines.craftax.world_model.feature import (
+    InitialWeights,
+    encode_frames,
+    post_attention,
+    pre_attention,
+)
 from priml.baselines.craftax.world_model.model import FrameEncoder
 from priml.baselines.craftax.world_model.schema import craftax_schema
 from priml.baselines.craftax.world_model.testing import (
@@ -58,6 +63,8 @@ from priml.model.transformer.block import TransformerBlock
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from configgle import Makeable
     from torch import Tensor
 
@@ -328,6 +335,8 @@ def test_a_bin_and_a_micro_batch_must_hold_something(name: str) -> None:
 
 
 @pytest.mark.compute_torch_compile
+@pytest.mark.gpu_torch_cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_a_compiled_replay_compiles_each_kernel_once_per_grad_mode(
     model: WorldModel,
 ) -> None:
@@ -337,7 +346,8 @@ def test_a_compiled_replay_compiles_each_kernel_once_per_grad_mode(
     micro-batches: dynamo guards on a parametrized module's per-instance class,
     which compiled once per block and ran a 20-block model past its limit.
     """
-    contexts = _contexts(SLIDING)
+    contexts = _cuda(_contexts(SLIDING))
+    model = model.cuda()
     runs: list[tuple[Tensor, list[Tensor]]] = []
     for compiled in (False, True):
         replay = _replay()
@@ -366,6 +376,37 @@ def test_a_compiled_replay_compiles_each_kernel_once_per_grad_mode(
     assert len(compiled_grads) == len(eager_grads) == len(list(joint.parameters()))
     for got, want in zip(compiled_grads, eager_grads, strict=True):
         assert torch.equal(got, want)
+
+
+def test_the_compile_slot_wraps_every_kernel_the_replay_runs(model: WorldModel) -> None:
+    """The slot wraps the block and encoder functions, and the replay runs only those.
+
+    ``torch.compile`` in the slot is the GPU test's above; here a wrapper that
+    counts its calls, so a function the replay ran around the slot would be
+    missed, in the forward or in the backward.
+    """
+    config = ContextReplay.Config()
+    config.pass_tokens, config.frames_per_batch = 26, 5
+    config.bin_tokens = 1
+    config.compile = _CountingCompile.Config()
+    replay = config.make()
+    kernels = (replay.kernels.pre, replay.kernels.post, replay.kernels.encode)
+    counted = [kernel for kernel in kernels if isinstance(kernel, _CountedCalls)]
+    assert [kernel.function for kernel in counted] == [
+        pre_attention,
+        post_attention,
+        encode_frames,
+    ]
+    joint = JointWorldModel(model, layers=2, replay=replay)
+    replayed = joint.forward(_contexts(REFILL))
+    forward = [kernel.calls for kernel in counted]
+    joint.backward(replayed, torch.ones_like(replayed.features))
+    assert all(calls > 0 for calls in forward)
+    assert all(
+        kernel.calls > calls for kernel, calls in zip(counted, forward, strict=True)
+    )
+    eager = _replay().forward(model, _contexts(REFILL), layers=2)
+    assert torch.equal(replayed.features, eager.features)
 
 
 @pytest.mark.filterwarnings(
@@ -413,19 +454,15 @@ def test_flash4_replays_and_backpropagates_as_masked_attention_in_bfloat16(
         if isinstance(module, RoPE):
             module.to(torch.float32)
     table = REFILL
-    contexts = random_contexts(
-        torch.tensor(table.lengths),
-        torch.tensor(table.anchored).bool(),
-        schema=craftax_schema(),
-        slots=SLOTS,
-        counts=torch.tensor(table.counts),
-        seed=7,
-    )
-    contexts = Contexts(
-        **{
-            entry.name: cast("torch.Tensor", getattr(contexts, entry.name)).cuda()
-            for entry in fields(contexts)
-        },
+    contexts = _cuda(
+        random_contexts(
+            torch.tensor(table.lengths),
+            torch.tensor(table.anchored).bool(),
+            schema=craftax_schema(),
+            slots=SLOTS,
+            counts=torch.tensor(table.counts),
+            seed=7,
+        ),
     )
     runs = [
         _cuda_replay(model, contexts, attention=attention, compiled=wrap)
@@ -483,6 +520,43 @@ def _cuda_replay(
         assert leaf.grad.is_contiguous(), name
         gradients[name] = leaf.grad.view(weight.shape).float()
     return replayed.features.float(), gradients
+
+
+class _CountedCalls:
+    """A function, and how often it was called."""
+
+    def __init__(self, function: Callable[..., object]) -> None:
+        self.function = function
+        self.calls = 0
+
+    def __call__(self, *args: object) -> object:
+        """Count the call, then make it."""
+        self.calls += 1
+        return self.function(*args)
+
+
+class _CountingCompile:
+    """A ``compile`` slot that counts each kernel's calls rather than compiling it."""
+
+    class Config(Fig["_CountingCompile"]):
+        """No options."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def __call__(self, function: Callable[..., object]) -> Callable[..., object]:
+        """Return ``function``, counted."""
+        return _CountedCalls(function)
+
+
+def _cuda(contexts: Contexts) -> Contexts:
+    """Return a copy of ``contexts`` on the CUDA device."""
+    return Contexts(
+        **{
+            entry.name: cast("torch.Tensor", getattr(contexts, entry.name)).cuda()
+            for entry in fields(contexts)
+        },
+    )
 
 
 def _relative(got: Tensor, want: Tensor) -> float:

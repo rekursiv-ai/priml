@@ -1139,6 +1139,21 @@ def _op_name(func: OpOverload[..., object]) -> str:
     return func.name().split("::")[-1].split(".")[0]
 
 
+# A view moves no bytes, so it is exact, and its result must alias its input: upcast,
+# it returns a float64 copy narrowed back, and every write through it lands on that
+# copy. ``x[:, :n]`` over a whole dimension issues ``alias``, not ``slice``, so a
+# rollout of one buffer stored each step into a copy and kept zeros (measured). The
+# schema names every view, the allowlist's and the 13 it lacked (``alias``,
+# ``diagonal``, ``unfold``, ``real``, ...), so no future view op can fall through.
+def _is_view(func: OpOverload[..., object]) -> bool:
+    """Whether every return aliases an input without writing it."""
+    returns = func._schema.returns  # noqa: SLF001 -- The harness reads the op schema to find views.
+    return bool(returns) and all(
+        value.alias_info is not None and not value.alias_info.is_write
+        for value in returns
+    )
+
+
 # ``add``/``sub`` with ``alpha != 1`` compute ``a + alpha * b``: vectorized kernels
 # fuse it into one FMA rounding, the scalar kernel rounds twice, so the float32
 # result depends on the host's vector ISA. Measured: 271-367 of 4096 differ between
@@ -1325,9 +1340,10 @@ class _Float64Compute(TorchDispatchMode):
     float32 argument and its overloadpacket name is NOT
     in ``_EXACT_F32_OPS``; the float32 args are widened to float64, the op runs,
     and float64 results are narrowed back to float32. Allowlisted ops (exact
-    elementwise arithmetic and pure data movement) pass through untouched. A
-    tensorless arithmetic factory in ``_FLOAT_FACTORIES`` is widened by its output dtype,
-    since it has no argument to read the width from.
+    elementwise arithmetic and pure data movement) pass through untouched, as
+    does every view op by its schema (``_is_view``), so a write through a view
+    reaches its base. A tensorless arithmetic factory in ``_FLOAT_FACTORIES`` is
+    widened by its output dtype, since it has no argument to read the width from.
 
     Upcast-by-default is the completeness guarantee: a transcendental or
     reduction absent from every list is still upcast, so it cannot silently mint
@@ -1353,7 +1369,7 @@ class _Float64Compute(TorchDispatchMode):
         kwargs = kwargs or {}
         if func.namespace in _COLLECTIVE_NAMESPACES:
             return func(*args, **kwargs)
-        exact = (
+        exact = _is_view(func) or (
             func.namespace == "aten"
             and _op_name(func) in _EXACT_F32_OPS
             and not _scales_operand(
