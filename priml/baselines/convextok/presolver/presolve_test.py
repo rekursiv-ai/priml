@@ -115,19 +115,23 @@ def test_compiled_kernels_match_pslp_on_every_program() -> None:
 @pytest.mark.usefixtures("two_numba_threads")
 def test_index_dtypes_share_one_kernel_specialization() -> None:
     # A second specialization of a cached kernel can segfault a later process.
+    # ``new_state`` fixes every kernel argument's dtype, so building the state
+    # compiles only what the assertion reads, not the whole presolve.
     program = fixture_program()
-    wide = replace(
-        program,
-        crow_indices=program.crow_indices.long(),
-        col_indices=program.col_indices.long(),
-    )
-    narrow_result, wide_result = presolve(program, _CPU), presolve(wide, _CPU)
-    assert torch.equal(narrow_result.program.values, wide_result.program.values)
+    new_state(program, _CPU)
+    new_state(_wide_indices(program), _CPU)
     # ``new_core`` is the Python entry that registers the struct proxies first;
     # the compiled kernel behind it is ``_new_core``.
     kernel = core._new_core
     assert isinstance(kernel, Dispatcher)
     assert len(kernel.signatures) == 1
+
+
+def test_index_dtypes_reduce_to_the_same_program() -> None:
+    program = fixture_program()
+    narrow_result = presolve(program, _CPU)
+    wide_result = presolve(_wide_indices(program), _CPU)
+    assert torch.equal(narrow_result.program.values, wide_result.program.values)
 
 
 def test_snapshot_names_the_reduced_program() -> None:
@@ -445,6 +449,15 @@ def _input_program(golden: np.lib.npyio.NpzFile) -> LinearProgram:
         objective=tensor("objective"),
         lower=tensor("lower"),
         upper=tensor("upper"),
+    )
+
+
+def _wide_indices(program: LinearProgram) -> LinearProgram:
+    """Return ``program`` with 64-bit row and column indices."""
+    return replace(
+        program,
+        crow_indices=program.crow_indices.long(),
+        col_indices=program.col_indices.long(),
     )
 
 

@@ -22,6 +22,8 @@ from numba.np.ufunc.parallel import (
     set_num_threads as set_num_threads,
 )
 
+__version__: str
+
 _F = TypeVar("_F", bound=Callable[..., object])
 
 @type_check_only
