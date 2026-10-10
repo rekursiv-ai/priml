@@ -546,7 +546,9 @@ def test_save_hf_checkpoint_failure_never_publishes_partial_directory(
 def test_save_hf_checkpoint_atomically_replaces_owned_weights(tmp_path: Path) -> None:
     """Replace only the weights when updating an owned export."""
     out = save_hf_checkpoint(
-        tmp_path / "out", {"model_type": "toy"}, {"w": torch.ones(1)}
+        tmp_path / "out",
+        {"model_type": "toy"},
+        {"w": torch.ones(1)},
     )
     save_hf_checkpoint(out, {"model_type": "toy"}, {"w": torch.zeros(1)})
     _, state = load_hf_checkpoint(out, dtype=None)
@@ -562,7 +564,9 @@ def test_save_hf_checkpoint_rejects_changed_immutable_metadata(
 ) -> None:
     """Reject a re-export whose immutable metadata changed."""
     out = save_hf_checkpoint(
-        tmp_path / "out", {"model_type": "toy"}, {"w": torch.ones(1)}
+        tmp_path / "out",
+        {"model_type": "toy"},
+        {"w": torch.ones(1)},
     )
     before = (out / "model.safetensors").read_bytes()
     with pytest.raises(ValueError, match="metadata does not match"):
@@ -576,7 +580,9 @@ def test_failed_owned_overwrite_preserves_old_export(
 ) -> None:
     """Preserve the published weights when their replacement fails."""
     out = save_hf_checkpoint(
-        tmp_path / "out", {"model_type": "toy"}, {"w": torch.ones(1)}
+        tmp_path / "out",
+        {"model_type": "toy"},
+        {"w": torch.ones(1)},
     )
     before = (out / "model.safetensors").read_bytes()
 

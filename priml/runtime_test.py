@@ -129,7 +129,8 @@ def test_multiprocess_passes_explicit_process_group_timeout(
 
 
 @pytest.mark.parametrize(
-    "timeout", [0.0, -1.0, float("inf"), float("-inf"), float("nan")]
+    "timeout",
+    [0.0, -1.0, float("inf"), float("-inf"), float("nan")],
 )
 def test_multiprocess_rejects_invalid_process_group_timeout(
     timeout: float,

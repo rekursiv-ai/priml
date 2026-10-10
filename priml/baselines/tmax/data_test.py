@@ -521,7 +521,9 @@ def test_shards_make_the_same_number_of_segment_forwards(
     shards: list[list[PackedRow]] = []
     for rank in (0, 1):
         monkeypatch.setattr(
-            data_module, "data_parallel_shape", lambda rank=rank: (rank, 2)
+            data_module,
+            "data_parallel_shape",
+            lambda rank=rank: (rank, 2),
         )
         shards.append(_smoke().make()._shard_rows(rows))
 
@@ -532,10 +534,12 @@ def test_shards_make_the_same_number_of_segment_forwards(
     for original, shard in zip(rows, shards, strict=True):
         size = len(original.query_responses)
         torch.testing.assert_close(
-            shard[0].query_responses[:size], original.query_responses
+            shard[0].query_responses[:size],
+            original.query_responses,
         )
         torch.testing.assert_close(
-            shard[0].response_mask[:size], original.response_mask
+            shard[0].response_mask[:size],
+            original.response_mask,
         )
         assert not shard[0].response_mask[size:].any()
         assert not shard[0].advantages[size:].any()

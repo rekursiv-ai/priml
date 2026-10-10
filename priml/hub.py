@@ -413,7 +413,7 @@ def _export_metadata(
         name = path.name
         if name in metadata or name in _OWNED_CORE_FILES:
             raise ValueError(
-                f"Auxiliary file conflicts with owned export file: {name}."
+                f"Auxiliary file conflicts with owned export file: {name}.",
             )
         if _is_weight_artifact(name):
             raise ValueError(f"Auxiliary file cannot be a weight artifact: {name}.")
