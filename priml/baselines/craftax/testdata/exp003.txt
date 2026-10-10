@@ -93,7 +93,8 @@ CraftaxTrainLoop(
         │       restart=FreshWorlds.Config(),
         │       spin_seconds=0.005,
         │       stall_cap=None,
-        │       practice=None
+        │       practice=None,
+        │       boss_fight_reward=None
         │   ),
         │   sampler=ExactPhiloxSampler.Config(seed=42, block=256, num_warps=8),
         │   rollout=Rollout.Config(
@@ -122,7 +123,8 @@ CraftaxTrainLoop(
         │           restart=FreshWorlds.Config(),
         │           spin_seconds=0.005,
         │           stall_cap=None,
-        │           practice=None
+        │           practice=None,
+        │           boss_fight_reward=None
         │       ),
         │       sampler=ExactPhiloxSampler.Config(seed=42, block=256, num_warps=8),
         │       rollout=Rollout.Config(

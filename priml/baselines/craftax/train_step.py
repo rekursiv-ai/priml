@@ -808,15 +808,18 @@ def load_masters(
     *,
     others: Sequence[Tensor] = (),
 ) -> None:
-    """Start a policy and its optimizer from a ``state_dict`` of fp32 masters.
+    """Start a policy and its optimizer from fp32 masters: a file of them, or a run's.
 
     The parameters take the masters rounded to their dtype; the optimizer's
-    masters take them exactly, in place, before its first step.
+    masters take them exactly, in place, before its first step. Its momentum
+    starts at zero either way, as a fresh optimizer's does.
 
     Args:
       model: The policy, on its device.
       optimizer: Its optimizer, which keeps fp32 masters.
-      path: The masters by parameter name, as ``torch.save`` wrote them.
+      path: The masters by parameter name, as ``torch.save`` wrote them; or a
+        ``TrainLoop`` checkpoint of a run of this policy, whose optimizer
+        saved them.
       others: Parameters the optimizer holds beside the policy's, a trained
         world model's, which keep the masters they start from.
 
@@ -831,9 +834,18 @@ def load_masters(
             "a checkpoint of fp32 masters needs an optimizer that keeps "
             "masters (MasterWeights)",
         )
-    masters = cast(
-        "dict[str, Tensor]",
-        torch.load(path, weights_only=True, map_location="cpu"),
+    # ``mmap`` leaves a run's environments and rollouts, most of its file, unread.
+    saved = from_plain(
+        cast(
+            "object",
+            torch.load(path, weights_only=True, map_location="cpu", mmap=True),
+        ),
+        dict[str, object],
+    )
+    masters = (
+        _trained_masters(model, from_plain(saved["step"], dict[str, object]))
+        if "step" in saved
+        else from_plain(saved, dict[str, Tensor])
     )
     model.load_state_dict(masters)
     names = {id(weight): name for name, weight in model.named_parameters()}
@@ -857,6 +869,20 @@ def load_masters(
                     "the optimizer holds a parameter the policy does not name "
                     "and no other owner claims",
                 )
+
+
+def _trained_masters(model: Policy, step: dict[str, object]) -> dict[str, Tensor]:
+    """Return the fp32 masters a run's optimizer saved, under the policy's names."""
+    optimizer = from_plain(step["optimizer"], dict[str, object])
+    state = from_plain(optimizer["state"], dict[int, dict[str, Tensor]])
+    groups = from_plain(optimizer["param_groups"], list[dict[str, object]])
+    # The step built its optimizer from the policy's parameters first, in their
+    # order, so the saved ids start with theirs; a trained world model's follow.
+    ids = [i for group in groups for i in from_plain(group["params"], list[int])]
+    names = [name for name, _ in model.named_parameters()]
+    return {
+        name: state[i]["master_weight"] for name, i in zip(names, ids, strict=False)
+    }
 
 
 def _fused_muon() -> Makeable[Callable[..., torch.optim.Optimizer]]:
@@ -957,9 +983,10 @@ class CraftaxTrainStep:
         given."""
 
         checkpoint: Path | str | None = None
-        """A ``state_dict`` of fp32 masters to start from: loaded into the
-        parameters, rounded to their dtype, and exactly into the optimizer's
-        masters, so the optimizer must keep them (:class:`MasterWeights`)."""
+        """fp32 masters to start from, a ``state_dict`` of them or a run's
+        ``TrainLoop`` checkpoint: loaded into the parameters, rounded to their
+        dtype, and exactly into the optimizer's masters, so the optimizer must
+        keep them (:class:`MasterWeights`); its momentum starts at zero."""
 
         reward_scale: float = 1.0
         """The learner's rewards are the stored ones times this, before the
@@ -998,10 +1025,11 @@ class CraftaxTrainStep:
                 self.feature.joint = self.feature_training is not None
             if self.evaluation.env is None:
                 # The evaluation plays training's rules, less its training-only
-                # options: no stall cap and no practice.
+                # options: no stall cap, no practice and the game's own reward.
                 env = self.evaluation.env = self.env.copy_tree()
                 env.stall_cap = None
                 env.practice = None
+                env.boss_fight_reward = None
             if self.evaluation.sampler is None:
                 self.evaluation.sampler = self.sampler.copy_tree()
             if self.evaluation.rollout is None:

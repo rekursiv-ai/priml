@@ -9,8 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from priml.baselines.craftax.experiments import exp114
 from priml.baselines.craftax.ghosts import experiments
-from priml.baselines.craftax.lib.compat import ExactScan
 from priml.baselines.craftax.model import MinGRUPolicy
 from priml.baselines.craftax.world_model.capture.source import (
     PolicySource,
@@ -96,19 +96,24 @@ def test_extras_play_2_048_more_episodes_of_each_tier_in_generation_2() -> None:
     assert experiments.extra_verifier().root.name == "w15-extra"
 
 
-def test_the_boss_tier_is_arm_3_of_the_captures_with_the_fine_tunes_numerics() -> None:
+def test_the_boss_tier_is_arm_3_of_the_captures_playing_exp114s_final_policy() -> None:
     config = _finalized(experiments.capture_boss)
     assert (config.arm, config.generation, config.decisions) == (3, 1, 1)
     assert config.root == _finalized(experiments.capture_high).root
     source = _source(config)
+    # exp114's 5,722 epochs past the parent's run.
     assert source.checkpoint == Path(
-        "/opt/scratch/artifacts/craftax/ghosts/policies/boss-s73-2999975936.pt",
+        "/opt/scratch/runs/craftax/exp114/checkpoints/step_00005722.pt",
     )
     assert (source.env.world_seeds, source.env.num_envs) == ((15,), 1_000)
-    model = source.policy.model
+    assert source.policy.checkpoint is None
+    model, recipe = source.policy.model, exp114().step.model
     assert isinstance(model, MinGRUPolicy.Config)
-    assert model.state_dtype == model.output_dtype == model.dtype
-    assert isinstance(model.block.scan, ExactScan.Config)
+    assert isinstance(recipe, MinGRUPolicy.Config)
+    # A partial compares by identity, so the two trees compare as printed.
+    assert model.pformat(mask_memory_addresses=True) == recipe.pformat(
+        mask_memory_addresses=True,
+    )
 
 
 def _finalized(factory: Callable[[], CaptureWorker.Config]) -> CaptureWorker.Config:

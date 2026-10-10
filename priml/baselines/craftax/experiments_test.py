@@ -21,7 +21,12 @@ import pytest
 import torch
 
 from priml.baselines.craftax import experiments
-from priml.baselines.craftax.env import CraftaxEnv, FreshWorlds, WorldPool
+from priml.baselines.craftax.env import (
+    BossFightReward,
+    CraftaxEnv,
+    FreshWorlds,
+    WorldPool,
+)
 from priml.baselines.craftax.experiments import (
     CraftaxTrainLoop,
     exp000,
@@ -46,6 +51,9 @@ from priml.baselines.craftax.experiments import (
     exp111,
     exp112,
     exp113,
+    exp114,
+    exp115,
+    exp116,
     exp_smoke,
 )
 from priml.baselines.craftax.game.state import (
@@ -62,7 +70,6 @@ from priml.baselines.craftax.learners.rnn_update import ShuffledTrajectories
 from priml.baselines.craftax.learners.update import ShuffledTransitions
 from priml.baselines.craftax.lib.adam import ClippedAdam
 from priml.baselines.craftax.model import (
-    FeasibilityLoss,
     MinGRUPolicy,
     NoEncoder,
 )
@@ -85,7 +92,9 @@ from priml.baselines.craftax.testing import (
     fp32,
     host_agnostic_pipeline,
     multi_hot_embedding,
+    optimizer_state,
     portable_uniform,
+    tiny_board_policy,
 )
 from priml.baselines.craftax.train_step import (
     AgentWindows,
@@ -108,9 +117,9 @@ from priml.lib.absent import ABSENT
 from priml.loss.policy_gradient import TorchPPO
 from priml.loss.policy_gradient_kernel import TritonPPO
 from priml.math.schedules import linear, warmup
-from priml.model.attention.flash4 import Flash4Varlen
 from priml.model.attention.kernel import SdpaVarlen
 from priml.model.init import fan_in_truncated_normal, kaiming_uniform
+from priml.model.linear import Linear
 from priml.model.min_gru import TorchScan, TritonScan
 from priml.optimizers.fused_muon import FusedMuon
 from priml.runtime import SingleProcess
@@ -132,9 +141,6 @@ if TYPE_CHECKING:
 
 
 _WORLD_MODEL_EXP001: Final = "priml.baselines.craftax.world_model.experiments.exp001"
-_ORACLE_CHECKPOINTS: Final = Path(
-    "/opt/scratch/datasets/craftax/world-model-oracle/v1/checkpoints",
-)
 
 _PORTED: Final[
     tuple[ExperimentFactory[CraftaxTrainLoop | CraftaxPQNTrainLoop], ...]
@@ -157,13 +163,20 @@ _PORTED: Final[
     exp107,
     exp108,
     exp109,
+    exp114,
+    exp_smoke,
+)
+"""Every experiment with a recipe, each built and printed below."""
+
+_NOT_REPRODUCIBLE: Final[tuple[ExperimentFactory[CraftaxTrainLoop], ...]] = (
     exp110,
     exp111,
     exp112,
     exp113,
-    exp_smoke,
+    exp115,
+    exp116,
 )
-"""Every experiment with a recipe, each built and printed below."""
+"""Experiments whose world model no experiment trains: each factory raises."""
 
 
 def test_every_experiment_is_ported() -> None:
@@ -173,7 +186,17 @@ def test_every_experiment_is_ported() -> None:
         for name, function in inspect.getmembers(experiments, inspect.isfunction)
         if name.startswith("exp") and function.__module__ == experiments.__name__
     }
-    assert {factory.__name__ for factory in _PORTED} == defined
+    assert {factory.__name__ for factory in (*_PORTED, *_NOT_REPRODUCIBLE)} == defined
+
+
+@pytest.mark.parametrize("factory", _NOT_REPRODUCIBLE)
+def test_an_experiment_without_its_world_model_raises_its_todo(
+    factory: ExperimentFactory[CraftaxTrainLoop],
+) -> None:
+    """Each names the producer it waits for, its own or its parent's."""
+    with pytest.raises(NotImplementedError, match="TODO"):
+        factory()
+    assert "Not yet reproducible" in (factory.__doc__ or "")
 
 
 def test_the_readme_links_every_experiment_to_its_factory() -> None:
@@ -188,7 +211,9 @@ def test_the_readme_links_every_experiment_to_its_factory() -> None:
     )
     linked = set(re.findall(r"\[`(exp\d+)`\]\(experiments\.py\)", readme))
     assert linked == {
-        factory.__name__ for factory in _PORTED if factory is not exp_smoke
+        factory.__name__
+        for factory in (*_PORTED, *_NOT_REPRODUCIBLE)
+        if factory is not exp_smoke
     }
     assert "experiments.py#L" not in readme
 
@@ -217,10 +242,7 @@ def test_every_experiment_is_named_for_its_factory(
         exp104,
         exp105,
         exp109,
-        exp110,
-        exp111,
-        exp112,
-        exp113,
+        exp114,
         exp_smoke,
     ],
 )
@@ -353,10 +375,7 @@ def test_every_experiment_seeds_torchs_generator_as_the_module_states() -> None:
         exp107,
         exp108,
         exp109,
-        exp110,
-        exp111,
-        exp112,
-        exp113,
+        exp114,
         exp_smoke,
     ):
         assert factory().seed == 73, factory.__name__
@@ -1205,6 +1224,76 @@ def test_base_dir_moves_the_steps_inputs(tmp_path: Path) -> None:
     )
 
 
+def test_exp114_fine_tunes_exp103s_final_run_for_the_boss_fight() -> None:
+    """The run's masters, the fight's reward, a longer horizon, a tenth of the rate."""
+    parent, config = exp103(), exp114()
+    assert {
+        name
+        for name in _deltas(parent, config)
+        if not name.startswith("step.env.boss_fight_reward.")
+    } == {
+        "experiment_name",
+        # The W&B group, inside the tracker list's dict.
+        "tracker.trackers",
+        "step.checkpoint",
+        "step.env.boss_fight_reward",
+        "step.learner.objective.discount",
+        "step.optimizer.lr",
+        "step.schedule.curve",
+        "max_steps",
+        "step.train_budget_steps",
+    }
+    final = config.copy_tree().finalize()
+    assert final.step.checkpoint == Path(
+        "/opt/scratch/runs/craftax/exp103/checkpoints/step_00038146.pt",
+    )
+    assert final.step.env.boss_fight_reward == BossFightReward.Config(hit=1.0, kill=1.5)
+    # The evaluation scores the game's reward alone.
+    evaluation = final.step.evaluation.env
+    assert evaluation is not None
+    assert evaluation.boss_fight_reward is None
+    optimizer, parent_optimizer = config.step.optimizer, parent.step.optimizer
+    assert isinstance(optimizer, FusedMuon.Config)
+    assert isinstance(parent_optimizer, FusedMuon.Config)
+    # A tenth of the parent's peak, as the arm's command wrote it.
+    assert parent_optimizer.lr == 0.001182217733003199
+    assert optimizer.lr == 0.0001182217733003199
+    transitions = config.step.env.num_envs * config.step.rollout.horizon
+    assert (config.max_steps, config.max_steps * transitions) == (5_722, 2_999_975_936)
+
+
+@pytest.mark.compute_training
+def test_exp114_warm_starts_from_an_exp103_run_and_trains(tmp_path: Path) -> None:
+    """exp103's run at test size, then exp114 from its checkpoint and one epoch.
+
+    The masters carry over exactly; the momentum does not, as the fine-tune's
+    optimizer starts afresh. The checkpoint is the parent's step state, under
+    ``step``, as the training loop saves it.
+    """
+    torch.manual_seed(1)
+    parent = _tiny_recipe_step(exp103()).make()
+    try:
+        parent.train_step()
+        masters = optimizer_state(parent.model, parent.optimizer, "master_weight")
+        torch.save({"step": parent.state_dict()}, tmp_path / "parent.pt")
+    finally:
+        parent.close()
+    config = _tiny_recipe_step(exp114())
+    config.checkpoint = tmp_path / "parent.pt"
+    torch.manual_seed(2)
+    step = config.make()
+    try:
+        loaded = optimizer_state(step.model, step.optimizer, "master_weight")
+        assert loaded.keys() == masters.keys()
+        for name, master in loaded.items():
+            assert torch.equal(master, masters[name]), name
+        momentum = optimizer_state(step.model, step.optimizer, "momentum_buffer")
+        assert not any(buffer.any() for buffer in momentum.values())
+        assert torch.isfinite(step.train_step()["loss"])
+    finally:
+        step.close()
+
+
 def test_exp107_adds_the_frozen_feature_and_its_zero_projection() -> None:
     feature_path, proj_path = "step.feature", "step.model.proj_feature"
     assert {
@@ -1255,138 +1344,10 @@ def test_exp108_swaps_only_the_feature_weights_for_a_seeded_init() -> None:
     )
 
 
-def test_exp110_reads_a_frozen_early_world_model_alone_and_evaluates_as_its_reference() -> (
-    None
-):
-    """The encoder's slots, the feature, and the evaluation's rows and cadence change."""
-    slots = (
-        "step.model.embedding",
-        "step.model.injection",
-        "step.model.proj_feature",
-        "step.feature",
-        "step.evaluation.env",
-    )
-    assert {
-        name
-        for name in _deltas(exp103(), exp110())
-        if not name.startswith(tuple(f"{slot}." for slot in slots))
-    } == {
-        "experiment_name",
-        # The W&B group, inside the tracker list's dict.
-        "tracker.trackers",
-        *slots,
-        "num_steps_eval",
-    }
-    config = exp110().copy_tree().finalize()
-    model = config.step.model
-    assert isinstance(model, MinGRUPolicy.Config)
-    assert isinstance(model.embedding, NoEncoder.Config)
-    assert model.observation_size == config.step.env.observation_size == ACTION_OBS_SIZE
-    assert model.injection is None
-    assert isinstance(model.auxiliary, FeasibilityLoss.Config)
-    proj = model.proj_feature
-    assert proj is not None
-    assert (proj.channels_in, proj.channels_out, proj.bias) == (1_152, 1_024, False)
-    assert proj.init_weight is kaiming_uniform
-    # Frozen: ``joint`` is False until exp112 gives the learner the feature to train.
-    assert config.step.feature == _frozen_feature(
-        TrainedWeights.Config(
-            experiment=_WORLD_MODEL_EXP001,
-            checkpoint=_ORACLE_CHECKPOINTS / "early-fit-s73" / "step_00013135.pt",
-            overrides=[],
-        ),
-    )
-
-
-def test_exp110_evaluates_on_1024_environments_every_250m_and_at_the_end() -> None:
-    """The first epoch past each 250M, at 20B and at the 1B the docstring overrides."""
-    config = exp110().copy_tree().finalize()
-    evaluation = config.step.evaluation.env
-    assert evaluation is not None
-    assert (evaluation.num_envs, evaluation.num_buffers) == (1_024, 4)
-    assert evaluation.stall_cap is None
-    assert evaluation.practice is None
-    assert evaluation.rules == config.step.env.rules
-    assert evaluation.restart == config.step.env.restart
-    transitions = config.step.env.num_envs * config.step.rollout.horizon
-    assert (config.num_steps_eval - 1) * transitions < 250_000_000
-    assert config.num_steps_eval * transitions == 250_085_376
-    assert config.max_steps == config.step.train_budget_steps == exp103().max_steps
-    one_billion = 1_000_000_000 // transitions
-    assert (one_billion, one_billion * transitions) == (1_907, 999_817_216)
-    evaluations = [
-        step for step in range(1, one_billion) if step % config.num_steps_eval == 0
-    ]
-    assert [step * transitions for step in evaluations] == [
-        250_085_376,
-        500_170_752,
-        750_256_128,
-    ]
-
-
-def test_exp110s_policy_builds_its_trunk_heads_and_projection_alone() -> None:
-    """At width 8: no encoder weight, the feature's projection last."""
-    model_config = exp110().step.model
-    assert isinstance(model_config, MinGRUPolicy.Config)
-    model_config.channels_hidden = 8
-    model = model_config.make()
-    shapes = [(name, tuple(weight.shape)) for name, weight in model.named_parameters()]
-    assert shapes == [
-        ("proj_out.weight", (44, 8)),
-        *((f"blocks.{index}.proj_gates.weight", (24, 8)) for index in range(4)),
-        ("auxiliary.proj_out.weight", (43, 8)),
-        ("proj_feature.weight", (8, 1_152)),
-    ]
-
-
-def test_exp111_swaps_only_the_world_models_checkpoint() -> None:
-    assert _deltas(exp110(), exp111()) == {
-        "experiment_name",
-        # The W&B group, inside the tracker list's dict.
-        "tracker.trackers",
-        "step.feature.weights.checkpoint",
-    }
-    feature = exp111().copy_tree().finalize().step.feature
-    assert isinstance(feature, WorldModelFeature.Config)
-    assert isinstance(feature.weights, TrainedWeights.Config)
-    assert feature.weights.checkpoint == (
-        _ORACLE_CHECKPOINTS / "mature-fit-s73" / "step_00012738.pt"
-    )
-
-
-@pytest.mark.parametrize(("parent", "child"), [(exp110, exp112), (exp111, exp113)])
-def test_the_joint_arms_train_their_frozen_parents_world_model(
-    parent: ExperimentFactory[CraftaxTrainLoop],
-    child: ExperimentFactory[CraftaxTrainLoop],
-) -> None:
-    """One change: the learner trains the feature, compiled, on FA4; it turns joint."""
-    training = "step.feature_training"
-    assert {
-        name
-        for name in _deltas(parent(), child())
-        if not name.startswith(f"{training}.")
-    } == {
-        "experiment_name",
-        # The W&B group, inside the tracker list's dict.
-        "tracker.trackers",
-        training,
-    }
-    final = child().copy_tree().finalize().step
-    assert isinstance(final.feature, WorldModelFeature.Config)
-    assert final.feature.joint
-    assert final.feature_training == ContextReplay.Config(
-        attention=Flash4Varlen.Config(),
-        bin_tokens=4_096,
-        pass_tokens=16_384,
-        frames_per_batch=512,
-        compile=PartialConfig(torch.compile, fullgraph=True, dynamic=False),
-    )
-
-
 def test_a_sole_feature_step_archives_the_features_its_actor_stored_for_branches() -> (
     None
 ):
-    """exp110's recipe on exact windows: width 8, 4 environments, the smoke world model.
+    """The sole-feature recipe on exact windows: width 8, 4 environments, the smoke model.
 
     Every row of the boot rollout's slot is marked a branch, as practice marks
     a restored row, and the imitation archives the features the actor stored
@@ -1394,7 +1355,7 @@ def test_a_sole_feature_step_archives_the_features_its_actor_stored_for_branches
     saves, is ``rollout_test``'s; an evaluation with a feature,
     ``evaluation_test``'s.
     """
-    step = _tiny_sole_feature_step(exp110()).make()
+    step = _tiny_sole_feature_step(_sole_feature_recipe()).make()
     try:
         step._boot()
         slot = step.rollout.slots[step.ready]
@@ -1412,16 +1373,15 @@ def test_a_sole_feature_step_archives_the_features_its_actor_stored_for_branches
 
 
 def test_a_joint_step_on_exact_windows_trains_beside_imitation() -> None:
-    """exp112's recipe at the same test size, the replay masked and eager.
+    """The joint sole-feature recipe at the same test size, the replay masked and eager.
 
     The boot slot is the starting weights' own, so its replay matches what the
     actor read; the world model trains and the imitation archives two
     branches' stored features. The rebuild of the actor's histories and the
     evaluation of the trained weights are ``train_step_test``'s.
     """
-    step_config = _tiny_sole_feature_step(exp112())
-    replay = step_config.feature_training
-    assert isinstance(replay, ContextReplay.Config)
+    step_config = _tiny_sole_feature_step(_sole_feature_recipe())
+    replay = step_config.feature_training = ContextReplay.Config()
     replay.attention = SdpaVarlen.Config()
     replay.compile = None
     replay.bin_tokens = 1
@@ -1459,10 +1419,7 @@ def test_a_joint_step_on_exact_windows_trains_beside_imitation() -> None:
         (exp107, "exp107"),
         (exp108, "exp108"),
         (exp109, "exp109"),
-        (exp110, "exp110"),
-        (exp111, "exp111"),
-        (exp112, "exp112"),
-        (exp113, "exp113"),
+        (exp114, "exp114"),
     ],
 )
 def test_the_dashboard_names_the_run_after_the_experiment_and_groups_its_seeds(
@@ -1555,6 +1512,52 @@ def _frozen_feature(
 # 0-1 into an archive of 2; windows of every agent over a horizon of 2; the smoke world
 # model, float32, on exact windows of 4 decisions, its blocks 2 steps; the torch forms
 # of the kernels. No test builds its evaluation.
+# exp103's recipe at test size, as :func:`_tiny_sole_feature_step` shrinks the
+# sole-feature arm: the board policy at width 8, 4 environments in 2 buffers of 8 pool
+# worlds, no practice or stall cap, imitation of 2 rows, windows of every agent over a
+# horizon of 2, and the torch forms of the kernels.
+def _tiny_recipe_step(config: CraftaxTrainLoop) -> CraftaxTrainStep.Config:
+    """Shrink a board recipe's step to the CPU."""
+    step = config.step
+    step.parallelism.device = "cpu"
+    env = step.env
+    env.num_envs = 4
+    env.num_buffers = 2
+    env.threads_per_buffer = 1
+    pool = env.restart
+    assert isinstance(pool, WorldPool.Config)
+    pool.num_worlds = 8
+    env.practice = env.stall_cap = None
+    model = step.model = tiny_board_policy()
+    model.block.scan = TorchScan.Config()
+    windows = step.learner
+    assert isinstance(windows, AgentWindows.Config)
+    windows.objective = TorchPPO.Config().update(windows.objective, skip_missing=True)
+    windows.minibatch_size = 8
+    imitation = windows.auxiliary
+    assert isinstance(imitation, BranchImitation.Config)
+    imitation.rows = imitation.capacity = 2
+    step.sampler = TorchPhiloxSampler.Config().update(step.sampler, skip_missing=True)
+    step.rollout.horizon = 2
+    step.train_budget_steps = 2
+    return step
+
+
+# exp110 waits for its world model's producer, so the pipeline's tests build its policy
+# and feature here; :func:`_tiny_sole_feature_step` gives the feature the smoke model's
+# weights.
+def _sole_feature_recipe() -> CraftaxTrainLoop:
+    """Return exp103 with a world-model feature as its only encoder, as exp110 has it."""
+    config = exp103()
+    model = config.step.model
+    assert isinstance(model, MinGRUPolicy.Config)
+    model.embedding = NoEncoder.Config()
+    model.injection = None
+    model.proj_feature = Linear.Config()
+    config.step.feature = WorldModelFeature.Config()
+    return config
+
+
 def _tiny_sole_feature_step(config: CraftaxTrainLoop) -> CraftaxTrainStep.Config:
     """Shrink a sole-feature recipe's step to the CPU and put it on exact windows."""
     step = config.step

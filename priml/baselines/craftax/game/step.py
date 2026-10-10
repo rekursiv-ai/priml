@@ -139,12 +139,17 @@ class Rules(NamedTuple):
         draw at each reset leaves uncapped.
       practice: The stats are ``TRAINING_STATS_DTYPE`` and carry a practice
         branch flag, and an episode that ends as a branch is not logged.
+      boss_fight_reward: Reward added per necromancer hit and per kill on the
+        final floor (a training recipe's shaping); a step that kills the
+        player earns none of it. The stall clock and the episode log count
+        achievements alone, so neither sees it.
 
     ``fresh_worlds``, ``symbolic_observation``, ``previous_action``,
-    ``stall_limit`` and ``practice`` default to None, which plays as off and
-    also keeps the option's code out of the compiled step: each is passed on
-    as an argument, and Numba prunes a branch on an argument typed None, so
-    the step compiles neither world generation nor the symbolic view.
+    ``stall_limit``, ``practice`` and ``boss_fight_reward`` default to None,
+    which plays as off and also keeps the option's code out of the compiled
+    step: each is passed on as an argument, and Numba prunes a branch on an
+    argument typed None, so the step compiles neither world generation nor the
+    symbolic view.
     Compiling both cost every cold start 21 s (measured on the Xeon: 34 s to
     55 s of compile for an env's first steps). False plays the same and
     compiles them.
@@ -162,6 +167,7 @@ class Rules(NamedTuple):
     stall_limit: int | None = None
     uncapped_permille: int = 0
     practice: bool | None = None
+    boss_fight_reward: tuple[float, float] | None = None
 
 
 class Batch(NamedTuple):
@@ -392,6 +398,8 @@ def play_numba(
     initial_low, initial_high = achievement_bits_numba(state)
     initial_armour = equipped_armour_numba(state)
     initial_health = state.player_health
+    initial_hits = state.boss_progress
+    initial_kills = state.monsters_killed[NUM_LEVELS - 1]
     stats.steps += 1
     prefetch_creatures_numba(state)
     ticks = 0
@@ -438,6 +446,9 @@ def play_numba(
     )
     reward = score_numba(
         state, stats, initial_low, initial_high, initial_armour, initial_health, done, rules,
+    )  # fmt: skip
+    reward = _boss_fight_numba(
+        state, reward, initial_hits, initial_kills, rules.boss_fight_reward,
     )  # fmt: skip
     return reward, done
 
@@ -864,6 +875,27 @@ def _stalled_numba(  # noqa: PLR0917 -- Numba nopython rejects keyword-only para
     return done
 
 
+# Added after the score, as PufferLib's reward plus the shaping: a step that kills the
+# player keeps the death penalty's -1, whatever it hit.
+@jit
+def _boss_fight_numba(
+    state: EnvState,
+    reward: np.float32,
+    initial_hits: int,
+    initial_kills: int,
+    boss_fight_reward: tuple[float, float] | None,
+) -> np.float32:
+    """:func:`play_numba`'s ``Rules.boss_fight_reward``, so None prunes it."""
+    if boss_fight_reward is None:
+        return reward
+    if state.player_health <= np.float32(0.0):
+        return reward
+    hit, kill = boss_fight_reward
+    hits = np.float32(state.boss_progress - initial_hits)
+    kills = np.float32(state.monsters_killed[NUM_LEVELS - 1] - initial_kills)
+    return reward + (np.float32(hit) * hits + np.float32(kill) * kills)
+
+
 # None prunes the draw, so the escape stream is untouched without the cap. The draw is
 # ``rand_r % 1000 < uncapped_permille``: the episode escapes the cap, with limit 0, with
 # probability ``uncapped_permille / 1000``.
@@ -982,7 +1014,8 @@ def _reset_layout_numba(  # noqa: PLR0917 -- Numba nopython rejects keyword-only
 
 # A Rules typed by the options is another Numba type, so play, the bulk of the step,
 # compiled again for every option setting a process met; typed None, it compiles once.
-# The two options play does read, the stall cap and practice's logs, keep their types.
+# The options play does read, the stall cap, practice's logs and the boss-fight
+# reward, keep their types.
 @jit
 def _played_numba(rules: Rules) -> Rules:
     """``rules`` with the options :func:`play_numba` never reads set to None."""
@@ -998,6 +1031,7 @@ def _played_numba(rules: Rules) -> Rules:
         rules.stall_limit,
         0,
         rules.practice,
+        rules.boss_fight_reward,
     )
 
 

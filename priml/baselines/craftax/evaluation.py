@@ -171,9 +171,9 @@ class Evaluation:
         Raises:
           ValueError: ``num_episodes`` is not positive, ``CraftaxEnv.check``
             refuses the env's sizes, or the env sets a training-only option:
-            a stall cap or practice. A train step's ``finalize`` copies
-            training's env into an unset one, so a recipe with either sets
-            its evaluation's env itself.
+            a stall cap, practice or the boss-fight reward. A train step's
+            ``finalize`` copies training's env into an unset one, dropping
+            them, so a recipe that sets its evaluation's env drops them itself.
 
         """
         if config.num_episodes <= 0:
@@ -182,10 +182,16 @@ class Evaluation:
             )
         if config.env is not None:
             CraftaxEnv.check(config.env)
-            if config.env.stall_cap is not None or config.env.practice is not None:
+            env = config.env
+            if (
+                env.stall_cap is not None
+                or env.practice is not None
+                or env.boss_fight_reward is not None
+            ):
                 raise ValueError(
-                    "an evaluation plays natural, uncapped episodes: its env "
-                    "sets neither stall_cap nor practice, which are training-only",
+                    "an evaluation plays natural, uncapped episodes for the game's "
+                    "reward: its env sets none of stall_cap, practice and "
+                    "boss_fight_reward, which are training-only",
                 )
 
     def reset(self) -> None:

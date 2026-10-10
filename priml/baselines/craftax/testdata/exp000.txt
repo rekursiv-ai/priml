@@ -112,7 +112,8 @@ CraftaxTrainLoop(
         │       restart=WorldPool.Config(num_worlds=8192),
         │       spin_seconds=0.005,
         │       stall_cap=None,
-        │       practice=None
+        │       practice=None,
+        │       boss_fight_reward=None
         │   ),
         │   sampler=ExactPhiloxSampler.Config(seed=73, block=256, num_warps=8),
         │   rollout=Rollout.Config(
@@ -141,7 +142,8 @@ CraftaxTrainLoop(
         │           restart=WorldPool.Config(num_worlds=8192),
         │           spin_seconds=0.005,
         │           stall_cap=None,
-        │           practice=None
+        │           practice=None,
+        │           boss_fight_reward=None
         │       ),
         │       sampler=ExactPhiloxSampler.Config(seed=73, block=256, num_warps=8),
         │       rollout=Rollout.Config(

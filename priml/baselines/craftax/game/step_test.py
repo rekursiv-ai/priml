@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from numba.core.dispatcher import Dispatcher
+    from numpy.typing import NDArray
 
     from priml.baselines.craftax.game.state import Array1, EnvState, EnvStats
 
@@ -582,6 +583,45 @@ def test_a_boss_beaten_while_asleep_ends_the_step_at_that_tick() -> None:
     assert ticks[1] > 1
 
 
+def test_the_boss_fight_reward_pays_a_hit_on_top_of_the_games_reward() -> None:
+    """A hit on the necromancer pays 1 more; the stats, the return among them, do not move."""
+    pool = small_worlds(1)
+    rewards: list[NDArray[np.float64]] = []
+    stats: list[bytes] = []
+    for shaping in (None, (1.0, 1.5)):
+        batch = _batch(1, pool, step.Rules(boss_fight_reward=shaping))
+        state = env_state(batch.states, 0)
+        state.player_level = NUM_LEVELS - 1
+        row = int(state.player_position[0]) - 1
+        col = int(state.player_position[1])
+        state.map[NUM_LEVELS - 1, row, col] = BlockType.NECROMANCER
+        state.melee_mobs[NUM_LEVELS - 1].mask[:] = 0
+        state.ranged_mobs[NUM_LEVELS - 1].mask[:] = 0
+        state.boss_timestep_to_spawn_this_round = 0
+        _step(batch, pool, Action.DO)
+        assert state.boss_progress == 1
+        rewards.append(batch.rewards.astype(np.float64))
+        stats.append(batch.stats.tobytes())
+    assert rewards[1][0] - rewards[0][0] == 1.0
+    assert stats[0] == stats[1]
+
+
+def test_the_boss_fight_reward_pays_hits_and_final_floor_kills_but_not_a_death() -> (
+    None
+):
+    """In float32, after the score; a step whose player dies keeps the -1."""
+    state = env_state(_batch(1, small_worlds(1)).states, 0)
+    state.boss_progress = 5
+    state.monsters_killed[NUM_LEVELS - 1] = 9
+    score = np.float32(0.25)
+    paid = step._boss_fight_numba(state, score, 3, 8, (1.0, 1.5))
+    assert paid == score + (np.float32(2.0) + np.float32(1.5))
+    assert step._boss_fight_numba(state, score, 3, 8, None) == score
+    state.player_health = np.float32(0.0)
+    death = np.float32(-1.0)
+    assert step._boss_fight_numba(state, death, 3, 8, (1.0, 1.5)) == death
+
+
 def test_a_practice_branch_ends_unlogged_where_a_natural_episode_is_logged() -> None:
     """A branch counts its steps and ends with its episode, which reaches no log."""
     pool = small_worlds(3)
@@ -637,6 +677,7 @@ def test_a_reset_starts_the_step_count_and_the_undefined_event_record_afresh() -
         (step._step_layout_numba, 6, 5, "ACTION_OBSERVATION_RECORD"),
         (step._reset_layout_numba, 7, 5, "SYMBOLIC_OBSERVATION_RECORD"),
         (step._reset_layout_numba, 7, 6, "ACTION_OBSERVATION_RECORD"),
+        (step._boss_fight_numba, 5, 4, "NUM_LEVELS"),
     ],
     ids=[
         "fresh-worlds",
@@ -645,6 +686,7 @@ def test_a_reset_starts_the_step_count_and_the_undefined_event_record_afresh() -
         "step-action-rows",
         "reset-symbolic-rows",
         "reset-action-rows",
+        "boss-fight-reward",
     ],
 )
 def test_an_option_typed_none_prunes_its_code_before_the_step_compiles(
@@ -705,6 +747,7 @@ def test_the_options_play_never_reads_reach_it_as_none(
         stall_limit=5,
         uncapped_permille=9,
         practice=True,
+        boss_fight_reward=(1.0, 1.5),
     )
     pool = small_worlds(1)
     _step(_batch(1, pool, rules), pool, Action.NOOP)
@@ -714,6 +757,7 @@ def test_the_options_play_never_reads_reach_it_as_none(
             max_timesteps=7,
             stall_limit=5,
             practice=True,
+            boss_fight_reward=(1.0, 1.5),
         ),
     ]
 

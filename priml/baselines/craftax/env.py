@@ -359,6 +359,47 @@ class StallCap:
         )
 
 
+class BossFightReward:
+    """Pay each necromancer hit and each final-floor kill, on top of the reward.
+
+    The game rewards the first hit and the eighth, the boss's defeat, and
+    nothing between, so a policy that has learned the floors hits once and
+    waits out the clock. This shaping pays every hit and every kill on the
+    last floor, a step that kills the player excepted. Game-specific, and
+    training only: an evaluation refuses it, so scores stay the game's.
+    """
+
+    class Config(Fig["BossFightReward"]):
+        """The reward per hit and per kill."""
+
+        hit: float = 1.0
+        """Added per point of the necromancer's progress, before reward scaling."""
+
+        kill: float = 1.5
+        """Added per creature killed on the final floor, before reward scaling."""
+
+    def __init__(self, config: Config) -> None:
+        """Keep the two rewards.
+
+        Args:
+          config: The reward per hit and per kill.
+
+        Raises:
+          ValueError: A reward is not finite.
+
+        """
+        if not (math.isfinite(config.hit) and math.isfinite(config.kill)):
+            raise ValueError(
+                f"Boss-fight rewards must be finite, not {config.hit}, {config.kill}",
+            )
+        self.hit = config.hit
+        self.kill = config.kill
+
+    def rules(self, rules: Rules) -> Rules:
+        """Return ``rules`` with the shaping compiled into the step."""
+        return rules._replace(boss_fight_reward=(self.hit, self.kill))
+
+
 class CraftaxEnv:
     """PufferLib's vectorized Craftax: ``num_envs`` worlds in ``num_buffers`` groups.
 
@@ -448,6 +489,10 @@ class CraftaxEnv:
         the first rows from them each rollout; training only. None compiles
         none of it."""
 
+        boss_fight_reward: BossFightReward.Config | None = None
+        """Pay each necromancer hit and final-floor kill; training only. None
+        pays the game's reward alone and compiles none of it."""
+
         @property
         def observation_size(self) -> int:
             """Floats per observation: the symbolic view's, or the packed one's."""
@@ -473,6 +518,8 @@ class CraftaxEnv:
             rules = config.stall_cap.make().rules(rules)
         if config.practice is not None:
             rules = rules._replace(practice=True)
+        if config.boss_fight_reward is not None:
+            rules = config.boss_fight_reward.make().rules(rules)
         self.num_envs = config.num_envs
         self.num_buffers = config.num_buffers
         self.envs_per_buffer = config.num_envs // config.num_buffers

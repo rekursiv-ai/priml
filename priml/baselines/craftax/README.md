@@ -6,14 +6,14 @@ policy and the learner run on the GPU in torch and Triton, captured in CUDA
 graphs. Beside it are Craftax_Baselines' recipes and the recipes of our
 [Craftax blog post](https://rekursiv.ai/blog/craftax/).
 
-For the blog post, see [Our recipes](#our-recipes-exp101-exp113).
+For the blog post, see [Our recipes](#our-recipes-exp101-exp116).
 
 ## Table of contents
 
 - [Run the baseline](#run-the-baseline)
 - [Results](#results)
   - [Baselines (exp000-exp008)](#baselines-exp000-exp008)
-  - [Our recipes (exp101-exp113)](#our-recipes-exp101-exp113)
+  - [Our recipes (exp101-exp116)](#our-recipes-exp101-exp116)
 - [Reproduce](#reproduce)
   - [Prerequisites](#prerequisites)
   - [Data](#data)
@@ -22,6 +22,7 @@ For the blog post, see [Our recipes](#our-recipes-exp101-exp113).
   - [The ghost overlay](#the-ghost-overlay)
   - [Smoke test of the chain](#smoke-test-of-the-chain)
   - [The base_dir knob](#the-base_dir-knob)
+  - [Not yet reproducible (TODO)](#not-yet-reproducible-todo)
 - [Parity](#parity)
 - [Speed](#speed)
 - [Tests](#tests)
@@ -81,7 +82,7 @@ For comparison, the reference implementations scored:
   the earlier JAX port at the same seed.
 - `exp006`: about 16.0%, as purejaxql reports.
 
-### Our recipes (exp101-exp113)
+### Our recipes (exp101-exp116)
 
 Our best experiment is [`exp103`](experiments.py), the blog post's recipe:
 72.48% over seeds 73-75 at 20B transitions, about 11 hours per seed on one H200.
@@ -97,10 +98,13 @@ Our best experiment is [`exp103`](experiments.py), the blog post's recipe:
 | [`exp107`](experiments.py) | A frozen world model's feature | 42.92% | 250M | 1.6 h | 73 |
 | [`exp108`](experiments.py) | That world model at its random init | 11.52% | 250M | 1.6 h | 73 |
 | [`exp109`](experiments.py) | A new world at every reset | 60.66% | 6B | 4.4 h | 73, 74 |
-| [`exp110`](experiments.py) | exp103's encoder replaced by a frozen world model trained on early-training play | 37.51% | 1B | 6.5 h | 73 |
+| [`exp110`](experiments.py) | exp103's encoder replaced by a frozen world model trained on early-training play | -- | 20B | -- | 73 |
 | [`exp111`](experiments.py) | exp110 with the world model trained on a 20B exp103 agent's play | -- | 20B | -- | 73 |
-| [`exp112`](experiments.py) | exp110's world model trained with the policy | 52.10% | 1B | 46 h | 73 |
+| [`exp112`](experiments.py) | exp110's world model trained with the policy | -- | 20B | -- | 73 |
 | [`exp113`](experiments.py) | exp111's world model trained with the policy | -- | 20B | -- | 73 |
+| [`exp114`](experiments.py) | exp103 fine-tuned for the boss fight | 80.06% | +3B | -- | 73 |
+| [`exp115`](experiments.py) | exp110 stopped after 1B | 37.51% | 1B | 6.5 h | 73 |
+| [`exp116`](experiments.py) | exp112 stopped after 1B | 52.10% | 1B | 46 h | 73 |
 
 - The original runs of `exp102` scored 66.83% (seed 73, the best of 15 runs of
   that family) and 49.90% (seed 74); those of `exp103`, 73.25% (seeds 73-80).
@@ -108,10 +112,15 @@ Our best experiment is [`exp103`](experiments.py), the blog post's recipe:
 - `exp106` to `exp108` score the mean of the 150M, 200M and 250M evaluations;
   the original runs scored 11.92%, 47.08% and 11.67%.
 - `exp109` scores at 6B, on exp103's pool.
-- `exp110` and `exp112` score their 1B arms: the config stopped after epoch
-  1,907, 999,817,216 transitions, its schedule keeping the 20B horizon. The
-  20B runs of `exp110` to `exp113` are still training; their docstrings hold
-  the latest evaluations.
+- `exp115` and `exp116` are the 1B arms of `exp110` and `exp112`: stopped
+  after epoch 1,907, 999,817,216 transitions, the schedule keeping the 20B
+  horizon. The 20B runs of `exp110` to `exp113` are still training; their
+  docstrings hold the latest evaluations. All six read world models the
+  original runs fitted ([Not yet reproducible](#not-yet-reproducible-todo)).
+- `exp114`'s score is its reference's: the original runs' fine-tune of
+  exp103's seed-78 run, its final weights evaluated on the port in their
+  numerics; 43.5% of its episodes defeat the necromancer. It has not run on
+  the port.
 - The world model `exp107` reads (`world_model.experiments.exp001`) predicts
   the next frame's cells at 98.83%, the mean of three seeds; see
   `world_model/README.md`.
@@ -171,10 +180,7 @@ uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp1
 uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp107
 uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp108
 uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp109
-uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp110
-uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp111
-uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp112
-uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp113
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp114
 ```
 
 Every experiment reads nothing but its config, except:
@@ -182,11 +188,12 @@ Every experiment reads nothing but its config, except:
 | Experiment | Reads | Run first |
 |---|---|---|
 | `exp107` | `/opt/scratch/runs/craftax-world-model/exp001/checkpoints/step_00001525.pt` | world-model `exp001` ([the chain](#the-world-model-chain), step 4) |
-| `exp110`, `exp112` | `/opt/scratch/datasets/craftax/world-model-oracle/v1/checkpoints/early-fit-s73/step_00013135.pt` | none here: no experiment trains this fit |
-| `exp111`, `exp113` | `/opt/scratch/datasets/craftax/world-model-oracle/v1/checkpoints/mature-fit-s73/step_00012738.pt` | none here: no experiment trains this fit |
+| `exp114` | `/opt/scratch/runs/craftax/exp103/checkpoints/step_00038146.pt` | `exp103` |
 
-exp107's record read world-model exp001's seed-0 run. The records and times
-are the Results tables'.
+exp107's record read world-model exp001's seed-0 run, and exp114's reference
+fine-tuned exp103's seed-78 run. exp114 trains 3B more transitions, 5,722
+epochs, about 1.7 hours at exp103's speed. The records and times are the
+Results tables'.
 
 ### The world-model chain
 
@@ -239,9 +246,7 @@ in order:
    updates about 1.7 hours, and exp010, exp012 and exp013 ran in 7,051 s,
    6,593 s and 6,579 s. Their recorded results, in each docstring, were
    measured on the original implementation's capture of the same mixture.
-   The corpora that exp014, exp015, exp020 and the flat comparison (exp003
-   to exp005) read are not produced by this chain; their docstrings hold
-   their records.
+   The rest wait for producers ([Not yet reproducible](#not-yet-reproducible-todo)).
 
 Then `exp107` above reads world-model exp001's final checkpoint.
 `world_model/README.md` covers the corpus tools, the evaluation report, and
@@ -253,7 +258,8 @@ The blog post's ghost overlay plays three policies' episodes on one world
 (`ghosts/experiments.py`, `ghosts/FORMAT.md`). Its tiers read the final
 checkpoints of `exp001`, `exp102` and `exp103`, so those train first. The
 published page's medium and high tiers were exp102's seed-73 and exp103's
-seed-74 runs. Its boss tier reads a policy no experiment here trains.
+seed-74 runs. Its boss tier reads exp114's, so exp114 trains first; the
+published page's was the original runs' fine-tune, in their numerics.
 
 ```bash
 m=priml.baselines.craftax.ghosts.experiments
@@ -270,8 +276,9 @@ $g/build.py $a/w15 /opt/scratch/artifacts/craftax/ghosts/site-data --tier early=
 ```
 
 The captures play world 15, the world `select_world.py` chose from the
-pilots; `extra_<tier>` and `extra_verifier` add the episodes of the short set
-the same way, and `endings.py` reports how each tier's episodes end.
+pilots; `capture_boss` adds the boss tier the same way, `extra_<tier>` and
+`extra_verifier` the episodes of the short set, and `endings.py` reports how
+each tier's episodes end.
 
 ### Smoke test of the chain
 
@@ -299,14 +306,30 @@ Every path above is `/opt/scratch` joined with a logical path: runs under
 inputs included, so give every job of a chain the same one. The scripts take
 their directories as arguments: substitute `DIR` for `/opt/scratch` in them.
 
+### Not yet reproducible (TODO)
+
+These experiments read an input no step here produces. Each factory raises
+`NotImplementedError`; its docstring keeps the record and names the step to
+add, the TODO.
+
+| Experiment | Missing producer |
+|---|---|
+| `exp110`, `exp112`, `exp115`, `exp116` | A world model fitted to 100M decisions of early-training exp103 play: its capture, corpus and world-model experiment |
+| `exp111`, `exp113` | A world model fitted to 100M decisions of a 20B exp103 policy's play: its capture, corpus and world-model experiment |
+| world-model `exp003` to `exp005` | The small corpus: a capture and freeze of 10M decisions |
+| world-model `exp014`, `exp015` | Frame shards of the capture archive, which writes replay shards only |
+| world-model `exp020` | The scale-up corpus: capture jobs at budgets above the arms' and a freeze of every shard |
+| capture `arm0_branch` to `arm3_branch` | The branch pools: `scripts/branch_pool.py`'s arguments per arm and worker |
+
 ## Parity
 
 The port was checked against fixtures PufferLib (pin `6ffa5b10`) minted, byte
 for byte, with no tolerance. `exp000` selects the kernel classes of
 `lib/compat.py`, which round as PufferLib's kernels do, and keeps PufferLib's
 bf16 carry, outputs and stored rollouts; the defaults use Triton's standard
-arithmetic and fp32. The fixtures, PufferLib's seed-73 init among them, are
-not distributed, so the suite that reads them lives beside them; the goldens
+arithmetic and fp32. The fixtures are not distributed, so the suite that
+reads them lives beside them; it builds PufferLib's seed-73 init, which the
+full runs below start from, from PufferLib's source at the pin. The goldens
 in `testdata/` run with this package's tests.
 
 | What | Checked |

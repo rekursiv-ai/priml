@@ -16,7 +16,7 @@ episodes, and decisions, the stored bytes per decision of each kind of shard
 file, and those timings. A replay shard's frames are replayed.
 
 Examples:
-  priml/baselines/craftax/world_model/scripts/coverage_report.py /opt/scratch/datasets/craftax/world-model/archive-v1 --corpus small-10m --freeze --output /opt/scratch/artifacts/craftax/world-model/coverage/small-10m.json
+  priml/baselines/craftax/world_model/scripts/coverage_report.py /opt/scratch/datasets/craftax/world-model/archive-v1 --corpus base --output /opt/scratch/artifacts/craftax/world-model/coverage/base.json
 
 '''
 # fmt: on
@@ -178,7 +178,7 @@ class Flags(Protocol):
 def _add_arguments(parser: argparse.ArgumentParser) -> None:
     """Register flags on ``parser``."""
     parser.add_argument("root", type=Path, help="Archive root.")
-    parser.add_argument("--corpus", required=True, help="Corpus name, e.g. small-10m.")
+    parser.add_argument("--corpus", required=True, help="Corpus name, e.g. base.")
     parser.add_argument(
         "--freeze",
         action="store_true",

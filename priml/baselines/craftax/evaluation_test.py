@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.craftax.env import StallCap
+from priml.baselines.craftax.env import BossFightReward, StallCap
 from priml.baselines.craftax.evaluation import Evaluation
 from priml.baselines.craftax.game.state import LOG_DTYPE
 from priml.baselines.craftax.learners.practice import FrontierPractice
@@ -186,7 +186,7 @@ def test_an_evaluation_needs_every_part_set(policy: MinGRUPolicy) -> None:
         Evaluation(Evaluation.Config(), policy=policy, device=torch.device("cpu"))
 
 
-@pytest.mark.parametrize("option", ["stall_cap", "practice"])
+@pytest.mark.parametrize("option", ["stall_cap", "practice", "boss_fight_reward"])
 def test_an_evaluation_refuses_a_training_only_option(option: str) -> None:
     """Scored episodes are natural and uncapped, as the recipe's evaluator plays them."""
     config = _config()
@@ -194,9 +194,11 @@ def test_an_evaluation_refuses_a_training_only_option(option: str) -> None:
     Evaluation.check(config)
     if option == "stall_cap":
         config.env.stall_cap = StallCap.Config()
-    else:
+    elif option == "practice":
         practice = config.env.practice = FrontierPractice.Config()
         practice.num_donors = 2
+    else:
+        config.env.boss_fight_reward = BossFightReward.Config()
     with pytest.raises(ValueError, match="training-only"):
         Evaluation.check(config)
 
