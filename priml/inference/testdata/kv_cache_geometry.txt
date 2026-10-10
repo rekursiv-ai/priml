@@ -1,0 +1,7 @@
+KVCacheGeometry(
+                num_layers=3,
+                num_heads=4,
+                num_heads_kv=2,
+                channels_head=5,
+                dtype=torch.bfloat16
+        )
