@@ -1,364 +1,192 @@
-"""Tests for the sudoku experiment ladder.
+"""Tests for the sudoku experiment chain.
 
-Each test asserts the DELTA a fork applies, which is what enforces one change
-per experiment: a fork that quietly moved a second knob fails here rather than
-producing a result nobody can attribute.
+Each fork test asserts the DELTA the fork applies, which is what enforces one
+change per experiment: a fork that quietly moved a second knob fails here
+rather than producing a result nobody can attribute.
 
 Every test builds configs only -- no data, no device, no training -- so the
-ladder stays checkable on any machine.
+chain stays checkable on any machine.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final, Protocol, Self, cast
+from pathlib import Path
+from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import pytest
 
 from priml.baselines.sudoku import experiments
-from priml.baselines.sudoku.act import (
-    HaltTraining,
-    LearnedStart,
-    SampledMinimum,
-    StreamingPool,
-    ZeroStart,
+from priml.baselines.sudoku.agreement_lock import AgreementLockEval
+from priml.baselines.sudoku.hps_eval import HpsEval
+from priml.baselines.sudoku.hypotheses import (
+    HypothesisRecursion,
+    WinnerRecompute,
+    WinnerTakeAll,
 )
-from priml.baselines.sudoku.embedding import (
-    FactoredPositions,
-    GridEmbedding,
-    PredictionFeedback,
-)
-from priml.baselines.sudoku.eval import (
-    NINE_VIEWS,
-    AgreementLockEval,
-    SieveEval,
-    VerifierAcceptor,
-)
+from priml.baselines.sudoku.latent_recursion import LatentRecursion, recipe_block
+from priml.baselines.sudoku.reproduction import Reproduction
+from priml.baselines.sudoku.sieve import FittedSieve, SieveEval, StaircaseSieveEval
 from priml.baselines.sudoku.trainer import Trainer
-from priml.baselines.sudoku.trm import recipe_block
+from priml.baselines.sudoku.verifier import (
+    DenoisingVerifier,
+    VerifierAcceptor,
+    row_column_positions,
+)
+from priml.baselines.sudoku.verifier_fit import DenoisingLoss
+from priml.baselines.sudoku.views import NINE_VIEWS
 from priml.model.attention.attention import Attention
-from priml.model.init import kaiming_uniform
-from priml.model.mlpmixer import MLPMixerBlock
-from priml.model.norm import RMSNorm
-from priml.model.swiglu import SwiGLU
-from priml.model.transformer.block import TransformerBlock
+from priml.paths import resolve_working_dir
 from priml.testing.golden import assert_pprint_golden
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    import torch
-
-    from priml.baselines.sudoku.experiments import SudokuTrainLoop
-
-
-LADDER: Final[list[tuple[str, Callable[[], SudokuTrainLoop]]]] = [
-    ("exp000", experiments.exp000),
-    ("exp001", experiments.exp001),
-    ("exp002", experiments.exp002),
-    ("exp003", experiments.exp003),
-    ("exp015", experiments.exp015),
-    ("exp_smoke", experiments.exp_smoke),
-]
-
-
-@pytest.mark.parametrize(("name", "factory"), LADDER, ids=[n for n, _ in LADDER])
-def test_every_experiment_finalizes(
-    name: str,
-    factory: Callable[[], SudokuTrainLoop],
-) -> None:
-    """A config must build without a dataset or a GPU."""
-    config = factory().copy_tree().finalize()
-    assert config.experiment_name == name
-    assert config.study_name == "sudoku"
-
-
-def test_the_lattice_is_two_independent_axes() -> None:
-    """Architecture and recurrence vary separately, spanning all four corners."""
-    corners = {
-        (
-            type(config.step.model.block).__qualname__.split(".")[0],
-            config.step.model.recurrence is not None,
-        )
-        for config in (
-            experiments.exp000(),
-            experiments.exp001(),
-            experiments.exp002(),
-            experiments.exp003(),
-        )
-    }
-    assert corners == {
-        ("TransformerBlock", False),
-        ("MLPMixerBlock", False),
-        ("TransformerBlock", True),
-        ("MLPMixerBlock", True),
-    }
-
-
-def test_solver_geometry_follows_the_dataset_spec() -> None:
-    default = experiments.exp000().finalize()
-    default_embedding = default.step.model.embedding
-    assert isinstance(default_embedding, GridEmbedding.Config)
-    assert default_embedding.grid_shape == (81,)
-    assert default.step.model.vocab_size == 11
-
-    config = experiments.exp000()
-    config.dataset.spec.grid_shape = (4, 4)
-    config.dataset.spec.box_shape = (2, 2)
-    config.dataset.spec.vocab_size = 6
-    finalized = config.finalize()
-    model = finalized.step.model
-    assert model.vocab_size == 6
-    embedding = model.embedding
-    assert isinstance(embedding, GridEmbedding.Config)
-    assert embedding.grid_shape == (16,)
-    positions = embedding.channels[0]
-    assert isinstance(positions, FactoredPositions.Config)
-    assert positions.grid_shape == (4, 4)
-    assert positions.box_shape == (2, 2)
-
-
-def test_exp001_changes_only_the_block() -> None:
-    base, fork = experiments.exp000(), experiments.exp001()
-    assert isinstance(base.step.model.block, TransformerBlock.Config)
-    assert isinstance(fork.step.model.block, MLPMixerBlock.Config)
-    assert fork.step.model.recurrence is base.step.model.recurrence is None
-    assert fork.step.pool is base.step.pool is None
-    assert fork.max_steps == base.max_steps
-
-
-def test_exp002_adds_recurrence_and_its_feedback_channel() -> None:
-    """Recurrence and prediction feedback move together, and say why.
-
-    A recurrence that re-reads only the original puzzle carries its belief
-    solely in the latent; the feedback channel is what lets it refine its own
-    answer, so the two are one change rather than two.
-    """
-    base, fork = experiments.exp000(), experiments.exp002()
-    assert base.step.model.recurrence is None
-    assert fork.step.model.recurrence is not None
-    assert fork.step.pool is not None
-    assert type(fork.step.model.block) is type(base.step.model.block)
-
-    base_embedding = base.step.model.embedding
-    fork_embedding = fork.step.model.embedding
-    assert isinstance(base_embedding, GridEmbedding.Config)
-    assert isinstance(fork_embedding, GridEmbedding.Config)
-    assert [type(c) for c in base_embedding.channels] == [FactoredPositions.Config]
-    assert [type(c) for c in fork_embedding.channels] == [
-        FactoredPositions.Config,
-        PredictionFeedback.Config,
-    ]
-
-
-@pytest.mark.parametrize("factory", [experiments.exp002, experiments.exp003])
-def test_the_recurrent_rungs_replay_as_trained(
-    factory: Callable[[], SudokuTrainLoop],
-) -> None:
-    """They trained with no fed-back grid and zero-seeded slots; keep it so."""
-    pool = factory().step.pool
-    assert pool is not None
-    assert pool.feedback is None
-    assert isinstance(pool.start, ZeroStart.Config)
-
-
-def test_exp002_pool_uses_its_trained_halting_and_batch_settings() -> None:
-    pool = experiments.exp002().step.pool
-    assert pool is not None
-    assert pool.batch_size == experiments.exp002().dataset.batch_size
-    assert pool.max_steps == 32
-    assert isinstance(pool.halting, HaltTraining.Config)
-    assert isinstance(pool.halting.exploration, SampledMinimum.Config)
-
-
-def test_exp015_changes_only_the_pool() -> None:
-    """Feedback and the learned start move together; nothing else does."""
-    base, fork = experiments.exp002(), experiments.exp015()
-    assert base.step.pool is not None
-    assert fork.step.pool is not None
-    assert fork.step.pool.feedback is not None
-    assert isinstance(fork.step.pool.start, LearnedStart.Config)
-    fork.step.pool.feedback = base.step.pool.feedback
-    fork.step.pool.start = base.step.pool.start
-    fork.experiment_name = base.experiment_name
-    assert fork.pformat() == base.pformat()
-
-
-def test_exp015_rejects_a_parent_without_an_atomic_pool(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config = experiments.exp002()
-    non_atomic_pool = StreamingPool.Config()
-    config.step.pool = non_atomic_pool
-    monkeypatch.setattr(experiments, "exp002", lambda: config)
-
-    with pytest.raises(TypeError) as error:
-        experiments.exp015()
-    assert str(error.value) == (
-        f"exp002's pool is atomic; got {type(non_atomic_pool)}."
-    )
-
-
-def test_the_clue_range_follows_the_vocabulary() -> None:
-    """Clues are every digit token, so a resized vocabulary moves the range."""
-    config = experiments.exp015()
-    config.dataset.spec.vocab_size = 6
-    finalized = config.copy_tree().finalize()
-    assert finalized.step.pool is not None
-    assert finalized.step.pool.feedback is not None
-    assert finalized.step.pool.feedback.givens == (2, 5)
-
-
-def test_exp003_is_exp002_with_the_other_block() -> None:
-    base, fork = experiments.exp002(), experiments.exp003()
-    assert isinstance(fork.step.model.block, MLPMixerBlock.Config)
-    assert fork.step.pool is not None
-    assert base.step.pool is not None
-    assert fork.step.pool.max_steps == base.step.pool.max_steps
-
-
-def test_mixer_block_pins_both_mixing_paths() -> None:
-    block = experiments._mixer_block()
-    assert block.seq_len == -1
-    assert block.prenorm is False
-    assert isinstance(block.token_mixer, SwiGLU.Config)
-    assert isinstance(block.channel_mixer, SwiGLU.Config)
-    for mixer in (block.token_mixer, block.channel_mixer):
-        assert isinstance(mixer.norm, RMSNorm.Config)
-        assert mixer.init_weight is kaiming_uniform
-        assert mixer.init_weight_out is kaiming_uniform
-
-
-def test_the_pool_is_built_to_the_models_shape() -> None:
-    """A pool sized independently of the model would fail only at runtime."""
-    config = experiments.exp002().copy_tree().finalize()
-    act = config.step.pool
-    model = config.step.model
-    assert act is not None
-    assert act.grid_len == model.grid_len
-    assert act.seq_len == model.total_seq_len
-    assert act.channels_hidden == model.channels_in
-
-
-def test_schedule_horizon_matches_the_step_budget() -> None:
-    """A schedule annealing past the end of training wastes the last steps."""
-    for name, factory in LADDER:
-        config = factory()
-        assert config.max_steps == config.step.total_train_steps, name
-
-
-def test_smoke_is_small_on_every_costly_axis() -> None:
-    """It answers "does this run", so anything not bearing on that is cut."""
-    smoke, base = experiments.exp_smoke(), experiments.exp000()
-    assert smoke.max_steps < base.max_steps
-    assert smoke.step.model.channels_in < base.step.model.channels_in
-    assert smoke.step.model.num_layers <= base.step.model.num_layers
-    assert smoke.dataset.batch_size < base.dataset.batch_size
-    assert smoke.dataset.num_train_puzzles is not None
-    assert (
-        smoke.step.model.channels_in,
-        smoke.step.model.num_layers,
-        smoke.dataset.batch_size,
-        smoke.dataset.num_train_puzzles,
-        smoke.dataset.num_eval_puzzles,
-        smoke.max_steps,
-        smoke.step.total_train_steps,
-        smoke.num_steps_eval,
-    ) == (32, 1, 8, 4, 4, 4, 4, 2)
-
-
-def test_exp000_matches_its_golden_config() -> None:
-    """Pin the WHOLE finalized ``exp000``: the control every fork is measured against."""
-    assert_pprint_golden(test_file=__file__, name="exp000", config=experiments.exp000())
-
-
-TRM_LADDER: Final = (
-    experiments.exp004,
-    experiments.exp005,
-    experiments.exp006,
-    experiments.exp007,
-    experiments.exp008,
-    experiments.exp009,
-    experiments.exp010,
-)
-"""The TRM training ladder; each forks the previous one."""
-
-EVALUATIONS: Final = (
-    experiments.exp011,
-    experiments.exp012,
-    experiments.exp013,
-    experiments.exp014,
-)
-"""Forks of exp010 that change how an answer is produced and accepted."""
-
-EXP010_CHECKPOINT: Final = "/runs/exp010/checkpoints/step_00019500.pt"
-
 
 type _Tree = dict[str, "_Tree"] | list["_Tree"] | str | int | float | bool | None
 """A serialized config tree (jsonpickle-style ``py/*`` dict/list/primitives)."""
 
 
-class _Runtime(Protocol):
-    device: torch.device | str | None
+type _Runner = HpsEval.Config | Reproduction.Config | StaircaseSieveEval.Config
+"""A rung that evaluates or runs a pipeline, under its own process runtime."""
+
+type _Rung = Trainer.Config | _Runner | FittedSieve.Config
+"""Any rung's config."""
 
 
-class _Runner(Protocol):
-    """What every TRM experiment config shares: identity, runtime, lifecycle."""
+RUNGS: Final[list[tuple[str, Callable[[], _Rung]]]] = [
+    ("exp000", experiments.exp000),
+    ("exp001", experiments.exp001),
+    ("exp002", experiments.exp002),
+    ("exp003", experiments.exp003),
+    ("exp004", experiments.exp004),
+    ("exp005", experiments.exp005),
+    ("exp006", experiments.exp006),
+    ("exp007", experiments.exp007),
+    ("exp008", experiments.exp008),
+    ("exp009", experiments.exp009),
+    ("exp010", experiments.exp010),
+    ("exp011", experiments.exp011),
+    ("exp012", experiments.exp012),
+    ("exp013", experiments.exp013),
+    ("exp_smoke", experiments.exp_smoke),
+]
+"""Every factory, in chain order."""
 
-    experiment_name: str
+TRAINED: Final = (
+    experiments.exp000,
+    experiments.exp001,
+    experiments.exp002,
+    experiments.exp003,
+    experiments.exp004,
+    experiments.exp005,
+    experiments.exp006,
+    experiments.exp009,
+    experiments.exp010,
+)
+"""The rungs that train a generator in one run."""
 
-    @property
-    def runtime(self) -> _Runtime:
-        """Return the runtime config."""
-        ...
+EXP006_CHECKPOINT: Final = "/runs/exp006/checkpoints/step_00019500.pt"
+EXP010_CHECKPOINT: Final = "/runs/exp010/checkpoints/step_00010000.pt"
 
-    def copy_tree(self) -> Self:
-        """Return a deep copy."""
-        ...
 
-    def finalize(self) -> Self:
-        """Apply derived defaults."""
-        ...
+def test_experiment_chain_has_fourteen_rungs() -> None:
+    """Expose exactly the fourteen numbered experiment factories."""
+    assert {f"exp{index:03d}" for index in range(14)} == {
+        name
+        for name in vars(experiments)
+        if name.startswith("exp") and name[3:].isdigit()
+    }
 
-    def make(self) -> object:
-        """Build the runner."""
-        ...
+
+@pytest.mark.parametrize(("name", "factory"), RUNGS, ids=[n for n, _ in RUNGS])
+def test_every_rung_finalizes_under_its_own_name(
+    name: str,
+    factory: Callable[[], _Rung],
+) -> None:
+    """A config must build without a dataset or a GPU."""
+    config = factory()
+    assert config.experiment_name == name
+    config.copy_tree().finalize()
 
 
 @pytest.mark.parametrize(
     ("name", "factory"),
-    [(f.__name__, f) for f in (*TRM_LADDER, *EVALUATIONS)],
+    [
+        ("exp000", experiments.exp000),
+        ("exp001", experiments.exp001),
+        ("exp002", experiments.exp002),
+        ("exp003", experiments.exp003),
+        ("exp004", experiments.exp004),
+        ("exp005", experiments.exp005),
+        ("exp006", experiments.exp006),
+        ("exp007", experiments.exp007),
+        ("exp008", experiments.exp008),
+        ("exp009", experiments.exp009),
+        ("exp010", experiments.exp010),
+        ("exp011", experiments.exp011),
+        ("exp012", experiments.exp012),
+        ("exp013", experiments.exp013),
+        ("exp_smoke", experiments.exp_smoke),
+    ],
 )
-def test_trm_experiment_constructs_and_finalizes(
+def test_experiment_matches_its_full_config_golden(
     name: str,
+    factory: Callable[[], _Rung],
+) -> None:
+    assert_pprint_golden(test_file=__file__, name=name, config=factory())
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [experiments.exp007, experiments.exp008, experiments.exp011, experiments.exp012],
+)
+def test_evaluation_runner_makes_without_data(
     factory: Callable[[], _Runner],
 ) -> None:
-    """Every rung builds without a dataset or a GPU, under its own name."""
-    cfg = factory()
-    assert cfg.experiment_name == name
-    cfg.copy_tree().finalize()
-
-
-@pytest.mark.parametrize("factory", EVALUATIONS)
-def test_evaluation_runner_makes(factory: Callable[[], _Runner]) -> None:
     """Runners defer data, weights, and models to ``run()``; ``make()`` is cheap."""
     config = factory()
     config.runtime.device = "cpu"
     config.make()
 
 
-def test_exp005_adds_only_the_2d_position_tables() -> None:
+@pytest.mark.parametrize("factory", TRAINED)
+def test_schedule_horizon_matches_the_step_budget(
+    factory: Callable[[], Trainer.Config],
+) -> None:
+    """A schedule annealing past the end of training wastes the last steps."""
+    config = factory()
+    assert config.max_steps == config.total_train_steps
+
+
+def test_exp000_mirrors_the_annealed_baseline() -> None:
+    cfg = experiments.exp000().copy_tree().finalize()
+    assert cfg.seed == 0
+    assert (cfg.max_steps, cfg.total_train_steps) == (62_000, 62_000)
+    assert (cfg.max_act_steps, cfg.label_smoothing) == (16, 0.2)
+    assert (cfg.ema_decay, cfg.ema_warmup_steps) == (0.9, 5_000)
+    assert (cfg.csp_loss_weight, cfg.feedback) == (0.0, False)
+    assert cfg.model.pos2d_grid_shape is None
+    assert (cfg.model.slow_cycles, cfg.model.fast_cycles) == (3, 4)
+    assert cfg.model.block is not None
+    attn = cfg.model.block.attn
+    assert isinstance(attn, Attention.Config)
+    assert attn.norm_qk is None
+    assert cfg.dataset.augment_digits_only is False
+
+
+def test_exp001_adds_only_the_2d_position_tables() -> None:
     assert_rung_delta(
-        experiments.exp004(),
-        experiments.exp005(),
+        experiments.exp000(),
+        experiments.exp001(),
         {"experiment_name", "model.pos2d_grid_shape"},
     )
 
 
-def test_exp006_adds_only_qk_norm_and_the_convergence_horizon() -> None:
+def test_exp002_adds_only_qk_norm_and_the_convergence_horizon() -> None:
     assert_rung_delta(
-        experiments.exp005(),
-        experiments.exp006(),
+        experiments.exp001(),
+        experiments.exp002(),
         {
             "experiment_name",
             "model.block.attn.norm_qk",
@@ -374,19 +202,10 @@ def test_exp006_adds_only_qk_norm_and_the_convergence_horizon() -> None:
     )
 
 
-def test_exp006_pins_its_convergence_horizon() -> None:
-    config = experiments.exp006()
-    assert (config.max_steps, config.total_train_steps, config.num_steps_eval) == (
-        12_000,
-        12_000,
-        500,
-    )
-
-
-def test_exp007_adds_only_the_consolidated_recipe_stack() -> None:
+def test_exp003_adds_only_the_consolidated_recipe_stack() -> None:
     assert_rung_delta(
-        experiments.exp006(),
-        experiments.exp007(),
+        experiments.exp002(),
+        experiments.exp003(),
         {
             "experiment_name",
             "max_act_steps",
@@ -399,35 +218,35 @@ def test_exp007_adds_only_the_consolidated_recipe_stack() -> None:
     )
 
 
-def test_exp008_adds_only_the_feedback_repair_channel() -> None:
+def test_exp004_adds_only_the_feedback_repair_channel() -> None:
     assert_rung_delta(
-        experiments.exp007(),
-        experiments.exp008(),
+        experiments.exp003(),
+        experiments.exp004(),
         {"experiment_name", "feedback"},
     )
 
 
-def test_exp009_adds_only_depth_and_the_recipe_seed() -> None:
+def test_exp005_adds_only_depth_and_the_recipe_seed() -> None:
     assert_rung_delta(
-        experiments.exp008(),
-        experiments.exp009(),
+        experiments.exp004(),
+        experiments.exp005(),
         {"experiment_name", "model.slow_cycles", "model.fast_cycles", "seed"},
     )
 
 
-def test_exp010_adds_only_the_capmax_horizon() -> None:
+def test_exp006_adds_only_the_longer_horizon() -> None:
     assert_rung_delta(
-        experiments.exp009(),
-        experiments.exp010(),
+        experiments.exp005(),
+        experiments.exp006(),
         {"experiment_name", "max_steps", "total_train_steps"},
     )
 
 
-def test_exp010_is_the_flat_recipe() -> None:
-    """The trainer defaults ARE the recipe: exp010 adds only identity and data."""
+def test_exp006_is_the_flat_recipe() -> None:
+    """The trainer defaults ARE the recipe: exp006 adds only identity and data."""
     expected = Trainer.Config()
     expected.study_name = "sudoku"
-    expected.experiment_name = "exp010"
+    expected.experiment_name = "exp006"
     expected.seed = 44
     expected.max_steps = 19_500
     expected.num_steps_eval = 500
@@ -437,29 +256,13 @@ def test_exp010_is_the_flat_recipe() -> None:
     expected.dataset.eval_num_instances = 2_000
     expected.dataset.augment = True
     expected.dataset.augment_digits_only = True
-    assert leaf_delta(expected, experiments.exp010()) == []
+    assert leaf_delta(expected, experiments.exp006()) == []
 
 
-def test_exp004_mirrors_the_annealed_baseline() -> None:
-    cfg = experiments.exp004().copy_tree().finalize()
-    assert cfg.seed == 0
-    assert (cfg.max_steps, cfg.total_train_steps) == (62_000, 62_000)
-    assert (cfg.max_act_steps, cfg.label_smoothing) == (16, 0.2)
-    assert (cfg.ema_decay, cfg.ema_warmup_steps) == (0.9, 5_000)
-    assert (cfg.csp_loss_weight, cfg.feedback) == (0.0, False)
-    assert cfg.model.pos2d_grid_shape is None
-    assert (cfg.model.slow_cycles, cfg.model.fast_cycles) == (3, 4)
-    assert cfg.model.block is not None
-    attn = cfg.model.block.attn
-    assert isinstance(attn, Attention.Config)
-    assert attn.norm_qk is None
-    assert cfg.dataset.augment_digits_only is False
-
-
-def test_exp011_scores_exp010_with_the_recipe_search() -> None:
-    cfg = experiments.exp011().copy_tree().finalize()
-    assert str(cfg.checkpoint_path) == EXP010_CHECKPOINT
-    parent = experiments.exp010().copy_tree().finalize()
+def test_exp007_scores_exp006_with_the_recipe_search() -> None:
+    cfg = experiments.exp007().copy_tree().finalize()
+    assert str(cfg.checkpoint_path) == EXP006_CHECKPOINT
+    parent = experiments.exp006().copy_tree().finalize()
     assert leaf_delta(parent.model, cfg.model) == []
     assert cfg.evaluation_count == 422_786
     search = cfg.search
@@ -473,25 +276,13 @@ def test_exp011_scores_exp010_with_the_recipe_search() -> None:
     assert search.acceptance_checkpoints == (24, 28, 32)
 
 
-def test_exp012_trains_exp010_then_locks_nine_views() -> None:
-    cfg = experiments.exp012()
-    assert leaf_delta(experiments.exp010(), cfg.generator) == []
-    assert (cfg.generator_names, cfg.generator_seeds) == (
-        ("exp012_generator",),
-        (44,),
-    )
-    assert (cfg.screen, cfg.trigger) == ("nine_view", "dev_perfect")
-    lock = cfg.full_eval
-    assert isinstance(lock, AgreementLockEval.Config)
-    assert tuple(member.view for member in lock.members) == NINE_VIEWS
-
-
-def test_exp013_trains_exp010_then_sieves_under_a_fresh_committee() -> None:
-    cfg = experiments.exp013()
-    assert leaf_delta(experiments.exp010(), cfg.generator) == []
-    assert str(cfg.harvest_source_checkpoint) == EXP010_CHECKPOINT
-    assert cfg.verifier_names == tuple(f"exp013_verifier_s{s}" for s in range(3))
-    assert (cfg.screen, cfg.trigger) == ("committee", "dev_perfect")
+def test_exp008_trains_exp006_then_sieves_under_a_fresh_committee() -> None:
+    cfg = experiments.exp008()
+    assert leaf_delta(experiments.exp006(), cfg.generator) == []
+    assert str(cfg.harvest_source_checkpoint) == EXP006_CHECKPOINT
+    assert cfg.generator_name == "exp008_generator"
+    assert cfg.verifier_names == tuple(f"exp008_verifier_s{s}" for s in range(3))
+    assert cfg.screen == "committee"
     sieve = cfg.full_eval
     assert isinstance(sieve, SieveEval.Config)
     assert isinstance(sieve.acceptor, VerifierAcceptor.Config)
@@ -500,50 +291,227 @@ def test_exp013_trains_exp010_then_sieves_under_a_fresh_committee() -> None:
     assert sieve.tail_search == (7, 4, 3, 8_400)
 
 
-def test_exp013_full_evaluation_locks_with_its_own_committee() -> None:
+@pytest.mark.parametrize("factory", [experiments.exp008, experiments.exp012])
+def test_pipeline_stages_build_the_generators_architecture(
+    factory: Callable[[], Reproduction.Config],
+) -> None:
+    """Every stage that loads a generator checkpoint builds its architecture.
+
+    A stage's ``model`` is otherwise a bare ``LatentRecursion.Config``, which has no
+    vocabulary or grid shape and cannot build at all.
+    """
+    cfg = factory().copy_tree().finalize()
+    model = cfg.generator.model
+    assert leaf_delta(model, cfg.full_eval.model) == []
+    if cfg.screen == "committee":
+        assert leaf_delta(model, cfg.harvest.model) == []
+    assert cfg.full_eval.model.vocab_size == 11
+    assert cfg.full_eval.model.puzzle_grid_shape == (81,)
+
+
+def test_exp008_full_evaluation_locks_with_its_own_committee() -> None:
     """The full-set sieve offers grids to the verifiers this pipeline trained."""
-    cfg = experiments.exp013()
+    cfg = experiments.exp008()
     cfg.runtime.device = "cpu"
-    sieve = cfg.make()._sieve_run_config(19_500).make()
-    acceptor = sieve.config.acceptor
+    pipeline = cfg.make()
+    acceptor = pipeline._sieve_run_config(19_500).make().config.acceptor
     assert isinstance(acceptor, VerifierAcceptor.Config)
     assert acceptor.checkpoint_paths == tuple(
-        f"/runs/exp013_verifier_s{seed}/checkpoints/step_00004000.pt"
+        f"/runs/exp008_verifier_s{seed}/checkpoints/step_00004000.pt"
         for seed in range(3)
     )
 
 
-def test_evaluation_forks_pin_their_run_identity_and_seeds() -> None:
-    exp012 = experiments.exp012()
-    exp013 = experiments.exp013()
-    exp014 = experiments.exp014()
-    assert (exp012.study_name, exp012.generator_names) == (
-        "sudoku",
-        ("exp012_generator",),
-    )
-    assert (exp013.study_name, exp013.generator_names) == (
-        "sudoku",
-        ("exp013_generator",),
-    )
-    assert (exp014.screen, exp014.trigger, exp014.generator_seeds) == (
-        "single_view",
-        "final_only",
-        (44, 45, 46),
-    )
-
-
-def test_exp014_swaps_nine_views_for_three_seeds() -> None:
+def test_exp009_trains_two_hypotheses_winner_take_all() -> None:
+    parent, cfg = experiments.exp006(), experiments.exp009()
+    assert isinstance(cfg.model, HypothesisRecursion.Config)
+    assert (cfg.model.num_hypotheses, cfg.model.hypothesis_seed) == (2, 44)
+    assert isinstance(cfg.routing, WinnerTakeAll.Config)
+    plain = LatentRecursion.Config().update(cfg.model, skip_missing=True)
+    assert leaf_delta(parent.model, plain) == []
+    cfg.model, cfg.routing = parent.model, parent.routing
     assert_rung_delta(
-        experiments.exp012(),
-        experiments.exp014(),
+        parent,
+        cfg,
+        {"experiment_name", "max_steps", "total_train_steps"},
+    )
+    assert (cfg.max_steps, cfg.total_train_steps) == (22_000, 22_000)
+
+
+def test_exp010_recomputes_the_winner_of_three_at_batch_1152() -> None:
+    parent, cfg = experiments.exp009(), experiments.exp010()
+    assert isinstance(cfg.routing, WinnerRecompute.Config)
+    assert isinstance(cfg.model, HypothesisRecursion.Config)
+    assert (cfg.model.num_hypotheses, cfg.dataset.batch_size) == (3, 1_152)
+    assert_rung_delta(
+        parent,
+        cfg,
         {
             "experiment_name",
-            "screen",
-            "trigger",
-            "generator_seeds",
-            "generator_names",
+            "routing",
+            "model.num_hypotheses",
+            "dataset.batch_size",
+            "max_steps",
+            "total_train_steps",
         },
     )
+
+
+def test_exp011_stairs_exp010_ahead_of_exp008s_sieve() -> None:
+    cfg = experiments.exp011().copy_tree().finalize()
+    hypothesis_parent = experiments.exp010().copy_tree().finalize()
+    # Finalization bookkeeping differs for a slot finalized twice; values do not.
+    assert [
+        delta
+        for delta in leaf_delta(hypothesis_parent.model, cfg.hypothesis_model)
+        if delta[0] != "_finalized"
+    ] == []
+    assert str(cfg.hypothesis_checkpoint_path) == EXP010_CHECKPOINT
+    ladder_parent = experiments.exp006().copy_tree().finalize()
+    assert leaf_delta(ladder_parent.model, cfg.model) == []
+    assert str(cfg.checkpoint_path) == EXP006_CHECKPOINT
+    assert (cfg.qsel_hypotheses, cfg.qsel_seed) == (5, 8_902)
+    committee = tuple(
+        f"/runs/exp008_verifier_s{seed}/checkpoints/step_00004000.pt"
+        for seed in range(3)
+    )
+    assert cfg.verifier_checkpoints == committee
+    assert isinstance(cfg.acceptor, VerifierAcceptor.Config)
+    assert cfg.acceptor.checkpoint_paths == committee
+    reference = SieveEval.Config().copy_tree().finalize()
+    assert (cfg.views, cfg.tail_search, cfg.det_halt_threshold) == (
+        reference.views,
+        reference.tail_search,
+        reference.det_halt_threshold,
+    )
+    assert leaf_delta(reference.search, cfg.search) == []
+
+
+def test_exp011_runs_the_staircase_then_the_view_ladder() -> None:
+    cfg = experiments.exp011()
+    cfg.runtime.device = "cpu"
+    sieve = cfg.make()
+    assert sieve._round_names() == [
+        "hypothesis_det_cond_halt",
+        "hypothesis_qsel",
+        "hypothesis_canonical_hps",
+        *(view.name for view in NINE_VIEWS),
+        "tail_escalated",
+    ]
+
+
+def test_exp012_trains_exp006_then_locks_nine_views() -> None:
+    cfg = experiments.exp012()
+    assert leaf_delta(experiments.exp006(), cfg.generator) == []
+    assert cfg.generator_name == "exp012_generator"
+    assert cfg.screen == "nine_view"
+    lock = cfg.full_eval
+    assert isinstance(lock, AgreementLockEval.Config)
+    assert tuple(member.view for member in lock.members) == NINE_VIEWS
+
+
+def test_exp013_fits_a_prior_free_committee_then_runs_exp011s_sieve() -> None:
+    cfg = experiments.exp013()
+    assert [member.seed for member in cfg.members] == [0, 1, 2]
+    for seed, member in enumerate(cfg.members):
+        assert member.experiment_name == f"exp013_verifier_s{seed}"
+        assert member.max_steps == 16_000
+        assert isinstance(member.model, DenoisingVerifier.Config)
+        assert member.model.attention_mask is None
+        assert member.model.position_index is row_column_positions
+        assert isinstance(member.loss, DenoisingLoss.Config)
+    sieve = cfg.sieve
+    acceptor = sieve.acceptor
+    assert isinstance(acceptor, VerifierAcceptor.Config)
+    assert leaf_delta(cfg.members[0].model, acceptor.model) == []
+    acceptor.model = VerifierAcceptor.Config().model
+    assert leaf_delta(experiments.exp011(), sieve) == []
+
+
+def test_exp013_locks_with_the_members_it_fits() -> None:
+    cfg = experiments.exp013().copy_tree().finalize()
+    assert isinstance(cfg, FittedSieve.Config)
+    committee = tuple(
+        f"/runs/exp013_verifier_s{seed}/checkpoints/step_00016000.pt"
+        for seed in range(3)
+    )
+    assert cfg.sieve.experiment_name == "exp013"
+    assert cfg.sieve.verifier_checkpoints == committee
+    assert isinstance(cfg.sieve.acceptor, VerifierAcceptor.Config)
+    assert cfg.sieve.acceptor.checkpoint_paths == committee
+
+
+def _final_checkpoint(rung: Trainer.Config, base: Path) -> Path:
+    """Return where a training rung's own checkpointer writes its last step."""
+    cfg = rung.copy_tree()
+    cfg.base_dir = base
+    checkpointer = cfg.finalize().checkpointer
+    assert checkpointer is not None
+    step = int(cfg.max_steps)
+    return Path(checkpointer.working_dir) / checkpointer.filename.format(step=step)
+
+
+def test_every_consumer_reads_the_checkpoint_its_producer_writes(
+    tmp_path: Path,
+) -> None:
+    """Each frozen-checkpoint rung derives the path its parent run writes."""
+    exp006 = _final_checkpoint(experiments.exp006(), tmp_path)
+    exp010 = _final_checkpoint(experiments.exp010(), tmp_path)
+    staircase = experiments.exp011()
+    reads = {
+        "exp007": experiments.exp007().checkpoint_path,
+        "exp008": experiments.exp008().harvest_source_checkpoint,
+        "exp011": staircase.checkpoint_path,
+    }
+    for rung, path in reads.items():
+        assert resolve_working_dir(tmp_path, str(path)) == exp006, rung
+    assert resolve_working_dir(tmp_path, str(staircase.hypothesis_checkpoint_path)) == (
+        exp010
+    )
+    pipeline = experiments.exp008()
+    pipeline.base_dir = tmp_path
+    pipeline.runtime.device = "cpu"
+    committee = pipeline.make()
+    assert tuple(
+        resolve_working_dir(tmp_path, str(path))
+        for path in staircase.verifier_checkpoints
+    ) == tuple(committee._verifier_checkpoint_path(seed) for seed in range(3))
+
+
+def test_exp013_fits_on_exp008s_harvest_corpus(tmp_path: Path) -> None:
+    pipeline = experiments.exp008()
+    pipeline.base_dir = tmp_path
+    harvest = pipeline.copy_tree().finalize().harvest
+    corpus = resolve_working_dir(
+        tmp_path,
+        str(harvest.run_dir).format(experiment_name=harvest.experiment_name),
+    )
+    cfg = experiments.exp013()
+    cfg.base_dir = tmp_path
+    for member in cfg.copy_tree().finalize().members:
+        assert Path(member.dataset.harvest_dir) == corpus
+
+
+def test_smoke_is_small_on_every_costly_axis() -> None:
+    """It answers "does this run", so anything not bearing on that is cut."""
+    smoke, base = experiments.exp_smoke(), experiments.exp000()
+    assert smoke.max_steps < base.max_steps
+    assert smoke.model.channels_in < base.model.channels_in
+    assert smoke.model.num_layers < base.model.num_layers
+    assert smoke.dataset.batch_size < base.dataset.batch_size
+    assert (
+        smoke.model.channels_in,
+        smoke.model.num_layers,
+        smoke.model.slow_cycles,
+        smoke.model.fast_cycles,
+        smoke.max_act_steps,
+        smoke.dataset.batch_size,
+        smoke.dataset.eval_num_instances,
+        smoke.max_steps,
+        smoke.total_train_steps,
+        smoke.num_steps_eval,
+    ) == (32, 1, 1, 1, 2, 8, 4, 4, 4, 2)
+    assert smoke.checkpointer is None
 
 
 class _Serializable(Protocol):

@@ -40,7 +40,7 @@ from torch import Tensor
 import numpy as np
 import torch
 
-from priml.baselines.arcagi1.augmentation import ColorDihedral
+from priml.baselines.arcagi.augmentation import ColorDihedral
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
 from priml.lib.codec import from_plain, loads
 from priml.math.basic import ceil_div

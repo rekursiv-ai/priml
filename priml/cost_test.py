@@ -641,7 +641,7 @@ def test_repr_intensity_total_divides_totals_instead_of_adding_ratios() -> None:
 
 
 def test_sudoku_cost_repr_includes_derived_intensity() -> None:
-    c = exp000().finalize().step.model.cost(batch_size=1, dtype=BF)
+    c = exp000().finalize().model.cost(batch_size=1, dtype=BF)
     text = repr(c)
     assert "intensity" in text.splitlines()[1]
     assert text.splitlines()[-1].startswith("total")

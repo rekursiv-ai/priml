@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.arcagi1.augmentation import ColorDihedral
+from priml.baselines.arcagi.augmentation import ColorDihedral
 from priml.baselines.sudoku import data
 from priml.baselines.sudoku.data import SudokuData, _load_split, augment_sudoku
 from priml.baselines.sudoku.puzzle_data import PuzzleDataset

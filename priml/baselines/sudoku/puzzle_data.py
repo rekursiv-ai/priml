@@ -108,7 +108,7 @@ def augment_sudoku(
     labels_aug = torch.gather(perms, 1, labels.long()).to(labels.dtype)
 
     # Random dihedral symmetry (8 symmetries of the square).
-    dihedral = _build_dihedral_indices(n, device)
+    dihedral = dihedral_indices(n, device)
     choice = torch.randint(0, 8, (B,), device=device, generator=generator)
     selected = dihedral[choice]
     inputs_aug = torch.gather(inputs_aug, 1, selected)
@@ -118,8 +118,17 @@ def augment_sudoku(
 
 
 @functools.cache
-def _build_dihedral_indices(n: int, device: torch.device) -> Tensor:
-    """8 dihedral symmetries of an n x n grid as index permutations."""
+def dihedral_indices(n: int, device: torch.device) -> Tensor:
+    """Return the 8 dihedral symmetries of an n x n grid as index permutations.
+
+    Args:
+      n: Grid side.
+      device: Device of the returned table; one cached table per device.
+
+    Returns:
+      indices: ``[8, n * n]`` source cell per output cell, per symmetry.
+
+    """
     base = torch.arange(n * n, device=device).reshape(n, n)
     symmetries: list[Tensor] = []
     for k in range(4):
@@ -580,7 +589,7 @@ class _PuzzleBatchIterator:
             strict=True,
         )
         # Two-level shuffle with a pinned draw order (per-instance randperms,
-        # then one global randperm over all samples). This is the internal
+        # then one global randperm over all samples). This is the original
         # bundle-grouped shuffle specialized to bundle size 1 -- the only
         # size any ported experiment uses -- with an identical RNG draw
         # sequence and identical resulting order.

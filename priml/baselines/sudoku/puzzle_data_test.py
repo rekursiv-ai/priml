@@ -16,10 +16,10 @@ import torch
 from priml.baselines.sudoku import puzzle_data
 from priml.baselines.sudoku.puzzle_data import (
     PuzzleDataset,
-    _build_dihedral_indices,
     _PuzzleBatchIterator,
     _subset_eval_iterator,
     augment_sudoku,
+    dihedral_indices,
     load_puzzle_dataset,
 )
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
@@ -897,7 +897,7 @@ def test_augmentation_pins_digit_only_output_and_dihedral_device(
     inputs = torch.tensor([[0, 1, 2, 3], [3, 2, 1, 0]], dtype=torch.int16)
     labels = torch.tensor([[3, 2, 1, 0], [0, 1, 2, 3]], dtype=torch.int64)
     arange = Mock(wraps=torch.arange)
-    original_build = _build_dihedral_indices
+    original_build = dihedral_indices
     devices: list[torch.device | None] = []
 
     def build(n: int, device: torch.device) -> Tensor:
@@ -930,7 +930,7 @@ def test_augmentation_pins_digit_only_output_and_dihedral_device(
     monkeypatch.setattr(torch, "arange", arange)
     monkeypatch.setattr(torch, "rand", rand)
     monkeypatch.setattr(torch, "randint", randint)
-    monkeypatch.setattr(puzzle_data, "_build_dihedral_indices", build)
+    monkeypatch.setattr(puzzle_data, "dihedral_indices", build)
 
     augmented_inputs, augmented_labels = augment_sudoku(
         inputs,

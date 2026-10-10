@@ -1,120 +1,76 @@
-"""The sudoku experiment ladder.
+"""The sudoku experiment chain.
 
-Two mechanisms vary, independently, so the ladder is a 2x2 rather than a chain:
+Every rung solves Sudoku-Extreme: read a 9x9 grid of tokens, predict the whole
+completed grid. A puzzle counts only if every cell is right. The 2K proxy is
+the first 2,000 test puzzles, scored during training; the full set is all
+422,786. The proxy underestimates the full set.
 
-* which block mixes the grid tokens -- transformer or MLP-mixer,
-* whether the solver runs a recurrence with adaptive computation time.
+``exp000`` is the attention TRM recipe the chain starts from and is never
+edited after it lands. Each later rung forks a named parent and changes one
+thing. The chain keeps the baseline, every new best, the cheapest 100%, and
+three ways to lock an answer -- a learned verifier committee, agreement
+between symmetric views, and a committee with no Sudoku structure at all::
 
-::
+    exp000  attention TRM baseline
+      +-- exp001 .. exp006  one training mechanism per rung
+            +-- exp007  hypothesis-pinning search at evaluation
+            +-- exp008  verifier-committee sieve (harvest, fit, train, sieve)
+            +-- exp009  winner-take-all latent hypotheses
+            |     +-- exp010  winner recompute, three hypotheses, batch 1,152
+            |           +-- exp011  staircase sieve: the cheapest 100%
+            |                 +-- exp013  prior-free committee lock
+            +-- exp012  nine-view agreement lock (train, then lock)
 
-              transformer   MLP-mixer
-    plain       exp000        exp001
-    recurrent   exp002        exp003
+``exp007`` and ``exp011`` evaluate frozen checkpoints, so their parents run
+first: ``exp011`` reads ``exp006``'s and ``exp010``'s generators and
+``exp008``'s committee. ``exp013`` fits its own committee on ``exp008``'s
+harvest corpus, then runs ``exp011``'s sieve. ``exp008`` and ``exp012`` are
+single-GPU pipelines that train their own generator. Run any of them::
 
-Both axes are config VALUES -- a slot filled differently -- so the four share
-one model class, one train step, and one dataset. That is what makes the
-comparison meaningful: nothing differs except the thing named.
-
-``exp000`` is the naive recipe and is never edited; improvements are forks, so
-a number measured against it stays comparable. Run any of them::
-
-    uv --quiet run --frozen python -m priml \
-        priml.baselines.sudoku.experiments.exp000
+    uv --quiet run --frozen python -m priml priml.baselines.sudoku.experiments.exp006
 """
 
 from __future__ import annotations
 
-from dataclasses import field
-from typing import Self, override
-
-import math
-
-from configgle import Makes
-
-from priml.baselines.sudoku.act import (
-    AtomicPool,
-    FeedbackCarry,
-    HaltTraining,
-    LearnedStart,
-    SampledMinimum,
-    ZeroStart,
+from priml.baselines.sudoku.agreement_lock import AgreementLockEval
+from priml.baselines.sudoku.hps_eval import HpsEval
+from priml.baselines.sudoku.hypotheses import (
+    HypothesisRecursion,
+    WinnerRecompute,
+    WinnerTakeAll,
 )
-from priml.baselines.sudoku.data import SudokuData
-from priml.baselines.sudoku.embedding import (
-    FactoredPositions,
-    GridEmbedding,
-    PredictionFeedback,
-)
-from priml.baselines.sudoku.eval import HpsEval, Reproduction, SieveEval
-from priml.baselines.sudoku.metric import GridAccuracy
-from priml.baselines.sudoku.model import DeepRecurrence
-from priml.baselines.sudoku.train_step import SudokuTrainStep
+from priml.baselines.sudoku.latent_recursion import recipe_block
+from priml.baselines.sudoku.reproduction import Reproduction
+from priml.baselines.sudoku.sieve import FittedSieve, SieveEval, StaircaseSieveEval
 from priml.baselines.sudoku.trainer import Trainer
-from priml.baselines.sudoku.trm import recipe_block
+from priml.baselines.sudoku.verifier import (
+    DenoisingVerifier,
+    VerifierAcceptor,
+    row_column_positions,
+)
+from priml.baselines.sudoku.verifier_fit import DenoisingLoss, VerifierFit
 from priml.model.attention.attention import Attention
-from priml.model.init import kaiming_uniform
-from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
-from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
-from priml.runtime import SingleProcess
-from priml.train.train_loop import TrainLoop
 
 
-class SudokuTrainLoop(
-    Makes["TrainLoop"],
-    TrainLoop.Config[SudokuTrainStep.Config, SudokuData.Config],
-):
-    """A training loop with the sudoku step and dataset already in place.
+def exp000() -> Trainer.Config:
+    """Return the attention TRM baseline.
 
-    Narrowing the two slots here rather than at each call site is what lets a
-    factory reach ``cfg.step.model`` directly, with no ``isinstance`` narrow
-    before a field it is about to set.
-    """
+    - Post-norm attention TRM: hidden 512, 8 heads, 2 layers, slow 3 / fast 4.
+    - No position tables, no QK-norm, no feedback, no CSP loss.
+    - Muon 0.02 on the reasoning matrices, AdamW 1e-4 on tables and heads.
+    - Label smoothing 0.2; EMA 0.9 from step 5,000; ACT depth 16.
+    - Batch 384, cosine annealing to zero over exactly 62,000 steps; seed 0.
+    - Evaluate the 2K proxy every 1,000 steps.
 
-    step: SudokuTrainStep.Config = field(default_factory=SudokuTrainStep.Config)
-    """Model, optimization, and the optional recurrence."""
-
-    dataset: SudokuData.Config = field(default_factory=SudokuData.Config)
-    """Prepared sudoku puzzles, served from device memory."""
-
-    @override
-    def finalize(self) -> Self:
-        self.dataset.spec.finalize()
-        spec = self.dataset.spec
-        model = self.step.model
-        model.vocab_size = spec.vocab_size
-        embedding = model.embedding
-        assert isinstance(embedding, GridEmbedding.Config)
-        embedding.grid_shape = (math.prod(spec.grid_shape),)
-        for channel in embedding.channels:
-            if isinstance(channel, FactoredPositions.Config):
-                channel.grid_shape = spec.grid_shape
-                channel.box_shape = spec.box_shape
-        if isinstance(model.block, MLPMixerBlock.Config):
-            model.block.seq_len = model.total_seq_len
-        pool = self.step.pool
-        if pool is not None and pool.feedback is not None:
-            pool.feedback.givens = (2, spec.vocab_size - 1)
-        return super().finalize()
-
-
-def exp000() -> SudokuTrainLoop:
-    """Post-norm transformer over the grid, one forward per puzzle.
-
-    The baseline every other experiment forks, and the only one stating a
-    recipe rather than a change. Frozen: improvements belong in a fork, so a
-    result measured against it stays comparable.
+    The trainer's defaults are the ``exp006`` recipe, so this rung switches
+    every later mechanism off explicitly and each fork turns one back on.
 
     Hypothesis:
-      A plain transformer with learned row/column/box positions, AdamW on the
-      lookup tables and Muon on the reasoning matrices, is the strongest recipe
-      that uses nothing exotic -- the bar recurrence must clear to earn its
-      cost.
-
-    Returns:
-      config: SudokuTrainLoop configuration with 2 layers, 512 hidden dim,
-        384 batch size, 19.5k steps.
+      The reference TRM recipe with a cosine that anneals over exactly the
+      trained steps is a reproducible control. The horizon is load-bearing:
+      a 100k horizon cut short by a wall-clock cap spreads 35 pp across seeds.
 
     References:
       https://arxiv.org/abs/2510.04871
@@ -122,164 +78,17 @@ def exp000() -> SudokuTrainLoop:
         Networks.
 
     Results:
-      TBD.
-
-    """
-    cfg = SudokuTrainLoop()
-    cfg.study_name = "sudoku"
-    cfg.experiment_name = "exp000"
-
-    embedding = GridEmbedding.Config()
-    # Sudoku's constraints are row, column, and box, so positions are described
-    # by which of each a cell belongs to rather than by its index in a flattened
-    # sequence.
-    embedding.channels = [FactoredPositions.Config()]
-    cfg.step.model.embedding = embedding
-    cfg.step.model.channels_in = 512
-    cfg.step.model.num_layers = 2
-    assert isinstance(cfg.step.model.block, TransformerBlock.Config)
-    cfg.step.model.block.ffn = SwiGLU.Config(
-        init_weight=kaiming_uniform,
-        init_weight_out=kaiming_uniform,
-    )
-
-    cfg.dataset.batch_size = 384
-    cfg.dataset.seed = 0
-    # Mid-training evaluation reads a fixed prefix of the test split as a proxy;
-    # the reported number is measured on the whole thing, and the two
-    # populations are not comparable.
-    cfg.dataset.num_eval_puzzles = 2_000
-
-    cfg.metrics_eval["accuracy"] = GridAccuracy.Config()
-    cfg.max_steps = cfg.step.total_train_steps = 19_500
-    cfg.num_steps_eval = 1_000
-    cfg.runtime = SingleProcess.Config()
-    return cfg
-
-
-def exp001() -> SudokuTrainLoop:
-    """exp000 with an MLP-mixer block instead of attention.
-
-    Hypothesis:
-      A sudoku grid is a fixed 81 cells in a fixed arrangement, so the content
-      addressing attention buys may be unnecessary: a learned mixing over
-      positions can express the same row/column/box routing at lower cost. If
-      so, the mixer matches the transformer, and attention is not what makes
-      this task work.
-
-    Returns:
-      config: SudokuTrainLoop with mixer block in place of attention.
-
-    References:
-      https://arxiv.org/abs/2105.01601
-        Tolstikhin et al. MLP-Mixer: An all-MLP Architecture for Vision.
-
-    Results:
-      TBD.
-
-    """
-    cfg = exp000()
-    cfg.experiment_name = "exp001"
-    cfg.step.model.block = _mixer_block()
-    return cfg
-
-
-def exp002() -> SudokuTrainLoop:
-    """exp000 plus deep recurrence with adaptive computation time.
-
-    Hypothesis:
-      Constraint propagation is iterative -- filling one cell licenses filling
-      the next -- so a fixed-depth network must learn in one pass what a
-      recurrence can unroll. Re-applying a small stack over a carried latent,
-      and letting each puzzle choose its own depth, should beat the same
-      parameters spent in a single forward.
-
-    Returns:
-      config: SudokuTrainLoop with deep recurrence; the feedback channel is
-        present but untrained.
-
-    References:
-      https://arxiv.org/abs/2510.04871
-        Jolicoeur-Martineau. Less is More: Recursive Reasoning with Tiny
-        Networks.
-
-    Results:
-      TBD.
-
-    """
-    cfg = exp000()
-    cfg.experiment_name = "exp002"
-    cfg.step.model.recurrence = DeepRecurrence.Config()
-    # As trained: the feedback channel is built, but the pool never fed the
-    # decoded grid back in training, so its zero-initialized table stayed zero
-    # and the recurrence carried belief only in the latent; slots were seated
-    # from zero latents rather than the learned ones evaluation starts from.
-    embedding = cfg.step.model.embedding
-    assert isinstance(embedding, GridEmbedding.Config)
-    embedding.channels = [FactoredPositions.Config(), PredictionFeedback.Config()]
-    cfg.step.pool = AtomicPool.Config(
-        batch_size=cfg.dataset.batch_size,
-        max_steps=32,
-        halting=HaltTraining.Config(exploration=SampledMinimum.Config()),
-        start=ZeroStart.Config(),
-    )
-    return cfg
-
-
-def exp003() -> SudokuTrainLoop:
-    """exp002 with an MLP-mixer block: the fourth corner of the 2x2.
-
-    Hypothesis:
-      If recurrence is what makes the task work (exp002) and attention is not
-      (exp001), the two gains are independent and the mixer keeps its recurrent
-      gain. A drop here instead would mean the recurrence relies on attention
-      specifically, not on depth.
-
-    Results:
-      TBD.
-
-    Returns:
-      config: SudokuTrainLoop with mixer block and deep recurrence.
-
-    """
-    cfg = exp002()
-    cfg.experiment_name = "exp003"
-    cfg.step.model.block = _mixer_block()
-    return cfg
-
-
-def exp004() -> Trainer.Config:
-    """Attention TRM with every later mechanism off: the blog's ladder root.
-
-    The rekursiv.ai sudoku ladder (``exp004``-``exp010``) runs on the TRM
-    trainer, whose defaults ARE the ``exp010`` recipe; this rung switches every
-    later mechanism off explicitly and each fork turns one back on. Mid-training
-    eval scores the first 2,000 test rows (the 2K proxy), which underestimates
-    the full 422,786-puzzle set.
-
-    Hypothesis:
-      The reference TRM recipe -- post-norm attention (hidden 512, 8 heads, 2
-      layers, slow 3 / fast 4), label smoothing 0.2, Muon 0.02 + AdamW 1e-4,
-      EMA 0.9 from step 5,000, ACT 16, batch 384 -- with cosine annealing to
-      zero over exactly the 62,000 trained steps is a reproducible control.
-      The horizon is load-bearing: a 100k horizon truncated by a wall-clock
-      cap spreads 35pp across seeds.
-
-    References:
-      https://arxiv.org/abs/2510.04871
-        Jolicoeur-Martineau. Less is More: Recursive Reasoning with Tiny
-        Networks.
-
-    Results:
-      0.61 exact (2K proxy, final; n=1).
-
-    Returns:
-      config: Baseline trainer configuration.
+      1x H100, 62k steps: 0.61 exact on the 2K proxy (final, 1 seed).
+      Unstable: the 0.61 is one clean seed. Reproduced on 1x H200 (about
+      3,120 s each), both seeds diverged and only partly recovered:
+        seed 0: at 18k steps (0.247 to 0.012 exact), 0.173 final.
+        seed 1: at 8k steps (0.128 to 0.0 exact), 0.1385 final.
+      exp002's QK-norm removes the instability.
 
     """
     cfg = Trainer.Config()
     cfg.study_name = "sudoku"
-    cfg.experiment_name = "exp004"
+    cfg.experiment_name = "exp000"
     cfg.seed = 0
 
     cfg.model.slow_cycles = 3
@@ -302,19 +111,23 @@ def exp004() -> Trainer.Config:
 
     cfg.dataset.batch_size = 384
     cfg.dataset.seed = 0
+    # Mid-training evaluation reads a fixed prefix of the test split as a
+    # proxy; reported full-set numbers come from the evaluation rungs.
     cfg.dataset.eval_num_instances = 2_000
     cfg.dataset.augment = True
     return cfg
 
 
-def exp005() -> Trainer.Config:
-    """exp004 plus learned row, column, and box position tables.
+def exp001() -> Trainer.Config:
+    """Fork exp000 with the following changes.
+
+    - Add learned row, column, and box position tables to the grid tokens.
 
     Hypothesis:
       Attention spends capacity discovering that cell (r, c) shares
-      constraints with row r, column c, and its 3x3 box. Adding learned
-      row + column + box embeddings to the grid tokens (RoPE kept, so the
-      delta is strictly additive; +13,824 params) hands it that structure.
+      constraints with row r, column c, and its 3x3 box. Learned tables for
+      each (RoPE kept, so the change is strictly additive; +13,824
+      parameters) hand it that structure.
 
     References:
       https://arxiv.org/abs/2510.04871
@@ -322,43 +135,46 @@ def exp005() -> Trainer.Config:
         Networks.
 
     Results:
-      0.70 exact (2K proxy, final at 62k; +9pp over exp004; n=1).
-
-    Returns:
-      config: Trainer configuration with structural position tables.
+      1x H100, 62k steps: 0.70 exact on the 2K proxy (final, 1 seed), +9 pp
+      over exp000.
+      Reproduced on 1x H200 (3,372 s): 0.7105 final,
+      0.708 last-5 mean.
 
     """
-    cfg = exp004()
-    cfg.experiment_name = "exp005"
+    cfg = exp000()
+    cfg.experiment_name = "exp001"
     cfg.model.pos2d_grid_shape = (0, 0)
     return cfg
 
 
-def exp006() -> Trainer.Config:
-    """exp005 plus parameter-free QK-norm at the 12k convergence horizon.
+def exp002() -> Trainer.Config:
+    """Fork exp001 with the following changes.
+
+    - Add parameter-free QK-norm to attention.
+    - Shorten the cosine horizon from 62,000 to 12,000 steps; evaluate every 500.
+
+    The two travel together: QK-norm converges near 10k steps, and training
+    past mastery at high learning rate collapses the ACT depth, so the cosine
+    must anneal inside that window.
 
     Hypothesis:
-      A shared affine-free RMSNorm over the per-head queries and keys bounds
-      the attention logits, so training converges several times sooner. The
-      horizon moves with it (62k -> 12k, eval every 500): QK-norm converges
-      near 10k steps, and post-mastery training at high LR collapses the ACT
-      depth, so the cosine must anneal inside that window. One change,
-      because the norm without the shorter anneal trains past convergence.
+      A shared affine-free RMSNorm over per-head queries and keys bounds the
+      attention logits, so training converges several times sooner.
 
     References:
       https://arxiv.org/abs/2010.04245
         Henry et al. Query-Key Normalization for Transformers.
 
     Results:
-      ~5x faster convergence (0.71@10k vs 0.15@10k, 2K proxy; n=1). QK-norm
-      is also what keeps the deep recurrence of exp009 trainable.
-
-    Returns:
-      config: Trainer configuration with parameter-free QK normalization.
+      1x H100: about 5x faster convergence, 0.71 exact on the 2K proxy at 10k
+      steps against 0.15 at 10k without QK-norm (1 seed). QK-norm is also
+      what keeps the deep recurrence of exp005 trainable.
+      Reproduced on 1x H200 (643 s): 0.698 at 10k,
+      0.7175 final at 12k.
 
     """
-    cfg = exp005()
-    cfg.experiment_name = "exp006"
+    cfg = exp001()
+    cfg.experiment_name = "exp002"
     assert isinstance(cfg.model.block, TransformerBlock.Config)
     attn = cfg.model.block.attn
     assert isinstance(attn, Attention.Config)
@@ -369,16 +185,21 @@ def exp006() -> Trainer.Config:
     return cfg
 
 
-def exp007() -> Trainer.Config:
-    """exp006 plus the consolidated training stack, including the CSP loss.
+def exp003() -> Trainer.Config:
+    """Fork exp002 with the following changes.
+
+    - ACT depth 32 (was 16).
+    - No label smoothing (was 0.2).
+    - EMA 0.999 from step 0 (was 0.9 from step 5,000).
+    - CSP row/column/box cardinality loss at weight 0.3.
+    - Augmentation permutes digit tokens only, never the blank marker.
+
+    One rung because each was measured alone first and the blog reports
+    them as one training stack.
 
     Hypothesis:
-      The reference TRM's own training choices -- ACT 32, no label smoothing,
-      EMA 0.999 from step 0, and digit-only augmentation (the legacy branch
-      mixes the blank marker into the permutation) -- plus a differentiable
-      row/column/box cardinality loss at weight 0.3 each help, and help
-      together. Consolidated into one rung because each was measured in
-      isolation before and the blog reports them as one stack.
+      The reference TRM's own training choices, plus a differentiable
+      cardinality loss, help and help together.
 
     References:
       https://arxiv.org/abs/2307.04895
@@ -386,15 +207,15 @@ def exp007() -> Trainer.Config:
         with Recurrent Transformer.
 
     Results:
-      0.78 exact (2K proxy, last-5 mean; config-family mean ~0.755-0.763,
-      seed spread ~2.4pp).
-
-    Returns:
-      config: Trainer configuration with the consolidated training stack.
+      1x H100, 12k steps: 0.78 exact on the 2K proxy (last-5 mean); the
+      config family's mean is 0.755-0.763 with a seed spread of about 2.4 pp.
+      Reproduced on 1x H200: seed 0 (694 s) 0.7185 final, 0.727 last-5
+      mean, below the family band; seed 1 (834 s) 0.770 final, 0.781
+      last-5 mean.
 
     """
-    cfg = exp006()
-    cfg.experiment_name = "exp007"
+    cfg = exp002()
+    cfg.experiment_name = "exp003"
     cfg.max_act_steps = 32
     cfg.label_smoothing = 0.0
     cfg.ema_decay = 0.999
@@ -404,43 +225,48 @@ def exp007() -> Trainer.Config:
     return cfg
 
 
-def exp008() -> Trainer.Config:
-    """exp007 plus corrupted-feedback repair training.
+def exp004() -> Trainer.Config:
+    """Fork exp003 with the following changes.
+
+    - Feed each ACT step its previous decoded grid, and corrupt that grid in
+      training: with probability 0.5 per slot, about 12 non-given cells.
+
+    The feedback table is zero-initialized, so the step-0 forward is
+    bit-identical to exp003's.
 
     Hypothesis:
-      Feeding each ACT step its previous decoded grid, and corrupting that
-      grid in training (probability 0.5 per slot, ~12 non-given cells),
-      teaches an explicit repair skill the recurrence otherwise lacks. The
-      feedback table is zero-initialized, so the step-0 forward is
-      bit-identical to exp007's.
+      Repairing a corrupted copy of its own answer teaches the recurrence an
+      explicit repair skill it otherwise lacks, as in discrete diffusion.
 
     References:
-      https://arxiv.org/abs/2510.04871
-        Jolicoeur-Martineau. Less is More: Recursive Reasoning with Tiny
-        Networks.
+      https://arxiv.org/abs/2107.03006
+        Austin et al. Structured Denoising Diffusion Models in Discrete
+        State-Spaces.
 
     Results:
-      0.82 exact (2K proxy, last-5 mean; paired gain +4.3..+5.9pp over exp007
-      on 3/3 seeds).
-
-    Returns:
-      config: Trainer configuration with corrupted-feedback repair training.
+      1x H100, 12k steps: 0.82 exact on the 2K proxy (last-5 mean); +4.3 to
+      +5.9 pp over exp003, paired on 3 seeds.
+      Reproduced on 1x H200: seed 0 (906 s) 0.7905 final, 0.793 last-5
+      mean; seed 1 (733 s) 0.7955 final, 0.803 last-5 mean. +6.6 and
+      +2.2 pp over exp003, paired by seed.
 
     """
-    cfg = exp007()
-    cfg.experiment_name = "exp008"
+    cfg = exp003()
+    cfg.experiment_name = "exp004"
     cfg.feedback = True
     return cfg
 
 
-def exp009() -> Trainer.Config:
-    """exp008 at the deep recurrence shape, slow 6 / fast 9.
+def exp005() -> Trainer.Config:
+    """Fork exp004 with the following changes.
+
+    - Deep recurrence: slow 6 / fast 9 cycles (was 3 / 4).
+    - Seed 44, the seed the measured lineage carries forward to exp006.
 
     Hypothesis:
-      Depth and repair are complementary rather than sub-additive: more
-      cycles per ACT step give the repair skill more room to act. QK-norm
-      (exp006) is what keeps the deeper stack trainable. Also moves the train
-      seed to 44, the seed the measured lineage carries forward to exp010.
+      Depth and repair compound: more cycles per ACT step give the repair
+      skill more room to act. QK-norm (exp002) keeps the deeper stack
+      trainable.
 
     References:
       https://arxiv.org/abs/2510.04871
@@ -448,29 +274,30 @@ def exp009() -> Trainer.Config:
         Networks.
 
     Results:
-      0.86-0.90 exact at 12k (2K proxy, last-5 on two paired seeds: 0.8634 /
-      0.8972; depth x repair +5.9..+7.5pp paired). Still climbing at 12k: the
-      anneal is too short for this class.
-
-    Returns:
-      config: Trainer configuration with deep recurrence.
+      1x H100, 12k steps: 0.8634 and 0.8972 exact on the 2K proxy (last-5
+      mean, two paired seeds); depth with repair adds +5.9 to +7.5 pp paired.
+      Still climbing at 12k: the anneal is too short for this depth.
+      Reproduced on 1x H200 (2,452 s): 0.8915 final,
+      0.887 last-5 mean.
 
     """
-    cfg = exp008()
-    cfg.experiment_name = "exp009"
+    cfg = exp004()
+    cfg.experiment_name = "exp005"
     cfg.model.slow_cycles = 6
     cfg.model.fast_cycles = 9
     cfg.seed = 44
     return cfg
 
 
-def exp010() -> Trainer.Config:
-    """exp009 at the 19,500-step anneal: the generator recipe.
+def exp006() -> Trainer.Config:
+    """Fork exp005 with the following changes.
+
+    - Anneal over 19,500 steps (was 12,000), the longest that fits one
+      H100-hour.
 
     Hypothesis:
-      Mastery arrives later on the deep + repair class, so a longer cosine
-      (12k -> 19,500, the longest that fits one H100-hour) converts exp009's
-      un-annealed climb into a higher plateau.
+      Mastery arrives later on the deep repair recipe, so a longer cosine
+      turns exp005's un-annealed climb into a higher plateau.
 
     References:
       https://arxiv.org/abs/2510.04871
@@ -478,32 +305,34 @@ def exp010() -> Trainer.Config:
         Networks.
 
     Results:
-      0.93 exact (2K proxy: final 0.9295, last-5 0.9300); full-set
-      deterministic pass 0.9624 (406,892/422,786). Trained with the ambient
-      global-RNG augmentation stream (``dataset.augment_seed = None``).
-
-    Returns:
-      config: Trainer configuration for the generator recipe.
+      1x H100, 19.5k steps: 0.9300 exact on the 2K proxy (last-5 mean; final
+      0.9295). Full set, deterministic pass: 0.9624 (406,892/422,786).
+      Augmentation drew from the ambient global RNG
+      (``dataset.augment_seed = None``).
+      Reproduced on 1x H200 (3,825 s): 0.923 final,
+      0.9245 last-5 mean.
 
     """
-    cfg = exp009()
-    cfg.experiment_name = "exp010"
+    cfg = exp005()
+    cfg.experiment_name = "exp006"
     cfg.max_steps = 19_500
     cfg.total_train_steps = 19_500
     return cfg
 
 
-def exp011() -> HpsEval.Config:
-    """exp010 plus hypothesis-pinning search at evaluation.
+def exp007() -> HpsEval.Config:
+    """Fork exp006 with the following changes.
 
-    Scores exp010's final checkpoint, so run exp010 first.
+    - Evaluate with hypothesis-pinning search: accept a grid only when the
+      halt logit q >= 7.875 at ACT steps 24, 28 and 32; otherwise pin a digit
+      into the most uncertain cell as an extra given and re-run, as a small
+      tree search hps(5, 3, 2, 512).
+
+    Scores exp006's final checkpoint, so run exp006 first.
 
     Hypothesis:
-      The halt head's confidence is a usable acceptance signal. Accept a grid
-      only when q >= 7.875 at ACT steps 24, 28 and 32; otherwise pin a digit
-      into the most uncertain cell as an extra given and re-run, as a small
-      tree search hps(5, 3, 2, 512). Most of exp010's residual 3.8% should be
-      recoverable without retraining.
+      The halt head's confidence is a usable acceptance signal, so most of
+      exp006's residual 3.8% is recoverable without retraining.
 
     References:
       https://arxiv.org/abs/2510.04871
@@ -511,71 +340,44 @@ def exp011() -> HpsEval.Config:
         Networks.
 
     Results:
-      0.99920 exact on the full set (422,447/422,786; ~2h on one H100), against
-      exp010's 0.9624. 321 accepted grids are wrong: confidence alone is not a
-      sound acceptance gate, which exp012 and exp013 address.
-
-    Returns:
-      config: HPS evaluation of exp010's final checkpoint.
+      1x H100, about 2 h: 0.99920 exact on the full set (422,447/422,786),
+      against exp006's 0.9624. 321 accepted grids are wrong: confidence alone
+      is not a sound acceptance gate, which exp008 and exp012 address.
+      Reproduced on 1x H200 over this chain's exp006
+      (8,337 s): 0.99957 (422,604/422,786), 142 accepted grids wrong.
 
     """
-    parent = exp010()
+    parent = exp006()
     cfg = HpsEval.Config()
-    cfg.experiment_name = "exp011"
-    cfg.checkpoint_path = _final_checkpoint(parent)
+    cfg.experiment_name = "exp007"
+    cfg.checkpoint_path = (
+        f"/runs/{parent.experiment_name}/checkpoints/"
+        f"step_{int(parent.max_steps):08d}.pt"
+    )
     cfg.model = parent.copy_tree().finalize().model
     return cfg
 
 
-def exp012() -> Reproduction.Config:
-    """exp010 plus a nine-view agreement lock at evaluation.
+def exp008() -> Reproduction.Config:
+    """Fork exp006 with the following changes.
 
-    Trains exp010, then evaluates it: each puzzle is solved (with exp011's
-    search) on the identity view and on a symmetric copy; two agreeing grids
-    lock, and a disagreement takes the modal grid over all nine views.
+    - Lock answers with a committee of three learned verifiers: a grid
+      retires only when all three accept it (minimum grid logit above 0).
+    - Evaluate as a progressive sieve: one deterministic pass, then the
+      nine-view HPS ladder on survivors only, then an escalated search
+      hps(7, 4, 3, 8,400) and a modal fallback on the residue.
 
-    Hypothesis:
-      Two exact symmetries of one puzzle rarely produce the same WRONG grid,
-      so agreement is a sound, verifier-free acceptance gate. Closing exp011's
-      321 wrong accepts should need about two solves per puzzle.
-
-    References:
-      https://arxiv.org/abs/2510.04871
-        Jolicoeur-Martineau. Less is More: Recursive Reasoning with Tiny
-        Networks.
-
-    Results:
-      422,786/422,786 on the full set measured, zero wrong locks (~26-28h on
-      one H100 including training). The measured run resumed from a
-      5,000-step checkpoint of an earlier launch of the same pinned-seed
-      pipeline; steps 5,000-19,500 and every evaluation ran fresh.
-
-    Returns:
-      config: Train-then-lock pipeline over the exp010 recipe.
-
-    """
-    cfg = Reproduction.Config()
-    cfg.study_name = "sudoku"
-    cfg.experiment_name = "exp012"
-    cfg.generator = exp010()
-    cfg.generator_names = ("exp012_generator",)
-    return cfg
-
-
-def exp013() -> Reproduction.Config:
-    """exp010 plus a verifier-committee sieve at evaluation.
-
-    Harvests candidate grids from exp010's final checkpoint, so run exp010
-    first, and fits three verifiers on them (seeds 0/1/2). Then trains a fresh
-    exp010 and evaluates it with the sieve: one cheap pass, symmetry-view
-    searches on the survivors, and an escalated search on the last few, every
-    round offered to the committee lock.
+    A single-GPU pipeline: harvest candidate grids from exp006's final
+    checkpoint (run exp006 first), fit the three verifiers (seeds 0/1/2),
+    then train a fresh exp006 generator, screening each 1,000-step checkpoint
+    under the committee and sieving the full set from the first perfect
+    screen on.
 
     Hypothesis:
       A small network that sees only (puzzle, candidate) and attends along
       rows, columns and boxes can learn to verify solutions. Three seeds err
-      on different grids, so unanimity is a sound lock -- and it makes
-      exp010's cheap single pass usable, retiring ~96% of puzzles at once.
+      on different grids, so unanimity is a sound lock, and it makes the
+      cheap deterministic pass usable: it retires about 96% of puzzles.
 
     References:
       https://arxiv.org/abs/2307.04895
@@ -583,142 +385,281 @@ def exp013() -> Reproduction.Config:
         with Recurrent Transformer.
 
     Results:
-      422,786/422,786 on the full set measured on exp010's frozen
-      checkpoint, zero false accepts over ~440K live accepts, 0.91 GPU-h
-      (the cheap pass retires ~96.2% in ~666s). This train-then-sieve
-      pipeline read 422,786/422,786 at two checkpoints before the run
-      crashed for unrelated infrastructure reasons.
-
-    Returns:
-      config: Train, harvest, fit, then sieve over the exp010 recipe.
+      1x H100, sieve on exp006's frozen checkpoint: 422,786/422,786, zero
+      false accepts over about 440K live accepts, 3,274 GPU-s (the
+      deterministic pass retires about 96.2% in about 666 s). This
+      train-then-sieve pipeline read 422,786/422,786 at two checkpoints
+      before the run crashed for unrelated infrastructure reasons.
 
     """
+    generator = exp006()
+    model = generator.copy_tree().finalize().model
     cfg = Reproduction.Config()
     cfg.study_name = "sudoku"
-    cfg.experiment_name = "exp013"
+    cfg.experiment_name = "exp008"
     cfg.screen = "committee"
-    cfg.harvest_source_checkpoint = _final_checkpoint(exp010())
-    cfg.generator = exp010()
-    cfg.generator_names = ("exp013_generator",)
-    cfg.verifier_names = tuple(f"exp013_verifier_s{seed}" for seed in range(3))
+    cfg.harvest_source_checkpoint = (
+        f"/runs/{generator.experiment_name}/checkpoints/"
+        f"step_{int(generator.max_steps):08d}.pt"
+    )
+    cfg.harvest.model = model
+    cfg.generator = generator
+    cfg.generator_name = "exp008_generator"
+    cfg.verifier_names = tuple(f"exp008_verifier_s{seed}" for seed in range(3))
     cfg.full_eval = SieveEval.Config()
+    cfg.full_eval.model = model
     return cfg
 
 
-def exp014() -> Reproduction.Config:
-    """exp012 with three training seeds as the committee instead of nine views.
+def exp009() -> Trainer.Config:
+    """Fork exp006 with the following changes.
+
+    - Train two fast-latent hypotheses per puzzle from one shared slow latent;
+      only the hypothesis with the lowest cross-entropy trains (winner take
+      all), with gradient through both. Each seated puzzle draws fresh
+      hypotheses aligned to the first FFN's top subspace.
+    - Anneal over 22,000 steps (was 19,500).
+
+    The two travel together: the campaign gave this mechanism two H100-hours,
+    and 22,000 steps is what two hypotheses complete in them.
 
     Hypothesis:
-      Independently trained models disagree on errors at least as often as
-      views of one model do, so a seed ensemble (44/45/46, plus six views of
-      seed 44) locks as soundly as exp012 -- a check that the lock's soundness
-      is not an artifact of one checkpoint.
+      Competing latent hypotheses specialize, so the deployed hypothesis 0
+      solves more puzzles in a single pass.
 
     References:
-      https://arxiv.org/abs/2510.04871
-        Jolicoeur-Martineau. Less is More: Recursive Reasoning with Tiny
-        Networks.
+      https://arxiv.org/abs/2601.19085
+        Speed is Confidence.
 
     Results:
-      TBD. Predicted before launch: 422,786/422,786, mean ~2.01 passes; the
-      (44, 45) first pair agreed on 0.998526 of puzzles with zero
-      identical-wrong grids.
-
-    Returns:
-      config: Three-seed train-then-lock pipeline.
+      1x H100, 22k steps (8,121 s): 0.9650 exact on the 2K proxy; full set,
+      deterministic pass: 0.9876297 (417,556/422,786), against exp006's
+      0.9624.
+      Reproduced on 1x H200 (7,282 s): 0.971 final,
+      0.967 last-5 mean on the 2K proxy.
 
     """
-    cfg = exp012()
-    cfg.experiment_name = "exp014"
-    cfg.screen = "single_view"
-    cfg.trigger = "final_only"
-    cfg.generator_seeds = (44, 45, 46)
-    cfg.generator_names = tuple(f"exp014_s{seed}" for seed in cfg.generator_seeds)
+    cfg = exp006()
+    cfg.experiment_name = "exp009"
+    model = cfg.model = HypothesisRecursion.Config().update(cfg.model)
+    if cfg.seed is None:
+        raise ValueError("Expected cfg.seed is not None.")
+    model.hypothesis_seed = cfg.seed
+    cfg.routing = WinnerTakeAll.Config()
+    cfg.max_steps = 22_000
+    cfg.total_train_steps = 22_000
     return cfg
 
 
-def exp015() -> SudokuTrainLoop:
-    """exp002 with the fed-back grid trained and slots seated from learned latents.
+def exp010() -> Trainer.Config:
+    """Fork exp009 with the following changes.
 
-    exp002 builds the feedback channel but trained without feeding the decoded
-    grid back, and seated slots from zero latents while evaluation starts from
-    the learned ones. Both are the pool's settings, changed together: they are
-    the two halves of training the recurrence the way it is evaluated. No run
-    has isolated feedback without the repair curriculum exp008 bundles it with.
+    - Route the hypotheses without gradient, then recompute only the winner
+      with it.
+    - Three hypotheses (was two).
+    - Batch 1,152 (was 384) and a 10,000-step anneal (was 22,000).
+
+    One change: recomputing the winner is what frees the activation memory
+    the third hypothesis and the larger batch spend.
 
     Hypothesis:
-      A recurrence that sees its own decoded answer refines it instead of
-      re-deriving it from the puzzle each step, so exact accuracy rises over
-      exp002 at equal steps.
+      Winner recomputation keeps one H100 within memory while the third
+      hypothesis and 11.52M puzzle slots raise single-pass accuracy beyond
+      exp009's.
 
     References:
-      https://arxiv.org/abs/2510.04871
-        Jolicoeur-Martineau. Less is More: Recursive Reasoning with Tiny
-        Networks.
+      https://arxiv.org/abs/2601.19085
+        Speed is Confidence.
 
     Results:
-      TBD. Compare to exp002 at the same seed.
-
-    Returns:
-      config: exp002 with feedback and the learned start.
+      1x H100, 10k steps (14,456 s): 0.9770 exact on the 2K proxy; full set,
+      deterministic pass: 0.9902007 (418,643/422,786).
+      Reproduced on 1x H200 (13,729 s): 0.968 final,
+      0.963 last-5 mean on the 2K proxy.
 
     """
-    cfg = exp002()
-    cfg.experiment_name = "exp015"
-    pool = cfg.step.pool
-    if not isinstance(pool, AtomicPool.Config):
-        raise TypeError(f"exp002's pool is atomic; got {type(pool)}.")
-    pool.feedback = FeedbackCarry.Config()
-    pool.start = LearnedStart.Config()
+    cfg = exp009()
+    cfg.experiment_name = "exp010"
+    cfg.routing = WinnerRecompute.Config()
+    assert isinstance(cfg.model, HypothesisRecursion.Config)
+    cfg.model.num_hypotheses = 3
+    cfg.dataset.batch_size = 1_152
+    cfg.max_steps = 10_000
+    cfg.total_train_steps = 10_000
     return cfg
 
 
-def exp_smoke() -> SudokuTrainLoop:
-    """exp000 at minimum size, for verifying an installation end to end.
+def exp011() -> StaircaseSieveEval.Config:
+    """Fork exp010 with the following changes.
 
-    Not a result. It answers one question -- is the data prepared and does the
-    loop run -- so every axis that costs time without bearing on that answer is
-    cut: a few steps, and a network narrow enough to finish in seconds.
-    Accuracy will be poor, which is expected.
+    - Evaluate as a staircase sieve under exp008's committee lock: exp010's
+      deterministic pass over every puzzle; on survivors, the highest-q grid
+      of six latent hypotheses (hypothesis 0 plus five fresh draws); then
+      exp010 under exp007's search; then exp008's nine-view ladder and
+      escalated tail on exp006's checkpoint.
 
-    Returns:
-      config: SudokuTrainLoop with minimal hidden dim and steps.
+    Scores frozen checkpoints, so run exp006, exp008 and exp010 first.
+
+    Hypothesis:
+      exp010's single pass leaves about a quarter of exp006's failures, at
+      the same cost, so the sieve's expensive view rounds see a quarter of
+      the puzzles. Every round only proposes grids; the committee alone
+      accepts, so the 100% stays sound.
+
+    References:
+      https://arxiv.org/abs/2601.19085
+        Speed is Confidence.
+
+    Results:
+      1x H100: 422,786/422,786 on the full set, zero wrong locks, 1,598.6
+      GPU-s, 2.05x cheaper than exp008's sieve.
 
     """
-    cfg = exp000()
-    cfg.experiment_name = "exp_smoke"
-    cfg.step.model.channels_in = 32
-    cfg.step.model.num_layers = 1
-    cfg.dataset.batch_size = 8
-    cfg.dataset.num_train_puzzles = 4
-    cfg.dataset.num_eval_puzzles = 4
-    cfg.max_steps = cfg.step.total_train_steps = 4
-    cfg.num_steps_eval = 2
-    return cfg
-
-
-def _final_checkpoint(parent: Trainer.Config) -> str:
-    """Return the logical path of ``parent``'s last checkpoint."""
-    return (
+    parent = exp010()
+    hypothesis_model = parent.copy_tree().finalize().model
+    assert isinstance(hypothesis_model, HypothesisRecursion.Config)
+    cfg = StaircaseSieveEval.Config()
+    cfg.experiment_name = "exp011"
+    cfg.hypothesis_model = hypothesis_model
+    cfg.hypothesis_checkpoint_path = (
         f"/runs/{parent.experiment_name}/checkpoints/"
         f"step_{int(parent.max_steps):08d}.pt"
     )
-
-
-# Post-norm, matching the transformer default: a recurrence feeds a block its own
-# output, and an unnormalized residual stream compounds when it does.
-def _mixer_block() -> MLPMixerBlock.Config:
-    """Return an MLP-mixer block shaped for the sudoku grid."""
-    return MLPMixerBlock.Config(
-        prenorm=False,
-        token_mixer=SwiGLU.Config(
-            norm=RMSNorm.Config(),
-            init_weight=kaiming_uniform,
-            init_weight_out=kaiming_uniform,
-        ),
-        channel_mixer=SwiGLU.Config(
-            norm=RMSNorm.Config(),
-            init_weight=kaiming_uniform,
-            init_weight_out=kaiming_uniform,
-        ),
+    ladder = exp006()
+    cfg.model = ladder.copy_tree().finalize().model
+    cfg.checkpoint_path = (
+        f"/runs/{ladder.experiment_name}/checkpoints/"
+        f"step_{int(ladder.max_steps):08d}.pt"
     )
+    committee = exp008()
+    fit = committee.verifier
+    cfg.verifier_checkpoints = tuple(
+        str(fit.run_dir).format(experiment_name=name)
+        + f"/checkpoints/step_{fit.max_steps:08d}.pt"
+        for name in committee.verifier_names
+    )
+    return cfg
+
+
+def exp012() -> Reproduction.Config:
+    """Fork exp006 with the following changes.
+
+    - Lock answers by agreement: solve each puzzle with exp007's search on
+      the identity view and on a symmetric copy; two agreeing grids lock, and
+      a disagreement takes the modal grid over all nine views.
+    - Train the generator in 1,000-step resumed segments with augmentation
+      drawn from a dedicated stream seeded 44 (exp006 draws from the ambient
+      global RNG), so a crashed run resumes to the same weights.
+
+    A single-GPU pipeline: train, screen each 1,000-step checkpoint on the
+    first 5,000 test puzzles once a cheap deterministic gate opens, then lock
+    the full set at the first perfect screen and at the final checkpoint.
+
+    Hypothesis:
+      Two exact symmetries of one puzzle rarely produce the same WRONG grid,
+      so agreement is a sound, verifier-free acceptance gate. Closing
+      exp007's 321 wrong accepts should need about two solves per puzzle.
+
+    References:
+      https://arxiv.org/abs/2510.04871
+        Jolicoeur-Martineau. Less is More: Recursive Reasoning with Tiny
+        Networks.
+
+    Results:
+      1x H100: 422,786/422,786 on the full set at the final checkpoint, zero
+      wrong locks, 2.005 solves per puzzle. 25,080.9 GPU-s (7.0 GPU-h) in
+      all: training 2,985.8 GPU-s, screens 1,121.8 GPU-s, the full-set lock
+      20,973.4 GPU-s. The gate never opened before step 19,500, so the first
+      perfect screen and the first perfect full set are both the final
+      checkpoint.
+
+    """
+    generator = exp006()
+    cfg = Reproduction.Config()
+    cfg.study_name = "sudoku"
+    cfg.experiment_name = "exp012"
+    cfg.generator = generator
+    cfg.generator_name = "exp012_generator"
+    lock = cfg.full_eval = AgreementLockEval.Config()
+    lock.model = generator.copy_tree().finalize().model
+    return cfg
+
+
+def exp013() -> FittedSieve.Config:
+    """Fork exp011 with the following changes.
+
+    - Lock with a committee that encodes no Sudoku structure: three plain
+      full-attention verifiers with row and column coordinates only (no
+      group mask, no boxes), each also trained to fill masked digits of its
+      candidate. Fit them (seeds 0/1/2, 16,000 steps) on exp008's harvest
+      corpus when their checkpoints are missing.
+
+    Run exp008 first for its corpus, and exp011's parents for the sieve.
+
+    Hypothesis:
+      Predicting a masked digit requires reading exactly the cell's row,
+      column and box peers, so the denoising task makes the verifier
+      discover the constraint graph that exp008 hands its committee. Such a
+      committee locks soundly, so the 100% needs no structural prior.
+
+    References:
+      https://arxiv.org/abs/2107.03006
+        Austin et al. Structured Denoising Diffusion Models in Discrete
+        State-Spaces.
+
+    Results:
+      1x H100, sieve: 422,786/422,786 on the full set, zero wrong locks
+      (422,782 locked, 4 modal), 1,613.6 GPU-s. The recorded committee was
+      fit on an earlier harvest corpus; this rung fits on exp008's.
+
+    """
+    cfg = FittedSieve.Config()
+    cfg.experiment_name = "exp013"
+    harvest = exp008().harvest
+    corpus = str(harvest.run_dir).format(experiment_name=harvest.experiment_name)
+    for seed in range(3):
+        member = VerifierFit.Config()
+        member.experiment_name = f"exp013_verifier_s{seed}"
+        member.seed = seed
+        member.max_steps = 16_000
+        model = member.model = DenoisingVerifier.Config()
+        model.attention_mask = None
+        model.position_index = row_column_positions
+        member.loss = DenoisingLoss.Config()
+        member.dataset.harvest_dir = corpus
+        cfg.members.append(member)
+    cfg.sieve = exp011()
+    acceptor = cfg.sieve.acceptor
+    assert isinstance(acceptor, VerifierAcceptor.Config)
+    acceptor.model = cfg.members[0].model.copy_tree()
+    return cfg
+
+
+def exp_smoke() -> Trainer.Config:
+    """Fork exp000 for an unscored installation check.
+
+    - Automatically select the available device; no compilation.
+    - Width 32, one layer, slow 1 / fast 1, ACT depth 2.
+    - Batch 8, four train steps, evaluate four puzzles twice.
+    - No checkpoints.
+    """
+    cfg = exp000()
+    cfg.experiment_name = "exp_smoke"
+    # A smoke run validates the installation it runs on. Scored rungs pin
+    # CUDA so a scheduler mistake cannot silently produce a CPU result; this
+    # unscored rung keeps the runtime's best-device fallback.
+    cfg.runtime.device = None
+    cfg.model.compile = False
+    cfg.model.channels_in = 32
+    cfg.model.num_layers = 1
+    cfg.model.slow_cycles = 1
+    cfg.model.fast_cycles = 1
+    cfg.max_act_steps = 2
+    cfg.dataset.batch_size = 8
+    cfg.dataset.eval_num_instances = 4
+    cfg.max_steps = 4
+    cfg.total_train_steps = 4
+    cfg.num_steps_eval = 2
+    cfg.eval_warmup_batches = 0
+    cfg.checkpointer = None
+    return cfg

@@ -258,8 +258,7 @@ For example,
 from priml import cost as theoretical
 from priml.baselines.sudoku import experiments as sudoku
 
-sudoku.exp000().finalize().step.model.cost(batch_size=64, dtype=torch.bfloat16)
-sudoku.exp001().finalize().step.model.cost(batch_size=64, dtype=torch.bfloat16)
+sudoku.exp000().finalize().model.cost(batch_size=64, dtype=torch.bfloat16)
 
 theoretical.peak()["rtx5090", torch.bfloat16]
 theoretical.peak()["h100", torch.bfloat16]
@@ -268,32 +267,18 @@ theoretical.peak()["h100", torch.bfloat16]
 prints,
 
 ```
-Cost(params=6841858, params_active=6824450, bytes_state=8192)
-                     flops  bytes  bytes intensity
-                      bf16   bf16  int64      bf16
-primal  matmul      144.8G 532.4M      -       272
-primal  elementwise 322.1M   907M      -    0.3551
-primal  reduction   47.73M 96.96M      -    0.4923
-primal  selection        - 11.11M 43.42K         -
-adjoint matmul      289.7G 1.065G      -       272
-adjoint elementwise 393.7M 1.454G      -    0.2708
-adjoint reduction   37.08M 75.15M      -    0.4934
-adjoint selection   2.779M 16.71M 43.42K    0.1663
-total               435.3G 4.158G 86.83K     104.7
-
-
-Cost(params=4869122, params_active=4851714, bytes_state=0)
-                     flops  bytes  bytes intensity
-                      bf16   bf16  int64      bf16
-primal  matmul      114.2G 502.2M      -     227.4
-primal  elementwise 601.2M 1.946G      -    0.3089
-primal  reduction   86.33M 173.9M      -    0.4965
-primal  selection        - 11.11M 43.42K         -
-adjoint matmul      228.4G 1.004G      -     227.4
-adjoint elementwise 837.5M 3.888G      -    0.2154
-adjoint reduction   88.95M 179.3M      -    0.4962
-adjoint selection   2.779M 16.71M 43.42K    0.1663
-total               344.2G 7.722G 86.83K     44.58
+Cost(params=6833666, params_active=6823426, bytes_state=20480)
+                     flops  flops  bytes  bytes  bytes intensity intensity
+                      bf16    f32   bf16    f32  int64      bf16       f32
+primal  matmul      1.307T      - 4.807G      -      -     271.8         -
+primal  elementwise 3.506G 524.3K 12.24G 4.194M      -    0.2864     0.125
+primal  reduction   762.3M      - 1.539G      -      -    0.4954         -
+primal  selection        -      - 22.61M      - 84.48K         -         -
+adjoint matmul        871G      - 3.205G      -      -     271.8         -
+adjoint elementwise 1.585G 524.3K 7.525G 4.194M      -    0.2106     0.125
+adjoint reduction   206.4M      - 415.6M      -      -    0.4967         -
+adjoint selection   5.308M      - 31.87M      - 82.94K    0.1665         -
+total               2.184T 1.049M 29.79G 8.389M 167.4K     73.31     0.125
 
 
              flops  bytes intensity
@@ -314,11 +299,8 @@ sort          67T 3.35T        20
 
 The H100's BF16 matmul roofline knee is `295.2` FLOPs/byte. The
 transformer's matmul intensity is about 8% below this knee
-(`272 / 295.2 - 1 = -0.07859`); the mixer's is about 23% below it
-(`227.4 / 295.2 - 1 = -0.2297`). The knee is the crossover from memory-bound to
-compute-bound operation. By this matmul-intensity criterion, the MLP mixer
-configuration is less well tuned to the H100's compute-to-bandwidth ratio
-than the transformer configuration.
+(`271.8 / 295.2 - 1 = -0.07927`). The knee is the crossover from
+memory-bound to compute-bound operation.
 
 Without a duration, `utilization` returns intensity divided by the device's
 roofline knee for each cell. With `duration_sec`, it returns achieved FLOP/s
@@ -329,7 +311,7 @@ or a single-device report such as `theoretical.peak()["h100"]`.
 
 ```python
 theoretical.utilization(
-    sudoku.exp000().finalize().step.model.cost(batch_size=64, dtype=torch.bfloat16),
+    sudoku.exp000().finalize().model.cost(batch_size=64, dtype=torch.bfloat16),
     device="h100",
 )
 ```
@@ -337,41 +319,19 @@ theoretical.utilization(
 prints,
 
 ```
-                        bf16
-primal  matmul        0.9214
-primal  elementwise  0.01775
-primal  reduction    0.02462
-adjoint matmul        0.9214
-adjoint elementwise  0.01354
-adjoint reduction    0.02467
-adjoint selection   0.008314
-total                  1.932
+                        bf16     f32
+primal  matmul        0.9206       -
+primal  elementwise  0.01432 0.00625
+primal  reduction    0.02477       -
+adjoint matmul        0.9206       -
+adjoint elementwise  0.01053 0.00625
+adjoint reduction    0.02484       -
+adjoint selection   0.008327       -
+total                  1.924  0.0125
 ```
 
 The displayed utilization `total` sums per-cell ratios; it is not a
 whole-model utilization and should not be interpreted as one.
-
-Why is the smaller mixer less well tuned? It has about 29% fewer parameters,
-but shrinking the model does not reduce computation and operand traffic in
-the same proportion. Its primal matmul work falls about 21% (`114.2G` versus
-`144.8G` FLOPs), while its primal matmul bytes fall only about 6% (`502.2M`
-versus `532.4M`). The mixer therefore does less arithmetic for nearly the
-same operand traffic, moving its matmul intensity farther below the H100's
-knee. The transformer gets about 20% more arithmetic per byte
-(`272 / 227.4 - 1 = 0.1961`).
-
-The parameter-to-traffic comparison tells the same tuning story. For primal
-matmuls, the transformer has `6841858 / 532.4M = 0.01285` parameters per
-operand byte, versus `4869122 / 502.2M = 0.009696` for the mixer: about 33%
-more parameters for the same traffic budget. Fewer parameters alone do not
-make a configuration better matched to the hardware.
-
-Across primal and adjoint, the mixer's non-matmul operand traffic is about
-2.43 times the transformer's (`6.216G` versus `2.561G` bytes). The displayed
-BF16 intensity totals are `44.58` and `104.7`, respectively. These divide
-summed BF16 FLOPs by summed BF16 bytes; they exclude the separate integer
-traffic. An all-dtype intensity divides total FLOPs by total bytes, including
-integer/index traffic, rather than adding or averaging per-dtype intensities.
 
 These bytes describe logical operand I/O for the analytical unfused algorithm.
 They are not measured HBM traffic: fusion and cache reuse can change physical

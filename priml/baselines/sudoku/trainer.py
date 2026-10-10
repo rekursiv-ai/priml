@@ -1,6 +1,6 @@
 """Single-GPU TRM trainer: pool-based ACT training, eval, and run plumbing.
 
-One :class:`Trainer` merges the internal train loop, the TRM ACT train step
+One :class:`Trainer` merges the train loop, the TRM ACT train step
 (atomic mode), the feedback-recurrence and CSP-auxiliary-loss extensions, and
 the conditional-depth eval into a single class, plus the supporting pieces it
 needs (optimizers, EMA, checkpointing, trackers, runtime, seeding) so the
@@ -10,8 +10,10 @@ Each ``train_step()`` call (atomic ACT scheduling):
 
   1. Slots the incoming batch into halted pool positions (``torch.where``);
      active slots keep their carried ``z_slow``/``z_fast``/feedback state.
-  2. Forwards the full pool (one multi-cycle forward), consuming the pool's
-     decoded-grid feedback.
+  2. Forwards the full pool through the ``routing`` slot, consuming the
+     pool's decoded-grid feedback. :class:`SingleChain` runs one multi-cycle
+     forward; a routing over several latent hypotheses (``hypotheses.py``) trains
+     and carries the one it selects.
   3. Computes the loss, backprops, clips, applies the cosine LR scale, and
      steps the optimizers.
   4. Updates the EMA shadow, the latent carry, and the per-slot halt mask.
@@ -31,7 +33,7 @@ Order- and name-sensitive invariants (fidelity contracts -- do not reorder):
   order: ``puzzle_emb`` -> SignSGD (sparse rows); names containing ``embed``
   or ``head`` (and every param with ndim < 2) -> AdamW (betas (0.9, 0.95)
   hardcoded); remaining 2D weights -> Muon (``ensemble_dims=0``), 3D ->
-  Muon (``ensemble_dims=1``). Parameter names are a contract with trm.py.
+  Muon (``ensemble_dims=1``). Parameter names are a contract with latent_recursion.py.
 * ``torch._inductor.config.emulate_precision_casts`` is set BEFORE model
   construction; when set, eval stays compiled (see
   ``Trainer._eval_compile_disabled``).
@@ -57,10 +59,9 @@ and ``metrics.json`` (see :func:`resolve_run_dir`; ``/opt/scratch`` is the
 default root).
 
 Downstream seams: :meth:`Trainer.run` trains to the stop condition;
-:meth:`Trainer.evaluate` scores the current (possibly resumed) weights over
-the eval split and publishes the result; :attr:`Trainer.ema_shadow` exposes
-the name-keyed EMA weights (checkpoint-upload contract); ``eval_loss`` /
-``preprocess_batch`` are the per-batch eval seams.
+:attr:`Trainer.ema_shadow` exposes the name-keyed EMA weights
+(checkpoint-upload contract); ``eval_loss`` / ``preprocess_batch`` are the
+per-batch eval seams.
 
 ``trainer_test.py`` replays frozen trajectories of every recipe bit-for-bit.
 """
@@ -69,6 +70,7 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -102,8 +104,14 @@ from priml.baselines.sudoku.act import (
     SampledMinimum,
     SlotScramble,
 )
+from priml.baselines.sudoku.latent_recursion import LatentRecursion
+from priml.baselines.sudoku.losses import (
+    csp_cardinality_per_sample,
+    token_cross_entropy,
+)
 from priml.baselines.sudoku.puzzle_data import PuzzleDataset
-from priml.baselines.sudoku.trm import TRM
+from priml.baselines.sudoku.puzzle_spec import sudoku_group_indices
+from priml.baselines.sudoku.routing import Routing, SingleChain
 from priml.math.seed import (
     RngState,
     get_rng_state,
@@ -118,13 +126,13 @@ from priml.train.checkpointer import Checkpointer
 from priml.train.ema import EMA
 from priml.train.grad_clip import clip_grad_norm_, total_grad_norm
 from priml.train.tracker import FileTracker, WandbTracker, scalar_metrics
+from priml.train.train_loop import EvalTimeLimitError
 
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable, Iterator, Mapping
 
     from priml.baselines.sudoku.puzzle_data import PuzzleBatch
-    from priml.baselines.sudoku.puzzle_spec import SudokuSpec
     from priml.train.custom_types import TrainStepOutput
 
 
@@ -138,7 +146,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Seeding and RNG state (subset of the internal seed utilities).
+# Recipe factories.
 # ---------------------------------------------------------------------------
 
 
@@ -179,80 +187,6 @@ def recipe_checkpointer() -> Checkpointer.Config:
     return Checkpointer.Config(keep_last_n=8, keep_every=10_000)
 
 
-def sudoku_group_indices(spec: SudokuSpec) -> Tensor:
-    """Return the cell indices of every sudoku constraint group.
-
-    Args:
-      spec: Dataset-owned grid and constraint-box geometry.
-
-    Returns:
-      group_indices: ``[27, 9]`` long tensor by default; rows 0-8 are the 9 grid rows,
-        rows 9-17 the 9 columns, rows 18-26 the 9 boxes, each listing the 9
-        row-major cell indices (0-80) of that group.
-
-    """
-    rows, cols = spec.grid_shape
-    box_rows, box_cols = spec.box_shape
-    cells = torch.arange(rows * cols).reshape(rows, cols)
-    boxes = (
-        cells.reshape(rows // box_rows, box_rows, cols // box_cols, box_cols)
-        .permute(0, 2, 1, 3)
-        .reshape(-1, box_rows * box_cols)
-    )
-    return torch.cat([cells, cells.T, boxes])
-
-
-def csp_cardinality_per_sample(
-    logits: Tensor,
-    labels: Tensor,
-    group_indices: Tensor,
-    temperature: float = 1.0,
-) -> Tensor:
-    """Mean squared row/column/box cardinality violation per sample.
-
-    The cardinality loss of arXiv 2307.04895 on the model's per-cell token
-    distributions: within every constraint group, each solution symbol's
-    probability mass must sum to exactly 1 over the group's 9 cells. The 9
-    solution symbols are read from ``labels`` per sample rather than
-    hardcoded to tokens 2-10: the on-the-fly augmentation's legacy branch
-    permutes token values 1-9 (blank marker included), so which 9 of the 10
-    non-pad tokens are digits is sample-dependent. The symbol absent from
-    the label (the blank marker) gets target 0. The softmax runs in fp32 so
-    bf16-autocast logits do not quantize the small per-group residuals.
-
-    Args:
-      logits: ``[B, 81, 11]`` prefix-stripped grid logits.
-      labels: ``[B, 81]`` label tokens. Rows holding only ignore labels
-        (atomic-mode tail padding) yield an all-zero target and must be
-        masked out by the caller.
-      group_indices: ``[27, 9]`` cell indices from
-        :func:`sudoku_group_indices`, on ``logits``'s device.
-      temperature: Softmax temperature for the per-cell distributions (1.0 is
-        the published form and the recipe value).
-
-    Returns:
-      per_sample: ``[B]`` mean over the 27 groups x 10 non-pad tokens of
-        ``(group mass - target) ** 2``.
-
-    References:
-      https://arxiv.org/abs/2307.04895
-        Yang, Lee & Park. Learning to Solve Constraint Satisfaction Problems
-        with Recurrent Transformer. ICLR 2023.
-
-    """
-    if logits.shape[-2] != group_indices.shape[-1] ** 2:
-        raise ValueError("logits must contain the prefix-stripped grid cells")
-    probs = (logits.float() / temperature).softmax(dim=-1)[..., 1:]
-    mass = probs[:, group_indices].sum(dim=-2)
-    with torch.no_grad():
-        present = nn.functional.one_hot(
-            labels.long().clamp(min=0),
-            num_classes=logits.shape[-1],
-        ).sum(dim=-2)
-        target = (present > 0).float()[..., 1:].unsqueeze(-2)
-    return (mass - target).square().mean(dim=(-2, -1))
-
-
 # ---------------------------------------------------------------------------
 # Run-directory convention.
 # ---------------------------------------------------------------------------
@@ -271,14 +205,6 @@ def resolve_run_dir(base_dir: str | Path, experiment_name: str) -> Path:
     """
     root = Path(base_dir) if str(base_dir) else Path("/opt/scratch")
     return root / "runs" / experiment_name
-
-
-class EvalTimeLimitError(RuntimeError):
-    """Raised when a single eval pass exceeds ``Trainer.Config.max_eval_time``.
-
-    Surfaced as a hard failure so an over-budget eval fails the experiment
-    instead of producing a slow, incomparable score.
-    """
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +228,8 @@ class Trainer:
 
         experiment_name: str = ""
         """Run identity; keys the run dir ``runs/{name}`` beneath the scratch
-        root and the checkpoint dir. Required (stamped by run.py when empty)."""
+        root and the checkpoint dir. Required (the launcher stamps the
+        factory name when empty)."""
 
         doc: str = ""
         """Free-text description (hypothesis/changes/outcome); forwarded to
@@ -313,8 +240,11 @@ class Trainer:
         to the fixed ``/opt/scratch`` root."""
 
         # -- Parts.
-        model: TRM.Config = field(default_factory=TRM.Config)
+        model: LatentRecursion.Config = field(default_factory=LatentRecursion.Config)
         """The TRM; defaults are the full recipe architecture."""
+
+        routing: Makeable[Routing] = field(default_factory=SingleChain.Config)
+        """Which latent chain each train step trains and the pool carries."""
 
         dataset: PuzzleDataset.Config = field(default_factory=PuzzleDataset.Config)
         """Puzzle data; ``dataset.batch_size`` is THE batch size (the pool
@@ -552,8 +482,9 @@ class Trainer:
                 self.model.pos2d_box_shape = spec.box_shape
             self.model.puzzle_emb_batch_size = self.dataset.batch_size
             # One device for data and compute unless the dataset was pointed
-            # elsewhere explicitly.
-            if self.dataset.device is None:
+            # elsewhere explicitly. A runtime left to pick its best device
+            # resolves at construction, where the dataset follows it.
+            if self.dataset.device is None and self.runtime.device is not None:
                 self.dataset.device = str(self.runtime.device)
             # Push run context down; explicit child values win. The dataset is
             # a resource child (rooted at the scratch base); the checkpointer is
@@ -611,10 +542,10 @@ class Trainer:
         if not config.ephemeral:
             set_seed_local(config.seed)
 
-        # Process-global TorchInductor flag; must be set before TRM.__init__
+        # Process-global TorchInductor flag; must be set before LatentRecursion.__init__
         # binds torch.compile so the first trace captures it.
         inductor_config.emulate_precision_casts = config.emulate_precision_casts
-        self.model: TRM = config.model.make()
+        self.model: LatentRecursion = config.model.make()
         if not config.train_q_halt:
             for param in self.model.q_head.parameters():
                 param.requires_grad_(False)
@@ -647,9 +578,19 @@ class Trainer:
         # weights stay bit-for-bit identical.
         self.pool: AtomicPool = _pool(config).make()
         self.pool.to(self.device)
+        self.routing: Routing = config.routing.make()
+        self._token_loss = partial(
+            token_cross_entropy,
+            label_smoothing=config.label_smoothing,
+            ignore_index=config.ignore_label_id,
+        )
         self._csp_groups = sudoku_group_indices(config.dataset.spec).to(self.device)
 
-        self.dataset = config.dataset.make()
+        dataset = config.dataset
+        if dataset.device is None:
+            dataset = dataset.copy_tree()
+            dataset.device = str(self.device)
+        self.dataset = dataset.make()
         self.checkpointer: Checkpointer | None = (
             config.checkpointer.make() if config.checkpointer is not None else None
         )
@@ -704,8 +645,9 @@ class Trainer:
     # * identical -- silent; * only stop conditions differ (top-level
     # ``max_steps``/``max_time`` -- horizon extension and the segmented reproduction
     # pipelines move them legitimately) -- an INFO notice; * anything else differs -- a
-    # loud warning with the full diff. Never a hard failure: ``--fresh`` remains the
-    # escape hatch, and the recorded file is left untouched as the fresh-start evidence.
+    # loud warning with the full diff. Never a hard failure: moving the run dir aside
+    # remains the escape hatch, and the recorded file is left untouched as the
+    # fresh-start evidence.
     def _guard_resume_config(self, resumed: bool) -> None:
         """Record the launch config; warn LOUDLY when a resume changed it."""
         path = self.run_dir / "config.txt"
@@ -757,7 +699,7 @@ class Trainer:
             "  %s\n"
             "Training onward under a changed config can silently corrupt a\n"
             "resumed run. If the change is intentional, carry on; otherwise\n"
-            "restart with --fresh (or move the run dir aside).\n"
+            "restart in a fresh run dir (move this one aside).\n"
             "Diff (recorded launch config -> current):\n%s\n%s",
             banner,
             banner,
@@ -835,25 +777,6 @@ class Trainer:
         finally:
             self._close()
 
-    def evaluate(self) -> dict[str, float]:
-        """Run one full eval pass on the current weights and publish it.
-
-        The checkpoint (if any) was already restored at construction by the
-        checkpointer's resume policy. Publishes the metrics as the run's
-        final eval (RESULT line + ``metrics.json``); trackers stay open so a
-        caller may evaluate repeatedly.
-
-        Returns:
-          metrics: The scalar eval metrics.
-
-        """
-        if self.global_step == 0:
-            logger.warning(
-                "evaluate() at global_step=0: no checkpoint was resumed; "
-                "scoring freshly initialized weights.",
-            )
-        return self._maybe_eval(is_final=True, force=True) or {}
-
     def preprocess_batch(self, batch: PuzzleBatch) -> PuzzleBatch:
         """Move every tensor in ``batch`` to the trainer's device.
 
@@ -901,6 +824,9 @@ class Trainer:
             puzzle_ids=pid,
             ignore_label_id=self.config.ignore_label_id,
         )
+        # Before the forward and outside autocast: seating state is drawn in
+        # full precision, as the routed recipes were trained.
+        self.routing.seat(self.model, self.pool, global_step=self.global_step)
         n_active = active.sum()
         fl = self._forward_and_loss(active=active, n_active=n_active)
         train_metrics = fl.train_metrics
@@ -1332,7 +1258,7 @@ class Trainer:
 
     # Order: feedback stash -> forward -> lm CE -> ``+ q_halt_weight * q_bce`` -> ``+
     # csp_loss_weight * csp`` -> feedback pool update (argmax + scramble draws). The
-    # feedback update runs LAST, matching the internal cooperative-override ordering.
+    # feedback update runs LAST, matching the original cooperative-override ordering.
     def _forward_and_loss(self, *, active: Tensor, n_active: Tensor) -> _ForwardLoss:
         """Forward the pool and compose the loss (the fixed-order contract)."""
         config = self.config
@@ -1341,16 +1267,16 @@ class Trainer:
         if pool.carry is not None:
             self.model.set_feedback(pool.feedback)
         with self._autocast():
-            out = self.model(
-                pool.inputs,
-                pool.z_slow,
-                pool.z_fast,
-                pool.puzzle_ids if self.model.puzzle_emb is not None else None,
+            routed = self.routing(
+                self.model,
+                pool,
+                token_loss=self._token_loss,
+                ignore_index=config.ignore_label_id,
             )
-        logits = out["logits"]
-        q_halt = out["q_halt"]
-        z_slow_out = out["z_slow"]
-        z_fast_out = out["z_fast"]
+        logits = routed.logits
+        q_halt = routed.q_halt
+        z_slow_out = routed.z_slow
+        z_fast_out = routed.z_fast
 
         lm_loss = self._compute_loss(
             logits=logits,
@@ -1434,6 +1360,7 @@ class Trainer:
                 )
                 loss = loss + config.csp_loss_weight * csp_loss
                 train_metrics["csp_loss"] = csp_loss.detach()
+        train_metrics.update(routed.metrics)
 
         # Advance the feedback recurrence AFTER the loss terms: the pool's
         # next feedback is this forward's decoded grid (givens clamped),
@@ -1462,13 +1389,7 @@ class Trainer:
     ) -> Tensor:
         """Token CE -> per-sample mean over non-ignore -> mean over active."""
         ignore = self.config.ignore_label_id
-        loss_per_token = nn.functional.cross_entropy(
-            logits.reshape(-1, logits.shape[-1]),
-            labels.reshape(-1).long(),
-            label_smoothing=self.config.label_smoothing,
-            ignore_index=ignore,
-            reduction="none",
-        ).reshape(logits.shape[0], -1)
+        loss_per_token = self._token_loss(logits, labels)
         nonpad = (labels != ignore).sum(dim=-1).clamp(min=1)
         loss_per_sample = loss_per_token.sum(dim=-1) / nonpad
         loss_per_sample = torch.where(
@@ -1652,18 +1573,15 @@ class Trainer:
         self,
         *,
         is_final: bool = False,
-        force: bool = False,
     ) -> dict[str, float] | None:
         """Run and publish an eval when due; the final eval emits RESULT."""
-        if not force:
-            if not math.isfinite(self.config.num_steps_eval):
-                return None
-            cadence_due = (
-                self.global_step != 0
-                and self.global_step % self.config.num_steps_eval == 0
-            )
-            if not is_final and not cadence_due:
-                return None
+        if not math.isfinite(self.config.num_steps_eval):
+            return None
+        cadence_due = (
+            self.global_step != 0 and self.global_step % self.config.num_steps_eval == 0
+        )
+        if not is_final and not cadence_due:
+            return None
         eval_start = time.perf_counter()
         eval_metrics = self._eval_epoch()
         eval_time = time.perf_counter() - eval_start

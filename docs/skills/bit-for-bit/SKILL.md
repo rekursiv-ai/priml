@@ -349,13 +349,13 @@ Apply in order; re-mint and confirm zero source mismatches after each.
 
 | Lever | Before -> after (measured) | Why it stays a valid test |
 |---|---|---|
-| Shrink by size only: width 16->8, heads 2, 1 layer, batch 2, 3-5 steps, 9-cell grid, `round_to` 8 | arcagi1 `exp004` 216 KB -> 38 KB (with the rows below) | Every numerical choice (init, norms, optimizer, loss, ACT) still runs. |
+| Shrink by size only: width 16->8, heads 2, 1 layer, batch 2, 3-5 steps, 9-cell grid, `round_to` 8 | arcagi `exp000` 216 KB -> 38 KB (with the rows below) | Every numerical choice (init, norms, optimizer, loss, ACT) still runs. |
 | Drop stored inputs the test rebuilds, and outputs implied by stored state | arcagi3 `canonical_exp000_training` 192 KB -> 11 KB | The rebuilt input and the implied output are still computed and still reach the compared state. |
 | RNG as its next 8 draws (`golden.rng_fingerprint`), not the 5 KB Mersenne state | 5,056 B -> 64 B per record | Same position pinned; any extra draw changes it. |
-| One key per quantity: stack per-step values on a step axis (`golden.put_steps`); join per-parameter heads into one tensor | arcagi1 110 -> 57 keys; `exp004` 25 KB -> 13 KB | Same values; per-key pickle overhead (~70-100 B) dominated. |
-| Write with `golden.write_tensors`: one flat tensor per dtype plus a zlib index | arcagi2 `metric_distributed` 300 keys: 25 KB -> 5.3 KB | File size stops growing with key count; still a plain `torch.load`. |
+| One key per quantity: stack per-step values on a step axis (`golden.put_steps`); join per-parameter heads into one tensor | arcagi 110 -> 57 keys; `exp000` 25 KB -> 13 KB | Same values; per-key pickle overhead (~70-100 B) dominated. |
+| Write with `golden.write_tensors`: one flat tensor per dtype plus a zlib index | arcagi `parity/metric_distributed` 300 keys: 25 KB -> 5.3 KB | File size stops growing with key count; still a plain `torch.load`. |
 | Narrow whole small numbers to uint8 (`golden.stored`) | token grids, counters: 8x smaller | Exact; a value that stops being whole changes the dtype, which is reported. |
-| Record carried state once, at the end (ACT latents, final params) | arcagi2 `distributed` 33 KB -> 18.6 KB | Final carried state depends on every step. |
+| Record carried state once, at the end (ACT latents, final params) | arcagi `parity/distributed` 33 KB -> 18.6 KB | Final carried state depends on every step. |
 | Never lzma or other whole-file compression | -- | `bfb_test` `torch.load`s every `.pt`; a compressed one broke it. |
 
 Prove each shrunk golden still bites: perturb one weight by one ULP, or one

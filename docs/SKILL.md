@@ -613,7 +613,7 @@ steps_per_epoch = NUM_TRAIN_SAMPLES // cfg.dataset.batch_size
 
 ## 6. Writing an experiment
 
-Directories are named after the dataset -- `mnist`, `cifar10`, `arcagi1`;
+Directories are named after the dataset -- `mnist`, `cifar10`, `arcagi`;
 `nanochat` and `sudoku` are exceptions, better known than their datasets. Layout
 mirrors priml: `data.py`, `model.py`, `train_step.py`, `experiments.py`, each
 with a `*_test.py`, plus `testdata/` and `scripts/prepare_data.py`. Data staging

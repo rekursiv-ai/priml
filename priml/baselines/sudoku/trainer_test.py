@@ -2,15 +2,20 @@
 
 The goldens in ``testdata/exp0NN.pt`` were recorded from the reference
 implementation this trainer was ported from; this module imports none of it,
-so the proof outlives that code. Each recipe runs through the same size-only shrink
-fixture while preserving every numerical choice the experiment makes.
+so the proof outlives that code. The latent-hypothesis goldens (exp009,
+exp010) are snapshots of this port, minted after its three training steps
+matched the reference bit for bit at the same model sizes on a 9x9 grid. Each
+recipe runs through the same size-only shrink fixture while preserving every
+numerical choice the experiment makes.
 
 Recorded per recipe, all compared with ``torch.equal``: every parameter and
 persistent buffer after init and a fingerprint of the global RNG; an
 evaluation rollout before and after training; three train steps (the batch the
 dataset served, loss, probe, every metric, the ACT pool); the final state,
-latents, and EMA shadow. Width 4 and batch 2: the goldens exercise every code
-path, not kernel throughput, so they stay a few KB each.
+latents, and EMA shadow. Width 4 and batch 2 (latent hypotheses: width 12,
+batch 1): the goldens exercise every code path, not kernel throughput, so they
+stay a few KB each. Only the representative rungs keep a golden (``GOLDEN_RECIPES``);
+every rung still builds and steps at full geometry.
 """
 
 from __future__ import annotations
@@ -26,10 +31,12 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.sudoku import experiments, trm
+from priml import runtime
+from priml.baselines.sudoku import experiments, latent_recursion
 from priml.baselines.sudoku.act import CellCorruption
+from priml.baselines.sudoku.hypotheses import HypothesisRecursion
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
-from priml.baselines.sudoku.trainer import Trainer, sudoku_group_indices
+from priml.baselines.sudoku.trainer import Trainer
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import (
@@ -40,6 +47,7 @@ from priml.testing.golden import (
     rng_fingerprint,
     stored,
 )
+from priml.train import checkpointer
 
 
 if TYPE_CHECKING:
@@ -54,8 +62,24 @@ if TYPE_CHECKING:
 
 _CWD: Final = Path(__file__).resolve().parent
 
-RECIPES: Final = ("exp004", "exp005", "exp006", "exp007", "exp008", "exp009", "exp010")
-"""Every rung of the training ladder."""
+RECIPES: Final = (
+    "exp000",
+    "exp001",
+    "exp002",
+    "exp003",
+    "exp004",
+    "exp005",
+    "exp006",
+    "exp009",
+    "exp010",
+)
+"""Every training rung."""
+
+GOLDEN_RECIPES: Final = ("exp000", "exp006", "exp009", "exp010")
+"""The rungs with a frozen trajectory: the baseline, the full single-chain
+recipe, and both latent-hypothesis routings. The rungs between exp000 and
+exp006 each add one mechanism that exp006 carries, so their trajectories are
+compositions the exp006 golden already freezes."""
 
 TRAIN_STEPS: Final = 3
 
@@ -166,15 +190,6 @@ class _FalsyCellCorruption(CellCorruption.Config):
         return False
 
 
-def test_constraint_groups_follow_puzzle_spec() -> None:
-    spec = SudokuSpec(grid_shape=(4, 4), box_shape=(2, 2), vocab_size=6)
-    groups = sudoku_group_indices(spec)
-    assert groups.shape == (12, 4)
-    assert torch.equal(groups[0], torch.tensor([0, 1, 2, 3]))
-    assert torch.equal(groups[4], torch.tensor([0, 4, 8, 12]))
-    assert torch.equal(groups[8], torch.tensor([0, 1, 4, 5]))
-
-
 def write_dataset(root: Path, *, grid_len: int = 16, vocab_size: int = 6) -> Path:
     """Write a square-grid fixture: 4 train rows (2 groups x 2), 2 test rows.
 
@@ -210,18 +225,32 @@ def write_dataset(root: Path, *, grid_len: int = 16, vocab_size: int = 6) -> Pat
 
 
 def port_config(recipe: str, scratch: Path) -> Trainer.Config:
-    """Return the priml ``recipe`` shrunk by size only."""
+    """Return the priml ``recipe`` shrunk by size only.
+
+    SIC recipes run at width 12, FFN hidden 4 and batch 1, the sizes their
+    source parity ran at: hypothesis alignment projects on the FFN's top-10
+    subspace, which is the whole space at width 10 or less and divides by a
+    zero perpendicular norm there.
+    """
     factory = cast("Callable[[], Trainer.Config]", getattr(experiments, recipe))
     config = shrink(
         factory(),
         scratch=scratch,
-        recipe_block=trm.recipe_block,
+        recipe_block=latent_recursion.recipe_block,
     )
     config.dataset.spec = SudokuSpec(
         grid_shape=(4, 4),
         box_shape=(2, 2),
         vocab_size=6,
     )
+    if isinstance(config.model, HypothesisRecursion.Config):
+        config.model.channels_in = 12
+        assert config.model.block is not None
+        assert isinstance(config.model.block.ffn, SwiGLU.Config)
+        config.model.block.ffn.channels_hidden = 4
+        config.dataset.batch_size = 1
+        config.dataset.eval_batch_size = 1
+        config.dataset.eval_num_instances = 1
     return config
 
 
@@ -370,7 +399,7 @@ def load_golden(recipe: str) -> dict[str, Tensor]:
     return read_tensors(golden_path(recipe))
 
 
-@pytest.mark.parametrize("recipe", RECIPES)
+@pytest.mark.parametrize("recipe", GOLDEN_RECIPES)
 def test_golden_replays_bit_for_bit(recipe: str, tmp_path: Path) -> None:
     """The trainer reproduces the frozen trajectory with zero mismatches."""
     actual = run(port_config(recipe, tmp_path), tmp_path)
@@ -379,15 +408,20 @@ def test_golden_replays_bit_for_bit(recipe: str, tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("recipe", RECIPES)
 def test_full_geometry_still_runs(recipe: str, tmp_path: Path) -> None:
+    """Every rung builds, trains a step, and evaluates on the 9x9 grid."""
     config = port_config(recipe, tmp_path)
     config.dataset.spec = SudokuSpec()
-    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
-        write_dataset(tmp_path / "data", grid_len=81, vocab_size=11)
-        result = record(cast(Subject, config.make()))
-    assert result["data/media"].shape[-1] == 81
+    write_dataset(tmp_path / "data", grid_len=81, vocab_size=11)
+    with torch.random.fork_rng(devices=[]):
+        subject = config.make()
+        batch = subject.preprocess_batch(next(iter(subject.dataset.train_dataloader())))
+        assert batch["media"].shape[-1] == 81
+        subject.train_step(**batch)
+        evaluation = subject.eval_loss(**batch)
+    assert evaluation["model"].shape == (batch["media"].shape[0], 1 + 81)
 
 
-@pytest.mark.parametrize("recipe", RECIPES)
+@pytest.mark.parametrize("recipe", GOLDEN_RECIPES)
 def test_one_ulp_weight_bites(recipe: str, tmp_path: Path) -> None:
     config = port_config(recipe, tmp_path)
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
@@ -404,9 +438,9 @@ def test_one_ulp_weight_bites(recipe: str, tmp_path: Path) -> None:
 
 def test_golden_bites(tmp_path: Path) -> None:
     """A changed loss weight is reported, not absorbed."""
-    config = port_config("exp010", tmp_path)
+    config = port_config("exp006", tmp_path)
     config.csp_loss_weight = 0.25
-    report = mismatches(load_golden("exp010"), run(config, tmp_path))
+    report = mismatches(load_golden("exp006"), run(config, tmp_path))
     assert any(line.startswith("train/loss") for line in report), report
 
 
@@ -446,7 +480,7 @@ def _put(out: dict[str, Tensor], prefix: str, values: Mapping[str, Tensor]) -> N
 
 
 def test_do_train_step_advances_training(tmp_path: Path) -> None:
-    config = port_config("exp004", tmp_path)
+    config = port_config("exp000", tmp_path)
     config.num_steps_log = 1
     write_dataset(tmp_path / "data")
     subject = config.make()
@@ -461,7 +495,7 @@ def test_a_cpu_run_logs_no_gpu_memory_on_a_cuda_host(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = port_config("exp004", tmp_path)
+    config = port_config("exp000", tmp_path)
     config.num_steps_log = 1
     write_dataset(tmp_path / "data")
     subject = config.make()
@@ -480,6 +514,23 @@ def test_a_cpu_run_logs_no_gpu_memory_on_a_cuda_host(
     assert all("gpu_mem_allocated_gb" not in metrics for metrics in logged)
 
 
+def test_a_best_device_runtime_puts_the_data_on_the_resolved_device(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runtime left to pick its device (exp_smoke) feeds data from that device."""
+    monkeypatch.setattr(runtime, "best_device", lambda: torch.device("cpu"))
+    config = port_config("exp000", tmp_path)
+    config.runtime.device = None
+    config.dataset.device = None
+    write_dataset(tmp_path / "data")
+    assert config.copy_tree().finalize().dataset.device is None
+    subject = config.make()
+    batch = subject._next_batch()
+    media = batch["media"]
+    assert media.device == subject.device == torch.device("cpu")
+
+
 def _recorder(
     logged: list[Mapping[str, float]],
 ) -> Callable[..., None]:
@@ -491,21 +542,22 @@ def _recorder(
 
 
 def test_trainer_execution_variants(tmp_path: Path) -> None:
-    config = port_config("exp004", tmp_path)
+    config = port_config("exp000", tmp_path)
     config.dataset.working_dir = tmp_path / "data"
     config.grad_clip_max_norm = None
     config.log_body_norms = True
     config.dataset.eval_batch_size = 1
     write_dataset(tmp_path / "data")
     subject = config.make()
-    assert isinstance(subject.evaluate(), dict)
+    subject.config.num_steps_eval = 1
+    assert isinstance(subject._maybe_eval(is_final=True), dict)
     subject.config.emulate_precision_casts = False
     with subject._eval_compile_disabled():
         pass
     result = subject.train_step(**next(iter(subject.dataset.train_dataloader())))
     assert "metrics" in result
     assert "lr" in result["metrics"]
-    assert isinstance(subject.evaluate(), dict)
+    assert isinstance(subject._maybe_eval(is_final=True), dict)
     subject.config.eval_warmup_batches = 1
     subject._warm_eval_compile()
     empty = subject.eval_loss(
@@ -520,18 +572,18 @@ def test_trainer_execution_variants(tmp_path: Path) -> None:
 
 
 def test_trainer_optional_constructor_and_stop_guards(tmp_path: Path) -> None:
-    config = port_config("exp004", tmp_path)
+    config = port_config("exp000", tmp_path)
     config.dataset.working_dir = tmp_path / "data"
     config.train_q_halt = False
     config.doc = "notes"
     write_dataset(tmp_path / "data")
     subject = config.make()
     assert all(not p.requires_grad for p in subject.model.q_head.parameters())
-    config = port_config("exp004", tmp_path)
+    config = port_config("exp000", tmp_path)
     config.dataset.working_dir = tmp_path / "data"
     config.use_ema = False
     assert config.make().ema_shadow is None
-    config = port_config("exp004", tmp_path)
+    config = port_config("exp000", tmp_path)
     config.dataset.working_dir = tmp_path / "data"
     config.max_steps = float("inf")
     config.max_time = float("inf")
@@ -539,8 +591,25 @@ def test_trainer_optional_constructor_and_stop_guards(tmp_path: Path) -> None:
         config.make().run()
 
 
+def test_a_short_run_checkpoints_evaluates_and_resumes(tmp_path: Path) -> None:
+    """Two steps with cadence evals and saves, then a resume that adds one."""
+    write_dataset(tmp_path / "data")
+    for steps in (2, 3):
+        config = port_config("exp000", tmp_path)
+        config.checkpointer = checkpointer.Checkpointer.Config(save_every=1)
+        config.num_steps_eval = 1
+        config.eval_halt_exit = True
+        config.eval_halt_threshold = -1e9
+        config.max_steps = steps
+        subject = config.make()
+        subject.run()
+        assert subject.global_step == steps
+    saved = sorted(path.name for path in (tmp_path / "runs").rglob("step_*.pt"))
+    assert saved[-1] == "step_00000003.pt"
+
+
 def test_trainer_run_and_resume_guard_branches(tmp_path: Path) -> None:
-    config = port_config("exp004", tmp_path)
+    config = port_config("exp000", tmp_path)
     config.dataset.working_dir = tmp_path / "data"
     write_dataset(tmp_path / "data")
     subject = config.make()
@@ -556,7 +625,7 @@ def test_trainer_run_and_resume_guard_branches(tmp_path: Path) -> None:
 
 def test_dedicated_generators_survive_a_checkpoint_round_trip(tmp_path: Path) -> None:
     """Resume continues the halt and scramble streams instead of restarting them."""
-    config = port_config("exp010", tmp_path)
+    config = port_config("exp006", tmp_path)
     write_dataset(tmp_path / "data")
     subject = config.make()
     subject.train_step(**subject._next_batch())
@@ -583,7 +652,7 @@ def test_dedicated_generators_survive_a_checkpoint_round_trip(tmp_path: Path) ->
 
 
 def test_feedback_corruption_overrides_the_slot_scramble(tmp_path: Path) -> None:
-    config = port_config("exp010", tmp_path)
+    config = port_config("exp006", tmp_path)
     write_dataset(tmp_path / "data")
     corruption = config.feedback_corruption = CellCorruption.Config()
     corruption.rate = 0.25
@@ -597,7 +666,7 @@ def test_a_falsy_feedback_corruption_still_overrides_the_slot_scramble(
     tmp_path: Path,
 ) -> None:
     """``or`` would discard a configured corruption whose truth value is False."""
-    config = port_config("exp010", tmp_path)
+    config = port_config("exp006", tmp_path)
     write_dataset(tmp_path / "data")
     corruption = _FalsyCellCorruption()
     config.feedback_corruption = corruption
@@ -608,19 +677,19 @@ def test_a_falsy_feedback_corruption_still_overrides_the_slot_scramble(
 
 
 def test_trainer_constructor_rejects_invalid_protocol_configs(tmp_path: Path) -> None:
-    config = port_config("exp004", tmp_path)
+    config = port_config("exp000", tmp_path)
     config.experiment_name = ""
     with pytest.raises(ValueError, match="experiment_name"):
         config.make()
-    config = port_config("exp004", tmp_path)
+    config = port_config("exp000", tmp_path)
     config.eval_act_steps = -1
     with pytest.raises(ValueError, match="eval_act_steps"):
         config.make()
-    config = port_config("exp004", tmp_path)
+    config = port_config("exp000", tmp_path)
     config.eval_min_act_steps = 0
     with pytest.raises(ValueError, match="eval_min_act_steps"):
         config.make()
-    config = port_config("exp004", tmp_path)
+    config = port_config("exp000", tmp_path)
     config.csp_loss_weight = 1.0
     config.dataset.spec = SudokuSpec(grid_shape=(4, 4), box_shape=(3, 3), vocab_size=6)
     with pytest.raises(ValueError, match="csp_loss_weight"):
