@@ -18,6 +18,14 @@ from priml.baselines.craftax.world_model.feature import (
 )
 
 
+_STUBBED = pytest.mark.xfail(
+    strict=True,
+    raises=NotImplementedError,
+    reason="exp112/exp113 are stubs until exp110 builds; remove this mark then",
+)
+
+
+@_STUBBED
 @pytest.mark.parametrize("experiment", sorted(ARMS))
 def test_the_smoke_drives_a_joint_arm_on_cuda(experiment: str) -> None:
     config = smoke_config(experiment, slots=1, episodes=64)
@@ -31,6 +39,7 @@ def test_the_smoke_drives_a_joint_arm_on_cuda(experiment: str) -> None:
     assert isinstance(final.feature_training, ContextReplay.Config)
 
 
+@_STUBBED
 @pytest.mark.parametrize("experiment", sorted(ARMS))
 def test_the_smoke_reads_exact_windows_with_donor_histories_on_request(
     experiment: str,
@@ -53,6 +62,7 @@ def test_the_smoke_reads_exact_windows_with_donor_histories_on_request(
     assert (refill.hook_interval, exact.hook_interval) == (128, 32)
 
 
+@_STUBBED
 def test_the_smoke_keeps_the_arms_slots_and_evaluation_by_default() -> None:
     final = smoke_config("exp112", slots=2, episodes=0).copy_tree().finalize()
     assert final.rollout.num_slots == 2

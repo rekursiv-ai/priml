@@ -35,8 +35,8 @@ whose world seeds would repeat. Name the roots as training will read them.
 Examples:
   priml/baselines/craftax/world_model/scripts/freeze_corpus.py /opt/scratch/datasets/craftax/world-model/archive-v1 --corpus base --decisions 50_000_000
   priml/baselines/craftax/world_model/scripts/freeze_corpus.py /opt/scratch/datasets/craftax/world-model/archive-v1 --corpus base --decisions 50_000_000 --shares 80,10,10,0
-  priml/baselines/craftax/world_model/scripts/freeze_corpus.py /opt/scratch/datasets/craftax/world-model/archive-v1 /opt/scratch/datasets/craftax/world-model/archive-v1-extra --corpus scaleup-v1 --all
-  priml/baselines/craftax/world_model/scripts/freeze_corpus.py /opt/scratch/datasets/craftax/world-model/archive-v2 --corpus v1v2 --combine /opt/scratch/datasets/craftax/world-model/archive-v1/corpora/scaleup-v1.json /opt/scratch/datasets/craftax/world-model/archive-v2/corpora/v2-fresh.json /opt/scratch/datasets/craftax/world-model/archive-v2-branch/corpora/v2-branch.json
+  priml/baselines/craftax/world_model/scripts/freeze_corpus.py /opt/scratch/datasets/craftax/world-model/archive-v1 --corpus every-shard --all
+  priml/baselines/craftax/world_model/scripts/freeze_corpus.py /opt/scratch/datasets/craftax/world-model/archive-v2 --corpus v1v2 --combine /opt/scratch/datasets/craftax/world-model/archive-v1/corpora/every-shard.json /opt/scratch/datasets/craftax/world-model/archive-v2/corpora/v2-fresh.json
 
 '''
 # fmt: on

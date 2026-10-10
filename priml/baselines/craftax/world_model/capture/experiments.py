@@ -33,7 +33,8 @@ trains first. The published archive's arms played exp103's seed-74 run
 The second dataset version adds, per arm, fresh episodes with training
 episodes cut after a stall without reward (``arm*_v2``, generation 1) and
 branches of Troll, Fire and Ice states of the fresh training episodes
-(``arm*_branch``, generation 2):
+(``arm*_branch``, generation 2, not yet reproducible: their branch pools'
+arguments are unrecorded):
 
 | Arm | Stall cap | Epsilon | Fresh | Branches |
 | --- | ---: | --- | ---: | ---: |
@@ -55,9 +56,6 @@ from priml.baselines.craftax.experiments import (
     exp102,
     exp103,
     exp_smoke,
-)
-from priml.baselines.craftax.world_model.capture.branches import (
-    BranchFeeder,
 )
 from priml.baselines.craftax.world_model.capture.source import (
     PolicySource,
@@ -189,55 +187,55 @@ def arm3_v2() -> CaptureWorker.Config:
 
 
 def arm0_branch() -> CaptureWorker.Config:
-    """Capture v2's arm 0 branches of its Troll, Fire and Ice states."""
-    config = arm0_v2()
-    config.root = Path("/datasets/craftax/world-model/archive-v2-branch")
-    config.generation = 2
-    config.decisions = 364_932_197
-    source = config.source
-    assert isinstance(source, PolicySource.Config)
-    feeder = source.branches = BranchFeeder.Config()
-    feeder.pools = config.root / "pools"
-    return config
+    """Capture v2's arm 0 branches of its Troll, Fire and Ice states.
+
+    Not yet reproducible: its branch pools, ``scripts/branch_pool.py``'s output
+    per arm and worker, were written with arguments nothing records. TODO:
+    record the pool commands as a step of the chain, or drop the v2 branch
+    arms.
+    """
+    # The pools' arguments are unrecorded, so the input has no producer.
+    msg = "TODO: arm0_branch needs its recorded branch pools; see its docstring."
+    raise NotImplementedError(msg)
 
 
 def arm1_branch() -> CaptureWorker.Config:
-    """Capture v2's arm 1 branches of its Troll, Fire and Ice states."""
-    config = arm1_v2()
-    config.root = Path("/datasets/craftax/world-model/archive-v2-branch")
-    config.generation = 2
-    config.decisions = 64_152_548
-    source = config.source
-    assert isinstance(source, PolicySource.Config)
-    feeder = source.branches = BranchFeeder.Config()
-    feeder.pools = config.root / "pools"
-    return config
+    """Capture v2's arm 1 branches of its Troll, Fire and Ice states.
+
+    Not yet reproducible: its branch pools, ``scripts/branch_pool.py``'s output
+    per arm and worker, were written with arguments nothing records. TODO:
+    record the pool commands as a step of the chain, or drop the v2 branch
+    arms.
+    """
+    # The pools' arguments are unrecorded, so the input has no producer.
+    msg = "TODO: arm1_branch needs its recorded branch pools; see its docstring."
+    raise NotImplementedError(msg)
 
 
 def arm2_branch() -> CaptureWorker.Config:
-    """Capture v2's arm 2 branches of its Troll, Fire and Ice states."""
-    config = arm2_v2()
-    config.root = Path("/datasets/craftax/world-model/archive-v2-branch")
-    config.generation = 2
-    config.decisions = 92_152_350
-    source = config.source
-    assert isinstance(source, PolicySource.Config)
-    feeder = source.branches = BranchFeeder.Config()
-    feeder.pools = config.root / "pools"
-    return config
+    """Capture v2's arm 2 branches of its Troll, Fire and Ice states.
+
+    Not yet reproducible: its branch pools, ``scripts/branch_pool.py``'s output
+    per arm and worker, were written with arguments nothing records. TODO:
+    record the pool commands as a step of the chain, or drop the v2 branch
+    arms.
+    """
+    # The pools' arguments are unrecorded, so the input has no producer.
+    msg = "TODO: arm2_branch needs its recorded branch pools; see its docstring."
+    raise NotImplementedError(msg)
 
 
 def arm3_branch() -> CaptureWorker.Config:
-    """Capture v2's arm 3 branches of its Troll, Fire and Ice states."""
-    config = arm3_v2()
-    config.root = Path("/datasets/craftax/world-model/archive-v2-branch")
-    config.generation = 2
-    config.decisions = 67_974_773
-    source = config.source
-    assert isinstance(source, PolicySource.Config)
-    feeder = source.branches = BranchFeeder.Config()
-    feeder.pools = config.root / "pools"
-    return config
+    """Capture v2's arm 3 branches of its Troll, Fire and Ice states.
+
+    Not yet reproducible: its branch pools, ``scripts/branch_pool.py``'s output
+    per arm and worker, were written with arguments nothing records. TODO:
+    record the pool commands as a step of the chain, or drop the v2 branch
+    arms.
+    """
+    # The pools' arguments are unrecorded, so the input has no producer.
+    msg = "TODO: arm3_branch needs its recorded branch pools; see its docstring."
+    raise NotImplementedError(msg)
 
 
 def e2e_arm0() -> CaptureWorker.Config:

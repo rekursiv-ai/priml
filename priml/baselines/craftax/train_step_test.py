@@ -662,6 +662,30 @@ def test_masters_refuse_an_optimizer_parameter_the_policy_does_not_name(
     load_masters(model, optimizer, tmp_path / "masters.pt", others=[stray])
 
 
+def test_masters_load_from_a_runs_checkpoint_as_its_optimizer_held_them(
+    tmp_path: Path,
+) -> None:
+    """A training loop's checkpoint gives the masters its step's optimizer saved."""
+    config = tiny_policy()
+    generator = torch.Generator().manual_seed(0)
+    run = config.make()
+    masters = {
+        name: torch.randn(parameter.shape, generator=generator)
+        for name, parameter in run.named_parameters()
+    }
+    torch.save(masters, tmp_path / "masters.pt")
+    optimizer = FusedMuon.Config().make()(run.parameters())
+    load_masters(run, optimizer, tmp_path / "masters.pt")
+    torch.save({"step": {"optimizer": optimizer.state_dict()}}, tmp_path / "run.pt")
+    model = config.make()
+    fresh = FusedMuon.Config().make()(model.parameters())
+    load_masters(model, fresh, tmp_path / "run.pt")
+    loaded = optimizer_state(model, fresh, "master_weight")
+    assert loaded.keys() == masters.keys()
+    for name, master in loaded.items():
+        assert torch.equal(master, masters[name]), name
+
+
 def test_a_failed_rollout_still_releases_every_thread_on_close() -> None:
     step = _train_step()
     failed: Future[RolloutStorage] = Future()

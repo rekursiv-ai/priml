@@ -62,7 +62,7 @@ def test_a_flash4_world_model_experiment_loads_on_the_cpu(tmp_path: Path) -> Non
 def test_an_experiment_training_another_model_is_refused(tmp_path: Path) -> None:
     with pytest.raises(TypeError, match="does not train a WorldModel"):
         load_world_model(
-            "priml.baselines.craftax.world_model.experiments.exp003",
+            "priml.baselines.craftax.experiments.exp_smoke",
             tmp_path / "absent.pt",
         )
 

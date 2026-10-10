@@ -21,16 +21,24 @@ the port's own.
       |     +-- exp102     board encoder, injection, feasibility loss, 20B
       |           +-- exp103     frontier practice, self-imitation, rewards / 8
       |           |     +-- exp109     a newly generated world at every reset
+      |           |     +-- exp114     fine-tuned for the boss fight, 3B more
       |           |     +-- exp110     an early world model, the sole encoder
       |           |           +-- exp111     a mature world model
       |           |           |     +-- exp113     trained with the policy
       |           |           +-- exp112     trained with the policy
+      |           |           |     +-- exp116     stopped after 1B
+      |           |           +-- exp115     stopped after 1B
       |           +-- exp104     width 2,048 on 1,024 environments x 512 steps
       |                 +-- exp105     a ConvNeXt trunk on the board
       |                       +-- exp106     250M, inside the 20B warmup
       |                             +-- exp107     a frozen world model's feature
       |                                   +-- exp108     its random-init weights
       +-- exp_smoke  the same recipe at minimum size, to check a machine
+
+Not yet reproducible: exp110 to exp113, exp115 and exp116 read a world model
+the original runs fitted, which no experiment here trains. Their factories
+raise ``NotImplementedError``; each docstring keeps the record and names the
+missing producer (TODO).
 
 Every random stream is seeded in the config, so a config replays its run: the
 environments' ``rand_r`` (``env.seed``), the action streams (``sampler.seed``),
@@ -59,7 +67,12 @@ import math
 from configgle import Makeable, Makes, PartialConfig
 
 from priml.baselines.craftax.data import CraftaxRollouts
-from priml.baselines.craftax.env import FreshWorlds, StallCap, WorldPool
+from priml.baselines.craftax.env import (
+    BossFightReward,
+    FreshWorlds,
+    StallCap,
+    WorldPool,
+)
 from priml.baselines.craftax.learners.gtrxl_train_step import TrajectoryWindows
 from priml.baselines.craftax.learners.imitation import BranchImitation
 from priml.baselines.craftax.learners.pqn_train_step import CraftaxPQNTrainLoop
@@ -78,7 +91,6 @@ from priml.baselines.craftax.model import (
     DenseObservation,
     FeasibilityLoss,
     MinGRUPolicy,
-    NoEncoder,
 )
 from priml.baselines.craftax.policies.actor_critic import ActorCritic
 from priml.baselines.craftax.policies.encoder import (
@@ -96,7 +108,6 @@ from priml.baselines.craftax.train_step import (
     ProgressSchedule,
     cosine_annealing_fp32,
 )
-from priml.baselines.craftax.world_model.context import ContextReplay
 from priml.baselines.craftax.world_model.experiments import (
     exp001 as world_model_exp001,
 )
@@ -107,8 +118,7 @@ from priml.baselines.craftax.world_model.feature import (
     WorldModelFeature,
 )
 from priml.loss.policy_gradient_kernel import TritonPPO
-from priml.math.schedules import linear, one_cycle, warmup
-from priml.model.attention.flash4 import Flash4Varlen
+from priml.math.schedules import constant, linear, one_cycle, warmup
 from priml.model.embedding import MultiHotEmbedding
 from priml.model.linear import Linear
 from priml.optimizers.fused_muon import FusedMuon
@@ -1170,15 +1180,20 @@ def exp109() -> CraftaxTrainLoop:
 def exp110() -> CraftaxTrainLoop:
     """exp103 with a frozen world model, fitted to early play, as its only encoder.
 
+    Not yet reproducible: its world model is the original runs' fit to 100M
+    decisions of early play, which no experiment here trains. TODO: add the
+    capture of an early-training exp103 policy, its corpus, and the world-model
+    experiment that fits it, then read that run's final checkpoint; or drop
+    exp110 to exp113 and exp115 and exp116.
+
     The early frozen arm of the sole world-model experiment, on the original
     implementation's engine, restated as one fork. The policy keeps exp103's four
     MinGRU layers of 1,024, its heads, its feasibility loss and its whole
     recipe, and loses its encoder: no board encoder, no ``proj_in`` and no
     injection. Its trunk reads only a frozen world model's state of the
     episode: each actor step, a model of exp001's geometry
-    (``world_model.experiments``), fitted to 100M decisions of early play (the
-    reference's early fit, step 13,135, in the port's layout), reads the
-    episode so far and taps its final-normed hidden state at the current
+    (``world_model.experiments``), fitted to 100M decisions of early play,
+    reads the episode so far and taps its final-normed hidden state at the current
     observation, 1,152 floats. A new projection without bias, 1,152 -> 1,024,
     drawn as every projection is, maps it into the first layer. The
     observation reaches only the feasibility loss's targets. The rollout
@@ -1203,10 +1218,7 @@ def exp110() -> CraftaxTrainLoop:
     transitions/s against 62.5k for 2,048. Its 10,000 episodes come from 1,024
     environments' streams, not exp103's 2,048.
 
-    The budget is exp103's 20B. The reference's 1B arm is this config with
-    ``--override max_steps=1907`` (999,817,216 transitions): the schedule
-    keeps its 20B horizon, as the reference's did, and the run evaluates just
-    past 250M, 500M and 750M and at the end.
+    The budget is exp103's 20B; exp115 is its 1B arm.
 
     Hypothesis:
       A world model's state, fitted only to predict early play, is by itself
@@ -1222,9 +1234,9 @@ def exp110() -> CraftaxTrainLoop:
       its ``Refill`` history.
 
     Results:
-      H200 + 16 CPUs, the 1B arm (``max_steps=1907``): 37.51% perf (seed
-      73). The 20B run is still training at seed 73: 52.35% at its 9.5B
-      evaluation.
+      H200 + 16 CPUs, 20B transitions: still training at seed 73, 52.35%
+      perf at its 9.5B evaluation, reading the original runs' early fit. Its
+      1B arm is exp115's.
 
       Reference: none. The original runs ended before any evaluation.
 
@@ -1232,51 +1244,24 @@ def exp110() -> CraftaxTrainLoop:
       cfg: Configured CraftaxTrainLoop.
 
     """
-    cfg = exp103()
-    cfg.experiment_name = "exp110"
-    trackers = cfg.tracker
-    assert isinstance(trackers, TrackerList.Config)
-    dashboard = unwrap_tracker_config(trackers.trackers["wandb"])
-    assert isinstance(dashboard, WandbTracker.Config)
-    dashboard.group = "exp110"
-    model = cfg.step.model
-    assert isinstance(model, MinGRUPolicy.Config)
-    encoder = model.embedding = NoEncoder.Config()
-    encoder.observation_size = cfg.step.env.observation_size
-    model.injection = None
-    proj = model.proj_feature = Linear.Config()
-    proj.channels_in = 1_152  # The world model's width.
-
-    feature = cfg.step.feature = WorldModelFeature.Config()
-    assert isinstance(feature.weights, TrainedWeights.Config)
-    feature.weights.checkpoint = Path(
-        "/datasets/craftax/world-model-oracle/v1/checkpoints/"
-        "early-fit-s73/step_00013135.pt",
-    )
-    feature.attention = Flash4CacheAttention.Config()
-    feature.compile = PartialConfig(
-        torch.compile,
-        fullgraph=True,
-        dynamic=False,
-        mode="max-autotune-no-cudagraphs",
-    )
-
-    evaluation = cfg.step.evaluation.env = cfg.step.env.copy_tree()
-    evaluation.stall_cap = None
-    evaluation.practice = None
-    evaluation.num_envs = 1_024
-    transitions = cfg.step.env.num_envs * cfg.step.rollout.horizon
-    cfg.num_steps_eval = math.ceil(250_000_000 / transitions)
-    return cfg
+    # The early fit has no producer in this chain; the record stays in the
+    # docstring above.
+    msg = "TODO: exp110 needs a world model fitted to early play; see its docstring."
+    raise NotImplementedError(msg)
 
 
 def exp111() -> CraftaxTrainLoop:
     """exp110 with the world model fitted to mature play.
 
+    Not yet reproducible: its world model is the original runs' fit to 100M
+    decisions of mature play, which no experiment here trains. TODO: add the
+    capture of a 20B exp103 policy's play, its corpus, and the world-model
+    experiment that fits it, then read that run's final checkpoint; or drop
+    exp111 and exp113.
+
     The mature frozen arm: the same model, engine and policy, the weights
-    fitted to 100M decisions of the strongest mature control's play (the
-    reference's mature fit, step 12,738, in the port's layout), whose episodes
-    reach the late floors.
+    fitted to 100M decisions of the strongest mature control's play, whose
+    episodes reach the late floors.
 
     Hypothesis:
       A world model that has seen the late floors gives the policy a state of
@@ -1287,7 +1272,7 @@ def exp111() -> CraftaxTrainLoop:
 
     Results:
       H200 + 16 CPUs, 20B transitions: still training at seed 73, 67.33%
-      perf at its 7.0B evaluation.
+      perf at its 7.0B evaluation, reading the original runs' mature fit.
 
       Reference: none. The original runs ended before any evaluation.
 
@@ -1295,25 +1280,16 @@ def exp111() -> CraftaxTrainLoop:
       cfg: Configured CraftaxTrainLoop.
 
     """
-    cfg = exp110()
-    cfg.experiment_name = "exp111"
-    trackers = cfg.tracker
-    assert isinstance(trackers, TrackerList.Config)
-    dashboard = unwrap_tracker_config(trackers.trackers["wandb"])
-    assert isinstance(dashboard, WandbTracker.Config)
-    dashboard.group = "exp111"
-    feature = cfg.step.feature
-    assert isinstance(feature, WorldModelFeature.Config)
-    assert isinstance(feature.weights, TrainedWeights.Config)
-    feature.weights.checkpoint = Path(
-        "/datasets/craftax/world-model-oracle/v1/checkpoints/"
-        "mature-fit-s73/step_00012738.pt",
-    )
-    return cfg
+    # The mature fit has no producer in this chain; the record stays in the
+    # docstring above.
+    msg = "TODO: exp111 needs a world model fitted to mature play; see its docstring."
+    raise NotImplementedError(msg)
 
 
 def exp112() -> CraftaxTrainLoop:
     """exp110 training its world model with the policy.
+
+    Not yet reproducible: it builds once exp110 does (TODO there).
 
     The early joint arm, on exp110's engine, restated as one fork. The learner
     trains a copy of the world model's feature weights -- its frame table and
@@ -1352,9 +1328,8 @@ def exp112() -> CraftaxTrainLoop:
       ``world_model/README.md``, "The frozen feature for RL" (``joint``).
 
     Results:
-      H200 + 16 CPUs, the 1B arm (``max_steps=1907``): 52.10% perf (seed
-      73), against exp110's 37.51%. The 20B run is still training at seed
-      73: 54.16% at its 1.25B evaluation.
+      H200 + 16 CPUs, 20B transitions: still training at seed 73, 54.16%
+      perf at its 1.25B evaluation. Its 1B arm is exp116's.
 
       Reference: none. The original runs ended before any evaluation.
 
@@ -1362,21 +1337,16 @@ def exp112() -> CraftaxTrainLoop:
       cfg: Configured CraftaxTrainLoop.
 
     """
-    cfg = exp110()
-    cfg.experiment_name = "exp112"
-    trackers = cfg.tracker
-    assert isinstance(trackers, TrackerList.Config)
-    dashboard = unwrap_tracker_config(trackers.trackers["wandb"])
-    assert isinstance(dashboard, WandbTracker.Config)
-    dashboard.group = "exp112"
-    training = cfg.step.feature_training = ContextReplay.Config()
-    training.attention = Flash4Varlen.Config()
-    training.compile = PartialConfig(torch.compile, fullgraph=True, dynamic=False)
-    return cfg
+    # Its parent raises until its producer lands; the record stays in the
+    # docstring above.
+    msg = "TODO: exp112 builds once exp110 does; see exp110's docstring."
+    raise NotImplementedError(msg)
 
 
 def exp113() -> CraftaxTrainLoop:
     """exp111 training its world model with the policy.
+
+    Not yet reproducible: it builds once exp111 does (TODO there).
 
     The mature joint arm, on exp111's engine: exp112's change, applied to the
     mature world model.
@@ -1397,17 +1367,153 @@ def exp113() -> CraftaxTrainLoop:
       cfg: Configured CraftaxTrainLoop.
 
     """
-    cfg = exp111()
-    cfg.experiment_name = "exp113"
+    # Its parent raises until its producer lands; the record stays in the
+    # docstring above.
+    msg = "TODO: exp113 builds once exp111 does; see exp111's docstring."
+    raise NotImplementedError(msg)
+
+
+def exp114() -> CraftaxTrainLoop:
+    """exp103's final policy fine-tuned for the boss fight, 3B more transitions.
+
+    The best arm of the original runs' boss-fight screen, restated as one
+    fork. It starts from exp103's final checkpoint, the run's fp32 masters,
+    with a fresh optimizer, a new world pool and an empty practice archive,
+    and trains 3B more transitions (5,722 epochs) with four changes, one
+    treatment, the arm's recipe:
+
+    - Training pays +1 per necromancer hit and +1.5 per kill on the final
+      floor, on top of the game's reward and before the learner's division
+      by 8 (:class:`~priml.baselines.craftax.env.BossFightReward`). The
+      game rewards only the first hit and the eighth, its defeat, so a policy
+      that has learned the floors hits once and waits out the clock. The
+      evaluation pays the game's reward alone.
+    - The discount rises from 0.9994 to 0.9998, a horizon of about 5,000
+      decisions instead of 1,700, the length of a fight.
+    - The rate is a tenth of exp103's peak, held constant: the parent ended
+      its schedule at zero, and a decay to zero over the fine-tune scored
+      lower.
+    - The budget is 3B transitions from the parent's 20B.
+
+    Hypothesis:
+      A policy that reaches the final floor but rarely wins learns the fight
+      once every hit and every wave's kill pays and its horizon spans a
+      fight: it defeats the necromancer in a large share of evaluation
+      episodes, which pay no bonus, where exp103 rarely does.
+
+    References:
+      https://rekursiv.ai/blog/craftax/
+        The boss-fight reward and its screen of six arms.
+
+    Results:
+      Reference (the original runs, one H200 each): from exp103's seed-78 run
+      at 20B, fine-tuned at seed 73, the arm's final weights score 80.06% perf
+      over 10,053 episodes, 4,377 of them (43.5%) defeating the necromancer,
+      evaluated on the port in the original runs' numerics (bf16 carry and
+      PufferLib's scan). Their own evaluation counted 4,415 defeats in 10,052
+      episodes (43.92%), a second fine-tuning seed 43.7%. The other arms:
+      with a cosine to zero, 42.8%; with the discount kept as well, 34.9%;
+      with the discount kept and the rate constant, 2 in 10,109 after 5B. Not
+      yet run on the port.
+
+    Returns:
+      cfg: Configured CraftaxTrainLoop.
+
+    """
+    cfg = exp103()
+    # The parent's last checkpoint, read before this fork renames the run and
+    # sets its own budget.
+    cfg.step.checkpoint = (
+        f"/runs/{cfg.study_name}/{cfg.experiment_name}/checkpoints/"
+        f"step_{int(cfg.max_steps):08d}.pt"
+    )
+    cfg.experiment_name = "exp114"
     trackers = cfg.tracker
     assert isinstance(trackers, TrackerList.Config)
     dashboard = unwrap_tracker_config(trackers.trackers["wandb"])
     assert isinstance(dashboard, WandbTracker.Config)
-    dashboard.group = "exp113"
-    training = cfg.step.feature_training = ContextReplay.Config()
-    training.attention = Flash4Varlen.Config()
-    training.compile = PartialConfig(torch.compile, fullgraph=True, dynamic=False)
+    dashboard.group = "exp114"
+    cfg.step.env.boss_fight_reward = BossFightReward.Config()
+    windows = cfg.step.learner
+    assert isinstance(windows, AgentWindows.Config)
+    ppo = windows.objective
+    assert isinstance(ppo, TritonPPO.Config)
+    ppo.discount = 0.9998
+    muon = cfg.step.optimizer
+    assert isinstance(muon, FusedMuon.Config)
+    # A tenth of exp103's peak as the arm's command wrote it; peak / 10 lands
+    # one double ulp above.
+    muon.lr = 0.0001182217733003199
+    schedule = cfg.step.schedule
+    assert isinstance(schedule, ProgressSchedule.Config)
+    schedule.curve = PartialConfig(constant)
+    transitions = cfg.step.env.num_envs * cfg.step.rollout.horizon
+    cfg.max_steps = cfg.step.train_budget_steps = 3_000_000_000 // transitions
     return cfg
+
+
+def exp115() -> CraftaxTrainLoop:
+    """exp110 stopped after 1B transitions, its schedule keeping the 20B horizon.
+
+    Not yet reproducible: it builds once exp110 does (TODO there).
+
+    The reference's 1B arm of the early frozen world model: the run stops
+    after epoch 1,907, 999,817,216 transitions, while the schedule keeps
+    exp110's 20B horizon, as the reference's did, so the rate is still near
+    its peak; it evaluates just past 250M, 500M and 750M and at the end.
+
+    Hypothesis:
+      A frozen world model's state of early play is an observation a policy
+      learns from within 1B transitions.
+
+    References:
+      exp110's.
+
+    Results:
+      H200 + 16 CPUs, 999,817,216 transitions: 37.51% perf (seed 73), reading
+      the original runs' early fit.
+
+      Reference: none. The original runs ended before any evaluation.
+
+    Returns:
+      cfg: Configured CraftaxTrainLoop.
+
+    """
+    # Its parent raises until its producer lands; the record stays in the
+    # docstring above.
+    msg = "TODO: exp115 builds once exp110 does; see exp110's docstring."
+    raise NotImplementedError(msg)
+
+
+def exp116() -> CraftaxTrainLoop:
+    """exp112 stopped after 1B transitions, its schedule keeping the 20B horizon.
+
+    Not yet reproducible: it builds once exp110 does (TODO there).
+
+    The reference's 1B arm of the early joint world model: exp115's budget
+    applied to exp112.
+
+    Hypothesis:
+      Training the world model with the policy adapts its state to what the
+      policy needs: exp116 scores above exp115, its frozen counterpart.
+
+    References:
+      exp112's.
+
+    Results:
+      H200 + 16 CPUs, 999,817,216 transitions: 52.10% perf (seed 73),
+      against exp115's 37.51%, from the original runs' early fit.
+
+      Reference: none. The original runs ended before any evaluation.
+
+    Returns:
+      cfg: Configured CraftaxTrainLoop.
+
+    """
+    # Its parent raises until its producer lands; the record stays in the
+    # docstring above.
+    msg = "TODO: exp116 builds once exp110 does; see exp110's docstring."
+    raise NotImplementedError(msg)
 
 
 def exp104() -> CraftaxTrainLoop:

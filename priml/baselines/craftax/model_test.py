@@ -209,12 +209,13 @@ def test_pufferlibs_own_seed_73_init_fits_the_reference() -> None:
 
     So the reference -- each distribution drawn in fp32 and rounded once --
     is PufferLib's algorithm, measured on its output rather than read off
-    its source. The draws are PufferLib's seed-73 init (the oracle's
-    ``trainer/init/seed73.bin``), one pool per distribution it draws from,
-    in bf16, which holds them exactly: the table whole, N(0, 1); three rows
-    of ``proj_in``, U(+-1635^-1/2); six rows across ``proj_out`` and the four
-    blocks, U(+-1024^-1/2). Pooled, a draw made in bf16 instead fails the
-    two uniforms at p = 0 (measured); the table's 2,464 are all it has.
+    its source. The draws are PufferLib's seed-73 init, one pool per
+    distribution it draws from, in bf16, which holds them exactly: the table
+    whole, N(0, 1); three rows of ``proj_in``, U(+-1635^-1/2); six rows across
+    ``proj_out`` and the four blocks, U(+-1024^-1/2). Pooled, a draw made in
+    bf16 instead fails the two uniforms at p = 0 (measured); the table's 2,464
+    are all it has. The parity suite's ``scripts/pufferlib_init.py --pools``
+    builds the init from PufferLib's source at the pin and writes this file.
     """
     pools = from_plain(
         cast(

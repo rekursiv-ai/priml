@@ -110,21 +110,19 @@ runs of either, which GPU nondeterminism sets.
 
 | Corpus | Holds |
 |---|---|
-| `archive-v1` | the base corpus as frame shards |
-| `archive-v1-replay` | the same episodes as records and snapshots; replay gives the same micro-batches |
-| `archive-v2`, `archive-v2-branch` | dataset v2, stall-capped, and its branches |
+| `archive-v1` | the behaviour mixture as replay shards, records and snapshots; corpus `base` |
+| `archive-v2` | dataset v2's fresh episodes, stall-capped |
 | `e2e` | 10.6M verified decisions of the four `e2e_` arms; a 1.44M-decision corpus |
 | `smoke` | The `smoke` capture of the RL `exp_smoke`'s policy; corpus `smoke` |
 
 Every root lies under `/opt/scratch/datasets/craftax/world-model`. A
 `ReplayStream` left at its default reads `archive-v1`'s corpus `base`, which
-the capture arms and `freeze_corpus.py` write; exp000-exp013 read it.
-`exp_smoke` reads `smoke`'s. The original implementation's corpora are not
-distributed and no step here produces them, yet four experiments name them
-under `/opt/scratch/datasets/craftax/world-model-reference/`: exp014 and
-exp015 read `archive-v1-replay`'s base corpus, and the flat comparison,
-exp003, exp004 and exp005, its small corpus. exp020 reads `archive-v1`'s
-`scaleup-v1`, every verified shard of one node of the original capture.
+the capture arms and `freeze_corpus.py` write; exp000-exp013 read it, and
+replay serves them the micro-batches frame shards of the same episodes would.
+`exp_smoke` reads `smoke`'s. The flat comparison (exp003 to exp005), exp014,
+exp015 and exp020 read corpora no step here produces, and dataset v2's branch
+arms pools no step records; their factories raise with a TODO naming the
+missing step (`../README.md`, "Not yet reproducible").
 
 Speed settings are slots on the pieces they change:
 `WorldModel.Config.embed_board = multi_hot_board` (default `gathered_board`),

@@ -7,13 +7,13 @@ Each model tier is one port policy, sampled as trained, as one capture arm:
 | early | 0 | exp001's final checkpoint (epoch 476) | 250M | 15.22% | dungeon 72.3% |
 | medium | 1 | exp102 at 20B, seed 73 | 20.0B | 56.24% | ice realm 6.4% |
 | high | 2 | exp103 at 20B, seed 74 | 20.0B | 77.66% | graveyard 60.5% |
-| boss | 3 | the boss-fight fine-tune of our recipe, step 2,999,975,936 | -- | 80.06% | graveyard 65.8% |
+| boss | 3 | exp114, exp103 fine-tuned for the boss fight | +3.0B | 80.06% | graveyard 65.8% |
 
-The early, medium and high tiers read their experiments' final ``TrainLoop``
-checkpoints, at the paths those runs write beneath ``base_dir``; the published
-page's medium and high tiers were exp102's seed-73 and exp103's seed-74 runs.
-The boss tier reads a policy no experiment here trains: the original recipe
-runs' boss-fight fine-tune, converted to the port's layout.
+Each tier reads its experiment's final ``TrainLoop`` checkpoint, at the path
+that run writes beneath ``base_dir``. The published page's medium and high
+tiers were exp102's seed-73 and exp103's seed-74 runs, and its boss tier the
+original runs' fine-tune that exp114 restates, played in their numerics: a
+bf16 carry and PufferLib's scan.
 
 A tier's run records exactly one episode per environment. Its budget is one
 decision, so once the first recorded episode ends the env records no further
@@ -61,9 +61,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from priml.baselines.craftax.experiments import exp001, exp102, exp103
-from priml.baselines.craftax.lib.compat import ExactScan
-from priml.baselines.craftax.model import MinGRUPolicy
+from priml.baselines.craftax.experiments import exp001, exp102, exp103, exp114
 from priml.baselines.craftax.world_model.capture.source import (
     PolicySource,
 )
@@ -171,18 +169,18 @@ def capture_high() -> CaptureWorker.Config:
 
 
 def capture_boss() -> CaptureWorker.Config:
-    """Capture the boss tier, the boss-fight fine-tune as arm 3: 1,000 of world 15."""
+    """Capture the boss tier, exp114's final policy as arm 3: 1,000 of world 15."""
     config = capture_high()
     config.arm = 3
     source = config.source
     assert isinstance(source, PolicySource.Config)
-    model = source.policy.model
-    assert isinstance(model, MinGRUPolicy.Config)
-    # The fine-tune's numerics: bf16 carry and decoder output, PufferLib's scan.
-    model.state_dtype = model.output_dtype = model.dtype
-    model.block.scan = ExactScan.Config()
+    policy = exp114()
+    source.policy = policy.step
+    # The source loads exp114's own weights below, not the parent's it started from.
+    source.policy.checkpoint = None
     source.checkpoint = Path(
-        "/artifacts/craftax/ghosts/policies/boss-s73-2999975936.pt",
+        f"/runs/{policy.study_name}/{policy.experiment_name}/checkpoints/"
+        f"step_{int(policy.max_steps):08d}.pt",
     )
     return config
 

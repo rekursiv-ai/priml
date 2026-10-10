@@ -8,7 +8,6 @@ checkpointer are exercised together.
 """
 
 from dataclasses import fields, is_dataclass
-from functools import partial
 from pathlib import Path
 from typing import (
     Final,
@@ -34,8 +33,6 @@ from priml.baselines.craftax.world_model.archive import (
 from priml.baselines.craftax.world_model.attention import VarlenAttention
 from priml.baselines.craftax.world_model.batch import (
     PackedBatch,
-    Segment,
-    pack_windows,
 )
 from priml.baselines.craftax.world_model.data import (
     EvalSpans,
@@ -43,9 +40,6 @@ from priml.baselines.craftax.world_model.data import (
     StratifiedWindows,
 )
 from priml.baselines.craftax.world_model.experiments import (
-    EXP001_UPDATE_FLOPS,
-    FLAT_UPDATE_FLOPS,
-    WARMUP_STEPS,
     WorldModelLoop,
     exp000,
     exp001,
@@ -61,11 +55,6 @@ from priml.baselines.craftax.world_model.experiments import (
     exp015,
     exp020,
     exp_smoke,
-)
-from priml.baselines.craftax.world_model.flat import (
-    FlatModel,
-    flat_cost,
-    flat_positions,
 )
 from priml.baselines.craftax.world_model.grid_encoder import (
     GridConvEncoder,
@@ -84,31 +73,20 @@ from priml.baselines.craftax.world_model.model import (
     to_autocast_dtype,
 )
 from priml.baselines.craftax.world_model.schema import craftax_schema
-from priml.baselines.craftax.world_model.testing import (
-    random_segment,
-    small_schema,
-)
 from priml.baselines.craftax.world_model.train_step import (
     WorldModelTrainStep,
-    compile_forward,
     muon_adamw,
 )
-from priml.cost import cost
 from priml.lib.codec import from_plain
-from priml.math.schedules import warmup
-from priml.model.attention.attention import Attention
 from priml.model.attention.flash4 import Flash4Varlen
-from priml.model.attention.kernel import SdpaVarlen
 from priml.model.custom_types import ChannelsInOutConfig
 from priml.model.linear import Linear
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
-from priml.model.transformer.transformer import Transformer
-from priml.optimizers import CompositeOptimizer, FusedAdamW
+from priml.optimizers import CompositeOptimizer
 from priml.runtime import MultiProcess, SingleProcess
 from priml.testing.golden import assert_pprint_golden
 from priml.train.activation import DefaultActivationStorage
-from priml.train.checkpointer import Checkpointer
 from priml.train.custom_types import TrainStepOutput
 from priml.train.parallelism import DataParallel, NoParallel
 from priml.train.tracker import (
@@ -135,18 +113,22 @@ ALL_EXPERIMENTS: Final[list[_Experiment]] = [
     exp000,
     exp001,
     exp002,
-    exp003,
-    exp004,
-    exp005,
     exp010,
     exp011,
     exp012,
     exp013,
+    exp_smoke,
+]
+
+NOT_REPRODUCIBLE: Final[list[_Experiment]] = [
+    exp003,
+    exp004,
+    exp005,
     exp014,
     exp015,
     exp020,
-    exp_smoke,
 ]
+"""Experiments whose input no step of the chain produces: each factory raises."""
 
 _ADDRESS: Final = re.compile(r" at 0x[0-9a-f]+")
 """A memory address in a repr: a function or object built anew by each factory call."""
@@ -446,18 +428,11 @@ def test_exp013_trains_and_validates_on_exp012s_decisions() -> None:
     assert from_plain(cast("object", schedule.warmup), float) == 0.1
 
 
-def test_exp015_is_exp014_with_the_grid_encoder() -> None:
-    expected = exp014()
-    expected.experiment_name = "exp015"
-    model = expected.step.model
-    assert isinstance(model, WorldModel.Config)
-    model.encoder = GridConvEncoder.Config()
-    expected.step.optimizer = muon_adamw(adamw_only=("depthwise",))
-    _assert_same(exp015(), expected)
-
-
-def test_exp015_trains_depthwise_kernels_with_adamw_and_matrices_with_muon() -> None:
-    optimizer = exp015().step.optimizer
+def test_the_grid_encoders_depthwise_kernels_train_with_adamw_matrices_with_muon() -> (
+    None
+):
+    """The optimizer exp015 gives the grid encoder routes each kernel by its name."""
+    optimizer = muon_adamw(adamw_only=("depthwise",))
     assert isinstance(optimizer, CompositeOptimizer.Config)
     adamw, muon, _ = optimizer.select
     torch.manual_seed(0)
@@ -470,165 +445,11 @@ def test_exp015_trains_depthwise_kernels_with_adamw_and_matrices_with_muon() -> 
     assert muon("encoder.film", names["encoder.film"])
 
 
-def test_exp014_is_exp013_on_the_converted_replay_shards() -> None:
-    fork = exp014()
-    assert str(fork.dataset.working_dir).endswith(
-        "/datasets/craftax/world-model-reference/archive-v1-replay",
-    )
-    assert fork.dataset.corpus == "corpora/base.json"
-    expected = exp013()
-    expected.experiment_name = "exp014"
-    expected.dataset.working_dir = (
-        "/datasets/craftax/world-model-reference/archive-v1-replay"
-    )
-    _assert_same(fork, expected)
-    assert _flat(fork) != _flat(exp013())
-
-
-def test_exp020_scales_every_module_of_exp013_five_fold() -> None:
-    sizes = [_module_sizes(_finalized_model(config)) for config in (exp013(), exp020())]
-    for name in ("encoder", "transformer", "decoder", "total"):
-        assert sizes[1][name] / sizes[0][name] == pytest.approx(5, rel=0.01), name
-    assert sizes[1]["total"] == 1_566_925_312
-    model = exp020().step.model.copy_tree().finalize()
-    assert isinstance(model, WorldModel.Config)
-    assert isinstance(model.encoder, FrameEncoder.Config)
-    assert model.encoder.channels_in == model.decoder.channels_in == 1_024
-    assert model.transformer.channels_in == 2_304
-    depths = [
-        s.num_layers
-        for s in (model.encoder.stack, model.transformer, model.decoder.stack)
-    ]
-    assert depths == [5, 25, 5]
-    heads: set[tuple[int, int, int]] = set()
-    for stack in (model.encoder.stack, model.transformer, model.decoder.stack):
-        assert isinstance(stack.block, list)
-        for block in stack.block:
-            assert isinstance(block, TransformerBlock.Config | DecoderBlock.Config)
-            assert isinstance(
-                block.attn,
-                Attention.Config | VarlenAttention.Config,
-            )
-            attention = block.attn
-            heads.add(
-                (attention.channels_head, attention.num_heads, attention.num_heads_kv),
-            )
-    # Every head 128 wide: 8 per local block, GQA 18 over 6 in the global stack.
-    assert heads == {(128, 8, 8), (128, 18, 6)}
-
-
-def test_exp020_trains_one_8k_window_per_gpu_on_eight_gpus() -> None:
-    cfg = exp020()
-    runtime = cfg.runtime
-    assert isinstance(runtime, MultiProcess.Config)
-    assert runtime.mesh_topology == {"dp": 8, "pp": 1, "tp": 1}
-    assert isinstance(cfg.step.parallelism, DataParallel.Config)
-    compile_slot = cfg.step.compile
-    assert isinstance(compile_slot, PartialConfig)
-    made = compile_slot.make()
-    assert isinstance(made, partial)
-    assert made.func is compile_forward
-    assert from_plain(cast("object", compile_slot.fullgraph), bool)
-    # 16,384-position windows ran out of memory at this width (see exp020).
-    assert (cfg.dataset.windows, cfg.dataset.t_g) == (1, 8_192)
-    model = cfg.step.model
-    assert isinstance(model, WorldModel.Config)
-    assert isinstance(model.encoder, FrameEncoder.Config)
-    for stack in (model.encoder.stack, model.decoder.stack, model.transformer):
-        blocks = stack.block if isinstance(stack.block, list) else [stack.block]
-        for block in blocks:
-            assert isinstance(block, TransformerBlock.Config | DecoderBlock.Config)
-            assert block.checkpoint == (stack is not model.transformer)
-    assert cfg.step.accumulate_grad_batches == 1
-    # Stated whole: the factory sets only ``spans``, so a changed default moves both.
-    spans = EvalSpans.Config(seed=0, spans=512, span_decisions=2_048, stratum_power=0.5)
-    assert cfg.dataset.validation == cfg.dataset.train_spans == spans
-
-
-def test_exp020_warms_up_then_holds_its_peak_rate_forever() -> None:
-    cfg = exp020()
-    schedule = cfg.step.lr_schedule.make()
-    budget = cfg.step.train_budget_steps
-    assert budget == WARMUP_STEPS
-
-    def multiplier(update: int) -> float:
-        # ``TrainStep.progress_complete``: updates over the budget, at most 1.
-        return float(schedule(min(1.0, update / budget)))
-
-    assert multiplier(0) == 0
-    assert multiplier(WARMUP_STEPS // 2) == pytest.approx(0.5)
-    for update in (WARMUP_STEPS, 10 * WARMUP_STEPS, int(cfg.max_steps)):
-        assert multiplier(update) == 1
-    # No decay is scheduled: the run stops by hand, far short of max_steps.
-    assert cfg.max_steps * 8 * cfg.dataset.t_g // 2 > 20_000_000_000
-
-
-def test_exp020_keeps_resumable_and_archival_checkpoints() -> None:
-    checkpoints = exp020().checkpointer
-    assert isinstance(checkpoints, Checkpointer.Config)
-    assert checkpoints.resume
-    assert checkpoints.keep_last_n >= 2
-    assert checkpoints.keep_every % checkpoints.save_every == 0
-    assert checkpoints.keep_every > checkpoints.save_every
-
-
-def test_exp020_is_exp013_five_fold_on_one_eight_gpu_node() -> None:
-    expected = exp013()
-    expected.experiment_name = "exp020"
-    model = expected.step.model
-    assert isinstance(model, WorldModel.Config)
-    assert isinstance(model.encoder, FrameEncoder.Config)
-    model.encoder.channels_in = model.decoder.channels_in = 1_024
-    for stack in (model.encoder.stack, model.decoder.stack):
-        assert isinstance(stack.block, list)
-        template = stack.block[0].copy_tree()
-        assert isinstance(template, TransformerBlock.Config | DecoderBlock.Config)
-        assert isinstance(template.ffn, SwiGLU.Config)
-        template.ffn.channels_hidden = 2_688
-        template.checkpoint = True
-        stack.num_layers = 5
-        stack.block = list[ChannelsInOutConfig](
-            template.copy_tree() for _ in range(stack.num_layers)
-        )
-    model.transformer.channels_in = 2_304
-    model.transformer.num_layers = 25
-    block = model.transformer.block
-    assert isinstance(block, TransformerBlock.Config)
-    assert isinstance(block.attn, VarlenAttention.Config)
-    assert isinstance(block.ffn, SwiGLU.Config)
-    block.attn.num_heads, block.attn.num_heads_kv = 18, 6
-    block.ffn.channels_hidden = 6_144
-    expected.runtime = MultiProcess.Config(
-        device="cuda",
-        mesh_topology={"dp": 8, "pp": 1, "tp": 1},
-    )
-    expected.step.parallelism = DataParallel.Config()
-    expected.step.compile = PartialConfig(compile_forward, fullgraph=True)
-    expected.dataset.t_g = 8_192
-    expected.step.train_budget_steps = WARMUP_STEPS
-    expected.step.lr_schedule = PartialConfig(warmup, fraction=1.0)
-    # 100B decisions, rounded up to whole updates of 8 ranks' windows.
-    decisions_per_update = 8 * expected.dataset.windows * expected.dataset.t_g // 2
-    expected.max_steps = -(-100_000_000_000 // decisions_per_update)
-    expected.dataset.corpus = "corpora/scaleup-v1.json"
-    expected.dataset.validation = EvalSpans.Config(spans=512)
-    expected.dataset.train_spans = EvalSpans.Config(spans=512)
-    expected.num_steps_eval = 1_800
-    checkpoints = expected.checkpointer
-    assert isinstance(checkpoints, Checkpointer.Config)
-    checkpoints.save_every = 3_600
-    checkpoints.keep_last_n = 2
-    checkpoints.keep_every = 4 * 3_600
-    _wandb(expected).group = "scaleup"
-    _assert_same(exp020(), expected)
-
-
 @pytest.mark.parametrize(
     ("factory", "name", "group"),
     [
         (exp001, "exp001", "exp001"),
         (exp010, "exp010-s0", "exp010"),
-        (exp003, "exp003", "exp003"),
     ],
 )
 def test_wandb_runs_are_named_after_their_experiment_and_seed(
@@ -650,144 +471,18 @@ def test_exp001_matches_its_golden() -> None:
     assert_pprint_golden(test_file=__file__, name="exp001", config=exp001())
 
 
-def test_exp003_runs_exp001s_stack_and_recipe_on_every_slot() -> None:
-    cfg, parent = exp003(), exp001()
-    model, hierarchy = cfg.step.model, parent.step.model
-    assert isinstance(model, FlatModel.Config)
-    assert isinstance(hierarchy, WorldModel.Config)
-    _assert_same(model.lm.transformer, hierarchy.transformer)
-    # The step differs from exp001's only in the model, its cost, the batch
-    # accumulation, and the schedule's horizon.
-    expected = parent.step
-    expected.model = model
-    expected.cost_fn = PartialConfig(flat_cost)
-    expected.accumulate_grad_batches = 1
-    expected.train_budget_steps = cfg.max_steps
-    schedule = expected.lr_schedule
-    assert isinstance(schedule, PartialConfig)
-    schedule.warmup = 2_000 / cfg.max_steps
-    _assert_same(cfg.step, expected)
-    # exp000's update: 8 windows of 8,192 positions, here flat ones, each the
-    # longest window of global positions whose flat form fits.
-    assert cfg.dataset.windows * cfg.step.accumulate_grad_batches == 8
-    assert model.context == parent.dataset.t_g
-    t_g = cfg.dataset.t_g
-    assert flat_positions(t_g) <= model.context < flat_positions(t_g + 1)
-    # 1.00 times the small corpus's decisions sampled; its training split stays
-    # decoded.
-    decisions = cfg.max_steps * cfg.dataset.windows * (t_g // 2)
-    assert 9_990_000 < decisions <= 10_000_000
-    assert cfg.dataset.corpus == "corpora/small-10m.json"
-    assert cfg.dataset.cached_decisions > 10_002_004
-    assert cfg.max_steps == cfg.step.train_budget_steps
-
-
-def test_exp003_update_flops_are_what_flat_cost_counts() -> None:
-    cfg = exp003()
-    model_config = cfg.step.model
-    assert isinstance(model_config, FlatModel.Config)
-    # The kernel counts no matmul FLOPs, and FA4 has no macOS build.
-    _attention(model_config.lm.transformer).attn_kernel = SdpaVarlen.Config()
-    # A window that opens an episode holds 53 jobs; mid-episode ones hold 52.
-    t_g = cfg.dataset.t_g
-    episode = _episode(t_g // 2, seed=0, split=0)
-    segment = Segment(
-        cells=episode.cells,
-        aux=episode.aux,
-        actions=episode.actions,
-        reward=episode.reward,
-        done=torch.zeros_like(episode.done),
-        starts_episode=True,
-    )
-    batch = pack_windows([[segment]] * cfg.dataset.windows, t_g=t_g, s_max=1)
-    # The stack's blocks are copies of one template, so the count is linear in its
-    # depth: one block and two, on the meta device, give it, where building all
-    # of them, even there, takes 0.2 s.
-    stack = model_config.lm.transformer
-    assert not isinstance(stack.block, list)
-    flops: list[float] = []
-    for layers in (1, 2):
-        shallow = model_config.copy_tree()
-        shallow.lm.transformer.num_layers = layers
-        with torch.device("meta"):
-            flops.append(flat_cost(shallow.make(), batch).flops)
-    per_block = flops[1] - flops[0]
-    update = 3 * (flops[0] + (stack.num_layers - 1) * per_block)
-    assert update == pytest.approx(FLAT_UPDATE_FLOPS, rel=1e-4)
-
-
-def test_exp004_is_exp001_on_exp003s_corpus_for_exp003s_flops() -> None:
-    cfg, flat = exp004(), exp003()
-    expected = exp001()
-    expected.experiment_name = "exp004"
-    expected.dataset.working_dir = flat.dataset.working_dir
-    expected.dataset.corpus = flat.dataset.corpus
-    expected.dataset.cached_decisions = flat.dataset.cached_decisions
-    expected.max_steps = expected.step.train_budget_steps = cfg.max_steps
-    _assert_same(cfg, expected)
-    spent = cfg.max_steps * EXP001_UPDATE_FLOPS
-    assert abs(spent - flat.max_steps * FLAT_UPDATE_FLOPS) <= EXP001_UPDATE_FLOPS / 2
-
-
-def test_exp005_scores_exp004s_weights_on_exp003s_micro_batches() -> None:
-    scored, trained, flat = exp005(), exp004(), exp003()
-    assert scored.eval_only
-    _assert_same(scored.step, trained.step)
-    # Every field a validation micro-batch is drawn from matches exp003's.
-    for name in (
-        "working_dir",
-        "corpus",
-        "windows",
-        "t_g",
-        "s_max",
-        "sampler_seed",
-        "stratum_power",
-        "validation",
-    ):
-        assert getattr(scored.dataset, name) == getattr(flat.dataset, name), name
-    # Finalizing the loops resolves each checkpoint directory; only the tracker
-    # is dropped, as it plays no part in where checkpoints are read.
-    scored.tracker = trained.tracker = None
-    scored.step = trained.step = WorldModelTrainStep.Config()
-    reads, wrote = (loop.copy_tree().finalize() for loop in (scored, trained))
-    checkpoints, source = reads.checkpointer, wrote.checkpointer
-    assert isinstance(checkpoints, Checkpointer.Config)
-    assert isinstance(source, Checkpointer.Config)
-    assert checkpoints.working_dir == source.working_dir
-    assert reads.working_dir != wrote.working_dir
-
-
-def test_exp003_trains_and_scores_a_packed_batch() -> None:
-    """Over the cut schema, frames of 7 slots, not the full 150: ``flat_test``'s layout."""
-    cfg = exp003()
-    t_g = 4
-    model = cfg.step.model
-    assert isinstance(model, FlatModel.Config)
-    schema = model.schema = small_schema()
-    model.context = flat_positions(t_g, frame_slots=schema.frame_slots)
-    _shrink_global(model.lm.transformer)
-    _run_on_cpu(cfg.step)
-    torch.manual_seed(0)
-    step = cfg.step.make()
-    segments = [random_segment(schema, 12, seed=seed) for seed in (0, 1)]
-    batch = pack_windows([[segment] for segment in segments], t_g=t_g, s_max=1)
-    assert step.train_step(media=batch).get("metrics")
-    bits = cfg.metrics_eval["val"]
-    assert isinstance(bits, CraftaxBitsPerByte.Config)
-    bits.schema = schema
-    metric = bits.make()
-    stratum = torch.zeros(batch.kind.shape, dtype=torch.long)
-    metric.update(step.eval_loss(media=batch)["model"], media=batch, stratum=stratum)
-    # Near-uniform predictions: well above zero bits and below eight per byte.
-    bpb = metric.compute()["bpb"]
-    assert isinstance(bpb, float)
-    assert 0.5 < bpb < 8
-
-
 def test_module_docstring_lists_every_experiment() -> None:
     documented = experiments.__doc__ or ""
-    for factory in ALL_EXPERIMENTS:
+    for factory in (*ALL_EXPERIMENTS, *NOT_REPRODUCIBLE):
         assert factory.__name__ in documented
+
+
+@pytest.mark.parametrize("factory", NOT_REPRODUCIBLE, ids=_name)
+def test_an_experiment_without_its_input_raises_its_todo(factory: _Experiment) -> None:
+    """Each names the producer it waits for, its own or its parent's."""
+    with pytest.raises(NotImplementedError, match="TODO"):
+        factory()
+    assert "Not yet reproducible" in (factory.__doc__ or "")
 
 
 def test_exp_smoke_reads_its_corpus_and_scores_validations_natural_mix(
@@ -904,39 +599,6 @@ def _wandb(config: WorldModelLoop.Config) -> WandbTracker.Config:
     return wandb.tracker
 
 
-# Each config's ``cost`` owns its parameters, which ``assert_cost_matches_torch``
-# checks against the built module at test size (``model_test``); counted here at
-# full size from the configs, as building them, even on the meta device, takes
-# 0.3-0.5 s a model.
-def _module_sizes(model: WorldModel.Config) -> dict[str, int]:
-    """Count a finalized model's parameters per module from its config."""
-    return {
-        "encoder": cost(model.encoder, batch_size=1, dtype=None).params,
-        "transformer": model.transformer.cost(
-            seq_len=1,
-            batch_size=1,
-            dtype=None,
-        ).params,
-        "decoder": model.decoder.cost(batch_size=1, dtype=None, memory_len=1).params,
-        "total": model.cost(
-            seq_len=1,
-            batch_size=1,
-            frames=1,
-            jobs=1,
-            dtype=None,
-        ).params,
-    }
-
-
-def _finalized_model(config: WorldModelLoop.Config) -> WorldModel.Config:
-    """Return a loop's world model config, finalized, its global kernel SDPA's."""
-    model = config.step.model.copy_tree()
-    assert isinstance(model, WorldModel.Config)
-    # FA4 imports only on Linux; the kernel holds no parameters.
-    _attention(model.transformer).attn_kernel = SdpaVarlen.Config()
-    return model.finalize()
-
-
 def _recomputed(config: WorldModelLoop.Config) -> set[str]:
     """Return the stacks whose blocks recompute their activations in backward."""
     # Only the blocks' own flag recomputes: a second mechanism on top would
@@ -995,39 +657,6 @@ def _flat(config: object, path: str = "") -> dict[str, str]:
     for suffix, child in children:
         flat |= _flat(child, path + suffix)
     return flat
-
-
-def _shrink_global(stack: Transformer.Config) -> None:
-    """Cut a global stack to one layer of width 36, GQA 9:3, on SDPA."""
-    stack.channels_in = 36
-    stack.num_layers = 1
-    attention = _attention(stack)
-    attention.channels_head = 4
-    attention.attn_kernel = SdpaVarlen.Config()
-    block = stack.block
-    assert isinstance(block, TransformerBlock.Config)
-    assert isinstance(block.ffn, SwiGLU.Config)
-    block.ffn.channels_hidden = 48
-
-
-def _attention(stack: Transformer.Config) -> VarlenAttention.Config:
-    """Return the attention template of a global stack's blocks."""
-    block = stack.block
-    assert isinstance(block, TransformerBlock.Config)
-    assert isinstance(block.attn, VarlenAttention.Config)
-    return block.attn
-
-
-def _run_on_cpu(config: WorldModelTrainStep.Config) -> None:
-    """Run a step eagerly in float32 on the CPU; the recipe is kept."""
-    config.parallelism = NoParallel.Config(device="cpu")
-    config.compile = None
-    config.dtype_autocast = None
-    optimizer = config.optimizer
-    assert isinstance(optimizer, CompositeOptimizer.Config)
-    for member in optimizer.optimizers:
-        if isinstance(member, FusedAdamW.Config):
-            member.compile = False
 
 
 def _write_corpus(root: Path, *, corpus: Path) -> None:

@@ -5,10 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pytest
+
 from priml.baselines.craftax.world_model import (
     experiments as world_model_experiments,
 )
 from priml.baselines.craftax.world_model.capture import experiments
+from priml.baselines.craftax.world_model.capture.branches import (
+    BranchFeeder,
+)
 from priml.baselines.craftax.world_model.capture.source import (
     PolicySource,
 )
@@ -72,12 +77,14 @@ def test_each_arm_reads_its_policy_runs_final_checkpoint() -> None:
 
 
 def test_base_dir_moves_every_path_of_a_capture(tmp_path: Path) -> None:
-    config = experiments.arm0_branch()
+    config = experiments.arm0_v2()
     config.base_dir = tmp_path
+    pools = _source(config).branches = BranchFeeder.Config()
+    pools.pools = config.root / "pools"
     config = config.copy_tree().finalize()
     source = _source(config)
     assert source.branches is not None
-    archive = tmp_path / "datasets/craftax/world-model/archive-v2-branch"
+    archive = tmp_path / "datasets/craftax/world-model/archive-v2"
     assert [config.root, config.run_root, source.checkpoint, source.branches.pools] == [
         archive,
         tmp_path / "runs/craftax/world-model/capture",
@@ -117,20 +124,18 @@ def test_v2_fresh_arms_are_generation_1_and_stall_capped() -> None:
     assert all(_source(c).branches is None for c in configs)
 
 
-def test_v2_branch_arms_are_generation_2_with_their_pools() -> None:
-    for arm, (branch, fresh) in enumerate(zip(V2_BRANCH, V2_FRESH, strict=True)):
-        config = branch()
-        assert (config.arm, config.generation) == (arm, 2)
-        source = _source(config)
-        assert source.branches is not None
-        assert source.branches.pools == config.root / "pools"
-        assert source.env == _source(fresh()).env
+@pytest.mark.parametrize("factory", V2_BRANCH)
+def test_a_v2_branch_arm_without_its_pools_raises_its_todo(
+    factory: Callable[[], CaptureWorker.Config],
+) -> None:
+    with pytest.raises(NotImplementedError, match="TODO"):
+        factory()
+    assert "Not yet reproducible" in (factory.__doc__ or "")
 
 
-def test_v2_budgets_total_6_66_billion() -> None:
-    fresh = [factory().decisions * 4 for factory in V2_FRESH]
-    branch = [factory().decisions * 4 for factory in V2_BRANCH]
-    assert abs(sum(fresh) + sum(branch) - 6_660_000_000) < 4 * 4
+def test_v2_fresh_budgets_are_the_tables_millions() -> None:
+    fresh = [round(factory().decisions * 4 / 1_000_000) for factory in V2_FRESH]
+    assert fresh == [3_406, 257, 369, 272]
 
 
 def test_the_verifier_reads_the_first_archive() -> None:
