@@ -309,8 +309,9 @@ wheels = [
 [[package]]
 name = "configgle"
 version = "1.4.2"
-source = { git = "https://github.com/rekursiv-ai/configgle?branch=main#ca5ae9a94b82eb23740741ee5cbbab9730516595" }
+source = { git = "https://github.com/rekursiv-ai/configgle?branch=main#9f9a594466866074585bc5b25321563946c98a20" }
 dependencies = [
+    { name = "treekle" },
     { name = "typing-extensions" },
 ]
 
@@ -2622,7 +2623,7 @@ wheels = [
 [[package]]
 name = "treekle"
 version = "0.1.0"
-source = { git = "https://github.com/rekursiv-ai/treekle?branch=main#5f9be5952799e7e16f05a95bdc96c263124a181a" }
+source = { git = "https://github.com/rekursiv-ai/treekle?branch=main#aaeed7e409e97d3a792c1c2f32139838a48a510b" }
 
 [[package]]
 name = "triton"
