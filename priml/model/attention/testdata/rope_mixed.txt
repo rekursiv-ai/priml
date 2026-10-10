@@ -1,8 +1,8 @@
 RoPEMixed.Config(
-                channels_head=8,
-                reduction_mode='cat',
-                frequencies=HuggingFaceFrequencies.Config(base=10000.0),
-                dtype=torch.float32,
-                num_heads=1,
-                learnable=False
-        )
+        channels_head=8,
+        reduction_mode='cat',
+        frequencies=HuggingFaceFrequencies.Config(base=10000.0),
+        dtype=torch.float32,
+        num_heads=1,
+        learnable=False
+    )

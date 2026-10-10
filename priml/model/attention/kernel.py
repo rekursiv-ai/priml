@@ -125,7 +125,7 @@ class SdpaFused(nn.Module):
     projection emits and the one a fused kernel wants -- and transposes to
     SDPA's ``[..., num_heads, S, channels_head]`` internally. The transpose is a
     stride view rather than a copy, so a kernel that needs the other layout
-    (FlashAttention-3) is a drop-in value in the same slot and pays nothing.
+    (FlashAttention-4) is a drop-in value in the same slot and pays nothing.
     """
 
     class Config(Fig["SdpaFused"]):

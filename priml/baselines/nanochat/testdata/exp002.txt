@@ -1,743 +1,776 @@
 NanoChatLoop.Config(
-                study_name='nanochat',
-                experiment_name='exp002',
-                base_dir='/opt/scratch',
-                working_dir=PosixPath('/opt/scratch/runs/nanochat/exp002'),
-                doc='',
-                step=NanoChatTrainStep.Config(
-                │       model=NanoChatLM.Config(
-                │       │       vocab_size=8_192,
-                │       │       max_seq_len=2_048,
-                │       │       channels_in=512,
-                │       │       num_layers=8,
-                │       │       block=[
-                │       │       │       TransformerBlock.Config(
-                │       │       │               channels_in=512,
-                │       │       │               channels_out=512,
-                │       │       │               attn=ValueGatedAttention.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       num_heads=4,
-                │       │       │                       channels_head=128,
-                │       │       │                       gate_channels=32,
-                │       │       │                       norm_qk=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=1.1920928955078125e-07,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       ),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       kernel=SdpaCausal.Config(),
-                │       │       │                       window=1_024,
-                │       │       │                       window_pattern='SSSL',
-                │       │       │                       max_seq_len=2_048,
-                │       │       │                       gated=False,
-                │       │       │                       depth_index=((0, 8),)
-                │       │       │               ),
-                │       │       │               ffn=SwiGLUReluSquared.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       channels_hidden=2_048,
-                │       │       │                       expansion=4.0,
-                │       │       │                       round_to=1,
-                │       │       │                       gate=False,
-                │       │       │                       bias=False,
-                │       │       │                       split_gate_projection=False,
-                │       │       │                       norm=None,
-                │       │       │                       act=<function priml.model.swiglu.relu_squared at 0xdefacedeface>,
-                │       │       │                       depth_index=((0, 8),),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                       shard='colwise'
-                │       │       │               ),
-                │       │       │               norm1=RMSNorm.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       eps=1.1920928955078125e-07,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               norm2=RMSNorm.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       eps=1.1920928955078125e-07,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               prenorm=True,
-                │       │       │               checkpoint=False,
-                │       │       │               depth_index=((0, 8),)
-                │       │       │       ),
-                │       │       │       TransformerBlock.Config(
-                │       │       │               channels_in=512,
-                │       │       │               channels_out=512,
-                │       │       │               attn=ValueGatedAttention.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       num_heads=4,
-                │       │       │                       channels_head=128,
-                │       │       │                       gate_channels=32,
-                │       │       │                       norm_qk=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=1.1920928955078125e-07,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       ),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       kernel=SdpaCausal.Config(),
-                │       │       │                       window=1_024,
-                │       │       │                       window_pattern='SSSL',
-                │       │       │                       max_seq_len=2_048,
-                │       │       │                       gated=False,
-                │       │       │                       depth_index=((1, 8),)
-                │       │       │               ),
-                │       │       │               ffn=SwiGLUReluSquared.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       channels_hidden=2_048,
-                │       │       │                       expansion=4.0,
-                │       │       │                       round_to=1,
-                │       │       │                       gate=False,
-                │       │       │                       bias=False,
-                │       │       │                       split_gate_projection=False,
-                │       │       │                       norm=None,
-                │       │       │                       act=<function priml.model.swiglu.relu_squared at 0xdefacedeface>,
-                │       │       │                       depth_index=((1, 8),),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                       shard='colwise'
-                │       │       │               ),
-                │       │       │               norm1=RMSNorm.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       eps=1.1920928955078125e-07,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               norm2=RMSNorm.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       eps=1.1920928955078125e-07,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               prenorm=True,
-                │       │       │               checkpoint=False,
-                │       │       │               depth_index=((1, 8),)
-                │       │       │       ),
-                │       │       │       TransformerBlock.Config(
-                │       │       │               channels_in=512,
-                │       │       │               channels_out=512,
-                │       │       │               attn=ValueGatedAttention.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       num_heads=4,
-                │       │       │                       channels_head=128,
-                │       │       │                       gate_channels=32,
-                │       │       │                       norm_qk=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=1.1920928955078125e-07,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       ),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       kernel=SdpaCausal.Config(),
-                │       │       │                       window=1_024,
-                │       │       │                       window_pattern='SSSL',
-                │       │       │                       max_seq_len=2_048,
-                │       │       │                       gated=False,
-                │       │       │                       depth_index=((2, 8),)
-                │       │       │               ),
-                │       │       │               ffn=SwiGLUReluSquared.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       channels_hidden=2_048,
-                │       │       │                       expansion=4.0,
-                │       │       │                       round_to=1,
-                │       │       │                       gate=False,
-                │       │       │                       bias=False,
-                │       │       │                       split_gate_projection=False,
-                │       │       │                       norm=None,
-                │       │       │                       act=<function priml.model.swiglu.relu_squared at 0xdefacedeface>,
-                │       │       │                       depth_index=((2, 8),),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                       shard='colwise'
-                │       │       │               ),
-                │       │       │               norm1=RMSNorm.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       eps=1.1920928955078125e-07,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               norm2=RMSNorm.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       eps=1.1920928955078125e-07,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               prenorm=True,
-                │       │       │               checkpoint=False,
-                │       │       │               depth_index=((2, 8),)
-                │       │       │       ),
-                │       │       │       TransformerBlock.Config(
-                │       │       │               channels_in=512,
-                │       │       │               channels_out=512,
-                │       │       │               attn=ValueGatedAttention.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       num_heads=4,
-                │       │       │                       channels_head=128,
-                │       │       │                       gate_channels=32,
-                │       │       │                       norm_qk=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=1.1920928955078125e-07,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       ),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       kernel=SdpaCausal.Config(),
-                │       │       │                       window=2_048,
-                │       │       │                       window_pattern='SSSL',
-                │       │       │                       max_seq_len=2_048,
-                │       │       │                       gated=False,
-                │       │       │                       depth_index=((3, 8),)
-                │       │       │               ),
-                │       │       │               ffn=SwiGLUReluSquared.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       channels_hidden=2_048,
-                │       │       │                       expansion=4.0,
-                │       │       │                       round_to=1,
-                │       │       │                       gate=False,
-                │       │       │                       bias=False,
-                │       │       │                       split_gate_projection=False,
-                │       │       │                       norm=None,
-                │       │       │                       act=<function priml.model.swiglu.relu_squared at 0xdefacedeface>,
-                │       │       │                       depth_index=((3, 8),),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                       shard='colwise'
-                │       │       │               ),
-                │       │       │               norm1=RMSNorm.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       eps=1.1920928955078125e-07,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               norm2=RMSNorm.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       eps=1.1920928955078125e-07,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               prenorm=True,
-                │       │       │               checkpoint=False,
-                │       │       │               depth_index=((3, 8),)
-                │       │       │       ),
-                │       │       │       TransformerBlock.Config(
-                │       │       │               channels_in=512,
-                │       │       │               channels_out=512,
-                │       │       │               attn=ValueGatedAttention.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       num_heads=4,
-                │       │       │                       channels_head=128,
-                │       │       │                       gate_channels=32,
-                │       │       │                       norm_qk=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=1.1920928955078125e-07,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       ),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       kernel=SdpaCausal.Config(),
-                │       │       │                       window=1_024,
-                │       │       │                       window_pattern='SSSL',
-                │       │       │                       max_seq_len=2_048,
-                │       │       │                       gated=False,
-                │       │       │                       depth_index=((4, 8),)
-                │       │       │               ),
-                │       │       │               ffn=SwiGLUReluSquared.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       channels_hidden=2_048,
-                │       │       │                       expansion=4.0,
-                │       │       │                       round_to=1,
-                │       │       │                       gate=False,
-                │       │       │                       bias=False,
-                │       │       │                       split_gate_projection=False,
-                │       │       │                       norm=None,
-                │       │       │                       act=<function priml.model.swiglu.relu_squared at 0xdefacedeface>,
-                │       │       │                       depth_index=((4, 8),),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                       shard='colwise'
-                │       │       │               ),
-                │       │       │               norm1=RMSNorm.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       eps=1.1920928955078125e-07,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               norm2=RMSNorm.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       eps=1.1920928955078125e-07,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               prenorm=True,
-                │       │       │               checkpoint=False,
-                │       │       │               depth_index=((4, 8),)
-                │       │       │       ),
-                │       │       │       TransformerBlock.Config(
-                │       │       │               channels_in=512,
-                │       │       │               channels_out=512,
-                │       │       │               attn=ValueGatedAttention.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       num_heads=4,
-                │       │       │                       channels_head=128,
-                │       │       │                       gate_channels=32,
-                │       │       │                       norm_qk=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=1.1920928955078125e-07,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       ),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       kernel=SdpaCausal.Config(),
-                │       │       │                       window=1_024,
-                │       │       │                       window_pattern='SSSL',
-                │       │       │                       max_seq_len=2_048,
-                │       │       │                       gated=False,
-                │       │       │                       depth_index=((5, 8),)
-                │       │       │               ),
-                │       │       │               ffn=SwiGLUReluSquared.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       channels_hidden=2_048,
-                │       │       │                       expansion=4.0,
-                │       │       │                       round_to=1,
-                │       │       │                       gate=False,
-                │       │       │                       bias=False,
-                │       │       │                       split_gate_projection=False,
-                │       │       │                       norm=None,
-                │       │       │                       act=<function priml.model.swiglu.relu_squared at 0xdefacedeface>,
-                │       │       │                       depth_index=((5, 8),),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                       shard='colwise'
-                │       │       │               ),
-                │       │       │               norm1=RMSNorm.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       eps=1.1920928955078125e-07,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               norm2=RMSNorm.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       eps=1.1920928955078125e-07,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               prenorm=True,
-                │       │       │               checkpoint=False,
-                │       │       │               depth_index=((5, 8),)
-                │       │       │       ),
-                │       │       │       TransformerBlock.Config(
-                │       │       │               channels_in=512,
-                │       │       │               channels_out=512,
-                │       │       │               attn=ValueGatedAttention.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       num_heads=4,
-                │       │       │                       channels_head=128,
-                │       │       │                       gate_channels=32,
-                │       │       │                       norm_qk=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=1.1920928955078125e-07,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       ),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       kernel=SdpaCausal.Config(),
-                │       │       │                       window=1_024,
-                │       │       │                       window_pattern='SSSL',
-                │       │       │                       max_seq_len=2_048,
-                │       │       │                       gated=False,
-                │       │       │                       depth_index=((6, 8),)
-                │       │       │               ),
-                │       │       │               ffn=SwiGLUReluSquared.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       channels_hidden=2_048,
-                │       │       │                       expansion=4.0,
-                │       │       │                       round_to=1,
-                │       │       │                       gate=False,
-                │       │       │                       bias=False,
-                │       │       │                       split_gate_projection=False,
-                │       │       │                       norm=None,
-                │       │       │                       act=<function priml.model.swiglu.relu_squared at 0xdefacedeface>,
-                │       │       │                       depth_index=((6, 8),),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                       shard='colwise'
-                │       │       │               ),
-                │       │       │               norm1=RMSNorm.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       eps=1.1920928955078125e-07,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               norm2=RMSNorm.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       eps=1.1920928955078125e-07,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               prenorm=True,
-                │       │       │               checkpoint=False,
-                │       │       │               depth_index=((6, 8),)
-                │       │       │       ),
-                │       │       │       TransformerBlock.Config(
-                │       │       │               channels_in=512,
-                │       │       │               channels_out=512,
-                │       │       │               attn=ValueGatedAttention.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       num_heads=4,
-                │       │       │                       channels_head=128,
-                │       │       │                       gate_channels=32,
-                │       │       │                       norm_qk=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=1.1920928955078125e-07,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       ),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       kernel=SdpaCausal.Config(),
-                │       │       │                       window=2_048,
-                │       │       │                       window_pattern='SSSL',
-                │       │       │                       max_seq_len=2_048,
-                │       │       │                       gated=False,
-                │       │       │                       depth_index=((7, 8),)
-                │       │       │               ),
-                │       │       │               ffn=SwiGLUReluSquared.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       channels_hidden=2_048,
-                │       │       │                       expansion=4.0,
-                │       │       │                       round_to=1,
-                │       │       │                       gate=False,
-                │       │       │                       bias=False,
-                │       │       │                       split_gate_projection=False,
-                │       │       │                       norm=None,
-                │       │       │                       act=<function priml.model.swiglu.relu_squared at 0xdefacedeface>,
-                │       │       │                       depth_index=((7, 8),),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                       shard='colwise'
-                │       │       │               ),
-                │       │       │               norm1=RMSNorm.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       eps=1.1920928955078125e-07,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               norm2=RMSNorm.Config(
-                │       │       │                       channels_in=512,
-                │       │       │                       channels_out=512,
-                │       │       │                       eps=1.1920928955078125e-07,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               prenorm=True,
-                │       │       │               checkpoint=False,
-                │       │       │               depth_index=((7, 8),)
-                │       │       │       )
-                │       │       ],
-                │       │       value_embedding_stride=0,
-                │       │       embedding=NarrowEmbedding.Config(
-                │       │               channels_in=8_192,
-                │       │               channels_out=512,
-                │       │               dtype=torch.bfloat16,
-                │       │               inner=Embedding.Config(
-                │       │                       channels_in=8_192,
-                │       │                       channels_out=512,
-                │       │                       padding_idx=None,
-                │       │                       device=None,
-                │       │                       dtype=None,
-                │       │                       shard=None,
-                │       │                       depth_index=(),
-                │       │                       init_weight=functools.partial(<function priml.model.init.normal at 0xdefacedeface>, std=1.0)
-                │       │               )
-                │       │       ),
-                │       │       norm=RMSNorm.Config(
-                │       │               channels_in=512,
-                │       │               channels_out=512,
-                │       │               eps=None,
-                │       │               elementwise_affine=False,
-                │       │               device=None,
-                │       │               dtype=None
-                │       │       ),
-                │       │       lm_head=SoftCap.Config(
-                │       │               channels_in=512,
-                │       │               channels_out=8_192,
-                │       │               cap=15.0,
-                │       │               inner=Linear.Config(
-                │       │                       channels_in=512,
-                │       │                       channels_out=8_192,
-                │       │                       bias=False,
-                │       │                       depth_index=(),
-                │       │                       device=None,
-                │       │                       dtype=None,
-                │       │                       init_weight=functools.partial(<function priml.model.init.normal at 0xdefacedeface>, std=0.001),
-                │       │                       init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │                       shard=None
-                │       │               ),
-                │       │               dtype=torch.float32
-                │       │       ),
-                │       │       rope=RoPE.Config(
-                │       │               channels_head=128,
-                │       │               reduction_mode='cat',
-                │       │               frequencies=HuggingFaceFrequencies.Config(
-                │       │                       base=10000.0
-                │       │               ),
-                │       │               dtype=torch.bfloat16
-                │       │       ),
-                │       │       mix=ResidualMix.Config(
-                │       │               num_layers=8,
-                │       │               channels_in=512,
-                │       │               running=1.0,
-                │       │               original=0.1
-                │       │       )
-                │       ),
-                │       optimizer=CompositeOptimizer.Config(
-                │       │       optimizers=[
-                │       │               PartialConfig(<class 'functools.partial'>, <class 'priml.optimizers.fused_adamw.FusedAdamW'>, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0, compile=True, lr=0.004898979485566357),
-                │       │               PartialConfig(<class 'functools.partial'>, <class 'priml.optimizers.fused_adamw.FusedAdamW'>, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0, compile=True, lr=0.7348469228349535),
-                │       │               PartialConfig(<class 'functools.partial'>, <class 'priml.optimizers.fused_adamw.FusedAdamW'>, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0, compile=True, lr=0.7348469228349535),
-                │       │               PartialConfig(<class 'functools.partial'>, <class 'priml.optimizers.fused_adamw.FusedAdamW'>, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0, compile=True, lr=0.005),
-                │       │               PartialConfig(<class 'functools.partial'>, <class 'priml.optimizers.fused_adamw.FusedAdamW'>, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0, compile=True, lr=0.5),
-                │       │               NorMuon.Config(
-                │       │                       lr=0.04,
-                │       │                       momentum=0.95,
-                │       │                       beta2=0.95,
-                │       │                       ns_steps=5,
-                │       │                       weight_decay=0.2,
-                │       │                       compile=True,
-                │       │                       coefficients=(
-                │       │                               (
-                │       │                                       8.156554524902461,
-                │       │                                       -22.48329292557795,
-                │       │                                       15.878769915207462
-                │       │                               ),
-                │       │                               (
-                │       │                                       4.042929935166739,
-                │       │                                       -2.808917465908714,
-                │       │                                       0.5000178451051316
-                │       │                               ),
-                │       │                               (
-                │       │                                       3.8916678022926607,
-                │       │                                       -2.772484153217685,
-                │       │                                       0.5060648178503393
-                │       │                               ),
-                │       │                               (
-                │       │                                       3.285753657755655,
-                │       │                                       -2.3681294933425376,
-                │       │                                       0.46449024233003106
-                │       │                               ),
-                │       │                               (
-                │       │                                       2.3465413258596377,
-                │       │                                       -1.7097828382687081,
-                │       │                                       0.42323551169305323
-                │       │                               )
-                │       │                       )
-                │       │               )
-                │       │       ],
-                │       │       select=[
-                │       │               matching('lm_head'),
-                │       │               excluding(matching('embed'), 'value_embeds'),
-                │       │               matching('value_embeds'),
-                │       │               matching('mix.running'),
-                │       │               matching('mix.original'),
-                │       │               excluding(NorMuon.eligible_tensor, 'embed', 'lm_head')
-                │       │       ],
-                │       │       require_total=True,
-                │       │       drop_empty=True
-                │       ),
-                │       loss=TokenCrossEntropy.Config(ignore_index=-1),
-                │       accumulate_grad_batches=1,
-                │       drop_partial_accumulation_on_epoch_end=True,
-                │       train_budget_steps=inf,
-                │       train_budget_sec=300.0,
-                │       train_budget_epochs=inf,
-                │       lr_schedule=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.constant at 0xdefacedeface>),
-                │       parallelism=NoParallel.Config(device='cuda'),
-                │       model_quantization=NoModelQuantization.Config(),
-                │       activation_memoization=DefaultActivationStorage.Config(),
-                │       compile=PartialConfig(<class 'functools.partial'>, <function torch.compile at 0xdefacedeface>),
-                │       ema=NoEMA.Config(),
-                │       gradient_clip_norm=inf,
-                │       skip_step_on_nonfinite_grad=False,
-                │       device_init='eager',
-                │       dtype_autocast=torch.bfloat16,
-                │       autocast_cache_enabled=False,
-                │       schedule=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.trapezoidal at 0xdefacedeface>, flat=0.5),
-                │       budget_warmup_steps=11,
-                │       tokens_per_optimizer_step=524_288,
-                │       rows_per_pass=32,
-                │       momentum_start=0.85,
-                │       momentum_end=0.95,
-                │       momentum_warmup_steps=300,
-                │       decay_to_zero=True,
-                │       divergence_threshold=100.0,
-                │       adam_lr_tuned_at_channels=512
+        study_name='nanochat',
+        experiment_name='exp002',
+        base_dir='/opt/scratch',
+        working_dir=PosixPath('/opt/scratch/runs/nanochat/exp002'),
+        doc='',
+        step=NanoChatTrainStep.Config(
+        │   model=NanoChatLM.Config(
+        │   │   vocab_size=8_192,
+        │   │   max_seq_len=2_048,
+        │   │   channels_in=512,
+        │   │   num_layers=8,
+        │   │   block=[
+        │   │   │   TransformerBlock.Config(
+        │   │   │       channels_in=512,
+        │   │   │       channels_out=512,
+        │   │   │       attn=ValueGatedAttention.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           num_heads=4,
+        │   │   │           channels_head=128,
+        │   │   │           gate_channels=32,
+        │   │   │           norm_qk=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=1.1920928955078125e-07,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           ),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           kernel=SdpaCausal.Config(),
+        │   │   │           window=1_024,
+        │   │   │           window_pattern='SSSL',
+        │   │   │           max_seq_len=2_048,
+        │   │   │           gated=False,
+        │   │   │           depth_index=((0, 8),)
+        │   │   │       ),
+        │   │   │       ffn=SwiGLUReluSquared.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           channels_hidden=2_048,
+        │   │   │           expansion=4.0,
+        │   │   │           round_to=1,
+        │   │   │           gate=False,
+        │   │   │           bias=False,
+        │   │   │           split_gate_projection=False,
+        │   │   │           norm=None,
+        │   │   │           act=priml.model.swiglu.relu_squared,
+        │   │   │           depth_index=((0, 8),),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           shard='colwise'
+        │   │   │       ),
+        │   │   │       norm1=RMSNorm.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           eps=1.1920928955078125e-07,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       norm2=RMSNorm.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           eps=1.1920928955078125e-07,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       prenorm=True,
+        │   │   │       checkpoint=False,
+        │   │   │       depth_index=((0, 8),)
+        │   │   │   ),
+        │   │   │   TransformerBlock.Config(
+        │   │   │       channels_in=512,
+        │   │   │       channels_out=512,
+        │   │   │       attn=ValueGatedAttention.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           num_heads=4,
+        │   │   │           channels_head=128,
+        │   │   │           gate_channels=32,
+        │   │   │           norm_qk=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=1.1920928955078125e-07,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           ),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           kernel=SdpaCausal.Config(),
+        │   │   │           window=1_024,
+        │   │   │           window_pattern='SSSL',
+        │   │   │           max_seq_len=2_048,
+        │   │   │           gated=False,
+        │   │   │           depth_index=((1, 8),)
+        │   │   │       ),
+        │   │   │       ffn=SwiGLUReluSquared.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           channels_hidden=2_048,
+        │   │   │           expansion=4.0,
+        │   │   │           round_to=1,
+        │   │   │           gate=False,
+        │   │   │           bias=False,
+        │   │   │           split_gate_projection=False,
+        │   │   │           norm=None,
+        │   │   │           act=priml.model.swiglu.relu_squared,
+        │   │   │           depth_index=((1, 8),),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           shard='colwise'
+        │   │   │       ),
+        │   │   │       norm1=RMSNorm.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           eps=1.1920928955078125e-07,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       norm2=RMSNorm.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           eps=1.1920928955078125e-07,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       prenorm=True,
+        │   │   │       checkpoint=False,
+        │   │   │       depth_index=((1, 8),)
+        │   │   │   ),
+        │   │   │   TransformerBlock.Config(
+        │   │   │       channels_in=512,
+        │   │   │       channels_out=512,
+        │   │   │       attn=ValueGatedAttention.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           num_heads=4,
+        │   │   │           channels_head=128,
+        │   │   │           gate_channels=32,
+        │   │   │           norm_qk=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=1.1920928955078125e-07,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           ),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           kernel=SdpaCausal.Config(),
+        │   │   │           window=1_024,
+        │   │   │           window_pattern='SSSL',
+        │   │   │           max_seq_len=2_048,
+        │   │   │           gated=False,
+        │   │   │           depth_index=((2, 8),)
+        │   │   │       ),
+        │   │   │       ffn=SwiGLUReluSquared.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           channels_hidden=2_048,
+        │   │   │           expansion=4.0,
+        │   │   │           round_to=1,
+        │   │   │           gate=False,
+        │   │   │           bias=False,
+        │   │   │           split_gate_projection=False,
+        │   │   │           norm=None,
+        │   │   │           act=priml.model.swiglu.relu_squared,
+        │   │   │           depth_index=((2, 8),),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           shard='colwise'
+        │   │   │       ),
+        │   │   │       norm1=RMSNorm.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           eps=1.1920928955078125e-07,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       norm2=RMSNorm.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           eps=1.1920928955078125e-07,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       prenorm=True,
+        │   │   │       checkpoint=False,
+        │   │   │       depth_index=((2, 8),)
+        │   │   │   ),
+        │   │   │   TransformerBlock.Config(
+        │   │   │       channels_in=512,
+        │   │   │       channels_out=512,
+        │   │   │       attn=ValueGatedAttention.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           num_heads=4,
+        │   │   │           channels_head=128,
+        │   │   │           gate_channels=32,
+        │   │   │           norm_qk=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=1.1920928955078125e-07,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           ),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           kernel=SdpaCausal.Config(),
+        │   │   │           window=2_048,
+        │   │   │           window_pattern='SSSL',
+        │   │   │           max_seq_len=2_048,
+        │   │   │           gated=False,
+        │   │   │           depth_index=((3, 8),)
+        │   │   │       ),
+        │   │   │       ffn=SwiGLUReluSquared.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           channels_hidden=2_048,
+        │   │   │           expansion=4.0,
+        │   │   │           round_to=1,
+        │   │   │           gate=False,
+        │   │   │           bias=False,
+        │   │   │           split_gate_projection=False,
+        │   │   │           norm=None,
+        │   │   │           act=priml.model.swiglu.relu_squared,
+        │   │   │           depth_index=((3, 8),),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           shard='colwise'
+        │   │   │       ),
+        │   │   │       norm1=RMSNorm.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           eps=1.1920928955078125e-07,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       norm2=RMSNorm.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           eps=1.1920928955078125e-07,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       prenorm=True,
+        │   │   │       checkpoint=False,
+        │   │   │       depth_index=((3, 8),)
+        │   │   │   ),
+        │   │   │   TransformerBlock.Config(
+        │   │   │       channels_in=512,
+        │   │   │       channels_out=512,
+        │   │   │       attn=ValueGatedAttention.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           num_heads=4,
+        │   │   │           channels_head=128,
+        │   │   │           gate_channels=32,
+        │   │   │           norm_qk=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=1.1920928955078125e-07,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           ),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           kernel=SdpaCausal.Config(),
+        │   │   │           window=1_024,
+        │   │   │           window_pattern='SSSL',
+        │   │   │           max_seq_len=2_048,
+        │   │   │           gated=False,
+        │   │   │           depth_index=((4, 8),)
+        │   │   │       ),
+        │   │   │       ffn=SwiGLUReluSquared.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           channels_hidden=2_048,
+        │   │   │           expansion=4.0,
+        │   │   │           round_to=1,
+        │   │   │           gate=False,
+        │   │   │           bias=False,
+        │   │   │           split_gate_projection=False,
+        │   │   │           norm=None,
+        │   │   │           act=priml.model.swiglu.relu_squared,
+        │   │   │           depth_index=((4, 8),),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           shard='colwise'
+        │   │   │       ),
+        │   │   │       norm1=RMSNorm.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           eps=1.1920928955078125e-07,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       norm2=RMSNorm.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           eps=1.1920928955078125e-07,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       prenorm=True,
+        │   │   │       checkpoint=False,
+        │   │   │       depth_index=((4, 8),)
+        │   │   │   ),
+        │   │   │   TransformerBlock.Config(
+        │   │   │       channels_in=512,
+        │   │   │       channels_out=512,
+        │   │   │       attn=ValueGatedAttention.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           num_heads=4,
+        │   │   │           channels_head=128,
+        │   │   │           gate_channels=32,
+        │   │   │           norm_qk=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=1.1920928955078125e-07,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           ),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           kernel=SdpaCausal.Config(),
+        │   │   │           window=1_024,
+        │   │   │           window_pattern='SSSL',
+        │   │   │           max_seq_len=2_048,
+        │   │   │           gated=False,
+        │   │   │           depth_index=((5, 8),)
+        │   │   │       ),
+        │   │   │       ffn=SwiGLUReluSquared.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           channels_hidden=2_048,
+        │   │   │           expansion=4.0,
+        │   │   │           round_to=1,
+        │   │   │           gate=False,
+        │   │   │           bias=False,
+        │   │   │           split_gate_projection=False,
+        │   │   │           norm=None,
+        │   │   │           act=priml.model.swiglu.relu_squared,
+        │   │   │           depth_index=((5, 8),),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           shard='colwise'
+        │   │   │       ),
+        │   │   │       norm1=RMSNorm.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           eps=1.1920928955078125e-07,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       norm2=RMSNorm.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           eps=1.1920928955078125e-07,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       prenorm=True,
+        │   │   │       checkpoint=False,
+        │   │   │       depth_index=((5, 8),)
+        │   │   │   ),
+        │   │   │   TransformerBlock.Config(
+        │   │   │       channels_in=512,
+        │   │   │       channels_out=512,
+        │   │   │       attn=ValueGatedAttention.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           num_heads=4,
+        │   │   │           channels_head=128,
+        │   │   │           gate_channels=32,
+        │   │   │           norm_qk=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=1.1920928955078125e-07,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           ),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           kernel=SdpaCausal.Config(),
+        │   │   │           window=1_024,
+        │   │   │           window_pattern='SSSL',
+        │   │   │           max_seq_len=2_048,
+        │   │   │           gated=False,
+        │   │   │           depth_index=((6, 8),)
+        │   │   │       ),
+        │   │   │       ffn=SwiGLUReluSquared.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           channels_hidden=2_048,
+        │   │   │           expansion=4.0,
+        │   │   │           round_to=1,
+        │   │   │           gate=False,
+        │   │   │           bias=False,
+        │   │   │           split_gate_projection=False,
+        │   │   │           norm=None,
+        │   │   │           act=priml.model.swiglu.relu_squared,
+        │   │   │           depth_index=((6, 8),),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           shard='colwise'
+        │   │   │       ),
+        │   │   │       norm1=RMSNorm.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           eps=1.1920928955078125e-07,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       norm2=RMSNorm.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           eps=1.1920928955078125e-07,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       prenorm=True,
+        │   │   │       checkpoint=False,
+        │   │   │       depth_index=((6, 8),)
+        │   │   │   ),
+        │   │   │   TransformerBlock.Config(
+        │   │   │       channels_in=512,
+        │   │   │       channels_out=512,
+        │   │   │       attn=ValueGatedAttention.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           num_heads=4,
+        │   │   │           channels_head=128,
+        │   │   │           gate_channels=32,
+        │   │   │           norm_qk=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=1.1920928955078125e-07,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           ),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           kernel=SdpaCausal.Config(),
+        │   │   │           window=2_048,
+        │   │   │           window_pattern='SSSL',
+        │   │   │           max_seq_len=2_048,
+        │   │   │           gated=False,
+        │   │   │           depth_index=((7, 8),)
+        │   │   │       ),
+        │   │   │       ffn=SwiGLUReluSquared.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           channels_hidden=2_048,
+        │   │   │           expansion=4.0,
+        │   │   │           round_to=1,
+        │   │   │           gate=False,
+        │   │   │           bias=False,
+        │   │   │           split_gate_projection=False,
+        │   │   │           norm=None,
+        │   │   │           act=priml.model.swiglu.relu_squared,
+        │   │   │           depth_index=((7, 8),),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           shard='colwise'
+        │   │   │       ),
+        │   │   │       norm1=RMSNorm.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           eps=1.1920928955078125e-07,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       norm2=RMSNorm.Config(
+        │   │   │           channels_in=512,
+        │   │   │           channels_out=512,
+        │   │   │           eps=1.1920928955078125e-07,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       prenorm=True,
+        │   │   │       checkpoint=False,
+        │   │   │       depth_index=((7, 8),)
+        │   │   │   )
+        │   │   ],
+        │   │   value_embedding_stride=0,
+        │   │   embedding=NarrowEmbedding.Config(
+        │   │       channels_in=8_192,
+        │   │       channels_out=512,
+        │   │       dtype=torch.bfloat16,
+        │   │       inner=Embedding.Config(
+        │   │           channels_in=8_192,
+        │   │           channels_out=512,
+        │   │           padding_idx=None,
+        │   │           device=None,
+        │   │           dtype=None,
+        │   │           shard=None,
+        │   │           depth_index=(),
+        │   │           init_weight=functools.partial(priml.model.init.normal, std=1.0)
+        │   │       )
+        │   │   ),
+        │   │   norm=RMSNorm.Config(
+        │   │       channels_in=512,
+        │   │       channels_out=512,
+        │   │       eps=None,
+        │   │       elementwise_affine=False,
+        │   │       device=None,
+        │   │       dtype=None
+        │   │   ),
+        │   │   lm_head=SoftCap.Config(
+        │   │       channels_in=512,
+        │   │       channels_out=8_192,
+        │   │       cap=15.0,
+        │   │       inner=Linear.Config(
+        │   │           channels_in=512,
+        │   │           channels_out=8_192,
+        │   │           bias=False,
+        │   │           depth_index=(),
+        │   │           device=None,
+        │   │           dtype=None,
+        │   │           init_weight=functools.partial(priml.model.init.normal, std=0.001),
+        │   │           init_bias=torch.nn.init.zeros_,
+        │   │           shard=None
+        │   │       ),
+        │   │       dtype=torch.float32
+        │   │   ),
+        │   │   rope=RoPE.Config(
+        │   │       channels_head=128,
+        │   │       reduction_mode='cat',
+        │   │       frequencies=HuggingFaceFrequencies.Config(base=10000.0),
+        │   │       dtype=torch.bfloat16
+        │   │   ),
+        │   │   mix=ResidualMix.Config(
+        │   │       num_layers=8,
+        │   │       channels_in=512,
+        │   │       running=1.0,
+        │   │       original=0.1
+        │   │   )
+        │   ),
+        │   optimizer=CompositeOptimizer.Config(
+        │   │   optimizers=[
+        │   │   │   PartialConfig(
+        │   │   │       <class 'priml.optimizers.fused_adamw.FusedAdamW'>,
+        │   │   │       betas=(0.8, 0.95),
+        │   │   │       eps=1e-10,
+        │   │   │       weight_decay=0.0,
+        │   │   │       compile=True,
+        │   │   │       lr=0.004898979485566357
+        │   │   │   ),
+        │   │   │   PartialConfig(
+        │   │   │       <class 'priml.optimizers.fused_adamw.FusedAdamW'>,
+        │   │   │       betas=(0.8, 0.95),
+        │   │   │       eps=1e-10,
+        │   │   │       weight_decay=0.0,
+        │   │   │       compile=True,
+        │   │   │       lr=0.7348469228349535
+        │   │   │   ),
+        │   │   │   PartialConfig(
+        │   │   │       <class 'priml.optimizers.fused_adamw.FusedAdamW'>,
+        │   │   │       betas=(0.8, 0.95),
+        │   │   │       eps=1e-10,
+        │   │   │       weight_decay=0.0,
+        │   │   │       compile=True,
+        │   │   │       lr=0.7348469228349535
+        │   │   │   ),
+        │   │   │   PartialConfig(
+        │   │   │       <class 'priml.optimizers.fused_adamw.FusedAdamW'>,
+        │   │   │       betas=(0.8, 0.95),
+        │   │   │       eps=1e-10,
+        │   │   │       weight_decay=0.0,
+        │   │   │       compile=True,
+        │   │   │       lr=0.005
+        │   │   │   ),
+        │   │   │   PartialConfig(
+        │   │   │       <class 'priml.optimizers.fused_adamw.FusedAdamW'>,
+        │   │   │       betas=(0.96, 0.95),
+        │   │   │       eps=1e-10,
+        │   │   │       weight_decay=0.0,
+        │   │   │       compile=True,
+        │   │   │       lr=0.5
+        │   │   │   ),
+        │   │   │   NorMuon.Config(
+        │   │   │       lr=0.04,
+        │   │   │       momentum=0.95,
+        │   │   │       beta2=0.95,
+        │   │   │       ns_steps=5,
+        │   │   │       weight_decay=0.2,
+        │   │   │       compile=True,
+        │   │   │       coefficients=(
+        │   │   │           (
+        │   │   │               8.156554524902461,
+        │   │   │               -22.48329292557795,
+        │   │   │               15.878769915207462
+        │   │   │           ),
+        │   │   │           (
+        │   │   │               4.042929935166739,
+        │   │   │               -2.808917465908714,
+        │   │   │               0.5000178451051316
+        │   │   │           ),
+        │   │   │           (
+        │   │   │               3.8916678022926607,
+        │   │   │               -2.772484153217685,
+        │   │   │               0.5060648178503393
+        │   │   │           ),
+        │   │   │           (
+        │   │   │               3.285753657755655,
+        │   │   │               -2.3681294933425376,
+        │   │   │               0.46449024233003106
+        │   │   │           ),
+        │   │   │           (
+        │   │   │               2.3465413258596377,
+        │   │   │               -1.7097828382687081,
+        │   │   │               0.42323551169305323
+        │   │   │           )
+        │   │   │       )
+        │   │   │   )
+        │   │   ],
+        │   │   select=[
+        │   │       matching('lm_head'),
+        │   │       excluding(matching('embed'), 'value_embeds'),
+        │   │       matching('value_embeds'),
+        │   │       matching('mix.running'),
+        │   │       matching('mix.original'),
+        │   │       excluding(NorMuon.eligible_tensor, 'embed', 'lm_head')
+        │   │   ],
+        │   │   require_total=True,
+        │   │   drop_empty=True
+        │   ),
+        │   loss=TokenCrossEntropy.Config(ignore_index=-1),
+        │   accumulate_grad_batches=1,
+        │   drop_partial_accumulation_on_epoch_end=True,
+        │   train_budget_steps=inf,
+        │   train_budget_sec=300.0,
+        │   train_budget_epochs=inf,
+        │   lr_schedule=PartialConfig(priml.math.schedules.constant),
+        │   parallelism=NoParallel.Config(device='cuda'),
+        │   model_quantization=NoModelQuantization.Config(),
+        │   activation_memoization=DefaultActivationStorage.Config(),
+        │   compile=PartialConfig(torch.compile),
+        │   ema=NoEMA.Config(),
+        │   gradient_clip_norm=inf,
+        │   skip_step_on_nonfinite_grad=False,
+        │   device_init='eager',
+        │   dtype_autocast=torch.bfloat16,
+        │   autocast_cache_enabled=False,
+        │   schedule=PartialConfig(priml.math.schedules.trapezoidal, flat=0.5),
+        │   budget_warmup_steps=11,
+        │   tokens_per_optimizer_step=524_288,
+        │   rows_per_pass=32,
+        │   momentum_start=0.85,
+        │   momentum_end=0.95,
+        │   momentum_warmup_steps=300,
+        │   decay_to_zero=True,
+        │   divergence_threshold=100.0,
+        │   adam_lr_tuned_at_channels=512
+        ),
+        dataset=NanoChatData.Config(
+            base_dir='/opt/scratch',
+            working_dir=PosixPath('/opt/scratch/datasets/nanochat'),
+            tokenizer_dir=PosixPath('/opt/scratch/datasets/nanochat/tokenizer'),
+            prepared_train_manifest='',
+            prepared_eval_manifest='',
+            reference_evaluation=None,
+            num_train_shards=7,
+            train_shard_indices=(),
+            val_shard=7,
+            batch_size=32,
+            eval_batch_size=128,
+            eval_tokens=20_971_520,
+            buffer_size=1_000,
+            train_buffer_size=None,
+            device='cuda',
+            vocab_size=8_192,
+            max_seq_len=2_048
+        ),
+        metrics_train={},
+        metrics_eval={'val': BitsPerByte.Config()},
+        checkpointer=Checkpointer.Config(
+            base_dir=PosixPath('/opt/scratch/runs/nanochat/exp002'),
+            working_dir=PosixPath('/opt/scratch/runs/nanochat/exp002/checkpoints'),
+            filename='step_{step:08d}.pt',
+            save_every=1_000,
+            keep_last_n=-1,
+            keep_every=0,
+            storer=SyncLocalStateDictStorer.Config(),
+            resume=False,
+            resume_step=-1,
+            allow_checkpoint_overwrite=False,
+            best_metric='',
+            best_mode='max'
+        ),
+        profiler=None,
+        phase_timer=PhaseTimer.Config(
+            enabled=False,
+            torch_profile=False,
+            base_dir=PosixPath('/opt/scratch/runs/nanochat/exp002'),
+            working_dir=PosixPath('/opt/scratch/runs/nanochat/exp002/profiling'),
+            heartbeat_interval_sec=20.0,
+            fault_dump_interval_sec=40.0,
+            cuda_events=False
+        ),
+        tracker=TrackerList.Config(
+            trackers={   'metrics': FileTracker.Config(
+                    base_dir=PosixPath('/opt/scratch/runs/nanochat/exp002'),
+                    working_dir=PosixPath('/opt/scratch/runs/nanochat/exp002/metrics.json'),
+                    capture_prefix='eval/'
                 ),
-                dataset=NanoChatData.Config(
-                        base_dir='/opt/scratch',
-                        working_dir=PosixPath('/opt/scratch/datasets/nanochat'),
-                        tokenizer_dir=PosixPath('/opt/scratch/datasets/nanochat/tokenizer'),
-                        prepared_train_manifest='',
-                        prepared_eval_manifest='',
-                        reference_evaluation=None,
-                        num_train_shards=7,
-                        train_shard_indices=(),
-                        val_shard=7,
-                        batch_size=32,
-                        eval_batch_size=128,
-                        eval_tokens=20_971_520,
-                        buffer_size=1_000,
-                        train_buffer_size=None,
-                        device='cuda',
-                        vocab_size=8_192,
-                        max_seq_len=2_048
-                ),
-                metrics_train={},
-                metrics_eval={'val': BitsPerByte.Config()},
-                checkpointer=Checkpointer.Config(
+                'wandb': AsyncTracker.Config(
+                    tracker=WandbTracker.Config(
+                        project='nanochat',
+                        name='',
+                        run_id='',
+                        group='',
+                        mode='online',
                         base_dir=PosixPath('/opt/scratch/runs/nanochat/exp002'),
-                        working_dir=PosixPath('/opt/scratch/runs/nanochat/exp002/checkpoints'),
-                        filename='step_{step:08d}.pt',
-                        save_every=1_000,
-                        keep_last_n=-1,
-                        keep_every=0,
-                        storer=SyncLocalStateDictStorer.Config(),
-                        resume=False,
-                        resume_step=-1,
-                        allow_checkpoint_overwrite=False,
-                        best_metric='',
-                        best_mode='max'
-                ),
-                profiler=None,
-                phase_timer=PhaseTimer.Config(
-                        enabled=False,
-                        torch_profile=False,
-                        base_dir=PosixPath('/opt/scratch/runs/nanochat/exp002'),
-                        working_dir=PosixPath('/opt/scratch/runs/nanochat/exp002/profiling'),
-                        heartbeat_interval_sec=20.0,
-                        fault_dump_interval_sec=40.0,
-                        cuda_events=False
-                ),
-                tracker=TrackerList.Config(
-                        trackers={       'metrics': FileTracker.Config(
-                                        base_dir=PosixPath('/opt/scratch/runs/nanochat/exp002'),
-                                        working_dir=PosixPath('/opt/scratch/runs/nanochat/exp002/metrics.json'),
-                                        capture_prefix='eval/'
-                                ),
-                                'wandb': AsyncTracker.Config(
-                                        tracker=WandbTracker.Config(
-                                                project='nanochat',
-                                                name='',
-                                                run_id='',
-                                                group='',
-                                                mode='online',
-                                                base_dir=PosixPath('/opt/scratch/runs/nanochat/exp002'),
-                                                working_dir=PosixPath('/opt/scratch/runs/nanochat/exp002/wandb'),
-                                                capture_console=True,
-                                                replay_startup_logs=False,
-                                                allow_startup_failure=True,
-                                                ingestion=WandbIngestion(
-                                                        init_timeout_sec=30.0,
-                                                        service_wait_sec=30.0,
-                                                        flush_interval_sec=15.0,
-                                                        system_metrics=True,
-                                                        system_metrics_interval_sec=60.0
-                                                ),
-                                                metric_step_metrics={},
-                                                run_config={},
-                                                notes=''
-                                        ),
-                                        enabled=True
-                                )},
-                        base_dir=PosixPath('/opt/scratch/runs/nanochat/exp002'),
-                        working_dir=PosixPath('/opt/scratch/runs/nanochat/exp002')
-                ),
-                max_steps=inf,
-                max_epochs=inf,
-                max_time=300.0,
-                max_time_kind='train',
-                max_eval_time=inf,
-                eval_stop_on_time_limit=False,
-                num_steps_eval=-1,
-                num_steps_log=1,
-                early_train_log_steps=0,
-                eval_every_epoch=False,
-                eval_extras_every_eval=False,
-                eval_warmup_batches=0,
-                eval_only=False,
-                restore_rng_state=True,
-                seed=42,
-                num_steps_garbage_collect=inf,
-                mesh_dim_model_seed='pp',
-                mesh_dim_data_seed='dp',
-                runtime=SingleProcess.Config(
-                        device='cuda',
-                        deterministic=False,
-                        float32_matmul_precision='high'
-                )
+                        working_dir=PosixPath('/opt/scratch/runs/nanochat/exp002/wandb'),
+                        capture_console=True,
+                        replay_startup_logs=False,
+                        allow_startup_failure=True,
+                        ingestion=WandbIngestion(
+                            init_timeout_sec=30.0,
+                            service_wait_sec=30.0,
+                            flush_interval_sec=15.0,
+                            system_metrics=True,
+                            system_metrics_interval_sec=60.0
+                        ),
+                        metric_step_metrics={},
+                        run_config={},
+                        notes=''
+                    ),
+                    enabled=True
+                )},
+            base_dir=PosixPath('/opt/scratch/runs/nanochat/exp002'),
+            working_dir=PosixPath('/opt/scratch/runs/nanochat/exp002')
+        ),
+        max_steps=inf,
+        max_epochs=inf,
+        max_time=300.0,
+        max_time_kind='train',
+        max_eval_time=inf,
+        eval_stop_on_time_limit=False,
+        num_steps_eval=-1,
+        num_steps_log=1,
+        early_train_log_steps=0,
+        eval_every_epoch=False,
+        eval_extras_every_eval=False,
+        eval_warmup_batches=0,
+        eval_only=False,
+        restore_rng_state=True,
+        seed=42,
+        num_steps_garbage_collect=inf,
+        mesh_dim_model_seed='pp',
+        mesh_dim_data_seed='dp',
+        runtime=SingleProcess.Config(
+            device='cuda',
+            deterministic=False,
+            float32_matmul_precision='high'
         )
+    )

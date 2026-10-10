@@ -32,7 +32,7 @@ import torch
 
 from priml import runtime
 from priml.cost import Cost, cost
-from priml.model.attention.flash3 import Flash3Attention
+from priml.model.attention.flash4 import Flash4Attention
 from priml.model.attention.kernel import (
     SdpaFused,
     SdpaNaive,
@@ -539,7 +539,7 @@ def test_latent_attention_cost_attends_over_the_latent_when_absorbed() -> None:
 def test_mla_cost_forwards_the_bus_to_the_kernel(absorb: bool) -> None:
     config, kernel = _mla_config()
     kernel.absorb = absorb
-    kernel.attn_kernel = Flash3Attention.Config()
+    kernel.attn_kernel = Flash4Attention.Config()
     finalized = config.copy_tree().finalize()
     full = finalized.cost(seq_len=8, batch_size=1, dtype=None)
     windowed = finalized.cost(seq_len=8, batch_size=1, dtype=None, window=2)

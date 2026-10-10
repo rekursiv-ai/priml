@@ -1,250 +1,245 @@
 CraftaxTrainLoop(
-                study_name='craftax',
-                experiment_name='exp000',
-                base_dir='/opt/scratch',
-                working_dir=PosixPath('/opt/scratch/runs/craftax/exp000'),
-                doc='',
-                step=CraftaxTrainStep.Config(
-                │       model=MinGRUPolicy.Config(
-                │       │       embedding=MultiHotEmbedding.Config(
-                │       │               channels_in=154,
-                │       │               channels_out=16,
-                │       │               offsets=(0, 64, 72, 74, 90, 106, 122, 138),
-                │       │               num_cells=99,
-                │       │               num_scalars=51,
-                │       │               dtype=None,
-                │       │               init_weight=functools.partial(<function priml.model.init.normal at 0xdefacedeface>, std=1.0)
-                │       │       ),
-                │       │       proj_in=Linear.Config(
-                │       │               channels_in=1_635,
-                │       │               channels_out=1_024,
-                │       │               bias=False,
-                │       │               depth_index=(),
-                │       │               device=None,
-                │       │               dtype=None,
-                │       │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │               shard=None
-                │       │       ),
-                │       │       block=MinGRUBlock.Config(
-                │       │               channels_hidden=1_024,
-                │       │               proj_gates=Linear.Config(
-                │       │                       channels_in=1_024,
-                │       │                       channels_out=3_072,
-                │       │                       bias=False,
-                │       │                       depth_index=(),
-                │       │                       device=None,
-                │       │                       dtype=None,
-                │       │                       init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                │       │                       init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │                       shard=None
-                │       │               ),
-                │       │               scan=ExactScan.Config(block=256, num_warps=8),
-                │       │               dtype=None
-                │       │       ),
-                │       │       num_layers=4,
-                │       │       channels_hidden=1_024,
-                │       │       num_actions=43,
-                │       │       proj_out=Linear.Config(
-                │       │               channels_in=1_024,
-                │       │               channels_out=44,
-                │       │               bias=False,
-                │       │               depth_index=(),
-                │       │               device=None,
-                │       │               dtype=None,
-                │       │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │               shard=None
-                │       │       ),
-                │       │       dtype=torch.bfloat16,
-                │       │       state_dtype=torch.bfloat16,
-                │       │       output_dtype=torch.bfloat16,
-                │       │       injection=None,
-                │       │       auxiliary=None,
-                │       │       proj_feature=None
-                │       ),
-                │       optimizer=ExactMuon.Config(
-                │               lr=0.00472887093,
-                │               momentum=0.930526733,
-                │               max_grad_norm=0.818616688,
-                │               ns_coefficients=(
-                │                       (4.0848, -6.8946, 2.927),
-                │                       (3.9505, -6.3029, 2.6377),
-                │                       (3.7418, -5.5913, 2.3037),
-                │                       (2.8769, -3.1427, 1.2046),
-                │                       (2.8366, -3.0525, 1.2012)
-                │               ),
-                │               eps=1e-07
-                │       ),
-                │       schedule=PartialConfig(<class 'functools.partial'>, <function priml.baselines.craftax.train_step.cosine_annealing_fp32 at 0xdefacedeface>, minimum=0.0),
-                │       learner=AgentWindows.Config(
-                │               objective=ExactPPO.Config(
-                │                       discount=0.999414682,
-                │                       trace_decay=0.801190972,
-                │                       clip_epsilon=0.226401091,
-                │                       value_clip_epsilon=1.14975154,
-                │                       value_coefficient=0.78808409,
-                │                       entropy_coefficient=0.000213571053,
-                │                       block=256,
-                │                       num_warps=8
-                │               ),
-                │               minibatch_size=32_768,
-                │               replay_ratio=1.17263889,
-                │               auxiliary=None
-                │       ),
-                │       env=CraftaxEnv.Config(
-                │               num_envs=2_048,
-                │               num_buffers=4,
-                │               threads_per_buffer=2,
-                │               seed=0,
-                │               rules=GameRules.Config(
-                │                       original_reward=False,
-                │                       collapse_sleep=True,
-                │                       action_mask=True,
-                │                       end_on_boss_defeat=False,
-                │                       max_timesteps=100_000,
-                │                       symbolic_observation=False,
-                │                       previous_action=False
-                │               ),
-                │               restart=WorldPool.Config(num_worlds=8192),
-                │               spin_seconds=0.005,
-                │               stall_cap=None,
-                │               practice=None
-                │       ),
-                │       sampler=ExactPhiloxSampler.Config(
-                │               seed=73,
-                │               block=256,
-                │               num_warps=8
-                │       ),
-                │       rollout=Rollout.Config(
-                │               num_slots=2,
-                │               horizon=256,
-                │               bootstrap=False,
-                │               dtype=torch.bfloat16
-                │       ),
-                │       feature=None,
-                │       feature_training=None,
-                │       evaluation=Evaluation.Config(
-                │               env=CraftaxEnv.Config(
-                │                       num_envs=2_048,
-                │                       num_buffers=4,
-                │                       threads_per_buffer=2,
-                │                       seed=0,
-                │                       rules=GameRules.Config(
-                │                               original_reward=False,
-                │                               collapse_sleep=True,
-                │                               action_mask=True,
-                │                               end_on_boss_defeat=False,
-                │                               max_timesteps=100_000,
-                │                               symbolic_observation=False,
-                │                               previous_action=False
-                │                       ),
-                │                       restart=WorldPool.Config(num_worlds=8192),
-                │                       spin_seconds=0.005,
-                │                       stall_cap=None,
-                │                       practice=None
-                │               ),
-                │               sampler=ExactPhiloxSampler.Config(
-                │                       seed=73,
-                │                       block=256,
-                │                       num_warps=8
-                │               ),
-                │               rollout=Rollout.Config(
-                │                       num_slots=1,
-                │                       horizon=256,
-                │                       bootstrap=False,
-                │                       dtype=torch.bfloat16
-                │               ),
-                │               num_episodes=10_000
-                │       ),
-                │       checkpoint='/opt/scratch/datasets/craftax/goldens-v1/init_seed73.pt',
-                │       reward_scale=1.0,
-                │       reward_clip=1.0,
-                │       train_budget_steps=6_662,
-                │       parallelism=NoParallel.Config(device=None)
+        study_name='craftax',
+        experiment_name='exp000',
+        base_dir='/opt/scratch',
+        working_dir=PosixPath('/opt/scratch/runs/craftax/exp000'),
+        doc='',
+        step=CraftaxTrainStep.Config(
+        │   model=MinGRUPolicy.Config(
+        │   │   embedding=MultiHotEmbedding.Config(
+        │   │       channels_in=154,
+        │   │       channels_out=16,
+        │   │       offsets=(0, 64, 72, 74, 90, 106, 122, 138),
+        │   │       num_cells=99,
+        │   │       num_scalars=51,
+        │   │       dtype=None,
+        │   │       init_weight=functools.partial(priml.model.init.normal, std=1.0)
+        │   │   ),
+        │   │   proj_in=Linear.Config(
+        │   │       channels_in=1_635,
+        │   │       channels_out=1_024,
+        │   │       bias=False,
+        │   │       depth_index=(),
+        │   │       device=None,
+        │   │       dtype=None,
+        │   │       init_weight=priml.model.init.kaiming_uniform,
+        │   │       init_bias=torch.nn.init.zeros_,
+        │   │       shard=None
+        │   │   ),
+        │   │   block=MinGRUBlock.Config(
+        │   │       channels_hidden=1_024,
+        │   │       proj_gates=Linear.Config(
+        │   │           channels_in=1_024,
+        │   │           channels_out=3_072,
+        │   │           bias=False,
+        │   │           depth_index=(),
+        │   │           device=None,
+        │   │           dtype=None,
+        │   │           init_weight=priml.model.init.kaiming_uniform,
+        │   │           init_bias=torch.nn.init.zeros_,
+        │   │           shard=None
+        │   │       ),
+        │   │       scan=ExactScan.Config(block=256, num_warps=8),
+        │   │       dtype=None
+        │   │   ),
+        │   │   num_layers=4,
+        │   │   channels_hidden=1_024,
+        │   │   num_actions=43,
+        │   │   proj_out=Linear.Config(
+        │   │       channels_in=1_024,
+        │   │       channels_out=44,
+        │   │       bias=False,
+        │   │       depth_index=(),
+        │   │       device=None,
+        │   │       dtype=None,
+        │   │       init_weight=priml.model.init.kaiming_uniform,
+        │   │       init_bias=torch.nn.init.zeros_,
+        │   │       shard=None
+        │   │   ),
+        │   │   dtype=torch.bfloat16,
+        │   │   state_dtype=torch.bfloat16,
+        │   │   output_dtype=torch.bfloat16,
+        │   │   injection=None,
+        │   │   auxiliary=None,
+        │   │   proj_feature=None
+        │   ),
+        │   optimizer=ExactMuon.Config(
+        │       lr=0.00472887093,
+        │       momentum=0.930526733,
+        │       max_grad_norm=0.818616688,
+        │       ns_coefficients=(
+        │           (4.0848, -6.8946, 2.927),
+        │           (3.9505, -6.3029, 2.6377),
+        │           (3.7418, -5.5913, 2.3037),
+        │           (2.8769, -3.1427, 1.2046),
+        │           (2.8366, -3.0525, 1.2012)
+        │       ),
+        │       eps=1e-07
+        │   ),
+        │   schedule=PartialConfig(
+        │       priml.baselines.craftax.train_step.cosine_annealing_fp32,
+        │       minimum=0.0
+        │   ),
+        │   learner=AgentWindows.Config(
+        │       objective=ExactPPO.Config(
+        │           discount=0.999414682,
+        │           trace_decay=0.801190972,
+        │           clip_epsilon=0.226401091,
+        │           value_clip_epsilon=1.14975154,
+        │           value_coefficient=0.78808409,
+        │           entropy_coefficient=0.000213571053,
+        │           block=256,
+        │           num_warps=8
+        │       ),
+        │       minibatch_size=32_768,
+        │       replay_ratio=1.17263889,
+        │       auxiliary=None
+        │   ),
+        │   env=CraftaxEnv.Config(
+        │       num_envs=2_048,
+        │       num_buffers=4,
+        │       threads_per_buffer=2,
+        │       seed=0,
+        │       rules=GameRules.Config(
+        │           original_reward=False,
+        │           collapse_sleep=True,
+        │           action_mask=True,
+        │           end_on_boss_defeat=False,
+        │           max_timesteps=100_000,
+        │           symbolic_observation=False,
+        │           previous_action=False
+        │       ),
+        │       restart=WorldPool.Config(num_worlds=8192),
+        │       spin_seconds=0.005,
+        │       stall_cap=None,
+        │       practice=None
+        │   ),
+        │   sampler=ExactPhiloxSampler.Config(seed=73, block=256, num_warps=8),
+        │   rollout=Rollout.Config(
+        │       num_slots=2,
+        │       horizon=256,
+        │       bootstrap=False,
+        │       dtype=torch.bfloat16
+        │   ),
+        │   feature=None,
+        │   feature_training=None,
+        │   evaluation=Evaluation.Config(
+        │       env=CraftaxEnv.Config(
+        │           num_envs=2_048,
+        │           num_buffers=4,
+        │           threads_per_buffer=2,
+        │           seed=0,
+        │           rules=GameRules.Config(
+        │               original_reward=False,
+        │               collapse_sleep=True,
+        │               action_mask=True,
+        │               end_on_boss_defeat=False,
+        │               max_timesteps=100_000,
+        │               symbolic_observation=False,
+        │               previous_action=False
+        │           ),
+        │           restart=WorldPool.Config(num_worlds=8192),
+        │           spin_seconds=0.005,
+        │           stall_cap=None,
+        │           practice=None
+        │       ),
+        │       sampler=ExactPhiloxSampler.Config(seed=73, block=256, num_warps=8),
+        │       rollout=Rollout.Config(
+        │           num_slots=1,
+        │           horizon=256,
+        │           bootstrap=False,
+        │           dtype=torch.bfloat16
+        │       ),
+        │       num_episodes=10_000
+        │   ),
+        │   checkpoint='/opt/scratch/datasets/craftax/goldens-v1/init_seed73.pt',
+        │   reward_scale=1.0,
+        │   reward_clip=1.0,
+        │   train_budget_steps=6_662,
+        │   parallelism=NoParallel.Config(device=None)
+        ),
+        dataset=CraftaxRollouts.Config(),
+        metrics_train={},
+        metrics_eval={'craftax': CraftaxScore.Config()},
+        checkpointer=Checkpointer.Config(
+            base_dir=PosixPath('/opt/scratch/runs/craftax/exp000'),
+            working_dir=PosixPath('/opt/scratch/runs/craftax/exp000/checkpoints'),
+            filename='step_{step:08d}.pt',
+            save_every=200,
+            keep_last_n=2,
+            keep_every=0,
+            storer=SyncLocalStateDictStorer.Config(),
+            resume=True,
+            resume_step=-1,
+            allow_checkpoint_overwrite=False,
+            best_metric='',
+            best_mode='max'
+        ),
+        profiler=None,
+        phase_timer=PhaseTimer.Config(
+            enabled=False,
+            torch_profile=False,
+            base_dir=PosixPath('/opt/scratch/runs/craftax/exp000'),
+            working_dir=PosixPath('/opt/scratch/runs/craftax/exp000/profiling'),
+            heartbeat_interval_sec=20.0,
+            fault_dump_interval_sec=40.0,
+            cuda_events=False
+        ),
+        tracker=TrackerList.Config(
+            trackers={   'metrics': FileTracker.Config(
+                    base_dir=PosixPath('/opt/scratch/runs/craftax/exp000'),
+                    working_dir=PosixPath('/opt/scratch/runs/craftax/exp000/metrics.json'),
+                    capture_prefix='eval/'
                 ),
-                dataset=CraftaxRollouts.Config(),
-                metrics_train={},
-                metrics_eval={'craftax': CraftaxScore.Config()},
-                checkpointer=Checkpointer.Config(
+                'wandb': AsyncTracker.Config(
+                    tracker=WandbTracker.Config(
+                        project='craftax',
+                        name='exp000',
+                        run_id='',
+                        group='',
+                        mode='online',
                         base_dir=PosixPath('/opt/scratch/runs/craftax/exp000'),
-                        working_dir=PosixPath('/opt/scratch/runs/craftax/exp000/checkpoints'),
-                        filename='step_{step:08d}.pt',
-                        save_every=200,
-                        keep_last_n=2,
-                        keep_every=0,
-                        storer=SyncLocalStateDictStorer.Config(),
-                        resume=True,
-                        resume_step=-1,
-                        allow_checkpoint_overwrite=False,
-                        best_metric='',
-                        best_mode='max'
-                ),
-                profiler=None,
-                phase_timer=PhaseTimer.Config(
-                        enabled=False,
-                        torch_profile=False,
-                        base_dir=PosixPath('/opt/scratch/runs/craftax/exp000'),
-                        working_dir=PosixPath('/opt/scratch/runs/craftax/exp000/profiling'),
-                        heartbeat_interval_sec=20.0,
-                        fault_dump_interval_sec=40.0,
-                        cuda_events=False
-                ),
-                tracker=TrackerList.Config(
-                        trackers={       'metrics': FileTracker.Config(
-                                        base_dir=PosixPath('/opt/scratch/runs/craftax/exp000'),
-                                        working_dir=PosixPath('/opt/scratch/runs/craftax/exp000/metrics.json'),
-                                        capture_prefix='eval/'
-                                ),
-                                'wandb': AsyncTracker.Config(
-                                        tracker=WandbTracker.Config(
-                                                project='craftax',
-                                                name='exp000',
-                                                run_id='',
-                                                group='',
-                                                mode='online',
-                                                base_dir=PosixPath('/opt/scratch/runs/craftax/exp000'),
-                                                working_dir=PosixPath('/opt/scratch/runs/craftax/exp000/wandb'),
-                                                capture_console=True,
-                                                replay_startup_logs=False,
-                                                allow_startup_failure=True,
-                                                ingestion=WandbIngestion(
-                                                        init_timeout_sec=30.0,
-                                                        service_wait_sec=30.0,
-                                                        flush_interval_sec=15.0,
-                                                        system_metrics=True,
-                                                        system_metrics_interval_sec=60.0
-                                                ),
-                                                metric_step_metrics={},
-                                                run_config={},
-                                                notes=''
-                                        ),
-                                        enabled=True
-                                )},
-                        base_dir=PosixPath('/opt/scratch/runs/craftax/exp000'),
-                        working_dir=PosixPath('/opt/scratch/runs/craftax/exp000')
-                ),
-                max_steps=6_662,
-                max_epochs=inf,
-                max_time=inf,
-                max_time_kind='wall',
-                max_eval_time=inf,
-                eval_stop_on_time_limit=False,
-                num_steps_eval=-1,
-                num_steps_log=10,
-                early_train_log_steps=100,
-                eval_every_epoch=True,
-                eval_extras_every_eval=False,
-                eval_warmup_batches=0,
-                eval_only=False,
-                restore_rng_state=True,
-                seed=73,
-                num_steps_garbage_collect=inf,
-                mesh_dim_model_seed='pp',
-                mesh_dim_data_seed='dp',
-                runtime=SingleProcess.Config(
-                        device=None,
-                        deterministic=False,
-                        float32_matmul_precision=None
-                )
+                        working_dir=PosixPath('/opt/scratch/runs/craftax/exp000/wandb'),
+                        capture_console=True,
+                        replay_startup_logs=False,
+                        allow_startup_failure=True,
+                        ingestion=WandbIngestion(
+                            init_timeout_sec=30.0,
+                            service_wait_sec=30.0,
+                            flush_interval_sec=15.0,
+                            system_metrics=True,
+                            system_metrics_interval_sec=60.0
+                        ),
+                        metric_step_metrics={},
+                        run_config={},
+                        notes=''
+                    ),
+                    enabled=True
+                )},
+            base_dir=PosixPath('/opt/scratch/runs/craftax/exp000'),
+            working_dir=PosixPath('/opt/scratch/runs/craftax/exp000')
+        ),
+        max_steps=6_662,
+        max_epochs=inf,
+        max_time=inf,
+        max_time_kind='wall',
+        max_eval_time=inf,
+        eval_stop_on_time_limit=False,
+        num_steps_eval=-1,
+        num_steps_log=10,
+        early_train_log_steps=100,
+        eval_every_epoch=True,
+        eval_extras_every_eval=False,
+        eval_warmup_batches=0,
+        eval_only=False,
+        restore_rng_state=True,
+        seed=73,
+        num_steps_garbage_collect=inf,
+        mesh_dim_model_seed='pp',
+        mesh_dim_data_seed='dp',
+        runtime=SingleProcess.Config(
+            device=None,
+            deterministic=False,
+            float32_matmul_precision=None
         )
+    )

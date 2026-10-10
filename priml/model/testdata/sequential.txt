@@ -1,30 +1,30 @@
 Sequential.Config(
+        channels_in=4,
+        channels_out=4,
+        elements=[
+            Linear.Config(
                 channels_in=4,
                 channels_out=4,
-                elements=[
-                        Linear.Config(
-                                channels_in=4,
-                                channels_out=4,
-                                bias=False,
-                                depth_index=((0, 2),),
-                                device=None,
-                                dtype=None,
-                                init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                                init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                                shard=None
-                        ),
-                        Linear.Config(
-                                channels_in=4,
-                                channels_out=4,
-                                bias=False,
-                                depth_index=((1, 2),),
-                                device=None,
-                                dtype=None,
-                                init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                                init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                                shard=None
-                        )
-                ],
-                repeat=1,
-                depth_index=()
-        )
+                bias=False,
+                depth_index=((0, 2),),
+                device=None,
+                dtype=None,
+                init_weight=priml.model.init.kaiming_uniform,
+                init_bias=torch.nn.init.zeros_,
+                shard=None
+            ),
+            Linear.Config(
+                channels_in=4,
+                channels_out=4,
+                bias=False,
+                depth_index=((1, 2),),
+                device=None,
+                dtype=None,
+                init_weight=priml.model.init.kaiming_uniform,
+                init_bias=torch.nn.init.zeros_,
+                shard=None
+            )
+        ],
+        repeat=1,
+        depth_index=()
+    )

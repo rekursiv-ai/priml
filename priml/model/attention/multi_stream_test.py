@@ -19,7 +19,7 @@ from priml.model.attention.attention import (
     Attention,
     AttentionProjections,
 )
-from priml.model.attention.flash3 import Flash3Attention
+from priml.model.attention.flash4 import Flash4Attention
 from priml.model.attention.kernel import (
     SdpaFused,
     SdpaNaive,
@@ -1444,7 +1444,7 @@ def test_multi_stream_cost_forwards_the_bus_to_the_kernel(explicit: bool) -> Non
         channels_in=16,
         num_heads=2,
         channels_head=8,
-        attn_kernel=Flash3Attention.Config(),
+        attn_kernel=Flash4Attention.Config(),
     )
     if explicit:
         config.streams = [AttentionProjections.Config(), AttentionProjections.Config()]

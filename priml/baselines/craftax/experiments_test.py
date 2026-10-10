@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Final, cast
 import inspect
 import math
 import re
+import sys
 import threading
 import warnings
 
@@ -1663,6 +1664,15 @@ def _flatten(config: object, prefix: str = "") -> dict[str, object]:
         else:
             flat[dotted] = repr(value)
     return flat
+
+
+def test_exp000_exp003_input_diff() -> None:
+    result = exp000().udiff(exp003(), finalize=False, n=0, width=120, color=False)
+    assert re.search(r"^-\s*[│\s]*experiment_name='exp000',$", result, re.MULTILINE)
+    assert re.search(r"^\+\s*[│\s]*experiment_name='exp003',$", result, re.MULTILINE)
+    assert re.search(r"^-.*\bhorizon=256[,)]", result, re.MULTILINE)
+    assert re.search(r"^\+.*\bhorizon=64[,)]", result, re.MULTILINE)
+    sys.stdout.write(result + "\n")
 
 
 if __name__ == "__main__":

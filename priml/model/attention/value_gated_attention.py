@@ -228,12 +228,10 @@ class ValueGatedAttention(nn.Module):
         kernel: Makeable[AttentionKernel] = field(default_factory=SdpaCausal.Config)
         """The attention kernel itself, injected rather than selected.
 
-        A kernel is a different VALUE in this slot, not a mode flag: the
-        reference recipe measured its score on FlashAttention-3, and a fused
-        kernel reduces in a different order than a masked SDPA, so reproducing
-        that number means issuing that kernel. The default runs anywhere; a
-        rung reproducing a published result pins the one it was published
-        with, and inherits its hardware requirement along with it."""
+        A kernel is a different VALUE in this slot, not a mode flag: a fused
+        kernel reduces in a different order than a masked SDPA, so a rung's
+        number depends on which kernel it issues. The default runs anywhere; a
+        rung pinning a fused kernel inherits its hardware requirement."""
 
         window: int = -1
         """Previous positions each query reaches, in addition to itself.

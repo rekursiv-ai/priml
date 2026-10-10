@@ -64,7 +64,7 @@ NanoChatLoop.Config(
       │  │  │           channels_out=128,
       │  │  │           eps=1.1920928955078125e-07
       │  │  │        ),
-      │  │  │        kernel=Flash3Attention.Config(),
+      │  │  │        kernel=Flash4Attention.Config(),
       │  │  │        window=1_024,
       │  │  │        max_seq_len=2_048,
       │  │  │        gated=False,
@@ -104,7 +104,7 @@ NanoChatLoop.Config(
       │  │  │           channels_out=128,
       │  │  │           eps=1.1920928955078125e-07
       │  │  │        ),
-      │  │  │        kernel=Flash3Attention.Config(),
+      │  │  │        kernel=Flash4Attention.Config(),
       │  │  │        window=2_048,
       │  │  │        max_seq_len=2_048,
       │  │  │        depth_index=((7, 8),)

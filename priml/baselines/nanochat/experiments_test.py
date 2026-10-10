@@ -40,7 +40,7 @@ from priml.baselines.nanochat.train_step import (
 )
 from priml.cost import cost
 from priml.metrics.bits_per_byte import BitsPerByte
-from priml.model.attention.flash3 import Flash3Attention
+from priml.model.attention.flash4 import Flash4Attention
 from priml.model.attention.value_gated_attention import ValueGatedAttention
 from priml.model.embedding import Embedding
 from priml.model.narrow_embedding import NarrowEmbedding
@@ -252,7 +252,7 @@ LADDER: Final[list[tuple[str, Callable[[], NanoChatLoop.Config]]]] = [
     ("exp_smoke", experiments.exp_smoke),
 ]
 
-# exp000 pins a kernel that builds only for SM90, so anything CONSTRUCTING a
+# exp000 pins a kernel that runs only on SM90/SM100, so anything CONSTRUCTING a
 # model excludes it: the rung is unbuildable on a laptop and on most CI, which
 # is the point of exp001 existing. Its config-level fields are still checked.
 PORTABLE: Final[list[tuple[str, Callable[[], NanoChatLoop.Config]]]] = LADDER[1:]
@@ -276,23 +276,21 @@ def test_every_experiment_finalizes(
     assert config.study_name == "nanochat"
 
 
-def test_exp000_pins_the_reference_kernel() -> None:
-    """The reproduction rung must issue the kernel the reference measured on.
+def test_exp000_pins_flash4() -> None:
+    """exp000 pins FlashAttention-4 in place of the reference's FlashAttention-3.
 
-    A fused attention reduces in a different order than a masked SDPA, so a
-    rung matching every hyperparameter and swapping the kernel produces a
-    different number -- and could not settle whether the port is faithful,
-    which is the only question exp000 exists to answer.
+    FA3 needed a separate Torch 2.9.1 runtime; FA4 installs with the monorepo.
+    Its published scores were measured on FA3 and predate the switch.
     """
     attn = experiments.exp000().step.model.template.attn
     assert isinstance(attn, ValueGatedAttention.Config)
-    assert isinstance(attn.kernel, Flash3Attention.Config)
+    assert isinstance(attn.kernel, Flash4Attention.Config)
 
 
 def test_the_reference_kernel_prices_like_the_portable_one() -> None:
-    """FA3 fuses the same two products SDPA issues, so the MFU numerator is shared.
+    """FA4 fuses the same two products SDPA issues, so the MFU numerator is shared.
 
-    The pinned build needs SM90 to construct, so it cannot be run against
+    FA4 needs SM90 or SM100 to construct, so it cannot be run against
     torch's counter here; the portable rung's kernel is, and the two configs
     must cost identically for exp000 and exp001 to report comparable MFU.
     """
@@ -323,8 +321,8 @@ def test_exp001_changes_only_the_kernel() -> None:
     base_attn, fork_attn = base.step.model.template.attn, fork.step.model.template.attn
     assert isinstance(base_attn, ValueGatedAttention.Config)
     assert isinstance(fork_attn, ValueGatedAttention.Config)
-    assert isinstance(base_attn.kernel, Flash3Attention.Config)
-    assert not isinstance(fork_attn.kernel, Flash3Attention.Config)
+    assert isinstance(base_attn.kernel, Flash4Attention.Config)
+    assert not isinstance(fork_attn.kernel, Flash4Attention.Config)
     assert _pattern(fork) == _pattern(base)
     assert fork.step.model.value_embedding_stride == (
         base.step.model.value_embedding_stride
@@ -548,7 +546,7 @@ def test_every_experiments_eval_geometry_is_constructible(
     fails the moment a run reaches for data.
 
     ``exp000`` is excluded because it CONSTRUCTS a model: its pinned kernel
-    builds only for SM90, so this would assert the runner's hardware rather
+    runs only on SM90/SM100, so this would assert the runner's hardware rather
     than the experiment's geometry. It shares every geometry field with
     ``exp001``, which is covered here.
     """

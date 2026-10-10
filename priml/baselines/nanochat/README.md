@@ -103,7 +103,7 @@ better. `—` means no measured comparison is available.
 
 | Experiment | Change | Mean BPB | Δ BPB | Seeds |
 |---|---|---:|---:|---|
-| `exp000` | Eight-layer reference with FlashAttention-3 | 1.005432 | — | 3 (42–44) |
+| `exp000` | Eight-layer reference (measured on FlashAttention-3; now runs FlashAttention-4) | 1.005432 | — | 3 (42–44) |
 | `exp001` | PyTorch attention | 1.056776 | +0.051344 | 3 (42–44) |
 | `exp002` | Remove value embeddings | 1.074704 | +0.017928 | 3 (42–44) |
 | `exp003` | Remove local windows | 1.030769 | -0.043935 | 3 (42–44) |
@@ -119,7 +119,7 @@ better. `—` means no measured comparison is available.
 | `exp013` | Per-layer hashed n-gram values and optimizer schedules | 0.946772 | -0.008281 | 3 (42–44) |
 | `exp014` | Nonuniform feed-forward expansion | 0.943577 | -0.003195 | 3 (42–44) |
 | `exp015` | Narrower model and row-wise RMSProp | 0.935564 | -0.008013 | 3 (42–44) |
-| `exp016` | FlashAttention-4 and CUDA graphs | 0.935105 | -0.000459 | 3 (42–44) |
+| `exp016` | FlashAttention-4 (now inherited from exp000) and CUDA graphs | 0.935105 | -0.000459 | 3 (42–44) |
 | `exp017` | Fused QK/RoPE and n-gram accumulation | 0.931969 | -0.003136 | 3 (42–44) |
 | `exp018` | Wider model and larger microbatches | 0.936150 | +0.004181 | 3 (42–44) |
 | `exp019` | Reuse attention inputs and reorder training documents | 0.932429 | -0.003721 | 3 (42–44) |
@@ -131,7 +131,7 @@ better. `—` means no measured comparison is available.
 
 | Experiment | Change | Mean BPB | Δ BPB | Seeds |
 |---|---|---:|---:|---|
-| `exp000` | Eight-layer reference with FlashAttention-3 | 0.973908 | — | 3 (42–44) |
+| `exp000` | Eight-layer reference (measured on FlashAttention-3; now runs FlashAttention-4) | 0.973908 | — | 3 (42–44) |
 | `exp001` | PyTorch attention | 1.011005 | +0.037097 | 3 (42–44) |
 | `exp002` | Remove value embeddings | 1.028092 | +0.017087 | 3 (42–44) |
 | `exp003` | Remove local windows | 0.995873 | -0.032219 | 3 (42–44) |
@@ -147,7 +147,7 @@ better. `—` means no measured comparison is available.
 | `exp013` | Per-layer hashed n-gram values and optimizer schedules | 0.910094 | -0.017100 | 3 (42–44) |
 | `exp014` | Nonuniform feed-forward expansion | 0.907300 | -0.002794 | 3 (42–44) |
 | `exp015` | Narrower model and row-wise RMSProp | 0.906465 | -0.000835 | 3 (42–44) |
-| `exp016` | FlashAttention-4 and CUDA graphs | 0.906208 | -0.000257 | 3 (42–44) |
+| `exp016` | FlashAttention-4 (now inherited from exp000) and CUDA graphs | 0.906208 | -0.000257 | 3 (42–44) |
 | `exp017` | Fused QK/RoPE and n-gram accumulation | 0.903610 | -0.002598 | 3 (42–44) |
 | `exp018` | Wider model and larger microbatches | 0.900618 | -0.002992 | 3 (42–44) |
 | `exp019` | Reuse attention inputs and reorder training documents | 0.897725 | -0.002893 | 3 (42–44) |

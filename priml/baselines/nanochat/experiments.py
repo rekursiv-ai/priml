@@ -6,19 +6,20 @@ rather than in fixed steps. A change that makes a step cheaper is rewarded with
 more steps; one that makes a step better is rewarded directly. Both show up in
 one number.
 
-``exp000`` REPRODUCES a published recipe rather than stating one of ours, down
-to the attention kernel, and is never edited: it is the number every other rung
+``exp000`` REPRODUCES a published recipe rather than stating one of ours, except
+its attention kernel (FA4 for the reference's FA3), and is never otherwise
+edited: it is the number every other rung
 is measured against, so an edit here silently reprices the whole ladder. Each
 rung below is a fork removing exactly one thing, so it answers "what does this
 part earn?" rather than "does adding it help?" -- the ladder descends from the
 reference to a plain transformer::
 
-    exp000  the published five-minute recipe, on its own FlashAttention-3
-      +-- exp001  without the pinned kernel: portable attention
+    exp000  the published five-minute recipe, on FlashAttention-4
+      +-- exp001  without the fused kernel: portable attention
             +-- exp002  without the value embeddings
                   +-- exp003  without the windowing too: a plain transformer
 
-Only ``exp000`` pins FA3, so only it requires SM90. ``exp001`` is the rung to
+Only ``exp000`` pins FA4, so only it requires SM90 or SM100. ``exp001`` is the rung to
 fork for ordinary work: the same recipe, and portable to any GPU.
 
 Prepare the data once, then launch::
@@ -36,10 +37,9 @@ swaps them for a ConvexTok vocabulary (``priml.baselines.convextok``).
 
 ``exp004`` through ``exp023`` default to 525 charged training seconds for
 H-series GPUs, excluding compilation warmup and evaluation. ``exp024`` is
-``exp022`` at B200's 300-second budget. In this added sequence, ``exp004``
-through ``exp015`` also use Hopper-only FA3 and need an attention-backend
-change for B200. ``exp016`` onward use FlashAttention-4 and
-Triton kernels. ``exp_smoke`` uses portable attention and a small model to
+``exp022`` at B200's 300-second budget. Every rung inherits FlashAttention-4
+from ``exp000``; ``exp000`` through ``exp015`` were measured on FA3 before that
+switch. ``exp016`` onward add Triton kernels. ``exp_smoke`` uses portable attention and a small model to
 check an installation.
 
 For prepared Unigram experiments, run the preparation script without the BPE
@@ -91,7 +91,6 @@ from priml.baselines.nanochat.train_step import (
 from priml.math.schedules import trapezoidal
 from priml.metrics.bits_per_byte import BitsPerByte
 from priml.model import softcap
-from priml.model.attention.flash3 import Flash3Attention
 from priml.model.attention.flash4 import Flash4Attention
 from priml.model.attention.rope import HuggingFaceFrequencies
 from priml.model.attention.value_gated_attention import (
@@ -198,7 +197,7 @@ def exp000() -> NanoChatLoop.Config:
     """Return the reference recipe.
 
     - Eight layers, width 512, and alternating value embeddings.
-    - Hopper-only FlashAttention-3 with SSSL attention windows.
+    - FlashAttention-4 with SSSL attention windows.
     - BF16 embedding tables and rotary factors; TF32 matrix multiplication.
     - 300-second training budget; evaluate once after training.
     - Seed 42; single-GPU execution without checkpoint resumption.
@@ -229,19 +228,19 @@ def exp000() -> NanoChatLoop.Config:
     Results:
       H200, 525s: 0.973908 mean BPB (3 seeds).
       H200, 300s: 1.005432 mean BPB (3 seeds).
+      Measured on FlashAttention-3, before exp000 switched to FlashAttention-4.
 
     """
     cfg = NanoChatLoop.Config()
     cfg.study_name = "nanochat"
     cfg.experiment_name = "exp000"
 
-    # The kernel the reference measured on, pinned by revision. Stated HERE
-    # rather than inherited from a portable rung, because it is part of the
-    # recipe being reproduced rather than a deviation from one: exp000 is the
-    # statement, and every other rung is a diff against it.
+    # Originally FA3, as the reference ran. FA3 builds only against Torch 2.9.1,
+    # which needed a separate uv runtime; FA4 installs with the monorepo's own
+    # dependencies. Forks exp004-exp015 inherit this, so they now run FA4 too.
     block = cfg.step.model.template
     assert isinstance(block.attn, ValueGatedAttention.Config)
-    block.attn.kernel = Flash3Attention.Config()
+    block.attn.kernel = Flash4Attention.Config()
 
     # The reference normalizes with a bare ``F.rms_norm(x, shape)``, which
     # leaves eps to torch -- the dtype's own epsilon, ~1.19e-7 in float32.
@@ -329,16 +328,16 @@ def exp000() -> NanoChatLoop.Config:
 def exp001() -> NanoChatLoop.Config:
     """Fork exp000 with the following changes.
 
-    - Replace FlashAttention-3 with PyTorch attention.
+    - Replace FlashAttention-4 with PyTorch attention.
 
-    The scientific deviation is the backend. ``exp000`` pins FlashAttention-3,
-    which builds only for SM90, so it refuses to construct anywhere else.
-    This rung takes the CUDA backend torch dispatches for the allocated GPU
-    and therefore runs across supported CUDA architectures. Fork this for
-    ordinary work: reproducing the reference kernel requires Hopper, while
-    a portable experiment should use the backend available on its GPU.
+    The scientific deviation is the backend. ``exp000`` pins FlashAttention-4,
+    which runs only on SM90 and SM100, so it refuses to construct anywhere
+    else. This rung takes the CUDA backend torch dispatches for the allocated
+    GPU and therefore runs across supported CUDA architectures. Fork this for
+    ordinary work: the fused kernel requires Hopper or Blackwell, while a
+    portable experiment should use the backend available on its GPU.
 
-    The FA3 path in ``exp000`` cannot be tested off Hopper. This rung lets us
+    The FA4 path in ``exp000`` cannot be tested off those GPUs. This rung lets us
     check the port with a common kernel: the reference implementation is given
     the same portable backend and stepped beside it. The
     ``scripts/karpathy_parity.py`` script compares parameters and gradients,
@@ -459,6 +458,7 @@ def exp004() -> NgramTrainLoop.Config:
     Results:
       Campaign H200, 525s: 0.972782 mean BPB (3 seeds).
       Campaign H200, 300s: 1.002721 mean BPB (3 seeds).
+      Measured on FlashAttention-3, inherited from exp000 before it switched to FA4.
 
     """
     config = NgramTrainLoop.Config().update(exp000())
@@ -482,6 +482,7 @@ def exp005() -> NgramTrainLoop.Config:
     Results:
       Campaign H200, 525s: 0.961005 mean BPB (3 seeds).
       Campaign H200, 300s: 0.988665 mean BPB (3 seeds).
+      Measured on FlashAttention-3, inherited from exp000 before it switched to FA4.
 
     """
     cfg = exp004()
@@ -504,6 +505,7 @@ def exp006() -> NgramTrainLoop.Config:
     Results:
       Campaign H200, 525s: 0.957160 mean BPB (3 seeds).
       Campaign H200, 300s: 0.969540 mean BPB (3 seeds).
+      Measured on FlashAttention-3, inherited from exp000 before it switched to FA4.
 
     """
     cfg = exp005()
@@ -530,6 +532,7 @@ def exp007() -> NgramTrainLoop.Config:
     Results:
       Campaign H200, 525s: 0.949300 mean BPB (3 seeds).
       Campaign H200, 300s: 0.960311 mean BPB (3 seeds).
+      Measured on FlashAttention-3, inherited from exp000 before it switched to FA4.
 
     """
     cfg = exp006()
@@ -579,6 +582,7 @@ def exp008() -> NgramTrainLoop.Config:
     Results:
       Campaign H200, 525s: 0.938595 mean BPB (3 seeds).
       Campaign H200, 300s: 0.956233 mean BPB (3 seeds).
+      Measured on FlashAttention-3, inherited from exp000 before it switched to FA4.
 
     """
     cfg = exp007()
@@ -640,6 +644,7 @@ def exp009() -> NgramTrainLoop.Config:
     Results:
       Campaign H200, 525s: 0.934975 mean BPB (3 seeds).
       Campaign H200, 300s: 0.962389 mean BPB (3 seeds).
+      Measured on FlashAttention-3, inherited from exp000 before it switched to FA4.
 
     """
     cfg = exp008()
@@ -688,6 +693,7 @@ def exp010() -> NgramTrainLoop.Config:
     Results:
       Campaign H200, 525s: 0.934865 mean BPB (3 seeds).
       Campaign H200, 300s: 0.961917 mean BPB (3 seeds).
+      Measured on FlashAttention-3, inherited from exp000 before it switched to FA4.
 
     """
     cfg = exp009()
@@ -733,6 +739,7 @@ def exp011() -> NgramTrainLoop.Config:
     Results:
       Campaign H200, 525s: 0.927435 mean BPB (3 seeds).
       Campaign H200, 300s: 0.955083 mean BPB (3 seeds).
+      Measured on FlashAttention-3, inherited from exp000 before it switched to FA4.
 
     """
     cfg = exp010()
@@ -769,6 +776,7 @@ def exp012() -> NgramTrainLoop.Config:
     Results:
       Campaign H200, 525s: 0.927194 mean BPB (3 seeds).
       Campaign H200, 300s: 0.955053 mean BPB (3 seeds).
+      Measured on FlashAttention-3, inherited from exp000 before it switched to FA4.
 
     """
     cfg = exp011()
@@ -794,6 +802,7 @@ def exp013() -> NgramTrainLoop.Config:
     Results:
       Campaign H200, 525s: 0.910094 mean BPB (3 seeds).
       Campaign H200, 300s: 0.946772 mean BPB (3 seeds).
+      Measured on FlashAttention-3, inherited from exp000 before it switched to FA4.
 
     """
     cfg = exp012()
@@ -922,6 +931,7 @@ def exp014() -> NgramTrainLoop.Config:
     Results:
       Campaign H200, 525s: 0.907300 mean BPB (3 seeds).
       Campaign H200, 300s: 0.943577 mean BPB (3 seeds).
+      Measured on FlashAttention-3, inherited from exp000 before it switched to FA4.
 
     """
     cfg = exp013()
@@ -952,6 +962,7 @@ def exp015() -> NgramTrainLoop.Config:
     Results:
       Campaign H200, 525s: 0.906465 mean BPB (3 seeds).
       Campaign H200, 300s: 0.935564 mean BPB (3 seeds).
+      Measured on FlashAttention-3, inherited from exp000 before it switched to FA4.
 
     """
     cfg = exp014()
@@ -982,8 +993,10 @@ def exp015() -> NgramTrainLoop.Config:
 def exp016() -> NgramTrainLoop.Config:
     """Fork exp015 with the following changes.
 
-    - Replace FlashAttention-3 with FlashAttention-4.
     - Enable CUDA graphs with max-autotune compilation.
+
+    Originally this rung also replaced FlashAttention-3 with FlashAttention-4;
+    exp000 has since switched, so that part is now a no-op.
 
     Results:
       Campaign H200, 525s: 0.906208 mean BPB (3 seeds).

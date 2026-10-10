@@ -1,7 +1,6 @@
 """Causal attention and fused normalization/rotary kernels.
 
-The attention kernels themselves are priml's: ``Flash3Attention`` in
-``priml.model.attention.flash3`` and ``Flash4Attention`` in
+The attention kernel itself is priml's: ``Flash4Attention`` in
 ``priml.model.attention.flash4``.
 
 Triton parses source annotations as device code. Keep tuple annotations quoted

@@ -1,1165 +1,1198 @@
 NgramTrainLoop.Config(
-                study_name='nanochat',
-                experiment_name='exp017',
-                base_dir='/opt/scratch',
-                working_dir=PosixPath('/opt/scratch/runs/nanochat/exp017'),
-                doc='',
-                step=NgramTrainStep.Config(
-                │       model=MemoryNanoChatLM.Config(
-                │       │       vocab_size=8_192,
-                │       │       max_seq_len=2_048,
-                │       │       channels_in=640,
-                │       │       num_layers=8,
-                │       │       block=[
-                │       │       │       TransformerBlock.Config(
-                │       │       │               channels_in=640,
-                │       │       │               channels_out=640,
-                │       │       │               attn=CausalAttention.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       num_heads=5,
-                │       │       │                       channels_head=128,
-                │       │       │                       gate_channels=16,
-                │       │       │                       norm_qk=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       ),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       kernel=Flash4Attention.Config(),
-                │       │       │                       window=256,
-                │       │       │                       window_pattern='SSSL',
-                │       │       │                       max_seq_len=2_048,
-                │       │       │                       gated=False,
-                │       │       │                       depth_index=((0, 8),),
-                │       │       │                       head_gate=Linear.Config(
-                │       │       │                               channels_in=16,
-                │       │       │                               channels_out=5,
-                │       │       │                               bias=False,
-                │       │       │                               depth_index=(),
-                │       │       │                               device=None,
-                │       │       │                               dtype=None,
-                │       │       │                               init_weight=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                               shard=None
-                │       │       │                       ),
-                │       │       │                       fused_qk_rope=True,
-                │       │       │                       bigram=False,
-                │       │       │                       trigram=False,
-                │       │       │                       norm_out=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       )
-                │       │       │               ),
-                │       │       │               ffn=OutputNormFeedForward.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       channels_hidden=1_280,
-                │       │       │                       expansion=2,
-                │       │       │                       round_to=1,
-                │       │       │                       gate=False,
-                │       │       │                       bias=False,
-                │       │       │                       split_gate_projection=False,
-                │       │       │                       norm=None,
-                │       │       │                       act=functools.partial(<function priml.model.swiglu.shifted_relu_squared at 0xdefacedeface>, threshold=0.75),
-                │       │       │                       depth_index=((0, 8),),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                       shard='colwise',
-                │       │       │                       norm_out=RMSNorm.Config(
-                │       │       │                               channels_in=640,
-                │       │       │                               channels_out=640,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       )
-                │       │       │               ),
-                │       │       │               norm1=RMSNorm.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       eps=None,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               norm2=RMSNorm.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       eps=None,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               prenorm=True,
-                │       │       │               checkpoint=False,
-                │       │       │               depth_index=((0, 8),)
-                │       │       │       ),
-                │       │       │       TransformerBlock.Config(
-                │       │       │               channels_in=640,
-                │       │       │               channels_out=640,
-                │       │       │               attn=CausalAttention.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       num_heads=5,
-                │       │       │                       channels_head=128,
-                │       │       │                       gate_channels=16,
-                │       │       │                       norm_qk=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       ),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       kernel=Flash4Attention.Config(),
-                │       │       │                       window=256,
-                │       │       │                       window_pattern='SSSL',
-                │       │       │                       max_seq_len=2_048,
-                │       │       │                       gated=True,
-                │       │       │                       depth_index=((1, 8),),
-                │       │       │                       head_gate=Linear.Config(
-                │       │       │                               channels_in=16,
-                │       │       │                               channels_out=5,
-                │       │       │                               bias=False,
-                │       │       │                               depth_index=(),
-                │       │       │                               device=None,
-                │       │       │                               dtype=None,
-                │       │       │                               init_weight=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                               shard=None
-                │       │       │                       ),
-                │       │       │                       fused_qk_rope=True,
-                │       │       │                       bigram=True,
-                │       │       │                       trigram=True,
-                │       │       │                       norm_out=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       )
-                │       │       │               ),
-                │       │       │               ffn=OutputNormFeedForward.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       channels_hidden=1_280,
-                │       │       │                       expansion=2,
-                │       │       │                       round_to=1,
-                │       │       │                       gate=False,
-                │       │       │                       bias=False,
-                │       │       │                       split_gate_projection=False,
-                │       │       │                       norm=None,
-                │       │       │                       act=functools.partial(<function priml.model.swiglu.shifted_relu_squared at 0xdefacedeface>, threshold=0.75),
-                │       │       │                       depth_index=((1, 8),),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                       shard='colwise',
-                │       │       │                       norm_out=RMSNorm.Config(
-                │       │       │                               channels_in=640,
-                │       │       │                               channels_out=640,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       )
-                │       │       │               ),
-                │       │       │               norm1=RMSNorm.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       eps=None,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               norm2=RMSNorm.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       eps=None,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               prenorm=True,
-                │       │       │               checkpoint=False,
-                │       │       │               depth_index=((1, 8),)
-                │       │       │       ),
-                │       │       │       TransformerBlock.Config(
-                │       │       │               channels_in=640,
-                │       │       │               channels_out=640,
-                │       │       │               attn=CausalAttention.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       num_heads=5,
-                │       │       │                       channels_head=128,
-                │       │       │                       gate_channels=16,
-                │       │       │                       norm_qk=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       ),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       kernel=Flash4Attention.Config(),
-                │       │       │                       window=256,
-                │       │       │                       window_pattern='SSSL',
-                │       │       │                       max_seq_len=2_048,
-                │       │       │                       gated=False,
-                │       │       │                       depth_index=((2, 8),),
-                │       │       │                       head_gate=Linear.Config(
-                │       │       │                               channels_in=16,
-                │       │       │                               channels_out=5,
-                │       │       │                               bias=False,
-                │       │       │                               depth_index=(),
-                │       │       │                               device=None,
-                │       │       │                               dtype=None,
-                │       │       │                               init_weight=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                               shard=None
-                │       │       │                       ),
-                │       │       │                       fused_qk_rope=True,
-                │       │       │                       bigram=False,
-                │       │       │                       trigram=False,
-                │       │       │                       norm_out=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       )
-                │       │       │               ),
-                │       │       │               ffn=OutputNormFeedForward.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       channels_hidden=1_920,
-                │       │       │                       expansion=3,
-                │       │       │                       round_to=1,
-                │       │       │                       gate=False,
-                │       │       │                       bias=False,
-                │       │       │                       split_gate_projection=False,
-                │       │       │                       norm=None,
-                │       │       │                       act=functools.partial(<function priml.model.swiglu.shifted_relu_squared at 0xdefacedeface>, threshold=0.75),
-                │       │       │                       depth_index=((2, 8),),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                       shard='colwise',
-                │       │       │                       norm_out=RMSNorm.Config(
-                │       │       │                               channels_in=640,
-                │       │       │                               channels_out=640,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       )
-                │       │       │               ),
-                │       │       │               norm1=RMSNorm.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       eps=None,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               norm2=RMSNorm.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       eps=None,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               prenorm=True,
-                │       │       │               checkpoint=False,
-                │       │       │               depth_index=((2, 8),)
-                │       │       │       ),
-                │       │       │       TransformerBlock.Config(
-                │       │       │               channels_in=640,
-                │       │       │               channels_out=640,
-                │       │       │               attn=CausalAttention.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       num_heads=5,
-                │       │       │                       channels_head=128,
-                │       │       │                       gate_channels=16,
-                │       │       │                       norm_qk=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       ),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       kernel=Flash4Attention.Config(),
-                │       │       │                       window=2_048,
-                │       │       │                       window_pattern='SSSL',
-                │       │       │                       max_seq_len=2_048,
-                │       │       │                       gated=True,
-                │       │       │                       depth_index=((3, 8),),
-                │       │       │                       head_gate=Linear.Config(
-                │       │       │                               channels_in=16,
-                │       │       │                               channels_out=5,
-                │       │       │                               bias=False,
-                │       │       │                               depth_index=(),
-                │       │       │                               device=None,
-                │       │       │                               dtype=None,
-                │       │       │                               init_weight=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                               shard=None
-                │       │       │                       ),
-                │       │       │                       fused_qk_rope=True,
-                │       │       │                       bigram=True,
-                │       │       │                       trigram=False,
-                │       │       │                       norm_out=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       )
-                │       │       │               ),
-                │       │       │               ffn=OutputNormFeedForward.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       channels_hidden=1_920,
-                │       │       │                       expansion=3,
-                │       │       │                       round_to=1,
-                │       │       │                       gate=False,
-                │       │       │                       bias=False,
-                │       │       │                       split_gate_projection=False,
-                │       │       │                       norm=None,
-                │       │       │                       act=functools.partial(<function priml.model.swiglu.shifted_relu_squared at 0xdefacedeface>, threshold=0.75),
-                │       │       │                       depth_index=((3, 8),),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                       shard='colwise',
-                │       │       │                       norm_out=RMSNorm.Config(
-                │       │       │                               channels_in=640,
-                │       │       │                               channels_out=640,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       )
-                │       │       │               ),
-                │       │       │               norm1=RMSNorm.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       eps=None,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               norm2=RMSNorm.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       eps=None,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               prenorm=True,
-                │       │       │               checkpoint=False,
-                │       │       │               depth_index=((3, 8),)
-                │       │       │       ),
-                │       │       │       TransformerBlock.Config(
-                │       │       │               channels_in=640,
-                │       │       │               channels_out=640,
-                │       │       │               attn=CausalAttention.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       num_heads=5,
-                │       │       │                       channels_head=128,
-                │       │       │                       gate_channels=16,
-                │       │       │                       norm_qk=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       ),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       kernel=Flash4Attention.Config(),
-                │       │       │                       window=256,
-                │       │       │                       window_pattern='SSSL',
-                │       │       │                       max_seq_len=2_048,
-                │       │       │                       gated=False,
-                │       │       │                       depth_index=((4, 8),),
-                │       │       │                       head_gate=Linear.Config(
-                │       │       │                               channels_in=16,
-                │       │       │                               channels_out=5,
-                │       │       │                               bias=False,
-                │       │       │                               depth_index=(),
-                │       │       │                               device=None,
-                │       │       │                               dtype=None,
-                │       │       │                               init_weight=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                               shard=None
-                │       │       │                       ),
-                │       │       │                       fused_qk_rope=True,
-                │       │       │                       bigram=False,
-                │       │       │                       trigram=False,
-                │       │       │                       norm_out=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       )
-                │       │       │               ),
-                │       │       │               ffn=OutputNormFeedForward.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       channels_hidden=3_200,
-                │       │       │                       expansion=5,
-                │       │       │                       round_to=1,
-                │       │       │                       gate=False,
-                │       │       │                       bias=False,
-                │       │       │                       split_gate_projection=False,
-                │       │       │                       norm=None,
-                │       │       │                       act=functools.partial(<function priml.model.swiglu.shifted_relu_squared at 0xdefacedeface>, threshold=0.75),
-                │       │       │                       depth_index=((4, 8),),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                       shard='colwise',
-                │       │       │                       norm_out=RMSNorm.Config(
-                │       │       │                               channels_in=640,
-                │       │       │                               channels_out=640,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       )
-                │       │       │               ),
-                │       │       │               norm1=RMSNorm.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       eps=None,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               norm2=RMSNorm.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       eps=None,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               prenorm=True,
-                │       │       │               checkpoint=False,
-                │       │       │               depth_index=((4, 8),)
-                │       │       │       ),
-                │       │       │       TransformerBlock.Config(
-                │       │       │               channels_in=640,
-                │       │       │               channels_out=640,
-                │       │       │               attn=CausalAttention.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       num_heads=5,
-                │       │       │                       channels_head=128,
-                │       │       │                       gate_channels=16,
-                │       │       │                       norm_qk=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       ),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       kernel=Flash4Attention.Config(),
-                │       │       │                       window=256,
-                │       │       │                       window_pattern='SSSL',
-                │       │       │                       max_seq_len=2_048,
-                │       │       │                       gated=True,
-                │       │       │                       depth_index=((5, 8),),
-                │       │       │                       head_gate=Linear.Config(
-                │       │       │                               channels_in=16,
-                │       │       │                               channels_out=5,
-                │       │       │                               bias=False,
-                │       │       │                               depth_index=(),
-                │       │       │                               device=None,
-                │       │       │                               dtype=None,
-                │       │       │                               init_weight=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                               shard=None
-                │       │       │                       ),
-                │       │       │                       fused_qk_rope=True,
-                │       │       │                       bigram=True,
-                │       │       │                       trigram=True,
-                │       │       │                       norm_out=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       )
-                │       │       │               ),
-                │       │       │               ffn=OutputNormFeedForward.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       channels_hidden=3_200,
-                │       │       │                       expansion=5,
-                │       │       │                       round_to=1,
-                │       │       │                       gate=False,
-                │       │       │                       bias=False,
-                │       │       │                       split_gate_projection=False,
-                │       │       │                       norm=None,
-                │       │       │                       act=functools.partial(<function priml.model.swiglu.shifted_relu_squared at 0xdefacedeface>, threshold=0.75),
-                │       │       │                       depth_index=((5, 8),),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                       shard='colwise',
-                │       │       │                       norm_out=RMSNorm.Config(
-                │       │       │                               channels_in=640,
-                │       │       │                               channels_out=640,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       )
-                │       │       │               ),
-                │       │       │               norm1=RMSNorm.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       eps=None,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               norm2=RMSNorm.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       eps=None,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               prenorm=True,
-                │       │       │               checkpoint=False,
-                │       │       │               depth_index=((5, 8),)
-                │       │       │       ),
-                │       │       │       TransformerBlock.Config(
-                │       │       │               channels_in=640,
-                │       │       │               channels_out=640,
-                │       │       │               attn=CausalAttention.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       num_heads=5,
-                │       │       │                       channels_head=128,
-                │       │       │                       gate_channels=16,
-                │       │       │                       norm_qk=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       ),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       kernel=Flash4Attention.Config(),
-                │       │       │                       window=256,
-                │       │       │                       window_pattern='SSSL',
-                │       │       │                       max_seq_len=2_048,
-                │       │       │                       gated=False,
-                │       │       │                       depth_index=((6, 8),),
-                │       │       │                       head_gate=Linear.Config(
-                │       │       │                               channels_in=16,
-                │       │       │                               channels_out=5,
-                │       │       │                               bias=False,
-                │       │       │                               depth_index=(),
-                │       │       │                               device=None,
-                │       │       │                               dtype=None,
-                │       │       │                               init_weight=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                               shard=None
-                │       │       │                       ),
-                │       │       │                       fused_qk_rope=True,
-                │       │       │                       bigram=False,
-                │       │       │                       trigram=False,
-                │       │       │                       norm_out=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       )
-                │       │       │               ),
-                │       │       │               ffn=OutputNormFeedForward.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       channels_hidden=3_840,
-                │       │       │                       expansion=6,
-                │       │       │                       round_to=1,
-                │       │       │                       gate=False,
-                │       │       │                       bias=False,
-                │       │       │                       split_gate_projection=False,
-                │       │       │                       norm=None,
-                │       │       │                       act=functools.partial(<function priml.model.swiglu.shifted_relu_squared at 0xdefacedeface>, threshold=0.75),
-                │       │       │                       depth_index=((6, 8),),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                       shard='colwise',
-                │       │       │                       norm_out=RMSNorm.Config(
-                │       │       │                               channels_in=640,
-                │       │       │                               channels_out=640,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       )
-                │       │       │               ),
-                │       │       │               norm1=RMSNorm.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       eps=None,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               norm2=RMSNorm.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       eps=None,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               prenorm=True,
-                │       │       │               checkpoint=False,
-                │       │       │               depth_index=((6, 8),)
-                │       │       │       ),
-                │       │       │       TransformerBlock.Config(
-                │       │       │               channels_in=640,
-                │       │       │               channels_out=640,
-                │       │       │               attn=CausalAttention.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       num_heads=5,
-                │       │       │                       channels_head=128,
-                │       │       │                       gate_channels=16,
-                │       │       │                       norm_qk=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       ),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       kernel=Flash4Attention.Config(),
-                │       │       │                       window=2_048,
-                │       │       │                       window_pattern='SSSL',
-                │       │       │                       max_seq_len=2_048,
-                │       │       │                       gated=True,
-                │       │       │                       depth_index=((7, 8),),
-                │       │       │                       head_gate=Linear.Config(
-                │       │       │                               channels_in=16,
-                │       │       │                               channels_out=5,
-                │       │       │                               bias=False,
-                │       │       │                               depth_index=(),
-                │       │       │                               device=None,
-                │       │       │                               dtype=None,
-                │       │       │                               init_weight=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                               shard=None
-                │       │       │                       ),
-                │       │       │                       fused_qk_rope=True,
-                │       │       │                       bigram=True,
-                │       │       │                       trigram=True,
-                │       │       │                       norm_out=RMSNorm.Config(
-                │       │       │                               channels_in=128,
-                │       │       │                               channels_out=128,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       )
-                │       │       │               ),
-                │       │       │               ffn=OutputNormFeedForward.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       channels_hidden=3_840,
-                │       │       │                       expansion=6,
-                │       │       │                       round_to=1,
-                │       │       │                       gate=False,
-                │       │       │                       bias=False,
-                │       │       │                       split_gate_projection=False,
-                │       │       │                       norm=None,
-                │       │       │                       act=functools.partial(<function priml.model.swiglu.shifted_relu_squared at 0xdefacedeface>, threshold=0.75),
-                │       │       │                       depth_index=((7, 8),),
-                │       │       │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │       │       │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │                       shard='colwise',
-                │       │       │                       norm_out=RMSNorm.Config(
-                │       │       │                               channels_in=640,
-                │       │       │                               channels_out=640,
-                │       │       │                               eps=None,
-                │       │       │                               elementwise_affine=False,
-                │       │       │                               device=None,
-                │       │       │                               dtype=None
-                │       │       │                       )
-                │       │       │               ),
-                │       │       │               norm1=RMSNorm.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       eps=None,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               norm2=RMSNorm.Config(
-                │       │       │                       channels_in=640,
-                │       │       │                       channels_out=640,
-                │       │       │                       eps=None,
-                │       │       │                       elementwise_affine=False,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None
-                │       │       │               ),
-                │       │       │               prenorm=True,
-                │       │       │               checkpoint=False,
-                │       │       │               depth_index=((7, 8),)
-                │       │       │       )
-                │       │       ],
-                │       │       value_embedding_stride=2,
-                │       │       embedding=NarrowEmbedding.Config(
-                │       │               channels_in=8_192,
-                │       │               channels_out=640,
-                │       │               dtype=torch.bfloat16,
-                │       │               inner=Embedding.Config(
-                │       │                       channels_in=8_192,
-                │       │                       channels_out=640,
-                │       │                       padding_idx=None,
-                │       │                       device=None,
-                │       │                       dtype=None,
-                │       │                       shard=None,
-                │       │                       depth_index=(),
-                │       │                       init_weight=functools.partial(<function priml.model.init.normal at 0xdefacedeface>, std=1.0)
-                │       │               )
-                │       │       ),
-                │       │       norm=RMSNorm.Config(
-                │       │               channels_in=640,
-                │       │               channels_out=640,
-                │       │               eps=None,
-                │       │               elementwise_affine=False,
-                │       │               device=None,
-                │       │               dtype=None
-                │       │       ),
-                │       │       lm_head=ScaledSoftCap.Config(
-                │       │               channels_in=640,
-                │       │               channels_out=8_192,
-                │       │               cap=15.0,
-                │       │               inner=Linear.Config(
-                │       │                       channels_in=640,
-                │       │                       channels_out=8_192,
-                │       │                       bias=False,
-                │       │                       depth_index=(),
-                │       │                       device=None,
-                │       │                       dtype=None,
-                │       │                       init_weight=functools.partial(<function priml.model.init.normal at 0xdefacedeface>, std=0.001),
-                │       │                       init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │                       shard=None
-                │       │               ),
-                │       │               dtype=None,
-                │       │               output_cap=15
-                │       │       ),
-                │       │       rope=RoPE.Config(
-                │       │               channels_head=128,
-                │       │               reduction_mode='cat',
-                │       │               frequencies=HuggingFaceFrequencies.Config(
-                │       │                       base=3_000_000
-                │       │               ),
-                │       │               dtype=torch.bfloat16
-                │       │       ),
-                │       │       mix=GatedResidualMix.Config(
-                │       │               num_layers=8,
-                │       │               channels_in=640,
-                │       │               running=1.0,
-                │       │               original=0.1,
-                │       │               gate_scale=0.0
-                │       │       ),
-                │       │       fused_ngram=True,
-                │       │       ngram_dirty_clear=False,
-                │       │       bigrams={       '1': HashedNgramTables.Config(
-                │       │       │               channels_out=640,
-                │       │       │               num_embeddings=1_048_576,
-                │       │       │               hash_multipliers=((922_969, 611_423), (871_659, 235_905)),
-                │       │       │               table=Embedding.Config(
-                │       │       │                       channels_in=1_048_576,
-                │       │       │                       channels_out=320,
-                │       │       │                       padding_idx=None,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       shard=None,
-                │       │       │                       depth_index=(),
-                │       │       │                       init_weight=functools.partial(<function torch.nn.init.uniform_ at 0xdefacedeface>, a=-0.06846531968814576, b=0.06846531968814576)
-                │       │       │               ),
-                │       │       │               init_after=None
-                │       │       │       ),
-                │       │       │       '3': HashedNgramTables.Config(
-                │       │       │               channels_out=640,
-                │       │       │               num_embeddings=1_048_576,
-                │       │       │               hash_multipliers=((878_215, 304_631), (716_167, 719_567)),
-                │       │       │               table=Embedding.Config(
-                │       │       │                       channels_in=1_048_576,
-                │       │       │                       channels_out=320,
-                │       │       │                       padding_idx=None,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       shard=None,
-                │       │       │                       depth_index=(),
-                │       │       │                       init_weight=functools.partial(<function torch.nn.init.uniform_ at 0xdefacedeface>, a=-0.06846531968814576, b=0.06846531968814576)
-                │       │       │               ),
-                │       │       │               init_after=None
-                │       │       │       ),
-                │       │       │       '5': HashedNgramTables.Config(
-                │       │       │               channels_out=640,
-                │       │       │               num_embeddings=1_048_576,
-                │       │       │               hash_multipliers=((608_275, 245_159), (172_587, 896_485)),
-                │       │       │               table=Embedding.Config(
-                │       │       │                       channels_in=1_048_576,
-                │       │       │                       channels_out=320,
-                │       │       │                       padding_idx=None,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       shard=None,
-                │       │       │                       depth_index=(),
-                │       │       │                       init_weight=functools.partial(<function torch.nn.init.uniform_ at 0xdefacedeface>, a=-0.06846531968814576, b=0.06846531968814576)
-                │       │       │               ),
-                │       │       │               init_after=None
-                │       │       │       ),
-                │       │       │       '7': HashedNgramTables.Config(
-                │       │       │               channels_out=640,
-                │       │       │               num_embeddings=1_048_576,
-                │       │       │               hash_multipliers=((749_129, 423_087), (424_077, 621_489)),
-                │       │       │               table=Embedding.Config(
-                │       │       │                       channels_in=1_048_576,
-                │       │       │                       channels_out=320,
-                │       │       │                       padding_idx=None,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       shard=None,
-                │       │       │                       depth_index=(),
-                │       │       │                       init_weight=functools.partial(<function torch.nn.init.uniform_ at 0xdefacedeface>, a=-0.06846531968814576, b=0.06846531968814576)
-                │       │       │               ),
-                │       │       │               init_after=None
-                │       │               )},
-                │       │       trigrams={       '1': HashedNgramTables.Config(
-                │       │       │               channels_out=640,
-                │       │       │               num_embeddings=1_048_576,
-                │       │       │               hash_multipliers=(
-                │       │       │                       (341_169, 629_529, 160_373),
-                │       │       │                       (34_179, 850_893, 300_111)
-                │       │       │               ),
-                │       │       │               table=Embedding.Config(
-                │       │       │                       channels_in=1_048_576,
-                │       │       │                       channels_out=320,
-                │       │       │                       padding_idx=None,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       shard=None,
-                │       │       │                       depth_index=(),
-                │       │       │                       init_weight=functools.partial(<function torch.nn.init.uniform_ at 0xdefacedeface>, a=-0.06846531968814576, b=0.06846531968814576)
-                │       │       │               ),
-                │       │       │               init_after=None
-                │       │       │       ),
-                │       │       │       '5': HashedNgramTables.Config(
-                │       │       │               channels_out=640,
-                │       │       │               num_embeddings=1_048_576,
-                │       │       │               hash_multipliers=(
-                │       │       │                       (741_551, 1_020_253, 441_521),
-                │       │       │                       (726_691, 511_307, 164_915)
-                │       │       │               ),
-                │       │       │               table=Embedding.Config(
-                │       │       │                       channels_in=1_048_576,
-                │       │       │                       channels_out=320,
-                │       │       │                       padding_idx=None,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       shard=None,
-                │       │       │                       depth_index=(),
-                │       │       │                       init_weight=functools.partial(<function torch.nn.init.uniform_ at 0xdefacedeface>, a=-0.06846531968814576, b=0.06846531968814576)
-                │       │       │               ),
-                │       │       │               init_after=None
-                │       │       │       ),
-                │       │       │       '7': HashedNgramTables.Config(
-                │       │       │               channels_out=640,
-                │       │       │               num_embeddings=1_048_576,
-                │       │       │               hash_multipliers=(
-                │       │       │                       (972_443, 995_473, 800_275),
-                │       │       │                       (864_041, 659_687, 665_505)
-                │       │       │               ),
-                │       │       │               table=Embedding.Config(
-                │       │       │                       channels_in=1_048_576,
-                │       │       │                       channels_out=320,
-                │       │       │                       padding_idx=None,
-                │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       shard=None,
-                │       │       │                       depth_index=(),
-                │       │       │                       init_weight=functools.partial(<function torch.nn.init.uniform_ at 0xdefacedeface>, a=-0.06846531968814576, b=0.06846531968814576)
-                │       │       │               ),
-                │       │       │               init_after=None
-                │       │               )},
-                │       │       num_pool_layers=2,
-                │       │       dtype=torch.bfloat16,
-                │       │       attention_source_layers=(),
-                │       │       attention_source_after_layer=0
-                │       ),
-                │       optimizer=CompositeOptimizer.Config(
-                │       │       optimizers=[
-                │       │       │       PartialConfig(<class 'functools.partial'>, <class 'priml.optimizers.fused_adamw.FusedAdamW'>, lr=0.004381780460041329, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0),
-                │       │       │       PartialConfig(<class 'functools.partial'>, <class 'priml.optimizers.fused_adamw.FusedAdamW'>, lr=0.6572670690061992, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0),
-                │       │       │       PartialConfig(<class 'functools.partial'>, <class 'priml.optimizers.fused_adamw.FusedAdamW'>, lr=0.6572670690061992, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0),
-                │       │       │       PartialConfig(<class 'functools.partial'>, <class 'priml.optimizers.fused_adamw.FusedAdamW'>, lr=0.008, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0),
-                │       │       │       PartialConfig(<class 'functools.partial'>, <class 'priml.optimizers.fused_adamw.FusedAdamW'>, lr=1.2, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.002),
-                │       │       │       BiasCorrectedRMSProp.Config(
-                │       │       │               lr=0.6572670690061992,
-                │       │       │               beta2=0.999,
-                │       │       │               eps=1e-10,
-                │       │       │               weight_decay=0.0,
-                │       │       │               compile=True,
-                │       │       │               rowwise=True,
-                │       │       │               sparse_rows=False
-                │       │       │       ),
-                │       │       │       BiasCorrectedRMSProp.Config(
-                │       │       │               lr=0.6572670690061992,
-                │       │       │               beta2=0.999,
-                │       │       │               eps=1e-10,
-                │       │       │               weight_decay=0.0,
-                │       │       │               compile=True,
-                │       │       │               rowwise=True,
-                │       │       │               sparse_rows=False
-                │       │       │       ),
-                │       │       │       FusedAdamW.Config(
-                │       │       │               lr=0.06,
-                │       │       │               betas=(0.96, 0.95),
-                │       │       │               eps=1e-10,
-                │       │       │               weight_decay=0.0,
-                │       │       │               compile=True
-                │       │       │       ),
-                │       │       │       FFNScaledNorMuon.Config(
-                │       │       │               channels_in=640,
-                │       │       │               reference_expansion=4.0,
-                │       │       │               ffn_lr_multiplier=1.25,
-                │       │       │               optimizer=NorMuon.Config(
-                │       │       │                       lr=0.04,
-                │       │       │                       momentum=0.95,
-                │       │       │                       beta2=0.95,
-                │       │       │                       ns_steps=5,
-                │       │       │                       weight_decay=0.1,
-                │       │       │                       compile=True,
-                │       │       │                       coefficients=(
-                │       │       │                               (
-                │       │       │                                       8.156554524902461,
-                │       │       │                                       -22.48329292557795,
-                │       │       │                                       15.878769915207462
-                │       │       │                               ),
-                │       │       │                               (
-                │       │       │                                       4.042929935166739,
-                │       │       │                                       -2.808917465908714,
-                │       │       │                                       0.5000178451051316
-                │       │       │                               ),
-                │       │       │                               (
-                │       │       │                                       3.8916678022926607,
-                │       │       │                                       -2.772484153217685,
-                │       │       │                                       0.5060648178503393
-                │       │       │                               ),
-                │       │       │                               (
-                │       │       │                                       3.285753657755655,
-                │       │       │                                       -2.3681294933425376,
-                │       │       │                                       0.46449024233003106
-                │       │       │                               ),
-                │       │       │                               (
-                │       │       │                                       2.3465413258596377,
-                │       │       │                                       -1.7097828382687081,
-                │       │       │                                       0.42323551169305323
-                │       │       │                               )
-                │       │       │                       )
-                │       │       │               )
-                │       │       │       )
-                │       │       ],
-                │       │       select=[
-                │       │               matching('lm_head'),
-                │       │               matching('embed.inner'),
-                │       │               matching('value_embeds'),
-                │       │               matching('mix.running'),
-                │       │               matching('mix.original', 'mix.gate_scales'),
-                │       │               matching('bigrams'),
-                │       │               matching('trigrams'),
-                │       │               matching('pool_weights'),
-                │       │               matching('blocks')
-                │       │       ],
-                │       │       require_total=True,
-                │       │       drop_empty=False
-                │       ),
-                │       loss=TokenCrossEntropy.Config(ignore_index=-1),
-                │       accumulate_grad_batches=1,
-                │       drop_partial_accumulation_on_epoch_end=True,
-                │       train_budget_steps=inf,
-                │       train_budget_sec=525.0,
-                │       train_budget_epochs=inf,
-                │       lr_schedule=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.constant at 0xdefacedeface>),
-                │       parallelism=NoParallel.Config(device='cuda'),
-                │       model_quantization=NoModelQuantization.Config(),
-                │       activation_memoization=DefaultActivationStorage.Config(),
-                │       compile=PartialConfig(<class 'functools.partial'>, <function torch.compile at 0xdefacedeface>, dynamic=False, fullgraph=True, mode='max-autotune'),
-                │       ema=NoEMA.Config(),
-                │       gradient_clip_norm=inf,
-                │       skip_step_on_nonfinite_grad=False,
-                │       device_init='meta',
-                │       dtype_autocast=None,
-                │       autocast_cache_enabled=False,
-                │       schedule=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.trapezoidal at 0xdefacedeface>, flat=0.5),
-                │       budget_warmup_steps=11,
-                │       tokens_per_optimizer_step=131_072,
-                │       rows_per_pass=64,
-                │       momentum_start=0.85,
-                │       momentum_end=0.95,
-                │       momentum_warmup_steps=300,
-                │       decay_to_zero=True,
-                │       divergence_threshold=100.0,
-                │       adam_lr_tuned_at_channels=640,
-                │       optimizer_update=ScheduledOptimizerUpdate.Config(
-                │               muon_warmdown=0.95,
-                │               adam_warmdown=0.6,
-                │               final_lr_fraction=0.025,
-                │               momentum_final=0.85,
-                │               muon_beta2_final=0.98,
-                │               adam_beta1_final=0.4,
-                │               ngram_beta2_final=0.99995,
-                │               ngram_ramp_fraction=1.0,
-                │               optimizer_recompile_limit=32,
-                │               skip_member=4,
-                │               adam_beta1_members=(0, 1, 2),
-                │               weight_decay_pulses=(
-                │                       WeightDecayPulse(
-                │                               center=0.015,
-                │                               half_width=0.005,
-                │                               multiplier=3.0,
-                │                               triangular=False
-                │                       ),
-                │                       WeightDecayPulse(
-                │                               center=0.03,
-                │                               half_width=0.01,
-                │                               multiplier=5.0,
-                │                               triangular=False
-                │                       ),
-                │                       WeightDecayPulse(
-                │                               center=0.8,
-                │                               half_width=0.025,
-                │                               multiplier=6,
-                │                               triangular=True
-                │                       )
-                │               )
-                │       )
+        study_name='nanochat',
+        experiment_name='exp017',
+        base_dir='/opt/scratch',
+        working_dir=PosixPath('/opt/scratch/runs/nanochat/exp017'),
+        doc='',
+        step=NgramTrainStep.Config(
+        │   model=MemoryNanoChatLM.Config(
+        │   │   vocab_size=8_192,
+        │   │   max_seq_len=2_048,
+        │   │   channels_in=640,
+        │   │   num_layers=8,
+        │   │   block=[
+        │   │   │   TransformerBlock.Config(
+        │   │   │       channels_in=640,
+        │   │   │       channels_out=640,
+        │   │   │       attn=CausalAttention.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           num_heads=5,
+        │   │   │           channels_head=128,
+        │   │   │           gate_channels=16,
+        │   │   │           norm_qk=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           ),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           kernel=Flash4Attention.Config(),
+        │   │   │           window=256,
+        │   │   │           window_pattern='SSSL',
+        │   │   │           max_seq_len=2_048,
+        │   │   │           gated=False,
+        │   │   │           depth_index=((0, 8),),
+        │   │   │           head_gate=Linear.Config(
+        │   │   │               channels_in=16,
+        │   │   │               channels_out=5,
+        │   │   │               bias=False,
+        │   │   │               depth_index=(),
+        │   │   │               device=None,
+        │   │   │               dtype=None,
+        │   │   │               init_weight=torch.nn.init.zeros_,
+        │   │   │               init_bias=torch.nn.init.zeros_,
+        │   │   │               shard=None
+        │   │   │           ),
+        │   │   │           fused_qk_rope=True,
+        │   │   │           bigram=False,
+        │   │   │           trigram=False,
+        │   │   │           norm_out=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           )
+        │   │   │       ),
+        │   │   │       ffn=OutputNormFeedForward.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           channels_hidden=1_280,
+        │   │   │           expansion=2,
+        │   │   │           round_to=1,
+        │   │   │           gate=False,
+        │   │   │           bias=False,
+        │   │   │           split_gate_projection=False,
+        │   │   │           norm=None,
+        │   │   │           act=functools.partial(priml.model.swiglu.shifted_relu_squared, threshold=0.75),
+        │   │   │           depth_index=((0, 8),),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           shard='colwise',
+        │   │   │           norm_out=RMSNorm.Config(
+        │   │   │               channels_in=640,
+        │   │   │               channels_out=640,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           )
+        │   │   │       ),
+        │   │   │       norm1=RMSNorm.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           eps=None,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       norm2=RMSNorm.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           eps=None,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       prenorm=True,
+        │   │   │       checkpoint=False,
+        │   │   │       depth_index=((0, 8),)
+        │   │   │   ),
+        │   │   │   TransformerBlock.Config(
+        │   │   │       channels_in=640,
+        │   │   │       channels_out=640,
+        │   │   │       attn=CausalAttention.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           num_heads=5,
+        │   │   │           channels_head=128,
+        │   │   │           gate_channels=16,
+        │   │   │           norm_qk=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           ),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           kernel=Flash4Attention.Config(),
+        │   │   │           window=256,
+        │   │   │           window_pattern='SSSL',
+        │   │   │           max_seq_len=2_048,
+        │   │   │           gated=True,
+        │   │   │           depth_index=((1, 8),),
+        │   │   │           head_gate=Linear.Config(
+        │   │   │               channels_in=16,
+        │   │   │               channels_out=5,
+        │   │   │               bias=False,
+        │   │   │               depth_index=(),
+        │   │   │               device=None,
+        │   │   │               dtype=None,
+        │   │   │               init_weight=torch.nn.init.zeros_,
+        │   │   │               init_bias=torch.nn.init.zeros_,
+        │   │   │               shard=None
+        │   │   │           ),
+        │   │   │           fused_qk_rope=True,
+        │   │   │           bigram=True,
+        │   │   │           trigram=True,
+        │   │   │           norm_out=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           )
+        │   │   │       ),
+        │   │   │       ffn=OutputNormFeedForward.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           channels_hidden=1_280,
+        │   │   │           expansion=2,
+        │   │   │           round_to=1,
+        │   │   │           gate=False,
+        │   │   │           bias=False,
+        │   │   │           split_gate_projection=False,
+        │   │   │           norm=None,
+        │   │   │           act=functools.partial(priml.model.swiglu.shifted_relu_squared, threshold=0.75),
+        │   │   │           depth_index=((1, 8),),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           shard='colwise',
+        │   │   │           norm_out=RMSNorm.Config(
+        │   │   │               channels_in=640,
+        │   │   │               channels_out=640,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           )
+        │   │   │       ),
+        │   │   │       norm1=RMSNorm.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           eps=None,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       norm2=RMSNorm.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           eps=None,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       prenorm=True,
+        │   │   │       checkpoint=False,
+        │   │   │       depth_index=((1, 8),)
+        │   │   │   ),
+        │   │   │   TransformerBlock.Config(
+        │   │   │       channels_in=640,
+        │   │   │       channels_out=640,
+        │   │   │       attn=CausalAttention.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           num_heads=5,
+        │   │   │           channels_head=128,
+        │   │   │           gate_channels=16,
+        │   │   │           norm_qk=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           ),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           kernel=Flash4Attention.Config(),
+        │   │   │           window=256,
+        │   │   │           window_pattern='SSSL',
+        │   │   │           max_seq_len=2_048,
+        │   │   │           gated=False,
+        │   │   │           depth_index=((2, 8),),
+        │   │   │           head_gate=Linear.Config(
+        │   │   │               channels_in=16,
+        │   │   │               channels_out=5,
+        │   │   │               bias=False,
+        │   │   │               depth_index=(),
+        │   │   │               device=None,
+        │   │   │               dtype=None,
+        │   │   │               init_weight=torch.nn.init.zeros_,
+        │   │   │               init_bias=torch.nn.init.zeros_,
+        │   │   │               shard=None
+        │   │   │           ),
+        │   │   │           fused_qk_rope=True,
+        │   │   │           bigram=False,
+        │   │   │           trigram=False,
+        │   │   │           norm_out=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           )
+        │   │   │       ),
+        │   │   │       ffn=OutputNormFeedForward.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           channels_hidden=1_920,
+        │   │   │           expansion=3,
+        │   │   │           round_to=1,
+        │   │   │           gate=False,
+        │   │   │           bias=False,
+        │   │   │           split_gate_projection=False,
+        │   │   │           norm=None,
+        │   │   │           act=functools.partial(priml.model.swiglu.shifted_relu_squared, threshold=0.75),
+        │   │   │           depth_index=((2, 8),),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           shard='colwise',
+        │   │   │           norm_out=RMSNorm.Config(
+        │   │   │               channels_in=640,
+        │   │   │               channels_out=640,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           )
+        │   │   │       ),
+        │   │   │       norm1=RMSNorm.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           eps=None,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       norm2=RMSNorm.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           eps=None,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       prenorm=True,
+        │   │   │       checkpoint=False,
+        │   │   │       depth_index=((2, 8),)
+        │   │   │   ),
+        │   │   │   TransformerBlock.Config(
+        │   │   │       channels_in=640,
+        │   │   │       channels_out=640,
+        │   │   │       attn=CausalAttention.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           num_heads=5,
+        │   │   │           channels_head=128,
+        │   │   │           gate_channels=16,
+        │   │   │           norm_qk=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           ),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           kernel=Flash4Attention.Config(),
+        │   │   │           window=2_048,
+        │   │   │           window_pattern='SSSL',
+        │   │   │           max_seq_len=2_048,
+        │   │   │           gated=True,
+        │   │   │           depth_index=((3, 8),),
+        │   │   │           head_gate=Linear.Config(
+        │   │   │               channels_in=16,
+        │   │   │               channels_out=5,
+        │   │   │               bias=False,
+        │   │   │               depth_index=(),
+        │   │   │               device=None,
+        │   │   │               dtype=None,
+        │   │   │               init_weight=torch.nn.init.zeros_,
+        │   │   │               init_bias=torch.nn.init.zeros_,
+        │   │   │               shard=None
+        │   │   │           ),
+        │   │   │           fused_qk_rope=True,
+        │   │   │           bigram=True,
+        │   │   │           trigram=False,
+        │   │   │           norm_out=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           )
+        │   │   │       ),
+        │   │   │       ffn=OutputNormFeedForward.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           channels_hidden=1_920,
+        │   │   │           expansion=3,
+        │   │   │           round_to=1,
+        │   │   │           gate=False,
+        │   │   │           bias=False,
+        │   │   │           split_gate_projection=False,
+        │   │   │           norm=None,
+        │   │   │           act=functools.partial(priml.model.swiglu.shifted_relu_squared, threshold=0.75),
+        │   │   │           depth_index=((3, 8),),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           shard='colwise',
+        │   │   │           norm_out=RMSNorm.Config(
+        │   │   │               channels_in=640,
+        │   │   │               channels_out=640,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           )
+        │   │   │       ),
+        │   │   │       norm1=RMSNorm.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           eps=None,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       norm2=RMSNorm.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           eps=None,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       prenorm=True,
+        │   │   │       checkpoint=False,
+        │   │   │       depth_index=((3, 8),)
+        │   │   │   ),
+        │   │   │   TransformerBlock.Config(
+        │   │   │       channels_in=640,
+        │   │   │       channels_out=640,
+        │   │   │       attn=CausalAttention.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           num_heads=5,
+        │   │   │           channels_head=128,
+        │   │   │           gate_channels=16,
+        │   │   │           norm_qk=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           ),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           kernel=Flash4Attention.Config(),
+        │   │   │           window=256,
+        │   │   │           window_pattern='SSSL',
+        │   │   │           max_seq_len=2_048,
+        │   │   │           gated=False,
+        │   │   │           depth_index=((4, 8),),
+        │   │   │           head_gate=Linear.Config(
+        │   │   │               channels_in=16,
+        │   │   │               channels_out=5,
+        │   │   │               bias=False,
+        │   │   │               depth_index=(),
+        │   │   │               device=None,
+        │   │   │               dtype=None,
+        │   │   │               init_weight=torch.nn.init.zeros_,
+        │   │   │               init_bias=torch.nn.init.zeros_,
+        │   │   │               shard=None
+        │   │   │           ),
+        │   │   │           fused_qk_rope=True,
+        │   │   │           bigram=False,
+        │   │   │           trigram=False,
+        │   │   │           norm_out=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           )
+        │   │   │       ),
+        │   │   │       ffn=OutputNormFeedForward.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           channels_hidden=3_200,
+        │   │   │           expansion=5,
+        │   │   │           round_to=1,
+        │   │   │           gate=False,
+        │   │   │           bias=False,
+        │   │   │           split_gate_projection=False,
+        │   │   │           norm=None,
+        │   │   │           act=functools.partial(priml.model.swiglu.shifted_relu_squared, threshold=0.75),
+        │   │   │           depth_index=((4, 8),),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           shard='colwise',
+        │   │   │           norm_out=RMSNorm.Config(
+        │   │   │               channels_in=640,
+        │   │   │               channels_out=640,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           )
+        │   │   │       ),
+        │   │   │       norm1=RMSNorm.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           eps=None,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       norm2=RMSNorm.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           eps=None,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       prenorm=True,
+        │   │   │       checkpoint=False,
+        │   │   │       depth_index=((4, 8),)
+        │   │   │   ),
+        │   │   │   TransformerBlock.Config(
+        │   │   │       channels_in=640,
+        │   │   │       channels_out=640,
+        │   │   │       attn=CausalAttention.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           num_heads=5,
+        │   │   │           channels_head=128,
+        │   │   │           gate_channels=16,
+        │   │   │           norm_qk=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           ),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           kernel=Flash4Attention.Config(),
+        │   │   │           window=256,
+        │   │   │           window_pattern='SSSL',
+        │   │   │           max_seq_len=2_048,
+        │   │   │           gated=True,
+        │   │   │           depth_index=((5, 8),),
+        │   │   │           head_gate=Linear.Config(
+        │   │   │               channels_in=16,
+        │   │   │               channels_out=5,
+        │   │   │               bias=False,
+        │   │   │               depth_index=(),
+        │   │   │               device=None,
+        │   │   │               dtype=None,
+        │   │   │               init_weight=torch.nn.init.zeros_,
+        │   │   │               init_bias=torch.nn.init.zeros_,
+        │   │   │               shard=None
+        │   │   │           ),
+        │   │   │           fused_qk_rope=True,
+        │   │   │           bigram=True,
+        │   │   │           trigram=True,
+        │   │   │           norm_out=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           )
+        │   │   │       ),
+        │   │   │       ffn=OutputNormFeedForward.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           channels_hidden=3_200,
+        │   │   │           expansion=5,
+        │   │   │           round_to=1,
+        │   │   │           gate=False,
+        │   │   │           bias=False,
+        │   │   │           split_gate_projection=False,
+        │   │   │           norm=None,
+        │   │   │           act=functools.partial(priml.model.swiglu.shifted_relu_squared, threshold=0.75),
+        │   │   │           depth_index=((5, 8),),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           shard='colwise',
+        │   │   │           norm_out=RMSNorm.Config(
+        │   │   │               channels_in=640,
+        │   │   │               channels_out=640,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           )
+        │   │   │       ),
+        │   │   │       norm1=RMSNorm.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           eps=None,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       norm2=RMSNorm.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           eps=None,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       prenorm=True,
+        │   │   │       checkpoint=False,
+        │   │   │       depth_index=((5, 8),)
+        │   │   │   ),
+        │   │   │   TransformerBlock.Config(
+        │   │   │       channels_in=640,
+        │   │   │       channels_out=640,
+        │   │   │       attn=CausalAttention.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           num_heads=5,
+        │   │   │           channels_head=128,
+        │   │   │           gate_channels=16,
+        │   │   │           norm_qk=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           ),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           kernel=Flash4Attention.Config(),
+        │   │   │           window=256,
+        │   │   │           window_pattern='SSSL',
+        │   │   │           max_seq_len=2_048,
+        │   │   │           gated=False,
+        │   │   │           depth_index=((6, 8),),
+        │   │   │           head_gate=Linear.Config(
+        │   │   │               channels_in=16,
+        │   │   │               channels_out=5,
+        │   │   │               bias=False,
+        │   │   │               depth_index=(),
+        │   │   │               device=None,
+        │   │   │               dtype=None,
+        │   │   │               init_weight=torch.nn.init.zeros_,
+        │   │   │               init_bias=torch.nn.init.zeros_,
+        │   │   │               shard=None
+        │   │   │           ),
+        │   │   │           fused_qk_rope=True,
+        │   │   │           bigram=False,
+        │   │   │           trigram=False,
+        │   │   │           norm_out=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           )
+        │   │   │       ),
+        │   │   │       ffn=OutputNormFeedForward.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           channels_hidden=3_840,
+        │   │   │           expansion=6,
+        │   │   │           round_to=1,
+        │   │   │           gate=False,
+        │   │   │           bias=False,
+        │   │   │           split_gate_projection=False,
+        │   │   │           norm=None,
+        │   │   │           act=functools.partial(priml.model.swiglu.shifted_relu_squared, threshold=0.75),
+        │   │   │           depth_index=((6, 8),),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           shard='colwise',
+        │   │   │           norm_out=RMSNorm.Config(
+        │   │   │               channels_in=640,
+        │   │   │               channels_out=640,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           )
+        │   │   │       ),
+        │   │   │       norm1=RMSNorm.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           eps=None,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       norm2=RMSNorm.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           eps=None,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       prenorm=True,
+        │   │   │       checkpoint=False,
+        │   │   │       depth_index=((6, 8),)
+        │   │   │   ),
+        │   │   │   TransformerBlock.Config(
+        │   │   │       channels_in=640,
+        │   │   │       channels_out=640,
+        │   │   │       attn=CausalAttention.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           num_heads=5,
+        │   │   │           channels_head=128,
+        │   │   │           gate_channels=16,
+        │   │   │           norm_qk=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           ),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           kernel=Flash4Attention.Config(),
+        │   │   │           window=2_048,
+        │   │   │           window_pattern='SSSL',
+        │   │   │           max_seq_len=2_048,
+        │   │   │           gated=True,
+        │   │   │           depth_index=((7, 8),),
+        │   │   │           head_gate=Linear.Config(
+        │   │   │               channels_in=16,
+        │   │   │               channels_out=5,
+        │   │   │               bias=False,
+        │   │   │               depth_index=(),
+        │   │   │               device=None,
+        │   │   │               dtype=None,
+        │   │   │               init_weight=torch.nn.init.zeros_,
+        │   │   │               init_bias=torch.nn.init.zeros_,
+        │   │   │               shard=None
+        │   │   │           ),
+        │   │   │           fused_qk_rope=True,
+        │   │   │           bigram=True,
+        │   │   │           trigram=True,
+        │   │   │           norm_out=RMSNorm.Config(
+        │   │   │               channels_in=128,
+        │   │   │               channels_out=128,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           )
+        │   │   │       ),
+        │   │   │       ffn=OutputNormFeedForward.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           channels_hidden=3_840,
+        │   │   │           expansion=6,
+        │   │   │           round_to=1,
+        │   │   │           gate=False,
+        │   │   │           bias=False,
+        │   │   │           split_gate_projection=False,
+        │   │   │           norm=None,
+        │   │   │           act=functools.partial(priml.model.swiglu.shifted_relu_squared, threshold=0.75),
+        │   │   │           depth_index=((7, 8),),
+        │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           shard='colwise',
+        │   │   │           norm_out=RMSNorm.Config(
+        │   │   │               channels_in=640,
+        │   │   │               channels_out=640,
+        │   │   │               eps=None,
+        │   │   │               elementwise_affine=False,
+        │   │   │               device=None,
+        │   │   │               dtype=None
+        │   │   │           )
+        │   │   │       ),
+        │   │   │       norm1=RMSNorm.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           eps=None,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       norm2=RMSNorm.Config(
+        │   │   │           channels_in=640,
+        │   │   │           channels_out=640,
+        │   │   │           eps=None,
+        │   │   │           elementwise_affine=False,
+        │   │   │           device=None,
+        │   │   │           dtype=None
+        │   │   │       ),
+        │   │   │       prenorm=True,
+        │   │   │       checkpoint=False,
+        │   │   │       depth_index=((7, 8),)
+        │   │   │   )
+        │   │   ],
+        │   │   value_embedding_stride=2,
+        │   │   embedding=NarrowEmbedding.Config(
+        │   │       channels_in=8_192,
+        │   │       channels_out=640,
+        │   │       dtype=torch.bfloat16,
+        │   │       inner=Embedding.Config(
+        │   │           channels_in=8_192,
+        │   │           channels_out=640,
+        │   │           padding_idx=None,
+        │   │           device=None,
+        │   │           dtype=None,
+        │   │           shard=None,
+        │   │           depth_index=(),
+        │   │           init_weight=functools.partial(priml.model.init.normal, std=1.0)
+        │   │       )
+        │   │   ),
+        │   │   norm=RMSNorm.Config(
+        │   │       channels_in=640,
+        │   │       channels_out=640,
+        │   │       eps=None,
+        │   │       elementwise_affine=False,
+        │   │       device=None,
+        │   │       dtype=None
+        │   │   ),
+        │   │   lm_head=ScaledSoftCap.Config(
+        │   │       channels_in=640,
+        │   │       channels_out=8_192,
+        │   │       cap=15.0,
+        │   │       inner=Linear.Config(
+        │   │           channels_in=640,
+        │   │           channels_out=8_192,
+        │   │           bias=False,
+        │   │           depth_index=(),
+        │   │           device=None,
+        │   │           dtype=None,
+        │   │           init_weight=functools.partial(priml.model.init.normal, std=0.001),
+        │   │           init_bias=torch.nn.init.zeros_,
+        │   │           shard=None
+        │   │       ),
+        │   │       dtype=None,
+        │   │       output_cap=15
+        │   │   ),
+        │   │   rope=RoPE.Config(
+        │   │       channels_head=128,
+        │   │       reduction_mode='cat',
+        │   │       frequencies=HuggingFaceFrequencies.Config(base=3000000),
+        │   │       dtype=torch.bfloat16
+        │   │   ),
+        │   │   mix=GatedResidualMix.Config(
+        │   │       num_layers=8,
+        │   │       channels_in=640,
+        │   │       running=1.0,
+        │   │       original=0.1,
+        │   │       gate_scale=0.0
+        │   │   ),
+        │   │   fused_ngram=True,
+        │   │   ngram_dirty_clear=False,
+        │   │   bigrams={   '1': HashedNgramTables.Config(
+        │   │   │       channels_out=640,
+        │   │   │       num_embeddings=1_048_576,
+        │   │   │       hash_multipliers=((922_969, 611_423), (871_659, 235_905)),
+        │   │   │       table=Embedding.Config(
+        │   │   │           channels_in=1_048_576,
+        │   │   │           channels_out=320,
+        │   │   │           padding_idx=None,
+        │   │   │           device=None,
+        │   │   │           dtype=None,
+        │   │   │           shard=None,
+        │   │   │           depth_index=(),
+        │   │   │           init_weight=functools.partial(torch.nn.init.uniform_, a=-0.06846531968814576, b=0.06846531968814576)
+        │   │   │       ),
+        │   │   │       init_after=None
+        │   │   │   ),
+        │   │   │   '3': HashedNgramTables.Config(
+        │   │   │       channels_out=640,
+        │   │   │       num_embeddings=1_048_576,
+        │   │   │       hash_multipliers=((878_215, 304_631), (716_167, 719_567)),
+        │   │   │       table=Embedding.Config(
+        │   │   │           channels_in=1_048_576,
+        │   │   │           channels_out=320,
+        │   │   │           padding_idx=None,
+        │   │   │           device=None,
+        │   │   │           dtype=None,
+        │   │   │           shard=None,
+        │   │   │           depth_index=(),
+        │   │   │           init_weight=functools.partial(torch.nn.init.uniform_, a=-0.06846531968814576, b=0.06846531968814576)
+        │   │   │       ),
+        │   │   │       init_after=None
+        │   │   │   ),
+        │   │   │   '5': HashedNgramTables.Config(
+        │   │   │       channels_out=640,
+        │   │   │       num_embeddings=1_048_576,
+        │   │   │       hash_multipliers=((608_275, 245_159), (172_587, 896_485)),
+        │   │   │       table=Embedding.Config(
+        │   │   │           channels_in=1_048_576,
+        │   │   │           channels_out=320,
+        │   │   │           padding_idx=None,
+        │   │   │           device=None,
+        │   │   │           dtype=None,
+        │   │   │           shard=None,
+        │   │   │           depth_index=(),
+        │   │   │           init_weight=functools.partial(torch.nn.init.uniform_, a=-0.06846531968814576, b=0.06846531968814576)
+        │   │   │       ),
+        │   │   │       init_after=None
+        │   │   │   ),
+        │   │   │   '7': HashedNgramTables.Config(
+        │   │   │       channels_out=640,
+        │   │   │       num_embeddings=1_048_576,
+        │   │   │       hash_multipliers=((749_129, 423_087), (424_077, 621_489)),
+        │   │   │       table=Embedding.Config(
+        │   │   │           channels_in=1_048_576,
+        │   │   │           channels_out=320,
+        │   │   │           padding_idx=None,
+        │   │   │           device=None,
+        │   │   │           dtype=None,
+        │   │   │           shard=None,
+        │   │   │           depth_index=(),
+        │   │   │           init_weight=functools.partial(torch.nn.init.uniform_, a=-0.06846531968814576, b=0.06846531968814576)
+        │   │   │       ),
+        │   │   │       init_after=None
+        │   │       )},
+        │   │   trigrams={   '1': HashedNgramTables.Config(
+        │   │   │       channels_out=640,
+        │   │   │       num_embeddings=1_048_576,
+        │   │   │       hash_multipliers=(
+        │   │   │           (341_169, 629_529, 160_373),
+        │   │   │           (34_179, 850_893, 300_111)
+        │   │   │       ),
+        │   │   │       table=Embedding.Config(
+        │   │   │           channels_in=1_048_576,
+        │   │   │           channels_out=320,
+        │   │   │           padding_idx=None,
+        │   │   │           device=None,
+        │   │   │           dtype=None,
+        │   │   │           shard=None,
+        │   │   │           depth_index=(),
+        │   │   │           init_weight=functools.partial(torch.nn.init.uniform_, a=-0.06846531968814576, b=0.06846531968814576)
+        │   │   │       ),
+        │   │   │       init_after=None
+        │   │   │   ),
+        │   │   │   '5': HashedNgramTables.Config(
+        │   │   │       channels_out=640,
+        │   │   │       num_embeddings=1_048_576,
+        │   │   │       hash_multipliers=(
+        │   │   │           (741_551, 1_020_253, 441_521),
+        │   │   │           (726_691, 511_307, 164_915)
+        │   │   │       ),
+        │   │   │       table=Embedding.Config(
+        │   │   │           channels_in=1_048_576,
+        │   │   │           channels_out=320,
+        │   │   │           padding_idx=None,
+        │   │   │           device=None,
+        │   │   │           dtype=None,
+        │   │   │           shard=None,
+        │   │   │           depth_index=(),
+        │   │   │           init_weight=functools.partial(torch.nn.init.uniform_, a=-0.06846531968814576, b=0.06846531968814576)
+        │   │   │       ),
+        │   │   │       init_after=None
+        │   │   │   ),
+        │   │   │   '7': HashedNgramTables.Config(
+        │   │   │       channels_out=640,
+        │   │   │       num_embeddings=1_048_576,
+        │   │   │       hash_multipliers=(
+        │   │   │           (972_443, 995_473, 800_275),
+        │   │   │           (864_041, 659_687, 665_505)
+        │   │   │       ),
+        │   │   │       table=Embedding.Config(
+        │   │   │           channels_in=1_048_576,
+        │   │   │           channels_out=320,
+        │   │   │           padding_idx=None,
+        │   │   │           device=None,
+        │   │   │           dtype=None,
+        │   │   │           shard=None,
+        │   │   │           depth_index=(),
+        │   │   │           init_weight=functools.partial(torch.nn.init.uniform_, a=-0.06846531968814576, b=0.06846531968814576)
+        │   │   │       ),
+        │   │   │       init_after=None
+        │   │       )},
+        │   │   num_pool_layers=2,
+        │   │   dtype=torch.bfloat16,
+        │   │   attention_source_layers=(),
+        │   │   attention_source_after_layer=0
+        │   ),
+        │   optimizer=CompositeOptimizer.Config(
+        │   │   optimizers=[
+        │   │   │   PartialConfig(
+        │   │   │       <class 'priml.optimizers.fused_adamw.FusedAdamW'>,
+        │   │   │       lr=0.004381780460041329,
+        │   │   │       betas=(0.8, 0.95),
+        │   │   │       eps=1e-10,
+        │   │   │       weight_decay=0.0
+        │   │   │   ),
+        │   │   │   PartialConfig(
+        │   │   │       <class 'priml.optimizers.fused_adamw.FusedAdamW'>,
+        │   │   │       lr=0.6572670690061992,
+        │   │   │       betas=(0.8, 0.95),
+        │   │   │       eps=1e-10,
+        │   │   │       weight_decay=0.0
+        │   │   │   ),
+        │   │   │   PartialConfig(
+        │   │   │       <class 'priml.optimizers.fused_adamw.FusedAdamW'>,
+        │   │   │       lr=0.6572670690061992,
+        │   │   │       betas=(0.8, 0.95),
+        │   │   │       eps=1e-10,
+        │   │   │       weight_decay=0.0
+        │   │   │   ),
+        │   │   │   PartialConfig(
+        │   │   │       <class 'priml.optimizers.fused_adamw.FusedAdamW'>,
+        │   │   │       lr=0.008,
+        │   │   │       betas=(0.8, 0.95),
+        │   │   │       eps=1e-10,
+        │   │   │       weight_decay=0.0
+        │   │   │   ),
+        │   │   │   PartialConfig(
+        │   │   │       <class 'priml.optimizers.fused_adamw.FusedAdamW'>,
+        │   │   │       lr=1.2,
+        │   │   │       betas=(0.96, 0.95),
+        │   │   │       eps=1e-10,
+        │   │   │       weight_decay=0.002
+        │   │   │   ),
+        │   │   │   BiasCorrectedRMSProp.Config(
+        │   │   │       lr=0.6572670690061992,
+        │   │   │       beta2=0.999,
+        │   │   │       eps=1e-10,
+        │   │   │       weight_decay=0.0,
+        │   │   │       compile=True,
+        │   │   │       rowwise=True,
+        │   │   │       sparse_rows=False
+        │   │   │   ),
+        │   │   │   BiasCorrectedRMSProp.Config(
+        │   │   │       lr=0.6572670690061992,
+        │   │   │       beta2=0.999,
+        │   │   │       eps=1e-10,
+        │   │   │       weight_decay=0.0,
+        │   │   │       compile=True,
+        │   │   │       rowwise=True,
+        │   │   │       sparse_rows=False
+        │   │   │   ),
+        │   │   │   FusedAdamW.Config(
+        │   │   │       lr=0.06,
+        │   │   │       betas=(0.96, 0.95),
+        │   │   │       eps=1e-10,
+        │   │   │       weight_decay=0.0,
+        │   │   │       compile=True
+        │   │   │   ),
+        │   │   │   FFNScaledNorMuon.Config(
+        │   │   │       channels_in=640,
+        │   │   │       reference_expansion=4.0,
+        │   │   │       ffn_lr_multiplier=1.25,
+        │   │   │       optimizer=NorMuon.Config(
+        │   │   │           lr=0.04,
+        │   │   │           momentum=0.95,
+        │   │   │           beta2=0.95,
+        │   │   │           ns_steps=5,
+        │   │   │           weight_decay=0.1,
+        │   │   │           compile=True,
+        │   │   │           coefficients=(
+        │   │   │               (
+        │   │   │                   8.156554524902461,
+        │   │   │                   -22.48329292557795,
+        │   │   │                   15.878769915207462
+        │   │   │               ),
+        │   │   │               (
+        │   │   │                   4.042929935166739,
+        │   │   │                   -2.808917465908714,
+        │   │   │                   0.5000178451051316
+        │   │   │               ),
+        │   │   │               (
+        │   │   │                   3.8916678022926607,
+        │   │   │                   -2.772484153217685,
+        │   │   │                   0.5060648178503393
+        │   │   │               ),
+        │   │   │               (
+        │   │   │                   3.285753657755655,
+        │   │   │                   -2.3681294933425376,
+        │   │   │                   0.46449024233003106
+        │   │   │               ),
+        │   │   │               (
+        │   │   │                   2.3465413258596377,
+        │   │   │                   -1.7097828382687081,
+        │   │   │                   0.42323551169305323
+        │   │   │               )
+        │   │   │           )
+        │   │   │       )
+        │   │   │   )
+        │   │   ],
+        │   │   select=[
+        │   │       matching('lm_head'),
+        │   │       matching('embed.inner'),
+        │   │       matching('value_embeds'),
+        │   │       matching('mix.running'),
+        │   │       matching('mix.original', 'mix.gate_scales'),
+        │   │       matching('bigrams'),
+        │   │       matching('trigrams'),
+        │   │       matching('pool_weights'),
+        │   │       matching('blocks')
+        │   │   ],
+        │   │   require_total=True,
+        │   │   drop_empty=False
+        │   ),
+        │   loss=TokenCrossEntropy.Config(ignore_index=-1),
+        │   accumulate_grad_batches=1,
+        │   drop_partial_accumulation_on_epoch_end=True,
+        │   train_budget_steps=inf,
+        │   train_budget_sec=525.0,
+        │   train_budget_epochs=inf,
+        │   lr_schedule=PartialConfig(priml.math.schedules.constant),
+        │   parallelism=NoParallel.Config(device='cuda'),
+        │   model_quantization=NoModelQuantization.Config(),
+        │   activation_memoization=DefaultActivationStorage.Config(),
+        │   compile=PartialConfig(
+        │       torch.compile,
+        │       dynamic=False,
+        │       fullgraph=True,
+        │       mode='max-autotune'
+        │   ),
+        │   ema=NoEMA.Config(),
+        │   gradient_clip_norm=inf,
+        │   skip_step_on_nonfinite_grad=False,
+        │   device_init='meta',
+        │   dtype_autocast=None,
+        │   autocast_cache_enabled=False,
+        │   schedule=PartialConfig(priml.math.schedules.trapezoidal, flat=0.5),
+        │   budget_warmup_steps=11,
+        │   tokens_per_optimizer_step=131_072,
+        │   rows_per_pass=64,
+        │   momentum_start=0.85,
+        │   momentum_end=0.95,
+        │   momentum_warmup_steps=300,
+        │   decay_to_zero=True,
+        │   divergence_threshold=100.0,
+        │   adam_lr_tuned_at_channels=640,
+        │   optimizer_update=ScheduledOptimizerUpdate.Config(
+        │       muon_warmdown=0.95,
+        │       adam_warmdown=0.6,
+        │       final_lr_fraction=0.025,
+        │       momentum_final=0.85,
+        │       muon_beta2_final=0.98,
+        │       adam_beta1_final=0.4,
+        │       ngram_beta2_final=0.99995,
+        │       ngram_ramp_fraction=1.0,
+        │       optimizer_recompile_limit=32,
+        │       skip_member=4,
+        │       adam_beta1_members=(0, 1, 2),
+        │       weight_decay_pulses=(
+        │           WeightDecayPulse(
+        │               center=0.015,
+        │               half_width=0.005,
+        │               multiplier=3.0,
+        │               triangular=False
+        │           ),
+        │           WeightDecayPulse(
+        │               center=0.03,
+        │               half_width=0.01,
+        │               multiplier=5.0,
+        │               triangular=False
+        │           ),
+        │           WeightDecayPulse(
+        │               center=0.8,
+        │               half_width=0.025,
+        │               multiplier=6,
+        │               triangular=True
+        │           )
+        │       )
+        │   )
+        ),
+        dataset=NanoChatData.Config(
+            base_dir='/opt/scratch',
+            working_dir=PosixPath('/opt/scratch/datasets/nanochat/train14'),
+            tokenizer_dir=PosixPath('/opt/scratch/datasets/nanochat/train14/tokenizer'),
+            prepared_train_manifest='',
+            prepared_eval_manifest='',
+            reference_evaluation=None,
+            num_train_shards=7,
+            train_shard_indices=(0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14),
+            val_shard=7,
+            batch_size=64,
+            eval_batch_size=128,
+            eval_tokens=20_971_520,
+            buffer_size=1_000,
+            train_buffer_size=256,
+            device='cuda',
+            vocab_size=8_192,
+            max_seq_len=2_048
+        ),
+        metrics_train={},
+        metrics_eval={'val': BitsPerByte.Config()},
+        checkpointer=None,
+        profiler=None,
+        phase_timer=PhaseTimer.Config(
+            enabled=False,
+            torch_profile=False,
+            base_dir=PosixPath('/opt/scratch/runs/nanochat/exp017'),
+            working_dir=PosixPath('/opt/scratch/runs/nanochat/exp017/profiling'),
+            heartbeat_interval_sec=20.0,
+            fault_dump_interval_sec=40.0,
+            cuda_events=False
+        ),
+        tracker=TrackerList.Config(
+            trackers={   'metrics': FileTracker.Config(
+                    base_dir=PosixPath('/opt/scratch/runs/nanochat/exp017'),
+                    working_dir=PosixPath('/opt/scratch/runs/nanochat/exp017/metrics.json'),
+                    capture_prefix='eval/'
                 ),
-                dataset=NanoChatData.Config(
-                        base_dir='/opt/scratch',
-                        working_dir=PosixPath('/opt/scratch/datasets/nanochat/train14'),
-                        tokenizer_dir=PosixPath('/opt/scratch/datasets/nanochat/train14/tokenizer'),
-                        prepared_train_manifest='',
-                        prepared_eval_manifest='',
-                        reference_evaluation=None,
-                        num_train_shards=7,
-                        train_shard_indices=(0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14),
-                        val_shard=7,
-                        batch_size=64,
-                        eval_batch_size=128,
-                        eval_tokens=20_971_520,
-                        buffer_size=1_000,
-                        train_buffer_size=256,
-                        device='cuda',
-                        vocab_size=8_192,
-                        max_seq_len=2_048
-                ),
-                metrics_train={},
-                metrics_eval={'val': BitsPerByte.Config()},
-                checkpointer=None,
-                profiler=None,
-                phase_timer=PhaseTimer.Config(
-                        enabled=False,
-                        torch_profile=False,
+                'wandb': AsyncTracker.Config(
+                    tracker=WandbTracker.Config(
+                        project='nanochat',
+                        name='',
+                        run_id='',
+                        group='',
+                        mode='online',
                         base_dir=PosixPath('/opt/scratch/runs/nanochat/exp017'),
-                        working_dir=PosixPath('/opt/scratch/runs/nanochat/exp017/profiling'),
-                        heartbeat_interval_sec=20.0,
-                        fault_dump_interval_sec=40.0,
-                        cuda_events=False
-                ),
-                tracker=TrackerList.Config(
-                        trackers={       'metrics': FileTracker.Config(
-                                        base_dir=PosixPath('/opt/scratch/runs/nanochat/exp017'),
-                                        working_dir=PosixPath('/opt/scratch/runs/nanochat/exp017/metrics.json'),
-                                        capture_prefix='eval/'
-                                ),
-                                'wandb': AsyncTracker.Config(
-                                        tracker=WandbTracker.Config(
-                                                project='nanochat',
-                                                name='',
-                                                run_id='',
-                                                group='',
-                                                mode='online',
-                                                base_dir=PosixPath('/opt/scratch/runs/nanochat/exp017'),
-                                                working_dir=PosixPath('/opt/scratch/runs/nanochat/exp017/wandb'),
-                                                capture_console=True,
-                                                replay_startup_logs=False,
-                                                allow_startup_failure=True,
-                                                ingestion=WandbIngestion(
-                                                        init_timeout_sec=30.0,
-                                                        service_wait_sec=30.0,
-                                                        flush_interval_sec=15.0,
-                                                        system_metrics=True,
-                                                        system_metrics_interval_sec=60.0
-                                                ),
-                                                metric_step_metrics={},
-                                                run_config={},
-                                                notes=''
-                                        ),
-                                        enabled=True
-                                )},
-                        base_dir=PosixPath('/opt/scratch/runs/nanochat/exp017'),
-                        working_dir=PosixPath('/opt/scratch/runs/nanochat/exp017')
-                ),
-                max_steps=inf,
-                max_epochs=inf,
-                max_time=525.0,
-                max_time_kind='train',
-                max_eval_time=inf,
-                eval_stop_on_time_limit=False,
-                num_steps_eval=-1,
-                num_steps_log=1,
-                early_train_log_steps=0,
-                eval_every_epoch=False,
-                eval_extras_every_eval=False,
-                eval_warmup_batches=0,
-                eval_only=False,
-                restore_rng_state=True,
-                seed=42,
-                num_steps_garbage_collect=inf,
-                mesh_dim_model_seed='pp',
-                mesh_dim_data_seed='dp',
-                runtime=SingleProcess.Config(
-                        device='cuda',
-                        deterministic=False,
-                        float32_matmul_precision='high'
-                )
+                        working_dir=PosixPath('/opt/scratch/runs/nanochat/exp017/wandb'),
+                        capture_console=True,
+                        replay_startup_logs=False,
+                        allow_startup_failure=True,
+                        ingestion=WandbIngestion(
+                            init_timeout_sec=30.0,
+                            service_wait_sec=30.0,
+                            flush_interval_sec=15.0,
+                            system_metrics=True,
+                            system_metrics_interval_sec=60.0
+                        ),
+                        metric_step_metrics={},
+                        run_config={},
+                        notes=''
+                    ),
+                    enabled=True
+                )},
+            base_dir=PosixPath('/opt/scratch/runs/nanochat/exp017'),
+            working_dir=PosixPath('/opt/scratch/runs/nanochat/exp017')
+        ),
+        max_steps=inf,
+        max_epochs=inf,
+        max_time=525.0,
+        max_time_kind='train',
+        max_eval_time=inf,
+        eval_stop_on_time_limit=False,
+        num_steps_eval=-1,
+        num_steps_log=1,
+        early_train_log_steps=0,
+        eval_every_epoch=False,
+        eval_extras_every_eval=False,
+        eval_warmup_batches=0,
+        eval_only=False,
+        restore_rng_state=True,
+        seed=42,
+        num_steps_garbage_collect=inf,
+        mesh_dim_model_seed='pp',
+        mesh_dim_data_seed='dp',
+        runtime=SingleProcess.Config(
+            device='cuda',
+            deterministic=False,
+            float32_matmul_precision='high'
         )
+    )

@@ -1,283 +1,283 @@
 MinGRUPolicy.Config(
-                embedding=BoardEncoder.Config(
-                │       cells=MultiHotEmbedding.Config(
-                │               channels_in=154,
-                │               channels_out=2,
-                │               offsets=(0, 64, 72, 74, 90, 106, 122, 138),
-                │               num_cells=99,
-                │               num_scalars=51,
-                │               dtype=None,
-                │               init_weight=functools.partial(<function priml.model.init.normal at 0xdefacedeface>, std=1.0)
-                │       ),
-                │       status=ActionConditionedStatus.Config(
-                │               channels_in=51,
-                │               embedding=Embedding.Config(
-                │                       channels_in=44,
-                │                       channels_out=3,
-                │                       padding_idx=None,
-                │                       device=None,
-                │                       dtype=None,
-                │                       shard=None,
-                │                       depth_index=(),
-                │                       init_weight=functools.partial(<function priml.model.init.normal at 0xdefacedeface>, std=1.0)
-                │               ),
-                │               block=MLP.Config(
-                │                       channels_in=54,
-                │                       channels_out=51,
-                │                       channels_hidden=4,
-                │                       proj_in=Linear.Config(
-                │                               channels_in=54,
-                │                               channels_out=4,
-                │                               bias=False,
-                │                               depth_index=(),
-                │                               device=None,
-                │                               dtype=None,
-                │                               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                │                               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │                               shard=None
-                │                       ),
-                │                       activation=<function torch.nn.functional.silu at 0xdefacedeface>,
-                │                       proj_out=Linear.Config(
-                │                               channels_in=4,
-                │                               channels_out=51,
-                │                               bias=False,
-                │                               depth_index=(),
-                │                               device=None,
-                │                               dtype=None,
-                │                               init_weight=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │                               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │                               shard=None
-                │                       )
-                │               ),
-                │               num_layers=2
-                │       ),
-                │       board=BoardCNN.Config(
-                │       │       channels_in=2,
-                │       │       channels_condition=51,
-                │       │       grid=(9, 11),
-                │       │       block=DepthwiseResidual.Config(
-                │       │               channels_in=2,
-                │       │               depthwise=Conv2d.Config(
-                │       │                       channels_in=2,
-                │       │                       channels_out=2,
-                │       │                       kernel_size=3,
-                │       │                       stride=1,
-                │       │                       padding='same',
-                │       │                       dilation=1,
-                │       │                       groups=2,
-                │       │                       bias=False,
-                │       │                       depth_index=(),
-                │       │                       device=None,
-                │       │                       dtype=None,
-                │       │                       init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                │       │                       init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>
-                │       │               ),
-                │       │               activation=<function torch.nn.functional.silu at 0xdefacedeface>,
-                │       │               pointwise=Conv2d.Config(
-                │       │                       channels_in=2,
-                │       │                       channels_out=2,
-                │       │                       kernel_size=1,
-                │       │                       stride=1,
-                │       │                       padding='same',
-                │       │                       dilation=1,
-                │       │                       groups=1,
-                │       │                       bias=False,
-                │       │                       depth_index=(),
-                │       │                       device=None,
-                │       │                       dtype=None,
-                │       │                       init_weight=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │                       init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>
-                │       │               )
-                │       │       ),
-                │       │       num_layers=2,
-                │       │       spatial=FilmBranch.Config(
-                │       │       │       channels_in=2,
-                │       │       │       channels_hidden=5,
-                │       │       │       channels_condition=51,
-                │       │       │       proj_in=Conv2d.Config(
-                │       │       │               channels_in=2,
-                │       │       │               channels_out=5,
-                │       │       │               kernel_size=1,
-                │       │       │               stride=1,
-                │       │       │               padding='same',
-                │       │       │               dilation=1,
-                │       │       │               groups=1,
-                │       │       │               bias=False,
-                │       │       │               depth_index=(),
-                │       │       │               device=None,
-                │       │       │               dtype=None,
-                │       │       │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                │       │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>
-                │       │       │       ),
-                │       │       │       proj_condition=Linear.Config(
-                │       │       │               channels_in=51,
-                │       │       │               channels_out=10,
-                │       │       │               bias=False,
-                │       │       │               depth_index=(),
-                │       │       │               device=None,
-                │       │       │               dtype=None,
-                │       │       │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                │       │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │               shard=None
-                │       │       │       ),
-                │       │       │       depthwise=Conv2d.Config(
-                │       │       │               channels_in=5,
-                │       │       │               channels_out=5,
-                │       │       │               kernel_size=3,
-                │       │       │               stride=1,
-                │       │       │               padding='same',
-                │       │       │               dilation=1,
-                │       │       │               groups=5,
-                │       │       │               bias=False,
-                │       │       │               depth_index=(),
-                │       │       │               device=None,
-                │       │       │               dtype=None,
-                │       │       │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                │       │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>
-                │       │       │       ),
-                │       │       │       activation=<function torch.nn.functional.silu at 0xdefacedeface>,
-                │       │       │       proj_out=Conv2d.Config(
-                │       │       │               channels_in=5,
-                │       │       │               channels_out=2,
-                │       │       │               kernel_size=1,
-                │       │       │               stride=1,
-                │       │       │               padding='same',
-                │       │       │               dilation=1,
-                │       │       │               groups=1,
-                │       │       │               bias=False,
-                │       │       │               depth_index=(),
-                │       │       │               device=None,
-                │       │       │               dtype=None,
-                │       │       │               init_weight=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │       │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>
-                │       │       │       )
-                │       │       ),
-                │       │       multiscale=MultiscaleMix.Config(
-                │       │               channels_in=2,
-                │       │               channels_hidden=7,
-                │       │               kernel_size=3,
-                │       │               proj_in=Conv2d.Config(
-                │       │                       channels_in=6,
-                │       │                       channels_out=7,
-                │       │                       kernel_size=1,
-                │       │                       stride=1,
-                │       │                       padding='same',
-                │       │                       dilation=1,
-                │       │                       groups=1,
-                │       │                       bias=False,
-                │       │                       depth_index=(),
-                │       │                       device=None,
-                │       │                       dtype=None,
-                │       │                       init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                │       │                       init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>
-                │       │               ),
-                │       │               activation=<function torch.nn.functional.silu at 0xdefacedeface>,
-                │       │               proj_out=Conv2d.Config(
-                │       │                       channels_in=7,
-                │       │                       channels_out=2,
-                │       │                       kernel_size=1,
-                │       │                       stride=1,
-                │       │                       padding='same',
-                │       │                       dilation=1,
-                │       │                       groups=1,
-                │       │                       bias=False,
-                │       │                       depth_index=(),
-                │       │                       device=None,
-                │       │                       dtype=None,
-                │       │                       init_weight=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │       │                       init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>
-                │       │               )
-                │       │       )
-                │       )
-                ),
-                proj_in=Linear.Config(
-                        channels_in=249,
-                        channels_out=8,
-                        bias=False,
-                        depth_index=(),
-                        device=None,
-                        dtype=None,
-                        init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                        init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                        shard=None
-                ),
-                block=MinGRUBlock.Config(
-                        channels_hidden=8,
-                        proj_gates=Linear.Config(
-                                channels_in=8,
-                                channels_out=24,
-                                bias=False,
-                                depth_index=(),
-                                device=None,
-                                dtype=None,
-                                init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                                init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                                shard=None
-                        ),
-                        scan=TorchScan.Config(),
-                        dtype=None
-                ),
-                num_layers=2,
-                channels_hidden=8,
-                num_actions=43,
-                proj_out=Linear.Config(
-                        channels_in=8,
-                        channels_out=44,
-                        bias=False,
-                        depth_index=(),
-                        device=None,
-                        dtype=None,
-                        init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                        init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                        shard=None
-                ),
-                dtype=torch.bfloat16,
-                state_dtype=torch.float32,
-                output_dtype=torch.float32,
-                injection=MLP.Config(
-                        channels_in=8,
-                        channels_out=8,
-                        channels_hidden=3,
-                        proj_in=Linear.Config(
-                                channels_in=8,
-                                channels_out=3,
-                                bias=False,
-                                depth_index=(),
-                                device=None,
-                                dtype=None,
-                                init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                                init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                                shard=None
-                        ),
-                        activation=<function torch.nn.functional.silu at 0xdefacedeface>,
-                        proj_out=Linear.Config(
-                                channels_in=3,
-                                channels_out=8,
-                                bias=False,
-                                depth_index=(),
-                                device=None,
-                                dtype=None,
-                                init_weight=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                                init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                                shard=None
-                        )
-                ),
-                auxiliary=FeasibilityLoss.Config(
-                        channels_in=8,
-                        channels_out=43,
-                        proj_out=Linear.Config(
-                                channels_in=8,
-                                channels_out=43,
-                                bias=False,
-                                depth_index=(),
-                                device=None,
-                                dtype=None,
-                                init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                                init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                                shard=None
-                        ),
-                        observation_size=843,
-                        coefficient=0.1
-                ),
-                proj_feature=None
-        )
+        embedding=BoardEncoder.Config(
+        │   cells=MultiHotEmbedding.Config(
+        │       channels_in=154,
+        │       channels_out=2,
+        │       offsets=(0, 64, 72, 74, 90, 106, 122, 138),
+        │       num_cells=99,
+        │       num_scalars=51,
+        │       dtype=None,
+        │       init_weight=functools.partial(priml.model.init.normal, std=1.0)
+        │   ),
+        │   status=ActionConditionedStatus.Config(
+        │       channels_in=51,
+        │       embedding=Embedding.Config(
+        │           channels_in=44,
+        │           channels_out=3,
+        │           padding_idx=None,
+        │           device=None,
+        │           dtype=None,
+        │           shard=None,
+        │           depth_index=(),
+        │           init_weight=functools.partial(priml.model.init.normal, std=1.0)
+        │       ),
+        │       block=MLP.Config(
+        │           channels_in=54,
+        │           channels_out=51,
+        │           channels_hidden=4,
+        │           proj_in=Linear.Config(
+        │               channels_in=54,
+        │               channels_out=4,
+        │               bias=False,
+        │               depth_index=(),
+        │               device=None,
+        │               dtype=None,
+        │               init_weight=priml.model.init.kaiming_uniform,
+        │               init_bias=torch.nn.init.zeros_,
+        │               shard=None
+        │           ),
+        │           activation=torch.nn.functional.silu,
+        │           proj_out=Linear.Config(
+        │               channels_in=4,
+        │               channels_out=51,
+        │               bias=False,
+        │               depth_index=(),
+        │               device=None,
+        │               dtype=None,
+        │               init_weight=torch.nn.init.zeros_,
+        │               init_bias=torch.nn.init.zeros_,
+        │               shard=None
+        │           )
+        │       ),
+        │       num_layers=2
+        │   ),
+        │   board=BoardCNN.Config(
+        │   │   channels_in=2,
+        │   │   channels_condition=51,
+        │   │   grid=(9, 11),
+        │   │   block=DepthwiseResidual.Config(
+        │   │       channels_in=2,
+        │   │       depthwise=Conv2d.Config(
+        │   │           channels_in=2,
+        │   │           channels_out=2,
+        │   │           kernel_size=3,
+        │   │           stride=1,
+        │   │           padding='same',
+        │   │           dilation=1,
+        │   │           groups=2,
+        │   │           bias=False,
+        │   │           depth_index=(),
+        │   │           device=None,
+        │   │           dtype=None,
+        │   │           init_weight=priml.model.init.kaiming_uniform,
+        │   │           init_bias=torch.nn.init.zeros_
+        │   │       ),
+        │   │       activation=torch.nn.functional.silu,
+        │   │       pointwise=Conv2d.Config(
+        │   │           channels_in=2,
+        │   │           channels_out=2,
+        │   │           kernel_size=1,
+        │   │           stride=1,
+        │   │           padding='same',
+        │   │           dilation=1,
+        │   │           groups=1,
+        │   │           bias=False,
+        │   │           depth_index=(),
+        │   │           device=None,
+        │   │           dtype=None,
+        │   │           init_weight=torch.nn.init.zeros_,
+        │   │           init_bias=torch.nn.init.zeros_
+        │   │       )
+        │   │   ),
+        │   │   num_layers=2,
+        │   │   spatial=FilmBranch.Config(
+        │   │   │   channels_in=2,
+        │   │   │   channels_hidden=5,
+        │   │   │   channels_condition=51,
+        │   │   │   proj_in=Conv2d.Config(
+        │   │   │       channels_in=2,
+        │   │   │       channels_out=5,
+        │   │   │       kernel_size=1,
+        │   │   │       stride=1,
+        │   │   │       padding='same',
+        │   │   │       dilation=1,
+        │   │   │       groups=1,
+        │   │   │       bias=False,
+        │   │   │       depth_index=(),
+        │   │   │       device=None,
+        │   │   │       dtype=None,
+        │   │   │       init_weight=priml.model.init.kaiming_uniform,
+        │   │   │       init_bias=torch.nn.init.zeros_
+        │   │   │   ),
+        │   │   │   proj_condition=Linear.Config(
+        │   │   │       channels_in=51,
+        │   │   │       channels_out=10,
+        │   │   │       bias=False,
+        │   │   │       depth_index=(),
+        │   │   │       device=None,
+        │   │   │       dtype=None,
+        │   │   │       init_weight=priml.model.init.kaiming_uniform,
+        │   │   │       init_bias=torch.nn.init.zeros_,
+        │   │   │       shard=None
+        │   │   │   ),
+        │   │   │   depthwise=Conv2d.Config(
+        │   │   │       channels_in=5,
+        │   │   │       channels_out=5,
+        │   │   │       kernel_size=3,
+        │   │   │       stride=1,
+        │   │   │       padding='same',
+        │   │   │       dilation=1,
+        │   │   │       groups=5,
+        │   │   │       bias=False,
+        │   │   │       depth_index=(),
+        │   │   │       device=None,
+        │   │   │       dtype=None,
+        │   │   │       init_weight=priml.model.init.kaiming_uniform,
+        │   │   │       init_bias=torch.nn.init.zeros_
+        │   │   │   ),
+        │   │   │   activation=torch.nn.functional.silu,
+        │   │   │   proj_out=Conv2d.Config(
+        │   │   │       channels_in=5,
+        │   │   │       channels_out=2,
+        │   │   │       kernel_size=1,
+        │   │   │       stride=1,
+        │   │   │       padding='same',
+        │   │   │       dilation=1,
+        │   │   │       groups=1,
+        │   │   │       bias=False,
+        │   │   │       depth_index=(),
+        │   │   │       device=None,
+        │   │   │       dtype=None,
+        │   │   │       init_weight=torch.nn.init.zeros_,
+        │   │   │       init_bias=torch.nn.init.zeros_
+        │   │   │   )
+        │   │   ),
+        │   │   multiscale=MultiscaleMix.Config(
+        │   │       channels_in=2,
+        │   │       channels_hidden=7,
+        │   │       kernel_size=3,
+        │   │       proj_in=Conv2d.Config(
+        │   │           channels_in=6,
+        │   │           channels_out=7,
+        │   │           kernel_size=1,
+        │   │           stride=1,
+        │   │           padding='same',
+        │   │           dilation=1,
+        │   │           groups=1,
+        │   │           bias=False,
+        │   │           depth_index=(),
+        │   │           device=None,
+        │   │           dtype=None,
+        │   │           init_weight=priml.model.init.kaiming_uniform,
+        │   │           init_bias=torch.nn.init.zeros_
+        │   │       ),
+        │   │       activation=torch.nn.functional.silu,
+        │   │       proj_out=Conv2d.Config(
+        │   │           channels_in=7,
+        │   │           channels_out=2,
+        │   │           kernel_size=1,
+        │   │           stride=1,
+        │   │           padding='same',
+        │   │           dilation=1,
+        │   │           groups=1,
+        │   │           bias=False,
+        │   │           depth_index=(),
+        │   │           device=None,
+        │   │           dtype=None,
+        │   │           init_weight=torch.nn.init.zeros_,
+        │   │           init_bias=torch.nn.init.zeros_
+        │   │       )
+        │   │   )
+        │   )
+        ),
+        proj_in=Linear.Config(
+            channels_in=249,
+            channels_out=8,
+            bias=False,
+            depth_index=(),
+            device=None,
+            dtype=None,
+            init_weight=priml.model.init.kaiming_uniform,
+            init_bias=torch.nn.init.zeros_,
+            shard=None
+        ),
+        block=MinGRUBlock.Config(
+            channels_hidden=8,
+            proj_gates=Linear.Config(
+                channels_in=8,
+                channels_out=24,
+                bias=False,
+                depth_index=(),
+                device=None,
+                dtype=None,
+                init_weight=priml.model.init.kaiming_uniform,
+                init_bias=torch.nn.init.zeros_,
+                shard=None
+            ),
+            scan=TorchScan.Config(),
+            dtype=None
+        ),
+        num_layers=2,
+        channels_hidden=8,
+        num_actions=43,
+        proj_out=Linear.Config(
+            channels_in=8,
+            channels_out=44,
+            bias=False,
+            depth_index=(),
+            device=None,
+            dtype=None,
+            init_weight=priml.model.init.kaiming_uniform,
+            init_bias=torch.nn.init.zeros_,
+            shard=None
+        ),
+        dtype=torch.bfloat16,
+        state_dtype=torch.float32,
+        output_dtype=torch.float32,
+        injection=MLP.Config(
+            channels_in=8,
+            channels_out=8,
+            channels_hidden=3,
+            proj_in=Linear.Config(
+                channels_in=8,
+                channels_out=3,
+                bias=False,
+                depth_index=(),
+                device=None,
+                dtype=None,
+                init_weight=priml.model.init.kaiming_uniform,
+                init_bias=torch.nn.init.zeros_,
+                shard=None
+            ),
+            activation=torch.nn.functional.silu,
+            proj_out=Linear.Config(
+                channels_in=3,
+                channels_out=8,
+                bias=False,
+                depth_index=(),
+                device=None,
+                dtype=None,
+                init_weight=torch.nn.init.zeros_,
+                init_bias=torch.nn.init.zeros_,
+                shard=None
+            )
+        ),
+        auxiliary=FeasibilityLoss.Config(
+            channels_in=8,
+            channels_out=43,
+            proj_out=Linear.Config(
+                channels_in=8,
+                channels_out=43,
+                bias=False,
+                depth_index=(),
+                device=None,
+                dtype=None,
+                init_weight=priml.model.init.kaiming_uniform,
+                init_bias=torch.nn.init.zeros_,
+                shard=None
+            ),
+            observation_size=843,
+            coefficient=0.1
+        ),
+        proj_feature=None
+    )
