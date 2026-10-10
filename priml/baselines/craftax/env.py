@@ -397,7 +397,9 @@ class BossFightReward:
 
     def rules(self, rules: Rules) -> Rules:
         """Return ``rules`` with the shaping compiled into the step."""
-        return rules._replace(boss_fight_reward=(self.hit, self.kill))
+        return rules._replace(
+            boss_fight_reward=(np.float32(self.hit), np.float32(self.kill)),
+        )
 
 
 class CraftaxEnv:

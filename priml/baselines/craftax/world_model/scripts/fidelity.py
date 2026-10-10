@@ -39,7 +39,7 @@ autocast it trained under (scoring.py), and dreams in bfloat16 with CUDA
 graphs.
 
 Examples:
-  priml/baselines/craftax/world_model/scripts/fidelity.py /opt/scratch/runs/craftax-world-model/exp014/checkpoints/step_00006103.pt --experiment priml.baselines.craftax.world_model.experiments.exp014 --output /opt/scratch/artifacts/craftax/world-model/fidelity/exp014.json
+  priml/baselines/craftax/world_model/scripts/fidelity.py /opt/scratch/runs/craftax-world-model/exp001/checkpoints/step_00001525.pt --experiment priml.baselines.craftax.world_model.experiments.exp001 --output /opt/scratch/artifacts/craftax/world-model/fidelity/exp001.json
 
 '''
 # fmt: on

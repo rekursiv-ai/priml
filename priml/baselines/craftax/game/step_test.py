@@ -10,7 +10,7 @@ restarted, and that each option of ``Rules`` changes what it names.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from llvmlite import ir
 from numba.core import (
@@ -583,12 +583,16 @@ def test_a_boss_beaten_while_asleep_ends_the_step_at_that_tick() -> None:
     assert ticks[1] > 1
 
 
+_BOSS_FIGHT: Final = (np.float32(1.0), np.float32(1.5))
+"""exp114's boss-fight reward per hit and per kill, float32 as ``Rules`` holds it."""
+
+
 def test_the_boss_fight_reward_pays_a_hit_on_top_of_the_games_reward() -> None:
     """A hit on the necromancer pays 1 more; the stats, the return among them, do not move."""
     pool = small_worlds(1)
     rewards: list[NDArray[np.float64]] = []
     stats: list[bytes] = []
-    for shaping in (None, (1.0, 1.5)):
+    for shaping in (None, _BOSS_FIGHT):
         batch = _batch(1, pool, step.Rules(boss_fight_reward=shaping))
         state = env_state(batch.states, 0)
         state.player_level = NUM_LEVELS - 1
@@ -614,12 +618,12 @@ def test_the_boss_fight_reward_pays_hits_and_final_floor_kills_but_not_a_death()
     state.boss_progress = 5
     state.monsters_killed[NUM_LEVELS - 1] = 9
     score = np.float32(0.25)
-    paid = step._boss_fight_numba(state, score, 3, 8, (1.0, 1.5))
+    paid = step._boss_fight_numba(state, score, 3, 8, _BOSS_FIGHT)
     assert paid == score + (np.float32(2.0) + np.float32(1.5))
     assert step._boss_fight_numba(state, score, 3, 8, None) == score
     state.player_health = np.float32(0.0)
     death = np.float32(-1.0)
-    assert step._boss_fight_numba(state, death, 3, 8, (1.0, 1.5)) == death
+    assert step._boss_fight_numba(state, death, 3, 8, _BOSS_FIGHT) == death
 
 
 def test_a_practice_branch_ends_unlogged_where_a_natural_episode_is_logged() -> None:
@@ -747,7 +751,7 @@ def test_the_options_play_never_reads_reach_it_as_none(
         stall_limit=5,
         uncapped_permille=9,
         practice=True,
-        boss_fight_reward=(1.0, 1.5),
+        boss_fight_reward=_BOSS_FIGHT,
     )
     pool = small_worlds(1)
     _step(_batch(1, pool, rules), pool, Action.NOOP)
@@ -757,7 +761,7 @@ def test_the_options_play_never_reads_reach_it_as_none(
             max_timesteps=7,
             stall_limit=5,
             practice=True,
-            boss_fight_reward=(1.0, 1.5),
+            boss_fight_reward=_BOSS_FIGHT,
         ),
     ]
 

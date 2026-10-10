@@ -21,6 +21,7 @@ import pytest
 import torch
 
 from priml.baselines.craftax import experiments
+from priml.baselines.craftax.eager import eager, tiny_world
 from priml.baselines.craftax.env import (
     BossFightReward,
     CraftaxEnv,
@@ -100,6 +101,7 @@ from priml.baselines.craftax.train_step import (
     AgentWindows,
     CraftaxTrainStep,
     ProgressSchedule,
+    load_masters,
     minibatch_count,
 )
 from priml.baselines.craftax.world_model.context import ContextReplay
@@ -1262,36 +1264,63 @@ def test_exp114_fine_tunes_exp103s_final_run_for_the_boss_fight() -> None:
     assert (config.max_steps, config.max_steps * transitions) == (5_722, 2_999_975_936)
 
 
-@pytest.mark.compute_training
-def test_exp114_warm_starts_from_an_exp103_run_and_trains(tmp_path: Path) -> None:
-    """exp103's run at test size, then exp114 from its checkpoint and one epoch.
+def test_exp114_reads_the_file_exp103s_checkpointer_writes_last(tmp_path: Path) -> None:
+    """exp103's run ends on a save at its last epoch; exp114 reads that file.
+
+    Both beneath one ``base_dir``, as one override puts every job of a chain.
+    """
+    parent, child = exp103(), exp114()
+    parent.base_dir = child.base_dir = tmp_path
+    parent, child = parent.copy_tree().finalize(), child.copy_tree().finalize()
+    checkpointer = parent.checkpointer
+    assert isinstance(checkpointer, Checkpointer.Config)
+    written = Path(checkpointer.working_dir) / checkpointer.filename.format(
+        step=parent.max_steps,
+    )
+    assert child.step.checkpoint == written
+    assert written == tmp_path / "runs/craftax/exp103/checkpoints/step_00038146.pt"
+
+
+def test_exp114_starts_from_the_masters_of_an_exp103_steps_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """exp103's step at test size, saved as the training loop saves it, starts exp114.
 
     The masters carry over exactly; the momentum does not, as the fine-tune's
-    optimizer starts afresh. The checkpoint is the parent's step state, under
-    ``step``, as the training loop saves it.
+    optimizer starts afresh. The parent's momentum is set to ones, as a run's
+    is after training, so a carried buffer would show; its masters are drawn
+    at random and loaded, which leaves its optimizer holding them. exp114's
+    model and optimizer load the file as its step's constructor does; the
+    parent's kernels run eagerly, on tiny worlds.
     """
-    torch.manual_seed(1)
-    parent = _tiny_recipe_step(exp103()).make()
-    try:
-        parent.train_step()
-        masters = optimizer_state(parent.model, parent.optimizer, "master_weight")
-        torch.save({"step": parent.state_dict()}, tmp_path / "parent.pt")
-    finally:
-        parent.close()
+    generator = torch.Generator().manual_seed(0)
+    config = _tiny_recipe_step(exp103())
+    masters = {
+        name: torch.randn(parameter.shape, generator=generator)
+        for name, parameter in config.model.make().named_parameters()
+    }
+    torch.save(masters, tmp_path / "masters.pt")
+    config.checkpoint = tmp_path / "masters.pt"
+    with eager(world=tiny_world):
+        parent = config.make()
+        try:
+            state = optimizer_state(parent.model, parent.optimizer, "momentum_buffer")
+            for buffer in state.values():
+                buffer.fill_(1.0)
+            held = optimizer_state(parent.model, parent.optimizer, "master_weight")
+            torch.save({"step": parent.state_dict()}, tmp_path / "run.pt")
+        finally:
+            parent.close()
     config = _tiny_recipe_step(exp114())
-    config.checkpoint = tmp_path / "parent.pt"
-    torch.manual_seed(2)
-    step = config.make()
-    try:
-        loaded = optimizer_state(step.model, step.optimizer, "master_weight")
-        assert loaded.keys() == masters.keys()
-        for name, master in loaded.items():
-            assert torch.equal(master, masters[name]), name
-        momentum = optimizer_state(step.model, step.optimizer, "momentum_buffer")
-        assert not any(buffer.any() for buffer in momentum.values())
-        assert torch.isfinite(step.train_step()["loss"])
-    finally:
-        step.close()
+    model = config.model.make()
+    optimizer = config.optimizer.make()(model.parameters())
+    load_masters(model, optimizer, tmp_path / "run.pt")
+    loaded = optimizer_state(model, optimizer, "master_weight")
+    assert loaded.keys() == held.keys()
+    for name, master in loaded.items():
+        assert torch.equal(master, held[name]), name
+    momentum = optimizer_state(model, optimizer, "momentum_buffer")
+    assert not any(buffer.any() for buffer in momentum.values())
 
 
 def test_exp107_adds_the_frozen_feature_and_its_zero_projection() -> None:

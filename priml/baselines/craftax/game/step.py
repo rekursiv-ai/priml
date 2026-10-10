@@ -142,7 +142,8 @@ class Rules(NamedTuple):
       boss_fight_reward: Reward added per necromancer hit and per kill on the
         final floor (a training recipe's shaping); a step that kills the
         player earns none of it. The stall clock and the episode log count
-        achievements alone, so neither sees it.
+        achievements alone, so neither sees it. float32, as the step
+        computes: a Python float types the compiled step float64.
 
     ``fresh_worlds``, ``symbolic_observation``, ``previous_action``,
     ``stall_limit``, ``practice`` and ``boss_fight_reward`` default to None,
@@ -167,7 +168,7 @@ class Rules(NamedTuple):
     stall_limit: int | None = None
     uncapped_permille: int = 0
     practice: bool | None = None
-    boss_fight_reward: tuple[float, float] | None = None
+    boss_fight_reward: tuple[np.float32, np.float32] | None = None
 
 
 class Batch(NamedTuple):
@@ -883,7 +884,7 @@ def _boss_fight_numba(
     reward: np.float32,
     initial_hits: int,
     initial_kills: int,
-    boss_fight_reward: tuple[float, float] | None,
+    boss_fight_reward: tuple[np.float32, np.float32] | None,
 ) -> np.float32:
     """:func:`play_numba`'s ``Rules.boss_fight_reward``, so None prunes it."""
     if boss_fight_reward is None:
@@ -893,7 +894,7 @@ def _boss_fight_numba(
     hit, kill = boss_fight_reward
     hits = np.float32(state.boss_progress - initial_hits)
     kills = np.float32(state.monsters_killed[NUM_LEVELS - 1] - initial_kills)
-    return reward + (np.float32(hit) * hits + np.float32(kill) * kills)
+    return reward + (hit * hits + kill * kills)
 
 
 # None prunes the draw, so the escape stream is untouched without the cap. The draw is

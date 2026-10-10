@@ -249,8 +249,7 @@ in order:
    The rest wait for producers ([Not yet reproducible](#not-yet-reproducible-todo)).
 
 Then `exp107` above reads world-model exp001's final checkpoint.
-`world_model/README.md` covers the corpus tools, the evaluation report, and
-`scripts/joint_smoke.py`, which smoke-tests a joint arm.
+`world_model/README.md` covers the corpus tools and the evaluation report.
 
 ### The ghost overlay
 

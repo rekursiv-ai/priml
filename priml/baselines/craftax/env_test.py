@@ -32,6 +32,7 @@ from priml.baselines.craftax.eager import eager
 from priml.baselines.craftax.env import (
     ROW,
     SERVE_STOPPED,
+    BossFightReward,
     CraftaxEnv,
     FreshWorlds,
     StallCap,
@@ -328,6 +329,32 @@ def test_the_default_config_plays_the_default_rules() -> None:
     env = _env()
     assert env._batch.rules == Rules()
     env.close()
+
+
+def test_the_boss_fight_reward_reaches_the_steps_rules() -> None:
+    # Construction compiles no step kernel; game/step_test plays the reward eagerly.
+    config = CraftaxEnv.Config()
+    config.num_envs = 2
+    config.num_buffers = 2
+    config.restart = _pool(2)
+    config.boss_fight_reward = BossFightReward.Config(hit=2.0, kill=3.0)
+    env = config.make()
+    try:
+        reward = env._batch.rules.boss_fight_reward
+        assert env._batch.rules == Rules(
+            boss_fight_reward=(np.float32(2.0), np.float32(3.0)),
+        )
+        # float32, as Numba types the compiled step by it: a float would be float64.
+        assert reward is not None
+        assert [type(value) for value in reward] == [np.float32, np.float32]
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize(("hit", "kill"), [(math.inf, 1.5), (1.0, math.nan)])
+def test_a_boss_fight_reward_must_be_finite(hit: float, kill: float) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        BossFightReward.Config(hit=hit, kill=kill).make()
 
 
 def test_reset_writes_first_observations_and_clears_the_step_outputs() -> None:
