@@ -36,17 +36,12 @@ Both `copy_tree().finalize()`, so you see the tree after propagation. Eg,
 sentinels filled in. That is why it is the debugging tool -- it shows what
 `make()` will use, not what you typed. Pass `finalize=False` for raw input.
 
-The default view is already a diff against the class defaults, so comparing two
-experiments is the same call on each:
+Compare experiments with `udiff`; never hand-roll `difflib` over `pformat`:
 
 ```python
-difflib.unified_diff(
-    exp000().pformat().splitlines(),
-    exp001().pformat().splitlines(),
-    "exp000",
-    "exp001",
-    lineterm="",
-)
+print(exp000().udiff(exp001()))  # Unified diff, defaults included.
+print(exp000().udiff(exp001(), mode="fields"))  # One row per changed path.
+print(exp000().udiff(exp001(), exp002(), mode="sxs"))  # Side by side.
 ```
 
 `exp().pprint()` is the single best way to debug an experiment!
