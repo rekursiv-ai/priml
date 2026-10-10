@@ -387,7 +387,7 @@ class TMaxRolloutData:
             )
         base, extra = divmod(len(rows), self._dp_world)
         rows_per_rank = base + (1 if extra else 0)
-        shards = []
+        shards: list[list[PackedRow]] = []
         for rank in range(self._dp_world):
             start = rank * base + min(rank, extra)
             stop = start + base + (1 if rank < extra else 0)

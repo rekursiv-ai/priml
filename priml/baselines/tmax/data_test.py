@@ -518,7 +518,7 @@ def test_shards_make_the_same_number_of_segment_forwards(
         min_num_batches=2,
     )
     assert [row.packed_seq_lens for row in rows] == [(2, 2, 2), (6,)]
-    shards = []
+    shards: list[list[PackedRow]] = []
     for rank in (0, 1):
         monkeypatch.setattr(
             data_module, "data_parallel_shape", lambda rank=rank: (rank, 2)
