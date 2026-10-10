@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import Final, cast
 
 from torch import Tensor
-from treekle.codec import ReadError
+from treekle import ReadError
 
 import pytest
 import torch

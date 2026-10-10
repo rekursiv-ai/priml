@@ -11,7 +11,7 @@ import math
 import sys
 
 from configgle import PartialConfig
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 import pytest
 import torch

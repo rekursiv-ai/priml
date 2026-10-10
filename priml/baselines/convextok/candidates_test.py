@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Final, Self
 
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 import pytest
 

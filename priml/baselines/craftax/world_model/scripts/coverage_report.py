@@ -29,7 +29,7 @@ import collections
 import json
 import time
 
-from treekle.codec import PlainTree, from_plain
+from treekle import PlainTree, from_plain
 
 from priml.baselines.craftax.world_model.archive import (
     ManifestLine,

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Final
 
 import dataclasses
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import numpy as np
 import pytest

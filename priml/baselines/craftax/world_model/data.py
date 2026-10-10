@@ -50,7 +50,7 @@ import threading
 from configgle import Fig
 from torch import Tensor
 from torch.nn import functional
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import numpy as np
 import torch

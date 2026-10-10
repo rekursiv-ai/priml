@@ -32,7 +32,7 @@ import re
 import threading
 
 from pyarrow import parquet
-from treekle.codec import ReadError, from_plain, loads
+from treekle import ReadError, from_plain, loads
 
 import numpy as np
 import pyarrow as pa

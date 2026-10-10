@@ -29,7 +29,7 @@ import fcntl
 import json
 import logging
 
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 from priml.baselines.arcagi.augmentation import (
     NO_TRAIN_SCALE_WEIGHTS,

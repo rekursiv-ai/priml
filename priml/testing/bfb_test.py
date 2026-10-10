@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from priml.distributed.testing import WarmPoolGetter
     from priml.math.custom_types import TensorFn
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 from priml.model.attention.attention import Attention
 from priml.model.transformer.block import TransformerBlock

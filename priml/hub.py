@@ -13,7 +13,7 @@ import logging
 import os
 
 from torch import Tensor, nn
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 import torch
 

@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import cast
 
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 import pytest
 import torch

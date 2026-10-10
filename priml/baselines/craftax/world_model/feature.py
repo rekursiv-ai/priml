@@ -71,7 +71,7 @@ import importlib
 from configgle import Fig, Makeable
 from torch import Tensor
 from torch.nn import functional
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import torch
 

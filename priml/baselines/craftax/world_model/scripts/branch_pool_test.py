@@ -5,7 +5,7 @@ from pathlib import Path
 import collections
 import sys
 
-from treekle.codec import loads
+from treekle import loads
 
 import pytest
 import torch

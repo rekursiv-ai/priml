@@ -8,7 +8,7 @@ import math
 import struct
 
 from torch.utils._python_dispatch import TorchDispatchMode
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import pytest
 import torch

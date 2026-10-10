@@ -48,7 +48,7 @@ import os
 import shutil
 import tempfile
 
-from treekle.codec import from_plain, loads, mutable
+from treekle import from_plain, loads, mutable
 
 import numpy as np
 

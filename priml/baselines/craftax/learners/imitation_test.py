@@ -21,7 +21,7 @@ import math
 
 from configgle import Fig, PartialConfig
 from torch import Tensor, nn
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import pytest
 import torch

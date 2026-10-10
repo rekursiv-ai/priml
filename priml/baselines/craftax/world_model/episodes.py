@@ -16,7 +16,7 @@ import dataclasses
 
 from torch import Tensor
 from torch.nn import functional
-from treekle.codec import PlainTree, from_plain
+from treekle import PlainTree, from_plain
 
 import torch
 

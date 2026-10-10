@@ -7,7 +7,7 @@ import dataclasses
 import json
 import struct
 
-from treekle.codec import (
+from treekle import (
     from_plain,
     loads,
 )

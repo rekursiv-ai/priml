@@ -21,7 +21,7 @@ import logging
 import shutil
 import tempfile
 
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 import numpy as np
 

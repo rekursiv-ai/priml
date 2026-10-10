@@ -40,7 +40,7 @@ import json
 import logging
 
 from huggingface_hub import hf_hub_download
-from treekle.codec import from_plain, loads, mutable
+from treekle import from_plain, loads, mutable
 
 import numpy as np
 

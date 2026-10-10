@@ -17,7 +17,7 @@ from configgle import Fig
 from pyarrow import parquet
 from tokenizers import Tokenizer, pre_tokenizers
 from torch import Tensor
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import pyarrow as pa
 import pytest

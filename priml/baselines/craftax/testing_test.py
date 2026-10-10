@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, cast
 import hashlib
 import threading
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import numpy as np
 import pytest

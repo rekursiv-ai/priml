@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from torch import Tensor
-from treekle.codec import ReadError
+from treekle import ReadError
 
 import pytest
 import torch

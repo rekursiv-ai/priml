@@ -8,7 +8,7 @@ from itertools import accumulate
 from typing import TYPE_CHECKING, Final, cast
 
 from numpy.typing import NDArray
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import numpy as np
 import pytest

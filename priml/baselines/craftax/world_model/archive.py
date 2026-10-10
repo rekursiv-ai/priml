@@ -67,7 +67,7 @@ import struct
 import sys
 import zlib
 
-from treekle.codec import from_plain, loads, to_plain
+from treekle import from_plain, loads, to_plain
 
 import torch
 

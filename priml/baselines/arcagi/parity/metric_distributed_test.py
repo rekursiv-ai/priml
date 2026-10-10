@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Final, Literal, cast, override
 import traceback
 
 from torch import Tensor
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import pytest
 import torch

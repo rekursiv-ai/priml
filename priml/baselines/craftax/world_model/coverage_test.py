@@ -7,7 +7,7 @@ from typing import cast
 import dataclasses
 import json
 
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 import pytest
 import torch

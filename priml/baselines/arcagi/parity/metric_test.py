@@ -8,7 +8,7 @@ import json
 import re
 
 from torch import Tensor
-from treekle.codec import ReadError
+from treekle import ReadError
 
 import numpy as np
 import pytest

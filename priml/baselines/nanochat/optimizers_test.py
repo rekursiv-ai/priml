@@ -11,7 +11,7 @@ import re
 
 from torch import Tensor, nn
 from torch.optim import Optimizer
-from treekle.codec import ReadError, from_plain
+from treekle import ReadError, from_plain
 
 import pytest
 import torch

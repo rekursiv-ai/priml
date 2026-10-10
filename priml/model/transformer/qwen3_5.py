@@ -11,7 +11,7 @@ import math
 
 from configgle import Makeable, Makes
 from torch import Tensor, nn
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 import torch
 

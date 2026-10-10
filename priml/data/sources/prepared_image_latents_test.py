@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 import json
 
 from PIL import Image
-from treekle.codec import ReadError
+from treekle import ReadError
 
 import numpy as np
 import pytest

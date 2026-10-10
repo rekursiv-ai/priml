@@ -42,7 +42,7 @@ import json
 import math
 import statistics
 
-from treekle.codec import PlainTree, from_plain, to_plain
+from treekle import PlainTree, from_plain, to_plain
 
 from priml.baselines.craftax.world_model.metric import MODALITIES
 from priml.paths import validated_output_path

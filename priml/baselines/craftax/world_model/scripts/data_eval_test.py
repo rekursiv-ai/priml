@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, cast
 
 import sys
 
-from treekle.codec import PlainTree, from_plain, loads
+from treekle import PlainTree, from_plain, loads
 
 import pytest
 import torch

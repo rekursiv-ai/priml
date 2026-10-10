@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import pytest
 import torch

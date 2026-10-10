@@ -19,7 +19,7 @@ from typing import (
 
 from torch import Tensor, nn
 from torch.nn import functional
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import numpy as np
 import pytest

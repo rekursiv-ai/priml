@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, TypedDict
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import pytest
 import torch

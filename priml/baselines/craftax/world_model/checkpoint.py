@@ -7,7 +7,7 @@ from typing import cast
 from configgle import Makeable, traverse
 from configgle.cli_override import apply_overrides
 from configgle.launch import resolve_config
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import torch
 

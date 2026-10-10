@@ -51,7 +51,7 @@ import struct
 from configgle import Fig
 from torch import Tensor
 from torch.optim import Optimizer
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import torch
 

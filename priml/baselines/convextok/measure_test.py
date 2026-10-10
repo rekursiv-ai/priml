@@ -17,7 +17,7 @@ import time
 from configgle import Fig
 from tokenizers import Tokenizer, pre_tokenizers
 from torch import Tensor
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 import numpy as np
 import pytest

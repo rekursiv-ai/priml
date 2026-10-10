@@ -18,7 +18,7 @@ from typing import (
 import re
 
 from configgle import InlineConfig, PartialConfig
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import pytest
 import torch

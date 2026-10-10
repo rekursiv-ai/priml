@@ -50,7 +50,7 @@ import itertools
 import json
 import subprocess
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 from priml.baselines.craftax.game import jit
 from priml.baselines.craftax.game.jit import package_digest, platform_key

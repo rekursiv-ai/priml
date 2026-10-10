@@ -12,7 +12,7 @@ from typing import Self, cast
 import dataclasses
 import sys
 
-from treekle.codec import PlainTree, from_plain, loads
+from treekle import PlainTree, from_plain, loads
 
 import pytest
 import torch

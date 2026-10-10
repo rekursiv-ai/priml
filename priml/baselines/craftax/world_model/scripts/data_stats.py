@@ -41,7 +41,7 @@ import hashlib
 import json
 
 from torch import Tensor
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import torch
 
@@ -61,7 +61,7 @@ from priml.paths import validated_output_path
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from treekle.codec import PlainTree
+    from treekle import PlainTree
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)

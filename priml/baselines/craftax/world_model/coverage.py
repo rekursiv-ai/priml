@@ -52,7 +52,7 @@ import dataclasses
 
 from numpy.typing import NDArray
 from torch import Tensor
-from treekle.codec import PlainTree, ReadError, from_plain
+from treekle import PlainTree, ReadError, from_plain
 
 import numpy as np
 import torch

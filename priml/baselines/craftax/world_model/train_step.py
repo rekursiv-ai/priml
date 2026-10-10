@@ -29,7 +29,7 @@ from configgle import Makeable, Makes, PartialConfig
 from torch import Tensor, nn
 from torch._dynamo.config import patch
 from torch._dynamo.decorators import maybe_mark_dynamic
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import torch
 import torch.distributed as dist

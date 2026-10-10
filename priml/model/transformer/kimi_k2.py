@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING, Self, override
 
 from configgle import Makeable, Makes
 from torch import Tensor, nn
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import torch
 

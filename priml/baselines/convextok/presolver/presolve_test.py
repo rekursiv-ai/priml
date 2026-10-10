@@ -22,7 +22,7 @@ from typing import Final, cast
 import json
 
 from numpy.typing import NDArray
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import numpy as np
 import pytest

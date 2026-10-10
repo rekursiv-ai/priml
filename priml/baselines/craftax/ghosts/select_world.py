@@ -40,7 +40,7 @@ import dataclasses
 import json
 import operator
 
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 from priml.baselines.craftax.game.state import Achievement
 from priml.baselines.craftax.metric import FLOOR_NAMES

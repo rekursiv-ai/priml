@@ -16,7 +16,7 @@ import inspect
 import io
 import logging
 
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 import numpy as np
 import pytest

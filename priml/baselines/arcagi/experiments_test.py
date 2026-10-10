@@ -17,7 +17,7 @@ import inspect
 import json
 
 from configgle import PartialConfig
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 import numpy as np
 import pytest

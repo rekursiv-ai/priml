@@ -13,7 +13,7 @@ import json
 import math
 import sys
 
-from treekle.codec import PlainTree, ReadError, from_plain, loads
+from treekle import PlainTree, ReadError, from_plain, loads
 
 import pytest
 import torch

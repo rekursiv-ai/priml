@@ -9,7 +9,7 @@ import functools
 import json
 import sys
 
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 import pytest
 
@@ -29,7 +29,7 @@ from priml.baselines.craftax.world_model.testing import tiny_model
 
 
 if TYPE_CHECKING:
-    from treekle.codec import PlainTree
+    from treekle import PlainTree
 
 
 TARGETS = (2, 4)

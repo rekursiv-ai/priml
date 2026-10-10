@@ -10,7 +10,7 @@ import logging
 
 from torch import Tensor
 from torchvision import datasets
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import numpy as np
 import pytest

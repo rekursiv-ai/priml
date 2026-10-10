@@ -16,7 +16,7 @@ from torch.distributed.tensor.parallel import (
     ParallelStyle,
     RowwiseParallel,
 )
-from treekle.codec import from_plain, to_plain
+from treekle import from_plain, to_plain
 
 import pytest
 import torch

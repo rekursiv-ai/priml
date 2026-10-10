@@ -4,7 +4,7 @@ from pathlib import Path
 
 import logging
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import pytest
 import torch

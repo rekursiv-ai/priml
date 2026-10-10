@@ -45,7 +45,7 @@ import argparse
 import dataclasses
 import json
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 from priml.baselines.craftax.world_model.archive import (
     Record,

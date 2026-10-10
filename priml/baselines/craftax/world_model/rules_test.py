@@ -1,7 +1,7 @@
 """Check the legal-action rules on decoded frames, by hand and against the game."""
 
 from torch import Tensor
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import pytest
 import torch

@@ -12,8 +12,8 @@ import sys
 import warnings
 
 from torch import Tensor
+from treekle import from_plain
 from treekle.absent import ABSENT
-from treekle.codec import from_plain
 
 import pytest
 import torch

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Self, TypedDict, cast
 
 import time
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 
 if TYPE_CHECKING:

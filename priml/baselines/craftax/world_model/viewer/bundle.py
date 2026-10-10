@@ -22,7 +22,7 @@ import gzip
 import hashlib
 
 from torch import Tensor
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import numpy as np
 import torch

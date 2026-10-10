@@ -13,7 +13,7 @@ import threading
 import time
 
 from configgle import Fig, Makeable
-from treekle.codec import from_plain
+from treekle import from_plain
 
 from priml.data.custom_types import Processor
 

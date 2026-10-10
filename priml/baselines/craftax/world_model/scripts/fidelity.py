@@ -63,7 +63,7 @@ import time
 
 from torch import Tensor
 from torch.nn import functional
-from treekle.codec import PlainTree, ReadError, from_plain, to_plain
+from treekle import PlainTree, ReadError, from_plain, to_plain
 
 import torch
 

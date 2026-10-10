@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, TypedDict, cast
 
 from torch import Tensor
-from treekle.codec import ReadError
+from treekle import ReadError
 
 import pytest
 import torch

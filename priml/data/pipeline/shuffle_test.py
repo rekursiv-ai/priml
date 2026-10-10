@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import random
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 from priml.data.pipeline.shuffle import ShuffleBuffer
 

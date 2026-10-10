@@ -12,7 +12,7 @@ from typing import Final, cast
 import json
 
 from tokenizers import pre_tokenizers
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import pytest
 

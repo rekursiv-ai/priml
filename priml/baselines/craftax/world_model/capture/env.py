@@ -62,7 +62,7 @@ import threading
 
 from configgle import Fig
 from numpy.typing import NDArray
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 import numpy as np
 

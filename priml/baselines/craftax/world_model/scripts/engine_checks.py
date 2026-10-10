@@ -42,7 +42,7 @@ import json
 import tempfile
 
 from torch import Tensor
-from treekle.codec import PlainTree
+from treekle import PlainTree
 
 import torch
 

@@ -10,7 +10,7 @@ import io
 from configgle import Fig
 from PIL import Image
 from torch import Tensor
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import pytest
 import torch

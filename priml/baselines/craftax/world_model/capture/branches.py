@@ -32,7 +32,7 @@ import json
 import threading
 
 from configgle import Fig
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 from priml.baselines.craftax.world_model import replay
 from priml.baselines.craftax.world_model.archive import (

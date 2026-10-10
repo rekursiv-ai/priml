@@ -16,7 +16,7 @@ import os
 import sys
 
 from torch import nn
-from treekle.codec import ReadError
+from treekle import ReadError
 
 import pytest
 import torch

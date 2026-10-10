@@ -38,7 +38,7 @@ import json
 import time
 
 from torch import Tensor
-from treekle.codec import PlainTree, from_plain
+from treekle import PlainTree, from_plain
 
 import torch
 

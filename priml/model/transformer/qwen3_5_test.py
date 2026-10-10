@@ -10,7 +10,7 @@ import json
 import re
 
 from configgle import Fig
-from treekle.codec import ReadError
+from treekle import ReadError
 
 import pytest
 import torch

@@ -13,7 +13,7 @@ import tempfile
 
 from pyarrow import Table, parquet
 from tokenizers import AddedToken, Tokenizer, normalizers, processors
-from treekle.codec import PlainTree, ReadError
+from treekle import PlainTree, ReadError
 
 import numpy as np
 import pytest

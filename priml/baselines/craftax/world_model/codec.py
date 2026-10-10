@@ -28,7 +28,7 @@ from typing import cast
 import dataclasses
 import functools
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import torch
 

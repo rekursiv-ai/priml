@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 import json
 
 from torch import Tensor
-from treekle.codec import ReadError
+from treekle import ReadError
 
 import pytest
 import torch

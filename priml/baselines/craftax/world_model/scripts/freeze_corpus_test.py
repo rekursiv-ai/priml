@@ -6,7 +6,7 @@ from pathlib import Path
 import json
 import sys
 
-from treekle.codec import to_plain
+from treekle import to_plain
 
 import pytest
 

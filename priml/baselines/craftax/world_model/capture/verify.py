@@ -42,7 +42,7 @@ import time
 import zlib
 
 from configgle import Fig
-from treekle.codec import from_plain, loads, to_plain
+from treekle import from_plain, loads, to_plain
 
 from priml.baselines.craftax.world_model import replay
 from priml.baselines.craftax.world_model.archive import (

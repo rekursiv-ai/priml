@@ -141,7 +141,7 @@ else:
     torch = lazy_import("torch")
 
 from configgle import Fig, Makeable
-from treekle.codec import from_plain
+from treekle import from_plain
 
 from priml.baselines.nanochat import experiments
 from priml.baselines.nanochat.data import (

@@ -6,7 +6,7 @@ from typing import cast
 import copy
 
 from torch import Tensor
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 import pytest
 import torch

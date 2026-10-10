@@ -22,7 +22,7 @@ from configgle import Fig
 from torch import Tensor, nn
 from torch._dynamo import config as torch_dynamo_config
 from torch.optim import Optimizer, optimizer
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import torch
 

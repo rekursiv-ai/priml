@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import json
 import sys
 
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 import pytest
 import torch

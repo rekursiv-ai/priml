@@ -74,7 +74,7 @@ from priml.paths import validated_output_path
 
 
 if TYPE_CHECKING:
-    from treekle.codec import PlainTree
+    from treekle import PlainTree
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)

@@ -22,7 +22,7 @@ from torch.distributed.checkpoint import state_dict_loader, state_dict_saver
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import pytest
 import torch

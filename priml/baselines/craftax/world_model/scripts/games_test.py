@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Final
 import dataclasses
 import sys
 
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 import pytest
 

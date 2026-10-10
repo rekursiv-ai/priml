@@ -44,7 +44,7 @@ import argparse
 import dataclasses
 import hashlib
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import numpy as np
 import torch

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from treekle.codec import loads
+from treekle import loads
 
 import numpy as np
 import pytest

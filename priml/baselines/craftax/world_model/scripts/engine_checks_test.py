@@ -13,7 +13,7 @@ import copy
 import sys
 
 from scipy import stats
-from treekle.codec import PlainTree, from_plain, loads
+from treekle import PlainTree, from_plain, loads
 
 import pytest
 import torch

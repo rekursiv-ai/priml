@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 from torch import Tensor
-from treekle.codec import ReadError
+from treekle import ReadError
 
 import pytest
 import torch

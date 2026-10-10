@@ -56,7 +56,7 @@ import subprocess
 import sys
 import time
 
-from treekle.codec import from_plain, loads, to_plain
+from treekle import from_plain, loads, to_plain
 
 import torch
 

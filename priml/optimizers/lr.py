@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 import math
 
 from torch import Tensor, nn
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import torch
 

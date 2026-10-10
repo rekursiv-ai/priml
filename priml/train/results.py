@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 import argparse
 import sys
 
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 
 if TYPE_CHECKING:

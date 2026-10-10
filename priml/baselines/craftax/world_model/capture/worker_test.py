@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Final
 
 import shutil
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import pytest
 import torch

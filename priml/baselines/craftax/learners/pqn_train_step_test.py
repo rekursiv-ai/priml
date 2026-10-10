@@ -19,7 +19,7 @@ import math
 import re
 
 from configgle import Fig
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import pytest
 import torch

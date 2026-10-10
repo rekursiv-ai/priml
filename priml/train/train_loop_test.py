@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from priml.train.custom_types import TrackerProtocol, TrainStepOutput
 
 from configgle import Fig, InlineConfig, Makeable, Makes, PartialConfig
-from treekle.codec import from_plain
+from treekle import from_plain
 
 from priml.cost import Cost, matmul_cost
 from priml.data.dummy import DummyDataset

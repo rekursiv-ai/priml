@@ -81,7 +81,7 @@ from priml.paths import validated_output_path
 
 
 if TYPE_CHECKING:
-    from treekle.codec import PlainTree
+    from treekle import PlainTree
 
 
 def main() -> int:

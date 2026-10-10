@@ -15,7 +15,7 @@ import tempfile
 
 from configgle import Fig
 from tokenizers import decoders, models, pre_tokenizers
-from treekle.codec import PlainTree, from_plain, loads
+from treekle import PlainTree, from_plain, loads
 
 import rustbpe
 import tokenizers

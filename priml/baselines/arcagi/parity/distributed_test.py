@@ -21,7 +21,7 @@ import traceback
 
 from torch import Tensor, nn
 from torch.optim import Optimizer
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import numpy as np
 import pytest

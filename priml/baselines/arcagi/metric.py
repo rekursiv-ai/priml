@@ -38,7 +38,7 @@ import struct
 
 from configgle import Fig, Makeable
 from torch import Tensor
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 import numpy as np
 import torch

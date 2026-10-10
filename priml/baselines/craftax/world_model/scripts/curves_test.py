@@ -7,7 +7,7 @@ from pathlib import Path
 import math
 import sys
 
-from treekle.codec import PlainTree, from_plain, loads
+from treekle import PlainTree, from_plain, loads
 
 import pytest
 

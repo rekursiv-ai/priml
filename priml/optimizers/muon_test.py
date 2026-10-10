@@ -10,7 +10,7 @@ import tempfile
 
 from torch import Tensor, nn
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor
-from treekle.codec import ReadError
+from treekle import ReadError
 
 import pytest
 import torch

@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import logging
 
-from treekle.codec import ReadError, from_plain, loads
+from treekle import ReadError, from_plain, loads
 
 import numpy as np
 import pytest
