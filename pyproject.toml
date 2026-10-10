@@ -67,8 +67,9 @@ dependencies = [
     # tensor utilities
     "einops",
     "einshape",
-    # config; 1.4.1 first ships LateBound and Fig.finalized(), which priml imports
-    "configgle>=1.4.1",
+    # config; 1.4.1 first ships LateBound and Fig.finalized(), which priml imports,
+    # and 1.4.2 the pformat layout every baseline's config golden is minted in
+    "configgle>=1.4.2",
     # containers
     "wrapt",
     # misc
@@ -218,7 +219,7 @@ markers = [
     "network_openreview: reaches OpenReview over the network",
     "network_pypi: reaches PyPI over the network",
     "network_searxng: reaches a SearXNG service over the network",
-    "network_shadeform: reaches Shadeform over the network",
+    "network_gpu_cloud: reaches a GPU cloud provider over the network",
     "network_slack: reaches Slack over the network",
     "network_together: reaches Together over the network",
     "network_wandb: reaches Weights & Biases over the network",
