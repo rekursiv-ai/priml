@@ -25,7 +25,7 @@ Outputs under OUTPUT: stats.json, episodes.json (decoded frames of a dozen
 episodes), and viewer model bundles under bundles/ for viewer/games.mjs build.
 
 Examples:
-  priml/baselines/craftax/world_model/scripts/dream_eval.py /opt/scratch/runs/craftax-world-model/exp001/checkpoints/step_00001525.pt --archive /opt/scratch/datasets/craftax/world-model-reference/archive-v1-replay --output /opt/scratch/artifacts/craftax/world-model/dream-eval-s0
+  priml/baselines/craftax/world_model/scripts/dream_eval.py /opt/scratch/runs/craftax-world-model/exp001/checkpoints/step_00001525.pt --archive /opt/scratch/datasets/craftax/world-model/archive-v1 --output /opt/scratch/artifacts/craftax/world-model/dream-eval
 
 '''
 # fmt: on

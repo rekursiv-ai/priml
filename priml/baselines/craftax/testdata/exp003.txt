@@ -133,6 +133,7 @@ CraftaxTrainLoop(
         │       ),
         │       num_episodes=10_000
         │   ),
+        │   base_dir='/opt/scratch',
         │   checkpoint=None,
         │   reward_scale=1.0,
         │   reward_clip=inf,

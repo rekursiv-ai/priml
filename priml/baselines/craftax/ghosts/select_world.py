@@ -24,7 +24,7 @@ Prints a table per tier and the ranking, and writes them with the choice to
 outcomes per tier.
 
 Examples:
-  priml/baselines/craftax/ghosts/select_world.py /opt/scratch/artifacts/craftax/ghosts/capture/pilot --tier early:0:exp001.metrics.json --tier medium:1:exp006.metrics.json --tier high:2:exp007_s74.metrics.json --output /opt/scratch/artifacts/craftax/ghosts/capture/world.json
+  priml/baselines/craftax/ghosts/select_world.py /opt/scratch/artifacts/craftax/ghosts/capture/pilot --tier early:0:/opt/scratch/runs/craftax/exp001/metrics.json --tier medium:1:/opt/scratch/runs/craftax/exp102/metrics.json --tier high:2:/opt/scratch/runs/craftax/exp103/metrics.json --output /opt/scratch/artifacts/craftax/ghosts/capture/world.json
 
 '''
 # fmt: on

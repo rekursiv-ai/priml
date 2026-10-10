@@ -40,7 +40,7 @@ from __future__ import annotations
 
 from dataclasses import field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self, override
 
 import dataclasses
 import logging
@@ -72,9 +72,11 @@ from priml.baselines.craftax.world_model.capture.shards import (
 from priml.baselines.craftax.world_model.capture.source import (
     EpisodeSource,
     PolicySource,
+    RandomSource,
     make_source,
 )
 from priml.lib.codec import from_plain
+from priml.paths import resolve_working_dir
 
 
 if TYPE_CHECKING:
@@ -113,7 +115,11 @@ class CaptureWorker:
     class Config(Fig["CaptureWorker"]):
         """The archive, the worker's identity and budget, the writer and the source."""
 
-        root: Path = Path("/opt/scratch/datasets/craftax/world-model/archive")
+        base_dir: Path | str | None = "/opt/scratch"
+        """Root every path below resolves beneath: ``root``, ``run_root``, and
+        the source's checkpoint and branch pools. None takes them as given."""
+
+        root: Path = Path("/datasets/craftax/world-model/archive")
         """Archive root holding ``{train,val}/arm{arm}/w{worker}/``."""
 
         arm: int = 0
@@ -142,7 +148,7 @@ class CaptureWorker:
         launch: str = ""
         """Launch that started this worker, named in its markers; empty writes none."""
 
-        run_root: Path = Path("/opt/scratch/runs/craftax/world-model/capture")
+        run_root: Path = Path("/runs/craftax/world-model/capture")
         """Parent of the sources' run directories, ``{launch}/arm{arm}-w{worker}``."""
 
         compressors: int = 4
@@ -155,6 +161,28 @@ class CaptureWorker:
 
         source: Makeable[EpisodeSource] = field(default_factory=PolicySource.Config)
         """What plays the arm's episodes."""
+
+        @override
+        def finalize(self) -> Self:
+            self.root = resolve_working_dir(self.base_dir, self.root)
+            self.run_root = resolve_working_dir(self.base_dir, self.run_root)
+            source = self.source
+            if (
+                isinstance(source, PolicySource.Config)
+                and source.checkpoint is not None
+            ):
+                source.checkpoint = resolve_working_dir(
+                    self.base_dir,
+                    source.checkpoint,
+                )
+            if isinstance(source, PolicySource.Config | RandomSource.Config) and (
+                source.branches is not None
+            ):
+                source.branches.pools = resolve_working_dir(
+                    self.base_dir,
+                    source.branches.pools,
+                )
+            return super().finalize()
 
     def __init__(self, config: Config) -> None:
         for name, high in (("arm", 3), ("worker", 3), ("generation", 9)):

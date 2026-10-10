@@ -1,12 +1,12 @@
 r"""Craftax experiments: PufferLib's trainer, ported bit for bit.
 
 ``exp000`` is PufferLib's own Craftax recipe (``config/craftax.ini`` at pin
-``6ffa5b10``) at its one-GPU budget, started from the weights PufferLib's
-``weights_init`` draws for seed 73, so the run is PufferLib's run. The class
-defaults are PufferLib's ``config/default.ini``; exp000 states what
-``craftax.ini`` changes. Every later experiment forks a named parent and
-applies ONE change. exp000-exp008 are baselines, published recipes restated
-here; exp100 on are the port's own.
+``6ffa5b10``) at its one-GPU budget, its policy drawing its own init from
+PufferLib's distributions under PufferLib's seed, 73. The class defaults are
+PufferLib's ``config/default.ini``; exp000 states what ``craftax.ini``
+changes. Every later experiment forks a named parent and applies ONE change.
+exp000-exp008 are baselines, published recipes restated here; exp101 on are
+the port's own.
 
     exp000     PufferLib's recipe, 3,492,806,656 transitions, 6,662 epochs
       +-- exp001     the same recipe at 250M transitions, the qualification run
@@ -17,28 +17,26 @@ here; exp100 on are the port's own.
       |           +-- exp006     PQN: Q-learning with an LSTM in place of PPO
       |           +-- exp007     its 1B geometry at 100M, a screening budget
       |           +-- exp008     GTrXL: PPO with gated Transformer-XL memory
-      +-- exp100     the same recipe from the policy's own init
-      |     +-- exp101     that run on the port's defaults, not PufferLib's bits
-      |           +-- exp102     board encoder, injection, feasibility loss, 20B
-      |                 +-- exp103     frontier practice, self-imitation, rewards / 8
-      |                 |     +-- exp109     a newly generated world at every reset
-      |                 |     +-- exp110     an early world model, the sole encoder
-      |                 |           +-- exp111     a mature world model
-      |                 |           |     +-- exp113     trained with the policy
-      |                 |           +-- exp112     trained with the policy
-      |                 +-- exp104     width 2,048 on 1,024 environments x 512 steps
-      |                       +-- exp105     a ConvNeXt trunk on the board
-      |                             +-- exp106     250M, inside the 20B warmup
-      |                                   +-- exp107     a frozen world model's feature
-      |                                         +-- exp108     its random-init weights
+      +-- exp101     the same recipe on the port's defaults, not PufferLib's bits
+      |     +-- exp102     board encoder, injection, feasibility loss, 20B
+      |           +-- exp103     frontier practice, self-imitation, rewards / 8
+      |           |     +-- exp109     a newly generated world at every reset
+      |           |     +-- exp110     an early world model, the sole encoder
+      |           |           +-- exp111     a mature world model
+      |           |           |     +-- exp113     trained with the policy
+      |           |           +-- exp112     trained with the policy
+      |           +-- exp104     width 2,048 on 1,024 environments x 512 steps
+      |                 +-- exp105     a ConvNeXt trunk on the board
+      |                       +-- exp106     250M, inside the 20B warmup
+      |                             +-- exp107     a frozen world model's feature
+      |                                   +-- exp108     its random-init weights
       +-- exp_smoke  the same recipe at minimum size, to check a machine
 
 Every random stream is seeded in the config, so a config replays its run: the
 environments' ``rand_r`` (``env.seed``), the action streams (``sampler.seed``),
-and torch's generator (``seed``), which draws the init of an experiment without
-a checkpoint. exp000 sets PufferLib's seed, 73, and every fork keeps it, except
-exp003 and its forks, which take their reference's seed, 42, for every stream
-they draw.
+and torch's generator (``seed``), which draws the policy's init. exp000 sets
+PufferLib's seed, 73, and every fork keeps it, except exp003 and its forks,
+which take their reference's seed, 42, for every stream they draw.
 
 Launch::
 
@@ -52,7 +50,7 @@ References:
 
 from __future__ import annotations
 
-from dataclasses import field, fields
+from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Self, override
 
@@ -99,6 +97,9 @@ from priml.baselines.craftax.train_step import (
     cosine_annealing_fp32,
 )
 from priml.baselines.craftax.world_model.context import ContextReplay
+from priml.baselines.craftax.world_model.experiments import (
+    exp001 as world_model_exp001,
+)
 from priml.baselines.craftax.world_model.feature import (
     Flash4CacheAttention,
     InitialWeights,
@@ -119,12 +120,12 @@ from priml.train.tracker import (
     FileTracker,
     TrackerList,
     WandbTracker,
+    unwrap_tracker_config,
 )
 from priml.train.train_loop import TrainLoop
 
 
 if TYPE_CHECKING:
-    from _typeshed import DataclassInstance
     from torch import nn
 
     import torch
@@ -168,24 +169,41 @@ class CraftaxTrainLoop(
         dashboard = _dashboard(self.tracker)
         if dashboard is not None and not dashboard.name:
             dashboard.name = self.experiment_name
+        if self.step.base_dir is None:
+            self.step.base_dir = self.base_dir
         return super().finalize()
 
 
 def exp000() -> CraftaxTrainLoop:
-    """PufferLib's Craftax trainer at its one-GPU budget, from PufferLib's init.
+    """PufferLib's Craftax trainer at its one-GPU budget, from the policy's own init.
 
     Frozen: it is the reference every fork is measured against.
+
+    The policy draws its weights from PufferLib's distributions by PufferLib's
+    algorithm -- the table from N(0, 1), every projection from
+    U(+-1/sqrt(fan_in)), in fp32, rounded once to bf16 -- from torch's
+    generator under PufferLib's seed, 73.
 
     Hypothesis:
       The port runs PufferLib's training exactly -- the same masters after
       every epoch, the same final score -- at PufferLib's speed or better.
+      Training depends on the init's distribution, not on its draws, so from
+      its own init it scores roughly PufferLib's 48.45%, inside the ~9pp that
+      same-seed reruns spread at 20B transitions.
 
     References:
       https://github.com/PufferAI/PufferLib (pin 6ffa5b10, config/craftax.ini)
 
     Results:
-      H200 + 16 CPUs, 3.49B transitions: 48.452% perf (seed 73).
+      H200 + 16 CPUs, 3.49B transitions: 47.20% perf (seed 73).
 
+      From its own init: perf 47.20% (score 106.68, achievement rate 68.85%)
+      over 10,011 episodes. Training took 1,871 s for 3.49B transitions
+      (1.87M transitions/s), and the eval 24 s.
+
+      The measurements below were made from PufferLib's seed-73 init, which
+      this recipe loaded before it drew its own: perf 48.452%, 1.25 points
+      above its own init's, inside the same-seed spread.
       Bit-identical to PufferLib's run: all 34
       masters checkpoints and the final masters (9b8eeb39...) equal
       PufferLib's files, and the final evaluation is PufferLib's to the last
@@ -209,13 +227,7 @@ def exp000() -> CraftaxTrainLoop:
     cfg = CraftaxTrainLoop()
     cfg.study_name = "craftax"
     cfg.experiment_name = "exp000"
-    # exp000 draws nothing from torch's generator: its weights are loaded and its
-    # streams seeded on their own. A fork without a checkpoint draws its init here.
     cfg.seed = 73
-
-    # PufferLib's ``weights_init`` for seed 73, converted once to a ``state_dict``
-    # (``goldens-v1/SOURCES`` names the source and ``MANIFEST`` its sha256).
-    cfg.step.checkpoint = "/opt/scratch/datasets/craftax/goldens-v1/init_seed73.pt"
 
     # PufferLib's kernels round as nvcc compiled them; the compat classes carry that
     # arithmetic, which the bits of every epoch follow. Its build also keeps the carry,
@@ -283,7 +295,8 @@ def exp001() -> CraftaxTrainLoop:
     Results:
       H200 + 16 CPUs, 250M transitions: 15.2224% perf (seed 73).
 
-      Bit-identical to PufferLib's run: the
+      Measured from PufferLib's seed-73 init, which exp000 loaded before it
+      drew its own. Bit-identical to PufferLib's run: the
       masters after epochs 200, 400 and 476 equal PufferLib's, and the final
       evaluation is PufferLib's 15.2224%. Its speed is exp000's (the same
       code): 1.46x PufferLib's training throughput.
@@ -309,10 +322,8 @@ def exp002() -> CraftaxTrainLoop:
     illegal-action mask (D5); a fresh world at every reset instead of the
     8,192-world pool (D6); and its 8,268-float symbolic observation (D8).
     That observation is already a feature vector, so ``proj_in`` reads it in
-    place of the embedding bag, and the policy starts from its own init:
-    PufferLib's seed-73 weights have the bag's geometry. The rest of the
-    learner, its recipe and the budget are exp000's, and the evaluation plays
-    by the same rules.
+    place of the embedding bag. The rest of the learner, its recipe and the
+    budget are exp000's, and the evaluation plays by the same rules.
 
     Hypothesis:
       The PufferLib recipe trains on original Craftax too, scoring below
@@ -328,7 +339,7 @@ def exp002() -> CraftaxTrainLoop:
     Results:
       H200 + 16 CPUs, 3.49B transitions: 12.48% perf (seed 73).
 
-      Confirmed: perf 12.48% over 10,008 episodes against exp000's 48.45%
+      Confirmed: perf 12.48% over 10,008 episodes against exp000's 47.20%
       (on the final code). Training took 3,842 s for
       3.49B transitions (0.91M transitions/s; fresh worlds, one tick per
       decision and the 8,268-float observation cost exp000's pool and packed
@@ -351,52 +362,14 @@ def exp002() -> CraftaxTrainLoop:
     model = cfg.step.model
     assert isinstance(model, MinGRUPolicy.Config)
     model.embedding = DenseObservation.Config()
-    cfg.step.checkpoint = None
-    return cfg
-
-
-def exp100() -> CraftaxTrainLoop:
-    """exp000 from the policy's own init, drawn by torch's generator under seed 73.
-
-    The one change is where the weights come from. exp000 loads PufferLib's
-    seed-73 weights; exp100 has no checkpoint, so the policy draws its own,
-    from PufferLib's distributions by PufferLib's algorithm -- the table from
-    N(0, 1), every projection from U(+-1/sqrt(fan_in)), in fp32, rounded once
-    to bf16 -- but from torch's generator, under exp000's seed. The recipe,
-    budget and evaluation are exp000's.
-
-    Hypothesis:
-      Training depends on the init's distribution, not on its draws: exp100
-      scores roughly exp000's 48.45%, inside the ~9pp that same-seed reruns
-      spread at 20B transitions.
-
-    References:
-      https://github.com/PufferAI/PufferLib (pin 6ffa5b10, ``weights_init``)
-
-    Results:
-      H200 + 16 CPUs, 3.49B transitions: 47.20% perf (seed 73).
-
-      Confirmed: perf 47.20% (score 106.68, achievement rate 68.85%) over
-      10,011 episodes, against exp000's and
-      PufferLib's 48.45% from PufferLib's init: 1.25 points lower, inside the
-      same-seed spread. Training took 1,871 s for 3.49B transitions (1.87M
-      transitions/s, exp000's speed), and the eval 24 s.
-
-    Returns:
-      cfg: Configured CraftaxTrainLoop.
-
-    """
-    cfg = exp000()
-    cfg.experiment_name = "exp100"
-    cfg.step.checkpoint = None
     return cfg
 
 
 def exp101() -> CraftaxTrainLoop:
-    """exp100 on the port's defaults: standard kernel arithmetic and fp32 precision.
+    """exp000 on the port's defaults: standard kernel arithmetic and fp32 precision.
 
     exp000 pins everything PufferLib's bits depend on; exp101 keeps its recipe
-    (every coefficient, the budget, the evaluation) and exp100's own init, and
+    (every coefficient, the budget, the evaluation) and its own init, and
     swaps each pin for the class default: the scan, PPO, Muon and sampler
     kernels in standard Triton and torch arithmetic instead of the compat
     classes, priml's cosine instead of the fp32 one, and an fp32 carry,
@@ -405,7 +378,7 @@ def exp101() -> CraftaxTrainLoop:
 
     Hypothesis:
       The defaults trade PufferLib's bits for precision and simplicity at no
-      cost: exp101 scores roughly exp100 (47.20%), inside the same-seed spread,
+      cost: exp101 scores roughly exp000 (47.20%), inside the same-seed spread,
       within 2% of its speed.
 
     References:
@@ -415,8 +388,8 @@ def exp101() -> CraftaxTrainLoop:
       H200 + 16 CPUs, 3.49B transitions: 50.27% perf (seed 73).
 
       Confirmed: perf 50.27% over 10,025 episodes (on the final code),
-      against exp100's 47.20% and PufferLib's 48.45%: inside the same-seed
-      spread, so the defaults cost no reward. Training took
+      against exp000's 47.20% and PufferLib's 48.45% from PufferLib's init:
+      inside the same-seed spread, so the defaults cost no reward. Training took
       1,875 s for 3.49B transitions (1.86M transitions/s), and the eval 30 s;
       in one allocation the defaults train 1.03x exp000's throughput.
 
@@ -424,7 +397,7 @@ def exp101() -> CraftaxTrainLoop:
       cfg: Configured CraftaxTrainLoop.
 
     """
-    cfg = exp100()
+    cfg = exp000()
     cfg.experiment_name = "exp101"
     defaults = CraftaxTrainLoop().step
     model, default_model = cfg.step.model, defaults.model
@@ -442,9 +415,9 @@ def exp101() -> CraftaxTrainLoop:
     assert isinstance(optimizer, ExactMuon.Config)
     assert isinstance(windows, AgentWindows.Config)
     assert isinstance(windows.objective, ExactPPO.Config)
-    cfg.step.sampler = _copy_fields(sampler, PhiloxSampler.Config())
-    cfg.step.optimizer = _copy_fields(optimizer, FusedMuon.Config())
-    windows.objective = _copy_fields(windows.objective, TritonPPO.Config())
+    cfg.step.sampler = PhiloxSampler.Config().update(sampler)
+    cfg.step.optimizer = FusedMuon.Config().update(optimizer)
+    windows.objective = TritonPPO.Config().update(windows.objective)
     return cfg
 
 
@@ -699,7 +672,7 @@ def exp005() -> CraftaxTrainLoop:
     learner = cfg.step.learner
     assert isinstance(learner, ShuffledTransitions.Config)
     # ShuffledTrajectories adds no field, so it takes exp003's as they are.
-    cfg.step.learner = _copy_fields(learner, ShuffledTrajectories.Config())
+    cfg.step.learner = ShuffledTrajectories.Config().update(learner)
     return cfg
 
 
@@ -1018,7 +991,12 @@ def exp102() -> CraftaxTrainLoop:
     """
     cfg = exp101()
     cfg.experiment_name = "exp102"
-    _group(cfg, "exp102")
+    # Every seed of a recipe files under one W&B group, so they share a board.
+    trackers = cfg.tracker
+    assert isinstance(trackers, TrackerList.Config)
+    dashboard = unwrap_tracker_config(trackers.trackers["wandb"])
+    assert isinstance(dashboard, WandbTracker.Config)
+    dashboard.group = "exp102"
     cfg.step.env.rules.previous_action = True
 
     model = cfg.step.model
@@ -1117,7 +1095,11 @@ def exp103() -> CraftaxTrainLoop:
     """
     cfg = exp102()
     cfg.experiment_name = "exp103"
-    _group(cfg, "exp103")
+    trackers = cfg.tracker
+    assert isinstance(trackers, TrackerList.Config)
+    dashboard = unwrap_tracker_config(trackers.trackers["wandb"])
+    assert isinstance(dashboard, WandbTracker.Config)
+    dashboard.group = "exp103"
     env = cfg.step.env
     env.rules.end_on_boss_defeat = True
     env.stall_cap = StallCap.Config()
@@ -1171,7 +1153,11 @@ def exp109() -> CraftaxTrainLoop:
     """
     cfg = exp103()
     cfg.experiment_name = "exp109"
-    _group(cfg, "exp109")
+    trackers = cfg.tracker
+    assert isinstance(trackers, TrackerList.Config)
+    dashboard = unwrap_tracker_config(trackers.trackers["wandb"])
+    assert isinstance(dashboard, WandbTracker.Config)
+    dashboard.group = "exp109"
     # exp103's evaluation env, taken before the restart changes: left unset, the
     # evaluation copies training's and would score on fresh worlds, not exp103's.
     evaluation = cfg.step.evaluation.env = cfg.step.env.copy_tree()
@@ -1248,7 +1234,11 @@ def exp110() -> CraftaxTrainLoop:
     """
     cfg = exp103()
     cfg.experiment_name = "exp110"
-    _group(cfg, "exp110")
+    trackers = cfg.tracker
+    assert isinstance(trackers, TrackerList.Config)
+    dashboard = unwrap_tracker_config(trackers.trackers["wandb"])
+    assert isinstance(dashboard, WandbTracker.Config)
+    dashboard.group = "exp110"
     model = cfg.step.model
     assert isinstance(model, MinGRUPolicy.Config)
     encoder = model.embedding = NoEncoder.Config()
@@ -1260,7 +1250,7 @@ def exp110() -> CraftaxTrainLoop:
     feature = cfg.step.feature = WorldModelFeature.Config()
     assert isinstance(feature.weights, TrainedWeights.Config)
     feature.weights.checkpoint = Path(
-        "/opt/scratch/datasets/craftax/world-model-oracle/v1/checkpoints/"
+        "/datasets/craftax/world-model-oracle/v1/checkpoints/"
         "early-fit-s73/step_00013135.pt",
     )
     feature.attention = Flash4CacheAttention.Config()
@@ -1307,12 +1297,16 @@ def exp111() -> CraftaxTrainLoop:
     """
     cfg = exp110()
     cfg.experiment_name = "exp111"
-    _group(cfg, "exp111")
+    trackers = cfg.tracker
+    assert isinstance(trackers, TrackerList.Config)
+    dashboard = unwrap_tracker_config(trackers.trackers["wandb"])
+    assert isinstance(dashboard, WandbTracker.Config)
+    dashboard.group = "exp111"
     feature = cfg.step.feature
     assert isinstance(feature, WorldModelFeature.Config)
     assert isinstance(feature.weights, TrainedWeights.Config)
     feature.weights.checkpoint = Path(
-        "/opt/scratch/datasets/craftax/world-model-oracle/v1/checkpoints/"
+        "/datasets/craftax/world-model-oracle/v1/checkpoints/"
         "mature-fit-s73/step_00012738.pt",
     )
     return cfg
@@ -1370,7 +1364,11 @@ def exp112() -> CraftaxTrainLoop:
     """
     cfg = exp110()
     cfg.experiment_name = "exp112"
-    _group(cfg, "exp112")
+    trackers = cfg.tracker
+    assert isinstance(trackers, TrackerList.Config)
+    dashboard = unwrap_tracker_config(trackers.trackers["wandb"])
+    assert isinstance(dashboard, WandbTracker.Config)
+    dashboard.group = "exp112"
     training = cfg.step.feature_training = ContextReplay.Config()
     training.attention = Flash4Varlen.Config()
     training.compile = PartialConfig(torch.compile, fullgraph=True, dynamic=False)
@@ -1401,7 +1399,11 @@ def exp113() -> CraftaxTrainLoop:
     """
     cfg = exp111()
     cfg.experiment_name = "exp113"
-    _group(cfg, "exp113")
+    trackers = cfg.tracker
+    assert isinstance(trackers, TrackerList.Config)
+    dashboard = unwrap_tracker_config(trackers.trackers["wandb"])
+    assert isinstance(dashboard, WandbTracker.Config)
+    dashboard.group = "exp113"
     training = cfg.step.feature_training = ContextReplay.Config()
     training.attention = Flash4Varlen.Config()
     training.compile = PartialConfig(torch.compile, fullgraph=True, dynamic=False)
@@ -1438,7 +1440,11 @@ def exp104() -> CraftaxTrainLoop:
     """
     cfg = exp102()
     cfg.experiment_name = "exp104"
-    _group(cfg, "exp104")
+    trackers = cfg.tracker
+    assert isinstance(trackers, TrackerList.Config)
+    dashboard = unwrap_tracker_config(trackers.trackers["wandb"])
+    assert isinstance(dashboard, WandbTracker.Config)
+    dashboard.group = "exp104"
     model = cfg.step.model
     assert isinstance(model, MinGRUPolicy.Config)
     model.channels_hidden = 2_048
@@ -1488,7 +1494,11 @@ def exp105() -> CraftaxTrainLoop:
     """
     cfg = exp104()
     cfg.experiment_name = "exp105"
-    _group(cfg, "exp105")
+    trackers = cfg.tracker
+    assert isinstance(trackers, TrackerList.Config)
+    dashboard = unwrap_tracker_config(trackers.trackers["wandb"])
+    assert isinstance(dashboard, WandbTracker.Config)
+    dashboard.group = "exp105"
     model = cfg.step.model
     assert isinstance(model, MinGRUPolicy.Config)
     encoder = model.embedding
@@ -1531,7 +1541,11 @@ def exp106() -> CraftaxTrainLoop:
     """
     cfg = exp105()
     cfg.experiment_name = "exp106"
-    _group(cfg, "exp106")
+    trackers = cfg.tracker
+    assert isinstance(trackers, TrackerList.Config)
+    dashboard = unwrap_tracker_config(trackers.trackers["wandb"])
+    assert isinstance(dashboard, WandbTracker.Config)
+    dashboard.group = "exp106"
     transitions = cfg.step.env.num_envs * cfg.step.rollout.horizon
     cfg.max_steps = 250_000_000 // transitions
     schedule = cfg.step.schedule
@@ -1545,15 +1559,17 @@ def exp107() -> CraftaxTrainLoop:
     """exp106 reading a frozen world model's state of the episode at every step.
 
     The treatment arm of that experiment, restated as one fork. Each actor
-    step, the world model exp001 of ``world_model.experiments``, trained on the
-    base corpus (seed 0, step 1,525), reads the episode so far -- each observation's frame
-    tokens, each action -- and its final-normed hidden state at the current
-    observation, 1,152 floats, is the feature
+    step, the world model exp001 of ``world_model.experiments``, from its run's
+    final checkpoint (step 1,525, trained on the base corpus), reads the
+    episode so far -- each observation's frame tokens, each action -- and its
+    final-normed hidden state at the current observation, 1,152 floats, is the
+    feature
     (:class:`~priml.baselines.craftax.world_model.feature.WorldModelFeature`).
-    Its weights stay frozen. The policy adds a projection of the feature,
-    1,152 -> 2,048 and zero at init, to ``proj_in``'s output, so the run
-    starts as exp106's. The rollout stores each step's feature and the learner
-    reads the stored one.
+    The recorded run read the original implementation's exp001 at seed 0, in
+    the port's layout. Its weights stay frozen. The policy adds a projection
+    of the feature, 1,152 -> 2,048 and zero at init, to ``proj_in``'s output,
+    so the run starts as exp106's. The rollout stores each step's feature and
+    the learner reads the stored one.
 
     The engine holds at most 1,024 positions of each row's history, two per
     decision; before a row would overflow, it restarts from its last 256
@@ -1582,8 +1598,18 @@ def exp107() -> CraftaxTrainLoop:
     """
     cfg = exp106()
     cfg.experiment_name = "exp107"
-    _group(cfg, "exp107")
+    trackers = cfg.tracker
+    assert isinstance(trackers, TrackerList.Config)
+    dashboard = unwrap_tracker_config(trackers.trackers["wandb"])
+    assert isinstance(dashboard, WandbTracker.Config)
+    dashboard.group = "exp107"
     feature = cfg.step.feature = WorldModelFeature.Config()
+    assert isinstance(feature.weights, TrainedWeights.Config)
+    world_model = world_model_exp001()
+    feature.weights.checkpoint = Path(
+        f"/runs/{world_model.study_name}/{world_model.experiment_name}/checkpoints/"
+        f"step_{int(world_model.max_steps):08d}.pt",
+    )
     feature.attention = Flash4CacheAttention.Config()
     feature.compile = PartialConfig(
         torch.compile,
@@ -1627,7 +1653,11 @@ def exp108() -> CraftaxTrainLoop:
     """
     cfg = exp107()
     cfg.experiment_name = "exp108"
-    _group(cfg, "exp108")
+    trackers = cfg.tracker
+    assert isinstance(trackers, TrackerList.Config)
+    dashboard = unwrap_tracker_config(trackers.trackers["wandb"])
+    assert isinstance(dashboard, WandbTracker.Config)
+    dashboard.group = "exp108"
     feature = cfg.step.feature
     assert isinstance(feature, WorldModelFeature.Config)
     feature.weights = InitialWeights.Config()
@@ -1639,7 +1669,7 @@ def exp_smoke() -> CraftaxTrainLoop:
 
     Not a result: it answers whether the loop runs, so every axis that costs
     time without bearing on that answer is cut, down to a network narrow
-    enough to train in seconds from its own init, which reads no file.
+    enough to train in seconds.
 
     Returns:
       cfg: A four-epoch CraftaxTrainLoop.
@@ -1647,7 +1677,6 @@ def exp_smoke() -> CraftaxTrainLoop:
     """
     cfg = exp000()
     cfg.experiment_name = "exp_smoke"
-    cfg.step.checkpoint = None
     model = cfg.step.model
     assert isinstance(model, MinGRUPolicy.Config)
     model.channels_hidden = 8
@@ -1670,14 +1699,6 @@ def exp_smoke() -> CraftaxTrainLoop:
     return cfg
 
 
-def _group(cfg: CraftaxTrainLoop, group: str) -> None:
-    """File a recipe's W&B runs under ``group``, so its seeds share one board."""
-    dashboard = _dashboard(cfg.tracker)
-    if dashboard is None:
-        raise ValueError(f"{cfg.experiment_name} logs to no W&B run to group")
-    dashboard.group = group
-
-
 def _dashboard(tracker: object) -> WandbTracker.Config | None:
     """Return the W&B tracker in a tree of tracker lists and async wrappers, if any."""
     if isinstance(tracker, WandbTracker.Config):
@@ -1690,14 +1711,3 @@ def _dashboard(tracker: object) -> WandbTracker.Config | None:
             if found is not None:
                 return found
     return None
-
-
-def _copy_fields[TargetT: DataclassInstance](
-    source: DataclassInstance,
-    target: TargetT,
-) -> TargetT:
-    """Copy ``source``'s init fields onto ``target``, a config of its parent class."""
-    for item in fields(source):
-        if item.init:
-            setattr(target, item.name, getattr(source, item.name))
-    return target

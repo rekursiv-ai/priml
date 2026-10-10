@@ -20,6 +20,12 @@ structure -- so the chain reads as an argument::
     exp020     exp013 five times larger on 8 GPUs, trained open-ended
     exp_smoke  exp000 at minimum size on the CPU; not a result
 
+The base corpus is ``corpora/base.json`` of the capture archive ``archive-v1``
+beneath ``/datasets/craftax/world-model``: the arms of ``capture.experiments``
+capture it, and ``scripts/freeze_corpus.py`` freezes 50M of its training
+decisions. The recorded results were measured on the original implementation's
+capture of the same mixture.
+
 The flat comparison trains on the frozen small corpus, 10M decisions of an
 earlier capture::
 
@@ -90,6 +96,7 @@ from priml.train.tracker import (
     FileTracker,
     TrackerList,
     WandbTracker,
+    unwrap_tracker_config,
 )
 from priml.train.train_loop import TrainLoop
 
@@ -267,7 +274,6 @@ def exp000() -> WorldModelLoop.Config:
     runtime.mesh_topology = {"dp": 8, "pp": 1, "tp": 1}
     cfg.step.parallelism = DataParallel.Config()
     cfg.dataset.device = "cuda"
-    cfg.dataset.working_dir = "/datasets/craftax/world-model-reference/archive-v1"
 
     # One window per GPU per step: 8 windows, about 32,760 decisions.
     decisions_per_step = runtime.mesh_topology["dp"] * cfg.dataset.t_g // 2
@@ -842,21 +848,26 @@ def exp020() -> WorldModelLoop.Config:
     checkpoints.save_every = 3_600
     checkpoints.keep_last_n = 2
     checkpoints.keep_every = 4 * checkpoints.save_every
-    for tracker in _wandb_trackers(cfg.tracker):
-        tracker.group = "scaleup"
+    series = cfg.tracker
+    assert isinstance(series, NanochatSeries.Config)
+    trackers = series.tracker
+    assert isinstance(trackers, TrackerList.Config)
+    dashboard = unwrap_tracker_config(trackers.trackers["wandb"])
+    assert isinstance(dashboard, WandbTracker.Config)
+    dashboard.group = "scaleup"
     return cfg
 
 
 def exp_smoke() -> WorldModelLoop.Config:
-    """exp000 at minimum size on the CPU, from a synthetic corpus.
+    """exp000 at minimum size on the CPU, from the smoke capture's corpus.
 
     Not a result. It answers one question -- does the loop run end to end
     through loader, model, step, metric, and checkpoint -- so every axis is
     cut: widths 16 and 36, one layer per module, 32-position windows, eager
-    single-process CPU, four steps, no W&B. No corpus ships under
-    ``/datasets/craftax/world-model/smoke``: write one first with
-    ``archive.write_shard`` and ``archive.write_corpus``, as ``experiments_test``
-    does beneath its own ``base_dir``.
+    single-process CPU, four steps, no W&B. It reads corpus ``smoke`` of
+    ``/datasets/craftax/world-model/smoke``, which ``capture.experiments.smoke``
+    captures from the RL ``exp_smoke``'s policy and ``scripts/freeze_corpus.py
+    --all`` freezes.
     """
     cfg = exp000()
     cfg.experiment_name = "exp_smoke"

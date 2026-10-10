@@ -15,7 +15,7 @@ read -- with the kernels and autocast it trained under on CUDA (scoring.py).
 OUTPUT receives the report and the run's settings as JSON.
 
 Examples:
-  priml/baselines/craftax/world_model/scripts/baselines.py /opt/scratch/runs/craftax-world-model/exp001/checkpoints/step_00001525.pt --override dataset.sampler_seed=0 --output /opt/scratch/artifacts/craftax/world-model/baselines-s0.json
+  priml/baselines/craftax/world_model/scripts/baselines.py /opt/scratch/runs/craftax-world-model/exp001/checkpoints/step_00001525.pt --output /opt/scratch/artifacts/craftax/world-model/baselines.json
 
 '''
 # fmt: on

@@ -74,7 +74,11 @@ def test_a_policy_source_plays_its_checkpoints_policy(
     finally:
         source.close()
     assert source.provenance()["rollout_seed"] == str(73 + 1_000_000 * 9)
-    assert source.provenance()["checkpoint_sha256"] == config.checkpoint_sha256
+    assert config.checkpoint is not None
+    assert (
+        source.provenance()["checkpoint_sha256"]
+        == hashlib.sha256(config.checkpoint.read_bytes()).hexdigest()
+    )
     assert sum(len(e.actions) for e in episodes) >= _DECISIONS
     for episode in episodes:
         assert episode.receipt.arm == 2
@@ -97,10 +101,10 @@ def test_a_policy_source_writes_its_policys_observation_layout(
     assert len(episodes) == source.env.num_envs
 
 
-def test_a_checkpoint_of_another_sha256_is_refused(tmp_path: Path) -> None:
+def test_a_policy_source_needs_its_checkpoint(tmp_path: Path) -> None:
     config = _policy_source(tmp_path, board=False)
-    config.checkpoint_sha256 = "0" * 64
-    with pytest.raises(ValueError, match="wrong SHA-256"):
+    config.checkpoint = None
+    with pytest.raises(ValueError, match="needs the arm's checkpoint"):
         config.make()
 
 
@@ -155,7 +159,6 @@ def _policy_source(directory: Path, *, board: bool) -> PolicySource.Config:
     config = PolicySource.Config()
     config.policy = step
     config.checkpoint = path
-    config.checkpoint_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
     config.env.num_envs = 1
     config.device = "cpu"
     return config

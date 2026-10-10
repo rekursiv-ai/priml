@@ -18,8 +18,8 @@ episodes from the port's own trained RL policies.
 Train an RL policy, capture its play, train the world model on it, then score
 it and dream with it:
 
-1. RL: the port's trainer, `priml/baselines/craftax` (exp000-exp003 and
-   exp100-exp113).
+1. RL: the port's trainer, `priml/baselines/craftax` (exp000-exp008 and
+   exp101-exp113).
 2. Capture: run each arm of `capture/experiments.py` and its verifier, which
    record the behaviour mixture into an archive, every closed shard
    replay-verified ([Capture](#capture)).
@@ -30,11 +30,14 @@ it and dream with it:
    evaluation, the eval-only matrix, the engine checks and the dreams, and
    writes `summary.json` and `report.md` ([Evaluation](#evaluation-and-the-report)).
 
-At small scale (the `e2e_` capture factories), the loop from captured
+`../README.md`, "Reproduce", gives the full-scale steps in order, with the
+runs each reads, and the chain at minimum size. At the end-to-end check's
+scale (the `e2e_` capture factories), the loop from captured
 exp000/exp102/exp103 play to a trained `exp_smoke` takes about 3.5 minutes on
-one node. Each capture job is one `python -m priml` run of a factory, on
-one GPU: the verifier, given the launch's id and its worker count, and each
-arm's worker, given the launch's id and its seed range:
+one node, once those three policies are trained. Each capture job is one
+`python -m priml` run of a factory, on one GPU: the verifier, given the
+launch's id and its worker count, and each arm's worker, given the launch's id
+and its seed range:
 
 ```bash
 w=priml/baselines/craftax/world_model
@@ -42,13 +45,13 @@ m=priml.baselines.craftax.world_model.capture.experiments
 id=e2e-$(date -u +%Y%m%dT%H%M%SZ)
 uv --quiet run --frozen python -m priml $m.e2e_verifier --override launch=$id --override workers=4 &
 gpu=0
-for arm in e2e_exp007_s74 e2e_exp007_s74_epsilon e2e_exp006_s73 e2e_exp000_s73; do
+for arm in e2e_arm0 e2e_arm1 e2e_arm2 e2e_arm3; do
   CUDA_VISIBLE_DEVICES=$gpu uv --quiet run --frozen python -m priml $m.$arm --override worker=0 --override launch=$id &
   gpu=$((gpu + 1))
 done; wait
-$w/scripts/freeze_corpus.py /opt/scratch/datasets/craftax/world-model/e2e --corpus e2e --decisions 1000000
-$w/scripts/coverage_report.py /opt/scratch/datasets/craftax/world-model/e2e --corpus e2e --output /opt/scratch/artifacts/craftax/world-model/e2e/coverage.json
-uv --quiet run --frozen python -m priml priml.baselines.craftax.world_model.experiments.exp_smoke --override dataset.working_dir=/datasets/craftax/world-model/e2e --override dataset.corpus=corpora/e2e.json
+$w/scripts/freeze_corpus.py /opt/scratch/datasets/craftax/world-model/e2e --corpus smoke --decisions 1000000
+$w/scripts/coverage_report.py /opt/scratch/datasets/craftax/world-model/e2e --corpus smoke --output /opt/scratch/artifacts/craftax/world-model/e2e/coverage.json
+uv --quiet run --frozen python -m priml priml.baselines.craftax.world_model.experiments.exp_smoke --override dataset.working_dir=/datasets/craftax/world-model/e2e
 ```
 
 A launch's id must be new, as the UTC time makes it: a rerun of the recipe, or
@@ -110,17 +113,18 @@ runs of either, which GPU nondeterminism sets.
 | `archive-v1` | the base corpus as frame shards |
 | `archive-v1-replay` | the same episodes as records and snapshots; replay gives the same micro-batches |
 | `archive-v2`, `archive-v2-branch` | dataset v2, stall-capped, and its branches |
-| `e2e` | 10.6M verified decisions of the four `e2e_` arms; corpus `e2e`, 1.44M decisions |
+| `e2e` | 10.6M verified decisions of the four `e2e_` arms; a 1.44M-decision corpus |
+| `smoke` | The `smoke` capture of the RL `exp_smoke`'s policy; corpus `smoke` |
 
-The original corpora are not distributed; the experiments name them under
-`/opt/scratch/datasets/craftax/world-model-reference/`. exp000-exp013 and
-exp020 read `archive-v1`; exp014 and exp015 read `archive-v1-replay`'s base
-corpus; the flat comparison, exp003, exp004 and exp005, reads its small
-corpus. A `ReplayStream` left at its default reads the capture's own archive,
-`/opt/scratch/datasets/craftax/world-model/archive-v1`. `exp_smoke` reads
-`/opt/scratch/datasets/craftax/world-model/smoke`, which nothing ships: write
-a corpus there first, or point it at one with `--override
-dataset.working_dir=...` as the e2e recipe does.
+Every root lies under `/opt/scratch/datasets/craftax/world-model`. A
+`ReplayStream` left at its default reads `archive-v1`'s corpus `base`, which
+the capture arms and `freeze_corpus.py` write; exp000-exp013 read it.
+`exp_smoke` reads `smoke`'s. The original implementation's corpora are not
+distributed and no step here produces them, yet four experiments name them
+under `/opt/scratch/datasets/craftax/world-model-reference/`: exp014 and
+exp015 read `archive-v1-replay`'s base corpus, and the flat comparison,
+exp003, exp004 and exp005, its small corpus. exp020 reads `archive-v1`'s
+`scaleup-v1`, every verified shard of one node of the original capture.
 
 Speed settings are slots on the pieces they change:
 `WorldModel.Config.embed_board = multi_hot_board` (default `gathered_board`),
@@ -159,16 +163,17 @@ shard.
 A launch's jobs meet only through one archive root -- the arm policies, the
 archive, and the start, completion and halt markers -- so they run on one
 machine, or on machines sharing that filesystem; `scripts/gather.py` copies
-shards between roots. The arms, of a 3.5B-decision target, use the runs'
-final weights, copied into
-`/opt/scratch/artifacts/craftax/world-model/behaviour-policies`:
+shards between roots. The arms, of a 3.5B-decision target, read their policy
+runs' final checkpoints, at the paths those runs write; the published archive
+played exp103's seed-74 run (77.66%), exp102's seed-73 run (56.24%) and
+exp000's run (48.45%, from PufferLib's init):
 
 | Arm | Factory | Policy | Share |
 |---|---|---|---:|
-| 0 | `exp103_s74` | exp103 at 20B, seed 74 (77.66%) | 70% |
-| 1 | `exp103_s74_epsilon` | the same, epsilon 0.05 | 10% |
-| 2 | `exp102_s73` | exp102 at 20B, seed 73 (56.24%) | 10% |
-| 3 | `exp000_s73` | exp000 at 3.5B (48.45%) | 10% |
+| 0 | `arm0` | exp103 at 20B | 70% |
+| 1 | `arm1` | the same, epsilon 0.05 | 10% |
+| 2 | `arm2` | exp102 at 20B | 10% |
+| 3 | `arm3` | exp000 at 3.5B | 10% |
 
 One H200 captures 831k decisions/s from exp103 at 1,024 environments in 4
 buffers and 1.16M/s from exp000 (rollout only; the encoders run beside it). A
@@ -246,12 +251,11 @@ build` is unchanged.
 
 From a checkpoint to one page:
 
-1. Capture: a capture arm (`capture/experiments.py`) records the checkpoint's
-   play, overriding the checkpoint, its SHA-256 and the root. `decisions=1`
-   records each environment's first episode and no other, so 256 environments
-   give 256 episodes, unbiased by length; `arm=0` gives every checkpoint the
-   same 256 worlds. The arm's policy config must be the checkpoint's
-   experiment's.
+1. Capture: a capture factory records the checkpoint's play into an archive,
+   as the ghost overlay's `capture_<tier>` do (`../ghosts/experiments.py`): a
+   budget of one decision records each environment's first episode and no
+   other, unbiased by length, and one arm gives every checkpoint the same
+   worlds. The factory's policy config must be the checkpoint's experiment's.
 2. Rank and save: `scripts/games.py rank` prints the archive's mean
    achievement return over its complete episodes and its best episode (the
    highest return, then the fewest decisions); `save` replays the best, or
@@ -264,24 +268,18 @@ From a checkpoint to one page:
 ```bash
 w=priml/baselines/craftax/world_model
 a=/opt/scratch/artifacts/craftax/games
-p=/opt/scratch/artifacts/craftax/world-model/behaviour-policies
-games() {  # NAME FACTORY CHECKPOINT SHA256 TITLE
-  uv --quiet run --frozen python -m priml priml.baselines.craftax.world_model.capture.experiments.$2 --override root=$a/$1/capture --override run_root=/opt/scratch/runs/craftax/games --override arm=0 --override decisions=1 --override source.checkpoint=$p/$3 --override source.checkpoint_sha256=$4 --override source.env.num_envs=256 && $w/scripts/games.py rank $a/$1/capture && $w/scripts/games.py save $a/$1/capture $a/$1/best --title "$5"
-}
-games exp000-s73 exp000_s73 exp000-s73-00006662.pt e4f2adcd0751fbd40186262bd1fab1b553b2046c30f4ad2ef5c31d743660ac10 "exp000, seed 73, 3.5B"
-games exp006-s73 exp102_s73 exp006-s73-00038146.pt 4034e88238769309b80d4ed121832c9fe18e4479e9a7c6c4950e9c79d2d852b0 "exp102, seed 73, 20B"
-games exp007-s73 exp103_s74 exp007-s73-00038146.pt 18e436a66a7b9e71f9471b6ad4757836d528fca44cb25b5c21feaf7a1268df49 "exp103, seed 73, 20B"
-games exp007-s74 exp103_s74 exp007-s74-00038146.pt 38dfe59f233640b571abea4efe4b71476437c0ed501e12ad8fe4e36d69039cef "exp103, seed 74, 20B"
-node $w/viewer/games.mjs build --output $a/games.html --page-title "Craftax across training" --picker-label Checkpoint --default-game last $a/{exp000-s73,exp006-s73,exp007-s73,exp007-s74}/best
+$w/scripts/games.py rank ARCHIVE
+$w/scripts/games.py save ARCHIVE $a/NAME/best --title "TITLE"
+node $w/viewer/games.mjs build --output $a/games.html --page-title "Craftax across training" --picker-label Checkpoint --default-game last $a/NAME/best
 node $w/viewer/render_check.mjs $a/render-check $a/games.html
 ```
 
-The page is one file with no external asset; it opens from disk. The four
-policies on the same 256 worlds took 7 minutes on one H200: each capture about
-85 s, each save 6 to 39 s (5,288 to 97,432 decisions). Their averages, 51.66%
-(exp000 s73), 58.21% (exp102 s73), 69.68% (exp103 s73) and 76.43% (exp103
-s74), lie within 3.3 points of their runs' final evaluations, and the 14.0 MB
-page renders all four games. A policy trained to stop at the necromancer's
+The page is one file with no external asset; it opens from disk. A recorded
+page of four policies on the same 256 worlds took 7 minutes on one H200: each
+capture about 85 s, each save 6 to 39 s (5,288 to 97,432 decisions). Their
+averages, 51.66% (exp000 from PufferLib's init), 58.21% (exp102 seed 73),
+69.68% (exp103 seed 73) and 76.43% (exp103 seed 74), lie within 3.3 points of
+their runs' final evaluations, and the 14.0 MB page renders all four games. A policy trained to stop at the necromancer's
 fall plays on here, to its death or the 100,000-tick timeout: exp103 s73's
 best game is 97,432 decisions long.
 
@@ -343,9 +341,13 @@ objectives against a reference).
 
 ```bash
 w=priml/baselines/craftax/world_model/scripts
-$w/report.py s0.pt s1.pt s2.pt --sampler-seeds 0,1,2 --output /opt/scratch/artifacts/craftax/world-model/report
-$w/report.py --summarize --wandb-runs RUN0,RUN1,RUN2 --output /opt/scratch/artifacts/craftax/world-model/report
+$w/report.py /opt/scratch/runs/craftax-world-model/exp001/checkpoints/step_00001525.pt --output /opt/scratch/artifacts/craftax/world-model/report
+$w/report.py --summarize --wandb-runs RUN --output /opt/scratch/artifacts/craftax/world-model/report
 ```
+
+`RUN` is the training run's W&B id. The recorded report scored three seeds of
+exp001, 0, 1 and 2, each its own run: `report.py` takes several checkpoints and
+their `--sampler-seeds`.
 
 On the base model's three seeds the whole report takes 82 minutes on one
 H200, most of it the dreams (256 x 4,000 decisions per checkpoint).
@@ -488,13 +490,13 @@ converted its first archive (capture here writes replay shards directly).
 
 ```bash
 uv --quiet run --frozen python -m torch.distributed.run --standalone --nproc_per_node=8 -m priml priml.baselines.craftax.world_model.experiments.exp000
-uv --quiet run --frozen python -m priml priml.baselines.craftax.world_model.experiments.exp014
+uv --quiet run --frozen python -m priml priml.baselines.craftax.world_model.experiments.exp013
 ```
 
 The global stack runs on FlashAttention 4 (`flash-attn-4`, Linux only);
 `exp_smoke` trains a minimum-size model on the CPU. Training the base model,
 scoring it and feeding it to the RL policy, step by step, with the results to
-expect: `../README.md`, "Reproducing the recipes".
+expect: `../README.md`, "Reproduce".
 
 ## Tests
 

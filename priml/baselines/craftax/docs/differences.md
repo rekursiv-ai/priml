@@ -26,7 +26,7 @@ Paths below are relative to those roots. `craftax.h:2378` is PufferLib, and
 so their line numbers hold. The port is still changing, so it is cited by
 function: `step.py::score_numba` is `game/step.py`'s `score_numba`, and
 a test checks that every such name exists.
-The pin's source is exported to `/opt/scratch/datasets/craftax/oracle-v1/pin/`,
+The pin's source is a checkout of PufferLib at `6ffa5b10`,
 and the `craftax` 1.6.1 sources come from the uv cache.
 
 ## Method

@@ -26,7 +26,7 @@ OUTPUT is one JSON report with each gate's numbers and verdict; the process
 exits 1 when a gate fails.
 
 Examples:
-  priml/baselines/craftax/world_model/scripts/feature_gates.py /opt/scratch/datasets/craftax/world-model-oracle/v1/checkpoints/exp001-s0/step_00001525.pt /opt/scratch/datasets/craftax/world-model-reference/archive-v1-replay/corpora/base.json /opt/scratch/artifacts/craftax/world-model/feature-gates-s0.json --attention fa4 --compile
+  priml/baselines/craftax/world_model/scripts/feature_gates.py /opt/scratch/runs/craftax-world-model/exp001/checkpoints/step_00001525.pt /opt/scratch/datasets/craftax/world-model/archive-v1/corpora/base.json /opt/scratch/artifacts/craftax/world-model/feature-gates.json --attention fa4 --compile
 
 '''
 # fmt: on

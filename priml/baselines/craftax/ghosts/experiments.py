@@ -9,6 +9,12 @@ Each model tier is one port policy, sampled as trained, as one capture arm:
 | high | 2 | exp103 at 20B, seed 74 | 20.0B | 77.66% | graveyard 60.5% |
 | boss | 3 | the boss-fight fine-tune of our recipe, step 2,999,975,936 | -- | 80.06% | graveyard 65.8% |
 
+The early, medium and high tiers read their experiments' final ``TrainLoop``
+checkpoints, at the paths those runs write beneath ``base_dir``; the published
+page's medium and high tiers were exp102's seed-73 and exp103's seed-74 runs.
+The boss tier reads a policy no experiment here trains: the original recipe
+runs' boss-fight fine-tune, converted to the port's layout.
+
 A tier's run records exactly one episode per environment. Its budget is one
 decision, so once the first recorded episode ends the env records no further
 one and drains those in flight (``capture/env.py``). Every environment resets
@@ -54,7 +60,6 @@ episode that wins goes on to its death or the timeout.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from priml.baselines.craftax.experiments import exp001, exp102, exp103
 from priml.baselines.craftax.lib.compat import ExactScan
@@ -70,54 +75,116 @@ from priml.baselines.craftax.world_model.capture.worker import (
 )
 
 
-if TYPE_CHECKING:
-    from priml.baselines.craftax.train_step import CraftaxTrainStep
-
-
 def pilot_early() -> CaptureWorker.Config:
-    """Pilot the early tier: 64 episodes on each of pool worlds 0-15."""
-    return _pilot(_early())
+    """Pilot the early tier, exp001's final policy as arm 0, on pool worlds 0-15."""
+    config = CaptureWorker.Config()
+    config.root = Path("/artifacts/craftax/ghosts/capture/pilot")
+    config.arm = 0
+    config.decisions = 1
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    policy = exp001()
+    source.policy = policy.step
+    source.checkpoint = Path(
+        f"/runs/{policy.study_name}/{policy.experiment_name}/checkpoints/"
+        f"step_{int(policy.max_steps):08d}.pt",
+    )
+    source.env.num_buffers = 4
+    source.env.world_seeds = tuple(range(16))
+    source.env.num_envs = 64 * len(source.env.world_seeds)
+    return config
 
 
 def pilot_medium() -> CaptureWorker.Config:
-    """Pilot the medium tier: 64 episodes on each of pool worlds 0-15."""
-    return _pilot(_medium())
+    """Pilot the medium tier, exp102's final policy as arm 1; seed 73's on the page."""
+    config = pilot_early()
+    config.arm = 1
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    policy = exp102()
+    source.policy = policy.step
+    source.checkpoint = Path(
+        f"/runs/{policy.study_name}/{policy.experiment_name}/checkpoints/"
+        f"step_{int(policy.max_steps):08d}.pt",
+    )
+    return config
 
 
 def pilot_high() -> CaptureWorker.Config:
-    """Pilot the high tier: 64 episodes on each of pool worlds 0-15."""
-    return _pilot(_high())
+    """Pilot the high tier, exp103's final policy as arm 2; seed 74's on the page."""
+    config = pilot_medium()
+    config.arm = 2
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    policy = exp103()
+    source.policy = policy.step
+    source.checkpoint = Path(
+        f"/runs/{policy.study_name}/{policy.experiment_name}/checkpoints/"
+        f"step_{int(policy.max_steps):08d}.pt",
+    )
+    return config
 
 
 def pilot_verifier() -> ReplayVerifier.Config:
     """Replay every episode the pilots publish."""
     config = ReplayVerifier.Config()
     config.root = pilot_early().root
-    config.log_dir = Path(
-        "/opt/scratch/artifacts/craftax/ghosts/capture/verifier",
-    )
+    config.log_dir = Path("/artifacts/craftax/ghosts/capture/verifier")
     config.fraction = 1.0
     return config
 
 
 def capture_early() -> CaptureWorker.Config:
-    """Capture the early tier: 1,000 episodes of world 15."""
-    return _capture(_early())
+    """Capture the early tier: 1,000 episodes of world 15, generation 1."""
+    config = pilot_early()
+    config.root = Path("/artifacts/craftax/ghosts/capture/w15")
+    config.generation = 1
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    source.env.world_seeds = (15,)
+    source.env.num_envs = 1_000
+    return config
 
 
 def capture_medium() -> CaptureWorker.Config:
-    """Capture the medium tier: 1,000 episodes of world 15."""
-    return _capture(_medium())
+    """Capture the medium tier: 1,000 episodes of world 15, generation 1."""
+    config = pilot_medium()
+    config.root = Path("/artifacts/craftax/ghosts/capture/w15")
+    config.generation = 1
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    source.env.world_seeds = (15,)
+    source.env.num_envs = 1_000
+    return config
 
 
 def capture_high() -> CaptureWorker.Config:
-    """Capture the high tier: 1,000 episodes of world 15."""
-    return _capture(_high())
+    """Capture the high tier: 1,000 episodes of world 15, generation 1."""
+    config = pilot_high()
+    config.root = Path("/artifacts/craftax/ghosts/capture/w15")
+    config.generation = 1
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    source.env.world_seeds = (15,)
+    source.env.num_envs = 1_000
+    return config
 
 
 def capture_boss() -> CaptureWorker.Config:
-    """Capture the boss tier: 1,000 episodes of world 15."""
-    return _capture(_boss())
+    """Capture the boss tier, the boss-fight fine-tune as arm 3: 1,000 of world 15."""
+    config = capture_high()
+    config.arm = 3
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    model = source.policy.model
+    assert isinstance(model, MinGRUPolicy.Config)
+    # The fine-tune's numerics: bf16 carry and decoder output, PufferLib's scan.
+    model.state_dtype = model.output_dtype = model.dtype
+    model.block.scan = ExactScan.Config()
+    source.checkpoint = Path(
+        "/artifacts/craftax/ghosts/policies/boss-s73-2999975936.pt",
+    )
+    return config
 
 
 def capture_verifier() -> ReplayVerifier.Config:
@@ -129,22 +196,46 @@ def capture_verifier() -> ReplayVerifier.Config:
 
 def extra_early() -> CaptureWorker.Config:
     """Capture 2,048 more early-tier episodes of world 15 for the short set."""
-    return _extra(_early())
+    config = capture_early()
+    config.root = config.root.with_name(f"{config.root.name}-extra")
+    config.generation = 2
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    source.env.num_envs = 2_048
+    return config
 
 
 def extra_medium() -> CaptureWorker.Config:
     """Capture 2,048 more medium-tier episodes of world 15 for the short set."""
-    return _extra(_medium())
+    config = capture_medium()
+    config.root = config.root.with_name(f"{config.root.name}-extra")
+    config.generation = 2
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    source.env.num_envs = 2_048
+    return config
 
 
 def extra_high() -> CaptureWorker.Config:
     """Capture 2,048 more high-tier episodes of world 15 for the short set."""
-    return _extra(_high())
+    config = capture_high()
+    config.root = config.root.with_name(f"{config.root.name}-extra")
+    config.generation = 2
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    source.env.num_envs = 2_048
+    return config
 
 
 def extra_boss() -> CaptureWorker.Config:
     """Capture 2,048 more boss-tier episodes of world 15 for the short set."""
-    return _extra(_boss())
+    config = capture_boss()
+    config.root = config.root.with_name(f"{config.root.name}-extra")
+    config.generation = 2
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    source.env.num_envs = 2_048
+    return config
 
 
 def extra_verifier() -> ReplayVerifier.Config:
@@ -152,120 +243,3 @@ def extra_verifier() -> ReplayVerifier.Config:
     config = pilot_verifier()
     config.root = extra_early().root
     return config
-
-
-def _early() -> CaptureWorker.Config:
-    """Return the early tier's worker: exp001's final policy as arm 0."""
-    return _tier(
-        arm=0,
-        policy=exp001().step,
-        checkpoint=Path(
-            "/opt/scratch/runs/craftax/exp001/checkpoints/step_00000476.pt",
-        ),
-        sha256="20a89a85eb8f9d48d307bdbf6b1b178979ab69e1c09032321892193616c9259f",
-    )
-
-
-def _medium() -> CaptureWorker.Config:
-    """Return the medium tier's worker: exp102's seed-73 policy as arm 1."""
-    return _tier(
-        arm=1,
-        policy=exp102().step,
-        checkpoint=Path(
-            "/opt/scratch/artifacts/craftax/world-model/behaviour-policies/"
-            "exp006-s73-00038146.pt",
-        ),
-        sha256="4034e88238769309b80d4ed121832c9fe18e4479e9a7c6c4950e9c79d2d852b0",
-    )
-
-
-def _high() -> CaptureWorker.Config:
-    """Return the high tier's worker: exp103's seed-74 policy as arm 2."""
-    return _tier(
-        arm=2,
-        policy=exp103().step,
-        checkpoint=Path(
-            "/opt/scratch/artifacts/craftax/world-model/behaviour-policies/"
-            "exp007-s74-00038146.pt",
-        ),
-        sha256="38dfe59f233640b571abea4efe4b71476437c0ed501e12ad8fe4e36d69039cef",
-    )
-
-
-def _boss() -> CaptureWorker.Config:
-    """Return the boss tier's worker: the boss-fight fine-tune as arm 3."""
-    policy = exp103().step
-    model = policy.model
-    assert isinstance(model, MinGRUPolicy.Config)
-    # The fine-tune's numerics: bf16 carry and decoder output, PufferLib's scan.
-    model.state_dtype = model.output_dtype = model.dtype
-    model.block.scan = ExactScan.Config()
-    return _tier(
-        arm=3,
-        policy=policy,
-        checkpoint=Path(
-            "/opt/scratch/artifacts/craftax/ghosts/policies/boss-s73-2999975936.pt",
-        ),
-        sha256="6d81fc29e14e3360a983a14041de988621b3608e4d3c26da0f0e8201f21c7d49",
-    )
-
-
-def _tier(
-    *,
-    arm: int,
-    policy: CraftaxTrainStep.Config,
-    checkpoint: Path,
-    sha256: str,
-) -> CaptureWorker.Config:
-    """Return worker 0 of a tier: its policy as an arm, one episode per environment."""
-    config = CaptureWorker.Config()
-    config.arm = arm
-    config.decisions = 1
-    source = _source(config)
-    source.policy = policy
-    source.checkpoint = checkpoint
-    source.checkpoint_sha256 = sha256
-    source.env.num_buffers = 4
-    return config
-
-
-def _pilot(config: CaptureWorker.Config) -> CaptureWorker.Config:
-    """Make a tier's worker its pilot: 64 episodes on each of pool worlds 0-15."""
-    config.root = Path(
-        "/opt/scratch/artifacts/craftax/ghosts/capture/pilot",
-    )
-    env = _source(config).env
-    env.world_seeds = tuple(range(16))
-    env.num_envs = 64 * len(env.world_seeds)
-    return config
-
-
-def _capture(config: CaptureWorker.Config) -> CaptureWorker.Config:
-    """Make a tier's worker its capture: 1,000 episodes of world 15, generation 1."""
-    env = _source(config).env
-    env.world_seeds = (15,)
-    env.num_envs = 1_000
-    config.generation = 1
-    config.root = (
-        Path(
-            "/opt/scratch/artifacts/craftax/ghosts/capture",
-        )
-        / f"w{env.world_seeds[0]}"
-    )
-    return config
-
-
-def _extra(config: CaptureWorker.Config) -> CaptureWorker.Config:
-    """Make a tier's worker its extra capture: 2,048 more of world 15, generation 2."""
-    config = _capture(config)
-    _source(config).env.num_envs = 2_048
-    config.generation = 2
-    config.root = config.root.with_name(f"{config.root.name}-extra")
-    return config
-
-
-def _source(config: CaptureWorker.Config) -> PolicySource.Config:
-    """Return a worker's policy source."""
-    source = config.source
-    assert isinstance(source, PolicySource.Config)
-    return source

@@ -298,6 +298,12 @@ def test_reset_begins_an_episode_in_every_row(source: WorldModelFeature) -> None
     assert reset.length.tolist() == [2, 2]
 
 
+def test_a_frozen_engine_refuses_a_rebuild(source: WorldModelFeature) -> None:
+    """Only a joint source's engine keeps the frames a rebuild re-encodes."""
+    with pytest.raises(ValueError, match="keeps no frames"):
+        _engine(source, rows=2).rebuild()
+
+
 def test_a_window_begun_on_a_fresh_engine_begins_a_window(
     source: WorldModelFeature,
 ) -> None:
@@ -776,6 +782,9 @@ def test_initial_weights_are_their_seeds_init(tmp_path: Path) -> None:
     torch.save({"step": {"model": first.state_dict()}}, path)
     trained = TrainedWeights.Config()
     trained.experiment = SMOKE
+    # No default run to read: the experiment names the checkpoint of its parent's.
+    with pytest.raises(ValueError, match="needs its experiment's checkpoint"):
+        trained.make()
     trained.checkpoint = path
     loaded = trained.make()()
     assert not loaded.training

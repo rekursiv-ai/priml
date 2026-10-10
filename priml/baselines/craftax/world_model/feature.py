@@ -208,16 +208,16 @@ class TrainedWeights:
         experiment: str = "priml.baselines.craftax.world_model.experiments.exp001"
         """Dotted path of the experiment factory that trained the checkpoint."""
 
-        checkpoint: Path = Path(
-            "/opt/scratch/datasets/craftax/world-model-oracle/v1/checkpoints/"
-            "exp001-s0/step_00001525.pt",
-        )
-        """A ``TrainLoop`` checkpoint of that experiment; the base model, seed 0."""
+        checkpoint: Path | None = None
+        """A ``TrainLoop`` checkpoint of that experiment, which the RL
+        experiment names from that run's config; required."""
 
         overrides: list[str] = field(default_factory=list[str])
         """``PATH=VALUE`` overrides the run was launched with."""
 
     def __init__(self, config: Config) -> None:
+        if config.checkpoint is None:
+            raise ValueError("TrainedWeights needs its experiment's checkpoint.")
         self.experiment = config.experiment
         self.checkpoint = config.checkpoint
         self.overrides = list(config.overrides)
