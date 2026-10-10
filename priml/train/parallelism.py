@@ -5,6 +5,9 @@ Each strategy applies the placement lifecycle in ``__call__``:
   1. Shard application -- ``fully_shard`` / ``replicate`` / per-block sharding.
   2. Placement -- :func:`place`, which materializes a meta module onto
      ``self.device`` or moves an already-allocated one there.
+  3. Communication buffers -- DDP's gradient buckets and FSDP's unshard
+     buffers, allocated now rather than on the first forward, which may run
+     under inference mode.
 
 Placement follows sharding, so each rank allocates and initializes its own
 shard through a DTensor-aware ``reset_parameters``. :func:`place` chooses
@@ -29,6 +32,7 @@ from torch.distributed._composable.fsdp import (
     fully_shard,
 )
 from torch.distributed._composable.replicate import replicate
+from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 from torch.nn.modules.batchnorm import _BatchNorm
 
@@ -126,6 +130,11 @@ class DataParallel:
             find_unused_parameters=self.find_unused_parameters,
             gradient_as_bucket_view=self.gradient_as_bucket_view,
         )
+        # Build DDP's gradient buckets now. replicate() defers them to the first
+        # forward, and they inherit that forward's autograd mode: when it runs
+        # under inference mode (the loop's warm eval), they become inference
+        # tensors and the first backward fails writing gradients into them.
+        replicate.state(model).lazy_init()
         logger.info(
             "Applied DataParallel: mesh_dim=%s, bucket_cap_mb=%s, gradient_as_bucket_view=%s",
             self.mesh_dim,
@@ -183,6 +192,7 @@ class FullySharded:
         # Placed AFTER sharding so each rank initializes only its local shard
         # with the correct (DTensor-aware) parameter init.
         model = place(model, self.device)
+        _allocate_unshard_buffers(model)
         logger.info(
             "Applied FullySharded: mesh_dim=%s, reshard_after_forward=%s",
             self.mesh_dim,
@@ -256,6 +266,7 @@ class HybridSharded:
             reshard_after_forward=self.reshard_after_forward,
         )
         model = place(model, self.device)
+        _allocate_unshard_buffers(model)
         logger.info(
             "Applied HybridSharded: replicate_dim=%s, shard_dim=%s, mesh_shape=%s",
             self.replicate_dim,
@@ -341,6 +352,7 @@ class RecursiveSharded:
         )
 
         model = place(model, self.device)
+        _allocate_unshard_buffers(model)
         logger.info(
             "Applied RecursiveSharded: sharded %s modules matching %s, mesh_dim=%s",
             matched_count,
@@ -550,3 +562,16 @@ def _shard(
         )
     else:
         fully_shard(module, mesh=mesh, reshard_after_forward=reshard_after_forward)
+
+
+# FSDP allocates the buffers it gathers each module's parameters into on that
+# module's first unshard, then reuses them for every later forward. When the first
+# unshard is a forward under inference mode (the loop's warm eval), the buffers are
+# inference tensors and the first training forward fails writing into them.
+# Gathering once here, before any forward, allocates them as ordinary tensors.
+def _allocate_unshard_buffers(model: nn.Module) -> None:
+    """Unshard and reshard every FSDP module once, one module at a time."""
+    for module in model.modules():
+        if isinstance(module, FSDPModule):
+            module.unshard()
+            module.reshard()

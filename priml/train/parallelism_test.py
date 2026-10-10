@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast, override
 
 import functools
@@ -67,6 +68,24 @@ class _FakeMesh:
     def size(self) -> int:
         """Ranks along this dimension."""
         return 1
+
+
+class _FakeReplicate:
+    """Composable ``replicate`` without a process group; records each use."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[nn.Module, dict[str, object]]] = []
+        self.initialized: list[nn.Module] = []
+
+    def __call__(self, module: nn.Module, **kwargs: object) -> nn.Module:
+        self.calls.append((module, kwargs))
+        return module
+
+    def state(self, module: nn.Module) -> SimpleNamespace:
+        """Return the module's state; its ``lazy_init`` records the module."""
+        return SimpleNamespace(
+            lazy_init=functools.partial(self.initialized.append, module),
+        )
 
 
 class SimpleModel(nn.Module):
@@ -144,12 +163,8 @@ def test_data_parallel_forwards_configuration_and_returns_placed_model(
 
     monkeypatch.setattr(parallelism, "global_device_mesh", lambda: mesh)
     monkeypatch.setattr(mesh, "get_group", get_group)
-    calls: list[tuple[nn.Module, dict[str, object]]] = []
-
-    def record(model: nn.Module, **kwargs: object) -> None:
-        calls.append((model, kwargs))
-
-    monkeypatch.setattr(parallelism, "replicate", record)
+    replicate = _FakeReplicate()
+    monkeypatch.setattr(parallelism, "replicate", replicate)
     model = SimpleModel()
     strategy = DataParallel.Config(
         mesh_dim="tp",
@@ -166,7 +181,7 @@ def test_data_parallel_forwards_configuration_and_returns_placed_model(
     assert strategy.bucket_cap_mb == 7
     assert strategy.find_unused_parameters is True
     assert strategy.gradient_as_bucket_view is True
-    assert calls == [
+    assert replicate.calls == [
         (
             model,
             {
@@ -177,6 +192,7 @@ def test_data_parallel_forwards_configuration_and_returns_placed_model(
             },
         ),
     ]
+    assert replicate.initialized == [model]
     assert result is model
     assert caplog.records[-1].message == (
         "Applied DataParallel: mesh_dim=tp, bucket_cap_mb=7, "
@@ -614,11 +630,6 @@ def test_distributed_strategies_place_an_eager_model(
     device and a batch on another.
     """
 
-    def replicate_in_place(model: nn.Module, **kwargs: object) -> nn.Module:
-        """Stand in for DDP's ``replicate``, which needs a process group."""
-        del kwargs
-        return model
-
     def ignore(
         module: nn.Module,
         mesh: DeviceMesh,
@@ -629,7 +640,7 @@ def test_distributed_strategies_place_an_eager_model(
         del module, mesh, mp_policy, reshard_after_forward
 
     monkeypatch.setattr(parallelism, "global_device_mesh", _FakeMesh)
-    monkeypatch.setattr(parallelism, "replicate", replicate_in_place)
+    monkeypatch.setattr(parallelism, "replicate", _FakeReplicate())
     monkeypatch.setattr(parallelism, "_shard", ignore)
     configs = (
         DataParallel.Config(),
@@ -776,6 +787,76 @@ def test_recursive_sharded_shards_batchnorm_multirank(
         pool(functools.partial(_bn_shard_worker, tmp))
         results = {p.name: p.read_text() for p in Path(tmp).iterdir() if p.is_file()}
     assert results == {"rank_0": "ok", "rank_1": "ok"}, results
+
+
+def _inference_then_train_worker(
+    result_dir: str,
+    config: Makeable[ParallelStrategyProtocol],
+    mesh: DeviceMesh,
+) -> None:
+    """Worker: apply the strategy, forward under inference mode, then backward."""
+    rank = mesh.get_rank()
+    try:
+        runtime._device_mesh = mesh
+        torch.manual_seed(0)
+        model = config.make()(_TwoLinear())
+        x = torch.full((2, 8), float(rank + 1))  # Ranks differ before the reduction.
+        with torch.inference_mode():
+            model(x)
+        cast(Tensor, model(x)).sum().backward()
+        grads = [_whole_grad(p) for p in model.parameters()]
+        outcome = repr([None if g is None else g.tolist() for g in grads])
+    except (RuntimeError, OSError, ValueError, TypeError, KeyError) as e:
+        outcome = f"FAIL:{e!r}"
+    finally:
+        runtime._device_mesh = None
+    (Path(result_dir) / f"rank_{rank}").write_text(outcome)
+
+
+def _whole_grad(param: Tensor) -> Tensor | None:
+    """Return ``param``'s gradient, gathering every rank's shard of a DTensor."""
+    grad = param.grad
+    return grad.full_tensor() if isinstance(grad, DTensor) else grad
+
+
+@pytest.mark.parametrize(
+    ("mesh_dims", "build"),
+    [
+        ({"dp": 2}, DataParallel.Config),
+        ({"dp": 2}, lambda: DataParallel.Config(gradient_as_bucket_view=True)),
+        ({"dp": 2}, FullySharded.Config),
+        ({"dp": 2}, lambda: RecursiveSharded.Config(module_types=(nn.Linear,))),
+        ({"dp": 1, "tp": 2}, HybridSharded.Config),
+    ],
+    ids=[
+        "data_parallel",
+        "data_parallel_bucket_view",
+        "fully_sharded",
+        "recursive_sharded",
+        "hybrid_sharded",
+    ],
+)
+@pytest.mark.compute_distributed
+def test_strategies_train_after_an_inference_forward(
+    warm_pools: WarmPoolGetter,
+    tmp_path: Path,
+    mesh_dims: dict[str, int],
+    build: Callable[[], Makeable[ParallelStrategyProtocol]],
+) -> None:
+    """The loop's warm eval is the first forward, under inference mode.
+
+    DDP allocates its gradient buckets on the first forward, and FSDP the
+    buffers it gathers parameters into. Allocated under inference mode, they
+    are inference tensors, and training fails writing into them.
+    """
+    pool = warm_pools(mesh_dims)
+    pool(functools.partial(_inference_then_train_worker, str(tmp_path), build()))
+    results = {p.name: p.read_text() for p in sorted(tmp_path.iterdir())}
+    failures = [f"{name}: {r}" for name, r in results.items() if r.startswith("FAIL")]
+    assert not failures, "\n".join(failures)
+    assert len(results) == math.prod(mesh_dims.values()), results
+    assert "None" not in results["rank_0"], "A parameter received no gradient."
+    assert len(set(results.values())) == 1, "Ranks disagree on the gradient."
 
 
 def test_tensor_parallel_lives_in_lib() -> None:
