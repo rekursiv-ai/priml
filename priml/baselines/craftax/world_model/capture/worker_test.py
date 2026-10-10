@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Final
 
 import shutil
 
+from treekle.codec import from_plain
+
 import pytest
 import torch
 
@@ -46,7 +48,6 @@ from priml.baselines.craftax.world_model.capture.worker import (
     shard_directory,
 )
 from priml.baselines.craftax.world_model.snapshots import replay_episodes
-from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:

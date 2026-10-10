@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import random
 
+from treekle.codec import from_plain
+
 from priml.data.pipeline.shuffle import ShuffleBuffer
-from priml.lib.codec import from_plain
 
 
 def test_shuffle_buffer():

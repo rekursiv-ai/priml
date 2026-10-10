@@ -34,8 +34,9 @@ import argparse
 import json
 import statistics
 
+from treekle.codec import from_plain, loads
+
 from priml.baselines.craftax.world_model.metric import MODALITIES
-from priml.lib.codec import from_plain, loads
 from priml.paths import validated_output_path
 
 

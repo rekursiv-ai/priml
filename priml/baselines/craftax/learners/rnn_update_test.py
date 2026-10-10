@@ -9,6 +9,7 @@ import io
 import math
 
 from configgle import PartialConfig
+from treekle.codec import from_plain
 
 import pytest
 import torch
@@ -41,7 +42,6 @@ from priml.baselines.craftax.train_step import (
     CraftaxTrainStep,
     LearnerRollout,
 )
-from priml.lib.codec import from_plain
 from priml.loss.policy_gradient import TorchPPO
 
 

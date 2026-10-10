@@ -7,6 +7,7 @@ from typing import cast
 from configgle import Makeable, traverse
 from configgle.cli_override import apply_overrides
 from configgle.launch import resolve_config
+from treekle.codec import from_plain
 
 import torch
 
@@ -14,7 +15,6 @@ from priml.baselines.craftax.world_model.model import WorldModel
 from priml.baselines.craftax.world_model.train_step import (
     WorldModelTrainStep,
 )
-from priml.lib.codec import from_plain
 from priml.model.attention.flash4 import Flash4Varlen
 from priml.model.attention.kernel import SdpaVarlen
 

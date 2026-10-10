@@ -10,6 +10,8 @@ import json
 import subprocess
 import tempfile
 
+from treekle.codec import ReadError, from_plain, loads
+
 import numpy as np
 import pytest
 
@@ -36,7 +38,6 @@ from priml.baselines.arcagi.scripts.build_dataset import (
     ensure_arc_dataset,
 )
 from priml.data.ensure import DataSpec, EnsureResult
-from priml.lib.codec import ReadError, from_plain, loads
 
 
 if TYPE_CHECKING:

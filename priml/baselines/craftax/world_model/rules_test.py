@@ -1,6 +1,7 @@
 """Check the legal-action rules on decoded frames, by hand and against the game."""
 
 from torch import Tensor
+from treekle.codec import from_plain
 
 import pytest
 import torch
@@ -8,7 +9,6 @@ import torch
 from priml.baselines.craftax.world_model.rules import legal_actions
 from priml.baselines.craftax.world_model.schema import craftax_schema
 from priml.baselines.craftax.world_model.testing import played_frames
-from priml.lib.codec import from_plain
 
 
 def frame(*, item: int = 1, **values: int) -> tuple[Tensor, Tensor]:

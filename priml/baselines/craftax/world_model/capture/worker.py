@@ -47,6 +47,7 @@ import logging
 import time
 
 from configgle import Fig, Makeable
+from treekle.codec import from_plain
 
 from priml.baselines.craftax.game import jit
 from priml.baselines.craftax.game.jit import package_digest
@@ -75,7 +76,6 @@ from priml.baselines.craftax.world_model.capture.source import (
     RandomSource,
     make_source,
 )
-from priml.lib.codec import from_plain
 from priml.paths import resolve_working_dir
 
 

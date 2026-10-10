@@ -6,6 +6,8 @@ from pathlib import Path
 import json
 import sys
 
+from treekle.codec import to_plain
+
 import pytest
 
 from priml.baselines.craftax.world_model.archive import (
@@ -24,7 +26,6 @@ from priml.baselines.craftax.world_model.capture.worker import (
     shard_directory,
 )
 from priml.baselines.craftax.world_model.scripts import freeze_corpus
-from priml.lib.codec import to_plain
 
 
 def test_each_arm_takes_the_fewest_whole_shards_of_its_own_for_its_share(

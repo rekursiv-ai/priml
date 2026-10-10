@@ -6,9 +6,10 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
+from treekle.codec import from_plain, loads
+
 import pytest
 
-from priml.lib.codec import from_plain, loads
 from priml.train import progress
 from priml.train.progress import write_progress
 

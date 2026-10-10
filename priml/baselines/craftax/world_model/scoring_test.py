@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
+from treekle.codec import from_plain
+
 import pytest
 import torch
 
@@ -21,7 +23,6 @@ from priml.baselines.craftax.world_model.scoring import (
     autocast,
     load_trained,
 )
-from priml.lib.codec import from_plain
 from priml.model.attention.flash4 import Flash4UnavailableError, Flash4Varlen
 from priml.model.attention.kernel import SdpaVarlen
 

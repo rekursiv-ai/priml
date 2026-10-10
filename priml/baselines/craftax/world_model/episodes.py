@@ -16,6 +16,7 @@ import dataclasses
 
 from torch import Tensor
 from torch.nn import functional
+from treekle.codec import PlainTree, from_plain
 
 import torch
 
@@ -26,7 +27,6 @@ from priml.baselines.craftax.world_model.dream import (
     invalid_cells,
 )
 from priml.baselines.craftax.world_model.schema import craftax_schema
-from priml.lib.codec import PlainTree, from_plain
 from priml.math.stats import total_variation
 
 

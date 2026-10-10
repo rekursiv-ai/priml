@@ -29,6 +29,8 @@ import fcntl
 import json
 import logging
 
+from treekle.codec import from_plain, loads
+
 from priml.baselines.arcagi.augmentation import (
     NO_TRAIN_SCALE_WEIGHTS,
     ArcAugmentation,
@@ -42,7 +44,6 @@ from priml.baselines.arcagi.scripts.build_dataset import (
     write_arc_tree,
 )
 from priml.data.distributed_build import run_rank_zero_build
-from priml.lib.codec import from_plain, loads
 
 
 if TYPE_CHECKING:

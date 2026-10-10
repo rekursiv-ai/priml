@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING, TypedDict, cast
 
 import math
 
-import numpy as np
+from treekle.codec import from_plain, loads
 
-from priml.lib.codec import from_plain, loads
+import numpy as np
 
 
 if TYPE_CHECKING:

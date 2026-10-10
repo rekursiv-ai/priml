@@ -32,6 +32,7 @@ import json
 import threading
 
 from configgle import Fig
+from treekle.codec import from_plain, loads
 
 from priml.baselines.craftax.world_model import replay
 from priml.baselines.craftax.world_model.archive import (
@@ -47,7 +48,6 @@ from priml.baselines.craftax.world_model.capture.seeds import TRAIN
 from priml.baselines.craftax.world_model.snapshots import (
     decode_snapshots,
 )
-from priml.lib.codec import from_plain, loads
 
 
 if TYPE_CHECKING:

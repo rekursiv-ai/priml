@@ -141,6 +141,7 @@ else:
     torch = lazy_import("torch")
 
 from configgle import Fig, Makeable
+from treekle.codec import from_plain
 
 from priml.baselines.nanochat import experiments
 from priml.baselines.nanochat.data import (
@@ -163,7 +164,6 @@ from priml.baselines.nanochat.scripts.prepare_tokenizer import (
     shard_path,
     write_mapping,
 )
-from priml.lib.codec import from_plain
 from priml.paths import validated_output_path
 from priml.train.checkpointer import Checkpointer
 from priml.train.tracker import FileTracker, TrackerList

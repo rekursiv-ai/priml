@@ -9,6 +9,8 @@ import functools
 import json
 import sys
 
+from treekle.codec import from_plain, loads
+
 import pytest
 
 from priml.baselines.craftax.world_model.metric import MODALITIES
@@ -24,11 +26,10 @@ from priml.baselines.craftax.world_model.scripts.fidelity_test import (
     validation_corpus,
 )
 from priml.baselines.craftax.world_model.testing import tiny_model
-from priml.lib.codec import from_plain, loads
 
 
 if TYPE_CHECKING:
-    from priml.lib.codec import PlainTree
+    from treekle.codec import PlainTree
 
 
 TARGETS = (2, 4)

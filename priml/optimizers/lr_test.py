@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from torch import nn
+from treekle.codec import ReadError
 
 import pytest
 import torch
 
-from priml.lib.codec import ReadError
 from priml.optimizers.lr import (
     apply_lr_scale,
     clip_grad_norm,

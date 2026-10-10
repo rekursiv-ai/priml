@@ -19,10 +19,10 @@ import re
 import zlib
 
 from torch import Tensor
+from treekle.codec import from_plain
 
 import torch
 
-from priml.lib.codec import from_plain
 from priml.testing import regenerate
 
 

@@ -2,6 +2,8 @@
 
 import math
 
+from treekle.codec import from_plain
+
 import pytest
 import torch
 
@@ -13,7 +15,6 @@ from priml.baselines.craftax.world_model.loss import (
     scalar_nll,
 )
 from priml.baselines.craftax.world_model.schema import craftax_schema
-from priml.lib.codec import from_plain
 
 
 def _restricted_nll(logits: torch.Tensor, allowed: list[int], target: int) -> float:

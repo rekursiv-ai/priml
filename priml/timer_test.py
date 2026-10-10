@@ -10,9 +10,10 @@ from __future__ import annotations
 import re
 import time
 
+from treekle.codec import ReadError
+
 import pytest
 
-from priml.lib.codec import ReadError
 from priml.timer import CheckpointableStepTimer
 
 

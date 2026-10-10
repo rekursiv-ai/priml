@@ -13,9 +13,9 @@ import threading
 import time
 
 from configgle import Fig, Makeable
+from treekle.codec import from_plain
 
 from priml.data.custom_types import Processor
-from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:

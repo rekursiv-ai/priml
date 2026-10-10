@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 import json
 import sys
 
+from treekle.codec import from_plain, loads
+
 import pytest
 import torch
 
@@ -34,7 +36,6 @@ from priml.baselines.craftax.world_model.capture.seeds import (
 from priml.baselines.craftax.world_model.capture.worker import (
     shard_directory,
 )
-from priml.lib.codec import from_plain, loads
 
 
 if TYPE_CHECKING:

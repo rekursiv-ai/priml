@@ -6,12 +6,12 @@ from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 from torch import Tensor
+from treekle.codec import ReadError
 
 import pytest
 import torch
 import torch.distributed as dist
 
-from priml.lib.codec import ReadError
 from priml.optimizers.sign_sgd import (
     SignSGD,
     _is_distributed,

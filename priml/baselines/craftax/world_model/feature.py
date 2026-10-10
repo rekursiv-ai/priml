@@ -71,6 +71,7 @@ import importlib
 from configgle import Fig, Makeable
 from torch import Tensor
 from torch.nn import functional
+from treekle.codec import from_plain
 
 import torch
 
@@ -95,7 +96,6 @@ from priml.baselines.craftax.world_model.model import (
     GlobalTransformer,
     WorldModel,
 )
-from priml.lib.codec import from_plain
 from priml.model.attention.attention import Attention, AttentionProjections
 from priml.model.attention.flash4 import Flash4Varlen
 from priml.model.attention.kernel import SdpaFused, SdpaVarlen

@@ -18,6 +18,8 @@ import gzip
 import hashlib
 import json
 
+from treekle.codec import from_plain, loads
+
 import numpy as np
 import pytest
 import torch
@@ -73,7 +75,6 @@ from priml.baselines.craftax.lib.arrays import ints
 from priml.baselines.craftax.world_model import replay
 from priml.baselines.craftax.world_model.archive import Episode, Receipt, Record
 from priml.baselines.craftax.world_model.capture.seeds import splitmix64
-from priml.lib.codec import from_plain, loads
 
 
 if TYPE_CHECKING:

@@ -52,6 +52,7 @@ import time
 
 from configgle import Fig, Makeable, PartialConfig
 from torch import Tensor
+from treekle.codec import from_plain
 
 import numpy as np
 import torch
@@ -85,7 +86,6 @@ from priml.baselines.craftax.world_model.feature import (
     TrainedWeights,
     WorldModelFeature,
 )
-from priml.lib.codec import from_plain
 from priml.loss.policy_gradient import PPO, TorchPPO
 from priml.loss.policy_gradient_kernel import TritonPPO
 from priml.math.schedules import Schedule, cosine

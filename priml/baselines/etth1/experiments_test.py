@@ -6,6 +6,7 @@ from typing import cast
 import copy
 
 from torch import Tensor
+from treekle.codec import from_plain, loads
 
 import pytest
 import torch
@@ -14,7 +15,6 @@ from priml.baselines.etth1.checkpointer import Etth1Checkpointer
 from priml.baselines.etth1.data_test import fixture_config
 from priml.baselines.etth1.experiments import dlinear_type1, exp000, exp_smoke
 from priml.baselines.etth1.train_step import Etth1TrainLoop, Etth1TrainStep
-from priml.lib.codec import from_plain, loads
 from priml.testing.golden import assert_pprint_golden, mismatches
 
 

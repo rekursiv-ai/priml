@@ -15,6 +15,8 @@ import hashlib
 import sys
 import zlib
 
+from treekle.codec import from_plain, loads
+
 import numpy as np
 import pytest
 import torch
@@ -69,7 +71,6 @@ from priml.baselines.craftax.world_model.capture.seeds import (
 from priml.baselines.craftax.world_model.capture.worker import (
     shard_directory,
 )
-from priml.lib.codec import from_plain, loads
 
 
 if TYPE_CHECKING:

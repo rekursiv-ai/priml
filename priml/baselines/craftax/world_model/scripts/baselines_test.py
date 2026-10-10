@@ -12,6 +12,8 @@ from typing import Self, cast
 import dataclasses
 import sys
 
+from treekle.codec import PlainTree, from_plain, loads
+
 import pytest
 import torch
 
@@ -19,7 +21,6 @@ from priml.baselines.craftax.world_model.batch import PackedBatch
 from priml.baselines.craftax.world_model.experiments import WorldModelLoop
 from priml.baselines.craftax.world_model.model import WorldModel
 from priml.baselines.craftax.world_model.scripts import baselines
-from priml.lib.codec import PlainTree, from_plain, loads
 
 
 _MODEL = cast("WorldModel", object())

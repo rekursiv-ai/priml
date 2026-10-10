@@ -33,6 +33,8 @@ import argparse
 import dataclasses
 import json
 
+from treekle.codec import from_plain
+
 from priml.baselines.craftax.game.state import (
     NUM_LEVELS,
     Achievement,
@@ -44,7 +46,6 @@ from priml.baselines.craftax.world_model.archive import (
     read_records,
     read_summaries,
 )
-from priml.lib.codec import from_plain
 from priml.paths import validated_output_path
 
 

@@ -42,6 +42,7 @@ import time
 import zlib
 
 from configgle import Fig
+from treekle.codec import from_plain, loads, to_plain
 
 from priml.baselines.craftax.world_model import replay
 from priml.baselines.craftax.world_model.archive import (
@@ -63,7 +64,6 @@ from priml.baselines.craftax.world_model.capture.control import (
 from priml.baselines.craftax.world_model.snapshots import (
     verify_snapshots,
 )
-from priml.lib.codec import from_plain, loads, to_plain
 from priml.paths import resolve_working_dir
 
 

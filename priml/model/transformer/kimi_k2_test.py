@@ -12,13 +12,13 @@ import sys
 import warnings
 
 from torch import Tensor
+from treekle.absent import ABSENT
+from treekle.codec import from_plain
 
 import pytest
 import torch
 
 from priml import hub
-from priml.lib.absent import ABSENT
-from priml.lib.codec import from_plain
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.embedding import Embedding

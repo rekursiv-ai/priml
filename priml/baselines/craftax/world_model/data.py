@@ -50,6 +50,7 @@ import threading
 from configgle import Fig
 from torch import Tensor
 from torch.nn import functional
+from treekle.codec import from_plain
 
 import numpy as np
 import torch
@@ -77,7 +78,6 @@ from priml.baselines.craftax.world_model.snapshots import (
     ReplayCache,
     replay_episodes,
 )
-from priml.lib.codec import from_plain
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
 from priml.timer import CheckpointableStepTimer

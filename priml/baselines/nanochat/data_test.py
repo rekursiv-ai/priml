@@ -32,6 +32,7 @@ import re
 import threading
 
 from pyarrow import parquet
+from treekle.codec import ReadError, from_plain, loads
 
 import numpy as np
 import pyarrow as pa
@@ -46,7 +47,6 @@ from priml.baselines.nanochat.data import (
     Tokenizer,
     token_bytes_fingerprint,
 )
-from priml.lib.codec import ReadError, from_plain, loads
 from priml.metrics.bits_per_byte import BitsPerByte
 
 

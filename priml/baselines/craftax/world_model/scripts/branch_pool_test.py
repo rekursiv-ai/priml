@@ -5,6 +5,8 @@ from pathlib import Path
 import collections
 import sys
 
+from treekle.codec import loads
+
 import pytest
 import torch
 
@@ -20,7 +22,6 @@ from priml.baselines.craftax.world_model.capture.branches import (
     read_pool,
 )
 from priml.baselines.craftax.world_model.scripts import branch_pool
-from priml.lib.codec import loads
 
 
 def _corpus(root: Path) -> Path:

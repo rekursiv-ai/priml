@@ -28,13 +28,14 @@ from typing import cast
 import dataclasses
 import functools
 
+from treekle.codec import from_plain
+
 import torch
 
 from priml.baselines.craftax.world_model.schema import (
     craftax_schema,
     number_id,
 )
-from priml.lib.codec import from_plain
 
 
 def encode(obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

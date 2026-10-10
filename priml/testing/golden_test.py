@@ -11,11 +11,11 @@ import textwrap
 import zlib
 
 from configgle.fig import Fig, Maker
+from treekle.codec import ReadError
 
 import pytest
 import torch
 
-from priml.lib.codec import ReadError
 from priml.testing import golden, regenerate
 from priml.testing.golden import (
     assert_pprint_golden,

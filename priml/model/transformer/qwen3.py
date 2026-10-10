@@ -36,11 +36,11 @@ import math
 
 from configgle import Makeable, Makes
 from torch import Tensor, nn
+from treekle.codec import from_plain
 
 import torch
 
 from priml import hub
-from priml.lib.codec import from_plain
 from priml.model.attention.attention import Attention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.custom_types import (

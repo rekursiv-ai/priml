@@ -6,6 +6,8 @@ from typing import ClassVar, cast
 
 import sys
 
+from treekle.codec import from_plain, loads
+
 import pytest
 import torch
 
@@ -32,7 +34,6 @@ from priml.baselines.craftax.world_model.testing import (
     small_schema,
     tiny_model,
 )
-from priml.lib.codec import from_plain, loads
 
 
 def test_sample_real_draws_only_the_split_and_arms_asked_for(tmp_path: Path) -> None:

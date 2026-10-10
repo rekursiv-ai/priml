@@ -7,10 +7,9 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 import math
 
 from torch import Tensor, nn
+from treekle.codec import from_plain
 
 import torch
-
-from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:

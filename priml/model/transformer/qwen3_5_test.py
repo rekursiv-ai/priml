@@ -10,11 +10,11 @@ import json
 import re
 
 from configgle import Fig
+from treekle.codec import ReadError
 
 import pytest
 import torch
 
-from priml.lib.codec import ReadError
 from priml.model.attention.attention import Attention
 from priml.model.attention.gated_attention import GatedAttention
 from priml.model.attention.kernel import SdpaNaive

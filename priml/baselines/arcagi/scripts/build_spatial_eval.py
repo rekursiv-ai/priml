@@ -21,6 +21,8 @@ import logging
 import shutil
 import tempfile
 
+from treekle.codec import from_plain, loads
+
 import numpy as np
 
 from priml.baselines.arcagi.augmentation import ArcSpec, normalize_scale_weights
@@ -31,7 +33,6 @@ from priml.baselines.arcagi.scripts.build_dataset import (
 )
 from priml.data.distributed_build import run_rank_zero_build
 from priml.data.ensure import DataSpec, EnsureResult, FileSpec, ensure_data
-from priml.lib.codec import from_plain, loads
 from priml.paths import validated_output_path
 
 

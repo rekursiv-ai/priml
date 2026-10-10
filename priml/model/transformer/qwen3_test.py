@@ -13,12 +13,12 @@ import re
 import sys
 
 from torch import Tensor
+from treekle.codec import ReadError, from_plain
 
 import pytest
 import torch
 
 from priml import hub
-from priml.lib.codec import ReadError, from_plain
 from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.rope import (

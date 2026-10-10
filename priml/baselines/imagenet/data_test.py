@@ -10,6 +10,7 @@ import io
 from configgle import Fig
 from PIL import Image
 from torch import Tensor
+from treekle.codec import from_plain
 
 import pytest
 import torch
@@ -45,7 +46,6 @@ from priml.data.processors.fields import FieldRenameKeys
 from priml.data.processors.labels import ImagenetSynsetToIndex
 from priml.data.processors.resize import Interpolate
 from priml.data.sources.extracted_imagenet import ExtractedImageNetSource
-from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:

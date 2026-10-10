@@ -10,6 +10,7 @@ import json
 import logging
 
 from torch import Tensor
+from treekle.codec import from_plain, loads
 
 import numpy as np
 import pytest
@@ -42,7 +43,6 @@ from priml.baselines.arcagi.metric import (
 from priml.baselines.arcagi.signal_dump import (
     SignalDumpPayload,
 )
-from priml.lib.codec import from_plain, loads
 
 
 _CWD: Final = Path(__file__).resolve().parent

@@ -2,6 +2,8 @@
 
 import dataclasses
 
+from treekle.codec import from_plain
+
 import pytest
 import torch
 
@@ -16,7 +18,6 @@ from priml.baselines.craftax.world_model.episodes import (
     summarize,
 )
 from priml.baselines.craftax.world_model.schema import craftax_schema
-from priml.lib.codec import from_plain
 
 
 def _rollout(done: list[list[bool]]) -> Rollout:

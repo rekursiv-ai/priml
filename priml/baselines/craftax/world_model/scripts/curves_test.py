@@ -7,10 +7,11 @@ from pathlib import Path
 import math
 import sys
 
+from treekle.codec import PlainTree, from_plain, loads
+
 import pytest
 
 from priml.baselines.craftax.world_model.scripts import curves
-from priml.lib.codec import PlainTree, from_plain, loads
 
 
 def test_update_objectives_invert_the_debiased_ema() -> None:

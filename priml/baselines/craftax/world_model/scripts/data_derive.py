@@ -44,6 +44,8 @@ import argparse
 import dataclasses
 import hashlib
 
+from treekle.codec import from_plain
+
 import numpy as np
 import torch
 
@@ -69,7 +71,6 @@ from priml.baselines.craftax.world_model.scripts.data_stats import (
     discover,
 )
 from priml.baselines.craftax.world_model.snapshots import replay_episodes
-from priml.lib.codec import from_plain
 
 
 type _Pick = tuple[tuple[Path, ManifestLine], EpisodeSummary]

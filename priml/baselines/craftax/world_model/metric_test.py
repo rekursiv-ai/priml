@@ -9,6 +9,7 @@ import copy
 import math
 
 from configgle import Fig
+from treekle.codec import from_plain
 
 import pytest
 import torch
@@ -40,7 +41,6 @@ from priml.baselines.craftax.world_model.model import (
 from priml.baselines.craftax.world_model.schema import FrameSchema, craftax_schema
 from priml.baselines.craftax.world_model.testing import small_schema, tiny_model
 from priml.lib import zstd_compat
-from priml.lib.codec import from_plain
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.transformer import Transformer

@@ -22,6 +22,7 @@ import gzip
 import hashlib
 
 from torch import Tensor
+from treekle.codec import from_plain
 
 import numpy as np
 import torch
@@ -37,7 +38,6 @@ from priml.baselines.craftax.world_model.viewer.exact import (
     frame_dtype,
     manifest_json,
 )
-from priml.lib.codec import from_plain
 from priml.paths import validated_output_path
 
 

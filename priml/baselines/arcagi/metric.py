@@ -38,6 +38,7 @@ import struct
 
 from configgle import Fig, Makeable
 from torch import Tensor
+from treekle.codec import from_plain, loads
 
 import numpy as np
 import torch
@@ -56,7 +57,6 @@ from priml.baselines.arcagi.signal_dump import (
     SignalRow,
     StepRow,
 )
-from priml.lib.codec import from_plain, loads
 from priml.paths import resolve_working_dir
 from priml.runtime import is_rank_zero
 

@@ -17,6 +17,7 @@ import time
 from configgle import Fig
 from tokenizers import Tokenizer, pre_tokenizers
 from torch import Tensor
+from treekle.codec import from_plain, loads
 
 import numpy as np
 import pytest
@@ -26,7 +27,6 @@ from priml.baselines.convextok.export import export_tokenizer
 from priml.baselines.convextok.measure import MAXRSS_UNIT_BYTES, MeasuredFit
 from priml.baselines.convextok.prepare_test import fixture_config
 from priml.baselines.convextok.program import LinearProgram
-from priml.lib.codec import from_plain, loads
 
 
 _CWD: Final = Path(__file__).resolve().parent

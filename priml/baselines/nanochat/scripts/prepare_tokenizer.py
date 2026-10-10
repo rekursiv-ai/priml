@@ -15,12 +15,12 @@ import tempfile
 
 from configgle import Fig
 from tokenizers import decoders, models, pre_tokenizers
+from treekle.codec import PlainTree, from_plain, loads
 
 import rustbpe
 import tokenizers
 
 from priml.baselines.nanochat.data import DEFAULT_ENCODE_THREADS
-from priml.lib.codec import PlainTree, from_plain, loads
 from priml.paths import validated_output_path
 
 

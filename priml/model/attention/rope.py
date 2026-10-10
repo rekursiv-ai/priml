@@ -21,6 +21,7 @@ import math
 
 from configgle import Fig, Makeable, Makes
 from torch import Tensor, nn
+from treekle.codec import from_plain
 
 import torch
 
@@ -32,7 +33,6 @@ from priml.cost import (
     resolve_dtype,
     traffic,
 )
-from priml.lib.codec import from_plain
 from priml.math.basic import broadcast_sequences
 
 

@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
 from configgle import InlineConfig
+from treekle.absent import ABSENT
 
 from priml.baselines.cifar10 import experiments
 from priml.baselines.cifar10.data import Cifar10Data
@@ -40,7 +41,6 @@ from priml.baselines.cifar10.experiments import (
 )
 from priml.baselines.cifar10.model import ConvBlock, ResNet, SpeedNet
 from priml.baselines.cifar10.train_step import Cifar10TrainStep
-from priml.lib.absent import ABSENT
 from priml.metrics.topk import TopK
 from priml.optimizers import CompositeOptimizer
 from priml.runtime import SingleProcess

@@ -12,11 +12,11 @@ from typing import Final, cast
 import json
 
 from tokenizers import pre_tokenizers
+from treekle.codec import from_plain
 
 import pytest
 
 from priml.baselines.convextok.export import export_tokenizer
-from priml.lib.codec import from_plain
 
 
 _CWD: Final = Path(__file__).resolve().parent

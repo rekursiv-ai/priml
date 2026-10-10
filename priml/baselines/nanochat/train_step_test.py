@@ -9,6 +9,7 @@ import math
 
 from configgle import PartialConfig
 from torch import Tensor, nn
+from treekle.codec import from_plain
 
 import pytest
 import torch
@@ -30,7 +31,6 @@ from priml.baselines.nanochat.train_step import (
     matrix_parameters,
     nanochat_optimizer,
 )
-from priml.lib.codec import from_plain
 from priml.math.schedules import trapezoidal
 from priml.model.attention.value_gated_attention import (
     ValueGatedAttention,

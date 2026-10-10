@@ -6,11 +6,11 @@ from collections.abc import Callable
 from typing import Final, cast
 
 from torch import Tensor
+from treekle.codec import ReadError
 
 import pytest
 import torch
 
-from priml.lib.codec import ReadError
 from priml.optimizers import normuon
 from priml.optimizers.normuon import NorMuon
 

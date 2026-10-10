@@ -10,13 +10,13 @@ import logging
 
 from torch import Tensor
 from torchvision import datasets
+from treekle.codec import from_plain
 
 import numpy as np
 import pytest
 import torch
 
 from priml.baselines.cifar10.data import Cifar10Data, _load_split, prepare
-from priml.lib.codec import from_plain
 from priml.math.pixel import rgb2float
 
 

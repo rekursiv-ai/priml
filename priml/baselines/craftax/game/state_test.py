@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+from treekle.codec import loads
+
 import numpy as np
 import pytest
 
@@ -44,7 +46,6 @@ from priml.baselines.craftax.game.state import (
     new_stats,
     semantic_bytes,
 )
-from priml.lib.codec import loads
 
 
 if TYPE_CHECKING:

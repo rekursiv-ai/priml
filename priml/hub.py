@@ -13,10 +13,10 @@ import logging
 import os
 
 from torch import Tensor, nn
+from treekle.codec import from_plain, loads
 
 import torch
 
-from priml.lib.codec import from_plain, loads
 from priml.lib.userdirs import cache_dir
 
 

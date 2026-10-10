@@ -17,11 +17,11 @@ import logging
 import re
 
 from configgle import Fig
+from treekle.codec import from_plain
 
 import numpy as np
 
 from priml.baselines.arcagi.augmentation import ArcSpec
-from priml.lib.codec import from_plain
 from priml.paths import resolve_working_dir
 from priml.runtime import is_rank_zero
 

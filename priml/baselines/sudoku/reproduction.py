@@ -18,6 +18,7 @@ import time
 from configgle import DataclassLike, Fig, Makeable
 from torch import Tensor
 from torch._inductor import config as inductor_config
+from treekle.codec import ReadError, from_plain, loads
 
 import torch
 
@@ -36,7 +37,6 @@ from priml.baselines.sudoku.sieve import SieveEval, det_pass
 from priml.baselines.sudoku.trainer import Trainer, resolve_run_dir
 from priml.baselines.sudoku.verifier import CommitteeLock, VerifierAcceptor
 from priml.baselines.sudoku.verifier_fit import VerifierFit
-from priml.lib.codec import ReadError, from_plain, loads
 from priml.paths import resolve_working_dir
 from priml.runtime import SingleProcess
 from priml.train.tracker import WandbTracker

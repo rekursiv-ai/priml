@@ -46,6 +46,7 @@ import socket
 import time
 
 from torch import Tensor
+from treekle.codec import PlainTree, from_plain
 
 import torch
 
@@ -92,7 +93,6 @@ from priml.baselines.craftax.world_model.viewer.bundle import (
     stream_of,
     write_bundle,
 )
-from priml.lib.codec import PlainTree, from_plain
 from priml.math.stats import holm, total_variation
 from priml.paths import validated_output_path
 

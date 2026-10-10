@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, TypedDict, cast
 
 from torch import Tensor
+from treekle.codec import ReadError
 
 import pytest
 import torch
 
-from priml.lib.codec import ReadError
 from priml.optimizers.adam_atan2 import AdamATan2
 
 

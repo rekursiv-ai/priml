@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, cast
 import inspect
 import json
 
+from treekle.codec import from_plain, loads
+
 import numpy as np
 import pytest
 
@@ -19,7 +21,6 @@ from priml.baselines.arcagi.scripts.build_arc2_dataset import (
     ensure_arc2_dataset,
 )
 from priml.baselines.arcagi.scripts.build_dataset import arc_manifest
-from priml.lib.codec import from_plain, loads
 
 
 if TYPE_CHECKING:

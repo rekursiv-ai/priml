@@ -22,6 +22,7 @@ import time
 from configgle import Fig, Makeable, Makes, PartialConfig
 from torch import Tensor, nn
 from torch.nn import functional
+from treekle.codec import from_plain
 
 import torch
 import torch.distributed as dist
@@ -32,7 +33,6 @@ from priml.baselines.nanochat.model import (
     ScaledSoftCap,
 )
 from priml.baselines.nanochat.optimizers import BiasCorrectedRMSProp
-from priml.lib.codec import from_plain
 from priml.loss.custom_types import LossOutput
 from priml.math.schedules import Schedule, trapezoidal
 from priml.model.softcap import SoftCap

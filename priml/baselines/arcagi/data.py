@@ -55,6 +55,7 @@ import logging
 
 from configgle import Fig
 from torch import Tensor
+from treekle.codec import from_plain, loads
 
 import numpy as np
 import torch
@@ -62,7 +63,6 @@ import torch.distributed as dist
 
 from priml.baselines.arcagi.augmentation import ArcAugmentation, ArcSpec
 from priml.baselines.arcagi.scripts.build_dataset import ensure_arc_dataset
-from priml.lib.codec import from_plain, loads
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
 from priml.timer import CheckpointableStepTimer

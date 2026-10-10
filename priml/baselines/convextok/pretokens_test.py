@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Final, Self, cast
 
 import json
 
+from treekle.codec import from_plain
+
 import pytest
 
 from priml.baselines.convextok import pretokens
@@ -21,7 +23,6 @@ from priml.baselines.convextok.pretokens import (
     count_pretokens,
     merge_counts,
 )
-from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:

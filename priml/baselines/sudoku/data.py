@@ -36,13 +36,13 @@ import math
 from configgle import Fig
 from numpy.typing import NDArray
 from torch import Tensor
+from treekle.codec import from_plain, loads
 
 import numpy as np
 import torch
 
 from priml.baselines.arcagi.augmentation import ColorDihedral
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
-from priml.lib.codec import from_plain, loads
 from priml.math.basic import ceil_div
 from priml.math.seed import salt
 from priml.paths import resolve_working_dir

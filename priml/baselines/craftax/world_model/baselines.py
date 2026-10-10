@@ -14,6 +14,7 @@ from collections.abc import Sequence
 
 from torch import Tensor
 from torch.nn import functional
+from treekle.codec import PlainTree
 
 import torch
 
@@ -22,7 +23,6 @@ from priml.baselines.craftax.world_model.model import (
     WorldModel,
     WorldModelLogits,
 )
-from priml.lib.codec import PlainTree
 
 
 @torch.no_grad()

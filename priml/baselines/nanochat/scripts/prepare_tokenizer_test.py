@@ -13,6 +13,7 @@ import tempfile
 
 from pyarrow import Table, parquet
 from tokenizers import AddedToken, Tokenizer, normalizers, processors
+from treekle.codec import PlainTree, ReadError
 
 import numpy as np
 import pytest
@@ -34,7 +35,6 @@ from priml.baselines.nanochat.scripts.prepare_tokenizer import (
     usage_scores,
     write_mapping,
 )
-from priml.lib.codec import PlainTree, ReadError
 
 
 def test_mapping_stages_in_destination_directory(

@@ -4,6 +4,8 @@ from pathlib import Path
 
 import sys
 
+from treekle.codec import from_plain, loads
+
 import pytest
 import torch
 
@@ -29,7 +31,6 @@ from priml.baselines.craftax.world_model.scripts import coverage_report
 from priml.baselines.craftax.world_model.snapshots_test import (
     replay_twin,
 )
-from priml.lib.codec import from_plain, loads
 
 
 def _episode(floors: list[int], *, split: int, world_seed: int = 1) -> Episode:

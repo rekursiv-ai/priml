@@ -4,11 +4,12 @@ from pathlib import Path
 
 import logging
 
+from treekle.codec import from_plain
+
 import pytest
 import torch
 
 from priml import hub
-from priml.lib.codec import from_plain
 from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.transformer.block import TransformerBlock

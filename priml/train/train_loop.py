@@ -33,13 +33,13 @@ import time
 
 from configgle import Fig, Makeable, traverse
 from torch import Tensor
+from treekle.codec import from_plain
 
 import torch
 import torch.distributed as dist
 
 from priml.data.custom_types import DatasetProtocol
 from priml.data.dummy import DummyDataset
-from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:

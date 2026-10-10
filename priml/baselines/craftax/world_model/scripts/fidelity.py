@@ -63,6 +63,7 @@ import time
 
 from torch import Tensor
 from torch.nn import functional
+from treekle.codec import PlainTree, ReadError, from_plain, to_plain
 
 import torch
 
@@ -110,7 +111,6 @@ from priml.baselines.craftax.world_model.scripts.dream_eval import (
     sampling_engine,
     truncate,
 )
-from priml.lib.codec import PlainTree, ReadError, from_plain, to_plain
 from priml.paths import validated_output_path
 from priml.train.tracker import WandbTracker
 

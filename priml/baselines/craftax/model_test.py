@@ -19,6 +19,7 @@ from typing import (
 
 from torch import Tensor, nn
 from torch.nn import functional
+from treekle.codec import from_plain
 
 import numpy as np
 import pytest
@@ -56,7 +57,6 @@ from priml.baselines.craftax.testing import (
     tiny_exp000_step,
     tiny_policy,
 )
-from priml.lib.codec import from_plain
 from priml.model.embedding import MultiHotEmbedding
 from priml.model.linear import Linear
 from priml.testing.bfb import (

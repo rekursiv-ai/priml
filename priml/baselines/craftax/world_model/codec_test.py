@@ -8,6 +8,7 @@ import math
 import struct
 
 from torch.utils._python_dispatch import TorchDispatchMode
+from treekle.codec import from_plain
 
 import pytest
 import torch
@@ -23,7 +24,6 @@ from priml.baselines.craftax.world_model.schema import (
     number_id,
 )
 from priml.baselines.craftax.world_model.testing import played_frames
-from priml.lib.codec import from_plain
 
 
 SQRT_FIELDS = frozenset(

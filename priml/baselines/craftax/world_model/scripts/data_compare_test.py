@@ -5,10 +5,11 @@ from pathlib import Path
 import json
 import sys
 
+from treekle.codec import PlainTree, from_plain, loads
+
 import pytest
 
 from priml.baselines.craftax.world_model.scripts import data_compare
-from priml.lib.codec import PlainTree, from_plain, loads
 
 
 def test_headline_reads_totals_arms_modalities_and_the_reweighted_mix() -> None:

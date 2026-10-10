@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Final
 
 import dataclasses
 
+from treekle.codec import from_plain
+
 import numpy as np
 import pytest
 import torch
@@ -47,7 +49,6 @@ from priml.baselines.craftax.world_model.index import (
     FLOOR_AUX,
     floor_trace,
 )
-from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:

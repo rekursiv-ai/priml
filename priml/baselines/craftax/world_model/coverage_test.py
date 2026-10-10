@@ -7,6 +7,8 @@ from typing import cast
 import dataclasses
 import json
 
+from treekle.codec import from_plain, loads
+
 import pytest
 import torch
 
@@ -29,7 +31,6 @@ from priml.baselines.craftax.world_model.index_test import inline_pools
 from priml.baselines.craftax.world_model.snapshots_test import (
     replay_twin,
 )
-from priml.lib.codec import from_plain, loads
 
 
 def _episode(

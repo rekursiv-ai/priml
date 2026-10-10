@@ -35,10 +35,10 @@ if TYPE_CHECKING:
     from priml.train.custom_types import TrackerProtocol, TrainStepOutput
 
 from configgle import Fig, InlineConfig, Makeable, Makes, PartialConfig
+from treekle.codec import from_plain
 
 from priml.cost import Cost, matmul_cost
 from priml.data.dummy import DummyDataset
-from priml.lib.codec import from_plain
 from priml.math.seed import RngState, get_rng_state, salt
 from priml.metrics.binary_accuracy import BinaryAccuracy
 from priml.metrics.topk import TopK

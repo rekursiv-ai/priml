@@ -26,11 +26,11 @@ from configgle import Fig
 from numpy.lib.npyio import NpzFile
 from numpy.typing import NDArray
 from torch import Tensor
+from treekle.codec import from_plain, loads
 
 import numpy as np
 import torch
 
-from priml.lib.codec import from_plain, loads
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
 from priml.timer import CheckpointableStepTimer

@@ -11,6 +11,7 @@ import hashlib
 import re
 
 from PIL import Image
+from treekle.codec import from_plain, loads
 
 import numpy as np
 import pytest
@@ -19,7 +20,6 @@ import torch
 from priml.baselines.speedrundit.data import PairedImageLatentDataset
 from priml.baselines.speedrundit.scripts import prepare_data
 from priml.data.sources.extracted_imagenet import ExtractedImageNetSource
-from priml.lib.codec import from_plain, loads
 
 
 if TYPE_CHECKING:

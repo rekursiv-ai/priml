@@ -38,6 +38,7 @@ import json
 import time
 
 from torch import Tensor
+from treekle.codec import PlainTree, from_plain
 
 import torch
 
@@ -65,7 +66,6 @@ from priml.baselines.craftax.world_model.scripts.data_stats import (
     frame_ids,
     repeats,
 )
-from priml.lib.codec import PlainTree, from_plain
 from priml.paths import validated_output_path
 
 

@@ -18,11 +18,10 @@ from typing import TYPE_CHECKING, TypedDict, cast
 
 from configgle import Fig
 from torch import Tensor
+from treekle.codec import from_plain
 
 import torch
 import torch.distributed as dist
-
-from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:

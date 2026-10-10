@@ -56,6 +56,8 @@ import subprocess
 import sys
 import time
 
+from treekle.codec import from_plain, loads, to_plain
+
 import torch
 
 from priml.baselines.craftax.world_model.experiments import (
@@ -78,7 +80,6 @@ from priml.baselines.craftax.world_model.scripts import (
     curves,
     data_eval,
 )
-from priml.lib.codec import from_plain, loads, to_plain
 from priml.paths import validated_output_path
 
 

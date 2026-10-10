@@ -43,6 +43,7 @@ from numpy.typing import NDArray
 from pyarrow import Table, parquet
 from tokenizers import decoders, models, normalizers, pre_tokenizers, processors
 from torch import Tensor
+from treekle.codec import ReadError, from_plain, loads
 
 import numpy as np
 import pyarrow as pa
@@ -97,7 +98,6 @@ from priml.baselines.nanochat.scripts.prepare_tokenizer import (
     UnigramPreparation,
     byte_alphabet,
 )
-from priml.lib.codec import ReadError, from_plain, loads
 from priml.paths import validated_output_path
 from priml.train.checkpointer import Checkpointer
 from priml.train.tracker import TrackerList

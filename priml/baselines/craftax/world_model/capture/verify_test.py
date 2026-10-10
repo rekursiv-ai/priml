@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING
 import copy
 import dataclasses
 
+from treekle.codec import from_plain, loads
+
 import pytest
 import torch
 
@@ -54,7 +56,6 @@ from priml.baselines.craftax.world_model.snapshots import (
     verify_snapshots,
 )
 from priml.lib import zstd_compat
-from priml.lib.codec import from_plain, loads
 
 
 if TYPE_CHECKING:

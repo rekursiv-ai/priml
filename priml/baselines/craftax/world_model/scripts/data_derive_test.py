@@ -6,6 +6,8 @@ from pathlib import Path
 import dataclasses
 import sys
 
+from treekle.codec import from_plain
+
 import pytest
 import torch
 
@@ -37,7 +39,6 @@ from priml.baselines.craftax.world_model.scripts import data_derive
 from priml.baselines.craftax.world_model.snapshots_test import (
     replay_twin,
 )
-from priml.lib.codec import from_plain
 
 
 def test_each_arm_takes_its_share_of_whole_episodes_from_every_shard(

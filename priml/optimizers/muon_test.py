@@ -10,12 +10,12 @@ import tempfile
 
 from torch import Tensor, nn
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor
+from treekle.codec import ReadError
 
 import pytest
 import torch
 
 from priml import runtime
-from priml.lib.codec import ReadError
 from priml.optimizers import lr_scale
 from priml.optimizers.muon import (
     Muon,

@@ -41,6 +41,7 @@ import time
 
 from configgle import Fig, Makeable, Makes, PartialConfig
 from torch import Tensor
+from treekle.codec import from_plain
 
 import numpy as np
 import torch
@@ -69,7 +70,6 @@ from priml.baselines.craftax.rollout import (
     Sampler,
 )
 from priml.baselines.craftax.train_step import ProgressSchedule, RateSchedule
-from priml.lib.codec import from_plain
 from priml.math.advantage import explained_variance, q_lambda_targets
 from priml.math.schedules import linear
 from priml.optimizers.lr import remember_initial_lrs

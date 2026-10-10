@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Final, cast
 
 import hashlib
 
+from treekle.codec import from_plain, loads
+
 import numpy as np
 import pytest
 
@@ -23,7 +25,6 @@ from priml.baselines.maze.data import (
     tokenize,
 )
 from priml.baselines.maze.scripts import prepare_data
-from priml.lib.codec import from_plain, loads
 from priml.lib.testing.cli import assert_help_without_docstring
 
 

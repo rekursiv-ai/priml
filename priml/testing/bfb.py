@@ -133,10 +133,10 @@ from torch._prims_common import ELEMENTWISE_TYPE_PROMOTION_KIND, elementwise_dty
 from torch._prims_common.wrappers import out_wrapper
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils._python_dispatch import TorchDispatchMode
+from treekle.codec import from_plain
 
 import torch
 
-from priml.lib.codec import from_plain
 from priml.testing import regenerate
 from priml.testing.golden import pack, tensor_bits_equal, unpack
 

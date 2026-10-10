@@ -17,6 +17,7 @@ import inspect
 import json
 
 from configgle import PartialConfig
+from treekle.codec import from_plain, loads
 
 import numpy as np
 import pytest
@@ -68,7 +69,6 @@ from priml.baselines.sudoku.model import (
     lattice_positions,
 )
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
-from priml.lib.codec import from_plain, loads
 from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE
 from priml.model.init import corrected_fan_in_normal

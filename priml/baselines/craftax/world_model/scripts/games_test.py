@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Final
 import dataclasses
 import sys
 
+from treekle.codec import from_plain, loads
+
 import pytest
 
 from priml.baselines.craftax.eager import eager, tiny_world
@@ -26,7 +28,6 @@ from priml.baselines.craftax.world_model.viewer.exact import (
     Manifest,
     read_manifest,
 )
-from priml.lib.codec import from_plain, loads
 
 
 if TYPE_CHECKING:

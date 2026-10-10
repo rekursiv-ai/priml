@@ -13,13 +13,13 @@ from typing import TYPE_CHECKING, Self, TypedDict, cast, override
 import logging
 
 from configgle import Fig
+from treekle.codec import from_plain, loads
 
 import numpy as np
 import torch
 import torch.distributed as dist
 
 from priml.baselines.arcagi.augmentation import ArcAugmentation, ArcSpec
-from priml.lib.codec import from_plain, loads
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
 from priml.timer import CheckpointableStepTimer

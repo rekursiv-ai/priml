@@ -29,6 +29,7 @@ from configgle import Makeable, Makes, PartialConfig
 from torch import Tensor, nn
 from torch._dynamo.config import patch
 from torch._dynamo.decorators import maybe_mark_dynamic
+from treekle.codec import from_plain
 
 import torch
 import torch.distributed as dist
@@ -44,7 +45,6 @@ from priml.baselines.craftax.world_model.model import (
     GlobalTransformer,
     WorldModel,
 )
-from priml.lib.codec import from_plain
 from priml.math import schedules
 from priml.math.schedules import Schedule
 from priml.model.attention.attention import Attention

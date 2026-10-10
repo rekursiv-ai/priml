@@ -45,6 +45,8 @@ import argparse
 import dataclasses
 import json
 
+from treekle.codec import from_plain
+
 from priml.baselines.craftax.world_model.archive import (
     Record,
     read_manifest,
@@ -56,7 +58,6 @@ from priml.baselines.craftax.world_model.viewer.exact import (
     replay_episode,
     write_bundle,
 )
-from priml.lib.codec import from_plain
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)

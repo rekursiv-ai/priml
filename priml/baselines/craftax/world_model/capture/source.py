@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 import hashlib
 
 from configgle import Fig, Makeable
+from treekle.codec import from_plain
 
 import numpy as np
 import torch
@@ -40,7 +41,6 @@ from priml.baselines.craftax.world_model.capture.seeds import (
     rollout_seed,
     splitmix64,
 )
-from priml.lib.codec import from_plain
 from priml.runtime import best_device, get_device
 
 

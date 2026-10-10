@@ -37,6 +37,7 @@ import time
 from configgle import Fig, Makeable, Makes
 from torch import Tensor
 from torch._inductor import config as inductor_config
+from treekle.codec import from_plain
 
 import numpy as np
 import torch
@@ -66,7 +67,6 @@ from priml.baselines.sudoku.views import (
     View,
     validate_views,
 )
-from priml.lib.codec import from_plain
 from priml.paths import resolve_working_dir
 from priml.runtime import SingleProcess
 from priml.train.train_loop import EvalTimeLimitError

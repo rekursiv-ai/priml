@@ -37,6 +37,7 @@ import time
 from configgle import Fig
 from torch import Tensor
 from torch._inductor import config as inductor_config
+from treekle.codec import from_plain
 
 import numpy as np
 import torch
@@ -55,7 +56,6 @@ from priml.baselines.sudoku.runner import (
 from priml.baselines.sudoku.search import HpsSearch
 from priml.baselines.sudoku.search_dump import write_member_dump
 from priml.baselines.sudoku.views import NINE_VIEWS, View, validate_views
-from priml.lib.codec import from_plain
 from priml.runtime import SingleProcess
 
 

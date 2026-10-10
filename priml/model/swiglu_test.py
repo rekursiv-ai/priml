@@ -16,12 +16,12 @@ from torch.distributed.tensor.parallel import (
     ParallelStyle,
     RowwiseParallel,
 )
+from treekle.codec import from_plain, to_plain
 
 import pytest
 import torch
 
 from priml.cost import map_cost, set_cost
-from priml.lib.codec import from_plain, to_plain
 from priml.model.init import kaiming_uniform, unit_fan_in_uniform
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import (

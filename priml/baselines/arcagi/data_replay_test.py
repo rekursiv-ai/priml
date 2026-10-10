@@ -25,6 +25,7 @@ import math
 import shutil
 
 from torch import Tensor
+from treekle.codec import from_plain, loads
 
 import numpy as np
 import pytest
@@ -49,7 +50,6 @@ from priml.baselines.arcagi.signal_dump import (
     SignalDumpTracker,
     write_signal_dump,
 )
-from priml.lib.codec import from_plain, loads
 from priml.testing import regenerate
 from priml.testing.golden import read_tensors, stored, write_tensors
 

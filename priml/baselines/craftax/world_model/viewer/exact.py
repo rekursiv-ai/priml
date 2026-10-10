@@ -54,6 +54,7 @@ import json
 import re
 
 from numpy.typing import NDArray
+from treekle.codec import MutablePlainTree, from_plain, loads, mutable
 
 import numpy as np
 
@@ -92,7 +93,6 @@ from priml.baselines.craftax.game.state import (
 from priml.baselines.craftax.game.step import Rules, observe_numba, play_numba
 from priml.baselines.craftax.lib.arrays import Shaped, ints
 from priml.baselines.craftax.world_model import replay
-from priml.lib.codec import MutablePlainTree, from_plain, loads, mutable
 from priml.paths import validated_output_path
 
 

@@ -11,12 +11,12 @@ import re
 
 from torch import Tensor, nn
 from torch.optim import Optimizer
+from treekle.codec import ReadError, from_plain
 
 import pytest
 import torch
 
 from priml.baselines.nanochat import optimizers
-from priml.lib.codec import ReadError, from_plain
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.normuon import NorMuon
 

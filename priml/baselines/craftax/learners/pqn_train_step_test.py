@@ -19,6 +19,7 @@ import math
 import re
 
 from configgle import Fig
+from treekle.codec import from_plain
 
 import pytest
 import torch
@@ -40,7 +41,6 @@ from priml.baselines.craftax.testing import (
     host_agnostic_pipeline,
     tiny_env,
 )
-from priml.lib.codec import from_plain
 from priml.math.advantage import q_lambda_targets
 from priml.train.tracker import (
     AsyncTracker,

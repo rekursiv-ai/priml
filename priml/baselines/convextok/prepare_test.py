@@ -17,6 +17,7 @@ from configgle import Fig
 from pyarrow import parquet
 from tokenizers import Tokenizer, pre_tokenizers
 from torch import Tensor
+from treekle.codec import from_plain
 
 import pyarrow as pa
 import pytest
@@ -33,7 +34,6 @@ from priml.baselines.convextok.pretokens import count_pretokens
 from priml.baselines.convextok.program import LinearProgram
 from priml.baselines.nanochat.scripts.prepare_data import donor_unigram16k
 from priml.baselines.nanochat.scripts.prepare_tokenizer import document_rows
-from priml.lib.codec import from_plain
 from priml.paths import validated_output_path
 
 

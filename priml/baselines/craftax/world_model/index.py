@@ -44,6 +44,7 @@ import hashlib
 import uuid
 
 from torch import Tensor
+from treekle.codec import from_plain
 
 import torch
 
@@ -57,7 +58,6 @@ from priml.baselines.craftax.world_model.archive import (
     read_summaries,
 )
 from priml.baselines.craftax.world_model.schema import craftax_schema
-from priml.lib.codec import from_plain
 
 
 FLOOR_AUX: Final = craftax_schema().scalar_names.index("floor")

@@ -47,6 +47,7 @@ import math
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
+from treekle.codec import from_plain
 
 import numpy as np
 import torch
@@ -66,7 +67,6 @@ from priml.baselines.craftax.world_model.schema import (
 )
 from priml.custom_types import HasNormalizedWorkingDirPattern
 from priml.lib import zstd_compat
-from priml.lib.codec import from_plain
 from priml.paths import resolve_working_dir
 from priml.train.custom_types import TrackerProtocol
 from priml.train.tracker import unwrap_tracker_config

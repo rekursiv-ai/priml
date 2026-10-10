@@ -15,6 +15,7 @@ import math
 
 from configgle import Makeable, Makes
 from torch import Tensor
+from treekle.codec import from_plain
 
 import torch
 
@@ -34,7 +35,6 @@ from priml.baselines.sudoku.model import (
 )
 from priml.baselines.sudoku.prefix import PrefixConfig, SparsePuzzleEmbedding
 from priml.baselines.sudoku.train_step import SudokuTrainStep
-from priml.lib.codec import from_plain
 from priml.math.loss import stablemax_cross_entropy
 from priml.model.custom_types import TensorModule
 from priml.optimizers import (

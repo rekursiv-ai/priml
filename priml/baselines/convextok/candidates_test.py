@@ -10,11 +10,12 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Final, Self
 
+from treekle.codec import from_plain, loads
+
 import pytest
 
 from priml.baselines.convextok import candidates
 from priml.baselines.convextok.candidates import count_candidates
-from priml.lib.codec import from_plain, loads
 
 
 _CWD: Final = Path(__file__).resolve().parent

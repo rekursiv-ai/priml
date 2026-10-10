@@ -67,10 +67,11 @@ import struct
 import sys
 import zlib
 
+from treekle.codec import from_plain, loads, to_plain
+
 import torch
 
 from priml.lib import zstd_compat
-from priml.lib.codec import from_plain, loads, to_plain
 
 
 _HEADER = struct.Struct("<4sHHQQQIIBB2x")

@@ -24,6 +24,7 @@ import math
 
 from configgle import Fig, Makes, PartialConfig
 from torch import Tensor, nn
+from treekle.codec import from_plain
 
 import numpy as np
 import pytest
@@ -91,7 +92,6 @@ from priml.baselines.craftax.world_model.testing import (
     small_schema,
     tiny_model,
 )
-from priml.lib.codec import from_plain
 from priml.loss.policy_gradient import TorchPPO
 from priml.loss.policy_gradient_kernel import TritonPPO
 from priml.model.linear import Linear

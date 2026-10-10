@@ -8,6 +8,7 @@ from typing import Final
 import json
 
 from torch import Tensor
+from treekle.codec import from_plain
 
 import numpy as np
 import pytest
@@ -18,7 +19,6 @@ from priml.baselines.sudoku import data
 from priml.baselines.sudoku.data import SudokuData, _load_split, augment_sudoku
 from priml.baselines.sudoku.puzzle_data import PuzzleDataset
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
-from priml.lib.codec import from_plain
 from priml.math.seed import salt
 from priml.runtime import get_device
 from priml.testing.golden import assert_tensor_golden, stored

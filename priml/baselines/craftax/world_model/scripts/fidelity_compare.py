@@ -42,6 +42,7 @@ import json
 import math
 
 from torch import Tensor
+from treekle.codec import PlainTree, from_plain, loads
 
 import torch
 
@@ -50,7 +51,6 @@ from priml.baselines.craftax.world_model.scripts.dream_eval import (
     compare_ratio,
     ratio_interval,
 )
-from priml.lib.codec import PlainTree, from_plain, loads
 from priml.paths import validated_output_path
 
 

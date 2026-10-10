@@ -40,6 +40,7 @@ import json
 import logging
 
 from huggingface_hub import hf_hub_download
+from treekle.codec import from_plain, loads, mutable
 
 import numpy as np
 
@@ -51,7 +52,6 @@ from priml.baselines.maze.data import (
     canonical_labels,
     tokenize,
 )
-from priml.lib.codec import from_plain, loads, mutable
 from priml.paths import validated_output_path
 
 

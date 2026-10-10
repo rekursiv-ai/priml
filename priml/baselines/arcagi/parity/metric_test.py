@@ -8,6 +8,7 @@ import json
 import re
 
 from torch import Tensor
+from treekle.codec import ReadError
 
 import numpy as np
 import pytest
@@ -16,7 +17,6 @@ import torch
 from priml.baselines.arcagi.augmentation import dihedral_transform, grid_hash
 from priml.baselines.arcagi.parity.metric import PassK
 from priml.baselines.arcagi.parity.record_test import assert_matches, reduce
-from priml.lib.codec import ReadError
 
 
 if TYPE_CHECKING:

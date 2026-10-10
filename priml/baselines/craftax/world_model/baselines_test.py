@@ -2,6 +2,8 @@
 
 import math
 
+from treekle.codec import from_plain
+
 import pytest
 import torch
 
@@ -19,7 +21,6 @@ from priml.baselines.craftax.world_model.model import (
     WorldModelLogits,
 )
 from priml.baselines.craftax.world_model.schema import craftax_schema
-from priml.lib.codec import from_plain
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 

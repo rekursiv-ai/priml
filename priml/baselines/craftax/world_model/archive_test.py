@@ -7,6 +7,11 @@ import dataclasses
 import json
 import struct
 
+from treekle.codec import (
+    from_plain,
+    loads,
+)
+
 import pytest
 import torch
 
@@ -29,10 +34,6 @@ from priml.baselines.craftax.world_model.archive import (
     write_shard,
 )
 from priml.lib import zstd_compat
-from priml.lib.codec import (
-    from_plain,
-    loads,
-)
 
 
 def _episode(decisions: int, *, seed: int) -> Episode:

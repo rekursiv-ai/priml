@@ -16,6 +16,7 @@ from unittest.mock import patch
 import json
 
 from torch import Tensor
+from treekle.codec import from_plain
 
 import numpy as np
 import torch
@@ -28,7 +29,6 @@ from priml.baselines.convextok.program import (
     build_program,
     token_edges,
 )
-from priml.lib.codec import from_plain
 
 
 _CWD: Final = Path(__file__).resolve().parent

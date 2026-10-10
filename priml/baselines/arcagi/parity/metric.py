@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Self, TypedDict, cast, override
 
 from configgle import Fig, Makeable
 from torch import Tensor
+from treekle.codec import from_plain, loads
 
 import torch
 import torch.distributed as dist
@@ -25,7 +26,6 @@ from priml.baselines.arcagi.augmentation import (
     grid_hash,
 )
 from priml.baselines.arcagi.metric import PerOutputPass, StrictPass, TaskScore
-from priml.lib.codec import from_plain, loads
 from priml.paths import resolve_working_dir
 
 

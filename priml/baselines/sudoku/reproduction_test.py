@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 import json
 
 from torch import Tensor
+from treekle.codec import ReadError
 
 import pytest
 import torch
@@ -31,7 +32,6 @@ from priml.baselines.sudoku.testing import (
 )
 from priml.baselines.sudoku.trainer import Trainer
 from priml.baselines.sudoku.views import NINE_VIEWS
-from priml.lib.codec import ReadError
 from priml.testing.golden import mismatches
 
 

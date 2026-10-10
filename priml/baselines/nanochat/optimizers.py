@@ -22,11 +22,11 @@ from configgle import Fig
 from torch import Tensor, nn
 from torch._dynamo import config as torch_dynamo_config
 from torch.optim import Optimizer, optimizer
+from treekle.codec import from_plain
 
 import torch
 
 from priml.kernel import jit_kernel
-from priml.lib.codec import from_plain
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.normuon import NorMuon
 from priml.train.custom_types import OptimizerProtocol

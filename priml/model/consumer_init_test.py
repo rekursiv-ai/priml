@@ -5,12 +5,12 @@ from pathlib import Path
 from typing import Final
 
 from torch import Tensor, nn
+from treekle.codec import from_plain
 
 import pytest
 import torch
 
 from priml.baselines.nanochat.model import NanoChatLM
-from priml.lib.codec import from_plain
 from priml.model.attention.attention import Attention
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.multi_stream import MultiStreamAttention

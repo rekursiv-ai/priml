@@ -6,11 +6,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, override
 
 from torch import Tensor, nn
+from treekle.codec import from_plain
 
 import pytest
 import torch
 
-from priml.lib.codec import from_plain
 from priml.model.attention.kvcache import KVCache
 from priml.model.generate import _sample, _topp_filter, generate
 from priml.testing.bfb import assert_bfb_against_golden

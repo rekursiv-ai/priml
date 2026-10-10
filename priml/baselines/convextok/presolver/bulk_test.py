@@ -8,12 +8,11 @@ from itertools import accumulate
 from typing import TYPE_CHECKING, Final, cast
 
 from numpy.typing import NDArray
+from treekle.codec import from_plain
 
 import numpy as np
 import pytest
 import torch
-
-from priml.lib.codec import from_plain
 
 
 if TYPE_CHECKING:

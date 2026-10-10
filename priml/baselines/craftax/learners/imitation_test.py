@@ -21,6 +21,7 @@ import math
 
 from configgle import Fig, PartialConfig
 from torch import Tensor, nn
+from treekle.codec import from_plain
 
 import pytest
 import torch
@@ -42,7 +43,6 @@ from priml.baselines.craftax.train_step import (
     CraftaxTrainStep,
     LearnerRollout,
 )
-from priml.lib.codec import from_plain
 from priml.loss.policy_gradient_kernel import TritonPPO
 from priml.model.min_gru import TritonScan
 from priml.optimizers.fused_muon import FusedMuon

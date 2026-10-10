@@ -4,6 +4,8 @@ from pathlib import Path
 
 import sys
 
+from treekle.codec import from_plain, loads
+
 import pytest
 import torch
 
@@ -27,7 +29,6 @@ from priml.baselines.craftax.world_model.scripts import data_stats
 from priml.baselines.craftax.world_model.snapshots_test import (
     replay_twin,
 )
-from priml.lib.codec import from_plain, loads
 
 
 def test_summaries_count_lengths_timeouts_floors_and_repeated_starts() -> None:

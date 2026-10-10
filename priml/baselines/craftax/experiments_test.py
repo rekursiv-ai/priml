@@ -16,6 +16,7 @@ import warnings
 
 from configgle import InlineConfig, PartialConfig
 from torch.nn import functional
+from treekle.absent import ABSENT
 
 import pytest
 import torch
@@ -115,7 +116,6 @@ from priml.baselines.craftax.world_model.feature import (
     TrainedWeights,
     WorldModelFeature,
 )
-from priml.lib.absent import ABSENT
 from priml.loss.policy_gradient import TorchPPO
 from priml.loss.policy_gradient_kernel import TritonPPO
 from priml.math.schedules import linear, warmup

@@ -3,6 +3,8 @@
 from pathlib import Path
 from typing import cast
 
+from treekle.codec import from_plain, loads
+
 import pytest
 import torch
 
@@ -10,7 +12,6 @@ from priml.baselines.etth1.checkpointer import Etth1Checkpointer
 from priml.baselines.etth1.data_test import fixture_config
 from priml.baselines.etth1.experiments import exp_smoke
 from priml.baselines.etth1.train_step import Etth1TrainStep
-from priml.lib.codec import from_plain, loads
 from priml.testing.golden import mismatches
 from priml.train.checkpointer import AsyncLocalStateDictStorer
 

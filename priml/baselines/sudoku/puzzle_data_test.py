@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 import json
 
 from torch import Tensor
+from treekle.codec import ReadError, from_plain, loads
 
 import numpy as np
 import pytest
@@ -23,7 +24,6 @@ from priml.baselines.sudoku.puzzle_data import (
     load_puzzle_dataset,
 )
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
-from priml.lib.codec import ReadError, from_plain, loads
 
 
 def _write(

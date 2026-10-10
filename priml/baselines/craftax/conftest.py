@@ -29,9 +29,9 @@ import os
 import subprocess
 import sys
 
-import pytest
+from treekle.codec import from_plain
 
-from priml.lib.codec import from_plain
+import pytest
 
 
 if TYPE_CHECKING:

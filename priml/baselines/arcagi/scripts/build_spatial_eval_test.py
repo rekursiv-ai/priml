@@ -8,13 +8,14 @@ from unittest.mock import Mock
 
 import logging
 
+from treekle.codec import ReadError, from_plain, loads
+
 import numpy as np
 import pytest
 
 from priml.baselines.arcagi.augmentation import ArcSpec
 from priml.baselines.arcagi.scripts import build_spatial_eval
 from priml.data.ensure import EnsureResult
-from priml.lib.codec import ReadError, from_plain, loads
 
 
 if TYPE_CHECKING:

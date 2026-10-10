@@ -50,6 +50,8 @@ import itertools
 import json
 import subprocess
 
+from treekle.codec import from_plain
+
 from priml.baselines.craftax.game import jit
 from priml.baselines.craftax.game.jit import package_digest, platform_key
 from priml.baselines.craftax.game.state import (
@@ -112,7 +114,6 @@ from priml.baselines.craftax.world_model.capture.seeds import (
 from priml.baselines.craftax.world_model.capture.worker import (
     shard_directory,
 )
-from priml.lib.codec import from_plain
 from priml.paths import validated_output_path
 
 

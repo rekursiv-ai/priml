@@ -11,10 +11,10 @@ import math
 from configgle import Fig
 from torch import Tensor
 from torch.optim import Optimizer
+from treekle.codec import from_plain
 
 import torch
 
-from priml.lib.codec import from_plain
 from priml.math.numeric import matrix_signum_via_newtonschulz
 
 

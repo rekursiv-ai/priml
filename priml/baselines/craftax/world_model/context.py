@@ -61,6 +61,7 @@ import copy
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
+from treekle.codec import from_plain
 
 import torch
 
@@ -73,7 +74,6 @@ from priml.baselines.craftax.world_model.feature import (
     _frame_encoder,
     _global_block,
 )
-from priml.lib.codec import from_plain
 from priml.model.attention.kernel import SdpaVarlen
 from priml.model.attention.rope import RoPE
 from priml.model.linear import EnsembleLinear

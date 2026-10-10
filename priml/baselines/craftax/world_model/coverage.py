@@ -52,6 +52,7 @@ import dataclasses
 
 from numpy.typing import NDArray
 from torch import Tensor
+from treekle.codec import PlainTree, ReadError, from_plain
 
 import numpy as np
 import torch
@@ -78,7 +79,6 @@ from priml.baselines.craftax.world_model.schema import (
     number_id,
 )
 from priml.baselines.craftax.world_model.snapshots import replay_episodes
-from priml.lib.codec import PlainTree, ReadError, from_plain
 
 
 INVENTORY_AUX: Final = 22

@@ -41,6 +41,7 @@ import hashlib
 import json
 
 from torch import Tensor
+from treekle.codec import from_plain
 
 import torch
 
@@ -54,14 +55,13 @@ from priml.baselines.craftax.world_model.archive import (
 )
 from priml.baselines.craftax.world_model.index import FLOORS
 from priml.baselines.craftax.world_model.snapshots import replay_episodes
-from priml.lib.codec import from_plain
 from priml.paths import validated_output_path
 
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from priml.lib.codec import PlainTree
+    from treekle.codec import PlainTree
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)

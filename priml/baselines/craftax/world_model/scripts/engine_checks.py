@@ -42,6 +42,7 @@ import json
 import tempfile
 
 from torch import Tensor
+from treekle.codec import PlainTree
 
 import torch
 
@@ -69,7 +70,6 @@ from priml.baselines.craftax.world_model.scoring import (
 )
 from priml.baselines.craftax.world_model.session import Session, Stream
 from priml.baselines.craftax.world_model.snapshots import replay_episodes
-from priml.lib.codec import PlainTree
 from priml.math.probability import gumbel_max
 from priml.paths import validated_output_path
 

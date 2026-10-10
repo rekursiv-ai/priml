@@ -11,6 +11,7 @@ from typing import Final, cast
 import json
 
 from tokenizers import pre_tokenizers
+from treekle.codec import from_plain
 
 import numpy as np
 import pytest
@@ -22,7 +23,6 @@ from priml.baselines.convextok.rounding import (
     deterministic_rounding,
     integral_rounding,
 )
-from priml.lib.codec import from_plain
 
 
 _CWD: Final = Path(__file__).resolve().parent

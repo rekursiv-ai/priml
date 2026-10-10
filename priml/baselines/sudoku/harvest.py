@@ -68,6 +68,7 @@ from configgle import Fig
 from torch import Tensor
 from torch._inductor import config as inductor_config
 from tqdm import tqdm
+from treekle.codec import from_plain
 
 import numpy as np
 import torch
@@ -77,7 +78,6 @@ from priml.baselines.sudoku.puzzle_data import load_puzzle_dataset
 from priml.baselines.sudoku.rollout import LearnedCheckpointRollout
 from priml.baselines.sudoku.runner import file_sha256, load_eval_weights, open_npz
 from priml.baselines.sudoku.search import select_pin_candidates
-from priml.lib.codec import from_plain
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
 

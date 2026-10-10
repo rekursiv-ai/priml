@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, cast
 
 import sys
 
+from treekle.codec import PlainTree, from_plain, loads
+
 import pytest
 import torch
 
@@ -26,7 +28,6 @@ from priml.baselines.craftax.world_model.scripts import (
 from priml.baselines.craftax.world_model.snapshots_test import (
     replay_twin,
 )
-from priml.lib.codec import PlainTree, from_plain, loads
 
 
 if TYPE_CHECKING:

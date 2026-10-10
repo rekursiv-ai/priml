@@ -20,6 +20,7 @@ import json
 
 from configgle import Fig
 from torch import Tensor
+from treekle.codec import ReadError, from_plain, loads
 
 import numpy as np
 import torch
@@ -29,7 +30,6 @@ from priml.baselines.sudoku.puzzle_data import (
     load_puzzle_dataset,
 )
 from priml.baselines.sudoku.runner import file_sha256, open_npz
-from priml.lib.codec import ReadError, from_plain, loads
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
 

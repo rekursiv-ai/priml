@@ -62,6 +62,7 @@ import threading
 
 from configgle import Fig
 from numpy.typing import NDArray
+from treekle.codec import from_plain, loads
 
 import numpy as np
 
@@ -116,7 +117,6 @@ from priml.baselines.craftax.world_model.replay import (
     save,
     xor_bytes,
 )
-from priml.lib.codec import from_plain, loads
 
 
 if TYPE_CHECKING:

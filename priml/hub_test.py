@@ -16,6 +16,7 @@ import os
 import sys
 
 from torch import nn
+from treekle.codec import ReadError
 
 import pytest
 import torch
@@ -28,7 +29,6 @@ from priml.hub import (
     load_transformers_model,
     resolve_hf_dtype,
 )
-from priml.lib.codec import ReadError
 from priml.lib.userdirs import cache_dir
 
 

@@ -8,6 +8,8 @@ from typing import cast
 import dataclasses
 import sys
 
+from treekle.codec import PlainTree, from_plain, loads
+
 import pytest
 import torch
 
@@ -41,7 +43,6 @@ from priml.baselines.craftax.world_model.testing import (
     small_schema,
     tiny_model,
 )
-from priml.lib.codec import PlainTree, from_plain, loads
 
 
 HORIZONS = (2, 4)

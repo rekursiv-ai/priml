@@ -9,13 +9,13 @@ from typing import TYPE_CHECKING, Final, Literal, cast, override
 import traceback
 
 from torch import Tensor
+from treekle.codec import from_plain
 
 import pytest
 import torch
 
 from priml.baselines.arcagi.parity.metric import PassK
 from priml.baselines.arcagi.parity.record_test import load, reduce
-from priml.lib.codec import from_plain
 from priml.testing.golden import mismatches
 
 

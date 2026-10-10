@@ -18,6 +18,7 @@ from typing import (
 import re
 
 from configgle import InlineConfig, PartialConfig
+from treekle.codec import from_plain
 
 import pytest
 import torch
@@ -77,7 +78,6 @@ from priml.baselines.craftax.world_model.train_step import (
     WorldModelTrainStep,
     muon_adamw,
 )
-from priml.lib.codec import from_plain
 from priml.model.attention.flash4 import Flash4Varlen
 from priml.model.custom_types import ChannelsInOutConfig
 from priml.model.linear import Linear

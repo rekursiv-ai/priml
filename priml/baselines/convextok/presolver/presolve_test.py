@@ -22,6 +22,7 @@ from typing import Final, cast
 import json
 
 from numpy.typing import NDArray
+from treekle.codec import from_plain
 
 import numpy as np
 import pytest
@@ -44,7 +45,6 @@ from priml.baselines.convextok.presolver.presolve import (
     presolve,
 )
 from priml.baselines.convextok.program import LinearProgram, build_program
-from priml.lib.codec import from_plain
 
 
 _CWD: Final = Path(__file__).resolve().parent

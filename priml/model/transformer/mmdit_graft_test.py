@@ -15,12 +15,12 @@ from pathlib import Path
 from typing import Final
 
 from torch import Tensor, nn
+from treekle.codec import from_plain
 
 import pytest
 import torch
 
 from priml.cost import Cost, cost
-from priml.lib.codec import from_plain
 from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.embedding import Embedding

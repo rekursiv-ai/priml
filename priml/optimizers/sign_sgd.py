@@ -27,11 +27,10 @@ import math
 from configgle import Fig
 from torch import Tensor
 from torch.optim import Optimizer
+from treekle.codec import from_plain
 
 import torch
 import torch.distributed as dist
-
-from priml.lib.codec import from_plain
 
 
 _ParamLike = Iterable[Tensor] | Iterable[dict[str, object]]

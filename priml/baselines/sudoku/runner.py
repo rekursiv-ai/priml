@@ -24,11 +24,11 @@ import json
 import os
 
 from torch import Tensor
+from treekle.codec import from_plain
 
 import numpy as np
 import torch
 
-from priml.lib.codec import from_plain
 from priml.paths import resolve_working_dir
 
 

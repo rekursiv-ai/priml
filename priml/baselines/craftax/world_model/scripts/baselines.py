@@ -28,6 +28,7 @@ import json
 import time
 
 from torch import Tensor
+from treekle.codec import PlainTree
 
 import torch
 
@@ -41,7 +42,6 @@ from priml.baselines.craftax.world_model.scoring import (
     autocast,
     load_trained,
 )
-from priml.lib.codec import PlainTree
 from priml.paths import validated_output_path
 
 

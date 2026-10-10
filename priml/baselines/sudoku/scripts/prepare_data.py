@@ -48,10 +48,11 @@ import os
 import shutil
 import tempfile
 
+from treekle.codec import from_plain, loads, mutable
+
 import numpy as np
 
 from priml.baselines.sudoku.data import SudokuData
-from priml.lib.codec import from_plain, loads, mutable
 from priml.paths import validated_output_path
 from priml.train.train_loop import TrainLoop
 

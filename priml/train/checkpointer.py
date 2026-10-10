@@ -66,8 +66,8 @@ else:
     dcp = lazy_import("torch.distributed.checkpoint")  # ~1050 ms; async saves need it.
 
 from configgle import Fig, Makeable
+from treekle.codec import from_plain, loads, to_plain
 
-from priml.lib.codec import from_plain, loads, to_plain
 from priml.paths import resolve_working_dir, validated_output_path
 from priml.runtime import is_rank_zero
 

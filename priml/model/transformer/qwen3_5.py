@@ -11,11 +11,11 @@ import math
 
 from configgle import Makeable, Makes
 from torch import Tensor, nn
+from treekle.codec import from_plain, loads
 
 import torch
 
 from priml import hub
-from priml.lib.codec import from_plain, loads
 from priml.model.attention.gated_attention import GatedAttention
 from priml.model.attention.kvcache import alloc_layer_cache
 from priml.model.attention.qwen3_5_delta import Qwen35GatedDeltaNet

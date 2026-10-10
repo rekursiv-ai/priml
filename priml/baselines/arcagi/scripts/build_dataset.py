@@ -28,6 +28,7 @@ import subprocess
 import tempfile
 
 from numpy.typing import NDArray
+from treekle.codec import from_plain, loads
 
 import numpy as np
 
@@ -38,7 +39,6 @@ from priml.baselines.arcagi.augmentation import (
 )
 from priml.data.distributed_build import run_rank_zero_build
 from priml.data.ensure import DataSpec, EnsureResult, FileSpec, ensure_data
-from priml.lib.codec import from_plain, loads
 
 
 if TYPE_CHECKING:

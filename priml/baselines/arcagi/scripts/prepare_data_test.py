@@ -9,6 +9,8 @@ import argparse
 import json
 import logging
 
+from treekle.codec import from_plain, loads
+
 import numpy as np
 import pytest
 
@@ -16,7 +18,6 @@ from priml.baselines.arcagi import experiments
 from priml.baselines.arcagi.data import PuzzleData
 from priml.baselines.arcagi.scripts import prepare_data
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
-from priml.lib.codec import from_plain, loads
 from priml.lib.testing.cli import assert_help_without_docstring
 
 

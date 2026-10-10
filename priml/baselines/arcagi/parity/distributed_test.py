@@ -21,6 +21,7 @@ import traceback
 
 from torch import Tensor, nn
 from torch.optim import Optimizer
+from treekle.codec import from_plain
 
 import numpy as np
 import pytest
@@ -36,7 +37,6 @@ from priml.baselines.arcagi.parity.train_step_test import (
 )
 from priml.baselines.arcagi.train_step import ArcDataParallel
 from priml.baselines.sudoku.embedding import GridEmbedding
-from priml.lib.codec import from_plain
 from priml.runtime import MultiProcess
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import joined, mismatches, put_steps

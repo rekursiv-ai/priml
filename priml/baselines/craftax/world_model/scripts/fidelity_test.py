@@ -13,6 +13,8 @@ import json
 import math
 import sys
 
+from treekle.codec import PlainTree, ReadError, from_plain, loads
+
 import pytest
 import torch
 
@@ -57,7 +59,6 @@ from priml.baselines.craftax.world_model.testing import (
     small_schema,
     tiny_model,
 )
-from priml.lib.codec import PlainTree, ReadError, from_plain, loads
 
 
 FIELDS = craftax_schema().scalar_names

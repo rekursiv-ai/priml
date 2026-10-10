@@ -29,6 +29,8 @@ import collections
 import json
 import time
 
+from treekle.codec import PlainTree, from_plain
+
 from priml.baselines.craftax.world_model.archive import (
     ManifestLine,
     read_corpus,
@@ -44,7 +46,6 @@ from priml.baselines.craftax.world_model.coverage import (
     report,
 )
 from priml.baselines.craftax.world_model.index import load_index
-from priml.lib.codec import PlainTree, from_plain
 from priml.paths import validated_output_path
 
 

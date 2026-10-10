@@ -10,12 +10,12 @@ import hashlib
 import json
 
 from torch import Tensor, nn
+from treekle.codec import from_plain, loads
 
 import numpy as np
 import torch
 
 from priml.baselines.etth1.experiments import exp000
-from priml.lib.codec import from_plain, loads
 from priml.paths import validated_output_path
 
 

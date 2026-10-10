@@ -16,6 +16,8 @@ import inspect
 import io
 import logging
 
+from treekle.codec import from_plain, loads
+
 import numpy as np
 import pytest
 
@@ -27,7 +29,6 @@ from priml.baselines.sudoku.scripts.prepare_data import (
     default_directory,
 )
 from priml.baselines.sudoku.verifier_data import VerifierData
-from priml.lib.codec import from_plain, loads
 from priml.lib.testing.cli import assert_help_without_docstring
 from priml.paths import resolve_working_dir
 

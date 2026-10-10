@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, cast
 import hashlib
 import threading
 
+from treekle.codec import from_plain
+
 import numpy as np
 import pytest
 import torch
@@ -29,7 +31,6 @@ from priml.baselines.craftax.rollout import StepGraph, TorchPhiloxSampler
 from priml.baselines.craftax.testing import FakeEnv, _golden_path
 from priml.baselines.craftax.train_step import AgentWindows
 from priml.baselines.craftax.world_model.feature import InitialWeights, Refill
-from priml.lib.codec import from_plain
 from priml.loss.policy_gradient import TorchPPO
 from priml.model.min_gru import TorchScan
 from priml.testing import regenerate

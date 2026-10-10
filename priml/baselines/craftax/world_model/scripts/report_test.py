@@ -11,6 +11,7 @@ import math
 import sys
 
 from configgle import PartialConfig
+from treekle.codec import from_plain, loads
 
 import pytest
 import torch
@@ -35,7 +36,6 @@ from priml.baselines.craftax.world_model.scripts import (
     engine_checks,
     report,
 )
-from priml.lib.codec import from_plain, loads
 
 
 SMOKE: str = "priml.baselines.craftax.world_model.experiments.exp_smoke"

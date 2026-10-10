@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from torch import Tensor
+from treekle.codec import ReadError
 
 import pytest
 import torch
 import torch.distributed as dist
 
 from priml.baselines.sudoku.metric import GridAccuracy
-from priml.lib.codec import ReadError
 
 
 def _packed(predictions: Tensor, prefix: int = 1) -> Tensor:
