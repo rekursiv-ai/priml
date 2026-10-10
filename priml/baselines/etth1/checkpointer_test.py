@@ -15,6 +15,8 @@ from priml.testing.golden import mismatches
 from priml.train.checkpointer import AsyncLocalStateDictStorer
 
 
+# The asynchronous storer needs a torch.distributed process group, so that case
+# stays in the distributed tier; the synchronous case is the unit test.
 @pytest.mark.parametrize(
     "asynchronous",
     [False, pytest.param(True, marks=pytest.mark.compute_distributed)],
@@ -60,7 +62,6 @@ def test_tied_score_selects_latest_checkpoint(
                 torch.distributed.destroy_process_group()
 
 
-@pytest.mark.compute_training
 def test_epoch_checkpoint_resumes_after_validation(tmp_path: Path) -> None:
     cfg = exp_smoke()
     cfg.base_dir = tmp_path

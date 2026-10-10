@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+import hashlib
+import re
+
 from torch import Tensor, nn
 from torch.nn import functional
 
@@ -10,6 +15,10 @@ import torch
 
 from priml.hub import load_torch_hub_distributed
 from priml.model.dinov2 import DinoV2Teacher
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_frozen_teacher_cost_has_no_backward_work() -> None:
@@ -25,8 +34,8 @@ def test_rank_zero_populates_hub_before_other_ranks(
     rank = 0
     encoder = nn.Identity()
 
-    def load(repository: str, variant: str) -> nn.Module:
-        del repository, variant
+    def load(repository: str, variant: str, *, skip_validation: bool) -> nn.Module:
+        del repository, variant, skip_validation
         events.append(f"load:{rank}")
         return encoder
 
@@ -71,7 +80,28 @@ def test_dino_teacher_requires_patch_aligned_image_size() -> None:
     assert str(error.value) == "image_size must be divisible by 16"
 
 
+def test_dino_teacher_repository_is_pinned_to_a_commit() -> None:
+    repository = DinoV2Teacher.Config().repository
+    assert re.fullmatch(r"facebookresearch/dinov2:[0-9a-f]{40}", repository)
+
+
+def test_dino_teacher_refuses_weights_with_another_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def load(repository: str, variant: str, *, skip_validation: bool) -> nn.Module:
+        del repository, variant, skip_validation
+        return nn.Identity()
+
+    config = DinoV2Teacher.Config()
+    _cached_weights(tmp_path, monkeypatch, config=config)
+    monkeypatch.setattr("priml.model.dinov2.load_torch_hub_distributed", load)
+    with pytest.raises(ValueError, match="not the pinned"):
+        DinoV2Teacher(config)
+
+
 def test_dino_teacher_resizes_position_and_clamps_layers(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class TinyEncoder(nn.Module):
@@ -103,10 +133,10 @@ def test_dino_teacher_resizes_position_and_clamps_layers(
                 for index in n
             )
 
-    hub_loads: list[tuple[str, str]] = []
+    hub_loads: list[tuple[str, str, bool]] = []
 
-    def load(repository: str, variant: str) -> TinyEncoder:
-        hub_loads.append((repository, variant))
+    def load(repository: str, variant: str, *, skip_validation: bool) -> TinyEncoder:
+        hub_loads.append((repository, variant, skip_validation))
         return TinyEncoder()
 
     interpolation_kwargs: list[
@@ -156,8 +186,9 @@ def test_dino_teacher_resizes_position_and_clamps_layers(
     config.variant = "tiny-test"
     config.image_size = 256
     config.layer_indices = (-3, 0, 9)
+    config.weights_sha256 = _cached_weights(tmp_path, monkeypatch, config=config)
     teacher = DinoV2Teacher(config)
-    assert hub_loads == [("facebookresearch/dinov2", "tiny-test")]
+    assert hub_loads == [(config.repository, "tiny-test", True)]
     assert teacher.encoder.pos_embed.shape == (1, 257, 3)
     assert not teacher.encoder.pos_embed.requires_grad
     assert isinstance(teacher.encoder, nn.Module)
@@ -197,8 +228,8 @@ def test_rank_zero_hub_failure_reaches_other_ranks(
     rank = 0
     status_message = None
 
-    def load(repository: str, variant: str) -> nn.Module:
-        del repository, variant
+    def load(repository: str, variant: str, *, skip_validation: bool) -> nn.Module:
+        del repository, variant, skip_validation
         raise OSError("hub unavailable")
 
     def broadcast(status: list[str | None], *, src: int) -> None:
@@ -223,6 +254,20 @@ def test_rank_zero_hub_failure_reaches_other_ranks(
         match="rank 0 could not load facebookresearch/dinov2",
     ):
         load_torch_hub_distributed("facebookresearch/dinov2", "dinov2_vitb14")
+
+
+def _cached_weights(
+    hub_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    config: DinoV2Teacher.Config,
+) -> str:
+    """Cache stand-in weights where torch.hub would, and return their SHA-256."""
+    monkeypatch.setattr(torch.hub, "get_dir", lambda: str(hub_dir))
+    weights = hub_dir / "checkpoints" / config.weights_file
+    weights.parent.mkdir()
+    weights.write_bytes(b"weights")
+    return hashlib.sha256(b"weights").hexdigest()
 
 
 if __name__ == "__main__":

@@ -346,7 +346,9 @@ def test_scheduled_update_drives_each_optimizer_family() -> None:
     matrix = nn.Parameter(torch.ones(2, 3))
     table = nn.Parameter(torch.ones(3, 4))
     dense = nn.Parameter(torch.ones(4, 5))
-    muon = NorMuon.Config(lr=0.1, weight_decay=0.01).make()([matrix])
+    # Eager: these parameters hold no gradients, so no update is ever issued,
+    # and only wrapping the step in torch.compile would cost seconds.
+    muon = NorMuon.Config(lr=0.1, weight_decay=0.01, compile=False).make()([matrix])
     rmsprop = optimizers.BiasCorrectedRMSProp.Config(lr=0.1).make()([table])
     adam = torch.optim.Adam([dense], lr=0.2, betas=(0.8, 0.99))
     members = CompositeOptimizer([muon, rmsprop, adam])

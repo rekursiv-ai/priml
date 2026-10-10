@@ -94,7 +94,10 @@ SpeedrunTrainLoop(
         │   dtype_autocast=torch.bfloat16,
         │   autocast_cache_enabled=False,
         │   teacher=DinoV2Teacher.Config(
+        │       repository='facebookresearch/dinov2:7764ea0f912e53c92e82eb78a2a1631e92725fc8',
         │       variant='dinov2_vitb14',
+        │       weights_file='dinov2_vitb14_pretrain.pth',
+        │       weights_sha256='0b8b82f85de91b424aded121c7e1dcc2b7bc6d0adeea651bf73a13307fad8c73',
         │       layer_indices=(12, 12, 12),
         │       image_size=256
         │   ),

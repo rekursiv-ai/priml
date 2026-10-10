@@ -3,9 +3,8 @@
 ``testdata/reg_source.pt`` was minted from this recipe after the same run of
 REG commit 3c51606's own ``SiT``, ``SILoss``, and ``CombinedOptimizer`` was
 shown bit-for-bit equal to it at this config, with REG's hardcoded timestep
-frequency (256) and decoder block count (2) set to 2 and 1 (see
-``/opt/scratch/probes/puzzlespec/speedrundit/parity_tiny.py``), so the golden
-pins REG's numerics without needing REG at test time.
+frequency (256) and decoder block count (2) set to 2 and 1, so the golden pins
+REG's numerics without needing REG at test time.
 The whole post-3-step state implies backward bit-for-bit.
 """
 
@@ -29,6 +28,8 @@ from priml.testing.golden import assert_tensor_golden
 _CWD: Final = Path(__file__).resolve().parent
 
 
+# Marked: the golden was recorded against REG's own run at these sizes, so a
+# smaller model would need REG itself to re-mint it.
 @pytest.mark.compute_training
 def test_initial_and_three_updates_golden() -> None:
     """Initial state, three losses, and final state, bitwise."""

@@ -31,8 +31,10 @@ Original BPE preparation:
     a pickled encoding, and the byte-length table without running a trainer.
 
 Added prepared Unigram workflow:
-    With no BPE flags, the default recipe prepares inputs for exp020-exp022.
-    It fetches pinned source shards, fits the reference BPE vocabulary, moves
+    With no BPE flags, the default recipe prepares the inputs exp012-exp022
+    and exp024 read: raw/ for exp012-exp018, donor-original/ for exp019, and
+    the prepared Unigram rows for the rest. It fetches pinned source shards,
+    each checked against its recorded SHA-256, fits the reference BPE vocabulary, moves
     selected training documents, fits a 16K Unigram vocabulary, and writes
     packed training and evaluation rows. Tokenizer fitting excludes validation
     text. Reference evaluation re-encodes the bytes selected by the BPE
@@ -50,15 +52,17 @@ Added prepared Unigram workflow:
     exp022 unless --experiment selects another recipe, by ladder name or by a
     factory's dotted import path. --train-budget-sec replaces the recipe's
     budget in both its schedule and its stop time. Metrics and the
-    resolved configuration are saved in --run-directory; --save-checkpoint
-    also retains the final model state. --directory relocates the inputs.
+    resolved configuration are saved in --run-directory, which that stage
+    requires; --save-checkpoint also retains the final model state.
+    --directory relocates the inputs; it defaults to the factory's own
+    working_dir, where a default TrainLoop's experiments read them.
 
 Examples:
     uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data --num-train-shards 7
     uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data --num-train-shards 7 --directory /opt/scratch/datasets/my-nanochat
     uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data --print-config
-    uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data --directory /opt/scratch/datasets/nanochat-unigram --stage all
-    uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data --directory /opt/scratch/datasets/nanochat-unigram --stage train --experiment exp022 --seed 42 --run-directory /opt/scratch/runs/nanochat-exp022-42
+    uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data --stage all
+    uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data --stage train --experiment exp022 --seed 43 --run-directory /opt/scratch/runs/nanochat/exp022-seed43
 
 References:
     https://github.com/karpathy/autoresearch
@@ -313,8 +317,9 @@ def prepare(
         directory if directory is not None else default_directory(),
     )
     out.mkdir(parents=True, exist_ok=True)
+    # The corpus config owns the source; this path has no config of its own.
     shards = (
-        _download(out, count=num_train_shards + 1)
+        _download(out, count=num_train_shards + 1, corpus=CorpusPreparation.Config())
         if download
         else _staged(out, count=num_train_shards + 1)
     )
@@ -329,15 +334,21 @@ def prepare(
     return out
 
 
-def _download(out: Path, *, count: int) -> list[Path]:
+def _download(
+    out: Path,
+    *,
+    count: int,
+    corpus: CorpusPreparation.Config,
+) -> list[Path]:
     """Fetch the source shards at the corpus revision, reusing verified copies."""
-    # The corpus config owns the source; this path has no config of its own.
-    corpus = CorpusPreparation.Config()
     paths = [shard_path(out, shard=index) for index in range(count)]
-    for index, path in enumerate(paths):
+    # Every digest is looked up before the first download, so an unpinned shard
+    # is refused before any bytes move.
+    digests = [_pinned_sha256(corpus, shard=index) for index in range(count)]
+    for index, (path, digest) in enumerate(zip(paths, digests, strict=True)):
         url = source_url(index, repository=corpus.repository, revision=corpus.revision)
         logger.info("fetching %s", url)
-        fetch_file(url, destination=path)
+        fetch_file(url, destination=path, sha256=digest)
     return paths
 
 
@@ -520,15 +531,17 @@ def _documents(
                     return
 
 
-def fetch_file(url: str, *, destination: Path) -> None:
+def fetch_file(url: str, *, destination: Path, sha256: str) -> None:
     """Download one HTTPS input, reusing only a copy from the same source.
 
     Args:
       url: Immutable HTTPS input URL.
       destination: Local input cache file.
+      sha256: Hexadecimal SHA-256 the bytes must hash to, cached or downloaded.
 
     Raises:
-      ValueError: The URL is not HTTPS or the cached source identity does not match.
+      ValueError: The URL is not HTTPS, the cached source identity does not
+        match, or the bytes hash to something other than ``sha256``.
 
     """
     if not url.startswith("https://"):
@@ -552,6 +565,11 @@ def fetch_file(url: str, *, destination: Path) -> None:
                     f"Cached source does not match {url}: {destination}. "
                     "Use a fresh download directory for this source.",
                 )
+            if (observed := _file_sha256(destination)) != sha256:
+                raise ValueError(
+                    f"Cached {destination} hashes to {observed}, not the pinned "
+                    f"{sha256}. Delete it to re-download from {url}.",
+                )
             return
         with tempfile.TemporaryDirectory(
             dir=destination.parent,
@@ -566,8 +584,30 @@ def fetch_file(url: str, *, destination: Path) -> None:
                 staged.open("wb") as output,
             ):
                 shutil.copyfileobj(response, output)
+            # Checked before the receipt: a receipt beside wrong bytes would
+            # vouch for them on every later reuse.
+            if (observed := _file_sha256(staged)) != sha256:
+                raise ValueError(
+                    f"{url} downloaded bytes hashing to {observed}, not the pinned "
+                    f"{sha256}.",
+                )
             source.write_text(url, encoding="utf-8")
             staged.replace(destination)
+
+
+def _pinned_sha256(corpus: CorpusPreparation.Config, *, shard: int) -> str:
+    """Return the recorded SHA-256 of one source shard, refusing an unpinned one."""
+    if shard not in corpus.shard_sha256:
+        raise ValueError(
+            f"No SHA-256 is recorded for source shard {shard}; add it to "
+            "CorpusPreparation.Config.shard_sha256 before fetching it.",
+        )
+    return corpus.shard_sha256[shard]
+
+
+def _file_sha256(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def copy_input(source: Path, *, destination: Path) -> None:
@@ -603,6 +643,30 @@ class CorpusPreparation:
 
         A branch name would let a corpus that moves upstream produce different
         shards under the same name; a commit cannot move."""
+
+        shard_sha256: dict[int, str] = field(
+            default_factory=lambda: {
+                0: "054ddbd98abf30d773c54de578fc9d579bafeb6c14e04e97bd36aa90e825bf9b",
+                1: "d4cfe1de19f4fd976022a9047458655968bc5583582ec5fa714801ec2be2c93c",
+                2: "5e80d7596d53be648d841ea5811082747281c39f6851e10dd90375a84bc509a7",
+                3: "b349c85d4b993d98e2328833ecfd3734692e0395a592d89858bae34a4ba73c59",
+                4: "87dae96fe1a6116c54c7873aadb81832178a36755991befd1b3b641c76244474",
+                5: "3d9aebf138ef69cff2585a686d7f21585b7ffc0de4655f8e7723590418583bd6",
+                6: "6a3f2afde8f1a39f9283ea9d9e9ee6431634d6881b63798176bf64efc3f33576",
+                7: "731eea337d941e5b18a9a4e2bbe73a517dac45d91bb93ae2e69346c68c5f37f6",
+                8: "e78379132451838afabed9034b5483a2f3bc5a422bed8b55b99f2bbb9a128755",
+                9: "f22410fe8f13b6976a2860a8a82ee71e838f4ee9b605d61584aaa963f966e120",
+                10: "15a7cec1c2ebad771f67a4cb7f7b43c85ae7e3614c35fb09307f4cdafb891a37",
+                11: "abbb0147368515250a5b86716d975cdb6d9c9d88f3b660e48f9b4cc474066279",
+                12: "4402a0dd2d19cc254cfd079603db39842a54f4e80287448c29344e78b7e98244",
+                13: "9f1bd5a03e9c1f85c672c52499dd5fdc74c10e06fef989f47820bf61b85aef84",
+                14: "71ccc90a4a1fc7e5aaa38e632aec3a6e0751f18a1b486838b967d8f2924bf013",
+            },
+        )
+        """SHA-256 of each source shard at ``revision``, checked on every fetch.
+
+        Read from the repository's LFS pointers at that commit. A shard with no
+        entry is refused rather than fetched unverified."""
 
         donor_source_ids: tuple[str, ...] = ()
         """Ordered source shard:row identities moved into earlier training shards."""
@@ -648,7 +712,9 @@ class CorpusPreparation:
 
     def fetch(self) -> None:
         """Download every source shard at the configured revision."""
-        for shard in sorted((*self.config.train_shard_indices, self.config.val_shard)):
+        shards = sorted((*self.config.train_shard_indices, self.config.val_shard))
+        digests = [_pinned_sha256(self.config, shard=shard) for shard in shards]
+        for shard, digest in zip(shards, digests, strict=True):
             path = shard_path(self.config.raw_dir, shard=shard)
             logger.info("Fetching source %s", path.name)
             fetch_file(
@@ -658,6 +724,7 @@ class CorpusPreparation:
                     revision=self.config.revision,
                 ),
                 destination=path,
+                sha256=digest,
             )
 
     def build(self) -> None:
@@ -2230,7 +2297,16 @@ def main() -> int:
     config = factory()
     if not isinstance(config, Preparation.Config):
         raise TypeError("The factory must return Preparation.Config.")
-    config.working_dir = args.directory.expanduser().absolute()
+    if args.directory is not None:
+        config.working_dir = args.directory.expanduser().absolute()
+    # No default run or bundle location: a hidden one would sit outside the
+    # --directory a relocated run names, and a run directory serves one run.
+    for stage, flag, value in (
+        ("train", "--run-directory", args.run_directory),
+        ("dump", "--output", args.output),
+    ):
+        if args.stage == stage and value is None:
+            parser.error(f"--stage {stage} needs {flag}.")
     bpe = {
         "num_train_shards": args.num_train_shards,
         "vocab_size": args.vocab_size,
@@ -2270,8 +2346,12 @@ def main() -> int:
         return 0
     preparation = config.make()
     if args.stage == "dump":
+        if args.output is None:
+            raise ValueError("Expected args.output is not None.")
         preparation.dump(args.output)
     elif args.stage == "train":
+        if args.run_directory is None:
+            raise ValueError("Expected args.run_directory is not None.")
         training = preparation.training_config(
             args.experiment,
             run_directory=args.run_directory,
@@ -2295,7 +2375,7 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--directory",
         type=Path,
-        default=Path("/opt/scratch/datasets/nanochat"),
+        help="Preparation root; defaults to the factory's own working_dir.",
     )
     parser.add_argument(
         "--stage",
@@ -2326,18 +2406,18 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--run-directory",
         type=Path,
-        default=Path("/opt/scratch/runs/nanochat-reproduction"),
+        help="New directory for --stage train's run; required by that stage.",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("/opt/scratch/artifacts/nanochat/prepared-inputs.tar"),
+        help="New tar archive for --stage dump; required by that stage.",
     )
 
 
 class _Arguments(Protocol):
     factory: str
-    directory: Path
+    directory: Path | None
     stage: str
     num_train_shards: int | None
     vocab_size: int | None
@@ -2348,8 +2428,8 @@ class _Arguments(Protocol):
     seed: int
     train_budget_sec: float | None
     save_checkpoint: bool
-    run_directory: Path
-    output: Path
+    run_directory: Path | None
+    output: Path | None
 
 
 if __name__ == "__main__":

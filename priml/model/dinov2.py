@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol, cast, override
+
+import hashlib
 
 from configgle import Fig
 from torch import Tensor, nn
@@ -19,8 +22,21 @@ class DinoV2Teacher(nn.Module):
     """Expose selected DINOv2 layers as CLS plus spatial patch tokens."""
 
     class Config(Fig["DinoV2Teacher"]):
+        repository: str = (
+            "facebookresearch/dinov2:7764ea0f912e53c92e82eb78a2a1631e92725fc8"
+        )
+        """Torch Hub repository, pinned to a commit so its code cannot move."""
+
         variant: str = "dinov2_vitb14"
         """Torch Hub DINOv2 backbone name."""
+
+        weights_file: str = "dinov2_vitb14_pretrain.pth"
+        """File the hub entry caches its weights as, under torch.hub's checkpoints."""
+
+        weights_sha256: str = (
+            "0b8b82f85de91b424aded121c7e1dcc2b7bc6d0adeea651bf73a13307fad8c73"
+        )
+        """SHA-256 of ``weights_file``; a teacher built from other bytes is refused."""
 
         layer_indices: tuple[int, ...] = (12, 12, 12)
         """Reference block indices for the three REG targets."""
@@ -122,10 +138,22 @@ class DinoV2Teacher(nn.Module):
         if config.image_size % 16:
             raise ValueError("image_size must be divisible by 16")
         self.config = config
+        # The repository has no tags, and torch.hub accepts a commit only while it is
+        # a branch head; once main moves past the pin, validation would refuse it.
         encoder = load_torch_hub_distributed(
-            "facebookresearch/dinov2",
+            config.repository,
             config.variant,
+            skip_validation=True,
         )
+        # The hub entry downloads its weights inside ``load``, so the check reads
+        # the file it cached rather than fetching them a second time.
+        weights = Path(torch.hub.get_dir()) / "checkpoints" / config.weights_file
+        with weights.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        if digest != config.weights_sha256:
+            raise ValueError(
+                f"{weights} hashes to {digest}, not the pinned {config.weights_sha256}.",
+            )
         encoder.eval().requires_grad_(False)
         self.encoder = cast("_DinoV2Encoder", encoder)
         patch_grid = config.image_size // 16

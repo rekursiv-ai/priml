@@ -98,7 +98,7 @@ def test_known_solution_pins_objective_infeasibility_and_diff(tmp_path: Path) ->
     ).save(str(reference))
     config.preparation.presolve = None
     config.preparation.solver = _Zeros.Config()
-    config.reference = reference
+    config.reference = Path("/reference.json")
     config.make().run()
 
     metrics = _read_metrics(tmp_path / "runs/convextok/exp000")
@@ -237,6 +237,15 @@ def test_run_directory_comes_from_study_and_experiment(tmp_path: Path) -> None:
     assert finalized.preparation.working_dir == finalized.working_dir
 
 
+def test_inputs_resolve_beneath_base_dir(tmp_path: Path) -> None:
+    config = MeasuredFit.Config()
+    config.base_dir = tmp_path
+    config.reference = Path("/runs/convextok/exp000/tokenizer.json")
+    finalized = config.copy_tree().finalize()
+    assert finalized.preparation.raw_dir == tmp_path / "datasets/nanochat/raw"
+    assert finalized.reference == tmp_path / "runs/convextok/exp000/tokenizer.json"
+
+
 def _measured_config(tmp_path: Path) -> MeasuredFit.Config:
     """Point a CPU measured fit at the fixture corpus, written as one raw shard."""
     config = MeasuredFit.Config()
@@ -244,6 +253,8 @@ def _measured_config(tmp_path: Path) -> MeasuredFit.Config:
     config.experiment_name = "exp000"
     config.base_dir = tmp_path
     config.preparation = fixture_config(tmp_path)
+    # Logical, as a measured fit's inputs are: it resolves beneath base_dir.
+    config.preparation.raw_dir = Path("/raw")
     return config
 
 

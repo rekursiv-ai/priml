@@ -1266,7 +1266,7 @@ def test_argument_defaults_and_overrides() -> None:
     assert (defaults.steps, defaults.warmup, defaults.budget_steps) == (20, 11, 191)
     assert (defaults.rows, defaults.eval_batches, defaults.device) == (8, 4, "cuda")
     assert defaults.clone == Path("/opt/scratch/karpathy-autoresearch")
-    assert defaults.corpus == Path("/opt/scratch/datasets/nanochat-priml")
+    assert defaults.corpus == Path("/opt/scratch/datasets/nanochat")
     help_text = parser.format_help()
     assert next(
         line for line in help_text.splitlines() if line.startswith("  --steps")

@@ -4,15 +4,21 @@
 '''' 2>/dev/null #
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
 Crop extracted ImageNet and encode paired 32-channel INVAE latents.
+
+--source is the extracted ILSVRC2012 training set: train/<synset>/*.JPEG,
+one directory for each of the 1,000 synsets; nothing else is read. The
+INVAE checkpoint is downloaded at a pinned revision and checked against
+its SHA-256; --checkpoint names a local copy, checked the same way.
 '''
 # fmt: on
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import argparse
+import hashlib
 import json
 
 from PIL import Image
@@ -24,13 +30,29 @@ from priml.paths import validated_output_path
 
 
 if TYPE_CHECKING:
+    from huggingface_hub import hf_hub_download
+
     import numpy as np
     import torch
 else:
     from wrapt import lazy_import
 
+    hf_hub_download = lazy_import("huggingface_hub", "hf_hub_download")
     np = lazy_import("numpy")
     torch = lazy_import("torch")
+
+
+INVAE_REPOSITORY: Final = "REPA-E/e2e-invae"
+"""Hugging Face repository publishing the INVAE checkpoint."""
+
+INVAE_FILE: Final = "e2e-invae-400k.pt"
+"""Checkpoint file within ``INVAE_REPOSITORY``."""
+
+INVAE_REVISION: Final = "79e3ea77928e1e34bc70e4e71de68fd5b4d4b3e0"
+"""Commit of ``INVAE_REPOSITORY`` the checkpoint is fetched at."""
+
+INVAE_SHA256: Final = "4d45ef5452bd6325eaa4b5c74975328cfed5ecf15a877656bed0f3f6de23d718"
+"""SHA-256 of ``INVAE_FILE`` at ``INVAE_REVISION``, as its LFS pointer records it."""
 
 
 def center_crop(image: Image.Image, size: int) -> Image.Image:
@@ -74,7 +96,7 @@ def prepare(
       source: Extracted ImageNet directory.
       output: Destination for paired images and INVAE latents.
       resolution: Cropped image side length.
-      checkpoint: Optional local INVAE checkpoint.
+      checkpoint: Optional local copy of the pinned INVAE checkpoint.
       device: Torch device used for INVAE encoding.
       limit: Optional maximum image count.
 
@@ -95,7 +117,7 @@ def prepare(
         split="train",
     ).make()
     labels = ImagenetSynsetToIndex.Config().make()
-    vae = load_invae(checkpoint, device=device)
+    vae = load_invae(invae_checkpoint(checkpoint), device=device)
     metadata: list[list[str | int]] = []
     for index, record in enumerate(labels(iter(image_source))):
         if limit is not None and index >= limit:
@@ -130,6 +152,58 @@ def prepare(
     return len(metadata)
 
 
+def require_imagenet_train(source: Path) -> None:
+    """Refuse a source whose ``train/`` is not exactly the 1,000 synset directories.
+
+    Args:
+      source: Extracted ImageNet directory.
+
+    Raises:
+      ValueError: A synset directory is missing, or an unexpected one is present.
+
+    """
+    synsets = set(ImagenetSynsetToIndex.Config().make().synset_to_idx)
+    present = {path.name for path in (source / "train").iterdir() if path.is_dir()}
+    if present != synsets:
+        raise ValueError(
+            f"{source / 'train'} must hold one directory per ImageNet synset; "
+            f"{len(synsets - present)} are missing and "
+            f"{len(present - synsets)} are unexpected.",
+        )
+
+
+def invae_checkpoint(checkpoint: Path | None) -> Path:
+    """Return the INVAE checkpoint to encode with, verified against its digest.
+
+    Args:
+      checkpoint: A local copy, or ``None`` to download ``INVAE_FILE`` at
+        ``INVAE_REVISION`` into the Hugging Face cache.
+
+    Returns:
+      path: The checkpoint, its bytes hashing to ``INVAE_SHA256``.
+
+    Raises:
+      ValueError: The bytes hash to anything else.
+
+    """
+    path = (
+        checkpoint
+        if checkpoint is not None
+        else Path(
+            hf_hub_download(
+                repo_id=INVAE_REPOSITORY,
+                filename=INVAE_FILE,
+                revision=INVAE_REVISION,
+            ),
+        )
+    )
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    if digest != INVAE_SHA256:
+        raise ValueError(f"{path} hashes to {digest}, not the pinned {INVAE_SHA256}.")
+    return path
+
+
 def main() -> int:
     """Prepare one paired ImageNet/INVAE corpus.
 
@@ -143,6 +217,8 @@ def main() -> int:
     )
     _add_arguments(parser)
     flags = cast(Flags, parser.parse_args())
+    # A partial extraction would otherwise train on fewer classes without a word.
+    require_imagenet_train(flags.source)
     print(
         prepare(
             flags.source,

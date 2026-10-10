@@ -54,6 +54,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import field
 from functools import partial
+from pathlib import Path
 from typing import TYPE_CHECKING, Self, cast, override
 
 
@@ -771,7 +772,7 @@ def exp012() -> NgramTrainLoop.Config:
     """Fork exp011 with the following changes.
 
     - Expand training to fourteen shards, excluding validation shard seven.
-    - Select the train14 dataset directory.
+    - Read the fifteen raw shards that ``scripts/prepare_data.py`` fetches.
 
     Results:
       Campaign H200, 525s: 0.927194 mean BPB (3 seeds).
@@ -781,7 +782,7 @@ def exp012() -> NgramTrainLoop.Config:
     """
     cfg = exp011()
     cfg.experiment_name = "exp012"
-    cfg.dataset.working_dir = "/datasets/nanochat/train14"
+    cfg.dataset.working_dir = "/datasets/nanochat/raw"
     cfg.dataset.train_shard_indices = (0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14)
     return cfg
 
@@ -1087,7 +1088,8 @@ def exp019() -> NgramTrainLoop.Config:
     """Fork exp018 with the following changes.
 
     - Reuse layer-4 attention inputs in layers 5, 6, and 7.
-    - Select the dataset with reordered training documents.
+    - Read the donor-original corpus, whose training documents are reordered,
+      through the raw shards' vocabulary.
 
     Results:
       Campaign H200, 525s: 0.897725 mean BPB (3 seeds).
@@ -1104,7 +1106,8 @@ def exp019() -> NgramTrainLoop.Config:
     model.block = [
         SourceReuseTransformerBlock.Config().update(block) for block in model.block
     ]
-    cfg.dataset.working_dir = "/datasets/nanochat/augmented"
+    cfg.dataset.working_dir = "/datasets/nanochat/donor-original"
+    cfg.dataset.tokenizer_dir = "/datasets/nanochat/raw/tokenizer"
     return cfg
 
 
@@ -1254,12 +1257,20 @@ def exp023() -> NgramTrainLoop.Config:
     """
     cfg = exp022()
     cfg.experiment_name = "exp023"
+    # Its own preparation root: the reference-eval archive is tokenizer-specific,
+    # so sharing exp022's root would score ConvexTok on Unigram replay rows.
     cfg.dataset.prepared_train_manifest = (
-        "/datasets/nanochat/convextok16k/prepared/train/PREPARED_MANIFEST.json"
+        "/datasets/nanochat-convextok/convextok16k/prepared/train/"
+        "PREPARED_MANIFEST.json"
     )
     cfg.dataset.prepared_eval_manifest = (
-        "/datasets/nanochat/convextok16k/prepared/eval/PACKED_EVAL_MANIFEST.json"
+        "/datasets/nanochat-convextok/convextok16k/prepared/eval/"
+        "PACKED_EVAL_MANIFEST.json"
     )
+    reference = cfg.dataset.reference_evaluation
+    if reference is None:
+        raise ValueError("Expected reference is not None.")
+    reference.path = Path("/datasets/nanochat-convextok/reference-eval/unigram.npz")
     return cfg
 
 
@@ -1289,7 +1300,8 @@ def exp_smoke() -> NanoChatLoop.Config:
     """Fork exp001 for an unscored installation check.
 
     - Automatically select the available device.
-    - Reduce vocabulary/width/depth/context to 16/32/2/8.
+    - Reduce width/depth/context to 32/2/8. Keep exp001's vocabulary, so the
+      check reads the corpus ``scripts/prepare_data.py`` prepares for exp001.
     - Reduce attention-head width to 16 and microbatches to two rows.
     - Use 32 tokens per optimizer step; disable compilation and warmup.
     - Stop after four steps or ten seconds.
@@ -1307,7 +1319,6 @@ def exp_smoke() -> NanoChatLoop.Config:
     runtime = cfg.runtime
     assert isinstance(runtime, SingleProcess.Config)
     runtime.device = None
-    cfg.step.model.vocab_size = 16
     # The value gate reads a fixed 32 channels_in of its input, so a model
     # narrower than 32 has a gate of a different shape than the reference's.
     cfg.step.model.channels_in = 32

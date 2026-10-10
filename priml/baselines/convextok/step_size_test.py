@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Final, cast
 from unittest.mock import Mock, call
 
+import inspect
 import math
 
 from torch import Tensor
@@ -200,9 +201,14 @@ def test_initial_step_size_observes_iteration_limit_and_strict_tolerance(
     monkeypatch.setattr(torch.linalg, "vector_norm", operations.vector_norm)
     monkeypatch.setattr(torch, "dot", operations.dot)
 
-    assert initial_step_size(scaled, tolerance=0.0) == 0.998
-    assert operations.dot_calls == 5000
-    assert operations.norm_calls == 10_000
+    assert initial_step_size(scaled, tolerance=0.0, max_iterations=3) == 0.998
+    assert operations.dot_calls == 3
+    assert operations.norm_calls == 6
+
+
+def test_initial_step_size_stops_at_cuopts_5000_iterations_by_default() -> None:
+    parameters = inspect.signature(initial_step_size).parameters
+    assert cast(object, parameters["max_iterations"].default) == 5_000
 
 
 @pytest.mark.parametrize("presolve", [0, 2])

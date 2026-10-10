@@ -171,6 +171,8 @@ class _SmokeSteps(nn.Module):
         return torch.stack(losses)
 
 
+# Marked: an end-to-end freeze of three updates; three blocks are the fewest that
+# reach the dense encoder, the routed middle and the dense decoder.
 @pytest.mark.compute_training
 def test_exp_smoke_three_steps_bfb() -> None:
     """Freeze initialization, three forward/backward passes, and weight updates."""

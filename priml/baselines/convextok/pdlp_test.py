@@ -206,44 +206,33 @@ def test_necessary_reduction_tracks_rising_error() -> None:
     assert result.primal_weight == pytest.approx(0.2082765327409026, rel=1e-12)
 
 
-def test_sufficient_reduction_thresholds_select_restarts() -> None:
-    weights: list[float] = []
-    for reduction in (
-        0.1,
-        0.2,
-        0.21,
-        0.22,
-        0.23,
-        0.24,
-        0.25,
-        0.3,
-        0.35,
-        0.36,
-        0.37,
-        0.38,
-        0.39,
-        0.4,
-        0.45,
-        0.5,
-        1.0,
-        2.0,
-        100.0,
-    ):
-        config = Pdlp.Config()
-        config.tolerance = 1e-12
-        config.iteration_limit = 20
-        config.restart_period = 4
-        config.sufficient_reduction = reduction
-        config.necessary_reduction = 0.0
-        config.artificial_restart = 100.0
-        weights.append(config.make()(_small_program()).primal_weight)
-
-    assert weights == pytest.approx(
-        [
-            *([0.086306313778881] * 4),
-            *([0.05797185827273946] * 5),
-            *([0.01699754655360023] * 10),
-        ],
+@pytest.mark.parametrize(
+    ("reduction", "weight"),
+    [
+        *((reduction, 0.086306313778881) for reduction in (0.1, 0.2, 0.21, 0.22)),
+        *(
+            (reduction, 0.05797185827273946)
+            for reduction in (0.23, 0.24, 0.25, 0.3, 0.35)
+        ),
+        *(
+            (reduction, 0.01699754655360023)
+            for reduction in (0.36, 0.37, 0.38, 0.39, 0.4, 0.45, 0.5, 1.0, 2.0, 100.0)
+        ),
+    ],
+)
+def test_sufficient_reduction_thresholds_select_restarts(
+    reduction: float,
+    weight: float,
+) -> None:
+    config = Pdlp.Config()
+    config.tolerance = 1e-12
+    config.iteration_limit = 20
+    config.restart_period = 4
+    config.sufficient_reduction = reduction
+    config.necessary_reduction = 0.0
+    config.artificial_restart = 100.0
+    assert config.make()(_small_program()).primal_weight == pytest.approx(
+        weight,
         rel=1e-12,
     )
 

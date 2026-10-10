@@ -139,7 +139,6 @@ def test_experiment_ladder_has_twenty_five_rungs() -> None:
     }
 
 
-@pytest.mark.compute_large_fixture
 def test_exp022_matches_its_full_config_golden() -> None:
     assert_pprint_golden(test_file=__file__, name="exp022", config=experiments.exp022())
 
@@ -148,10 +147,23 @@ def test_exp023_changes_only_the_prepared_inputs() -> None:
     changed = experiments.exp023()
     assert "convextok16k" in str(changed.dataset.prepared_train_manifest)
     assert "convextok16k" in str(changed.dataset.prepared_eval_manifest)
+    reference = changed.dataset.reference_evaluation
+    assert reference is not None
+    # The replay archive is tokenizer-specific, so all three inputs come from
+    # the ConvexTok preparation's own root rather than exp022's.
+    for path in (
+        changed.dataset.prepared_train_manifest,
+        changed.dataset.prepared_eval_manifest,
+        reference.path,
+    ):
+        assert str(path).startswith("/datasets/nanochat-convextok/")
     original = experiments.exp022()
+    original_reference = original.dataset.reference_evaluation
+    assert original_reference is not None
     changed.experiment_name = original.experiment_name
     changed.dataset.prepared_train_manifest = original.dataset.prepared_train_manifest
     changed.dataset.prepared_eval_manifest = original.dataset.prepared_eval_manifest
+    reference.path = original_reference.path
     assert (
         changed.copy_tree().finalize().serialize()
         == original.copy_tree().finalize().serialize()
@@ -532,7 +544,6 @@ def test_the_dataset_batch_follows_the_steps_pass_size() -> None:
 
 
 @pytest.mark.parametrize(("name", "factory"), PORTABLE, ids=[n for n, _ in PORTABLE])
-@pytest.mark.compute_training
 def test_every_experiments_eval_geometry_is_constructible(
     name: str,
     factory: Callable[[], NanoChatLoop.Config],
@@ -557,7 +568,7 @@ def test_every_experiments_eval_geometry_is_constructible(
     # are cut to what a CPU runner can step in milliseconds.
     model.channels_in = 32
     model.num_layers = 1
-    model.max_seq_len = 16
+    model.max_seq_len = 8
     model.vocab_size = 32
     attention = model.template.attn
     assert isinstance(attention, ValueGatedAttention.Config)
@@ -647,9 +658,11 @@ def _prepared(root: Path, *, vocab: int) -> None:
             },
         ),
     )
+    # Lengths 1-8, repeated so one read of a shard fills most of the two eval
+    # batches: rereading an eight-document shard took 700 reads, 0.1 s on x86.
     documents = [
-        bytes(alphabet[index % merges][0] for _ in range(index + 1)).decode()
-        for index in range(8)
+        bytes(alphabet[index % merges][0] for _ in range(index % 8 + 1)).decode()
+        for index in range(512)
     ]
     for shard in range(2):
         parquet.write_table(
@@ -947,6 +960,9 @@ def test_smoke_differs_from_exp001_only_in_size() -> None:
     """
     smoke, base = experiments.exp_smoke(), experiments.exp001()
     smoke_model, base_model = smoke.step.model, base.step.model
+    # Not a size: the smoke reads the corpus prepared for exp001, whose fitted
+    # vocabulary the dataset checks against the model at load.
+    assert smoke_model.vocab_size == base_model.vocab_size
     assert smoke_model.value_embedding_stride == base_model.value_embedding_stride
     assert repr(smoke_model.embedding) == repr(base_model.embedding)
     assert smoke_model.rope.dtype == base_model.rope.dtype
@@ -987,7 +1003,6 @@ def test_the_models_compile_switch_leaves_the_optimizers_alone() -> None:
                 assert member.compile is True, factory.__name__
 
 
-@pytest.mark.compute_large_fixture
 def test_exp000_matches_its_golden_config() -> None:
     assert_pprint_golden(test_file=__file__, name="exp000", config=experiments.exp000())
 

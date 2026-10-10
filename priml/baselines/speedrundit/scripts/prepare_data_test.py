@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
+from unittest.mock import Mock
 
 import argparse
+import hashlib
+import re
 
 from PIL import Image
 
@@ -15,7 +18,6 @@ import torch
 
 from priml.baselines.speedrundit.data import PairedImageLatentDataset
 from priml.baselines.speedrundit.scripts import prepare_data
-from priml.data.processors.labels import ImagenetSynsetToIndex
 from priml.data.sources.extracted_imagenet import ExtractedImageNetSource
 from priml.lib.codec import from_plain, loads
 
@@ -50,18 +52,40 @@ def _fake_load_invae(*_args: object, **_kwargs: object) -> _FakeVAE:
     return _FakeVAE()
 
 
+@pytest.fixture
+def pinned_invae(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Stand in for the pinned download: a supplied copy passes, else this path."""
+    pinned = tmp_path / "pinned-invae.pt"
+
+    def checkpoint(supplied: Path | None) -> Path:
+        return supplied if supplied is not None else pinned
+
+    monkeypatch.setattr(prepare_data, "invae_checkpoint", checkpoint)
+    return pinned
+
+
+def _synsets() -> list[str]:
+    """Return the 1,000 ImageNet synsets in the shipped label order."""
+    labels = _CWD.parents[2] / "data/processors/labels_imagenet.txt"
+    return labels.read_text(encoding="utf-8").splitlines()
+
+
+def _gradient(size: tuple[int, int]) -> Image.Image:
+    """Return an RGB image whose every pixel differs, so a misplaced crop shows."""
+    image = Image.new("RGB", size)
+    for x in range(image.width):
+        for y in range(image.height):
+            image.putpixel((x, y), (x * 18, y * 18, (x + y) * 9))
+    return image
+
+
 def test_center_crop_box_downsamples_before_center_crop() -> None:
-    image = Image.new("RGB", (768, 512))
-    for x in range(768):
-        for y in range(512):
-            image.putpixel((x, y), (x % 256, y % 256, (x + y) % 256))
+    image = _gradient((12, 8))
 
-    cropped = prepare_data.center_crop(image, 256)
-    expected = image.resize((384, 256), Image.Resampling.BOX).crop(
-        (64, 0, 320, 256),
-    )
+    cropped = prepare_data.center_crop(image, 4)
+    expected = image.resize((6, 4), Image.Resampling.BOX).crop((1, 0, 5, 4))
 
-    assert cropped.size == (256, 256)
+    assert cropped.size == (4, 4)
     assert cropped.tobytes() == expected.tobytes()
 
 
@@ -81,8 +105,8 @@ def test_center_crop_resizes_short_axis_and_centers_both_axes() -> None:
 @pytest.mark.parametrize(
     ("source_size", "resized_size", "crop_box"),
     [
-        ((774, 512), (387, 256), (65, 0, 321, 256)),
-        ((512, 774), (256, 387), (0, 65, 256, 321)),
+        ((14, 8), (7, 4), (1, 0, 5, 4)),
+        ((8, 14), (4, 7), (0, 1, 4, 5)),
     ],
 )
 def test_center_crop_floors_odd_center_offsets(
@@ -90,22 +114,19 @@ def test_center_crop_floors_odd_center_offsets(
     resized_size: tuple[int, int],
     crop_box: tuple[int, int, int, int],
 ) -> None:
-    image = Image.new("RGB", source_size)
-    for x in range(image.width):
-        for y in range(image.height):
-            image.putpixel((x, y), (x % 256, y % 256, (x + y) % 256))
+    image = _gradient(source_size)
     resized = image.resize(resized_size, Image.Resampling.BOX)
     expected = resized.crop(crop_box)
 
-    assert prepare_data.center_crop(image, 256).tobytes() == expected.tobytes()
+    assert prepare_data.center_crop(image, 4).tobytes() == expected.tobytes()
 
 
+@pytest.mark.usefixtures("pinned_invae")
 def test_prepare_forwards_checkpoint_device_and_limit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    synsets = _CWD.parents[2] / "data/processors/labels_imagenet.txt"
-    first_class = synsets.read_text(encoding="utf-8").splitlines()[0]
+    first_class = _synsets()[0]
     image_dir = tmp_path / "raw" / "train" / first_class
     image_dir.mkdir(parents=True)
     for image_id in (1, 2):
@@ -186,6 +207,8 @@ def test_main_forwards_arguments_and_reports_prepared_count(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     source = tmp_path / "source"
+    for synset in _synsets():
+        (source / "train" / synset).mkdir(parents=True)
     output = tmp_path / "out"
     checkpoint = tmp_path / "invae.pt"
     monkeypatch.setattr(
@@ -254,6 +277,7 @@ def test_main_forwards_arguments_and_reports_prepared_count(
         ),
     ],
 )
+@pytest.mark.usefixtures("pinned_invae")
 def test_prepare_rejects_untyped_records(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -264,16 +288,9 @@ def test_prepare_rejects_untyped_records(
         del config
         return [record]
 
-    def labels_make(config: ImagenetSynsetToIndex.Config) -> object:
-        del config
-
-        def identity(records: object) -> object:
-            return records
-
-        return identity
-
+    # The real synset mapping passes both records through unchanged: one label
+    # names no synset, the other is already an index.
     monkeypatch.setattr(ExtractedImageNetSource.Config, "make", source_make)
-    monkeypatch.setattr(ImagenetSynsetToIndex.Config, "make", labels_make)
     monkeypatch.setattr(prepare_data, "load_invae", _fake_load_invae)
 
     with pytest.raises(TypeError) as error:
@@ -289,9 +306,30 @@ def test_prepare_refuses_to_write_over_its_source(tmp_path: Path) -> None:
     assert list(source.iterdir()) == []
 
 
+def test_main_refuses_a_partial_imagenet_before_preparing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    train = tmp_path / "raw" / "train"
+    for synset in _synsets()[1:]:
+        (train / synset).mkdir(parents=True)
+    (train / "n00000000").mkdir()
+    prepare = Mock()
+    monkeypatch.setattr(prepare_data, "prepare", prepare)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["prepare_data", "--source", str(tmp_path / "raw"), "--output", "out"],
+    )
+
+    with pytest.raises(ValueError, match="1 are missing and 1 are unexpected"):
+        prepare_data.main()
+    prepare.assert_not_called()
+
+
 def test_prepare_creates_manifest_for_empty_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    pinned_invae: Path,
 ) -> None:
     source = tmp_path / "raw"
     (source / "train").mkdir(parents=True)
@@ -305,7 +343,7 @@ def test_prepare_creates_manifest_for_empty_source(
     output = tmp_path / "prepared"
 
     assert prepare_data.prepare(source, output) == 0
-    assert captured == {"checkpoint": None, "device": "cuda"}
+    assert captured == {"checkpoint": pinned_invae, "device": "cuda"}
     assert (output / "vae-in/dataset.json").read_bytes() == b'{"labels": []}'
 
 
@@ -337,6 +375,10 @@ def test_main_help_includes_module_description(
         "                    [--resolution {256,512}] [--checkpoint CHECKPOINT]\n"
         "                    [--device DEVICE] [--limit LIMIT]\n\n"
         "Crop extracted ImageNet and encode paired 32-channel INVAE latents.\n\n"
+        "--source is the extracted ILSVRC2012 training set: train/<synset>/*.JPEG,\n"
+        "one directory for each of the 1,000 synsets; nothing else is read. The\n"
+        "INVAE checkpoint is downloaded at a pinned revision and checked against\n"
+        "its SHA-256; --checkpoint names a local copy, checked the same way.\n\n"
         "options:\n"
         "  -h, --help            show this help message and exit\n"
         "  --source SOURCE\n"
@@ -348,12 +390,12 @@ def test_main_help_includes_module_description(
     )
 
 
+@pytest.mark.usefixtures("pinned_invae")
 def test_preparer_writes_paired_source_layout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    synsets = _CWD.parents[2] / "data/processors/labels_imagenet.txt"
-    first_class = synsets.read_text(encoding="utf-8").splitlines()[0]
+    first_class = _synsets()[0]
     image_dir = tmp_path / "raw" / "train" / first_class
     image_dir.mkdir(parents=True)
     Image.new("L", (320, 280), 128).save(image_dir / f"{first_class}_1.JPEG")
@@ -389,6 +431,40 @@ def test_preparer_writes_paired_source_layout(
     dataset = PairedImageLatentDataset.Config(working_dir=output).make()
     assert len(dataset) == 1
     assert dataset[0]["label"] == 0
+
+
+def test_the_invae_pin_is_a_commit_and_a_digest() -> None:
+    assert re.fullmatch(r"[0-9a-f]{40}", prepare_data.INVAE_REVISION)
+    assert re.fullmatch(r"[0-9a-f]{64}", prepare_data.INVAE_SHA256)
+
+
+def test_invae_checkpoint_downloads_the_pinned_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    downloaded = tmp_path / "e2e-invae-400k.pt"
+    downloaded.write_bytes(b"weights")
+    download = Mock(return_value=str(downloaded))
+    monkeypatch.setattr(prepare_data, "hf_hub_download", download)
+    monkeypatch.setattr(
+        prepare_data,
+        "INVAE_SHA256",
+        hashlib.sha256(b"weights").hexdigest(),
+    )
+
+    assert prepare_data.invae_checkpoint(None) == downloaded
+    download.assert_called_once_with(
+        repo_id="REPA-E/e2e-invae",
+        filename="e2e-invae-400k.pt",
+        revision=prepare_data.INVAE_REVISION,
+    )
+
+
+def test_invae_checkpoint_refuses_a_copy_with_another_digest(tmp_path: Path) -> None:
+    local = tmp_path / "copy.pt"
+    local.write_bytes(b"other bytes")
+    with pytest.raises(ValueError, match="not the pinned"):
+        prepare_data.invae_checkpoint(local)
 
 
 if __name__ == "__main__":

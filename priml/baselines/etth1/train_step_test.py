@@ -25,14 +25,12 @@ _CWD: Final = Path(__file__).resolve().parent
 _GOLDEN: Final = _CWD / "testdata" / "dlinear_training.pt"
 
 
-@pytest.mark.compute_training
 def test_three_updates_match_source_golden() -> None:
     with host_agnostic_numerics():
         actual = training_record(tiny_config().make())
     assert not mismatches(read_tensors(_GOLDEN), golden_record(actual, training=True))
 
 
-@pytest.mark.compute_training
 def test_training_golden_detects_changed_recipe() -> None:
     cfg = tiny_config()
     cfg.optimizer = PartialConfig(torch.optim.Adam, lr=2e-4)
@@ -85,7 +83,6 @@ def test_unsupported_controls_fail_before_training(name: str, value: object) -> 
     assert torch.equal(before, torch.get_rng_state())
 
 
-@pytest.mark.compute_training
 def test_forward_and_eval_timers_count_calls() -> None:
     step = tiny_config().make()
     batch = next(tiny_batches())

@@ -93,21 +93,25 @@ def two_numba_threads() -> Iterator[None]:
     torch.set_num_threads(torch_threads)
 
 
-# Compiled: the first presolve in a process JIT-compiles every kernel it reaches,
-# about 45 s on x86 with a cold Numba cache, so this is one test, not one per program.
+# Compiled, so marked: the first case in a process JIT-compiles every kernel it
+# reaches, about 45 s on x86 with a cold Numba cache. Later cases, and every case
+# under a warm cache, take milliseconds. The fuzz programs with the fixture execute
+# every reachable kernel line, so together these cases compile every kernel the
+# presolve can call.
 @pytest.mark.compute_large_fixture
 @pytest.mark.parametrize("kernels", ["compiled"], indirect=True)
 @pytest.mark.usefixtures("two_numba_threads")
-def test_compiled_kernels_match_pslp_on_every_program() -> None:
-    """Every kernel compiles, and the compiled presolve still matches PSLP.
-
-    The fuzz programs with the fixture execute every reachable kernel line, so
-    together they compile every kernel the presolve can call.
-    """
+def test_compiled_kernels_match_pslp_on_fixture() -> None:
     with _npz(_TESTDATA / "presolve.npz") as golden:
         _assert_reduced_like(presolve(fixture_program(), _CPU), golden)
-    for path in _FUZZ:
-        _assert_matches_pslp(path)
+
+
+@pytest.mark.compute_large_fixture
+@pytest.mark.parametrize("kernels", ["compiled"], indirect=True)
+@pytest.mark.parametrize("path", [pytest.param(path, id=path.stem) for path in _FUZZ])
+@pytest.mark.usefixtures("two_numba_threads")
+def test_compiled_kernels_match_pslp_on_fuzz_program(path: Path) -> None:
+    _assert_matches_pslp(path)
 
 
 @pytest.mark.compute_large_fixture
@@ -128,9 +132,17 @@ def test_index_dtypes_share_one_kernel_specialization() -> None:
 
 
 def test_index_dtypes_reduce_to_the_same_program() -> None:
-    program = fixture_program()
-    narrow_result = presolve(program, _CPU)
-    wide_result = presolve(_wide_indices(program), _CPU)
+    # A 121-entry fuzz program that presolve cuts to 51: the fixture's 2,553
+    # entries cost 0.12 s for the two presolves on x86.
+    with _npz(_TESTDATA / "presolve_fuzz" / "general_00801.npz") as golden:
+        wide = _input_program(golden)
+    narrow = replace(
+        wide,
+        crow_indices=wide.crow_indices.int(),
+        col_indices=wide.col_indices.int(),
+    )
+    narrow_result = presolve(narrow, _CPU)
+    wide_result = presolve(wide, _CPU)
     assert torch.equal(narrow_result.program.values, wide_result.program.values)
 
 

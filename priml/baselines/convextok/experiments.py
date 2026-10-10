@@ -1,15 +1,17 @@
 """ConvexTok fitting experiments: one measured vocabulary fit per run.
 
-Each experiment is a ``MeasuredFit``. It fits a vocabulary with
-``ConvexTokPreparation`` and writes ``tokenizer.json`` and ``metrics.json`` (stage
+Each experiment is a ``MeasuredFit``. It reads the raw shards at
+``datasets/nanochat/raw`` and writes ``tokenizer.json`` and ``metrics.json`` (stage
 seconds, peak memory, objective, infeasibility, iterations, vocabulary diff) to
-``/opt/scratch/runs/convextok/<experiment>``. The README's "Experiments" section
-gives the commands that fetch the raw shards and launch a run.
+``runs/convextok/<experiment>``, both beneath ``base_dir`` (``/opt/scratch``). The
+README's "Reproduce" section gives the commands that fetch the raw shards and
+launch a run.
 
 A fork changes one slot of ``cfg.preparation``: ``solver`` (any callable from a
 ``LinearProgram`` to a solution with a ``primal`` tensor), ``presolve``,
 ``rounding``, ``shard_indices`` for a smaller program, or ``vocab_size``. Set
-``cfg.reference`` to exp000's ``tokenizer.json`` to count the pieces that moved.
+``cfg.reference = Path("/runs/convextok/exp000/tokenizer.json")``, exp000's output
+beneath the same ``base_dir``, to count the pieces that moved.
 """
 
 from priml.baselines.convextok.measure import MeasuredFit

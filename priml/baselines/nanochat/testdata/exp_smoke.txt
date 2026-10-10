@@ -6,7 +6,7 @@ NanoChatLoop.Config(
         doc='',
         step=NanoChatTrainStep.Config(
         │   model=NanoChatLM.Config(
-        │   │   vocab_size=16,
+        │   │   vocab_size=8_192,
         │   │   max_seq_len=8,
         │   │   channels_in=32,
         │   │   num_layers=2,
@@ -136,11 +136,11 @@ NanoChatLoop.Config(
         │   │   ],
         │   │   value_embedding_stride=2,
         │   │   embedding=NarrowEmbedding.Config(
-        │   │       channels_in=16,
+        │   │       channels_in=8_192,
         │   │       channels_out=32,
         │   │       dtype=torch.bfloat16,
         │   │       inner=Embedding.Config(
-        │   │           channels_in=16,
+        │   │           channels_in=8_192,
         │   │           channels_out=32,
         │   │           padding_idx=None,
         │   │           device=None,
@@ -160,11 +160,11 @@ NanoChatLoop.Config(
         │   │   ),
         │   │   lm_head=SoftCap.Config(
         │   │       channels_in=32,
-        │   │       channels_out=16,
+        │   │       channels_out=8_192,
         │   │       cap=15.0,
         │   │       inner=Linear.Config(
         │   │           channels_in=32,
-        │   │           channels_out=16,
+        │   │           channels_out=8_192,
         │   │           bias=False,
         │   │           depth_index=(),
         │   │           device=None,
@@ -321,7 +321,7 @@ NanoChatLoop.Config(
             buffer_size=1_000,
             train_buffer_size=None,
             device=None,
-            vocab_size=16,
+            vocab_size=8_192,
             max_seq_len=8
         ),
         metrics_train={},

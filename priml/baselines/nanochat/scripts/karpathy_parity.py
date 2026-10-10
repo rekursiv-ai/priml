@@ -848,7 +848,7 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--corpus",
         type=Path,
-        default=Path("/opt/scratch/datasets/nanochat-priml"),
+        default=Path("/opt/scratch/datasets/nanochat"),
         help="Prepared shards and tokenizer, read by THEIR loader.",
     )
 

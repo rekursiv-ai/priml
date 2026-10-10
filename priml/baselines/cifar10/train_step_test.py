@@ -183,16 +183,16 @@ def test_schedule_warms_up_then_decays() -> None:
     assert rates[-1] < rates[2] < rates[1]
 
 
-@pytest.mark.compute_training
 def test_the_injected_schedule_drives_the_learning_rate() -> None:
     def trace(schedule: PartialConfig[float]) -> list[float]:
         config = tiny_step()
-        config.total_train_steps = 20
+        # Three steps: cosine and power-1.2 decay already part at a third.
+        config.total_train_steps = 3
         config.warmup_fraction = 0.0
         config.schedule = schedule
         step = config.make()
         out: list[float] = []
-        for _ in range(20):
+        for _ in range(config.total_train_steps):
             _ = step.train_step(**tiny_batch())
             out.append(learning_rate(step.optimizer))
         return out

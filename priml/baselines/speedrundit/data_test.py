@@ -196,12 +196,17 @@ def test_worker_loader_carries_its_prefetch_settings(tmp_path: Path) -> None:
     assert loader.drop_last
     train_sampler: object = loader.sampler
     _assert_random_sampler(train_sampler)
-    data.config.pin_memory = False
-    eval_loader = data.eval_dataloader()
-    eval_loader.multiprocessing_context = _WORKER_CONTEXT
-    assert [batch["label"].shape[0] for batch in eval_loader] == [2, 2]
-    eval_sampler: object = eval_loader.sampler
+    eval_sampler: object = data.eval_dataloader().sampler
     _assert_sequential_sampler(eval_sampler)
+
+
+@pytest.mark.cli_python_subprocess
+def test_worker_processes_read_every_full_batch(tmp_path: Path) -> None:
+    _labelled_pairs(tmp_path, 5)
+    loader = _data(tmp_path, num_workers=2).eval_dataloader()
+    loader.multiprocessing_context = _WORKER_CONTEXT
+    # drop_last discards the fifth sample.
+    assert [batch["label"].shape[0] for batch in loader] == [2, 2]
 
 
 def test_distributed_loader_uses_a_reshuffled_sampler(tmp_path: Path) -> None:
@@ -231,11 +236,25 @@ def test_distributed_loader_uses_a_reshuffled_sampler(tmp_path: Path) -> None:
     finally:
         dist.destroy_process_group()
     assert data.dataset.sampler is sampler
+
+
+def test_distributed_sampler_orders_each_epoch_by_its_seed(tmp_path: Path) -> None:
+    _labelled_pairs(tmp_path, 4)
+    data = _data(tmp_path)
+    dist.init_process_group(
+        backend="gloo",
+        init_method=(tmp_path / "gloo-rendezvous").resolve().as_uri(),
+        rank=0,
+        world_size=1,
+    )
+    try:
+        loader = data.train_dataloader()
+    finally:
+        dist.destroy_process_group()
     data.dataset.set_epoch(3)
     # One rank's sampler draws the whole permutation seeded by seed 0 + epoch,
     # and the loader reads its batches in that order.
     order = torch.randperm(4, generator=torch.Generator().manual_seed(3))
-    loader.multiprocessing_context = _WORKER_CONTEXT
     labels = [batch["label"] for batch in loader]
     assert torch.equal(torch.cat(labels), order)
 

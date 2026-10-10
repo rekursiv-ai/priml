@@ -35,6 +35,9 @@ def test_module_entry_point(
         assert "pytest" in captured.out
 
 
+# End to end by design: the polyglot header re-executes the script through uv
+# from another directory, which no in-process call reaches; the in-process
+# `test_module_entry_point` above is the unit test of the same entry points.
 @pytest.mark.cli_uv
 @pytest.mark.parametrize("script", ["prepare_data", "evaluate", "verify_reference"])
 def test_executable_entry_point_from_another_directory(

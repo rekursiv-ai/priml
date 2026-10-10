@@ -30,14 +30,14 @@ time budget, and evaluator all run as written.
 
 Examples:
   CUDA_VISIBLE_DEVICES=0 karpathy_race.py
-  CUDA_VISIBLE_DEVICES=0 karpathy_race.py --rows 16 --corpus /opt/scratch/datasets/nanochat-priml
+  CUDA_VISIBLE_DEVICES=0 karpathy_race.py --rows 16 --corpus /opt/scratch/datasets/nanochat
 
 Example Output:
 
 ````
 $ CUDA_VISIBLE_DEVICES=0 karpathy_race.py
 upstream:  /opt/scratch/karpathy-autoresearch/train.py
-corpus:    /opt/scratch/datasets/nanochat-priml
+corpus:    /opt/scratch/datasets/nanochat
 kernel:    their_attention (SDPA; FA3 needs SM90)
 rows/pass: 32 (theirs is 128; 45 GiB on H100)
 vocab:     8,192
@@ -78,9 +78,7 @@ RESULT: {
 ```
 
 See Also:
-  CUDA_VISIBLE_DEVICES=1 uv --quiet run --frozen python -m priml priml.baselines.nanochat.experiments.exp001 --override cfg.step.rows_per_pass=64
-  # 26-08-17 20:40:26.175900 | INFO | priml.train.train_loop | _maybe_eval:1249 | RESULT: steps=221 | time=345.1s | train_sec=300.0s | train_unbilled_sec=17.7s | eval_sec=24.9s | other_sec=2.5s | mean_batch_time=0.3088 | total_loss=3.1983 | val_bpb=1.1426
-  # 26-08-17 20:40:26.176222 | INFO | priml.launch | main:133 | Total program time: 347.2s
+  CUDA_VISIBLE_DEVICES=1 uv --quiet run --frozen python -m priml priml.baselines.nanochat.experiments.exp001
 
 '''
 # fmt: on
@@ -188,7 +186,7 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--corpus",
         type=Path,
-        default=Path("/opt/scratch/datasets/nanochat-priml"),
+        default=Path("/opt/scratch/datasets/nanochat"),
         help="Prepared shards and tokenizer, read by both sides.",
     )
     # Measured on this card: 32 peaks at 22.9 GiB of 31.4, and 64 OOMs. The

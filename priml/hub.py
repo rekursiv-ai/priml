@@ -60,7 +60,12 @@ def get_cache_dir() -> Path:
     return models_dir
 
 
-def load_torch_hub_distributed(repository: str, model: str) -> nn.Module:
+def load_torch_hub_distributed(
+    repository: str,
+    model: str,
+    *,
+    skip_validation: bool = False,
+) -> nn.Module:
     """Let rank zero populate the Hub cache before other ranks load a model.
 
     A rank-zero download failure is broadcast before peers enter ``hub.load``;
@@ -69,6 +74,8 @@ def load_torch_hub_distributed(repository: str, model: str) -> nn.Module:
     Args:
       repository: Torch Hub repository, ``owner/repo[:ref]``.
       model: Entry point name within the repository.
+      skip_validation: Skip torch.hub's check that the ref is a branch or tag head;
+        a commit pin needs it once its branch moves on.
 
     Returns:
       module: The loaded model.
@@ -76,13 +83,19 @@ def load_torch_hub_distributed(repository: str, model: str) -> nn.Module:
     """
     distributed = torch.distributed
     if not distributed.is_available() or not distributed.is_initialized():
-        return cast(nn.Module, torch.hub.load(repository, model))
+        return cast(
+            nn.Module,
+            torch.hub.load(repository, model, skip_validation=skip_validation),
+        )
 
     loaded: nn.Module | None = None
     error: Exception | None = None
     if distributed.get_rank() == 0:
         try:
-            loaded = cast(nn.Module, torch.hub.load(repository, model))
+            loaded = cast(
+                nn.Module,
+                torch.hub.load(repository, model, skip_validation=skip_validation),
+            )
         except Exception as exc:  # noqa: BLE001 -- Every rank must see any rank-zero failure.
             error = exc
     status = [str(error) if error is not None else None]
@@ -92,7 +105,10 @@ def load_torch_hub_distributed(repository: str, model: str) -> nn.Module:
             raise error
         raise RuntimeError(f"rank 0 could not load {repository}/{model}: {status[0]}")
     if loaded is None:
-        loaded = cast(nn.Module, torch.hub.load(repository, model))
+        loaded = cast(
+            nn.Module,
+            torch.hub.load(repository, model, skip_validation=skip_validation),
+        )
     return loaded
 
 

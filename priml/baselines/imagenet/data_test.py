@@ -70,7 +70,7 @@ def test_working_dir_propagates_through_imagenet_pipelines(tmp_path: Path) -> No
 
 def _fake_jpeg() -> bytes:
     buffer = io.BytesIO()
-    Image.new("RGB", (256, 255), color="red").save(buffer, format="JPEG")
+    Image.new("RGB", (12, 10), color="red").save(buffer, format="JPEG")
     return buffer.getvalue()
 
 
@@ -311,14 +311,21 @@ def test_deit_train_data_pipeline(tmp_path: Path, batch_size: int) -> None:
     cfg.source.shuffle = False
     (batcher,) = (p for p in cfg.processors if isinstance(p, Batcher.Config))
     batcher.size = batch_size
+    (crop,) = (
+        p
+        for p in cfg.processors
+        if isinstance(p, GetRandomResizedCropBoxFromDimensions.Config)
+    )
+    assert crop.size == (224, 224)
+    crop.size = (6, 5)
 
     batch = next(iter(cfg.make()))
 
     image, label = batch["image"], batch["label"]
     assert isinstance(image, Tensor)
     assert isinstance(label, Tensor)
-    # (B, C, F, H, W): an image is one frame.
-    assert image.shape == (batch_size, 3, 1, 224, 224)
+    # (B, C, F, H, W): an image is one frame, resized to the crop's size.
+    assert image.shape == (batch_size, 3, 1, *crop.size)
     # MixUp with label smoothing emits soft float labels over the classes.
     assert label.shape == (batch_size, 1000)
     assert label.dtype == torch.float32

@@ -57,7 +57,6 @@ def test_schedule_matches_source_epoch_boundaries() -> None:
     assert dlinear_type1(2 / 10 - 1e-6) == 1
 
 
-@pytest.mark.compute_training
 def test_smoke_runs_end_to_end(tmp_path: Path) -> None:
     cfg = exp_smoke()
     cfg.base_dir = tmp_path
@@ -109,7 +108,6 @@ def test_early_stopping_ties_and_state_restore(tmp_path: Path) -> None:
         loop.close()
 
 
-@pytest.mark.compute_training
 def test_mid_epoch_resume_replays_exact_next_update(tmp_path: Path) -> None:
     cfg = exp_smoke()
     cfg.base_dir = tmp_path
@@ -165,7 +163,6 @@ def epoch_config(directory: Path) -> Etth1TrainLoop.Config:
     return cfg
 
 
-@pytest.mark.compute_training
 @pytest.mark.parametrize("epochs", [1, 2])
 def test_step_budget_validates_complete_epochs(tmp_path: Path, epochs: int) -> None:
     cfg = epoch_config(tmp_path)
@@ -186,7 +183,6 @@ def test_step_budget_validates_complete_epochs(tmp_path: Path, epochs: int) -> N
     assert torch.equal(expected_rng, torch.get_rng_state())
 
 
-@pytest.mark.compute_training
 def test_resume_after_last_batch_before_validation(tmp_path: Path) -> None:
     cfg = epoch_config(tmp_path)
     control = cfg.make()
@@ -207,7 +203,6 @@ def test_resume_after_last_batch_before_validation(tmp_path: Path) -> None:
     assert torch.equal(expected_rng, torch.get_rng_state())
 
 
-@pytest.mark.compute_training
 def test_restore_into_running_loop_rewinds_iterator(tmp_path: Path) -> None:
     cfg = epoch_config(tmp_path)
     loop = cfg.make()
@@ -233,7 +228,6 @@ def test_restore_into_running_loop_rewinds_iterator(tmp_path: Path) -> None:
         loop.close()
 
 
-@pytest.mark.compute_training
 @pytest.mark.parametrize("resume", [False, True])
 def test_terminal_step_saves_validated_checkpoint(tmp_path: Path, resume: bool) -> None:
     cfg = epoch_config(tmp_path)
@@ -273,7 +267,6 @@ def test_terminal_step_saves_validated_checkpoint(tmp_path: Path, resume: bool) 
     assert saved["pending_epoch_completion"] is False
 
 
-@pytest.mark.compute_training
 def test_partial_epoch_does_not_force_epoch_validation(tmp_path: Path) -> None:
     cfg = epoch_config(tmp_path)
     cfg.max_steps = 4

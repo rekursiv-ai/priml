@@ -81,7 +81,7 @@ class MeasuredFit:
         """Experiment description; launch stamps the factory's docstring here."""
 
         base_dir: Path | str | None = "/opt/scratch"
-        """Root the run directory resolves beneath."""
+        """Root the run directory, the raw shards, and ``reference`` resolve beneath."""
 
         working_dir: Path | str = "/runs/{study_name}/{experiment_name}"
         """Run directory; the preparation's ``working_dir`` is set to it."""
@@ -92,7 +92,10 @@ class MeasuredFit:
         """The fit: shards, vocabulary size, presolve, solver, and rounding."""
 
         reference: Path | None = None
-        """Tokenizer whose pieces the fit's are compared with; None skips it."""
+        """Tokenizer whose pieces the fit's are compared with; None skips it.
+
+        Logical, like the run directory: a fork names its parent's output as
+        ``/runs/<study>/<experiment>/tokenizer.json``."""
 
         @override
         def finalize(self) -> Self:
@@ -106,6 +109,12 @@ class MeasuredFit:
                 working_dir=self.working_dir,
             )
             self.preparation.working_dir = self.working_dir
+            self.preparation.raw_dir = resolve_working_dir(
+                self.base_dir,
+                self.preparation.raw_dir,
+            )
+            if self.reference is not None:
+                self.reference = resolve_working_dir(self.base_dir, self.reference)
             return super().finalize()
 
     def __init__(self, config: Config) -> None:

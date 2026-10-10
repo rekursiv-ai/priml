@@ -998,8 +998,8 @@ NgramTrainLoop.Config(
         ),
         dataset=NanoChatData.Config(
             base_dir='/opt/scratch',
-            working_dir=PosixPath('/opt/scratch/datasets/nanochat/train14'),
-            tokenizer_dir=PosixPath('/opt/scratch/datasets/nanochat/train14/tokenizer'),
+            working_dir=PosixPath('/opt/scratch/datasets/nanochat/raw'),
+            tokenizer_dir=PosixPath('/opt/scratch/datasets/nanochat/raw/tokenizer'),
             prepared_train_manifest='',
             prepared_eval_manifest='',
             reference_evaluation=None,

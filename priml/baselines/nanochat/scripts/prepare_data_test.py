@@ -52,6 +52,7 @@ import tiktoken
 import tokenizers
 import torch
 
+from priml.baselines.nanochat import experiments
 from priml.baselines.nanochat.data import (
     NanoChatData,
     Tokenizer,
@@ -100,6 +101,7 @@ from priml.lib.codec import ReadError, from_plain, loads
 from priml.paths import validated_output_path
 from priml.train.checkpointer import Checkpointer
 from priml.train.tracker import TrackerList
+from priml.train.train_loop import TrainLoop
 
 
 VOCAB: Final = 300
@@ -216,7 +218,7 @@ def test_argument_defaults_stage_choices_and_help_are_exact(
     args = parser.parse_args([])
     assert vars(args) == {
         "factory": "priml.baselines.nanochat.scripts.prepare_data.donor_unigram16k",
-        "directory": Path("/opt/scratch/datasets/nanochat"),
+        "directory": None,
         "stage": "all",
         "num_train_shards": None,
         "vocab_size": None,
@@ -227,8 +229,8 @@ def test_argument_defaults_stage_choices_and_help_are_exact(
         "seed": 42,
         "train_budget_sec": None,
         "save_checkpoint": False,
-        "run_directory": Path("/opt/scratch/runs/nanochat-reproduction"),
-        "output": Path("/opt/scratch/artifacts/nanochat/prepared-inputs.tar"),
+        "run_directory": None,
+        "output": None,
     }
 
     with pytest.raises(SystemExit) as error:
@@ -321,6 +323,7 @@ _PINNED: Final = (
     "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve/"
     "915333b4f8b8684f39aeaafea600fea6f43fb703/"
 )
+_URL: Final = "https://example.com/pinned/shard.parquet"
 
 
 def test_download_fetches_missing_shards_and_retains_verified(tmp_path: Path) -> None:
@@ -330,11 +333,13 @@ def test_download_fetches_missing_shards_and_retains_verified(tmp_path: Path) ->
         _PINNED + "shard_00000.parquet",
         encoding="utf-8",
     )
+    corpus = CorpusPreparation.Config()
+    corpus.shard_sha256 = {0: _sha256(b"original"), 1: _sha256(b"downloaded")}
     with patch(
         "priml.baselines.nanochat.scripts.prepare_data.request.urlopen",
         return_value=io.BytesIO(b"downloaded"),
     ) as fetch:
-        paths = _download(tmp_path, count=2)
+        paths = _download(tmp_path, count=2, corpus=corpus)
     fetch.assert_called_once_with(_PINNED + "shard_00001.parquet", timeout=120)
     assert [path.name for path in paths] == [
         "shard_00000.parquet",
@@ -351,7 +356,7 @@ def test_download_names_the_fix_for_a_cache_without_a_receipt(tmp_path: Path) ->
         ValueError,
         match=r"no source receipt.*Delete it to re-download",
     ):
-        _download(tmp_path, count=1)
+        _download(tmp_path, count=1, corpus=CorpusPreparation.Config())
     assert legacy.read_bytes() == b"fetched at an unknown revision"
 
 
@@ -804,6 +809,11 @@ def test_training_handoff_preserves_config_and_uses_priml(
     save_checkpoint: bool | None,
 ) -> None:
     config = exp022()
+    # One layer of the eight: printing and reloading cost scales with the tree.
+    model = config.step.model
+    assert isinstance(model.block, list)
+    model.num_layers = 1
+    model.block = model.block[:1]
     config.working_dir = tmp_path / "outer" / "training"
     config.seed = 1102
     expected = config.copy_tree().finalize().serialize()
@@ -1033,6 +1043,8 @@ def test_the_tokenizer_slot_takes_a_shard_fitted_recipe(tmp_path: Path) -> None:
     assert finalized.rows.tokenizer.reserved_count == 10
 
 
+# Marked: it runs every preparation stage end to end, fetch to verify, then
+# moves the result and verifies it again; each stage has its own unit tests.
 @pytest.mark.compute_large_fixture
 def test_preparation_builds_and_relocates(
     tmp_path: Path,
@@ -1052,6 +1064,7 @@ def test_preparation_builds_and_relocates(
             row_group_size=8,
         )
         responses.append(io.BytesIO(path.read_bytes()))
+        config.corpus.shard_sha256[index] = _sha256(path.read_bytes())
     config.corpus.train_shard_indices = (0, 1)
     config.corpus.val_shard = 2
     config.corpus.donor_source_ids = ("1:3", "1:5")
@@ -1208,6 +1221,7 @@ def test_corpus_fetch_rejects_changed_source(
     config.train_shard_indices = (0,)
     config.val_shard = 1
     config.donor_source_ids = ()
+    config.shard_sha256 = {0: _sha256(b"training"), 1: _sha256(b"validation")}
     caplog.set_level("INFO")
     with patch(
         "urllib.request.urlopen",
@@ -1244,7 +1258,7 @@ def test_fetch_rejects_existing_file_without_source_identity(tmp_path: Path) -> 
     destination = tmp_path / "shard.parquet"
     destination.write_bytes(b"unknown source")
     with pytest.raises(ValueError, match=r"no source receipt"):
-        fetch_file("https://example.com/pinned/shard.parquet", destination=destination)
+        fetch_file(_URL, destination=destination, sha256=_sha256(b"payload"))
     assert destination.read_bytes() == b"unknown source"
 
 
@@ -1256,11 +1270,11 @@ def test_fetch_receipt_failure_leaves_download_retryable(tmp_path: Path) -> None
         patch("pathlib.Path.write_text", side_effect=OSError("Receipt write failed")),
         pytest.raises(OSError, match="Receipt write failed"),
     ):
-        fetch_file(url, destination=destination)
+        fetch_file(url, destination=destination, sha256=_sha256(b"payload"))
     assert not destination.exists()
     assert destination.with_name(destination.name + ".lock").is_file()
     with patch("urllib.request.urlopen", return_value=io.BytesIO(b"payload")):
-        fetch_file(url, destination=destination)
+        fetch_file(url, destination=destination, sha256=_sha256(b"payload"))
     assert destination.read_bytes() == b"payload"
 
 
@@ -1275,7 +1289,7 @@ def test_fetch_stages_beside_destination_with_named_temporary_directory(
             wraps=tempfile.TemporaryDirectory,
         ) as temporary_directory,
     ):
-        fetch_file("https://example.com/pinned/shard.parquet", destination=destination)
+        fetch_file(_URL, destination=destination, sha256=_sha256(b"payload"))
     temporary_directory.assert_called_once_with(
         dir=destination.parent,
         prefix="nanochat-download-",
@@ -1305,7 +1319,12 @@ def test_concurrent_fetch_preserves_source_identity(
         patch("urllib.request.urlopen", side_effect=response) as download,
         ThreadPoolExecutor(max_workers=2) as workers,
     ):
-        first = workers.submit(fetch_file, first_url, destination=destination)
+        first = workers.submit(
+            fetch_file,
+            first_url,
+            destination=destination,
+            sha256=_sha256(first_url.encode()),
+        )
         try:
             assert downloading.wait(timeout=5), "First download never started."
             second = workers.submit(
@@ -1326,7 +1345,11 @@ def test_concurrent_fetch_preserves_source_identity(
         else:
             with pytest.raises(ValueError, match=r"source.*match"):
                 second.result(timeout=5)
-        fetch_file(first_url, destination=destination)
+        fetch_file(
+            first_url,
+            destination=destination,
+            sha256=_sha256(first_url.encode()),
+        )
         assert download.call_count == 1
     assert destination.read_bytes() == first_url.encode()
     assert (
@@ -1337,7 +1360,8 @@ def test_concurrent_fetch_preserves_source_identity(
 
 def _fetch_when_started(url: str, *, destination: Path, attempted: Event) -> None:
     attempted.set()
-    fetch_file(url, destination=destination)
+    # ``_held_download`` serves each URL's own bytes.
+    fetch_file(url, destination=destination, sha256=_sha256(url.encode()))
 
 
 def _held_download(
@@ -1442,13 +1466,14 @@ def test_training_documents_read_in_a_fresh_interpreter(tmp_path: Path) -> None:
     assert result.stdout.strip() == "[['alpha', 'beta']]"
 
 
-@pytest.mark.parametrize("relative", [False, True])
 @pytest.mark.cli_python_subprocess
-def test_cli_prints_factory_without_preparing_inputs(
-    tmp_path: Path,
-    relative: bool,
-) -> None:
-    """Resolve the importable Config class when launched with python -m."""
+def test_cli_prints_factory_without_preparing_inputs(tmp_path: Path) -> None:
+    """Resolve the importable Config class when launched with python -m.
+
+    A fresh interpreter is the subject: under ``-m`` the module runs as
+    ``__main__``. A relative ``--directory`` is checked in process by
+    ``test_main_print_config_resolves_a_relative_directory_against_the_cwd``.
+    """
     destination = tmp_path / "inputs"
     result = subprocess.run(  # noqa: S603 -- Fixed interpreter/module and test-owned arguments.
         [
@@ -1457,7 +1482,7 @@ def test_cli_prints_factory_without_preparing_inputs(
             "priml.baselines.nanochat.scripts.prepare_data",
             "--print-config",
             "--directory",
-            destination.name if relative else str(destination),
+            str(destination),
         ],
         cwd=tmp_path,
         env={**os.environ, "PYTHONPATH": str(_CWD.parents[4])},
@@ -2591,6 +2616,8 @@ def test_download_logs_url_and_records_its_receipt(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     url = _PINNED + "shard_00000.parquet"
+    corpus = CorpusPreparation.Config()
+    corpus.shard_sha256 = {0: _sha256(b"payload")}
     caplog.set_level(
         "INFO",
         logger="priml.baselines.nanochat.scripts.prepare_data",
@@ -2599,7 +2626,7 @@ def test_download_logs_url_and_records_its_receipt(
         "priml.baselines.nanochat.scripts.prepare_data.request.urlopen",
         return_value=io.BytesIO(b"payload"),
     ):
-        paths = _download(tmp_path, count=1)
+        paths = _download(tmp_path, count=1, corpus=corpus)
 
     assert caplog.messages == [f"fetching {url}"]
     assert paths[0].read_bytes() == b"payload"
@@ -2657,7 +2684,7 @@ def test_prepare_uses_training_prefix_plus_one_heldout_shard(
             tokenizer_doc_cap=5,
         )
     assert result == tmp_path / "data"
-    download.assert_called_once_with(result, count=3)
+    download.assert_called_once_with(result, count=3, corpus=CorpusPreparation.Config())
     fit.assert_called_once_with(
         [Path("s0"), Path("s1")],
         out=result / "tokenizer",
@@ -2691,7 +2718,11 @@ def test_prepare_uses_default_recipe_and_directory(
     assert result == directory
     assert directory.is_dir()
     default.assert_called_once_with()
-    download.assert_called_once_with(directory, count=8)
+    download.assert_called_once_with(
+        directory,
+        count=8,
+        corpus=CorpusPreparation.Config(),
+    )
     fit.assert_called_once_with(
         shards[:7],
         out=directory / "tokenizer",
@@ -2792,7 +2823,11 @@ def test_fetch_file_requires_https_before_creating_paths(tmp_path: Path) -> None
         ValueError,
         match=r"^Preparation downloads require HTTPS\.$",
     ) as error:
-        prepare_data.fetch_file("http://example.test/file", destination=destination)
+        prepare_data.fetch_file(
+            "http://example.test/file",
+            destination=destination,
+            sha256=_sha256(b"payload"),
+        )
     assert str(error.value) == "Preparation downloads require HTTPS."
     assert not destination.parent.exists()
 
@@ -2807,8 +2842,16 @@ def test_fetch_file_downloads_once_and_validates_cached_source(
         "urlopen",
         return_value=io.BytesIO(response),
     ) as open_url:
-        prepare_data.fetch_file("https://example.test/file", destination=destination)
-        prepare_data.fetch_file("https://example.test/file", destination=destination)
+        prepare_data.fetch_file(
+            "https://example.test/file",
+            destination=destination,
+            sha256=_sha256(response),
+        )
+        prepare_data.fetch_file(
+            "https://example.test/file",
+            destination=destination,
+            sha256=_sha256(response),
+        )
     open_url.assert_called_once_with("https://example.test/file", timeout=120)
     assert destination.read_bytes() == response
     assert (
@@ -2818,7 +2861,11 @@ def test_fetch_file_downloads_once_and_validates_cached_source(
         == "https://example.test/file"
     )
     with pytest.raises(ValueError, match="Cached source does not match"):
-        prepare_data.fetch_file("https://example.test/other", destination=destination)
+        prepare_data.fetch_file(
+            "https://example.test/other",
+            destination=destination,
+            sha256=_sha256(response),
+        )
 
 
 def test_encode_fragment_round_trips_valid_and_incomplete_utf8() -> None:
@@ -3035,6 +3082,20 @@ def test_main_print_config_uses_absolute_directory_and_skips_build(
     make.assert_not_called()
 
 
+def test_main_print_config_resolves_a_relative_directory_against_the_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = _main_config(monkeypatch, ["--print-config", "--directory", "inputs"])
+    monkeypatch.setattr(Preparation.Config, "pprint", Mock())
+
+    assert prepare_data.main() == 0
+
+    assert config.working_dir == Path.cwd() / "inputs"
+    assert not (tmp_path / "inputs").exists()
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
@@ -3174,6 +3235,46 @@ def test_main_train_forwards_options_and_launches(
     launch.assert_called_once_with(training, save_checkpoint=True)
     preparation.run.assert_not_called()
     preparation.dump.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("stage", "flag"),
+    [("train", "--run-directory"), ("dump", "--output")],
+)
+def test_main_requires_the_output_location_of_a_writing_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stage: str,
+    flag: str,
+) -> None:
+    _main_config(monkeypatch, ["--stage", stage])
+    make = Mock()
+    monkeypatch.setattr(Preparation.Config, "make", make)
+
+    with pytest.raises(SystemExit) as error:
+        prepare_data.main()
+
+    assert error.value.code == 2
+    assert f"--stage {stage} needs {flag}." in capsys.readouterr().err
+    make.assert_not_called()
+
+
+def test_main_keeps_the_factorys_root_without_a_directory_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _main_config(monkeypatch, ["--stage", "verify"])
+    config.working_dir = tmp_path / "factory-root"
+    roots: list[Path] = []
+
+    def make(self: Preparation.Config) -> Mock:
+        roots.append(self.working_dir)
+        return Mock()
+
+    monkeypatch.setattr(Preparation.Config, "make", make)
+
+    assert prepare_data.main() == 0
+    assert roots == [tmp_path / "factory-root"]
 
 
 def test_main_rejects_factory_returning_wrong_type(
@@ -3350,7 +3451,7 @@ def test_fetch_cached_receipt_reads_explicit_lowercase_utf8(
         return read_text(path, encoding=encoding, errors=errors)
 
     monkeypatch.setattr(Path, "read_text", record_read)
-    prepare_data.fetch_file(url, destination=destination)
+    prepare_data.fetch_file(url, destination=destination, sha256=_sha256(b"cached"))
 
     assert encodings == ["utf-8"]
 
@@ -3384,6 +3485,7 @@ def test_fetch_write_receipt_uses_explicit_lowercase_utf8(
     prepare_data.fetch_file(
         "https://example.test/shard.parquet",
         destination=destination,
+        sha256=_sha256(b"downloaded"),
     )
 
     assert encodings == ["utf-8"]
@@ -3403,7 +3505,7 @@ def test_fetch_cached_source_mismatch_message_is_exact(tmp_path: Path) -> None:
         ValueError,
         match=r"^Cached source does not match ",
     ) as error:
-        prepare_data.fetch_file(url, destination=destination)
+        prepare_data.fetch_file(url, destination=destination, sha256=_sha256(b"cached"))
 
     assert str(error.value) == (
         f"Cached source does not match {url}: {destination}. "
@@ -4091,6 +4193,85 @@ def test_prepared_rows_refuse_a_vocabulary_beyond_uint16() -> None:
 
 def test_the_source_revision_is_a_commit() -> None:
     assert re.fullmatch(r"[0-9a-f]{40}", CorpusPreparation.Config().revision)
+
+
+def test_every_shard_the_recipes_fetch_has_a_pinned_digest() -> None:
+    corpus = CorpusPreparation.Config()
+    fetched = {*corpus.train_shard_indices, corpus.val_shard}
+    assert fetched == set(range(15)) == set(corpus.shard_sha256)
+    assert all(
+        re.fullmatch(r"[0-9a-f]{64}", value) for value in corpus.shard_sha256.values()
+    )
+
+
+def test_fetch_refuses_downloaded_bytes_with_another_digest(tmp_path: Path) -> None:
+    destination = tmp_path / "shard.parquet"
+    with (
+        patch("urllib.request.urlopen", return_value=io.BytesIO(b"tampered")),
+        pytest.raises(
+            ValueError,
+            match=r"downloaded bytes hashing to .* not the pinned",
+        ),
+    ):
+        fetch_file(
+            "https://example.com/pinned/shard.parquet",
+            destination=destination,
+            sha256=_sha256(b"payload"),
+        )
+    assert not destination.exists()
+    assert not destination.with_name("shard.parquet.source-url").exists()
+
+
+def test_fetch_refuses_a_cached_copy_with_another_digest(tmp_path: Path) -> None:
+    url = "https://example.com/pinned/shard.parquet"
+    destination = tmp_path / "shard.parquet"
+    destination.write_bytes(b"tampered")
+    destination.with_name("shard.parquet.source-url").write_text(url, encoding="utf-8")
+    with pytest.raises(ValueError, match=r"Cached .* not the pinned .* re-download"):
+        fetch_file(url, destination=destination, sha256=_sha256(b"payload"))
+    assert destination.read_bytes() == b"tampered"
+
+
+def test_fetching_an_unpinned_shard_is_refused_before_any_download(
+    tmp_path: Path,
+) -> None:
+    with (
+        patch("urllib.request.urlopen", side_effect=AssertionError("Unexpected fetch")),
+        pytest.raises(ValueError, match="No SHA-256 is recorded for source shard 15"),
+    ):
+        _download(tmp_path, count=16, corpus=CorpusPreparation.Config())
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_direct_launches_read_the_default_preparation_layout() -> None:
+    """exp012-exp022 launched by priml read what ``--stage all`` writes by default."""
+    layout = donor_unigram16k().copy_tree().finalize()
+    raw, donor = layout.corpus.raw_dir, layout.corpus.working_dir
+    exp012 = experiments.exp012().dataset
+    exp019 = experiments.exp019().dataset
+    exp020 = experiments.exp020().dataset
+    # Each factory builds a fresh tree, so finalizing in place touches nothing else.
+    for dataset in (exp012, exp019, exp020):
+        dataset.base_dir = TrainLoop.Config().base_dir
+        dataset.finalize()
+    assert Path(exp012.working_dir) == raw
+    assert Path(exp012.tokenizer_dir) == raw / "tokenizer"
+    assert Path(exp019.working_dir) == donor
+    assert Path(exp019.tokenizer_dir) == raw / "tokenizer"
+    assert Path(exp020.prepared_train_manifest) == (
+        layout.rows.working_dir / "train/PREPARED_MANIFEST.json"
+    )
+    assert Path(exp020.prepared_eval_manifest) == (
+        layout.rows.working_dir / "eval/PACKED_EVAL_MANIFEST.json"
+    )
+    assert exp020.reference_evaluation is not None
+    assert exp020.reference_evaluation.path == (
+        layout.working_dir / "reference-eval/unigram.npz"
+    )
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 if __name__ == "__main__":

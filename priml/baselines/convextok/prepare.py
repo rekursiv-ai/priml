@@ -72,8 +72,11 @@ class ConvexTokPreparation:
     class Config(Fig["ConvexTokPreparation"]):
         """Every fitting choice, visible in the preparation recipe."""
 
-        raw_dir: Path = Path("/opt/scratch/datasets/nanochat/raw")
-        """Original ClimbMix Parquet shards."""
+        raw_dir: Path = Path("/datasets/nanochat/raw")
+        """Original ClimbMix Parquet shards; the owner resolves it beneath its root.
+
+        ``MeasuredFit`` resolves it beneath ``base_dir``; nanochat's preparation
+        replaces it with its own raw shards."""
 
         shard_indices: list[int] = field(default_factory=lambda: list(range(7)))
         """Shards whose documents are fitted, in order; upstream fits the first seven."""
@@ -187,12 +190,16 @@ def donor_convextok16k() -> Preparation.Config:
     Only the vocabulary changes: the corpus, the donor moves, the packed rows and
     the reference evaluation are the Unigram recipe's. ConvexTok fits upstream's
     first seven raw shards rather than the Unigram sample, and reserves ten IDs.
+    It prepares into its own root, where nanochat's ``exp023`` reads: the
+    reference-eval archive and the fitting sample would collide with the Unigram
+    recipe's in a shared one.
 
     Returns:
       config: Source selection, ConvexTok fitting, and packed-row geometry.
 
     """
     config = donor_unigram16k()
+    config.working_dir = Path("/opt/scratch/datasets/nanochat-convextok")
     config.tokenizer = ConvexTokPreparation.Config()
     config.tokenizer_name = "convextok16k"
     return config

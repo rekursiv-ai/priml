@@ -57,7 +57,7 @@ def test_add_arguments_sets_machine_local_defaults() -> None:
 
     flags = cast(_Flags, parser.parse_args([]))
     assert flags.clone == Path("/opt/scratch/karpathy-autoresearch")
-    assert flags.corpus == Path("/opt/scratch/datasets/nanochat-priml")
+    assert flags.corpus == Path("/opt/scratch/datasets/nanochat")
     assert flags.rows == 32
     assert flags.output is None
 

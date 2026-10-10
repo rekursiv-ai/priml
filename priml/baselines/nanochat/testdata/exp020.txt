@@ -1111,8 +1111,8 @@ NgramTrainLoop.Config(
         ),
         dataset=NanoChatData.Config(
             base_dir='/opt/scratch',
-            working_dir=PosixPath('/opt/scratch/datasets/nanochat/augmented'),
-            tokenizer_dir=PosixPath('/opt/scratch/datasets/nanochat/augmented/tokenizer'),
+            working_dir=PosixPath('/opt/scratch/datasets/nanochat/donor-original'),
+            tokenizer_dir=PosixPath('/opt/scratch/datasets/nanochat/raw/tokenizer'),
             prepared_train_manifest=PosixPath('/opt/scratch/datasets/nanochat/unigram16k/prepared/train/PREPARED_MANIFEST.json'),
             prepared_eval_manifest=PosixPath('/opt/scratch/datasets/nanochat/unigram16k/prepared/eval/PACKED_EVAL_MANIFEST.json'),
             reference_evaluation=ReferenceEvaluation.Config(
