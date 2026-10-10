@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from priml.cost import cost
-from priml.model.attention.flash3 import Flash3Attention
+from priml.model.attention.flash4 import Flash4Attention
 from priml.model.attention.gated_attention import (
     GatedAttention,
     _causal_bias,
@@ -519,7 +519,7 @@ def test_gated_attention_cost_forwards_the_bus_to_the_kernel() -> None:
     config.num_heads = 2
     config.num_heads_kv = 1
     config.channels_head = 4
-    config.attn_kernel = Flash3Attention.Config()
+    config.attn_kernel = Flash4Attention.Config()
     finalized = config.copy_tree().finalize()
     full = finalized.cost(seq_len=8, batch_size=1, dtype=None)
     windowed = finalized.cost(seq_len=8, batch_size=1, dtype=None, window=2)

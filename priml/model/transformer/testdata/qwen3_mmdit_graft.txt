@@ -1,390 +1,384 @@
 Qwen3MMDiTGraft.Config(
-                backbone=Qwen3.Config(
-                │       channels_in=8,
-                │       channels_out=9,
-                │       num_layers=1,
-                │       proj_in=Embedding.Config(
-                │               channels_in=9,
-                │               channels_out=8,
-                │               padding_idx=None,
-                │               device=None,
-                │               dtype=None,
-                │               shard='vocab',
-                │               depth_index=(),
-                │               init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02)
-                │       ),
-                │       block=[
-                │       │       TransformerBlock.Config(
-                │       │               channels_in=8,
-                │       │               channels_out=8,
-                │       │               attn=Attention.Config(
-                │       │                       channels_in=8,
-                │       │                       channels_out=8,
-                │       │                       num_heads=4,
-                │       │                       channels_head=6,
-                │       │                       num_heads_kv=2,
-                │       │                       bias=False,
-                │       │                       dropout=0.0,
-                │       │                       causal=True,
-                │       │                       rope=RoPE.Config(
-                │       │                               channels_head=6,
-                │       │                               reduction_mode='cat',
-                │       │                               frequencies=HuggingFaceFrequencies.Config(
-                │       │                                       base=1000000.0
-                │       │                               ),
-                │       │                               dtype=torch.float32
-                │       │                       ),
-                │       │                       norm_qk=RMSNorm.Config(
-                │       │                               channels_in=6,
-                │       │                               channels_out=6,
-                │       │                               eps=1e-06,
-                │       │                               elementwise_affine=True,
-                │       │                               device=None,
-                │       │                               dtype=None
-                │       │                       ),
-                │       │                       share_qk_norm=False,
-                │       │                       norm_out=None,
-                │       │                       split_qkv_projection=False,
-                │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
-                │       │                       depth_index=((0, 1),),
-                │       │                       attn_kernel=SdpaFused.Config()
-                │       │               ),
-                │       │               ffn=SwiGLU.Config(
-                │       │                       channels_in=8,
-                │       │                       channels_out=8,
-                │       │                       channels_hidden=7,
-                │       │                       expansion=2.6666666666666665,
-                │       │                       round_to=256,
-                │       │                       gate=True,
-                │       │                       bias=False,
-                │       │                       split_gate_projection=False,
-                │       │                       norm=None,
-                │       │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
-                │       │                       depth_index=((0, 1),),
-                │       │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
-                │       │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
-                │       │                       shard='colwise'
-                │       │               ),
-                │       │               norm1=RMSNorm.Config(
-                │       │                       channels_in=8,
-                │       │                       channels_out=8,
-                │       │                       eps=1e-06,
-                │       │                       elementwise_affine=True,
-                │       │                       device=None,
-                │       │                       dtype=None
-                │       │               ),
-                │       │               norm2=RMSNorm.Config(
-                │       │                       channels_in=8,
-                │       │                       channels_out=8,
-                │       │                       eps=1e-06,
-                │       │                       elementwise_affine=True,
-                │       │                       device=None,
-                │       │                       dtype=None
-                │       │               ),
-                │       │               prenorm=True,
-                │       │               checkpoint=False,
-                │       │               depth_index=((0, 1),)
-                │       │       )
-                │       ],
-                │       proj_out=Sequential.Config(
-                │               channels_in=8,
-                │               channels_out=9,
-                │               elements=[
-                │                       RMSNorm.Config(
-                │                               channels_in=8,
-                │                               channels_out=8,
-                │                               eps=1e-06,
-                │                               elementwise_affine=True,
-                │                               device=None,
-                │                               dtype=None
-                │                       ),
-                │                       Linear.Config(
-                │                               channels_in=8,
-                │                               channels_out=9,
-                │                               bias=False,
-                │                               depth_index=(),
-                │                               device=None,
-                │                               dtype=None,
-                │                               init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
-                │                               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │                               shard='vocab'
-                │                       )
-                │               ],
-                │               repeat=1,
-                │               depth_index=()
-                │       )
-                ),
-                streams=[
-                │       MMDiTStream.Config(
-                │               channels_in=8,
-                │               attn=AttentionProjections.Config(
-                │                       channels_in=-1,
-                │                       channels_out=-1,
-                │                       num_heads=8,
-                │                       channels_head=-1,
-                │                       num_heads_kv=8,
-                │                       bias=False,
-                │                       dropout=0.0,
-                │                       causal=False,
-                │                       rope=None,
-                │                       norm_qk=None,
-                │                       share_qk_norm=True,
-                │                       norm_out=None,
-                │                       split_qkv_projection=False,
-                │                       init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                │                       depth_index=()
-                │               ),
-                │               norm1=LayerNorm.Config(
-                │                       channels_in=8,
-                │                       channels_out=8,
-                │                       eps=1e-05,
-                │                       elementwise_affine=False,
-                │                       device=None,
-                │                       dtype=None
-                │               ),
-                │               norm2=LayerNorm.Config(
-                │                       channels_in=8,
-                │                       channels_out=8,
-                │                       eps=1e-05,
-                │                       elementwise_affine=False,
-                │                       device=None,
-                │                       dtype=None
-                │               ),
-                │               ffn=SwiGLU.Config(
-                │                       channels_in=8,
-                │                       channels_out=8,
-                │                       channels_hidden=256,
-                │                       expansion=2.6666666666666665,
-                │                       round_to=256,
-                │                       gate=True,
-                │                       bias=False,
-                │                       split_gate_projection=False,
-                │                       norm=None,
-                │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
-                │                       depth_index=(),
-                │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │                       shard=None
-                │               ),
-                │               adaln=None,
-                │               depth_index=()
-                │       )
-                ],
-                block=[
-                │       MMDiTBlock.Config(
-                │               channels_in=8,
-                │               channels_out=8,
-                │               num_streams=2,
-                │               attn=MultiStreamAttention.Config(
-                │               │       channels_in=8,
-                │               │       channels_out=8,
-                │               │       num_streams=2,
-                │               │       streams=[
-                │               │       │       AttentionProjections.Config(
-                │               │       │               channels_in=8,
-                │               │       │               channels_out=8,
-                │               │       │               num_heads=4,
-                │               │       │               channels_head=6,
-                │               │       │               num_heads_kv=2,
-                │               │       │               bias=False,
-                │               │       │               dropout=0.0,
-                │               │       │               causal=False,
-                │               │       │               rope=RoPE.Config(
-                │               │       │                       channels_head=6,
-                │               │       │                       reduction_mode='cat',
-                │               │       │                       frequencies=HuggingFaceFrequencies.Config(
-                │               │       │                               base=1000000.0
-                │               │       │                       ),
-                │               │       │                       dtype=torch.float32
-                │               │       │               ),
-                │               │       │               norm_qk=RMSNorm.Config(
-                │               │       │                       channels_in=6,
-                │               │       │                       channels_out=6,
-                │               │       │                       eps=1e-06,
-                │               │       │                       elementwise_affine=True,
-                │               │       │                       device=None,
-                │               │       │                       dtype=None
-                │               │       │               ),
-                │               │       │               share_qk_norm=False,
-                │               │       │               norm_out=None,
-                │               │       │               split_qkv_projection=False,
-                │               │       │               init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
-                │               │       │               depth_index=((0, 1),)
-                │               │       │       ),
-                │               │       │       AttentionProjections.Config(
-                │               │       │               channels_in=8,
-                │               │       │               channels_out=8,
-                │               │       │               num_heads=4,
-                │               │       │               channels_head=6,
-                │               │       │               num_heads_kv=2,
-                │               │       │               bias=False,
-                │               │       │               dropout=0.0,
-                │               │       │               causal=False,
-                │               │       │               rope=None,
-                │               │       │               norm_qk=None,
-                │               │       │               share_qk_norm=True,
-                │               │       │               norm_out=None,
-                │               │       │               split_qkv_projection=False,
-                │               │       │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                │               │       │               depth_index=((0, 1),)
-                │               │       │       )
-                │               │       ],
-                │               │       num_heads=4,
-                │               │       channels_head=6,
-                │               │       num_heads_kv=2,
-                │               │       bias=False,
-                │               │       dropout=0.0,
-                │               │       causal=False,
-                │               │       rope=[],
-                │               │       norm_qk=None,
-                │               │       share_qk_norm=True,
-                │               │       norm_out=None,
-                │               │       attn_kernel=SdpaFused.Config(),
-                │               │       init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                │               │       depth_index=((0, 1),)
-                │               ),
-                │               streams=[
-                │               │       MMDiTStream.Config(
-                │               │               channels_in=8,
-                │               │               attn=AttentionProjections.Config(
-                │               │                       channels_in=8,
-                │               │                       channels_out=8,
-                │               │                       num_heads=4,
-                │               │                       channels_head=6,
-                │               │                       num_heads_kv=2,
-                │               │                       bias=False,
-                │               │                       dropout=0.0,
-                │               │                       causal=False,
-                │               │                       rope=RoPE.Config(
-                │               │                               channels_head=6,
-                │               │                               reduction_mode='cat',
-                │               │                               frequencies=HuggingFaceFrequencies.Config(
-                │               │                                       base=1000000.0
-                │               │                               ),
-                │               │                               dtype=torch.float32
-                │               │                       ),
-                │               │                       norm_qk=RMSNorm.Config(
-                │               │                               channels_in=6,
-                │               │                               channels_out=6,
-                │               │                               eps=1e-06,
-                │               │                               elementwise_affine=True,
-                │               │                               device=None,
-                │               │                               dtype=None
-                │               │                       ),
-                │               │                       share_qk_norm=False,
-                │               │                       norm_out=None,
-                │               │                       split_qkv_projection=False,
-                │               │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
-                │               │                       depth_index=((0, 1),)
-                │               │               ),
-                │               │               norm1=RMSNorm.Config(
-                │               │                       channels_in=8,
-                │               │                       channels_out=8,
-                │               │                       eps=1e-06,
-                │               │                       elementwise_affine=True,
-                │               │                       device=None,
-                │               │                       dtype=None
-                │               │               ),
-                │               │               norm2=RMSNorm.Config(
-                │               │                       channels_in=8,
-                │               │                       channels_out=8,
-                │               │                       eps=1e-06,
-                │               │                       elementwise_affine=True,
-                │               │                       device=None,
-                │               │                       dtype=None
-                │               │               ),
-                │               │               ffn=SwiGLU.Config(
-                │               │                       channels_in=8,
-                │               │                       channels_out=8,
-                │               │                       channels_hidden=7,
-                │               │                       expansion=2.6666666666666665,
-                │               │                       round_to=256,
-                │               │                       gate=True,
-                │               │                       bias=False,
-                │               │                       split_gate_projection=False,
-                │               │                       norm=None,
-                │               │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
-                │               │                       depth_index=((0, 1),),
-                │               │                       init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
-                │               │                       init_weight_out=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
-                │               │                       shard='colwise'
-                │               │               ),
-                │               │               adaln=None,
-                │               │               depth_index=((0, 1),)
-                │               │       ),
-                │               │       MMDiTStream.Config(
-                │               │               channels_in=8,
-                │               │               attn=AttentionProjections.Config(
-                │               │                       channels_in=8,
-                │               │                       channels_out=8,
-                │               │                       num_heads=4,
-                │               │                       channels_head=6,
-                │               │                       num_heads_kv=2,
-                │               │                       bias=False,
-                │               │                       dropout=0.0,
-                │               │                       causal=False,
-                │               │                       rope=None,
-                │               │                       norm_qk=None,
-                │               │                       share_qk_norm=True,
-                │               │                       norm_out=None,
-                │               │                       split_qkv_projection=False,
-                │               │                       init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                │               │                       depth_index=((0, 1),)
-                │               │               ),
-                │               │               norm1=LayerNorm.Config(
-                │               │                       channels_in=8,
-                │               │                       channels_out=8,
-                │               │                       eps=1e-05,
-                │               │                       elementwise_affine=False,
-                │               │                       device=None,
-                │               │                       dtype=None
-                │               │               ),
-                │               │               norm2=LayerNorm.Config(
-                │               │                       channels_in=8,
-                │               │                       channels_out=8,
-                │               │                       eps=1e-05,
-                │               │                       elementwise_affine=False,
-                │               │                       device=None,
-                │               │                       dtype=None
-                │               │               ),
-                │               │               ffn=SwiGLU.Config(
-                │               │                       channels_in=8,
-                │               │                       channels_out=8,
-                │               │                       channels_hidden=256,
-                │               │                       expansion=2.6666666666666665,
-                │               │                       round_to=256,
-                │               │                       gate=True,
-                │               │                       bias=False,
-                │               │                       split_gate_projection=False,
-                │               │                       norm=None,
-                │               │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
-                │               │                       depth_index=((0, 1),),
-                │               │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │               │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │               │                       shard=None
-                │               │               ),
-                │               │               adaln=None,
-                │               │               depth_index=((0, 1),)
-                │               │       )
-                │               ],
-                │               cond_dim=0,
-                │               ffn=SwiGLU.Config(
-                │                       channels_in=-1,
-                │                       channels_out=-1,
-                │                       channels_hidden=0,
-                │                       expansion=2.6666666666666665,
-                │                       round_to=256,
-                │                       gate=True,
-                │                       bias=False,
-                │                       split_gate_projection=False,
-                │                       norm=None,
-                │                       act=<function priml.model.swiglu.silu at 0xdefacedeface>,
-                │                       depth_index=(),
-                │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                │                       shard=None
-                │               ),
-                │               depth_index=((0, 1),)
-                │       )
-                ]
-        )
+        backbone=Qwen3.Config(
+        │   channels_in=8,
+        │   channels_out=9,
+        │   num_layers=1,
+        │   proj_in=Embedding.Config(
+        │       channels_in=9,
+        │       channels_out=8,
+        │       padding_idx=None,
+        │       device=None,
+        │       dtype=None,
+        │       shard='vocab',
+        │       depth_index=(),
+        │       init_weight=functools.partial(torch.nn.init.normal_, std=0.02)
+        │   ),
+        │   block=[
+        │   │   TransformerBlock.Config(
+        │   │       channels_in=8,
+        │   │       channels_out=8,
+        │   │       attn=Attention.Config(
+        │   │           channels_in=8,
+        │   │           channels_out=8,
+        │   │           num_heads=4,
+        │   │           channels_head=6,
+        │   │           num_heads_kv=2,
+        │   │           bias=False,
+        │   │           dropout=0.0,
+        │   │           causal=True,
+        │   │           rope=RoPE.Config(
+        │   │               channels_head=6,
+        │   │               reduction_mode='cat',
+        │   │               frequencies=HuggingFaceFrequencies.Config(base=1000000.0),
+        │   │               dtype=torch.float32
+        │   │           ),
+        │   │           norm_qk=RMSNorm.Config(
+        │   │               channels_in=6,
+        │   │               channels_out=6,
+        │   │               eps=1e-06,
+        │   │               elementwise_affine=True,
+        │   │               device=None,
+        │   │               dtype=None
+        │   │           ),
+        │   │           share_qk_norm=False,
+        │   │           norm_out=None,
+        │   │           split_qkv_projection=False,
+        │   │           init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
+        │   │           depth_index=((0, 1),),
+        │   │           attn_kernel=SdpaFused.Config()
+        │   │       ),
+        │   │       ffn=SwiGLU.Config(
+        │   │           channels_in=8,
+        │   │           channels_out=8,
+        │   │           channels_hidden=7,
+        │   │           expansion=2.6666666666666665,
+        │   │           round_to=256,
+        │   │           gate=True,
+        │   │           bias=False,
+        │   │           split_gate_projection=False,
+        │   │           norm=None,
+        │   │           act=priml.model.swiglu.silu,
+        │   │           depth_index=((0, 1),),
+        │   │           init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
+        │   │           init_weight_out=functools.partial(torch.nn.init.normal_, std=0.02),
+        │   │           shard='colwise'
+        │   │       ),
+        │   │       norm1=RMSNorm.Config(
+        │   │           channels_in=8,
+        │   │           channels_out=8,
+        │   │           eps=1e-06,
+        │   │           elementwise_affine=True,
+        │   │           device=None,
+        │   │           dtype=None
+        │   │       ),
+        │   │       norm2=RMSNorm.Config(
+        │   │           channels_in=8,
+        │   │           channels_out=8,
+        │   │           eps=1e-06,
+        │   │           elementwise_affine=True,
+        │   │           device=None,
+        │   │           dtype=None
+        │   │       ),
+        │   │       prenorm=True,
+        │   │       checkpoint=False,
+        │   │       depth_index=((0, 1),)
+        │   │   )
+        │   ],
+        │   proj_out=Sequential.Config(
+        │       channels_in=8,
+        │       channels_out=9,
+        │       elements=[
+        │           RMSNorm.Config(
+        │               channels_in=8,
+        │               channels_out=8,
+        │               eps=1e-06,
+        │               elementwise_affine=True,
+        │               device=None,
+        │               dtype=None
+        │           ),
+        │           Linear.Config(
+        │               channels_in=8,
+        │               channels_out=9,
+        │               bias=False,
+        │               depth_index=(),
+        │               device=None,
+        │               dtype=None,
+        │               init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
+        │               init_bias=torch.nn.init.zeros_,
+        │               shard='vocab'
+        │           )
+        │       ],
+        │       repeat=1,
+        │       depth_index=()
+        │   )
+        ),
+        streams=[
+        │   MMDiTStream.Config(
+        │       channels_in=8,
+        │       attn=AttentionProjections.Config(
+        │           channels_in=-1,
+        │           channels_out=-1,
+        │           num_heads=8,
+        │           channels_head=-1,
+        │           num_heads_kv=8,
+        │           bias=False,
+        │           dropout=0.0,
+        │           causal=False,
+        │           rope=None,
+        │           norm_qk=None,
+        │           share_qk_norm=True,
+        │           norm_out=None,
+        │           split_qkv_projection=False,
+        │           init_weight=priml.model.init.kaiming_uniform,
+        │           depth_index=()
+        │       ),
+        │       norm1=LayerNorm.Config(
+        │           channels_in=8,
+        │           channels_out=8,
+        │           eps=1e-05,
+        │           elementwise_affine=False,
+        │           device=None,
+        │           dtype=None
+        │       ),
+        │       norm2=LayerNorm.Config(
+        │           channels_in=8,
+        │           channels_out=8,
+        │           eps=1e-05,
+        │           elementwise_affine=False,
+        │           device=None,
+        │           dtype=None
+        │       ),
+        │       ffn=SwiGLU.Config(
+        │           channels_in=8,
+        │           channels_out=8,
+        │           channels_hidden=256,
+        │           expansion=2.6666666666666665,
+        │           round_to=256,
+        │           gate=True,
+        │           bias=False,
+        │           split_gate_projection=False,
+        │           norm=None,
+        │           act=priml.model.swiglu.silu,
+        │           depth_index=(),
+        │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │           init_weight_out=torch.nn.init.zeros_,
+        │           shard=None
+        │       ),
+        │       adaln=None,
+        │       depth_index=()
+        │   )
+        ],
+        block=[
+        │   MMDiTBlock.Config(
+        │       channels_in=8,
+        │       channels_out=8,
+        │       num_streams=2,
+        │       attn=MultiStreamAttention.Config(
+        │       │   channels_in=8,
+        │       │   channels_out=8,
+        │       │   num_streams=2,
+        │       │   streams=[
+        │       │       AttentionProjections.Config(
+        │       │           channels_in=8,
+        │       │           channels_out=8,
+        │       │           num_heads=4,
+        │       │           channels_head=6,
+        │       │           num_heads_kv=2,
+        │       │           bias=False,
+        │       │           dropout=0.0,
+        │       │           causal=False,
+        │       │           rope=RoPE.Config(
+        │       │               channels_head=6,
+        │       │               reduction_mode='cat',
+        │       │               frequencies=HuggingFaceFrequencies.Config(base=1000000.0),
+        │       │               dtype=torch.float32
+        │       │           ),
+        │       │           norm_qk=RMSNorm.Config(
+        │       │               channels_in=6,
+        │       │               channels_out=6,
+        │       │               eps=1e-06,
+        │       │               elementwise_affine=True,
+        │       │               device=None,
+        │       │               dtype=None
+        │       │           ),
+        │       │           share_qk_norm=False,
+        │       │           norm_out=None,
+        │       │           split_qkv_projection=False,
+        │       │           init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
+        │       │           depth_index=((0, 1),)
+        │       │       ),
+        │       │       AttentionProjections.Config(
+        │       │           channels_in=8,
+        │       │           channels_out=8,
+        │       │           num_heads=4,
+        │       │           channels_head=6,
+        │       │           num_heads_kv=2,
+        │       │           bias=False,
+        │       │           dropout=0.0,
+        │       │           causal=False,
+        │       │           rope=None,
+        │       │           norm_qk=None,
+        │       │           share_qk_norm=True,
+        │       │           norm_out=None,
+        │       │           split_qkv_projection=False,
+        │       │           init_weight=priml.model.init.kaiming_uniform,
+        │       │           depth_index=((0, 1),)
+        │       │       )
+        │       │   ],
+        │       │   num_heads=4,
+        │       │   channels_head=6,
+        │       │   num_heads_kv=2,
+        │       │   bias=False,
+        │       │   dropout=0.0,
+        │       │   causal=False,
+        │       │   rope=[],
+        │       │   norm_qk=None,
+        │       │   share_qk_norm=True,
+        │       │   norm_out=None,
+        │       │   attn_kernel=SdpaFused.Config(),
+        │       │   init_weight=priml.model.init.kaiming_uniform,
+        │       │   depth_index=((0, 1),)
+        │       ),
+        │       streams=[
+        │       │   MMDiTStream.Config(
+        │       │       channels_in=8,
+        │       │       attn=AttentionProjections.Config(
+        │       │           channels_in=8,
+        │       │           channels_out=8,
+        │       │           num_heads=4,
+        │       │           channels_head=6,
+        │       │           num_heads_kv=2,
+        │       │           bias=False,
+        │       │           dropout=0.0,
+        │       │           causal=False,
+        │       │           rope=RoPE.Config(
+        │       │               channels_head=6,
+        │       │               reduction_mode='cat',
+        │       │               frequencies=HuggingFaceFrequencies.Config(base=1000000.0),
+        │       │               dtype=torch.float32
+        │       │           ),
+        │       │           norm_qk=RMSNorm.Config(
+        │       │               channels_in=6,
+        │       │               channels_out=6,
+        │       │               eps=1e-06,
+        │       │               elementwise_affine=True,
+        │       │               device=None,
+        │       │               dtype=None
+        │       │           ),
+        │       │           share_qk_norm=False,
+        │       │           norm_out=None,
+        │       │           split_qkv_projection=False,
+        │       │           init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
+        │       │           depth_index=((0, 1),)
+        │       │       ),
+        │       │       norm1=RMSNorm.Config(
+        │       │           channels_in=8,
+        │       │           channels_out=8,
+        │       │           eps=1e-06,
+        │       │           elementwise_affine=True,
+        │       │           device=None,
+        │       │           dtype=None
+        │       │       ),
+        │       │       norm2=RMSNorm.Config(
+        │       │           channels_in=8,
+        │       │           channels_out=8,
+        │       │           eps=1e-06,
+        │       │           elementwise_affine=True,
+        │       │           device=None,
+        │       │           dtype=None
+        │       │       ),
+        │       │       ffn=SwiGLU.Config(
+        │       │           channels_in=8,
+        │       │           channels_out=8,
+        │       │           channels_hidden=7,
+        │       │           expansion=2.6666666666666665,
+        │       │           round_to=256,
+        │       │           gate=True,
+        │       │           bias=False,
+        │       │           split_gate_projection=False,
+        │       │           norm=None,
+        │       │           act=priml.model.swiglu.silu,
+        │       │           depth_index=((0, 1),),
+        │       │           init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
+        │       │           init_weight_out=functools.partial(torch.nn.init.normal_, std=0.02),
+        │       │           shard='colwise'
+        │       │       ),
+        │       │       adaln=None,
+        │       │       depth_index=((0, 1),)
+        │       │   ),
+        │       │   MMDiTStream.Config(
+        │       │       channels_in=8,
+        │       │       attn=AttentionProjections.Config(
+        │       │           channels_in=8,
+        │       │           channels_out=8,
+        │       │           num_heads=4,
+        │       │           channels_head=6,
+        │       │           num_heads_kv=2,
+        │       │           bias=False,
+        │       │           dropout=0.0,
+        │       │           causal=False,
+        │       │           rope=None,
+        │       │           norm_qk=None,
+        │       │           share_qk_norm=True,
+        │       │           norm_out=None,
+        │       │           split_qkv_projection=False,
+        │       │           init_weight=priml.model.init.kaiming_uniform,
+        │       │           depth_index=((0, 1),)
+        │       │       ),
+        │       │       norm1=LayerNorm.Config(
+        │       │           channels_in=8,
+        │       │           channels_out=8,
+        │       │           eps=1e-05,
+        │       │           elementwise_affine=False,
+        │       │           device=None,
+        │       │           dtype=None
+        │       │       ),
+        │       │       norm2=LayerNorm.Config(
+        │       │           channels_in=8,
+        │       │           channels_out=8,
+        │       │           eps=1e-05,
+        │       │           elementwise_affine=False,
+        │       │           device=None,
+        │       │           dtype=None
+        │       │       ),
+        │       │       ffn=SwiGLU.Config(
+        │       │           channels_in=8,
+        │       │           channels_out=8,
+        │       │           channels_hidden=256,
+        │       │           expansion=2.6666666666666665,
+        │       │           round_to=256,
+        │       │           gate=True,
+        │       │           bias=False,
+        │       │           split_gate_projection=False,
+        │       │           norm=None,
+        │       │           act=priml.model.swiglu.silu,
+        │       │           depth_index=((0, 1),),
+        │       │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │       │           init_weight_out=torch.nn.init.zeros_,
+        │       │           shard=None
+        │       │       ),
+        │       │       adaln=None,
+        │       │       depth_index=((0, 1),)
+        │       │   )
+        │       ],
+        │       cond_dim=0,
+        │       ffn=SwiGLU.Config(
+        │           channels_in=-1,
+        │           channels_out=-1,
+        │           channels_hidden=0,
+        │           expansion=2.6666666666666665,
+        │           round_to=256,
+        │           gate=True,
+        │           bias=False,
+        │           split_gate_projection=False,
+        │           norm=None,
+        │           act=priml.model.swiglu.silu,
+        │           depth_index=(),
+        │           init_weight=priml.model.init.unit_fan_in_uniform,
+        │           init_weight_out=torch.nn.init.zeros_,
+        │           shard=None
+        │       ),
+        │       depth_index=((0, 1),)
+        │   )
+        ]
+    )

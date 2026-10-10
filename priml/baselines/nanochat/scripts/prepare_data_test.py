@@ -265,7 +265,8 @@ def test_main_print_config_does_not_prepare_files(
         ],
     )
     assert main() == 0
-    assert "Preparation.Config(" in capsys.readouterr().out
+    output = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
+    assert "Preparation.Config(" in output
     assert not (tmp_path / "not-created").exists()
 
 
@@ -1466,8 +1467,9 @@ def test_cli_prints_factory_without_preparing_inputs(
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
-    assert "Preparation.Config(" in result.stdout
-    assert str(destination) in result.stdout
+    output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+    assert "Preparation.Config(" in output
+    assert str(destination) in output
     assert not destination.exists()
 
 

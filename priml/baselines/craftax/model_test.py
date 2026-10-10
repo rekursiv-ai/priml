@@ -59,7 +59,11 @@ from priml.baselines.craftax.testing import (
 from priml.lib.codec import from_plain
 from priml.model.embedding import MultiHotEmbedding
 from priml.model.linear import Linear
-from priml.testing.bfb import assert_bfb_against_golden, host_agnostic_numerics
+from priml.testing.bfb import (
+    assert_bfb_against_golden,
+    host_agnostic_numerics,
+    portable_half_precision,
+)
 from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.golden import assert_pprint_golden
 
@@ -874,6 +878,7 @@ FEATURE_WIDTH: Final = 5
 """The external feature's width at test size, distinct from every other."""
 
 
+@portable_half_precision()
 def test_a_zero_feature_projection_starts_the_policy_as_its_control() -> None:
     """Init parity: the control's weights, draws, outputs and gradients, bit for bit."""
     torch.manual_seed(7)

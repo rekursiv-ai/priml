@@ -1,7 +1,7 @@
 SoftmaxRouter.Config(
-                channels_in=4,
-                num_experts=2,
-                top_k=1,
-                norm_topk_prob=False,
-                jitter_noise=0.0
-        )
+        channels_in=4,
+        num_experts=2,
+        top_k=1,
+        norm_topk_prob=False,
+        jitter_noise=0.0
+    )

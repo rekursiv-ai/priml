@@ -74,8 +74,6 @@ ipython_config.py
 
 # pyenv
 .python-version
-# The nanochat runtime pins its own interpreter; it ships on purpose.
-!/priml/baselines/nanochat/runtime/.python-version
 
 # pipenv
 Pipfile.lock

@@ -1,15 +1,15 @@
 Conv2d.Config(
-                channels_in=2,
-                channels_out=3,
-                kernel_size=3,
-                stride=1,
-                padding='same',
-                dilation=1,
-                groups=1,
-                bias=False,
-                depth_index=(),
-                device=None,
-                dtype=None,
-                init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>
-        )
+        channels_in=2,
+        channels_out=3,
+        kernel_size=3,
+        stride=1,
+        padding='same',
+        dilation=1,
+        groups=1,
+        bias=False,
+        depth_index=(),
+        device=None,
+        dtype=None,
+        init_weight=priml.model.init.kaiming_uniform,
+        init_bias=torch.nn.init.zeros_
+    )
