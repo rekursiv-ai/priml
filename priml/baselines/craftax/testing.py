@@ -295,7 +295,6 @@ def tiny_exp000_step() -> CraftaxTrainStep.Config:
 
     """
     config = exp000().step
-    config.checkpoint = None
     model = config.model
     assert isinstance(model, MinGRUPolicy.Config)
     model.channels_hidden = 8
@@ -755,7 +754,6 @@ class FakeEnv:
 
 def _shrink_pipeline(config: CraftaxTrainStep.Config) -> CraftaxTrainStep.Config:
     """Shrink a recipe's step in place to the tiny CPU pipeline; its env is already tiny."""
-    config.checkpoint = None
     model = config.model
     assert isinstance(model, MinGRUPolicy.Config)
     model.channels_hidden = 8

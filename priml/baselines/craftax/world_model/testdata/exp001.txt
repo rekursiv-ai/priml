@@ -2353,9 +2353,9 @@ WorldModelLoop.Config(
         ),
         dataset=ReplayStream.Config(
             base_dir='/opt/scratch',
-            working_dir=PosixPath('/opt/scratch/datasets/craftax/world-model-reference/archive-v1'),
-            corpus=PosixPath('/opt/scratch/datasets/craftax/world-model-reference/archive-v1/corpora/base.json'),
-            index_dir=PosixPath('/opt/scratch/datasets/craftax/world-model-reference/archive-v1/index'),
+            working_dir=PosixPath('/opt/scratch/datasets/craftax/world-model/archive-v1'),
+            corpus=PosixPath('/opt/scratch/datasets/craftax/world-model/archive-v1/corpora/base.json'),
+            index_dir=PosixPath('/opt/scratch/datasets/craftax/world-model/archive-v1/index'),
             windows=1,
             t_g=8_192,
             s_max=64,

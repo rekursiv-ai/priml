@@ -37,7 +37,7 @@ whose settings.json names the checkpoints and their seeds, so a host with W&B
 access can add --wandb-runs to an evaluation run where it had none.
 
 Examples:
-  priml/baselines/craftax/world_model/scripts/report.py /opt/scratch/runs/craftax-world-model/exp001/checkpoints/step_00001525.pt --override dataset.working_dir=/datasets/craftax/world-model-reference/archive-v1-replay --skip dreams --output /opt/scratch/artifacts/craftax/world-model/stage0-s0
+  priml/baselines/craftax/world_model/scripts/report.py /opt/scratch/runs/craftax-world-model/exp001/checkpoints/step_00001525.pt --skip dreams --output /opt/scratch/artifacts/craftax/world-model/stage0
   priml/baselines/craftax/world_model/scripts/report.py s0.pt s1.pt s2.pt --sampler-seeds 0,1,2 --wandb-runs RUN0,RUN1,RUN2 --output /opt/scratch/artifacts/craftax/world-model/stage0
 
 '''

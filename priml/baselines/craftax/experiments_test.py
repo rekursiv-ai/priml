@@ -33,7 +33,6 @@ from priml.baselines.craftax.experiments import (
     exp006,
     exp007,
     exp008,
-    exp100,
     exp101,
     exp102,
     exp103,
@@ -149,7 +148,6 @@ _PORTED: Final[
     exp006,
     exp007,
     exp008,
-    exp100,
     exp101,
     exp102,
     exp103,
@@ -213,7 +211,6 @@ def test_every_experiment_is_named_for_its_factory(
         exp005,
         exp007,
         exp008,
-        exp100,
         exp101,
         exp102,
         exp103,
@@ -273,7 +270,6 @@ def test_exp000_states_craftax_ini_over_the_class_defaults() -> None:
     The class defaults are PufferLib's ``default.ini``.
     """
     assert _deltas(CraftaxTrainLoop(), exp000()) >= {
-        "step.checkpoint",
         "step.optimizer.lr",
         "step.optimizer.momentum",
         "step.optimizer.max_grad_norm",
@@ -319,8 +315,8 @@ def test_exp001_changes_only_the_budget() -> None:
 
 def test_exp002_changes_the_setup_and_what_its_observation_needs() -> None:
     # The six options are one treatment (the Hypothesis says why); the dense
-    # first stage and the policy's own init travel with the symbolic view. A
-    # swapped slot also lists the fields its new class does not share.
+    # first stage travels with the symbolic view. A swapped slot also lists the
+    # fields its new class does not share.
     assert _deltas(exp000(), exp002()) == {
         "experiment_name",
         "step.env.rules.original_reward",
@@ -339,7 +335,6 @@ def test_exp002_changes_the_setup_and_what_its_observation_needs() -> None:
         "step.model.embedding.dtype",
         "step.model.embedding.init_weight",
         "step.model.embedding.observation_size",
-        "step.checkpoint",
     }
 
 
@@ -349,7 +344,6 @@ def test_every_experiment_seeds_torchs_generator_as_the_module_states() -> None:
         exp000,
         exp001,
         exp002,
-        exp100,
         exp101,
         exp102,
         exp103,
@@ -376,16 +370,16 @@ def test_every_experiment_seeds_torchs_generator_as_the_module_states() -> None:
         assert seeds == {42}, factory.__name__
 
 
-def test_exp100_changes_only_where_the_weights_come_from() -> None:
-    """No checkpoint, so the policy draws its own init under exp000's seed."""
-    assert _deltas(exp000(), exp100()) == {"experiment_name", "step.checkpoint"}
-    assert exp100().step.checkpoint is None
+def test_exp000_draws_its_own_init_and_reads_no_file() -> None:
+    """No checkpoint: torch's generator draws the policy's init under seed 73."""
+    config = exp000()
+    assert (config.step.checkpoint, config.seed) == (None, 73)
 
 
 def test_exp101_swaps_every_bit_pin_for_the_default_and_keeps_the_recipe() -> None:
     """The compat classes become their parents with the same fields; fp32 precision."""
     config, defaults = exp101(), CraftaxTrainLoop().step
-    parent = exp100()
+    parent = exp000()
     assert type(config.step.optimizer) is FusedMuon.Config
     assert type(config.step.sampler) is PhiloxSampler.Config
     learner, parent_learner = config.step.learner, parent.step.learner
@@ -416,7 +410,6 @@ def test_exp101_swaps_every_bit_pin_for_the_default_and_keeps_the_recipe() -> No
 def test_exp_smoke_changes_only_sizes_budget_and_sinks() -> None:
     assert _deltas(exp000(), exp_smoke()) == {
         "experiment_name",
-        "step.checkpoint",
         "step.model.channels_hidden",
         "step.model.num_layers",
         "step.model.embedding.channels_out",
@@ -1194,6 +1187,24 @@ def test_exp106_trains_250m_inside_the_20b_warmup_evaluating_every_50m() -> None
     assert curve(250_000_000 / 20_000_000_000) == 1.0
 
 
+def test_base_dir_moves_the_steps_inputs(tmp_path: Path) -> None:
+    """One override relocates a step's checkpoint and the weights exp107 reads."""
+    config = exp000()
+    config.base_dir = tmp_path
+    config.step.checkpoint = "/runs/craftax/init.pt"
+    assert config.copy_tree().finalize().step.checkpoint == (
+        tmp_path / "runs/craftax/init.pt"
+    )
+    config = exp107()
+    config.base_dir = tmp_path
+    feature = config.copy_tree().finalize().step.feature
+    assert isinstance(feature, WorldModelFeature.Config)
+    assert isinstance(feature.weights, TrainedWeights.Config)
+    assert feature.weights.checkpoint == (
+        tmp_path / "runs/craftax-world-model/exp001/checkpoints/step_00001525.pt"
+    )
+
+
 def test_exp107_adds_the_frozen_feature_and_its_zero_projection() -> None:
     feature_path, proj_path = "step.feature", "step.model.proj_feature"
     assert {
@@ -1211,7 +1222,11 @@ def test_exp107_adds_the_frozen_feature_and_its_zero_projection() -> None:
     assert config.step.feature == _frozen_feature(
         TrainedWeights.Config(
             experiment=_WORLD_MODEL_EXP001,
-            checkpoint=_ORACLE_CHECKPOINTS / "exp001-s0" / "step_00001525.pt",
+            # World-model exp001's run, its final step: 50M decisions / 32,768.
+            checkpoint=Path(
+                "/opt/scratch/runs/craftax-world-model/exp001/checkpoints/"
+                "step_00001525.pt",
+            ),
             overrides=[],
         ),
     )
@@ -1331,7 +1346,7 @@ def test_exp111_swaps_only_the_world_models_checkpoint() -> None:
         "tracker.trackers",
         "step.feature.weights.checkpoint",
     }
-    feature = exp111().step.feature
+    feature = exp111().copy_tree().finalize().step.feature
     assert isinstance(feature, WorldModelFeature.Config)
     assert isinstance(feature.weights, TrainedWeights.Config)
     assert feature.weights.checkpoint == (

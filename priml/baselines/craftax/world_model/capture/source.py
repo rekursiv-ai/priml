@@ -129,10 +129,8 @@ class PolicySource:
 
         checkpoint: Path | None = None
         """A ``TrainLoop`` checkpoint of that experiment, the policy's weights
-        under ``step``/``model``; required."""
-
-        checkpoint_sha256: str = ""
-        """Expected SHA-256 of ``checkpoint``; required, and recorded in provenance."""
+        under ``step``/``model``; required. Its SHA-256 is recorded in
+        provenance."""
 
         env: CaptureEnv.Config = field(default_factory=CaptureEnv.Config)
         """The environments and the per-episode settings; the observation
@@ -145,22 +143,20 @@ class PolicySource:
         """Where the policy runs; see ``get_device``."""
 
     def __init__(self, config: Config) -> None:
-        """Check the checkpoint and build the policy with its weights.
+        """Hash the checkpoint and build the policy with its weights.
 
         Args:
           config: The policy, its weights, the environments and branches.
 
         Raises:
-          ValueError: The checkpoint or its SHA-256 is missing, or its bytes
-            have another SHA-256.
+          ValueError: The checkpoint is missing.
 
         """
-        if config.checkpoint is None or not config.checkpoint_sha256:
-            raise ValueError("Capture needs the arm's checkpoint and its SHA-256.")
+        if config.checkpoint is None:
+            raise ValueError("Capture needs the arm's checkpoint.")
         with config.checkpoint.open("rb") as weights:
-            digest = hashlib.file_digest(weights, "sha256").hexdigest()
-        if digest != config.checkpoint_sha256:
-            raise ValueError(f"Checkpoint {config.checkpoint} has the wrong SHA-256.")
+            self.checkpoint_sha256 = hashlib.file_digest(weights, "sha256").hexdigest()
+            """SHA-256 of the checkpoint's bytes, recorded in provenance."""
         self.config = config
         self.device = get_device(config.device)
         self.policy = config.policy.model.make().to(self.device)
@@ -192,7 +188,7 @@ class PolicySource:
         """Return the checkpoint, its hash, and the worker's sampler seed."""
         return {
             "checkpoint": str(self.config.checkpoint),
-            "checkpoint_sha256": self.config.checkpoint_sha256,
+            "checkpoint_sha256": self.checkpoint_sha256,
             "rollout_seed": str(self.seed),
         }
 

@@ -30,7 +30,7 @@ marker is incomplete: workers still queued by Slurm never expire it.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self, override
 
 import dataclasses
 import hashlib
@@ -64,6 +64,7 @@ from priml.baselines.craftax.world_model.snapshots import (
     verify_snapshots,
 )
 from priml.lib.codec import from_plain, loads, to_plain
+from priml.paths import resolve_working_dir
 
 
 if TYPE_CHECKING:
@@ -172,10 +173,13 @@ class ReplayVerifier:
     class Config(Fig["ReplayVerifier"]):
         """The archive, the launch it waits for, and the sample of each shard."""
 
-        root: Path = Path("/opt/scratch/datasets/craftax/world-model/archive")
+        base_dir: Path | str | None = "/opt/scratch"
+        """Root ``root`` and ``log_dir`` resolve beneath; None takes them as given."""
+
+        root: Path = Path("/datasets/craftax/world-model/archive")
         """Archive root holding ``{train,val}/arm{arm}/w{worker}/MANIFEST.jsonl``."""
 
-        log_dir: Path = Path("/opt/scratch/artifacts/craftax/world-model/verifier")
+        log_dir: Path = Path("/artifacts/craftax/world-model/verifier")
         """Directory of the append-only verified-shard logs, ``{launch}.jsonl``."""
 
         fraction: float = 0.01
@@ -199,6 +203,12 @@ class ReplayVerifier:
 
         slowest_decisions_per_second: float = 10.0
         """Slowest per-environment rate of a capture source."""
+
+        @override
+        def finalize(self) -> Self:
+            self.root = resolve_working_dir(self.base_dir, self.root)
+            self.log_dir = resolve_working_dir(self.base_dir, self.log_dir)
+            return super().finalize()
 
     def __init__(self, config: Config) -> None:
         if config.fraction <= 0 or config.fraction > 1:

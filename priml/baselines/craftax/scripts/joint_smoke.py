@@ -151,9 +151,12 @@ def smoke_config(
       config: The step's config, unfinalized.
 
     """
-    step = ARMS[experiment]().step
-    # The training loop's runtime places the step; driven alone, it says so here.
+    loop = ARMS[experiment]()
+    step = loop.step
+    # The training loop's runtime places the step and roots its inputs; driven
+    # alone, it says so here.
     step.parallelism.device = "cuda"
+    step.base_dir = loop.base_dir
     step.rollout.num_slots = slots
     if episodes:
         step.evaluation.num_episodes = episodes

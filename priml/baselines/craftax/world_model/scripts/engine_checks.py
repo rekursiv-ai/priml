@@ -26,7 +26,7 @@ OUTPUT is a JSON file with each check's measurements and verdict, and
 all_passed.
 
 Examples:
-  priml/baselines/craftax/world_model/scripts/engine_checks.py /opt/scratch/runs/craftax-world-model/exp001/checkpoints/step_00001525.pt /opt/scratch/datasets/craftax/world-model-reference/archive-v1-replay/corpora/base.json /opt/scratch/artifacts/craftax/world-model/engine-checks-s0.json
+  priml/baselines/craftax/world_model/scripts/engine_checks.py /opt/scratch/runs/craftax-world-model/exp001/checkpoints/step_00001525.pt /opt/scratch/datasets/craftax/world-model/archive-v1/corpora/base.json /opt/scratch/artifacts/craftax/world-model/engine-checks.json
 
 '''
 # fmt: on

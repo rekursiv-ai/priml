@@ -5,10 +5,10 @@ policies:
 
 | Arm | Factory | Policy | Share |
 | --- | --- | --- | ---: |
-| 0 | ``exp103_s74`` | exp103 at 20B, seed 74 (77.66%), sampled | 70% |
-| 1 | ``exp103_s74_epsilon`` | the same, epsilon 0.05 over legal actions | 10% |
-| 2 | ``exp102_s73`` | exp102 at 20B, seed 73 (56.24%), sampled | 10% |
-| 3 | ``exp000_s73`` | exp000 at 3.5B (48.45%), sampled | 10% |
+| 0 | ``arm0`` | exp103 at 20B, sampled | 70% |
+| 1 | ``arm1`` | the same, epsilon 0.05 over legal actions | 10% |
+| 2 | ``arm2`` | exp102 at 20B, sampled | 10% |
+| 3 | ``arm3`` | exp000 at 3.5B, sampled | 10% |
 
 Arm 0 is the strongest policy, the one that reaches the last floor in 61% of
 its evaluation episodes; arm 2 is exp102's recipe (a board encoder and
@@ -25,14 +25,15 @@ plays its policy exactly as trained, with learning, practice and auxiliary
 objectives off, on the game's default rules: exp103's episodes, which ended at
 the necromancer's fall in training, play on.
 
-The policies are their runs' final weights, copied out of the runs' last
-``TrainLoop`` checkpoints by ``{"step": {"model": ...}}`` alone, into
-``behaviour-policies/``.
+Each arm reads its policy experiment's final ``TrainLoop`` checkpoint, at the
+path that experiment's run writes beneath ``base_dir``, so the experiment
+trains first. The published archive's arms played exp103's seed-74 run
+(77.66%), exp102's seed-73 run (56.24%) and exp000's run (48.45%).
 
 The second dataset version adds, per arm, fresh episodes with training
-episodes cut after a stall without reward (``*_v2``, generation 1) and
+episodes cut after a stall without reward (``arm*_v2``, generation 1) and
 branches of Troll, Fire and Ice states of the fresh training episodes
-(``*_branch``, generation 2):
+(``arm*_branch``, generation 2):
 
 | Arm | Stall cap | Epsilon | Fresh | Branches |
 | --- | ---: | --- | ---: | ---: |
@@ -48,9 +49,13 @@ so the validation split is natural play.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from priml.baselines.craftax.experiments import exp000, exp102, exp103
+from priml.baselines.craftax.experiments import (
+    exp000,
+    exp102,
+    exp103,
+    exp_smoke,
+)
 from priml.baselines.craftax.world_model.capture.branches import (
     BranchFeeder,
 )
@@ -65,199 +70,260 @@ from priml.baselines.craftax.world_model.capture.worker import (
 )
 
 
-if TYPE_CHECKING:
-    from priml.baselines.craftax.train_step import CraftaxTrainStep
-
-
-def exp103_s74() -> CaptureWorker.Config:
-    """Capture arm 0: exp103's seed-74 run at 20B, sampled."""
-    return _arm(
-        arm=0,
-        share=70,
-        policy=exp103().step,
-        checkpoint="exp007-s74-00038146.pt",
-        sha256="38dfe59f233640b571abea4efe4b71476437c0ed501e12ad8fe4e36d69039cef",
+def arm0() -> CaptureWorker.Config:
+    """Capture arm 0: exp103's run at 20B, sampled; seed 74's in the published archive."""
+    config = CaptureWorker.Config()
+    config.root = Path("/datasets/craftax/world-model/archive-v1")
+    config.arm = 0
+    config.decisions = 3_500_000_000 * 70 // 100 // 4
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    policy = exp103()
+    source.policy = policy.step
+    source.checkpoint = Path(
+        f"/runs/{policy.study_name}/{policy.experiment_name}/checkpoints/"
+        f"step_{int(policy.max_steps):08d}.pt",
     )
-
-
-def exp103_s74_epsilon() -> CaptureWorker.Config:
-    """Capture arm 1: arm 0's policy with 5% of actions replaced by uniform legal ones."""
-    config = exp103_s74()
-    config.arm = 1
-    config.decisions = 3_500_000_000 * 10 // 100 // 4
-    _source(config).env.epsilon = 0.05
+    source.env.num_envs = 1_024
+    source.env.num_buffers = 4
     return config
 
 
-def exp102_s73() -> CaptureWorker.Config:
-    """Capture arm 2: exp102's seed-73 run at 20B, sampled."""
-    return _arm(
-        arm=2,
-        share=10,
-        policy=exp102().step,
-        checkpoint="exp006-s73-00038146.pt",
-        sha256="4034e88238769309b80d4ed121832c9fe18e4479e9a7c6c4950e9c79d2d852b0",
-    )
+def arm1() -> CaptureWorker.Config:
+    """Capture arm 1: arm 0's policy with 5% of actions replaced by uniform legal ones."""
+    config = arm0()
+    config.arm = 1
+    config.decisions = 3_500_000_000 * 10 // 100 // 4
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    source.env.epsilon = 0.05
+    return config
 
 
-def exp000_s73() -> CaptureWorker.Config:
-    """Capture arm 3: exp000's run at 3.5B, sampled."""
-    return _arm(
-        arm=3,
-        share=10,
-        policy=exp000().step,
-        checkpoint="exp000-s73-00006662.pt",
-        sha256="e4f2adcd0751fbd40186262bd1fab1b553b2046c30f4ad2ef5c31d743660ac10",
+def arm2() -> CaptureWorker.Config:
+    """Capture arm 2: exp102's run at 20B, sampled; seed 73's in the published archive."""
+    config = arm0()
+    config.arm = 2
+    config.decisions = 3_500_000_000 * 10 // 100 // 4
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    policy = exp102()
+    source.policy = policy.step
+    source.checkpoint = Path(
+        f"/runs/{policy.study_name}/{policy.experiment_name}/checkpoints/"
+        f"step_{int(policy.max_steps):08d}.pt",
     )
+    return config
+
+
+def arm3() -> CaptureWorker.Config:
+    """Capture arm 3: exp000's run at 3.5B, sampled; seed 73, its config's own."""
+    config = arm2()
+    config.arm = 3
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    policy = exp000()
+    source.policy = policy.step
+    source.checkpoint = Path(
+        f"/runs/{policy.study_name}/{policy.experiment_name}/checkpoints/"
+        f"step_{int(policy.max_steps):08d}.pt",
+    )
+    return config
 
 
 def verifier() -> ReplayVerifier.Config:
     """Verify every closed shard; a launch sets ``launch`` and ``workers``."""
     config = ReplayVerifier.Config()
-    config.root = Path("/opt/scratch/datasets/craftax/world-model/archive-v1")
+    config.root = Path("/datasets/craftax/world-model/archive-v1")
     return config
 
 
-def exp103_s74_v2() -> CaptureWorker.Config:
+def arm0_v2() -> CaptureWorker.Config:
     """Capture v2's fresh arm 0: training episodes cut at 2,000 stalls."""
-    return _fresh(exp103_s74(), decisions=851_508_459, stall_limit=2_000)
-
-
-def exp103_s74_epsilon_v2() -> CaptureWorker.Config:
-    """Capture v2's fresh arm 1: each episode's epsilon drawn from 0.04-0.06."""
-    config = _fresh(exp103_s74_epsilon(), decisions=64_152_549, stall_limit=2_000)
-    env = _source(config).env
-    env.epsilon = 0.04
-    env.epsilon_high = 0.06
+    config = arm0()
+    config.root = Path("/datasets/craftax/world-model/archive-v2")
+    config.generation = 1
+    config.decisions = 851_508_459
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    source.env.stall_limit = 2_000
     return config
 
 
-def exp102_s73_v2() -> CaptureWorker.Config:
+def arm1_v2() -> CaptureWorker.Config:
+    """Capture v2's fresh arm 1: each episode's epsilon drawn from 0.04-0.06."""
+    config = arm1()
+    config.root = Path("/datasets/craftax/world-model/archive-v2")
+    config.generation = 1
+    config.decisions = 64_152_549
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    source.env.stall_limit = 2_000
+    source.env.epsilon = 0.04
+    source.env.epsilon_high = 0.06
+    return config
+
+
+def arm2_v2() -> CaptureWorker.Config:
     """Capture v2's fresh arm 2: training episodes cut at 10,000 stalls."""
-    return _fresh(exp102_s73(), decisions=92_152_350, stall_limit=10_000)
+    config = arm2()
+    config.root = Path("/datasets/craftax/world-model/archive-v2")
+    config.generation = 1
+    config.decisions = 92_152_350
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    source.env.stall_limit = 10_000
+    return config
 
 
-def exp000_s73_v2() -> CaptureWorker.Config:
+def arm3_v2() -> CaptureWorker.Config:
     """Capture v2's fresh arm 3: training episodes cut at 10,000 stalls."""
-    return _fresh(exp000_s73(), decisions=67_974_772, stall_limit=10_000)
+    config = arm3()
+    config.root = Path("/datasets/craftax/world-model/archive-v2")
+    config.generation = 1
+    config.decisions = 67_974_772
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    source.env.stall_limit = 10_000
+    return config
 
 
-def exp103_s74_branch() -> CaptureWorker.Config:
+def arm0_branch() -> CaptureWorker.Config:
     """Capture v2's arm 0 branches of its Troll, Fire and Ice states."""
-    return _branch(exp103_s74_v2(), decisions=364_932_197)
+    config = arm0_v2()
+    config.root = Path("/datasets/craftax/world-model/archive-v2-branch")
+    config.generation = 2
+    config.decisions = 364_932_197
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    feeder = source.branches = BranchFeeder.Config()
+    feeder.pools = config.root / "pools"
+    return config
 
 
-def exp103_s74_epsilon_branch() -> CaptureWorker.Config:
+def arm1_branch() -> CaptureWorker.Config:
     """Capture v2's arm 1 branches of its Troll, Fire and Ice states."""
-    return _branch(exp103_s74_epsilon_v2(), decisions=64_152_548)
+    config = arm1_v2()
+    config.root = Path("/datasets/craftax/world-model/archive-v2-branch")
+    config.generation = 2
+    config.decisions = 64_152_548
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    feeder = source.branches = BranchFeeder.Config()
+    feeder.pools = config.root / "pools"
+    return config
 
 
-def exp102_s73_branch() -> CaptureWorker.Config:
+def arm2_branch() -> CaptureWorker.Config:
     """Capture v2's arm 2 branches of its Troll, Fire and Ice states."""
-    return _branch(exp102_s73_v2(), decisions=92_152_350)
+    config = arm2_v2()
+    config.root = Path("/datasets/craftax/world-model/archive-v2-branch")
+    config.generation = 2
+    config.decisions = 92_152_350
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    feeder = source.branches = BranchFeeder.Config()
+    feeder.pools = config.root / "pools"
+    return config
 
 
-def exp000_s73_branch() -> CaptureWorker.Config:
+def arm3_branch() -> CaptureWorker.Config:
     """Capture v2's arm 3 branches of its Troll, Fire and Ice states."""
-    return _branch(exp000_s73_v2(), decisions=67_974_773)
+    config = arm3_v2()
+    config.root = Path("/datasets/craftax/world-model/archive-v2-branch")
+    config.generation = 2
+    config.decisions = 67_974_773
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    feeder = source.branches = BranchFeeder.Config()
+    feeder.pools = config.root / "pools"
+    return config
 
 
-def e2e_exp103_s74() -> CaptureWorker.Config:
+def e2e_arm0() -> CaptureWorker.Config:
     """Capture arm 0 at the end-to-end check's size: 64 environments, 700k decisions.
 
     The whole loop at small scale: each ``e2e_`` arm
     captures into one root with every in-flight episode drained, and
     ``e2e_verifier`` verifies a tenth of each shard.
     """
-    return _e2e(exp103_s74(), decisions=700_000)
+    config = arm0()
+    config.root = Path("/datasets/craftax/world-model/e2e")
+    config.decisions = 700_000
+    config.shard_decisions = 100_000
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    source.env.num_envs = 64
+    source.env.num_buffers = 2
+    return config
 
 
-def e2e_exp103_s74_epsilon() -> CaptureWorker.Config:
+def e2e_arm1() -> CaptureWorker.Config:
     """Capture arm 1 at the end-to-end check's size: 100k decisions."""
-    return _e2e(exp103_s74_epsilon(), decisions=100_000)
+    config = arm1()
+    config.root = Path("/datasets/craftax/world-model/e2e")
+    config.decisions = 100_000
+    config.shard_decisions = 100_000
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    source.env.num_envs = 64
+    source.env.num_buffers = 2
+    return config
 
 
-def e2e_exp102_s73() -> CaptureWorker.Config:
+def e2e_arm2() -> CaptureWorker.Config:
     """Capture arm 2 at the end-to-end check's size: 100k decisions."""
-    return _e2e(exp102_s73(), decisions=100_000)
+    config = arm2()
+    config.root = Path("/datasets/craftax/world-model/e2e")
+    config.decisions = 100_000
+    config.shard_decisions = 100_000
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    source.env.num_envs = 64
+    source.env.num_buffers = 2
+    return config
 
 
-def e2e_exp000_s73() -> CaptureWorker.Config:
+def e2e_arm3() -> CaptureWorker.Config:
     """Capture arm 3 at the end-to-end check's size: 100k decisions."""
-    return _e2e(exp000_s73(), decisions=100_000)
+    config = arm3()
+    config.root = Path("/datasets/craftax/world-model/e2e")
+    config.decisions = 100_000
+    config.shard_decisions = 100_000
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    source.env.num_envs = 64
+    source.env.num_buffers = 2
+    return config
 
 
 def e2e_verifier() -> ReplayVerifier.Config:
     """Verify a tenth of every shard the ``e2e_`` arms publish."""
     config = verifier()
-    config.root = Path("/opt/scratch/datasets/craftax/world-model/e2e")
+    config.root = Path("/datasets/craftax/world-model/e2e")
     config.fraction = 0.1
     return config
 
 
-def _e2e(config: CaptureWorker.Config, *, decisions: int) -> CaptureWorker.Config:
-    """Shrink an arm to the end-to-end check: its root, 64 environments, small shards."""
-    config.root = Path("/opt/scratch/datasets/craftax/world-model/e2e")
-    config.decisions = decisions
-    config.shard_decisions = 100_000
-    env = _source(config).env
-    env.num_envs = 64
-    env.num_buffers = 2
-    return config
+def smoke() -> CaptureWorker.Config:
+    """Capture arm 3 at minimum size from exp_smoke's policy, to check the chain.
 
-
-def _arm(
-    *,
-    arm: int,
-    share: int,
-    policy: CraftaxTrainStep.Config,
-    checkpoint: str,
-    sha256: str,
-) -> CaptureWorker.Config:
-    """Return worker 0 of one arm of the first dataset version."""
-    config = CaptureWorker.Config()
-    config.root = Path("/opt/scratch/datasets/craftax/world-model/archive-v1")
-    config.arm = arm
-    config.decisions = 3_500_000_000 * share // 100 // 4
-    source = _source(config)
-    source.policy = policy
-    source.checkpoint = (
-        Path("/opt/scratch/artifacts/craftax/world-model/behaviour-policies")
-        / checkpoint
-    )
-    source.checkpoint_sha256 = sha256
-    source.env.num_envs = 1_024
-    source.env.num_buffers = 4
-    return config
-
-
-def _source(config: CaptureWorker.Config) -> PolicySource.Config:
-    """Return a worker's policy source."""
+    Not a dataset: it answers whether a policy run's checkpoint captures into
+    shards that freeze into a corpus the world model's ``exp_smoke`` reads.
+    exp_smoke is exp000 at minimum size, so the arm is exp000's; its 16
+    environments record 20,000 decisions into ``world-model/smoke``.
+    """
+    config = e2e_arm3()
+    config.root = Path("/datasets/craftax/world-model/smoke")
+    config.decisions = 20_000
+    config.shard_decisions = 10_000
     source = config.source
     assert isinstance(source, PolicySource.Config)
-    return source
-
-
-def _fresh(
-    config: CaptureWorker.Config,
-    *,
-    decisions: int,
-    stall_limit: int,
-) -> CaptureWorker.Config:
-    """Make a first-version arm the second's: generation 1, training cut at stalls."""
-    config.root = Path("/opt/scratch/datasets/craftax/world-model/archive-v2")
-    config.generation = 1
-    config.decisions = decisions
-    _source(config).env.stall_limit = stall_limit
-    return config
-
-
-def _branch(config: CaptureWorker.Config, *, decisions: int) -> CaptureWorker.Config:
-    """Make a second-version arm branch from its node's pools, as generation 2."""
-    root = Path("/opt/scratch/datasets/craftax/world-model/archive-v2-branch")
-    config.root = root
-    config.generation = 2
-    config.decisions = decisions
-    feeder = _source(config).branches = BranchFeeder.Config()
-    feeder.pools = root / "pools"
+    policy = exp_smoke()
+    source.policy = policy.step
+    source.checkpoint = Path(
+        f"/runs/{policy.study_name}/{policy.experiment_name}/checkpoints/"
+        f"step_{int(policy.max_steps):08d}.pt",
+    )
+    source.env.num_envs = 16
     return config

@@ -81,7 +81,10 @@ from priml.baselines.craftax.world_model.context import (
     Contexts,
     JointWorldModel,
 )
-from priml.baselines.craftax.world_model.feature import WorldModelFeature
+from priml.baselines.craftax.world_model.feature import (
+    TrainedWeights,
+    WorldModelFeature,
+)
 from priml.lib.codec import from_plain
 from priml.loss.policy_gradient import PPO, TorchPPO
 from priml.loss.policy_gradient_kernel import TritonPPO
@@ -89,6 +92,7 @@ from priml.math.schedules import Schedule, cosine
 from priml.model.min_gru import TritonScan
 from priml.optimizers.fused_muon import FusedMuon
 from priml.optimizers.lr import remember_initial_lrs
+from priml.paths import resolve_working_dir
 from priml.timer import CheckpointableStepTimer
 from priml.train.parallelism import NoParallel
 
@@ -947,6 +951,11 @@ class CraftaxTrainStep:
         """The fresh trainer an evaluation plays in; ``finalize`` fills the
         parts it leaves unset from training's."""
 
+        base_dir: Path | str | None = None
+        """Root the step's inputs resolve beneath: ``checkpoint`` and a trained
+        feature's weights. The training loop fills its own; None takes them as
+        given."""
+
         checkpoint: Path | str | None = None
         """A ``state_dict`` of fp32 masters to start from: loaded into the
         parameters, rounded to their dtype, and exactly into the optimizer's
@@ -971,7 +980,18 @@ class CraftaxTrainStep:
 
         @override
         def finalize(self) -> Self:
+            if self.checkpoint is not None:
+                self.checkpoint = resolve_working_dir(self.base_dir, self.checkpoint)
             if isinstance(self.feature, WorldModelFeature.Config):
+                weights = self.feature.weights
+                if (
+                    isinstance(weights, TrainedWeights.Config)
+                    and weights.checkpoint is not None
+                ):
+                    weights.checkpoint = resolve_working_dir(
+                        self.base_dir,
+                        weights.checkpoint,
+                    )
                 # The learner recomputes the features from what a joint
                 # source's rollout stores, and publishes into its model; a
                 # joint source no learner trains would store it for nothing.

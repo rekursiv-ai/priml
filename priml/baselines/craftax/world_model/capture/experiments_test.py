@@ -5,8 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import pytest
-
+from priml.baselines.craftax.world_model import (
+    experiments as world_model_experiments,
+)
 from priml.baselines.craftax.world_model.capture import experiments
 from priml.baselines.craftax.world_model.capture.source import (
     PolicySource,
@@ -22,22 +23,22 @@ if TYPE_CHECKING:
 
 
 ARMS = (
-    experiments.exp103_s74,
-    experiments.exp103_s74_epsilon,
-    experiments.exp102_s73,
-    experiments.exp000_s73,
+    experiments.arm0,
+    experiments.arm1,
+    experiments.arm2,
+    experiments.arm3,
 )
 V2_FRESH = (
-    experiments.exp103_s74_v2,
-    experiments.exp103_s74_epsilon_v2,
-    experiments.exp102_s73_v2,
-    experiments.exp000_s73_v2,
+    experiments.arm0_v2,
+    experiments.arm1_v2,
+    experiments.arm2_v2,
+    experiments.arm3_v2,
 )
 V2_BRANCH = (
-    experiments.exp103_s74_branch,
-    experiments.exp103_s74_epsilon_branch,
-    experiments.exp102_s73_branch,
-    experiments.exp000_s73_branch,
+    experiments.arm0_branch,
+    experiments.arm1_branch,
+    experiments.arm2_branch,
+    experiments.arm3_branch,
 )
 
 
@@ -60,20 +61,45 @@ def test_arms_read_their_policys_observation_layout() -> None:
     ]
 
 
-@pytest.mark.parametrize("factory", ARMS)
-def test_every_arm_refuses_weights_of_another_sha256(
-    factory: Callable[[], CaptureWorker.Config],
-    tmp_path: Path,
-) -> None:
-    source = _source(factory())
-    assert source.checkpoint is not None
-    assert source.checkpoint.parent == Path(
-        "/opt/scratch/artifacts/craftax/world-model/behaviour-policies",
+def test_each_arm_reads_its_policy_runs_final_checkpoint() -> None:
+    runs = Path("/opt/scratch/runs/craftax")
+    assert [_source(_finalized(factory)).checkpoint for factory in ARMS] == [
+        runs / "exp103/checkpoints/step_00038146.pt",
+        runs / "exp103/checkpoints/step_00038146.pt",
+        runs / "exp102/checkpoints/step_00038146.pt",
+        runs / "exp000/checkpoints/step_00006662.pt",
+    ]
+
+
+def test_base_dir_moves_every_path_of_a_capture(tmp_path: Path) -> None:
+    config = experiments.arm0_branch()
+    config.base_dir = tmp_path
+    config = config.copy_tree().finalize()
+    source = _source(config)
+    assert source.branches is not None
+    archive = tmp_path / "datasets/craftax/world-model/archive-v2-branch"
+    assert [config.root, config.run_root, source.checkpoint, source.branches.pools] == [
+        archive,
+        tmp_path / "runs/craftax/world-model/capture",
+        tmp_path / "runs/craftax/exp103/checkpoints/step_00038146.pt",
+        archive / "pools",
+    ]
+    verifier = experiments.verifier()
+    verifier.base_dir = tmp_path
+    verifier = verifier.copy_tree().finalize()
+    assert (verifier.root, verifier.log_dir) == (
+        tmp_path / "datasets/craftax/world-model/archive-v1",
+        tmp_path / "artifacts/craftax/world-model/verifier",
     )
-    source.checkpoint = tmp_path / "policy.pt"
-    source.checkpoint.write_bytes(b"not the arm's weights")
-    with pytest.raises(ValueError, match="wrong SHA-256"):
-        source.make()
+
+
+def test_the_smoke_arm_captures_exp_smoke_into_the_world_models_smoke_corpus() -> None:
+    config = _finalized(experiments.smoke)
+    assert _source(config).checkpoint == Path(
+        "/opt/scratch/runs/craftax/exp_smoke/checkpoints/step_00000004.pt",
+    )
+    reader = world_model_experiments.exp_smoke().copy_tree().finalize().dataset
+    assert config.root == reader.working_dir
 
 
 def test_v2_fresh_arms_are_generation_1_and_stall_capped() -> None:
@@ -108,15 +134,15 @@ def test_v2_budgets_total_6_66_billion() -> None:
 
 
 def test_the_verifier_reads_the_first_archive() -> None:
-    assert experiments.verifier().root == experiments.exp103_s74().root
+    assert experiments.verifier().root == experiments.arm0().root
 
 
 def test_the_e2e_arms_shrink_the_arms_into_one_root() -> None:
     arms = [
-        experiments.e2e_exp103_s74(),
-        experiments.e2e_exp103_s74_epsilon(),
-        experiments.e2e_exp102_s73(),
-        experiments.e2e_exp000_s73(),
+        experiments.e2e_arm0(),
+        experiments.e2e_arm1(),
+        experiments.e2e_arm2(),
+        experiments.e2e_arm3(),
     ]
     assert [c.arm for c in arms] == [0, 1, 2, 3]
     assert [c.decisions for c in arms] == [700_000, 100_000, 100_000, 100_000]
@@ -125,6 +151,11 @@ def test_the_e2e_arms_shrink_the_arms_into_one_root() -> None:
     assert [_source(c).checkpoint for c in arms] == [
         _source(factory()).checkpoint for factory in ARMS
     ]
+
+
+def _finalized(factory: Callable[[], CaptureWorker.Config]) -> CaptureWorker.Config:
+    """Return a factory's config with its paths resolved."""
+    return factory().copy_tree().finalize()
 
 
 def _source(config: CaptureWorker.Config) -> PolicySource.Config:

@@ -24,8 +24,8 @@ criteria: finite losses and gradient norms, loss spikes and whether they
 recover, and whether each modality's validation bits per byte fell.
 
 Examples:
-  priml/baselines/craftax/world_model/scripts/curves.py 47np9zim qmuvw6we vdrxdh0s
-  priml/baselines/craftax/world_model/scripts/curves.py 47np9zim vdrxdh0s --output /opt/scratch/artifacts/craftax/world-model/curves.json
+  priml/baselines/craftax/world_model/scripts/curves.py RUN0 RUN1 RUN2
+  priml/baselines/craftax/world_model/scripts/curves.py RUN0 RUN1 --output /opt/scratch/artifacts/craftax/world-model/curves.json
 
 '''
 # fmt: on

@@ -93,6 +93,7 @@ def tiny() -> Generator[None]:
 @pytest.fixture
 def verifier(tmp_path: Path) -> ReplayVerifier:
     config = ReplayVerifier.Config()
+    config.base_dir = None
     config.root = tmp_path / "archive"
     config.log_dir = tmp_path / "verifier"
     config.fraction = 1.0

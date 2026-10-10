@@ -31,8 +31,8 @@ saw, for the panel whose script viewer/games.mjs panel writes; and, unless
 played a tick at a time and checked against its collapsed step.
 
 Examples:
-  priml/baselines/craftax/world_model/scripts/games.py rank /opt/scratch/artifacts/craftax/games/exp007-s74/capture
-  priml/baselines/craftax/world_model/scripts/games.py save /opt/scratch/artifacts/craftax/games/exp007-s74/capture /opt/scratch/artifacts/craftax/games/exp007-s74/best --title "exp103, seed 74"
+  priml/baselines/craftax/world_model/scripts/games.py rank /opt/scratch/artifacts/craftax/games/exp103/capture
+  priml/baselines/craftax/world_model/scripts/games.py save /opt/scratch/artifacts/craftax/games/exp103/capture /opt/scratch/artifacts/craftax/games/exp103/best --title "exp103, 20B"
   priml/baselines/craftax/world_model/scripts/games.py panel /opt/scratch/artifacts/craftax/policy-view/capture/w15 /opt/scratch/artifacts/craftax/policy-view/boss-short-935 --episode val/arm3/w0/shard-000000/34 --limit 3822 --sleep-stride 4
 
 '''

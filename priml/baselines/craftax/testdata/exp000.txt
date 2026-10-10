@@ -152,7 +152,8 @@ CraftaxTrainLoop(
         │       ),
         │       num_episodes=10_000
         │   ),
-        │   checkpoint='/opt/scratch/datasets/craftax/goldens-v1/init_seed73.pt',
+        │   base_dir='/opt/scratch',
+        │   checkpoint=None,
         │   reward_scale=1.0,
         │   reward_clip=1.0,
         │   train_budget_steps=6_662,
