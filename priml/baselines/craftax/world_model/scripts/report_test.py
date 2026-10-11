@@ -104,6 +104,7 @@ def test_summarize_reads_every_step_and_spreads_over_checkpoints(
     own = sigma["own_windows"]["nats_per_decision_natural"]
     assert own["values"] == [4.0, 6.0]
     assert own["sd"] == pytest.approx(2**0.5)
+    assert own["sd_over_mean"] == pytest.approx(2**0.5 / 5.0)
     assert sigma["same_windows"]["v0"]["nats_per_decision_natural"]["values"] == [
         4.0,
         7.0,

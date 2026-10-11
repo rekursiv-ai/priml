@@ -24,6 +24,7 @@ from priml.baselines.sudoku.verifier_fit import (
     VerifierFit,
     VerifierLoss,
 )
+from priml.testing.bfb import portable_half_precision
 from priml.testing.golden import mismatches
 
 
@@ -116,6 +117,7 @@ def test_verifier_fit_needs_a_positive_clip_norm() -> None:
         VerifierFit.Config(gradient_clip_norm=0.0).make()
 
 
+@portable_half_precision()
 def test_a_fit_step_under_autocast_updates_the_weights() -> None:
     """The bf16 forward feeds an fp32 loss and moves every trained matrix."""
     torch.manual_seed(0)

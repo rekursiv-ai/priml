@@ -1,8 +1,8 @@
 """The port stands alone: it imports no other baseline and leaves no dead name.
 
 Its parity checks live outside priml, beside their fixtures, and import the
-port, never the reverse. So the port imports nothing but priml, configgle and
-the shared modules priml ships, and no other priml baseline; and a public name
+port, never the reverse. So the port imports nothing but priml, configgle,
+treekle and the shared modules priml ships, and no other priml baseline; and a public name
 that only those checks read would be dead code here, where no test notices it,
 so every public top-level name must be read inside the package -- by its own
 module, another module or a test.
@@ -57,14 +57,14 @@ _IMPORT: Final = re.compile(
 
 
 def test_the_port_imports_only_what_priml_ships() -> None:
-    """The port imports priml, configgle and priml's shared modules, no other baseline."""
+    """The port imports priml, configgle, treekle and priml's shared modules only."""
     offenders = [
         f"{path.relative_to(_CWD)}: {module}"
         for path, code in _sources().items()
         for module in _imports(code)
         if (
             module.startswith("loop.")
-            and module.split(".")[1] not in {"priml", "configgle", "lib"}
+            and module.split(".")[1] not in {"priml", "configgle", "treekle", "lib"}
         )
         or (
             module.startswith("priml.baselines")
