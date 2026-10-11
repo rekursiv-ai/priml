@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import field
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Self, TypedDict, cast, override
+from typing import TYPE_CHECKING, Self, TypedDict, override
 
 from configgle import Fig, Makeable
 from torch import Tensor
@@ -31,7 +31,7 @@ from priml.paths import resolve_working_dir
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Mapping
 
     from numpy.typing import NDArray
 
@@ -297,4 +297,4 @@ class PassK:
 
 # An integer token tensor narrows to uint8 by wrapping, as the reference voted on.
 def _uint8_rows(values: Tensor) -> list[NDArray[np.uint8]]:
-    return list(cast("Iterable[NDArray[np.uint8]]", values.to(torch.uint8).numpy()))
+    return list(values.to(torch.uint8).numpy())

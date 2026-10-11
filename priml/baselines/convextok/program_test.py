@@ -13,10 +13,8 @@ from pathlib import Path
 from typing import Final, cast
 from unittest.mock import patch
 
-import json
-
 from torch import Tensor
-from treekle import from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 import torch
@@ -29,25 +27,31 @@ from priml.baselines.convextok.program import (
     build_program,
     token_edges,
 )
+from priml.baselines.convextok.testing import (
+    TESTDATA,
+    Candidates,
+    Corpus,
+    Pretokens,
+)
 
 
 _CWD: Final = Path(__file__).resolve().parent
 
 
 def test_program_matches_upstream_golden() -> None:
-    pretokens = _read_json("pretokens.json")
-    candidates = _read_json("candidates.json")
-    corpus = _read_json("corpus.json")
+    pretokens = json_loads((TESTDATA / "pretokens.json").read_text(), Pretokens)
+    candidates = json_loads((TESTDATA / "candidates.json").read_text(), Candidates)
+    corpus = json_loads((TESTDATA / "corpus.json").read_text(), Corpus)
     built = build_program(
         dict(
             zip(
-                from_plain(pretokens.get("pretokens"), list[str]),
-                from_plain(pretokens.get("frequencies"), list[int]),
+                pretokens["pretokens"],
+                pretokens["frequencies"],
                 strict=True,
             ),
         ),
-        from_plain(candidates.get("tokens"), list[str]),
-        budget=from_plain(corpus.get("budget"), int),
+        candidates["tokens"],
+        budget=corpus["budget"],
     )
     program = built.program
     with _npz("program.npz") as golden:
@@ -282,11 +286,6 @@ def _npz(name: str) -> np.lib.npyio.NpzFile:
     loaded = cast(object, np.load(_CWD / "testdata" / name))
     assert isinstance(loaded, np.lib.npyio.NpzFile)
     return loaded
-
-
-def _read_json(name: str) -> dict[str, object]:
-    raw = cast(object, json.loads((_CWD / "testdata" / name).read_text()))
-    return dict(from_plain(raw, dict[str, object]))
 
 
 if __name__ == "__main__":

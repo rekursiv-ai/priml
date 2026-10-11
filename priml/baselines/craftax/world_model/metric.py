@@ -314,37 +314,36 @@ class CraftaxBitsPerByte:
             raise ValueError("Craftax bits per byte has no scored targets.")
         self.measure_reference = False
         bits = math.log(2)
-        result = {"bpb": _ratio(nats, size, scale=bits)}
+        result = {"bpb": float(nats.sum() / (bits * size.sum()))}
         for index, name in enumerate(MODALITIES):
-            result[f"bpb/{name}"] = _ratio(nats[index], size[index], scale=bits)
+            result[f"bpb/{name}"] = float(
+                nats[index].sum() / (bits * size[index].sum()),
+            )
         grid = (FLOORS, len(Event))
         stratum_nats, stratum_bytes = nats.sum(0).view(grid), size.sum(0).view(grid)
         for floor in range(FLOORS):
             if stratum_bytes[floor].sum() > 0:
-                result[f"bpb/floor_{floor}"] = _ratio(
-                    stratum_nats[floor],
-                    stratum_bytes[floor],
-                    scale=bits,
+                result[f"bpb/floor_{floor}"] = float(
+                    stratum_nats[floor].sum() / (bits * stratum_bytes[floor].sum()),
                 )
         for event in Event:
             if stratum_bytes[:, event].sum() > 0:
-                result[f"bpb/{event.name.lower()}"] = _ratio(
-                    stratum_nats[:, event],
-                    stratum_bytes[:, event],
-                    scale=bits,
+                result[f"bpb/{event.name.lower()}"] = float(
+                    stratum_nats[:, event].sum()
+                    / (bits * stratum_bytes[:, event].sum()),
                 )
-        result["nats_per_decision"] = _ratio(nats, decisions, scale=1.0)
+        result["nats_per_decision"] = float(nats.sum() / (1.0 * decisions.sum()))
         if reference[1] > 0:
             result["zstd19_bpb"] = float(8 * reference[0] / reference[1])
         if len(self.natural_decisions):
             natural = self.natural_decisions
             weight = torch.where(decisions > 0, natural / decisions, 0.0)
             weighted = nats.sum(0) * weight
-            result["bpb_natural"] = _ratio(weighted, size.sum(0) * weight, scale=bits)
-            result["nats_per_decision_natural"] = _ratio(
-                weighted,
-                decisions * weight,
-                scale=1.0,
+            result["bpb_natural"] = float(
+                weighted.sum() / (bits * (size.sum(0) * weight).sum()),
+            )
+            result["nats_per_decision_natural"] = float(
+                weighted.sum() / (1.0 * (decisions * weight).sum()),
             )
         return result
 
@@ -504,11 +503,6 @@ def _record_columns(schema: FrameSchema) -> tuple[Tensor, Tensor]:
 def _little(values: Tensor) -> np.ndarray:
     """Return ``[N, K]`` ``values`` as little-endian int16 bytes, ``[N, 2K]``."""
     return values.numpy().astype("<i2").view(np.uint8)
-
-
-def _ratio(nats: Tensor, size: Tensor, *, scale: float) -> float:
-    """Return ``sum(nats) / (scale · sum(size))``."""
-    return float(nats.sum() / (scale * size.sum()))
 
 
 def _all_reduce(*tensors: Tensor) -> list[Tensor]:

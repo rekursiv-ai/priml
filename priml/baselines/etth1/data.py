@@ -282,19 +282,14 @@ class _ForecastBatches:
         order = order[:usable]
 
         for start in range(self._position, usable, self.batch_size):
-            indices = order[start : start + self.batch_size]
+            indices = [int(i) for i in order[start : start + self.batch_size]]
 
-            media = torch.stack(
-                [
-                    self.values[i : i + self.seq_len]
-                    for i in cast(list[int], cast(object, indices.tolist()))
-                ],
-            )
+            media = torch.stack([self.values[i : i + self.seq_len] for i in indices])
 
             label = torch.stack(
                 [
                     self.values[i + self.seq_len : i + self.seq_len + self.pred_len]
-                    for i in cast(list[int], cast(object, indices.tolist()))
+                    for i in indices
                 ],
             )
 

@@ -47,6 +47,11 @@ class _PluginManager:
         """Return whether plugin ``name`` is registered."""
         return self.controller and name == "dsession"
 
+    def get_plugin(self, name: str) -> object | None:
+        """Return no plugin; the compile the hooks start is recorded, not run."""
+        del name
+        return None
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _Config:
@@ -54,6 +59,12 @@ class _Config:
 
     stash: pytest.Stash = field(default_factory=pytest.Stash)
     pluginmanager: _PluginManager = field(default_factory=_PluginManager)
+    rootpath: Path = _CWD
+
+    def getoption(self, name: str) -> object:
+        """Return no option value; the compile the hooks start is recorded, not run."""
+        del name
+        return None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -95,7 +106,7 @@ def test_a_session_whose_tests_call_no_kernel_compiles_nothing(
     compiled: list[object],
     items: tuple[_Item, ...],
 ) -> None:
-    conftest.pytest_collection_finish(_hooked(_Session(items=items)))
+    conftest.pytest_collection_finish(_Session(items=items))
     assert compiled == []
 
 
@@ -119,7 +130,7 @@ def test_a_session_with_a_test_that_may_call_a_kernel_compiles_once(
     items: tuple[_Item, ...],
 ) -> None:
     session = _Session(items=items)
-    conftest.pytest_collection_finish(_hooked(session))
+    conftest.pytest_collection_finish(session)
     assert compiled == [session.config]
 
 
@@ -129,8 +140,8 @@ def test_a_serial_run_that_loaded_the_file_at_startup_compiles_once_the_tests_ar
     integration = _Session(items=(_Item(path=_INTEGRATION, marks=("integration",)),))
     unit = _Session(items=(_Item(path=_UNIT),))
     for session in (integration, unit):
-        conftest.pytest_sessionstart(_hooked(session))
-        conftest.pytest_collection_finish(_hooked(session))
+        conftest.pytest_sessionstart(session)
+        conftest.pytest_collection_finish(session)
     assert compiled == [unit.config]
 
 
@@ -139,18 +150,13 @@ def test_an_xdist_controller_compiles_at_startup_for_its_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _Session(config=_Config(pluginmanager=_PluginManager(controller=True)))
-    conftest.pytest_sessionstart(_hooked(controller))
+    conftest.pytest_sessionstart(controller)
     assert compiled == [controller.config]
     monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw0")
     worker = _Session(items=(_Item(path=_UNIT),))
-    conftest.pytest_sessionstart(_hooked(worker))
-    conftest.pytest_collection_finish(_hooked(worker))
+    conftest.pytest_sessionstart(worker)
+    conftest.pytest_collection_finish(worker)
     assert compiled == [controller.config]
-
-
-def _hooked(session: _Session) -> pytest.Session:
-    """Hand ``session`` to a hook, which reads only what it carries."""
-    return cast("pytest.Session", cast("object", session))
 
 
 if __name__ == "__main__":

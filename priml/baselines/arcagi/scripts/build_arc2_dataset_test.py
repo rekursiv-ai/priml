@@ -22,13 +22,12 @@ from priml.baselines.arcagi.scripts.build_arc2_dataset import (
     ensure_arc2_dataset,
 )
 from priml.baselines.arcagi.scripts.build_dataset import arc_manifest
+from priml.data.arrays import load_array
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
-
-    from numpy.typing import NDArray
 
 
 def num_identifiers(root: Path) -> int:
@@ -242,8 +241,8 @@ def test_ensure_builds_tiny_tree_and_sentinel(
     for split in ("train", "test"):
         for filename in ("all__inputs.npy", "all__labels.npy"):
             np.testing.assert_array_equal(
-                cast("NDArray[np.int32]", np.load(root / split / filename)),
-                cast("NDArray[np.int32]", np.load(second_root / split / filename)),
+                load_array(root / split / filename, np.integer),
+                load_array(second_root / split / filename, np.integer),
             )
 
 
@@ -274,7 +273,7 @@ def test_ensure_noops_on_matching_sentinel(
     prefix = write_tiny_kaggle_source(tmp_path)
     target = tmp_path / "arc2concept-tiny"
     ensure_arc2_dataset(target=target, num_aug=2, seed=7, input_file_prefix=prefix)
-    before = cast("NDArray[np.int32]", np.load(target / "train" / "all__inputs.npy"))
+    before = load_array(target / "train" / "all__inputs.npy", np.integer)
     mtime = (target / "train" / "all__inputs.npy").stat().st_mtime_ns
 
     def fail_build(**kwargs: object) -> None:
@@ -289,7 +288,7 @@ def test_ensure_noops_on_matching_sentinel(
     )
     assert cached_root == target
     assert (target / "train" / "all__inputs.npy").stat().st_mtime_ns == mtime
-    after = cast("NDArray[np.int32]", np.load(target / "train" / "all__inputs.npy"))
+    after = load_array(target / "train" / "all__inputs.npy", np.integer)
     np.testing.assert_array_equal(before, after)
 
 

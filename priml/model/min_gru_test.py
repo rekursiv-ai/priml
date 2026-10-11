@@ -272,22 +272,20 @@ def test_scan_config_cost_and_triton_cpu_dispatch() -> None:
     assert final.shape == state.shape
 
 
-def _cuda_tensor_metadata(dtype: torch.dtype) -> Tensor:
-    return cast(Tensor, SimpleNamespace(is_cuda=True, dtype=dtype))
-
-
 def test_runs_triton_checks_cuda_and_every_tensor_dtype() -> None:
     assert _runs_triton(
-        _cuda_tensor_metadata(torch.bfloat16),
-        _cuda_tensor_metadata(torch.float32),
+        cast(Tensor, SimpleNamespace(is_cuda=True, dtype=torch.bfloat16)),
+        cast(Tensor, SimpleNamespace(is_cuda=True, dtype=torch.float32)),
     )
     assert not _runs_triton(
         cast(Tensor, SimpleNamespace(is_cuda=False, dtype=torch.float32)),
     )
-    assert not _runs_triton(_cuda_tensor_metadata(torch.float64))
     assert not _runs_triton(
-        _cuda_tensor_metadata(torch.float32),
-        _cuda_tensor_metadata(torch.float64),
+        cast(Tensor, SimpleNamespace(is_cuda=True, dtype=torch.float64)),
+    )
+    assert not _runs_triton(
+        cast(Tensor, SimpleNamespace(is_cuda=True, dtype=torch.float32)),
+        cast(Tensor, SimpleNamespace(is_cuda=True, dtype=torch.float64)),
     )
 
 

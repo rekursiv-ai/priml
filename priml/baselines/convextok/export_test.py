@@ -7,16 +7,20 @@ and must produce upstream's token strings on held-out text.
 """
 
 from pathlib import Path
-from typing import Final, cast
-
-import json
+from typing import Final
 
 from tokenizers import pre_tokenizers
-from treekle import from_plain
+from treekle.wire import json_loads
 
 import pytest
 
 from priml.baselines.convextok.export import export_tokenizer
+from priml.baselines.convextok.testing import (
+    TESTDATA,
+    Corpus,
+    HeldoutTokens,
+    Vocab,
+)
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -26,21 +30,17 @@ def test_held_out_text_segments_as_upstream() -> None:
     alphabet = set(pre_tokenizers.ByteLevel.alphabet())
     learned = [
         token
-        for token in from_plain(_read_json("vocab.json").get("det"), list[str])
+        for token in json_loads((TESTDATA / "vocab.json").read_text(), Vocab)["det"]
         if token not in alphabet
     ]
-    corpus = _read_json("corpus.json")
+    corpus = json_loads((TESTDATA / "corpus.json").read_text(), Corpus)
     tokenizer = export_tokenizer(
         learned,
-        split_pattern=str(corpus.get("split_pattern")),
+        split_pattern=corpus["split_pattern"],
     )
-    texts = from_plain(corpus.get("heldout"), list[str])
-    golden = [
-        from_plain(row, list[str])
-        for row in from_plain(
-            _read_json("heldout_tokens.json").get("tokens"),
-            list[object],
-        )
+    texts = corpus["heldout"]
+    golden = json_loads((TESTDATA / "heldout_tokens.json").read_text(), HeldoutTokens)[
+        "tokens"
     ]
     assert [
         tokenizer.encode(text, add_special_tokens=False).tokens for text in texts
@@ -83,11 +83,6 @@ def test_single_bytes_are_rejected() -> None:
         match=r"^Learned pieces span two or more bytes; single bytes are built in\.$",
     ):
         export_tokenizer(["a"], split_pattern=r"\S+")
-
-
-def _read_json(name: str) -> dict[str, object]:
-    raw = cast(object, json.loads((_CWD / "testdata" / name).read_text()))
-    return dict(from_plain(raw, dict[str, object]))
 
 
 if __name__ == "__main__":

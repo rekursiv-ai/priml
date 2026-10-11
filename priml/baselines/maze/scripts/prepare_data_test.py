@@ -6,7 +6,7 @@ nothing here touches the network.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 import hashlib
 
@@ -25,13 +25,12 @@ from priml.baselines.maze.data import (
     tokenize,
 )
 from priml.baselines.maze.scripts import prepare_data
+from priml.data.arrays import load_array
 from priml.lib.testing.cli import assert_help_without_docstring
 
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from numpy.typing import NDArray
 
 
 MAZES: Final = ("  S   G  ", "S#   #  G")
@@ -61,9 +60,12 @@ def test_training_mazes_take_eight_views_and_test_mazes_one(
     for name in (ORIGINAL, CANONICAL):
         for split, views in (("train", 8), ("test", 1)):
             directory = out / name / split
-            assert _array(directory / "all__inputs.npy").shape == (2 * views, 9)
+            assert load_array(directory / "all__inputs.npy", np.integer).shape == (
+                2 * views,
+                9,
+            )
             np.testing.assert_array_equal(
-                _array(directory / "all__group_indices.npy"),
+                load_array(directory / "all__group_indices.npy", np.integer),
                 [0, views, 2 * views],
             )
             marker = json_loads(
@@ -81,7 +83,10 @@ def test_the_original_tree_moves_each_stored_label_with_its_view(
     train = out / ORIGINAL / "train"
     label = canonical_path_label(tokenize(MAZES[0], side=3))
     expected = [view(label).reshape(-1) for view in DIHEDRAL_VIEWS]
-    np.testing.assert_array_equal(_array(train / "all__labels.npy")[:8], expected)
+    np.testing.assert_array_equal(
+        load_array(train / "all__labels.npy", np.integer)[:8],
+        expected,
+    )
 
 
 def test_the_canonical_tree_relabels_training_views_only(
@@ -91,10 +96,13 @@ def test_the_canonical_tree_relabels_training_views_only(
     """The test split stays as given, so every recipe is scored on the same grids."""
     out = prepare_data.prepare(tmp_path / "maze", csv_directory=csv_dir)
     original, canonical = out / ORIGINAL, out / CANONICAL
-    inputs = _array(canonical / "train" / "all__inputs.npy")
-    relabeled = _array(canonical / "train" / "all__labels.npy")
+    inputs = load_array(canonical / "train" / "all__inputs.npy", np.uint8)
+    relabeled = load_array(canonical / "train" / "all__labels.npy", np.integer)
     np.testing.assert_array_equal(relabeled, canonical_labels(inputs))
-    assert not np.array_equal(relabeled, _array(original / "train" / "all__labels.npy"))
+    assert not np.array_equal(
+        relabeled,
+        load_array(original / "train" / "all__labels.npy", np.integer),
+    )
     for array in ("all__inputs.npy", "all__labels.npy", "all__group_indices.npy"):
         assert (original / "test" / array).read_bytes() == (
             canonical / "test" / array
@@ -168,10 +176,6 @@ def test_main_help_works_without_a_module_docstring(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert_help_without_docstring(monkeypatch, prepare_data, prepare_data.main)
-
-
-def _array(path: Path) -> NDArray[np.uint8]:
-    return cast("NDArray[np.uint8]", np.load(path))
 
 
 if __name__ == "__main__":

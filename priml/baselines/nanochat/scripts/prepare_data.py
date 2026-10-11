@@ -164,6 +164,7 @@ from priml.baselines.nanochat.scripts.prepare_tokenizer import (
     shard_path,
     write_mapping,
 )
+from priml.data.arrays import load_array
 from priml.paths import validated_output_path
 from priml.train.checkpointer import Checkpointer
 from priml.train.tracker import FileTracker, TrackerList
@@ -465,7 +466,7 @@ def _stale_reason(
         return f"recipe differs {differing}"
     if not table.is_file():
         return "no byte table beside it"
-    fingerprint = token_bytes_fingerprint(cast(np.ndarray, np.load(table)))
+    fingerprint = token_bytes_fingerprint(load_array(table, np.generic))
     if fingerprint != recorded.get("token_bytes_sha256"):
         return "byte table differs from its recorded digest"
     return ""

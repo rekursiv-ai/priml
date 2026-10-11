@@ -36,16 +36,11 @@ if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
 
-def _pool(world_size: int) -> WorkerPool:
-    """Build a WorkerPool whose mesh has ``world_size`` ranks."""
-    return WorkerPool(WorkerPool.Config(mesh_dims={"r": world_size}))
-
-
 def test_call_reports_exact_message_when_dispatch_attempts_are_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(WorkerPool, "_DISPATCH_ATTEMPTS", 0)
-    pool = _pool(1)
+    pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))
     pool.queue = cast("tm.Queue[bytes | None]", MagicMock())
     pool.ack_queue = cast("tm.Queue[bool]", MagicMock())
     pool.processes = []
@@ -71,13 +66,13 @@ def test_respawn_reports_exact_message_when_rendezvous_attempts_are_zero(
         RuntimeError,
         match=r"^worker pool \{'r': 1\} failed to rendezvous$",
     ) as error:
-        _pool(1)._respawn()
+        WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))._respawn()
 
     assert error.value.__cause__ is None
 
 
 def test_worker_pool_starts_with_no_process_or_queue() -> None:
-    pool = _pool(2)
+    pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 2}))
 
     assert pool.mesh_dims == {"r": 2}
     assert pool.processes is None
@@ -106,7 +101,7 @@ def test_enter_kills_started_children_when_a_later_start_fails() -> None:
     fake_ctx = MagicMock()
     fake_ctx.Process = _make_process
     fake_ctx.Queue = MagicMock()
-    pool = _pool(5)
+    pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 5}))
     with (
         patch(
             "priml.distributed.testing.tm.get_context",
@@ -138,7 +133,7 @@ def test_terminate_force_kills_wedged_child_after_join_timeout() -> None:
     healthy = MagicMock()
     healthy.is_alive.return_value = False
 
-    pool = _pool(2)
+    pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 2}))
     pool.queue = cast("tm.Queue[bytes | None]", MagicMock())
     pool.processes = [cast(PoolWorker, healthy), cast(PoolWorker, wedged)]
 
@@ -187,7 +182,7 @@ def test_call_retries_then_raises_when_worker_keeps_dying(
     proc = MagicMock()
     proc.exitcode = 1
     proc.is_alive.return_value = False
-    pool = _pool(1)
+    pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))
     pool.queue = cast("tm.Queue[bytes | None]", MagicMock())
     pool.ack_queue = cast("tm.Queue[bool]", MagicMock())
     assert pool.ack_queue is not None
@@ -226,7 +221,7 @@ def test_call_retries_then_raises_on_persistent_ack_timeout(
     proc = MagicMock()
     proc.exitcode = None  # Alive: never produces a _WorkerDiedError.
     proc.is_alive.return_value = True
-    pool = _pool(1)
+    pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))
     pool.queue = cast("tm.Queue[bytes | None]", MagicMock())
     pool.ack_queue = cast("tm.Queue[bool]", MagicMock())
     cast(
@@ -336,7 +331,7 @@ def test_enter_spawns_every_rank_and_exit_tears_them_down() -> None:
     ctx = MagicMock()
     ctx.Process = make_process
     ctx.Queue = queue_mod.Queue
-    pool = _pool(3)
+    pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 3}))
     with (
         patch(
             "priml.distributed.testing.tm.get_context",
@@ -379,7 +374,7 @@ def test_enter_spawns_every_rank_and_exit_tears_them_down() -> None:
 def test_call_returns_once_rank_zero_acks(monkeypatch: pytest.MonkeyPatch) -> None:
     proc = MagicMock()
     proc.exitcode = None
-    pool = _pool(1)
+    pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))
     commands: queue_mod.Queue[bytes | None] = queue_mod.Queue()
     acks: queue_mod.Queue[bool] = queue_mod.Queue()
     acks.put(True)
@@ -415,7 +410,7 @@ def test_rendezvous_times_out_when_no_rank_acks(
         TimeoutError,
         match=r"^rendezvous timed out: 0/2 ranks ready$",
     ):
-        _pool(2)._await_ready(
+        WorkerPool(WorkerPool.Config(mesh_dims={"r": 2}))._await_ready(
             [cast(PoolWorker, alive)],
             cast("tm.Queue[int]", ready),
             2,
@@ -436,7 +431,7 @@ def test_rendezvous_fails_fast_when_a_rank_dies_before_acking(
         RuntimeError,
         match=r"^a worker exited before rendezvous \(port collision\?\)$",
     ):
-        _pool(1)._await_ready(
+        WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))._await_ready(
             [cast(PoolWorker, dead)],
             cast("tm.Queue[int]", ready),
             1,
@@ -448,7 +443,7 @@ def test_rendezvous_fails_fast_when_a_rank_dies_before_acking(
 def test_await_dispatch_ack_deadline_and_timeout_are_explicit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pool = _pool(1)
+    pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))
     ack_queue = MagicMock()
     ack_queue.get.side_effect = queue_mod.Empty
     pool.ack_queue = cast("tm.Queue[bool]", ack_queue)
@@ -479,7 +474,7 @@ def test_await_dispatch_ack_deadline_and_timeout_are_explicit(
 def test_await_dispatch_ack_accepts_ack_inside_final_second(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pool = _pool(1)
+    pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))
     ack_queue = MagicMock()
     ack_queue.get.return_value = True
     pool.ack_queue = cast("tm.Queue[bool]", ack_queue)
@@ -495,7 +490,7 @@ def test_await_dispatch_ack_accepts_ack_inside_final_second(
 def test_await_ready_times_out_at_deadline_without_polling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pool = _pool(1)
+    pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))
     monkeypatch.setattr(WorkerPool, "_RENDEZVOUS_TIMEOUT", timedelta(0))
     ticks = iter((0.0, 0.0, 1.0))
     monkeypatch.setattr(time, "monotonic", lambda: next(ticks))
@@ -519,7 +514,9 @@ def test_await_ready_accepts_ack_with_less_than_one_second_remaining(
     ready: queue_mod.Queue[int] = queue_mod.Queue()
     ready.put(0)
 
-    _pool(1)._await_ready([], cast("tm.Queue[int]", ready), 1)
+    WorkerPool(
+        WorkerPool.Config(mesh_dims={"r": 1}),
+    )._await_ready([], cast("tm.Queue[int]", ready), 1)
 
     assert ready.empty()
 
@@ -530,7 +527,9 @@ def test_await_ready_counts_each_rank_ack() -> None:
     ready.put(1)
     ready.put(2)
 
-    _pool(3)._await_ready([], cast("tm.Queue[int]", ready), 3)
+    WorkerPool(
+        WorkerPool.Config(mesh_dims={"r": 3}),
+    )._await_ready([], cast("tm.Queue[int]", ready), 3)
 
     assert ready.empty()
 
@@ -540,7 +539,7 @@ def test_await_dispatch_ack_reports_dead_worker_and_kills_all(
 ) -> None:
     dead = MagicMock()
     dead.exitcode = 1
-    pool = _pool(2)
+    pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 2}))
     pool.ack_queue = cast("tm.Queue[bool]", MagicMock())
     cast(MagicMock, pool.ack_queue).get.side_effect = queue_mod.Empty
     killed: list[list[PoolWorker]] = []
@@ -564,7 +563,7 @@ def test_respawn_tears_down_the_degraded_pool_before_spawning(
 ) -> None:
     stale = MagicMock()
     stale.is_alive.return_value = False
-    pool = _pool(1)
+    pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))
     pool.processes = [cast(PoolWorker, stale)]
     pool.queue = cast("tm.Queue[bytes | None]", MagicMock())
     order: list[str] = []
@@ -823,7 +822,10 @@ def test_bindable_port_selection_retries_a_stolen_candidate(
     )
 
     try:
-        assert _pool(1)._pick_bindable_port() == free_port
+        assert (
+            WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))._pick_bindable_port()
+            == free_port
+        )
     finally:
         holder.close()
 
@@ -851,7 +853,7 @@ def test_port_selection_sees_a_holder_on_a_non_loopback_address() -> None:
         # The pool must reject a port it cannot actually listen on. Feeding the
         # held port as the first candidate makes the probe the only thing that
         # can catch it.
-        pool = _pool(2)
+        pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 2}))
         with (
             patch.object(WorkerPool, "find_free_port", staticmethod(lambda: held_port)),
             pytest.raises(RuntimeError, match="could not secure a bindable"),
@@ -910,13 +912,13 @@ def test_call_reports_exact_error_when_queue_is_missing() -> None:
         ValueError,
         match=re.escape("Expected self.queue is not None."),
     ) as error:
-        _pool(1)(do_something)
+        WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))(do_something)
 
     assert error.value.args == ("Expected self.queue is not None.",)
 
 
 def test_call_reports_exact_error_when_ack_queue_is_missing() -> None:
-    pool = _pool(1)
+    pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))
     pool.queue = cast("tm.Queue[bytes | None]", MagicMock())
 
     with pytest.raises(
@@ -929,7 +931,7 @@ def test_call_reports_exact_error_when_ack_queue_is_missing() -> None:
 
 
 def test_call_reports_exact_error_when_processes_are_missing() -> None:
-    pool = _pool(1)
+    pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))
     pool.queue = cast("tm.Queue[bytes | None]", MagicMock())
     pool.ack_queue = cast("tm.Queue[bool]", MagicMock())
 
@@ -947,7 +949,7 @@ def test_await_dispatch_ack_reports_exact_error_when_ack_queue_is_missing() -> N
         ValueError,
         match=re.escape("Expected self.ack_queue is not None."),
     ) as error:
-        _pool(1)._await_dispatch_ack([])
+        WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))._await_dispatch_ack([])
 
     assert error.value.args == ("Expected self.ack_queue is not None.",)
 
@@ -957,13 +959,13 @@ def test_terminate_reports_exact_error_when_queue_is_missing() -> None:
         ValueError,
         match=re.escape("Expected self.queue is not None."),
     ) as error:
-        _pool(1).terminate()
+        WorkerPool(WorkerPool.Config(mesh_dims={"r": 1})).terminate()
 
     assert error.value.args == ("Expected self.queue is not None.",)
 
 
 def test_terminate_reports_exact_error_when_processes_are_missing() -> None:
-    pool = _pool(1)
+    pool = WorkerPool(WorkerPool.Config(mesh_dims={"r": 1}))
     pool.queue = cast("tm.Queue[bytes | None]", MagicMock())
 
     with pytest.raises(

@@ -794,14 +794,8 @@ class NgramTrainStep(NanoChatTrainStep):
 
     def _bind_ngram_gradients(self, model: MemoryNanoChatLM) -> None:
         """Bind each persistent table sink to exactly its RMSProp owner."""
-        tables = cast(
-            "Mapping[str, HashedNgramTables]",
-            cast(object, model.bigrams),
-        )
-        trigram_tables = cast(
-            "Mapping[str, HashedNgramTables]",
-            cast(object, model.trigrams),
-        )
+        tables = cast("Mapping[str, HashedNgramTables]", model.bigrams)
+        trigram_tables = cast("Mapping[str, HashedNgramTables]", model.trigrams)
         sinks = {
             part.weight: sink
             for table in (*tables.values(), *trigram_tables.values())

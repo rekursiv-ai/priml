@@ -1626,7 +1626,7 @@ def test_the_default_schedule_is_primls_cosine_of_the_progress() -> None:
 
 def test_the_fp32_cosine_runs_from_the_fp32_base_to_the_minimum() -> None:
     base = 0.00472887093
-    single = _single(base)
+    single = float(np.float32(base))
     assert cosine_annealing_fp32(base, 0.0, 0, 6662) == single
     # cos(pi / 2) is 6e-17, which fp32 rounds away: exactly half the base.
     assert cosine_annealing_fp32(base, 0.0, 3331, 6662) == single / 2
@@ -1640,12 +1640,7 @@ def test_the_fp32_cosine_is_not_the_default_schedule_rounded() -> None:
     base = 0.00472887093
     standard = ProgressSchedule(ProgressSchedule.Config())
     ours = cosine_annealing_fp32(base, 0.0, 5, 6662)
-    assert ours != _single(standard(base, step=5, total_steps=6662))
-
-
-def _single(value: float) -> float:
-    """Round to the nearest fp32."""
-    return float(np.float32(value))
+    assert ours != float(np.float32(standard(base, step=5, total_steps=6662)))
 
 
 def _half_rate(base: float, *, step: int, total_steps: int) -> float:

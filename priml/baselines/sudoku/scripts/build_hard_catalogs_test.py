@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Self, cast
+from typing import Final, Self
 from urllib import request
 
 import csv
@@ -17,6 +17,7 @@ from treekle.wire import json_loads
 import numpy as np
 import pytest
 
+from priml.baselines.sudoku.data import read_split_arrays
 from priml.baselines.sudoku.scripts import build_hard_catalogs, prepare_data
 from priml.baselines.sudoku.scripts.build_hard_catalogs import (
     CSV_HEADER,
@@ -31,10 +32,6 @@ from priml.baselines.sudoku.scripts.build_hard_catalogs import (
     parse_puzzle_line,
     question_text,
 )
-
-
-if TYPE_CHECKING:
-    from numpy.typing import NDArray
 
 
 SOLVED: Final = (
@@ -67,16 +64,6 @@ def _spec(
         zip_member=zip_member,
         rows=tuple((row, f"https://example.com/{name}") for row in rows),
     )
-
-
-def _array(path: Path) -> NDArray[np.integer]:
-    """Load one npy array."""
-    return cast("NDArray[np.integer]", np.load(path))
-
-
-def _manifest(dataset_dir: Path) -> dict[str, object]:
-    """Load the published manifest."""
-    return json_loads((dataset_dir / "manifest.json").read_text(), dict[str, object])
 
 
 def _archive(text: str) -> zipfile.ZipFile:
@@ -162,9 +149,9 @@ def test_build_dataset_end_to_end(tmp_path: Path) -> None:
     assert duplicate[5] == "https://example.com/cat_a;https://example.com/cat_b"
     assert by_question[PUZZLE_C][4] == "cat_b"
 
-    inputs = _array(dataset_dir / "test" / "all__inputs.npy")
-    labels = _array(dataset_dir / "test" / "all__labels.npy")
-    groups = _array(dataset_dir / "test" / "all__group_indices.npy")
+    inputs = read_split_arrays(dataset_dir / "test").inputs
+    labels = read_split_arrays(dataset_dir / "test").labels
+    groups = read_split_arrays(dataset_dir / "test").group_indices
     assert inputs.shape == labels.shape == (3, 81)
     assert inputs.dtype == labels.dtype == np.uint8
     assert [int(groups.item(index)) for index in range(4)] == [0, 1, 2, 3]
@@ -175,13 +162,16 @@ def test_build_dataset_end_to_end(tmp_path: Path) -> None:
         )
     metadata = json_loads((dataset_dir / "test" / "dataset.json").read_text())
     assert metadata == {"vocab_size": 11, "seq_len": 81}
-    assert _array(dataset_dir / "train" / "all__inputs.npy").shape == (1, 81)
+    assert read_split_arrays(dataset_dir / "train").inputs.shape == (1, 81)
 
     card = (dataset_dir / "README.md").read_text()
     assert "Rows: 3 unique puzzles" in card
     assert "cat_a+cat_b" in card
 
-    manifest = _manifest(dataset_dir)
+    manifest = json_loads(
+        (dataset_dir / "manifest.json").read_text(),
+        dict[str, object],
+    )
     assert manifest["n_rows"] == 3
     for relative, digest in from_plain(manifest["files"], dict[str, str]).items():
         payload = (dataset_dir / relative).read_bytes()
@@ -224,7 +214,10 @@ def test_extreme_overlap_join(tmp_path: Path) -> None:
     assert "## Overlap with sudoku-extreme" in card
     assert "| cat_a | 3 | 1 | 1 | 1 | 1 | 1 |" in card
     overlap = from_plain(
-        _manifest(dataset_dir)["extreme_overlap"],
+        json_loads(
+            (dataset_dir / "manifest.json").read_text(),
+            dict[str, object],
+        )["extreme_overlap"],
         list[dict[str, object]],
     )
     assert overlap[0]["in_neither"] == 1
@@ -248,7 +241,13 @@ def test_rebuild_replaces_existing_dataset(tmp_path: Path) -> None:
             workers=1,
         )
         assert report.row_count == 1
-    catalogs = from_plain(_manifest(dataset_dir)["catalogs"], list[dict[str, object]])
+    catalogs = from_plain(
+        json_loads(
+            (dataset_dir / "manifest.json").read_text(),
+            dict[str, object],
+        )["catalogs"],
+        list[dict[str, object]],
+    )
     assert catalogs[0]["source_name"] == "cat_b"
     assert not list(tmp_path.glob("dataset.old.*"))
 

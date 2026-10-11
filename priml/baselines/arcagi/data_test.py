@@ -9,6 +9,7 @@ import json
 import logging
 
 from torch import Tensor
+from treekle import ReadError
 
 import numpy as np
 import pytest
@@ -21,6 +22,7 @@ from priml.baselines.arcagi.data import (
     load_puzzle_dataset,
     resolve_rank,
 )
+from priml.data.arrays import load_array
 
 import priml.baselines.arcagi.data as arc_data
 
@@ -126,7 +128,7 @@ def test_puzzle_data_eval_caps_and_batches(dataset_dir: Path) -> None:
 
 def test_puzzle_batch_collate_masks_and_pads_exactly(dataset_dir: Path) -> None:
     train = dataset_dir / "train"
-    labels = cast(np.ndarray, np.load(train / "all__labels.npy"))
+    labels = load_array(train / "all__labels.npy", np.generic)
     labels[0, :2] = [0, 3]
     np.save(train / "all__labels.npy", labels)
     batches = PuzzleBatches(
@@ -331,6 +333,12 @@ def test_puzzle_dataset_missing_paths_report_exact_locations(tmp_path: Path) -> 
     )
 
 
+def test_puzzle_dataset_metadata_must_be_an_object(dataset_dir: Path) -> None:
+    (dataset_dir / "train" / "dataset.json").write_text("[1, 2]")
+    with pytest.raises(ReadError):
+        load_puzzle_dataset(dataset_dir, "train")
+
+
 def test_puzzle_data_rank_past_eval_tail_emits_empty_batch(dataset_dir: Path) -> None:
     config = PuzzleData.Config()
     config.working_dir = str(dataset_dir)
@@ -392,13 +400,13 @@ def test_existing_load_puzzle_dataset_partial_group_adds_boundary_without_mutati
 ) -> None:
     _write_small_puzzle_split(tmp_path)
     group_path = tmp_path / "train" / "all__group_indices.npy"
-    groups_before = cast(np.ndarray, np.load(group_path)).copy()
+    groups_before = load_array(group_path, np.generic).copy()
 
     capped = load_puzzle_dataset(tmp_path, "train", max_samples=7)
 
     assert capped["puzzle_indices"].tolist() == [0, 2, 5, 7]
     assert capped["group_indices"].tolist() == [0, 2, 3]
-    assert np.array_equal(cast(np.ndarray, np.load(group_path)), groups_before)
+    assert np.array_equal(load_array(group_path, np.generic), groups_before)
 
 
 def test_existing_load_puzzle_dataset_caps_beyond_rows_without_inventing_boundary(
@@ -543,11 +551,11 @@ def test_load_puzzle_dataset_partial_group_adds_boundary_without_mutating_file(
 ) -> None:
     _write_split(tmp_path)
     group_path = tmp_path / "train" / "all__group_indices.npy"
-    groups_before = cast(np.ndarray, np.load(group_path)).copy()
+    groups_before = load_array(group_path, np.generic).copy()
     capped = load_puzzle_dataset(tmp_path, "train", max_samples=7)
     assert capped["puzzle_indices"].tolist() == [0, 2, 5, 7]
     assert capped["group_indices"].tolist() == [0, 2, 3]
-    assert np.array_equal(cast(np.ndarray, np.load(group_path)), groups_before)
+    assert np.array_equal(load_array(group_path, np.generic), groups_before)
 
 
 def test_load_puzzle_dataset_caps_beyond_rows_without_inventing_boundary(

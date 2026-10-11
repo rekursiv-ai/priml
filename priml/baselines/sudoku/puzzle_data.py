@@ -46,14 +46,13 @@ import numpy as np
 import torch
 
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
+from priml.data.arrays import load_array
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
 
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
-
-    from numpy.typing import NDArray
 
 
 def augment_sudoku(
@@ -191,17 +190,11 @@ def load_puzzle_dataset(
     if not group_path.exists():
         raise FileNotFoundError(f"Required file not found: {group_path}")
 
-    group_indices = torch.from_numpy(cast("NDArray[np.int32]", np.load(group_path)))
+    group_indices = torch.from_numpy(load_array(group_path, np.integer))
     if max_samples is not None and max_samples < 0:
         raise ValueError(f"max_samples must be non-negative, got {max_samples}.")
-    inputs_mmap = cast(
-        "NDArray[np.integer]",
-        np.load(data_path / "all__inputs.npy", mmap_mode="r"),
-    )
-    labels_mmap = cast(
-        "NDArray[np.integer]",
-        np.load(data_path / "all__labels.npy", mmap_mode="r"),
-    )
+    inputs_mmap = load_array(data_path / "all__inputs.npy", np.integer, mmap=True)
+    labels_mmap = load_array(data_path / "all__labels.npy", np.integer, mmap=True)
     available = min(len(inputs_mmap), len(labels_mmap))
     n = min(max_samples, available) if max_samples is not None else None
     inputs = torch.from_numpy(np.array(inputs_mmap[:n])).to(torch.int32)

@@ -57,10 +57,6 @@ def _cfg(
     return cfg
 
 
-def _canonical_adaln_config() -> AdaLNZero.Config:
-    return AdaLNZero.Config(channels_in=4, cond_dim=2)
-
-
 def _canonical_mmdit_config() -> MMDiTBlock.Config:
     config = MMDiTBlock.Config(channels_in=4, num_streams=2)
     config.attn = MultiStreamAttention.Config(num_heads=2, channels_head=2)
@@ -72,7 +68,7 @@ def test_adaln_zero_config_pprint() -> None:
     assert_pprint_golden(
         test_file=__file__,
         name="ada_ln_zero",
-        config=_canonical_adaln_config(),
+        config=AdaLNZero.Config(channels_in=4, cond_dim=2),
     )
 
 
@@ -80,7 +76,7 @@ def test_adaln_zero_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="ada_ln_zero",
-        build_module=_canonical_adaln_config().make,
+        build_module=AdaLNZero.Config(channels_in=4, cond_dim=2).make,
         build_input=lambda: torch.randn(3, 2),
         seed=0,
         run=_run_adaln,

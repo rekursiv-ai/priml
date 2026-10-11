@@ -45,7 +45,7 @@ Examples:
 
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Final, Protocol, cast
+from typing import Final, Protocol, TypedDict, cast
 
 import argparse
 import dataclasses
@@ -56,7 +56,7 @@ import subprocess
 import sys
 import time
 
-from treekle import from_plain, to_plain
+from treekle import to_plain
 from treekle.wire import json_loads
 
 import torch
@@ -81,6 +81,16 @@ from priml.baselines.craftax.world_model.scripts import (
     curves,
     data_eval,
 )
+from priml.baselines.craftax.world_model.scripts.reports import (
+    BaselinesReport,
+    DreamReport,
+    EngineChecks,
+    Settings,
+    TilesReport,
+    Timing,
+    TrainingRun,
+    WandbReport,
+)
 from priml.paths import validated_output_path
 
 
@@ -91,6 +101,78 @@ STEPS: Final = ("baselines", "tiles", "matrix", "engine", "dreams")
 
 PRIMARY: Final = "nats_per_decision_natural"
 """The design's primary metric, as the metric names it."""
+
+
+class Spread(TypedDict):
+    """Values over checkpoints, their mean, and their standard deviation."""
+
+    values: list[float]
+    mean: float
+    sd: float | None
+    sd_over_mean: float | None
+
+
+class Spreads(TypedDict):
+    """The primary metric's, bits per byte's, and each modality's NLL's spread."""
+
+    nats_per_decision_natural: Spread
+    bpb: Spread
+    nll: dict[str, Spread]
+
+
+class WindowSet(Spreads):
+    """Every checkpoint's spreads on one sampler seed's windows."""
+
+    zstd19_bpb: float | None
+
+
+class TileSpreads(TypedDict):
+    """Every checkpoint's spreads on the common natural-mix tiles."""
+
+    decisions: int
+    nats_per_decision: Spread
+    bpb: Spread
+    nll: dict[str, Spread]
+
+
+class Sigma(TypedDict, total=False):
+    """The seed spreads, each present when its step's outputs all are."""
+
+    own_windows: Spreads
+    same_windows: dict[str, WindowSet]
+    same_windows_pooled_seed_sd: float | None
+    window_set_sd_of_means: float | None
+    common_natural_tiles: TileSpreads
+
+
+class TrainingSummary(TypedDict):
+    """The stability and trend entries of one W&B training run."""
+
+    last_logged_step: int | None
+    eval_steps: list[int]
+    loss_finite: bool
+    grad_norm_finite: bool
+    unrecovered_spikes: int
+    spikes: int
+    logged: dict[str, int]
+    grad_norm_first_last_max: list[float] | None
+    clip_fraction_final: float | None
+    max_attention_logit_max: float | None
+    modality_decreased: dict[str, bool]
+    modality_monotone: dict[str, bool]
+
+
+class Summary(TypedDict):
+    """``summary.json``: the criteria verdicts and the seed spreads."""
+
+    training: dict[str, TrainingSummary]
+    timing: dict[str, Timing | None]
+    criterion_1_stable: bool | None
+    criterion_2_every_modality_decreased: bool | None
+    criterion_3_beats_baselines: dict[str, BaselinesReport | None]
+    criterion_4_engine_checks: dict[str, bool | None]
+    sigma: Sigma
+    dreams: dict[str, DreamReport | None]
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -208,7 +290,7 @@ def summarize(
     names: Sequence[str],
     own: Sequence[int],
     windows: Sequence[int],
-) -> dict[str, object]:
+) -> Summary:
     """Return the criteria verdicts and seed spreads of an evaluated directory.
 
     Reads whatever the steps wrote; a criterion no step measured is None.
@@ -229,38 +311,40 @@ def summarize(
         distances and settings.
 
     """
-    wandb = _read(directory / "wandb-report.json")
-    runs = [_object(run) for run in _list(wandb["runs"])] if wandb is not None else []
+    wandb = directory / "wandb-report.json"
+    runs = json_loads(wandb.read_text(), WandbReport)["runs"] if wandb.exists() else []
     stable = [
-        from_plain(r["loss_finite"], bool)
-        and from_plain(r["grad_norm_finite"], bool)
-        and from_plain(r["unrecovered_spikes"], int) == 0
+        r["loss_finite"] and r["grad_norm_finite"] and r["unrecovered_spikes"] == 0
         for r in runs
     ]
-    trends = [_object(r["modalities"]) for r in runs]
     decreased = [
-        set(trend) == set(MODALITIES)
-        and all(from_plain(_object(v)["decreased"], bool) for v in trend.values())
-        for trend in trends
+        set(r["modalities"]) == set(MODALITIES)
+        and all(trend["decreased"] for trend in r["modalities"].values())
+        for r in runs
     ]
-    criterion3: dict[str, object] = {}
-    criterion4: dict[str, object] = {}
-    dreams: dict[str, object] = {}
+    criterion3: dict[str, BaselinesReport | None] = {}
+    criterion4: dict[str, bool | None] = {}
+    dreams: dict[str, DreamReport | None] = {}
     for name in names:
-        baseline = _read(directory / f"baselines-{name}.json")
-        keys = ("beats", "model_nll", "empirical_nll", "cell_accuracy")
+        baseline = directory / f"baselines-{name}.json"
         criterion3[name] = (
-            {k: baseline[k] for k in keys} if baseline is not None else None
+            json_loads(baseline.read_text(), BaselinesReport)
+            if baseline.exists()
+            else None
         )
-        engine = _read(directory / f"engine-checks-{name}.json")
-        criterion4[name] = engine["all_passed"] if engine is not None else None
-        dream = _read(directory / f"dreams-{name}" / "report.json")
+        engine = directory / f"engine-checks-{name}.json"
+        criterion4[name] = (
+            json_loads(engine.read_text(), EngineChecks)["all_passed"]
+            if engine.exists()
+            else None
+        )
+        dream = directory / f"dreams-{name}" / "report.json"
         dreams[name] = (
-            {k: dream[k] for k in ("distance", "run")} if dream is not None else None
+            json_loads(dream.read_text(), DreamReport) if dream.exists() else None
         )
     return {
-        "training": {from_plain(r["run"], str): _training(r) for r in runs},
-        "timing": {from_plain(r["run"], str): r.get("timing") for r in runs},
+        "training": {r["run"]: _training(r) for r in runs},
+        "timing": {r["run"]: r.get("timing") for r in runs},
         "criterion_1_stable": all(stable) if runs else None,
         "criterion_2_every_modality_decreased": all(decreased) if runs else None,
         "criterion_3_beats_baselines": criterion3,
@@ -270,7 +354,7 @@ def summarize(
     }
 
 
-def render(summary: Mapping[str, object], *, names: Sequence[str]) -> str:
+def render(summary: Summary, *, names: Sequence[str]) -> str:
     """Return ``summary`` as a markdown report.
 
     Args:
@@ -286,15 +370,11 @@ def render(summary: Mapping[str, object], *, names: Sequence[str]) -> str:
     lines.append(f"| 1. Training stable | {_verdict(summary['criterion_1_stable'])} |")
     fell = _verdict(summary["criterion_2_every_modality_decreased"])
     lines.append(f"| 2. Every modality's validation NLL fell | {fell} |")
-    criterion3 = _object(summary["criterion_3_beats_baselines"])
-    criterion4 = _object(summary["criterion_4_engine_checks"])
+    criterion3 = summary["criterion_3_beats_baselines"]
+    criterion4 = summary["criterion_4_engine_checks"]
     for name in names:
         entry = criterion3[name]
-        beats = (
-            all(from_plain(v, bool) for v in _object(_object(entry)["beats"]).values())
-            if entry
-            else None
-        )
+        beats = all(entry["beats"].values()) if entry is not None else None
         lines.append(f"| 3. {name} beats the trivial baselines | {_verdict(beats)} |")
         engine = _verdict(criterion4[name])
         lines.append(f"| 4. {name} passes the engine checks | {engine} |")
@@ -303,21 +383,19 @@ def render(summary: Mapping[str, object], *, names: Sequence[str]) -> str:
     for name in names:
         if (entry := criterion3[name]) is None:
             continue
-        model, empirical = (
-            _object(_object(entry)[key]) for key in ("model_nll", "empirical_nll")
-        )
-        for target, nll in empirical.items():
+        model = entry["model_nll"]
+        for target, nll in entry["empirical_nll"].items():
             lines.append(
                 f"| {name} | {target} | {_number(model[target])} | {_number(nll)} |",
             )
-        cells = _object(_object(entry)["cell_accuracy"])
+        cells = entry["cell_accuracy"]
         lines.append(
             f"| {name} | cells (copy baseline) | {_number(cells['model'])} | "
             f"{_number(cells['copy'])} |",
         )
     lines += _training_lines(summary)
-    lines += _sigma_lines(_object(summary["sigma"]))
-    return "\n".join([*lines, *_dream_lines(_object(summary["dreams"]))]) + "\n"
+    lines += _sigma_lines(summary["sigma"])
+    return "\n".join([*lines, *_dream_lines(summary["dreams"])]) + "\n"
 
 
 class Flags(Protocol):
@@ -446,11 +524,10 @@ def _settings(
             (flags.checkpoints, flags.names, flags.sampler_seeds, flags.window_seeds),
         ):
             parser.error("--summarize reads the checkpoints and seeds from OUTPUT.")
-        settings = _object(json_loads((output / "settings.json").read_text()))
-        names = from_plain(settings["names"], list[str])
-        text = from_plain(settings["sampler_seeds"], str)
-        seeds = _integers(text) or [0] * len(names)
-        windows = from_plain(settings["windows"], list[int])
+        settings = json_loads((output / "settings.json").read_text(), Settings)
+        names = settings["names"]
+        seeds = _integers(settings["sampler_seeds"]) or [0] * len(names)
+        windows = settings["windows"]
     else:
         count = len(flags.checkpoints)
         names = (
@@ -589,22 +666,22 @@ def _wandb_report(flags: Flags) -> dict[str, object]:
     }
 
 
-def _training(run: Mapping[str, object]) -> dict[str, object]:
+def _training(run: TrainingRun) -> TrainingSummary:
     """Return the stability and trend entries of one run's W&B report."""
-    trend = _object(run["modalities"])
+    trend = run["modalities"]
     return {
         "last_logged_step": run["last_step"],
         "eval_steps": run["eval_steps"],
         "loss_finite": run["loss_finite"],
         "grad_norm_finite": run["grad_norm_finite"],
         "unrecovered_spikes": run["unrecovered_spikes"],
-        "spikes": len(_list(run["spikes"])),
+        "spikes": len(run["spikes"]),
         "logged": run["logged"],
         "grad_norm_first_last_max": run["grad_norm_first_last_max"],
         "clip_fraction_final": run["clip_fraction_last"],
         "max_attention_logit_max": run["max_attention_logit_max"],
-        "modality_decreased": {m: _object(v)["decreased"] for m, v in trend.items()},
-        "modality_monotone": {m: _object(v)["monotone"] for m, v in trend.items()},
+        "modality_decreased": {m: v["decreased"] for m, v in trend.items()},
+        "modality_monotone": {m: v["monotone"] for m, v in trend.items()},
     }
 
 
@@ -614,26 +691,35 @@ def _sigma(
     names: Sequence[str],
     own: Sequence[int],
     windows: Sequence[int],
-) -> dict[str, object]:
+) -> Sigma:
     """Return the seed spreads on own windows, on each window set, and on the tiles."""
-    result: dict[str, object] = {}
+    result: Sigma = {}
     diagonal = _all_read(
-        directory / f"evalonly-{n}-on-v{v}.json"
-        for n, v in zip(names, own, strict=True)
+        (
+            directory / f"evalonly-{n}-on-v{v}.json"
+            for n, v in zip(names, own, strict=True)
+        ),
+        dict[str, float],
     )
     if diagonal:
         result["own_windows"] = _spreads(diagonal, prefix="val/")
-    sets: dict[str, object] = {}
+    sets: dict[str, WindowSet] = {}
     seed_sd: list[float] = []
     means: list[float] = []
     for v in windows:
-        row = _all_read(directory / f"evalonly-{n}-on-v{v}.json" for n in names)
+        row = _all_read(
+            (directory / f"evalonly-{n}-on-v{v}.json" for n in names),
+            dict[str, float],
+        )
         if row:
+            spreads = _spreads(row, prefix="val/")
             sets[f"v{v}"] = {
-                **_spreads(row, prefix="val/"),
+                "nats_per_decision_natural": spreads["nats_per_decision_natural"],
+                "bpb": spreads["bpb"],
+                "nll": spreads["nll"],
                 "zstd19_bpb": row[0].get("val/zstd19_bpb"),
             }
-            primary = [from_plain(m[f"val/{PRIMARY}"], float) for m in row]
+            primary = [m[f"val/{PRIMARY}"] for m in row]
             means.append(statistics.fmean(primary))
             seed_sd += [statistics.stdev(primary)] if len(primary) > 1 else []
     if sets:
@@ -644,53 +730,49 @@ def _sigma(
         result["window_set_sd_of_means"] = (
             statistics.stdev(means) if len(means) > 1 else None
         )
-    tiles = _all_read(directory / f"data-eval-{n}.json" for n in names)
+    tiles = _all_read(
+        (directory / f"data-eval-{n}.json" for n in names),
+        TilesReport,
+    )
     if tiles:
-        metrics = [_object(t["metric"]) for t in tiles]
+        metrics = [t["metric"] for t in tiles]
         result["common_natural_tiles"] = {
             "decisions": tiles[0]["decisions"],
-            "nats_per_decision": _spread(
-                [from_plain(m["nats_per_decision"], float) for m in metrics],
-            ),
-            "bpb": _spread([from_plain(m["bpb"], float) for m in metrics]),
+            "nats_per_decision": _spread([m["nats_per_decision"] for m in metrics]),
+            "bpb": _spread([m["bpb"] for m in metrics]),
             "nll": _nll_spreads(metrics, prefix=""),
         }
     return result
 
 
-def _spreads(
-    metrics: Sequence[Mapping[str, object]],
-    *,
-    prefix: str,
-) -> dict[str, object]:
+def _spreads(metrics: Sequence[Mapping[str, float]], *, prefix: str) -> Spreads:
     """Return the spreads of the primary metric, bits per byte, and per-modality NLL."""
     return {
-        PRIMARY: _spread([from_plain(m[f"{prefix}{PRIMARY}"], float) for m in metrics]),
-        "bpb": _spread([from_plain(m[f"{prefix}bpb"], float) for m in metrics]),
+        "nats_per_decision_natural": _spread(
+            [m[f"{prefix}{PRIMARY}"] for m in metrics],
+        ),
+        "bpb": _spread([m[f"{prefix}bpb"] for m in metrics]),
         "nll": _nll_spreads(metrics, prefix=prefix),
     }
 
 
 def _nll_spreads(
-    metrics: Sequence[Mapping[str, object]],
+    metrics: Sequence[Mapping[str, float]],
     *,
     prefix: str,
-) -> dict[str, object]:
+) -> dict[str, Spread]:
     """Return each modality's NLL spread in nats per target, from its bits per byte."""
     schema = craftax_schema()
     width = {**HEAD_BYTES, "board": len(schema.cell_fields), "hud": SCALAR_BYTES}
     return {
         m: _spread(
-            [
-                from_plain(metric[f"{prefix}bpb/{m}"], float) * width[m] * math.log(2)
-                for metric in metrics
-            ],
+            [metric[f"{prefix}bpb/{m}"] * width[m] * math.log(2) for metric in metrics],
         )
         for m in MODALITIES
     }
 
 
-def _spread(values: Sequence[float]) -> dict[str, object]:
+def _spread(values: Sequence[float]) -> Spread:
     """Return the values, their mean, standard deviation, and its share of the mean."""
     mean = statistics.fmean(values)
     sd = statistics.stdev(values) if len(values) > 1 else None
@@ -702,12 +784,12 @@ def _spread(values: Sequence[float]) -> dict[str, object]:
     }
 
 
-def _training_lines(summary: Mapping[str, object]) -> list[str]:
+def _training_lines(summary: Summary) -> list[str]:
     """Return the report's section of each W&B training run, empty without one."""
-    runs = _object(summary["training"])
+    runs = summary["training"]
     if not runs:
         return []
-    timing = _object(summary["timing"])
+    timing = summary["timing"]
     lines = ["", "## Training runs (W&B)", ""]
     lines += [
         (
@@ -716,9 +798,9 @@ def _training_lines(summary: Mapping[str, object]) -> list[str]:
         ),
         "|---|---|---|---|---|---|---|---|",
     ]
-    for run, entry in runs.items():
-        stats, times = _object(entry), _object(timing.get(run) or {})
-        fell = _object(stats["modality_decreased"])
+    for run, stats in runs.items():
+        times: Timing = timing.get(run) or {}
+        fell = stats["modality_decreased"]
         lines.append(
             f"| {run} | {stats['last_logged_step']} | {stats['loss_finite']} "
             f"| {stats['unrecovered_spikes']} | {sum(map(bool, fell.values()))}/{len(fell)} "
@@ -729,42 +811,52 @@ def _training_lines(summary: Mapping[str, object]) -> list[str]:
     return lines
 
 
-def _sigma_lines(sigma: Mapping[str, object]) -> list[str]:
+def _sigma_lines(sigma: Sigma) -> list[str]:
     """Return the report's seed-spread section."""
     lines = ["", "## Seed spread of nats per decision", ""]
     lines += ["| Scored on | Values | Mean | SD |", "|---|---|---|---|"]
-    rows: list[tuple[str, object]] = []
+    rows: list[tuple[str, Spread]] = []
     if "own_windows" in sigma:
         rows.append(
-            ("own windows, natural mix", _object(sigma["own_windows"])[PRIMARY]),
+            (
+                "own windows, natural mix",
+                sigma["own_windows"]["nats_per_decision_natural"],
+            ),
         )
-    for key, value in _object(sigma.get("same_windows", {})).items():
-        rows.append((f"windows {key}, natural mix", _object(value)[PRIMARY]))
+    for key, value in sigma.get("same_windows", {}).items():
+        rows.append((f"windows {key}, natural mix", value["nats_per_decision_natural"]))
     if "common_natural_tiles" in sigma:
-        tiles = _object(sigma["common_natural_tiles"])["nats_per_decision"]
-        rows.append(("common tiles", tiles))
-    for label, entry in rows:
-        spread = _object(entry)
-        values = ", ".join(_number(v) for v in _list(spread["values"]))
+        rows.append(
+            ("common tiles", sigma["common_natural_tiles"]["nats_per_decision"]),
+        )
+    for label, spread in rows:
+        values = ", ".join(_number(v) for v in spread["values"])
         mean, sd = _number(spread["mean"]), _number(spread["sd"])
         lines.append(f"| {label} | {values} | {mean} | {sd} |")
-    for key in ("same_windows_pooled_seed_sd", "window_set_sd_of_means"):
-        if key in sigma:
-            lines += ["", f"{key.replace('_', ' ')}: {_number(sigma[key])}"]
+    if "same_windows_pooled_seed_sd" in sigma:
+        pooled = _number(sigma["same_windows_pooled_seed_sd"])
+        lines += ["", f"same windows pooled seed sd: {pooled}"]
+    if "window_set_sd_of_means" in sigma:
+        between = _number(sigma["window_set_sd_of_means"])
+        lines += ["", f"window set sd of means: {between}"]
     return lines + _modality_lines(sigma)
 
 
-def _modality_lines(sigma: Mapping[str, object]) -> list[str]:
+def _modality_lines(sigma: Sigma) -> list[str]:
     """Return each modality's NLL, mean and SD over checkpoints, as each spread scores it."""
-    columns = {
-        "own windows": sigma.get("own_windows"),
+    columns: dict[str, dict[str, Spread] | None] = {
+        "own windows": sigma["own_windows"]["nll"] if "own_windows" in sigma else None,
         **{
-            f"windows {key}": value
-            for key, value in _object(sigma.get("same_windows", {})).items()
+            f"windows {key}": value["nll"]
+            for key, value in sigma.get("same_windows", {}).items()
         },
-        "common tiles": sigma.get("common_natural_tiles"),
+        "common tiles": (
+            sigma["common_natural_tiles"]["nll"]
+            if "common_natural_tiles" in sigma
+            else None
+        ),
     }
-    measured = {label: _object(_object(c)["nll"]) for label, c in columns.items() if c}
+    measured = {label: nll for label, nll in columns.items() if nll is not None}
     if not measured:
         return []
     lines = [
@@ -775,15 +867,15 @@ def _modality_lines(sigma: Mapping[str, object]) -> list[str]:
     lines += ["| Modality | " + " | ".join(measured) + " |"]
     lines += ["|---|" + "---|" * len(measured)]
     for modality in MODALITIES:
-        cells = [_object(nll[modality]) for nll in measured.values()]
+        cells = [nll[modality] for nll in measured.values()]
         shown = [f"{_number(c['mean'])} +- {_number(c['sd'])}" for c in cells]
         lines.append(f"| {modality} | " + " | ".join(shown) + " |")
     return lines
 
 
-def _dream_lines(dreams: Mapping[str, object]) -> list[str]:
+def _dream_lines(dreams: Mapping[str, DreamReport | None]) -> list[str]:
     """Return the report's section of dream distances from real episodes."""
-    measured = {name: _object(entry) for name, entry in dreams.items() if entry}
+    measured = {name: entry for name, entry in dreams.items() if entry is not None}
     if not measured:
         return []
     lines = ["", "## Dreams: distance from real validation episodes", ""]
@@ -791,38 +883,22 @@ def _dream_lines(dreams: Mapping[str, object]) -> list[str]:
     for name, entry in measured.items():
         lines += [
             f"| {name} | {statistic} | {_number(distance)} |"
-            for statistic, distance in _object(entry["distance"]).items()
+            for statistic, distance in entry["distance"].items()
         ]
     return lines
 
 
-def _all_read(paths: Iterable[Path]) -> list[dict[str, object]]:
-    """Return every file's JSON object, or nothing when one of them is absent."""
-    documents = [_read(path) for path in paths]
-    present = [d for d in documents if d is not None]
-    return present if len(present) == len(documents) else []
+def _all_read[T](paths: Iterable[Path], schema: type[T]) -> list[T]:
+    """Return every file read as ``schema``, or nothing when one of them is absent."""
+    files = list(paths)
+    if not all(path.exists() for path in files):
+        return []
+    return [json_loads(path.read_text(), schema) for path in files]
 
 
 def _integers(text: str) -> list[int]:
     """Return a comma-separated list of integers; empty for empty text."""
     return [int(part) for part in text.split(",")] if text else []
-
-
-def _read(path: Path) -> dict[str, object] | None:
-    """Return a step's JSON object, or None when the step did not write it."""
-    if not path.exists():
-        return None
-    return _object(json_loads(path.read_text()))
-
-
-def _object(value: object) -> dict[str, object]:
-    """Return a JSON object this report reads, which every step writes as one."""
-    return from_plain(value, dict[str, object])
-
-
-def _list(value: object) -> list[object]:
-    """Return a JSON array this report reads."""
-    return from_plain(value, list[object])
 
 
 def _write(path: Path, value: Mapping[str, object]) -> None:
@@ -842,9 +918,9 @@ def _verdict(value: object) -> str:
     return "pass" if value else "FAIL"
 
 
-def _number(value: object) -> str:
+def _number(value: float | None) -> str:
     """Return a number with five significant digits, or n/a."""
-    return "n/a" if value is None else f"{from_plain(value, float):.5g}"
+    return "n/a" if value is None else f"{value:.5g}"
 
 
 if __name__ == "__main__":

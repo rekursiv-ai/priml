@@ -8,16 +8,15 @@ strings.
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, cast
+from typing import Final
 
-import json
 import time
 
 from configgle import Fig
 from pyarrow import parquet
 from tokenizers import Tokenizer, pre_tokenizers
 from torch import Tensor
-from treekle import from_plain
+from treekle.wire import json_loads
 
 import pyarrow as pa
 import pytest
@@ -32,6 +31,13 @@ from priml.baselines.convextok.prepare import (
 from priml.baselines.convextok.presolver.presolve import Presolved, presolve
 from priml.baselines.convextok.pretokens import count_pretokens
 from priml.baselines.convextok.program import LinearProgram
+from priml.baselines.convextok.testing import (
+    TESTDATA,
+    Candidates,
+    Corpus,
+    HeldoutTokens,
+    Vocab,
+)
 from priml.baselines.nanochat.scripts.prepare_data import donor_unigram16k
 from priml.baselines.nanochat.scripts.prepare_tokenizer import document_rows
 from priml.paths import validated_output_path
@@ -44,7 +50,7 @@ _CWD: Final = Path(__file__).resolve().parent
 # interpreted, past the unit tier's 100 ms.
 @pytest.mark.compute_large_fixture
 def test_fixture_corpus_yields_upstream_tokenizer(tmp_path: Path) -> None:
-    corpus = _read_json("corpus.json")
+    corpus = json_loads((TESTDATA / "corpus.json").read_text(), Corpus)
     config = fixture_config(tmp_path)
     config.make().build()
 
@@ -52,20 +58,20 @@ def test_fixture_corpus_yields_upstream_tokenizer(tmp_path: Path) -> None:
     learned = _learned_pieces(tokenizer)
     alphabet = set(pre_tokenizers.ByteLevel.alphabet())
     golden = set(
-        from_plain(_read_json("vocab.json").get("det"), list[str]),
+        json_loads((TESTDATA / "vocab.json").read_text(), Vocab)["det"],
     )
     assert learned == golden - alphabet
     held_out = [
         tokenizer.encode(text, add_special_tokens=False).tokens
-        for text in from_plain(corpus.get("heldout"), list[str])
+        for text in corpus["heldout"]
     ]
-    assert held_out == [
-        from_plain(row, list[str])
-        for row in from_plain(
-            _read_json("heldout_tokens.json").get("tokens"),
-            list[object],
-        )
-    ]
+    assert (
+        held_out
+        == json_loads(
+            (TESTDATA / "heldout_tokens.json").read_text(),
+            HeldoutTokens,
+        )["tokens"]
+    )
 
 
 # The same pipeline as above, with a stand-in solver instead of PDLP and presolve.
@@ -144,11 +150,11 @@ def test_any_solver_fills_the_solver_slot(
     config.make().build()
 
     tokenizer = Tokenizer.from_file(str(config.working_dir / "tokenizer.json"))
-    candidates = from_plain(
-        _read_json("candidates.json").get("tokens"),
-        list[str],
-    )
-    budget = from_plain(_read_json("corpus.json").get("budget"), int)
+    candidates = json_loads(
+        (TESTDATA / "candidates.json").read_text(),
+        Candidates,
+    )["tokens"]
+    budget = json_loads((TESTDATA / "corpus.json").read_text(), Corpus)["budget"]
     assert _learned_pieces(tokenizer) == set(candidates[:budget])
     assert shards == [(config.raw_dir / "shard_00000.parquet", 0)]
     assert solver_devices == [torch.device("meta")]
@@ -272,12 +278,12 @@ def fixture_config(tmp_path: Path) -> ConvexTokPreparation.Config:
         ``tmp_path / "convextok"``.
 
     """
-    corpus = _read_json("corpus.json")
+    corpus = json_loads((TESTDATA / "corpus.json").read_text(), Corpus)
     raw = tmp_path / "raw"
     raw.mkdir()
     parquet.write_table(
         pa.table(
-            {"text": from_plain(corpus.get("texts"), list[str])},
+            {"text": corpus["texts"]},
         ),
         raw / "shard_00000.parquet",
     )
@@ -285,7 +291,7 @@ def fixture_config(tmp_path: Path) -> ConvexTokPreparation.Config:
     config.raw_dir = raw
     config.shard_indices = [0]
     config.working_dir = tmp_path / "convextok"
-    config.vocab_size = from_plain(corpus.get("vocab_size"), int)
+    config.vocab_size = corpus["vocab_size"]
     config.num_workers = 1
     config.device = "cpu"
     return config
@@ -296,11 +302,6 @@ def _learned_pieces(tokenizer: Tokenizer) -> set[str | None]:
     return {
         tokenizer.id_to_token(index) for index in range(256, tokenizer.get_vocab_size())
     }
-
-
-def _read_json(name: str) -> dict[str, object]:
-    raw = cast(object, json.loads((_CWD / "testdata" / name).read_text()))
-    return dict(from_plain(raw, dict[str, object]))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

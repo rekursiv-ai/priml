@@ -21,6 +21,7 @@ from treekle.wire import json_loads
 import numpy as np
 import pytest
 
+from priml.baselines.sudoku.data import read_split_arrays
 from priml.baselines.sudoku.harvest import Harvest
 from priml.baselines.sudoku.puzzle_data import PuzzleDataset
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
@@ -35,10 +36,6 @@ from priml.paths import resolve_working_dir
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
-
-
-def _load_array(path: Path) -> NDArray[np.int64]:
-    return cast("NDArray[np.int64]", np.load(path))
 
 
 def _build(*, num_puzzles: int | None, copies_per_puzzle: int) -> prepare_data._Build:
@@ -97,8 +94,8 @@ def test_training_split_expands_and_test_split_does_not(
         copies_per_puzzle=2,
         csv_directory=csv_dir,
     )
-    train = _load_array(out / "train" / "all__inputs.npy")
-    test = _load_array(out / "test" / "all__inputs.npy")
+    train = read_split_arrays(out / "train").inputs
+    test = read_split_arrays(out / "test").inputs
     assert train.shape == (3 * 3, 81)  # 3 puzzles x (1 original + 2 copies)
     assert test.shape == (4, 81)  # Every source puzzle, untouched.
 
@@ -111,7 +108,7 @@ def test_group_indices_bound_each_puzzles_copies(tmp_path: Path, csv_dir: Path) 
         copies_per_puzzle=2,
         csv_directory=csv_dir,
     )
-    bounds = _load_array(out / "train" / "all__group_indices.npy")
+    bounds = read_split_arrays(out / "train").group_indices
     assert bounds.tolist() == [0, 3, 6, 9]
 
 
@@ -126,8 +123,8 @@ def test_tokens_land_in_the_documented_vocabulary(
         copies_per_puzzle=1,
         csv_directory=csv_dir,
     )
-    inputs = _load_array(out / "train" / "all__inputs.npy")
-    labels = _load_array(out / "train" / "all__labels.npy")
+    inputs = read_split_arrays(out / "train").inputs
+    labels = read_split_arrays(out / "train").labels
     assert inputs.min() >= 1  # No padding in stored rows.
     assert inputs.max() <= 10
     unique_labels = cast(list[int], np.unique(labels).tolist())
@@ -152,7 +149,7 @@ def test_transformations_keep_the_solution_valid(tmp_path: Path, csv_dir: Path) 
         copies_per_puzzle=4,
         csv_directory=csv_dir,
     )
-    labels = _load_array(out / "train" / "all__labels.npy")
+    labels = read_split_arrays(out / "train").labels
     label_rows = cast(list[list[int]], labels.tolist())
     for row in label_rows:
         grid = [row[index : index + 9] for index in range(0, 81, 9)]
@@ -173,8 +170,8 @@ def test_the_clues_survive_transformation(tmp_path: Path, csv_dir: Path) -> None
         copies_per_puzzle=4,
         csv_directory=csv_dir,
     )
-    inputs = _load_array(out / "train" / "all__inputs.npy")
-    labels = _load_array(out / "train" / "all__labels.npy")
+    inputs = read_split_arrays(out / "train").inputs
+    labels = read_split_arrays(out / "train").labels
     given = inputs > 1  # Token 1 is an empty cell.
     assert np.array_equal(inputs[given], labels[given])
 
@@ -194,8 +191,8 @@ def test_the_build_is_deterministic(tmp_path: Path, csv_dir: Path) -> None:
         csv_directory=csv_dir,
     )
     assert np.array_equal(
-        _load_array(first / "train" / "all__inputs.npy"),
-        _load_array(second / "train" / "all__inputs.npy"),
+        read_split_arrays(first / "train").inputs,
+        read_split_arrays(second / "train").inputs,
     )
 
 
@@ -214,8 +211,8 @@ def test_a_different_seed_builds_different_data(tmp_path: Path, csv_dir: Path) -
         csv_directory=csv_dir,
     )
     assert not np.array_equal(
-        _load_array(first / "train" / "all__inputs.npy"),
-        _load_array(second / "train" / "all__inputs.npy"),
+        read_split_arrays(first / "train").inputs,
+        read_split_arrays(second / "train").inputs,
     )
 
 
@@ -312,7 +309,7 @@ def test_a_rebuild_with_different_parameters_is_refused(
                 seed=seed,
                 csv_directory=csv_dir,
             )
-    bounds = _load_array(tmp_path / "data" / "train" / "all__group_indices.npy")
+    bounds = read_split_arrays(tmp_path / "data" / "train").group_indices
     assert bounds.tolist() == [0, 2, 4]
 
 
@@ -512,9 +509,9 @@ def test_split_creation_handles_nested_output_and_keeps_original(
         rng=np.random.default_rng(3),
         csv_path=csv_path,
     )
-    inputs = _load_array(out / "train" / "all__inputs.npy")
-    labels = _load_array(out / "train" / "all__labels.npy")
-    bounds = _load_array(out / "train" / "all__group_indices.npy")
+    inputs = read_split_arrays(out / "train").inputs
+    labels = read_split_arrays(out / "train").labels
+    bounds = read_split_arrays(out / "train").group_indices
     assert inputs.shape == labels.shape == (1, 81)
     expected_inputs = prepare_data._tokenize(
         [prepare_data._grid("0" + SOLUTION[1:], spec=SPEC)],
@@ -575,11 +572,11 @@ def test_equal_puzzle_limit_preserves_source_order(
         csv_directory=csv_dir,
     )
     assert np.array_equal(
-        _load_array(out / "train" / "all__inputs.npy"),
+        read_split_arrays(out / "train").inputs,
         expected_inputs,
     )
     assert np.array_equal(
-        _load_array(out / "train" / "all__labels.npy"),
+        read_split_arrays(out / "train").labels,
         expected_labels,
     )
 
@@ -625,7 +622,7 @@ def test_subsampling_never_duplicates_source_puzzles(
             seed=seed,
             csv_directory=csv_dir,
         )
-        inputs = _load_array(out / "train" / "all__inputs.npy")
+        inputs = read_split_arrays(out / "train").inputs
         assert len(np.unique(inputs, axis=0)) == 3
 
 
@@ -686,7 +683,7 @@ def test_prepared_splits_log_exact_counts_and_skip_existing(
         "sudoku 'test': 4 puzzles -> 4 rows",
         f"sudoku data ready at {out}",
     ]
-    train_bounds = _load_array(out / "train" / "all__group_indices.npy")
+    train_bounds = read_split_arrays(out / "train").group_indices
     assert train_bounds.dtype == np.int32
     assert np.array_equal(train_bounds, np.array([0, 2, 4], dtype=np.int32))
 
@@ -835,7 +832,7 @@ def test_downloaded_split_verifies_and_removes_the_staged_csv(
     assert verified == [(downloaded, "train.csv")]
     assert unlink_calls == [(downloaded, True)]
     assert not downloaded.exists()
-    assert _load_array(out / "train" / "all__inputs.npy").shape == (1, 81)
+    assert read_split_arrays(out / "train").inputs.shape == (1, 81)
 
 
 def test_main_help_works_without_a_module_docstring(

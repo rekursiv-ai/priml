@@ -45,10 +45,6 @@ def _kernel_buffers(kernel: _FakeKernel) -> list[Tensor]:
     return list(value)
 
 
-def _kernel_dimensions(kernel: _FakeKernel) -> tuple[int, ...]:
-    return cast(tuple[int, ...], kernel.kwargs["dimensions"])
-
-
 def test_ngram_embedding_zeros_incomplete_prefix_and_receives_gradients() -> None:
     config = NgramEmbedding.Config()
     config.channels_in = 13
@@ -539,7 +535,10 @@ def test_ngram_cuda_dispatch_pins_kernel_arguments(
     assert all(forward_buffers[i] is gates[i - 2] for i in (2, 3))
     assert all(forward_buffers[i] is weights[i - 4] for i in range(4, 8))
     assert all(forward_buffers[i] is indices[i - 8] for i in range(8, 12))
-    assert all(isinstance(value, int) for value in _kernel_dimensions(forward_kernel))
+    assert all(
+        isinstance(value, int)
+        for value in cast(tuple[int, ...], forward_kernel.kwargs["dimensions"])
+    )
     assert {
         key: forward_kernel.kwargs[key]
         for key in (
@@ -581,7 +580,10 @@ def test_ngram_cuda_dispatch_pins_kernel_arguments(
     assert backward_buffers[11] is not backward_buffers[12]
     assert all(backward_buffers[i] is sinks[i - 13] for i in range(13, 17))
     assert all(backward_buffers[i] is bitmaps[i - 17] for i in range(17, 21))
-    assert all(isinstance(value, int) for value in _kernel_dimensions(backward_kernel))
+    assert all(
+        isinstance(value, int)
+        for value in cast(tuple[int, ...], backward_kernel.kwargs["dimensions"])
+    )
     assert {
         key: backward_kernel.kwargs[key]
         for key in (

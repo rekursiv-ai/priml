@@ -12,9 +12,7 @@ from inspect import signature
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Self, cast
 
-import json
-
-from treekle import from_plain
+from treekle.wire import json_loads
 
 import pytest
 
@@ -22,6 +20,11 @@ from priml.baselines.convextok import pretokens
 from priml.baselines.convextok.pretokens import (
     count_pretokens,
     merge_counts,
+)
+from priml.baselines.convextok.testing import (
+    TESTDATA,
+    Corpus,
+    Pretokens,
 )
 
 
@@ -45,7 +48,16 @@ def test_count_pretokens_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
         pytest.fail(f"default serial count constructed a process pool: {args}")
 
     monkeypatch.setattr(pretokens, "ProcessPoolExecutor", unexpected_executor)
-    assert count_pretokens([], split_pattern=_split_pattern()) == {}
+    assert (
+        count_pretokens(
+            [],
+            split_pattern=json_loads(
+                (TESTDATA / "corpus.json").read_text(),
+                Corpus,
+            )["split_pattern"],
+        )
+        == {}
+    )
 
 
 def test_default_chunk_size_counts_ten_thousand_documents(
@@ -79,7 +91,10 @@ def test_default_chunk_size_counts_ten_thousand_documents(
     assert (
         count_pretokens(
             [""] * 10_001,
-            split_pattern=_split_pattern(),
+            split_pattern=json_loads(
+                (TESTDATA / "corpus.json").read_text(),
+                Corpus,
+            )["split_pattern"],
             num_workers=2,
         )
         == {}
@@ -87,21 +102,36 @@ def test_default_chunk_size_counts_ten_thousand_documents(
 
 
 def test_counts_match_upstream_golden() -> None:
-    corpus = _read_json("corpus.json")
-    golden = _read_json("pretokens.json")
-    texts = from_plain(corpus.get("texts"), list[str])
-    counts = count_pretokens(texts, split_pattern=_split_pattern())
-    assert list(counts) == from_plain(golden.get("pretokens"), list[str])
-    assert list(counts.values()) == from_plain(
-        golden.get("frequencies"),
-        list[int],
+    corpus = json_loads((TESTDATA / "corpus.json").read_text(), Corpus)
+    golden = json_loads((TESTDATA / "pretokens.json").read_text(), Pretokens)
+    texts = corpus["texts"]
+    counts = count_pretokens(
+        texts,
+        split_pattern=json_loads((TESTDATA / "corpus.json").read_text(), Corpus)[
+            "split_pattern"
+        ],
     )
+    assert list(counts) == golden["pretokens"]
+    assert list(counts.values()) == golden["frequencies"]
 
 
 def test_chunks_merge_into_first_occurrence_order() -> None:
     texts = ["b a b", "c a", "", "d c b"]
-    whole = count_pretokens(texts, split_pattern=_split_pattern())
-    chunked = count_pretokens(texts, split_pattern=_split_pattern(), chunk_size=1)
+    whole = count_pretokens(
+        texts,
+        split_pattern=json_loads(
+            (TESTDATA / "corpus.json").read_text(),
+            Corpus,
+        )["split_pattern"],
+    )
+    chunked = count_pretokens(
+        texts,
+        split_pattern=json_loads(
+            (TESTDATA / "corpus.json").read_text(),
+            Corpus,
+        )["split_pattern"],
+        chunk_size=1,
+    )
     assert list(chunked.items()) == list(whole.items())
     assert list(whole.items()) == [
         ("b", 1),
@@ -119,32 +149,35 @@ def test_merge_counts_sums_and_keeps_earliest_position() -> None:
 
 
 def test_bytes_map_to_the_byte_level_alphabet() -> None:
-    counts = count_pretokens(["é\n"], split_pattern=_split_pattern())
+    counts = count_pretokens(
+        ["é\n"],
+        split_pattern=json_loads(
+            (TESTDATA / "corpus.json").read_text(),
+            Corpus,
+        )["split_pattern"],
+    )
     assert list(counts) == ["Ã©", "Ċ"]
 
 
 @pytest.mark.cli_python_subprocess
 def test_worker_processes_match_serial_counts() -> None:
-    corpus = _read_json("corpus.json")
-    texts = from_plain(corpus.get("texts"), list[str])
-    serial = count_pretokens(texts, split_pattern=_split_pattern())
+    corpus = json_loads((TESTDATA / "corpus.json").read_text(), Corpus)
+    texts = corpus["texts"]
+    serial = count_pretokens(
+        texts,
+        split_pattern=json_loads((TESTDATA / "corpus.json").read_text(), Corpus)[
+            "split_pattern"
+        ],
+    )
     parallel = count_pretokens(
         texts,
-        split_pattern=_split_pattern(),
+        split_pattern=json_loads((TESTDATA / "corpus.json").read_text(), Corpus)[
+            "split_pattern"
+        ],
         num_workers=2,
         chunk_size=3,
     )
     assert list(parallel.items()) == list(serial.items())
-
-
-def _read_json(name: str) -> dict[str, object]:
-    raw = cast(object, json.loads((_CWD / "testdata" / name).read_text()))
-    return dict(from_plain(raw, dict[str, object]))
-
-
-def _split_pattern() -> str:
-    """Upstream's nanochat regular expression, as recorded when the goldens were minted."""
-    return from_plain(_read_json("corpus.json").get("split_pattern"), str)
 
 
 if __name__ == "__main__":

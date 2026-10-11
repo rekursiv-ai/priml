@@ -99,6 +99,7 @@ from priml.baselines.nanochat.scripts.prepare_tokenizer import (
     UnigramPreparation,
     byte_alphabet,
 )
+from priml.data.arrays import load_array
 from priml.paths import validated_output_path
 from priml.train.checkpointer import Checkpointer
 from priml.train.tracker import TrackerList
@@ -667,10 +668,7 @@ def test_the_recorded_fingerprint_matches_the_table_written(corpus: Path) -> Non
     """
     _prepare(corpus)
     directory = corpus / "tokenizer"
-    table: NDArray[np.int32] = cast(
-        NDArray[np.int32],
-        np.load(directory / "token_bytes.npy"),
-    )
+    table: NDArray[np.int32] = load_array(directory / "token_bytes.npy", np.int32)
     recipe = json_loads(
         (directory / "tokenizer_recipe.json").read_text(),
         dict[str, object],
@@ -685,9 +683,9 @@ def test_reserved_tokens_carry_no_bytes(corpus: Path) -> None:
     which is a property of the corpus rather than of the model.
     """
     _prepare(corpus)
-    table: NDArray[np.int32] = cast(
-        NDArray[np.int32],
-        np.load(corpus / "tokenizer" / "token_bytes.npy"),
+    table: NDArray[np.int32] = load_array(
+        corpus / "tokenizer" / "token_bytes.npy",
+        np.int32,
     )
     assert int(table[-len(RESERVED_TOKENS) :].sum()) == 0
     assert int(table[: -len(RESERVED_TOKENS)].min()) > 0
@@ -777,13 +775,13 @@ def test_an_intact_vocabulary_at_the_same_flags_is_reused(corpus: Path) -> None:
     identical table rather than refit and produce another one.
     """
     _prepare(corpus)
-    before: NDArray[np.int32] = cast(
-        NDArray[np.int32],
-        np.load(corpus / "tokenizer" / "token_bytes.npy"),
+    before: NDArray[np.int32] = load_array(
+        corpus / "tokenizer" / "token_bytes.npy",
+        np.int32,
     ).copy()
     assert _prepare(corpus) == corpus
     assert np.array_equal(
-        cast(NDArray[np.int32], np.load(corpus / "tokenizer" / "token_bytes.npy")),
+        load_array(corpus / "tokenizer" / "token_bytes.npy", np.int32),
         before,
     )
 

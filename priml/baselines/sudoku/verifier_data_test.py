@@ -18,6 +18,7 @@ from priml.baselines.sudoku.verifier_data import (
     _HarvestShardEntry,
     _load_harvest,
 )
+from priml.data.arrays import load_array
 
 
 if TYPE_CHECKING:
@@ -116,11 +117,6 @@ def test_load_harvest_binds_shards_to_the_manifest(tmp_path: Path) -> None:
     assert groups.tolist() == [0, 1, 3, 2, 3]
 
 
-def _load_array(path: Path) -> np.ndarray:
-    """Load one ``.npy`` fixture array; ``np.load`` itself returns ``Any``."""
-    return cast("np.ndarray", np.load(path))
-
-
 def _write_shard(
     shard: Path,
     *,
@@ -146,8 +142,8 @@ def _bound_harvest(
     groups: list[int],
 ) -> Path:
     """Write a one-shard harvest whose originals are the named train rows."""
-    inputs = _load_array(data / "train" / "all__inputs.npy")
-    labels = _load_array(data / "train" / "all__labels.npy")
+    inputs = load_array(data / "train" / "all__inputs.npy", np.generic)
+    labels = load_array(data / "train" / "all__labels.npy", np.generic)
     harvest.mkdir(parents=True)
     shard = harvest / "shard-00000.npz"
     _write_shard(
@@ -201,7 +197,7 @@ def test_verifier_data_rejects_a_broken_harvest_binding(tmp_path: Path) -> None:
     cfg.train_group_end = 0
     with pytest.raises(ValueError, match="no harvest rows"):
         cfg.make()
-    inputs = _load_array(tmp_path / "data" / "train" / "all__inputs.npy")
+    inputs = load_array(tmp_path / "data" / "train" / "all__inputs.npy", np.generic)
     shard = harvest / "shard-00000.npz"
     for flat_views, message in (
         ([0, 1, 2, 9], "flat_view_id exceeds"),

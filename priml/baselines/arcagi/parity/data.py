@@ -408,23 +408,10 @@ def _load_split(dataset_dir: Path, *, split: str) -> _Split:
     metadata = json_loads(metadata_path.read_text(), dict[str, object])
     logger.info("loading ARC split %r from %s", split, path)
     return {
-        "inputs": torch.from_numpy(_npy(path / "all__inputs.npy")).to(torch.int32),
-        "labels": torch.from_numpy(_npy(path / "all__labels.npy")).to(torch.int32),
-        "puzzle_indices": cast(
-            "NDArray[np.int64]",
-            np.load(path / "all__puzzle_indices.npy"),
-        ),
-        "group_indices": cast(
-            "NDArray[np.int64]",
-            np.load(path / "all__group_indices.npy"),
-        ),
-        "puzzle_identifiers": cast(
-            "NDArray[np.int64]",
-            np.load(path / "all__puzzle_identifiers.npy"),
-        ),
+        "inputs": torch.from_numpy(np.load(path / "all__inputs.npy")).to(torch.int32),
+        "labels": torch.from_numpy(np.load(path / "all__labels.npy")).to(torch.int32),
+        "puzzle_indices": np.load(path / "all__puzzle_indices.npy"),
+        "group_indices": np.load(path / "all__group_indices.npy"),
+        "puzzle_identifiers": np.load(path / "all__puzzle_identifiers.npy"),
         "ignore_label_id": from_plain(metadata.get("ignore_label_id"), int, default=0),
     }
-
-
-def _npy(path: Path) -> NDArray[np.int32]:
-    return cast("NDArray[np.int32]", np.load(path))

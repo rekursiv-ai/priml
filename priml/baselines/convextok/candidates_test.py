@@ -10,31 +10,31 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Final, Self
 
-from treekle import from_plain
 from treekle.wire import json_loads
 
 import pytest
 
 from priml.baselines.convextok import candidates
 from priml.baselines.convextok.candidates import count_candidates
+from priml.baselines.convextok.testing import (
+    TESTDATA,
+    Candidates,
+    Pretokens,
+)
 
 
 _CWD: Final = Path(__file__).resolve().parent
 
 
 def test_candidates_match_upstream_golden() -> None:
-    pretokens = _read_json("pretokens.json")
-    golden = _read_json("candidates.json")
+    pretokens = json_loads((TESTDATA / "pretokens.json").read_text(), Pretokens)
+    golden = json_loads((TESTDATA / "candidates.json").read_text(), Candidates)
     counts = dict(
-        zip(
-            from_plain(pretokens.get("pretokens"), list[str]),
-            from_plain(pretokens.get("frequencies"), list[int]),
-            strict=True,
-        ),
+        zip(pretokens["pretokens"], pretokens["frequencies"], strict=True),
     )
     candidates = count_candidates(counts)
-    assert list(candidates) == from_plain(golden.get("tokens"), list[str])
-    assert list(candidates.values()) == from_plain(golden.get("counts"), list[int])
+    assert list(candidates) == golden["tokens"]
+    assert list(candidates.values()) == golden["counts"]
 
 
 def test_occurrences_are_weighted_by_pretoken_frequency() -> None:
@@ -157,22 +157,12 @@ def test_process_pool_path_maps_counts_and_merges(
 
 @pytest.mark.cli_python_subprocess
 def test_worker_processes_match_serial_counts() -> None:
-    pretokens = _read_json("pretokens.json")
+    pretokens = json_loads((TESTDATA / "pretokens.json").read_text(), Pretokens)
     counts = dict(
-        zip(
-            from_plain(pretokens.get("pretokens"), list[str]),
-            from_plain(pretokens.get("frequencies"), list[int]),
-            strict=True,
-        ),
+        zip(pretokens["pretokens"], pretokens["frequencies"], strict=True),
     )
     parallel = count_candidates(counts, num_workers=2, chunk_size=7, num_partitions=4)
     assert list(parallel.items()) == list(count_candidates(counts).items())
-
-
-def _read_json(name: str) -> dict[str, object]:
-    return dict(
-        json_loads((_CWD / "testdata" / name).read_text(), dict[str, object]),
-    )
 
 
 if __name__ == "__main__":

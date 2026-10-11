@@ -23,7 +23,7 @@ none, skips a compile of over two minutes on a GitHub runner.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
 import os
 import subprocess
@@ -35,7 +35,7 @@ import pytest
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -44,14 +44,44 @@ _SEEN_AT_START: Final = pytest.StashKey[bool]()
 """Set once this conftest saw the session start; a worker's controller then compiled."""
 
 
-def pytest_sessionstart(session: pytest.Session) -> None:
+class _PluginManager(Protocol):
+    def has_plugin(self, name: str) -> bool: ...
+    def get_plugin(self, name: str) -> object | None: ...
+
+
+class _Config(Protocol):
+    @property
+    def stash(self) -> pytest.Stash: ...
+    @property
+    def pluginmanager(self) -> _PluginManager: ...
+    @property
+    def rootpath(self) -> Path: ...
+    def getoption(self, name: str) -> object: ...
+
+
+class _Item(Protocol):
+    @property
+    def path(self) -> Path: ...
+    def get_closest_marker(self, name: str) -> pytest.Mark | None: ...
+
+
+class _Session(Protocol):
+    """What these hooks read of a ``pytest.Session``."""
+
+    @property
+    def config(self) -> _Config: ...
+    @property
+    def items(self) -> Sequence[_Item]: ...
+
+
+def pytest_sessionstart(session: _Session) -> None:
     """Compile on the xdist controller, when it loaded this file at startup."""
     session.config.stash[_SEEN_AT_START] = True
     if session.config.pluginmanager.has_plugin("dsession"):
         _compile(session.config)
 
 
-def pytest_collection_finish(session: pytest.Session) -> None:
+def pytest_collection_finish(session: _Session) -> None:
     """Compile once the tests are known, if one may call a kernel and no controller did."""
     if "PYTEST_XDIST_WORKER" in os.environ and session.config.stash.get(
         _SEEN_AT_START,
@@ -66,7 +96,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
 # process, node or a device, never a kernel in this process. Should one call a kernel
 # the cache lacks, the kernel compiles at that call, as any kernel the child missed
 # does: slower, inside the test's timeout, never wrong.
-def _needs_kernels(items: Iterable[pytest.Item]) -> bool:
+def _needs_kernels(items: Iterable[_Item]) -> bool:
     """Whether a selected test of this package may call a compiled kernel."""
     return any(
         item.path.is_relative_to(_CWD)
@@ -76,7 +106,7 @@ def _needs_kernels(items: Iterable[pytest.Item]) -> bool:
     )
 
 
-def _compile(config: pytest.Config) -> None:
+def _compile(config: _Config) -> None:
     """Run ``compile_kernels`` in a child process; report a failure, not raise it."""
     if from_plain(config.getoption("collectonly"), bool):
         return

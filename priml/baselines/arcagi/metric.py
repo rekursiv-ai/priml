@@ -710,7 +710,7 @@ def _model_output_header_width(*, out_width: int, media_len: int, k_steps: int) 
 
 # An integer token tensor narrows to uint8 by wrapping, as the reference voted on.
 def _uint8_rows(values: Tensor) -> list[NDArray[np.uint8]]:
-    array = cast("NDArray[np.integer]", values.numpy()).astype(np.uint8)
+    array = values.numpy().astype(np.uint8)
     return list(cast("Iterable[NDArray[np.uint8]]", array))
 
 

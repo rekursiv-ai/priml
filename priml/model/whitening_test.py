@@ -21,14 +21,13 @@ from priml.testing.golden import assert_text_golden
 _CWD: Final = Path(__file__).resolve().parent
 
 
-def _whitening() -> PCAWhiteningConv2d:
-    return PCAWhiteningConv2d(2, 16, kernel_size=2, bias=False)
-
-
 def test_orientation_undoes_an_eigenvector_sign_flip() -> None:
     """A per-eigenvector sign flip, as another LAPACK returns, orients identically."""
     torch.manual_seed(0)
-    reference, flipped = _whitening(), _whitening()
+    reference, flipped = (
+        PCAWhiteningConv2d(2, 16, kernel_size=2, bias=False),
+        PCAWhiteningConv2d(2, 16, kernel_size=2, bias=False),
+    )
     train_images = torch.randn(3, 2, 4, 5)
     reference.init_whiten(train_images)
 
@@ -162,7 +161,7 @@ def test_whitening_text() -> None:
     assert_text_golden(
         test_file=__file__,
         name="whitening",
-        rendered=repr(_whitening()),
+        rendered=repr(PCAWhiteningConv2d(2, 16, kernel_size=2, bias=False)),
     )
 
 
@@ -176,7 +175,12 @@ def test_whitening_bfb(device: str) -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="whitening",
-        build_module=lambda: _whitening().to(device),
+        build_module=lambda: PCAWhiteningConv2d(
+            2,
+            16,
+            kernel_size=2,
+            bias=False,
+        ).to(device),
         # Kernel size 2 requires spatial inputs at least 2x2.
         build_input=lambda: (torch.randn(3, 2, 4, 5), torch.randn(3, 2, 4, 5)),
         seed=0,

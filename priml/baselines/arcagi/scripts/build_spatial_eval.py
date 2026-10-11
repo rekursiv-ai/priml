@@ -31,6 +31,7 @@ from priml.baselines.arcagi.scripts.build_dataset import (
     check_recipe,
     stamp_recipe,
 )
+from priml.data.arrays import load_array
 from priml.data.distributed_build import run_rank_zero_build
 from priml.data.ensure import DataSpec, EnsureResult, FileSpec, ensure_data
 from priml.paths import validated_output_path
@@ -171,9 +172,15 @@ def build_spatial_eval(
     src_test = source_dir / "test"
     inputs = _rows(_load(src_test / "all__inputs.npy"))
     labels = _rows(_load(src_test / "all__labels.npy"))
-    puzzle_indices = _int_list(_load(src_test / "all__puzzle_indices.npy"))
-    group_indices = _int_list(_load(src_test / "all__group_indices.npy"))
-    puzzle_ids = _int_list(_load(src_test / "all__puzzle_identifiers.npy"))
+    puzzle_indices = cast(
+        list[int],
+        _load(src_test / "all__puzzle_indices.npy").tolist(),
+    )
+    group_indices = cast(list[int], _load(src_test / "all__group_indices.npy").tolist())
+    puzzle_ids = cast(
+        list[int],
+        _load(src_test / "all__puzzle_identifiers.npy").tolist(),
+    )
     identifiers = json_loads((source_dir / "identifiers.json").read_text(), list[str])
 
     new_inputs: list[NDArray[np.int64]] = []
@@ -346,16 +353,12 @@ class _SpatialEvalBuild:
         self._built = True
 
 
-def _load(path: Path) -> NDArray[np.int64]:
-    return cast("NDArray[np.int64]", np.load(path))
+def _load(path: Path) -> NDArray[np.integer]:
+    return load_array(path, np.integer)
 
 
-def _rows(array: NDArray[np.int64]) -> list[NDArray[np.int64]]:
+def _rows(array: NDArray[np.integer]) -> list[NDArray[np.int64]]:
     return list(cast("Iterable[NDArray[np.int64]]", array))
-
-
-def _int_list(array: NDArray[np.int64]) -> list[int]:
-    return cast(list[int], array.tolist())
 
 
 def _content_shape(flat: NDArray[np.int64], *, spec: ArcSpec) -> tuple[int, int]:
@@ -363,9 +366,9 @@ def _content_shape(flat: NDArray[np.int64], *, spec: ArcSpec) -> tuple[int, int]
     color = flat.reshape(spec.max_grid, spec.max_grid) >= spec.vocab_color_offset
     if not color.any():
         return 0, 0
-    rows = _int_list(np.nonzero(color.any(axis=1))[0])
-    cols = _int_list(np.nonzero(color.any(axis=0))[0])
-    return rows[-1] + 1, cols[-1] + 1
+    rows = int(np.nonzero(color.any(axis=1))[0].max())
+    cols = int(np.nonzero(color.any(axis=0))[0].max())
+    return rows + 1, cols + 1
 
 
 def _forward_spatial(

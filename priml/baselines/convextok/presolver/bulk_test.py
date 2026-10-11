@@ -8,7 +8,6 @@ from itertools import accumulate
 from typing import TYPE_CHECKING, Final, cast
 
 from numpy.typing import NDArray
-from treekle import from_plain
 
 import numpy as np
 import pytest
@@ -42,8 +41,14 @@ def test_sort_rows_matches_pslp(n_rows: int) -> None:
     coeff = ch_keys[rng.integers(0, ch_keys.size, size=n_rows + 10)]
     active = np.sort(rng.permutation(n_rows + 10)[:n_rows]).astype(np.int32)
     reference = _pslp_insertion_sort if n_rows < 256 else _pslp_radix_sort
-    expected = reference(_ints(active), _ints(sparsity), _ints(coeff))
-    assert _ints(sort_rows(active, sparsity, coeff, _CPU)) == expected
+    expected = reference(
+        cast(list[int], active.tolist()),
+        cast(list[int], sparsity.tolist()),
+        cast(list[int], coeff.tolist()),
+    )
+    assert (
+        cast(list[int], sort_rows(active, sparsity, coeff, _CPU).tolist()) == expected
+    )
 
 
 def test_sort_rows_passes_device_and_dtype_to_tensor_to(
@@ -212,7 +217,10 @@ def test_transpose_slots_matches_pslp_layout() -> None:
     rng = np.random.default_rng(0)
     n_rows, n_cols = 7, 5
     rows = [
-        _ints(np.sort(rng.permutation(n_cols)[: int(rng.integers(0, 4))]))
+        cast(
+            list[int],
+            np.sort(rng.permutation(n_cols)[: int(rng.integers(0, 4))]).tolist(),
+        )
         for _ in range(n_rows)
     ]
     starts = [0, *accumulate(len(r) for r in rows)]
@@ -225,16 +233,17 @@ def test_transpose_slots_matches_pslp_layout() -> None:
         n_cols,
         _CPU,
     )
-    assert (_ints(dest), _ints(at_start), _ints(at_end), n_alloc) == _pslp_transpose(
+    assert (
+        cast(list[int], dest.tolist()),
+        cast(list[int], at_start.tolist()),
+        cast(list[int], at_end.tolist()),
+        n_alloc,
+    ) == _pslp_transpose(
         cols,
         starts,
         ends,
         n_cols,
     )
-
-
-def _ints(values: NDArray[np.int32] | NDArray[np.int64]) -> list[int]:
-    return from_plain(cast(object, values.tolist()), list[int])
 
 
 def _pslp_insertion_sort(rows: list[int], sp: list[int], ch: list[int]) -> list[int]:

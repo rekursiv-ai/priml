@@ -11,7 +11,6 @@ import math
 import sys
 
 from configgle import PartialConfig
-from treekle import from_plain
 from treekle.wire import json_loads
 
 import pytest
@@ -37,6 +36,7 @@ from priml.baselines.craftax.world_model.scripts import (
     engine_checks,
     report,
 )
+from priml.baselines.craftax.world_model.scripts.reports import TilesReport
 
 
 SMOKE: str = "priml.baselines.craftax.world_model.experiments.exp_smoke"
@@ -90,29 +90,30 @@ def test_summarize_reads_every_step_and_spreads_over_checkpoints(
     _write(dreams / "report.json", {"distance": {"action_tv": 0.25}, "run": {}})
     summary = report.summarize(tmp_path, names=["a", "b"], own=[0, 1], windows=[0, 1])
     assert summary["criterion_1_stable"] is None
-    criterion3 = from_plain(summary["criterion_3_beats_baselines"], dict[str, object])
-    assert from_plain(
-        from_plain(criterion3["a"], dict[str, object])["beats"],
-        dict[str, object],
-    )["cells"]
+    criterion3 = summary["criterion_3_beats_baselines"]["a"]
+    assert criterion3 is not None
+    assert criterion3["beats"]["cells"]
     assert summary["criterion_4_engine_checks"] == {"a": True, "b": True}
-    assert from_plain(summary["dreams"], dict[str, object])["b"] is None
-    sigma = from_plain(summary["sigma"], dict[str, object])
-    own = _spread(sigma, "own_windows")
+    assert summary["dreams"]["b"] is None
+    sigma = summary["sigma"]
+    assert "own_windows" in sigma
+    assert "same_windows" in sigma
+    assert "same_windows_pooled_seed_sd" in sigma
+    assert "window_set_sd_of_means" in sigma
+    assert "common_natural_tiles" in sigma
+    own = sigma["own_windows"]["nats_per_decision_natural"]
     assert own["values"] == [4.0, 6.0]
-    assert from_plain(own["sd"], float) == pytest.approx(2**0.5)
-    v0 = _spread(from_plain(sigma["same_windows"], dict[str, object]), "v0")
-    assert v0["values"] == [4.0, 7.0]
+    assert own["sd"] == pytest.approx(2**0.5)
+    assert sigma["same_windows"]["v0"]["nats_per_decision_natural"]["values"] == [
+        4.0,
+        7.0,
+    ]
     # Variances 4.5 on v0 (4 and 7) and 0.5 on v1 (5 and 6) pool to 2.5.
     assert sigma["same_windows_pooled_seed_sd"] == pytest.approx(2.5**0.5)
     assert sigma["window_set_sd_of_means"] == pytest.approx(0.0)
-    tiles = from_plain(sigma["common_natural_tiles"], dict[str, object])
-    board = from_plain(
-        from_plain(tiles["nll"], dict[str, object])["board"],
-        dict[str, object],
-    )
+    board = sigma["common_natural_tiles"]["nll"]["board"]
     # 0.01 bits per canonical byte of a cell's 8 fields.
-    assert from_plain(board["mean"], float) == pytest.approx(0.01 * 8 * math.log(2))
+    assert board["mean"] == pytest.approx(0.01 * 8 * math.log(2))
     text = report.render(summary, names=["a", "b"])
     assert "| 3. a beats the trivial baselines | pass |" in text
     assert "| 3. b beats the trivial baselines | FAIL |" in text
@@ -175,13 +176,11 @@ def test_summarize_reads_the_names_and_seeds_of_the_runs_settings(
         ["report.py", "--summarize", "--output", str(tmp_path)],
     )
     assert report.main() == 0
-    summary = json_loads((tmp_path / "summary.json").read_text(), dict[str, object])
-    assert set(from_plain(summary["criterion_4_engine_checks"], dict[str, object])) == {
-        "a",
-        "b",
-    }
-    own = _spread(from_plain(summary["sigma"], dict[str, object]), "own_windows")
-    assert own["values"] == [4.0, 4.0]
+    summary = json_loads((tmp_path / "summary.json").read_text(), report.Summary)
+    assert set(summary["criterion_4_engine_checks"]) == {"a", "b"}
+    sigma = summary["sigma"]
+    assert "own_windows" in sigma
+    assert sigma["own_windows"]["nats_per_decision_natural"]["values"] == [4.0, 4.0]
     # Seeds on the command line would contradict the run's own.
     monkeypatch.setattr(sys, "argv", [*sys.argv, "--sampler-seeds", "0,0"])
     with pytest.raises(SystemExit):
@@ -323,22 +322,18 @@ def test_main_scores_a_checkpoint_and_writes_the_summary(
     # Tiles of the run's corpus at its window, the flags' count and seed.
     assert tiled == [(Path("corpora/smoke.json"), 32, 4, 4, 0, 7)]
     assert windows == [0, 1]
-    tiles_run = from_plain(
-        json_loads((output / "data-eval-s0.json").read_text(), dict[str, object])[
-            "run"
-        ],
-        dict[str, object],
-    )
-    assert from_plain(tiles_run["overrides"], list[str]) == [
+    scored = json_loads((output / "data-eval-s0.json").read_text(), TilesReport)
+    assert "run" in scored
+    assert scored["run"]["overrides"] == [
         f"base_dir={tmp_path}",
         "dataset.sampler_seed=0",
     ]
-    assert (tiles_run["tiles_available"], tiles_run["t_g"]) == (9, 32)
-    summary = json_loads((output / "summary.json").read_text(), dict[str, object])
-    sigma = from_plain(summary["sigma"], dict[str, object])
+    assert (scored["run"]["tiles_available"], scored["run"]["t_g"]) == (9, 32)
+    summary = json_loads((output / "summary.json").read_text(), report.Summary)
+    sigma = summary["sigma"]
     assert set(sigma) >= {"own_windows", "same_windows", "common_natural_tiles"}
-    own = _spread(sigma, "own_windows")
-    assert own["values"] == [4.0]
+    assert "own_windows" in sigma
+    assert sigma["own_windows"]["nats_per_decision_natural"]["values"] == [4.0]
 
 
 @pytest.mark.cli_python_subprocess
@@ -363,7 +358,7 @@ def test_a_failed_child_is_named_and_the_summary_still_written(
     assert report.main() == 1
     printed = capsys.readouterr().out
     assert "Failed: s0 engine_checks.py." in printed
-    summary = json_loads((output / "summary.json").read_text(), dict[str, object])
+    summary = json_loads((output / "summary.json").read_text(), report.Summary)
     # The checks crashed: criterion 4 failed, it was not left unmeasured.
     assert summary["criterion_4_engine_checks"] == {"s0": False}
     report_md = (output / "report.md").read_text()
@@ -524,14 +519,6 @@ def _tiles(nats: float) -> dict[str, object]:
     """Return a data_eval report of ``nats`` per decision over 100 decisions."""
     metric = {"nats_per_decision": nats, "bpb": nats / 1000}
     return {"metric": metric | {f"bpb/{m}": 0.01 for m in MODALITIES}, "decisions": 100}
-
-
-def _spread(parent: dict[str, object], key: str) -> dict[str, object]:
-    """Return the primary metric's spread under ``parent[key]``."""
-    return from_plain(
-        from_plain(parent[key], dict[str, object])[report.PRIMARY],
-        dict[str, object],
-    )
 
 
 def _write(path: Path, value: dict[str, object]) -> None:

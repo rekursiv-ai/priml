@@ -4276,10 +4276,6 @@ def test_run_unfused_addbmm_keeps_batched_product_sum_unfused() -> None:
     )
 
 
-def _run_unfused_op(name: str) -> OpOverload[..., object]:
-    return cast("OpOverload[..., object]", getattr(torch.ops.aten, name).default)
-
-
 def test_non_aten_run_forwards_keyword_arguments() -> None:
     with torch.library._scoped_library("bfb_run_unfused_probe", "FRAGMENT") as library:
         library.define("scale(Tensor value, float factor) -> Tensor")
@@ -4331,7 +4327,7 @@ def test_run_unfused_affine_dispatch_accepts_keyword_operands(
         operands["mat2"] = right
     if name == "_addmm_activation":
         operands["use_gelu"] = True
-    op = _run_unfused_op(name)
+    op = cast("OpOverload[..., object]", getattr(torch.ops.aten, name).default)
     if name == "addbmm":
         result = _run_unfused(op, (), operands)
         assert isinstance(result, Tensor)
@@ -4374,10 +4370,10 @@ def test_inplace_affine_alias_uses_functional_decomposition(
         bias = torch.zeros(2, dtype=torch.float64)
         right = torch.ones(4, dtype=torch.float64)
     sentinel = torch.full_like(bias, 23.0)
-    functional = _run_unfused_op(name)
+    functional = cast("OpOverload[..., object]", getattr(torch.ops.aten, name).default)
     monkeypatch.setitem(decomposition_table, functional, _FixedResult(result=sentinel))
     result = _run_unfused(
-        _run_unfused_op(name + "_"),
+        cast("OpOverload[..., object]", getattr(torch.ops.aten, (name + "_")).default),
         (bias, left, right),
         {"alpha": 0.5, "beta": 1.0},
     )
@@ -4471,7 +4467,11 @@ def test_run_unfused_routes_convolution_bias_forms(
             cudnn_enabled=False,
             allow_tf32=False,
         )
-    actual = _run_unfused(_run_unfused_op(name), arguments, options)
+    actual = _run_unfused(
+        cast("OpOverload[..., object]", getattr(torch.ops.aten, name).default),
+        arguments,
+        options,
+    )
     assert actual is result
     assert seen == [bias]
 

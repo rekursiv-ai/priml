@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import Final, Protocol, cast
 from unittest.mock import Mock
 
 import argparse
@@ -19,11 +19,8 @@ import torch
 
 from priml.baselines.speedrundit.data import PairedImageLatentDataset
 from priml.baselines.speedrundit.scripts import prepare_data
+from priml.data.arrays import load_array
 from priml.data.sources.extracted_imagenet import ExtractedImageNetSource
-
-
-if TYPE_CHECKING:
-    from numpy.typing import NDArray
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -421,7 +418,7 @@ def test_preparer_writes_paired_source_layout(
         assert prepared_image.size == (256, 256)
         assert prepared_image.mode == "RGB"
         assert prepared_image.getpixel((128, 128)) == (128, 128, 128)
-    latent = cast("NDArray[np.float32]", np.load(latent_path))
+    latent = load_array(latent_path, np.float32)
     assert latent.shape == (1, 32, 16, 16)
     manifest = json_loads(
         (output / "vae-in/dataset.json").read_text(),

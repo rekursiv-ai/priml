@@ -456,10 +456,9 @@ def leaf(value: object) -> Leaf:
     if isinstance(value, Tensor):
         return stored(value.cpu())
     if isinstance(value, np.ndarray):
-        array = cast("NDArray[np.generic]", value)
-        if array.dtype.kind in "USO":
-            return repr(cast(object, array.tolist()))
-        return stored(torch.from_numpy(np.array(array, copy=True)))
+        if value.dtype.kind in "USO":
+            return repr(cast(object, value.tolist()))
+        return stored(torch.from_numpy(np.array(value, copy=True)))
     if isinstance(value, bytes):
         return torch.frombuffer(bytearray(value), dtype=torch.uint8).clone()
     if isinstance(value, (bool, int, float, np.bool_, np.integer, np.floating)):
@@ -492,6 +491,13 @@ def rng_state(rng: np.random.Generator) -> Tensor:
 
 def _u64_words(value: int) -> tuple[int, int]:
     return value >> 64, value & ((1 << 64) - 1)
+
+
+def _load_ints(path: Path) -> NDArray[np.integer]:
+    loaded = cast(object, np.load(path))
+    assert isinstance(loaded, np.ndarray)
+    assert np.issubdtype(loaded.dtype, np.integer), f"{path}: {loaded.dtype}"
+    return loaded
 
 
 def outcome(fn: Callable[[], object]) -> Leaf:
@@ -584,10 +590,7 @@ def capture_grid_ops(b: Backend, tmp: Path) -> Capture:
         for k in (1, 2, 3):
             put(out, f"scale/{i}/{k}", b.scale_grid(grid, k))
         out[f"hash/{i}"] = b.grid_hash(grid)
-        rows = [
-            from_plain(row, list[int])
-            for row in from_plain(cast(object, grid.tolist()), list[object])
-        ]
+        rows = [from_plain(row, list[int]) for row in cast(list[object], grid.tolist())]
         put(out, f"to_np/{i}", b.to_np(rows))
     rng = np.random.default_rng(3)
     for i, flat in enumerate(random_tokens(1, 2, side=b.spec.max_grid)):
@@ -807,21 +810,21 @@ def capture_spatial_eval(b: Backend, tmp: Path) -> Capture:
     shutil.copytree(source, test_only, ignore=shutil.ignore_patterns("train"))
     edge = test_only / "test"
     # An empty grid never varies, and a full grid only fits identity.
-    inputs = load_npy(edge / "all__inputs.npy")
-    labels = load_npy(edge / "all__labels.npy")
+    inputs = _load_ints(edge / "all__inputs.npy")
+    labels = _load_ints(edge / "all__labels.npy")
     full = np.full((1, inputs.shape[1]), 5, dtype=inputs.dtype)
     blank = np.zeros((1, inputs.shape[1]), dtype=inputs.dtype)
     np.save(edge / "all__inputs.npy", np.concatenate([inputs, blank, full]))
     np.save(edge / "all__labels.npy", np.concatenate([labels, blank, full]))
     for name, extra in (("puzzle_indices", 2), ("group_indices", 2)):
-        values = load_npy(edge / f"all__{name}.npy")
+        values = _load_ints(edge / f"all__{name}.npy")
         np.save(
             edge / f"all__{name}.npy",
             np.concatenate(
                 [values, values[-1] + np.arange(1, extra + 1, dtype=values.dtype)],
             ),
         )
-    ids = load_npy(edge / "all__puzzle_identifiers.npy")
+    ids = _load_ints(edge / "all__puzzle_identifiers.npy")
     np.save(edge / "all__puzzle_identifiers.npy", np.concatenate([ids, ids[:2]]))
     for views, weights in ((2, {2: 1.0}), (4, {1: 1.0})):
         b.spatial_build(
@@ -1011,7 +1014,7 @@ def _corrupt(root: Path, target: Path, kind: str) -> Path:
             # Reference-recorded golden input.
             np.save(split / "all__spatial_tags.npy", np.ones((1, 3), dtype=np.int32))
         else:
-            groups = load_npy(split / "all__group_indices.npy")
+            groups = _load_ints(split / "all__group_indices.npy")
             np.save(
                 split / "all__group_indices.npy",
                 np.concatenate([groups[:1], groups]),
@@ -1120,11 +1123,6 @@ def put_npz(out: Capture, prefix: str, path: Path) -> None:
             out[f"{prefix}/{name}"] = leaf(loaded[name])
 
 
-def npz_array(npz: NpzFile, name: str) -> NDArray[np.generic]:
-    """Narrow an NPZ entry to the array its untyped index returns."""
-    return cast("NDArray[np.generic]", npz[name])
-
-
 def assert_payload_implied(payload: object, path: Path) -> None:
     """Check every signal payload value against its stored NPZ representation."""
     assert isinstance(payload, tuple)
@@ -1136,22 +1134,10 @@ def assert_payload_implied(payload: object, path: Path) -> None:
     )
     pass_ks = cast("tuple[int, ...]", payload[3])
     with cast("NpzFile", np.load(path)) as npz:
-        groups = from_plain(
-            cast(object, npz_array(npz, "group_table").tolist()),
-            list[str],
-        )
-        predictions = from_plain(
-            cast(object, npz_array(npz, "pred_table").tolist()),
-            list[str],
-        )
-        group_ids = from_plain(
-            cast(object, npz_array(npz, "group_id").tolist()),
-            list[int],
-        )
-        pred_ids = from_plain(
-            cast(object, npz_array(npz, "pred_id").tolist()),
-            list[int],
-        )
+        groups = cast(list[str], npz["group_table"].tolist())
+        predictions = cast(list[str], npz["pred_table"].tolist())
+        group_ids = cast(list[int], npz["group_id"].tolist())
+        pred_ids = cast(list[int], npz["pred_id"].tolist())
         assert [f"{row[0]}\t{row[1]}" for row in rows] == [
             groups[idx] for idx in group_ids
         ]
@@ -1165,33 +1151,22 @@ def assert_payload_implied(payload: object, path: Path) -> None:
         ):
             assert np.array_equal(
                 np.array([row[index] for row in rows], dtype=dtype),
-                npz_array(npz, column),
+                npz[column],
                 equal_nan=True,
             )
         assert set(grids) == set(predictions)
-        pred_rows = from_plain(
-            cast(object, npz_array(npz, "pred_n_rows").tolist()),
-            list[int],
-        )
-        pred_cols = from_plain(
-            cast(object, npz_array(npz, "pred_n_cols").tolist()),
-            list[int],
-        )
+        pred_rows = cast(list[int], npz["pred_n_rows"].tolist())
+        pred_cols = cast(list[int], npz["pred_n_cols"].tolist())
         for index, name in enumerate(predictions):
             assert np.array_equal(
                 grids[name],
-                npz_array(npz, "pred_grids")[
+                npz["pred_grids"][
                     index,
                     : pred_rows[index],
                     : pred_cols[index],
                 ],
             )
-        assert (
-            tuple(
-                from_plain(cast(object, npz_array(npz, "pass_ks").tolist()), list[int]),
-            )
-            == pass_ks
-        )
+        assert tuple(cast(list[int], npz["pass_ks"].tolist())) == pass_ks
         if steps:
             for column, index, dtype in (
                 ("converge_step", 0, np.uint8),
@@ -1201,15 +1176,10 @@ def assert_payload_implied(payload: object, path: Path) -> None:
             ):
                 assert np.array_equal(
                     np.array([step[index] for step in steps], dtype=dtype),
-                    npz_array(npz, column),
+                    npz[column],
                 )
         else:
             assert "converge_step" not in npz
-
-
-def load_npy(path: Path) -> NDArray[np.int64]:
-    """Load a small index array written by a builder."""
-    return cast("NDArray[np.int64]", np.load(path))
 
 
 def capture_metric(b: Backend, tmp: Path) -> Capture:

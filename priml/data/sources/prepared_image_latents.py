@@ -10,6 +10,8 @@ from treekle.wire import json_loads
 
 import numpy as np
 
+from priml.data.arrays import load_array
+
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -47,8 +49,13 @@ def read_image(path: Path) -> NDArray[np.uint8]:
 
     """
     if path.suffix.lower() == ".npy":
-        array = cast("NDArray[np.uint8]", np.load(path))
-        if array.dtype != np.uint8 or array.ndim < 3:
+        try:
+            array = load_array(path, np.uint8)
+        except TypeError as error:
+            raise ValueError(
+                f"Stored image {path} must be uint8 with at least three dimensions.",
+            ) from error
+        if array.ndim < 3:
             raise ValueError(
                 f"Stored image {path} must be uint8 with at least three dimensions.",
             )

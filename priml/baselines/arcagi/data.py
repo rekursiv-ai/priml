@@ -610,7 +610,7 @@ def resolve_rank(rank: int, num_replicas: int) -> tuple[int, int]:
 def _load_int32(path: Path, *, mmap: bool = False) -> NDArray[np.int32]:
     loaded = cast(object, np.load(path, mmap_mode="r" if mmap else None))
     assert isinstance(loaded, np.ndarray)
-    return cast("NDArray[np.int32]", loaded)
+    return loaded
 
 
 def _last(values: NDArray[np.integer]) -> int:

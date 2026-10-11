@@ -9,7 +9,6 @@ import argparse
 import json
 import logging
 
-from treekle import from_plain
 from treekle.wire import json_loads
 
 import numpy as np
@@ -19,12 +18,11 @@ from priml.baselines.arcagi import experiments
 from priml.baselines.arcagi.data import PuzzleData
 from priml.baselines.arcagi.scripts import prepare_data
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
+from priml.data.arrays import load_array
 from priml.lib.testing.cli import assert_help_without_docstring
 
 
 if TYPE_CHECKING:
-    from numpy.typing import NDArray
-
     from priml.baselines.arcagi.augmentation import ArcAugmentation
 
 
@@ -70,11 +68,8 @@ def test_exp005_prepares_the_spatial_views_its_directory_names(tmp_path: Path) -
         config,
         input_file_prefix=_write_source(tmp_path / "source"),
     )
-    loaded = cast(
-        "NDArray[np.int32]",
-        np.load(target / "test" / "all__spatial_tags.npy"),
-    )
-    tags = from_plain(cast(object, loaded.tolist()), list[list[int]])
+    loaded = load_array(target / "test" / "all__spatial_tags.npy", np.integer)
+    tags = cast(list[list[int]], loaded.tolist())
     assert any(tag != [1, 0, 0] for tag in tags)
 
 

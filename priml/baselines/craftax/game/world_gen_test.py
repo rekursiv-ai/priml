@@ -198,7 +198,7 @@ def test_every_floor_is_generated_exactly_once() -> None:
 
 
 def test_overworld_row_matches_constants_h() -> None:
-    overworld = _config(0)
+    overworld = cast("SmoothGenConfig", SMOOTH_LEVEL_CONFIGS.view(np.recarray)[0])
     assert overworld.default_block == BlockType.GRASS
     assert overworld.player_spawn == BlockType.GRASS
     assert list(overworld.ores) == [
@@ -221,7 +221,7 @@ def test_overworld_row_matches_constants_h() -> None:
 
 
 def test_graveyard_row_matches_constants_h() -> None:
-    graveyard = _config(5)
+    graveyard = cast("SmoothGenConfig", SMOOTH_LEVEL_CONFIGS.view(np.recarray)[5])
     assert list(graveyard.ore_requirement_blocks) == [
         BlockType.WALL,
         BlockType.GRAVE,
@@ -277,7 +277,7 @@ def test_a_dungeon_floor_is_lit_walled_by_darkness_and_laddered_on_its_paths() -
         env_state(states, 0),
         np.array([11], dtype=np.uint32),
         level,
-        _dungeon_config(0),
+        cast("DungeonConfig", DUNGEON_LEVEL_CONFIGS.view(np.recarray)[0]),
     )
     state = env_state(states, 0)
     assert np.equal(typed(states["light_map"], np.uint8)[0, level, ...], 255).all()
@@ -380,14 +380,6 @@ def test_the_pool_generates_world_k_from_seed_k_into_a_zeroed_row(
     for k in range(3):
         rest["timestep"] = 100 + k
         assert pool[k : k + 1].tobytes() == rest.tobytes(), k
-
-
-def _config(index: int) -> SmoothGenConfig:
-    return cast("SmoothGenConfig", SMOOTH_LEVEL_CONFIGS.view(np.recarray)[index])
-
-
-def _dungeon_config(index: int) -> DungeonConfig:
-    return cast("DungeonConfig", DUNGEON_LEVEL_CONFIGS.view(np.recarray)[index])
 
 
 def _recorder(cells: list[tuple[int, int, int]]) -> object:

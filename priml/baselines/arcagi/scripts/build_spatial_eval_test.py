@@ -30,10 +30,8 @@ if TYPE_CHECKING:
 def _load_int_array(path: Path) -> NDArray[np.int32] | NDArray[np.int64]:
     array = cast("object", np.load(path))
     assert isinstance(array, np.ndarray)
-    if array.dtype == np.dtype(np.int32):
-        return cast("NDArray[np.int32]", array)
-    assert array.dtype == np.dtype(np.int64)
-    return cast("NDArray[np.int64]", array)
+    assert array.dtype in (np.dtype(np.int32), np.dtype(np.int64))
+    return array
 
 
 def test_content_shape_uses_top_left_color_extent() -> None:

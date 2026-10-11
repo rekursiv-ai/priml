@@ -21,7 +21,16 @@ The run directory receives the fitted ``tokenizer.json`` and a ``metrics.json``:
 
 from dataclasses import field
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, Self, override, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Final,
+    NotRequired,
+    Protocol,
+    Self,
+    TypedDict,
+    override,
+    runtime_checkable,
+)
 
 import json
 import resource
@@ -48,6 +57,37 @@ else:
 
 MAXRSS_UNIT_BYTES: Final = 1 if sys.platform == "darwin" else 1024
 """Bytes per unit of ``ru_maxrss``: Linux reports kibibytes, macOS bytes."""
+
+
+class ProgramSize(TypedDict):
+    """A program's shape: rows, columns, and stored nonzeros."""
+
+    rows: int
+    columns: int
+    nonzeros: int
+
+
+class _SolutionMetrics(TypedDict):
+    program: ProgramSize
+    solved: ProgramSize
+    objective: float
+    infeasibility: float
+    iterations: NotRequired[int]
+    optimal: NotRequired[bool]
+
+
+class _VocabularyMetrics(TypedDict):
+    pieces: int
+    missing: NotRequired[int]
+    extra: NotRequired[int]
+
+
+class Metrics(_SolutionMetrics, _VocabularyMetrics):
+    """``metrics.json``, as the module docstring describes it."""
+
+    seconds: dict[str, float]
+    peak_gpu_bytes: int | None
+    peak_host_bytes: int
 
 
 @runtime_checkable
@@ -158,7 +198,7 @@ class MeasuredFit:
         )
         tokenizer.save(str(output / "tokenizer.json"))
         seconds = {**fit.seconds, "export": time.perf_counter() - start}
-        metrics: dict[str, object] = {
+        metrics: Metrics = {
             "seconds": {**seconds, "total": sum(seconds.values())},
             "peak_gpu_bytes": peak_gpu_bytes,
             "peak_host_bytes": peak_host_bytes,
@@ -170,7 +210,7 @@ class MeasuredFit:
         )
 
 
-def _solution_metrics(fit: Fit) -> dict[str, object]:
+def _solution_metrics(fit: Fit) -> _SolutionMetrics:
     """Measure the programs' sizes and the solution against the program as built."""
     program = fit.program.program
     primal = fit.primal.to(program.objective.dtype)
@@ -182,7 +222,7 @@ def _solution_metrics(fit: Fit) -> dict[str, object]:
             primal - primal.clamp(min=program.lower, max=program.upper),
         ],
     )
-    metrics: dict[str, object] = {
+    metrics: _SolutionMetrics = {
         "program": _size(program),
         "solved": _size(fit.solved),
         "objective": float(torch.dot(program.objective, primal)),
@@ -194,7 +234,7 @@ def _solution_metrics(fit: Fit) -> dict[str, object]:
     return metrics
 
 
-def _size(program: LinearProgram) -> dict[str, int]:
+def _size(program: LinearProgram) -> ProgramSize:
     return {
         "rows": program.num_rows,
         "columns": program.num_columns,
@@ -206,7 +246,7 @@ def _vocabulary_metrics(
     tokenizer: Tokenizer,
     *,
     reference: Path | None,
-) -> dict[str, int]:
+) -> _VocabularyMetrics:
     """Count the fitted pieces and, given a reference, how the vocabularies differ."""
     fitted = set(tokenizer.get_vocab())
     if reference is None:

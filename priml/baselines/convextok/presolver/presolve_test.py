@@ -19,10 +19,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Final, cast
 
-import json
-
 from numpy.typing import NDArray
-from treekle import from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 import pytest
@@ -45,6 +43,12 @@ from priml.baselines.convextok.presolver.presolve import (
     presolve,
 )
 from priml.baselines.convextok.program import LinearProgram, build_program
+from priml.baselines.convextok.testing import (
+    TESTDATA,
+    Candidates,
+    Corpus,
+    Pretokens,
+)
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -399,17 +403,13 @@ def test_program_beyond_int32_positions_raises() -> None:
 
 def fixture_program() -> LinearProgram:
     """Build the eight-document fixture's program from upstream's pretokens."""
-    pretokens = _read_json("pretokens.json")
+    pretokens = json_loads((TESTDATA / "pretokens.json").read_text(), Pretokens)
     return build_program(
         dict(
-            zip(
-                from_plain(pretokens.get("pretokens"), list[str], default=[]),
-                from_plain(pretokens.get("frequencies"), list[int], default=[]),
-                strict=True,
-            ),
+            zip(pretokens["pretokens"], pretokens["frequencies"], strict=True),
         ),
-        from_plain(_read_json("candidates.json").get("tokens"), list[str], default=[]),
-        budget=from_plain(_read_json("corpus.json").get("budget"), int, default=0),
+        json_loads((TESTDATA / "candidates.json").read_text(), Candidates)["tokens"],
+        budget=json_loads((TESTDATA / "corpus.json").read_text(), Corpus)["budget"],
     ).program
 
 
@@ -477,11 +477,6 @@ def _npz(path: Path) -> np.lib.npyio.NpzFile:
     loaded = cast(object, np.load(path))
     assert isinstance(loaded, np.lib.npyio.NpzFile)
     return loaded
-
-
-def _read_json(name: str) -> dict[str, object]:
-    raw = cast(object, json.loads((_TESTDATA / name).read_text()))
-    return dict(from_plain(raw, dict[str, object]))
 
 
 def _stub_trivial_core(
