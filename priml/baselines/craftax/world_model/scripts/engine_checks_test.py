@@ -13,7 +13,8 @@ import copy
 import sys
 
 from scipy import stats
-from treekle import PlainTree, from_plain, loads
+from treekle import PlainTree, from_plain
+from treekle.wire import json_loads
 
 import pytest
 import torch
@@ -222,7 +223,7 @@ def test_main_runs_the_checks_on_the_runs_models_and_the_corpus_segment(
     assert next(model.parameters()).dtype == torch.float32
     # The first validation episode long enough: episode 8, its first 4 decisions.
     assert given.segment.actions.tolist() == [8] * 4
-    results = from_plain(loads(output.read_text()), dict[str, object])
+    results = from_plain(json_loads(output.read_text()), dict[str, object])
     assert list(results) == [
         "checkpoint",
         "corpus",

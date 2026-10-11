@@ -11,7 +11,8 @@ import hashlib
 import re
 
 from PIL import Image
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 import pytest
@@ -424,7 +425,7 @@ def test_preparer_writes_paired_source_layout(
     latent = cast("NDArray[np.float32]", np.load(latent_path))
     assert latent.shape == (1, 32, 16, 16)
     manifest = from_plain(
-        loads((output / "vae-in/dataset.json").read_text()),
+        json_loads((output / "vae-in/dataset.json").read_text()),
         dict[str, object],
     )
     assert manifest["labels"] == [["00000/img-latents-00000000.npy", 0]]

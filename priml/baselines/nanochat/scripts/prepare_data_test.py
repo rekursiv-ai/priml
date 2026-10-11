@@ -43,7 +43,8 @@ from numpy.typing import NDArray
 from pyarrow import Table, parquet
 from tokenizers import decoders, models, normalizers, pre_tokenizers, processors
 from torch import Tensor
-from treekle import ReadError, from_plain, loads
+from treekle import ReadError, from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 import pyarrow as pa
@@ -109,7 +110,7 @@ _CWD: Final = Path(__file__).resolve().parent
 
 
 def _json_object(path: Path) -> dict[str, object]:
-    return from_plain(loads(path.read_text()), dict[str, object])
+    return from_plain(json_loads(path.read_text()), dict[str, object])
 
 
 def _write_shard(root: Path, index: int, documents: list[str]) -> None:

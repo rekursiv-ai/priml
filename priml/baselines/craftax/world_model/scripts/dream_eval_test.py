@@ -8,7 +8,8 @@ from typing import cast
 import dataclasses
 import sys
 
-from treekle import PlainTree, from_plain, loads
+from treekle import PlainTree, from_plain
+from treekle.wire import json_loads
 
 import pytest
 import torch
@@ -823,14 +824,14 @@ def test_evaluate_writes_statistics_episodes_and_bundles(
         permutations=4,
     )
     written = from_plain(
-        loads((output / "stats.json").read_text()),
+        json_loads((output / "stats.json").read_text()),
         dict[str, object],
     )
     assert written["schema"] == stats["schema"] == "craftax-dream-eval/v1"
     for key in ("free_running", "comparison", "continuation", "bundles", "provenance"):
         assert key in written, key
     episodes = from_plain(
-        loads((output / "episodes.json").read_text()),
+        json_loads((output / "episodes.json").read_text()),
         dict[str, object],
     )
     assert len(from_plain(episodes["episodes"], list[object])) >= 2

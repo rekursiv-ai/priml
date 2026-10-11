@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING, Protocol, cast
 import argparse
 import sys
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 
 if TYPE_CHECKING:
@@ -35,7 +36,7 @@ def read_metrics(path: Path) -> dict[str, float]:
       FileNotFoundError: If ``path`` does not exist.
 
     """
-    decoded = loads(path.read_text())
+    decoded = json_loads(path.read_text())
     return {
         k: from_plain(v, float)
         for k, v in from_plain(decoded, dict[str, object]).items()

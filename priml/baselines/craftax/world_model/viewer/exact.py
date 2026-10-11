@@ -54,7 +54,8 @@ import json
 import re
 
 from numpy.typing import NDArray
-from treekle import MutablePlainTree, from_plain, loads, mutable
+from treekle import MutablePlainTree, from_plain, mutable
+from treekle.wire import json_loads
 
 import numpy as np
 
@@ -233,7 +234,7 @@ def read_manifest[T](text: str, kind: type[T]) -> T:
       manifest: The manifest.
 
     """
-    return from_plain(_renamed(loads(text), _field_name), kind)
+    return from_plain(_renamed(json_loads(text), _field_name), kind)
 
 
 @functools.cache

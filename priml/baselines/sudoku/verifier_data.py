@@ -20,7 +20,8 @@ import json
 
 from configgle import Fig
 from torch import Tensor
-from treekle import ReadError, from_plain, loads
+from treekle import ReadError, from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 import torch
@@ -353,7 +354,7 @@ def _load_harvest(
     if not manifest_path.is_file():
         raise FileNotFoundError(f"harvest manifest not found: {manifest_path}.")
     try:
-        manifest = from_plain(loads(manifest_path.read_text()), _HarvestManifest)
+        manifest = from_plain(json_loads(manifest_path.read_text()), _HarvestManifest)
     except (json.JSONDecodeError, ReadError) as error:
         raise ValueError(
             f"invalid harvest manifest {manifest_path}: {error}",

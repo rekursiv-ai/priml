@@ -16,7 +16,8 @@ from typing import TYPE_CHECKING
 import copy
 import dataclasses
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import pytest
 import torch
@@ -160,7 +161,7 @@ def test_a_mutated_action_halts_capture(
     ):
         verifier.poll_once()
     halt = from_plain(
-        loads((verifier.config.root / "HALT.json").read_text()),
+        json_loads((verifier.config.root / "HALT.json").read_text()),
         dict[str, object],
     )
     assert halt["shard"] == "train/arm0/w0/shard-000000"
@@ -205,7 +206,7 @@ def test_a_damaged_shard_halts_capture(
     with pytest.raises(ReplayMismatchError, match=match):
         verifier.poll_once()
     halt = from_plain(
-        loads((verifier.config.root / "HALT.json").read_text()),
+        json_loads((verifier.config.root / "HALT.json").read_text()),
         dict[str, object],
     )
     assert match in str(halt["reason"])

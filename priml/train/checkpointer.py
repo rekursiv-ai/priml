@@ -66,7 +66,8 @@ else:
     dcp = lazy_import("torch.distributed.checkpoint")  # ~1050 ms; async saves need it.
 
 from configgle import Fig, Makeable
-from treekle import from_plain, loads, to_plain
+from treekle import from_plain, to_plain
+from treekle.wire import json_loads
 
 from priml.paths import resolve_working_dir, validated_output_path
 from priml.runtime import is_rank_zero
@@ -959,7 +960,7 @@ class Checkpointer:
         path = self.checkpoint_dir / "best.json"
         if not path.is_file():
             return
-        record = from_plain(loads(path.read_text()), dict[str, object])
+        record = from_plain(json_loads(path.read_text()), dict[str, object])
         if (
             from_plain(record.get("metric"), str, default="") != self.best_metric
             or from_plain(record.get("mode"), str, default="") != self.best_mode

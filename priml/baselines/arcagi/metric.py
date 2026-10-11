@@ -38,7 +38,8 @@ import struct
 
 from configgle import Fig, Makeable
 from torch import Tensor
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 import torch
@@ -202,7 +203,7 @@ class CanonicalPassK:
     def _identifier_map(self) -> list[str]:
         """``identifiers.json``: index is puzzle id."""
         return from_plain(
-            loads((self._root / "identifiers.json").read_text()),
+            json_loads((self._root / "identifiers.json").read_text()),
             list[str],
         )
 
@@ -212,7 +213,7 @@ class CanonicalPassK:
         return {
             name: from_plain(puzzle, dict[str, object])
             for name, puzzle in from_plain(
-                loads((self._root / "test_puzzles.json").read_text()),
+                json_loads((self._root / "test_puzzles.json").read_text()),
                 dict[str, object],
             ).items()
         }
@@ -222,7 +223,7 @@ class CanonicalPassK:
         """The id the loader pads with, so the two never desync."""
         meta_path = self._root / "test" / "dataset.json"
         meta = (
-            from_plain(loads(meta_path.read_text()), dict[str, object])
+            from_plain(json_loads(meta_path.read_text()), dict[str, object])
             if meta_path.is_file()
             else {}
         )

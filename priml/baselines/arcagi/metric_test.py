@@ -10,7 +10,8 @@ import json
 import logging
 
 from torch import Tensor
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 import pytest
@@ -847,7 +848,7 @@ def test_canonical_state_round_trip_preserves_ballots(tmp_path: Path) -> None:
     restored = CanonicalPassK.Config(working_dir=tmp_path, pass_ks=(1,)).make()
 
     restored.load_state_dict(
-        from_plain(loads(json.dumps(source.state_dict())), dict[str, object]),
+        from_plain(json_loads(json.dumps(source.state_dict())), dict[str, object]),
     )
 
     assert restored.state_dict() == source.state_dict()

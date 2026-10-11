@@ -42,7 +42,8 @@ import time
 import zlib
 
 from configgle import Fig
-from treekle import from_plain, loads, to_plain
+from treekle import from_plain, to_plain
+from treekle.wire import json_loads
 
 from priml.baselines.craftax.world_model import replay
 from priml.baselines.craftax.world_model.archive import (
@@ -225,7 +226,7 @@ class ReplayVerifier:
         self.verified: set[str] = (
             {
                 from_plain(
-                    from_plain(loads(text), dict[str, object])["shard"],
+                    from_plain(json_loads(text), dict[str, object])["shard"],
                     str,
                 )
                 for text in self.log.read_text().splitlines()

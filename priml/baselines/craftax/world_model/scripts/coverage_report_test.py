@@ -4,7 +4,8 @@ from pathlib import Path
 
 import sys
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import pytest
 import torch
@@ -253,7 +254,7 @@ def test_main_writes_the_report(
         ],
     )
     assert coverage_report.main() == 0
-    written = from_plain(loads(output.read_text()), dict[str, object])
+    written = from_plain(json_loads(output.read_text()), dict[str, object])
     assert written["decisions"] == 14
     assert (tmp_path / "index").is_dir()
 

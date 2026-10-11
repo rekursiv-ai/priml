@@ -18,7 +18,8 @@ import time
 from configgle import DataclassLike, Fig, Makeable
 from torch import Tensor
 from torch._inductor import config as inductor_config
-from treekle import ReadError, from_plain, loads
+from treekle import ReadError, from_plain
+from treekle.wire import json_loads
 
 import torch
 
@@ -465,7 +466,7 @@ class Reproduction:
             return {}
         try:
             progress = from_plain(
-                loads(progress_path.read_text()),
+                json_loads(progress_path.read_text()),
                 _ReproductionProgress,
             )
         except ReadError as error:
@@ -510,7 +511,7 @@ class Reproduction:
             # rolled out from a different generator must never silently train
             # this pipeline's committee.
             recorded = from_plain(
-                loads(manifest_path.read_text()),
+                json_loads(manifest_path.read_text()),
                 _HarvestSource,
             )["source_checkpoint"]
             source_checkpoint = harvest.harvest_source_checkpoint
@@ -1029,7 +1030,7 @@ class _OuterRun:
         """
         if self._tracker is None or not metrics_path.exists():
             return
-        rows = from_plain(loads(metrics_path.read_text()), dict[str, object])
+        rows = from_plain(json_loads(metrics_path.read_text()), dict[str, object])
         if rows:
             self.log(rows, step)
 

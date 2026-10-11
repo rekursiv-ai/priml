@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING, Self, TypedDict, cast, override
 
 from configgle import Fig, Makeable
 from torch import Tensor
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import torch
 import torch.distributed as dist
@@ -79,7 +80,7 @@ class PassK:
     def identifiers(self) -> list[str]:
         """Prepared identifier table, loaded only when evaluation starts."""
         return from_plain(
-            loads((self.root / "identifiers.json").read_text()),
+            json_loads((self.root / "identifiers.json").read_text()),
             list[str],
         )
 
@@ -87,7 +88,7 @@ class PassK:
     def puzzles(self) -> dict[str, object]:
         """Canonical evaluation tasks, including tasks without predictions."""
         return from_plain(
-            loads((self.root / "test_puzzles.json").read_text()),
+            json_loads((self.root / "test_puzzles.json").read_text()),
             dict[str, object],
         )
 
@@ -101,7 +102,7 @@ class PassK:
         """
         path = self.root / "test" / "dataset.json"
         metadata = (
-            from_plain(loads(path.read_text()), dict[str, object])
+            from_plain(json_loads(path.read_text()), dict[str, object])
             if path.is_file()
             else {}
         )

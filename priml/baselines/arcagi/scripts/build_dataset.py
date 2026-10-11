@@ -28,7 +28,8 @@ import subprocess
 import tempfile
 
 from numpy.typing import NDArray
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 
@@ -154,7 +155,7 @@ def arc_recipe(
 
     """
     return from_plain(
-        loads(
+        json_loads(
             json.dumps(
                 {
                     "builder": "arc",
@@ -190,7 +191,7 @@ def check_recipe(target_dir: Path, recipe: Mapping[str, object]) -> None:
                 _stamp_command(path, recipe),
             )
         return
-    stamped = from_plain(loads(path.read_text()), dict[str, object])
+    stamped = from_plain(json_loads(path.read_text()), dict[str, object])
     if stamped != recipe:
         raise ValueError(
             f"{target_dir} was built by a different recipe than requested; "
@@ -330,7 +331,7 @@ def write_arc_tree(
     test_dest = ("test", "all")
     for subset_name in subsets:
         raw_puzzles = from_plain(
-            loads(
+            json_loads(
                 Path(f"{input_file_prefix}_{subset_name}_challenges.json").read_text(),
             ),
             dict[str, object],
@@ -348,7 +349,7 @@ def write_arc_tree(
         solutions = Path(f"{input_file_prefix}_{subset_name}_solutions.json")
         if solutions.is_file():
             raw_solutions = from_plain(
-                loads(solutions.read_text()),
+                json_loads(solutions.read_text()),
                 dict[str, object],
             )
             for pid, puzzle in puzzles.items():

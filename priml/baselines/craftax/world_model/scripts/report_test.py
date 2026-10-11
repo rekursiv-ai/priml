@@ -11,7 +11,8 @@ import math
 import sys
 
 from configgle import PartialConfig
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import pytest
 import torch
@@ -175,7 +176,7 @@ def test_summarize_reads_the_names_and_seeds_of_the_runs_settings(
     )
     assert report.main() == 0
     summary = from_plain(
-        loads((tmp_path / "summary.json").read_text()),
+        json_loads((tmp_path / "summary.json").read_text()),
         dict[str, object],
     )
     assert set(from_plain(summary["criterion_4_engine_checks"], dict[str, object])) == {
@@ -327,7 +328,7 @@ def test_main_scores_a_checkpoint_and_writes_the_summary(
     assert windows == [0, 1]
     tiles_run = from_plain(
         from_plain(
-            loads((output / "data-eval-s0.json").read_text()),
+            json_loads((output / "data-eval-s0.json").read_text()),
             dict[str, object],
         )["run"],
         dict[str, object],
@@ -338,7 +339,7 @@ def test_main_scores_a_checkpoint_and_writes_the_summary(
     ]
     assert (tiles_run["tiles_available"], tiles_run["t_g"]) == (9, 32)
     summary = from_plain(
-        loads((output / "summary.json").read_text()),
+        json_loads((output / "summary.json").read_text()),
         dict[str, object],
     )
     sigma = from_plain(summary["sigma"], dict[str, object])
@@ -370,7 +371,7 @@ def test_a_failed_child_is_named_and_the_summary_still_written(
     printed = capsys.readouterr().out
     assert "Failed: s0 engine_checks.py." in printed
     summary = from_plain(
-        loads((output / "summary.json").read_text()),
+        json_loads((output / "summary.json").read_text()),
         dict[str, object],
     )
     # The checks crashed: criterion 4 failed, it was not left unmeasured.

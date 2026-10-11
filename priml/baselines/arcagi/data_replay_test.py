@@ -25,7 +25,8 @@ import math
 import shutil
 
 from torch import Tensor
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 import pytest
@@ -1023,7 +1024,7 @@ def capture_verify(b: Backend, tmp: Path) -> Capture:
     out: Capture = {}
     root = base_tree(b, tmp)
     count = len(
-        from_plain(loads((root / "identifiers.json").read_text()), list[object]),
+        from_plain(json_loads((root / "identifiers.json").read_text()), list[object]),
     )
     for name, expected in (("match", count), ("mismatch", count + 1)):
         target = tmp / f"verify-{name}"
@@ -1249,7 +1250,7 @@ def capture_metric(b: Backend, tmp: Path) -> Capture:
             restored = b.metric({**fields})
             restored.load_state_dict(
                 from_plain(
-                    loads(json.dumps(metric.state_dict())),
+                    json_loads(json.dumps(metric.state_dict())),
                     dict[str, object],
                 ),
             )
@@ -1317,7 +1318,7 @@ def capture_metric(b: Backend, tmp: Path) -> Capture:
     no_tests = tmp / "no-tests-metric"
     shutil.copytree(root, no_tests, ignore=shutil.ignore_patterns("train", "test"))
     puzzles = from_plain(
-        loads((no_tests / "test_puzzles.json").read_text()),
+        json_loads((no_tests / "test_puzzles.json").read_text()),
         dict[str, object],
     )
     first = next(iter(puzzles))

@@ -4,7 +4,8 @@ from pathlib import Path
 
 import sys
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import pytest
 import torch
@@ -104,7 +105,7 @@ def test_main_reports_each_split_and_arm_of_a_corpus(
     argv = ["data_stats.py", str(corpus), "--frame-shards", "1", "--workers", "1"]
     monkeypatch.setattr(sys, "argv", [*argv, "--output", str(output)])
     assert data_stats.main() == 0
-    result = from_plain(loads(output.read_text()), dict[str, object])
+    result = from_plain(json_loads(output.read_text()), dict[str, object])
     groups = from_plain(result["groups"], dict[str, object])
     assert sorted(groups) == ["train/arm1", "val/arm2"]
     frames = from_plain(
@@ -156,7 +157,7 @@ def test_a_replay_corpus_reports_as_its_frames(
         monkeypatch.setattr(sys, "argv", [*argv, "--output", str(output)])
         assert data_stats.main() == 0
         groups.append(
-            from_plain(loads(output.read_text()), dict[str, object])["groups"],
+            from_plain(json_loads(output.read_text()), dict[str, object])["groups"],
         )
     assert "frames" in from_plain(
         from_plain(groups[0], dict[str, object])["train/arm1"],

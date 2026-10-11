@@ -9,7 +9,8 @@ import argparse
 import json
 import logging
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 import pytest
@@ -143,7 +144,7 @@ def test_prepared_tree_loads_and_sizes_exp000(tmp_path: Path) -> None:
         input_file_prefix=_write_source(tmp_path / "source"),
     )
     identifiers = from_plain(
-        loads((directory / "identifiers.json").read_text()),
+        json_loads((directory / "identifiers.json").read_text()),
         list[str],
     )
     assert len(identifiers) > 1

@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING, Final
 import dataclasses
 import sys
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import pytest
 
@@ -110,7 +111,7 @@ def test_rank_prints_its_choice(
 ) -> None:
     monkeypatch.setattr(sys, "argv", ["games.py", "rank", str(archive)])
     assert games.main() == 0
-    printed = from_plain(loads(capsys.readouterr().out), dict[str, object])
+    printed = from_plain(json_loads(capsys.readouterr().out), dict[str, object])
     assert (
         from_plain(printed["best"], dict[str, object])["episode"]
         == "train/arm0/w0/shard-000000/1"

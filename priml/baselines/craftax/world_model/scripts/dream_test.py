@@ -6,7 +6,8 @@ from typing import ClassVar, cast
 
 import sys
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import pytest
 import torch
@@ -102,7 +103,7 @@ def test_main_writes_a_report_and_viewer_bundles(
     # The engine's rows and window are the flags' and the run's, its model float32.
     assert _Engine.built == [(2, exp_smoke().dataset.t_g, torch.float32)]
     report = from_plain(
-        loads((output / "report.json").read_text()),
+        json_loads((output / "report.json").read_text()),
         dict[str, object],
     )
     generated = from_plain(report["generated"], dict[str, object])
@@ -118,7 +119,7 @@ def test_main_writes_a_report_and_viewer_bundles(
     assert from_plain(run["decisions_generated"], int) == 6
     assert run["dtype"] == "torch.float32"
     manifest = from_plain(
-        loads((output / "bundles" / "generated-0" / "manifest.json").read_text()),
+        json_loads((output / "bundles" / "generated-0" / "manifest.json").read_text()),
         dict[str, object],
     )
     assert manifest["actions"] == 3

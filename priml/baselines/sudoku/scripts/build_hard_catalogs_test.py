@@ -11,7 +11,8 @@ import hashlib
 import io
 import zipfile
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 import pytest
@@ -76,7 +77,7 @@ def _array(path: Path) -> NDArray[np.integer]:
 def _manifest(dataset_dir: Path) -> dict[str, object]:
     """Load the published manifest."""
     return from_plain(
-        loads((dataset_dir / "manifest.json").read_text()),
+        json_loads((dataset_dir / "manifest.json").read_text()),
         dict[str, object],
     )
 
@@ -175,7 +176,7 @@ def test_build_dataset_end_to_end(tmp_path: Path) -> None:
             [int(labels.item(row, cell)) for cell in range(81)],
             [int(inputs.item(row, cell)) for cell in range(81)],
         )
-    metadata = loads((dataset_dir / "test" / "dataset.json").read_text())
+    metadata = json_loads((dataset_dir / "test" / "dataset.json").read_text())
     assert metadata == {"vocab_size": 11, "seq_len": 81}
     assert _array(dataset_dir / "train" / "all__inputs.npy").shape == (1, 81)
 

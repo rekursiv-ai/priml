@@ -7,7 +7,8 @@ from pathlib import Path
 import math
 import sys
 
-from treekle import PlainTree, from_plain, loads
+from treekle import PlainTree, from_plain
+from treekle.wire import json_loads
 
 import pytest
 
@@ -59,7 +60,7 @@ def test_main_writes_the_report(
         ["curves.py", "ref", "cand", "--output", str(output)],
     )
     assert curves.main() == 0
-    report = from_plain(loads(output.read_text()), dict[str, object])
+    report = from_plain(json_loads(output.read_text()), dict[str, object])
     candidate = from_plain(
         from_plain(report["candidates"], dict[str, object])["cand"],
         dict[str, object],

@@ -32,7 +32,8 @@ import json
 import threading
 
 from configgle import Fig
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 from priml.baselines.craftax.world_model import replay
 from priml.baselines.craftax.world_model.archive import (
@@ -161,7 +162,9 @@ def write_pool(path: Path, points: Sequence[BranchPoint]) -> None:
 
 def read_pool(path: Path) -> list[BranchPoint]:
     """Return a branch pool's points in branch order."""
-    return [_point(from_plain(loads(text), dict[str, object])) for text in path.open()]
+    return [
+        _point(from_plain(json_loads(text), dict[str, object])) for text in path.open()
+    ]
 
 
 class BranchFeeder:

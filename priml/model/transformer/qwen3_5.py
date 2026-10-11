@@ -11,7 +11,8 @@ import math
 
 from configgle import Makeable, Makes
 from torch import Tensor, nn
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import torch
 
@@ -184,7 +185,7 @@ class Qwen35(Transformer):
         """
         directory = Path(path)
         metadata = from_plain(
-            loads((directory / "config.json").read_text()),
+            json_loads((directory / "config.json").read_text()),
             dict[str, object],
         )
         config = cls.Config.from_hf(metadata)

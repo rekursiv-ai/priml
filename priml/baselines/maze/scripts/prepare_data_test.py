@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING, Final, cast
 
 import hashlib
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 import pytest
@@ -67,7 +68,7 @@ def test_training_mazes_take_eight_views_and_test_mazes_one(
                 [0, views, 2 * views],
             )
             marker = from_plain(
-                loads((directory / "dataset.json").read_text()),
+                json_loads((directory / "dataset.json").read_text()),
                 dict[str, object],
             )
             assert (marker["seq_len"], marker["vocab_size"]) == (9, 6)

@@ -5,7 +5,7 @@ from pathlib import Path
 import collections
 import sys
 
-from treekle import loads
+from treekle.wire import json_loads
 
 import pytest
 import torch
@@ -74,7 +74,7 @@ def test_pool_holds_every_point_in_each_copy_shuffled_by_its_seed(
     common = ["--corpus", str(corpus), "--arm", "2", "--floors", "5", "6"]
     common += ["--spacing", "500", "--copies", "2"]
     assert _run(monkeypatch, *common, "--output", str(tmp_path / "a.jsonl")) == 0
-    report = loads(capsys.readouterr().out)
+    report = json_loads(capsys.readouterr().out)
     assert _run(monkeypatch, *common, "--output", str(tmp_path / "b.jsonl")) == 0
     assert (
         _run(monkeypatch, *common, "--seed", "1", "--output", str(tmp_path / "c.jsonl"))

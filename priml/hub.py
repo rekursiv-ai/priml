@@ -13,7 +13,8 @@ import logging
 import os
 
 from torch import Tensor, nn
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import torch
 
@@ -315,7 +316,7 @@ def load_hf_checkpoint(
     path = Path(path_or_repo)
     if (path / "config.json").exists():
         hf_config = from_plain(
-            loads((path / "config.json").read_text()),
+            json_loads((path / "config.json").read_text()),
             dict[str, object],
         )
         return hf_config, load_local_state_dict(path)

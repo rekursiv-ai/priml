@@ -42,7 +42,8 @@ import json
 import math
 
 from torch import Tensor
-from treekle import PlainTree, from_plain, loads
+from treekle import PlainTree, from_plain
+from treekle.wire import json_loads
 
 import torch
 
@@ -71,7 +72,7 @@ def main() -> int:
     if output and output.exists():
         raise FileExistsError(f"Output {output} exists; choose a new file.")
     base, *others = (
-        from_plain(loads(Path(path).read_text()), dict[str, object])
+        from_plain(json_loads(Path(path).read_text()), dict[str, object])
         for path in flags.reports
     )
     result = compare(base, others, resamples=flags.resamples, seed=flags.seed)

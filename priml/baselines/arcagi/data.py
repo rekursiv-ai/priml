@@ -55,7 +55,8 @@ import logging
 
 from configgle import Fig
 from torch import Tensor
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 import torch
@@ -127,7 +128,7 @@ def load_puzzle_dataset(
     metadata_path = data_path / "dataset.json"
     if not metadata_path.exists():
         raise FileNotFoundError(f"Dataset metadata not found: {metadata_path}")
-    metadata = from_plain(loads(metadata_path.read_text()), dict[str, object])
+    metadata = from_plain(json_loads(metadata_path.read_text()), dict[str, object])
     logger.info("loading ARC dataset split %r from %s", split, data_path)
     inputs = _load_int32(data_path / "all__inputs.npy", mmap=True)
     labels = _load_int32(data_path / "all__labels.npy", mmap=True)
@@ -473,7 +474,7 @@ class PuzzleData:
         if config.num_puzzle_identifiers > 0:
             self._ensure_tree(config)
             path = self.dataset_dir.expanduser() / "identifiers.json"
-            actual = len(from_plain(loads(path.read_text()), list[str]))
+            actual = len(from_plain(json_loads(path.read_text()), list[str]))
             if actual != config.num_puzzle_identifiers:
                 raise ValueError(
                     f"expected {config.num_puzzle_identifiers} puzzle identifiers "

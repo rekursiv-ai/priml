@@ -21,7 +21,8 @@ import logging
 import shutil
 import tempfile
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 
@@ -175,7 +176,7 @@ def build_spatial_eval(
     group_indices = _int_list(_load(src_test / "all__group_indices.npy"))
     puzzle_ids = _int_list(_load(src_test / "all__puzzle_identifiers.npy"))
     identifiers = from_plain(
-        loads((source_dir / "identifiers.json").read_text()),
+        json_loads((source_dir / "identifiers.json").read_text()),
         list[str],
     )
 
@@ -289,14 +290,14 @@ def _spatial_recipe(
     """Return every input that changes an expansion's bytes, as JSON."""
     source_recipe = source_dir / RECIPE_FILE
     return from_plain(
-        loads(
+        json_loads(
             json.dumps(
                 {
                     "builder": "spatial_eval",
                     "source": str(source_dir),
                     "source_recipe": (
                         from_plain(
-                            loads(source_recipe.read_text()),
+                            json_loads(source_recipe.read_text()),
                             dict[str, object],
                         )
                         if source_recipe.is_file()
@@ -438,7 +439,7 @@ def _copy_dataset_json(
 ) -> None:
     """Copy a split's ``dataset.json``, restating the counts the expansion changed."""
     meta = from_plain(
-        loads((source / "dataset.json").read_text()),
+        json_loads((source / "dataset.json").read_text()),
         dict[str, object],
     )
     meta["num_puzzle_identifiers"] = num_ids

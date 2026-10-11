@@ -40,7 +40,8 @@ import json
 import logging
 
 from huggingface_hub import hf_hub_download
-from treekle import from_plain, loads, mutable
+from treekle import from_plain, mutable
+from treekle.wire import json_loads
 
 import numpy as np
 
@@ -205,7 +206,7 @@ def _write_split(
 
 def _check_existing(marker: Path, *, build: _Build) -> None:
     """Refuse a split whose recorded build differs from ``build``."""
-    recorded = from_plain(loads(marker.read_text()), dict[str, object])
+    recorded = from_plain(json_loads(marker.read_text()), dict[str, object])
     expected = mutable(asdict(build))
     if {key: recorded.get(key) for key in expected} != expected:
         raise ValueError(

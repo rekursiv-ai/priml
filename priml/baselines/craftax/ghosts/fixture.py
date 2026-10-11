@@ -46,7 +46,8 @@ import hashlib
 import itertools
 import json
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 
@@ -270,7 +271,7 @@ def expected(site: Path) -> dict[str, object]:
         that differ (``shared``); ``resolved`` expands it.
 
     """
-    manifest = from_plain(loads((site / "manifest.json").read_text()), Manifest)
+    manifest = from_plain(json_loads((site / "manifest.json").read_text()), Manifest)
     world = read_world(gzip.decompress((site / "world.bin.gz").read_bytes()))
     episodes: list[dict[str, object]] = []
     timelines: list[dict[str, object]] = []
@@ -476,7 +477,7 @@ def _group_expected(
     windows: int,
 ) -> list[dict[str, object]]:
     """Return the expected values of one group's episodes."""
-    group = from_plain(loads((directory / "episodes.json").read_text()), GroupFile)
+    group = from_plain(json_loads((directory / "episodes.json").read_text()), GroupFile)
     players = gzip.decompress((directory / "players.bin.gz").read_bytes())
     events = read_events(gzip.decompress((directory / "events.bin.gz").read_bytes()))
     runs = [

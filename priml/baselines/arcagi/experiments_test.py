@@ -17,7 +17,8 @@ import inspect
 import json
 
 from configgle import PartialConfig
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 import pytest
@@ -653,7 +654,7 @@ def test_the_loop_trains_evaluates_checkpoints_and_resumes(tmp_path: Path) -> No
     assert isinstance(loop.step, PooledActTrainStep)
     assert loop.step.global_step == 1
     metrics = from_plain(
-        loads((tmp_path / "runs/arcagi/exp_smoke/metrics.json").read_text()),
+        json_loads((tmp_path / "runs/arcagi/exp_smoke/metrics.json").read_text()),
         dict[str, object],
     )
     assert any(key.endswith("pass@2") for key in metrics)

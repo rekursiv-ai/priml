@@ -17,7 +17,8 @@ import time
 from configgle import Fig
 from tokenizers import Tokenizer, pre_tokenizers
 from torch import Tensor
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 import pytest
@@ -129,7 +130,7 @@ def test_run_writes_stage_seconds_memory_and_tokenizer(tmp_path: Path) -> None:
 
     run_dir = tmp_path / "runs/convextok/exp000"
     text = (run_dir / "metrics.json").read_text()
-    metrics = from_plain(loads(text), dict[str, object])
+    metrics = from_plain(json_loads(text), dict[str, object])
     assert text == json.dumps(metrics, indent=2) + "\n"
     seconds = from_plain(metrics["seconds"], dict[str, float])
     assert list(seconds) == [
@@ -260,7 +261,7 @@ def _measured_config(tmp_path: Path) -> MeasuredFit.Config:
 
 def _read_metrics(run_dir: Path) -> dict[str, object]:
     return from_plain(
-        loads((run_dir / "metrics.json").read_text()),
+        json_loads((run_dir / "metrics.json").read_text()),
         dict[str, object],
     )
 
@@ -273,7 +274,7 @@ def _npz(name: str) -> np.lib.npyio.NpzFile:
 
 def _read_json(name: str) -> dict[str, object]:
     return from_plain(
-        loads((_CWD / "testdata" / name).read_text()),
+        json_loads((_CWD / "testdata" / name).read_text()),
         dict[str, object],
     )
 

@@ -40,7 +40,8 @@ import dataclasses
 import json
 import operator
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 from priml.baselines.craftax.game.state import Achievement
 from priml.baselines.craftax.metric import FLOOR_NAMES
@@ -163,7 +164,7 @@ def outcomes(root: Path, *, arm: int) -> dict[int, Outcomes]:
 
 def evaluation(path: Path) -> Evaluation:
     """Return what the world choice compares of a final evaluation's ``metrics.json``."""
-    metrics = from_plain(loads(path.read_text()), dict[str, float])
+    metrics = from_plain(json_loads(path.read_text()), dict[str, float])
     return Evaluation(
         mean_return=metrics["eval/craftax_episode_return"],
         reach=tuple(metrics[f"eval/craftax_{name}"] for name in FLOOR_NAMES),

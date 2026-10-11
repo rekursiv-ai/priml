@@ -3,7 +3,8 @@
 from pathlib import Path
 from typing import cast
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import pytest
 import torch
@@ -49,7 +50,7 @@ def test_tied_score_selects_latest_checkpoint(
         assert checker.on_eval(loop, step=2, metrics={"total_loss": 0.7})
         checker.close()
         record = from_plain(
-            loads((tmp_path / "checkpoints/best.json").read_text()),
+            json_loads((tmp_path / "checkpoints/best.json").read_text()),
             dict[str, object],
         )
         assert record["step"] == 2

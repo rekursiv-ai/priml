@@ -34,7 +34,8 @@ import argparse
 import json
 import statistics
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 from priml.baselines.craftax.world_model.metric import MODALITIES
 from priml.paths import validated_output_path
@@ -57,7 +58,7 @@ def main() -> int:
     groups = {
         name: [
             headline(
-                from_plain(loads(Path(p).read_text()), dict[str, object]),
+                from_plain(json_loads(Path(p).read_text()), dict[str, object]),
                 mix=flags.mix,
             )
             for p in paths.split(",")

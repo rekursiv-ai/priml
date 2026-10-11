@@ -10,7 +10,8 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Final, Self
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import pytest
 
@@ -171,7 +172,7 @@ def test_worker_processes_match_serial_counts() -> None:
 def _read_json(name: str) -> dict[str, object]:
     return dict(
         from_plain(
-            loads((_CWD / "testdata" / name).read_text()),
+            json_loads((_CWD / "testdata" / name).read_text()),
             dict[str, object],
         ),
     )

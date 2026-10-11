@@ -16,7 +16,8 @@ import inspect
 import io
 import logging
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 import pytest
@@ -133,7 +134,7 @@ def test_tokens_land_in_the_documented_vocabulary(
     unique_labels = cast(list[int], np.unique(labels).tolist())
     assert set(unique_labels) <= set(range(2, 11))  # Solved: no empties.
     metadata = from_plain(
-        loads((out / "train" / "dataset.json").read_text()),
+        json_loads((out / "train" / "dataset.json").read_text()),
         dict[str, object],
     )
     assert (metadata["vocab_size"], metadata["seq_len"]) == (11, 81)
@@ -330,7 +331,7 @@ def test_a_non_default_spec_is_what_the_build_writes(
         spec=spec,
     )
     metadata = from_plain(
-        loads((out / "train" / "dataset.json").read_text()),
+        json_loads((out / "train" / "dataset.json").read_text()),
         dict[str, object],
     )
     assert metadata["vocab_size"] == 12

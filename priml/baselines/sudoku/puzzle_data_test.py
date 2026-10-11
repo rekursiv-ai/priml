@@ -8,7 +8,8 @@ from unittest.mock import Mock, patch
 import json
 
 from torch import Tensor
-from treekle import ReadError, from_plain, loads
+from treekle import ReadError, from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 import pytest
@@ -852,9 +853,9 @@ def test_loader_preserves_mmap_and_metadata_contract(
     np.save(split / "all__labels.npy", source_labels)
 
     load = Mock(wraps=np.load)
-    parse_metadata = Mock(wraps=loads)
+    parse_metadata = Mock(wraps=json_loads)
     monkeypatch.setattr(np, "load", load)
-    monkeypatch.setattr(puzzle_data, "loads", parse_metadata)
+    monkeypatch.setattr(puzzle_data, "json_loads", parse_metadata)
 
     data = load_puzzle_dataset(tmp_path, "test", max_samples=5)
 

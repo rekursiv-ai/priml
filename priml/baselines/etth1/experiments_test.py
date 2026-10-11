@@ -6,7 +6,8 @@ from typing import cast
 import copy
 
 from torch import Tensor
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import pytest
 import torch
@@ -249,7 +250,7 @@ def test_terminal_step_saves_validated_checkpoint(tmp_path: Path, resume: bool) 
     assert loop.step.global_step == 5
     assert loop.current_epoch == 1
     selector = from_plain(
-        loads((tmp_path / "checkpoints" / "best.json").read_text()),
+        json_loads((tmp_path / "checkpoints" / "best.json").read_text()),
         dict[str, object],
     )
     assert selector["step"] == 5

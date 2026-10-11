@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from treekle import loads
+from treekle.wire import json_loads
 
 import numpy as np
 import pytest
@@ -106,7 +106,7 @@ _LAYOUT_GOLDEN = _CWD.parent / "testdata" / "state_layout.json"
 
 
 def _layout(struct: str) -> dict[str, tuple[int, int]]:
-    golden = loads(_LAYOUT_GOLDEN.read_text(encoding="utf-8"))
+    golden = json_loads(_LAYOUT_GOLDEN.read_text(encoding="utf-8"))
     assert isinstance(golden, dict)
     table = golden[struct]
     assert isinstance(table, dict)
@@ -121,7 +121,7 @@ def _layout(struct: str) -> dict[str, tuple[int, int]]:
 
 
 def _sizeof(struct: str) -> int:
-    golden = loads(_LAYOUT_GOLDEN.read_text(encoding="utf-8"))
+    golden = json_loads(_LAYOUT_GOLDEN.read_text(encoding="utf-8"))
     assert isinstance(golden, dict)
     sizes = golden["sizeof"]
     assert isinstance(sizes, dict)

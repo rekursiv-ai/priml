@@ -13,7 +13,8 @@ import json
 import math
 import sys
 
-from treekle import PlainTree, ReadError, from_plain, loads
+from treekle import PlainTree, ReadError, from_plain
+from treekle.wire import json_loads
 
 import pytest
 import torch
@@ -905,7 +906,7 @@ def test_main_writes_the_report_of_the_runs_measurement(
             ),
         ),
     ]
-    report = from_plain(loads(output.read_text()), dict[str, object])
+    report = from_plain(json_loads(output.read_text()), dict[str, object])
     assert report["schema"] == fidelity.SCHEMA
     assert report["summary"] == {"nll/nats_per_decision": 1.5}
     provenance = from_plain(report["provenance"], dict[str, object])

@@ -5,7 +5,8 @@ from pathlib import Path
 import json
 import sys
 
-from treekle import PlainTree, from_plain, loads
+from treekle import PlainTree, from_plain
+from treekle.wire import json_loads
 
 import pytest
 
@@ -76,7 +77,7 @@ def test_main_prints_a_flagged_table_and_writes_the_comparison(
     table = capsys.readouterr().out
     (line,) = [row for row in table.splitlines() if row.startswith("nats ")]
     assert "*" in line
-    written = from_plain(loads(output.read_text()), dict[str, object])
+    written = from_plain(json_loads(output.read_text()), dict[str, object])
     arm = from_plain(
         from_plain(written["nats"], dict[str, object])["arm"],
         dict[str, object],

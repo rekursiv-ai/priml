@@ -56,7 +56,8 @@ import subprocess
 import sys
 import time
 
-from treekle import from_plain, loads, to_plain
+from treekle import from_plain, to_plain
+from treekle.wire import json_loads
 
 import torch
 
@@ -445,7 +446,7 @@ def _settings(
             (flags.checkpoints, flags.names, flags.sampler_seeds, flags.window_seeds),
         ):
             parser.error("--summarize reads the checkpoints and seeds from OUTPUT.")
-        settings = _object(loads((output / "settings.json").read_text()))
+        settings = _object(json_loads((output / "settings.json").read_text()))
         names = from_plain(settings["names"], list[str])
         text = from_plain(settings["sampler_seeds"], str)
         seeds = _integers(text) or [0] * len(names)
@@ -811,7 +812,7 @@ def _read(path: Path) -> dict[str, object] | None:
     """Return a step's JSON object, or None when the step did not write it."""
     if not path.exists():
         return None
-    return _object(loads(path.read_text()))
+    return _object(json_loads(path.read_text()))
 
 
 def _object(value: object) -> dict[str, object]:

@@ -9,7 +9,8 @@ import functools
 import json
 import sys
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import pytest
 
@@ -167,7 +168,7 @@ def test_main_prints_and_writes_the_comparison(
         ["fidelity_compare.py", *paths, "--output", str(output), "--resamples", "8"],
     )
     assert fidelity_compare.main() == 0
-    written = from_plain(loads(output.read_text()), dict[str, object])
+    written = from_plain(json_loads(output.read_text()), dict[str, object])
     action = _entry(written, "teacher_forced", "action", "other")
     assert action["value"] == pytest.approx(1 / 6)
     printed = capsys.readouterr().out

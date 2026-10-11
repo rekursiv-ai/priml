@@ -36,7 +36,8 @@ import math
 from configgle import Fig
 from numpy.typing import NDArray
 from torch import Tensor
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 import torch
@@ -297,7 +298,7 @@ def _load_split(dataset_dir: Path, split: str) -> _SudokuSplit:
             "`uv --quiet run --frozen python -m "
             "priml.baselines.sudoku.scripts.prepare_data`.",
         )
-    metadata = from_plain(loads(metadata_path.read_text()), dict[str, object])
+    metadata = from_plain(json_loads(metadata_path.read_text()), dict[str, object])
     logger.info("loading sudoku split %r from %s", split, path)
     inputs_array = cast(NDArray[np.int64], np.load(path / "all__inputs.npy"))
     labels_array = cast(NDArray[np.int64], np.load(path / "all__labels.npy"))

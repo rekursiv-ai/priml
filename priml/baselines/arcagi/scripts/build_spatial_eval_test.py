@@ -8,7 +8,8 @@ from unittest.mock import Mock
 
 import logging
 
-from treekle import ReadError, from_plain, loads
+from treekle import ReadError, from_plain
+from treekle.wire import json_loads
 
 import numpy as np
 import pytest
@@ -401,7 +402,7 @@ def test_expanded_metadata_counts_the_expanded_puzzles(tmp_path: Path) -> None:
         spec=spec,
     )
     meta = from_plain(
-        loads((target / "test" / "dataset.json").read_text()),
+        json_loads((target / "test" / "dataset.json").read_text()),
         dict[str, object],
     )
     ids = _load_int_array(target / "test" / "all__puzzle_identifiers.npy")

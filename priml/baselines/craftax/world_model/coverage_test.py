@@ -7,7 +7,8 @@ from typing import cast
 import dataclasses
 import json
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import pytest
 import torch
@@ -302,7 +303,7 @@ def _loose(
         max_new_rate=max_new_rate,
         increment_decisions=increment_decisions,
     )
-    return from_plain(loads(json.dumps(result)), dict[str, object])
+    return from_plain(json_loads(json.dumps(result)), dict[str, object])
 
 
 def _floor(result: dict[str, object], floor: int) -> dict[str, object]:
