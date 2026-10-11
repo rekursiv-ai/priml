@@ -102,10 +102,7 @@ def test_main_writes_a_report_and_viewer_bundles(
     assert dream.main() == 0
     # The engine's rows and window are the flags' and the run's, its model float32.
     assert _Engine.built == [(2, exp_smoke().dataset.t_g, torch.float32)]
-    report = from_plain(
-        json_loads((output / "report.json").read_text()),
-        dict[str, object],
-    )
+    report = json_loads((output / "report.json").read_text(), dict[str, object])
     generated = from_plain(report["generated"], dict[str, object])
     real = from_plain(report["real"], dict[str, object])
     assert from_plain(generated["episodes"], int) == 2
@@ -118,8 +115,8 @@ def test_main_writes_a_report_and_viewer_bundles(
     run = from_plain(report["run"], dict[str, object])
     assert from_plain(run["decisions_generated"], int) == 6
     assert run["dtype"] == "torch.float32"
-    manifest = from_plain(
-        json_loads((output / "bundles" / "generated-0" / "manifest.json").read_text()),
+    manifest = json_loads(
+        (output / "bundles" / "generated-0" / "manifest.json").read_text(),
         dict[str, object],
     )
     assert manifest["actions"] == 3

@@ -60,7 +60,7 @@ def test_main_writes_the_report(
         ["curves.py", "ref", "cand", "--output", str(output)],
     )
     assert curves.main() == 0
-    report = from_plain(json_loads(output.read_text()), dict[str, object])
+    report = json_loads(output.read_text(), dict[str, object])
     candidate = from_plain(
         from_plain(report["candidates"], dict[str, object])["cand"],
         dict[str, object],

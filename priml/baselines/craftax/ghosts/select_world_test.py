@@ -135,7 +135,7 @@ def test_main_writes_the_tables_and_the_chosen_world(
         ],
     )
     assert select_world.main() == 0
-    written = from_plain(json_loads(output.read_text()), dict[str, object])
+    written = json_loads(output.read_text(), dict[str, object])
     assert written["world"] == 7
     tiers = from_plain(written["tiers"], dict[str, dict[str, object]])
     assert from_plain(tiers["high"]["worlds"], dict[str, dict[str, object]])["7"][

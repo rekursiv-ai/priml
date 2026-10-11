@@ -90,10 +90,7 @@ _CENTRE: Final = MAP_SIZE // 2
 
 
 def test_every_file_matches_its_manifest_digest() -> None:
-    manifest = from_plain(
-        json_loads((_FIXTURE / "site" / "manifest.json").read_text()),
-        Manifest,
-    )
+    manifest = json_loads((_FIXTURE / "site" / "manifest.json").read_text(), Manifest)
     for name, digest in manifest.files.items():
         data = (_FIXTURE / "site" / name).read_bytes()
         assert hashlib.sha256(data).hexdigest() == digest, name
@@ -103,7 +100,7 @@ def test_every_file_matches_its_manifest_digest() -> None:
 def test_each_fixture_file_is_what_the_encoders_write_of_its_contents() -> None:
     site = _FIXTURE / "site"
     text = (site / "manifest.json").read_text()
-    manifest = from_plain(json_loads(text), Manifest)
+    manifest = json_loads(text, Manifest)
     assert manifest.format == FORMAT
     assert text == json.dumps(dataclasses.asdict(manifest), indent=1) + "\n"
     assert {path.relative_to(site).as_posix() for path in site.rglob("*.*")} == {
@@ -113,7 +110,7 @@ def test_each_fixture_file_is_what_the_encoders_write_of_its_contents() -> None:
     for name in manifest.files:
         data = (site / name).read_bytes()
         if name.endswith(".json"):
-            group = from_plain(json_loads(data.decode()), GroupFile)
+            group = json_loads(data.decode(), GroupFile)
             line = json.dumps(dataclasses.asdict(group), separators=(",", ":"))
             assert data.decode() == line + "\n", name
             continue
@@ -128,10 +125,7 @@ def test_the_expected_values_are_what_the_site_decodes_to() -> None:
 
 
 def test_the_fixture_crosses_floors_both_ways() -> None:
-    manifest = from_plain(
-        json_loads((_FIXTURE / "site" / "manifest.json").read_text()),
-        Manifest,
-    )
+    manifest = json_loads((_FIXTURE / "site" / "manifest.json").read_text(), Manifest)
     tier, _ = manifest.tiers
     every, short = tier.sets
     assert [group.count for group in every.groups] == [3]
@@ -145,18 +139,15 @@ def test_the_fixture_crosses_floors_both_ways() -> None:
 
 
 def test_the_fixture_plays_its_pinned_win_unbroken_and_compresses_the_other() -> None:
-    manifest = from_plain(
-        json_loads((_FIXTURE / "site" / "manifest.json").read_text()),
-        Manifest,
-    )
+    manifest = json_loads((_FIXTURE / "site" / "manifest.json").read_text(), Manifest)
     _, tier = manifest.tiers
     every, _, wins = tier.sets
     assert (tier.name, wins.name, wins.counts) == ("fixture-wins", "wins", (2,))
     assert wins.time_map is not None
     assert wins.time_map.unbroken == 0
     (group,) = wins.groups
-    entries = from_plain(
-        json_loads((_FIXTURE / "site" / group.path / "episodes.json").read_text()),
+    entries = json_loads(
+        (_FIXTURE / "site" / group.path / "episodes.json").read_text(),
         GroupFile,
     ).episodes
     assert [e.sampling_seed for e in entries] == [str(FIXTURE_UNBROKEN), "0"]
@@ -179,10 +170,9 @@ def test_the_fixture_plays_its_pinned_win_unbroken_and_compresses_the_other() ->
 def test_shared_entries_resolve_to_what_the_site_decodes_each_to() -> None:
     episodes = _expected_episodes()
     stored = from_plain(
-        from_plain(
-            json_loads((_FIXTURE / "expected.json").read_text()),
-            dict[str, object],
-        )["episodes"],
+        json_loads((_FIXTURE / "expected.json").read_text(), dict[str, object])[
+            "episodes"
+        ],
         list[dict[str, object]],
     )
     # The repeats are references, and each expands to a full entry.
@@ -307,7 +297,7 @@ def test_the_minted_site_has_both_tiers_by_the_fixtures_rules(
     with eager(world=tiny_world):
         write_fixture(tmp_path, world_seed=1)
     site = tmp_path / "site"
-    manifest = from_plain(json_loads((site / "manifest.json").read_text()), Manifest)
+    manifest = json_loads((site / "manifest.json").read_text(), Manifest)
     assert sorted(set(wins)) == sorted({Achievement.DEFEAT_NECROMANCER, FIXTURE_WIN})
     assert [t.name for t in manifest.tiers] == ["fixture", "fixture-wins"]
     assert (manifest.counts, manifest.short_decisions) == ((3,), 160)
@@ -317,8 +307,8 @@ def test_the_minted_site_has_both_tiers_by_the_fixtures_rules(
     *_, won = manifest.tiers[1].sets
     assert won.time_map is not None
     assert (won.time_map.rule, won.time_map.unbroken) == (FIXTURE_TIME_RULE, 0)
-    entries = from_plain(
-        json_loads((site / won.groups[0].path / "episodes.json").read_text()),
+    entries = json_loads(
+        (site / won.groups[0].path / "episodes.json").read_text(),
         GroupFile,
     ).episodes
     assert [e.sampling_seed for e in entries] == [str(FIXTURE_UNBROKEN), "0"]
@@ -438,10 +428,7 @@ def _extracted(record: Record, *, ordinal: int, win: int, wins: list[int]) -> Gh
 
 
 def _expected_episodes() -> list[dict[str, object]]:
-    data = from_plain(
-        json_loads((_FIXTURE / "expected.json").read_text()),
-        dict[str, object],
-    )
+    data = json_loads((_FIXTURE / "expected.json").read_text(), dict[str, object])
     return resolved(from_plain(data["episodes"], list[dict[str, object]]))
 
 

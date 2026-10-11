@@ -21,7 +21,6 @@ import logging
 import shutil
 import tempfile
 
-from treekle import from_plain
 from treekle.wire import json_loads
 
 import numpy as np
@@ -175,10 +174,7 @@ def build_spatial_eval(
     puzzle_indices = _int_list(_load(src_test / "all__puzzle_indices.npy"))
     group_indices = _int_list(_load(src_test / "all__group_indices.npy"))
     puzzle_ids = _int_list(_load(src_test / "all__puzzle_identifiers.npy"))
-    identifiers = from_plain(
-        json_loads((source_dir / "identifiers.json").read_text()),
-        list[str],
-    )
+    identifiers = json_loads((source_dir / "identifiers.json").read_text(), list[str])
 
     new_inputs: list[NDArray[np.int64]] = []
     new_labels: list[NDArray[np.int64]] = []
@@ -289,31 +285,26 @@ def _spatial_recipe(
 ) -> dict[str, object]:
     """Return every input that changes an expansion's bytes, as JSON."""
     source_recipe = source_dir / RECIPE_FILE
-    return from_plain(
-        json_loads(
-            json.dumps(
-                {
-                    "builder": "spatial_eval",
-                    "source": str(source_dir),
-                    "source_recipe": (
-                        from_plain(
-                            json_loads(source_recipe.read_text()),
-                            dict[str, object],
-                        )
-                        if source_recipe.is_file()
-                        else None
-                    ),
-                    "spatial_views": spatial_views,
-                    "scale_weights": [
-                        [scale, weight]
-                        for scale, weight in normalize_scale_weights(
-                            scale_weights,
-                        ).items()
-                    ],
-                    "seed": seed,
-                    "spec": dataclasses.asdict(spec),
-                },
-            ),
+    return json_loads(
+        json.dumps(
+            {
+                "builder": "spatial_eval",
+                "source": str(source_dir),
+                "source_recipe": (
+                    json_loads(source_recipe.read_text(), dict[str, object])
+                    if source_recipe.is_file()
+                    else None
+                ),
+                "spatial_views": spatial_views,
+                "scale_weights": [
+                    [scale, weight]
+                    for scale, weight in normalize_scale_weights(
+                        scale_weights,
+                    ).items()
+                ],
+                "seed": seed,
+                "spec": dataclasses.asdict(spec),
+            },
         ),
         dict[str, object],
     )
@@ -438,10 +429,7 @@ def _copy_dataset_json(
     num_examples: int = 0,
 ) -> None:
     """Copy a split's ``dataset.json``, restating the counts the expansion changed."""
-    meta = from_plain(
-        json_loads((source / "dataset.json").read_text()),
-        dict[str, object],
-    )
+    meta = json_loads((source / "dataset.json").read_text(), dict[str, object])
     meta["num_puzzle_identifiers"] = num_ids
     if num_puzzles is not None:
         meta["total_puzzles"] = num_puzzles

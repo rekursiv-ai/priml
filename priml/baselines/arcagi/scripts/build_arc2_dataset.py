@@ -29,7 +29,6 @@ import fcntl
 import json
 import logging
 
-from treekle import from_plain
 from treekle.wire import json_loads
 
 from priml.baselines.arcagi.augmentation import (
@@ -214,7 +213,7 @@ def _params_match(root: Path, want: dict[str, object]) -> bool:
     if not path.is_file():
         return False
     try:
-        got = from_plain(json_loads(path.read_text()), dict[str, object])
+        got = json_loads(path.read_text(), dict[str, object])
     except (json.JSONDecodeError, TypeError):
         return False
     if got != want:

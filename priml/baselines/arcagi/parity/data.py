@@ -405,7 +405,7 @@ def _load_split(dataset_dir: Path, *, split: str) -> _Split:
     metadata_path = path / "dataset.json"
     if not metadata_path.is_file():
         raise FileNotFoundError(f"no prepared ARC data at {path}.")
-    metadata = from_plain(json_loads(metadata_path.read_text()), dict[str, object])
+    metadata = json_loads(metadata_path.read_text(), dict[str, object])
     logger.info("loading ARC split %r from %s", split, path)
     return {
         "inputs": torch.from_numpy(_npy(path / "all__inputs.npy")).to(torch.int32),

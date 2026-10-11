@@ -49,8 +49,8 @@ def test_tied_score_selects_latest_checkpoint(
         assert checker.on_eval(loop, step=1, metrics={"total_loss": 0.7})
         assert checker.on_eval(loop, step=2, metrics={"total_loss": 0.7})
         checker.close()
-        record = from_plain(
-            json_loads((tmp_path / "checkpoints/best.json").read_text()),
+        record = json_loads(
+            (tmp_path / "checkpoints/best.json").read_text(),
             dict[str, object],
         )
         assert record["step"] == 2

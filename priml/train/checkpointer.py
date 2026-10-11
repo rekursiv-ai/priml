@@ -960,7 +960,7 @@ class Checkpointer:
         path = self.checkpoint_dir / "best.json"
         if not path.is_file():
             return
-        record = from_plain(json_loads(path.read_text()), dict[str, object])
+        record = json_loads(path.read_text(), dict[str, object])
         if (
             from_plain(record.get("metric"), str, default="") != self.best_metric
             or from_plain(record.get("mode"), str, default="") != self.best_mode

@@ -202,18 +202,15 @@ class CanonicalPassK:
     @cached_property
     def _identifier_map(self) -> list[str]:
         """``identifiers.json``: index is puzzle id."""
-        return from_plain(
-            json_loads((self._root / "identifiers.json").read_text()),
-            list[str],
-        )
+        return json_loads((self._root / "identifiers.json").read_text(), list[str])
 
     @cached_property
     def _test_puzzles(self) -> dict[str, dict[str, object]]:
         """Scored tasks from ``test_puzzles.json``."""
         return {
             name: from_plain(puzzle, dict[str, object])
-            for name, puzzle in from_plain(
-                json_loads((self._root / "test_puzzles.json").read_text()),
+            for name, puzzle in json_loads(
+                (self._root / "test_puzzles.json").read_text(),
                 dict[str, object],
             ).items()
         }
@@ -223,7 +220,7 @@ class CanonicalPassK:
         """The id the loader pads with, so the two never desync."""
         meta_path = self._root / "test" / "dataset.json"
         meta = (
-            from_plain(json_loads(meta_path.read_text()), dict[str, object])
+            json_loads(meta_path.read_text(), dict[str, object])
             if meta_path.is_file()
             else {}
         )

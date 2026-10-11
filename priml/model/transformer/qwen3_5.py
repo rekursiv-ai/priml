@@ -184,8 +184,8 @@ class Qwen35(Transformer):
 
         """
         directory = Path(path)
-        metadata = from_plain(
-            json_loads((directory / "config.json").read_text()),
+        metadata = json_loads(
+            (directory / "config.json").read_text(),
             dict[str, object],
         )
         config = cls.Config.from_hf(metadata)

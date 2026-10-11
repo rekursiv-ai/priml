@@ -303,7 +303,7 @@ def _loose(
         max_new_rate=max_new_rate,
         increment_decisions=increment_decisions,
     )
-    return from_plain(json_loads(json.dumps(result)), dict[str, object])
+    return json_loads(json.dumps(result), dict[str, object])
 
 
 def _floor(result: dict[str, object], floor: int) -> dict[str, object]:

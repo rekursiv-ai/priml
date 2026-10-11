@@ -58,7 +58,7 @@ def main() -> int:
     groups = {
         name: [
             headline(
-                from_plain(json_loads(Path(p).read_text()), dict[str, object]),
+                json_loads(Path(p).read_text(), dict[str, object]),
                 mix=flags.mix,
             )
             for p in paths.split(",")

@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, TypedDict, cast
 
 import math
 
-from treekle import from_plain
 from treekle.wire import json_loads
 
 import numpy as np
@@ -33,7 +32,7 @@ def read_labels(manifest: Path) -> dict[str, int]:
       labels: Class labels keyed by normalized latent names.
 
     """
-    payload = from_plain(json_loads(manifest.read_bytes()), _LabelManifest)
+    payload = json_loads(manifest.read_bytes(), _LabelManifest)
     return {name.replace("\\", "/"): label for name, label in payload["labels"]}
 
 

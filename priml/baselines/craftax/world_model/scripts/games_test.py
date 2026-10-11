@@ -111,7 +111,7 @@ def test_rank_prints_its_choice(
 ) -> None:
     monkeypatch.setattr(sys, "argv", ["games.py", "rank", str(archive)])
     assert games.main() == 0
-    printed = from_plain(json_loads(capsys.readouterr().out), dict[str, object])
+    printed = json_loads(capsys.readouterr().out, dict[str, object])
     assert (
         from_plain(printed["best"], dict[str, object])["episode"]
         == "train/arm0/w0/shard-000000/1"

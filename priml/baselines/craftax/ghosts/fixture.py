@@ -271,7 +271,7 @@ def expected(site: Path) -> dict[str, object]:
         that differ (``shared``); ``resolved`` expands it.
 
     """
-    manifest = from_plain(json_loads((site / "manifest.json").read_text()), Manifest)
+    manifest = json_loads((site / "manifest.json").read_text(), Manifest)
     world = read_world(gzip.decompress((site / "world.bin.gz").read_bytes()))
     episodes: list[dict[str, object]] = []
     timelines: list[dict[str, object]] = []
@@ -477,7 +477,7 @@ def _group_expected(
     windows: int,
 ) -> list[dict[str, object]]:
     """Return the expected values of one group's episodes."""
-    group = from_plain(json_loads((directory / "episodes.json").read_text()), GroupFile)
+    group = json_loads((directory / "episodes.json").read_text(), GroupFile)
     players = gzip.decompress((directory / "players.bin.gz").read_bytes())
     events = read_events(gzip.decompress((directory / "events.bin.gz").read_bytes()))
     runs = [

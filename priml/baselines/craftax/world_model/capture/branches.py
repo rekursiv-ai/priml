@@ -162,9 +162,7 @@ def write_pool(path: Path, points: Sequence[BranchPoint]) -> None:
 
 def read_pool(path: Path) -> list[BranchPoint]:
     """Return a branch pool's points in branch order."""
-    return [
-        _point(from_plain(json_loads(text), dict[str, object])) for text in path.open()
-    ]
+    return [_point(json_loads(text, dict[str, object])) for text in path.open()]
 
 
 class BranchFeeder:

@@ -823,17 +823,11 @@ def test_evaluate_writes_statistics_episodes_and_bundles(
         resamples=4,
         permutations=4,
     )
-    written = from_plain(
-        json_loads((output / "stats.json").read_text()),
-        dict[str, object],
-    )
+    written = json_loads((output / "stats.json").read_text(), dict[str, object])
     assert written["schema"] == stats["schema"] == "craftax-dream-eval/v1"
     for key in ("free_running", "comparison", "continuation", "bundles", "provenance"):
         assert key in written, key
-    episodes = from_plain(
-        json_loads((output / "episodes.json").read_text()),
-        dict[str, object],
-    )
+    episodes = json_loads((output / "episodes.json").read_text(), dict[str, object])
     assert len(from_plain(episodes["episodes"], list[object])) >= 2
     bundles = sorted(p.name for p in (output / "bundles").iterdir())
     assert len(bundles) >= 2

@@ -109,10 +109,6 @@ VOCAB: Final = 300
 _CWD: Final = Path(__file__).resolve().parent
 
 
-def _json_object(path: Path) -> dict[str, object]:
-    return from_plain(json_loads(path.read_text()), dict[str, object])
-
-
 def _write_shard(root: Path, index: int, documents: list[str]) -> None:
     """Write one parquet shard holding the given documents."""
     parquet.write_table(
@@ -408,7 +404,7 @@ def test_fit_vocabulary_records_and_reuses_exact_artifacts(
     assert token_bytes[-len(RESERVED_TOKENS) :].tobytes() == bytes(
         np.dtype(np.int32).itemsize * len(RESERVED_TOKENS),
     )
-    recipe = _json_object(recipe_path)
+    recipe = json_loads(recipe_path.read_text(), dict[str, object])
     assert recipe_path.read_text() == json.dumps(recipe, sort_keys=True)
     assert recipe == {
         "vocab_size": 280,
@@ -454,7 +450,7 @@ def test_fit_vocabulary_records_and_reuses_exact_artifacts(
         train_chars=25,
         doc_cap=7,
     )
-    updated = _json_object(recipe_path)
+    updated = json_loads(recipe_path.read_text(), dict[str, object])
     assert updated["train_chars"] == 25
     updated_token_bytes = np.asarray(_load_array(table_path), dtype=np.int32)
     assert updated["token_bytes_sha256"] == token_bytes_fingerprint(updated_token_bytes)
@@ -675,7 +671,10 @@ def test_the_recorded_fingerprint_matches_the_table_written(corpus: Path) -> Non
         NDArray[np.int32],
         np.load(directory / "token_bytes.npy"),
     )
-    recipe = _json_object(directory / "tokenizer_recipe.json")
+    recipe = json_loads(
+        (directory / "tokenizer_recipe.json").read_text(),
+        dict[str, object],
+    )
     assert recipe["token_bytes_sha256"] == token_bytes_fingerprint(table)
 
 
@@ -701,7 +700,10 @@ def test_the_recipe_records_what_the_vocabulary_was_fitted_on(corpus: Path) -> N
     would then mean something else.
     """
     _prepare(corpus)
-    recipe = _json_object(corpus / "tokenizer" / "tokenizer_recipe.json")
+    recipe = json_loads(
+        (corpus / "tokenizer" / "tokenizer_recipe.json").read_text(),
+        dict[str, object],
+    )
     assert recipe["vocab_size"] == VOCAB
     assert recipe["train_chars"] == 1_000
     assert recipe["doc_cap"] == 100
@@ -712,7 +714,10 @@ def test_the_recipe_records_what_the_vocabulary_was_fitted_on(corpus: Path) -> N
 def test_the_validation_shard_is_excluded_from_the_fit(corpus: Path) -> None:
     """The vocabulary must not be fitted on the text it will be scored on."""
     _prepare(corpus, num_train_shards=1)
-    recipe = _json_object(corpus / "tokenizer" / "tokenizer_recipe.json")
+    recipe = json_loads(
+        (corpus / "tokenizer" / "tokenizer_recipe.json").read_text(),
+        dict[str, object],
+    )
     assert "shard_00001.parquet" not in cast(list[str], recipe["shards"])
 
 
@@ -724,9 +729,15 @@ def test_a_vocabulary_fitted_under_other_flags_is_refitted(corpus: Path) -> None
     vocabulary gets one instead of an instruction to delete a file.
     """
     _prepare(corpus)
-    before = _json_object(corpus / "tokenizer" / "tokenizer_recipe.json")
+    before = json_loads(
+        (corpus / "tokenizer" / "tokenizer_recipe.json").read_text(),
+        dict[str, object],
+    )
     _prepare(corpus, tokenizer_train_chars=2_000)
-    after = _json_object(corpus / "tokenizer" / "tokenizer_recipe.json")
+    after = json_loads(
+        (corpus / "tokenizer" / "tokenizer_recipe.json").read_text(),
+        dict[str, object],
+    )
     assert before["train_chars"] != after["train_chars"]
     assert after["train_chars"] == 2_000
 

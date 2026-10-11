@@ -76,10 +76,7 @@ def _array(path: Path) -> NDArray[np.integer]:
 
 def _manifest(dataset_dir: Path) -> dict[str, object]:
     """Load the published manifest."""
-    return from_plain(
-        json_loads((dataset_dir / "manifest.json").read_text()),
-        dict[str, object],
-    )
+    return json_loads((dataset_dir / "manifest.json").read_text(), dict[str, object])
 
 
 def _archive(text: str) -> zipfile.ZipFile:

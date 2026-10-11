@@ -15,7 +15,6 @@ import tempfile
 
 from configgle import Fig
 from tokenizers import decoders, models, pre_tokenizers
-from treekle import PlainTree, from_plain
 from treekle.wire import json_loads
 
 import rustbpe
@@ -30,6 +29,7 @@ if TYPE_CHECKING:
 
     from numpy import array, save, zeros
     from pyarrow import Table, parquet
+    from treekle import PlainTree
 
     import tiktoken
 else:
@@ -56,7 +56,7 @@ def read_mapping(path: Path) -> dict[str, object]:
       mapping: The decoded object.
 
     """
-    return from_plain(json_loads(path.read_text()), dict[str, object])
+    return json_loads(path.read_text(), dict[str, object])
 
 
 def write_mapping(path: Path, *, value: PlainTree) -> None:

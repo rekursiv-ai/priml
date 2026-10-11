@@ -143,10 +143,7 @@ def test_prepared_tree_loads_and_sizes_exp000(tmp_path: Path) -> None:
         recipe,
         input_file_prefix=_write_source(tmp_path / "source"),
     )
-    identifiers = from_plain(
-        json_loads((directory / "identifiers.json").read_text()),
-        list[str],
-    )
+    identifiers = json_loads((directory / "identifiers.json").read_text(), list[str])
     assert len(identifiers) > 1
     config = PuzzleData.Config()
     config.base_dir = "/"

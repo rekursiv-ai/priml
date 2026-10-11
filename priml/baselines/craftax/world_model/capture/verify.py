@@ -226,7 +226,7 @@ class ReplayVerifier:
         self.verified: set[str] = (
             {
                 from_plain(
-                    from_plain(json_loads(text), dict[str, object])["shard"],
+                    json_loads(text, dict[str, object])["shard"],
                     str,
                 )
                 for text in self.log.read_text().splitlines()

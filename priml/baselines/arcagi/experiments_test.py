@@ -653,8 +653,8 @@ def test_the_loop_trains_evaluates_checkpoints_and_resumes(tmp_path: Path) -> No
     loop.run()
     assert isinstance(loop.step, PooledActTrainStep)
     assert loop.step.global_step == 1
-    metrics = from_plain(
-        json_loads((tmp_path / "runs/arcagi/exp_smoke/metrics.json").read_text()),
+    metrics = json_loads(
+        (tmp_path / "runs/arcagi/exp_smoke/metrics.json").read_text(),
         dict[str, object],
     )
     assert any(key.endswith("pass@2") for key in metrics)

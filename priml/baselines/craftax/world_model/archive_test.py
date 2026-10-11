@@ -7,7 +7,6 @@ import dataclasses
 import json
 import struct
 
-from treekle import from_plain
 from treekle.wire import json_loads
 
 import pytest
@@ -305,10 +304,7 @@ def test_damaged_snapshots_fail_their_checksum(tmp_path: Path) -> None:
 
 def test_frame_shard_lines_read_as_stride_zero(tmp_path: Path) -> None:
     line = write_shard(tmp_path, index=0, episodes=[_episode(3, seed=1)], provenance={})
-    text = from_plain(
-        json_loads((tmp_path / "MANIFEST.jsonl").read_text()),
-        dict[str, object],
-    )
+    text = json_loads((tmp_path / "MANIFEST.jsonl").read_text(), dict[str, object])
     del text["snapshot_stride"]
     (tmp_path / "MANIFEST.jsonl").write_text(json.dumps(text) + "\n")
     assert read_manifest(tmp_path) == [line]

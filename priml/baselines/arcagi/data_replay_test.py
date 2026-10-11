@@ -1024,7 +1024,7 @@ def capture_verify(b: Backend, tmp: Path) -> Capture:
     out: Capture = {}
     root = base_tree(b, tmp)
     count = len(
-        from_plain(json_loads((root / "identifiers.json").read_text()), list[object]),
+        json_loads((root / "identifiers.json").read_text(), list[object]),
     )
     for name, expected in (("match", count), ("mismatch", count + 1)):
         target = tmp / f"verify-{name}"
@@ -1249,10 +1249,7 @@ def capture_metric(b: Backend, tmp: Path) -> Capture:
             put_results(out, key, results)
             restored = b.metric({**fields})
             restored.load_state_dict(
-                from_plain(
-                    json_loads(json.dumps(metric.state_dict())),
-                    dict[str, object],
-                ),
+                json_loads(json.dumps(metric.state_dict()), dict[str, object]),
             )
             put(
                 out,
@@ -1317,8 +1314,8 @@ def capture_metric(b: Backend, tmp: Path) -> Capture:
     put_results(out, "partial", partial.compute())
     no_tests = tmp / "no-tests-metric"
     shutil.copytree(root, no_tests, ignore=shutil.ignore_patterns("train", "test"))
-    puzzles = from_plain(
-        json_loads((no_tests / "test_puzzles.json").read_text()),
+    puzzles = json_loads(
+        (no_tests / "test_puzzles.json").read_text(),
         dict[str, object],
     )
     first = next(iter(puzzles))

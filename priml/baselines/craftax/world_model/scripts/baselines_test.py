@@ -81,7 +81,7 @@ def test_main_writes_the_report_and_the_runs_settings(
     assert loaded == [
         ("experiments.exp_smoke", tmp_path / "step.pt", overrides, torch.device("cpu")),
     ]
-    assert from_plain(json_loads(output.read_text()), dict[str, object]) == {
+    assert json_loads(output.read_text(), dict[str, object]) == {
         **_REPORT,
         "run": {
             "checkpoint": str(tmp_path / "step.pt"),

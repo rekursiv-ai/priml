@@ -254,7 +254,7 @@ def test_main_writes_the_report(
         ],
     )
     assert coverage_report.main() == 0
-    written = from_plain(json_loads(output.read_text()), dict[str, object])
+    written = json_loads(output.read_text(), dict[str, object])
     assert written["decisions"] == 14
     assert (tmp_path / "index").is_dir()
 

@@ -171,10 +171,7 @@ def test_worker_processes_match_serial_counts() -> None:
 
 def _read_json(name: str) -> dict[str, object]:
     return dict(
-        from_plain(
-            json_loads((_CWD / "testdata" / name).read_text()),
-            dict[str, object],
-        ),
+        json_loads((_CWD / "testdata" / name).read_text(), dict[str, object]),
     )
 
 

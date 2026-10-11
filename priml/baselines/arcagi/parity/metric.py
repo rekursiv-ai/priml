@@ -79,16 +79,13 @@ class PassK:
     @cached_property
     def identifiers(self) -> list[str]:
         """Prepared identifier table, loaded only when evaluation starts."""
-        return from_plain(
-            json_loads((self.root / "identifiers.json").read_text()),
-            list[str],
-        )
+        return json_loads((self.root / "identifiers.json").read_text(), list[str])
 
     @cached_property
     def puzzles(self) -> dict[str, object]:
         """Canonical evaluation tasks, including tasks without predictions."""
-        return from_plain(
-            json_loads((self.root / "test_puzzles.json").read_text()),
+        return json_loads(
+            (self.root / "test_puzzles.json").read_text(),
             dict[str, object],
         )
 
@@ -102,9 +99,7 @@ class PassK:
         """
         path = self.root / "test" / "dataset.json"
         metadata = (
-            from_plain(json_loads(path.read_text()), dict[str, object])
-            if path.is_file()
-            else {}
+            json_loads(path.read_text(), dict[str, object]) if path.is_file() else {}
         )
         return from_plain(metadata.get("blank_identifier_id"), int, default=0)
 

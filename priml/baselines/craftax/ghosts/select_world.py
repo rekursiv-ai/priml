@@ -164,7 +164,7 @@ def outcomes(root: Path, *, arm: int) -> dict[int, Outcomes]:
 
 def evaluation(path: Path) -> Evaluation:
     """Return what the world choice compares of a final evaluation's ``metrics.json``."""
-    metrics = from_plain(json_loads(path.read_text()), dict[str, float])
+    metrics = json_loads(path.read_text(), dict[str, float])
     return Evaluation(
         mean_return=metrics["eval/craftax_episode_return"],
         reach=tuple(metrics[f"eval/craftax_{name}"] for name in FLOOR_NAMES),

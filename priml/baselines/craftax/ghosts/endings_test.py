@@ -178,7 +178,7 @@ def test_main_reports_a_captures_endings(
         ["endings.py", str(root), "--tier=boss:3", f"--output={output}"],
     )
     assert endings.main() == 0
-    (row,) = from_plain(json_loads(output.read_text()), list[dict[str, object]])
+    (row,) = json_loads(output.read_text(), list[dict[str, object]])
     assert (row["tier"], row["root"], row["death"]) == ("boss", str(root), 3)
     assert row["ended_within"] == 2
     episodes = from_plain(row["episodes"], list[dict[str, object]])

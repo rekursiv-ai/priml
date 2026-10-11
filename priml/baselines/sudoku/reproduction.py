@@ -18,7 +18,7 @@ import time
 from configgle import DataclassLike, Fig, Makeable
 from torch import Tensor
 from torch._inductor import config as inductor_config
-from treekle import ReadError, from_plain
+from treekle import ReadError
 from treekle.wire import json_loads
 
 import torch
@@ -465,10 +465,7 @@ class Reproduction:
         if not progress_path.is_file():
             return {}
         try:
-            progress = from_plain(
-                json_loads(progress_path.read_text()),
-                _ReproductionProgress,
-            )
+            progress = json_loads(progress_path.read_text(), _ReproductionProgress)
         except ReadError as error:
             raise ValueError(
                 f"invalid reproduction progress: {progress_path}.",
@@ -510,10 +507,9 @@ class Reproduction:
             # Reuse is keyed on corpus IDENTITY, not mere existence: a corpus
             # rolled out from a different generator must never silently train
             # this pipeline's committee.
-            recorded = from_plain(
-                json_loads(manifest_path.read_text()),
-                _HarvestSource,
-            )["source_checkpoint"]
+            recorded = json_loads(manifest_path.read_text(), _HarvestSource)[
+                "source_checkpoint"
+            ]
             source_checkpoint = harvest.harvest_source_checkpoint
             configured = str(
                 source_checkpoint
@@ -1030,7 +1026,7 @@ class _OuterRun:
         """
         if self._tracker is None or not metrics_path.exists():
             return
-        rows = from_plain(json_loads(metrics_path.read_text()), dict[str, object])
+        rows = json_loads(metrics_path.read_text(), dict[str, object])
         if rows:
             self.log(rows, step)
 

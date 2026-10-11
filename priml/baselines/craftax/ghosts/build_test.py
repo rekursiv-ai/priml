@@ -15,7 +15,6 @@ import hashlib
 import sys
 import zlib
 
-from treekle import from_plain
 from treekle.wire import json_loads
 
 import numpy as np
@@ -249,8 +248,8 @@ def test_an_unbroken_set_plays_every_decision_of_each_win_that_fits(
     entries = [
         entry
         for group in unbroken.groups
-        for entry in from_plain(
-            json_loads((data / group.path / "episodes.json").read_text()),
+        for entry in json_loads(
+            (data / group.path / "episodes.json").read_text(),
             GroupFile,
         ).episodes
     ]
@@ -377,10 +376,7 @@ def test_the_manifest_names_every_file_with_its_size_and_digest(
             digest,
             manifest.sizes[name],
         )
-    assert (
-        from_plain(json_loads((out / "manifest.json").read_text()), Manifest)
-        == manifest
-    )
+    assert json_loads((out / "manifest.json").read_text(), Manifest) == manifest
     assert manifest.short_decisions == _SHORT
     assert manifest.tiers[0].sources[0].episodes == 3
 
@@ -526,7 +522,7 @@ def test_the_command_line_builds_a_site(
     ]
     monkeypatch.setattr(sys, "argv", argv)
     assert build.main() == 0
-    manifest = from_plain(json_loads((out / "manifest.json").read_text()), Manifest)
+    manifest = json_loads((out / "manifest.json").read_text(), Manifest)
     (tier,) = manifest.tiers
     assert [g.count for g in tier.sets[0].groups] == [2, 1]
     assert [s.capped for s in tier.sources] == [False, False, True]
@@ -586,10 +582,7 @@ def _episode(ghost: Ghost, *, split: int) -> Episode:
 
 def _check_group(directory: Path, first: int) -> tuple[EpisodeEntry, ...]:
     """Check one group's files against its ghosts; return its entries."""
-    entries = from_plain(
-        json_loads((directory / "episodes.json").read_text()),
-        GroupFile,
-    ).episodes
+    entries = json_loads((directory / "episodes.json").read_text(), GroupFile).episodes
     players = gzip.decompress((directory / "players.bin.gz").read_bytes())
     events = read_events(gzip.decompress((directory / "events.bin.gz").read_bytes()))
     windows = [

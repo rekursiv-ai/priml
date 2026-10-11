@@ -187,8 +187,8 @@ def test_missing_solution_files_fill_dummy_outputs_and_log_context(
 
     warnings = [record.getMessage() for record in caplog.records]
     assert warnings == ["evaluation solutions not found, filling with dummy"]
-    test_puzzles = from_plain(
-        json_loads((target / "test_puzzles.json").read_text()),
+    test_puzzles = json_loads(
+        (target / "test_puzzles.json").read_text(),
         dict[str, object],
     )
     outputs = [
@@ -496,10 +496,7 @@ def test_spatial_eval_reuses_puzzle_id_and_canonical_answer(
     assert _ints(group_indices) == [0, 2, 4, 6]
     assert not (target / "train" / "all__spatial_tags.npy").exists()
     assert _load_array(test_dir / "all__spatial_tags.npy").dtype == np.int32
-    assert from_plain(
-        json_loads((test_dir / "dataset.json").read_text()),
-        dict[str, object],
-    ) == {
+    assert json_loads((test_dir / "dataset.json").read_text(), dict[str, object]) == {
         "pad_id": 0,
         "ignore_label_id": 0,
         "blank_identifier_id": 0,
@@ -555,7 +552,7 @@ def test_augmented_views_are_grouped_with_their_source(
     assert 0 in train_inputs[:, 0]
     ids = _ints(_array(target / "train" / "all__puzzle_identifiers.npy"))
     groups = _ints(_array(target / "train" / "all__group_indices.npy"))
-    names = from_plain(json_loads((target / "identifiers.json").read_text()), list[str])
+    names = json_loads((target / "identifiers.json").read_text(), list[str])
     assert groups == list(range(0, 28, 3))
     assert len(ids) == 27
     for start in range(0, len(ids), 3):
@@ -634,15 +631,12 @@ def test_plain_build_writes_no_spatial_tags(
     )
     assert _ints(_array(target / "test" / "all__puzzle_indices.npy")) == [0, 1, 2, 3]
     assert _ints(_array(target / "test" / "all__group_indices.npy")) == [0, 1, 2, 3]
-    test_puzzles = from_plain(
-        json_loads((target / "test_puzzles.json").read_text()),
+    test_puzzles = json_loads(
+        (target / "test_puzzles.json").read_text(),
         dict[str, object],
     )
     assert set(test_puzzles) == {f"evaluation-{index}" for index in range(3)}
-    identifiers = from_plain(
-        json_loads((target / "identifiers.json").read_text()),
-        list[str],
-    )
+    identifiers = json_loads((target / "identifiers.json").read_text(), list[str])
     assert identifiers[0] == "<blank>"
     assert set(identifiers[1:]) == {
         f"{subset}-{index}"
@@ -658,8 +652,8 @@ def test_plain_build_writes_no_spatial_tags(
     }
     assert _array(target / "train" / "all__inputs.npy").shape == (24, 900)
     assert _array(target / "test" / "all__inputs.npy").shape == (3, 900)
-    assert from_plain(
-        json_loads((target / "train" / "dataset.json").read_text()),
+    assert json_loads(
+        (target / "train" / "dataset.json").read_text(),
         dict[str, object],
     ) == {
         "pad_id": 0,
@@ -673,8 +667,8 @@ def test_plain_build_writes_no_spatial_tags(
         "total_puzzles": 9,
         "sets": ["all"],
     }
-    assert from_plain(
-        json_loads((target / "test" / "dataset.json").read_text()),
+    assert json_loads(
+        (target / "test" / "dataset.json").read_text(),
         dict[str, object],
     ) == {
         "pad_id": 0,
@@ -741,8 +735,8 @@ def test_ensure_arc_dataset_uses_rank_zero_callback_and_caches_result(
         is result
     )
     assert names == ["ensure_arc_dataset"]
-    assert from_plain(
-        json_loads((target / build_dataset.RECIPE_FILE).read_text()),
+    assert json_loads(
+        (target / build_dataset.RECIPE_FILE).read_text(),
         dict[str, object],
     ) == (build_dataset.arc_recipe(augmentation, input_file_prefix="source"))
 
@@ -825,8 +819,8 @@ def test_a_vendored_build_stamps_the_pinned_source_not_its_clone_path(
         augmentation=augmentation,
     )
 
-    stamped = from_plain(
-        json_loads((target / build_dataset.RECIPE_FILE).read_text()),
+    stamped = json_loads(
+        (target / build_dataset.RECIPE_FILE).read_text(),
         dict[str, object],
     )
     assert stamped["source"] == (

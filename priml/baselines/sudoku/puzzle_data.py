@@ -185,7 +185,7 @@ def load_puzzle_dataset(
     metadata_path = data_path / "dataset.json"
     if not metadata_path.exists():
         raise FileNotFoundError(f"Dataset metadata not found: {metadata_path}")
-    metadata = from_plain(json_loads(metadata_path.read_text()), _Metadata)
+    metadata = json_loads(metadata_path.read_text(), _Metadata)
 
     group_path = data_path / "all__group_indices.npy"
     if not group_path.exists():

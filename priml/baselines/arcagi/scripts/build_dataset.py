@@ -154,17 +154,15 @@ def arc_recipe(
       recipe: JSON-ready mapping, compared verbatim against a tree's sentinel.
 
     """
-    return from_plain(
-        json_loads(
-            json.dumps(
-                {
-                    "builder": "arc",
-                    "source": input_file_prefix or f"{SOURCE_URL}@{SOURCE_REVISION}",
-                    "subsets": list(subsets),
-                    "test_set_name": test_set_name,
-                    "augmentation": dataclasses.asdict(augmentation.config),
-                },
-            ),
+    return json_loads(
+        json.dumps(
+            {
+                "builder": "arc",
+                "source": input_file_prefix or f"{SOURCE_URL}@{SOURCE_REVISION}",
+                "subsets": list(subsets),
+                "test_set_name": test_set_name,
+                "augmentation": dataclasses.asdict(augmentation.config),
+            },
         ),
         dict[str, object],
     )
@@ -191,7 +189,7 @@ def check_recipe(target_dir: Path, recipe: Mapping[str, object]) -> None:
                 _stamp_command(path, recipe),
             )
         return
-    stamped = from_plain(json_loads(path.read_text()), dict[str, object])
+    stamped = json_loads(path.read_text(), dict[str, object])
     if stamped != recipe:
         raise ValueError(
             f"{target_dir} was built by a different recipe than requested; "
@@ -330,10 +328,8 @@ def write_arc_tree(
     train_dest = ("train", "all")
     test_dest = ("test", "all")
     for subset_name in subsets:
-        raw_puzzles = from_plain(
-            json_loads(
-                Path(f"{input_file_prefix}_{subset_name}_challenges.json").read_text(),
-            ),
+        raw_puzzles = json_loads(
+            Path(f"{input_file_prefix}_{subset_name}_challenges.json").read_text(),
             dict[str, object],
         )
         puzzles = {
@@ -348,10 +344,7 @@ def write_arc_tree(
         }
         solutions = Path(f"{input_file_prefix}_{subset_name}_solutions.json")
         if solutions.is_file():
-            raw_solutions = from_plain(
-                json_loads(solutions.read_text()),
-                dict[str, object],
-            )
+            raw_solutions = json_loads(solutions.read_text(), dict[str, object])
             for pid, puzzle in puzzles.items():
                 for index, grid in enumerate(
                     from_plain(raw_solutions[pid], list[object]),

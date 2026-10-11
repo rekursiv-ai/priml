@@ -176,7 +176,7 @@ def test_main_scores_the_runs_corpus_and_writes_the_report(
     assert data_eval.main() == 0
     assert loaded == [(SMOKE, tmp_path / "step.pt", ["base_dir=/b"])]
     assert evaluated == [(Path(corpus), t_g, 4, 5, 3)]
-    result = from_plain(json_loads(output.read_text()), dict[str, object])
+    result = json_loads(output.read_text(), dict[str, object])
     run = from_plain(result.pop("run"), dict[str, object])
     assert result == {"tiles": 5}
     assert from_plain(run.pop("seconds"), float) >= 0

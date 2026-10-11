@@ -82,7 +82,7 @@ def main() -> int:
     if checkpoint.is_dir():
         selector = checkpoint / "best.json"
         protected.append(selector)
-        best = from_plain(json_loads(selector.read_text()), dict[str, object])
+        best = json_loads(selector.read_text(), dict[str, object])
         if from_plain(best["metric"], str) != "total_loss":
             raise ValueError("Expected a validation total_loss best-checkpoint record.")
         checkpoint = checkpoint / f"step_{from_plain(best['step'], int):08d}.pt"

@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 def num_identifiers(root: Path) -> int:
     """Return the length of a built tree's ``identifiers.json``."""
     return len(
-        from_plain(json_loads((root / "identifiers.json").read_text()), list[str]),
+        json_loads((root / "identifiers.json").read_text(), list[str]),
     )
 
 
@@ -206,10 +206,7 @@ def test_ensure_builds_tiny_tree_and_sentinel(
     assert f"Done. ARC-AGI-2 dataset at {target}" in caplog.messages
     for spec in arc_manifest():
         assert (root / spec.rel_path).is_file(), spec.rel_path
-    params = from_plain(
-        json_loads((root / "_build_params.json").read_text()),
-        dict[str, object],
-    )
+    params = json_loads((root / "_build_params.json").read_text(), dict[str, object])
     assert params["subsets"] == ["training2", "evaluation2", "concept"]
     assert params["test_set_name"] == "evaluation2"
     assert params["train_scale_weights"] == [[1, 1.0]]
@@ -226,14 +223,11 @@ def test_ensure_builds_tiny_tree_and_sentinel(
     # 6 source tasks, each <= 1 + num_aug identifiers, + the blank sentinel.
     n_ids = num_identifiers(root)
     assert 1 < n_ids <= 1 + 6 * 3
-    identifiers = from_plain(
-        json_loads((root / "identifiers.json").read_text()),
-        list[str],
-    )
+    identifiers = json_loads((root / "identifiers.json").read_text(), list[str])
     assert identifiers[0] == "<blank>"
     # Only the evaluation2 tasks form the test split.
-    test_puzzles = from_plain(
-        json_loads((root / "test_puzzles.json").read_text()),
+    test_puzzles = json_loads(
+        (root / "test_puzzles.json").read_text(),
         dict[str, object],
     )
     assert set(test_puzzles) == {"evaluation2_task0", "evaluation2_task1"}
@@ -328,10 +322,7 @@ def test_ensure_rebuilds_on_param_change(tmp_path: Path) -> None:
     mtime = (target / "train" / "all__inputs.npy").stat().st_mtime_ns
     ensure_arc2_dataset(target=target, num_aug=3, seed=7, input_file_prefix=prefix)
     assert (target / "train" / "all__inputs.npy").stat().st_mtime_ns != mtime
-    params = from_plain(
-        json_loads((target / "_build_params.json").read_text()),
-        dict[str, object],
-    )
+    params = json_loads((target / "_build_params.json").read_text(), dict[str, object])
     assert params["num_aug"] == 3
 
 

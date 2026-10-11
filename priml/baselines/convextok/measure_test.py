@@ -130,7 +130,7 @@ def test_run_writes_stage_seconds_memory_and_tokenizer(tmp_path: Path) -> None:
 
     run_dir = tmp_path / "runs/convextok/exp000"
     text = (run_dir / "metrics.json").read_text()
-    metrics = from_plain(json_loads(text), dict[str, object])
+    metrics = json_loads(text, dict[str, object])
     assert text == json.dumps(metrics, indent=2) + "\n"
     seconds = from_plain(metrics["seconds"], dict[str, float])
     assert list(seconds) == [
@@ -260,10 +260,7 @@ def _measured_config(tmp_path: Path) -> MeasuredFit.Config:
 
 
 def _read_metrics(run_dir: Path) -> dict[str, object]:
-    return from_plain(
-        json_loads((run_dir / "metrics.json").read_text()),
-        dict[str, object],
-    )
+    return json_loads((run_dir / "metrics.json").read_text(), dict[str, object])
 
 
 def _npz(name: str) -> np.lib.npyio.NpzFile:
@@ -273,10 +270,7 @@ def _npz(name: str) -> np.lib.npyio.NpzFile:
 
 
 def _read_json(name: str) -> dict[str, object]:
-    return from_plain(
-        json_loads((_CWD / "testdata" / name).read_text()),
-        dict[str, object],
-    )
+    return json_loads((_CWD / "testdata" / name).read_text(), dict[str, object])
 
 
 def _golden_matrix(

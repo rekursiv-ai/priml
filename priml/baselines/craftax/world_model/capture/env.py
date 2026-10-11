@@ -62,7 +62,6 @@ import threading
 
 from configgle import Fig
 from numpy.typing import NDArray
-from treekle import from_plain
 from treekle.wire import json_loads
 
 import numpy as np
@@ -732,7 +731,7 @@ def _summary(
         f'"cleared":{cleared[k]},"descended":{descended[k]}}}'
         for k in range(NUM_LEVELS)
     )
-    summary = from_plain(json_loads(text + "]}"), dict[str, object])
+    summary = json_loads(text + "]}", dict[str, object])
     if episode.point is not None:
         summary["branch"] = dict(episode.point)
     return summary

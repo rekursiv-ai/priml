@@ -442,7 +442,7 @@ class Tokenizer:
         with pickled.open("rb") as file:
             encoding = cast(object, pickle.load(file))  # noqa: S301 -- The artifact is a trusted tokenizer file created by this pipeline.
         assert isinstance(encoding, tiktoken.Encoding)
-        recipe = from_plain(json_loads(recipe_path.read_text()), dict[str, object])
+        recipe = json_loads(recipe_path.read_text(), dict[str, object])
         for field in ("bos_token", "token_bytes_sha256"):
             if field not in recipe:
                 raise ValueError(

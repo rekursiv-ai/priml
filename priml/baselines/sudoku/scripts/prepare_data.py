@@ -48,7 +48,7 @@ import os
 import shutil
 import tempfile
 
-from treekle import from_plain, mutable
+from treekle import mutable
 from treekle.wire import json_loads
 
 import numpy as np
@@ -241,7 +241,7 @@ def _build_split(
 
 def _check_existing(marker: Path, *, build: _Build) -> None:
     """Refuse a split whose recorded build parameters differ from ``build``."""
-    recorded = from_plain(json_loads(marker.read_text()), dict[str, object])
+    recorded = json_loads(marker.read_text(), dict[str, object])
     expected = mutable(asdict(build))
     if recorded != expected:
         raise ValueError(

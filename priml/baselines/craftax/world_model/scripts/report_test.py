@@ -175,10 +175,7 @@ def test_summarize_reads_the_names_and_seeds_of_the_runs_settings(
         ["report.py", "--summarize", "--output", str(tmp_path)],
     )
     assert report.main() == 0
-    summary = from_plain(
-        json_loads((tmp_path / "summary.json").read_text()),
-        dict[str, object],
-    )
+    summary = json_loads((tmp_path / "summary.json").read_text(), dict[str, object])
     assert set(from_plain(summary["criterion_4_engine_checks"], dict[str, object])) == {
         "a",
         "b",
@@ -327,10 +324,9 @@ def test_main_scores_a_checkpoint_and_writes_the_summary(
     assert tiled == [(Path("corpora/smoke.json"), 32, 4, 4, 0, 7)]
     assert windows == [0, 1]
     tiles_run = from_plain(
-        from_plain(
-            json_loads((output / "data-eval-s0.json").read_text()),
-            dict[str, object],
-        )["run"],
+        json_loads((output / "data-eval-s0.json").read_text(), dict[str, object])[
+            "run"
+        ],
         dict[str, object],
     )
     assert from_plain(tiles_run["overrides"], list[str]) == [
@@ -338,10 +334,7 @@ def test_main_scores_a_checkpoint_and_writes_the_summary(
         "dataset.sampler_seed=0",
     ]
     assert (tiles_run["tiles_available"], tiles_run["t_g"]) == (9, 32)
-    summary = from_plain(
-        json_loads((output / "summary.json").read_text()),
-        dict[str, object],
-    )
+    summary = json_loads((output / "summary.json").read_text(), dict[str, object])
     sigma = from_plain(summary["sigma"], dict[str, object])
     assert set(sigma) >= {"own_windows", "same_windows", "common_natural_tiles"}
     own = _spread(sigma, "own_windows")
@@ -370,10 +363,7 @@ def test_a_failed_child_is_named_and_the_summary_still_written(
     assert report.main() == 1
     printed = capsys.readouterr().out
     assert "Failed: s0 engine_checks.py." in printed
-    summary = from_plain(
-        json_loads((output / "summary.json").read_text()),
-        dict[str, object],
-    )
+    summary = json_loads((output / "summary.json").read_text(), dict[str, object])
     # The checks crashed: criterion 4 failed, it was not left unmeasured.
     assert summary["criterion_4_engine_checks"] == {"s0": False}
     report_md = (output / "report.md").read_text()

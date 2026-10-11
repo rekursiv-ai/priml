@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING
 import copy
 import dataclasses
 
-from treekle import from_plain
 from treekle.wire import json_loads
 
 import pytest
@@ -160,8 +159,8 @@ def test_a_mutated_action_halts_capture(
         match=f"world seed {mutated.receipt.world_seed}",
     ):
         verifier.poll_once()
-    halt = from_plain(
-        json_loads((verifier.config.root / "HALT.json").read_text()),
+    halt = json_loads(
+        (verifier.config.root / "HALT.json").read_text(),
         dict[str, object],
     )
     assert halt["shard"] == "train/arm0/w0/shard-000000"
@@ -205,8 +204,8 @@ def test_a_damaged_shard_halts_capture(
         path.write_bytes(bytes(payload))
     with pytest.raises(ReplayMismatchError, match=match):
         verifier.poll_once()
-    halt = from_plain(
-        json_loads((verifier.config.root / "HALT.json").read_text()),
+    halt = json_loads(
+        (verifier.config.root / "HALT.json").read_text(),
         dict[str, object],
     )
     assert match in str(halt["reason"])

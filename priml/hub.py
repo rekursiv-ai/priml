@@ -315,10 +315,7 @@ def load_hf_checkpoint(
     """
     path = Path(path_or_repo)
     if (path / "config.json").exists():
-        hf_config = from_plain(
-            json_loads((path / "config.json").read_text()),
-            dict[str, object],
-        )
+        hf_config = json_loads((path / "config.json").read_text(), dict[str, object])
         return hf_config, load_local_state_dict(path)
     hf_model = load_transformers_model(
         str(path_or_repo),

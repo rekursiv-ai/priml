@@ -390,10 +390,7 @@ def read_manifest(directory: Path) -> list[ManifestLine]:
     if not path.exists():
         return []
     lines = path.read_text().split("\n")[:-1]
-    return [
-        _manifest_line(from_plain(json_loads(text), dict[str, object]))
-        for text in lines
-    ]
+    return [_manifest_line(json_loads(text, dict[str, object])) for text in lines]
 
 
 def read_shard(directory: Path, line: ManifestLine) -> list[Episode]:
@@ -588,7 +585,7 @@ def read_corpus(path: Path) -> list[tuple[Path, ManifestLine]]:
 
     """
     shards = from_plain(
-        from_plain(json_loads(path.read_text()), dict[str, object])["shards"],
+        json_loads(path.read_text(), dict[str, object])["shards"],
         list[dict[str, object]],
     )
     return [
@@ -731,7 +728,7 @@ def _replay_meta_line(
 
 def _summary(text: str) -> EpisodeSummary:
     """Decode one ``.meta.jsonl`` line of either format."""
-    line = from_plain(json_loads(text), dict[str, object])
+    line = json_loads(text, dict[str, object])
     changes = [
         from_plain(c, list[int])
         for c in from_plain(line.get("floors"), list[list[int]], default=[])
