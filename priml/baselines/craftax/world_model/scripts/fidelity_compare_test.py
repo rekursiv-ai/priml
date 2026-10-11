@@ -79,7 +79,7 @@ def test_compare_differences_dream_rates_per_thousand_decisions() -> None:
     assert over["base"] == pytest.approx(2.0)
     assert over["other"] == pytest.approx(6.0)
     assert over["value"] == pytest.approx(4.0)
-    assert from_plain(over["low"], float) <= 4.0 <= from_plain(over["high"], float)
+    assert over["low"] <= 4.0 <= over["high"]
     deaths = _entry(result, "dreams", "deaths", "other")
     assert deaths["value"] == 0.0
 
@@ -103,7 +103,9 @@ def test_compare_averages_seeds_and_scores_them_against_seed_noise() -> None:
     assert nll["delta"] == pytest.approx(-0.9)
     # One degree of freedom: sd 0.1414 over sqrt(1/2 + 1/1).
     assert nll["z"] == pytest.approx(-0.9 / (0.02 * 1.5) ** 0.5)
-    assert "continuation/ended/1" not in from_plain(result["seeds"], dict[str, object])
+    seeds = result["seeds"]
+    assert isinstance(seeds, Mapping)
+    assert "continuation/ended/1" not in seeds
 
 
 def test_compare_rejects_reports_scored_on_different_data() -> None:
@@ -225,12 +227,12 @@ def _report(
     }
 
 
-def _entry(result: object, *path: str) -> dict[str, object]:
+def _entry(result: Mapping[str, object], *path: str) -> dict[str, float]:
     """Return the comparison entry at a path of nested objects."""
-    node = result
+    node: object = result
     for key in path:
-        node = from_plain(node, dict[str, object])[key]
-    return from_plain(node, dict[str, object])
+        node = from_plain(node, Mapping[str, object])[key]
+    return from_plain(node, dict[str, float])
 
 
 if __name__ == "__main__":
