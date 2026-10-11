@@ -1,0 +1,107 @@
+{
+ "cv-dbm-sampler": {
+  "_runtime_patch.sh": "6ea9f1304ad938416836058a685aa7f03fb574c2221b9e524f64777aa099732c",
+  "run_DIODE.sh": "0cca30de05f6fb7c2853e34b59a8f6a9cb473a27992461cd29a3005d15c60745",
+  "run_Imagenet.sh": "37459772f42fed20985da18c7a9525b48926b0acbf79eb6b14e62185b6430ef9",
+  "run_e2h.sh": "5f7b09fb5ab38d2a12194986185440d6293f321680d76eeafede4cd724a98b7c"
+ },
+ "cv-dbm-scheduler": {
+  "run_DIODE.sh": "f2f6070e7d1c67232da2aaa7add30ea238fc6c162221c8695fe2595fe82942e3",
+  "run_Imagenet.sh": "3350458fc4f21c0ae8e9047d8bbe5d3cc6c9096b9fbc07046038d6dd6cc4285e",
+  "run_e2h.sh": "50716b540db172e7984bdbe3310cac7eb119d05cc1811f13ce1c9d8f6dd9bce1"
+ },
+ "cv-diffusion-conditioning": {
+  "train_large.sh": "f8d6845b7df6a2f228f64a16b70138d56983dfff030c361d06acc9d394ef9c0d",
+  "train_medium.sh": "ea7ddbfffa421519626b38c31cbe930a7645101ba36d4532ee0cc5284d1a51c7",
+  "train_small.sh": "f714fec5f0c7686abe4b5329373c1ea3fa00480b10fcaec5680c2aa6dbd43e23"
+ },
+ "cv-vae-loss": {
+  "train_large.sh": "f328469ccaa577b030b8dfd6a15929e973096aede2716d54ae938fedb16f72b5",
+  "train_medium.sh": "a1ac74aab02e7994f76b92756730c7fca75961e7f6f05cfe5f551330ce7dab94",
+  "train_small.sh": "74b8922d1ff011b49826e161790f65fdd0e58a0905a5028993d0d5cb042fb5a7"
+ },
+ "llm-rl-advantage": {
+  "train.sh": "009fe76022046054a97ce0e0b7d64297b28b186101f8166221a92427983ed75b"
+ },
+ "llm-rl-importance-sampling": {
+  "train.sh": "aa20dc0a25608bb8ce337afcb7293238da21c5cff676aed838f9ae49fae3e22b"
+ },
+ "llm-rl-kl-estimator": {
+  "train.sh": "d791ef046bdd56a5eb8d9a2631f118e2968b44e8e5acb7190dafb4d4d1ef4801"
+ },
+ "llm-rl-reward-normalization": {
+  "train.sh": "fdb2a5e304ecf03c2dcf8a8bb8aad7e6d0e7d9bc7dab8daeb5723a943eda9dc7"
+ },
+ "meta-inner-loop-optimizer": {
+  "cifar_fs_5shot.sh": "2e1c89ddd403c2a03b3e7c08baba0143c7e7d8c6bc1ae44f42956491a9319f63",
+  "mini_imagenet_1shot.sh": "1663d572324c863932f3f89486a48f66dde5d9de4b6c107801b72fdbd7a11b05",
+  "mini_imagenet_5shot.sh": "700dfbe1038f87ed3eddbaae7be96d7c0509beb6000fe96a4fbc27c96d92ba51"
+ },
+ "meta-rl": {
+  "cheetah_vel.sh": "257914cb31969ef8230734a8722273d9686a1083ae862e2057ea3039a4248f3f",
+  "point_robot.sh": "aad3e5d159bfc68586bdaf5b55c270b64c9cfde84b1c30d8660f73f8839e58ab",
+  "sparse_point_robot.sh": "85a75bee8259f3b94e0a5a300ff8c9ccd49873977bed0a053718b8544f5fb6d0"
+ },
+ "optimization-diagonal-net": {
+  "d10000_k50_a1e0.sh": "0be432d13470e33e6087fe191291bad0264e31feefe4b2bb6f0782bf62a42baa",
+  "d200_k20_a1e3.sh": "bd7c5a884d667cc4039730a28f690bb31ba5fd8ea900a14d42d93dcaaf450465",
+  "d500_k10_a1e3.sh": "2ffd236dee885ec05b8fae0990468a1ffc3b2a1e07ea1d068ef950ede0cf71c3",
+  "d500_k10_a5e1.sh": "2bd2fdb7710cfacb6e0d5412c36edcca49fa2e3fffc5afa15450ca89fd79fbe8",
+  "fixed_entry.py": "76a5c9909321a3608c0a3d0df22cd1b5d5585396d1519f884fedcf45c373cea9"
+ },
+ "optimization-nas": {
+  "cifar10.sh": "46fd6e9cda48dc603f65b4d801d06deaa48f06cb0898320a4f32e3089b24a6f5",
+  "cifar100.sh": "914dc6a229052b05172eb42e0b8cd1ffd29dc33de3ecc4855a4ba3ae37206eda",
+  "fixed_entry.py": "bcbddbfe06401f74ed4e0c20543bee1cae07396018534a902b4b321a55991cc6",
+  "imagenet16.sh": "102e6091f127dfedbb1f8a56c50835ad239efae908367819ff5c04621b0becac"
+ },
+ "optimization-parity": {
+  "eval.sh": "29da0a0774fe6e8753b0ea125581f3213730d09cd1947d3ce85f7ce87ffa2f21",
+  "eval_n16_k4.sh": "9447003925eb2534aac76d4f484fdef5b0c81011aecdd4ebaf3c9718262dec51",
+  "eval_n50_k8.sh": "0dab50db477ebfc52ab1020823cb83b0276eb4b42b2d7d0357274a1179a31123",
+  "eval_n64_k12.sh": "c91b59d5646f953065d1642bf6ceef86b84d4967dbdad2838f07642df75dc5bb",
+  "eval_n64_k8.sh": "7036a3b79f03a1dfec6b7a14acd015c2e15a5dd23f2a606e439cac272f30c8fb",
+  "fixed_entry.py": "bcbddbfe06401f74ed4e0c20543bee1cae07396018534a902b4b321a55991cc6"
+ },
+ "quant-concept-drift": {
+  "_label_guard.py": "403f10f37df402dea92fcb17d351640d2ab15fdbc0dd610af846d3912f9f29a9",
+  "csi300.sh": "5a158f668be5e87297d97062e5359bc4c181f4e5856023aa02d0f6fe703d16ac",
+  "csi300_recent.sh": "e5155ada6b7b94e9728899b33ed718e4fa5bbcb580f9ca2c079cd9c758bc1d99",
+  "csi300_shifted.sh": "515d8278b188911fe063894b9394b79f0e6be0a9659182fe76478b1cf140368d",
+  "run_workflow.py": "bc146998950c0d4d55da325d15a890fb438abf0047c165a854ed107b646387a1"
+ },
+ "quant-graph-stock": {
+  "_label_guard.py": "403f10f37df402dea92fcb17d351640d2ab15fdbc0dd610af846d3912f9f29a9",
+  "csi100.sh": "4ca73112c4b5439a4575c10795f89d1dee1545c847fd182bde271839c2e6d884",
+  "csi300.sh": "7d70210646d9847c3893c1dbec6577dc198fb369651ffb179db377962d505386",
+  "csi300_recent.sh": "3f57cda6e0ef25169220fdd7b46606d21c4ce9934014b9aaf3cfcf0c33db40a0",
+  "run_workflow.py": "7ff6b242243c2aa1cd2b85a27a4f1a3c2616b1b87326ea3ae9797352b98ee9fa"
+ },
+ "quant-stock-prediction": {
+  "_label_guard.py": "403f10f37df402dea92fcb17d351640d2ab15fdbc0dd610af846d3912f9f29a9",
+  "csi100.sh": "18b233de7c90de561b659d6d32d3e1b4b4d17d420239f57845810224a551b498",
+  "csi300.sh": "5a158f668be5e87297d97062e5359bc4c181f4e5856023aa02d0f6fe703d16ac",
+  "csi300_recent.sh": "d1d573a54cb6ab8b599cd689ae640c8514b27729c6c45d55913308f0bea98603",
+  "run_workflow.py": "caf12c3675ec671657d90b536786c67bf8dd278fd4c99cd559932502f7a56c51"
+ },
+ "rl-reward-learning": {
+  "halfcheetah.sh": "7f2fe19a7927b681c261593f6e941d79df1bc12a35c70d201c4206a43e4cf1be",
+  "hopper.sh": "58ecfe7aa019929a5b4818b67e13ed1afa58d9b7c00db622391474faa128bedc",
+  "walker2d.sh": "15264b2e97f8b80a40cc477d4b7592f22d555b7effdd74561b414d38f433420a"
+ },
+ "robo-diffusion-guidance": {
+  "train_halfcheetah.sh": "4b047dee3e74147fbf63cef0751c4eed09136fa07fa5488e4f3116c67fa2d373",
+  "train_hopper.sh": "0d5a6d8aab841700d0f0b82fbda512158a0108d5dae2bac04eadb62e03c7bded",
+  "train_walker2d.sh": "e571c8cf3b8e04010b9820416ed19f8a20336046950503daa4e1d957545eeabd"
+ },
+ "robo-diffusion-policy": {
+  "train_halfcheetah.sh": "a98b77b1ab8fb6edf24e775b5545f11f292b9e4bdd2e735816d937fc96261308",
+  "train_hopper.sh": "77c76470a646492a86567678bdcc626df3d2faccf3c77881b0dafb6012f69717",
+  "train_walker2d.sh": "8309f2534d1a2bbb100b5c1dc1c72f466aff1e348044e919c827115e1b5768b4"
+ },
+ "robo-diffusion-sampling-method": {
+  "train_halfcheetah.sh": "4e6c854dec99cb55a33f2dbed5c3f857ee39b37058f11d295af4c2ff3e3dff8f",
+  "train_hopper.sh": "5e0ddceba61fea3a7da0cc7be5832512001453a70eaf7223ac51ed9b433deafe",
+  "train_walker2d.sh": "787731fe1a648decf89b5f6ae8ee3a6194684ad8613e3566875c7dc1e166c30a"
+ }
+}

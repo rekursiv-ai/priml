@@ -3,6 +3,20 @@
 All notable priml changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Added
+
+- Baseline `mlsbench`: a generic harness that runs any of the 140 MLS-Bench
+  tasks as a priml `TrainLoop` experiment, reading tasks from an unmodified
+  upstream clone (logical `/mlsbench`, pinned commit `80cf5c5c`). All 566
+  (task, baseline, seed) rows are generated as one module per task,
+  `tasks/<task_module>.expNNN`, with pprint goldens. Includes diff and
+  eval-script guards, a pluggable executor (`LocalDocker`, `FakeExecutor`)
+  over digest-pinned upstream images, data staging, and a whole-benchmark
+  leaderboard. `candidate_experiment` runs a new edit of a task as its own
+  experiment, and `leaderboard --candidate` sets it against a published row.
+
 ## 0.1.6 - 2026-10-07
 
 ### Added
