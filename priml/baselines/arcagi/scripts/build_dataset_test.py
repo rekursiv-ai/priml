@@ -10,8 +10,7 @@ import json
 import subprocess
 import tempfile
 
-from treekle import ReadError, from_plain
-from treekle.wire import json_loads
+from treekle import ReadError, from_plain, json_loads
 
 import numpy as np
 import pytest

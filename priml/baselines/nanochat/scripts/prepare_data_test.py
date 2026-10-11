@@ -43,8 +43,7 @@ from numpy.typing import NDArray
 from pyarrow import Table, parquet
 from tokenizers import decoders, models, normalizers, pre_tokenizers, processors
 from torch import Tensor
-from treekle import ReadError, from_plain
-from treekle.wire import json_loads
+from treekle import ReadError, from_plain, json_loads
 
 import numpy as np
 import pyarrow as pa

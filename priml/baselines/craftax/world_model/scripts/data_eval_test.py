@@ -6,8 +6,7 @@ from typing import TYPE_CHECKING, cast
 
 import sys
 
-from treekle import PlainTree, from_plain
-from treekle.wire import json_loads
+from treekle import PlainTree, from_plain, json_loads
 
 import pytest
 import torch

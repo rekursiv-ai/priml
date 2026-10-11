@@ -13,8 +13,7 @@ from typing import TYPE_CHECKING, Self, TypedDict, cast, override
 import logging
 
 from configgle import Fig
-from treekle import from_plain
-from treekle.wire import json_loads
+from treekle import from_plain, json_loads
 
 import numpy as np
 import torch

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from treekle.wire import json_loads
+from treekle import json_loads
 
 import numpy as np
 import pytest

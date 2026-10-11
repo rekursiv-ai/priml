@@ -20,8 +20,7 @@ import json
 
 from configgle import Fig
 from torch import Tensor
-from treekle import ReadError
-from treekle.wire import json_loads
+from treekle import ReadError, json_loads
 
 import numpy as np
 import torch

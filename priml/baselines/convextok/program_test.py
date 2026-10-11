@@ -14,7 +14,7 @@ from typing import Final, cast
 from unittest.mock import patch
 
 from torch import Tensor
-from treekle.wire import json_loads
+from treekle import json_loads
 
 import numpy as np
 import torch

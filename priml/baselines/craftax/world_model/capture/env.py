@@ -62,7 +62,7 @@ import threading
 
 from configgle import Fig
 from numpy.typing import NDArray
-from treekle.wire import json_loads
+from treekle import json_loads
 
 import numpy as np
 

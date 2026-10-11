@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Final, Self
 
-from treekle.wire import json_loads
+from treekle import json_loads
 
 import pytest
 

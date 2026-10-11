@@ -5,8 +5,7 @@ from pathlib import Path
 import json
 import sys
 
-from treekle import PlainTree, from_plain
-from treekle.wire import json_loads
+from treekle import PlainTree, from_plain, json_loads
 
 import pytest
 

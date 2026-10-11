@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Final
 
 import hashlib
 
-from treekle.wire import json_loads
+from treekle import json_loads
 
 import numpy as np
 import pytest

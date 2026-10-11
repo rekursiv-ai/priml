@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Final
 
 from tokenizers import pre_tokenizers
-from treekle.wire import json_loads
+from treekle import json_loads
 
 import pytest
 

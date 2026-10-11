@@ -13,8 +13,7 @@ import json
 import math
 import sys
 
-from treekle import PlainTree, ReadError, from_plain
-from treekle.wire import json_loads
+from treekle import PlainTree, ReadError, from_plain, json_loads
 
 import pytest
 import torch

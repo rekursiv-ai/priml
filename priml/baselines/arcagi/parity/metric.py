@@ -13,8 +13,7 @@ from typing import TYPE_CHECKING, Self, TypedDict, override
 
 from configgle import Fig, Makeable
 from torch import Tensor
-from treekle import from_plain
-from treekle.wire import json_loads
+from treekle import from_plain, json_loads
 
 import torch
 import torch.distributed as dist

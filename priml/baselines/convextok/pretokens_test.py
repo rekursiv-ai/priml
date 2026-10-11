@@ -12,7 +12,7 @@ from inspect import signature
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Self, cast
 
-from treekle.wire import json_loads
+from treekle import json_loads
 
 import pytest
 

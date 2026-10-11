@@ -7,7 +7,7 @@ import dataclasses
 import json
 import struct
 
-from treekle.wire import json_loads
+from treekle import json_loads
 
 import pytest
 import torch

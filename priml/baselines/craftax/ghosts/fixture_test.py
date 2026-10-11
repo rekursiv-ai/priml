@@ -18,8 +18,7 @@ import gzip
 import hashlib
 import json
 
-from treekle import from_plain
-from treekle.wire import json_loads
+from treekle import from_plain, json_loads
 
 import numpy as np
 import pytest

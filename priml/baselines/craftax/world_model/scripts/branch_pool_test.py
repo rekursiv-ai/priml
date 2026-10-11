@@ -5,7 +5,7 @@ from pathlib import Path
 import collections
 import sys
 
-from treekle.wire import json_loads
+from treekle import json_loads
 
 import pytest
 import torch

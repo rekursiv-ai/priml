@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Final, cast
 
 from numpy.typing import NDArray
-from treekle.wire import json_loads
+from treekle import json_loads
 
 import numpy as np
 import pytest

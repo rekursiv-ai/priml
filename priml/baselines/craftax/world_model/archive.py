@@ -67,8 +67,7 @@ import struct
 import sys
 import zlib
 
-from treekle import from_plain, to_plain
-from treekle.wire import json_loads
+from treekle import from_plain, json_loads, to_plain
 
 import torch
 

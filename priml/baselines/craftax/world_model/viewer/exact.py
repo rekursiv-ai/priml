@@ -54,8 +54,7 @@ import json
 import re
 
 from numpy.typing import NDArray
-from treekle import MutablePlainTree, from_plain, mutable
-from treekle.wire import json_loads
+from treekle import MutablePlainTree, from_plain, json_loads, mutable
 
 import numpy as np
 

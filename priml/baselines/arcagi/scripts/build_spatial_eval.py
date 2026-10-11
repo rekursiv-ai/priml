@@ -21,7 +21,7 @@ import logging
 import shutil
 import tempfile
 
-from treekle.wire import json_loads
+from treekle import json_loads
 
 import numpy as np
 

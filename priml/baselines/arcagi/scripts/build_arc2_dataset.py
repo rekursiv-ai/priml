@@ -29,7 +29,7 @@ import fcntl
 import json
 import logging
 
-from treekle.wire import json_loads
+from treekle import json_loads
 
 from priml.baselines.arcagi.augmentation import (
     NO_TRAIN_SCALE_WEIGHTS,

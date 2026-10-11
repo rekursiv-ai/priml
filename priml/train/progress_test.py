@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
-from treekle.wire import json_loads
+from treekle import json_loads
 
 import pytest
 

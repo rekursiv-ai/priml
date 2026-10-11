@@ -42,8 +42,7 @@ import json
 import math
 
 from torch import Tensor
-from treekle import PlainTree, from_plain
-from treekle.wire import json_loads
+from treekle import PlainTree, from_plain, json_loads
 
 import torch
 

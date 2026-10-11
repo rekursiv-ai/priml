@@ -16,7 +16,7 @@ from configgle import Fig
 from pyarrow import parquet
 from tokenizers import Tokenizer, pre_tokenizers
 from torch import Tensor
-from treekle.wire import json_loads
+from treekle import json_loads
 
 import pyarrow as pa
 import pytest

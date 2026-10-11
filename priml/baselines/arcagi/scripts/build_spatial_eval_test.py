@@ -8,8 +8,7 @@ from unittest.mock import Mock
 
 import logging
 
-from treekle import ReadError
-from treekle.wire import json_loads
+from treekle import ReadError, json_loads
 
 import numpy as np
 import pytest

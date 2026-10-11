@@ -48,8 +48,7 @@ import os
 import shutil
 import tempfile
 
-from treekle import mutable
-from treekle.wire import json_loads
+from treekle import json_loads, mutable
 
 import numpy as np
 

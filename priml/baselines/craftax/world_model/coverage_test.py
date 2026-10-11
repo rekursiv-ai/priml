@@ -7,8 +7,7 @@ from typing import cast
 import dataclasses
 import json
 
-from treekle import from_plain
-from treekle.wire import json_loads
+from treekle import from_plain, json_loads
 
 import pytest
 import torch

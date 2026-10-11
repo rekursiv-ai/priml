@@ -34,8 +34,7 @@ import argparse
 import json
 import statistics
 
-from treekle import from_plain
-from treekle.wire import json_loads
+from treekle import from_plain, json_loads
 
 from priml.baselines.craftax.world_model.metric import MODALITIES
 from priml.paths import validated_output_path

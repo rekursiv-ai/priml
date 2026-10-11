@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import copy
 import dataclasses
 
-from treekle.wire import json_loads
+from treekle import json_loads
 
 import pytest
 import torch

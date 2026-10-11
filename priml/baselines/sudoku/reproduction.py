@@ -18,8 +18,7 @@ import time
 from configgle import DataclassLike, Fig, Makeable
 from torch import Tensor
 from torch._inductor import config as inductor_config
-from treekle import ReadError
-from treekle.wire import json_loads
+from treekle import ReadError, json_loads
 
 import torch
 

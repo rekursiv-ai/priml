@@ -56,8 +56,7 @@ import subprocess
 import sys
 import time
 
-from treekle import to_plain
-from treekle.wire import json_loads
+from treekle import json_loads, to_plain
 
 import torch
 

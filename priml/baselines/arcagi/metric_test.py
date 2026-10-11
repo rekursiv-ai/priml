@@ -10,7 +10,7 @@ import json
 import logging
 
 from torch import Tensor
-from treekle.wire import json_loads
+from treekle import json_loads
 
 import numpy as np
 import pytest

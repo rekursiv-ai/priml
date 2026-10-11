@@ -11,7 +11,7 @@ import math
 import sys
 
 from configgle import PartialConfig
-from treekle.wire import json_loads
+from treekle import json_loads
 
 import pytest
 import torch
