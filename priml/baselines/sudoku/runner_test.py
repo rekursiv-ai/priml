@@ -50,12 +50,17 @@ def test_eval_weights_overlay_the_ema_shadow_on_a_full_checkpoint(
     live = {"w": torch.zeros(2, 3), "b": torch.ones(3)}
     shadow = {"w": torch.full((2, 3), 5.0)}
     full = tmp_path / "full.pt"
-    torch.save({"step": {"model": live, "ema": shadow, "global_step": 4}}, full)
+    ema = {"shadow_params": shadow, "shadow_buffers": {}, "global_step": 4}
+    torch.save({"step": {"model": live, "ema": ema}}, full)
     weights = load_eval_weights(full)
     assert weights.keys() == {"w", "b"}
     assert torch.equal(weights["w"], shadow["w"])
     assert torch.equal(weights["b"], live["b"])
     assert torch.equal(checkpoint_payload(full, "cpu")["model"]["w"], live["w"])
+    # An EMA that has not updated yet saves only its counters: the live weights load.
+    torch.save({"step": {"model": live, "ema": {"global_step": 0}}}, full)
+    assert "ema" not in checkpoint_payload(full, "cpu")
+    assert torch.equal(load_eval_weights(full)["w"], live["w"])
 
 
 def test_eval_weights_load_a_model_only_file_as_is(tmp_path: Path) -> None:

@@ -7,7 +7,7 @@ HpsEval.Config(
         experiment_name='exp007',
         doc='',
         base_dir=None,
-        checkpoint_path='/runs/exp006/checkpoints/step_00019500.pt',
+        checkpoint_path='/runs/sudoku/exp006/checkpoints/step_00019500.pt',
         model=LatentRecursion.Config(
         │   vocab_size=11,
         │   puzzle_grid_shape=(81,),

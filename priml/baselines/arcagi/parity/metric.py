@@ -20,12 +20,12 @@ import torch.distributed as dist
 
 from priml.baselines.arcagi.augmentation import (
     ArcSpec,
-    ColorDihedral,
     arc_grid_to_np,
     crop_grid,
     grid_hash,
 )
 from priml.baselines.arcagi.metric import PerOutputPass, StrictPass, TaskScore
+from priml.data.color_dihedral import ColorDihedral
 from priml.paths import resolve_working_dir
 
 

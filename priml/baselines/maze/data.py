@@ -1,4 +1,4 @@
-"""Maze-Hard tokens, dihedral views, the canonical path, and the loader.
+"""Maze-Hard tokens, dihedral views, and the canonical path.
 
 A maze is a 30x30 grid of six tokens. The label is the input with the cells of
 ONE shortest start-to-goal path marked. Most mazes have several shortest paths,
@@ -17,20 +17,15 @@ policy. ``scripts/prepare_data.py`` writes both forms; the recipes choose one.
 from __future__ import annotations
 
 from collections import deque
-from typing import TYPE_CHECKING, Final, NotRequired, cast, override
+from typing import TYPE_CHECKING, Final, cast
 
 import math
 
-from configgle import Makes
-
 import numpy as np
-
-from priml.baselines.sudoku.puzzle_data import PuzzleDataset
-from priml.timer import CheckpointableStepTimer
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
     from numpy.typing import NDArray
 
@@ -80,39 +75,6 @@ ORIGINAL: Final = "hard-1k"
 
 CANONICAL: Final = "hard-1k-canonical"
 """Prepared tree of the eight views, each relabeled in its own frame."""
-
-
-class MazeData(PuzzleDataset):
-    """Prepared maze arrays on the device, with the epoch count a loop reads.
-
-    Batches are drawn exactly as :class:`PuzzleDataset` draws them -- the
-    two-level seeded shuffle, a zero-padded final batch, and a puzzle id of 0
-    for the one shared prefix row.
-    """
-
-    class Config(Makes["MazeData"], PuzzleDataset.Config):
-        """Where the prepared arrays live, and how batches are drawn."""
-
-    def __init__(self, config: Config) -> None:
-        super().__init__(config)
-        self.timer_epoch = CheckpointableStepTimer()
-        """Passes over the training split; ticked by the loop."""
-
-    class MazeStateDict(PuzzleDataset.StateDict):
-        """The shuffle's epoch counter and the loop's epoch timer."""
-
-        timer_epoch: NotRequired[CheckpointableStepTimer.StateDict]
-
-    @override
-    def state_dict(self) -> MazeStateDict:
-        return {**super().state_dict(), "timer_epoch": self.timer_epoch.state_dict()}
-
-    @override
-    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
-        super().load_state_dict(state_dict)
-        state = cast(MazeData.MazeStateDict, state_dict)
-        if "timer_epoch" in state:
-            self.timer_epoch.load_state_dict(state["timer_epoch"])
 
 
 def tokenize(text: str, *, side: int) -> NDArray[np.uint8]:

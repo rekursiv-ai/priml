@@ -6,7 +6,7 @@ end-to-end reproductions (exp008 and exp012).
 
 from __future__ import annotations
 
-from dataclasses import field, fields
+from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, Self, TypedDict, override
 
@@ -15,7 +15,7 @@ import logging
 import math
 import time
 
-from configgle import DataclassLike, Fig, Makeable
+from configgle import Fig, Makeable
 from torch import Tensor
 from torch._inductor import config as inductor_config
 from treekle import ReadError, json_loads
@@ -24,6 +24,7 @@ import torch
 
 from priml.baselines.sudoku.agreement_lock import AgreementLockEval, Member
 from priml.baselines.sudoku.harvest import Harvest
+from priml.baselines.sudoku.routed_act_step import HaltRelease
 from priml.baselines.sudoku.runner import (
     eval_model,
     fill_template,
@@ -34,11 +35,13 @@ from priml.baselines.sudoku.runner import (
 )
 from priml.baselines.sudoku.search import GridAcceptor, HpsSearch, run_search
 from priml.baselines.sudoku.sieve import SieveEval, det_pass
-from priml.baselines.sudoku.trainer import Trainer, resolve_run_dir
+from priml.baselines.sudoku.train_loop import SudokuTrainLoop
 from priml.baselines.sudoku.verifier import CommitteeLock, VerifierAcceptor
 from priml.baselines.sudoku.verifier_fit import VerifierFit
 from priml.paths import resolve_working_dir
 from priml.runtime import SingleProcess
+from priml.train.checkpointer import Checkpointer
+from priml.train.parallelism import NoParallel
 from priml.train.tracker import WandbTracker
 
 
@@ -76,12 +79,13 @@ class Reproduction:
       (``screen="nine_view"``, lock ``full_eval``.)
 
     Training happens in ``eval_every_steps`` segments via a fresh
-    :class:`~priml.baselines.sudoku.trainer.Trainer` per segment
-    resuming the same checkpoint directory; the segment builder mutates ONLY
-    run identity, seed, the segment horizon, the eval cadence, the dedicated
-    RNG-stream pins, and checkpoint retention -- the cosine horizon
-    (``total_train_steps``) is untouched, so the composed segments replay
-    the recipe's single-run schedule. Crash resume is free: a re-run skips
+    :class:`~priml.baselines.sudoku.train_loop.SudokuTrainLoop` per
+    segment resuming the same checkpoint directory. ``finalize`` stamps the
+    generator's identity and scratch root; the segment builder then mutates
+    ONLY the segment horizon, the eval cadence, the dedicated RNG-stream pins,
+    and checkpoint retention -- the cosine horizon (``total_train_steps``) is
+    untouched, so the composed segments replay the recipe's single-run
+    schedule. Crash resume is free: a re-run skips
     segments whose horizon checkpoint already exists and resumes a partial
     segment from its latest checkpoint. The resume re-walk re-runs the
     gates, screens, and any already-triggered full evals at pre-crash
@@ -93,13 +97,12 @@ class Reproduction:
     boundary checkpoint loadable on resume.
 
     TRACKING is single-outer-run: the runner owns at most ONE W&B run
-    (``wandb_project`` -- the trainer convention: set to enable) and
-    forwards the stage results through it -- each segment's last EVAL row
-    (read back from the segment's ``metrics.json``; the per-step train
-    stream is file-local to the segment and is NOT forwarded), screen
-    results as ``screen/`` rows, trigger events and full-eval results as
-    ``trigger/`` / ``full/`` rows, and ``summary/`` fields at the end. Inner
-    runs never open W&B (the segment builder pins ``wandb_project=None``);
+    (``wandb_project``: set to enable) and forwards the stage results
+    through it -- each segment's last EVAL row (read back from the segment's
+    ``metrics.json``; the per-step train stream is file-local to the segment
+    and is NOT forwarded), screen results as ``screen/`` rows, trigger events
+    and full-eval results as ``trigger/`` / ``full/`` rows, and ``summary/``
+    fields at the end. Inner runs track to their own ``metrics.json`` only;
     the aggregate ``metrics.json`` under the runner's own run dir is the
     complete record -- W&B is additive. Per-eval metrics and dumps land
     under ``<scratch>/runs/{experiment_name}/dumps/``.
@@ -109,7 +112,8 @@ class Reproduction:
         """Generator recipe and identity, screens, and the full eval."""
 
         runtime: SingleProcess.Config = field(
-            # Device PINNED: priml defaults to ``None`` (see Trainer.Config).
+            # Device PINNED: priml's ``None`` falls back to the CPU when no GPU is
+            # visible, a silent 100x-slow run.
             default_factory=lambda: SingleProcess.Config(device="cuda"),
         )
         """The SINGLE process runtime of the whole staged job; ``finalize()``
@@ -131,15 +135,16 @@ class Reproduction:
         """Scratch root shared by every stage; ``None`` resolves from the
         environment at construction. Pushed into children left unset."""
 
-        generator: Trainer.Config = field(default_factory=Trainer.Config)
+        generator: SudokuTrainLoop = field(default_factory=SudokuTrainLoop)
         """The FULL generator training recipe segments derive from (the
         recipe seam experiments.py fills). Its ``max_steps`` is the staged
-        horizon; ``total_train_steps`` -- the cosine horizon -- is never
+        horizon; ``step.total_train_steps`` -- the cosine horizon -- is never
         touched by segmentation. Its ``seed`` also seeds the dedicated
         augmentation stream, so it must be set."""
 
         generator_name: str = ""
-        """Fresh checkpoint identity of the generator. Required."""
+        """Fresh checkpoint identity of the generator, stamped onto it as its
+        ``experiment_name``. Required."""
 
         eval_every_steps: int = 1_000
         """Checkpoint/eval cadence in train steps (the trigger-eval knob)."""
@@ -209,10 +214,10 @@ class Reproduction:
         population; dev screens use ``dev_screen_count``."""
 
         wandb_project: str | None = None
-        """W&B project for the SINGLE outer tracker (the trainer
-        convention: set -> W&B on). Sub-runs never open W&B; the runner
-        forwards segment/screen/full-eval metrics through this tracker.
-        None keeps the run file-tracked only."""
+        """W&B project for the SINGLE outer tracker (set -> W&B on). Sub-runs
+        track to their own files only; the runner forwards
+        segment/screen/full-eval metrics through this tracker. None keeps the
+        run file-tracked only."""
 
         metrics_path: str | Path = "/runs/{experiment_name}/metrics.json"
         """Aggregate JSON result path resolved beneath ``base_dir``."""
@@ -220,17 +225,18 @@ class Reproduction:
         @override
         def finalize(self) -> Self:
             self.generator.runtime = self.runtime
+            self.generator.experiment_name = self.generator_name
+            # The generator is a whole training loop, rooted at the scratch
+            # default rather than left unset, so the pipeline's root must
+            # override it or one ``base_dir`` would not relocate the run.
+            if self.base_dir is not None:
+                self.generator.base_dir = self.base_dir
             self.full_eval.runtime = self.runtime
             if self.harvest.device is None:
                 self.harvest.device = str(self.runtime.device)
             if self.verifier.device is None:
                 self.verifier.device = str(self.runtime.device)
-            for child in (
-                self.generator,
-                self.harvest,
-                self.verifier,
-                self.full_eval,
-            ):
+            for child in (self.harvest, self.verifier, self.full_eval):
                 if child.base_dir is None:
                     child.base_dir = self.base_dir
             return super().finalize()
@@ -254,6 +260,11 @@ class Reproduction:
             raise ValueError(
                 "the generator recipe needs a seed: it also seeds the dedicated "
                 "augmentation stream that makes resumed segments replay exactly.",
+            )
+        if not isinstance(config.generator.checkpointer, Checkpointer.Config):
+            raise TypeError(
+                "the generator recipe needs a checkpointer: each segment resumes "
+                "from the last, and every screen and full evaluation loads one.",
             )
         if config.screen == "nine_view" and not isinstance(
             config.full_eval,
@@ -284,9 +295,9 @@ class Reproduction:
         self.runtime.initialize()
         self.device = self.runtime.device
         # Process-global TorchInductor flag; must be set before any screen
-        # model construction binds torch.compile (the trainer contract).
+        # model construction binds torch.compile (the train step's contract).
         inductor_config.emulate_precision_casts = (
-            config.generator.emulate_precision_casts
+            config.generator.step.emulate_precision_casts
         )
 
     def run(self, *args: str) -> None:
@@ -586,8 +597,6 @@ class Reproduction:
         cfg = self.config
         segment = _generator_segment(
             cfg.generator.copy_tree(),
-            study_name=cfg.study_name,
-            experiment_name=cfg.generator_name,
             num_steps_eval=cfg.eval_every_steps,
             max_steps=boundary,
         )
@@ -595,27 +604,31 @@ class Reproduction:
 
     def _segment_metrics_path(self) -> Path:
         """Return the generator's own run-dir metrics file (forwarded)."""
-        run_dir = resolve_run_dir(self._generator_base(), self.config.generator_name)
-        return run_dir / "metrics.json"
+        return Path(self.config.generator.working_dir) / "metrics.json"
 
     def _checkpoint_path(self, step: int) -> Path:
         """Resolve the generator's checkpoint path at one boundary step."""
-        run_dir = resolve_run_dir(self._generator_base(), self.config.generator_name)
-        return run_dir / "checkpoints" / f"step_{step:08d}.pt"
+        checkpointer = self.config.generator.checkpointer
+        assert isinstance(checkpointer, Checkpointer.Config)  # __init__ validated.
+        return Path(checkpointer.working_dir) / checkpointer.filename.format(step=step)
 
-    def _generator_base(self) -> Path:
-        """Return the generator subtree's scratch root (defaults to ``/opt/scratch``)."""
+    # The consuming stage resolves it beneath its own ``base_dir``, which ``finalize``
+    # roots where the generator's is.
+    def _checkpoint_logical(self, step: int) -> str:
+        """Return the boundary checkpoint as a logical path beneath the scratch root."""
         base = self.config.generator.base_dir
-        return Path(base) if base is not None else Path("/opt/scratch")
+        if base is None:  # The loop's default root, or the pipeline's.
+            raise ValueError("Expected base is not None.")
+        return f"/{self._checkpoint_path(step).relative_to(base)}"
 
     def _det_gate(self, step: int) -> tuple[int, int, float]:
         """Run the cheap det gate at one boundary; (exact, of, seconds)."""
         cfg = self.config
         return _det_gate_screen(
             recipe=cfg.generator,
-            experiment_name=f"{cfg.experiment_name}_detgate_{step}",
             checkpoint_path=self._checkpoint_path(step),
             count=cfg.dev_screen_count,
+            device=self.device,
         )
 
     def _dev_screen(self, step: int) -> tuple[int, int, int | None, float]:
@@ -642,7 +655,7 @@ class Reproduction:
         started = time.monotonic()
         acceptor = self._screen_acceptor_config().make()
         model = eval_model(
-            cfg.generator.model,
+            cfg.generator.step.model,
             self._checkpoint_path(step),
             self.device,
         )
@@ -727,7 +740,7 @@ class Reproduction:
         assert isinstance(cfg.full_eval, AgreementLockEval.Config)  # Validated.
         run = cfg.full_eval.copy_tree()
         run.experiment_name = f"{cfg.experiment_name}_{tag}_{step}"
-        checkpoint = _checkpoint_template(cfg.generator_name, step)
+        checkpoint = self._checkpoint_logical(step)
         run.members = tuple(
             Member(checkpoint, member.view, member.name) for member in run.members
         )
@@ -762,7 +775,7 @@ class Reproduction:
         cfg = self.config
         assert isinstance(cfg.full_eval, SieveEval.Config)  # __init__ validated.
         run = cfg.full_eval.copy_tree()
-        run.checkpoint_path = _checkpoint_template(cfg.generator_name, step)
+        run.checkpoint_path = self._checkpoint_logical(step)
         run.verifier_checkpoints = self._verifier_checkpoints()
         # The template is already finalized, so its finalize -- which pushes
         # verifier_checkpoints into the acceptor -- never reruns; without this the
@@ -775,75 +788,44 @@ class Reproduction:
         return run
 
 
+# ``recipe`` is a finalized tree whose identity and root are already stamped, and
+# nothing set here feeds a ``finalize`` derivation, so the copy builds as it is.
 def _generator_segment(
-    recipe: Trainer.Config,
+    recipe: SudokuTrainLoop,
     *,
-    study_name: str,
-    experiment_name: str,
     num_steps_eval: int,
     max_steps: int,
-) -> Trainer.Config:
-    """One training segment of ``recipe`` under a fresh identity."""
+) -> SudokuTrainLoop:
+    """One training segment of ``recipe``: its horizon, cadence, and replay pins."""
     cfg = recipe
-    cfg.study_name = study_name
-    cfg.experiment_name = experiment_name
     cfg.num_steps_eval = num_steps_eval
     cfg.max_steps = max_steps
-    cfg.halt_exploration_seed = 0  # Explicit pin (the recipe's default).
-    # A dedicated augmentation stream seeded like the trainer: a resumed
-    # segment then draws exactly what one uninterrupted run would have.
+    halting = cfg.step.pool.halting
+    if halting is not None:
+        halting.seed = 0  # Explicit pin (the recipe's default).
+    # A dedicated augmentation stream seeded like the loop: a resumed segment
+    # then draws exactly what one uninterrupted run would have.
     cfg.dataset.augment_seed = cfg.seed
     cfg.dataset.seed = 0  # Explicit pin (the recipe's train-shuffle stream).
-    cfg.wandb_project = None  # No W&B in sub-runs; the outer run owns W&B.
-    if cfg.checkpointer is not None:
-        # Identity is runner-owned via ``cfg.experiment_name`` above; the
-        # trainer's finalize injects the run directory into the checkpointer's
-        # ``base_dir``, so the checkpoint dir tracks the fresh identity. The
-        # runner copies an ALREADY-finalized ``generator`` seam, so both fields
-        # carry a stale run dir resolved under the unstamped identity; reset
-        # them to their logical defaults so re-finalization re-injects the
-        # freshly stamped run directory.
-        cfg.checkpointer.base_dir = None
-        default_working_dir = _field_default(cfg.checkpointer, "working_dir")
-        assert isinstance(default_working_dir, (str, Path))
-        cfg.checkpointer.working_dir = default_working_dir
-        _clear_finalized(cfg.checkpointer)
-        # The top-level config is finalized too; clear it so ``make()``
-        # re-finalizes (and re-injects the checkpointer run dir) instead of
-        # skipping finalize on an already-finalized tree.
-        _clear_finalized(cfg)
-        # The crash-resume re-walk loads OLD boundary checkpoints (gates,
-        # screens, full evals); the recipe's rolling retention would prune
-        # them past keep_last_n boundaries and wedge every resume, so
-        # segments keep every boundary checkpoint.
-        cfg.checkpointer.keep_last_n = -1
+    checkpointer = cfg.checkpointer
+    assert isinstance(checkpointer, Checkpointer.Config)  # Pipeline validated.
+    # The crash-resume re-walk loads OLD boundary checkpoints (gates, screens,
+    # full evals); the recipe's rolling retention would prune them past
+    # keep_last_n boundaries and wedge every resume, so segments keep every
+    # boundary checkpoint.
+    checkpointer.keep_last_n = -1
     return cfg
 
 
-# ``finalize`` is not idempotent (it resolves logical paths to absolute); a re-finalize
-# of an already-finalized subtree is otherwise skipped by the ``_finalized`` guard,
-# leaving stale derived values in place.
-def _clear_finalized(config: object) -> None:
-    """Mark a finalized config pending again so a later finalize re-derives it."""
-    object.__setattr__(config, "_finalized", False)
-
-
-def _field_default(config: DataclassLike, name: str) -> object:
-    """Return the declared dataclass default of ``config``'s ``name`` field."""
-    for spec in fields(config):
-        if spec.name == name:
-            return spec.default
-    raise AttributeError(f"{type(config).__name__} has no field {name!r}.")
-
-
 # Crash resume: a completed segment (latest checkpoint at or past the segment horizon)
-# is skipped without constructing a trainer; a partial segment resumes from its latest
-# checkpoint through the trainer's ordinary resume.
-def _run_training(config: Trainer.Config) -> tuple[float, bool]:
+# is skipped without constructing a loop; a partial segment resumes from its latest
+# checkpoint through the loop's ordinary resume.
+def _run_training(config: SudokuTrainLoop) -> tuple[float, bool]:
     """Run one training segment; skip it when its horizon is already on disk."""
-    finalized = config.copy_tree().finalize()
-    if finalized.checkpointer is not None:
-        steps = finalized.checkpointer.make().available_steps()
+    finalized = config.finalized()
+    checkpointer = finalized.checkpointer
+    if isinstance(checkpointer, Checkpointer.Config):
+        steps = checkpointer.make().available_steps()
         boundary = int(finalized.max_steps)
         if boundary in steps:
             logger.info(
@@ -861,54 +843,46 @@ def _run_training(config: Trainer.Config) -> tuple[float, bool]:
                 "requested boundary.",
             )
     started = time.monotonic()
-    trainer = config.make()
+    loop = finalized.make()
     try:
-        trainer.run()
+        loop.run()
     finally:
-        del trainer
+        del loop
         release()
     return time.monotonic() - started, True
 
 
-# No search anywhere: a throwaway eval-only trainer (the recipe's model / runtime /
-# rollout knobs; checkpointing off) loads the boundary checkpoint's eval weights and
-# runs the conditional-halt deterministic pass (per-row release at q >= +2, the
-# registered bar). Purely a cost gate for the expensive learned-q screens: early-
-# training screens explode because every failing root searches at full budget.
+# No search anywhere: a throwaway evaluation step (the recipe's model and rollout knobs,
+# no loop, so no reseed) loads the boundary checkpoint's eval weights and runs the
+# conditional-halt deterministic pass (per-row release at q >= +2, the registered bar).
+# Purely a cost gate for the expensive learned-q screens: early-training screens explode
+# because every failing root searches at full budget.
 def _det_gate_screen(
     *,
-    recipe: Trainer.Config,
-    experiment_name: str,
+    recipe: SudokuTrainLoop,
     checkpoint_path: Path,
     count: int,
+    device: torch.device,
 ) -> tuple[int, int, float]:
     """Cheap conditional-halt det dev screen; returns (exact, of, seconds)."""
-    cfg = Trainer.Config()
-    cfg.experiment_name = experiment_name
-    cfg.base_dir = recipe.base_dir
-    # Throwaway eval-only trainer: no global reseed (weights are overwritten
-    # by the checkpoint) and no per-boundary run-dir record.
-    cfg.ephemeral = True
-    cfg.runtime = recipe.runtime
-    cfg.model = recipe.model
-    cfg.emulate_precision_casts = recipe.emulate_precision_casts
-    cfg.max_act_steps = recipe.max_act_steps
-    cfg.dtype_autocast = recipe.dtype_autocast
+    step = recipe.step.copy_tree()
+    step.release = HaltRelease.Config()
+    placement = step.parallelism = NoParallel.Config()
+    placement.device = device
     dataset = recipe.dataset.copy_tree()
     dataset.eval_num_instances = count
     dataset.eval_instance_indices = ()
-    cfg.dataset = dataset
-    cfg.checkpointer = None
-    cfg.eval_warmup_batches = 0
+    if dataset.device is None:
+        dataset.device = str(device)
     started = time.monotonic()
-    trainer = cfg.make()
+    gate = step.make()
     try:
-        trainer.model.load_state_dict(
-            load_eval_weights(checkpoint_path, device=trainer.device),
+        gate.model.load_state_dict(
+            load_eval_weights(checkpoint_path, device=gate.device),
         )
-        result = det_pass(trainer)
+        result = det_pass(gate, dataset.make())
     finally:
-        del trainer
+        del gate
         release()
     exact = (result.grids == result.label).all(dim=-1)
     return int(exact.sum()), int(exact.shape[0]), time.monotonic() - started
@@ -940,11 +914,6 @@ def _screen_pass(
     if not accepted_parts:
         raise ValueError("the dev screen found no valid eval rows.")
     return torch.cat(accepted_parts), torch.cat(exact_parts)
-
-
-def _checkpoint_template(experiment_name: str, step: int) -> str:
-    """Run-dir checkpoint logical path (resolved beneath the consumer's base)."""
-    return f"/runs/{experiment_name}/checkpoints/step_{step:08d}.pt"
 
 
 def _eval_boundaries(every: int, total: int) -> list[int]:
@@ -1017,7 +986,7 @@ class _OuterRun:
             metrics_path: Segment metrics JSON path.
             step: W&B step assigned to the forwarded row.
 
-        The rows carry their own ``eval/`` key prefixes (the trainer's file
+        The rows carry their own ``eval/`` key prefixes (the segment's file
         tracker keeps the last write -- at cadence-length segments the
         boundary row), so the segment trajectory stays step-continuous
         across segments.

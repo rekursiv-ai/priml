@@ -180,7 +180,7 @@ reference step, kept to replay its single- and two-rank trajectories.
 | `experiments.py` | Experiment factories and training loops |
 | `model.py` | Rotary block, task table, convolutional feed-forward, one-state recurrence |
 | `train_step.py` | ACT training step, evaluation signals, data parallelism |
-| `loss.py`, `optimizer.py` | Stablemax token loss, Muon/AdamW partition |
+| `loss.py` | Stablemax and cross-entropy token losses, batch reductions |
 | `data.py`, `puzzle_data.py`, `augmentation.py` | ARC-AGI-1 and ARC-AGI-2 loaders, views |
 | `metric.py` | Canonical pass@K, strict and per-output rules |
 | `signal_dump.py` | Per-view evaluation signals written beside a run |

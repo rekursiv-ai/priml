@@ -466,11 +466,11 @@ class Harvest:
 
         harvest_source_checkpoint: str | Path = ""
         """Frozen generator checkpoint the harvest rolls out. Both package
-        schemas load: the full trainer checkpoint (``state["step"]["model"]``
-        plus the flat ``state["step"]["ema"]`` shadow -- the EMA weights are
-        the eval weights and take precedence when present) and the model-only
-        flavor (``{"model": ...}`` at the top level). A relative logical path
-        resolves beneath ``base_dir`` at construction."""
+        schemas load: the full training checkpoint (``state["step"]["model"]``
+        plus the EMA shadow ``state["step"]["ema"]["shadow_params"]`` -- the
+        EMA weights are the eval weights and take precedence when present) and
+        the model-only flavor (``{"model": ...}`` at the top level). A relative
+        logical path resolves beneath ``base_dir`` at construction."""
 
         model: LatentRecursion.Config = field(default_factory=LatentRecursion.Config)
         """Generator architecture (default: the recipe TRM); must match the
@@ -534,13 +534,13 @@ class Harvest:
         strength."""
 
         dtype_autocast: torch.dtype | None = torch.bfloat16
-        """Autocast compute dtype for the rollouts (mirrors the trainer);
+        """Autocast compute dtype for the rollouts (mirrors the train step);
         None disables autocast."""
 
         emulate_precision_casts: bool = True
         """Set TorchInductor's precision-cast emulation (process-global)
         before generator model construction -- required for sound compiled
-        bf16 rollouts (the trainer contract)."""
+        bf16 rollouts (the train step's contract)."""
 
         device: torch.device | str | None = None
         """Rollout device."""
@@ -611,7 +611,7 @@ class Harvest:
         )
 
         # Process-global TorchInductor flag; must be set before model
-        # construction binds torch.compile (the trainer contract; compiled
+        # construction binds torch.compile (the train step's contract; compiled
         # bf16 rollouts are numerically unsound without it).
         inductor_config.emulate_precision_casts = config.emulate_precision_casts
         self.model = config.model.make().to(self.device)

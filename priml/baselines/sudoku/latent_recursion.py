@@ -33,21 +33,21 @@ position and feedback tables stay local: composing
 under a slot name, and this class exists to load the reference checkpoints,
 whose keys are flat.
 
-Precision and compile contract (the trainer's side of the seam):
+Precision and compile contract (the train step's side of the seam):
 
-* Master weights stay fp32; the trainer wraps forward passes in bf16
+* Master weights stay fp32; the train step wraps forward passes in bf16
   autocast. The model never casts its own weights.
 * When ``config.compile`` is True the constructor binds
   ``torch.compile(self.reasoning.forward)`` -- a compiled callable, not a
   submodule -- so the state_dict never grows ``_orig_mod`` keys and the
-  recurrence driver stays eager. The trainer is expected to set
+  recurrence driver stays eager. The train step is expected to set
   ``torch._inductor.config.emulate_precision_casts = True`` BEFORE
   constructing a compiled model (it keeps compiled bf16 train and eval
   numerics sound); the model does not set process-global flags itself.
-* The trainer may flip ``config.compile`` off at runtime to force eager
+* The train step may flip ``config.compile`` off at runtime to force eager
   evaluation; :meth:`LatentRecursion.core` re-reads the flag on every call.
 
-Parameter names are a stable contract: the trainer routes parameters to
+Parameter names are a stable contract: the train step routes parameters to
 optimizers by name substring (``embed``/``head`` -> AdamW, everything else ->
 Muon), so the attribute names here (``embed_tokens``, ``head``, ``q_head``,
 ``puzzle_emb``, ``reasoning``, ``embed_pos_row/col/box``, ``embed_feedback``)
@@ -189,7 +189,7 @@ class LatentRecursion(nn.Module):
 
         compile: bool = True
         """Bind ``torch.compile(reasoning.forward, fullgraph=True)`` at
-        construction. The trainer must set ``torch._inductor.config.
+        construction. The train step must set ``torch._inductor.config.
         emulate_precision_casts = True`` before construction, and may flip
         this flag off at runtime to force eager evaluation."""
 
@@ -715,7 +715,7 @@ class LatentRecursion(nn.Module):
         """One slow-cycle: fast_cycles of z_fast updates, then one z_slow update.
 
         The reasoning sub-unit dispatches on ``config.compile`` EVERY call, so
-        the trainer can flip the flag off at runtime to force eager eval
+        the train step can flip the flag off at runtime to force eager eval
         (compile + bf16 corrupts the repeated-carry eval loop unless
         ``emulate_precision_casts`` is set).
 

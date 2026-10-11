@@ -1,10 +1,13 @@
-"""Per-token and per-sample training losses of the TRM trainer."""
+"""Per-token and per-sample training losses of the sudoku train step."""
 
 from __future__ import annotations
 
+from configgle import Fig
 from torch import Tensor, nn
 
 import torch
+
+from priml.baselines.sudoku.puzzle_spec import SudokuSpec, sudoku_group_indices
 
 
 def token_cross_entropy(
@@ -84,3 +87,86 @@ def csp_cardinality_per_sample(
         ).sum(dim=-2)
         target = (present > 0).float()[..., 1:].unsqueeze(-2)
     return (mass - target).square().mean(dim=(-2, -1))
+
+
+class CardinalityLoss:
+    """Add the row, column, and box cardinality term to the token loss.
+
+    The term (:func:`csp_cardinality_per_sample`) is reduced over the slots
+    that trained exactly as the token loss is, then weighted; it joins the
+    loss only once ``warmup_steps`` optimizer steps have passed.
+    """
+
+    class Config(Fig["CardinalityLoss"]):
+        """Weight, warmup, temperature, and the grid it constrains."""
+
+        weight: float = 1.0
+        """Weight relative to the token loss."""
+
+        warmup_steps: int = 0
+        """Optimizer steps before the term joins the loss."""
+
+        temperature: float = 1.0
+        """Softmax temperature of the per-cell distributions."""
+
+        spec: SudokuSpec | None = None
+        """Grid, box, and vocabulary geometry; filled by the loop from its data."""
+
+    def __init__(self, config: Config) -> None:
+        spec = config.spec
+        if spec is None:
+            raise ValueError("The cardinality loss spec must be filled by its loop.")
+        rows, cols = spec.grid_shape
+        box_rows, box_cols = spec.box_shape
+        if (
+            rows != cols
+            or min(rows, cols, box_rows, box_cols) < 1
+            or rows % box_rows
+            or cols % box_cols
+            or box_rows * box_cols != rows
+            or spec.vocab_size != rows + 2
+        ):
+            raise ValueError(
+                "The cardinality loss requires sudoku grid, boxes, and vocabulary "
+                "to agree.",
+            )
+        self.weight = config.weight
+        self.warmup_steps = config.warmup_steps
+        self.temperature = config.temperature
+        self.groups = sudoku_group_indices(spec)
+
+    def to(self, device: torch.device) -> None:
+        """Move the constraint-group table to ``device``."""
+        self.groups = self.groups.to(device)
+
+    # Only active slots contribute; rows whose labels are entirely the ignore label
+    # (atomic tail padding) are zeroed too.
+    def __call__(
+        self,
+        logits: Tensor,
+        labels: Tensor,
+        *,
+        active: Tensor,
+        ignore_index: int,
+    ) -> Tensor:
+        """Return the unweighted term reduced over the active slots.
+
+        Args:
+          logits: ``[B, G, V]`` prefix-stripped grid logits.
+          labels: ``[B, G]`` labels; ``ignore_index`` marks cells that do not count.
+          active: ``[B]`` slots that trained this step.
+          ignore_index: Label of cells that do not count.
+
+        Returns:
+          loss: Scalar mean over the active slots.
+
+        """
+        per_sample = csp_cardinality_per_sample(
+            logits,
+            labels,
+            self.groups,
+            temperature=self.temperature,
+        )
+        contributes = active & (labels != ignore_index).any(dim=-1)
+        per_sample = torch.where(contributes, per_sample, torch.zeros_like(per_sample))
+        return per_sample.sum() / active.sum().clamp(min=1)

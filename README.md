@@ -258,7 +258,7 @@ For example,
 from priml import cost as theoretical
 from priml.baselines.sudoku import experiments as sudoku
 
-sudoku.exp000().finalize().model.cost(batch_size=64, dtype=torch.bfloat16)
+sudoku.exp000().finalize().step.model.cost(batch_size=64, dtype=torch.bfloat16)
 
 theoretical.peak()["rtx5090", torch.bfloat16]
 theoretical.peak()["h100", torch.bfloat16]
@@ -311,7 +311,7 @@ or a single-device report such as `theoretical.peak()["h100"]`.
 
 ```python
 theoretical.utilization(
-    sudoku.exp000().finalize().model.cost(batch_size=64, dtype=torch.bfloat16),
+    sudoku.exp000().finalize().step.model.cost(batch_size=64, dtype=torch.bfloat16),
     device="h100",
 )
 ```

@@ -14,11 +14,11 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.arcagi.augmentation import ColorDihedral
 from priml.baselines.sudoku import data
 from priml.baselines.sudoku.data import SudokuData, _load_split, augment_sudoku
 from priml.baselines.sudoku.puzzle_data import PuzzleDataset
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
+from priml.data.color_dihedral import ColorDihedral
 from priml.math.seed import salt
 from priml.runtime import get_device
 from priml.testing.golden import assert_tensor_golden, stored

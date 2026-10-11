@@ -1,4 +1,4 @@
-"""Tests for maze tokens, dihedral views, canonical labels, and the loader."""
+"""Tests for maze tokens, dihedral views, and canonical labels."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import pytest
 from priml.baselines.maze.data import (
     CHARSET,
     DIHEDRAL_VIEWS,
-    MazeData,
     canonical_labels,
     canonical_path_label,
     tokenize,
@@ -18,8 +17,6 @@ from priml.baselines.maze.data import (
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from numpy.typing import NDArray
 
 
@@ -112,17 +109,6 @@ def test_the_dihedral_views_are_the_eight_symmetries_in_stored_order() -> None:
         [0, 3, 1, 4, 2, 5],
         [5, 2, 4, 1, 3, 0],
     ]
-
-
-def test_the_epoch_timer_survives_a_checkpoint(tmp_path: Path) -> None:
-    """The loop counts epochs on the dataset, so resuming must restore them."""
-    data = MazeData(MazeData.Config(working_dir=tmp_path))
-    data.timer_epoch.global_count = 3
-    restored = MazeData(MazeData.Config(working_dir=tmp_path))
-    restored.load_state_dict(data.state_dict())
-    assert restored.timer_epoch.global_count == 3
-    restored.load_state_dict({})
-    assert restored.timer_epoch.global_count == 3
 
 
 def _grid(*rows: str) -> NDArray[np.uint8]:

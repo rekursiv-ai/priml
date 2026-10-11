@@ -105,7 +105,8 @@ class AgreementLockEval:
         """Committee membership, search policy, population, and outputs."""
 
         runtime: SingleProcess.Config = field(
-            # Device PINNED: priml defaults to ``None`` (see Trainer.Config).
+            # Device PINNED: priml's ``None`` falls back to the CPU when no GPU is
+            # visible, a silent 100x-slow run.
             default_factory=lambda: SingleProcess.Config(device="cuda"),
         )
         """Process runtime (device + determinism)."""
@@ -156,7 +157,7 @@ class AgreementLockEval:
         emulate_precision_casts: bool = True
         """Set TorchInductor's precision-cast emulation (process-global)
         before member model construction -- required for sound compiled
-        bf16 eval (the trainer contract)."""
+        bf16 eval (the train step's contract)."""
 
         metrics_path: str | Path = (
             "/runs/{experiment_name}/dumps/agreement_lock_metrics.json"
@@ -197,7 +198,7 @@ class AgreementLockEval:
         self.runtime.initialize()
         self.device = self.runtime.device
         # Process-global TorchInductor flag; must be set before any member
-        # model construction binds torch.compile (the trainer contract).
+        # model construction binds torch.compile (the train step's contract).
         inductor_config.emulate_precision_casts = config.emulate_precision_casts
         self._scratch = (
             config.base_dir if config.base_dir is not None else Path("/opt/scratch")

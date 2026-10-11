@@ -462,7 +462,7 @@ def truncated_normal_(tensor: Tensor, *, generator: torch.Generator) -> Tensor:
 
 
 def _hypothesis_recursion(model: LatentRecursion) -> HypothesisRecursion:
-    """Narrow the trainer's model to the hypothesis-holding TRM."""
+    """Narrow the train step's model to the hypothesis-holding TRM."""
     if not isinstance(model, HypothesisRecursion):
         raise TypeError(
             f"winner-take-all routing requires a HypothesisRecursion; got {type(model).__name__}.",

@@ -59,7 +59,6 @@ from priml.baselines.arcagi.model import (
     SingleLatentRecurrence,
     depthwise_shift,
 )
-from priml.baselines.arcagi.optimizer import with_ndim
 from priml.baselines.arcagi.puzzle_data import Arc2PuzzleDataset
 from priml.baselines.arcagi.signal_dump import (
     SignalDumpTracker,
@@ -94,7 +93,7 @@ from priml.model.swiglu import SwiGLU
 from priml.optimizers import AdamATan2
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.muon import Muon
-from priml.optimizers.parameter_filter import complement, excluding
+from priml.optimizers.parameter_filter import complement, excluding, with_ndim
 from priml.runtime import MultiProcess, SingleProcess
 from priml.train.checkpointer import Checkpointer
 from priml.train.ema import EMA

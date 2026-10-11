@@ -46,7 +46,6 @@ import torch.distributed as dist
 
 from priml.baselines.arcagi.augmentation import (
     ArcSpec,
-    ColorDihedral,
     arc_grid_to_np,
     crop_grid,
     grid_hash,
@@ -57,6 +56,7 @@ from priml.baselines.arcagi.signal_dump import (
     SignalRow,
     StepRow,
 )
+from priml.data.color_dihedral import ColorDihedral
 from priml.paths import resolve_working_dir
 from priml.runtime import is_rank_zero
 

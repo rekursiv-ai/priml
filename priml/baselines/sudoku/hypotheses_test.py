@@ -1,6 +1,6 @@
 """Tests for winner-take-all training over several fast-latent hypotheses.
 
-The recipes' numerics are pinned by the trainer goldens (``exp009``,
+The recipes' numerics are pinned by the train step goldens (``exp009``,
 ``exp010``); these tests pin each piece's contract on a tiny model.
 """
 

@@ -1,4 +1,4 @@
-"""Sudoku puzzle data as the TRM trainer reads it.
+"""Sudoku puzzle data as the train loop reads it.
 
 Data on disk is a flattened cross-product of (instance, augmentation) pairs,
 written by ``scripts/prepare_data.py``:
@@ -9,7 +9,7 @@ written by ``scripts/prepare_data.py``:
 
 Tokens: 0=pad, 1=blank cell, 2-10=digits 1-9 (vocab_size 11).
 
-Batch contract (what the trainer consumes) -- every yielded batch is a dict:
+Batch contract (what the train step consumes) -- every yielded batch is a dict:
   "media"              : int32 [batch_size, seq_len] input tokens
   "label"              : int32 [batch_size, seq_len] solution tokens
   "valid_count"        : int; number of real rows. The final batch of an
@@ -48,6 +48,7 @@ from priml.baselines.sudoku.puzzle_spec import SudokuSpec
 from priml.data.arrays import load_array
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
+from priml.timer import CheckpointableStepTimer
 
 
 if TYPE_CHECKING:
@@ -229,7 +230,7 @@ class PuzzleDataset:
     digit permutation) on top of the pre-augmented disk data; eval batches
     are never augmented. Two augmentation RNG modes are supported (see
     :attr:`Config.augment_seed`): the ambient global torch RNG (legacy,
-    checkpointed via the trainer's "rng" state) and a dedicated generator
+    checkpointed via the loop's "rng" state) and a dedicated generator
     that deliberately restarts from its seed on every fresh
     :meth:`train_dataloader` (the segmented-repro semantics).
     """
@@ -242,7 +243,7 @@ class PuzzleDataset:
 
         base_dir: Path | str | None = None
         """Resource root; ``None`` resolves beneath ``/opt/scratch``. The
-        trainer may inject an explicit root here."""
+        loop injects its own root here."""
 
         working_dir: Path | str = "/datasets/sudoku-extreme"
         """Dataset root containing train/ and test/ splits. A ``str`` is a
@@ -273,7 +274,7 @@ class PuzzleDataset:
         augment_seed: int | None = None
         """Seed for a dedicated augmentation RNG stream. None (default) draws
         from the ambient global torch RNG -- the legacy mode, reproduced via
-        the trainer's checkpointed "rng" state. When set, each
+        the loop's checkpointed "rng" state. When set, each
         ``train_dataloader()`` call creates a fresh generator that RESTARTS
         from this seed (and advances across epochs within one loader), so a
         fixed segment/resume schedule reproduces exactly."""
@@ -325,6 +326,9 @@ class PuzzleDataset:
         self.dataset_dir = Path(config.working_dir)
         self.batch_size = config.batch_size
         self.eval_batch_size = config.eval_batch_size or config.batch_size
+        self.timer_epoch = CheckpointableStepTimer()
+        """Passes over the training split; ticked by the loop."""
+
         # Completed train epochs, persisted across checkpoint resume so the
         # restored run continues the per-epoch shuffle sequence instead of
         # replaying the seeded epoch 0.
@@ -380,15 +384,19 @@ class PuzzleDataset:
         return iterator
 
     class StateDict(TypedDict):
-        """The completed-epoch counter; tolerated absent on load."""
+        """The completed-epoch counter and the loop's epoch timer.
+
+        Both tolerated absent on load.
+        """
 
         train_epochs: NotRequired[int]
+        timer_epoch: NotRequired[CheckpointableStepTimer.StateDict]
 
     def state_dict(self) -> StateDict:
-        """Snapshot resume state (the completed-epoch counter).
+        """Snapshot resume state (the completed-epoch counter and epoch timer).
 
         Returns:
-          state: Mapping with the completed-epoch counter.
+          state: Mapping with the completed-epoch counter and the epoch timer.
 
         """
         # The live iterator's counter advances when an epoch's iteration
@@ -401,15 +409,22 @@ class PuzzleDataset:
             if self._active_train_iter is not None
             else self._train_epochs
         )
-        return {"train_epochs": epochs}
+        return {"train_epochs": epochs, "timer_epoch": self.timer_epoch.state_dict()}
 
     def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
-        """Restore resume state produced by :meth:`state_dict`."""
+        """Restore resume state produced by :meth:`state_dict`.
+
+        Args:
+          state_dict: The counter and timer; either may be absent.
+
+        """
         state = cast(PuzzleDataset.StateDict, state_dict)
         if "train_epochs" in state:
             self._train_epochs = state["train_epochs"]
             if self._active_train_iter is not None:
                 self._active_train_iter.epoch = self._train_epochs
+        if "timer_epoch" in state:
+            self.timer_epoch.load_state_dict(state["timer_epoch"])
 
 
 # Ported survivor-rerun semantics: the iterator's tensors and instance bounds are re-

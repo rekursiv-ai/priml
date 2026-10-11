@@ -138,7 +138,10 @@ def test_dataset_starts_with_empty_epoch_state(tmp_path: Path) -> None:
 
     assert dataset._train_epochs == 0
     assert dataset._active_train_iter is None
-    assert dataset.state_dict() == {"train_epochs": 0}
+    assert dataset.state_dict() == {
+        "train_epochs": 0,
+        "timer_epoch": dataset.timer_epoch.state_dict(),
+    }
 
 
 def test_train_loader_forwards_config_and_tracks_active_epoch(tmp_path: Path) -> None:
@@ -191,13 +194,19 @@ def test_train_loader_forwards_config_and_tracks_active_epoch(tmp_path: Path) ->
     )
     torch.testing.assert_close(augmented["media"], expected_inputs, rtol=0, atol=0)
     torch.testing.assert_close(augmented["label"], expected_labels, rtol=0, atol=0)
-    assert dataset.state_dict() == {"train_epochs": 1}
+    assert dataset.state_dict() == {
+        "train_epochs": 1,
+        "timer_epoch": dataset.timer_epoch.state_dict(),
+    }
     resumed = dataset.train_dataloader()
     assert resumed.epoch == 1
     assert dataset._active_train_iter is resumed
     dataset.load_state_dict({"train_epochs": 4})
     assert resumed.epoch == 4
-    assert dataset.state_dict() == {"train_epochs": 4}
+    assert dataset.state_dict() == {
+        "train_epochs": 4,
+        "timer_epoch": dataset.timer_epoch.state_dict(),
+    }
 
 
 def test_train_loader_applies_instance_cap_without_sample_cap(tmp_path: Path) -> None:
@@ -954,6 +963,17 @@ def test_augmentation_pins_digit_only_output_and_dihedral_device(
     assert arange.call_args_list[0].kwargs["dtype"] is torch.long
     assert arange.call_args_list[0].kwargs["device"] == inputs.device
     assert devices == [inputs.device]
+
+
+def test_the_epoch_timer_survives_a_checkpoint(tmp_path: Path) -> None:
+    """The loop counts epochs on the dataset, so resuming must restore them."""
+    data = PuzzleDataset(PuzzleDataset.Config(working_dir=tmp_path))
+    data.timer_epoch.global_count = 3
+    restored = PuzzleDataset(PuzzleDataset.Config(working_dir=tmp_path))
+    restored.load_state_dict(data.state_dict())
+    assert restored.timer_epoch.global_count == 3
+    restored.load_state_dict({})
+    assert restored.timer_epoch.global_count == 3
 
 
 if __name__ == "__main__":

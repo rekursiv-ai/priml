@@ -2,7 +2,7 @@
 
 :class:`VerifierFit` is the DEDICATED training run: plain AdamW + cosine
 annealing, bf16 autocast, gradient clip 1.0, no EMA / Muon / lr_scale.
-Deliberately not the generator ``Trainer`` (its schedule cannot express this
+Deliberately not the generator's train loop (its schedule cannot express this
 recipe; the committee's zero-false-accept property depends on it).
 
 Checkpoint layout (written by :meth:`VerifierFit.run`, consumed by
@@ -160,7 +160,7 @@ class DenoisingLoss(VerifierLoss):
 
 
 class VerifierFit:
-    """Dedicated verifier training run (NOT the generator trainer).
+    """Dedicated verifier training run (NOT the generator's train loop).
 
     Recipe (ported verbatim): plain ``torch.optim.AdamW`` with lr 3e-4,
     betas (0.9, 0.95) [hardcoded], weight decay 0.01;

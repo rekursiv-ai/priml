@@ -14,9 +14,10 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.arcagi.augmentation import dihedral_transform, grid_hash
+from priml.baselines.arcagi.augmentation import grid_hash
 from priml.baselines.arcagi.parity.metric import PassK
 from priml.baselines.arcagi.parity.record_test import assert_matches, reduce
+from priml.data.color_dihedral import dihedral_transform
 
 
 if TYPE_CHECKING:

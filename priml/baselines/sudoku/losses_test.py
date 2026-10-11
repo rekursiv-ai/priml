@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from priml.baselines.sudoku.losses import (
+    CardinalityLoss,
     csp_cardinality_per_sample,
     token_cross_entropy,
 )
@@ -50,6 +51,39 @@ def test_cardinality_loss_matches_its_closed_form_on_uniform_logits() -> None:
             labels[:, :80],
             sudoku_group_indices(SudokuSpec()),
         )
+
+
+def test_cardinality_term_reduces_over_the_slots_that_trained() -> None:
+    """Padding rows and inactive slots add nothing; the mean is over active slots."""
+    config = CardinalityLoss.Config()
+    config.spec = SudokuSpec()
+    loss = config.make()
+    loss.to(torch.device("cpu"))
+    labels = torch.stack(
+        [sudoku_solution(), sudoku_solution(), torch.full((81,), -100)],
+    )
+    logits = torch.zeros(3, 81, 11)
+    active = torch.tensor([True, False, True])
+    reduced = loss(logits, labels, active=active, ignore_index=-100)
+    # Slot 0 contributes 117/1210 (the closed form above); slot 1 is inactive and
+    # slot 2 is all padding, so the sum divides by the two active slots.
+    torch.testing.assert_close(reduced, torch.tensor(117 / 1210 / 2))
+    assert loss.weight == 1.0
+    assert loss.warmup_steps == 0
+
+
+def test_cardinality_term_needs_a_consistent_sudoku_spec() -> None:
+    with pytest.raises(ValueError, match="filled by its loop"):
+        CardinalityLoss.Config().make()
+    for spec in (
+        SudokuSpec(grid_shape=(4, 6), box_shape=(2, 2), vocab_size=6),
+        SudokuSpec(grid_shape=(4, 4), box_shape=(3, 3), vocab_size=6),
+        SudokuSpec(grid_shape=(4, 4), box_shape=(2, 2), vocab_size=7),
+    ):
+        config = CardinalityLoss.Config()
+        config.spec = spec
+        with pytest.raises(ValueError, match="grid, boxes, and vocabulary"):
+            config.make()
 
 
 if __name__ == "__main__":

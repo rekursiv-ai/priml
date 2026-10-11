@@ -1,7 +1,7 @@
 """Frozen-model ACT rollouts: the units the search and the harvest replay.
 
 Every rollout starts from a fresh ``init_z`` and threads the decoded grid back
-as feedback with the given cells clamped -- the trainer's fixed-depth eval
+as feedback with the given cells clamped -- the train step's fixed-depth eval
 recurrence -- so :func:`family_rollout` on the original boards is
 bit-identical to the plain eval. The variants differ in what they keep:
 :func:`segmented_rollout_rows` prunes at q@8, and the checkpoint rollouts
@@ -41,7 +41,7 @@ def family_rollout(
     """Full-ACT eval rollout on ``boards`` (the deterministic root unit).
 
     Fresh ``init_z``, decoded-grid feedback threaded from ``boards`` with
-    given cells clamped -- exactly the trainer's fixed-depth eval recurrence,
+    given cells clamped -- exactly the train step's fixed-depth eval recurrence,
     so a call on the original media is bit-identical to the plain eval.
 
     Args:

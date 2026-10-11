@@ -33,7 +33,7 @@ branches -- the committee dev-screen engine.
 
 Seam contract: :func:`run_search` / :meth:`HpsSearch.run` consume a bare
 :class:`~priml.baselines.sudoku.latent_recursion.LatentRecursion`
-(eval weights -- the EMA swap is the CALLER's job, e.g. via the trainer's EMA
+(eval weights -- the EMA swap is the CALLER's job, e.g. via the train step's EMA
 ``apply_to``) and one dataset batch dict (``media`` / ``valid_count`` /
 ``puzzle_identifiers``; ``label`` is never read).
 """
@@ -182,7 +182,7 @@ class HpsSearch:
         checkpoint."""
 
         dtype_autocast: torch.dtype | None = torch.bfloat16
-        """Autocast compute dtype for the rollouts (mirrors the trainer);
+        """Autocast compute dtype for the rollouts (mirrors the train step);
         None disables autocast."""
 
     def __init__(self, config: Config) -> None:

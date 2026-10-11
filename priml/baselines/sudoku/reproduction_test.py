@@ -10,7 +10,7 @@ from treekle import ReadError
 import pytest
 import torch
 
-from priml.baselines.sudoku import latent_recursion, puzzle_data
+from priml.baselines.sudoku import experiments, latent_recursion, puzzle_data
 from priml.baselines.sudoku.agreement_lock import (
     AgreementLockEval,
     nine_view_members,
@@ -30,7 +30,7 @@ from priml.baselines.sudoku.testing import (
     replay,
     weight_tensors,
 )
-from priml.baselines.sudoku.trainer import Trainer
+from priml.baselines.sudoku.train_loop import SudokuTrainLoop
 from priml.baselines.sudoku.views import NINE_VIEWS
 from priml.testing.golden import mismatches
 
@@ -61,16 +61,17 @@ def _pipeline(h: Harness, name: str) -> _PipelineConfig:
     cfg.experiment_name = name
     cfg.base_dir = h.scratch
     cfg.runtime.device = "cpu"
-    generator = Trainer.Config()
-    generator.model = h.model()
+    generator = experiments.exp006()
+    generator.step.model = h.model()
+    generator.step.dtype_autocast = None
+    generator.step.pool.max_steps = 2
     generator.dataset.working_dir = h.data
     generator.dataset.batch_size = 2
-    generator.dataset.augment = True  # The recipe's; draws from the segment seed.
+    generator.dataset.eval_num_instances = None
+    # The recipe augments; the segments draw from the dedicated seeded stream.
+    generator.dataset.augment_digits_only = False
     generator.max_steps = 3
-    generator.max_act_steps = 2
-    generator.dtype_autocast = None
     generator.eval_warmup_batches = 0
-    generator.seed = 44
     cfg.generator = generator
     cfg.generator_name = f"{name}_generator"
     cfg.eval_every_steps = 2
@@ -107,6 +108,7 @@ def _run_pipeline(h: Harness, config: _PipelineConfig) -> dict[str, Tensor]:
         torch.load(
             h.scratch
             / "runs"
+            / config.generator.study_name
             / generator
             / "checkpoints"
             / f"step_{int(config.generator.max_steps):08d}.pt",
@@ -208,6 +210,10 @@ def test_reproduction_rejects_an_invalid_config(tmp_path: Path) -> None:
     cfg = _reproduction_config(tmp_path)
     cfg.generator.seed = None
     with pytest.raises(ValueError, match="needs a seed"):
+        cfg.make()
+    cfg = _reproduction_config(tmp_path)
+    cfg.generator.checkpointer = None
+    with pytest.raises(TypeError, match="needs a checkpointer"):
         cfg.make()
     cfg = _reproduction_config(tmp_path)
     cfg.full_eval = SieveEval.Config()
@@ -343,7 +349,7 @@ def test_outer_run_clamps_steps_and_forwards_segments(tmp_path: Path) -> None:
 def test_run_training_skips_or_refuses_existing_segment_checkpoints(
     tmp_path: Path,
 ) -> None:
-    cfg = Trainer.Config()
+    cfg = SudokuTrainLoop()
     cfg.experiment_name = "segment"
     cfg.base_dir = tmp_path
     cfg.max_steps = 4

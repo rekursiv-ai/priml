@@ -6,12 +6,14 @@ from torch import nn
 
 import torch
 
+from priml.optimizers.muon import Muon
 from priml.optimizers.parameter_filter import (
     complement,
     everything,
     excluding,
     matching,
     trainable,
+    with_ndim,
 )
 
 
@@ -89,6 +91,20 @@ def test_filter_reprs_name_functions_without_addresses() -> None:
     assert repr(excluding(everything, "head")) == "excluding(everything, 'head')"
     assert repr(complement(matching("x"))) == "complement(matching('x'))"
     assert repr(excluding(trainable, "head")) == "excluding(trainable, 'head')"
+
+
+def test_rank_filter_accepts_one_rank_and_compares_by_value() -> None:
+    select = excluding(Muon.eligible_tensor, "head")
+    rank2 = with_ndim(select, 2)
+    rank3 = with_ndim(select, 3)
+    assert rank2("body", nn.Parameter(torch.zeros(2, 3)))
+    assert not rank2("body", nn.Parameter(torch.zeros(2, 3, 4)))
+    assert rank3("body", nn.Parameter(torch.zeros(2, 3, 4)))
+    assert not rank2("head", nn.Parameter(torch.zeros(2, 3)))
+    assert rank2 == with_ndim(select, 2)
+    assert rank2 != rank3
+    assert hash(rank2) == hash(with_ndim(select, 2))
+    assert "with_ndim" in repr(rank2)
 
 
 if __name__ == "__main__":

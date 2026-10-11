@@ -1,12 +1,13 @@
 """Plumbing shared by the evaluation runners.
 
 Checkpoint loading (:func:`load_eval_weights`, shared by every eval-side
-loader) accepts BOTH schemas: full trainer checkpoints
-(``state["step"]["model"]`` plus the flat EMA shadow ``state["step"]["ema"]``)
-and HF model-only files (top-level ``state["model"]``). Eval weights are
-ALWAYS the EMA weights on the recipe (EMA warmup 0), so a full checkpoint's
-shadow overlays the live parameters exactly like the trainer's eval-time EMA
-swap; model-only HF files are exported EMA-applied already and load as-is.
+loader) accepts BOTH schemas: full training checkpoints
+(``state["step"]["model"]`` plus the EMA state ``state["step"]["ema"]``, whose
+``shadow_params`` hold the name-keyed shadow) and HF model-only files
+(top-level ``state["model"]``). Eval weights are ALWAYS the EMA weights on the
+recipe (EMA warmup 0), so a full checkpoint's shadow overlays the live
+parameters exactly like the train step's eval-time EMA swap; model-only HF files
+are exported EMA-applied already and load as-is.
 
 Outputs follow the run-dir convention: metrics JSON and npz dumps land under
 ``<scratch>/runs/{experiment_name}/dumps/``, resolved by
@@ -50,13 +51,13 @@ def load_eval_weights(
 
     The shared eval-side loader. Accepts BOTH schemas:
 
-    * full trainer checkpoints -- ``state["step"]["model"]`` plus, when the
-      run kept one, the flat name-keyed EMA shadow ``state["step"]["ema"]``;
+    * full training checkpoints -- ``state["step"]["model"]`` plus, once the
+      run's EMA has a shadow, ``state["step"]["ema"]["shadow_params"]``;
     * HF model-only files -- top-level ``state["model"]``.
 
     Eval weights are ALWAYS the EMA weights on the recipe (EMA warmup 0):
     when a full checkpoint carries a shadow, the shadow OVERLAYS the live
-    parameters -- exactly the trainer's eval-time ``EMA.apply_to`` swap
+    parameters -- exactly the train step's eval-time ``EMA.apply_to`` swap
     (buffers are never shadowed and come from the model state). Model-only
     HF files are exported EMA-applied already, so they load as-is.
 
@@ -82,7 +83,7 @@ def checkpoint_payload(path: Path, device: torch.device | str) -> _Weights:
       device: ``map_location`` for the loaded tensors.
 
     Returns:
-      weights: The ``model`` state and, when present, the ``ema`` shadow.
+      weights: The ``model`` state and, when present, the EMA shadow as ``ema``.
 
     """
     state = from_plain(
@@ -92,8 +93,10 @@ def checkpoint_payload(path: Path, device: torch.device | str) -> _Weights:
     nested = state.get("step")
     payload = from_plain(nested, dict[str, object]) if nested is not None else state
     weights: _Weights = {"model": from_plain(payload["model"], dict[str, Tensor])}
-    if "ema" in payload:
-        weights["ema"] = from_plain(payload["ema"], dict[str, Tensor])
+    # An EMA that has not yet updated, or no EMA at all, saves only its counters.
+    ema = from_plain(payload.get("ema", {}), dict[str, object])
+    if "shadow_params" in ema:
+        weights["ema"] = from_plain(ema["shadow_params"], dict[str, Tensor])
     return weights
 
 

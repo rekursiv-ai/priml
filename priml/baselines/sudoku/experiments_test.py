@@ -13,6 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
+from configgle import PartialConfig
+
 import pytest
 
 from priml.baselines.sudoku import experiments
@@ -23,10 +25,11 @@ from priml.baselines.sudoku.hypotheses import (
     WinnerRecompute,
     WinnerTakeAll,
 )
-from priml.baselines.sudoku.latent_recursion import LatentRecursion, recipe_block
+from priml.baselines.sudoku.latent_recursion import LatentRecursion
+from priml.baselines.sudoku.losses import token_cross_entropy
 from priml.baselines.sudoku.reproduction import Reproduction
 from priml.baselines.sudoku.sieve import FittedSieve, SieveEval, StaircaseSieveEval
-from priml.baselines.sudoku.trainer import Trainer
+from priml.baselines.sudoku.train_loop import SudokuTrainLoop
 from priml.baselines.sudoku.verifier import (
     DenoisingVerifier,
     VerifierAcceptor,
@@ -37,6 +40,8 @@ from priml.baselines.sudoku.views import NINE_VIEWS
 from priml.model.attention.attention import Attention
 from priml.paths import resolve_working_dir
 from priml.testing.golden import assert_pprint_golden
+from priml.train.checkpointer import Checkpointer
+from priml.train.ema import EMA
 
 
 if TYPE_CHECKING:
@@ -50,7 +55,7 @@ type _Tree = dict[str, "_Tree"] | list["_Tree"] | str | int | float | bool | Non
 type _Runner = HpsEval.Config | Reproduction.Config | StaircaseSieveEval.Config
 """A rung that evaluates or runs a pipeline, under its own process runtime."""
 
-type _Rung = Trainer.Config | _Runner | FittedSieve.Config
+type _Rung = SudokuTrainLoop | _Runner | FittedSieve.Config
 """Any rung's config."""
 
 
@@ -86,8 +91,8 @@ TRAINED: Final = (
 )
 """The rungs that train a generator in one run."""
 
-EXP006_CHECKPOINT: Final = "/runs/exp006/checkpoints/step_00019500.pt"
-EXP010_CHECKPOINT: Final = "/runs/exp010/checkpoints/step_00010000.pt"
+EXP006_CHECKPOINT: Final = "/runs/sudoku/exp006/checkpoints/step_00019500.pt"
+EXP010_CHECKPOINT: Final = "/runs/sudoku/exp010/checkpoints/step_00010000.pt"
 
 
 def test_experiment_chain_has_fourteen_rungs() -> None:
@@ -152,24 +157,27 @@ def test_evaluation_runner_makes_without_data(
 
 @pytest.mark.parametrize("factory", TRAINED)
 def test_schedule_horizon_matches_the_step_budget(
-    factory: Callable[[], Trainer.Config],
+    factory: Callable[[], SudokuTrainLoop],
 ) -> None:
     """A schedule annealing past the end of training wastes the last steps."""
     config = factory()
-    assert config.max_steps == config.total_train_steps
+    assert config.max_steps == config.step.total_train_steps
 
 
 def test_exp000_mirrors_the_annealed_baseline() -> None:
     cfg = experiments.exp000().copy_tree().finalize()
+    step = cfg.step
     assert cfg.seed == 0
-    assert (cfg.max_steps, cfg.total_train_steps) == (62_000, 62_000)
-    assert (cfg.max_act_steps, cfg.label_smoothing) == (16, 0.2)
-    assert (cfg.ema_decay, cfg.ema_warmup_steps) == (0.9, 5_000)
-    assert (cfg.csp_loss_weight, cfg.feedback) == (0.0, False)
-    assert cfg.model.pos2d_grid_shape is None
-    assert (cfg.model.slow_cycles, cfg.model.fast_cycles) == (3, 4)
-    assert cfg.model.block is not None
-    attn = cfg.model.block.attn
+    assert (cfg.max_steps, step.total_train_steps) == (62_000, 62_000)
+    assert step.pool.max_steps == 16
+    assert step.token_loss == PartialConfig(token_cross_entropy, label_smoothing=0.2)
+    assert isinstance(step.ema, EMA.Config)
+    assert (step.ema.decay, step.ema.update_after_step) == (0.9, 5_000)
+    assert (step.cardinality, step.pool.feedback) == (None, None)
+    assert step.model.pos2d_grid_shape is None
+    assert (step.model.slow_cycles, step.model.fast_cycles) == (3, 4)
+    assert step.model.block is not None
+    attn = step.model.block.attn
     assert isinstance(attn, Attention.Config)
     assert attn.norm_qk is None
     assert cfg.dataset.augment_digits_only is False
@@ -179,7 +187,7 @@ def test_exp001_adds_only_the_2d_position_tables() -> None:
     assert_rung_delta(
         experiments.exp000(),
         experiments.exp001(),
-        {"experiment_name", "model.pos2d_grid_shape"},
+        {"experiment_name", "step.model.pos2d_grid_shape"},
     )
 
 
@@ -189,14 +197,9 @@ def test_exp002_adds_only_qk_norm_and_the_convergence_horizon() -> None:
         experiments.exp002(),
         {
             "experiment_name",
-            "model.block.attn.norm_qk",
-            "model.block.attn.norm_qk.channels_in",
-            "model.block.attn.norm_qk.device",
-            "model.block.attn.norm_qk.dtype",
-            "model.block.attn.norm_qk.elementwise_affine",
-            "model.block.attn.norm_qk.eps",
+            "step.model.block.attn.norm_qk",
             "max_steps",
-            "total_train_steps",
+            "step.total_train_steps",
             "num_steps_eval",
         },
     )
@@ -208,11 +211,11 @@ def test_exp003_adds_only_the_consolidated_recipe_stack() -> None:
         experiments.exp003(),
         {
             "experiment_name",
-            "max_act_steps",
-            "label_smoothing",
-            "ema_decay",
-            "ema_warmup_steps",
-            "csp_loss_weight",
+            "step.pool.max_steps",
+            "step.token_loss",
+            "step.ema.decay",
+            "step.ema.update_after_step",
+            "step.cardinality",
             "dataset.augment_digits_only",
         },
     )
@@ -222,7 +225,7 @@ def test_exp004_adds_only_the_feedback_repair_channel() -> None:
     assert_rung_delta(
         experiments.exp003(),
         experiments.exp004(),
-        {"experiment_name", "feedback"},
+        {"experiment_name", "step.pool.feedback"},
     )
 
 
@@ -230,7 +233,7 @@ def test_exp005_adds_only_depth_and_the_recipe_seed() -> None:
     assert_rung_delta(
         experiments.exp004(),
         experiments.exp005(),
-        {"experiment_name", "model.slow_cycles", "model.fast_cycles", "seed"},
+        {"experiment_name", "step.model.slow_cycles", "step.model.fast_cycles", "seed"},
     )
 
 
@@ -238,32 +241,15 @@ def test_exp006_adds_only_the_longer_horizon() -> None:
     assert_rung_delta(
         experiments.exp005(),
         experiments.exp006(),
-        {"experiment_name", "max_steps", "total_train_steps"},
+        {"experiment_name", "max_steps", "step.total_train_steps"},
     )
-
-
-def test_exp006_is_the_flat_recipe() -> None:
-    """The trainer defaults ARE the recipe: exp006 adds only identity and data."""
-    expected = Trainer.Config()
-    expected.study_name = "sudoku"
-    expected.experiment_name = "exp006"
-    expected.seed = 44
-    expected.max_steps = 19_500
-    expected.num_steps_eval = 500
-    expected.model.block = recipe_block()
-    expected.dataset.batch_size = 384
-    expected.dataset.seed = 0
-    expected.dataset.eval_num_instances = 2_000
-    expected.dataset.augment = True
-    expected.dataset.augment_digits_only = True
-    assert leaf_delta(expected, experiments.exp006()) == []
 
 
 def test_exp007_scores_exp006_with_the_recipe_search() -> None:
     cfg = experiments.exp007().copy_tree().finalize()
     assert str(cfg.checkpoint_path) == EXP006_CHECKPOINT
     parent = experiments.exp006().copy_tree().finalize()
-    assert leaf_delta(parent.model, cfg.model) == []
+    assert leaf_delta(parent.step.model, cfg.model) == []
     assert cfg.evaluation_count == 422_786
     search = cfg.search
     assert (
@@ -301,7 +287,7 @@ def test_pipeline_stages_build_the_generators_architecture(
     vocabulary or grid shape and cannot build at all.
     """
     cfg = factory().copy_tree().finalize()
-    model = cfg.generator.model
+    model = cfg.generator.step.model
     assert leaf_delta(model, cfg.full_eval.model) == []
     if cfg.screen == "committee":
         assert leaf_delta(model, cfg.harvest.model) == []
@@ -324,35 +310,37 @@ def test_exp008_full_evaluation_locks_with_its_own_committee() -> None:
 
 def test_exp009_trains_two_hypotheses_winner_take_all() -> None:
     parent, cfg = experiments.exp006(), experiments.exp009()
-    assert isinstance(cfg.model, HypothesisRecursion.Config)
-    assert (cfg.model.num_hypotheses, cfg.model.hypothesis_seed) == (2, 44)
-    assert isinstance(cfg.routing, WinnerTakeAll.Config)
-    plain = LatentRecursion.Config().update(cfg.model, skip_missing=True)
-    assert leaf_delta(parent.model, plain) == []
-    cfg.model, cfg.routing = parent.model, parent.routing
+    model = cfg.step.model
+    assert isinstance(model, HypothesisRecursion.Config)
+    assert (model.num_hypotheses, model.hypothesis_seed) == (2, 44)
+    assert isinstance(cfg.step.routing, WinnerTakeAll.Config)
+    plain = LatentRecursion.Config().update(model, skip_missing=True)
+    assert leaf_delta(parent.step.model, plain) == []
+    cfg.step.model, cfg.step.routing = parent.step.model, parent.step.routing
     assert_rung_delta(
         parent,
         cfg,
-        {"experiment_name", "max_steps", "total_train_steps"},
+        {"experiment_name", "max_steps", "step.total_train_steps"},
     )
-    assert (cfg.max_steps, cfg.total_train_steps) == (22_000, 22_000)
+    assert (cfg.max_steps, cfg.step.total_train_steps) == (22_000, 22_000)
 
 
 def test_exp010_recomputes_the_winner_of_three_at_batch_1152() -> None:
     parent, cfg = experiments.exp009(), experiments.exp010()
-    assert isinstance(cfg.routing, WinnerRecompute.Config)
-    assert isinstance(cfg.model, HypothesisRecursion.Config)
-    assert (cfg.model.num_hypotheses, cfg.dataset.batch_size) == (3, 1_152)
+    model = cfg.step.model
+    assert isinstance(cfg.step.routing, WinnerRecompute.Config)
+    assert isinstance(model, HypothesisRecursion.Config)
+    assert (model.num_hypotheses, cfg.dataset.batch_size) == (3, 1_152)
     assert_rung_delta(
         parent,
         cfg,
         {
             "experiment_name",
-            "routing",
-            "model.num_hypotheses",
+            "step.routing",
+            "step.model.num_hypotheses",
             "dataset.batch_size",
             "max_steps",
-            "total_train_steps",
+            "step.total_train_steps",
         },
     )
 
@@ -363,12 +351,12 @@ def test_exp011_stairs_exp010_ahead_of_exp008s_sieve() -> None:
     # Finalization bookkeeping differs for a slot finalized twice; values do not.
     assert [
         delta
-        for delta in leaf_delta(hypothesis_parent.model, cfg.hypothesis_model)
+        for delta in leaf_delta(hypothesis_parent.step.model, cfg.hypothesis_model)
         if delta[0] != "_finalized"
     ] == []
     assert str(cfg.hypothesis_checkpoint_path) == EXP010_CHECKPOINT
     ladder_parent = experiments.exp006().copy_tree().finalize()
-    assert leaf_delta(ladder_parent.model, cfg.model) == []
+    assert leaf_delta(ladder_parent.step.model, cfg.model) == []
     assert str(cfg.checkpoint_path) == EXP006_CHECKPOINT
     assert (cfg.qsel_hypotheses, cfg.qsel_seed) == (5, 8_902)
     committee = tuple(
@@ -441,12 +429,12 @@ def test_exp013_locks_with_the_members_it_fits() -> None:
     assert cfg.sieve.acceptor.checkpoint_paths == committee
 
 
-def _final_checkpoint(rung: Trainer.Config, base: Path) -> Path:
+def _final_checkpoint(rung: SudokuTrainLoop, base: Path) -> Path:
     """Return where a training rung's own checkpointer writes its last step."""
     cfg = rung.copy_tree()
     cfg.base_dir = base
     checkpointer = cfg.finalize().checkpointer
-    assert checkpointer is not None
+    assert isinstance(checkpointer, Checkpointer.Config)
     step = int(cfg.max_steps)
     return Path(checkpointer.working_dir) / checkpointer.filename.format(step=step)
 
@@ -476,6 +464,12 @@ def test_every_consumer_reads_the_checkpoint_its_producer_writes(
         resolve_working_dir(tmp_path, str(path))
         for path in staircase.verifier_checkpoints
     ) == tuple(committee._verifier_checkpoint_path(seed) for seed in range(3))
+    # The pipeline's stages read the boundary checkpoints its generator writes.
+    final = committee._checkpoint_path(19_500)
+    assert final == (
+        tmp_path / "runs/sudoku/exp008_generator/checkpoints/step_00019500.pt"
+    )
+    assert resolve_working_dir(tmp_path, committee._checkpoint_logical(19_500)) == final
 
 
 def test_exp013_fits_on_exp008s_harvest_corpus(tmp_path: Path) -> None:
@@ -495,20 +489,21 @@ def test_exp013_fits_on_exp008s_harvest_corpus(tmp_path: Path) -> None:
 def test_smoke_is_small_on_every_costly_axis() -> None:
     """It answers "does this run", so anything not bearing on that is cut."""
     smoke, base = experiments.exp_smoke(), experiments.exp000()
+    model, base_model = smoke.step.model, base.step.model
     assert smoke.max_steps < base.max_steps
-    assert smoke.model.channels_in < base.model.channels_in
-    assert smoke.model.num_layers < base.model.num_layers
+    assert model.channels_in < base_model.channels_in
+    assert model.num_layers < base_model.num_layers
     assert smoke.dataset.batch_size < base.dataset.batch_size
     assert (
-        smoke.model.channels_in,
-        smoke.model.num_layers,
-        smoke.model.slow_cycles,
-        smoke.model.fast_cycles,
-        smoke.max_act_steps,
+        model.channels_in,
+        model.num_layers,
+        model.slow_cycles,
+        model.fast_cycles,
+        smoke.step.pool.max_steps,
         smoke.dataset.batch_size,
         smoke.dataset.eval_num_instances,
         smoke.max_steps,
-        smoke.total_train_steps,
+        smoke.step.total_train_steps,
         smoke.num_steps_eval,
     ) == (32, 1, 1, 1, 2, 8, 4, 4, 4, 2)
     assert smoke.checkpointer is None

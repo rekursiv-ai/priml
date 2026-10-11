@@ -141,7 +141,7 @@ FittedSieve.Config(
         │   experiment_name='exp013',
         │   doc='',
         │   base_dir=None,
-        │   checkpoint_path='/runs/exp006/checkpoints/step_00019500.pt',
+        │   checkpoint_path='/runs/sudoku/exp006/checkpoints/step_00019500.pt',
         │   verifier_checkpoints=(
         │       '/runs/exp013_verifier_s0/checkpoints/step_00016000.pt',
         │       '/runs/exp013_verifier_s1/checkpoints/step_00016000.pt',
@@ -402,7 +402,7 @@ FittedSieve.Config(
         │   │   num_hypotheses=3,
         │   │   hypothesis_seed=44
         │   ),
-        │   hypothesis_checkpoint_path='/runs/exp010/checkpoints/step_00010000.pt',
+        │   hypothesis_checkpoint_path='/runs/sudoku/exp010/checkpoints/step_00010000.pt',
         │   qsel_hypotheses=5,
         │   qsel_seed=8_902
         )

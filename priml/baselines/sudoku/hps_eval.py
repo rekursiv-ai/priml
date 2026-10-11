@@ -66,7 +66,8 @@ class HpsEval:
         """Checkpoint, search policy, population, and outputs."""
 
         runtime: SingleProcess.Config = field(
-            # Device PINNED: priml defaults to ``None`` (see Trainer.Config).
+            # Device PINNED: priml's ``None`` falls back to the CPU when no GPU is
+            # visible, a silent 100x-slow run.
             default_factory=lambda: SingleProcess.Config(device="cuda"),
         )
         """Process runtime (device + determinism)."""
@@ -106,7 +107,7 @@ class HpsEval:
         emulate_precision_casts: bool = True
         """Set TorchInductor's precision-cast emulation (process-global)
         before model construction -- required for sound compiled bf16 eval
-        (the trainer contract)."""
+        (the train step's contract)."""
 
         metrics_path: str | Path = "/runs/{experiment_name}/dumps/hps_eval_metrics.json"
         """Label-joined scalar metrics JSON path resolved beneath ``base_dir``."""
@@ -140,7 +141,7 @@ class HpsEval:
         self.runtime.initialize()
         self.device = self.runtime.device
         # Process-global TorchInductor flag; must be set before the model
-        # construction binds torch.compile (the trainer contract).
+        # construction binds torch.compile (the train step's contract).
         inductor_config.emulate_precision_casts = config.emulate_precision_casts
         self._scratch = (
             config.base_dir if config.base_dir is not None else Path("/opt/scratch")

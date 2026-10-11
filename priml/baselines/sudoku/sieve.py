@@ -18,8 +18,8 @@ no resident committee coexists with the next round's compiled generator (the
 original run died with a SIGSEGV when it did).
 
 R0 is :func:`det_pass`, which wires to
-:meth:`~priml.baselines.sudoku.trainer.Trainer.eval_loss`, the
-trainer's conditional-depth eval seam (per-row release at q >= +2).
+:meth:`~priml.baselines.sudoku.routed_act_step.RoutedActTrainStep.eval_loss`,
+the train step's conditional-depth evaluation (per-row release at q >= +2).
 """
 
 from __future__ import annotations
@@ -42,11 +42,13 @@ from treekle import from_plain
 import numpy as np
 import torch
 
+from priml.baselines.sudoku.act import FeedbackCarry
 from priml.baselines.sudoku.agreement_lock import modal_grid_predictions
 from priml.baselines.sudoku.hps_eval import search_pass
 from priml.baselines.sudoku.hypotheses import HypothesisRecursion
 from priml.baselines.sudoku.latent_recursion import LatentRecursion
 from priml.baselines.sudoku.puzzle_data import PuzzleDataset
+from priml.baselines.sudoku.routed_act_step import HaltRelease, RoutedActTrainStep
 from priml.baselines.sudoku.runner import (
     eval_model,
     fill_template,
@@ -58,7 +60,6 @@ from priml.baselines.sudoku.runner import (
     write_json,
 )
 from priml.baselines.sudoku.search import HpsSearch
-from priml.baselines.sudoku.trainer import Trainer
 from priml.baselines.sudoku.verifier import CommitteeLock, VerifierAcceptor
 from priml.baselines.sudoku.verifier_fit import VerifierFit
 from priml.baselines.sudoku.views import (
@@ -69,6 +70,7 @@ from priml.baselines.sudoku.views import (
 )
 from priml.paths import resolve_working_dir
 from priml.runtime import SingleProcess
+from priml.train.parallelism import NoParallel
 from priml.train.train_loop import EvalTimeLimitError
 
 
@@ -93,51 +95,45 @@ class DetPassResult:
     label: Tensor
 
 
-def det_pass(trainer: Trainer, *, halt_threshold: float = 2.0) -> DetPassResult:
-    """Conditional-depth deterministic pass over the trainer's eval split.
+def det_pass(step: RoutedActTrainStep, dataset: PuzzleDataset) -> DetPassResult:
+    """Conditional-depth deterministic pass over a dataset's eval split.
 
-    The det gate / sieve round-0 pass: every row rolls until its q-halt logit
-    clears ``halt_threshold`` (default +2, the registered release bar) or the
-    ACT depth cap. Wires to the trainer's own conditional-depth eval seam
-    (:meth:`Trainer.eval_loss` -- EMA swap, compile guard, and the per-row
-    release rollout all live there); this function only flips the release
-    config on for the pass and collects the per-puzzle outputs. Batch pooling
-    (the recorded pass used one pooled 5,000-row eval batch) is the dataset
-    config's ``eval_batch_size``.
+    The det gate / sieve round-0 pass: every row rolls until its halt logit
+    clears the step's ``release`` threshold (+2, the registered release bar)
+    or the ACT depth cap. Wires to the train step's own evaluation seam
+    (:meth:`RoutedActTrainStep.eval_loss` -- EMA swap, compile guard, and the
+    per-row release rollout all live there); this function only collects the
+    per-puzzle outputs. Batch pooling (the recorded pass used one pooled
+    5,000-row eval batch) is the dataset config's ``eval_batch_size``.
 
     Args:
-      trainer: Trainer whose (possibly resumed) weights are scored; its
-        ``eval_halt_exit`` / ``eval_halt_threshold`` are overridden for the
-        duration of the pass and restored after.
-      halt_threshold: Q-halt logit release threshold.
+      step: Step built with a ``release`` policy, its eval weights loaded.
+      dataset: The puzzles to pass over, in eval order.
 
     Returns:
       result: :class:`DetPassResult` over all valid eval rows, in arrival
         order (CPU tensors; labels are carried for post-hoc scoring only).
 
     """
-    config = trainer.config
-    saved = (config.eval_halt_exit, config.eval_halt_threshold)
-    config.eval_halt_exit = True
-    config.eval_halt_threshold = halt_threshold
     grid_parts: list[Tensor] = []
     q_parts: list[Tensor] = []
     media_parts: list[Tensor] = []
     label_parts: list[Tensor] = []
-    try:
-        for raw_batch in trainer.dataset.eval_dataloader():
-            batch = trainer.preprocess_batch(raw_batch)
-            media = batch["media"]
-            valid_count = batch["valid_count"]
-            if valid_count == 0:
-                continue
-            packed = trainer.eval_loss(**batch)["model"]
-            q_parts.append(packed[:valid_count, 0].float().cpu())
-            grid_parts.append(packed[:valid_count, 1:].to(torch.int64).cpu())
-            media_parts.append(media[:valid_count].to(torch.int64).cpu())
-            label_parts.append(batch["label"][:valid_count].to(torch.int64).cpu())
-    finally:
-        config.eval_halt_exit, config.eval_halt_threshold = saved
+    for raw_batch in dataset.eval_dataloader():
+        batch = step.preprocess_batch(dict(raw_batch))
+        media = batch["media"]
+        assert isinstance(media, Tensor)
+        label = batch["label"]
+        assert isinstance(label, Tensor)
+        valid_count = batch["valid_count"]
+        assert isinstance(valid_count, int)
+        if valid_count == 0:
+            continue
+        packed = step.eval_loss(**batch)["model"]
+        q_parts.append(packed[:valid_count, 0].float().cpu())
+        grid_parts.append(packed[:valid_count, 1:].to(torch.int64).cpu())
+        media_parts.append(media[:valid_count].to(torch.int64).cpu())
+        label_parts.append(label[:valid_count].to(torch.int64).cpu())
     if not grid_parts:
         raise ValueError("det_pass found no valid eval rows.")
     return DetPassResult(
@@ -160,7 +156,8 @@ class SieveEval:
         """Generator, lock committee, round ladder, and outputs."""
 
         runtime: SingleProcess.Config = field(
-            # Device PINNED: priml defaults to ``None`` (see Trainer.Config).
+            # Device PINNED: priml's ``None`` falls back to the CPU when no GPU is
+            # visible, a silent 100x-slow run.
             default_factory=lambda: SingleProcess.Config(device="cuda"),
         )
         """Process runtime (device + determinism)."""
@@ -233,7 +230,7 @@ class SieveEval:
         emulate_precision_casts: bool = True
         """Set TorchInductor's precision-cast emulation (process-global)
         before model construction -- required for sound compiled bf16 eval
-        (the trainer contract)."""
+        (the train step's contract)."""
 
         metrics_path: str | Path = "/runs/{experiment_name}/dumps/sieve_metrics.json"
         """Aggregate JSON result path resolved beneath ``base_dir``."""
@@ -274,7 +271,7 @@ class SieveEval:
         self.runtime.initialize()
         self.device = self.runtime.device
         # Process-global TorchInductor flag; must be set before any model
-        # construction binds torch.compile (the trainer contract).
+        # construction binds torch.compile (the train step's contract).
         inductor_config.emulate_precision_casts = config.emulate_precision_casts
         self._scratch = (
             config.base_dir if config.base_dir is not None else Path("/opt/scratch")
@@ -407,8 +404,8 @@ class SieveEval:
             checkpoint=cfg.checkpoint_path,
         )
 
-    # Wires to the trainer's conditional-depth eval seam via :func:`~det_pass`; batch
-    # pooling is the dataset config's ``eval_batch_size``.
+    # Wires to the train step's conditional-depth evaluation via :func:`~det_pass`;
+    # batch pooling is the dataset config's ``eval_batch_size``.
     def _det_round(
         self,
         model: LatentRecursion.Config,
@@ -416,34 +413,32 @@ class SieveEval:
     ) -> tuple[Tensor, Tensor, Tensor]:
         """R0: conditional-halt deterministic pass over the full population."""
         cfg = self.config
-        trainer_cfg = Trainer.Config()
-        trainer_cfg.experiment_name = f"{cfg.experiment_name}_det_cond_halt"
-        trainer_cfg.base_dir = cfg.base_dir
-        # Throwaway eval-only trainer: no global reseed (weights are
-        # overwritten by the checkpoint) and no per-round run-dir record.
-        trainer_cfg.ephemeral = True
-        trainer_cfg.runtime = cfg.runtime
-        trainer_cfg.model = model
-        trainer_cfg.emulate_precision_casts = cfg.emulate_precision_casts
+        # A throwaway evaluation step, not a loop: no global reseed, since the
+        # checkpoint overwrites the weights.
+        step = RoutedActTrainStep.Config()
+        step.model = model
+        step.emulate_precision_casts = cfg.emulate_precision_casts
         # R0 rolls to the same ACT depth and compute dtype as the HPS
         # rounds (one frozen rollout contract across the whole sieve).
-        trainer_cfg.max_act_steps = cfg.search.max_act_steps
-        trainer_cfg.dtype_autocast = cfg.search.dtype_autocast
+        step.pool.max_steps = cfg.search.max_act_steps
+        step.dtype_autocast = cfg.search.dtype_autocast
+        feedback = step.pool.feedback = FeedbackCarry.Config()
+        feedback.givens = (2, cfg.dataset.spec.vocab_size - 1)
+        halt_release = step.release = HaltRelease.Config()
+        halt_release.threshold = cfg.det_halt_threshold
+        placement = step.parallelism = NoParallel.Config()
+        placement.device = self.device
         dataset = cfg.dataset.copy_tree()
         dataset.eval_num_instances = cfg.evaluation_count
         dataset.eval_instance_indices = ()
-        trainer_cfg.dataset = dataset
-        trainer_cfg.checkpointer = None
-        trainer_cfg.eval_warmup_batches = 0
-        trainer_cfg.max_eval_time = cfg.max_round_eval_seconds
-        trainer = trainer_cfg.make()
+        det_step = step.make()
         try:
-            trainer.model.load_state_dict(
-                load_eval_weights(self._path(checkpoint), device=trainer.device),
+            det_step.model.load_state_dict(
+                load_eval_weights(self._path(checkpoint), device=det_step.device),
             )
-            result = det_pass(trainer, halt_threshold=cfg.det_halt_threshold)
+            result = det_pass(det_step, dataset.make())
         finally:
-            del trainer
+            del det_step
             release()
         return result.grids, result.media, result.label
 
@@ -673,7 +668,7 @@ def qsel_grids(
 
     Hypothesis 0 starts from the deployed fast latent; hypothesis ``i + 1``
     from the first row of :meth:`HypothesisRecursion.fresh_fast_states` seeded
-    ``seed + i``. Each rolls the trainer's fixed-depth eval recurrence:
+    ``seed + i``. Each rolls the train step's fixed-depth eval recurrence:
     fresh slow latent, decoded-grid feedback with givens clamped. Selection
     is label-free: the final halt logit.
 

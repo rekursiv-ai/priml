@@ -19,7 +19,6 @@ import torch
 from priml.baselines.arcagi import metric
 from priml.baselines.arcagi.augmentation import (
     ArcSpec,
-    ColorDihedral,
     SpatialAugmentation,
     grid_hash,
 )
@@ -43,6 +42,7 @@ from priml.baselines.arcagi.metric import (
 from priml.baselines.arcagi.signal_dump import (
     SignalDumpPayload,
 )
+from priml.data.color_dihedral import ColorDihedral
 
 
 _CWD: Final = Path(__file__).resolve().parent

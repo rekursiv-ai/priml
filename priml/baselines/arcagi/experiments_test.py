@@ -26,7 +26,6 @@ import torch
 from priml.baselines.arcagi import experiments
 from priml.baselines.arcagi.augmentation import (
     ArcSpec,
-    ColorDihedral,
     SpatialAugmentation,
 )
 from priml.baselines.arcagi.data import PuzzleData
@@ -44,7 +43,6 @@ from priml.baselines.arcagi.model import (
     depthwise_conv,
     depthwise_shift,
 )
-from priml.baselines.arcagi.optimizer import with_ndim
 from priml.baselines.arcagi.signal_dump import (
     SignalDumpTracker,
 )
@@ -69,6 +67,7 @@ from priml.baselines.sudoku.model import (
     lattice_positions,
 )
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
+from priml.data.color_dihedral import ColorDihedral
 from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE
 from priml.model.init import corrected_fan_in_normal
@@ -77,7 +76,7 @@ from priml.model.swiglu import SwiGLU
 from priml.optimizers import AdamATan2
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.muon import Muon
-from priml.optimizers.parameter_filter import complement, excluding
+from priml.optimizers.parameter_filter import complement, excluding, with_ndim
 from priml.runtime import MultiProcess, SingleProcess
 from priml.testing.golden import assert_pprint_golden
 from priml.train.checkpointer import Checkpointer

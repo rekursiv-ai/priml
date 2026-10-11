@@ -32,6 +32,16 @@ single-GPU pipelines that train their own generator. Run any of them::
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+from configgle import PartialConfig
+
+from priml.baselines.sudoku.act import (
+    FeedbackCarry,
+    HaltTraining,
+    SampledMinimum,
+    SlotScramble,
+)
 from priml.baselines.sudoku.agreement_lock import AgreementLockEval
 from priml.baselines.sudoku.hps_eval import HpsEval
 from priml.baselines.sudoku.hypotheses import (
@@ -40,9 +50,11 @@ from priml.baselines.sudoku.hypotheses import (
     WinnerTakeAll,
 )
 from priml.baselines.sudoku.latent_recursion import recipe_block
+from priml.baselines.sudoku.losses import CardinalityLoss, token_cross_entropy
+from priml.baselines.sudoku.metric import GridAccuracy
 from priml.baselines.sudoku.reproduction import Reproduction
 from priml.baselines.sudoku.sieve import FittedSieve, SieveEval, StaircaseSieveEval
-from priml.baselines.sudoku.trainer import Trainer
+from priml.baselines.sudoku.train_loop import SudokuTrainLoop
 from priml.baselines.sudoku.verifier import (
     DenoisingVerifier,
     VerifierAcceptor,
@@ -52,9 +64,24 @@ from priml.baselines.sudoku.verifier_fit import DenoisingLoss, VerifierFit
 from priml.model.attention.attention import Attention
 from priml.model.norm import RMSNorm
 from priml.model.transformer.block import TransformerBlock
+from priml.optimizers.composite import CompositeOptimizer
+from priml.optimizers.muon import Muon
+from priml.optimizers.parameter_filter import complement, excluding, with_ndim
+from priml.runtime import SingleProcess
+from priml.train.checkpointer import Checkpointer
+from priml.train.ema import EMA
+from priml.train.tracker import FileTracker
 
 
-def exp000() -> Trainer.Config:
+if TYPE_CHECKING:
+    import torch
+else:
+    from wrapt import lazy_import
+
+    torch = lazy_import("torch")  # ~1050 ms; only exp000's AdamW member names it.
+
+
+def exp000() -> SudokuTrainLoop:
     """Return the attention TRM baseline.
 
     - Post-norm attention TRM: hidden 512, 8 heads, 2 layers, slow 3 / fast 4.
@@ -64,8 +91,7 @@ def exp000() -> Trainer.Config:
     - Batch 384, cosine annealing to zero over exactly 62,000 steps; seed 0.
     - Evaluate the 2K proxy every 1,000 steps.
 
-    The trainer's defaults are the ``exp006`` recipe, so this rung switches
-    every later mechanism off explicitly and each fork turns one back on.
+    Every later mechanism is a slot left empty here; each fork fills one.
 
     Hypothesis:
       The reference TRM recipe with a cosine that anneals over exactly the
@@ -86,28 +112,57 @@ def exp000() -> Trainer.Config:
       exp002's QK-norm removes the instability.
 
     """
-    cfg = Trainer.Config()
+    cfg = SudokuTrainLoop()
     cfg.study_name = "sudoku"
     cfg.experiment_name = "exp000"
     cfg.seed = 0
 
-    cfg.model.slow_cycles = 3
-    cfg.model.fast_cycles = 4
-    cfg.model.pos2d_grid_shape = None
-    block = recipe_block()
+    model = cfg.step.model
+    model.slow_cycles = 3
+    model.fast_cycles = 4
+    model.pos2d_grid_shape = None
+    block = model.block = recipe_block()
     attn = block.attn
     assert isinstance(attn, Attention.Config)
     attn.norm_qk = None
-    cfg.model.block = block
 
-    cfg.max_steps = 62_000
-    cfg.total_train_steps = 62_000
-    cfg.max_act_steps = 16
-    cfg.label_smoothing = 0.2
-    cfg.ema_decay = 0.9
-    cfg.ema_warmup_steps = 5_000
-    cfg.csp_loss_weight = 0.0
-    cfg.feedback = False
+    step = cfg.step
+    # Every member decays at 1e-4 / lr: the decoupled decay per step,
+    # lr * weight_decay, is then 1e-4 at any rate.
+    adamw = PartialConfig(torch.optim.AdamW)
+    adamw.lr = 1e-4
+    adamw.betas = (0.9, 0.95)
+    adamw.weight_decay = 1.0
+    adamw.fused = False
+    muon = Muon.Config()
+    muon.lr = 0.02
+    muon.weight_decay = 1e-4 / muon.lr
+    muon.momentum = 0.6
+    muon.ns_steps = 3
+    # Muon folds a rank-3 weight's leading axis into an ensemble of matrices.
+    muon_ensemble = muon.copy_tree()
+    muon_ensemble.ensemble_dims = 1
+    optimizer = step.optimizer = CompositeOptimizer.Config()
+    optimizer.optimizers = [adamw, muon, muon_ensemble]
+    on_muon = excluding(Muon.eligible_tensor, "embed", "head")
+    optimizer.select = [
+        complement(on_muon),
+        with_ndim(on_muon, 2),
+        with_ndim(on_muon, 3),
+    ]
+    optimizer.drop_empty = True
+    step.gradient_clip_norm = 1.0
+    token_loss = step.token_loss = PartialConfig(token_cross_entropy)
+    token_loss.label_smoothing = 0.2
+    ema = step.ema = EMA.Config()
+    ema.decay = 0.9
+    ema.update_after_step = 5_000
+    ema.warmup_seed = True
+    ema.track_buffers = False
+    ema.shadow_kind = "param_dict"
+    step.pool.max_steps = 16
+    halting = step.pool.halting = HaltTraining.Config()
+    halting.exploration = SampledMinimum.Config()
 
     cfg.dataset.batch_size = 384
     cfg.dataset.seed = 0
@@ -115,10 +170,22 @@ def exp000() -> Trainer.Config:
     # proxy; reported full-set numbers come from the evaluation rungs.
     cfg.dataset.eval_num_instances = 2_000
     cfg.dataset.augment = True
+    cfg.metrics_eval["grid"] = GridAccuracy.Config()
+
+    cfg.max_steps = step.total_train_steps = 62_000
+    cfg.eval_every_epoch = False
+    cfg.eval_warmup_batches = 1
+    checkpointer = cfg.checkpointer
+    assert isinstance(checkpointer, Checkpointer.Config)
+    checkpointer.keep_last_n = 8
+    checkpointer.keep_every = 10_000
+    cfg.tracker = FileTracker.Config()
+    runtime = cfg.runtime = SingleProcess.Config()
+    runtime.device = "cuda"
     return cfg
 
 
-def exp001() -> Trainer.Config:
+def exp001() -> SudokuTrainLoop:
     """Fork exp000 with the following changes.
 
     - Add learned row, column, and box position tables to the grid tokens.
@@ -143,11 +210,11 @@ def exp001() -> Trainer.Config:
     """
     cfg = exp000()
     cfg.experiment_name = "exp001"
-    cfg.model.pos2d_grid_shape = (0, 0)
+    cfg.step.model.pos2d_grid_shape = (0, 0)
     return cfg
 
 
-def exp002() -> Trainer.Config:
+def exp002() -> SudokuTrainLoop:
     """Fork exp001 with the following changes.
 
     - Add parameter-free QK-norm to attention.
@@ -175,17 +242,17 @@ def exp002() -> Trainer.Config:
     """
     cfg = exp001()
     cfg.experiment_name = "exp002"
-    assert isinstance(cfg.model.block, TransformerBlock.Config)
-    attn = cfg.model.block.attn
+    block = cfg.step.model.block
+    assert isinstance(block, TransformerBlock.Config)
+    attn = block.attn
     assert isinstance(attn, Attention.Config)
     attn.norm_qk = RMSNorm.Config()
-    cfg.max_steps = 12_000
-    cfg.total_train_steps = 12_000
+    cfg.max_steps = cfg.step.total_train_steps = 12_000
     cfg.num_steps_eval = 500
     return cfg
 
 
-def exp003() -> Trainer.Config:
+def exp003() -> SudokuTrainLoop:
     """Fork exp002 with the following changes.
 
     - ACT depth 32 (was 16).
@@ -216,16 +283,22 @@ def exp003() -> Trainer.Config:
     """
     cfg = exp002()
     cfg.experiment_name = "exp003"
-    cfg.max_act_steps = 32
-    cfg.label_smoothing = 0.0
-    cfg.ema_decay = 0.999
-    cfg.ema_warmup_steps = 0
-    cfg.csp_loss_weight = 0.3
+    step = cfg.step
+    step.pool.max_steps = 32
+    token_loss = step.token_loss
+    assert isinstance(token_loss, PartialConfig)
+    token_loss.label_smoothing = 0.0
+    ema = step.ema
+    assert isinstance(ema, EMA.Config)
+    ema.decay = 0.999
+    ema.update_after_step = 0
+    cardinality = step.cardinality = CardinalityLoss.Config()
+    cardinality.weight = 0.3
     cfg.dataset.augment_digits_only = True
     return cfg
 
 
-def exp004() -> Trainer.Config:
+def exp004() -> SudokuTrainLoop:
     """Fork exp003 with the following changes.
 
     - Feed each ACT step its previous decoded grid, and corrupt that grid in
@@ -253,11 +326,12 @@ def exp004() -> Trainer.Config:
     """
     cfg = exp003()
     cfg.experiment_name = "exp004"
-    cfg.feedback = True
+    feedback = cfg.step.pool.feedback = FeedbackCarry.Config()
+    feedback.corruption = SlotScramble.Config()
     return cfg
 
 
-def exp005() -> Trainer.Config:
+def exp005() -> SudokuTrainLoop:
     """Fork exp004 with the following changes.
 
     - Deep recurrence: slow 6 / fast 9 cycles (was 3 / 4).
@@ -283,13 +357,13 @@ def exp005() -> Trainer.Config:
     """
     cfg = exp004()
     cfg.experiment_name = "exp005"
-    cfg.model.slow_cycles = 6
-    cfg.model.fast_cycles = 9
+    cfg.step.model.slow_cycles = 6
+    cfg.step.model.fast_cycles = 9
     cfg.seed = 44
     return cfg
 
 
-def exp006() -> Trainer.Config:
+def exp006() -> SudokuTrainLoop:
     """Fork exp005 with the following changes.
 
     - Anneal over 19,500 steps (was 12,000), the longest that fits one
@@ -315,8 +389,7 @@ def exp006() -> Trainer.Config:
     """
     cfg = exp005()
     cfg.experiment_name = "exp006"
-    cfg.max_steps = 19_500
-    cfg.total_train_steps = 19_500
+    cfg.max_steps = cfg.step.total_train_steps = 19_500
     return cfg
 
 
@@ -351,10 +424,10 @@ def exp007() -> HpsEval.Config:
     cfg = HpsEval.Config()
     cfg.experiment_name = "exp007"
     cfg.checkpoint_path = (
-        f"/runs/{parent.experiment_name}/checkpoints/"
+        f"/runs/{parent.study_name}/{parent.experiment_name}/checkpoints/"
         f"step_{int(parent.max_steps):08d}.pt"
     )
-    cfg.model = parent.copy_tree().finalize().model
+    cfg.model = parent.copy_tree().finalize().step.model
     return cfg
 
 
@@ -390,16 +463,19 @@ def exp008() -> Reproduction.Config:
       deterministic pass retires about 96.2% in about 666 s). This
       train-then-sieve pipeline read 422,786/422,786 at two checkpoints
       before the run crashed for unrelated infrastructure reasons.
+      1x H200, the whole pipeline (41,049.4 s): 422,786/422,786 with zero
+      wrong locks at every full-set sieve from the 14k checkpoint to the
+      final 19.5k; the final sieve took 3,590.3 s.
 
     """
     generator = exp006()
-    model = generator.copy_tree().finalize().model
+    model = generator.copy_tree().finalize().step.model
     cfg = Reproduction.Config()
     cfg.study_name = "sudoku"
     cfg.experiment_name = "exp008"
     cfg.screen = "committee"
     cfg.harvest_source_checkpoint = (
-        f"/runs/{generator.experiment_name}/checkpoints/"
+        f"/runs/{generator.study_name}/{generator.experiment_name}/checkpoints/"
         f"step_{int(generator.max_steps):08d}.pt"
     )
     cfg.harvest.model = model
@@ -411,7 +487,7 @@ def exp008() -> Reproduction.Config:
     return cfg
 
 
-def exp009() -> Trainer.Config:
+def exp009() -> SudokuTrainLoop:
     """Fork exp006 with the following changes.
 
     - Train two fast-latent hypotheses per puzzle from one shared slow latent;
@@ -441,17 +517,16 @@ def exp009() -> Trainer.Config:
     """
     cfg = exp006()
     cfg.experiment_name = "exp009"
-    model = cfg.model = HypothesisRecursion.Config().update(cfg.model)
+    model = cfg.step.model = HypothesisRecursion.Config().update(cfg.step.model)
     if cfg.seed is None:
         raise ValueError("Expected cfg.seed is not None.")
     model.hypothesis_seed = cfg.seed
-    cfg.routing = WinnerTakeAll.Config()
-    cfg.max_steps = 22_000
-    cfg.total_train_steps = 22_000
+    cfg.step.routing = WinnerTakeAll.Config()
+    cfg.max_steps = cfg.step.total_train_steps = 22_000
     return cfg
 
 
-def exp010() -> Trainer.Config:
+def exp010() -> SudokuTrainLoop:
     """Fork exp009 with the following changes.
 
     - Route the hypotheses without gradient, then recompute only the winner
@@ -480,12 +555,12 @@ def exp010() -> Trainer.Config:
     """
     cfg = exp009()
     cfg.experiment_name = "exp010"
-    cfg.routing = WinnerRecompute.Config()
-    assert isinstance(cfg.model, HypothesisRecursion.Config)
-    cfg.model.num_hypotheses = 3
+    cfg.step.routing = WinnerRecompute.Config()
+    model = cfg.step.model
+    assert isinstance(model, HypothesisRecursion.Config)
+    model.num_hypotheses = 3
     cfg.dataset.batch_size = 1_152
-    cfg.max_steps = 10_000
-    cfg.total_train_steps = 10_000
+    cfg.max_steps = cfg.step.total_train_steps = 10_000
     return cfg
 
 
@@ -513,22 +588,24 @@ def exp011() -> StaircaseSieveEval.Config:
     Results:
       1x H100: 422,786/422,786 on the full set, zero wrong locks, 1,598.6
       GPU-s, 2.05x cheaper than exp008's sieve.
+      Reproduced on 1x H200 (2,041.8 s): 422,786/422,786, zero wrong locks
+      (422,785 locked, 1 modal).
 
     """
     parent = exp010()
-    hypothesis_model = parent.copy_tree().finalize().model
+    hypothesis_model = parent.copy_tree().finalize().step.model
     assert isinstance(hypothesis_model, HypothesisRecursion.Config)
     cfg = StaircaseSieveEval.Config()
     cfg.experiment_name = "exp011"
     cfg.hypothesis_model = hypothesis_model
     cfg.hypothesis_checkpoint_path = (
-        f"/runs/{parent.experiment_name}/checkpoints/"
+        f"/runs/{parent.study_name}/{parent.experiment_name}/checkpoints/"
         f"step_{int(parent.max_steps):08d}.pt"
     )
     ladder = exp006()
-    cfg.model = ladder.copy_tree().finalize().model
+    cfg.model = ladder.copy_tree().finalize().step.model
     cfg.checkpoint_path = (
-        f"/runs/{ladder.experiment_name}/checkpoints/"
+        f"/runs/{ladder.study_name}/{ladder.experiment_name}/checkpoints/"
         f"step_{int(ladder.max_steps):08d}.pt"
     )
     committee = exp008()
@@ -572,6 +649,15 @@ def exp012() -> Reproduction.Config:
       20,973.4 GPU-s. The gate never opened before step 19,500, so the first
       perfect screen and the first perfect full set are both the final
       checkpoint.
+      Reproduced on 1x H200 (24,304 s; the full-set lock 18,818 s):
+      0.9999953 (422,784/422,786), one wrong lock and one wrong modal grid.
+      The two-view lock accepts any grid both views emit identically; the
+      first pair emitted the same wrong grid for one puzzle, both accepted
+      by search (q 9.56 and 9.63), and the lock has no rule check by design.
+      The record's first pair was chosen because it measured zero wrong
+      locks on the evaluated set, so that 0 is one draw, not a guarantee.
+      The second miss is a nine-way tie (nine distinct grids), which goes
+      to the first-listed view, whose grid was wrong.
 
     """
     generator = exp006()
@@ -581,7 +667,7 @@ def exp012() -> Reproduction.Config:
     cfg.generator = generator
     cfg.generator_name = "exp012_generator"
     lock = cfg.full_eval = AgreementLockEval.Config()
-    lock.model = generator.copy_tree().finalize().model
+    lock.model = generator.copy_tree().finalize().step.model
     return cfg
 
 
@@ -611,6 +697,8 @@ def exp013() -> FittedSieve.Config:
       1x H100, sieve: 422,786/422,786 on the full set, zero wrong locks
       (422,782 locked, 4 modal), 1,613.6 GPU-s. The recorded committee was
       fit on an earlier harvest corpus; this rung fits on exp008's.
+      Reproduced on 1x H200: 422,786/422,786, zero wrong locks (all
+      locked); the sieve took 1,962.3 s, 3,920.3 s with the three fits.
 
     """
     cfg = FittedSieve.Config()
@@ -635,7 +723,7 @@ def exp013() -> FittedSieve.Config:
     return cfg
 
 
-def exp_smoke() -> Trainer.Config:
+def exp_smoke() -> SudokuTrainLoop:
     """Fork exp000 for an unscored installation check.
 
     - Automatically select the available device; no compilation.
@@ -648,17 +736,17 @@ def exp_smoke() -> Trainer.Config:
     # A smoke run validates the installation it runs on. Scored rungs pin
     # CUDA so a scheduler mistake cannot silently produce a CPU result; this
     # unscored rung keeps the runtime's best-device fallback.
-    cfg.runtime.device = None
-    cfg.model.compile = False
-    cfg.model.channels_in = 32
-    cfg.model.num_layers = 1
-    cfg.model.slow_cycles = 1
-    cfg.model.fast_cycles = 1
-    cfg.max_act_steps = 2
+    cfg.runtime = SingleProcess.Config()
+    model = cfg.step.model
+    model.compile = False
+    model.channels_in = 32
+    model.num_layers = 1
+    model.slow_cycles = 1
+    model.fast_cycles = 1
+    cfg.step.pool.max_steps = 2
     cfg.dataset.batch_size = 8
     cfg.dataset.eval_num_instances = 4
-    cfg.max_steps = 4
-    cfg.total_train_steps = 4
+    cfg.max_steps = cfg.step.total_train_steps = 4
     cfg.num_steps_eval = 2
     cfg.eval_warmup_batches = 0
     cfg.checkpointer = None

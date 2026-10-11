@@ -18,7 +18,6 @@ import pytest
 from priml.baselines.arcagi.augmentation import (
     ArcAugmentation,
     ArcSpec,
-    ColorDihedral,
     crop_grid,
     grid_hash,
     untranslate_unscale,
@@ -37,6 +36,7 @@ from priml.baselines.arcagi.scripts.build_dataset import (
     build_arc_dataset,
     ensure_arc_dataset,
 )
+from priml.data.color_dihedral import ColorDihedral
 from priml.data.ensure import DataSpec, EnsureResult
 
 

@@ -23,6 +23,7 @@ frame instead.
   - [H100, 1 hour](#h100-1-hour)
   - [H200, 1 hour](#h200-1-hour)
   - [H100, 4 hours](#h100-4-hours)
+  - [H200, 4 hours](#h200-4-hours)
   - [References](#references)
 - [Evaluation](#evaluation)
 - [Tests](#tests)
@@ -125,6 +126,12 @@ result above; best is the highest of the evaluations every 500 steps.
 
 `exp003` peaked at 0.957 at step 58,500. Its parent was not run for four
 hours.
+
+### H200, 4 hours
+
+| Experiment | Exact | Best (step) | Steps | H100 |
+|---|---:|---:|---:|---:|
+| `exp003` | 0.952 | 0.963 (65,000) | 71,536 | 0.952 |
 
 ### References
 

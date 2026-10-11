@@ -74,16 +74,17 @@ land beneath `/opt/scratch/runs/`:
 
 | Experiment | Reads (run first) | Writes | Record, 1x H100 |
 |---|---|---|---|
-| `exp000`-`exp006` | the dataset | `runs/exp00N/` | 2K exact, table below |
+| `exp000`-`exp006` | the dataset | `runs/sudoku/exp00N/` | 2K exact, table below |
 | `exp007` | `exp006`'s final checkpoint | `runs/exp007/dumps/` | 0.99920 full set, about 2 h |
-| `exp008` | `exp006`'s final checkpoint | `runs/exp008/`, `runs/harvest/harvest/`, `runs/exp008_generator/`, `runs/exp008_verifier_s{0,1,2}/` | 1.0 full set, 0 wrong locks |
-| `exp009`, `exp010` | the dataset | `runs/exp009/`, `runs/exp010/` | 0.9650, 0.9770 2K |
+| `exp008` | `exp006`'s final checkpoint | `runs/exp008/`, `runs/harvest/harvest/`, `runs/sudoku/exp008_generator/`, `runs/exp008_verifier_s{0,1,2}/` | 1.0 full set, 0 wrong locks |
+| `exp009`, `exp010` | the dataset | `runs/sudoku/exp009/`, `runs/sudoku/exp010/` | 0.9650, 0.9770 2K |
 | `exp011` | `exp006`, `exp010` final checkpoints; `exp008`'s verifiers | `runs/exp011/dumps/` | 1.0 full set, 1,598.6 GPU-s |
-| `exp012` | the dataset (trains its own generator) | `runs/exp012/`, `runs/exp012_generator/` | 1.0 full set, 7.0 GPU-h |
+| `exp012` | the dataset (trains its own generator) | `runs/exp012/`, `runs/sudoku/exp012_generator/` | 1.0 full set, 7.0 GPU-h |
 | `exp013` | `exp006`, `exp010` final checkpoints; `exp008`'s harvest corpus | `runs/exp013/dumps/`, `runs/exp013_verifier_s{0,1,2}/` | 1.0 full set, 1,613.6 GPU-s |
 
 A consumer derives each path from its parent's config: the parent's
-`experiment_name` and final step, `runs/<name>/checkpoints/step_<steps>.pt`.
+`study_name`, `experiment_name`, and final step,
+`runs/<study>/<name>/checkpoints/step_<steps>.pt`.
 
 **The base_dir knob.** `--override base_dir=/your/root` relocates a rung's
 runs and its dataset root together: runs land in `/your/root/runs/` and the
@@ -117,7 +118,9 @@ Every number was measured on one H100. Δ compares each rung with its parent;
 ### Training, 2K proxy
 
 Exact accuracy on the first 2,000 test puzzles, scored during training. The
-proxy underestimates the full set.
+proxy underestimates the full set. Training logs it as `eval/grid_exact`,
+solved over scored puzzles from integer counts; every full-set number below
+is likewise a count ratio, with its count in parentheses.
 
 | Experiment | Change | Exact (2K) | Δ | Seeds |
 |---|---|---:|---:|---|
@@ -179,6 +182,10 @@ Full-set rungs score every one of the 422,786 test puzzles:
 | Experiment | Exact (full set) | Wrong | Seconds | H100 |
 |---|---:|---:|---:|---:|
 | `exp007` | 0.99957 (422,604) | 142 accepted | 8,337 | 0.99920 (422,447; 321 wrong) |
+| `exp008` | 1.0 (422,786) | 0 (422,785 locked, 1 modal) | 3,590.3 | 1.0, 3,274 GPU-s |
+| `exp011` | 1.0 (422,786) | 0 (422,785 locked, 1 modal) | 2,041.8 | 1.0, 1,598.6 GPU-s |
+| `exp012` | 0.9999953 (422,784) | 2 (1 lock, 1 modal) | 24,304 (lock 18,818) | 1.0, 0 wrong locks |
+| `exp013` | 1.0 (422,786) | 0 (all locked) | 1,962.3 | 1.0, 1,613.6 GPU-s |
 
 - `exp000` is unstable: its 0.61 record is one clean seed. Both reproduced
   seeds diverged (seed 0 at 18k steps, 0.247 to 0.012; seed 1 at 8k, 0.128 to
@@ -186,7 +193,22 @@ Full-set rungs score every one of the 422,786 test puzzles:
 - `exp003` and `exp004` seed 0 land 5.3 and 2.7 pp below their H100 records
   (last 5); seed 1 lands within 0.1 and 1.7 pp, so the gap is seed spread.
   Repair adds +6.6 and +2.2 pp over `exp003`, paired by seed.
-- `exp008` and `exp011` through `exp013` are running; their rows land here.
+- `exp012` misses two puzzles: seed variation in a lock that is not
+  guaranteed safe.
+  - The two-view lock accepts any grid both views emit identically. The first
+    pair emitted the same wrong grid for one puzzle, both search-accepted (q
+    9.56 and 9.63); the lock has no rule check by design.
+  - The record's first view pair was chosen because it measured zero wrong
+    locks on the evaluated set, so the record's 0 wrong locks is one draw, not
+    a guarantee.
+  - The second miss is a nine-way tie (nine distinct grids); the tie goes to
+    the first-listed view, which was wrong.
+- `exp008`'s seconds are its final sieve. Every full-set sieve from the 14k
+  checkpoint to the final 19.5k read 422,786 with 0 wrong locks; the whole
+  pipeline, with harvest, committee fits, generator training and those
+  sieves, took 41,049.4 s.
+- `exp013`'s seconds are its sieve; with its three 16k-step committee fits
+  the job took 3,920.3 s.
 
 ### References
 
@@ -238,18 +260,18 @@ uv --quiet run --frozen pytest priml/baselines/sudoku
 ```
 
 Tensor goldens replay the representative recipes' training steps (`exp000`,
-`exp006`, `exp009`, `exp010`) and each evaluation runner bit for bit at tiny
-size on CPU. `exp009`, `exp010`, and the staircase sieve's selection round
-matched the implementations that produced the recorded results before their
-goldens were minted.
+`exp004`, `exp006`, `exp009`, `exp010`) and each evaluation runner bit for bit
+at tiny size on CPU. `exp009`, `exp010`, and the staircase sieve's selection
+round matched the implementations that produced the recorded results before
+their goldens were minted.
 
 ## Files
 
 | File | Responsibility |
 |---|---|
 | `experiments.py` | Experiment factories |
-| `trainer.py` | The TRM trainer: ACT pool, optimizers, EMA, evaluation |
-| `routing.py`, `losses.py` | The trainer's routing slot and its training losses |
+| `train_loop.py`, `routed_act_step.py` | The training loop, and its pooled ACT step with the routing slot and EMA evaluation |
+| `routing.py`, `losses.py` | The step's routing slot and its training losses |
 | `latent_recursion.py` | The tiny recursive model |
 | `hypotheses.py` | Winner-take-all training over several latent hypotheses |
 | `views.py` | Exact Sudoku symmetries and the frozen nine-view table |

@@ -35,7 +35,6 @@ from priml.baselines.arcagi import augmentation
 from priml.baselines.arcagi.augmentation import (
     ArcAugmentation,
     ArcSpec,
-    ColorDihedral,
     SpatialAugmentation,
 )
 from priml.baselines.arcagi.data import PuzzleData, load_puzzle_dataset
@@ -50,6 +49,7 @@ from priml.baselines.arcagi.signal_dump import (
     SignalDumpTracker,
     write_signal_dump,
 )
+from priml.data.color_dihedral import ColorDihedral, dihedral_transform
 from priml.testing import regenerate
 from priml.testing.golden import read_tensors, stored, write_tensors
 
@@ -220,7 +220,7 @@ class PortBackend:
     spec: ArcSpec = dataclass_field(default_factory=ArcSpec)
 
     def dihedral(self, arr: Grid, tid: int) -> Grid:
-        return augmentation.dihedral_transform(arr, tid=tid)
+        return dihedral_transform(arr, tid=tid)
 
     def scale_grid(self, grid: Grid, scale: int) -> Grid:
         return augmentation.scale_grid(grid, scale)

@@ -219,7 +219,7 @@ MazeTrainLoop(
         │   norm_log_interval=10,
         │   boundary=CanonicalBoundary.Config(weight=0.1, grid_shape=(30, 30))
         ),
-        dataset=MazeData.Config(
+        dataset=PuzzleDataset.Config(
             spec=SudokuSpec(grid_shape=(30, 30), box_shape=(3, 3), vocab_size=6),
             base_dir='/opt/scratch',
             working_dir=PosixPath('/opt/scratch/datasets/maze/hard-1k-canonical'),

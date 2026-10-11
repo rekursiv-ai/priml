@@ -39,12 +39,10 @@ from priml.baselines.arcagi.model import (
     SingleLatentRecurrence,
     depthwise_shift,
 )
-from priml.baselines.arcagi.optimizer import with_ndim
 from priml.baselines.maze.data import (
     CANONICAL,
     ORIGINAL,
     VOCAB_SIZE,
-    MazeData,
 )
 from priml.baselines.maze.loss import CanonicalBoundary
 from priml.baselines.maze.train_step import BoundaryLossTrainStep
@@ -56,6 +54,7 @@ from priml.baselines.sudoku.act import (
 from priml.baselines.sudoku.embedding import GridEmbedding
 from priml.baselines.sudoku.model import CoreCompile, DeepRecurrence
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
+from priml.baselines.sudoku.puzzle_data import PuzzleDataset
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
 from priml.model.attention.attention import Attention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, RoPEMixed
@@ -66,7 +65,7 @@ from priml.model.transformer.block import TransformerBlock
 from priml.optimizers import AdamATan2, SignSGD
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.muon import Muon
-from priml.optimizers.parameter_filter import complement, excluding
+from priml.optimizers.parameter_filter import complement, excluding, with_ndim
 from priml.runtime import SingleProcess
 from priml.train.checkpointer import Checkpointer
 from priml.train.ema import EMA
@@ -85,7 +84,7 @@ else:
 
 class MazeTrainLoop(
     Makes["TrainLoop"],
-    TrainLoop.Config[BoundaryLossTrainStep.Config, MazeData.Config],
+    TrainLoop.Config[BoundaryLossTrainStep.Config, PuzzleDataset.Config],
 ):
     """A training loop with the maze step and dataset already in place.
 
@@ -98,7 +97,7 @@ class MazeTrainLoop(
     )
     """The reference TRM step, with the optional boundary loss."""
 
-    dataset: MazeData.Config = field(default_factory=MazeData.Config)
+    dataset: PuzzleDataset.Config = field(default_factory=PuzzleDataset.Config)
     """Prepared maze grids, held on the device."""
 
     @override
@@ -385,6 +384,7 @@ def exp003() -> MazeTrainLoop:
     Results:
       H100, 4 h: 0.952 exact (952/1,000) final, 14,400.1 training seconds;
       best 0.957 at step 58,500.
+      H200, 4 h: 0.952 final at step 71,536; best 0.963 at step 65,000.
 
     """
     cfg = exp002()

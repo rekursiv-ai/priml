@@ -7,7 +7,7 @@ StaircaseSieveEval.Config(
         experiment_name='exp011',
         doc='',
         base_dir=None,
-        checkpoint_path='/runs/exp006/checkpoints/step_00019500.pt',
+        checkpoint_path='/runs/sudoku/exp006/checkpoints/step_00019500.pt',
         verifier_checkpoints=(
             '/runs/exp008_verifier_s0/checkpoints/step_00004000.pt',
             '/runs/exp008_verifier_s1/checkpoints/step_00004000.pt',
@@ -267,7 +267,7 @@ StaircaseSieveEval.Config(
         │   num_hypotheses=3,
         │   hypothesis_seed=44
         ),
-        hypothesis_checkpoint_path='/runs/exp010/checkpoints/step_00010000.pt',
+        hypothesis_checkpoint_path='/runs/sudoku/exp010/checkpoints/step_00010000.pt',
         qsel_hypotheses=5,
         qsel_seed=8_902
     )

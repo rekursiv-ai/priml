@@ -41,9 +41,9 @@ from treekle import from_plain, json_loads
 import numpy as np
 import torch
 
-from priml.baselines.arcagi.augmentation import ColorDihedral
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
 from priml.data.arrays import load_array
+from priml.data.color_dihedral import ColorDihedral
 from priml.math.basic import ceil_div
 from priml.math.seed import salt
 from priml.paths import resolve_working_dir

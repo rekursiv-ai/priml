@@ -3,7 +3,7 @@
 The runner goldens in ``testdata/`` replay frozen evaluation trajectories.
 Every case runs one real runner end to end at tiny size on CPU -- no released
 checkpoint anywhere: generators and verifiers are trained inside the case, so
-the chain is trainer -> harvest -> verifier fits -> HPS / agreement lock /
+the chain is training -> harvest -> verifier fits -> HPS / agreement lock /
 sieve, and the pipeline cases run it all segmented, screened, and triggered as
 exp008 and exp012 do. Each records every array its runner writes, its numeric
 metrics, and the trained weights, compared with ``torch.equal``.
@@ -29,14 +29,15 @@ from torch import Tensor
 import numpy as np
 import torch
 
+from priml.baselines.sudoku import experiments
 from priml.baselines.sudoku.harvest import Harvest
 from priml.baselines.sudoku.hypotheses import HypothesisRecursion, WinnerRecompute
 from priml.baselines.sudoku.latent_recursion import LatentRecursion, recipe_block
 from priml.baselines.sudoku.search import HpsSearch
-from priml.baselines.sudoku.trainer import Trainer
 from priml.baselines.sudoku.verifier import SudokuVerifier
 from priml.baselines.sudoku.verifier_fit import VerifierFit, VerifierLoss
 from priml.model.swiglu import SwiGLU
+from priml.runtime import SingleProcess
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import read_tensors, stored
 
@@ -45,6 +46,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from numpy.lib.npyio import NpzFile
+
+    from priml.baselines.sudoku.train_loop import SudokuTrainLoop
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -224,22 +227,12 @@ class Harness:
           checkpoint: Logical path of the final checkpoint.
 
         """
-        cfg = Trainer.Config()
-        cfg.experiment_name = name
-        cfg.base_dir = self.scratch
-        cfg.seed = seed
-        cfg.runtime.device = "cpu"
-        cfg.model = self.hypothesis_model()
-        cfg.routing = WinnerRecompute.Config()
-        cfg.dataset.working_dir = self.data
+        cfg = self._recipe(name, seed=seed)
+        cfg.step.model = self.hypothesis_model()
+        cfg.step.routing = WinnerRecompute.Config()
         cfg.dataset.batch_size = 3
-        cfg.max_steps = 3
-        cfg.max_act_steps = 2
-        cfg.num_steps_eval = float("inf")
-        cfg.eval_warmup_batches = 0
-        cfg.dtype_autocast = None
         cfg.make().run()
-        return f"/runs/{name}/checkpoints/step_00000003.pt"
+        return f"/runs/{cfg.study_name}/{name}/checkpoints/step_00000003.pt"
 
     def search(self) -> HpsSearch.Config:
         """Return the search policy.
@@ -278,21 +271,11 @@ class Harness:
           checkpoint: Logical path of the final checkpoint.
 
         """
-        cfg = Trainer.Config()
-        cfg.experiment_name = name
-        cfg.base_dir = self.scratch
-        cfg.seed = seed
-        cfg.runtime.device = "cpu"
-        cfg.model = self.model()
-        cfg.dataset.working_dir = self.data
+        cfg = self._recipe(name, seed=seed)
+        cfg.step.model = self.model()
         cfg.dataset.batch_size = 2
-        cfg.max_steps = 3
-        cfg.max_act_steps = 2
-        cfg.num_steps_eval = float("inf")
-        cfg.eval_warmup_batches = 0
-        cfg.dtype_autocast = None
         cfg.make().run()
-        return f"/runs/{name}/checkpoints/step_00000003.pt"
+        return f"/runs/{cfg.study_name}/{name}/checkpoints/step_00000003.pt"
 
     def harvest(self, checkpoint: str) -> Path:
         """Harvest a tiny corpus from ``checkpoint``; return its directory.
@@ -386,3 +369,26 @@ class Harness:
                     else:
                         out[prefix] = array
         return out
+
+    # The generators these goldens were recorded with trained the recipe on
+    # plain data: unaugmented, shuffled from the ambient stream, scored on the
+    # whole fixture, at full precision.
+    def _recipe(self, name: str, *, seed: int) -> SudokuTrainLoop:
+        """Return ``exp006`` shrunk to two ACT steps and three train steps."""
+        cfg = experiments.exp006()
+        cfg.experiment_name = name
+        cfg.base_dir = self.scratch
+        cfg.seed = seed
+        runtime = cfg.runtime = SingleProcess.Config()
+        runtime.device = "cpu"
+        cfg.step.dtype_autocast = None
+        cfg.step.pool.max_steps = 2
+        cfg.dataset.working_dir = self.data
+        cfg.dataset.seed = None
+        cfg.dataset.eval_num_instances = None
+        cfg.dataset.augment = False
+        cfg.dataset.augment_digits_only = False
+        cfg.max_steps = 3
+        cfg.num_steps_eval = float("inf")
+        cfg.eval_warmup_batches = 0
+        return cfg
