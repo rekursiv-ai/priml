@@ -1,0 +1,81 @@
+digraph craftax {
+  rankdir=LR;
+  graph [fontname="Helvetica", nodesep=0.12, ranksep=0.35, margin=0.1, labelloc=t, fontsize=22,
+         label="Craftax experiments: how each run builds on the last"];
+  node  [shape=box, style="rounded,filled", fillcolor="white", fontname="Helvetica", fontsize=11];
+  edge  [color="#888888"];
+
+  subgraph cluster_main {
+    label="Our recipe: the main line"; fontsize=14; style="rounded"; color="#2e7d32"; penwidth=2;
+    exp000 [label="exp000\nPufferLib's published recipe\nscore 47%\nplayed 3.5B steps"];
+    exp101 [label="exp101\nhigher-precision numbers\nscore 50%\nplayed 3.5B steps"];
+    exp102 [label="exp102\nboard encoder, 20B steps\nscore 53%\nplayed 20B steps"];
+    exp103 [label="exp103\npractice + self-imitation\nscore 72%\nplayed 20B steps", penwidth=2];
+    exp114 [label="exp114\nextra boss training\nscore 80%, beats boss 43.5%\nplayed 3B more (23B total)", fillcolor="#b7e4b0", penwidth=3];
+  }
+  exp000 -> exp101 -> exp102 -> exp103 -> exp114 [color="#2e7d32", penwidth=3, weight=10];
+
+  exp001 [label="exp001\nexp000, shorter training\nscore 15%\nplayed 250M steps", fillcolor="#f2f2f2"];
+  exp109 [label="exp109\nexp103, new world every game\nscore 61% (stopped at 6B)\nplayed 6B steps", fillcolor="#f2f2f2"];
+  exp000 -> exp001;
+  exp103 -> exp109;
+
+  subgraph cluster_baselines {
+    label="Published baselines, original game rules (context only)"; fontsize=14; style="rounded,dashed"; color="#999999"; fontcolor="#666666";
+    node [fillcolor="#f2f2f2", fontcolor="#555555", color="#999999"];
+    exp002 [label="exp002\nexp000 on original rules\nscore 12%\nplayed 3.5B steps"];
+    exp003 [label="exp003\nCraftax paper's PPO\nscore 12%\nplayed 1B steps"];
+    exp004 [label="exp004\nexp003, tiny budget\nscore 2%\nplayed 1M steps"];
+    exp005 [label="exp005\n+ memory (GRU)\nscore 17%\nplayed 1B steps"];
+    exp006 [label="exp006\nQ-learning instead\nscore 16%\nplayed 1B steps"];
+    exp007 [label="exp007\nexp003, 100M budget\nscore 10%\nplayed 100M steps"];
+    exp008 [label="exp008\n+ memory (Transformer)\nscore 17%\nplayed 1B steps"];
+  }
+  exp000 -> exp002 [color="#bbbbbb"];
+  exp002 -> exp003 [color="#bbbbbb"];
+  exp003 -> exp004 [color="#bbbbbb"]; exp003 -> exp005 [color="#bbbbbb"]; exp003 -> exp006 [color="#bbbbbb"];
+  exp003 -> exp007 [color="#bbbbbb"]; exp003 -> exp008 [color="#bbbbbb"];
+
+  subgraph cluster_wm_test {
+    label="Does a world model help? Cheap 250M-step test"; fontsize=14; style="rounded"; color="#1f5fa8"; penwidth=2;
+    exp104 [label="exp104\nexp102, 2x wider network\nscore 65%\nplayed 20B steps"];
+    exp105 [label="exp105\nbetter board encoder\nscore 62%\nplayed 20B steps"];
+    exp106 [label="exp106\nexp105 at 250M (control)\nscore 18%\nplayed 250M steps"];
+    exp107 [label="exp107\n+ trained world model\nscore 53%\npolicy played 250M steps\nWM watched 50M (frozen)\nteachers played 43.5B steps", fillcolor="#cfe0f7"];
+    exp108 [label="exp108\n+ untrained world model\nscore 16%\npolicy played 250M steps\nWM watched 0\nteachers played 0", fillcolor="#cfe0f7"];
+  }
+  exp102 -> exp104;
+  exp104 -> exp105 -> exp106 -> exp107 -> exp108 [color="#1f5fa8", penwidth=2];
+
+  subgraph cluster_wm_best {
+    label="World model on our best recipe (exp103): runs stopped early"; fontsize=14; style="rounded"; color="#1f5fa8";
+    node [fillcolor="#cfe0f7"];
+    exp110 [label="exp110\nWM taught by exp103 @ 1B\nscore 52% (stopped at 9.5B)\npolicy played 9.5B steps\nWM watched 100M (frozen)\nteachers played 1B steps"];
+    exp111 [label="exp111\nWM taught by exp103 @ 20B\nscore 67% (stopped at 7B)\npolicy played 7B steps\nWM watched 100M (frozen)\nteachers played 20B steps"];
+    exp112 [label="exp112\nexp110, WM keeps learning\nscore 54% (stopped at 1.25B)\npolicy played 1.25B steps\nWM watched 100M (keeps learning)\nteachers played 1B steps"];
+    exp113 [label="exp113\nexp111, WM keeps learning\nscore 60% (stopped at 1.25B)\npolicy played 1.25B steps\nWM watched 100M (keeps learning)\nteachers played 20B steps"];
+    exp115 [label="exp115\nexp110 stopped at 1B\nscore 38%\npolicy played 1B steps\nWM watched 100M (frozen)\nteachers played 1B steps"];
+    exp116 [label="exp116\nexp112 stopped at 1B\nscore 52%\npolicy played 1B steps\nWM watched 100M (keeps learning)\nteachers played 1B steps"];
+  }
+  exp103 -> exp110;
+  exp110 -> exp111; exp110 -> exp112; exp110 -> exp115;
+  exp111 -> exp113; exp112 -> exp116;
+
+  key [shape=plaintext, style="", label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" CELLPADDING="4" BGCOLOR="white">
+      <TR><TD COLSPAN="2" ALIGN="LEFT"><B>How to read this</B></TD></TR>
+      <TR><TD ALIGN="LEFT">arrow</TD><TD ALIGN="LEFT">child = parent + one change (line 2)</TD></TR>
+      <TR><TD ALIGN="LEFT">score</TD><TD ALIGN="LEFT">% of 226 achievement points, ~10k test games</TD></TR>
+      <TR><TD ALIGN="LEFT">beats boss</TD><TD ALIGN="LEFT">% of test games that defeat the final boss</TD></TR>
+      <TR><TD ALIGN="LEFT">played N steps</TD><TD ALIGN="LEFT">game actions the agent took while training (B = billion)</TD></TR>
+      <TR><TD ALIGN="LEFT">policy played</TD><TD ALIGN="LEFT">steps the acting agent trained for</TD></TR>
+      <TR><TD ALIGN="LEFT">WM watched</TD><TD ALIGN="LEFT">recorded steps the world model trained on first;<BR ALIGN="LEFT"/>frozen = stops learning after that</TD></TR>
+      <TR><TD ALIGN="LEFT">teachers played</TD><TD ALIGN="LEFT">steps spent training the agents whose games were recorded</TD></TR>
+      <TR><TD ALIGN="LEFT">stopped at N</TD><TD ALIGN="LEFT">run did not finish; score is from that point</TD></TR>
+      <TR><TD ALIGN="LEFT">world model</TD><TD ALIGN="LEFT">network that learned the game from<BR ALIGN="LEFT"/>recorded games of other agents ("teachers")</TD></TR>
+      <TR><TD ALIGN="LEFT" BGCOLOR="#b7e4b0">green</TD><TD ALIGN="LEFT">best run</TD></TR>
+      <TR><TD ALIGN="LEFT" BGCOLOR="#cfe0f7">blue</TD><TD ALIGN="LEFT">uses a world model</TD></TR>
+      <TR><TD ALIGN="LEFT" BGCOLOR="#f2f2f2">gray</TD><TD ALIGN="LEFT">side experiment or outside baseline</TD></TR>
+    </TABLE>>];
+  exp109 -> key [style=invis];
+}
