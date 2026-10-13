@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-import math
-
 from torch import Tensor, nn
 
 import torch
@@ -85,30 +83,38 @@ def cross_entropy_logz(
 
     """
     dims = reduction_dims(dim, ndim=input.ndim)
-    num_classes = math.prod(input.shape[d] for d in dims)
-    logits = input.movedim(dims, tuple(range(-len(dims), 0))).reshape(-1, num_classes)
-    flat_target = target.reshape(-1)
-    logz = logits.logsumexp(-1)
-    valid = flat_target != ignore_index
-    index = torch.where(valid, flat_target, 0)
-    loss = logz - logits.gather(-1, index[:, None])[:, 0]
-    count = valid if weight is None else torch.where(valid, weight[index], 0.0)
-    if weight is not None:
+    # One axis stays in place: moving it last and flattening copies ``input``
+    # for ``F.cross_entropy``'s ``[N, C, ...]`` layout.
+    if len(dims) == 1:
+        (axis,) = dims
+        logits = input
+    else:
+        axis = input.ndim - len(dims)
+        logits = input.movedim(dims, tuple(range(axis, input.ndim))).flatten(axis)
+    logz = logits.logsumexp(axis)
+    valid = target != ignore_index
+    index = torch.where(valid, target, 0)
+    loss = logz - logits.gather(axis, index.unsqueeze(axis)).squeeze(axis)
+    if weight is None:
+        count = valid
+    else:
+        count = torch.where(valid, weight[index], 0.0)
         loss = count * loss
     # Skipped at zero, not multiplied by it: one ``-inf`` logit makes ``smooth``
     # infinite, and ``0 * inf`` is NaN.
     if label_smoothing:
         if weight is None:
-            smooth = logz - logits.mean(-1)
+            smooth = logz - logits.mean(axis)
         else:
-            smooth = (logz * weight.sum() - logits @ weight) / num_classes
+            weighted = logits.movedim(axis, -1) @ weight
+            smooth = (logz * weight.sum() - weighted) / logits.shape[axis]
         loss = loss.lerp(smooth, label_smoothing)
     # ``where``, not a multiply: an ignored target may sit on a ``-inf`` logit,
     # and ``inf * 0`` would turn every reduction into NaN.
     loss = torch.where(valid, loss, 0.0)
-    logz = torch.where(valid, logz, 0.0).reshape(target.shape)
+    logz = torch.where(valid, logz, 0.0)
     if reduction == "none":
-        return loss.reshape(target.shape), logz
+        return loss, logz
     if reduction == "sum":
         return loss.sum(), logz
     return loss.sum() / count.sum(), logz
