@@ -316,6 +316,29 @@ def test_cache_restore_rejects_invalid_layer_kinds_and_field_sets(
     assert str(error.value) == message
 
 
+def test_cache_state_rejects_an_empty_depth_key() -> None:
+    with pytest.raises(ValueError, match="nonempty") as error:
+        cache_state_dict({(): {}})
+    assert str(error.value) == "A Qwen3.5 cache key must be nonempty."
+
+
+@pytest.mark.parametrize(
+    ("layer", "message"),
+    [
+        ("full_attention", "Qwen3.5 cache layer must be a dictionary."),
+        ({1: "full_attention"}, "Qwen3.5 cache layer keys must be strings."),
+    ],
+    ids=["not-a-dict", "non-string-key"],
+)
+def test_cache_restore_rejects_malformed_layer_containers(
+    layer: object,
+    message: str,
+) -> None:
+    with pytest.raises(TypeError, match=re.escape(message)) as error:
+        cache_from_state_dict({_KEY: layer})
+    assert str(error.value) == message
+
+
 def test_an_empty_delta_cache_round_trips() -> None:
     """A freshly allocated delta layer holds no tensors yet and still persists."""
     state = cache_state_dict({_KEY: {}})
@@ -499,6 +522,6 @@ def _is_object_dict(value: object) -> TypeGuard[dict[object, object]]:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -351,6 +351,6 @@ def test_objective_requires_a_teacher_feature_map() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

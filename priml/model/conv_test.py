@@ -129,6 +129,99 @@ def test_conv_reset():
         m.reset_parameters()
 
 
+@pytest.mark.parametrize(
+    ("config_type", "given", "inferred"),
+    [
+        (Conv1d.Config, "channels_out", "channels_in"),
+        (Conv2d.Config, "channels_in", "channels_out"),
+        (Conv3d.Config, "channels_out", "channels_in"),
+    ],
+)
+def test_conv_infers_either_width_from_the_other(
+    config_type: type[Conv1d.Config | Conv2d.Config | Conv3d.Config],
+    given: str,
+    inferred: str,
+) -> None:
+    config = config_type()
+    setattr(config, given, 5)
+    config.finalize()
+    assert getattr(config, inferred) == 5
+
+
+@pytest.mark.parametrize(
+    ("config_type", "ndim"),
+    [(Conv1d.Config, 1), (Conv2d.Config, 2), (Conv3d.Config, 3)],
+)
+def test_conv_reset_draws_the_bias_with_its_own_initializer(
+    config_type: type[Conv1d.Config | Conv2d.Config | Conv3d.Config],
+    ndim: int,
+) -> None:
+    config = config_type(2, 3)
+    config.bias = True
+    config.init_bias = torch.nn.init.ones_
+    module = config.make()
+    assert module.bias is not None
+    assert torch.equal(module.bias, torch.ones(3))
+    assert module.weight.ndim == ndim + 2
+
+
+def test_conv_cost_rejects_an_unknown_padding_string() -> None:
+    with pytest.raises(TypeError, match=r"^Unsupported convolution padding: 'full'\.$"):
+        conv_cost(
+            channels_in=2,
+            channels_out=3,
+            kernel_size=3,
+            ndim=1,
+            groups=1,
+            bias=False,
+            input_grid=(4,),
+            batch_size=2,
+            padding="full",
+        )
+
+
+def test_conv_cost_rejects_a_grid_of_the_wrong_rank() -> None:
+    with pytest.raises(ValueError, match=r"^input_grid has 2 axes; ndim is 1\.$"):
+        conv_cost(
+            channels_in=2,
+            channels_out=3,
+            kernel_size=3,
+            ndim=1,
+            groups=1,
+            bias=False,
+            input_grid=(4, 5),
+            batch_size=2,
+        )
+
+
+@pytest.mark.parametrize(
+    ("batch_size", "input_grid", "error", "message"),
+    [
+        (2.0, (4,), TypeError, "must be integers"),
+        (2, (2,), ValueError, "must be positive"),
+    ],
+)
+def test_conv_cost_rejects_row_counts_that_are_not_positive_integers(
+    batch_size: int,
+    input_grid: tuple[int, ...],
+    error: type[Exception],
+    message: str,
+) -> None:
+    """A float batch is not a row count; a kernel wider than its input leaves none."""
+    with pytest.raises(error, match=message):
+        conv_cost(
+            channels_in=2,
+            channels_out=3,
+            kernel_size=3,
+            ndim=1,
+            groups=1,
+            bias=False,
+            input_grid=input_grid,
+            batch_size=batch_size,
+            padding="valid",
+        )
+
+
 def test_conv2d_cost_is_a_matmul_over_the_receptive_field() -> None:
     """Count every output position: ``channels_in * prod(kernel_size)`` -> ``channels_out``.
 
@@ -271,6 +364,6 @@ def test_convolution_cost_counts_only_requested_gradients(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

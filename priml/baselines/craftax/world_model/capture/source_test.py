@@ -23,6 +23,7 @@ from priml.baselines.craftax.testing import (
 )
 from priml.baselines.craftax.train_step import CraftaxTrainStep
 from priml.baselines.craftax.world_model import replay
+from priml.baselines.craftax.world_model.capture.branches import BranchFeeder
 from priml.baselines.craftax.world_model.capture.env import Schedule
 from priml.baselines.craftax.world_model.capture.source import (
     CaptureError,
@@ -146,6 +147,41 @@ def test_random_play_raises_a_failure_once_its_episodes_are_taken(
         source.poll()
 
 
+def test_a_source_polled_before_its_start_is_refused(tmp_path: Path) -> None:
+    sources = [
+        _policy_source(tmp_path, board=False).make(),
+        RandomSource.Config().make(),
+    ]
+    for source in sources:
+        assert not source.finished()
+        with pytest.raises(ValueError, match="Start first"):
+            source.poll()
+        source.close()
+
+
+def test_an_empty_branch_pool_records_nothing_and_closes_its_feeder(
+    tmp_path: Path,
+    short: None,
+) -> None:
+    del short
+    (tmp_path / "arm1-w2.jsonl").write_text("")
+    policy = _policy_source(tmp_path, board=False)
+    random = RandomSource.Config(steps_per_poll=1)
+    random.env.num_envs = 2
+    for config in (policy, random):
+        config.branches = BranchFeeder.Config(pools=tmp_path)
+    sources = [policy.make(), random.make()]
+    for source in sources:
+        source.start(schedule=Schedule(arm=1, worker=2, budget=10**9), run_dir=tmp_path)
+        assert source.feeder is not None
+        assert source.finished()
+        assert source.poll() == []
+        source.close()
+        # A closed feeder's pool takes no more work.
+        with pytest.raises(RuntimeError, match="shutdown"):
+            source.feeder._replay.submit(int)
+
+
 def _policy_source(directory: Path, *, board: bool) -> PolicySource.Config:
     """Return a policy source of a tiny float32 policy on the CPU, its checkpoint written."""
     step = CraftaxTrainStep.Config()
@@ -176,6 +212,6 @@ def _poll(source: PolicySource) -> list[Captured]:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

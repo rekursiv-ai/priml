@@ -1497,6 +1497,6 @@ def test_multistream_independent_qk_norm_scales_are_each_read_once() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

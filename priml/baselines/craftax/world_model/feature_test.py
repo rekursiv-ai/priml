@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Final
 
 import copy
 import itertools
+import sys
+import types
 
 from configgle import Fig, PartialConfig
 from torch import nn
@@ -27,14 +29,18 @@ from torch import nn
 import pytest
 import torch
 
+from priml.baselines.craftax.world_model import feature
+from priml.baselines.craftax.world_model.attention import VarlenAttention
 from priml.baselines.craftax.world_model.codec import decode
 from priml.baselines.craftax.world_model.feature import (
     DonorHistory,
     FeatureEngine,
     Flash4CacheAttention,
     InitialWeights,
+    MaskedCacheAttention,
     Refill,
     Sliding,
+    SlidingEngine,
     TrainedWeights,
     WorldModelFeature,
     context_inputs,
@@ -53,6 +59,7 @@ from priml.baselines.craftax.world_model.testing import (
     window_segment,
 )
 from priml.model.attention.kernel import SdpaNaive
+from priml.model.attention.rope import RoPE
 from priml.model.transformer.block import TransformerBlock
 
 
@@ -876,6 +883,256 @@ def test_an_attention_kernel_the_engine_does_not_run_is_refused(
         _engine(source, rows=1)
 
 
+@pytest.mark.parametrize("returns_tuple", [False, True])
+def test_flash4_cache_attention_attends_as_the_masked_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    returns_tuple: bool,
+) -> None:
+    interface = _Flash4Interface(returns_tuple=returns_tuple)
+    monkeypatch.setitem(sys.modules, "flash_attn.cute.interface", interface)
+    generator = torch.Generator().manual_seed(0)
+    q = torch.randn(2, 2, 4, 3, generator=generator)
+    keys, values = (torch.randn(2, 5, 2, 3, generator=generator) for _ in range(2))
+    seqused = torch.tensor([3, 5], dtype=torch.int32)
+    got = Flash4CacheAttention.Config().make()(q, keys, values, seqused)
+    want = MaskedCacheAttention.Config().make()(q, keys, values, seqused)
+    torch.testing.assert_close(got, want)
+
+
+def test_a_flash4_module_without_the_varlen_function_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    interface = types.ModuleType("flash_attn.cute.interface")
+    monkeypatch.setitem(sys.modules, "flash_attn.cute.interface", interface)
+    with pytest.raises(TypeError, match="flash_attn_varlen_func"):
+        Flash4CacheAttention.Config().make()
+
+
+def test_a_frozen_view_keeps_the_weights_and_no_frames() -> None:
+    config = _config(layers=2)
+    config.joint = True
+    config.practice = DonorHistory.Config()
+    source = config.make()
+    frozen = source.frozen()
+    assert frozen.model is source.model
+    assert (source.joint, frozen.joint) == (True, False)
+    assert (source.ring, frozen.ring) == ((T_MAX + 1) // 2, KEEP)
+    device = torch.device("cpu")
+    joint_archive = source.history_archive(3, device=device)
+    frozen_archive = frozen.history_archive(3, device=device)
+    assert joint_archive is not None
+    assert frozen_archive is not None
+    assert joint_archive["cells"].shape == (3, source.ring, 99, 8)
+    assert "obs" not in joint_archive
+    assert frozen_archive["obs"].shape == (3, KEEP, source.width)
+    joint, plain = _engine(source, rows=2), _engine(frozen, rows=2)
+    assert plain.cell_ring is None
+    joint_state, plain_state = joint.capture_state(), plain.capture_state()
+    assert len(joint_state) == len(plain_state) + 2
+    assert any(t is joint.cell_ring for t in joint_state)
+    assert any(t is joint.aux_ring for t in joint_state)
+    assert any(t is plain.obs_ring for t in plain_state)
+
+
+def test_a_sliding_engines_plan_lives_on_the_engines_device() -> None:
+    config = _sliding_config()
+    config.weights = _TwoLayerWeights.Config()
+    sliding = config.history
+    assert isinstance(sliding, Sliding.Config)
+    sliding.fallback_rows = 2
+    source = config.make()
+    engine = source.make_engine(rows=3, device=torch.device("meta"))
+    assert isinstance(engine, SlidingEngine)
+    # Three rows in chunks of two: 4 plan slots, then the dump slot.
+    plan, planned, slid = engine._plan, engine._planned, engine._slid
+    assert (plan.shape, plan.dtype, plan.device.type) == ((5,), torch.long, "meta")
+    assert (planned.shape, planned.dtype, planned.device.type) == (
+        (3,),
+        torch.bool,
+        "meta",
+    )
+    assert (slid.shape, slid.dtype, slid.device.type) == (
+        (4, source.width),
+        torch.float32,
+        "meta",
+    )
+    cpu = _engine(_sliding_config().make(), rows=3)
+    assert isinstance(cpu, SlidingEngine)
+    assert cpu._plan.tolist() == [3] * 5
+    assert not cpu._planned.any()
+
+
+def test_timing_events_exist_on_cuda_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "Event", _FakeEvent)
+    assert feature._timing_events(torch.device("cpu")) is None
+    events = feature._timing_events(torch.device("cuda"))
+    assert events is not None
+    begin, end = events
+    assert isinstance(begin, _FakeEvent)
+    assert isinstance(end, _FakeEvent)
+    assert begin is not end
+    assert begin.timing
+    assert end.timing
+
+
+def test_a_reprefill_is_timed_and_reported_at_the_next_call(
+    source: WorldModelFeature,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+    monkeypatch.setattr(feature, "_timing_events", partial(_cpu_timing_events, order))
+    cells, aux, actions = _frames(2, 8)
+    engine = _engine(source, rows=2)
+    run_steps(
+        engine,
+        engine,
+        obs=decode(cells, aux),
+        actions=actions,
+        resets={4: [1]},
+        hook=HOOK,
+        history=HeldHistory(2, t_max=T_MAX, keep=KEEP),
+    )
+    order.clear()
+    first = engine.ensure_room(HOOK)
+    assert first["feature/reprefill_rows"] == 1
+    assert "feature/reprefill_ms" not in first
+    assert order == ["begin", "end"]
+    second = engine.ensure_room(1)
+    assert second["feature/reprefill_ms"] == 2.5
+    assert engine._prefill_events is None
+    assert "feature/reprefill_ms" not in engine.ensure_room(1)
+
+
+def test_frame_rings_need_both_rings(source: WorldModelFeature) -> None:
+    config = _config(layers=2)
+    config.weights = _TwoLayerWeights.Config()
+    config.joint = True
+    engine = _engine(config.make(), rows=2)
+    assert set(engine._frame_rings()) == {"cells", "aux"}
+    engine.aux_ring = None
+    assert engine._frame_rings() == {}
+    assert set(_engine(source, rows=2)._rings()) == {"obs", "actions"}
+
+
+def test_a_fresh_window_practice_saves_no_history(source: WorldModelFeature) -> None:
+    assert source.history_archive(3, device=torch.device("cpu")) is None
+
+
+def test_a_frozen_engine_refuses_a_history_saved_as_frames(
+    source: WorldModelFeature,
+) -> None:
+    archive = (
+        DonorHistory.Config()
+        .make()
+        .archive(
+            entries=1,
+            ring=KEEP,
+            width=source.width,
+            frames=True,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+    )
+    with pytest.raises(ValueError, match="keeps no frames"):
+        _engine(source, rows=2).restore_history(archive, torch.tensor([0, -1]))
+
+
+def test_an_engine_in_another_dtype_keeps_rope_tables_in_float32() -> None:
+    source = _make_source(layers=2, dtype=torch.bfloat16)
+    assert source.model.start.dtype == torch.float32
+    engine = _engine(source, rows=2)
+    assert source.model.start.dtype == torch.bfloat16
+    assert engine.keys.dtype == torch.bfloat16
+    ropes = [m for m in source.model.modules() if isinstance(m, RoPE)]
+    assert ropes
+    assert all(rope.dtype == torch.float32 for rope in ropes)
+
+
+def test_a_refill_engine_plans_one_shape_and_releases_its_cache(
+    source: WorldModelFeature,
+) -> None:
+    engine = _engine(source, rows=2)
+    engine.ensure_room(HOOK)
+    assert engine.plan == 0
+    engine.release()
+    assert engine.keys.numel() == engine.values.numel() == 0
+
+
+def test_a_non_finite_feature_is_raised(source: WorldModelFeature) -> None:
+    engine = _engine(source, rows=2)
+    engine.nonfinite.add_(2)
+    with pytest.raises(RuntimeError, match="2 steps produced a non-finite feature"):
+        engine.ensure_room(HOOK)
+
+
+def test_an_invalid_frame_since_replaced_is_raised_without_a_field(
+    source: WorldModelFeature,
+) -> None:
+    cells, aux, _ = _frames(2, 2)
+    obs = decode(cells, aux)
+    bad = obs[:, 0].clone()
+    bad[1, 0] = 0.5
+    engine = _engine(source, rows=2)
+    engine(bad, torch.zeros(2), torch.zeros(2))
+    engine(obs[:, 1], torch.zeros(2), torch.zeros(2))
+    with pytest.raises(ValueError, match=r"^1 frames held .* schema\.$"):
+        engine.ensure_room(HOOK)
+
+
+def test_an_encoder_with_an_input_projection_is_refused() -> None:
+    source = _make_source(layers=1)
+    encoder = source.model.encoder
+    assert isinstance(encoder, FrameEncoder)
+    encoder.stack.proj_in = nn.Linear(2, 2)
+    with pytest.raises(TypeError, match="encodes with a FrameEncoder"):
+        _engine(source, rows=1)
+
+
+def _unattended(block: TransformerBlock) -> None:
+    """Replace a block's attention with a module the engine does not run."""
+    block.register_module("attn", nn.Identity())
+
+
+def _post_norm(block: TransformerBlock) -> None:
+    """Make a block post-norm."""
+    block.prenorm = False
+
+
+def _unrotated(block: TransformerBlock) -> None:
+    """Drop a block's rotary embedding."""
+    assert isinstance(block.attn, VarlenAttention)
+    block.attn.rope = None
+
+
+@pytest.mark.parametrize(
+    ("edit", "error", "match"),
+    [
+        (_unattended, TypeError, "runs VarlenAttention"),
+        (_post_norm, ValueError, "fused-QKV"),
+        (_unrotated, TypeError, "rotary"),
+    ],
+)
+def test_a_global_block_the_engine_does_not_run_is_refused(
+    edit: Callable[[TransformerBlock], object],
+    error: type[Exception],
+    match: str,
+) -> None:
+    source = _make_source(layers=1)
+    block = source.model.transformer.blocks[0]
+    assert isinstance(block, TransformerBlock)
+    edit(block)
+    with pytest.raises(error, match=match):
+        _engine(source, rows=1)
+
+
+def test_a_global_block_that_is_not_a_transformer_block_is_refused() -> None:
+    source = _make_source(layers=1)
+    source.model.transformer.blocks[0] = nn.Identity()
+    with pytest.raises(TypeError, match="runs TransformerBlocks"):
+        _engine(source, rows=1)
+
+
 @pytest.mark.gpu_torch_cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_a_graphed_step_replays_the_eager_step_bit_for_bit() -> None:
@@ -1038,6 +1295,86 @@ def test_a_graphed_sliding_step_replays_the_eager_one_under_every_plan() -> None
             plans = sorted(step.graphs)
     assert torch.equal(runs[0], runs[1])
     assert plans == [0, 1, 2, 4]
+
+
+class _FakeEvent:
+    """A CUDA timing event on the CPU: records its name, times every span 2.5 ms."""
+
+    def __init__(
+        self,
+        order: list[str] | None = None,
+        name: str = "",
+        *,
+        enable_timing: bool = True,
+    ) -> None:
+        self.order = [] if order is None else order
+        self.name = name
+        self.timing = enable_timing
+
+    def record(self) -> None:
+        """Note the record in ``order``."""
+        self.order.append(self.name)
+
+    def elapsed_time(self, end: _FakeEvent) -> float:
+        """Return 2.5 ms, once both ends are recorded."""
+        assert self.order.index(self.name) < end.order.index(end.name)
+        return 2.5
+
+
+def _cpu_timing_events(
+    order: list[str],
+    device: torch.device,
+) -> tuple[_FakeEvent, _FakeEvent]:
+    """Return timing events on any device, recording into ``order``."""
+    assert device.type == "cpu"
+    return _FakeEvent(order, "begin"), _FakeEvent(order, "end")
+
+
+class _Flash4Interface(types.ModuleType):
+    """Stand in for ``flash_attn.cute.interface``: its varlen call, computed plainly."""
+
+    def __init__(self, *, returns_tuple: bool) -> None:
+        super().__init__("flash_attn.cute.interface")
+        self.returns_tuple = returns_tuple
+
+    def flash_attn_varlen_func(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        *,
+        seqused_k: Tensor,
+        causal: bool,
+    ) -> Tensor | tuple[Tensor, None]:
+        """Attend bottom-right causally, as FA4 does; wrap in a tuple if asked."""
+        assert causal
+        out = _bottom_right_causal(q, k, v, seqused_k=seqused_k)
+        return (out, None) if self.returns_tuple else out
+
+
+def _bottom_right_causal(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    *,
+    seqused_k: Tensor,
+) -> Tensor:
+    """Attend each row's queries so its last sees ``seqused_k`` keys."""
+    heads, queries = q.shape[-2], q.shape[1]
+    out = torch.zeros_like(q)
+    for row in range(len(q)):
+        used = int(seqused_k[row])
+        keys, values = (
+            t[row, :used]
+            .repeat_interleave(heads // t.shape[-2], dim=-2)
+            .transpose(0, 1)
+            for t in (k, v)
+        )
+        logits = q[row].transpose(0, 1) @ keys.transpose(-1, -2) * q.shape[-1] ** -0.5
+        allowed = torch.arange(used) <= torch.arange(used - queries, used)[:, None]
+        weights = logits.masked_fill(~allowed, float("-inf")).softmax(-1)
+        out[row] = (weights @ values).transpose(0, 1)
+    return out
 
 
 def _config(*, layers: int) -> WorldModelFeature.Config:
@@ -1339,6 +1676,6 @@ def _frames(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

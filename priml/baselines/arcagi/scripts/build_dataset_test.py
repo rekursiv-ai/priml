@@ -1049,6 +1049,6 @@ def test_build_arc_dataset_stages_in_target_parent_with_fixed_name(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

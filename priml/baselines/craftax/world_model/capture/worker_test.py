@@ -11,8 +11,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+import dataclasses
+import logging
 import shutil
 
+from configgle import Fig
 from treekle import from_plain
 
 import pytest
@@ -22,18 +25,26 @@ from priml.baselines.craftax.eager import eager, tiny_world
 from priml.baselines.craftax.game.state import DEFAULT_MAX_TIMESTEPS
 from priml.baselines.craftax.world_model import replay
 from priml.baselines.craftax.world_model.archive import (
+    Episode,
     FloorTrace,
     Receipt,
     ReplayEpisode,
     read_manifest,
     read_summaries,
     write_replay_shard,
+    write_shard,
 )
+from priml.baselines.craftax.world_model.capture import worker as worker_module
+from priml.baselines.craftax.world_model.capture.branches import BranchFeeder
 from priml.baselines.craftax.world_model.capture.control import (
     CaptureHaltedError,
     completed,
     halt,
     started,
+)
+from priml.baselines.craftax.world_model.capture.env import (
+    Captured,
+    Schedule,
 )
 from priml.baselines.craftax.world_model.capture.seeds import (
     TRAIN,
@@ -41,6 +52,7 @@ from priml.baselines.craftax.world_model.capture.seeds import (
 )
 from priml.baselines.craftax.world_model.capture.source import (
     CaptureError,
+    PolicySource,
     RandomSource,
 )
 from priml.baselines.craftax.world_model.capture.worker import (
@@ -245,6 +257,139 @@ def test_invalid_settings_are_rejected(
         CaptureWorker(config)
 
 
+def test_finalize_resolves_every_path_beneath_the_base(tmp_path: Path) -> None:
+    config = CaptureWorker.Config()
+    config.base_dir = tmp_path
+    policy = config.source = PolicySource.Config()
+    policy.checkpoint = Path("/runs/policy.pt")
+    policy.branches = BranchFeeder.Config()
+    policy.branches.pools = Path("/pools")
+    config.finalize()
+    assert config.root == tmp_path / "datasets/craftax/world-model/archive"
+    assert config.run_root == tmp_path / "runs/craftax/world-model/capture"
+    assert (policy.checkpoint, policy.branches.pools) == (
+        tmp_path / "runs/policy.pt",
+        tmp_path / "pools",
+    )
+    config = CaptureWorker.Config()
+    config.base_dir = tmp_path
+    random = config.source = RandomSource.Config()
+    random.branches = BranchFeeder.Config()
+    random.branches.pools = Path("/pools")
+    config.finalize()
+    assert random.branches.pools == tmp_path / "pools"
+
+
+def test_finalize_leaves_a_source_without_checkpoint_or_branches(
+    tmp_path: Path,
+) -> None:
+    config = CaptureWorker.Config()
+    config.base_dir = tmp_path
+    config.finalize()
+    source = config.source
+    assert isinstance(source, PolicySource.Config)
+    assert (source.checkpoint, source.branches) == (None, None)
+
+
+def test_run_logs_what_capture_published_and_refuses_arguments(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    worker = _worker(tmp_path, decisions=1)
+    with pytest.raises(ValueError, match="--override"):
+        worker.run("decisions=2")
+    with caplog.at_level(logging.INFO, logger=worker_module.__name__):
+        worker.run()
+    lines = [
+        line
+        for split in (TRAIN, VALIDATION)
+        for line in read_manifest(
+            shard_directory(tmp_path, split=split, arm=1, worker=2),
+        )
+    ]
+    (record,) = caplog.records
+    assert record.getMessage() == (
+        f"Capture published {sum(line.episodes for line in lines)} episodes, "
+        f"{sum(line.decisions for line in lines)} decisions, {len(lines)} shards."
+    )
+    assert lines
+
+
+def test_an_episode_of_another_arm_is_refused(tmp_path: Path) -> None:
+    worker = _worker(tmp_path, decisions=1_000)
+    worker.config.source = _OtherArm.Config()
+    with pytest.raises(ValueError, match=r"receipt\.arm == cfg\.arm"):
+        worker.capture()
+
+
+def test_a_directory_of_frame_shards_is_not_resumed(tmp_path: Path) -> None:
+    train = shard_directory(tmp_path, split=TRAIN, arm=1, worker=2)
+    train.mkdir(parents=True)
+    write_shard(
+        train,
+        index=0,
+        episodes=[
+            Episode(
+                receipt=_receipt(ordinal=0),
+                actions=torch.zeros(2, dtype=torch.uint8),
+                hashes=torch.zeros(2, dtype=torch.int64),
+                cells=torch.zeros(2, 99, 8, dtype=torch.uint8),
+                aux=torch.zeros(2, 51, dtype=torch.int16),
+                reward=torch.zeros(2, dtype=torch.int16),
+                done=torch.tensor([False, True]),
+                summary={"episode": 0},
+            ),
+        ],
+        provenance={},
+    )
+    with pytest.raises(ValueError, match="holds frame shards"):
+        _worker(tmp_path, decisions=1_000).capture()
+
+
+class _OtherArm:
+    """A source whose one episode belongs to arm 0, whatever arm captures it."""
+
+    class Config(Fig["_OtherArm"]):
+        """No settings."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def provenance(self) -> dict[str, str]:
+        return {}
+
+    def start(self, *, schedule: Schedule, run_dir: Path) -> None:
+        del schedule, run_dir
+
+    def poll(self) -> list[Captured]:
+        return [
+            Captured(
+                receipt=dataclasses.replace(_receipt(ordinal=0), arm=0),
+                actions=torch.zeros(1, dtype=torch.uint8),
+                hashes=torch.zeros(2, dtype=torch.int64),
+                floors=FloorTrace(changes=((0, 0),), died=False),
+                summary={"episode": 0},
+            ),
+        ]
+
+    def finished(self) -> bool:
+        return False
+
+    def close(self) -> None:
+        pass
+
+
+def _receipt(*, ordinal: int) -> Receipt:
+    """Return arm 1's training receipt of episode ``ordinal``."""
+    return Receipt(
+        world_seed=1,
+        sampling_seed=ordinal,
+        initial_state_hash=0,
+        arm=1,
+        split=TRAIN,
+    )
+
+
 def _worker(
     root: Path,
     *,
@@ -281,13 +426,7 @@ def _publish(directory: Path, *, index: int, ordinals: tuple[int, ...]) -> None:
         index=index,
         episodes=[
             ReplayEpisode(
-                receipt=Receipt(
-                    world_seed=1,
-                    sampling_seed=ordinal,
-                    initial_state_hash=0,
-                    arm=1,
-                    split=TRAIN,
-                ),
+                receipt=_receipt(ordinal=ordinal),
                 actions=torch.zeros(1, dtype=torch.uint8),
                 hashes=torch.zeros(2, dtype=torch.int64),
                 snapshots=b"",
@@ -302,6 +441,6 @@ def _publish(directory: Path, *, index: int, ordinals: tuple[int, ...]) -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

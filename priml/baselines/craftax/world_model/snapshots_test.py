@@ -252,6 +252,41 @@ def test_several_snapshots_decode_in_decision_order() -> None:
     assert decode_snapshots(b"", base=decoded[0], stride=512) == []
 
 
+def test_bytes_that_are_not_whole_snapshots_are_refused() -> None:
+    base = replay.Snapshot(decision=0, state=bytes(4))
+    with pytest.raises(ValueError, match="not whole snapshots"):
+        decode_snapshots(zstd_compat.compress(bytes(6)), base=base, stride=256)
+
+
+def test_a_frame_shard_named_a_replay_shard_is_refused(archive: Path) -> None:
+    directory, line = _entries(archive, split=0)[0]
+    cache = ReplayCache(
+        [(directory, dataclasses.replace(line, snapshot_stride=_STRIDE))],
+        capacity=100,
+    )
+    with pytest.raises(ValueError, match="hold floors"):
+        cache.segment(0, 0, start=0, stop=1)
+
+
+def test_replay_cache_holds_its_latest_episodes(converted: Path) -> None:
+    cache = ReplayCache(_entries(converted, split=0), capacity=100, cached_episodes=2)
+    for episode in (0, 1, 0, 2):
+        cache.starts_at_reset(0, episode)
+    assert list(cache._episodes) == [(0, 0), (0, 2)]
+
+
+def test_replay_cache_counts_a_block_replayed_again_once(converted: Path) -> None:
+    entries = _entries(converted, split=0)
+    cache = ReplayCache(entries, capacity=100_000, block_decisions=64)
+    long = max(range(4), key=lambda e: cache.decisions(0, e))
+    assert cache.decisions(0, long) > 3 * 64
+    cache.segment(0, long, start=70, stop=80)
+    # Blocks 0 and 2 are missing, so the replay spans held block 1 again.
+    cache.segment(0, long, start=10, stop=150)
+    assert sorted(cache.resident) == [(0, long, 0), (0, long, 1), (0, long, 2)]
+    assert cache._decisions == 3 * 64
+
+
 def test_a_replay_shard_keeps_its_episodes_records_summaries_and_index(
     archive: Path,
     converted: Path,
@@ -664,6 +699,6 @@ def _assert_same_value(left: object, right: object) -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

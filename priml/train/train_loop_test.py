@@ -5376,6 +5376,6 @@ def test_loader_length_is_zero_for_a_loader_over_a_stream() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

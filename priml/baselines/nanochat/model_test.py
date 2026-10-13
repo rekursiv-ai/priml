@@ -1202,6 +1202,232 @@ def test_output_norm_feed_forward_reset_initializes_affine_output_norm() -> None
     assert torch.equal(norm_out.weight, torch.ones(4))
 
 
+def test_the_template_of_a_per_layer_list_is_refused() -> None:
+    config = _config()
+    config.block = [config.template.copy_tree()]
+    with pytest.raises(TypeError, match="there is no one template"):
+        _ = config.template
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    [
+        ("vocab_size", 0, "vocab_size must be positive"),
+        ("max_seq_len", 1, "max_seq_len must be at least two"),
+        ("num_layers", 0, "num_layers and channels_in must be positive"),
+    ],
+)
+def test_an_unbuildable_stack_geometry_is_rejected(
+    field_name: str,
+    value: int,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _config(**{field_name: value}).make()
+
+
+def test_a_block_list_disagreeing_with_the_depth_is_rejected() -> None:
+    config = _config(num_layers=2)
+    # A block without a depth index, so finalize accepts the third layer.
+    config.block = [ResetlessBlock.Config() for _ in range(3)]
+    with pytest.raises(ValueError, match="block names 3 layers for num_layers=2"):
+        config.make()
+
+
+def test_gated_residual_reset_restores_the_configured_gate() -> None:
+    config = GatedResidualMix.Config(gate_scale=0.25)
+    config.num_layers = 2
+    mix = config.make()
+    with torch.no_grad():
+        mix.gate_scales.fill_(float("nan"))
+    mix.reset_parameters()
+    assert torch.equal(mix.gate_scales, torch.full((2,), 0.25))
+
+
+def _source_reuse_block(*, prenorm: bool) -> SourceReuseTransformerBlock:
+    config = SourceReuseTransformerBlock.Config()
+    config.channels_in = 4
+    config.prenorm = prenorm
+    config.attn = Linear.Config(4, 4)
+    config.ffn = Identity.Config()
+    config.norm1 = Identity.Config()
+    config.norm2 = Identity.Config()
+    block = config.make()
+    assert isinstance(block.attn, Linear)
+    with torch.no_grad():
+        block.attn.weight.copy_(2 * torch.eye(4))
+    return block
+
+
+def test_source_reuse_block_without_a_source_attends_to_its_input() -> None:
+    current = torch.ones(3, 2, 4)
+    # `x` + 2x, then that sum doubled by the identity feed-forward.
+    torch.testing.assert_close(
+        _source_reuse_block(prenorm=True)(current),
+        torch.full_like(current, 6.0),
+    )
+
+
+def test_source_reuse_block_requires_prenorm_for_a_source() -> None:
+    current = torch.ones(3, 2, 4)
+    with pytest.raises(ValueError, match=r"^Expected self\.prenorm\.$"):
+        _source_reuse_block(prenorm=False)(current, attention_source=current)
+
+
+def _two_gram_config() -> MemoryNanoChatLM.Config:
+    config = _memory_config()
+    attention = config.template.attn
+    assert isinstance(attention, CausalAttention.Config)
+    attention.trigram = True
+    attention.gate_channels = 4  # Three gate slices must fit channels_in=16.
+    config.trigrams["0"] = HashedNgramTables.Config(
+        num_embeddings=16,
+        hash_multipliers=((1, 3, 5), (5, 7, 9)),
+    )
+    return config
+
+
+def test_memory_fused_and_unfused_ngram_paths_agree() -> None:
+    torch.manual_seed(0)
+    unfused = _two_gram_config().make()
+    randomize_parameters(unfused, seed=1, std=0.5)
+    fused_config = _two_gram_config()
+    fused_config.fused_ngram = True
+    fused = fused_config.make()
+    fused.load_state_dict(unfused.state_dict())
+    tokens = torch.tensor([[1, 2, 3, 4], [4, 3, 2, 1]])
+    with torch.no_grad():
+        expected = unfused(tokens)
+        actual = fused(tokens)
+    torch.testing.assert_close(actual, expected)
+    # The tables must reach the output, or agreement above proves nothing.
+    with torch.no_grad():
+        for table in (*unfused.bigrams.values(), *unfused.trigrams.values()):
+            assert isinstance(table, HashedNgramTables)
+            for part in table.tables:
+                part.weight.zero_()
+        without_tables = unfused(tokens)
+    assert not torch.equal(expected, without_tables)
+
+
+def test_the_attention_source_is_the_residual_after_the_named_layer() -> None:
+    config = _memory_config()
+    config.num_layers = 3
+    config.attention_source_layers = (2,)
+    config.attention_source_after_layer = 0
+    config.block = SourceReuseTransformerBlock.Config().update(config.template)
+    model = config.make()
+    recorder = _SourceRecorder()
+    model.blocks[0].register_forward_hook(recorder.save)
+    model.blocks[2].register_forward_pre_hook(recorder.receive, with_kwargs=True)
+    model(torch.tensor([[1, 2, 3, 4]]))
+    assert len(recorder.saved) == len(recorder.received) == 1
+    source = recorder.received[0]
+    assert isinstance(source, Tensor)
+    assert source is recorder.saved[0]
+
+
+class _SourceRecorder:
+    """Records one block's output and another's ``attention_source`` message."""
+
+    def __init__(self) -> None:
+        self.saved: list[object] = []
+        self.received: list[object] = []
+
+    def save(self, module: nn.Module, args: tuple[object, ...], output: object) -> None:
+        del module, args
+        self.saved.append(output)
+
+    def receive(
+        self,
+        module: nn.Module,
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+    ) -> None:
+        del module, args
+        self.received.append(kwargs.get("attention_source"))
+
+
+def test_memory_forward_rejects_a_longer_input_than_the_context() -> None:
+    model = _memory_config().make()
+    with pytest.raises(ValueError, match="exceeds max_seq_len=4"):
+        model(torch.zeros(1, 5, dtype=torch.long))
+
+
+def test_memory_rotation_table_refuses_to_build_while_compiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _memory_config().make()
+    model._rotation = None
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    with pytest.raises(RuntimeError, match="materialized outside compilation"):
+        model._rotation_table(4, device=torch.device("cpu"))
+
+
+def test_memory_reset_zeroes_the_pool_weights() -> None:
+    config = _memory_config()
+    config.num_layers = 2
+    config.num_pool_layers = 2
+    model = config.make()
+    assert model.pool_weights is not None
+    with torch.no_grad():
+        model.pool_weights.fill_(float("nan"))
+    model.reset_parameters()
+    assert torch.equal(model.pool_weights, torch.zeros(1))
+
+
+@pytest.mark.parametrize("dirty_clear", [False, True])
+def test_memory_zero_grad_clears_the_table_gradient_sinks(dirty_clear: bool) -> None:
+    config = _memory_config()
+    config.fused_ngram = True
+    config.ngram_dirty_clear = dirty_clear
+    model = config.make()
+    table = model.bigrams["0"]
+    assert isinstance(table, HashedNgramTables)
+    for sink in table.gradient_sinks:
+        sink.fill_(1.0)
+    for bitmap in table.gradient_bitmaps:
+        bitmap[3] = 1
+    model.zero_grad()
+    for sink in table.gradient_sinks:
+        expected = torch.ones_like(sink) if dirty_clear else torch.zeros_like(sink)
+        expected[3] = 0
+        assert torch.equal(sink, expected)
+    assert all(torch.count_nonzero(bitmap) == 0 for bitmap in table.gradient_bitmaps)
+
+
+@pytest.mark.parametrize(
+    ("num_pool_layers", "source_layers", "source_after", "message"),
+    [
+        (0, (), 0, "num_pool_layers must be between one and num_layers"),
+        (3, (), 0, "num_pool_layers must be between one and num_layers"),
+        (1, (1,), 1, "Attention source must precede every receiving layer"),
+        (1, (1,), -1, "Attention source must precede every receiving layer"),
+        (1, (2,), 0, "Attention source must precede every receiving layer"),
+    ],
+)
+def test_memory_pooling_and_source_fields_are_validated(
+    num_pool_layers: int,
+    source_layers: tuple[int, ...],
+    source_after: int,
+    message: str,
+) -> None:
+    config = _memory_config()
+    config.num_layers = 2
+    config.num_pool_layers = num_pool_layers
+    config.attention_source_layers = source_layers
+    config.attention_source_after_layer = source_after
+    with pytest.raises(ValueError, match=message):
+        config.make()
+
+
+def test_a_memory_table_outside_the_stack_is_rejected() -> None:
+    config = _memory_config()
+    config.bigrams["1"] = config.bigrams["0"].copy_tree()
+    with pytest.raises(ValueError, match="layer 1 is outside the 1-layer model"):
+        config.make()
+
+
 def test_scaled_soft_cap_returns_float32_logits() -> None:
     config = ScaledSoftCap.Config(cap=2.0, output_cap=3.0)
     config.channels_in = config.channels_out = 3
@@ -1214,6 +1440,6 @@ def test_scaled_soft_cap_returns_float32_logits() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

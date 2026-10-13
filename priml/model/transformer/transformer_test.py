@@ -571,6 +571,6 @@ def test_transformer_rejects_a_block_list_that_disagrees_with_num_layers() -> No
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

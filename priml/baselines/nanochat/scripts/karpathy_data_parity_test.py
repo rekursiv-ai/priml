@@ -20,7 +20,7 @@ from priml.baselines.nanochat.scripts.karpathy_data_parity import (
     compare,
     compare_stream,
 )
-from priml.lib.testing.cli import assert_help_without_docstring
+from priml.lib.testing.checks import assert_help_without_docstring
 
 
 if TYPE_CHECKING:
@@ -515,6 +515,6 @@ def test_compare_stream_checks_media_and_labels_for_each_batch() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

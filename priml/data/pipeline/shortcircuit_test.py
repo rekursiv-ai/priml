@@ -800,6 +800,6 @@ def test_short_circuit_logs_mid_stream_once_the_interval_passes() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

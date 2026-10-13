@@ -162,6 +162,6 @@ def test_resume_reads_an_integral_seconds_total_as_a_float() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

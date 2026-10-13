@@ -14,8 +14,9 @@ platform's libm.
 from __future__ import annotations
 
 from concurrent.futures import Future
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import fields, replace
-from functools import cache
+from functools import cache, partial
 from typing import TYPE_CHECKING, cast, override
 
 import copy
@@ -41,8 +42,10 @@ from priml.baselines.craftax.rollout import (
     CAPTURE_LOCK,
     PhiloxSampler,
     Rollout,
+    TorchPhiloxSampler,
 )
 from priml.baselines.craftax.testing import (
+    FakeEnv,
     assert_golden,
     digest,
     forward_parameters,
@@ -68,6 +71,7 @@ from priml.baselines.craftax.train_step import (
     LearnerRollout,
     ProgressSchedule,
     _check_recipe,
+    _stored_contexts,
     cosine_annealing_fp32,
     learn_joint_minibatch,
     learn_minibatch,
@@ -83,6 +87,7 @@ from priml.baselines.craftax.world_model.context import (
 from priml.baselines.craftax.world_model.feature import (
     FeatureEngine,
     Sliding,
+    TrainedWeights,
     WorldModelFeature,
 )
 from priml.baselines.craftax.world_model.schema import craftax_schema
@@ -99,7 +104,7 @@ from priml.optimizers.fused_muon import FusedMuon, clip_coefficient
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Generator, Mapping
     from pathlib import Path
 
     from priml.baselines.craftax.rollout import RolloutStorage
@@ -1602,6 +1607,165 @@ def test_one_slot_learns_from_a_rollout_of_the_weights_it_updates(
         step.close()
 
 
+def test_a_joint_minibatch_refuses_a_window_it_cannot_learn_from() -> None:
+    """No context, no stored features, or a policy that ignores them: each is refused."""
+    config = tiny_policy()
+    rollout = LearnerRollout.from_time_major(
+        *_rollout(config, agents=2, horizon=3),
+        reward_scale=1.0,
+        reward_clip=1.0,
+        contexts=random_contexts(
+            torch.tensor(((1, 2, 3), (1, 1, 2))),
+            torch.tensor(((1, 1, 1), (0, 0, 0))).bool(),
+            schema=small_schema(),
+            slots=3,
+            counts=torch.tensor((0, 1)),
+            seed=7,
+        ),
+    )
+    joint = JointWorldModel(
+        tiny_model(small_schema(), global_layers=2),
+        layers=2,
+        replay=_small_bins().make(),
+    )
+    with pytest.raises(ValueError, match="stored context"):
+        learn_joint_minibatch(
+            config.make(),
+            _objective(),
+            replace(rollout, contexts=None),
+            joint,
+        )
+    with pytest.raises(ValueError, match="none are stored"):
+        learn_joint_minibatch(config.make(), _objective(), rollout, joint)
+    stored = replace(rollout, features=torch.ones(2, 3, 36))
+    with pytest.raises(ValueError, match="does not read the features"):
+        learn_joint_minibatch(
+            _LinearPolicy(_LinearPolicy.Config()),
+            _objective(),
+            stored,
+            joint,
+        )
+
+
+def test_the_first_window_adds_the_auxiliary_loss_and_reports_its_metrics() -> None:
+    """The auxiliary ingests the rollout, and its loss joins window 0's backward alone."""
+    config = _quick(tiny_train_step())
+    windows = config.learner
+    assert isinstance(windows, AgentWindows.Config)
+    imitation = windows.auxiliary = BranchImitation.Config()
+    imitation.rows = 3
+    step = _train_step(config)
+    try:
+        model = step.config.model
+        assert isinstance(model, MinGRUPolicy.Config)
+        rollout = LearnerRollout.from_time_major(
+            *_rollout(model, agents=4, horizon=2),
+            reward_scale=1.0,
+            reward_clip=1.0,
+        )
+        rollout.action_mask.fill_(1)
+        _, metrics = step.learner(step, rollout)
+    finally:
+        step.close()
+    # The rows that start a branch, among the 3 imitated, are archived and scored.
+    kept = int(rollout.branch_starts[:3].sum())
+    assert kept > 0
+    assert float(metrics["imitation/branches"]) == kept
+    assert float(metrics["imitation/loss"]) > 0
+
+
+def test_a_joint_learners_loss_refuses_a_rollout_without_contexts() -> None:
+    step = _joint_step()
+    try:
+        model = step.config.model
+        assert isinstance(model, MinGRUPolicy.Config)
+        rollout = LearnerRollout.from_time_major(
+            *_rollout(model, agents=2, horizon=step.config.rollout.horizon),
+            reward_scale=1.0,
+            reward_clip=1.0,
+        )
+        with pytest.raises(ValueError, match="stored context"):
+            step.learner.loss(step, rollout)
+    finally:
+        step.close()
+
+
+def test_a_trained_features_checkpoint_resolves_beneath_the_base_dir(
+    tmp_path: Path,
+) -> None:
+    config = tiny_train_step()
+    feature = config.feature = smoke_feature()
+    weights = feature.weights = TrainedWeights.Config()
+    weights.checkpoint = tmp_path.parent / "runs" / "wm.pt"
+    config.base_dir = tmp_path
+    final = config.copy_tree().finalize().feature
+    assert isinstance(final, WorldModelFeature.Config)
+    assert isinstance(final.weights, TrainedWeights.Config)
+    assert final.weights.checkpoint == tmp_path / str(weights.checkpoint).lstrip("/")
+
+
+def test_the_loops_batch_passes_through_and_eval_scores_as_train() -> None:
+    step = _train_step()
+    try:
+        batch: dict[str, object] = {"tick": 3}
+        assert step.preprocess_batch(batch) is batch
+        evaluated = step.eval_loss()
+        trained = step.train_loss()
+        assert torch.equal(evaluated["model"], trained["model"])
+        assert torch.equal(evaluated["loss"], trained["loss"])
+    finally:
+        step.close()
+
+
+def test_call_eval_scores_observations_from_a_zero_carry() -> None:
+    step = _train_step()
+    try:
+        observations = packed_observations(tiny_policy(), batch=3, seed=4)
+        with torch.no_grad():
+            decoded, _ = step.model.forward_fused(
+                observations,
+                step.model.initial_state(3),
+                None,
+            )
+        positional = step.call_eval(observations)
+        keyword = step.call_eval(observation=observations)
+    finally:
+        step.close()
+    assert positional.shape == (3, ATN_DIM)
+    assert torch.equal(positional, decoded[:, :-1])
+    assert torch.equal(keyword, positional)
+
+
+def test_waiting_with_no_rollout_in_flight_is_refused() -> None:
+    step = _train_step()
+    try:
+        with pytest.raises(RuntimeError, match="no rollout is in flight"):
+            step._rollout_finish()
+    finally:
+        step.close()
+
+
+def test_the_step_refuses_a_horizon_that_is_not_positive() -> None:
+    config = tiny_train_step()
+    config.rollout.horizon = 0
+    with pytest.raises(ValueError, match="horizon must be positive, not 0"):
+        _check_recipe(config)
+
+
+def test_a_slot_without_every_learner_input_yields_no_contexts() -> None:
+    storage = Rollout(
+        Rollout.Config(),
+        policy=tiny_policy().make(),
+        sampler=TorchPhiloxSampler.Config().make(),
+        env=FakeEnv.make(num_envs=4, num_buffers=2, seed=0),
+        device=torch.device("cpu"),
+    )
+    try:
+        assert _stored_contexts(storage.slots[0]) is None
+    finally:
+        storage.close()
+
+
 def test_the_default_learner_is_pufferlibs_windows() -> None:
     assert isinstance(CraftaxTrainStep.Config().learner, AgentWindows.Config)
 
@@ -1697,6 +1861,243 @@ def test_a_checkpoint_loaded_into_a_step_that_moved_on_trains_as_it_did() -> Non
     assert len(actual) == len(expected)
     for index, (ours, theirs) in enumerate(zip(actual, expected, strict=True)):
         assert torch.equal(ours, theirs), index
+
+
+def test_captured_learner_epochs_train_as_the_eager_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On CUDA's path: one eager warmup, each slot's next epoch captured, then replays.
+
+    Every epoch runs on the learner stream and waits for it alone. A capture
+    records the epoch without training, and its replay trains, so the four
+    epochs' losses and Muon's state are the eager run's bit for bit.
+    """
+    step = _train_step(_four_epochs())
+    cuda = _FakeCuda(step)
+    cuda.install(monkeypatch, step)
+    try:
+        losses = [step.train_step()["model"] for _ in range(4)]
+    finally:
+        step.close()
+    expected_losses, expected_state = _eager_four_epochs()
+    actual = [*losses, *_masters_and_momentum(step)]
+    expected = [*expected_losses, *expected_state]
+    assert len(actual) == len(expected)
+    for index, (ours, theirs) in enumerate(zip(actual, expected, strict=True)):
+        assert torch.equal(ours, theirs), index
+    assert cuda.events == [
+        "enter",
+        "synchronize",
+        "enter",
+        "capture 0 into pool 1 thread_local",
+        "replay 0",
+        "synchronize",
+        "enter",
+        "capture 1 into pool 1 thread_local",
+        "replay 1",
+        "synchronize",
+        "enter",
+        "replay 0",
+        "synchronize",
+    ]
+
+
+def test_a_load_drops_the_captured_epochs_and_recaptures_in_a_new_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Epoch 2's checkpoint, loaded after both slots captured: epochs 3 and 4 again.
+
+    The load waits the learner stream on the device's, drops both graphs and
+    takes a fresh pool; each slot's next epoch is captured anew into it.
+    """
+    step = _train_step(_four_epochs())
+    cuda = _FakeCuda(step)
+    cuda.install(monkeypatch, step)
+    try:
+        for _ in range(2):
+            step.train_step()
+        saved = io.BytesIO()
+        torch.save(step.state_dict(), saved)
+        for _ in range(2):
+            step.train_step()
+        cuda.events.clear()
+        step.load_state_dict(_read(saved))
+        assert step._graphs == {}
+        assert cuda.events == ["wait current cpu"]
+        losses = [step.train_step()["model"] for _ in range(2)]
+    finally:
+        step.close()
+    expected_losses, expected_state = _eager_four_epochs()
+    actual = [*losses, *_masters_and_momentum(step)]
+    expected = [*expected_losses[2:], *expected_state]
+    for index, (ours, theirs) in enumerate(zip(actual, expected, strict=True)):
+        assert torch.equal(ours, theirs), index
+    assert cuda.events == [
+        "wait current cpu",
+        "enter",
+        "capture 2 into pool 2 thread_local",
+        "replay 2",
+        "synchronize",
+        "enter",
+        "capture 3 into pool 2 thread_local",
+        "replay 3",
+        "synchronize",
+    ]
+
+
+def test_a_cuda_rollout_launches_after_the_device_lands_the_weight_copies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    step = _train_step()
+    events: list[str] = []
+    collect = step.rollout.collect
+
+    def collect_after(slot: int) -> RolloutStorage:
+        events.append(f"collect {slot}")
+        return collect(slot)
+
+    def synchronize(device: torch.device) -> None:
+        events.append(f"synchronize {device}")
+
+    monkeypatch.setattr(step.rollout, "collect", collect_after)
+    monkeypatch.setattr(torch.cuda, "synchronize", synchronize)
+    monkeypatch.setattr(step, "device", torch.device("cuda"))
+    try:
+        step._boot()
+    finally:
+        step.close()
+    assert events == ["synchronize cuda", "collect 0"]
+
+
+def _four_epochs() -> CraftaxTrainStep.Config:
+    config = _quick(tiny_train_step())
+    config.train_budget_steps = 4
+    return config
+
+
+@cache
+def _eager_four_epochs() -> tuple[list[Tensor], list[Tensor]]:
+    """Return four eager epochs' losses, then Muon's masters and momentum after them."""
+    step = _train_step(_four_epochs())
+    try:
+        losses = [step.train_step()["model"] for _ in range(4)]
+    finally:
+        step.close()
+    return losses, _masters_and_momentum(step)
+
+
+class _FakeStream:
+    """The learner stream, recording its waits."""
+
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def synchronize(self) -> None:
+        self.events.append("synchronize")
+
+    def wait_stream(self, stream: str) -> None:
+        self.events.append(f"wait {stream}")
+
+
+class _FakeGraph:
+    """A CUDA graph whose replay runs the learner epochs captured into it."""
+
+    def __init__(self, events: list[str], index: int) -> None:
+        self.events = events
+        self.index = index
+        self.captured: list[Callable[[], None]] = []
+
+    def replay(self) -> None:
+        self.events.append(f"replay {self.index}")
+        for run in self.captured:
+            run()
+
+
+class _FakeCuda:
+    """Record the step's CUDA calls on the CPU, in one event list.
+
+    A capture runs no epoch: it hands back zeros shaped as the last eager
+    epoch's outputs, and its graph's replay trains and writes the results into
+    them, as a real graph replays into the outputs it captured.
+    """
+
+    def __init__(self, step: CraftaxTrainStep) -> None:
+        self.events: list[str] = []
+        self.stream = _FakeStream(self.events)
+        self.graphs: list[_FakeGraph] = []
+        self.pools = 0
+        self.capturing: _FakeGraph | None = None
+        self._eager = step._learn_epoch
+        self._template: tuple[Tensor, dict[str, Tensor]] | None = None
+
+    def install(self, monkeypatch: pytest.MonkeyPatch, step: CraftaxTrainStep) -> None:
+        monkeypatch.setattr(torch.cuda, "CUDAGraph", self.new_graph)
+        monkeypatch.setattr(torch.cuda, "graph", self.graph)
+        monkeypatch.setattr(torch.cuda, "stream", self.enter)
+        monkeypatch.setattr(torch.cuda, "graph_pool_handle", self.pool)
+        monkeypatch.setattr(torch.cuda, "current_stream", self.current_stream)
+        monkeypatch.setattr(step, "_learn_epoch", self.learn)
+        monkeypatch.setattr(step, "_stream", self.stream)
+        monkeypatch.setattr(step, "_pool", self.pool())
+
+    def new_graph(self) -> _FakeGraph:
+        graph = _FakeGraph(self.events, len(self.graphs))
+        self.graphs.append(graph)
+        return graph
+
+    @contextmanager
+    def graph(
+        self,
+        graph: _FakeGraph,
+        *,
+        pool: int,
+        stream: _FakeStream,
+        capture_error_mode: str,
+    ) -> Generator[None]:
+        assert stream is self.stream
+        self.events.append(
+            f"capture {graph.index} into pool {pool} {capture_error_mode}",
+        )
+        self.capturing = graph
+        try:
+            yield
+        finally:
+            self.capturing = None
+
+    def enter(self, stream: _FakeStream) -> AbstractContextManager[None]:
+        assert stream is self.stream
+        self.events.append("enter")
+        return nullcontext()
+
+    def pool(self) -> int:
+        self.pools += 1
+        return self.pools
+
+    def current_stream(self, device: torch.device) -> str:
+        return f"current {device}"
+
+    def learn(self, storage: RolloutStorage) -> tuple[Tensor, dict[str, Tensor]]:
+        if self.capturing is None:
+            self._template = self._eager(storage)
+            return self._template
+        assert self._template is not None
+        losses, metrics = self._template
+        outputs = (
+            torch.zeros_like(losses),
+            {name: torch.zeros_like(value) for name, value in metrics.items()},
+        )
+        self.capturing.captured.append(partial(self._replay, storage, outputs))
+        return outputs
+
+    def _replay(
+        self,
+        storage: RolloutStorage,
+        outputs: tuple[Tensor, dict[str, Tensor]],
+    ) -> None:
+        losses, metrics = self._eager(storage)
+        outputs[0].copy_(losses)
+        for name, value in metrics.items():
+            outputs[1][name].copy_(value)
 
 
 @pytest.mark.gpu_triton
@@ -1956,6 +2357,6 @@ def _muon_entries(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

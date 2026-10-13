@@ -245,6 +245,6 @@ def test_compute_moves_counts_to_the_current_cuda_device(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

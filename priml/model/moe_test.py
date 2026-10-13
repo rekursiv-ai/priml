@@ -74,6 +74,89 @@ def test_router_rejects_top_k_above_grouped_eligible():
         ).make()
 
 
+@pytest.mark.parametrize(
+    ("n_group", "topk_group", "message"),
+    [
+        (3, 1, r"^num_experts=8 must be divisible by n_group=3\.$"),
+        (2, 3, r"^topk_group=3 > n_group=2\.$"),
+    ],
+)
+def test_sigmoid_router_rejects_groups_it_cannot_form(
+    n_group: int,
+    topk_group: int,
+    message: str,
+) -> None:
+    config = SigmoidRouter.Config(
+        channels_in=4,
+        num_experts=8,
+        top_k=1,
+        n_group=n_group,
+        topk_group=topk_group,
+    )
+    with pytest.raises(ValueError, match=message):
+        config.make()
+
+
+def test_sigmoid_router_cost_adds_the_grouped_selection() -> None:
+    """Each of four groups sums its top two: one add per group per row."""
+    flat = SigmoidRouter.Config(channels_in=4, num_experts=8, top_k=2)
+    grouped = SigmoidRouter.Config(
+        channels_in=4,
+        num_experts=8,
+        top_k=2,
+        n_group=4,
+        topk_group=2,
+    )
+    rows = 3 * 2
+    plain = flat.cost(seq_len=3, batch_size=2, dtype=None)
+    extra = grouped.cost(seq_len=3, batch_size=2, dtype=None)
+    assert (
+        extra["flops", "primal", "reduction"].sum()
+        == plain["flops", "primal", "reduction"].sum() + rows * 4
+    )
+    assert extra["bytes", "primal", "sort", torch.int64] == plain[
+        "bytes",
+        "primal",
+        "sort",
+        torch.int64,
+    ] + rows * 8 * (4 * 2 + 2)
+
+
+def test_sigmoid_router_reset_zeroes_the_correction_bias() -> None:
+    router = SigmoidRouter.Config(channels_in=4, num_experts=3, top_k=1).make()
+    bias = router.e_score_correction_bias
+    assert bias is not None
+    bias.fill_(2.0)
+    router.reset_parameters()
+    assert torch.equal(bias, torch.zeros(3))
+
+
+def test_moe_infers_channels_in_from_channels_out() -> None:
+    config = MoE.Config(channels_out=6).finalize()
+    assert config.channels_in == 6
+    assert config.router.channels_in == 6
+
+
+@pytest.mark.parametrize(
+    ("expert_rows", "message"),
+    [
+        ((2, 2, 2), r"^expert_rows has length 3; expected 4\.$"),
+        ((5, -1, 2, 2), r"^expert_rows must contain nonnegative integers\.$"),
+        ((2, 2, 2, 1), r"^expert_rows sums to 7; expected 8 for 4 rows and top_k=2\.$"),
+    ],
+)
+def test_moe_cost_rejects_inconsistent_expert_rows(
+    expert_rows: tuple[int, ...],
+    message: str,
+) -> None:
+    config = MoE.Config(
+        channels_in=4,
+        router=SoftmaxRouter.Config(num_experts=4, top_k=2),
+    ).finalize()
+    with pytest.raises(ValueError, match=message):
+        config.cost(seq_len=4, batch_size=1, dtype=None, expert_rows=expert_rows)
+
+
 def test_router():
     m = SoftmaxRouter.Config(channels_in=64, num_experts=4, top_k=2).make()
     x = torch.randn(2, 8, 64)
@@ -695,6 +778,6 @@ def _first_tensor(module: torch.nn.Module, value: object) -> Tensor:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -4,6 +4,8 @@ from typing_extensions import TypeVar
 
 import builtins
 
+from triton.language import standard as standard
+
 class dtype: ...
 
 class pointer_type(dtype):

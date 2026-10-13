@@ -252,6 +252,6 @@ def test_sharded_param_norm_is_gathered_to_a_plain_tensor(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

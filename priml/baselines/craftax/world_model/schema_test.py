@@ -1,5 +1,6 @@
 """Check the Craftax slot schema against the design's vocabulary."""
 
+import pytest
 import torch
 
 from priml.baselines.craftax.world_model.schema import (
@@ -51,6 +52,19 @@ def test_craftax_number_and_action_ids() -> None:
     assert len(craftax_schema().scalar_names) == 51
 
 
+@pytest.mark.parametrize("value", [-2, 261])
+def test_a_number_outside_the_vocabulary_is_refused(value: int) -> None:
+    with pytest.raises(ValueError, match=str(value)):
+        number_id(value)
+
+
+@pytest.mark.parametrize("action", [-1, 43])
+def test_an_action_outside_the_game_is_refused(action: int) -> None:
+    assert action_id(42) == 458
+    with pytest.raises(ValueError, match=str(action)):
+        action_id(action)
+
+
 def test_craftax_local_masks_follow_valid_ranges() -> None:
     schema = craftax_schema()
     allowed = schema.local_allowed()
@@ -88,6 +102,6 @@ def test_schema_is_cached_and_frozen() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

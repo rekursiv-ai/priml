@@ -123,6 +123,6 @@ def test_to_device_moves_each_tensor_and_keeps_the_count() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -2382,6 +2382,6 @@ def test_video_decoder_invokes_ffmpeg_with_the_output_contract() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

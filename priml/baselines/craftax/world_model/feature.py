@@ -1568,10 +1568,8 @@ class FeatureEngine:
     def _encode_rings(self, rows: Tensor) -> None:
         """Encode ``rows``' frame rings afresh into their ``obs`` rings."""
         cell_ring, aux_ring = self.cell_ring, self.aux_ring
-        if cell_ring is None:
-            raise ValueError("Expected cell_ring is not None.")
-        if aux_ring is None:
-            raise ValueError("Expected aux_ring is not None.")
+        if cell_ring is None or aux_ring is None:
+            raise ValueError("The engine keeps no frames: its source is not joint.")
         batch, ring = len(self._rows), self.ring
         frames = (
             rows[:, None] * ring + torch.arange(ring, device=rows.device)
@@ -1652,12 +1650,8 @@ class FeatureEngine:
     # only into that row's scratch position, which no step reads.
     def _reprefill(self, rows: Tensor) -> None:
         """Rebuild ``rows``' caches from their last ``keep`` decisions, from position 0."""
-        events = None
-        if self.keys.is_cuda:
-            events = (
-                torch.cuda.Event(enable_timing=True),
-                torch.cuda.Event(enable_timing=True),
-            )
+        events = _timing_events(self.keys.device)
+        if events is not None:
             events[0].record()
         for first in range(0, len(rows), self._chunk):
             real = rows[first : first + self._chunk]
@@ -1822,11 +1816,10 @@ class SlidingEngine(FeatureEngine):
         self._plan = torch.full(
             (self._most + 1,),
             rows,
-            dtype=torch.long,
             device=device,
         )
         self._planned = torch.zeros(rows, dtype=torch.bool, device=device)
-        self._slid = self.feature.new_zeros(rows + 1, self.feature.shape[-1])
+        self._slid = self.feature.new_zeros(rows + 1, model.start.shape[-1])
         self._capacity = 0
 
     @property
@@ -1975,6 +1968,15 @@ def _block_attention(
             f"computes it, not as {type(attn.attn_kernel).__name__}.",
         )
     return attn
+
+
+def _timing_events(
+    device: torch.device,
+) -> tuple[torch.cuda.Event, torch.cuda.Event] | None:
+    """Return a begin and an end timing event on CUDA; None elsewhere."""
+    if device.type != "cuda":
+        return None
+    return torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
 
 
 @runtime_checkable

@@ -350,13 +350,9 @@ class WorldModelTrainStep(TrainStep):
             float,
         )
 
-    # Synchronized first, so ``dt`` is the device's time for the whole window and not
-    # the host's enqueue time; nanochat synchronizes at the same boundary.
     def _update_metrics(self) -> dict[str, float | Tensor]:
         """Return the nanochat series for the update just taken."""
-        if self.device.type == "cuda":
-            torch.cuda.synchronize()
-        dt = time.perf_counter() - self._window_started
+        dt = self._window_seconds()
         world = dist.get_world_size() if dist.is_initialized() else 1
         # nanochat's EMA: it starts at zero, so dividing by 1 - beta**n, n the
         # updates it has seen (this process's), removes the pull toward zero.
@@ -401,6 +397,14 @@ class WorldModelTrainStep(TrainStep):
                 dist.all_reduce(largest, op=dist.ReduceOp.MAX)
             metrics["max_attention_logit"] = largest
         return metrics
+
+    # Synchronized first, so ``dt`` is the device's time for the whole window and not
+    # the host's enqueue time; nanochat synchronizes at the same boundary.
+    def _window_seconds(self) -> float:
+        """Return the seconds since the window began, once the device has finished it."""
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        return time.perf_counter() - self._window_started
 
     def _grad_norm(self) -> Tensor:
         """Return the norm the last update clipped."""

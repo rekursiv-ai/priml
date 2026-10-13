@@ -125,6 +125,6 @@ def test_modality_loss_with_nothing_scored_is_zero_not_nan() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -1009,6 +1009,6 @@ def test_reducers_reject_an_empty_dim(reduce: Callable[[Tensor], Tensor]) -> Non
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -19,6 +19,7 @@ from functools import partial
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Protocol, cast
+from unittest.mock import Mock
 
 import traceback
 
@@ -27,6 +28,7 @@ from torch import Tensor, nn
 
 import pytest
 import torch
+import torch.distributed as dist
 
 from priml.baselines.arcagi import experiments
 from priml.baselines.arcagi.model import ConvSwiGLU, RotaryBlock
@@ -34,6 +36,8 @@ from priml.baselines.arcagi.train_step import (
     ArcDataParallel,
     EvalSignals,
     PooledActTrainStep,
+    _accuracy_metrics,
+    _Correctness,
     _empty_eval,
 )
 from priml.baselines.sudoku.act import AtomicPool
@@ -690,6 +694,195 @@ def test_optional_prefix_and_checkpoint_branches() -> None:
     assert restored.step.state_dict().keys() == state.keys()
 
 
+def test_train_step_rejects_non_tensor_identifiers() -> None:
+    step = PortSubject("exp000").step
+    with pytest.raises(TypeError, match="must be a Tensor; got <class 'list'>"):
+        step.train_step(**{**batches()[0], "puzzle_identifiers": [0, 1]})
+
+
+def test_a_model_without_a_task_table_trains_without_identifiers() -> None:
+    config = port_config("exp000")
+    config.model.prefix = None
+    torch.manual_seed(0)
+    step = PortSubject.from_config(config).step
+    assert step.puzzle_table is None
+    assert step.sparse_optimizer is None
+    assert step._prefix_kwargs(None) == {}
+    batch = {k: v for k, v in batches()[0].items() if k != "puzzle_identifiers"}
+    before = [p.detach().clone() for p in step.model.parameters()]
+    step.train_step(**batch)
+    assert any(
+        not torch.equal(old, new)
+        for old, new in zip(before, step.model.parameters(), strict=True)
+    )
+    assert "sparse_optimizer" not in step.state_dict()
+
+
+def test_train_loss_scores_a_batch_as_evaluation_does() -> None:
+    batch = batches()[0]
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        torch.manual_seed(0)
+        step = PortSubject("exp000").step
+        train = step.train_loss(**batch)
+        evaluation = step.eval_loss(**batch)
+    assert torch.equal(train["loss"], evaluation["loss"])
+    assert torch.equal(train["model"], evaluation["model"])
+
+
+def test_call_eval_returns_the_rollout_logits_eval_decodes() -> None:
+    batch = batches()[0]
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        torch.manual_seed(0)
+        step = PortSubject("exp000").step
+        logits = step.call_eval(
+            media=batch["media"],
+            puzzle_identifiers=batch["puzzle_identifiers"],
+        )
+        packed = step.eval_loss(**batch)["model"]
+    assert logits.shape == (2, 3, 4)
+    assert torch.equal(logits.argmax(dim=-1).float(), packed[:, 1:])
+    with pytest.raises(ValueError, match="no positional arguments"):
+        step.call_eval(batch["media"])
+
+
+def test_the_corruption_generator_round_trips_through_the_state_dict() -> None:
+    torch.manual_seed(0)
+    source = PortSubject("exp006").step
+    carry = source.pool.carry
+    assert carry is not None
+    torch.rand(3, generator=carry.generator)
+    state = source.state_dict()
+    assert "corruption_rng" in state
+    saved = state["corruption_rng"]
+    assert torch.equal(saved, carry.generator.get_state())
+    restored = PortSubject("exp006").step
+    restored_carry = restored.pool.carry
+    assert restored_carry is not None
+    assert not torch.equal(restored_carry.generator.get_state(), saved)
+    restored.load_state_dict(state)
+    assert torch.equal(restored_carry.generator.get_state(), saved)
+
+
+def test_accuracy_metrics_average_over_the_scored_slots_only() -> None:
+    # Slot 0 alone is scored: one counted cell, correct, a zero halt logit.
+    correctness = _Correctness(
+        is_correct=torch.tensor([[True, False], [True, True], [False, False]]),
+        loss_counts=torch.tensor([1, 2, 0]),
+        correct=torch.tensor([1.0, 1.0, 0.0]),
+    )
+    metrics = _accuracy_metrics(
+        correctness,
+        halt=torch.tensor([0.0, -1.0, 2.0]),
+        scored=torch.tensor([True, False, False]),
+        steps=torch.tensor([3, 5, 7]),
+    )
+    assert {key: float(value) for key, value in metrics.items()} == {
+        "cell_accuracy": 1.0,
+        "exact_accuracy": 1.0,
+        "q_halt_accuracy": 1.0,
+        "act_steps": 3.0,
+    }
+
+
+def test_accuracy_metrics_treat_every_leading_axis_as_slots() -> None:
+    generator = torch.Generator().manual_seed(0)
+    is_correct = torch.rand(2, 3, 4, generator=generator) > 0.5
+    # Power-of-two counts keep every per-slot fraction exact in any sum order.
+    loss_counts = torch.tensor([[1, 2, 4], [4, 2, 1]])
+    correct = (torch.rand(2, 3, generator=generator) > 0.5).float()
+    halt = torch.randn(2, 3, generator=generator)
+    scored = torch.tensor([[True, False, True], [True, True, False]])
+    steps = torch.tensor([[1, 2, 3], [4, 5, 6]])
+    batched = _accuracy_metrics(
+        _Correctness(is_correct, loss_counts, correct),
+        halt=halt,
+        scored=scored,
+        steps=steps,
+    )
+    flat = _accuracy_metrics(
+        _Correctness(
+            is_correct.flatten(0, 1),
+            loss_counts.flatten(),
+            correct.flatten(),
+        ),
+        halt=halt.flatten(),
+        scored=scored.flatten(),
+        steps=steps.flatten(),
+    )
+    assert batched.keys() == flat.keys()
+    for key, value in batched.items():
+        assert torch.equal(torch.as_tensor(value), torch.as_tensor(flat[key]))
+
+
+def test_without_halt_training_the_loss_is_the_token_loss() -> None:
+    config = port_config("exp000")
+    config.pool.halting = None
+    torch.manual_seed(0)
+    step = PortSubject.from_config(config).step
+    result = step.train_step(**batches()[0])
+    metrics = result.get("metrics", {})
+    assert "q_halt_loss" not in metrics
+    assert "halted_frac" not in metrics
+    lm_loss = torch.as_tensor(metrics["lm_loss"])
+    assert torch.equal(result["loss"], lm_loss.reshape(1))
+
+
+def test_a_finite_clip_norm_bounds_the_body_update() -> None:
+    config = port_config("exp000")
+    config.gradient_clip_norm = 1e-3
+    torch.manual_seed(0)
+    step = PortSubject.from_config(config).step
+    clipped: list[Tensor] = []
+
+    def capture(optimizer: object, args: object, kwargs: object) -> None:
+        del optimizer, args, kwargs
+        clipped.extend(
+            p.grad.detach().clone()
+            for p in step.model.parameters()
+            if p.grad is not None
+        )
+
+    assert isinstance(step.optimizer, torch.optim.Optimizer)
+    step.optimizer.register_step_pre_hook(capture)
+    metrics = step.train_step(**batches()[0]).get("metrics", {})
+    norm = metrics["grad_norm"]
+    assert isinstance(norm, Tensor)
+    assert float(norm) > 1e-3
+    total = torch.linalg.vector_norm(torch.stack([g.norm() for g in clipped]))
+    torch.testing.assert_close(total, torch.tensor(1e-3), rtol=1e-4, atol=0.0)
+
+
+def test_arc_data_parallel_broadcasts_every_tensor_from_rank_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dist.init_process_group(
+        backend="gloo",
+        init_method=(tmp_path / "rendezvous").resolve().as_uri(),
+        rank=0,
+        world_size=1,
+    )
+    runtime = MultiProcess.Config(device="cpu", mesh_topology={"dp": 1}).make()
+    try:
+        runtime.initialize()
+        broadcast = Mock(wraps=dist.broadcast)
+        monkeypatch.setattr(dist, "broadcast", broadcast)
+        model = nn.Linear(2, 3)
+        model.register_buffer("scale", torch.ones(3))
+        parallel = ArcDataParallel.Config().make()
+        replicated = parallel(model)
+        tensors = [*model.parameters(), *model.buffers()]
+        assert [call.args[0] for call in broadcast.call_args_list] == tensors
+        assert all(
+            call.kwargs == {"src": 0, "group": parallel.process_group}
+            for call in broadcast.call_args_list
+        )
+        assert replicated is model
+    finally:
+        runtime.destroy()
+        dist.destroy_process_group()
+
+
 @pytest.mark.compute_distributed
 def test_a_warm_eval_before_training_leaves_replication_trainable(
     tmp_path: Path,
@@ -729,6 +922,6 @@ def _warm_eval_then_train(root: Path, mesh: DeviceMesh) -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

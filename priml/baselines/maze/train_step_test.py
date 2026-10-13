@@ -207,6 +207,6 @@ def test_the_boundary_loss_joins_at_its_weight() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

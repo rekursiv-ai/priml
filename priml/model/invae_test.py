@@ -282,6 +282,6 @@ def test_load_invae_missing_hub_dependency(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

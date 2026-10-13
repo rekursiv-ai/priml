@@ -846,7 +846,10 @@ class Harvest:
             + [part.predictions[:, -1] for part in random_parts],
         )
         if puzzle_rows.numel() != batch * self._rows_per_view:
-            raise RuntimeError("harvest did not emit the declared rows per view.")
+            raise ValueError(
+                "__init__ requires search_budget to cover the full fixed-HPS tree, so "
+                "every view emits exactly rows_per_view rows.",
+            )
         order = torch.argsort(
             puzzle_rows * self._rows_per_view + candidate_index,
             stable=True,

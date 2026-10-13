@@ -181,6 +181,6 @@ def test_worker_processes_match_serial_counts() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

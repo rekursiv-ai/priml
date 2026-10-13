@@ -10,7 +10,11 @@ from torch import Tensor
 import pytest
 import torch
 
-from priml.optimizers.fused_adamw import FusedAdamW
+from priml.optimizers.fused_adamw import (
+    FusedAdamW,
+    _adamw_update,
+    _compiled_update,
+)
 
 
 if TYPE_CHECKING:
@@ -143,6 +147,66 @@ def test_the_schedule_can_move_the_rate_between_steps() -> None:
     assert torch.equal(parameter.detach(), before)
 
 
+def test_step_returns_the_closure_loss_computed_with_grad_enabled() -> None:
+    """The closure re-evaluates under grad mode, and its loss is returned."""
+    parameter = torch.full((2,), 3.0, requires_grad=True)
+    optimizer = FusedAdamW([parameter], lr=0.1, compile=False)
+
+    def closure() -> Tensor:
+        optimizer.zero_grad()
+        loss = (parameter**2).sum()
+        loss.backward()
+        return loss
+
+    loss = optimizer.step(closure)
+
+    assert isinstance(loss, Tensor)
+    assert loss.item() == 18.0
+    # First Adam step moves each coordinate by exactly lr against the gradient sign.
+    torch.testing.assert_close(parameter.detach(), torch.full((2,), 2.9))
+
+
+def test_compile_wraps_the_update_once_per_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``compile=True`` compiles the eager step once, statically, and shares it.
+
+    ``torch.compile`` is faked: importing Dynamo costs ~0.4s, and the claim here
+    is which function gets compiled and how often, not what Dynamo emits.
+    """
+    compiled: list[tuple[object, object]] = []
+
+    def fake_compile(fn: object, *, dynamic: object) -> Callable[..., None]:
+        compiled.append((fn, dynamic))
+        return _adamw_update
+
+    monkeypatch.setattr(torch, "compile", fake_compile)
+    _compiled_update.cache_clear()
+    try:
+        first = FusedAdamW([torch.zeros(2, requires_grad=True)])
+        second = FusedAdamW([torch.zeros(3, requires_grad=True)])
+        FusedAdamW([torch.zeros(2, requires_grad=True)], compile=False)
+    finally:
+        _compiled_update.cache_clear()
+
+    assert compiled == [(_adamw_update, False)]
+    assert first._update is second._update
+
+
+def test_parameters_without_a_gradient_are_left_alone() -> None:
+    """A parameter the loss never reached keeps its value and gets no state."""
+    stepped = torch.ones(2, requires_grad=True)
+    idle = torch.ones(3, requires_grad=True)
+    optimizer = FusedAdamW([stepped, idle], lr=0.1, weight_decay=0.5, compile=False)
+    stepped.grad = torch.ones(2)
+
+    optimizer.step()
+
+    assert torch.equal(idle.detach(), torch.ones(3))
+    assert idle not in optimizer.state
+    assert not torch.equal(stepped.detach(), torch.ones(2))
+
+
 @pytest.mark.parametrize(
     ("build", "message"),
     [
@@ -190,6 +254,6 @@ def test_the_config_builds_a_constructor_awaiting_parameters() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

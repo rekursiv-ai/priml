@@ -55,6 +55,6 @@ def test_avg_pool_sums_each_channel_scales_once_and_spreads_back() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

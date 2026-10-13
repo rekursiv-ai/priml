@@ -51,18 +51,10 @@ def load_trained(
       config: The experiment's finalized config, overrides applied.
 
     """
-    if device.type != "cuda":
-        loaded, config = load_world_model(experiment, checkpoint, overrides=overrides)
-        assert isinstance(config, WorldModelLoop.Config)
-        return loaded.to(device), config
-    declared = resolve_config(experiment)
-    apply_overrides(declared, list(overrides))
-    declared = declared.copy_tree().finalize()
-    assert isinstance(declared, WorldModelLoop.Config)
-    model = declared.step.model.make()
-    assert isinstance(model, WorldModel)
-    model.load_state_dict(model_state(checkpoint))
-    return model.eval().to(device), declared
+    load = _declared_model if device.type == "cuda" else load_world_model
+    model, config = load(experiment, checkpoint, overrides=overrides)
+    assert isinstance(config, WorldModelLoop.Config)
+    return model.to(device), config
 
 
 def autocast(
@@ -88,3 +80,20 @@ def autocast(
         dtype=dtype,
         cache_enabled=config.step.autocast_cache_enabled,
     )
+
+
+def _declared_model(
+    experiment: str,
+    checkpoint: Path,
+    *,
+    overrides: Sequence[str],
+) -> tuple[WorldModel, WorldModelLoop.Config]:
+    """Build ``experiment``'s model on the kernels it declares; load ``checkpoint``."""
+    declared = resolve_config(experiment)
+    apply_overrides(declared, list(overrides))
+    declared = declared.copy_tree().finalize()
+    assert isinstance(declared, WorldModelLoop.Config)
+    model = declared.step.model.make()
+    assert isinstance(model, WorldModel)
+    model.load_state_dict(model_state(checkpoint))
+    return model.eval(), declared

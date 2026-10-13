@@ -40,6 +40,6 @@ def test_suppressed_turns_both_flags_off_then_restores(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

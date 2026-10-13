@@ -108,6 +108,6 @@ def test_parse_shard_spec_rejects_a_slice_with_more_than_three_fields(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -202,6 +202,6 @@ def test_float8_linear_forward_keeps_autocast_enabled(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

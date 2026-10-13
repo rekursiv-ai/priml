@@ -640,6 +640,115 @@ def test_ngram_cuda_dispatch_pins_kernel_arguments(
     )
 
 
+def test_ngram_embedding_reset_redraws_its_contexts() -> None:
+    config = NgramEmbedding.Config()
+    config.channels_in = 5
+    config.channels_out = 2
+    context = NgramEmbedding.Config()
+    context.channels_in = 7
+    config.contexts = {"previous": context}
+    built = config.make()
+    previous = built.contexts["previous"]
+    assert isinstance(previous, NgramEmbedding)
+    assert isinstance(previous.inner, Embedding)
+    with torch.no_grad():
+        previous.inner.weight.fill_(float("nan"))
+    built.reset_parameters()
+    assert bool(torch.isfinite(previous.inner.weight).all())
+
+
+def test_cuda_dispatch_routes_mix_backward_and_clear_to_the_kernels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The custom ops branch on ``is_cuda``; a CPU tensor reporting CUDA takes it."""
+    values = torch.randn(2, 3, 4, 6)
+    gate = torch.randn(2, 3, 4)
+    weights = [torch.randn(16, 12) for _ in range(2)]
+    indices = [torch.tensor([[1, 2, 3], [4, 5, 6]]) for _ in weights]
+    sinks = [torch.zeros_like(weight) for weight in weights]
+    bitmaps = [torch.zeros(16, dtype=torch.uint8) for _ in weights]
+    calls: list[str] = []
+    forward_out = torch.full_like(values, 7.0)
+    gate_grad = torch.full_like(gate, 3.0)
+
+    def forward(*args: object) -> Tensor:
+        del args
+        calls.append("forward")
+        return forward_out
+
+    def backward(*args: object, bitmaps: list[Tensor] | None) -> list[Tensor]:
+        del args
+        calls.append(f"backward:{bitmaps is not None}")
+        return [gate_grad]
+
+    def clear(*args: object) -> None:
+        del args
+        calls.append("clear")
+
+    monkeypatch.setattr(ngram, "_mix_forward_cuda", forward)
+    monkeypatch.setattr(ngram, "_mix_backward_cuda", backward)
+    monkeypatch.setattr(ngram, "_clear_marked_sinks_cuda", clear)
+    monkeypatch.setattr(Tensor, "is_cuda", property(_always_cuda))
+
+    assert ngram_mix(values, [gate], weights, indices, sinks, bitmaps) is forward_out
+    first, second = ngram._mix_backward(values, [gate], weights, indices, sinks, [])
+    assert first is gate_grad
+    assert second.numel() == 0
+    ngram._mix_backward(values, [gate], weights, indices, sinks, bitmaps)
+    clear_marked_sinks(sinks, bitmaps)
+    assert calls == ["forward", "backward:False", "backward:True", "clear"]
+
+
+def test_fake_kernels_report_the_real_output_shapes() -> None:
+    values = torch.randn(2, 3, 4, 6)
+    gates = [torch.randn(2, 3, 4) for _ in range(2)]
+    weights = [torch.randn(13, 12) for _ in range(4)]
+    indices = [torch.tensor([[1, 2, 3], [4, 5, 6]]) for _ in weights]
+    sinks = [torch.zeros_like(weight) for weight in weights]
+    mixed = ngram._mix_fake(values, gates[:1], weights[:2], indices[:2], sinks[:2], [])
+    assert mixed.shape == values.shape
+    assert mixed.dtype == values.dtype
+    one = ngram._mix_backward_fake(values, gates[:1], weights, indices, sinks, [])
+    assert one[0].shape == gates[0].shape
+    assert one[1].numel() == 0
+    two = ngram._mix_backward_fake(values, gates, weights, indices, sinks, [])
+    assert [grad.shape for grad in two] == [gate.shape for gate in gates]
+
+
+def test_compiled_kernels_jit_their_triton_bodies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jitted: list[object] = []
+
+    def record(function: object) -> object:
+        jitted.append(function)
+        return function
+
+    monkeypatch.setattr(ngram, "jit_kernel", record)
+    for compiled in (
+        ngram._compiled_ngram_forward,
+        ngram._compiled_ngram_backward,
+        ngram._compiled_sink_clear,
+    ):
+        compiled.cache_clear()
+    try:
+        assert ngram._compiled_ngram_forward() is ngram._ngram_mix_fwd_triton
+        assert ngram._compiled_ngram_backward() is ngram._ngram_mix_bwd_triton
+        assert ngram._compiled_sink_clear() is ngram._clear_marked_sink_triton
+    finally:
+        for compiled in (
+            ngram._compiled_ngram_forward,
+            ngram._compiled_ngram_backward,
+            ngram._compiled_sink_clear,
+        ):
+            compiled.cache_clear()
+    assert jitted == [
+        ngram._ngram_mix_fwd_triton,
+        ngram._ngram_mix_bwd_triton,
+        ngram._clear_marked_sink_triton,
+    ]
+
+
 def test_prepare_gradient_sinks_allocates_exact_shapes_and_dtypes() -> None:
     tables = HashedNgramTables.Config(
         channels_out=4,
@@ -713,7 +822,12 @@ def test_ngram_cuda_host_dispatch_accepts_cpu_fixture(
     ngram._clear_marked_sinks_cuda(sinks, bitmaps)
 
 
+def _always_cuda(tensor: Tensor) -> bool:
+    del tensor
+    return True
+
+
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

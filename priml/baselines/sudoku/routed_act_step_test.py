@@ -20,7 +20,7 @@ stay a few KB each. Only the representative rungs keep a golden
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final, cast, override
 
 import json
 
@@ -443,6 +443,78 @@ def test_release_keeps_each_rows_first_confident_step(tmp_path: Path) -> None:
     )
 
 
+class _ReleaseFirstRow(HaltRelease):
+    """Release only the first surviving row at every step."""
+
+    @override
+    def __call__(self, q_halt: Tensor) -> Tensor:
+        return torch.arange(q_halt.shape[0]) == 0
+
+
+def test_release_drops_rows_one_at_a_time(tmp_path: Path) -> None:
+    """Row 0 leaves at step 1 and row 1 at step 2, each with that step's grid."""
+    config = port_config("exp004", tmp_path)
+    write_dataset(tmp_path / "data")
+    loop = config.make()
+    step = cast(RoutedActTrainStep, loop.step)
+    batch = loop._get_next_batch()
+    step.release = _ReleaseFirstRow(HaltRelease.Config())
+    staggered = step.eval_loss(**batch)
+    step.release = None
+    fixed: list[Tensor] = []
+    for depth in (1, 2):
+        step.pool.config.max_steps = depth
+        fixed.append(step.eval_loss(**batch)["model"])
+    loop.close()
+    assert torch.equal(staggered["model"][0], fixed[0][0])
+    assert torch.equal(staggered["model"][1], fixed[1][1])
+    assert staggered.get("metrics", {})["act_steps"] == 1.5
+
+
+def test_a_zero_depth_rollout_is_refused(tmp_path: Path) -> None:
+    config = port_config("exp000", tmp_path)
+    write_dataset(tmp_path / "data")
+    loop = config.make()
+    step = cast(RoutedActTrainStep, loop.step)
+    step.pool.config.max_steps = 0
+    with pytest.raises(ValueError, match="final_logits"):
+        step.eval_loss(**loop._get_next_batch())
+    loop.close()
+
+
+def test_cardinality_waits_out_its_warmup(tmp_path: Path) -> None:
+    config = port_config("exp006", tmp_path)
+    cardinality = config.step.cardinality
+    assert cardinality is not None
+    cardinality.warmup_steps = 2
+    write_dataset(tmp_path / "data")
+    loop = config.make()
+    step = cast(RoutedActTrainStep, loop.step)
+    metrics = [
+        step.train_step(**loop._get_next_batch()).get("metrics", {}) for _ in range(3)
+    ]
+    loop.close()
+    assert [m["csp_loss"] for m in metrics[:2]] == [0.0, 0.0]
+    assert isinstance(metrics[2]["csp_loss"], Tensor)
+
+
+def test_without_a_puzzle_table_there_is_no_sparse_step(tmp_path: Path) -> None:
+    config = port_config("exp000", tmp_path)
+    config.step.model.num_puzzle_identifiers = 0
+    write_dataset(tmp_path / "data")
+    loop = config.make()
+    step = cast(RoutedActTrainStep, loop.step)
+    assert step.net.puzzle_emb is None
+    assert step.sparse_optimizer is None
+    before = [p.detach().clone() for p in step._body_params]
+    step.train_step(**loop._get_next_batch())
+    loop.close()
+    assert any(
+        not torch.equal(old, new)
+        for old, new in zip(before, step._body_params, strict=True)
+    )
+
+
 def test_a_whole_model_compile_is_refused(tmp_path: Path) -> None:
     config = port_config("exp000", tmp_path)
     config.step.compile = PartialConfig(torch.compile)
@@ -501,6 +573,6 @@ def _put(out: dict[str, Tensor], prefix: str, values: Mapping[str, Tensor]) -> N
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

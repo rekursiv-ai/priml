@@ -17,7 +17,7 @@ import pytest
 import torch
 
 from priml.baselines.nanochat.scripts import karpathy_race
-from priml.lib.testing.cli import assert_help_without_docstring
+from priml.lib.testing.checks import assert_help_without_docstring
 
 
 class _Flags(Protocol):
@@ -244,6 +244,6 @@ def test_main_executes_reference_script_and_reports_summary(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -19,7 +19,7 @@ from priml.baselines.arcagi.data import PuzzleData
 from priml.baselines.arcagi.scripts import prepare_data
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.data.arrays import load_array
-from priml.lib.testing.cli import assert_help_without_docstring
+from priml.lib.testing.checks import assert_help_without_docstring
 
 
 if TYPE_CHECKING:
@@ -429,6 +429,6 @@ def test_an_arc2_rung_is_refused_rather_than_built_from_arc1(experiment: str) ->
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

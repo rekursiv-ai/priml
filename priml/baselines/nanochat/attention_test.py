@@ -733,6 +733,6 @@ def test_qk_triton_kernels_load_masked_rows_and_store_all_outputs(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

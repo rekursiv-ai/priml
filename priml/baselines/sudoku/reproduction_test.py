@@ -3,9 +3,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import json
+import logging
+import re
 
+from configgle import Fig
 from torch import Tensor
-from treekle import ReadError
+from torch._inductor import config as inductor_config
+from treekle import ReadError, json_loads
 
 import pytest
 import torch
@@ -16,12 +20,15 @@ from priml.baselines.sudoku.agreement_lock import (
     nine_view_members,
 )
 from priml.baselines.sudoku.harvest import Harvest
+from priml.baselines.sudoku.puzzle_data import PuzzleDataset
 from priml.baselines.sudoku.reproduction import (
     Reproduction,
     _outer_run,
     _OuterRun,
     _run_training,
+    _screen_pass,
 )
+from priml.baselines.sudoku.search import HpsSearch
 from priml.baselines.sudoku.sieve import SieveEval
 from priml.baselines.sudoku.testing import (
     Harness,
@@ -29,19 +36,18 @@ from priml.baselines.sudoku.testing import (
     metric_tensors,
     replay,
     weight_tensors,
+    write_dataset,
 )
 from priml.baselines.sudoku.train_loop import SudokuTrainLoop
+from priml.baselines.sudoku.verifier import VerifierAcceptor
 from priml.baselines.sudoku.views import NINE_VIEWS
 from priml.testing.golden import mismatches
+from priml.train.tracker import WandbTracker
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from pathlib import Path
-
-    from priml.baselines.sudoku.puzzle_data import PuzzleDataset
-    from priml.baselines.sudoku.search import HpsSearch
-    from priml.baselines.sudoku.verifier import VerifierAcceptor
 
 
 class _ProtocolConfig(Protocol):
@@ -190,46 +196,90 @@ def _reproduction_config(tmp_path: Path) -> Reproduction.Config:
     return cfg
 
 
+def _rejects(
+    cfg: Reproduction.Config,
+    message: str,
+    error: type[Exception] = ValueError,
+) -> None:
+    """Assert ``cfg`` fails to build with exactly ``message``."""
+    with pytest.raises(error, match=f"^{re.escape(message)}$"):
+        cfg.make()
+
+
 def test_reproduction_rejects_an_invalid_config(tmp_path: Path) -> None:
     cfg = _reproduction_config(tmp_path)
     cfg.experiment_name = ""
-    with pytest.raises(ValueError, match="experiment_name is required"):
-        cfg.make()
+    _rejects(
+        cfg,
+        "Reproduction.Config.experiment_name is required: it keys the aggregate "
+        "run directory.",
+    )
     cfg = _reproduction_config(tmp_path)
     cfg.eval_every_steps = 0
-    with pytest.raises(ValueError, match="eval_every_steps"):
-        cfg.make()
+    _rejects(cfg, "eval_every_steps must be positive.")
     cfg = _reproduction_config(tmp_path)
     cfg.generator.max_steps = float("inf")
-    with pytest.raises(ValueError, match="finite max_steps"):
-        cfg.make()
+    _rejects(
+        cfg,
+        "the generator recipe needs a finite max_steps horizon (the staged "
+        "boundaries derive from it).",
+    )
     cfg = _reproduction_config(tmp_path)
     cfg.generator_name = ""
-    with pytest.raises(ValueError, match="generator_name"):
-        cfg.make()
+    _rejects(cfg, "generator_name must name a fresh checkpoint identity.")
     cfg = _reproduction_config(tmp_path)
     cfg.generator.seed = None
-    with pytest.raises(ValueError, match="needs a seed"):
-        cfg.make()
+    _rejects(
+        cfg,
+        "the generator recipe needs a seed: it also seeds the dedicated "
+        "augmentation stream that makes resumed segments replay exactly.",
+    )
     cfg = _reproduction_config(tmp_path)
     cfg.generator.checkpointer = None
-    with pytest.raises(TypeError, match="needs a checkpointer"):
-        cfg.make()
+    _rejects(
+        cfg,
+        "the generator recipe needs a checkpointer: each segment resumes from the "
+        "last, and every screen and full evaluation loads one.",
+        TypeError,
+    )
     cfg = _reproduction_config(tmp_path)
     cfg.full_eval = SieveEval.Config()
-    with pytest.raises(ValueError, match="nine_view"):
-        cfg.make()
+    _rejects(
+        cfg,
+        "nine_view screens run the agreement-lock protocol; full_eval must be an "
+        "AgreementLockEval config.",
+    )
     cfg = _reproduction_config(tmp_path)
     cfg.screen = "committee"
-    with pytest.raises(ValueError, match="harvest_source_checkpoint"):
-        cfg.make()
+    _rejects(
+        cfg,
+        "harvest_source_checkpoint must name a frozen generator checkpoint (train "
+        "the recipe generator first).",
+    )
     cfg.harvest_source_checkpoint = "/runs/source/step.pt"
     cfg.verifier_names = ("a", "b")
-    with pytest.raises(ValueError, match="three verifier"):
-        cfg.make()
+    _rejects(cfg, "the committee is exactly the three verifier seed recipes.")
     cfg.verifier_names = ("a", "b", "c")
-    with pytest.raises(ValueError, match="SieveEval"):
-        cfg.make()
+    _rejects(
+        cfg,
+        "committee screens share the sieve's search policy and acceptor; "
+        "full_eval must be a SieveEval config.",
+    )
+
+
+@pytest.mark.parametrize("emulate", [True, False])
+def test_reproduction_accepts_a_one_step_cadence_and_sets_the_cast_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    emulate: bool,
+) -> None:
+    """The smallest legal cadence builds; Inductor's flag follows the recipe step."""
+    monkeypatch.setattr(inductor_config, "emulate_precision_casts", not emulate)
+    cfg = _reproduction_config(tmp_path)
+    cfg.eval_every_steps = 1
+    cfg.generator.step.emulate_precision_casts = emulate
+    assert cfg.make().config.eval_every_steps == 1
+    assert inductor_config.emulate_precision_casts is emulate
 
 
 def test_reproduction_restores_stage_seconds_from_progress(tmp_path: Path) -> None:
@@ -256,6 +306,15 @@ def test_reproduction_restores_stage_seconds_from_progress(tmp_path: Path) -> No
     )
     assert recorded == 4.0
     assert repro._load_stage_seconds() == {"train_to_4": 4.0}
+    # A stage re-run to completion overwrites the restored duration.
+    rerun = repro._record_stage_seconds(
+        "train_to_4",
+        6.0,
+        completed=True,
+        stage_seconds={"train_to_4": 4.0},
+    )
+    assert rerun == 6.0
+    assert repro._load_stage_seconds() == {"train_to_4": 6.0}
     progress = repro._progress_path()
     for payload in (
         "[]",
@@ -346,6 +405,157 @@ def test_outer_run_clamps_steps_and_forwards_segments(tmp_path: Path) -> None:
     disabled.close()
 
 
+def test_staged_run_gates_screens_and_latches_full_evals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The gate opens at 4, whose perfect screen latches full evals at 4 and 6."""
+    cfg = _reproduction_config(tmp_path)
+    cfg.generator.max_steps = 6
+    cfg.eval_every_steps = 2
+    cfg.dev_screen_count = 2
+    cfg.full_eval.evaluation_count = 2
+    repro = cfg.make()
+    calls: list[tuple[str, int]] = []
+
+    def train_segment(boundary: int) -> tuple[float, bool]:
+        calls.append(("train", boundary))
+        return 1.0, True
+
+    def det_gate(step: int) -> tuple[int, int, float]:
+        calls.append(("gate", step))
+        return (0 if step == 2 else 2), 2, 1.0
+
+    def dev_screen(step: int) -> tuple[int, int, None, float]:
+        calls.append(("screen", step))
+        return 2, 2, None, 1.0
+
+    def full_eval(step: int) -> tuple[dict[str, object], float]:
+        calls.append(("full", step))
+        return {"eval/n_correct": 1 if step == 4 else 2}, 1.0
+
+    monkeypatch.setattr(repro, "_train_segment", train_segment)
+    monkeypatch.setattr(repro, "_det_gate", det_gate)
+    monkeypatch.setattr(repro, "_dev_screen", dev_screen)
+    monkeypatch.setattr(repro, "_full_eval", full_eval)
+    with caplog.at_level(logging.INFO):
+        repro.run("--extra")
+    assert "--extra" in caplog.text
+    assert calls == [
+        ("train", 2),
+        ("gate", 2),
+        ("train", 4),
+        ("gate", 4),
+        ("screen", 4),
+        ("full", 4),
+        ("train", 6),
+        ("screen", 6),
+        ("full", 6),
+    ]
+    results = json_loads(repro._metrics_path().read_text(), dict[str, object])
+    assert results["eval/first_dev_perfect_step"] == 4
+    assert results["eval/first_fullset_perfect_step"] == 6
+    assert results["eval/total_seconds"] == 3 + 2 + 2 + 2
+
+
+def test_checkpoint_logical_needs_a_generator_root(tmp_path: Path) -> None:
+    cfg = _reproduction_config(tmp_path)
+    cfg.base_dir = None
+    cfg.generator.base_dir = None
+    repro = cfg.make()
+    with pytest.raises(ValueError, match="Expected base is not None"):
+        repro._checkpoint_logical(2)
+
+
+class _AcceptAll:
+    """A committee lock that accepts every grid."""
+
+    class Config(Fig["_AcceptAll"]):
+        """No settings."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def __call__(self, preds: Tensor, media: Tensor) -> Tensor:
+        del media
+        return torch.ones(preds.shape[0], dtype=torch.bool)
+
+
+def _committee_config(tmp_path: Path) -> Reproduction.Config:
+    cfg = _reproduction_config(tmp_path)
+    cfg.screen = "committee"
+    cfg.harvest_source_checkpoint = "/runs/source/step.pt"
+    cfg.verifier_names = ("a", "b", "c")
+    cfg.full_eval = SieveEval.Config()
+    return cfg
+
+
+def test_screen_acceptor_repoints_only_a_verifier_committee(tmp_path: Path) -> None:
+    """The default committee lock is re-pointed and keeps the finalized placement."""
+    repro = _committee_config(tmp_path).make()
+    acceptor = repro._screen_acceptor_config()
+    assert isinstance(acceptor, VerifierAcceptor.Config)
+    assert acceptor.checkpoint_paths == repro._verifier_checkpoints()
+    # Reproduction.finalize -> SieveEval.finalize fill both before any build.
+    assert (acceptor.device, acceptor.base_dir) == ("cpu", tmp_path)
+    cfg = _committee_config(tmp_path)
+    sieve = cast("SieveEval.Config", cfg.full_eval)
+    sieve.acceptor = _AcceptAll.Config()
+    custom = cfg.make()
+    assert isinstance(custom.config.full_eval, SieveEval.Config)
+    assert custom._screen_acceptor_config() is custom.config.full_eval.acceptor
+
+
+def test_screen_pass_rejects_a_split_of_only_padding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset = PuzzleDataset.Config(
+        working_dir=write_dataset(tmp_path / "data"),
+        batch_size=2,
+        device="cpu",
+    ).make()
+    padded = [{**batch, "valid_count": 0} for batch in dataset.eval_dataloader()]
+    monkeypatch.setattr(dataset, "eval_dataloader", lambda: padded)
+
+    def run_search(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("an all-padding batch must not search")
+
+    monkeypatch.setattr(
+        "priml.baselines.sudoku.reproduction.run_search",
+        run_search,
+    )
+    with pytest.raises(ValueError, match="dev screen found no valid eval rows"):
+        _screen_pass(
+            model=cast("latent_recursion.LatentRecursion", object()),
+            dataset=dataset,
+            search=HpsSearch.Config(),
+            device=torch.device("cpu"),
+        )
+
+
+def test_outer_run_opens_one_resumable_wandb_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run id is a stable hash of project and name, so a rerun resumes it."""
+    opened: list[WandbTracker.Config] = []
+
+    def init(tracker: WandbTracker, config: WandbTracker.Config) -> None:
+        del tracker
+        opened.append(config)
+
+    monkeypatch.setattr(WandbTracker, "__init__", init)
+    _outer_run("proj", name="exp", notes="why")
+    _outer_run("proj", name="exp", notes="why")
+    _outer_run("proj", name="other", notes="")
+    first, again, other = opened
+    assert (first.project, first.name, first.notes) == ("proj", "exp", "why")
+    assert len(first.run_id) == 16
+    assert first.run_id == again.run_id != other.run_id
+
+
 def test_run_training_skips_or_refuses_existing_segment_checkpoints(
     tmp_path: Path,
 ) -> None:
@@ -383,6 +593,6 @@ def test_golden_replays_bit_for_bit(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

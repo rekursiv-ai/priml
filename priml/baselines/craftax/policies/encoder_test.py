@@ -372,6 +372,6 @@ def _layers(module: nn.Module) -> list[nn.Linear | nn.Conv2d]:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

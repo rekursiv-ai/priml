@@ -297,6 +297,21 @@ def test_forward_with_q_lora():
     assert m.proj_q_b is not None
 
 
+@pytest.mark.parametrize(
+    ("child", "message"),
+    [
+        ("proj_q_a", r"^proj_q is None only on the LoRA path\.$"),
+        ("q_a_layernorm", r"^LoRA path builds q_a_layernorm\.$"),
+        ("proj_q_b", r"^LoRA path builds proj_q_b\.$"),
+    ],
+)
+def test_lora_q_path_refuses_a_missing_child(child: str, message: str) -> None:
+    module = _tiny(q_lora_rank=64)
+    setattr(module, child, None)
+    with pytest.raises(ValueError, match=message):
+        module(torch.randn(2, 3, 128))
+
+
 def test_explicit_zero_softmax_scale_is_honored() -> None:
     """``0.0`` is a value, not an absence.
 
@@ -1134,6 +1149,6 @@ def _mla_config() -> tuple[MultiHeadLatentAttention.Config, LatentAttention.Conf
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

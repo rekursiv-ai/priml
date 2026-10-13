@@ -777,11 +777,11 @@ class MultiHeadLatentAttention(nn.Module):
             q = self.proj_q(x)
         else:
             if self.proj_q_a is None:
-                raise ValueError("Expected self.proj_q_a is not None.")
+                raise ValueError("proj_q is None only on the LoRA path.")
             if self.q_a_layernorm is None:
-                raise ValueError("Expected self.q_a_layernorm is not None.")
+                raise ValueError("LoRA path builds q_a_layernorm.")
             if self.proj_q_b is None:
-                raise ValueError("Expected self.proj_q_b is not None.")
+                raise ValueError("LoRA path builds proj_q_b.")
             q = self.proj_q_b(self.q_a_layernorm(self.proj_q_a(x)))
         return q.view(*q.shape[:-1], self._heads_local, self.channels_qk_head)
 

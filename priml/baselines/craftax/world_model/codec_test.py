@@ -1,8 +1,9 @@
 """Check the observation codec against the game's float32 formulas and its frames."""
 
 from collections.abc import Callable
-from typing import override
+from typing import cast, override
 
+import dataclasses
 import functools
 import math
 import struct
@@ -15,6 +16,7 @@ import torch
 
 from priml.baselines.craftax.eager import eager, tiny_world
 from priml.baselines.craftax.world_model.codec import (
+    _tables,
     decode,
     encode,
     tokens_and_flags,
@@ -342,6 +344,26 @@ def test_decode_marks_out_of_field_values_as_nan() -> None:
     assert nan_at == [3 * 8, 792 + 22, 792 + 23, 792 + 28, 792 + 43]
 
 
+def test_tables_off_the_cpu_are_the_cpus_moved_float64_included() -> None:
+    # ``meta`` stands in for an accelerator: any device but the CPU and MPS
+    # takes every CPU table, the float64 ones too.
+    meta = torch.device("meta")
+    cpu, moved = _tables(torch.device("cpu")), _tables(meta)
+    assert moved.obs_names is cpu.obs_names
+    for field in dataclasses.fields(moved):
+        if field.name != "obs_names":
+            table = cast("torch.Tensor", getattr(moved, field.name))
+            want = cast("torch.Tensor", getattr(cpu, field.name))
+            assert (table.device, table.dtype, table.shape) == (
+                meta,
+                want.dtype,
+                want.shape,
+            ), field.name
+    _, cells, aux = _synthetic_frames()
+    decoded = decode(cells[:2].to(meta), aux[:2].to(meta))
+    assert (decoded.device, decoded.shape) == (meta, (2, 843))
+
+
 @pytest.mark.gpu_torch_mps
 def test_decode_on_mps_equals_the_cpus() -> None:
     if not torch.backends.mps.is_available():
@@ -486,6 +508,6 @@ class _SyncRecorder(TorchDispatchMode):
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

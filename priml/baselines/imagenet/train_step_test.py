@@ -153,6 +153,28 @@ def test_tta_sums_the_image_and_its_mirror() -> None:
     assert torch.allclose(out, plain + mirrored)
 
 
+def test_eval_loss_scores_the_tta_logits_per_example() -> None:
+    step = tiny_step().make()
+    batch = tiny_batch()
+    out = step.eval_loss(**batch)
+    logits = step.call_eval(image=batch["image"])
+    assert isinstance(logits, Tensor)
+    assert torch.equal(out["model"], logits)
+    expected = nn.functional.cross_entropy(
+        logits,
+        batch["label"],
+        label_smoothing=0.1,
+        reduction="none",
+    )
+    assert torch.equal(out["loss"], expected)
+
+
+def test_call_eval_rejects_positional_arguments() -> None:
+    step = tiny_step().make()
+    with pytest.raises(ValueError, match="Expected not args"):
+        step.call_eval(tiny_batch()["image"])
+
+
 def test_preprocess_drops_the_frame_axis_and_goes_channels_last() -> None:
     step = tiny_step().make()
     batch: dict[str, object] = {
@@ -269,6 +291,6 @@ def test_blurpool_is_on_by_default() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

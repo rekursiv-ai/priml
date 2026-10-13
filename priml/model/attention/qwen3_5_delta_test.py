@@ -486,6 +486,6 @@ def test_qwen_delta_cost_does_not_repeat_the_norm_owned_output_gate() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

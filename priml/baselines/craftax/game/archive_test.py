@@ -338,6 +338,6 @@ def test_restore_rows_restores_the_first_rows_from_drawn_entries() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

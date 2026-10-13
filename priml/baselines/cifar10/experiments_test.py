@@ -367,6 +367,6 @@ def test_exp000_matches_its_golden_config() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -87,6 +87,6 @@ def test_cardinality_term_needs_a_consistent_sudoku_spec() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

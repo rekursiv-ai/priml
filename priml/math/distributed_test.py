@@ -267,6 +267,6 @@ def test_log_reductions_reduce_every_axis_for_none() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

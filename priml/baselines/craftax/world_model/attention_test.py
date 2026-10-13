@@ -1,5 +1,6 @@
 """Check the world model's varlen self-attention and its max logit."""
 
+import pytest
 import torch
 
 from priml.baselines.craftax.world_model.attention import (
@@ -72,6 +73,24 @@ def test_varlen_attention_costs_what_causal_attention_costs() -> None:
     assert costs[0] == costs[1]
 
 
+def test_varlen_attention_cost_refuses_a_memory() -> None:
+    config = VarlenAttention.Config(channels_in=8, num_heads=2).finalize()
+    with pytest.raises(ValueError, match="attends to no memory"):
+        config.cost(seq_len=3, batch_size=2, dtype=torch.float32, memory_len=0)
+
+
+@pytest.mark.parametrize(("causal", "dropout"), [(False, 0.0), (True, 0.25)])
+def test_varlen_attention_refuses_bidirectional_or_dropout(
+    causal: bool,
+    dropout: float,
+) -> None:
+    config = VarlenAttention.Config(channels_in=8, num_heads=2)
+    config.causal = causal
+    config.dropout = dropout
+    with pytest.raises(ValueError, match="causal and has no dropout"):
+        config.make()
+
+
 def test_varlen_attention_shares_attention_parameter_names() -> None:
     varlen = VarlenAttention.Config(channels_in=8, num_heads=2).make()
     reference = Attention.Config(channels_in=8, num_heads=2).make()
@@ -106,6 +125,6 @@ def test_varlen_attention_is_attention_with_its_options() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

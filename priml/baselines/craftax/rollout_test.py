@@ -17,31 +17,40 @@ seed: the torch sampler on any CPU, the kernel on the GPU.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
     Final,
+    Protocol,
     cast,
     override,
 )
 
+import contextlib
 import copy
 import ctypes
 import functools
+import inspect
+import threading
 
 from configgle import Fig
 from torch import Tensor, nn
+from triton.runtime import interpreter, jit
 
 import numpy as np
 import pytest
 import torch
+import triton
 
+from priml.baselines.craftax import rollout as rollout_module
 from priml.baselines.craftax.game.state import OBS_SIZE
+from priml.baselines.craftax.lib import compat
 from priml.baselines.craftax.lib.arrays import ints
 from priml.baselines.craftax.lib.compat import ExactPhiloxSampler
 from priml.baselines.craftax.model import MinGRUPolicy
 from priml.baselines.craftax.policies.actor_critic import ActorCritic
 from priml.baselines.craftax.rollout import (
+    CarrySaves,
     PhiloxSampler,
     Rollout,
     RolloutStorage,
@@ -49,9 +58,18 @@ from priml.baselines.craftax.rollout import (
     Sampler,
     StepGraph,
     TorchPhiloxSampler,
+    _accumulate_exp_triton,
+    _emit_triton,
+    _graph_launcher,
+    _ingest_triton,
+    _kernels,
     _philox,
+    _philox_triton,
+    _sample_kernel,
+    _sample_triton,
     philox_uniform,
     philox_uniforms,
+    rollout_stream,
 )
 from priml.baselines.craftax.testing import (
     FakeEnv,
@@ -86,6 +104,7 @@ from priml.baselines.craftax.world_model.scripts.feature_gates import (
     reference_features,
 )
 from priml.baselines.craftax.world_model.testing import random_segment
+from priml.loss import policy_gradient_kernel
 from priml.loss.policy_gradient import TorchPPO
 from priml.model.linear import Linear
 from priml.testing.bfb import host_agnostic_numerics
@@ -94,8 +113,15 @@ from priml.testing.bfb import host_agnostic_numerics
 if TYPE_CHECKING:
     from collections.abc import (
         Callable,
+        Generator,
+        Iterator,
         Mapping,
+        Sequence,
     )
+    from types import FunctionType
+    from typing_extensions import TypeIs
+
+    from numpy.typing import NDArray
 
     from priml.baselines.craftax.rollout import FeatureStep
     from priml.baselines.craftax.world_model.feature import (
@@ -369,6 +395,315 @@ def test_a_rollout_refuses_an_empty_geometry(num_slots: int, horizon: int) -> No
             env=FakeEnv.make(num_envs=4, num_buffers=2, seed=0),
             device=torch.device("cpu"),
         )
+
+
+def test_an_eager_step_graph_has_no_graph_to_launch() -> None:
+    rollout, _, _ = _rollout(horizon=2)
+    try:
+        with pytest.raises(ValueError, match="nothing to launch"):
+            rollout.graphs[0][0].launch_handles()
+    finally:
+        rollout.close()
+
+
+def test_a_featured_step_refuses_storage_without_a_feature_store() -> None:
+    rollout, env, policy = _rollout(horizon=2)
+    try:
+        graph = StepGraph(
+            policy=policy,
+            sampler=TorchPhiloxSampler.Config().make(),
+            env=env,
+            storage=rollout.slots[0],
+            buffer=0,
+            stream=None,
+            feature=_CountingStep(rows=4, device=torch.device("cpu")),
+        )
+        with pytest.raises(ValueError, match=r"storage\.features is not None"):
+            graph.replay()
+    finally:
+        rollout.close()
+
+
+def test_a_saving_step_with_histories_refuses_to_run_without_a_feature() -> None:
+    rollout, env, policy = _rollout(horizon=2)
+    storage = rollout.slots[0]
+    try:
+        graph = StepGraph(
+            policy=policy,
+            sampler=TorchPhiloxSampler.Config().make(),
+            env=env,
+            storage=storage,
+            buffer=0,
+            stream=None,
+            saving=CarrySaves(
+                carries=storage.initial_states.new_zeros(4, 2, 8),
+                slots=torch.full((2,), -1, dtype=torch.int32),
+                rows=slice(0, 2),
+                dumps=torch.arange(2, 4),
+                histories={},
+            ),
+        )
+        with pytest.raises(ValueError, match=r"self\.feature is not None"):
+            graph.replay()
+    finally:
+        rollout.close()
+
+
+def test_the_step_kernels_jit_their_bodies_once() -> None:
+    kernels = _kernels()
+    assert _kernels() is kernels
+    assert kernels.ingest.fn.__code__ is _ingest_triton.__code__
+    assert kernels.emit.fn.__code__ is _emit_triton.__code__
+
+
+@pytest.mark.parametrize(
+    ("sampler", "add_log", "accumulate"),
+    [
+        (
+            PhiloxSampler,
+            policy_gradient_kernel.add_log_triton,
+            _accumulate_exp_triton,
+        ),
+        (ExactPhiloxSampler, compat.add_log_fma_triton, compat.accumulate_expf_triton),
+    ],
+)
+def test_the_sampler_kernel_binds_its_classs_helpers_by_name(
+    sampler: type[PhiloxSampler],
+    add_log: FunctionType,
+    accumulate: FunctionType,
+) -> None:
+    kernel = _sample_kernel(**sampler.helpers)
+    assert kernel.fn.__code__ is _sample_triton.__code__
+    logsumexp = _bound(kernel, "masked_logsumexp_triton")
+    assert _bound(logsumexp, "add_log_triton").fn.__code__ is add_log.__code__
+    assert _bound(kernel, "_accumulate_exp_triton").fn.__code__ is accumulate.__code__
+    uniform = _bound(kernel, "_uniform_triton")
+    assert _bound(uniform, "_philox_triton").fn.__code__ is _philox_triton.__code__
+
+
+def _bound(
+    kernel: jit.JITFunction[..., object],
+    name: str,
+) -> jit.JITFunction[..., object]:
+    """Return the jitted helper ``kernel`` binds under ``name``."""
+    return _jit_global(kernel.fn.__globals__, name)
+
+
+def _jit_global(scope: Mapping[str, object], name: str) -> jit.JITFunction[..., object]:
+    helper = scope[name]
+    assert _is_jit(helper)
+    return helper
+
+
+@pytest.mark.usefixtures("interpreted_kernels")
+def test_the_interpreted_sampler_draws_as_the_torch_sampler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The kernel's streams, masked CDF and snap to the last legal action.
+
+    Agent 0's last action is masked, so a fall-through snaps; 5 agents leave
+    a block of 8 three dead lanes.
+    """
+    monkeypatch.setattr(rollout_module, "_require_cuda", _accept_any_device)
+    decoded, mask, draws = _portable_draw_inputs(5)
+    config = PhiloxSampler.Config()
+    config.block = 8
+    config.num_warps = 1
+    kernel_draws, torch_draws = draws.clone(), draws.clone()
+    for _ in range(2):
+        # The logsumexp's ``where`` evaluates the rescale it discards, whose
+        # ``exp`` overflows to inf on a GPU too; numpy would otherwise raise.
+        with np.errstate(over="ignore"):
+            kernel = config.make()(
+                decoded,
+                mask,
+                kernel_draws,
+                buffer=3,
+                dtype=torch.float32,
+            )
+        reference = TorchPhiloxSampler.Config().make()(
+            decoded,
+            mask,
+            torch_draws,
+            buffer=3,
+            dtype=torch.float32,
+        )
+        assert torch.equal(kernel.actions, reference.actions)
+        assert torch.equal(kernel.values, reference.values)
+        assert torch.equal(kernel_draws, torch_draws)
+        # The one-pass logsumexp and torch's differ in their last bits, as the
+        # class docstrings say; fp32's default tolerance is a few ulp.
+        torch.testing.assert_close(kernel.logprobs, reference.logprobs)
+
+
+@pytest.mark.usefixtures("interpreted_kernels")
+def test_the_interpreted_ingest_and_emit_store_as_the_torch_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fused step's kernels store, reset and snapshot as the torch step does.
+
+    In fp32: the interpreter's bf16 store truncates where a GPU's rounds.
+    """
+    launched: list[str] = []
+    for name in ("_ingest_triton", "_emit_triton"):
+        monkeypatch.setattr(
+            StepGraph,
+            name,
+            functools.partialmethod(
+                _recorded,
+                launched=launched,
+                name=name,
+                method=getattr(StepGraph, name),
+            ),
+        )
+    rows: list[list[Tensor]] = []
+    for kernels in (False, True):
+        rollout, env = _fp32_rollout()
+        try:
+            graph = rollout.graphs[0][1]
+            assert not graph.fused
+            graph.state.copy_(torch.randn_like(graph.state))
+            env.terminals[graph.rows] = torch.tensor([1.0, 0.0, 0.0, 1.0])
+            graph.fused = kernels
+            for _ in range(2):
+                graph.replay()
+            assert launched == ["_ingest_triton", "_emit_triton"] * 2 * kernels
+            storage = rollout.slots[0]
+            rows.append(
+                [
+                    graph.state,
+                    graph.observations,
+                    graph.mask,
+                    *(
+                        cast("Tensor", getattr(storage, name))
+                        for name in (
+                            "observations",
+                            "action_mask",
+                            "rewards",
+                            "terminals",
+                            "initial_states",
+                            "actions",
+                            "logprobs",
+                            "values",
+                        )
+                    ),
+                ],
+            )
+        finally:
+            rollout.close()
+    torch_rows, kernel_rows = rows
+    assert bool(torch_rows[3][:2].any())
+    for index, (want, got) in enumerate(zip(torch_rows, kernel_rows, strict=True)):
+        assert torch.equal(got, want), index
+
+
+def _fp32_rollout() -> tuple[Rollout, FakeEnv]:
+    """Return :func:`_rollout`'s geometry with an fp32 policy and carry: stores are exact."""
+    config = tiny_policy(dtype=torch.float32)
+    torch.manual_seed(6)
+    env = FakeEnv.make(num_envs=8, num_buffers=2, seed=6)
+    rollout_config = Rollout.Config()
+    rollout_config.horizon = 3
+    rollout = Rollout(
+        rollout_config,
+        policy=config.make(),
+        sampler=TorchPhiloxSampler.Config().make(),
+        env=env,
+        device=torch.device("cpu"),
+    )
+    return rollout, env
+
+
+def _recorded(
+    graph: StepGraph,
+    *args: Sampled,
+    launched: list[str],
+    name: str,
+    method: Callable[[StepGraph, Sampled], None] | Callable[[StepGraph], None],
+) -> None:
+    """Record a kernel launch by name, then make it."""
+    launched.append(name)
+    method(graph, *args)
+
+
+def _accept_any_device(decoded: Tensor) -> None:
+    del decoded
+
+
+@pytest.fixture
+def interpreted_kernels(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Run the module's Triton kernels through Triton's CPU interpreter, uncached."""
+    monkeypatch.setenv("TRITON_INTERPRET", "1")
+    monkeypatch.setattr(
+        jit,
+        "_normalize_ty",
+        functools.partial(_normalize_bare_constexpr, normalize=jit._normalize_ty),
+    )
+    monkeypatch.setattr(
+        interpreter,
+        "_patch_lang_tensor",
+        functools.partial(_patch_scalar_index, patch=interpreter._patch_lang_tensor),
+    )
+    # Triton jitted its library functions at import, compiled-mode, which the
+    # interpreter refuses to call.
+    for module in (triton.language, triton.language.standard):
+        for name, value in inspect.getmembers(module, _is_jit):
+            monkeypatch.setattr(
+                module,
+                name,
+                interpreter.InterpretedFunction(value.fn),
+            )
+    _kernels.cache_clear()
+    _sample_kernel.cache_clear()
+    try:
+        yield
+    finally:
+        _kernels.cache_clear()
+        _sample_kernel.cache_clear()
+
+
+# The interpreter matches a constexpr only by its bare name; the module's postponed
+# annotations spell it ``language.constexpr``.
+def _normalize_bare_constexpr(
+    ty: object,
+    *,
+    normalize: Callable[[object], str],
+) -> str:
+    return normalize(
+        ty.strip("'").removeprefix("language.") if isinstance(ty, str) else ty,
+    )
+
+
+# The interpreter holds a scalar as a one-element array, which numpy 2.5 no longer
+# converts with ``int``; a runtime loop bound needs it.
+def _patch_scalar_index(
+    tensor: type,
+    scope: _PatchScope,
+    *,
+    patch: Callable[[type, _PatchScope], None],
+) -> None:
+    patch(tensor, scope)
+    scope.set_attr(tensor, "__index__", _scalar_index)
+
+
+def _scalar_index(tensor: _InterpretedTensor) -> int:
+    return int(tensor.handle.data.item())
+
+
+def _is_jit(value: object) -> TypeIs[jit.JITFunction[..., object]]:
+    return isinstance(value, jit.JITFunction)
+
+
+class _PatchScope(Protocol):
+    def set_attr(self, obj: object, name: str, value: object) -> None: ...
+
+
+class _InterpretedHandle(Protocol):
+    data: NDArray[np.integer]
+
+
+class _InterpretedTensor(Protocol):
+    handle: _InterpretedHandle
 
 
 def test_a_one_step_rollout_is_accepted() -> None:
@@ -882,6 +1217,27 @@ def test_a_restored_row_starts_from_its_donors_saved_carry(num_slots: int) -> No
     _assert_restored_rows_start_from_their_donors_carries("cpu", num_slots)
 
 
+def test_a_resume_restores_the_carry_archive_in_place() -> None:
+    source, _ = _practising("cpu")
+    target, _ = _practising("cpu")
+    try:
+        source.collect(0)
+        state = source.state_dict(slot=0)
+        assert source.archive is not None
+        assert target.archive is not None
+        assert bool(source.archive.any())
+        archive = target.archive
+        target.load_state_dict(
+            {name: value.clone() for name, value in state.items()},
+            slot=0,
+        )
+        assert target.archive is archive
+        assert torch.equal(archive, source.archive)
+    finally:
+        source.close()
+        target.close()
+
+
 def test_an_env_with_no_carry_slots_gets_no_carry_archive() -> None:
     """As ``CraftaxEnv`` without practice: the slots exist, and no carry is kept."""
     rollout, _ = _practising("cpu", carry_slots=0)
@@ -956,6 +1312,611 @@ def test_practice_adds_its_upload_and_its_save_to_the_saving_buffers_graph_alone
     assert kinds[2][memcpy] == kinds[0][memcpy] + 1
     assert kinds[2][kernel] > kinds[0][kernel]
     assert set(kinds[2]) == set(kinds[0])
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Event:
+    """One faked CUDA call: what it was, the stream it ran on, its particulars."""
+
+    kind: str
+    stream: str
+    graph: int = -1
+    """The replayed or captured graph's index."""
+
+    other: str = ""
+    """What else the call names: the stream a wait waits on, a capture's mode."""
+
+    pool: object = None
+    """A capture's pool."""
+
+    buffer: int = -1
+    """An eager step's buffer."""
+
+
+class _FakeStream:
+    """A CUDA stream on the CPU: it records the waits and syncs made on it."""
+
+    def __init__(self, cuda: _FakeCuda, name: str, priority: int) -> None:
+        self.cuda = cuda
+        self.name = name
+        self.priority = priority
+        self.device = torch.device("cpu")
+        self.cuda_stream = 0x5000 + len(cuda.streams)
+        cuda.streams.append(self)
+
+    def wait_stream(self, other: _FakeStream) -> None:
+        self.cuda.log.append(_Event(kind="wait", stream=self.name, other=other.name))
+
+    def synchronize(self) -> None:
+        self.cuda.log.append(_Event(kind="sync", stream=self.name))
+
+    def priority_range(self) -> tuple[int, int]:
+        return (0, -5)
+
+
+class _FakeGraph:
+    """A captured graph whose replay runs the step its capture recorded."""
+
+    def __init__(self, cuda: _FakeCuda) -> None:
+        self.cuda = cuda
+        self.index = len(cuda.graphs)
+        self.captured: Callable[[], None] | None = None
+        cuda.graphs.append(self)
+
+    def pool(self) -> tuple[str, int]:
+        return ("pool", self.index)
+
+    def replay(self) -> None:
+        stream = self.cuda.current_stream().name
+        self.cuda.log.append(_Event(kind="replay", stream=stream, graph=self.index))
+        assert self.captured is not None
+        self.captured()
+
+    def raw_cuda_graph_exec(self) -> int:
+        return 0x9000 + self.index
+
+
+@dataclass(slots=True, kw_only=True)
+class _FakeCapture:
+    """``torch.cuda.graph``: the enclosed step is recorded into the graph, not run."""
+
+    cuda: _FakeCuda
+    graph: _FakeGraph
+    pool: object
+    stream: _FakeStream
+    mode: str
+
+    def __enter__(self) -> None:
+        self.cuda.log.append(
+            _Event(
+                kind="capture",
+                stream=self.stream.name,
+                graph=self.graph.index,
+                other=self.mode,
+                pool=self.pool,
+            ),
+        )
+        self.cuda.local.capturing = self.graph
+
+    def __exit__(self, *args: object) -> None:
+        self.cuda.local.capturing = None
+
+
+class _ThreadState(threading.local):
+    """Each buffer's worker thread has its own current stream and capture."""
+
+    current: _FakeStream | None = None
+    capturing: _FakeGraph | None = None
+
+
+class _FakeCuda:
+    """Recording stand-ins for the ``torch.cuda`` calls the rollout makes."""
+
+    def __init__(self) -> None:
+        self.log: list[_Event] = []
+        self.streams: list[_FakeStream] = []
+        self.graphs: list[_FakeGraph] = []
+        self.local = _ThreadState()
+        self.devices: list[object] = []
+        self.default = _FakeStream(self, "default", 0)
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Patch the ``torch.cuda`` calls the rollout makes."""
+        monkeypatch.setattr(torch.cuda, "Stream", self.stream_factory)
+        monkeypatch.setattr(torch.cuda, "stream", self.enter)
+        monkeypatch.setattr(torch.cuda, "current_stream", self.current_stream)
+        monkeypatch.setattr(torch.cuda, "CUDAGraph", self.graph_factory)
+        monkeypatch.setattr(torch.cuda, "graph", self.capture)
+
+    def attach(self, rollout: Rollout, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        """Give each buffer a stream, as a CUDA rollout has; return their names.
+
+        Every slot's graph of a buffer shares its stream, and a capture of its
+        step records the step into the graph.
+        """
+        streams = [
+            self.stream_factory(priority=-5) for _ in range(rollout.env.num_buffers)
+        ]
+        monkeypatch.setattr(rollout, "streams", streams)
+        for graphs in rollout.graphs:
+            for graph, stream in zip(graphs, streams, strict=True):
+                monkeypatch.setattr(graph, "stream", stream)
+                monkeypatch.setattr(
+                    graph,
+                    "_step",
+                    functools.partial(self.step, graph, step=graph._step),
+                )
+        return [stream.name for stream in streams]
+
+    def step(self, graph: StepGraph, *, step: Callable[[], None]) -> None:
+        """Run ``_step``, or record it into the graph being captured, as CUDA does."""
+        capturing = self.local.capturing
+        if capturing is None:
+            stream = self.current_stream().name
+            self.log.append(_Event(kind="eager", stream=stream, buffer=graph.buffer))
+            step()
+            return
+        capturing.captured = step
+
+    def stream_factory(self, device: object = None, priority: int = 0) -> _FakeStream:
+        self.devices.append(device)
+        return _FakeStream(self, f"s{len(self.streams)}", priority)
+
+    def graph_factory(self) -> _FakeGraph:
+        return _FakeGraph(self)
+
+    def capture(
+        self,
+        graph: _FakeGraph,
+        *,
+        pool: object,
+        stream: _FakeStream,
+        capture_error_mode: str,
+    ) -> _FakeCapture:
+        return _FakeCapture(
+            cuda=self,
+            graph=graph,
+            pool=pool,
+            stream=stream,
+            mode=capture_error_mode,
+        )
+
+    @contextlib.contextmanager
+    def enter(self, stream: _FakeStream) -> Generator[None]:
+        previous, self.local.current = self.local.current, stream
+        try:
+            yield
+        finally:
+            self.local.current = previous
+
+    def current_stream(self, device: object = None) -> _FakeStream:
+        del device
+        return self.local.current or self.default
+
+    def on(self, stream: str) -> list[str]:
+        """Return the kinds of the calls made on ``stream``, in order."""
+        return [event.kind for event in self.log if event.stream == stream]
+
+    def of(self, kind: str) -> list[_Event]:
+        return [event for event in self.log if event.kind == kind]
+
+
+# Per (slot, buffer) and rollout, on the buffer's stream: the capture's two eager
+# warmups, a sync, the capture and a sync, then each of the 3 steps replays and is
+# waited on before the env steps.
+_CAPTURED_ROLLOUT: Final = [
+    "eager",
+    "eager",
+    "sync",
+    "capture",
+    "sync",
+    *["replay", "sync"] * 3,
+]
+
+
+def _streamed(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    bootstrap: bool = False,
+) -> tuple[Rollout, FakeEnv, _FakeCuda, list[str]]:
+    """Return :func:`_twin`'s rollout on faked streams and graphs, and their names."""
+    cuda = _FakeCuda()
+    cuda.install(monkeypatch)
+    rollout, env = _twin(bootstrap=bootstrap)
+    return rollout, env, cuda, cuda.attach(rollout, monkeypatch)
+
+
+# The faked rollout's tensors stay on the CPU, so its graphs replay the very torch ops
+# this one runs eagerly.
+def _twin(
+    *,
+    bootstrap: bool = False,
+    env: FakeEnv | None = None,
+) -> tuple[Rollout, FakeEnv]:
+    """Return an eager rollout of 8 envs in 2 buffers, horizon 3, from seed 4."""
+    torch.manual_seed(4)
+    policy = tiny_policy().make()
+    env = env or FakeEnv.make(num_envs=8, num_buffers=2, seed=4)
+    config = Rollout.Config()
+    config.horizon = 3
+    config.bootstrap = bootstrap
+    config.num_slots = 1 if bootstrap else 2
+    rollout = Rollout(
+        config,
+        policy=policy,
+        sampler=TorchPhiloxSampler.Config().make(),
+        env=env,
+        device=torch.device("cpu"),
+    )
+    return rollout, env
+
+
+def _collected(rollout: Rollout, slots: Sequence[int]) -> list[Tensor]:
+    """Collect each slot; return copies of its tensors, carries and draw counts."""
+    out: list[Tensor] = []
+    for slot in slots:
+        rollout.collect(slot)
+        out += [value.clone() for value in rollout.state_dict(slot=slot).values()]
+    return out
+
+
+def _assert_equal(actual: Sequence[Tensor], expected: Sequence[Tensor]) -> None:
+    assert len(actual) == len(expected)
+    for index, (ours, theirs) in enumerate(zip(actual, expected, strict=True)):
+        assert torch.equal(ours, theirs), index
+
+
+def test_a_captured_rollout_replays_the_eager_rollouts_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Design A: each step replays its buffer's graph on its stream, then waits.
+
+    Both slots, the carries and the draw counts equal an eager twin's, and the
+    env took the same actions: the capture's warmups left no trace.
+    """
+    eager, eager_env = _twin()
+    rollout, env, cuda, names = _streamed(monkeypatch)
+    try:
+        expected = _collected(eager, (0, 1))
+        actual = _collected(rollout, (0, 1))
+    finally:
+        eager.close()
+        rollout.close()
+    _assert_equal(actual, expected)
+    for ours, theirs in zip(env.stepped, eager_env.stepped, strict=True):
+        _assert_equal(ours, theirs)
+    for name in names:
+        assert cuda.on(name) == _CAPTURED_ROLLOUT * 2, name
+    # Thread-local captures into fresh pools; each buffer's warmups are its own.
+    assert {(e.pool, e.other) for e in cuda.of("capture")} == {(None, "thread_local")}
+    assert {(e.stream, e.buffer) for e in cuda.of("eager")} == {
+        (names[0], 0),
+        (names[1], 1),
+    }
+    # Each rollout replays its slot's own graph, captured on the buffer's stream.
+    for name in names:
+        captured = [e.graph for e in cuda.of("capture") if e.stream == name]
+        replayed = [e.graph for e in cuda.of("replay") if e.stream == name]
+        assert replayed == [captured[0]] * 3 + [captured[1]] * 3
+
+
+def test_a_replay_runs_on_its_graphs_stream_from_any_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``CUDAGraph.replay`` launches on the current stream, so the step enters its own.
+
+    The first replay captures from the caller's thread and leaves the env's
+    actions as they were before the capture's warmups, which drew others.
+    """
+    rollout, env, cuda, names = _streamed(monkeypatch)
+    try:
+        graph = rollout.graphs[0][0]
+        played = env.actions.clone()
+        graph.step.fill_(1)
+        graph.replay()
+        replays = cuda.of("replay")
+        restored = env.actions.clone()
+        graph.replay()
+    finally:
+        rollout.close()
+    assert [e.stream for e in replays] == [names[0]]
+    assert cuda.on("default") == []
+    # The capture restored the actions the warmups overwrote; its replay then
+    # drew this step's.
+    sampled = rollout.slots[0].actions[1, graph.rows]
+    assert torch.equal(restored[graph.rows, 0], sampled)
+    assert not torch.equal(played[graph.rows], restored[graph.rows])
+    assert torch.equal(played[4:], restored[4:])
+
+
+def test_a_captured_bootstrap_row_puts_back_the_carry_its_replay_advanced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the horizon each stream replays once more, unstepped, and waits."""
+    eager, _ = _twin(bootstrap=True)
+    rollout, env, cuda, names = _streamed(monkeypatch, bootstrap=True)
+    try:
+        expected = _collected(eager, (0,))
+        actual = _collected(rollout, (0,))
+    finally:
+        eager.close()
+        rollout.close()
+    _assert_equal(actual, expected)
+    assert all(len(rows) == 3 for rows in env.stepped)
+    for name in names:
+        assert cuda.on(name) == [*_CAPTURED_ROLLOUT, "replay", "sync"], name
+
+
+@dataclass(slots=True, kw_only=True)
+class _NogilEnv(FakeEnv):
+    """``FakeEnv`` with design B's loop: ``prepare`` before every step, in one call."""
+
+    launched: list[tuple[object, ...]] = field(default_factory=list)
+
+    def run_buffer(
+        self,
+        buffer: int,
+        steps: int,
+        prepare: Callable[..., int],
+        args: tuple[object, ...],
+    ) -> None:
+        self.launched.append((buffer, steps, *args))
+        for _ in range(steps):
+            assert prepare(*args) == 0
+            self.step_buffer(buffer)
+
+
+class _FakeDriver:
+    """libcuda's two entry points the launcher binds, as ctypes callbacks."""
+
+    def __init__(self, cuda: _FakeCuda) -> None:
+        self.cuda = cuda
+        launch = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_uint64, ctypes.c_uint64)
+        synchronize = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_uint64)
+        self.cuGraphLaunch = launch(self.launch)
+        self.cuStreamSynchronize = synchronize(self.synchronize)
+
+    def launch(self, graph_exec: int, stream: int) -> int:
+        assert self.cuda.current_stream().cuda_stream == stream
+        self.cuda.graphs[graph_exec - 0x9000].replay()
+        return 0
+
+    def synchronize(self, stream: int) -> int:
+        (owner,) = (s for s in self.cuda.streams if s.cuda_stream == stream)
+        owner.synchronize()
+        return 0
+
+
+def test_a_nogil_env_launches_each_captured_step_through_the_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Design B: the env's loop calls the cfunc, which launches the graph and waits.
+
+    The launcher binds ``cuGraphLaunch`` and ``cuStreamSynchronize`` from
+    libcuda into one Numba ``cfunc``, which the env calls with the graph's
+    executable and stream handles.
+    """
+    cuda = _FakeCuda()
+    cuda.install(monkeypatch)
+    loaded: list[str] = []
+    monkeypatch.setattr(
+        ctypes,
+        "CDLL",
+        functools.partial(_load_driver, loaded=loaded, driver=_FakeDriver(cuda)),
+    )
+    _graph_launcher.cache_clear()
+    eager, eager_env = _twin()
+    env = _NogilEnv.make(num_envs=8, num_buffers=2, seed=4)
+    assert isinstance(env, _NogilEnv)
+    rollout, _ = _twin(env=env)
+    names = cuda.attach(rollout, monkeypatch)
+    try:
+        expected = _collected(eager, (0,))
+        actual = _collected(rollout, (0,))
+    finally:
+        eager.close()
+        rollout.close()
+        _graph_launcher.cache_clear()
+    _assert_equal(actual, expected)
+    for ours, theirs in zip(env.stepped, eager_env.stepped, strict=True):
+        _assert_equal(ours, theirs)
+    # Each buffer's thread may miss the launcher's cache before the other fills it.
+    assert set(loaded) == {"libcuda.so.1"}
+    for name in names:
+        assert cuda.on(name) == _CAPTURED_ROLLOUT, name
+    handles = {stream.name: stream.cuda_stream for stream in cuda.streams}
+    captured = {e.stream: e.graph for e in cuda.of("capture")}
+    assert sorted(env.launched, key=_first) == [
+        (buffer, 3, np.uint64(0x9000 + captured[name]), np.uint64(handles[name]))
+        for buffer, name in enumerate(names)
+    ]
+
+
+def _first(launch: tuple[object, ...]) -> str:
+    return str(launch[0])
+
+
+def _load_driver(name: str, *, loaded: list[str], driver: _FakeDriver) -> _FakeDriver:
+    loaded.append(name)
+    return driver
+
+
+def test_a_restore_and_a_save_order_their_work_between_the_buffers_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Practice on streams: the restore waits for every buffer, which then waits on it.
+
+    The saving buffer keeps its last step's saves through the tail on its own
+    stream and waits for it; the archive and the slots are the eager twin's.
+    """
+    cuda = _FakeCuda()
+    cuda.install(monkeypatch)
+    eager, eager_env = _practising("cpu")
+    rollout, env = _practising("cpu")
+    names = cuda.attach(rollout, monkeypatch)
+    try:
+        expected: list[Tensor] = []
+        actual: list[Tensor] = []
+        for slot in (0, 1):
+            for practising in (eager_env, env):
+                practising.restore_slots[:2] = torch.tensor([2, 4], dtype=torch.int32)
+            expected += _collected(eager, (slot,))
+            actual += _collected(rollout, (slot,))
+    finally:
+        eager.close()
+        rollout.close()
+    _assert_equal(actual, expected)
+    # Each collect's restores: the current stream waits on every buffer's, then
+    # each buffer's waits on it.
+    waits = [(e.stream, e.other) for e in cuda.of("wait")]
+    between = [
+        ("default", names[0]),
+        ("default", names[1]),
+        (names[0], "default"),
+        (names[1], "default"),
+    ]
+    assert waits == between * 2
+    # Each buffer's stream waits once for the restore; only the saving buffer (1)
+    # then scatters its tail, and waits for it.
+    assert cuda.on(names[0]) == ["wait", *_CAPTURED_ROLLOUT] * 2
+    assert cuda.on(names[1]) == ["wait", *_CAPTURED_ROLLOUT, "sync"] * 2
+
+
+def test_a_resume_makes_every_buffers_stream_wait_for_the_copies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rollout, _, cuda, names = _streamed(monkeypatch)
+    try:
+        state = {k: v.clone() for k, v in rollout.state_dict(slot=0).items()}
+        rollout.load_state_dict(state, slot=0)
+    finally:
+        rollout.close()
+    assert cuda.log == [
+        _Event(kind="wait", stream=name, other="default") for name in names
+    ]
+
+
+def test_a_new_feature_plan_captures_its_graph_into_the_first_graphs_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A buffer replays one graph at a time, so its plans share one memory pool."""
+    cuda = _FakeCuda()
+    cuda.install(monkeypatch)
+    rollout, _, _ = _featured(horizon=3, hook=3)
+    names = cuda.attach(rollout, monkeypatch)
+    try:
+        rollout.collect(0)
+        for engine in rollout.engines:
+            assert isinstance(engine, _CountingStep)
+            engine.plan = 1
+        rollout.collect(0)
+    finally:
+        rollout.close()
+    for buffer, name in enumerate(names):
+        captures = [e for e in cuda.of("capture") if e.stream == name]
+        first, second = (capture.graph for capture in captures)
+        assert [capture.pool for capture in captures] == [None, ("pool", first)]
+        assert rollout.graphs[0][buffer].graphs == {
+            0: cuda.graphs[first],
+            1: cuda.graphs[second],
+        }
+        replays = [e.graph for e in cuda.of("replay") if e.stream == name]
+        assert replays == [first] * 3 + [second] * 3
+
+
+def test_a_mid_rollout_capture_feeds_the_feature_the_action_each_row_played(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plan captured mid-rollout puts back the actions its warmups drew.
+
+    The env's actions are the previous action the next step's feature reads;
+    a capture that left the warmup's draw there fed every row an action it
+    never played. Each step's feature reads the action the step before stored.
+    """
+    cuda = _FakeCuda()
+    cuda.install(monkeypatch)
+    rollout, env, _ = _featured(horizon=4, hook=2)
+    cuda.attach(rollout, monkeypatch)
+    try:
+        engines = [_counting(engine) for engine in rollout.engines]
+        monkeypatch.setattr(
+            FakeEnv,
+            "step_buffer",
+            functools.partialmethod(
+                _replan,
+                step=FakeEnv.step_buffer,
+                engines=engines,
+                at=2,
+            ),
+        )
+        storage = rollout.collect(0)
+    finally:
+        rollout.close()
+    for buffer, engine in enumerate(engines):
+        rows = env.buffer_slice(buffer)
+        previous = [seen[2] for seen in engine.seen]
+        # Warmups and replays alike record; the replays are the last of each
+        # capture's run: steps 0 and 1 under plan 0, then 2 and 3 under plan 1.
+        replayed = [previous[2], previous[3], previous[6], previous[7]]
+        for time in range(1, 4):
+            assert torch.equal(replayed[time], storage.actions[time - 1, rows]), (
+                buffer,
+                time,
+            )
+
+
+def _counting(engine: FeatureStep) -> _CountingStep:
+    assert isinstance(engine, _CountingStep)
+    return engine
+
+
+def _replan(
+    env: FakeEnv,
+    buffer: int,
+    *,
+    step: Callable[[FakeEnv, int], None],
+    engines: list[_CountingStep],
+    at: int,
+) -> None:
+    """Step the env, then switch the buffer's feature to plan 1 after ``at`` steps."""
+    step(env, buffer)
+    engine = engines[buffer]
+    if len(engine.seen) >= at + 2:
+        engine.plan = 1
+
+
+def test_a_step_graph_on_a_stream_waits_for_its_zeroed_counters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The counter, carry and draws are zeroed on the building thread's stream."""
+    cuda = _FakeCuda()
+    cuda.install(monkeypatch)
+    rollout, env, policy = _rollout(horizon=2)
+    stream = cuda.stream_factory()
+    try:
+        StepGraph(
+            policy=policy,
+            sampler=TorchPhiloxSampler.Config().make(),
+            env=env,
+            storage=rollout.slots[0],
+            buffer=0,
+            stream=cast("torch.cuda.Stream", stream),
+        )
+    finally:
+        rollout.close()
+    assert cuda.log == [_Event(kind="wait", stream=stream.name, other="default")]
+
+
+def test_a_rollout_stream_takes_the_devices_highest_priority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cuda = _FakeCuda()
+    cuda.install(monkeypatch)
+    device = torch.device("cuda", 1)
+    stream = rollout_stream(device)
+    assert isinstance(stream, _FakeStream)
+    assert stream.priority == -5
+    assert cuda.devices == [device]
 
 
 def _graph_node_kinds(graph: int) -> dict[int, int]:
@@ -1098,7 +2059,13 @@ def test_the_config_seeds_and_counts(
 def test_the_kernel_refuses_a_cpu_batch_rather_than_changing_its_bits() -> None:
     philox = PhiloxSampler.Config().make()
     draws = philox.draws(2, device="cpu")
-    with pytest.raises(ValueError, match="TorchPhiloxSampler"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^PhiloxSampler runs on a CUDA device, not cpu; "
+            r"select TorchPhiloxSampler to sample elsewhere$"
+        ),
+    ):
         philox(torch.zeros(2, 44).bfloat16(), torch.ones(2, 43), draws, buffer=0)
     assert not draws.any()
 
@@ -2089,6 +3056,6 @@ def _narrowed(engine: FeatureStep) -> FeatureEngine:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

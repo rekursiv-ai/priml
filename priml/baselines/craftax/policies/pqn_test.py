@@ -695,6 +695,6 @@ def test_the_previous_action_refuses_what_only_a_joint_feature_keeps() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

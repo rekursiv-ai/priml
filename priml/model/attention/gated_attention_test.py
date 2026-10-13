@@ -754,6 +754,6 @@ def test_gated_attention_rejects_each_cache_geometry_mismatch(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

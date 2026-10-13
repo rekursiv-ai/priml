@@ -1183,6 +1183,6 @@ def test_canonical_compute_continues_after_an_input_without_predictions(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

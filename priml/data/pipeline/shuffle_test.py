@@ -94,6 +94,6 @@ def test_shuffle_buffer_without_seed_uses_global_random_state() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

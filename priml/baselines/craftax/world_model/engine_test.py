@@ -4,11 +4,14 @@ The fourth, Gumbel-max frequencies, lives with ``gumbel_max`` in priml's
 ``math/probability_test.py``.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from functools import partial
+from typing import cast
 
+import contextlib
 import dataclasses
 
-from torch import Tensor
+from torch import Tensor, nn
 
 import pytest
 import torch
@@ -154,6 +157,54 @@ def test_global_attention_on_another_kernel_is_refused() -> None:
         Engine(model, rows=1, t_max=8, generator=torch.Generator())
 
 
+def test_a_decoder_stack_with_an_input_projection_is_refused() -> None:
+    model = tiny_model(small_schema())
+    model.decoder.stack.proj_in = nn.Linear(16, 16)
+    with pytest.raises(ValueError, match="without an input projection"):
+        Engine(model, rows=1, t_max=8, generator=torch.Generator())
+
+
+def test_a_post_norm_global_block_is_refused() -> None:
+    model = tiny_model(small_schema())
+    block = model.transformer.blocks[0]
+    assert isinstance(block, TransformerBlock)
+    block.prenorm = False
+    with pytest.raises(ValueError, match="pre-norm global blocks"):
+        Engine(model, rows=1, t_max=8, generator=torch.Generator())
+
+
+def test_a_decoder_self_attention_with_split_projections_is_refused() -> None:
+    model = tiny_model(small_schema())
+    block = model.decoder.stack.blocks[0]
+    assert isinstance(block, DecoderBlock)
+    assert isinstance(block.attn, Attention)
+    block.attn.split_qkv_projection = True
+    with pytest.raises(ValueError, match="decoder self-attention with a fused QKV"):
+        Engine(model, rows=1, t_max=8, generator=torch.Generator())
+
+
+def test_a_prefix_past_the_window_keeps_its_last_quarter() -> None:
+    schema = small_schema()
+    model = tiny_model(schema, global_layers=2)
+    segment = random_segment(schema, 7, seed=29)
+    # 1 + 2 * 7 positions overrun 16 - 2, so the last 4 decisions are kept.
+    long = Engine(model, rows=1, t_max=16, generator=torch.Generator())
+    long.prefill(torch.tensor([0]), prefix_of(segment))
+    assert int(long.state.length[0]) == 8
+    assert int(long.state.count[0]) == 4
+    kept = Engine(model, rows=1, t_max=16, generator=torch.Generator())
+    kept.prefill(
+        torch.tensor([0]),
+        Prefix(
+            cells=segment.cells[None, 3:],
+            aux=segment.aux[None, 3:],
+            actions=segment.actions[None, 3:],
+            starts_episode=False,
+        ),
+    )
+    _assert_same_decision(long, kept, seed=30)
+
+
 def test_a_row_run_past_its_window_never_writes_another_rows_cache() -> None:
     engine = Engine(
         tiny_model(small_schema()),
@@ -213,6 +264,96 @@ def test_graphed_reset_leaves_other_rows_unchanged() -> None:
         generator.manual_seed(3)
         runs.append(_reset_run(engine, replay, reset=reset))
     _assert_reset_is_row_local(*runs)
+
+
+def test_a_graphed_step_on_another_generator_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "default_generators", (torch.Generator(),))
+    engine = Engine(
+        tiny_model(small_schema()),
+        rows=2,
+        t_max=16,
+        generator=torch.Generator(),
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"^A graphed engine samples from its default CUDA generator\.$",
+    ):
+        GraphedStep(engine)
+
+
+def test_a_graphed_step_captures_once_and_replays_eager_steps_into_its_buffers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = tiny_model(small_schema())
+    eager = Engine(model, rows=2, t_max=16, generator=torch.Generator())
+    graphed = Engine(model, rows=2, t_max=16, generator=torch.Generator())
+    cuda = _FakeCuda(graphed)
+    cuda.install(monkeypatch)
+    replay = GraphedStep(graphed, warmup=2)
+    # Warmup runs idle steps on the side stream, then each graph captures there.
+    assert cuda.log == [
+        "enter side",
+        "warmup start",
+        "warmup decide",
+        "warmup start",
+        "warmup decide",
+        "exit side",
+        "capture 0 on side",
+        "capture 1 on side",
+        "capture 2 on side",
+    ]
+    for graph, method, buffer in zip(
+        cuda.graphs,
+        ("start", "skip_start", "decide"),
+        (replay._start, replay._skip, replay._decision),
+        strict=True,
+    ):
+        graph.run = partial(_rerun, getattr(graphed, method), replay._control, buffer)
+    cuda.log.clear()
+    outputs: list[list[tuple[StartResult, Decision]]] = []
+    returned: list[tuple[StartResult, Decision]] = []
+    for engine, step in ((eager, eager.step), (graphed, replay)):
+        engine.generator.manual_seed(21)
+        ending = no_done(engine)
+        ending.job_tokens[1, 1, 0] = done_id(done=True)
+        controls = [no_done(engine), no_done(engine), ending, no_done(engine)]
+        # Cloned as returned: a graphed step overwrites its outputs at the next call.
+        results = [(result, _clone_step(*result)) for result in map(step, controls)]
+        if engine is graphed:
+            returned = [result for result, _ in results]
+        outputs.append([clone for _, clone in results])
+    assert len(cuda.graphs) == 3
+    assert [graph.captures for graph in cuda.graphs] == [1, 1, 1]
+    assert cuda.log == [
+        "replay 0",
+        "replay 2",
+        "replay 1",
+        "replay 2",
+        "replay 1",
+        "replay 2",
+        "replay 0",
+        "replay 2",
+    ]
+    assert [start for start, _ in returned] == [
+        replay._start,
+        replay._skip,
+        replay._skip,
+        replay._start,
+    ]
+    assert all(decision is replay._decision for _, decision in returned)
+    for (start_a, decision_a), (start_b, decision_b) in zip(
+        outputs[0],
+        outputs[1],
+        strict=True,
+    ):
+        assert torch.equal(start_a.started, start_b.started)
+        assert torch.equal(start_a.job.tokens, start_b.job.tokens)
+        assert torch.equal(start_a.job.logp, start_b.job.logp)
+        assert torch.equal(decision_a.action, decision_b.action)
+        assert torch.equal(decision_a.job.tokens, decision_b.job.tokens)
+        assert torch.equal(decision_a.job.logp, decision_b.job.logp)
 
 
 def test_step_runs_the_start_job_only_when_a_row_begins_an_episode(
@@ -529,6 +670,135 @@ def test_action_logits_are_the_distribution_decide_samples_from() -> None:
     torch.testing.assert_close(decision.action_logp, logp[[0, 1], [3, 40]])
 
 
+class _FakeGraph:
+    """A CUDA graph on the CPU: counts its captures; ``replay`` calls ``run``."""
+
+    def __init__(self, log: list[str], index: int) -> None:
+        self.log = log
+        self.index = index
+        self.captures = 0
+        self.run: Callable[[], None] = _unwired
+
+    def replay(self) -> None:
+        """Log the replay and rerun what the graph captured."""
+        self.log.append(f"replay {self.index}")
+        self.run()
+
+
+class _FakeStream:
+    """A CUDA stream on the CPU, named for the log."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def wait_stream(self, stream: object) -> None:
+        """Order nothing: the CPU runs in program order."""
+        del stream
+
+
+class _FakeCuda:
+    """The CUDA calls ``GraphedStep`` makes, recorded on the CPU for one engine.
+
+    A capture runs its body eagerly, as the CPU must, then restores the engine's
+    state: a real capture records kernels without running them.
+    """
+
+    def __init__(self, engine: Engine) -> None:
+        self.engine = engine
+        self.log: list[str] = []
+        self.graphs: list[_FakeGraph] = []
+        self._capturing: _FakeGraph | None = None
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Replace ``torch.cuda``'s graph, stream and device calls with this fake's."""
+        monkeypatch.setattr(torch.cuda, "default_generators", (self.engine.generator,))
+        monkeypatch.setattr(torch.cuda, "device", _no_device)
+        monkeypatch.setattr(torch.cuda, "Stream", lambda: _FakeStream("side"))
+        monkeypatch.setattr(torch.cuda, "current_stream", lambda: _FakeStream("main"))
+        monkeypatch.setattr(torch.cuda, "stream", self.stream)
+        monkeypatch.setattr(torch.cuda, "CUDAGraph", self.new_graph)
+        monkeypatch.setattr(torch.cuda, "graph", self.graph)
+        for name in ("start", "decide"):
+            monkeypatch.setattr(
+                self.engine,
+                name,
+                partial(self._logged, name, getattr(self.engine, name)),
+            )
+
+    def new_graph(self) -> _FakeGraph:
+        """Return a fresh graph."""
+        self.graphs.append(_FakeGraph(self.log, len(self.graphs)))
+        return self.graphs[-1]
+
+    @contextlib.contextmanager
+    def stream(self, stream: _FakeStream) -> Generator[None]:
+        """Log entering and leaving ``stream``."""
+        self.log.append(f"enter {stream.name}")
+        yield
+        self.log.append(f"exit {stream.name}")
+
+    @contextlib.contextmanager
+    def graph(self, graph: _FakeGraph, *, stream: _FakeStream) -> Generator[None]:
+        """Capture into ``graph`` on ``stream``, leaving the engine's state as it was."""
+        graph.captures += 1
+        self.log.append(f"capture {graph.index} on {stream.name}")
+        saved = [
+            cast("Tensor", getattr(self.engine.state, f.name)).clone()
+            for f in dataclasses.fields(self.engine.state)
+        ]
+        self._capturing = graph
+        yield
+        self._capturing = None
+        for f, value in zip(dataclasses.fields(self.engine.state), saved, strict=True):
+            cast("Tensor", getattr(self.engine.state, f.name)).copy_(value)
+
+    def _logged(
+        self,
+        name: str,
+        method: Callable[[Control], object],
+        control: Control,
+    ) -> object:
+        """Log a warmup call of ``method``; captures and replays are logged above."""
+        if self._capturing is None and not self.graphs:
+            self.log.append(f"warmup {name}")
+        return method(control)
+
+
+def _unwired() -> None:
+    """Fail a replay of a graph the test did not wire."""
+    raise AssertionError("A graph replayed without a captured body.")
+
+
+@contextlib.contextmanager
+def _no_device(device: object) -> Generator[None]:
+    """Enter no CUDA device: the CPU has one."""
+    del device
+    yield
+
+
+def _rerun(
+    method: Callable[[Control], object],
+    control: Control,
+    buffer: object,
+) -> None:
+    """Run ``method`` on ``control`` and copy its output into ``buffer``'s tensors."""
+    _copy_into(buffer, method(control))
+
+
+def _copy_into(target: object, source: object) -> None:
+    """Copy every tensor of a dataclass tree ``source`` into ``target``'s."""
+    if isinstance(target, Tensor):
+        assert isinstance(source, Tensor)
+        target.copy_(source)
+        return
+    assert dataclasses.is_dataclass(target)
+    for f in dataclasses.fields(target):
+        _copy_into(
+            cast("object", getattr(target, f.name)),
+            cast("object", getattr(source, f.name)),
+        )
+
+
 class _OtherVarlen(SdpaVarlen):
     """A varlen kernel the engine was never held to: a subclass may change the math."""
 
@@ -684,6 +954,6 @@ def _assert_row_equal(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)
