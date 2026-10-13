@@ -61,7 +61,7 @@ class ModalityLoss:
 
 def cross_entropy(logits: Tensor, target: Tensor) -> Nll:
     """Return ``target``'s NLL under ``softmax(logits)``, ``-inf`` logits excluded."""
-    nll, logz = cross_entropy_logz(logits, target)
+    nll, logz = cross_entropy_logz(logits, target, reduction="none", dim=-1)
     return Nll(nll=nll, logz_sq=logz.square())
 
 
