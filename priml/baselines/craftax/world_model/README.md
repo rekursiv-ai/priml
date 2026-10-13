@@ -18,8 +18,8 @@ episodes from the port's own trained RL policies.
 Train an RL policy, capture its play, train the world model on it, then score
 it and dream with it:
 
-1. RL: the port's trainer, `priml/baselines/craftax` (exp000-exp008 and
-   exp101-exp113).
+1. RL: the port's trainer, `priml/baselines/craftax` (`experiments.py`,
+   exp000-exp015, and the experimental `experiments_world_model.py`).
 2. Capture: run each arm of `capture/experiments.py` and its verifier, which
    record the behaviour mixture into an archive, every closed shard
    replay-verified ([Capture](#capture)).
@@ -32,8 +32,8 @@ it and dream with it:
 
 `../README.md`, "Reproduce", gives the full-scale steps in order, with the
 runs each reads, and the chain at minimum size. At the end-to-end check's
-scale (the `e2e_` capture factories), the loop from captured
-exp000/exp102/exp103 play to a trained `exp_smoke` takes about 3.5 minutes on
+scale (the `e2e_` capture factories), the loop from captured RL
+exp000/exp002/exp003 play to a trained `exp_smoke` takes about 3.5 minutes on
 one node, once those three policies are trained. Each capture job is one
 `python -m priml` run of a factory, on one GPU: the verifier, given the
 launch's id and its worker count, and each arm's worker, given the launch's id
@@ -163,18 +163,18 @@ archive, and the start, completion and halt markers -- so they run on one
 machine, or on machines sharing that filesystem; `scripts/gather.py` copies
 shards between roots. The arms, of a 3.5B-decision target, read their policy
 runs' final checkpoints, at the paths those runs write; the published archive
-played exp103's seed-74 run (77.66%), exp102's seed-73 run (56.24%) and
-exp000's run (48.45%, from PufferLib's init):
+played RL exp003's seed-74 run (77.66%), exp002's seed-73 run (56.24%)
+and exp000's run (48.45%, from PufferLib's init):
 
 | Arm | Factory | Policy | Share |
 |---|---|---|---:|
-| 0 | `arm0` | exp103 at 20B | 70% |
+| 0 | `arm0` | RL exp003 at 20B | 70% |
 | 1 | `arm1` | the same, epsilon 0.05 | 10% |
-| 2 | `arm2` | exp102 at 20B | 10% |
-| 3 | `arm3` | exp000 at 3.5B | 10% |
+| 2 | `arm2` | RL exp002 at 20B | 10% |
+| 3 | `arm3` | RL exp000 at 3.5B | 10% |
 
-One H200 captures 831k decisions/s from exp103 at 1,024 environments in 4
-buffers and 1.16M/s from exp000 (rollout only; the encoders run beside it). A
+One H200 captures 831k decisions/s from RL exp003 at 1,024 environments in 4
+buffers and 1.16M/s from RL exp000 (rollout only; the encoders run beside it). A
 worker over budget records no new episode but finishes the ones in flight, one
 per environment, so no episode is cut, recorded or dropped for its length. It
 overshoots its budget by those episodes, and long episodes are the likeliest
@@ -275,10 +275,10 @@ node $w/viewer/render_check.mjs $a/render-check $a/games.html
 The page is one file with no external asset; it opens from disk. A recorded
 page of four policies on the same 256 worlds took 7 minutes on one H200: each
 capture about 85 s, each save 6 to 39 s (5,288 to 97,432 decisions). Their
-averages, 51.66% (exp000 from PufferLib's init), 58.21% (exp102 seed 73),
-69.68% (exp103 seed 73) and 76.43% (exp103 seed 74), lie within 3.3 points of
+averages, 51.66% (RL exp000 from PufferLib's init), 58.21% (RL exp002 seed 73),
+69.68% (RL exp003 seed 73) and 76.43% (RL exp003 seed 74), lie within 3.3 points of
 their runs' final evaluations, and the 14.0 MB page renders all four games. A policy trained to stop at the necromancer's
-fall plays on here, to its death or the 100,000-tick timeout: exp103 s73's
+fall plays on here, to its death or the 100,000-tick timeout: RL exp003 s73's
 best game is 97,432 decisions long.
 
 ### The policy-view panel
@@ -355,10 +355,11 @@ H200, most of it the dreams (256 x 4,000 decisions per checkpoint).
 `feature.py` feeds the RL policy a trained world model's state of the
 episode: each step, the global stack's final-normed hidden state at `obs_t`,
 reading the episode as training does (`start, obs_0, act_0, obs_1, ...`). Its
-weights stay frozen. On exp105's policy at 250M transitions the original
+weights stay frozen. On RL exp007's policy at 250M transitions the original
 implementation measured 47.1% averaged over the 150M, 200M and 250M
 evaluations, against 11.9% without it and 11.7% with random frozen weights;
-the RL package's exp106-exp108 replicate those arms.
+exp000-exp002 of the experimental `experiments_world_model.py` replicate
+those arms.
 
 `WorldModelFeature` loads the weights once per process from a slot
 (`TrainedWeights`, a checkpoint in the port's layout; `InitialWeights`, an
@@ -476,7 +477,7 @@ synchronizes the device, so `ensure_room` holds the rollout's capture lock.
 | `feature.py` | The frozen feature for RL ([The frozen feature](#the-frozen-feature-for-rl)) |
 | `context.py` | The feature recomputed from each step's stored context with a learner's weights, and its gradient: the RL learner trains the world model with the policy |
 | `scripts/` | Corpus tools, evaluation, dreams and the report |
-| `scripts/joint_speed.py` | Time the joint learner's epoch at exp103's geometry on synthetic contexts (CUDA) |
+| `scripts/joint_speed.py` | Time the joint learner's epoch at RL exp003's geometry on synthetic contexts (CUDA) |
 | `testing.py` | Tiny models and fixtures the tests share |
 
 Not ported: the original's text layout of a decision, its browser export and

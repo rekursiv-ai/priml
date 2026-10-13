@@ -5,13 +5,13 @@ policies:
 
 | Arm | Factory | Policy | Share |
 | --- | --- | --- | ---: |
-| 0 | ``arm0`` | exp103 at 20B, sampled | 70% |
+| 0 | ``arm0`` | experiments.exp003 at 20B, sampled | 70% |
 | 1 | ``arm1`` | the same, epsilon 0.05 over legal actions | 10% |
-| 2 | ``arm2`` | exp102 at 20B, sampled | 10% |
-| 3 | ``arm3`` | exp000 at 3.5B, sampled | 10% |
+| 2 | ``arm2`` | experiments.exp002 at 20B, sampled | 10% |
+| 3 | ``arm3`` | experiments.exp000 at 3.5B, sampled | 10% |
 
 Arm 0 is the strongest policy, the one that reaches the last floor in 61% of
-its evaluation episodes; arm 2 is exp102's recipe (a board encoder and
+its evaluation episodes; arm 2 is exp002's recipe (a board encoder and
 feasibility loss); arm 3 is the base recipe, a weaker player of a different
 architecture. Shares are of the 3.5B-decision target, and each arm's four
 workers, one per seed range, capture a quarter of it. The shares, and v2's
@@ -22,13 +22,13 @@ of the longest episodes, and its own mix differs; ``freeze_corpus.py
 worker 0; a launch picks the worker with ``--override worker=N`` and names
 itself with ``--override launch=ID``, an id no other launch uses. Each arm
 plays its policy exactly as trained, with learning, practice and auxiliary
-objectives off, on the game's default rules: exp103's episodes, which ended at
+objectives off, on the game's default rules: exp003's episodes, which ended at
 the necromancer's fall in training, play on.
 
 Each arm reads its policy experiment's final ``TrainLoop`` checkpoint, at the
 path that experiment's run writes beneath ``base_dir``, so the experiment
-trains first. The published archive's arms played exp103's seed-74 run
-(77.66%), exp102's seed-73 run (56.24%) and exp000's run (48.45%).
+trains first. The published archive's arms played exp003's seed-74 run
+(77.66%), exp002's seed-73 run (56.24%) and exp000's run (48.45%).
 
 The second dataset version adds, per arm, fresh episodes with training
 episodes cut after a stall without reward (``arm*_v2``, generation 1) and
@@ -53,8 +53,8 @@ from pathlib import Path
 
 from priml.baselines.craftax.experiments import (
     exp000,
-    exp102,
-    exp103,
+    exp002,
+    exp003,
     exp_smoke,
 )
 from priml.baselines.craftax.world_model.capture.source import (
@@ -69,14 +69,14 @@ from priml.baselines.craftax.world_model.capture.worker import (
 
 
 def arm0() -> CaptureWorker.Config:
-    """Capture arm 0: exp103's run at 20B, sampled; seed 74's in the published archive."""
+    """Capture arm 0: exp003's run at 20B, sampled; seed 74's in the published archive."""
     config = CaptureWorker.Config()
     config.root = Path("/datasets/craftax/world-model/archive-v1")
     config.arm = 0
     config.decisions = 3_500_000_000 * 70 // 100 // 4
     source = config.source
     assert isinstance(source, PolicySource.Config)
-    policy = exp103()
+    policy = exp003()
     source.policy = policy.step
     source.checkpoint = Path(
         f"/runs/{policy.study_name}/{policy.experiment_name}/checkpoints/"
@@ -99,13 +99,13 @@ def arm1() -> CaptureWorker.Config:
 
 
 def arm2() -> CaptureWorker.Config:
-    """Capture arm 2: exp102's run at 20B, sampled; seed 73's in the published archive."""
+    """Capture arm 2: exp002's run at 20B, sampled; seed 73's in the published archive."""
     config = arm0()
     config.arm = 2
     config.decisions = 3_500_000_000 * 10 // 100 // 4
     source = config.source
     assert isinstance(source, PolicySource.Config)
-    policy = exp102()
+    policy = exp002()
     source.policy = policy.step
     source.checkpoint = Path(
         f"/runs/{policy.study_name}/{policy.experiment_name}/checkpoints/"

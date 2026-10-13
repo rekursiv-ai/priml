@@ -17,7 +17,7 @@ import pytest
 import torch
 
 from priml.baselines.craftax import testing
-from priml.baselines.craftax.experiments import exp000, exp002
+from priml.baselines.craftax.experiments import exp000, exp009
 from priml.baselines.craftax.game.jit import platform_key
 from priml.baselines.craftax.game.state import ATN_DIM, OBS_SIZE
 from priml.baselines.craftax.model import (
@@ -283,6 +283,18 @@ def test_optimizer_state_names_each_tensor_by_its_parameter() -> None:
     )
 
 
+def test_config_deltas_name_a_changed_field_and_a_swapped_slot_once() -> None:
+    """A swapped slot is its class, then the fields the two classes do not share."""
+    parent, child = testing.tiny_policy(), testing.tiny_policy()
+    assert testing.config_deltas(parent, child) == set()
+    child.num_layers = 3
+    child.embedding = BoardEncoder.Config()
+    deltas = testing.config_deltas(parent, child)
+    assert {"num_layers", "embedding"} <= deltas
+    assert all(name == "num_layers" or name.startswith("embedding") for name in deltas)
+    assert testing.config_fields(child)["embedding"] is BoardEncoder.Config
+
+
 @pytest.mark.parametrize(
     ("host", "file_name"),
     [("", "probe.txt"), ("h", "probe_h.txt")],
@@ -349,7 +361,7 @@ def test_a_portable_checkpoint_holds_the_filled_policys_weights_as_fp32_masters(
 
 
 def _tiny_rnn() -> ActorCriticRNN.Config:
-    """Return exp005's GRU actor-critic at test size."""
+    """Return experiments.exp012's GRU actor-critic at test size."""
     config = ActorCriticRNN.Config()
     config.observation_size = 6
     config.channels_hidden = 4
@@ -358,7 +370,7 @@ def _tiny_rnn() -> ActorCriticRNN.Config:
 
 
 def _tiny_towers() -> ActorCritic.Config:
-    """Return exp003's actor-critic towers at test size."""
+    """Return experiments.exp010's actor-critic towers at test size."""
     config = ActorCritic.Config()
     config.observation_size = 6
     config.channels_hidden = 4
@@ -445,7 +457,7 @@ def test_gpu_key_names_the_device_model_then_the_platform(
 
 @pytest.mark.parametrize(
     ("tiny", "recipe"),
-    [(testing.tiny_train_step, exp000), (testing.tiny_exp002_step, exp002)],
+    [(testing.tiny_train_step, exp000), (testing.tiny_exp009_step, exp009)],
 )
 def test_a_tiny_step_is_its_recipe_in_torch_forms_at_test_size(
     tiny: Callable[[], CraftaxTrainStep.Config],

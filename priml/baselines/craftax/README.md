@@ -6,14 +6,16 @@ policy and the learner run on the GPU in torch and Triton, captured in CUDA
 graphs. Beside it are Craftax_Baselines' recipes and the recipes of our
 [Craftax blog post](https://rekursiv.ai/blog/craftax/).
 
-For the blog post, see [Our recipes](#our-recipes-exp101-exp116).
+For the blog post, see the [main line](#main-line-exp000-exp004).
 
 ## Table of contents
 
 - [Run the baseline](#run-the-baseline)
 - [Results](#results)
-  - [Baselines (exp000-exp008)](#baselines-exp000-exp008)
-  - [Our recipes (exp101-exp116)](#our-recipes-exp101-exp116)
+  - [Main line (exp000-exp004)](#main-line-exp000-exp004)
+  - [Side runs (exp005-exp008)](#side-runs-exp005-exp008)
+  - [Published baselines (exp009-exp015)](#published-baselines-exp009-exp015)
+- [World-model experiments (experimental)](#world-model-experiments-experimental)
 - [Reproduce](#reproduce)
   - [Prerequisites](#prerequisites)
   - [Data](#data)
@@ -48,7 +50,9 @@ A run writes to `/opt/scratch/runs/craftax/{experiment_name}`, so the name
 decides what a launch resumes: a launch under a used name continues from its
 newest checkpoint and logs a `Resuming` warning naming it. Pass
 `--override working_dir=...` to start over. A checkpoint holds the whole
-pipeline, so a resumed run is bit-identical to one that never stopped.
+pipeline, so a resumed run is bit-identical to one that never stopped. The
+world-model experiments write to `/opt/scratch/runs/craftax-world-model-rl/`
+instead, since their names repeat these.
 
 ## Results
 
@@ -56,77 +60,126 @@ Scores are perf: the achievement return as a share of its 226 points, over
 about 10,000 episodes of the final evaluation. Every run trained on one H200 and
 16 CPUs; Time is one seed's wall time. With several seeds, Score is their mean.
 
-### Baselines (exp000-exp008)
+### Main line (exp000-exp004)
+
+Our best experiments are [`exp003`](experiments.py), the blog post's recipe,
+72.48% over seeds 73-75 at 20B transitions, about 11 hours per seed on one
+H200; and [`exp004`](experiments.py), its fine-tune for the boss fight, 80.06%,
+with 43.5% of its episodes defeating the necromancer.
 
 | Experiment | Change | Score | Transitions | Time | Seeds |
 |---|---|---:|---:|---:|---|
 | [`exp000`](experiments.py) | PufferLib's recipe, from the policy's own init | 47.20% | 3.49B | 31 min | 73 |
-| [`exp001`](experiments.py) | 250M transitions | 15.22% | 250M | 2 min | 73 |
-| [`exp002`](experiments.py) | Original Craftax's rules and observation | 12.48% | 3.49B | 64 min | 73 |
-| [`exp003`](experiments.py) | Craftax_Baselines' 1B PPO recipe | 12.37% | 1B | 50 min | 42-44 |
-| [`exp004`](experiments.py) | Its 1M-interaction geometry | 2.45% | 1M | 14 s | 42 |
-| [`exp005`](experiments.py) | PPO-RNN: a reset-aware GRU | 16.69% | 1B | 1.6 h | 42 |
-| [`exp006`](experiments.py) | PQN: Q-learning with an LSTM | 16.32% | 1B | 3.0 h | 42 |
-| [`exp007`](experiments.py) | exp003 at 100M, a screen | 9.56% | 100M | 5 min | 42 |
-| [`exp008`](experiments.py) | GTrXL: gated Transformer-XL memory | 17.44% | 1B | 2.6 h | 42 |
+| [`exp001`](experiments.py) | The port's default kernels and fp32 | 50.27% | 3.49B | 31 min | 73 |
+| [`exp002`](experiments.py) | Board encoder, injection, feasibility loss | 52.76% | 20B | 12 h | 73-76 |
+| [`exp003`](experiments.py) | Frontier practice, self-imitation, rewards / 8 | 72.48% | 20B | 11 h | 73-75 |
+| [`exp004`](experiments.py) | exp003 fine-tuned for the boss fight | 80.06% | +3B | -- | 73 |
 
-`exp000` and `exp001` once loaded PufferLib's seed-73 init instead of drawing
-their own. From it they scored 48.45% and 15.22% and equalled PufferLib's runs
-bit for bit: every checkpoint's weights and the final evaluation, to the last
-digit. `exp001`'s score is from that init. `exp002` switches back every way
-PufferLib differs from original Craftax (`docs/differences.md`).
-For comparison, the reference implementations scored:
+- The original runs of `exp002` scored 66.83% (seed 73, the best of 15 runs of
+  that family) and 49.90% (seed 74); those of `exp003`, 73.25% (seeds 73-80).
+  Same-seed runs spread by up to about 9 points.
+- `exp004`'s score is its reference's: the original runs' fine-tune of
+  exp003's seed-78 run, its final weights evaluated on the port in their
+  numerics. It has not run on the port.
+- `exp000` and `exp005` once loaded PufferLib's seed-73 init instead of drawing
+  their own. From it they scored 48.45% and 15.22% and equalled PufferLib's
+  runs bit for bit: every checkpoint's weights and the final evaluation, to the
+  last digit.
 
-- `exp003`: 12.16%, Craftax_Baselines' JAX runs (their training return).
-- `exp004`, `exp005`, `exp007`, `exp008`: 2.21%, 16.10%, 8.98% and 18.16%,
-  the earlier JAX port at the same seed.
-- `exp006`: about 16.0%, as purejaxql reports.
-
-### Our recipes (exp101-exp116)
-
-Our best experiment is [`exp103`](experiments.py), the blog post's recipe:
-72.48% over seeds 73-75 at 20B transitions, about 11 hours per seed on one H200.
+### Side runs (exp005-exp008)
 
 | Experiment | Change | Score | Transitions | Time | Seeds |
 |---|---|---:|---:|---:|---|
-| [`exp101`](experiments.py) | The port's default kernels and fp32 | 50.27% | 3.49B | 31 min | 73 |
-| [`exp102`](experiments.py) | Board encoder, injection, feasibility loss | 52.76% | 20B | 12 h | 73-76 |
-| [`exp103`](experiments.py) | Frontier practice, self-imitation, rewards / 8 | 72.48% | 20B | 11 h | 73-75 |
-| [`exp104`](experiments.py) | Width 2,048 on 1,024 environments x 512 steps | 65.10% | 20B | 16.5 h | 73 |
-| [`exp105`](experiments.py) | A ConvNeXt trunk on the board | 62.01% | 20B | 23 h | 73 |
-| [`exp106`](experiments.py) | exp105 for 250M, evaluated every 50M | 12.17% | 250M | 20 min | 73 |
-| [`exp107`](experiments.py) | A frozen world model's feature | 42.92% | 250M | 1.6 h | 73 |
-| [`exp108`](experiments.py) | That world model at its random init | 11.52% | 250M | 1.6 h | 73 |
-| [`exp109`](experiments.py) | A new world at every reset | 60.66% | 6B | 4.4 h | 73, 74 |
-| [`exp110`](experiments.py) | exp103's encoder replaced by a frozen world model trained on early-training play | -- | 20B | -- | 73 |
-| [`exp111`](experiments.py) | exp110 with the world model trained on a 20B exp103 agent's play | -- | 20B | -- | 73 |
-| [`exp112`](experiments.py) | exp110's world model trained with the policy | -- | 20B | -- | 73 |
-| [`exp113`](experiments.py) | exp111's world model trained with the policy | -- | 20B | -- | 73 |
-| [`exp114`](experiments.py) | exp103 fine-tuned for the boss fight | 80.06% | +3B | -- | 73 |
-| [`exp115`](experiments.py) | exp110 stopped after 1B | 37.51% | 1B | 6.5 h | 73 |
-| [`exp116`](experiments.py) | exp112 stopped after 1B | 52.10% | 1B | 46 h | 73 |
+| [`exp005`](experiments.py) | exp000 at 250M transitions | 15.22% | 250M | 2 min | 73 |
+| [`exp006`](experiments.py) | exp002 at width 2,048 on 1,024 environments x 512 steps | 65.10% | 20B | 16.5 h | 73 |
+| [`exp007`](experiments.py) | exp006 with a ConvNeXt trunk on the board | 62.01% | 20B | 23 h | 73 |
+| [`exp008`](experiments.py) | exp003 with a new world at every reset | 60.66% | 6B | 4.4 h | 73, 74 |
 
-- The original runs of `exp102` scored 66.83% (seed 73, the best of 15 runs of
-  that family) and 49.90% (seed 74); those of `exp103`, 73.25% (seeds 73-80).
-  Same-seed runs spread by up to about 9 points.
-- `exp106` to `exp108` score the mean of the 150M, 200M and 250M evaluations;
-  the original runs scored 11.92%, 47.08% and 11.67%.
-- `exp109` scores at 6B, on exp103's pool.
-- `exp115` and `exp116` are the 1B arms of `exp110` and `exp112`: stopped
-  after epoch 1,907, 999,817,216 transitions, the schedule keeping the 20B
-  horizon. The 20B runs of `exp110` to `exp113` are still training; their
-  docstrings hold the latest evaluations. All six read world models the
-  original runs fitted ([Not yet reproducible](#not-yet-reproducible-todo)).
-- `exp114`'s score is its reference's: the original runs' fine-tune of
-  exp103's seed-78 run, its final weights evaluated on the port in their
-  numerics; 43.5% of its episodes defeat the necromancer. It has not run on
-  the port.
-- The world model `exp107` reads (`world_model.experiments.exp001`) predicts
-  the next frame's cells at 98.83%, the mean of three seeds; see
-  `world_model/README.md`.
+- `exp005`'s score is from PufferLib's init.
+- `exp008` scores at 6B, on exp003's pool.
+
+### Published baselines (exp009-exp015)
+
+Published recipes, restated on original Craftax's rules.
+
+| Experiment | Change | Score | Transitions | Time | Seeds |
+|---|---|---:|---:|---:|---|
+| [`exp009`](experiments.py) | exp000 on original Craftax's rules and observation | 12.48% | 3.49B | 64 min | 73 |
+| [`exp010`](experiments.py) | Craftax_Baselines' 1B PPO recipe | 12.37% | 1B | 50 min | 42-44 |
+| [`exp011`](experiments.py) | Its 1M-interaction geometry | 2.45% | 1M | 14 s | 42 |
+| [`exp012`](experiments.py) | PPO-RNN: a reset-aware GRU | 16.69% | 1B | 1.6 h | 42 |
+| [`exp013`](experiments.py) | PQN: Q-learning with an LSTM | 16.32% | 1B | 3.0 h | 42 |
+| [`exp014`](experiments.py) | exp010 at 100M, a screen | 9.56% | 100M | 5 min | 42 |
+| [`exp015`](experiments.py) | GTrXL: gated Transformer-XL memory | 17.44% | 1B | 2.6 h | 42 |
+
+`exp009` switches back every way PufferLib differs from original Craftax
+(`docs/differences.md`). For comparison, the reference implementations scored:
+
+- `exp010`: 12.16%, Craftax_Baselines' JAX runs (their training return).
+- `exp011`, `exp012`, `exp014`, `exp015`: 2.21%, 16.10%, 8.98% and 18.16%,
+  the earlier JAX port at the same seed.
+- `exp013`: about 16.0%, as purejaxql reports.
 
 Each experiment's docstring holds its result in full: every seed, the episode
 count and the speed.
+
+## World-model experiments (experimental)
+
+These results are experimental and not yet officially published. They are an
+alternative approach, not the baseline's result: the main line above is.
+Each policy here reads a world model fitted to play captured from the
+policies above (`world_model/`): its hidden state at the current observation,
+the input to its behaviour-cloning head. Nothing trains in imagination; every
+policy gradient comes from real environment steps. The factories are in
+[`experiments_world_model.py`](experiments_world_model.py).
+
+A policy starting from random weights, whose only encoder is a frozen world
+model fitted to mature play ([`exp004`](experiments_world_model.py)), scores
+63.2% at 2B steps (76.6% of achievements unlocked), against the recipe's 73%
+at 20B; 69.9% at its latest evaluation, 15.5B. It reaches 50%, 60% and 65% at
+0.75B, 1.5B and 2.75B steps, where the recipe's eight original runs take a
+median 3.5B, 7.5B and 9.9B. It is one run, at seed 73, still training, and
+read mid-run; each step costs about 11 times the recipe's. `exp004` restates
+its config field for field, the 20B budget included.
+
+The arms on the recipe read world models the original runs fitted, which no
+experiment here trains, so they are not reproducible from a fresh clone: their
+factories raise `NotImplementedError`
+([Not yet reproducible](#not-yet-reproducible-todo)). Each docstring holds its
+latest evaluation, with its step and status.
+
+The 250M test, a cheap screen of whether the feature helps at all:
+
+| Experiment | Parent | Change | Score | Transitions | Time | Seeds |
+|---|---|---|---:|---:|---:|---|
+| [`exp000`](experiments_world_model.py) | `experiments.exp007` | 250M of the 20B schedule, evaluated every 50M | 12.17% | 250M | 20 min | 73 |
+| [`exp001`](experiments_world_model.py) | `exp000` | A frozen world model's feature | 42.92% | 250M | 1.6 h | 73 |
+| [`exp002`](experiments_world_model.py) | `exp001` | That world model at its random init | 11.52% | 250M | 1.6 h | 73 |
+
+- Each scores the mean of the 150M, 200M and 250M evaluations; the original
+  runs scored 11.92%, 47.08% and 11.67%.
+- The world model `exp001` reads (`world_model.experiments.exp001`) predicts
+  the next frame's cells at 98.83%, the mean of three seeds; see
+  `world_model/README.md`.
+
+The world model on the recipe, as the policy's only encoder:
+
+| Experiment | Parent | Change | Score | Transitions | State | Seeds |
+|---|---|---|---:|---:|---|---|
+| [`exp003`](experiments_world_model.py) | `experiments.exp003` | A frozen world model of early play | 55.32% | 20B | finished | 73 |
+| [`exp004`](experiments_world_model.py) | `exp003` | A world model of mature play | 69.91% | 15.5B of 20B | training | 73 |
+| [`exp005`](experiments_world_model.py) | `exp003` | The world model trained with the policy | 67.31% | 3.25B of 20B | training | 73 |
+| [`exp006`](experiments_world_model.py) | `exp004` | The world model trained with the policy | 65.20% | 3.25B of 20B | training | 73 |
+| [`exp007`](experiments_world_model.py) | `exp003` | Stopped after 1B, the 20B schedule kept | 37.51% | 1B | finished | 73 |
+| [`exp008`](experiments_world_model.py) | `exp005` | Stopped after 1B, the 20B schedule kept | 52.10% | 1B | finished | 73 |
+
+- A finished run scores its final evaluation; a run still training, its
+  latest, at the transitions shown.
+- `exp003` reaches the Ice Realm in at most 0.01% of episodes at any
+  evaluation; `exp004` reaches it in 47% at 15.5B.
+- The frozen arms train at about 46k transitions/s, the arms that train the
+  world model at about 5.9k, against `experiments.exp003`'s 509k: `exp003`
+  took 145 hours, `exp007` 6.5 and `exp008` 46.
 
 ## Reproduce
 
@@ -142,11 +195,11 @@ others were the same config with every seed field set to that seed.
   `exp_smoke` included, needs CUDA. Every record is from one H200 with 16
   CPUs per run.
 - FlashAttention 4 (`flash-attn-4`, Linux only) for the world model and for
-  exp107 to exp113, whose feature runs it.
+  the world-model experiments, whose feature runs it.
 - A W&B login (`wandb login`) for every run but the smoke runs, or
   `WANDB_MODE=offline` to log locally.
 - Disk: a run keeps its newest two checkpoints, 2.6 GB for exp000 and 18 GB
-  for exp002; a capture archive takes about 0.7 bytes per decision, a few GB
+  for exp009; a capture archive takes about 0.7 bytes per decision, a few GB
   for the 3.5B decisions of `archive-v1`.
 
 ### Data
@@ -159,7 +212,8 @@ model's corpus is captured from the RL policies (below).
 Each command trains one experiment into
 `/opt/scratch/runs/craftax/{experiment}/`: its checkpoints,
 `checkpoints/step_{epoch:08d}.pt` (the newest two, the last at the final
-epoch), and `metrics.json`, the final evaluation.
+epoch), and `metrics.json`, the final evaluation. The world-model experiments
+train into `/opt/scratch/runs/craftax-world-model-rl/{experiment}/`.
 
 ```bash
 uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp000
@@ -171,38 +225,38 @@ uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp0
 uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp006
 uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp007
 uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp008
-uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp101
-uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp102
-uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp103
-uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp104
-uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp105
-uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp106
-uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp107
-uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp108
-uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp109
-uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp114
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp009
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp010
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp011
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp012
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp013
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp014
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp015
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments_world_model.exp000
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments_world_model.exp001
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments_world_model.exp002
 ```
 
 Every experiment reads nothing but its config, except:
 
 | Experiment | Reads | Run first |
 |---|---|---|
-| `exp107` | `/opt/scratch/runs/craftax-world-model/exp001/checkpoints/step_00001525.pt` | world-model `exp001` ([the chain](#the-world-model-chain), step 4) |
-| `exp114` | `/opt/scratch/runs/craftax/exp103/checkpoints/step_00038146.pt` | `exp103` |
+| `exp004` | `/opt/scratch/runs/craftax/exp003/checkpoints/step_00038146.pt` | `exp003` |
+| `experiments_world_model.exp001` | `/opt/scratch/runs/craftax-world-model/exp001/checkpoints/step_00001525.pt` | world-model `exp001` ([the chain](#the-world-model-chain), step 4) |
 
-exp107's record read world-model exp001's seed-0 run, and exp114's reference
-fine-tuned exp103's seed-78 run. exp114 trains 3B more transitions, 5,722
-epochs, about 1.7 hours at exp103's speed. The records and times are the
-Results tables'.
+exp004's reference fine-tuned exp003's seed-78 run, and
+`experiments_world_model.exp001`'s record read world-model exp001's seed-0
+run. exp004 trains 3B more transitions, 5,722 epochs, about 1.7 hours at
+exp003's speed. The records and times are the Results tables'.
 
 ### The world-model chain
 
 The world model trains on play captured from three RL policies. Four steps,
 in order:
 
-1. **Train the policies.** `exp103` (11 h), `exp102` (12 h) and `exp000`
+1. **Train the policies.** `exp003` (11 h), `exp002` (12 h) and `exp000`
    (31 min), as above, one H200 each. The published archive's policies were
-   exp103's seed-74 run, exp102's seed-73 run and exp000's run.
+   exp003's seed-74 run, exp002's seed-73 run and exp000's run.
 2. **Capture.** Each of the four arms runs four workers, one per seed range,
    beside one verifier that replays a sample of every shard; each job takes
    one GPU. A launch id names the launch's markers and verifier log, and is
@@ -215,11 +269,11 @@ in order:
    for arm in arm0 arm1 arm2 arm3; do for worker in 0 1 2 3; do uv --quiet run --frozen python -m priml $m.$arm --override worker=$worker --override launch=$id; done; done; wait
    ```
 
-   `arm0` and `arm1` read exp103's final checkpoint,
-   `/opt/scratch/runs/craftax/exp103/checkpoints/step_00038146.pt`; `arm2`
-   exp102's, `step_00038146.pt`; `arm3` exp000's, `step_00006662.pt`. They
+   `arm0` and `arm1` read exp003's final checkpoint,
+   `/opt/scratch/runs/craftax/exp003/checkpoints/step_00038146.pt`; `arm2`
+   exp002's, `step_00038146.pt`; `arm3` exp000's, `step_00006662.pt`. They
    write `/opt/scratch/datasets/craftax/world-model/archive-v1`. One H200
-   captured 831k decisions/s from exp103 and 1.16M/s from exp000 (rollout
+   captured 831k decisions/s from exp003 and 1.16M/s from exp000 (rollout
    only), about 1.2 GPU-hours for the 3.5B decisions.
 3. **Freeze the base corpus**, 50M training decisions in the arms' shares,
    into `archive-v1/corpora/base.json`:
@@ -248,16 +302,17 @@ in order:
    measured on the original implementation's capture of the same mixture.
    The rest wait for producers ([Not yet reproducible](#not-yet-reproducible-todo)).
 
-Then `exp107` above reads world-model exp001's final checkpoint.
-`world_model/README.md` covers the corpus tools and the evaluation report.
+Then `experiments_world_model.exp001` reads world-model exp001's final
+checkpoint. `world_model/README.md` covers the corpus tools and the evaluation
+report.
 
 ### The ghost overlay
 
 The blog post's ghost overlay plays three policies' episodes on one world
 (`ghosts/experiments.py`, `ghosts/FORMAT.md`). Its tiers read the final
-checkpoints of `exp001`, `exp102` and `exp103`, so those train first. The
-published page's medium and high tiers were exp102's seed-73 and exp103's
-seed-74 runs. Its boss tier reads exp114's, so exp114 trains first; the
+checkpoints of `exp005`, `exp002` and `exp003`, so those train first. The
+published page's medium and high tiers were exp002's seed-73 and exp003's
+seed-74 runs. Its boss tier reads exp004's, so exp004 trains first; the
 published page's was the original runs' fine-tune, in their numerics.
 
 ```bash
@@ -267,7 +322,7 @@ a=/opt/scratch/artifacts/craftax/ghosts/capture
 id=pilot-$(date -u +%Y%m%dT%H%M%SZ)
 uv --quiet run --frozen python -m priml $m.pilot_verifier --override launch=$id --override workers=3 &
 for tier in pilot_early pilot_medium pilot_high; do uv --quiet run --frozen python -m priml $m.$tier --override launch=$id; done; wait
-$g/select_world.py $a/pilot --tier early:0:/opt/scratch/runs/craftax/exp001/metrics.json --tier medium:1:/opt/scratch/runs/craftax/exp102/metrics.json --tier high:2:/opt/scratch/runs/craftax/exp103/metrics.json --output $a/world.json
+$g/select_world.py $a/pilot --tier early:0:/opt/scratch/runs/craftax/exp005/metrics.json --tier medium:1:/opt/scratch/runs/craftax/exp002/metrics.json --tier high:2:/opt/scratch/runs/craftax/exp003/metrics.json --output $a/world.json
 id=w15-$(date -u +%Y%m%dT%H%M%SZ)
 uv --quiet run --frozen python -m priml $m.capture_verifier --override launch=$id --override workers=3 &
 for tier in capture_early capture_medium capture_high; do uv --quiet run --frozen python -m priml $m.$tier --override launch=$id; done; wait
@@ -313,8 +368,8 @@ add, the TODO.
 
 | Experiment | Missing producer |
 |---|---|
-| `exp110`, `exp112`, `exp115`, `exp116` | A world model fitted to 100M decisions of early-training exp103 play: its capture, corpus and world-model experiment |
-| `exp111`, `exp113` | A world model fitted to 100M decisions of a 20B exp103 policy's play: its capture, corpus and world-model experiment |
+| `experiments_world_model.exp003`, `exp005`, `exp007`, `exp008` | A world model fitted to 100M decisions of early-training exp003 play: its capture, corpus and world-model experiment |
+| `experiments_world_model.exp004`, `exp006` | A world model fitted to 100M decisions of a 20B exp003 policy's play: its capture, corpus and world-model experiment |
 | world-model `exp003` to `exp005` | The small corpus: a capture and freeze of 10M decisions |
 | world-model `exp014`, `exp015` | Frame shards of the capture archive, which writes replay shards only |
 | world-model `exp020` | The scale-up corpus: capture jobs at budgets above the arms' and a freeze of every shard |
@@ -333,13 +388,13 @@ in `testdata/` run with this package's tests.
 
 | What | Checked |
 |---|---|
-| Full runs | exp000 (all 34 checkpoints and the final eval) and exp001, from PufferLib's seed-73 init |
+| Full runs | exp000 (all 34 checkpoints and the final eval) and exp005, from PufferLib's seed-73 init |
 | Training | Epochs 1, 2, 4, 200 and 201; a resume; an eval between epochs |
 | Learner | 18 minibatches at epochs 0, 1 and 200; Muon; each PPO kernel |
 | Actor | The policy step, scan and embedding; the sampler; the rollouts |
 | Environment | 2,048 envs x 10,000 steps; all 8,192 pool worlds; every step phase |
 | Original Craftax | Against JAX on all nine floors, in distribution |
-| Recipe policies | exp102's encoder and exp105's trunk, at init and at 20B, CPU and H200 |
+| Recipe policies | exp002's encoder and exp007's trunk, at init and at 20B, CPU and H200 |
 
 The recipe-policy fixtures carry two deviations: the encoder's dead
 previous-action input, and the gradient-scale wrapper at scale 1, whose
@@ -355,7 +410,7 @@ the median of two runs each.
 | Training, transitions/s | 1,322,762 | 1,936,186 | 1.46x |
 | Eval, 10,000 episodes, s | 30.37 | 23.00 | 0.76x |
 
-On original Craftax's 1B PPO recipe (`exp003`), the port trains at about 332k
+On original Craftax's 1B PPO recipe (`exp010`), the port trains at about 332k
 transitions/s against Craftax_Baselines' 155k in JAX: 2.1x.
 
 ## Tests
@@ -373,7 +428,8 @@ differ.
 
 | Path | Contents |
 |---|---|
-| `experiments.py` | The configs |
+| `experiments.py` | The configs: the main line, its side runs and the published baselines |
+| `experiments_world_model.py` | The world-model experiments' configs (experimental) |
 | `game/` | The game: rules, world generation, the observation. Numba, CPU |
 | `env.py` | The learner's view: 2,048 envs in four buffers on worker threads |
 | `model.py` | The MinGRU policy |
@@ -381,7 +437,7 @@ differ.
 | `train_step.py` | One PPO epoch |
 | `metric.py`, `evaluation.py` | The score and the eval protocol |
 | `data.py` | The loop's cadence: one tick per epoch |
-| `policies/` | The other policies: exp102's encoder, exp003's MLPs, the GRU, PQN and GTrXL |
+| `policies/` | The other policies: exp002's encoder, exp010's MLPs, the GRU, PQN and GTrXL |
 | `learners/` | The other learners, frontier practice and self-imitation |
 | `lib/` | PufferLib's kernel arithmetic, Adam, typed array reads, cost helpers |
 | `world_model/` | The world model, its full loop and the frozen feature; its own README |
@@ -410,7 +466,7 @@ This is a port. The game and the recipe are other people's work:
   ported. [arXiv:2402.16801][craftax-paper] ·
   [MichaelTMatthews/Craftax][craftax-repo] (MIT)
 - **Craftax_Baselines** -- the same authors' PPO baseline, whose 1B recipe and
-  actor-critic `exp003` restates, commit `7ce36fa`.
+  actor-critic `exp010` restates, commit `7ce36fa`.
   [MichaelTMatthews/Craftax_Baselines][craftax-baselines] (MIT)
 
 All three are MIT-licensed, which permits this port.

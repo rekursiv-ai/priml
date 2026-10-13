@@ -84,10 +84,10 @@ Classes:
 The built options are the fields of `CraftaxEnv.Config.rules`, named as
 `game/step.py`'s `Rules` names them, plus the `restart_numba` slot; the env passes
 D1-D6 and D8 to `Rules`, whose defaults are PufferLib's. D6 is
-`restart = FreshWorlds.Config()`, which sets `Rules.fresh_worlds`. exp002 sets
+`restart = FreshWorlds.Config()`, which sets `Rules.fresh_worlds`. exp009 sets
 D1, D2, D4, D5, D6 and D8 to original. D5 has the env write an all-ones mask,
 which leaves the sampler unchanged. D8 is `rules.symbolic_observation = True`;
-since `MinGRUPolicy`'s multi-hot embedding reads packed ids, exp002 pairs it
+since `MinGRUPolicy`'s multi-hot embedding reads packed ids, exp009 pairs it
 with `DenseObservation`, a first stage that hands the 8,268 floats to
 `proj_in` unchanged, and the step refuses an env whose observation width its
 policy's first stage does not read.
@@ -372,7 +372,7 @@ policy's first stage does not read.
 | D12-D14 | RNG; not built (the chain covers it) | the proof chain |
 | D15 | logging only | -- |
 | D16 | never read | the pin's lockstep test |
-| all | exp002's setup plays like JAX under a random policy | the trajectory test |
+| all | exp009's setup plays like JAX under a random policy | the trajectory test |
 
 The last row is the trajectory test: 11,200 random
 episodes a side, 99 pre-stated tests (episode length and return, death rate,
@@ -407,7 +407,7 @@ second JAX sample.
   Over 128 seeds x 1,000 actions, 112 seeds pass. Of the 16 that fail, 12
   differ in one D9 observation bit, 2 fail only the test's own structure
   assertions (identically in JAX), and 2 differ in one world-generation cell
-  each, both D11 threshold flips. With exp002's options
+  each, both D11 threshold flips. With exp009's options
   the port matches JAX transition by transition on JAX's own states
   (the original-setup test) and in distribution under a random policy
   (the trajectory test).

@@ -506,7 +506,7 @@ def test_without_the_new_slots_the_policy_builds_what_it_built() -> None:
 
 
 def test_the_board_policy_holds_the_references_live_weights() -> None:
-    """exp102's model: the reference's weights less D1's dead ones, new ones last."""
+    """exp002's model: the reference's weights less D1's dead ones, new ones last."""
     config = MinGRUPolicy.Config()
     config.embedding = BoardEncoder.Config()
     injection = config.injection = MLP.Config()
@@ -742,7 +742,7 @@ def _same_outputs(
 
 
 def _tiny_board_policy_at_defaults() -> MinGRUPolicy.Config:
-    """Return the tiny board policy with the port's fp32 carry and output, as exp102."""
+    """Return the tiny board policy with the port's fp32 carry and output, as exp002."""
     config = tiny_board_policy()
     config.state_dtype = config.output_dtype = torch.float32
     return config

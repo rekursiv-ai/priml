@@ -20,7 +20,7 @@ def _rollouts() -> CraftaxRollouts:
 
 
 def test_the_cadence_ticks_once_per_training_step_without_end() -> None:
-    """More than exp003's 15,258 epochs: the loop's ``max_steps`` ends a run."""
+    """More than experiments.exp010's 15,258 epochs: ``max_steps`` ends a run."""
     ticks = list(itertools.islice(_rollouts().train_dataloader(), 20_000))
 
     assert len(ticks) == 20_000

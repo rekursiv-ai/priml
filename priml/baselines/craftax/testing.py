@@ -2,8 +2,8 @@
 
 Nothing here trains. A test that needs a small policy, a small pipeline, an
 env without a game, valid packed observations, a masked random action stream,
-or the bit-for-bit goldens' inputs and text files imports it from here rather
-than from another test module.
+the fields a fork changes, or the bit-for-bit goldens' inputs and text files
+imports it from here rather than from another test module.
 
 A golden is a text file under the test's ``testdata/``: one line per frozen
 value, a tensor as its dtype, shape and sha256, a scalar as its fp32 bits.
@@ -20,7 +20,7 @@ every host, so no golden reads a checkpoint from outside the repository.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -30,14 +30,16 @@ import difflib
 import hashlib
 import re
 
+from configgle import InlineConfig
 from torch import Tensor, nn
+from treekle.absent import ABSENT
 
 import numpy as np
 import pytest
 import torch
 
 from priml.baselines.craftax.env import CraftaxEnv, WorldPool
-from priml.baselines.craftax.experiments import exp000, exp002
+from priml.baselines.craftax.experiments import exp000, exp009
 from priml.baselines.craftax.game.jit import jit, platform_key
 from priml.baselines.craftax.game.state import ATN_DIM, OBS_SIZE
 from priml.baselines.craftax.model import (
@@ -65,6 +67,8 @@ from priml.testing.golden import assert_text_golden
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
+
+    from _typeshed import DataclassInstance
 
     from priml.baselines.craftax.game.state import Array1, Array2
     from priml.baselines.craftax.train_step import CraftaxTrainStep
@@ -309,17 +313,17 @@ def tiny_exp000_step() -> CraftaxTrainStep.Config:
     return config
 
 
-def tiny_exp002_step() -> CraftaxTrainStep.Config:
-    """Return exp002's pipeline at :func:`tiny_train_step`'s size and in its torch forms.
+def tiny_exp009_step() -> CraftaxTrainStep.Config:
+    """Return experiments.exp009's pipeline as :func:`tiny_train_step` shrinks exp000's.
 
-    exp002's rules, fresh worlds and dense symbolic view, in 4 environments of
-    2 buffers.
+    Its rules, fresh worlds and dense symbolic view, in 4 environments of 2
+    buffers, its kernels in their torch forms.
 
     Returns:
       config: Three epochs from the policy's own init.
 
     """
-    config = exp002().step
+    config = exp009().step
     env = tiny_env()
     env.rules = config.env.rules
     env.restart = config.env.restart
@@ -483,6 +487,54 @@ def optimizer_state(
         name: state[index][key]
         for index, name in enumerate(_optimizer_names(model, optimizer))
     }
+
+
+def config_deltas(parent: object, child: object) -> set[str]:
+    """Return the dotted names of the fields that differ between two configs.
+
+    Args:
+      parent: A config.
+      child: Another, usually a fork of ``parent``.
+
+    Returns:
+      names: Every :func:`config_fields` name whose value differs or that one
+        of the two lacks.
+
+    """
+    flat_parent, flat_child = config_fields(parent), config_fields(child)
+    return {
+        name
+        for name in flat_parent.keys() | flat_child.keys()
+        if flat_parent.get(name, ABSENT) != flat_child.get(name, ABSENT)
+    }
+
+
+def config_fields(config: object, prefix: str = "") -> dict[str, object]:
+    """Return a dotted-name to value map, descending into nested Configs.
+
+    Args:
+      config: A config.
+      prefix: Prepended to every name, for a nested config.
+
+    Returns:
+      fields: Each field's ``repr`` by dotted name, a nested config's class
+        under its own name.
+
+    """
+    flat: dict[str, object] = {}
+    for member in fields(cast("DataclassInstance", config)):
+        value = cast("object", getattr(config, member.name))
+        dotted = f"{prefix}{member.name}"
+        if isinstance(value, InlineConfig):
+            flat[dotted] = repr(cast("InlineConfig[object]", value))
+        elif is_dataclass(value) and not isinstance(value, type):
+            # The class itself, so swapping in a different Config registers
+            # as one change rather than a diff of every field.
+            flat[dotted] = type(value)
+            flat.update(config_fields(value, prefix=f"{dotted}."))
+        else:
+            flat[dotted] = repr(value)
+    return flat
 
 
 def digest(value: Tensor | np.ndarray) -> str:

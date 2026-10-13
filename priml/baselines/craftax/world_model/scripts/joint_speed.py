@@ -3,9 +3,9 @@
 # fmt: off
 '''' 2>/dev/null #
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
-Time one joint learner epoch at exp103's geometry with a 20-layer world model.
+Time a joint learner epoch at experiments.exp003's geometry with a 20-layer world model.
 
-exp103's policy, objective and optimizer, the policy reading a projection of
+exp003's policy, objective and optimizer, the policy reading a projection of
 the feature, and exp001's world model at its seed-0 init in bfloat16 on CUDA,
 trained with the policy (``world_model.context``): 18 windows of 128 agents
 by 256 steps, each recomputing its features from synthetic contexts, the
@@ -48,7 +48,7 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.baselines.craftax.experiments import exp103
+from priml.baselines.craftax.experiments import exp003
 from priml.baselines.craftax.model import MinGRUPolicy
 from priml.baselines.craftax.train_step import (
     AgentWindows,
@@ -99,7 +99,7 @@ def main() -> int:
     flags = cast("Flags", parser.parse_args())
     output = validated_output_path(flags.output)
     device = torch.device("cuda")
-    step = exp103().step
+    step = exp003().step
     model = step.model
     assert isinstance(model, MinGRUPolicy.Config)
     proj = model.proj_feature = Linear.Config()

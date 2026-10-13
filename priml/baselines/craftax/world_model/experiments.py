@@ -699,8 +699,8 @@ def exp015() -> WorldModelLoop.Config:
 
     Hypothesis:
       The frame encoder is about half of the RL feature step at the frozen
-      feature's geometry (the RL package's exp107), so a ~15x cheaper encoder
-      makes the step at least 1.5x faster; the global stack and the decoder
+      feature's geometry (experiments_world_model.exp001), so a ~15x cheaper
+      encoder makes the step at least 1.5x faster; the global stack and the decoder
       see the frame as before, so total loss stays within max(1%, 2 sd) of
       exp013's and board NLL no worse beyond its noise.
 

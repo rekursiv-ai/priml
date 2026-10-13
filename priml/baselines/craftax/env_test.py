@@ -3,9 +3,9 @@
 Every test but the goldens runs the env's kernels as their Python source
 (``craftax.eager``) on small hand-built worlds: a compile costs
 seconds, these worlds milliseconds. The goldens run the machine code, the one
-check that the compiled kernels play exp000's and exp002's environments bit
-for bit, and that those kernels compute in float32 without fused
-multiply-adds.
+check that the compiled kernels play exp000's and experiments.exp009's
+environments bit for bit, and that those kernels compute in float32 without
+fused multiply-adds.
 """
 
 from __future__ import annotations
@@ -977,8 +977,8 @@ def test_the_escape_streams_are_seeded_once_and_draw_once_per_reset() -> None:
 def test_practice_plays_the_same_bits_at_every_thread_count(fresh_worlds: bool) -> None:
     """Donors save in row order after each step's shares join, whoever stepped them.
 
-    In fresh worlds too (exp109), where every reset generates the world that
-    donors save from.
+    In fresh worlds too (experiments.exp008), where every reset generates the
+    world that donors save from.
     """
     runs: list[list[str]] = []
     for threads in (1, 2):
@@ -1013,7 +1013,7 @@ def test_practice_resumes_bit_identically_from_the_state_dict() -> None:
     [
         ("exp000", {}, False),
         (
-            "exp002",
+            "exp009",
             {
                 "original_reward": True,
                 "end_on_boss_defeat": True,
@@ -1030,7 +1030,7 @@ def test_the_environments_play_their_golden(
     rules: dict[str, bool],
     fresh: bool,
 ) -> None:
-    """exp000's and exp002's environments, compiled, frozen: the kernels' one bit-for-bit check.
+    """exp000's and exp009's environments, compiled, frozen: the kernels' one bit-for-bit check.
 
     PufferLib's rules and original Craftax's, the baselines of the recipes.
     Each plays from seed 0 -- 4 environments in 2 buffers of 2 threads, so a
@@ -1038,7 +1038,7 @@ def test_the_environments_play_their_golden(
     32 steps, on the oracle traces' xorshift action stream over the last
     step's mask. The golden holds the pool, every array after the reset, each
     step's rewards and terminals and a digest of every array after it, and
-    every array at the end. exp002's options are ``docs/differences.md``'s D1,
+    every array at the end. exp009's options are ``docs/differences.md``'s D1,
     D2, D4, D5, D6 and D8. Each rule and option is a unit test of
     ``game/step_test.py``, which plays it as Python.
 

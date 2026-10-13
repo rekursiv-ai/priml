@@ -1938,7 +1938,8 @@ def _sample_kernel(**helpers: Callable[..., object]) -> triton.JITFunction[..., 
 
 # Programs are sectioned: the observations, the mask, the two scalar rows, then the
 # carry. No value is cast before its stores: a store rounds to its tensor's dtype, so the
-# storage decides, bf16 for exp000 and fp32 for exp003, as the torch path rounds them.
+# storage decides, bf16 for exp000 and fp32 for experiments.exp010, as the torch path
+# rounds them.
 # The carry rows of ended episodes are zeroed in place, and at ``step == 0`` the
 # (zeroed) carry is also written to the initial states.
 def _ingest_triton(  # noqa: PLR0917 -- The signature is the kernel's positional ABI.

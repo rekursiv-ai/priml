@@ -3,12 +3,12 @@
 Goldens freeze whole epochs of the tiny pipeline, the same bits on every CPU:
 exp000's recipe in its torch forms from portable seed-73 masters (four epochs
 that walk its whole cosine, which a resume after epoch 2 and a checkpoint
-loaded two epochs later must reproduce), and exp002's from the port's own
-init. On the GPU, host-keyed goldens freeze exp000's kernels at the same tiny
-size: four epochs, the last three as captured learner graphs (captured again
-after a load drops them), and three steps of its fused Muon. The fp32
-cosine's rate at every one of exp000's epochs is frozen on each platform's
-libm.
+loaded two epochs later must reproduce), and experiments.exp009's from the
+port's own init. On the GPU, host-keyed goldens freeze exp000's kernels at the
+same tiny size: four epochs, the last three as captured learner graphs
+(captured again after a load drops them), and three steps of its fused Muon.
+The fp32 cosine's rate at every one of exp000's epochs is frozen on each
+platform's libm.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ from priml.baselines.craftax.testing import (
     smoke_feature,
     tiny_env,
     tiny_exp000_step,
-    tiny_exp002_step,
+    tiny_exp009_step,
     tiny_policy,
     tiny_train_step,
 )
@@ -199,7 +199,7 @@ def test_the_learner_rollout_is_agent_major_with_clamped_rewards() -> None:
 def test_a_reward_scale_of_an_eighth_is_exact_before_the_clamp(
     dtype: torch.dtype,
 ) -> None:
-    """exp103's 0.125 with no clamp is an exact power of two, in either storage.
+    """experiments.exp003's unclamped 0.125 is an exact power of two in either storage.
 
     With a clamp at 0.25 the scale comes first: 3 becomes 0.375, clamped to
     0.25, where clamping first would give 1/32.
@@ -1334,8 +1334,9 @@ def test_the_step_has_no_field_it_would_ignore(name: str) -> None:
 
     On the base a custom ``loss`` built and was silently ignored, and the
     printed exp000 named a constant schedule and a BCE loss it never ran. The
-    learning rule and the minibatches are the learner's own, so exp003's
-    learner no longer carries exp000's unread PPO coefficients.
+    learning rule and the minibatches are the learner's own, so
+    experiments.exp010's learner no longer carries exp000's unread PPO
+    coefficients.
     """
     config = tiny_train_step()
     with pytest.raises(AttributeError):
@@ -1744,15 +1745,15 @@ def test_a_checkpoint_loaded_after_the_capture_trains_as_the_golden(
     assert lines == _after_epoch_2(golden)
 
 
-def test_exp002s_epoch_matches_its_golden() -> None:
-    """exp002 at test size from the policy's own init under torch seed 0, frozen.
+def test_exp009s_epoch_matches_its_golden() -> None:
+    """exp009 at test size from the policy's own init under torch seed 0, frozen.
 
     From scratch, so the golden moves with the init's draws: their order,
-    their distributions, or torch's generator. The env plays exp002's rules
+    their distributions, or torch's generator. The env plays exp009's rules
     in fresh worlds and writes the dense symbolic view. One epoch of two-step
     rollouts, as the tiny step's golden above.
     """
-    config = _quick(tiny_exp002_step())
+    config = _quick(tiny_exp009_step())
     config.train_budget_steps = 1
     with host_agnostic_pipeline():
         step = _train_step(config)
@@ -1760,7 +1761,7 @@ def test_exp002s_epoch_matches_its_golden() -> None:
         lines += _train_out(step)
     assert_golden(
         test_file=__file__,
-        name="train_step_exp002_tiny",
+        name="train_step_exp009_tiny",
         lines=lines,
     )
 

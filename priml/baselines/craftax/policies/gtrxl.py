@@ -708,8 +708,8 @@ def _towers(*, channels_hidden: int, num_layers: int) -> ActorCritic.Config:
 
 
 # Each tower's input is the last block's output, which takes a gradient, so unlike
-# exp003's towers over the observation the first projection forms its input's
-# gradient too. ReLU is one compare-and-select each way.
+# experiments.exp010's towers over the observation the first projection forms its
+# input's gradient too. ReLU is one compare-and-select each way.
 def _decoder_cost(
     decoder: ActorCritic.Config,
     *,

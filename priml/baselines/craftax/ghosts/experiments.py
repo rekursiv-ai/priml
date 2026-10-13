@@ -4,15 +4,15 @@ Each model tier is one port policy, sampled as trained, as one capture arm:
 
 | Tier | Arm | Policy | Transitions | Eval perf | Deepest floor reached |
 | --- | ---: | --- | ---: | ---: | --- |
-| early | 0 | exp001's final checkpoint (epoch 476) | 250M | 15.22% | dungeon 72.3% |
-| medium | 1 | exp102 at 20B, seed 73 | 20.0B | 56.24% | ice realm 6.4% |
-| high | 2 | exp103 at 20B, seed 74 | 20.0B | 77.66% | graveyard 60.5% |
-| boss | 3 | exp114, exp103 fine-tuned for the boss fight | +3.0B | 80.06% | graveyard 65.8% |
+| early | 0 | experiments.exp005's final checkpoint (epoch 476) | 250M | 15.22% | dungeon 72.3% |
+| medium | 1 | experiments.exp002 at 20B, seed 73 | 20.0B | 56.24% | ice realm 6.4% |
+| high | 2 | experiments.exp003 at 20B, seed 74 | 20.0B | 77.66% | graveyard 60.5% |
+| boss | 3 | experiments.exp004, exp003 fine-tuned for the boss fight | +3.0B | 80.06% | graveyard 65.8% |
 
 Each tier reads its experiment's final ``TrainLoop`` checkpoint, at the path
 that run writes beneath ``base_dir``. The published page's medium and high
-tiers were exp102's seed-73 and exp103's seed-74 runs, and its boss tier the
-original runs' fine-tune that exp114 restates, played in their numerics: a
+tiers were exp002's seed-73 and exp003's seed-74 runs, and its boss tier the
+original runs' fine-tune that exp004 restates, played in their numerics: a
 bf16 carry and PufferLib's scan.
 
 A tier's run records exactly one episode per environment. Its budget is one
@@ -61,7 +61,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from priml.baselines.craftax.experiments import exp001, exp102, exp103, exp114
+from priml.baselines.craftax.experiments import exp002, exp003, exp004, exp005
 from priml.baselines.craftax.world_model.capture.source import (
     PolicySource,
 )
@@ -74,14 +74,14 @@ from priml.baselines.craftax.world_model.capture.worker import (
 
 
 def pilot_early() -> CaptureWorker.Config:
-    """Pilot the early tier, exp001's final policy as arm 0, on pool worlds 0-15."""
+    """Pilot the early tier, exp005's final policy as arm 0, on pool worlds 0-15."""
     config = CaptureWorker.Config()
     config.root = Path("/artifacts/craftax/ghosts/capture/pilot")
     config.arm = 0
     config.decisions = 1
     source = config.source
     assert isinstance(source, PolicySource.Config)
-    policy = exp001()
+    policy = exp005()
     source.policy = policy.step
     source.checkpoint = Path(
         f"/runs/{policy.study_name}/{policy.experiment_name}/checkpoints/"
@@ -94,12 +94,12 @@ def pilot_early() -> CaptureWorker.Config:
 
 
 def pilot_medium() -> CaptureWorker.Config:
-    """Pilot the medium tier, exp102's final policy as arm 1; seed 73's on the page."""
+    """Pilot the medium tier, exp002's final policy as arm 1; seed 73's on the page."""
     config = pilot_early()
     config.arm = 1
     source = config.source
     assert isinstance(source, PolicySource.Config)
-    policy = exp102()
+    policy = exp002()
     source.policy = policy.step
     source.checkpoint = Path(
         f"/runs/{policy.study_name}/{policy.experiment_name}/checkpoints/"
@@ -109,12 +109,12 @@ def pilot_medium() -> CaptureWorker.Config:
 
 
 def pilot_high() -> CaptureWorker.Config:
-    """Pilot the high tier, exp103's final policy as arm 2; seed 74's on the page."""
+    """Pilot the high tier, exp003's final policy as arm 2; seed 74's on the page."""
     config = pilot_medium()
     config.arm = 2
     source = config.source
     assert isinstance(source, PolicySource.Config)
-    policy = exp103()
+    policy = exp003()
     source.policy = policy.step
     source.checkpoint = Path(
         f"/runs/{policy.study_name}/{policy.experiment_name}/checkpoints/"
@@ -169,14 +169,14 @@ def capture_high() -> CaptureWorker.Config:
 
 
 def capture_boss() -> CaptureWorker.Config:
-    """Capture the boss tier, exp114's final policy as arm 3: 1,000 of world 15."""
+    """Capture the boss tier, exp004's final policy as arm 3: 1,000 of world 15."""
     config = capture_high()
     config.arm = 3
     source = config.source
     assert isinstance(source, PolicySource.Config)
-    policy = exp114()
+    policy = exp004()
     source.policy = policy.step
-    # The source loads exp114's own weights below, not the parent's it started from.
+    # The source loads exp004's own weights below, not the parent's it started from.
     source.policy.checkpoint = None
     source.checkpoint = Path(
         f"/runs/{policy.study_name}/{policy.experiment_name}/checkpoints/"

@@ -435,7 +435,7 @@ def test_fresh_worlds_are_generated_from_the_environment_stream(
 
     The generator stands in as one draw that marks the world, so the step's
     side is checked here and world generation's own bits by ``world_gen_test``
-    and ``env_test``'s exp002 golden.
+    and ``env_test``'s experiments.exp009 golden.
     """
     monkeypatch.setattr(step, "generate_world_numba", generate_small_world)
     template = new_states(1)
@@ -584,7 +584,7 @@ def test_a_boss_beaten_while_asleep_ends_the_step_at_that_tick() -> None:
 
 
 _BOSS_FIGHT: Final = (np.float32(1.0), np.float32(1.5))
-"""exp114's boss-fight reward per hit and per kill, float32 as ``Rules`` holds it."""
+"""experiments.exp004's fight reward per hit and per kill, in ``Rules``' float32."""
 
 
 def test_the_boss_fight_reward_pays_a_hit_on_top_of_the_games_reward() -> None:

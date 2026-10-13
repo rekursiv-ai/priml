@@ -465,7 +465,7 @@ def _collected(policy: Policy) -> LearnerRollout:
 
 
 def _learner() -> ShuffledTransitions:
-    """Return exp003's epoch at two passes of two minibatches, sized for the window."""
+    """Return exp010's epoch at two passes of two minibatches, sized for the window."""
     config = ShuffledTransitions.Config()
     config.num_passes = 2
     config.num_minibatches = 2
@@ -484,7 +484,7 @@ def _window() -> CraftaxTrainStep.Config:
 
 
 def _tiny_policy() -> ActorCritic.Config:
-    """Return exp003's policy at test size, reading ``FakeEnv``'s packed observations."""
+    """Return exp010's policy at test size, reading ``FakeEnv``'s packed observations."""
     config = ActorCritic.Config()
     config.observation_size = OBS_SIZE
     config.channels_hidden = 4
@@ -516,7 +516,7 @@ def _rollout(
 
 
 def _tiny_config() -> CraftaxTrainStep.Config:
-    """Return exp003's learner on exp000's tiny CPU pipeline: two passes of two minibatches."""
+    """Return exp010's learner on exp000's tiny CPU pipeline: two passes of two minibatches."""
     config = tiny_train_step()
     model = config.model = ActorCritic.Config()
     model.observation_size = OBS_SIZE
