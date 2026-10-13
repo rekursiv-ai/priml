@@ -400,6 +400,7 @@ def test_diffusion_loss_time_transform_moves_log_t_before_the_schedule() -> None
     """A transform sending every ``log_t`` to ``0`` pins ``log_snr`` at its ``t = 1``."""
     config = DiffusionLoss.Config(time_transform=_to_zero_log_time)
     result = config.make()(denoiser=_zero_denoiser, x0=torch.randn(2, 3, 4))
+    # log_t broadcasts over x0's (3, 4) feature dims, so the trailing dims are 1.
     expected = config.logsnr_fn(torch.zeros(2, 1, 1))
     assert torch.equal(result["log_snr"], expected)
 

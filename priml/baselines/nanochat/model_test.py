@@ -1351,7 +1351,7 @@ class _SourceRecorder:
 def test_memory_forward_rejects_a_longer_input_than_the_context() -> None:
     model = _memory_config().make()
     with pytest.raises(ValueError, match="exceeds max_seq_len=4"):
-        model(torch.zeros(1, 5, dtype=torch.long))
+        model(torch.zeros(2, 5, dtype=torch.long))
 
 
 def test_memory_rotation_table_refuses_to_build_while_compiling(

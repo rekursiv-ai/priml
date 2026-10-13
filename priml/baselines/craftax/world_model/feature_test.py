@@ -892,6 +892,8 @@ def test_flash4_cache_attention_attends_as_the_masked_reference(
     interface = _Flash4Interface(returns_tuple=returns_tuple)
     monkeypatch.setitem(sys.modules, "flash_attn.cute.interface", interface)
     generator = torch.Generator().manual_seed(0)
+    # Flash4 q is [batch, heads, seq, head_dim]; keys/values are
+    # [batch, seq, heads, head_dim], so batch, heads and head_dim recur.
     q = torch.randn(2, 2, 4, 3, generator=generator)
     keys, values = (torch.randn(2, 5, 2, 3, generator=generator) for _ in range(2))
     seqused = torch.tensor([3, 5], dtype=torch.int32)

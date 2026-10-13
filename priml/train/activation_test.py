@@ -631,7 +631,7 @@ def test_quantized_module_conv_below_min_size_matches_plain_conv() -> None:
         module_types=(nn.Conv2d,),
         min_size=1_000,
     ).make()(wrapped)
-    x_reference = torch.randn(2, 2, 4, 5, requires_grad=True)
+    x_reference = torch.randn(3, 2, 4, 5, requires_grad=True)
     x_wrapped = x_reference.detach().clone().requires_grad_(True)
 
     reference(x_reference).square().sum().backward()
@@ -652,7 +652,7 @@ def test_quantized_module_conv_backward_rejects_string_padding() -> None:
         module_types=(nn.Conv2d,),
         min_size=4,
     ).make()(conv)
-    out = conv(torch.randn(2, 2, 4, 5, requires_grad=True))
+    out = conv(torch.randn(3, 2, 4, 5, requires_grad=True))
 
     with pytest.raises(TypeError, match="padding"):
         out.sum().backward()
