@@ -15,6 +15,16 @@ All notable priml changes are documented here. This project follows
   `NotImplementedError` for a cached step.
 - `priml.cost.nbytes` returns the bytes a count of values occupies at a dtype.
 
+### Changed
+
+- `Cost` and `Report` carry their `axes`, so a slice answers by the axes it
+  kept whether or not it holds a cell. An empty slice used to accept any axis
+  and read a sub-table where a full one read zero.
+- Naming every axis of a sub-table, such as `cost["flops"]["primal",
+  "matmul", torch.bfloat16]`, is a `KeyError`; read it with `.sum()`, or name
+  all four axes on the full table. A three-value `Report` lookup is typed
+  `float | Report`: a three-axis report reads a value, `peak()` a sub-table.
+
 ### Fixed
 
 - Costs at `torch.float4_e2m1fn_x2` count two values per byte. Every byte
