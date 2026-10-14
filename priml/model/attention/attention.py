@@ -255,13 +255,9 @@ class AttentionProjections(nn.Module):
             channels_in=config.channels_in,
             num_heads=config.num_heads,
             channels_head=config.channels_head,
+            num_heads_kv=config.num_heads_kv,
         )
         super().__init__()
-        if config.num_heads % config.num_heads_kv != 0:
-            raise ValueError(
-                f"num_heads={config.num_heads} must be divisible by "
-                f"num_heads_kv={config.num_heads_kv}.",
-            )
         self.num_heads = config.num_heads
         self.channels_head = config.channels_head
         self.num_heads_kv = config.num_heads_kv
@@ -366,6 +362,7 @@ def _validate_head_dims(
     channels_in: int,
     num_heads: int,
     channels_head: int,
+    num_heads_kv: int,
 ) -> None:
     """Reject geometry that stayed unresolved after finalize."""
     if channels_head == -1 and channels_in != -1:
@@ -382,6 +379,12 @@ def _validate_head_dims(
         raise ValueError(
             f"Need at least two of channels_in={channels_in}, "
             f"num_heads={num_heads}, channels_head={channels_head}.",
+        )
+    # Zero key/value heads builds empty projections without complaint, so it is
+    # checked here; the modulo would otherwise divide by it.
+    if num_heads_kv == 0 or num_heads % num_heads_kv:
+        raise ValueError(
+            f"num_heads={num_heads} must be divisible by num_heads_kv={num_heads_kv}.",
         )
 
 
@@ -535,8 +538,8 @@ class Attention(AttentionProjections):
             num_heads=self.num_heads_kv,
             max_seq=max_seq,
             channels_head=self.channels_head,
-            device=device,
-            dtype=dtype,
+            device=self.proj_qkv.weight.device if device is None else device,
+            dtype=self.proj_qkv.weight.dtype if dtype is None else dtype,
         )
 
     @override

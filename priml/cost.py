@@ -1036,7 +1036,12 @@ def utilization(
       ratio: At ``(phase, kernel, dtype)`` keys, owning nothing; ``inf`` where
         the device lists no peak for the cell.
 
+    Raises:
+      ValueError: ``duration_sec`` is not positive.
+
     """
+    if math.isnan(duration_sec) or duration_sec <= 0:
+        raise ValueError(f"duration_sec must be positive; got {duration_sec}.")
     ceiling = (peak()[device] if isinstance(device, str) else device).cells
     ratios = intensity(cost).cells
     cells: dict[tuple[object, ...], float] = {}

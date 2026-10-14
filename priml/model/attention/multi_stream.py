@@ -299,13 +299,9 @@ class MultiStreamAttention(nn.Module):
             channels_in=config.channels_in,
             num_heads=config.num_heads,
             channels_head=config.channels_head,
+            num_heads_kv=config.num_heads_kv,
         )
         super().__init__()
-        if config.num_heads % config.num_heads_kv != 0:
-            raise ValueError(
-                f"num_heads={config.num_heads} must be divisible by "
-                f"num_heads_kv={config.num_heads_kv}.",
-            )
         causal = config.causal or any(s.causal for s in config.streams)
         if causal and config.num_streams > 1:
             raise ValueError("causal=True requires num_streams=1.")
@@ -451,8 +447,10 @@ class MultiStreamAttention(nn.Module):
         Args:
           batch: Batch size or batch shape.
           max_seq: Maximum cached sequence length.
-          device: Device for the cache tensors.
-          dtype: Dtype for the cache tensors.
+          device: Device for the cache tensors; defaults to each stream's
+            projection device.
+          dtype: Dtype for the cache tensors; defaults to each stream's
+            projection dtype.
 
         Returns:
           caches: One KV cache per stream, in stream order.
@@ -468,16 +466,26 @@ class MultiStreamAttention(nn.Module):
             if self.streams
             else [self.channels_head] * self.num_streams
         )
+        weights = (
+            [stream.proj_qkv.weight for stream in self.streams]
+            if self.streams
+            else [next(self.proj_qkvs.parameters())] * self.num_streams
+        )
         return tuple(
             KVCache.alloc(
                 batch=batch,
                 num_heads=num_heads,
                 max_seq=max_seq,
                 channels_head=channels_head,
-                device=device,
-                dtype=dtype,
+                device=weight.device if device is None else device,
+                dtype=weight.dtype if dtype is None else dtype,
             )
-            for num_heads, channels_head in zip(heads, widths, strict=True)
+            for num_heads, channels_head, weight in zip(
+                heads,
+                widths,
+                weights,
+                strict=True,
+            )
         )
 
     @override

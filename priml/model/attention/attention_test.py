@@ -449,6 +449,23 @@ def test_alloc_kv_cache_preserves_requested_device_dtype_and_gqa_shape() -> None
     assert cache.seen == 0
 
 
+def test_alloc_kv_cache_defaults_to_the_block_device_and_dtype() -> None:
+    module = Attention.Config(channels_in=8, num_heads=4, channels_head=3).make()
+    module.to(device="meta", dtype=torch.bfloat16)
+
+    cache = module.alloc_kv_cache(batch=2, max_seq=7)
+
+    for state in (cache.k, cache.v):
+        assert state.device.type == "meta"
+        assert state.dtype is torch.bfloat16
+
+
+def test_attention_rejects_zero_kv_heads() -> None:
+    config = Attention.Config(channels_in=8, num_heads=2, num_heads_kv=0)
+    with pytest.raises(ValueError, match="num_heads_kv"):
+        config.make()
+
+
 def test_forward_forwards_each_attention_argument(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

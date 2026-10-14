@@ -337,6 +337,33 @@ def test_multi_stream_cache():
     assert caches[1].length == 12
 
 
+def test_multi_stream_cache_defaults_to_the_block_device_and_dtype() -> None:
+    module = MultiStreamAttention.Config(
+        channels_in=8,
+        num_heads=4,
+        channels_head=3,
+        num_streams=2,
+    ).make()
+    module.to(device="meta", dtype=torch.bfloat16)
+
+    caches = module.alloc_kv_cache(batch=5, max_seq=7)
+
+    for state in (tensor for cache in caches for tensor in (cache.k, cache.v)):
+        assert state.device.type == "meta"
+        assert state.dtype is torch.bfloat16
+
+
+def test_multi_stream_rejects_zero_kv_heads() -> None:
+    config = MultiStreamAttention.Config(
+        channels_in=8,
+        num_heads=2,
+        num_heads_kv=0,
+        num_streams=3,
+    )
+    with pytest.raises(ValueError, match="num_heads_kv"):
+        config.make()
+
+
 def test_multi_stream_cache_allocates_for_an_uncached_stream() -> None:
     m = MultiStreamAttention.Config(
         channels_in=8,

@@ -331,6 +331,18 @@ def test_explicit_zero_softmax_scale_is_honored() -> None:
     assert module.softmax_scale == 0.0
 
 
+def test_mla_cache_defaults_to_the_block_device_and_dtype() -> None:
+    config, _ = _mla_config()
+    module = config.make()
+    module.to(device="meta", dtype=torch.bfloat16)
+
+    cache = module.alloc_kv_cache(batch=3, max_seq=5)
+
+    for state in (cache.k, cache.v):
+        assert state.device.type == "meta"
+        assert state.dtype is torch.bfloat16
+
+
 def test_prealloc_cache_decode():
     m = _tiny()
     cache = m.alloc_kv_cache(batch=2, max_seq=16)

@@ -184,6 +184,25 @@ def test_kv_cache_fifo_rolling():
     assert k_out[0, 0, 0, 0].item() == 3.0
 
 
+def test_kv_cache_update_rejects_values_of_another_length() -> None:
+    cache = KVCache.alloc(batch=2, num_heads=3, max_seq=9, channels_head=4)
+    with pytest.raises(ValueError, match="keys and values"):
+        cache.update(torch.ones(2, 3, 5, 4), torch.ones(2, 3, 6, 4))
+    assert cache.length == cache.seen == 0
+
+
+def test_kv_cache_failed_update_leaves_the_cache_unchanged() -> None:
+    cache = KVCache.alloc(batch=2, num_heads=3, max_seq=7, channels_head=4)
+    keys = torch.arange(2 * 3 * 6 * 4, dtype=torch.float32).reshape(2, 3, 6, 4)
+    cache.update(keys, keys)
+    # Five more tokens overflow, so eviction would shift the cache before the
+    # too-wide values fail to write.
+    with pytest.raises(ValueError, match="cache"):
+        cache.update(torch.ones(2, 3, 5, 4), torch.ones(2, 3, 5, 8))
+    assert cache.length == cache.seen == 6
+    torch.testing.assert_close(cache.k[..., :6, :], keys)
+
+
 def test_kv_cache_freeze():
     cache = KVCache.alloc(batch=2, num_heads=3, max_seq=8, channels_head=5)
     k = torch.randn(2, 3, 4, 5)

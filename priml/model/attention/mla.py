@@ -673,8 +673,8 @@ class MultiHeadLatentAttention(nn.Module):
             max_seq=max_seq,
             channels_head=self.kv_lora_rank,
             channels_v_head=self.channels_qk_rope_head,
-            device=device,
-            dtype=dtype,
+            device=self.proj_kv_b.weight.device if device is None else device,
+            dtype=self.proj_kv_b.weight.dtype if dtype is None else dtype,
         )
 
     @override

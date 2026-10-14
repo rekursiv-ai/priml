@@ -920,6 +920,15 @@ def test_utilization_with_a_duration_is_achieved_over_the_roofline_ceiling(
     assert achieved["adjoint", "sort", F32] == pytest.approx(1 / 2 / 3.35e12)
 
 
+@pytest.mark.parametrize("duration_sec", [0.0, -1.0, math.nan, -math.inf])
+def test_utilization_rejects_a_duration_that_is_not_positive(
+    duration_sec: float,
+) -> None:
+    cost = matmul_cost(channels_in=4, channels_out=3, rows=2, dtype=BF)
+    with pytest.raises(ValueError, match="duration_sec"):
+        utilization(cost, device="h100", duration_sec=duration_sec)
+
+
 def test_utilization_treats_missing_bandwidth_as_zero() -> None:
     cost = Cost(
         cells={
