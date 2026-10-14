@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import Generic, ParamSpec, TypeVar
+from typing import ParamSpec, TypeVar
 
 from triton import (
     compiler as compiler,
@@ -7,20 +7,12 @@ from triton import (
     runtime as runtime,
     testing as testing,
 )
+from triton.runtime.jit import JITFunction as JITFunction
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
 __version__: str
-
-class JITFunction(Generic[_P, _R]):
-    @property
-    def src(self) -> str: ...
-    def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _R: ...
-    def __getitem__(
-        self,
-        grid: tuple[int, ...] | Callable[[dict[str, int]], tuple[int, ...]],
-    ) -> Callable[..., object]: ...
 
 class Config:
     def __init__(

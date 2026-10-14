@@ -61,8 +61,8 @@ from priml.cost import (
     cost,
     elementwise_cost,
     matmul_cost,
+    nbytes,
     reduction_cost,
-    resolve_dtype,
     traffic,
 )
 from priml.loss.policy_gradient import TorchPPO
@@ -238,7 +238,7 @@ class RecurrentQNetwork(nn.Module):
                 + head
                 + greedy
                 + fused,
-                bytes_state=resolve_dtype(dtype).itemsize * batch_size * 2 * width,
+                bytes_state=nbytes(batch_size * 2 * width, dtype),
             )
 
     def __init__(self, config: Config) -> None:

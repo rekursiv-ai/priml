@@ -244,6 +244,6 @@ def test_ladder_alignment_reads_no_decision_outside_the_episode() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

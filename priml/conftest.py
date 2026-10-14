@@ -19,10 +19,12 @@ import sys
 
 import pytest
 
-from priml.lib.testing import userdirs_fixture
-from priml.lib.testing.resource_markers import pytest_collection_modifyitems
-from priml.lib.testing.threads import cap_math_threads
-from priml.lib.testing.userdirs_fixture import isolate_user_dirs
+from priml.lib.testing import resources
+from priml.lib.testing.resources import (
+    cap_math_threads,
+    isolate_user_dirs,
+    pytest_collection_modifyitems,
+)
 from priml.testing import regenerate
 from priml.testing.fixtures import cleanup_cuda
 
@@ -80,7 +82,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 def pytest_configure(config: pytest.Config) -> None:
     """Declare the ``real_user_dirs`` marker and read the regeneration flags."""
-    userdirs_fixture.pytest_configure(config)
+    resources.pytest_configure(config)
     regenerate.configure(config)
 
 

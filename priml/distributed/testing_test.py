@@ -978,6 +978,6 @@ def test_terminate_reports_exact_error_when_processes_are_missing() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

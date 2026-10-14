@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import Final, cast, override
 
@@ -446,6 +447,23 @@ def test_alloc_kv_cache_preserves_requested_device_dtype_and_gqa_shape() -> None
     assert cache.v.dtype is torch.bfloat16
     assert cache.length == 0
     assert cache.seen == 0
+
+
+def test_alloc_kv_cache_defaults_to_the_block_device_and_dtype() -> None:
+    module = Attention.Config(channels_in=8, num_heads=4, channels_head=3).make()
+    module.to(device="meta", dtype=torch.bfloat16)
+
+    cache = module.alloc_kv_cache(batch=2, max_seq=7)
+
+    for state in (cache.k, cache.v):
+        assert state.device.type == "meta"
+        assert state.dtype is torch.bfloat16
+
+
+def test_attention_rejects_zero_kv_heads() -> None:
+    config = Attention.Config(channels_in=8, num_heads=2, num_heads_kv=0)
+    with pytest.raises(ValueError, match="num_heads_kv"):
+        config.make()
 
 
 def test_forward_forwards_each_attention_argument(
@@ -1050,6 +1068,58 @@ def test_gqa_cost_caches_only_kv_heads() -> None:
     assert cost.params == sum(p.numel() for p in config.make().parameters())
 
 
+@pytest.mark.parametrize("seq_len", [1, 6])
+def test_cached_step_cost_matches_torch(seq_len: int) -> None:
+    """Queries after a filled cache attend to every cached key and their own.
+
+    ``seq_len=1`` is one decode step, which emits one token; 6 is a chunk.
+    The heads are grouped, so the kernel reads the keys the forward repeats.
+    """
+    assert_cost_matches_torch(
+        Attention.Config(
+            channels_in=7,
+            num_heads=4,
+            num_heads_kv=2,
+            channels_head=5,
+            attn_kernel=SdpaNaive.Config(),
+        ),
+        build_input=lambda: torch.randn(3, seq_len, 7, requires_grad=True),
+        run=partial(_step_after_cache, context_len=9),
+        seq_len=seq_len,
+        batch_size=3,
+        dtype=None,
+        context_len=9,
+    )
+
+
+def test_transformer_cost_hands_context_len_to_every_attention() -> None:
+    config = Transformer.Config(
+        channels_in=8,
+        num_layers=3,
+        block=TransformerBlock.Config(
+            attn=Attention.Config(num_heads=2, channels_head=4),
+        ),
+    )
+    finalized = config.copy_tree().finalize()
+    step, fresh = (
+        finalized.cost(seq_len=1, batch_size=1, dtype=None, context_len=context_len)
+        for context_len in (5, 0)
+    )
+    reach, own = (
+        attention_kernel_cost(
+            seq_len=keys,
+            rows=1,
+            dtype=None,
+            num_heads=2,
+            channels_head=4,
+        )
+        for keys in (6, 1)
+    )
+    assert step["flops", "matmul"].sum() - fresh["flops", "matmul"].sum() == 3 * (
+        reach["flops", "matmul"].sum() - own["flops", "matmul"].sum()
+    )
+
+
 def test_attention_cost_counts_its_norms_and_rotary() -> None:
     config = Attention.Config(
         channels_in=16,
@@ -1369,7 +1439,15 @@ def _attend_to_memory(module: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:
     return module(inputs[0], memory=inputs[1])
 
 
+def _step_after_cache(module: nn.Module, x: Tensor, *, context_len: int) -> Tensor:
+    """Attend ``x`` after ``context_len`` tokens of a fresh, zeroed cache."""
+    assert isinstance(module, Attention)
+    state = module.alloc_kv_cache(batch=x.shape[0], max_seq=context_len + x.shape[-2])
+    state.length = state.seen = context_len
+    return module(x, cache=_layer_cache(module, state))
+
+
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

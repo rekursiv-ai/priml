@@ -17,7 +17,7 @@ from priml.cost import (
     cost,
     elementwise_cost,
     matmul_cost,
-    resolve_dtype,
+    nbytes,
 )
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.kvcache import KVCache
@@ -94,6 +94,7 @@ class GatedAttention(nn.Module):
             seq_len: int,
             batch_size: int,
             dtype: torch.dtype | None,
+            context_len: int = 0,
             **kwargs: object,
         ) -> Cost:
             """Cost four projections, two norms, rotary, the kernel, and the gate.
@@ -107,6 +108,8 @@ class GatedAttention(nn.Module):
               seq_len: Tokens per sequence.
               batch_size: Sequences per step.
               dtype: Activation dtype; ``None`` is torch's default.
+              context_len: Tokens each sequence already holds in its KV cache;
+                the ``seq_len`` queries attend to those and to their own keys.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
@@ -165,7 +168,8 @@ class GatedAttention(nn.Module):
                 )
             total += cost(
                 self.attn_kernel,
-                seq_len=seq_len,
+                seq_len=context_len + seq_len,
+                rows=seq_len,
                 batch_size=batch_size,
                 dtype=dtype,
                 num_heads=self.num_heads,
@@ -184,7 +188,7 @@ class GatedAttention(nn.Module):
                 rows=rows,
                 dtype=dt,
             )
-            return replace(total, bytes_state=resolve_dtype(dtype).itemsize * 2 * kv)
+            return replace(total, bytes_state=nbytes(2 * kv, dtype))
 
     def __init__(self, config: Config) -> None:
         super().__init__()

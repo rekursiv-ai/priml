@@ -278,6 +278,6 @@ def test_state_dict_round_trips_the_epoch_timer(tmp_path: Path) -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

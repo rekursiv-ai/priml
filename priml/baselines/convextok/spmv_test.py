@@ -1,12 +1,16 @@
 """A CSR product must equal the dense product and repeat bit for bit on every device."""
 
+from collections.abc import Callable, Iterator
+from functools import partial
 from types import FunctionType
 from unittest.mock import Mock
 
 from torch import Tensor
+from triton.runtime import interpreter, jit
 
 import pytest
 import torch
+import triton
 
 from priml.baselines.convextok import spmv
 from priml.baselines.convextok.spmv import CsrMatrix
@@ -346,6 +350,62 @@ def test_matches_dense_product_with_an_empty_row() -> None:
     ]
 
 
+@pytest.fixture
+def interpreted_kernels(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Run the Triton kernels through Triton's CPU interpreter, uncached."""
+    monkeypatch.setenv("TRITON_INTERPRET", "1")
+    # The compiler finds a constexpr by substring; the interpreter re-parses the source,
+    # sees the quoted ``'language.constexpr'``, and matches only a bare ``constexpr``.
+    monkeypatch.setattr(
+        jit,
+        "_normalize_ty",
+        partial(_normalize_bare_constexpr, normalize=jit._normalize_ty),
+    )
+    # Triton decided at import that its library kernels compile, so ``sum`` is a
+    # JITFunction the interpreter refuses to call; interpret it as the kernels are.
+    monkeypatch.setattr(
+        triton.language,
+        "sum",
+        interpreter.InterpretedFunction(triton.language.standard.sum.fn),
+    )
+    spmv._bucket_kernel.cache_clear()
+    spmv._chunk_kernel.cache_clear()
+    try:
+        yield
+    finally:
+        spmv._bucket_kernel.cache_clear()
+        spmv._chunk_kernel.cache_clear()
+
+
+def _normalize_bare_constexpr(
+    ty: object,
+    *,
+    normalize: Callable[[object], str],
+) -> str:
+    return normalize(
+        ty.strip("'").removeprefix("language.") if isinstance(ty, str) else ty,
+    )
+
+
+@pytest.mark.usefixtures("interpreted_kernels")
+def test_interpreted_kernels_match_the_segmented_reduction() -> None:
+    # Row lengths: empty, one per bucket width class, and 300 -- two chunks.
+    lengths = torch.tensor([0, 1, 3, 33, 300])
+    crow = torch.zeros(len(lengths) + 1, dtype=torch.int64)
+    crow[1:] = lengths.cumsum(0)
+    generator = torch.Generator().manual_seed(0)
+    nnz = int(crow[-1])
+    columns = torch.randint(0, 5, (nnz,), generator=generator)
+    values = torch.randn(nnz, generator=generator, dtype=torch.float64)
+    vector = torch.randn(5, generator=generator, dtype=torch.float64)
+    expected = CsrMatrix(crow, columns, values) @ vector
+    out = torch.full((len(lengths),), float("nan"), dtype=torch.float64)
+
+    spmv._run(spmv._plan(crow), columns, values, vector, out)
+
+    torch.testing.assert_close(out, expected, rtol=1e-12, atol=1e-12)
+
+
 def test_repeats_bit_for_bit() -> None:
     matrix, vector = _random(torch.device("cpu"))
     assert torch.equal(matrix @ vector, matrix @ vector)
@@ -388,6 +448,6 @@ def _random(device: torch.device) -> tuple[CsrMatrix, torch.Tensor]:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

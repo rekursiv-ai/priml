@@ -193,6 +193,6 @@ def test_choose_weighted_pair_makes_the_choice_of_the_two_weight_array(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

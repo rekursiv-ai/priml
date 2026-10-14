@@ -4,6 +4,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
 
+import time
+
 from configgle import PartialConfig
 from torch import nn
 from torch._dynamo.exc import Unsupported
@@ -417,6 +419,53 @@ def test_eval_loss_counts_the_targets_the_metric_counts_at_their_weights() -> No
     assert repeated["loss"].item() == 0
 
 
+def test_train_loss_is_the_objective_without_a_gradient() -> None:
+    step = _step_config().make()
+    batch = next(_batches())
+    result = step.train_loss(**batch)
+    trained = step.train_step(**batch)
+    torch.testing.assert_close(result["loss"], trained["loss"])
+    torch.testing.assert_close(result["model"].reshape(1), trained["model"])
+    assert not result["loss"].requires_grad
+
+
+@pytest.mark.parametrize(("device", "synced"), [("cuda", 1), ("cpu", 0)])
+def test_the_window_time_waits_for_a_cuda_device(
+    monkeypatch: pytest.MonkeyPatch,
+    device: str,
+    synced: int,
+) -> None:
+    step = _step_config().make()
+    calls: list[None] = []
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: calls.append(None))
+    monkeypatch.setattr(step.parallelism, "device", torch.device(device))
+    step._window_started = time.perf_counter() - 5.0
+    assert step._window_seconds() >= 5.0
+    assert len(calls) == synced
+
+
+def test_the_grad_norm_is_refused_before_any_update() -> None:
+    with pytest.raises(ValueError, match="last_grad_norm"):
+        _step_config().make()._grad_norm()
+
+
+def test_eval_autocast_enters_the_configured_dtype() -> None:
+    config = _step_config()
+    config.dtype_autocast = torch.bfloat16
+    step = config.make()
+    assert not torch.is_autocast_enabled("cpu")
+    # `torch` caches autocast casts by default; the config does not.
+    assert torch.is_autocast_cache_enabled()
+    assert not config.autocast_cache_enabled
+    with step._autocast():
+        assert torch.is_autocast_enabled("cpu")
+        assert torch.get_autocast_dtype("cpu") == torch.bfloat16
+        assert not torch.is_autocast_cache_enabled()
+    assert not torch.is_autocast_enabled("cpu")
+    with _step_config().make()._autocast():
+        assert not torch.is_autocast_enabled("cpu")
+
+
 def test_eval_loss_restores_the_models_mode() -> None:
     step = _step_config().make()
     step.model.train()
@@ -686,6 +735,6 @@ class _PeerRank:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

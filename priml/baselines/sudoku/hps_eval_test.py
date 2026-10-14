@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final, cast
 
+import logging
+
 from torch import Tensor
+from treekle import json_loads
 
 import pytest
 import torch
@@ -21,6 +24,7 @@ from priml.baselines.sudoku.testing import (
 )
 from priml.baselines.sudoku.views import NINE_VIEWS
 from priml.testing.golden import mismatches
+from priml.train.train_loop import EvalTimeLimitError
 
 
 if TYPE_CHECKING:
@@ -33,6 +37,127 @@ def test_hps_eval_requires_a_name_and_a_checkpoint() -> None:
         HpsEval.Config().make()
     with pytest.raises(ValueError, match="checkpoint_path is required"):
         HpsEval.Config(experiment_name="x").make()
+
+
+def test_hps_eval_requires_a_positive_population() -> None:
+    with pytest.raises(ValueError, match="evaluation_count must be positive"):
+        HpsEval.Config(
+            experiment_name="x",
+            checkpoint_path="g.pt",
+            evaluation_count=0,
+        ).make()
+
+
+def test_hps_eval_logs_and_ignores_launcher_args(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Passthrough args are logged; the canonical pass publishes its metrics."""
+    cfg = HpsEval.Config()
+    cfg.checkpoint_path = "/runs/generator.pt"
+    cfg.experiment_name = "hps"
+    cfg.base_dir = tmp_path
+    cfg.runtime.device = "cpu"
+    cfg.evaluation_count = 2
+    seen: dict[str, object] = {}
+
+    def search_pass(**kwargs: object) -> tuple[Tensor, Tensor, Tensor]:
+        seen.update(kwargs)
+        labels = torch.full((2, 81), 2, dtype=torch.int64)
+        rows = torch.zeros(2, learned_hps_output_width(81))
+        rows[:, -81:] = 2
+        return rows, labels, labels
+
+    def eval_model(*args: object) -> object:
+        seen["eval_model"] = args
+        return object()
+
+    monkeypatch.setattr("priml.baselines.sudoku.hps_eval.eval_model", eval_model)
+    monkeypatch.setattr("priml.baselines.sudoku.hps_eval.search_pass", search_pass)
+    hps = cfg.make()
+    with caplog.at_level(logging.INFO):
+        metrics = hps.run("--extra")
+    assert "Ignoring launcher passthrough args: ('--extra',)." in caplog.messages
+    dataset = cast("PuzzleDataset", seen["dataset"])
+    assert dataset.config.eval_num_instances == 2
+    assert seen["eval_model"] == (
+        hps.config.model,
+        tmp_path / "runs" / "generator.pt",
+        torch.device("cpu"),
+    )
+    assert seen["device"] == torch.device("cpu")
+    assert seen["label"] == "HpsEval"
+    assert seen["join_solution_visited"] is True
+    assert seen["view"] == NINE_VIEWS[0]
+    assert metrics["eval/exact_accuracy"] == 1.0
+    assert 0.0 <= metrics["eval/total_seconds"] < 60.0
+    written = json_loads(
+        (tmp_path / "runs" / "hps" / "dumps" / "hps_eval_metrics.json").read_text(),
+        dict[str, float],
+    )
+    assert written == metrics
+
+
+def _search_dataset(tmp_path: Path) -> PuzzleDataset:
+    return PuzzleDataset.Config(
+        working_dir=write_dataset(tmp_path / "data"),
+        batch_size=2,
+        device="cpu",
+    ).make()
+
+
+def _unreachable_search(*args: object, **kwargs: object) -> SearchResult:
+    del args, kwargs
+    raise AssertionError("search must not run")
+
+
+def test_search_pass_stops_at_its_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "priml.baselines.sudoku.hps_eval.run_search",
+        _unreachable_search,
+    )
+    with pytest.raises(EvalTimeLimitError, match="probe exceeded its eval budget"):
+        search_pass(
+            model=cast("latent_recursion.LatentRecursion", object()),
+            dataset=_search_dataset(tmp_path),
+            view=NINE_VIEWS[0],
+            search=HpsSearch.Config(),
+            device=torch.device("cpu"),
+            deadline_seconds=-1.0,
+            label="probe",
+        )
+
+
+def test_search_pass_skips_padding_and_rejects_an_empty_split(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An all-padding batch searches nothing, so no rows is an error."""
+    dataset = _search_dataset(tmp_path)
+    loader = list(dataset.eval_dataloader())
+
+    def padding_only() -> list[dict[str, object]]:
+        return [{**batch, "valid_count": 0} for batch in loader]
+
+    monkeypatch.setattr(dataset, "eval_dataloader", padding_only)
+    monkeypatch.setattr(
+        "priml.baselines.sudoku.hps_eval.run_search",
+        _unreachable_search,
+    )
+    with pytest.raises(ValueError, match="probe found no valid eval rows"):
+        search_pass(
+            model=cast("latent_recursion.LatentRecursion", object()),
+            dataset=dataset,
+            view=NINE_VIEWS[0],
+            search=HpsSearch.Config(),
+            device=torch.device("cpu"),
+            deadline_seconds=float("inf"),
+            label="probe",
+        )
 
 
 def _record_hps(h: Harness) -> dict[str, Tensor]:
@@ -84,7 +209,10 @@ def test_hps_eval_rejects_a_population_short_of_evaluation_count(
 
     monkeypatch.setattr("priml.baselines.sudoku.hps_eval.eval_model", eval_model)
     monkeypatch.setattr("priml.baselines.sudoku.hps_eval.search_pass", search_pass)
-    with pytest.raises(RuntimeError, match=r"evaluated 2 puzzles.*population is 3"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"^HpsEval evaluated 2 puzzles.*population is 3",
+    ):
         cfg.make().run()
     assert not (tmp_path / "runs" / "hps" / "dumps").exists()
 
@@ -157,6 +285,6 @@ def test_golden_replays_bit_for_bit(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

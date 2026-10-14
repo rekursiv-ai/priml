@@ -6,13 +6,18 @@ config slot takes one of these directly via ``PartialConfig``.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from torch import Tensor, nn
 
 import torch
 
+from priml.math.basic import reduction_dims
 from priml.math.numeric import log_modulus
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 __all__ = [
@@ -23,13 +28,26 @@ __all__ = [
 ]
 
 
-def cross_entropy_logz(logits: Tensor, target: Tensor) -> tuple[Tensor, Tensor]:
-    """Return each target's cross-entropy and its log-normalizer, from one logsumexp.
+def cross_entropy_logz(
+    input: Tensor,
+    target: Tensor,
+    *,
+    weight: Tensor | None = None,
+    ignore_index: int = -100,
+    reduction: Literal["none", "mean", "sum"] = "mean",
+    label_smoothing: float = 0.0,
+    dim: int | Sequence[int] = 1,
+) -> tuple[Tensor, Tensor]:
+    """``nn.functional.cross_entropy`` that also returns its log-normalizer.
 
     The log-normalizer ``log Z`` is what z-loss penalizes, ``mean(log Z ** 2)``,
     which keeps the logits from drifting where bf16 cannot resolve them; one
     ``logsumexp`` serves both. A ``-inf`` logit takes no probability, so masking
     entries to ``-inf`` restricts the softmax to the rest.
+
+    ``log Z`` is not recovered from ``F.cross_entropy`` as ``loss + x_t``: that
+    adds the loss's rounding to the logit's, measured up to 5.8x the error of a
+    direct ``logsumexp`` on bfloat16 logits.
 
     It computes in the logits' dtype. On bfloat16 logits ``log Z`` rounds at its
     own magnitude before the subtraction, and the gradient through it with it,
@@ -37,21 +55,69 @@ def cross_entropy_logz(logits: Tensor, target: Tensor) -> tuple[Tensor, Tensor]:
     pass float32 logits where that matters.
 
     Args:
-      logits: Scores ``[..., V]``.
-      target: Indices into the last axis, ``[...]``.
+      input: Logits; the class axes are ``dim``.
+      target: Class indices, ``input``'s shape without ``dim``. Over several
+        axes, a row-major index into them in ``input``'s axis order.
+      weight: Per-class weight, ``[C]``.
+      ignore_index: Target value that contributes no loss and no gradient.
+      reduction: "none", "mean", or "sum", as in ``F.cross_entropy``.
+      label_smoothing: Mass in ``[0, 1]`` spread uniformly over the classes.
+      dim: Class axis, or axes taking one joint softmax. ``1`` is
+        ``F.cross_entropy``'s; pass ``0`` for unbatched logits.
 
     Returns:
-      nll: ``log Z - logits[target]``, ``[...]``, in the dtype of ``logits``.
-      logz: ``logsumexp(logits)``, ``[...]``.
+      loss: ``F.cross_entropy`` with the same arguments.
+      logz: ``logsumexp`` over ``dim``, shaped like ``target``, never reduced:
+        z-loss squares it first. ``0`` where ``target`` is ignored.
 
     References:
       https://arxiv.org/abs/2204.02311
         Chowdhery et al. 2022. PaLM: z-loss on the softmax normalizer.
 
+    Derivation::
+      With w = weight (or ones), a = label_smoothing, and C classes,
+      -log_softmax(x)_c = log Z - x_c, so
+      nll = w_t * (log Z - x_t)
+      smooth = -sum_c w_c * log_softmax(x)_c / C = (log Z * sum(w) - x @ w) / C
+      loss = lerp(nll, smooth, a)
+
     """
-    logz = logits.logsumexp(-1)
-    picked = logits.gather(-1, target.unsqueeze(-1)).squeeze(-1)
-    return logz - picked, logz
+    dims = reduction_dims(dim, ndim=input.ndim)
+    # One axis stays in place: moving it last and flattening copies ``input``
+    # for ``F.cross_entropy``'s ``[N, C, ...]`` layout.
+    if len(dims) == 1:
+        (axis,) = dims
+        logits = input
+    else:
+        axis = input.ndim - len(dims)
+        logits = input.movedim(dims, tuple(range(axis, input.ndim))).flatten(axis)
+    logz = logits.logsumexp(axis)
+    valid = target != ignore_index
+    index = torch.where(valid, target, 0)
+    loss = logz - logits.gather(axis, index.unsqueeze(axis)).squeeze(axis)
+    if weight is None:
+        count = valid
+    else:
+        count = torch.where(valid, weight[index], 0.0)
+        loss = count * loss
+    # Skipped at zero, not multiplied by it: one ``-inf`` logit makes ``smooth``
+    # infinite, and ``0 * inf`` is NaN.
+    if label_smoothing:
+        if weight is None:
+            smooth = logz - logits.mean(axis)
+        else:
+            weighted = logits.movedim(axis, -1) @ weight
+            smooth = (logz * weight.sum() - weighted) / logits.shape[axis]
+        loss = loss.lerp(smooth, label_smoothing)
+    # ``where``, not a multiply: an ignored target may sit on a ``-inf`` logit,
+    # and ``inf * 0`` would turn every reduction into NaN.
+    loss = torch.where(valid, loss, 0.0)
+    logz = torch.where(valid, logz, 0.0)
+    if reduction == "none":
+        return loss, logz
+    if reduction == "sum":
+        return loss.sum(), logz
+    return loss.sum() / count.sum(), logz
 
 
 def cross_entropy_with_batched_smoothing(

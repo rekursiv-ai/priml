@@ -678,6 +678,6 @@ def test_sample_uses_the_requested_one_step_function() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

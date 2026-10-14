@@ -35,8 +35,8 @@ from priml.cost import (
     cost,
     elementwise_cost,
     matmul_cost,
+    nbytes,
     reduction_cost,
-    resolve_dtype,
     traffic,
 )
 from priml.model.attention.kernel import attention_kernel_cost
@@ -397,7 +397,7 @@ class ValueGatedAttention(nn.Module):
                         phase="adjoint",
                     )
                 ).tile(rows)
-            return replace(total, bytes_state=resolve_dtype(dtype).itemsize * 2 * inner)
+            return replace(total, bytes_state=nbytes(2 * inner, dtype))
 
     def __init__(self, config: Config) -> None:
         # Only constraints torch cannot state: RoPE pairs the head width, and

@@ -9,6 +9,7 @@ import torch
 
 from priml.baselines.arcagi.model import (
     ConvSwiGLU,
+    RotaryBlock,
     SingleLatentRecurrence,
     depthwise_conv,
     depthwise_shift,
@@ -16,6 +17,7 @@ from priml.baselines.arcagi.model import (
 from priml.baselines.sudoku.embedding import GridEmbedding
 from priml.baselines.sudoku.model import SudokuNet
 from priml.cost import cost
+from priml.model.attention.attention import Attention
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.testing.cost import assert_cost_matches_torch
@@ -130,7 +132,36 @@ def test_inner_grad_loops_truncate_the_backward() -> None:
     assert seen == [False, False, False, True]
 
 
+def test_rotary_block_without_rope_uses_the_callers_cos_sin() -> None:
+    config = RotaryBlock.Config(channels_in=4)
+    assert isinstance(config.attn, Attention.Config)
+    config.attn.num_heads = 2
+    config.attn.channels_head = 2
+    assert isinstance(config.ffn, SwiGLU.Config)
+    config.ffn.round_to = 1
+    assert config.rope is not None
+    config.rope.channels_head = 2
+    owned = config.make()
+    bare_config = config.copy_tree()
+    bare_config.rope = None
+    bare = bare_config.make()
+    bare.load_state_dict(owned.state_dict())
+    x = torch.randn(2, 3, 4)
+    cos_sin = owned.factors(3, device=x.device)
+    assert cos_sin is not None
+    assert bare.factors(3, device=x.device) is None
+    with pytest.raises(ValueError, match="needs cos_sin"):
+        bare(x)
+    assert torch.equal(bare(x, cos_sin=cos_sin), owned(x))
+
+
+def test_conv_swiglu_infers_channels_in_from_channels_out() -> None:
+    config = ConvSwiGLU.Config(channels_out=4, channels_hidden=6).finalize()
+    assert config.channels_in == 4
+    assert config.channels_out == 4
+
+
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

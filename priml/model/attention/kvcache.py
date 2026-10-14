@@ -117,7 +117,8 @@ class KVCache:
         """Write new KV pairs into the cache and return the valid slice.
 
         If the cache is full, shifts old entries out (FIFO) to make room.
-        Uses sliced copy instead of torch.roll for torch.compile compat.
+        Uses sliced copy instead of torch.roll for torch.compile compat. A
+        rejected update leaves the cache as it was.
 
         Args:
           k: New key tensor of shape [..., seq_len, channels_head].
@@ -127,13 +128,35 @@ class KVCache:
           k: Valid key-cache slice after the update.
           v: Valid value-cache slice after the update.
 
+        Raises:
+          ValueError: ``k`` and ``v`` differ in length, or either cannot be
+            written into the cache.
+
         """
         s = k.shape[-2]
+        if v.shape[-2] != s:
+            raise ValueError(
+                f"Got {s} keys and {v.shape[-2]} values; keys and values pair "
+                "up one per token.",
+            )
         if s > self.max_seq:
             raise ValueError(
                 f"Update length {s} exceeds cache capacity {self.max_seq}.",
             )
         overflow = self.length + s - self.max_seq
+        # Checked before eviction moves anything; a failed write would otherwise
+        # leave the cache shifted.
+        for new, store in ((k, self.k), (v, self.v)):
+            slot = store[..., :s, :].shape
+            try:
+                fits = torch.broadcast_shapes(new.shape, slot) == slot
+            except RuntimeError:
+                fits = False
+            if not fits:
+                raise ValueError(
+                    f"Cannot write {tuple(new.shape)} into the cache's "
+                    f"{tuple(slot)} slot.",
+                )
         if overflow > 0:
             keep = self.length - overflow
             self.k[..., :keep, :] = self.k[..., overflow : self.length, :].clone()
@@ -193,7 +216,7 @@ def alloc_layer_cache(
             device=device,
             dtype=dtype,
         )
-        owners[key] = name or "<root>"
+        owners[key] = name
     return result
 
 

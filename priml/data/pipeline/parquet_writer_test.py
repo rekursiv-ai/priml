@@ -440,6 +440,6 @@ def test_parquet_merge_writer_serializes_tensors_arrays_and_nested_values(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -344,6 +344,6 @@ def test_delta_rule_matches_closed_form_with_orthonormal_keys() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

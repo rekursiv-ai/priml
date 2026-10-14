@@ -5,7 +5,10 @@ from typing import cast
 
 import dataclasses
 import json
+import re
 import struct
+import sys
+import zlib
 
 from treekle import json_loads
 
@@ -13,10 +16,12 @@ import pytest
 import torch
 
 from priml.baselines.craftax.world_model.archive import (
+    _HEADER,
     Episode,
     FloorTrace,
     Receipt,
     ReplayEpisode,
+    Span,
     read_corpus,
     read_episodes,
     read_manifest,
@@ -419,7 +424,133 @@ def test_a_torn_manifest_line_is_not_published_and_is_repaired(tmp_path: Path) -
     assert read_manifest(tmp_path) == [first, second]
 
 
+@pytest.mark.parametrize(
+    ("stride", "message"),
+    [(0, "stride > 0"), (100, "stride % 256")],
+)
+def test_a_replay_shard_needs_a_positive_multiple_of_256(
+    tmp_path: Path,
+    stride: int,
+    message: str,
+) -> None:
+    episodes = [_replay_episode(_episode(3, seed=1), snapshots=b"")]
+    with pytest.raises(ValueError, match=message):
+        write_replay_shard(
+            tmp_path,
+            index=0,
+            episodes=episodes,
+            stride=stride,
+            provenance={},
+        )
+    assert not list(tmp_path.iterdir())
+
+
+def test_a_replay_episode_stores_snapshots_or_frames_not_both(tmp_path: Path) -> None:
+    episode = dataclasses.replace(
+        _replay_episode(_episode(3, seed=1), snapshots=b"xyz"),
+        frames=token_frame(_episode(3, seed=1)),
+    )
+    with pytest.raises(ValueError, match=r"snapshots and episode\.frames"):
+        write_replay_shard(
+            tmp_path,
+            index=0,
+            episodes=[episode],
+            stride=256,
+            provenance={},
+        )
+
+
+def test_a_big_endian_host_writes_no_shard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "byteorder", "big")
+    with pytest.raises(ValueError, match="little"):
+        write_shard(tmp_path, index=0, episodes=[_episode(3, seed=1)], provenance={})
+    assert not list(tmp_path.iterdir())
+
+
+def test_damaged_summaries_fail_their_sha256(tmp_path: Path) -> None:
+    line = write_shard(tmp_path, index=0, episodes=[_episode(3, seed=1)], provenance={})
+    path = tmp_path / f"{line.shard}.meta.jsonl"
+    path.write_bytes(path.read_bytes().replace(b'"death": 1', b'"death": 2'))
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        read_summaries(tmp_path, line)
+
+
+def test_a_frame_shard_has_no_snapshots_to_read(tmp_path: Path) -> None:
+    line = write_shard(tmp_path, index=0, episodes=[_episode(3, seed=1)], provenance={})
+    with pytest.raises(ValueError, match="stores no snapshots"):
+        read_snapshots(tmp_path, line, summaries=read_summaries(tmp_path, line))
+
+
+def test_a_stride_zero_line_over_a_replayed_episode_is_refused(tmp_path: Path) -> None:
+    # A line claiming a frame shard for a replay shard that stores one
+    # episode's frames: its other episode still has none to read.
+    framed = dataclasses.replace(
+        _replay_episode(_episode(4, seed=2), snapshots=b""),
+        frames=token_frame(_episode(4, seed=2)),
+    )
+    replayed = _replay_episode(_episode(3, seed=1), snapshots=b"")
+    line = write_replay_shard(
+        tmp_path,
+        index=0,
+        episodes=[framed, replayed],
+        stride=256,
+        provenance={},
+    )
+    with pytest.raises(ValueError, match=r"summary\.frames is not None"):
+        read_shard(tmp_path, dataclasses.replace(line, snapshot_stride=0))
+
+
+def test_frames_longer_than_their_record_are_refused(tmp_path: Path) -> None:
+    line = write_shard(
+        tmp_path,
+        index=0,
+        episodes=[_episode(3, seed=1), _episode(5, seed=2)],
+        provenance={},
+    )
+    short, long = read_summaries(tmp_path, line)
+    mixed = dataclasses.replace(short, frames=long.frames)
+    with pytest.raises(ValueError, match="Expected not frames"):
+        read_episodes(tmp_path, line, summaries=[mixed])
+
+
+@pytest.mark.parametrize(
+    ("patch", "message"),
+    [
+        ({"magic": b"CXE2"}, "Unsupported episode record b'CXE2' version 1"),
+        ({"version": 3}, "version 3 flags 0"),
+        ({"version": 2}, "version 2 flags 0"),
+        ({"flags": 2}, "version 1 flags 2"),
+        ({"count": 4}, "disagrees with its summary"),
+        ({"version": 2, "flags": 2}, "disagrees with its flags"),
+    ],
+)
+def test_a_malformed_record_is_refused(
+    tmp_path: Path,
+    patch: dict[str, object],
+    message: str,
+) -> None:
+    episode = _episode(3, seed=1)
+    line = write_shard(tmp_path, index=0, episodes=[episode], provenance={})
+    (summary,) = read_summaries(tmp_path, line)
+    raw = zstd_compat.decompress(record_frame(episode))
+    names = ("magic", "version", "flags", "world", "sampling", "initial", "count")
+    values = cast("list[object]", [*_HEADER.unpack_from(raw)])
+    for index, name in enumerate(names):
+        values[index] = patch.get(name, values[index])
+    frame = zstd_compat.compress(_HEADER.pack(*values) + raw[_HEADER.size :])
+    (tmp_path / f"{line.shard}.bin.zst").write_bytes(frame)
+    crafted = dataclasses.replace(
+        summary,
+        bin=Span(offset=0, size=len(frame), crc32=zlib.crc32(frame)),
+    )
+    with pytest.raises(ValueError, match=re.escape(message)):
+        read_records(tmp_path, line, summaries=[crafted])
+
+
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

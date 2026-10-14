@@ -114,6 +114,27 @@ def test_patchify_rejects_inconsistent_channel_boundaries() -> None:
         ).finalize()
 
 
+def test_patchify_rejects_channels_indivisible_by_patch() -> None:
+    with pytest.raises(ValueError, match="channels_out=7 must be divisible"):
+        Patchify.Config(channels_out=7, patch_size=[2, 3]).finalize()
+    with pytest.raises(ValueError, match="channels_in=7 must be divisible"):
+        Unpatchify.Config(channels_in=7, patch_size=[2, 3]).finalize()
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        Patchify.Config(channels_in=3, patch_size=[1, 1]),
+        Unpatchify.Config(channels_out=3, patch_size=[1, 1]),
+    ],
+    ids=["patchify", "unpatchify"],
+)
+def test_unit_patch_costs_nothing(config: Patchify.Config | Unpatchify.Config) -> None:
+    """A 1x1 patch is the identity reshape, so it moves no payload."""
+    final = config.finalize()
+    assert final.cost(seq_len=4, batch_size=2, dtype=None) == Cost()
+
+
 def test_patchify_forward_accepts_messages_and_rejects_positional_extras():
     m = Patchify.Config(channels_in=3, patch_size=[2, 3]).make()
     x = torch.randn(2, 3, 4, 6)
@@ -171,6 +192,6 @@ def test_patchify_cost_counts_payload_reordering(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

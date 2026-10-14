@@ -618,6 +618,16 @@ def test_multi_hot_backward_triton_program_count_ceil_division(
     assert kernels.accumulate.args[2] == (pairs + 127) // 128
 
 
+def test_kernels_are_jitted_once_from_their_bodies() -> None:
+    embed = embedding._embed_kernel()
+    backward = embedding._backward_kernels()
+    assert embedding._embed_kernel() is embed
+    assert embedding._backward_kernels() is backward
+    assert "def _embed_triton(" in embed.src
+    assert "def _embed_backward_triton(" in backward.accumulate.src
+    assert "def _embed_decode_triton(" in backward.decode.src
+
+
 def test_multi_hot_embedding_cost_counts_cpu_gather_and_scatter() -> None:
     config = _small_layout()
     cost = config.cost(seq_len=3, batch_size=2, dtype=torch.float32)
@@ -1081,6 +1091,6 @@ def test_multi_hot_backward_triton_program_count_uses_signed_ceil_division(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

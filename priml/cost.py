@@ -33,7 +33,9 @@ Counting policy:
   MFU, not HFU.
 - ``bytes`` and ``bytes_state`` hold bytes, not element counts. Each leaf
   costs its tensors at its own storage dtype (``None`` is torch's default)
-  and tags every cell with it, so traffic can be read per dtype.
+  and tags every cell with it, so traffic can be read per dtype. Bytes come
+  from :func:`nbytes`, never a bare ``itemsize``, which counts a packed fp4
+  value at a whole byte.
 - Traffic is the analytical unfused algorithm's minimum tensor operand I/O:
   each primitive reads its inputs and writes its outputs once. Intermediates
   between primitives count even when a fused implementation keeps them on chip.
@@ -98,6 +100,7 @@ __all__ = [
     "intensity",
     "map_cost",
     "matmul_cost",
+    "nbytes",
     "peak",
     "reduction_cost",
     "resolve_dtype",
@@ -416,7 +419,7 @@ def traffic(
     return Cost(
         cells={
             ("flops", phase, kernel, dt): flops,
-            ("bytes", phase, kernel, dt): elements * dt.itemsize,
+            ("bytes", phase, kernel, dt): nbytes(elements, dt),
         },
     )
 
@@ -424,6 +427,25 @@ def traffic(
 def resolve_dtype(dtype: torch.dtype | None) -> torch.dtype:
     """Return ``dtype``, or torch's default when a config left it ``None``."""
     return torch.get_default_dtype() if dtype is None else dtype
+
+
+def nbytes(elements: int, dtype: torch.dtype | None) -> int:
+    """Return the bytes ``elements`` values of ``dtype`` occupy.
+
+    ``torch.float4_e2m1fn_x2`` packs two values into its one-byte element, so
+    ``itemsize`` alone counts fp4 at twice its size.
+
+    Args:
+      elements: Values stored, not storage elements.
+      dtype: Storage dtype; ``None`` is torch's default.
+
+    Returns:
+      nbytes: Whole storage elements' bytes; a partial element takes a whole one.
+
+    """
+    dt = resolve_dtype(dtype)
+    per_element = 2 if dt == torch.float4_e2m1fn_x2 else 1
+    return -(-elements // per_element) * dt.itemsize
 
 
 def cost(config: object, **kwargs: object) -> Cost:
@@ -600,12 +622,11 @@ def matmul_cost(
     if dequant_flops and not weight_bytes:
         raise ValueError("dequant_flops needs a packed matrix; set weight_bytes.")
     dt = resolve_dtype(dtype)
-    s = dt.itemsize
     products = channels_in * channels_out
     biases = channels_out if bias else 0
     params = (products if weight else 0) + biases
-    stored = weight_bytes or s * products
-    moved = s * rows * (channels_in + channels_out) + stored
+    stored = weight_bytes or nbytes(products, dt)
+    moved = nbytes(rows * (channels_in + channels_out), dt) + stored
     return Cost(
         cells={
             ("flops", "primal", "matmul", dt): 2 * rows * products,
@@ -614,9 +635,12 @@ def matmul_cost(
             ("flops", "adjoint", "matmul", dt): 4 * rows * products,
             ("flops", "adjoint", "reduction", dt): biases * (rows - 1),
             ("bytes", "primal", "matmul", dt): moved,
-            ("bytes", "primal", "elementwise", dt): s * (2 * rows * biases + biases),
+            ("bytes", "primal", "elementwise", dt): nbytes(
+                2 * rows * biases + biases,
+                dt,
+            ),
             ("bytes", "adjoint", "matmul", dt): 2 * moved,
-            ("bytes", "adjoint", "reduction", dt): s * (rows * biases + biases),
+            ("bytes", "adjoint", "reduction", dt): nbytes(rows * biases + biases, dt),
         },
         params=params,
         params_active=params,
@@ -679,21 +703,22 @@ def elementwise_cost(
     if rows < 1:
         raise ValueError("rows must be at least one.")
     dt = resolve_dtype(dtype)
-    s = dt.itemsize
     return Cost(
         cells={
             ("flops", "primal", "elementwise", dt): primal,
             ("flops", "adjoint", "elementwise", dt): adjoint,
             ("flops", "adjoint", "reduction", dt): params * (rows - 1),
-            ("bytes", "primal", "elementwise", dt): s
-            * (rows * channels * (inputs + outputs) + params),
-            ("bytes", "adjoint", "elementwise", dt): s
-            * (
+            ("bytes", "primal", "elementwise", dt): nbytes(
+                rows * channels * (inputs + outputs) + params,
+                dt,
+            ),
+            ("bytes", "adjoint", "elementwise", dt): nbytes(
                 rows * channels * (adjoint_inputs + adjoint_outputs)
                 + rows * params
-                + params
+                + params,
+                dt,
             ),
-            ("bytes", "adjoint", "reduction", dt): s * (rows * params + params),
+            ("bytes", "adjoint", "reduction", dt): nbytes(rows * params + params, dt),
         },
         params=params,
         params_active=params,
@@ -735,8 +760,10 @@ def reduction_cost(
                 0,
                 input_elements - output_groups,
             ),
-            ("bytes", phase, "reduction", dt): dt.itemsize
-            * (input_elements + output_groups),
+            ("bytes", phase, "reduction", dt): nbytes(
+                input_elements + output_groups,
+                dt,
+            ),
         },
     )
 
@@ -1009,7 +1036,12 @@ def utilization(
       ratio: At ``(phase, kernel, dtype)`` keys, owning nothing; ``inf`` where
         the device lists no peak for the cell.
 
+    Raises:
+      ValueError: ``duration_sec`` is not positive.
+
     """
+    if math.isnan(duration_sec) or duration_sec <= 0:
+        raise ValueError(f"duration_sec must be positive; got {duration_sec}.")
     ceiling = (peak()[device] if isinstance(device, str) else device).cells
     ratios = intensity(cost).cells
     cells: dict[tuple[object, ...], float] = {}

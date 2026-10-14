@@ -195,6 +195,6 @@ def test_extracted_imagenet_explicit_path_is_literal(tmp_path: Path) -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

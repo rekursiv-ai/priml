@@ -26,6 +26,7 @@ import torch
 
 from priml.cost import (
     Cost,
+    nbytes,
     resolve_dtype,
 )
 from priml.kernel import jit_kernel
@@ -124,11 +125,13 @@ class Embedding(nn.Embedding):
             return Cost(
                 cells={
                     ("flops", "adjoint", "selection", dt): rows * row,
-                    ("bytes", "primal", "selection", index): rows * index.itemsize,
-                    ("bytes", "primal", "selection", dt): dt.itemsize * 2 * rows * row,
-                    ("bytes", "adjoint", "selection", index): rows * index.itemsize,
-                    ("bytes", "adjoint", "selection", dt): dt.itemsize
-                    * (3 * rows * row + self.channels_in * row),
+                    ("bytes", "primal", "selection", index): nbytes(rows, index),
+                    ("bytes", "primal", "selection", dt): nbytes(2 * rows * row, dt),
+                    ("bytes", "adjoint", "selection", index): nbytes(rows, index),
+                    ("bytes", "adjoint", "selection", dt): nbytes(
+                        3 * rows * row + self.channels_in * row,
+                        dt,
+                    ),
                 },
                 params=self.channels_in * row,
                 params_active=row,
@@ -251,11 +254,15 @@ class MultiHotEmbedding(nn.Module):
             return Cost(
                 cells={
                     ("flops", "primal", "elementwise", dt): gathered - summed,
-                    ("bytes", "primal", "selection", dt): dt.itemsize
-                    * (ids + gathered + 2 * scalars + summed),
+                    ("bytes", "primal", "selection", dt): nbytes(
+                        ids + gathered + 2 * scalars + summed,
+                        dt,
+                    ),
                     ("flops", "adjoint", "selection", dt): gathered,
-                    ("bytes", "adjoint", "selection", dt): dt.itemsize
-                    * (ids + summed + 2 * gathered + table),
+                    ("bytes", "adjoint", "selection", dt): nbytes(
+                        ids + summed + 2 * gathered + table,
+                        dt,
+                    ),
                 },
                 params=table,
                 params_active=fields * self.channels_out,

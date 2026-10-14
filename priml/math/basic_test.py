@@ -328,6 +328,6 @@ def test_reduction_dims_rejects_empty_duplicate_and_out_of_range(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

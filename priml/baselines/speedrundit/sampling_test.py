@@ -110,6 +110,6 @@ def test_sampler_rejects_one_step_before_changing_model_mode() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

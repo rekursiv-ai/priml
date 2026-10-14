@@ -367,6 +367,6 @@ def test_zero_cls_guidance_keeps_conditional_cls_drift() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

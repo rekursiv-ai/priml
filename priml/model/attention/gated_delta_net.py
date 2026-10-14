@@ -22,6 +22,7 @@ from priml.cost import (
     cost,
     elementwise_cost,
     matmul_cost,
+    nbytes,
     reduction_cost,
     resolve_dtype,
 )
@@ -496,18 +497,21 @@ def _chunk_matmul_cost(
 def _delta_gate_cost(*, rows: int, heads: int, dtype: torch.dtype | None) -> Cost:
     """Count the gate map and its two parameter-gradient reductions exactly."""
     dt = resolve_dtype(dtype)
-    itemsize = dt.itemsize
     params = 2 * heads
     return Cost(
         cells={
             ("flops", "primal", "elementwise", dt): (9 * rows + 2) * heads,
             ("flops", "adjoint", "elementwise", dt): 9 * rows * heads,
             ("flops", "adjoint", "reduction", dt): params * (rows - 1),
-            ("bytes", "primal", "elementwise", dt): itemsize
-            * (6 * rows * heads + params),
-            ("bytes", "adjoint", "elementwise", dt): itemsize
-            * (9 * rows * heads + params * rows + params),
-            ("bytes", "adjoint", "reduction", dt): itemsize * (params * rows + params),
+            ("bytes", "primal", "elementwise", dt): nbytes(
+                6 * rows * heads + params,
+                dt,
+            ),
+            ("bytes", "adjoint", "elementwise", dt): nbytes(
+                9 * rows * heads + params * rows + params,
+                dt,
+            ),
+            ("bytes", "adjoint", "reduction", dt): nbytes(params * rows + params, dt),
         },
         params=params,
         params_active=params,

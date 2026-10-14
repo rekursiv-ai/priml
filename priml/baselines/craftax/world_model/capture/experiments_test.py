@@ -69,9 +69,9 @@ def test_arms_read_their_policys_observation_layout() -> None:
 def test_each_arm_reads_its_policy_runs_final_checkpoint() -> None:
     runs = Path("/opt/scratch/runs/craftax")
     assert [_source(_finalized(factory)).checkpoint for factory in ARMS] == [
-        runs / "exp103/checkpoints/step_00038146.pt",
-        runs / "exp103/checkpoints/step_00038146.pt",
-        runs / "exp102/checkpoints/step_00038146.pt",
+        runs / "exp003/checkpoints/step_00038146.pt",
+        runs / "exp003/checkpoints/step_00038146.pt",
+        runs / "exp002/checkpoints/step_00038146.pt",
         runs / "exp000/checkpoints/step_00006662.pt",
     ]
 
@@ -88,7 +88,7 @@ def test_base_dir_moves_every_path_of_a_capture(tmp_path: Path) -> None:
     assert [config.root, config.run_root, source.checkpoint, source.branches.pools] == [
         archive,
         tmp_path / "runs/craftax/world-model/capture",
-        tmp_path / "runs/craftax/exp103/checkpoints/step_00038146.pt",
+        tmp_path / "runs/craftax/exp003/checkpoints/step_00038146.pt",
         archive / "pools",
     ]
     verifier = experiments.verifier()
@@ -171,6 +171,6 @@ def _source(config: CaptureWorker.Config) -> PolicySource.Config:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

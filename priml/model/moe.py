@@ -26,6 +26,7 @@ from priml.cost import (
     cost,
     elementwise_cost,
     matmul_cost,
+    nbytes,
     reduction_cost,
     resolve_dtype,
     traffic,
@@ -157,7 +158,6 @@ class Router(nn.Module):
             del kwargs
             rows = seq_len * batch_size
             dt = resolve_dtype(dtype)
-            s = dt.itemsize
             index = torch.int64
             k, e = self.top_k, self.num_experts
             total = matmul_cost(
@@ -169,12 +169,15 @@ class Router(nn.Module):
             ) + Cost(
                 cells={
                     ("flops", "adjoint", "selection", dt): rows * k,
-                    ("bytes", "primal", "sort", dt): rows * s * (e + k),
-                    ("bytes", "primal", "sort", index): rows * index.itemsize * k,
-                    ("bytes", "primal", "selection", dt): rows * s * 2 * k,
-                    ("bytes", "primal", "selection", index): rows * index.itemsize * k,
-                    ("bytes", "adjoint", "selection", dt): rows * s * (3 * k + e),
-                    ("bytes", "adjoint", "selection", index): rows * index.itemsize * k,
+                    ("bytes", "primal", "sort", dt): nbytes(rows * (e + k), dt),
+                    ("bytes", "primal", "sort", index): nbytes(rows * k, index),
+                    ("bytes", "primal", "selection", dt): nbytes(rows * 2 * k, dt),
+                    ("bytes", "primal", "selection", index): nbytes(rows * k, index),
+                    ("bytes", "adjoint", "selection", dt): nbytes(
+                        rows * (3 * k + e),
+                        dt,
+                    ),
+                    ("bytes", "adjoint", "selection", index): nbytes(rows * k, index),
                 },
             )
             if self.norm_topk_prob:
@@ -441,7 +444,6 @@ class SigmoidRouter(Router):
             """
             rows = seq_len * batch_size
             dt = resolve_dtype(dtype)
-            s = dt.itemsize
             index = torch.int64
             width = self.num_experts
             bias = width if self.use_correction_bias else 0
@@ -453,27 +455,32 @@ class SigmoidRouter(Router):
                         ("flops", "primal", "reduction", dt): rows
                         * self.n_group
                         * (picks - 1),
-                        ("bytes", "primal", "sort", dt): rows
-                        * s
-                        * (
-                            width
-                            + self.n_group * picks
-                            + self.n_group
-                            + self.topk_group
+                        ("bytes", "primal", "sort", dt): nbytes(
+                            rows
+                            * (
+                                width
+                                + self.n_group * picks
+                                + self.n_group
+                                + self.topk_group
+                            ),
+                            dt,
                         ),
-                        ("bytes", "primal", "sort", index): rows
-                        * index.itemsize
-                        * (self.n_group * picks + self.topk_group),
-                        ("bytes", "primal", "reduction", dt): rows
-                        * s
-                        * self.n_group
-                        * (picks + 1),
-                        ("bytes", "primal", "selection", dt): rows
-                        * s
-                        * (self.topk_group + 5 * width),
-                        ("bytes", "primal", "selection", index): rows
-                        * index.itemsize
-                        * (self.n_group + self.topk_group),
+                        ("bytes", "primal", "sort", index): nbytes(
+                            rows * (self.n_group * picks + self.topk_group),
+                            index,
+                        ),
+                        ("bytes", "primal", "reduction", dt): nbytes(
+                            rows * self.n_group * (picks + 1),
+                            dt,
+                        ),
+                        ("bytes", "primal", "selection", dt): nbytes(
+                            rows * (self.topk_group + 5 * width),
+                            dt,
+                        ),
+                        ("bytes", "primal", "selection", index): nbytes(
+                            rows * (self.n_group + self.topk_group),
+                            index,
+                        ),
                     },
                 )
             return (
@@ -696,7 +703,6 @@ class MoE(nn.Module):
                     f"{expected_rows} for {rows} rows and top_k={top_k}.",
                 )
             dt = resolve_dtype(dtype)
-            s = dt.itemsize
             index = torch.int64
             one_expert = cost(
                 self.expert,
@@ -752,44 +758,45 @@ class MoE(nn.Module):
                     ("flops", "adjoint", "selection", dt): rows
                     * (top_k + n_shared)
                     * width_in,
-                    ("bytes", "primal", "sort", index): rows
-                    * index.itemsize
-                    * 2
-                    * top_k,
-                    ("bytes", "primal", "elementwise", dt): rows
-                    * s
-                    * top_k
-                    * (2 * width + 1),
-                    ("bytes", "primal", "selection", dt): rows
-                    * s
-                    * (
-                        top_k * (2 * width_in + 3 * width)
-                        + width
-                        + 3 * n_shared * width
+                    ("bytes", "primal", "sort", index): nbytes(rows * 2 * top_k, index),
+                    ("bytes", "primal", "elementwise", dt): nbytes(
+                        rows * top_k * (2 * width + 1),
+                        dt,
                     ),
-                    ("bytes", "primal", "selection", index): rows
-                    * index.itemsize
-                    * top_k
-                    * 11,
-                    ("bytes", "adjoint", "elementwise", dt): rows
-                    * s
-                    * top_k
-                    * (5 * width + 1),
-                    ("bytes", "adjoint", "reduction", dt): rows
-                    * s
-                    * top_k
-                    * (width + 1),
-                    ("bytes", "adjoint", "selection", dt): rows
-                    * s
-                    * (
-                        top_k * (3 * width_in + 2 * width)
-                        + width_in
-                        + 3 * n_shared * width_in
+                    ("bytes", "primal", "selection", dt): nbytes(
+                        rows
+                        * (
+                            top_k * (2 * width_in + 3 * width)
+                            + width
+                            + 3 * n_shared * width
+                        ),
+                        dt,
                     ),
-                    ("bytes", "adjoint", "selection", index): rows
-                    * index.itemsize
-                    * top_k
-                    * 11,
+                    ("bytes", "primal", "selection", index): nbytes(
+                        rows * top_k * 11,
+                        index,
+                    ),
+                    ("bytes", "adjoint", "elementwise", dt): nbytes(
+                        rows * top_k * (5 * width + 1),
+                        dt,
+                    ),
+                    ("bytes", "adjoint", "reduction", dt): nbytes(
+                        rows * top_k * (width + 1),
+                        dt,
+                    ),
+                    ("bytes", "adjoint", "selection", dt): nbytes(
+                        rows
+                        * (
+                            top_k * (3 * width_in + 2 * width)
+                            + width_in
+                            + 3 * n_shared * width_in
+                        ),
+                        dt,
+                    ),
+                    ("bytes", "adjoint", "selection", index): nbytes(
+                        rows * top_k * 11,
+                        index,
+                    ),
                 },
             )
             return (

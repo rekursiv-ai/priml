@@ -271,6 +271,6 @@ def test_a_time_map_tightens_until_it_fits_and_always_keeps_floors_and_the_end()
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

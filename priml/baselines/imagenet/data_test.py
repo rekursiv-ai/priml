@@ -408,6 +408,6 @@ def test_dataset_builds_loaders_from_both_pipelines_and_checkpoints_its_pass_cou
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -357,11 +357,11 @@ class PipelinedGPUProcessor3Stream(_SpecTransformMixin):
 
         # Three-stream pipelined processing with async transfers.
         if self.stream_input is None:
-            raise ValueError("Expected self.stream_input is not None.")
+            raise ValueError("CUDA streams exist when CUDA does.")
         if self.stream_work is None:
-            raise ValueError("Expected self.stream_work is not None.")
+            raise ValueError("CUDA streams exist when CUDA does.")
         if self.stream_output is None:
-            raise ValueError("Expected self.stream_output is not None.")
+            raise ValueError("CUDA streams exist when CUDA does.")
 
         # Prime: Get first batch.
         try:
@@ -472,9 +472,9 @@ class PipelinedGPUProcessor2Stream(_SpecTransformMixin):
             return
 
         if self.stream_output is None:
-            raise ValueError("Expected self.stream_output is not None.")
+            raise ValueError("CUDA streams exist when CUDA does.")
         if self.stream_input is None:
-            raise ValueError("Expected self.stream_input is not None.")
+            raise ValueError("CUDA streams exist when CUDA does.")
 
         try:
             next_sample = next(samples)

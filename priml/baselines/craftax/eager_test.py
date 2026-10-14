@@ -405,6 +405,6 @@ def test_a_scripted_record_replays_to_its_hashes_and_stats_are_their_record() ->
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

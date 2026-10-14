@@ -13,6 +13,7 @@ from typing import Final
 
 from torch import Tensor, nn
 
+import pytest
 import torch
 
 from priml.model.residual_mix import ResidualMix
@@ -96,7 +97,18 @@ def test_residual_mix_cost_is_two_scalars_per_layer() -> None:
     )
 
 
+def test_residual_mix_cost_needs_the_inherited_width() -> None:
+    config = ResidualMix.Config(num_layers=3)
+    with pytest.raises(ValueError, match="needs channels_in"):
+        config.cost(seq_len=2, batch_size=1, dtype=None)
+
+
+def test_residual_mix_needs_a_positive_layer_count() -> None:
+    with pytest.raises(ValueError, match="num_layers must be positive"):
+        ResidualMix.Config(channels_in=4).make()
+
+
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

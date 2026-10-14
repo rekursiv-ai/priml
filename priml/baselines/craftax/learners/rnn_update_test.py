@@ -14,7 +14,7 @@ from treekle import from_plain
 import pytest
 import torch
 
-from priml.baselines.craftax.experiments import exp005
+from priml.baselines.craftax.experiments import exp012
 from priml.baselines.craftax.game.state import ATN_DIM, OBS_SIZE
 from priml.baselines.craftax.learners.rnn_update import ShuffledTrajectories
 from priml.baselines.craftax.learners.update import shuffles
@@ -442,19 +442,19 @@ def test_captured_epochs_resume_exactly_on_the_gpu() -> None:
     assert bool(torch.isfinite(torch.stack(actual[:3])).all())
 
 
-def test_exp005s_epoch_matches_its_golden() -> None:
-    """exp005 at test size from portable seed-73 weights, an epoch, frozen.
+def test_exp012s_epoch_matches_its_golden() -> None:
+    """exp012 at test size from portable seed-73 weights, an epoch, frozen.
 
-    exp005's recipe -- its GRU, shuffled trajectories, Adam and its rules --
+    exp012's recipe -- its GRU, shuffled trajectories, Adam and its rules --
     on a GRU of 8 with heads of one layer in 4 environments of horizon 2,
     minibatches of 2 agents: the epoch's rate, mean losses and weights. One
-    pass, not the recipe's four, as for exp003's golden; the heads' second
+    pass, not the recipe's four, as for exp010's golden; the heads' second
     layers and the init's distributions are ``rnn_test``'s. Built natively,
     as the portable draws overwrite every
     weight the build draws: in host-agnostic numerics the build cost a
     third of the test.
     """
-    config = exp005().step
+    config = exp012().step
     env = tiny_env()
     env.rules = config.env.rules
     env.restart = config.env.restart
@@ -482,7 +482,7 @@ def test_exp005s_epoch_matches_its_golden() -> None:
             lines = _epoch_entries(step, step.train_step())
         finally:
             step.close()
-    assert_golden(test_file=__file__, name="train_step_exp005_tiny", lines=lines)
+    assert_golden(test_file=__file__, name="train_step_exp012_tiny", lines=lines)
 
 
 # The GRU's cell and heads init from ``randn``, whose bits differ by host (SLEEF's
@@ -698,7 +698,7 @@ def _collected(policy: Policy, *, envs: int) -> LearnerRollout:
 
 
 def _learner() -> ShuffledTrajectories:
-    """Return exp005's epoch at two passes of four minibatches, one agent each."""
+    """Return exp012's epoch at two passes of four minibatches, one agent each."""
     config = ShuffledTrajectories.Config()
     config.num_passes = 2
     config.num_minibatches = 4
@@ -717,7 +717,7 @@ def _window() -> CraftaxTrainStep.Config:
 
 
 def _tiny_config() -> CraftaxTrainStep.Config:
-    """Return exp005's learner on exp000's tiny CPU pipeline: two passes of two minibatches."""
+    """Return exp012's learner on exp000's tiny CPU pipeline: two passes of two minibatches."""
     config = tiny_train_step()
     model = config.model = ActorCriticRNN.Config()
     model.observation_size = OBS_SIZE
@@ -738,6 +738,6 @@ def _make(config: CraftaxTrainStep.Config) -> CraftaxTrainStep:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

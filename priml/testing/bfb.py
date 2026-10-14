@@ -114,6 +114,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -986,6 +987,11 @@ def _floating_tensors(value: object) -> list[Tensor]:
 # of it.
 def _result_dtype(tensors: Sequence[Tensor]) -> torch.dtype:
     """Return the dtype the op would have produced natively."""
+    # Nearly every op meets one dtype, which promotes to itself; the general rule
+    # costs ~10us per op and the harness dispatches ~1e4 ops per golden.
+    first = tensors[0].dtype
+    if all(tensor.dtype == first for tensor in tensors):
+        return first
     # A zero-dimensional float64 tensor does not widen a float32 vector.
     # Dtype-only promotion loses that distinction.
     return elementwise_dtypes(
@@ -1134,6 +1140,7 @@ def _resolve_output(
     return _downcast_f64(element, target)
 
 
+@cache
 def _op_name(func: OpOverload[..., object]) -> str:
     """Return an Aten overload's packet name."""
     return func.name().split("::")[-1].split(".")[0]
@@ -1145,6 +1152,7 @@ def _op_name(func: OpOverload[..., object]) -> str:
 # rollout of one buffer stored each step into a copy and kept zeros (measured). The
 # schema names every view, the allowlist's and the 13 it lacked (``alias``,
 # ``diagonal``, ``unfold``, ``real``, ...), so no future view op can fall through.
+@cache
 def _is_view(func: OpOverload[..., object]) -> bool:
     """Whether every return aliases an input without writing it."""
     returns = func._schema.returns  # noqa: SLF001 -- The harness reads the op schema to find views.
@@ -1164,12 +1172,28 @@ def _scales_operand(
     kwargs: dict[str, object],
 ) -> bool:
     """Whether an allowlisted op carries a non-unit ``alpha`` multiplier."""
+    index = _alpha_index(func)
+    if index is None:
+        return False
+    return kwargs.get("alpha", args[index] if index < len(args) else 1) != 1
+
+
+@cache
+def _alpha_index(func: OpOverload[..., object]) -> int | None:
+    """Return the position of the op's ``alpha`` argument, if it has one."""
     for index, argument in enumerate(func._schema.arguments):  # noqa: SLF001 -- The harness reads the op schema to find the multiplier argument.
-        if argument.name != "alpha":
-            continue
-        alpha = kwargs.get("alpha", args[index] if index < len(args) else 1)
-        return alpha != 1
-    return False
+        if argument.name == "alpha":
+            return index
+    return None
+
+
+@cache
+def _writes(func: OpOverload[..., object]) -> bool:
+    """Whether the op mutates an argument: in-place, ``out=``, or foreach."""
+    return any(
+        arg.alias_info is not None and arg.alias_info.is_write
+        for arg in func._schema.arguments  # noqa: SLF001 -- The harness reads the op schema to find write arguments.
+    )
 
 
 # Upcasting is not enough for a fused multiply-add: its float64 kernel is itself
@@ -1418,10 +1442,7 @@ class _Float64Compute(TorchDispatchMode):
         result = _one_term_mm(func, args=up_args)
         if result is None:
             result = _run_unfused(func, up_args, up_kwargs)
-        if any(
-            arg.alias_info is not None and arg.alias_info.is_write
-            for arg in func._schema.arguments  # noqa: SLF001 -- The harness reads the op schema to find write arguments.
-        ):
+        if _writes(func):
             # In-place / ``out=`` / foreach op: it mutated the float64 copies, not
             # the caller's originals. Narrow each back and return the originals
             # in the op's own return shape.

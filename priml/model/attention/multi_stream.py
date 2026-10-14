@@ -15,7 +15,7 @@ import torch
 from priml.cost import (
     Cost,
     cost,
-    resolve_dtype,
+    nbytes,
 )
 from priml.model.attention.attention import (
     AttentionProjections,
@@ -173,12 +173,13 @@ class MultiStreamAttention(nn.Module):
             seq_len: int,
             batch_size: int,
             dtype: torch.dtype | None,
+            context_len: int = 0,
             **kwargs: object,
         ) -> Cost:
             """Cost every stream's ``seq_len`` tokens, each stream attending jointly.
 
             Each stream pays its own projections, runs the kernel at its own
-            dropout over the ``num_streams * seq_len`` concatenated keys, and
+            dropout over every stream's concatenated cached and new keys, and
             shares those keys only across its own ``seq_len`` query rows. A
             shared norm runs on every stream's rows but is owned once.
 
@@ -186,6 +187,7 @@ class MultiStreamAttention(nn.Module):
               seq_len: Tokens per sequence of one stream.
               batch_size: Sequences per step.
               dtype: Activation dtype; ``None`` is torch's default.
+              context_len: Tokens each stream's KV cache already holds.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
@@ -271,7 +273,7 @@ class MultiStreamAttention(nn.Module):
                 (
                     cost(
                         self.attn_kernel,
-                        seq_len=seq_len * self.num_streams,
+                        seq_len=(context_len + seq_len) * self.num_streams,
                         batch_size=batch_size,
                         dtype=dtype,
                         num_heads=self.num_heads,
@@ -286,11 +288,10 @@ class MultiStreamAttention(nn.Module):
             )
             return replace(
                 total + kernels,
-                bytes_state=resolve_dtype(dtype).itemsize
-                * self.num_streams
-                * 2
-                * self.num_heads_kv
-                * self.channels_head,
+                bytes_state=nbytes(
+                    self.num_streams * 2 * self.num_heads_kv * self.channels_head,
+                    dtype,
+                ),
             )
 
     def __init__(self, config: Config) -> None:
@@ -298,13 +299,9 @@ class MultiStreamAttention(nn.Module):
             channels_in=config.channels_in,
             num_heads=config.num_heads,
             channels_head=config.channels_head,
+            num_heads_kv=config.num_heads_kv,
         )
         super().__init__()
-        if config.num_heads % config.num_heads_kv != 0:
-            raise ValueError(
-                f"num_heads={config.num_heads} must be divisible by "
-                f"num_heads_kv={config.num_heads_kv}.",
-            )
         causal = config.causal or any(s.causal for s in config.streams)
         if causal and config.num_streams > 1:
             raise ValueError("causal=True requires num_streams=1.")
@@ -450,8 +447,10 @@ class MultiStreamAttention(nn.Module):
         Args:
           batch: Batch size or batch shape.
           max_seq: Maximum cached sequence length.
-          device: Device for the cache tensors.
-          dtype: Dtype for the cache tensors.
+          device: Device for the cache tensors; defaults to each stream's
+            projection device.
+          dtype: Dtype for the cache tensors; defaults to each stream's
+            projection dtype.
 
         Returns:
           caches: One KV cache per stream, in stream order.
@@ -467,16 +466,26 @@ class MultiStreamAttention(nn.Module):
             if self.streams
             else [self.channels_head] * self.num_streams
         )
+        weights = (
+            [stream.proj_qkv.weight for stream in self.streams]
+            if self.streams
+            else [next(self.proj_qkvs.parameters())] * self.num_streams
+        )
         return tuple(
             KVCache.alloc(
                 batch=batch,
                 num_heads=num_heads,
                 max_seq=max_seq,
                 channels_head=channels_head,
-                device=device,
-                dtype=dtype,
+                device=weight.device if device is None else device,
+                dtype=weight.dtype if dtype is None else dtype,
             )
-            for num_heads, channels_head in zip(heads, widths, strict=True)
+            for num_heads, channels_head, weight in zip(
+                heads,
+                widths,
+                weights,
+                strict=True,
+            )
         )
 
     @override

@@ -7,6 +7,13 @@ All notable priml changes are documented here. This project follows
 
 ### Added
 
+- `cost(..., context_len=...)` prices a step after `context_len` cached
+  tokens: `Attention`, `GatedAttention`, and `MultiStreamAttention` attend
+  their `seq_len` queries to `context_len + seq_len` keys. One decode step is
+  `cost(model, seq_len=1, context_len=T, ...)`, and `utilization` places it
+  against a device's ridge. `MultiHeadLatentAttention` raises
+  `NotImplementedError` for a cached step.
+- `priml.cost.nbytes` returns the bytes a count of values occupies at a dtype.
 - Baseline `mlsbench`: a generic harness that runs any of the 140 MLS-Bench
   tasks as a priml `TrainLoop` experiment, reading tasks from an unmodified
   upstream clone (logical `/mlsbench`, pinned commit `80cf5c5c`). All 566
@@ -16,6 +23,12 @@ All notable priml changes are documented here. This project follows
   over digest-pinned upstream images, data staging, and a whole-benchmark
   leaderboard. `candidate_experiment` runs a new edit of a task as its own
   experiment, and `leaderboard --candidate` sets it against a published row.
+
+### Fixed
+
+- Costs at `torch.float4_e2m1fn_x2` count two values per byte. Every byte
+  count multiplied by `itemsize`, which is one byte per two packed fp4 values,
+  so fp4 traffic and cache state were doubled.
 
 ## 0.1.6 - 2026-10-07
 

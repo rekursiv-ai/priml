@@ -2,7 +2,8 @@
 
 Goldens freeze whole evaluations of the tiny pipeline, played and then
 scored, the same bits on every CPU: exp000's recipe from portable seed-73
-weights, over three rollouts and over one, and exp002's from its own init.
+weights, over three rollouts and over one, and experiments.exp009's from its
+own init.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from priml.baselines.craftax.testing import (
     host_agnostic_pipeline,
     smoke_feature,
     tiny_env,
-    tiny_exp002_step,
+    tiny_exp009_step,
     tiny_policy,
     tiny_train_step,
 )
@@ -253,14 +254,14 @@ def test_exp000s_evaluation_from_portable_weights_matches_its_golden() -> None:
     assert_golden(test_file=__file__, name="evaluation_tiny", lines=lines)
 
 
-def test_exp002s_short_evaluation_matches_its_golden() -> None:
-    """exp002's evaluation at test size, of the policy's own init under torch seed 0.
+def test_exp009s_short_evaluation_matches_its_golden() -> None:
+    """exp009's evaluation at test size, of the policy's own init under torch seed 0.
 
     Frozen on every host. From scratch, so the golden moves with the init's
     draws: their order, their distributions, or torch's generator. One
     rollout of 2 steps, every episode cut at 2 ticks.
     """
-    config = tiny_exp002_step()
+    config = tiny_exp009_step()
     config.rollout.horizon = 2
     config = config.copy_tree().finalize()
     with host_agnostic_pipeline():
@@ -270,7 +271,7 @@ def test_exp002s_short_evaluation_matches_its_golden() -> None:
         lines += _score_entries(config.evaluation, policy, episodes=4, ticks=2)
     assert_golden(
         test_file=__file__,
-        name="evaluation_exp002_tiny_short",
+        name="evaluation_exp009_tiny_short",
         lines=lines,
     )
 
@@ -330,6 +331,6 @@ def _score_entries(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

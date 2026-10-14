@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import AbstractContextManager, nullcontext
+from functools import partial
 from typing import TypeGuard, cast
 from unittest.mock import MagicMock, patch
 
@@ -749,6 +751,120 @@ def test_3stream_gpu_output_spec_preserves_user_transform() -> None:
     assert _tensor_at(result[0], "result").dtype == torch.float64
 
 
+def test_empty_specs_leave_every_field_untouched(
+    gpu_processor_class: type[
+        PipelinedGPUProcessor2Stream | PipelinedGPUProcessor3Stream
+    ],
+) -> None:
+    """An empty spec is no transform, not the default move to a device."""
+    config = gpu_processor_class.Config()
+    config.processors.append(PassthroughProcessor.Config())
+    config.input_spec = {}
+    config.output_spec = {}
+    tensor = torch.tensor([1, 2])
+
+    with patch("torch.cuda.is_available", return_value=False):
+        processor = _make(gpu_processor_class, config)
+        result = list(processor(iter([{"t": tensor}])))
+
+    assert result[0]["t"] is tensor
+
+
+def test_spec_skips_fields_held_by_an_object_attribute(
+    gpu_processor_class: type[
+        PipelinedGPUProcessor2Stream | PipelinedGPUProcessor3Stream
+    ],
+) -> None:
+    """The walk reaches an attribute, but only containers are written through."""
+    config = gpu_processor_class.Config()
+    config.processors.append(PassthroughProcessor.Config())
+    config.input_spec = {"holder.value": _times_ten}
+    config.input_require_tensor = False
+    holder = _Holder(3)
+
+    with patch("torch.cuda.is_available", return_value=False):
+        processor = _make(gpu_processor_class, config)
+        result = list(processor(iter([{"holder": holder}])))
+
+    assert result[0]["holder"] is holder
+    assert holder.value == 3
+
+
+def test_3stream_enters_each_phase_on_its_own_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two batches: prime, one overlapped step, then the final drain."""
+    streams = [MagicMock(name=name) for name in ("input", "work", "output")]
+    entered: list[object] = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "Stream", MagicMock(side_effect=streams))
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.cuda, "stream", partial(_record_entry, entered))
+    config = PipelinedGPUProcessor3Stream.Config()
+    config.processors.append(SimpleProcessor.Config())
+    processor = PipelinedGPUProcessor3Stream(config)
+
+    result = list(processor(iter([{"a": 1}, {"b": 2}])))
+
+    assert [sample["processed"] for sample in result] == [True, True]
+    input_stream, work, output = streams
+    assert entered == [input_stream, work, input_stream, output, work, output]
+
+
+@pytest.mark.parametrize("stream", ["stream_input", "stream_work", "stream_output"])
+def test_3stream_refuses_cuda_without_its_streams(stream: str) -> None:
+    config = PipelinedGPUProcessor3Stream.Config()
+    config.processors.append(SimpleProcessor.Config())
+    with (
+        patch("torch.cuda.is_available", return_value=True),
+        patch("torch.cuda.Stream", side_effect=[MagicMock(), MagicMock(), MagicMock()]),
+    ):
+        processor = PipelinedGPUProcessor3Stream(config)
+        setattr(processor, stream, None)
+        with pytest.raises(ValueError, match=r"^CUDA streams exist when CUDA does\.$"):
+            list(processor(iter([{"a": 1}])))
+
+
+@pytest.mark.parametrize("stream", ["stream_output", "stream_input"])
+def test_2stream_refuses_cuda_without_its_streams(stream: str) -> None:
+    config = PipelinedGPUProcessor2Stream.Config()
+    config.processors.append(SimpleProcessor.Config())
+    with (
+        patch("torch.cuda.is_available", return_value=True),
+        patch("torch.cuda.Stream", side_effect=[MagicMock(), MagicMock()]),
+    ):
+        processor = PipelinedGPUProcessor2Stream(config)
+        setattr(processor, stream, None)
+        with pytest.raises(ValueError, match=r"^CUDA streams exist when CUDA does\.$"):
+            list(processor(iter([{"a": 1}])))
+
+
+def test_a_stage_built_without_cuda_refuses_to_run_on_cuda() -> None:
+    """Streams are made at construction, so CUDA appearing later is refused."""
+    config = PipelinedGPUProcessor3Stream.Config()
+    config.processors.append(SimpleProcessor.Config())
+    with patch("torch.cuda.is_available", return_value=False):
+        processor = PipelinedGPUProcessor3Stream(config)
+    with (
+        patch("torch.cuda.is_available", return_value=True),
+        pytest.raises(ValueError, match=r"^CUDA streams exist when CUDA does\.$"),
+    ):
+        list(processor(iter([{"a": 1}])))
+
+
+def _record_entry(
+    entered: list[object],
+    stream: object,
+) -> AbstractContextManager[None]:
+    entered.append(stream)
+    return nullcontext()
+
+
+class _Holder:
+    def __init__(self, value: int) -> None:
+        self.value = value
+
+
 def test_inference_mode() -> None:
     """InferenceMode wraps iterator with torch.inference_mode()."""
     samples = [{"a": 1}, {"b": 2}, {"c": 3}]
@@ -823,6 +939,6 @@ def _tensor_to_list(value: object) -> object:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -30,7 +30,7 @@ from priml.baselines.sudoku.scripts.prepare_data import (
     default_directory,
 )
 from priml.baselines.sudoku.verifier_data import VerifierData
-from priml.lib.testing.cli import assert_help_without_docstring
+from priml.lib.testing.checks import assert_help_without_docstring
 from priml.paths import resolve_working_dir
 
 
@@ -902,6 +902,6 @@ def test_download_is_streamed_and_digest_verification_is_exact(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

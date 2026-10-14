@@ -8,6 +8,9 @@ import contextlib
 
 from configgle import Fig
 from torch import Tensor, nn
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    CheckpointWrapper,
+)
 
 import pytest
 import torch
@@ -583,6 +586,78 @@ def test_quantized_activation_storage_all_zero_no_nan() -> None:
     assert not torch.isnan(x.grad).any()
 
 
+def test_layer_activation_checkpointing_counts_only_leaves() -> None:
+    """Containers are never wrapped; the interval counts leaf modules only."""
+    module = nn.Sequential(
+        nn.Sequential(nn.Linear(2, 3), nn.Linear(3, 2)),
+        nn.Linear(2, 2),
+    )
+    LayerActivationCheckpointing.Config(interval=2).make()(module)
+
+    inner = module[0]
+    assert isinstance(inner, nn.Sequential)
+    assert isinstance(inner[0], CheckpointWrapper)
+    assert not isinstance(inner[1], CheckpointWrapper)
+    assert isinstance(module[1], CheckpointWrapper)
+
+
+def test_selective_activation_checkpointing_zero_fraction_wraps_nothing() -> None:
+    module = TransformerModel(num_blocks=2)
+    SelectiveActivationCheckpointing.Config(
+        module_types=(BlockModule,),
+        checkpoint_fraction=0.0,
+    ).make()(module)
+
+    assert not any(isinstance(m, CheckpointWrapper) for m in module.modules())
+
+
+def test_quantized_module_activation_storage_requires_module_types() -> None:
+    with pytest.raises(ValueError, match="requires module_types"):
+        QuantizedModuleActivationStorage.Config().make()
+
+
+def test_quantized_module_activation_storage_rejects_unsupported_types() -> None:
+    with pytest.raises(ValueError, match="not yet supported"):
+        QuantizedModuleActivationStorage.Config(module_types=(nn.Linear,)).make()
+
+
+def test_quantized_module_conv_below_min_size_matches_plain_conv() -> None:
+    """An input under ``min_size`` is saved unquantized, so gradients are exact."""
+    torch.manual_seed(0)
+    reference = nn.Conv2d(2, 3, kernel_size=3, padding=1, bias=False)
+    wrapped = nn.Conv2d(2, 3, kernel_size=3, padding=1, bias=False)
+    wrapped.load_state_dict(reference.state_dict())
+    QuantizedModuleActivationStorage.Config(
+        module_types=(nn.Conv2d,),
+        min_size=1_000,
+    ).make()(wrapped)
+    x_reference = torch.randn(3, 2, 4, 5, requires_grad=True)
+    x_wrapped = x_reference.detach().clone().requires_grad_(True)
+
+    reference(x_reference).square().sum().backward()
+    wrapped(x_wrapped).square().sum().backward()
+
+    assert wrapped.weight.grad is not None
+    assert reference.weight.grad is not None
+    assert x_wrapped.grad is not None
+    assert x_reference.grad is not None
+    torch.testing.assert_close(wrapped.weight.grad, reference.weight.grad)
+    torch.testing.assert_close(x_wrapped.grad, x_reference.grad)
+
+
+def test_quantized_module_conv_backward_rejects_string_padding() -> None:
+    """``padding="same"`` has no explicit-padding backward; refuse it loudly."""
+    conv = nn.Conv2d(2, 3, kernel_size=3, padding="same")
+    QuantizedModuleActivationStorage.Config(
+        module_types=(nn.Conv2d,),
+        min_size=4,
+    ).make()(conv)
+    out = conv(torch.randn(3, 2, 4, 5, requires_grad=True))
+
+    with pytest.raises(TypeError, match="padding"):
+        out.sum().backward()
+
+
 @pytest.mark.parametrize("interval", [0, -1])
 def test_layer_activation_checkpointing_rejects_nonpositive_interval(
     interval: int,
@@ -595,6 +670,6 @@ def test_layer_activation_checkpointing_rejects_nonpositive_interval(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

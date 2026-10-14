@@ -183,6 +183,6 @@ def test_target_cost_closure_counts_vector_and_sample_work() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

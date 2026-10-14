@@ -1,10 +1,10 @@
-"""Tests for the Q-learning train step, at exp006's recipe and a tiny geometry.
+"""Tests for the Q-learning train step, at experiments.exp013's recipe, a tiny geometry.
 
 The geometry: 12 environments in 2 buffers, rollouts of 2 steps, 2 passes of
 2 minibatches of 6 trajectories, not the recipe's 4 of 4, a network 5 wide;
 the recipe's schedules stay. Most tests train on ``testing.FakeEnv``'s random
 transitions, which need no game; the rest step the real game's 4
-environments by exp006's rules. The golden runs inside
+environments by exp013's rules. The golden runs inside
 ``host_agnostic_pipeline``, so its bits hold on every CPU.
 """
 
@@ -25,7 +25,7 @@ import pytest
 import torch
 
 from priml.baselines.craftax.env import CraftaxEnv
-from priml.baselines.craftax.experiments import exp006
+from priml.baselines.craftax.experiments import exp013
 from priml.baselines.craftax.game.state import OBS_SIZE, new_stats
 from priml.baselines.craftax.learners.pqn_train_step import (
     CraftaxPQNTrainLoop,
@@ -154,8 +154,8 @@ class _Recording(CraftaxPQNTrainStep):
 
 
 def _config(*, game: bool = False) -> CraftaxPQNTrainStep.Config:
-    """Return exp006's step on the CPU at the tiny geometry; on the real game if ``game``."""
-    config = exp006().step
+    """Return exp013's step on the CPU at the tiny geometry; on the real game if ``game``."""
+    config = exp013().step
     if game:
         env = tiny_env()
         parent = config.env
@@ -600,7 +600,7 @@ def test_a_setting_at_its_bound_is_accepted(path: str, value: float) -> None:
 def test_the_loop_names_its_wandb_run_after_the_experiment() -> None:
     """Unnamed, W&B makes a name up, and a board of seeds cannot be told apart."""
     config = CraftaxPQNTrainLoop()
-    config.experiment_name = "exp006_s43"
+    config.experiment_name = "exp013_s43"
     dashboard = WandbTracker.Config()
     wrapper = AsyncTracker.Config()
     wrapper.tracker = dashboard
@@ -611,7 +611,7 @@ def test_the_loop_names_its_wandb_run_after_the_experiment() -> None:
     named = finalized.tracker.trackers["wandb"]
     assert isinstance(named, AsyncTracker.Config)
     assert isinstance(named.tracker, WandbTracker.Config)
-    assert named.tracker.name == "exp006_s43"
+    assert named.tracker.name == "exp013_s43"
     dashboard.name = "kept"
     kept = config.copy_tree().finalize().tracker
     assert isinstance(kept, TrackerList.Config)
@@ -670,9 +670,9 @@ def test_an_evaluation_plays_greedily_and_changes_nothing_training_reads() -> No
 
 
 def test_the_tiny_steps_update_matches_its_golden() -> None:
-    """exp006's step at test size from torch seed 0, its first update frozen on every host.
+    """exp013's step at test size from torch seed 0, its first update frozen on every host.
 
-    The whole update on the real game by exp006's rules: the epsilon-greedy
+    The whole update on the real game by exp013's rules: the epsilon-greedy
     rollout, the rescore and its targets, one minibatch of every
     environment, RAdam behind the clip, the linear rate, the running
     normalization. The update's targets, rate, exploration and loss, then
@@ -695,12 +695,12 @@ def test_the_tiny_steps_update_matches_its_golden() -> None:
             f"final {name} {digest(value)}"
             for name, value in step.model.state_dict().items()
         ]
-    assert_golden(test_file=__file__, name="train_step_exp006_tiny", lines=lines)
+    assert_golden(test_file=__file__, name="train_step_exp013_tiny", lines=lines)
 
 
 @pytest.mark.gpu_triton
-def test_exp006s_step_trains_and_evaluates_on_the_gpu() -> None:
-    """exp006's step at the tiny geometry on CUDA: Philox's kernel, captured step graphs.
+def test_exp013s_step_trains_and_evaluates_on_the_gpu() -> None:
+    """exp013's step at the tiny geometry on CUDA: Philox's kernel, captured step graphs.
 
     The rescore runs the 12 rows at once where each captured step ran its
     buffer's 6, and the GPU's products round by their row counts, so the two
@@ -784,6 +784,6 @@ def _reference_targets(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

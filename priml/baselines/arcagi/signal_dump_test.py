@@ -468,6 +468,6 @@ def test_zero_archive_interval_prunes_to_latest_signal_dump(tmp_path: Path) -> N
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

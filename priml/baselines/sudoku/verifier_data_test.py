@@ -15,8 +15,10 @@ from priml.baselines.sudoku.runner import file_sha256
 from priml.baselines.sudoku.testing import write_dataset
 from priml.baselines.sudoku.verifier_data import (
     VerifierData,
+    _corrupt_hamming,
     _HarvestShardEntry,
     _load_harvest,
+    _swap_cells,
 )
 from priml.data.arrays import load_array
 
@@ -279,6 +281,36 @@ def test_contradiction_rows_follow_two_seeded_draws_and_align_labels(
     assert torch.equal(solution, data.train_labels[row_indices].long())
 
 
+def test_hamming_corruption_changes_only_non_given_cells() -> None:
+    solution = (torch.arange(2 * 9).reshape(2, 9) % 9 + 2).long()
+    given = torch.zeros(2, 9, dtype=torch.bool)
+    given[:, :4] = True
+    # Row 1 asks for more cells than its 5 blanks: the givens must still hold.
+    k = torch.tensor([2, 7])
+    corrupted = _corrupt_hamming(
+        solution,
+        given,
+        k=k,
+        generator=torch.Generator().manual_seed(0),
+    )
+    changed = corrupted != solution
+    assert changed.sum(dim=-1).tolist() == [2, 5]
+    assert not changed[given].any()
+    assert corrupted.min() >= 2
+    assert corrupted.max() <= 10
+
+
+def test_swaps_with_no_pairs_return_the_candidate_untouched() -> None:
+    candidate = torch.arange(2 * 9).reshape(2, 9)
+    out = _swap_cells(
+        candidate,
+        torch.zeros(2, 9, dtype=torch.bool),
+        pairs=torch.zeros(2, dtype=torch.int64),
+        generator=torch.Generator().manual_seed(0),
+    )
+    assert out is candidate
+
+
 @pytest.mark.parametrize("steps", [0, -1])
 def test_verifier_data_rejects_a_nonpositive_epoch(steps: int) -> None:
     """``VerifierFit.run`` would otherwise loop forever on an empty epoch."""
@@ -287,6 +319,6 @@ def test_verifier_data_rejects_a_nonpositive_epoch(steps: int) -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -69,6 +69,6 @@ def test_binary_accuracy_state_round_trips_and_reset_clears_it() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

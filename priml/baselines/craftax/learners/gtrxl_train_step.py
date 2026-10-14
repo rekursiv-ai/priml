@@ -30,8 +30,8 @@ last step, the rollout's bootstrap row.
 
 The replay costs one more policy pass over the first ``horizon - window``
 steps each update, carries the actor already computed. Storing them instead
-takes ``horizon x envs x carry`` floats, tens of GB at exp008's size; a
-cheaper replay is a speed follow-up, not a change of what is learned.
+takes ``horizon x envs x carry`` floats, tens of GB at experiments.exp015's
+size; a cheaper replay is a speed follow-up, not a change of what is learned.
 
 References:
     https://github.com/Reytuag/transformerXL_PPO_JAX

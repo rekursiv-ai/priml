@@ -133,7 +133,7 @@ def test_poison_free_pool_leaves_written_allocations_alone() -> None:
 
 def test_test_main_calls_pytest():
     """Test that test_main calls pytest.main with correct arguments."""
-    from priml.lib.testing.main import (  # noqa: PLC0415 -- The fixture imports optional test dependencies only inside the cases that use them.
+    from priml.lib.testing.runner import (  # noqa: PLC0415 -- The fixture imports optional test dependencies only inside the cases that use them.
         test_main,
     )
 
@@ -163,7 +163,7 @@ def test_test_main_calls_pytest():
 
 def test_test_main_passes_through_argv():
     """Test that test_main passes through command-line arguments."""
-    from priml.lib.testing.main import (  # noqa: PLC0415 -- The fixture imports optional test dependencies only inside the cases that use them.
+    from priml.lib.testing.runner import (  # noqa: PLC0415 -- The fixture imports optional test dependencies only inside the cases that use them.
         test_main,
     )
 
@@ -192,7 +192,7 @@ def test_test_main_passes_through_argv():
 
 def test_test_main_exits_with_pytest_return_code():
     """Test that test_main exits with the return code from pytest."""
-    from priml.lib.testing.main import (  # noqa: PLC0415 -- The fixture imports optional test dependencies only inside the cases that use them.
+    from priml.lib.testing.runner import (  # noqa: PLC0415 -- The fixture imports optional test dependencies only inside the cases that use them.
         test_main,
     )
 
@@ -269,7 +269,67 @@ def test_cleanup_cuda_teardown_skips_synchronize(
     assert synchronize.call_count == calls_at_setup, reason
 
 
+def _start_cleanup_cuda() -> Generator[None, None, None]:
+    """Run ``cleanup_cuda`` setup and return the generator paused at its yield."""
+    gen = cast(
+        Generator[None, None, None],
+        fixtures.cleanup_cuda._get_wrapped_function()(),
+    )
+    next(gen)
+    return gen
+
+
+def _fake_cuda(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """Fake a live CUDA context; return the ``synchronize`` spy."""
+    synchronize = MagicMock()
+    monkeypatch.setattr(torch.cuda, "synchronize", synchronize)
+    monkeypatch.setattr(torch.cuda, "empty_cache", MagicMock())
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+    return synchronize
+
+
+def test_cleanup_cuda_reclaims_at_setup_and_teardown_with_a_live_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    synchronize = _fake_cuda(monkeypatch)
+
+    gen = _start_cleanup_cuda()
+    assert synchronize.call_count == 1
+    with pytest.raises(StopIteration):
+        next(gen)
+
+    assert synchronize.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("initialized", "expected_calls"),
+    [(True, 1), (False, 0)],
+    ids=["context-created", "no-context"],
+)
+def test_cleanup_cuda_rechecks_when_torch_arrives_during_the_test(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    initialized: bool,
+    expected_calls: int,
+) -> None:
+    """Torch imported by the test body: reclaim only if a context now exists."""
+    synchronize = _fake_cuda(monkeypatch)
+    real_torch = sys.modules["torch"]
+    monkeypatch.delitem(sys.modules, "torch")
+
+    gen = _start_cleanup_cuda()
+    assert synchronize.call_count == 0
+
+    monkeypatch.setitem(sys.modules, "torch", real_torch)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: initialized)
+    with pytest.raises(StopIteration):
+        next(gen)
+
+    assert synchronize.call_count == expected_calls
+
+
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

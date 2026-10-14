@@ -12,7 +12,7 @@ with the signature the tests use, and every later process loads it.
 from __future__ import annotations
 
 from priml.baselines.craftax.ghosts.extract import extract
-from priml.baselines.craftax.testing import tiny_env, tiny_exp002_step
+from priml.baselines.craftax.testing import tiny_env, tiny_exp009_step
 from priml.baselines.craftax.world_model import replay
 from priml.baselines.craftax.world_model.capture.env import CaptureEnv, Schedule
 
@@ -25,15 +25,15 @@ def compile_kernels() -> None:
     of :func:`~priml.baselines.craftax.testing.tiny_env` on two threads a
     buffer, ``lead_numba``, the helper thread's ``follow_numba`` and
     ``serve_numba``, and the pool and reset kernels, and a step of
-    :func:`~priml.baselines.craftax.testing.tiny_exp002_step`'s env, the
-    same kernels under original Craftax's rules, which the goldens of exp002 and
-    of the recipes forked from it play, ``env_test``'s among them; a buffer step
-    under each capture rule set, ``record_rows_numba``, whose previous-action
-    rules type apart.
+    :func:`~priml.baselines.craftax.testing.tiny_exp009_step`'s env, the
+    same kernels under original Craftax's rules, which the goldens of
+    experiments.exp009 and of the recipes forked from it play, ``env_test``'s
+    among them; a buffer step under each capture rule set,
+    ``record_rows_numba``, whose previous-action rules type apart.
     """
     episode = replay.record(world_seed=1, sampling_seed=1, max_decisions=20_000)
     extract(episode, ordinal=0)
-    for config in (tiny_env(), tiny_exp002_step().env):
+    for config in (tiny_env(), tiny_exp009_step().env):
         config.threads_per_buffer = 2
         env = config.make()
         try:

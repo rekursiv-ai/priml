@@ -15,7 +15,7 @@ from priml.cost import (
     Cost,
     cost,
     matmul_cost,
-    resolve_dtype,
+    nbytes,
 )
 from priml.model.attention.kernel import SdpaFused
 from priml.model.attention.kvcache import KVCache
@@ -134,6 +134,7 @@ class AttentionProjections(nn.Module):
             batch_size: int,
             dtype: torch.dtype | None,
             memory_len: int = -1,
+            context_len: int = 0,
             **kwargs: object,
         ) -> Cost:
             """Cost the projections, norms, and rotary; no kernel here.
@@ -145,12 +146,15 @@ class AttentionProjections(nn.Module):
               memory_len: Memory positions per sequence the keys and values
                 are projected from; -1 projects them from the sequence itself.
                 Projections from a memory are not rotated.
+              context_len: Tokens already cached. Only the ``seq_len`` new
+                tokens are projected, so it changes nothing here.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             """
+            del context_len
             rows = seq_len * batch_size
             dt = dtype
             inner = self.num_heads * self.channels_head
@@ -251,13 +255,9 @@ class AttentionProjections(nn.Module):
             channels_in=config.channels_in,
             num_heads=config.num_heads,
             channels_head=config.channels_head,
+            num_heads_kv=config.num_heads_kv,
         )
         super().__init__()
-        if config.num_heads % config.num_heads_kv != 0:
-            raise ValueError(
-                f"num_heads={config.num_heads} must be divisible by "
-                f"num_heads_kv={config.num_heads_kv}.",
-            )
         self.num_heads = config.num_heads
         self.channels_head = config.channels_head
         self.num_heads_kv = config.num_heads_kv
@@ -362,6 +362,7 @@ def _validate_head_dims(
     channels_in: int,
     num_heads: int,
     channels_head: int,
+    num_heads_kv: int,
 ) -> None:
     """Reject geometry that stayed unresolved after finalize."""
     if channels_head == -1 and channels_in != -1:
@@ -378,6 +379,12 @@ def _validate_head_dims(
         raise ValueError(
             f"Need at least two of channels_in={channels_in}, "
             f"num_heads={num_heads}, channels_head={channels_head}.",
+        )
+    # Zero key/value heads builds empty projections without complaint, so it is
+    # checked here; the modulo would otherwise divide by it.
+    if num_heads_kv == 0 or num_heads % num_heads_kv:
+        raise ValueError(
+            f"num_heads={num_heads} must be divisible by num_heads_kv={num_heads_kv}.",
         )
 
 
@@ -433,6 +440,7 @@ class Attention(AttentionProjections):
             batch_size: int,
             dtype: torch.dtype | None,
             memory_len: int = -1,
+            context_len: int = 0,
             **kwargs: object,
         ) -> Cost:
             """Add the kernel's products and, for self-attention, the per-token KV cache.
@@ -448,17 +456,19 @@ class Attention(AttentionProjections):
               memory_len: Memory positions per sequence the queries attend to;
                 -1 attends to the sequence itself. A memory is attended
                 without a cache, so it carries no state.
+              context_len: Tokens each sequence already holds in its KV cache.
+                The ``seq_len`` queries attend to those and to their own keys,
+                so ``seq_len=1`` is one decode step. A memory ignores it.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             """
-            # Cross-attention prices ``seq_len`` queries against ``memory_len`` keys.
-            reach = {} if memory_len < 0 else {"seq_len": memory_len, "rows": seq_len}
             kernel = cost(
                 self.attn_kernel,
-                **{"seq_len": seq_len} | reach,
+                seq_len=memory_len if memory_len >= 0 else context_len + seq_len,
+                rows=seq_len,
                 batch_size=batch_size,
                 dtype=dtype,
                 num_heads=self.num_heads,
@@ -472,15 +482,13 @@ class Attention(AttentionProjections):
                     batch_size=batch_size,
                     dtype=dtype,
                     memory_len=memory_len,
+                    context_len=context_len,
                     **kwargs,
                 )
                 + kernel,
                 bytes_state=0
                 if memory_len >= 0
-                else resolve_dtype(dtype).itemsize
-                * 2
-                * self.num_heads_kv
-                * self.channels_head,
+                else nbytes(2 * self.num_heads_kv * self.channels_head, dtype),
             )
 
     def __init__(self, config: Config) -> None:
@@ -530,8 +538,8 @@ class Attention(AttentionProjections):
             num_heads=self.num_heads_kv,
             max_seq=max_seq,
             channels_head=self.channels_head,
-            device=device,
-            dtype=dtype,
+            device=self.proj_qkv.weight.device if device is None else device,
+            dtype=self.proj_qkv.weight.dtype if dtype is None else dtype,
         )
 
     @override

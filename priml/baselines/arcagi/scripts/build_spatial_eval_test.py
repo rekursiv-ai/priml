@@ -629,6 +629,6 @@ def test_ensure_spatial_eval_data_declares_split_manifest(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -173,6 +173,6 @@ def test_acceptor_locks_only_when_every_member_strictly_clears(tmp_path: Path) -
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

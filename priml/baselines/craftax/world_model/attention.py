@@ -25,7 +25,7 @@ from torch import Tensor
 
 import torch
 
-from priml.cost import Cost, cost, resolve_dtype
+from priml.cost import Cost, cost, nbytes
 from priml.model.attention.attention import AttentionProjections
 from priml.model.attention.kernel import SdpaVarlen
 from priml.model.attention.rope import RoPE
@@ -91,6 +91,7 @@ class VarlenAttention(AttentionProjections):
             batch_size: int,
             dtype: torch.dtype | None,
             memory_len: int = -1,
+            context_len: int = 0,
             **kwargs: object,
         ) -> Cost:
             """Add the kernel's products and the per-token KV cache, as ``Attention``'s.
@@ -102,6 +103,7 @@ class VarlenAttention(AttentionProjections):
               batch_size: Rows per step.
               dtype: Activation dtype; ``None`` is torch's default.
               memory_len: -1: a varlen attention attends to no memory.
+              context_len: 0: a varlen attention attends from no cache.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
@@ -110,6 +112,8 @@ class VarlenAttention(AttentionProjections):
             """
             if memory_len >= 0:
                 raise ValueError("A varlen attention attends to no memory.")
+            if context_len:
+                raise ValueError("A varlen attention attends from no cache.")
             kernel = cost(
                 self.attn_kernel,
                 seq_len=seq_len,
@@ -124,12 +128,12 @@ class VarlenAttention(AttentionProjections):
                 batch_size=batch_size,
                 dtype=dtype,
                 memory_len=memory_len,
+                context_len=context_len,
                 **kwargs,
             )
-            itemsize = resolve_dtype(dtype).itemsize
             return replace(
                 projections + kernel,
-                bytes_state=itemsize * 2 * self.num_heads_kv * self.channels_head,
+                bytes_state=nbytes(2 * self.num_heads_kv * self.channels_head, dtype),
             )
 
     def __init__(self, config: Config) -> None:

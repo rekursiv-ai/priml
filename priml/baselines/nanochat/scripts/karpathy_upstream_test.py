@@ -156,6 +156,6 @@ def test_their_attention_is_the_windowed_sdpa_and_rejects_other_masks() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

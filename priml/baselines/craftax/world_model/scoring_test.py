@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from priml.baselines.craftax.world_model.attention import VarlenAttention
+from priml.baselines.craftax.world_model.checkpoint import model_state
 from priml.baselines.craftax.world_model.checkpoint_test import (
     smoke_on_flash4,
 )
@@ -20,9 +21,11 @@ from priml.baselines.craftax.world_model.experiments import (
 )
 from priml.baselines.craftax.world_model.model import WorldModel
 from priml.baselines.craftax.world_model.scoring import (
+    _declared_model,
     autocast,
     load_trained,
 )
+from priml.model.attention import flash4
 from priml.model.attention.flash4 import Flash4UnavailableError, Flash4Varlen
 from priml.model.attention.kernel import SdpaVarlen
 
@@ -48,6 +51,40 @@ def test_off_cuda_a_flash4_experiment_scores_in_float32_on_sdpa(
     # float32.
     assert config.step.dtype_autocast == torch.bfloat16
     assert isinstance(autocast(config, torch.device("cpu")), nullcontext)
+
+
+def test_the_declared_model_keeps_the_experiments_flash4_kernels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # FA4's import and device check stand aside: building a kernel holds no
+    # weights, so the CUDA path's model builds and loads on the CPU.
+    monkeypatch.setattr(flash4, "_interface", lambda: None)
+    checkpoint = _saved(tmp_path)
+    model, config = _declared_model(
+        f"{_HERE}.smoke_on_flash4_in_bfloat16",
+        checkpoint,
+        overrides=["dataset.sampler_seed=3"],
+    )
+    assert config.dataset.sampler_seed == 3
+    assert not model.training
+    assert _kernels(model) == {Flash4Varlen}
+    saved = model_state(checkpoint)
+    for name, tensor in model.state_dict().items():
+        assert torch.equal(tensor, from_plain(saved[name], torch.Tensor)), name
+
+
+@pytest.mark.filterwarnings("ignore:CUDA is not available:UserWarning")
+def test_on_cuda_the_experiments_autocast_is_entered() -> None:
+    config = smoke_on_flash4_in_bfloat16()
+    # `torch` caches autocast casts by default; training does not.
+    assert torch.is_autocast_cache_enabled()
+    assert not config.step.autocast_cache_enabled
+    with autocast(config, torch.device("cuda")):
+        assert torch.get_autocast_dtype("cuda") == torch.bfloat16
+        assert not torch.is_autocast_cache_enabled()
+    assert torch.get_autocast_dtype("cuda") == torch.float16
+    assert torch.is_autocast_cache_enabled()
 
 
 def test_an_experiment_without_autocast_scores_without_it() -> None:
@@ -121,6 +158,6 @@ def _kernels(model: torch.nn.Module) -> set[type[object]]:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -353,6 +353,6 @@ def test_a_custom_layer_supplies_its_own_style_only_when_sharded() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

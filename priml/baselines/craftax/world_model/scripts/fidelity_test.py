@@ -1070,6 +1070,6 @@ def _episode(segment: Segment, *, index: int, split: int = 1) -> Episode:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -691,10 +691,6 @@ class Reproduction:
             return base
         acceptor = base.copy_tree()
         acceptor.checkpoint_paths = self._verifier_checkpoints()
-        if acceptor.device is None:
-            acceptor.device = str(cfg.runtime.device)
-        if acceptor.base_dir is None:
-            acceptor.base_dir = cfg.base_dir
         return acceptor
 
     def _full_eval(self, step: int) -> tuple[dict[str, object], float]:

@@ -33,6 +33,7 @@ from priml.cost import (
     intensity,
     map_cost,
     matmul_cost,
+    nbytes,
     peak,
     reduction_cost,
     resolve_dtype,
@@ -352,6 +353,28 @@ def test_matmul_cost_prices_a_packed_weight_at_its_stored_bytes() -> None:
     assert c["flops", "primal", "elementwise", BF] == 3 * 12
     assert c["bytes", "primal", "elementwise"] == Cost()
     assert c.params == c.params_active == 12
+
+
+def test_nbytes_matches_torch_storage_for_packed_fp4() -> None:
+    fp4 = torch.float4_e2m1fn_x2
+    # Each fp4 element holds two values in one byte.
+    packed = torch.zeros(3, 5, dtype=torch.uint8).view(fp4)
+    assert nbytes(2 * packed.numel(), fp4) == packed.nbytes
+    assert nbytes(3, fp4) == 2
+    assert nbytes(3, BF) == 6
+
+
+def test_matmul_cost_moves_half_the_int8_bytes_at_fp4() -> None:
+    fp4, int8 = torch.float4_e2m1fn_x2, torch.int8
+    packed, plain = (
+        matmul_cost(channels_in=2, channels_out=4, rows=3, dtype=dt)
+        for dt in (fp4, int8)
+    )
+    for phase in ("primal", "adjoint"):
+        assert (
+            2 * packed["bytes", phase, "matmul", fp4]
+            == (plain["bytes", phase, "matmul", int8])
+        )
 
 
 def test_matmul_cost_dequantizes_once_per_invocation_not_per_row() -> None:
@@ -897,6 +920,15 @@ def test_utilization_with_a_duration_is_achieved_over_the_roofline_ceiling(
     assert achieved["adjoint", "sort", F32] == pytest.approx(1 / 2 / 3.35e12)
 
 
+@pytest.mark.parametrize("duration_sec", [0.0, -1.0, math.nan, -math.inf])
+def test_utilization_rejects_a_duration_that_is_not_positive(
+    duration_sec: float,
+) -> None:
+    cost = matmul_cost(channels_in=4, channels_out=3, rows=2, dtype=BF)
+    with pytest.raises(ValueError, match="duration_sec"):
+        utilization(cost, device="h100", duration_sec=duration_sec)
+
+
 def test_utilization_treats_missing_bandwidth_as_zero() -> None:
     cost = Cost(
         cells={
@@ -1292,6 +1324,6 @@ def test_scalar_leaf_formulas_and_composition() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -316,6 +316,33 @@ def test_the_minted_site_has_both_tiers_by_the_fixtures_rules(
     )
 
 
+def test_main_makes_the_directory_and_writes_the_fixture_of_the_world_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    written: list[tuple[Path, int, bool]] = []
+
+    def write_fixture(out: Path, *, world_seed: int) -> None:
+        written.append((out, world_seed, out.is_dir()))
+
+    monkeypatch.setattr(fixture, "write_fixture", write_fixture)
+    out = tmp_path / "new" / "fixture"
+    monkeypatch.setattr("sys.argv", ["fixture.py", str(out), "--world", "7"])
+    assert fixture.main() == 0
+    monkeypatch.setattr("sys.argv", ["fixture.py", str(tmp_path / "default")])
+    assert fixture.main() == 0
+    assert written == [(out, 7, True), (tmp_path / "default", 1, True)]
+
+
+def test_main_refuses_an_existing_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", ["fixture.py", str(tmp_path)])
+    with pytest.raises(FileExistsError):
+        fixture.main()
+
+
 _UNREACHED: Final = MAP_SIZE * MAP_SIZE
 
 
@@ -432,6 +459,6 @@ def _expected_episodes() -> list[dict[str, object]]:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

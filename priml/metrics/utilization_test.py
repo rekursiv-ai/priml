@@ -366,6 +366,6 @@ def test_update_uses_last_axis_for_rank_three_tokens() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

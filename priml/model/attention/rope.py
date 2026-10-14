@@ -29,6 +29,7 @@ from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
+    nbytes,
     reduction_cost,
     resolve_dtype,
     traffic,
@@ -1329,14 +1330,15 @@ def _learned_frequency_cost(
 ) -> Cost:
     """Count learned frequency gradients over every position without averaging."""
     dt = resolve_dtype(dtype)
-    itemsize = dt.itemsize
     return Cost(
         cells={
             ("flops", "adjoint", "elementwise", dt): rows * (5 * outputs + params),
             ("flops", "adjoint", "reduction", dt): params * (rows - 1),
-            ("bytes", "adjoint", "elementwise", dt): itemsize
-            * (10 * outputs * rows + params * rows + params),
-            ("bytes", "adjoint", "reduction", dt): itemsize * (params * rows + params),
+            ("bytes", "adjoint", "elementwise", dt): nbytes(
+                10 * outputs * rows + params * rows + params,
+                dt,
+            ),
+            ("bytes", "adjoint", "reduction", dt): nbytes(params * rows + params, dt),
         },
         params=params,
         params_active=params,

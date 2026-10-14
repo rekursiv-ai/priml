@@ -10,7 +10,7 @@ import sys
 import pytest
 
 from priml.baselines.cifar10.scripts import prepare_data
-from priml.lib.testing.cli import assert_help_without_docstring
+from priml.lib.testing.checks import assert_help_without_docstring
 
 
 def test_default_directory_matches_the_loop_resolution() -> None:
@@ -98,6 +98,6 @@ def test_main_configures_info_logging(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

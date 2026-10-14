@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import math
 
 from torch import nn
@@ -17,19 +19,133 @@ from priml.math.loss import (
 )
 
 
-def test_cross_entropy_logz_is_cross_entropy_and_its_normalizer() -> None:
-    logits, target = torch.randn(2, 3, 5), torch.randint(0, 5, (2, 3))
-    nll, logz = cross_entropy_logz(logits, target)
-    expected = nn.functional.cross_entropy(logits.flatten(0, 1), target.flatten())
-    torch.testing.assert_close(nll.mean(), expected)
-    torch.testing.assert_close(logz, logits.logsumexp(-1))
-    assert nll.shape == logz.shape == (2, 3)
+@pytest.mark.parametrize("weighted", [False, True])
+@pytest.mark.parametrize("label_smoothing", [0.0, 0.2])
+@pytest.mark.parametrize("reduction", ["none", "mean", "sum"])
+def test_cross_entropy_logz_matches_f_cross_entropy(
+    weighted: bool,
+    label_smoothing: float,
+    reduction: Literal["none", "mean", "sum"],
+) -> None:
+    torch.manual_seed(5)
+    logits = torch.randn(2, 5, 3, 4, dtype=torch.float64, requires_grad=True)
+    target = torch.randint(0, 5, (2, 3, 4))
+    target[0, 1] = -100
+    weight = torch.rand(5, dtype=torch.float64) + 0.5 if weighted else None
+    loss, _ = cross_entropy_logz(
+        logits,
+        target,
+        weight=weight,
+        reduction=reduction,
+        label_smoothing=label_smoothing,
+    )
+    expected = nn.functional.cross_entropy(
+        logits,
+        target,
+        weight=weight,
+        reduction=reduction,
+        label_smoothing=label_smoothing,
+    )
+    torch.testing.assert_close(loss, expected)
+    (gradient,) = torch.autograd.grad(loss.sum(), logits)
+    (expected_gradient,) = torch.autograd.grad(expected.sum(), logits)
+    torch.testing.assert_close(gradient, expected_gradient)
+    _, logz = cross_entropy_logz(
+        logits,
+        target,
+        weight=weight,
+        label_smoothing=label_smoothing,
+    )
+    expected_logz = torch.where(target != -100, logits.logsumexp(1), 0.0)
+    torch.testing.assert_close(logz, expected_logz)
+    (gradient,) = torch.autograd.grad(logz.square().sum(), logits)
+    (expected_gradient,) = torch.autograd.grad(expected_logz.square().sum(), logits)
+    torch.testing.assert_close(gradient, expected_gradient)
+
+
+def test_cross_entropy_logz_normalizer_is_a_direct_logsumexp_in_bfloat16() -> None:
+    """``loss + x_t`` adds two bf16 roundings; ``logsumexp`` rounds ``log Z`` once."""
+    torch.manual_seed(0)
+    logits = (torch.randn(64, 256) * 30).to(torch.bfloat16)
+    target = logits.argmin(-1)
+    _, logz = cross_entropy_logz(logits, target, reduction="none", dim=-1)
+    torch.testing.assert_close(logz, logits.logsumexp(-1), rtol=0, atol=0)
+
+
+def test_cross_entropy_logz_survives_a_zero_class_weight() -> None:
+    logits = torch.randn(3, 4, dtype=torch.float64)
+    target = torch.tensor([0, 1, 2])
+    weight = torch.tensor([0.0, 1.0, 2.0, 3.0], dtype=torch.float64)
+    _, logz = cross_entropy_logz(logits, target, weight=weight, reduction="none")
+    torch.testing.assert_close(logz, logits.logsumexp(1))
+
+
+def test_cross_entropy_logz_returns_the_normalizer_zeroed_where_ignored() -> None:
+    logits = torch.randn(2, 5, 3)
+    target = torch.tensor([[0, 7, 4], [7, 2, 1]])
+    _, logz = cross_entropy_logz(logits, target, ignore_index=7, reduction="sum")
+    expected = torch.where(target != 7, logits.logsumexp(1), 0.0)
+    torch.testing.assert_close(logz, expected)
+
+
+def test_cross_entropy_logz_accepts_unbatched_logits() -> None:
+    logits, target = torch.randn(5), torch.tensor(2)
+    loss, logz = cross_entropy_logz(logits, target, dim=0)
+    torch.testing.assert_close(loss, nn.functional.cross_entropy(logits, target))
+    torch.testing.assert_close(logz, logits.logsumexp(0))
+
+
+@pytest.mark.parametrize("dim", [-1, 2, 0])
+def test_cross_entropy_logz_takes_the_class_axis_anywhere(dim: int) -> None:
+    logits = torch.randn(2, 3, 4, 5, dtype=torch.float64)
+    target_shape = list(logits.shape)
+    num_classes = target_shape.pop(dim)
+    target = torch.randint(0, num_classes, target_shape)
+    loss, logz = cross_entropy_logz(logits, target, dim=dim, reduction="none")
+    moved = logits.movedim(dim, 1)
+    expected = nn.functional.cross_entropy(moved, target, reduction="none")
+    torch.testing.assert_close(loss, expected)
+    torch.testing.assert_close(logz, logits.logsumexp(dim))
+
+
+@pytest.mark.parametrize("dim", [(1, 3), (3, 1), (-3, -1)])
+def test_cross_entropy_logz_takes_one_softmax_over_several_axes(
+    dim: tuple[int, int],
+) -> None:
+    logits = torch.randn(2, 3, 4, 5, dtype=torch.float64)
+    target = torch.randint(0, 3 * 5, (2, 4))
+    loss, logz = cross_entropy_logz(logits, target, dim=dim, reduction="none")
+    joint = logits.movedim(2, 1).flatten(2)
+    expected = nn.functional.cross_entropy(
+        joint.movedim(-1, 1),
+        target,
+        reduction="none",
+    )
+    torch.testing.assert_close(loss, expected)
+    torch.testing.assert_close(logz, logits.logsumexp((1, 3)))
+
+
+@pytest.mark.parametrize(
+    ("dim", "error"),
+    [((1, -3), ValueError), (4, IndexError), ((), ValueError)],
+)
+def test_cross_entropy_logz_rejects_malformed_dims(
+    dim: int | tuple[int, ...],
+    error: type[Exception],
+) -> None:
+    logits = torch.randn(2, 3, 4, 5)
+    with pytest.raises(error):
+        cross_entropy_logz(logits, torch.zeros(2, 4, dtype=torch.long), dim=dim)
 
 
 def test_cross_entropy_logz_restricts_the_softmax_to_finite_logits() -> None:
     logits, target = torch.randn(4, 5), torch.tensor([0, 2, 2, 4])
     allowed = torch.tensor([True, False, True, False, True])
-    nll, logz = cross_entropy_logz(logits.masked_fill(~allowed, -math.inf), target)
+    nll, logz = cross_entropy_logz(
+        logits.masked_fill(~allowed, -math.inf),
+        target,
+        reduction="none",
+    )
     kept = logits[:, allowed]
     torch.testing.assert_close(logz, kept.logsumexp(-1))
     torch.testing.assert_close(nll, logz - logits.gather(-1, target[:, None])[:, 0])
@@ -38,8 +154,8 @@ def test_cross_entropy_logz_restricts_the_softmax_to_finite_logits() -> None:
 def test_cross_entropy_logz_gradient_is_softmax_minus_onehot() -> None:
     logits = torch.randn(3, 5, requires_grad=True)
     target = torch.tensor([1, 0, 4])
-    nll, _ = cross_entropy_logz(logits, target)
-    (gradient,) = torch.autograd.grad(nll.sum(), logits)
+    nll, _ = cross_entropy_logz(logits, target, reduction="sum")
+    (gradient,) = torch.autograd.grad(nll, logits)
     onehot = nn.functional.one_hot(target, 5).float()
     torch.testing.assert_close(gradient, logits.softmax(-1).detach() - onehot)
 
@@ -410,6 +526,6 @@ def test_tensor_smoothing_rejects_invalid_targets(target: torch.Tensor) -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -440,9 +440,9 @@ class NanoChatLM(nn.Module):
             # (rope.py:395-401), so a moved table is not the table that device
             # would have produced.
             self.materialize_rotation_table(device=device)
-        if self._rotation is None:
-            raise ValueError("Expected self._rotation is not None.")
-        cos, sin = self._rotation
+        rotation = self._rotation
+        assert isinstance(rotation, tuple)
+        cos, sin = rotation
         return cos[:length], sin[:length]
 
     def materialize_rotation_table(self, *, device: torch.device) -> None:
@@ -483,9 +483,9 @@ class NanoChatLM(nn.Module):
 
     def _materialized_device(self) -> torch.device | None:
         """Return the first parameter's device, excluding meta tensors."""
-        for tensor in self.parameters():
-            return None if tensor.device.type == "meta" else tensor.device
-        return None
+        # The residual mix always owns parameters, so the stack is never empty.
+        tensor = next(self.parameters())
+        return None if tensor.device.type == "meta" else tensor.device
 
     def flops_per_token(self) -> float:
         """Report matmul FLOPs per token at the configured context.

@@ -10,15 +10,21 @@ own values by the parity suite (README, "Parity").
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
+import inspect
+
 from torch import Tensor
+from triton.runtime import interpreter, jit
 
 import pytest
 import torch
+import triton
 
 from priml.baselines.craftax.experiments import exp000
+from priml.baselines.craftax.lib import compat
 from priml.baselines.craftax.lib.compat import (
     LAUNCH_OPTIONS,
     ExactMuon,
@@ -30,6 +36,7 @@ from priml.baselines.craftax.lib.compat import (
 from priml.baselines.craftax.testing import portable_uniform
 from priml.baselines.craftax.train_step import AgentWindows
 from priml.loss import policy_gradient_kernel
+from priml.loss.policy_gradient import TorchPPO
 from priml.optimizers.fused_muon import FusedMuon, clip_coefficient
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import assert_tensor_golden
@@ -40,6 +47,13 @@ _CWD: Final = Path(__file__).resolve().parent
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator, Mapping
+    from typing_extensions import TypeIs
+
+    from numpy.typing import NDArray
+
+    import numpy as np
+
     from priml.baselines.craftax.model import MinGRUPolicy
 
 
@@ -68,6 +82,31 @@ def test_the_cuda_kernels_sum_the_squares_in_the_torch_trees_order(count: int) -
     generator = torch.Generator().manual_seed(count)
     values = torch.randn(count, generator=generator).to(torch.bfloat16)
     assert torch.equal(sum_squares(values.cuda()).cpu(), sum_squares(values))
+
+
+class _ReportsCuda(Tensor):
+    """A CPU tensor that reports itself on CUDA, to reach the kernels' dispatch."""
+
+    is_cuda = True
+
+
+def test_the_sum_of_squares_hands_a_cuda_tensor_to_the_kernels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launched: list[Tensor] = []
+    total = torch.tensor(5.0)
+
+    def kernels(values: Tensor) -> Tensor:
+        launched.append(values)
+        return total
+
+    monkeypatch.setattr(compat, "_sum_squares_cuda", kernels)
+    on_cuda = torch.ones(3).as_subclass(_ReportsCuda)
+    assert sum_squares(on_cuda) is total
+    assert len(launched) == 1
+    assert launched[0] is on_cuda
+    assert float(sum_squares(torch.ones(3))) == 3.0
+    assert len(launched) == 1
 
 
 def test_the_exact_muon_takes_fused_muons_hyperparameters() -> None:
@@ -137,6 +176,41 @@ def test_the_exact_muon_reproduces_its_golden() -> None:
         _CWD / "testdata" / "exact_muon_tiny.pt",
         record,
     )
+
+
+def test_the_sum_kernels_jit_their_bodies_once_with_the_shared_tree() -> None:
+    kernels = compat._sum_squares_kernels()
+    assert compat._sum_squares_kernels() is kernels
+    for kernel, body in (
+        (kernels.partials, compat._sum_squares_partials_triton),
+        (kernels.total, compat._sum_squares_total_triton),
+    ):
+        assert kernel.fn.__code__ is body.__code__
+        tree = _jit_global(kernel.fn.__globals__, "_halving_tree_triton")
+        assert tree.fn.__code__ is compat._halving_tree_triton.__code__
+    ordered = compat._ordered_sum_kernel()
+    assert compat._ordered_sum_kernel() is ordered
+    assert ordered.fn.__code__ is compat._ordered_sum_triton.__code__
+
+
+@pytest.mark.usefixtures("interpreted_kernels")
+def test_the_interpreted_sum_of_squares_kernels_follow_the_torch_tree() -> None:
+    # Two blocks, the second part padding. A second grid-stride pass needs over
+    # 65,536 values, 1.2 s interpreted; the GPU test covers it.
+    generator = torch.Generator().manual_seed(0)
+    values = torch.randn(300, generator=generator).to(torch.bfloat16)
+    assert torch.equal(compat._sum_squares_cuda(values), sum_squares(values))
+
+
+@pytest.mark.usefixtures("interpreted_kernels")
+def test_the_interpreted_block_sum_adds_the_blocks_in_order() -> None:
+    # 2^24 + 1 + 1 in block order loses both ones; any other order keeps one.
+    partials = torch.zeros(3, len(TorchPPO.Config.LOSS_NAMES))
+    partials[:, 0] = torch.tensor([16_777_216.0, 1.0, 1.0])
+    partials[:, 1:] = torch.randn(3, 7, generator=torch.Generator().manual_seed(2))
+    losses = ExactPPO.Config().make().sum_blocks(partials)
+    assert torch.equal(losses, partials[0] + partials[1] + partials[2])
+    assert float(losses[0]) == 16_777_216.0
 
 
 def test_exp000_selects_every_compat_class() -> None:
@@ -209,6 +283,88 @@ def test_the_exact_rule_issues_pufferlibs_intrinsics() -> None:
     assert census["div.full.f32"] == 0
 
 
+@pytest.fixture
+def interpreted_kernels(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Run the module's Triton kernels through Triton's CPU interpreter, uncached."""
+    monkeypatch.setenv("TRITON_INTERPRET", "1")
+    monkeypatch.setattr(
+        jit,
+        "_normalize_ty",
+        partial(_normalize_bare_constexpr, normalize=jit._normalize_ty),
+    )
+    monkeypatch.setattr(
+        interpreter,
+        "_patch_lang_tensor",
+        partial(_patch_scalar_index, patch=interpreter._patch_lang_tensor),
+    )
+    # Triton jitted its library functions at import, compiled-mode, which the
+    # interpreter refuses to call.
+    for module in (triton.language, triton.language.standard):
+        for name, value in inspect.getmembers(module, _is_jit):
+            monkeypatch.setattr(
+                module,
+                name,
+                interpreter.InterpretedFunction(value.fn),
+            )
+    compat._sum_squares_kernels.cache_clear()
+    compat._ordered_sum_kernel.cache_clear()
+    try:
+        yield
+    finally:
+        compat._sum_squares_kernels.cache_clear()
+        compat._ordered_sum_kernel.cache_clear()
+
+
+# The interpreter matches a constexpr only by its bare name; the module's postponed
+# annotations spell it ``language.constexpr``.
+def _normalize_bare_constexpr(
+    ty: object,
+    *,
+    normalize: Callable[[object], str],
+) -> str:
+    return normalize(
+        ty.strip("'").removeprefix("language.") if isinstance(ty, str) else ty,
+    )
+
+
+# The interpreter holds a scalar as a one-element array, which numpy 2.5 no longer
+# converts with ``int``; a runtime loop bound such as ``range(passes)`` needs it.
+def _patch_scalar_index(
+    tensor: type,
+    scope: _PatchScope,
+    *,
+    patch: Callable[[type, _PatchScope], None],
+) -> None:
+    patch(tensor, scope)
+    scope.set_attr(tensor, "__index__", _scalar_index)
+
+
+def _scalar_index(tensor: _InterpretedTensor) -> int:
+    return int(tensor.handle.data.item())
+
+
+def _is_jit(value: object) -> TypeIs[jit.JITFunction[..., object]]:
+    return isinstance(value, jit.JITFunction)
+
+
+def _jit_global(scope: Mapping[str, object], name: str) -> jit.JITFunction[..., object]:
+    helper = scope[name]
+    assert _is_jit(helper)
+    return helper
+
+
+class _PatchScope(Protocol):
+    def set_attr(self, obj: object, name: str, value: object) -> None: ...
+
+
+class _InterpretedHandle(Protocol):
+    data: NDArray[np.integer]
+
+
+class _InterpretedTensor(Protocol):
+    handle: _InterpretedHandle
+
+
 def _muon_record(
     optimizer: FusedMuon,
     parameters: dict[str, torch.nn.Parameter],
@@ -244,6 +400,6 @@ def _muon_record(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

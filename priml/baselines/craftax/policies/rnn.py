@@ -48,7 +48,7 @@ from priml.cost import (
     Cost,
     elementwise_cost,
     matmul_cost,
-    resolve_dtype,
+    nbytes,
 )
 from priml.math.custom_types import TensorFn
 from priml.model.linear import Linear
@@ -206,7 +206,7 @@ class ActorCriticRNN(nn.Module):
             fused = concat_cost(elements=rows * (self.num_actions + 1), dtype=dtype)
             return replace(
                 embed + cell + hidden + outputs + fused,
-                bytes_state=resolve_dtype(dtype).itemsize * batch_size * width,
+                bytes_state=nbytes(batch_size * width, dtype),
             )
 
     def __init__(self, config: Config) -> None:

@@ -89,6 +89,6 @@ def test_solution_visited_flags_find_the_solution_at_any_node() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

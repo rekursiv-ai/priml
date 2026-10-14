@@ -296,6 +296,6 @@ def test_rule_outputs_returns_every_stage_detached_on_cpu() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

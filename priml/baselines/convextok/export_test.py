@@ -86,6 +86,6 @@ def test_single_bytes_are_rejected() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

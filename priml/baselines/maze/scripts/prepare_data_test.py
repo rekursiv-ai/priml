@@ -26,7 +26,7 @@ from priml.baselines.maze.data import (
 )
 from priml.baselines.maze.scripts import prepare_data
 from priml.data.arrays import load_array
-from priml.lib.testing.cli import assert_help_without_docstring
+from priml.lib.testing.checks import assert_help_without_docstring
 
 
 if TYPE_CHECKING:
@@ -179,6 +179,6 @@ def test_main_help_works_without_a_module_docstring(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

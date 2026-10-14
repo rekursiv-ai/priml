@@ -598,12 +598,7 @@ class PhiloxSampler(TorchPhiloxSampler):
           ValueError: ``decoded`` is not on a CUDA device.
 
         """
-        if not decoded.is_cuda:
-            msg = (
-                f"PhiloxSampler runs on a CUDA device, not {decoded.device}; "
-                "select TorchPhiloxSampler to sample elsewhere"
-            )
-            raise ValueError(msg)
+        _require_cuda(decoded)
         agents, fused = decoded.shape
         actions = torch.empty(agents, dtype=torch.float32, device=decoded.device)
         logprobs = torch.empty(
@@ -841,6 +836,8 @@ class StepGraph:
       state: The buffer's carry, ``[layers, agents, width]``; advanced in
         place.
       draws: The buffer's sampler streams; advanced in place.
+      fused: Whether the ingest and the sampler's stores run as the Triton
+        kernels, as on a CUDA device, rather than as torch ops.
       saving: Where the buffer's saving rows put their carries; None when no
         row of it can save, and the graph is then practice's-off.
       feature: The buffer's feature, stepped between the ingest and the
@@ -873,6 +870,7 @@ class StepGraph:
         self.feature = feature
         self.rows = env.buffer_slice(buffer)
         device = storage.actions.device
+        self.fused = device.type == "cuda"
         agents = len(range(*self.rows.indices(env.num_envs)))
         self.step = torch.zeros(1, dtype=torch.int64, device=device)
         self.state = policy.initial_state(agents, device=device)
@@ -961,8 +959,7 @@ class StepGraph:
 
         """
         storage, rows, step = self.storage, self.rows, self.step
-        cuda = step.device.type == "cuda"
-        if cuda:
+        if self.fused:
             self._ingest_triton()
         else:
             self._ingest_torch()
@@ -986,7 +983,7 @@ class StepGraph:
                 features.to(storage.features.dtype)[None],
             )
             if storage.frame_cells is not None:
-                self._store_inputs()
+                self._store_inputs(self.feature)
         # The carry is already reset for this step, so the policy skips its own,
         # and it advances in place.
         decoded, _ = self.policy.forward_fused(
@@ -1003,7 +1000,7 @@ class StepGraph:
             buffer=self.buffer,
             dtype=storage.logprobs.dtype,
         )
-        if cuda:
+        if self.fused:
             self._emit_triton(sampled)
         else:
             storage.actions[:, rows].index_copy_(0, step, sampled.actions[None])
@@ -1182,13 +1179,11 @@ class StepGraph:
             num_warps=4,
         )
 
-    def _store_inputs(self) -> None:
+    def _store_inputs(self, feature: FeatureStep) -> None:
         """Store the step's frame, previous action and context, for a joint learner."""
-        if self.feature is None:
-            raise ValueError("Expected self.feature is not None.")
         storage, rows, step = self.storage, self.rows, self.step
-        recent = self.feature.last_decisions(1)
-        decisions, anchored = self.feature.context()
+        recent = feature.last_decisions(1)
+        decisions, anchored = feature.context()
         for store, value in (
             (storage.frame_cells, recent.cells[:, -1]),
             (storage.frame_aux, recent.aux[:, -1]),
@@ -1196,8 +1191,7 @@ class StepGraph:
             (storage.context_decisions, decisions),
             (storage.context_anchored, anchored),
         ):
-            if store is None:
-                raise ValueError("Expected store is not None.")
+            assert isinstance(store, Tensor)
             store[:, rows].index_copy_(0, step, value.to(store.dtype)[None])
 
     # Before the feature steps: the history saved is the one its next step extends,
@@ -1417,8 +1411,7 @@ class Rollout:
         if self._practice is not None:
             assert isinstance(self.archive, Tensor)
             self._start_branches(slot, self._practice.restore_slots, self.archive)
-        if self.slots[slot].prefix_cells is not None:
-            self._store_prefixes(slot)
+        self._store_prefixes(slot)
         for telemetry in self._telemetry:
             telemetry.clear()
         futures = [
@@ -1654,23 +1647,20 @@ class Rollout:
 
     @torch.no_grad()
     def _store_prefixes(self, slot: int) -> None:
-        """Store each row's decisions before the slot's first step, for the learner."""
+        """Store each row's decisions before the slot's first step, if it keeps them."""
         storage = self.slots[slot]
+        if storage.prefix_cells is None:
+            return
         with self._between_steps():
-            for graph in self.graphs[slot]:
-                if graph.feature is None:
-                    raise ValueError("Expected graph.feature is not None.")
-                if storage.prefix_cells is None:
-                    raise ValueError("Expected storage.prefix_cells is not None.")
-                prefix = graph.feature.last_decisions(storage.prefix_cells.shape[1])
+            for graph, engine in zip(self.graphs[slot], self.engines, strict=True):
+                prefix = engine.last_decisions(storage.prefix_cells.shape[1])
                 for store, value in (
                     (storage.prefix_cells, prefix.cells),
                     (storage.prefix_aux, prefix.aux),
                     (storage.prefix_previous_actions, prefix.previous_actions),
                     (storage.prefix_decisions, prefix.count),
                 ):
-                    if store is None:
-                        raise ValueError("Expected store is not None.")
+                    assert isinstance(store, Tensor)
                     store[graph.rows].copy_(value)
 
     # Every buffer's stream waits for the work, and the work for every buffer's last:
@@ -1938,7 +1928,8 @@ def _sample_kernel(**helpers: Callable[..., object]) -> triton.JITFunction[..., 
 
 # Programs are sectioned: the observations, the mask, the two scalar rows, then the
 # carry. No value is cast before its stores: a store rounds to its tensor's dtype, so the
-# storage decides, bf16 for exp000 and fp32 for exp003, as the torch path rounds them.
+# storage decides, bf16 for exp000 and fp32 for experiments.exp010, as the torch path
+# rounds them.
 # The carry rows of ended episodes are zeroed in place, and at ``step == 0`` the
 # (zeroed) carry is also written to the initial states.
 def _ingest_triton(  # noqa: PLR0917 -- The signature is the kernel's positional ABI.
@@ -2186,3 +2177,13 @@ def _accumulate_exp_triton(
 ) -> language.tensor:
     """Return ``total + exp(a)``, the inverse CDF's next partial sum."""
     return total + language.exp(a)
+
+
+def _require_cuda(decoded: Tensor) -> None:
+    """Refuse rows off a CUDA device: the kernel has no bit-equal fallback."""
+    if not decoded.is_cuda:
+        msg = (
+            f"PhiloxSampler runs on a CUDA device, not {decoded.device}; "
+            "select TorchPhiloxSampler to sample elsewhere"
+        )
+        raise ValueError(msg)

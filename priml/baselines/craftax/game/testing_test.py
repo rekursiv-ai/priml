@@ -171,6 +171,6 @@ def test_an_ir_builder_writes_into_a_fresh_function_of_its_arguments() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

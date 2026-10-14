@@ -21,7 +21,10 @@ import torch
 from priml.baselines.craftax.eager import eager, tiny_world
 from priml.baselines.craftax.game import step
 from priml.baselines.craftax.game.state import (
+    ACTION_OBS_SIZE,
     DEFAULT_MAX_TIMESTEPS,
+    OBS_SIZE,
+    SYMBOLIC_OBS_SIZE,
     Action,
     env_state,
     env_stats,
@@ -30,12 +33,14 @@ from priml.baselines.craftax.game.step import Rules
 from priml.baselines.craftax.rollout import Rollout, TorchPhiloxSampler
 from priml.baselines.craftax.testing import tiny_policy
 from priml.baselines.craftax.world_model import replay
-from priml.baselines.craftax.world_model.archive import Episode
+from priml.baselines.craftax.world_model.archive import Episode, Receipt
 from priml.baselines.craftax.world_model.capture.env import (
     BranchStart,
     Captured,
     CaptureEnv,
     Schedule,
+    _Open,
+    _summary,
 )
 from priml.baselines.craftax.world_model.capture.seeds import (
     TRAIN,
@@ -447,6 +452,106 @@ def test_the_ports_rollout_captures_episodes_that_replay(short: None) -> None:
         )
 
 
+def test_the_observation_size_follows_the_layout() -> None:
+    config = CaptureEnv.Config()
+    assert config.observation_size == OBS_SIZE
+    config.rules.previous_action = True
+    assert config.observation_size == ACTION_OBS_SIZE
+    config.rules.previous_action = False
+    config.rules.symbolic_observation = True
+    assert config.observation_size == SYMBOLIC_OBS_SIZE
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("epsilon", -0.25), ("epsilon_high", 1.5), ("max_decisions", 0)],
+)
+def test_an_epsilon_off_zero_to_one_or_no_decisions_is_refused(
+    name: str,
+    value: float,
+) -> None:
+    config = CaptureEnv.Config(num_envs=2)
+    setattr(config, name, value)
+    with pytest.raises(ValueError, match="max_decisions > 0"):
+        config.finalize()
+
+
+def test_a_drain_records_no_episode_after_the_ones_in_flight(short: None) -> None:
+    del short
+    env = CaptureEnv(CaptureEnv.Config(num_envs=2), schedule=Schedule(budget=10**9))
+    env.drain()
+    assert not env.finished()
+    episodes = _play(env, decisions=2 * _DECISIONS)
+    assert env.finished()
+    assert len(episodes) == 2
+    assert [env.receipt(row) for row in range(2)] == [None, None]
+
+
+def test_a_reward_outside_the_schema_drops_its_episode_and_stops(short: None) -> None:
+    del short
+    env = CaptureEnv(CaptureEnv.Config(num_envs=2), schedule=Schedule(budget=10**9))
+    env.actions[:, 0] = 0.0
+    env.step_buffer(0)
+    env._rows.chunk_rewards[0, 0] = 0.5
+    episodes = _play(env, decisions=_DECISIONS)
+    assert env.failure == "A reward lies outside the schema."
+    assert [from_plain(e.summary["environment"], int) for e in episodes] == [1]
+    assert env.finished()
+
+
+def test_an_ordinal_past_the_seed_range_stops_recording_at_the_reset(
+    short: None,
+) -> None:
+    del short
+    env = CaptureEnv(
+        CaptureEnv.Config(num_envs=2),
+        schedule=Schedule(first_episode=20 * 10_000_000, budget=10**9),
+    )
+    assert "leaves the worker's seed range" in env.failure
+    assert [env.receipt(row) for row in range(2)] == [None, None]
+    assert env.finished()
+
+
+def test_the_summary_counts_descents_clears_and_health_snaps() -> None:
+    killed = np.zeros(9, dtype=np.int64)
+    episode = _Open(
+        receipt=Receipt(
+            world_seed=1,
+            sampling_seed=2,
+            initial_state_hash=3,
+            arm=0,
+            split=TRAIN,
+        ),
+        ordinal=5,
+        environment=1,
+        epsilon=np.float32(0.0),
+        killed=killed,
+        origin=b"",
+        point=None,
+    )
+    summary = _summary(
+        episode,
+        floors=[0, 0, 1, 1, 2],
+        killed=np.array([0, 9, 2, 0, 0, 0, 0, 0, 0], dtype=np.int64),
+        achievements=[4, 7],
+        returned=np.float32(1.5),
+        health_snaps=3,
+        death=False,
+        timeout=False,
+        truncated=False,
+        ranged=False,
+    )
+    assert summary["health_snaps"] == 3
+    assert summary["achievements"] == [4, 7]
+    floors = from_plain(summary["floors"], list[dict[str, int]])
+    assert floors[:4] == [
+        {"reached": 1, "decisions": 2, "kills": 0, "cleared": 0, "descended": 1},
+        {"reached": 1, "decisions": 2, "kills": 9, "cleared": 1, "descended": 1},
+        {"reached": 1, "decisions": 0, "kills": 2, "cleared": 0, "descended": 0},
+        {"reached": 0, "decisions": 0, "kills": 0, "cleared": 0, "descended": 0},
+    ]
+
+
 @dataclasses.dataclass(slots=True, kw_only=True)
 class _Starts:
     """Branch starts handed out in order, then none."""
@@ -489,6 +594,6 @@ def _play(env: CaptureEnv, *, decisions: int, episodes: int = 0) -> list[Capture
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

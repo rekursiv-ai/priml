@@ -20,6 +20,7 @@ import torch
 
 from priml.cost import (
     Cost,
+    nbytes,
     reduction_cost,
     resolve_dtype,
 )
@@ -85,7 +86,6 @@ class ResidualMix(nn.Module):
                 )
             rows = seq_len * batch_size
             dt = resolve_dtype(dtype)
-            s = dt.itemsize
             width = self.channels_in * self.num_layers
             params = 2 * self.num_layers
             return (
@@ -93,10 +93,14 @@ class ResidualMix(nn.Module):
                     cells={
                         ("flops", "primal", "elementwise", dt): 3 * width * rows,
                         ("flops", "adjoint", "elementwise", dt): 4 * width * rows,
-                        ("bytes", "primal", "elementwise", dt): s
-                        * (7 * width * rows + params),
-                        ("bytes", "adjoint", "elementwise", dt): s
-                        * (10 * width * rows + params),
+                        ("bytes", "primal", "elementwise", dt): nbytes(
+                            7 * width * rows + params,
+                            dt,
+                        ),
+                        ("bytes", "adjoint", "elementwise", dt): nbytes(
+                            10 * width * rows + params,
+                            dt,
+                        ),
                     },
                     params=params,
                     params_active=params,

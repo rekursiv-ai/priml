@@ -413,6 +413,6 @@ def test_extreme_csv_pins_the_revision_and_the_digest(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

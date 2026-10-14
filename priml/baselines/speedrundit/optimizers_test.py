@@ -83,6 +83,6 @@ def test_speedrundit_optimizer_can_disable_reference_numerics() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -20,7 +20,7 @@ def _rollouts() -> CraftaxRollouts:
 
 
 def test_the_cadence_ticks_once_per_training_step_without_end() -> None:
-    """More than exp003's 15,258 epochs: the loop's ``max_steps`` ends a run."""
+    """More than experiments.exp010's 15,258 epochs: ``max_steps`` ends a run."""
     ticks = list(itertools.islice(_rollouts().train_dataloader(), 20_000))
 
     assert len(ticks) == 20_000
@@ -86,6 +86,6 @@ def test_evaluation_without_a_bound_step_fails_loudly() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

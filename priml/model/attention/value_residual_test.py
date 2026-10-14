@@ -93,6 +93,6 @@ def test_init_configures_reference_rope_and_value_residual_parameter() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

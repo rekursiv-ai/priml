@@ -63,6 +63,28 @@ def test_tied_score_selects_latest_checkpoint(
                 torch.distributed.destroy_process_group()
 
 
+def test_failed_tied_save_restores_the_previous_best(tmp_path: Path) -> None:
+    cfg = exp_smoke()
+    cfg.base_dir = tmp_path
+    cfg.dataset = fixture_config(tmp_path / "data")
+    cfg.dataset.base_dir = "/"
+    loop = cfg.make()
+    checker_cfg = Etth1Checkpointer.Config()
+    checker_cfg.working_dir = tmp_path / "checkpoints"
+    checker_cfg.best_metric = "total_loss"
+    checker_cfg.best_mode = "min"
+    checker = checker_cfg.make()
+    try:
+        assert checker.on_eval(loop, step=1, metrics={"total_loss": 0.7})
+        with pytest.raises(ValueError, match="non-negative"):
+            checker.on_eval(loop, step=-1, metrics={"total_loss": 0.7})
+        assert checker.best_value == 0.7
+        assert checker.best_step == 1
+    finally:
+        checker.close()
+        loop.close()
+
+
 def test_epoch_checkpoint_resumes_after_validation(tmp_path: Path) -> None:
     cfg = exp_smoke()
     cfg.base_dir = tmp_path
@@ -120,6 +142,6 @@ def test_epoch_checkpoint_resumes_after_validation(tmp_path: Path) -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -900,6 +900,64 @@ def test_no_ema_apply_to_is_noop() -> None:
     torch.testing.assert_close(model.weight, pre)
 
 
+def test_ema_update_every_skips_off_cycle_calls() -> None:
+    """Only every Nth post-warmup call lerps; the others just count."""
+    model = nn.Linear(2, 3, bias=False)
+    with torch.no_grad():
+        model.weight.fill_(1.0)
+    ema = EMA.Config(decay=0.5, update_every=2, shadow_kind="param_dict").make()
+    ema(model)  # Call 0: lerps against itself, shadow 1.0.
+    with torch.no_grad():
+        model.weight.fill_(3.0)
+    ema(model)  # Call 1: off-cycle, shadow untouched.
+    torch.testing.assert_close(ema.shadow_params["weight"], torch.ones(3, 2))
+    assert (ema.global_step, ema.local_step) == (2, 1)
+    ema(model)  # Call 2: 0.5 * 1 + 0.5 * 3.
+    torch.testing.assert_close(ema.shadow_params["weight"], torch.full((3, 2), 2.0))
+
+
+def test_ema_before_first_update_is_a_noop_and_saves_counters_only() -> None:
+    model = nn.Linear(2, 3)
+    with torch.no_grad():
+        model.weight.fill_(4.0)
+    ema = EMA.Config().make()
+
+    with ema.apply_to(model):
+        torch.testing.assert_close(model.weight, torch.full((3, 2), 4.0))
+
+    assert ema.state_dict() == {"global_step": 0, "local_step": 0}
+
+
+def test_ema_param_dict_load_into_initialized_copies_buffers() -> None:
+    """Loading into an initialized param_dict EMA overwrites shadow buffers too."""
+    src = EMA.Config(decay=0.0, shadow_kind="param_dict").make()
+    source_model = nn.BatchNorm1d(2)
+    assert source_model.running_mean is not None
+    with torch.no_grad():
+        source_model.running_mean.fill_(6.0)
+    src(source_model)
+
+    dst = EMA.Config(decay=0.0, shadow_kind="param_dict").make()
+    dst(nn.BatchNorm1d(2))
+    dst.load_state_dict(src.state_dict())
+
+    torch.testing.assert_close(
+        dst._shadow_buffers["running_mean"],
+        torch.full((2,), 6.0),
+    )
+
+
+def test_ema_param_dict_refuses_a_pending_module_checkpoint() -> None:
+    """A module-kind checkpoint cannot seed a param_dict shadow."""
+    src = EMA.Config().make()
+    src(nn.Linear(2, 3))
+    dst = EMA.Config(shadow_kind="param_dict").make()
+    dst.load_state_dict(src.state_dict())
+
+    with pytest.raises(ValueError, match="shadow_model"):
+        dst(nn.Linear(2, 3))
+
+
 @pytest.mark.parametrize("decay", [-0.1, 1.5])
 def test_ema_rejects_out_of_range_decay(decay: float) -> None:
     """#343: decay must lie in [0, 1]; an out-of-range lerp coefficient is a bug."""
@@ -921,6 +979,6 @@ def test_ema_rejects_negative_update_after_step() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

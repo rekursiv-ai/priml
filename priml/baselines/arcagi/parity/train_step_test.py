@@ -342,6 +342,70 @@ def test_an_empty_eval_batch_scores_zero_and_keeps_padded_rows() -> None:
     assert "metrics" not in result
 
 
+def test_a_finite_clip_norm_bounds_the_dense_update() -> None:
+    config = training_config(4, None)
+    config.gradient_clip_norm = 0.01
+    torch.manual_seed(0)
+    step = config.make()
+    seen: dict[str, Tensor] = {}
+    assert isinstance(step.optimizer, Optimizer)
+    step.optimizer.register_step_pre_hook(
+        partial(
+            capture_gradients,
+            model=step.model,
+            sparse=step.puzzle_embedding.local_weights,
+            target=seen,
+        ),
+    )
+    metrics = step.train_step(**training_batch(0, 0)).get("metrics", {})
+    norm = metrics["grad_norm"]
+    assert isinstance(norm, Tensor)
+    assert float(norm) > 0.01
+    del seen["sparse"]
+    clipped = torch.linalg.vector_norm(torch.stack([g.norm() for g in seen.values()]))
+    torch.testing.assert_close(clipped, torch.tensor(0.01), rtol=1e-4, atol=0.0)
+
+
+def test_eval_scores_only_the_valid_rows() -> None:
+    torch.manual_seed(0)
+    step = training_config(4, None).make()
+    batch = training_batch(0, 0)
+    full = step.eval_loss(**batch)
+    first = step.eval_loss(**{**batch, "valid_count": 1})
+    assert full["model"].shape == first["model"].shape == (2, 4)
+    assert torch.equal(full["model"], first["model"])
+    full_metrics = full.get("metrics", {})
+    metrics = first.get("metrics", {})
+    assert not torch.equal(
+        torch.as_tensor(full_metrics["lm_loss"]),
+        torch.as_tensor(metrics["lm_loss"]),
+    )
+    pool = step.pool
+    assert pool is not None
+    assert pool.halting is not None
+    expected = torch.as_tensor(metrics["lm_loss"]) + pool.halting.weight * (
+        torch.as_tensor(metrics["halt_loss"])
+    )
+    torch.testing.assert_close(first["loss"], expected.reshape(1).float())
+
+
+@pytest.mark.parametrize("load_optimizer", [True, False])
+def test_the_sparse_optimizer_round_trips_through_the_state_dict(
+    *,
+    load_optimizer: bool,
+) -> None:
+    torch.manual_seed(0)
+    source = training_config(4, None).make()
+    source.sparse_optimizer.param_groups[0]["lr"] = 0.25
+    state = source.state_dict()
+    assert state["sparse_optimizer"] == source.sparse_optimizer.state_dict()
+    restored = training_config(4, None).make()
+    restored.load_state_dict(state, load_optimizer=load_optimizer)
+    assert restored.sparse_optimizer.param_groups[0]["lr"] == (
+        0.25 if load_optimizer else 1e-2
+    )
+
+
 def test_arc_step_requires_atomic_act() -> None:
     config = training_config(4, None)
     config.pool = None
@@ -350,6 +414,6 @@ def test_arc_step_requires_atomic_act() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)
