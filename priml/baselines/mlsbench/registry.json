@@ -320,24 +320,6 @@
    "stump": 3600.0
   }
  },
- "cv-classification-loss": {
-  "baselines": [
-   "label_smoothing",
-   "focal_loss",
-   "poly_loss"
-  ],
-  "hidden": [
-   "mobilenetv2-fmnist"
-  ],
-  "seeds": [
-   42
-  ],
-  "settings": {
-   "mobilenetv2-fmnist": 9900.0,
-   "resnet56-cifar100": 9900.0,
-   "vgg16bn-cifar100": 9900.0
-  }
- },
  "cv-data-augmentation": {
   "baselines": [
    "cutout",

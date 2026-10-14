@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-N_EXPERIMENTS: Final = 566
+N_EXPERIMENTS: Final = 563
 """Sum over tasks of baselines x seeds, pinned to upstream commit 80cf5c5c."""
 
 
@@ -58,7 +58,7 @@ def test_generated_files_match_the_generator_byte_for_byte() -> None:
 
 def test_there_is_one_module_per_registry_task() -> None:
     assert set(tasks.task_modules()) == {gen.module_of(t) for t in REGISTRY}
-    assert len(tasks.task_modules()) == len(REGISTRY) == 140
+    assert len(tasks.task_modules()) == len(REGISTRY) == 139
     assert {p.stem for p in gen.TASKS_DIR.glob("*.py")} - {"__init__"} == set(
         tasks.task_modules(),
     )
@@ -119,8 +119,8 @@ def test_multi_seed_and_hidden_registry_facts() -> None:
     seeds = {t: _entry(t).seeds for t in REGISTRY}
     assert sum(len(s) > 1 for s in seeds.values()) == 13
     assert seeds["optimization-nas"] == (0, 1, 2, 3, 4)
-    assert sum(s == (42,) for s in seeds.values()) == 127
-    assert sum(len(_entry(t).hidden) for t in REGISTRY) == 135
+    assert sum(s == (42,) for s in seeds.values()) == 126
+    assert sum(len(_entry(t).hidden) for t in REGISTRY) == 134
     for t in REGISTRY:
         assert set(_entry(t).hidden) <= set(_entry(t).settings), t
 

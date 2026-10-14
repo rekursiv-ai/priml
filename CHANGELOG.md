@@ -16,13 +16,17 @@ All notable priml changes are documented here. This project follows
 - `priml.cost.nbytes` returns the bytes a count of values occupies at a dtype.
 - Baseline `mlsbench`: a generic harness that runs any of the 140 MLS-Bench
   tasks as a priml `TrainLoop` experiment, reading tasks from an unmodified
-  upstream clone (logical `/mlsbench`, pinned commit `80cf5c5c`). All 566
-  (task, baseline, seed) rows are generated as one module per task,
+  upstream clone (logical `/mlsbench`, pinned commit `80cf5c5c`). The 563
+  (task, baseline, seed) rows of 139 tasks are generated as one module per task,
   `tasks/<task_module>.expNNN`, with pprint goldens. Includes diff and
   eval-script guards, a pluggable executor (`LocalDocker`, `FakeExecutor`)
   over digest-pinned upstream images, data staging, and a whole-benchmark
   leaderboard. `candidate_experiment` runs a new edit of a task as its own
   experiment, and `leaderboard --candidate` sets it against a published row.
+- Baseline `mlsbench.pytorch_vision`: MLS-Bench `cv-classification-loss` at
+  `resnet56-cifar100` as native priml experiments, `exp000` (cross-entropy)
+  to `exp003`, each loss a fork of one slot. `scripts/capture_reference.py`
+  proves the port bit-for-bit against the upstream script.
 
 ### Fixed
 

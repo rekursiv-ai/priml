@@ -96,9 +96,10 @@ uv --quiet run --frozen python -m priml.baselines.mlsbench.scripts.generate_expe
 | `tasks.llm_dllm_demask_strategy.exp002` | `llm-dllm-demask-strategy` | `klass` | 42 |
 | `experiments.exp_smoke` | synthetic | `base_a` | 42 |
 
-There are 566 experiments over 140 tasks. Most tasks publish seed 42 only, and
-13 publish several. A seed the task does not publish is refused. Every setting
-runs, hidden ones included.
+There are 563 generated experiments over 139 tasks. `cv-classification-loss`
+is ported natively instead, in [`pytorch_vision/`](pytorch_vision/README.md).
+Most tasks publish seed 42 only, and 13 publish several. A seed the task does
+not publish is refused. Every setting runs, hidden ones included.
 
 A new edit of a task is an experiment of its own. Write the edit script (the
 format of the task's `edits/`) beneath `base_dir`, then add a function that

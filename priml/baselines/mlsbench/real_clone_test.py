@@ -21,6 +21,7 @@ import pytest
 from priml.baselines.mlsbench.executor import FakeExecutor
 from priml.baselines.mlsbench.experiments import mlsbench_experiment
 from priml.baselines.mlsbench.metric import MlsbenchSuite, expected_columns
+from priml.baselines.mlsbench.scripts.generate_experiments import NATIVE
 from priml.baselines.mlsbench.task import TaskSpec, load_all
 from priml.baselines.mlsbench.workspace import materialize
 from priml.baselines.mlsbench.workspace_harbor import (
@@ -125,7 +126,9 @@ def test_every_task_and_baseline_materializes_edits_and_passes_the_guard() -> No
         json.loads((Path(__file__).parent / "registry.json").read_text()),
     )
     assert len(swept) == len(set(swept)) == N_BASELINES
-    assert sum(len(v["baselines"]) for v in registry.values()) == N_BASELINES
+    assert {(t, str(b)) for t, v in registry.items() for b in v["baselines"]} == {
+        (t.name, b.name) for t in tasks if t.name not in NATIVE for b in t.baselines
+    }
     # ... and the ones where no edit is applied are an explicit, justified list.
     assert (with_edit, cmd_only, tuple(noop)) == (N_EDIT, N_CMD_ONLY, NOOP_BASELINES)
     assert with_edit + cmd_only + len(noop) == N_BASELINES
@@ -252,14 +255,14 @@ def test_full_path_with_fake_executor_and_real_parser(
 # Experiments whose baseline applies no edit script (nothing to materialize but
 # the pristine tree): the 22 ``cmd``-only baselines and the 6 ``default`` ones,
 # each once per seed of its task. Every other experiment applies an edit.
-N_EXPERIMENTS = 566
+N_EXPERIMENTS = 563
 
 
 @needs_clone
 def test_every_generated_experiment_materializes_with_its_edit_and_guards() -> None:
     from priml.baselines.mlsbench import tasks as task_pkg  # noqa: PLC0415
 
-    tasks = {t.name: t for t in load_all(_root())}
+    tasks = {t.name: t for t in load_all(_root()) if t.name not in NATIVE}
     seen: set[tuple[str, str, int]] = set()
     no_edit: list[tuple[str, str, int]] = []
     with tempfile.TemporaryDirectory() as td:

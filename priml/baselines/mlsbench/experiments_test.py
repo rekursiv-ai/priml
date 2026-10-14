@@ -28,6 +28,7 @@ from priml.baselines.mlsbench.experiments import (
 )
 from priml.baselines.mlsbench.metric import MlsbenchSuite
 from priml.baselines.mlsbench.scripts.generate_experiments import (
+    NATIVE,
     registry_from_clone,
     write_registry,
 )
@@ -130,9 +131,9 @@ def test_a_task_outside_the_registry_has_no_budget() -> None:
 
 def test_the_committed_registry_has_the_plans_shape() -> None:
     reg = registry()
-    assert len(reg) == 140
-    assert sum(len(b) for b in reg.values()) == 480
-    assert sum(len(cast("TaskEntry", task_entry(t)).settings) for t in reg) == 424
+    assert len(reg) == 139
+    assert sum(len(b) for b in reg.values()) == 477
+    assert sum(len(cast("TaskEntry", task_entry(t)).settings) for t in reg) == 421
     assert reg == REGISTRY
 
 
@@ -144,6 +145,22 @@ def test_registry_round_trips_through_a_clone(tmp_path: Path) -> None:
     out = tmp_path / "registry.json"
     assert write_registry(root, out) == 1
     assert json.loads(out.read_text())[SYNTH_TASK]["baselines"] == list(SYNTH_BASELINES)
+
+
+def test_a_natively_ported_task_leaves_the_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = build_synth_task(tmp_path / "up")
+    monkeypatch.setitem(NATIVE, SYNTH_TASK, "priml.baselines.mlsbench.pytorch_vision")
+    assert registry_from_clone(root) == {}
+
+
+def test_every_native_port_has_an_exp000_and_no_generated_module() -> None:
+    for task, module in NATIVE.items():
+        assert task not in REGISTRY
+        assert tasks.module_of(task) not in tasks.task_modules()
+        assert hasattr(importlib.import_module(module), "exp000")
 
 
 def _generated() -> list[tuple[str, str, tuple[str, str, int]]]:
@@ -171,8 +188,8 @@ def _raw_registry() -> dict[str, dict[str, list[object]]]:
 def test_experiment_count_is_baselines_times_seeds_of_the_registry() -> None:
     raw = _raw_registry()
     total = sum(len(d["baselines"]) * len(d.get("seeds") or [42]) for d in raw.values())
-    assert total == len(GENERATED) == 566
-    assert sum(len(d["baselines"]) for d in raw.values()) == 480
+    assert total == len(GENERATED) == 563
+    assert sum(len(d["baselines"]) for d in raw.values()) == 477
 
 
 def test_generated_names_are_unique() -> None:
@@ -250,9 +267,15 @@ def test_generated_experiments_are_the_clones_baselines_times_seeds() -> None:
     from priml.baselines.mlsbench.task import load_all  # noqa: PLC0415
 
     tasks = load_all(Path(_CLONE))
-    want = {(t.name, b.name, s) for t in tasks for b in t.baselines for s in t.seeds}
+    want = {
+        (t.name, b.name, s)
+        for t in tasks
+        if t.name not in NATIVE
+        for b in t.baselines
+        for s in t.seeds
+    }
     assert sum(len(t.baselines) for t in tasks) == 480
-    assert len(want) == len(GENERATED) == 566
+    assert len(want) == len(GENERATED) == 563
     assert {i for _, _, i in GENERATED} == want
 
 

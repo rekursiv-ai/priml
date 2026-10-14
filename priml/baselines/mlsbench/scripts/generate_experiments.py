@@ -54,6 +54,11 @@ WIDTH: Final = 88
 UPSTREAM_PIN: Final = "80cf5c5c"
 """The upstream MLS-Bench commit ``registry.json`` was read from."""
 
+NATIVE: Final = {
+    "cv-classification-loss": "priml.baselines.mlsbench.pytorch_vision.experiments",
+}
+"""Tasks ported as native priml baselines, to their experiments module; never generated."""
+
 Row = tuple[str, str, int]
 """One experiment: (task, baseline, seed)."""
 
@@ -74,10 +79,10 @@ def registry_from_clone(root: Path) -> dict[str, TaskEntry]:
       root: The upstream clone.
 
     Returns:
-      tasks: Task name to its :class:`TaskEntry`.
+      tasks: Task name to its :class:`TaskEntry`, without the :data:`NATIVE` ones.
 
     """
-    return {t.name: _entry(t) for t in load_all(Path(root))}
+    return {t.name: _entry(t) for t in load_all(Path(root)) if t.name not in NATIVE}
 
 
 def write_registry(root: Path, path: Path = REGISTRY_PATH) -> int:
