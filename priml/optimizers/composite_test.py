@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Protocol, TypeGuard, cast, runtime_checkable
+
+import gc
+import weakref
 
 from configgle import PartialConfig
 from torch import Tensor, nn
@@ -10,7 +14,8 @@ from torch import Tensor, nn
 import pytest
 import torch
 
-from priml.optimizers.composite import CompositeOptimizer, _ChainedState
+from priml.optimizers.composite import CompositeOptimizer
+from priml.optimizers.lr import apply_lr_scale, remember_initial_lrs
 from priml.optimizers.muon import Muon
 from priml.optimizers.newton import Newton
 from priml.optimizers.parameter_filter import (
@@ -136,6 +141,123 @@ def test_state_exposes_member_state_after_a_step() -> None:
     assert len(optimizer.state) > 0
 
 
+@pytest.mark.parametrize("operation", ["get", "items", "values", "contains"])
+def test_state_reads_observe_lazy_member_initialization(operation: str) -> None:
+    parameter = nn.Parameter(torch.ones(2, 3))
+    member = torch.optim.Adam([parameter], lr=0.1)
+    optimizer = CompositeOptimizer([member])
+    parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+    state = optimizer.state
+    expected = cast(object, member.state[parameter])
+    if operation == "get":
+        assert state.get(parameter) is expected
+    elif operation == "items":
+        assert [(id(key), id(value)) for key, value in state.items()] == [
+            (id(parameter), id(expected)),
+        ]
+    elif operation == "values":
+        assert [id(value) for value in state.values()] == [id(expected)]
+    else:
+        assert parameter in state
+
+
+def test_state_drops_removed_entries_and_follows_replacement() -> None:
+    parameter = nn.Parameter(torch.ones(2, 3))
+    member = torch.optim.Adam([parameter], lr=0.1)
+    optimizer = CompositeOptimizer([member])
+    parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+    assert optimizer.state[parameter] is member.state[parameter]
+    member.state.clear()
+    assert optimizer.state == {}
+    member.state = {parameter: {"replacement": 3}}
+    assert optimizer.state.get(parameter) is member.state[parameter]
+
+
+def test_member_group_addition_and_load_keep_scheduling_aliases() -> None:
+    model = nn.Linear(2, 3)
+    assert model.bias is not None
+    member = torch.optim.SGD([model.weight], lr=0.1)
+    optimizer = CompositeOptimizer([member])
+    member.add_param_group({"params": [model.bias]})
+    remember_initial_lrs([optimizer])
+    apply_lr_scale([optimizer], scale=0.25)
+    assert member.param_groups[1]["lr"] == 0.025
+    member.load_state_dict(member.state_dict())
+    assert len(optimizer.param_groups) == 2
+    assert all(
+        actual is expected
+        for actual, expected in zip(
+            optimizer.param_groups,
+            member.param_groups,
+            strict=True,
+        )
+    )
+    apply_lr_scale([optimizer], scale=0.5)
+    assert all(group["lr"] == 0.05 for group in member.param_groups)
+    member.param_groups.pop()
+    assert len(optimizer.param_groups) == 1
+
+
+def test_a_discarded_composite_is_not_kept_alive_by_its_members() -> None:
+    member = torch.optim.SGD([nn.Parameter(torch.ones(2))], lr=0.1)
+    composite = weakref.ref(CompositeOptimizer([member]))
+    _ = gc.collect()
+    assert composite() is None
+
+
+def test_step_rejects_a_parameter_a_member_took_from_its_sibling() -> None:
+    """A group added on a member is stepped, so ownership is checked per step."""
+    owned = nn.Parameter(torch.ones(2))
+    sibling = torch.optim.SGD([nn.Parameter(torch.ones(2))], lr=1.0)
+    optimizer = CompositeOptimizer([torch.optim.SGD([owned], lr=1.0), sibling])
+    sibling.add_param_group({"params": [owned]})
+    owned.grad = torch.ones_like(owned)
+    with pytest.raises(ValueError, match="more than one optimizer"):
+        optimizer.step()
+    assert torch.equal(owned, torch.ones(2))
+
+
+def test_static_steps_and_resume_match_independent_members_exactly() -> None:
+    parameters = [
+        nn.Parameter(torch.arange(6).float().reshape(2, 3) / 7),
+        nn.Parameter(torch.arange(3).float() / 5),
+    ]
+    reference = [nn.Parameter(parameter.detach().clone()) for parameter in parameters]
+    members = [
+        torch.optim.AdamW([parameters[0]], lr=0.01),
+        torch.optim.SGD([parameters[1]], lr=0.03, momentum=0.7),
+    ]
+    controls = [
+        torch.optim.AdamW([reference[0]], lr=0.01),
+        torch.optim.SGD([reference[1]], lr=0.03, momentum=0.7),
+    ]
+    optimizer = CompositeOptimizer(members)
+    for step in range(3):
+        if step == 1:
+            optimizer.load_state_dict(deepcopy(optimizer.state_dict()))
+            for control in controls:
+                control.load_state_dict(deepcopy(control.state_dict()))
+        for actual, expected in zip(parameters, reference, strict=True):
+            actual.grad = torch.full_like(actual, fill_value=(step + 1) / 3)
+            expected.grad = actual.grad.clone()
+        optimizer.step()
+        for control in controls:
+            control.step()
+        for actual, expected in zip(parameters, reference, strict=True):
+            assert torch.equal(actual, expected)
+        for member, control in zip(members, controls, strict=True):
+            torch.testing.assert_close(
+                member.state_dict(),
+                control.state_dict(),
+                rtol=0,
+                atol=0,
+            )
+        optimizer.zero_grad()
+        assert all(parameter.grad is None for parameter in parameters)
+
+
 def test_step_returns_the_closure_value() -> None:
     model = split_model()
     optimizer = split_optimizer(model)
@@ -199,7 +321,11 @@ def test_rejects_a_parameter_shared_between_members() -> None:
     # Two members holding one parameter would apply two updates per step.
     model = split_model()
     shared = list(model.parameters())
-    with pytest.raises(ValueError, match="more than one optimizer"):
+    with pytest.raises(
+        ValueError,
+        match=r"^A parameter belongs to more than one optimizer in the composite, "
+        r"so it would be updated twice per step\.$",
+    ):
         _ = CompositeOptimizer(
             [torch.optim.SGD(shared, lr=0.1), torch.optim.AdamW(shared, lr=0.1)],
         )
@@ -351,14 +477,13 @@ def test_a_filter_receives_the_parameter_name() -> None:
     assert seen == [name for name, _ in model.named_parameters()]
 
 
-def test_chained_state_iterates_over_every_members_keys() -> None:
+def test_state_iterates_over_every_members_keys() -> None:
     torch.manual_seed(0)
     model = split_model()
     optimizer = split_optimizer(model)
     backward(model)
     optimizer.step()
     state = optimizer.state
-    assert isinstance(state, _ChainedState)
     # Plain SGD keeps no per-parameter state; Muon holds a momentum buffer.
     keys = list(state)
     assert {id(k) for k in keys} == {id(p) for p in model.parameters() if p.ndim >= 2}

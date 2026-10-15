@@ -33,44 +33,11 @@ from priml.optimizers.parameter_filter import ParameterFilter, everything
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Sequence
 
     from torch import Tensor, nn
     from torch.nn import Parameter
     from torch.optim.optimizer import StateDict as OptimizerStateDict
-
-
-class _ChainedState(dict[object, object]):
-    """A live view of every member's per-parameter state.
-
-    ``Optimizer.state`` is a plain attribute, so the composite
-    cannot expose it as a property without breaking the base class contract.
-    This subclasses ``dict`` instead and refreshes from the members on each
-    read, so state a member creates lazily (on its first step) still appears.
-    """
-
-    def __init__(self, optimizers: Sequence[Optimizer]) -> None:
-        super().__init__()
-        self._optimizers = optimizers
-
-    @override
-    def __getitem__(self, key: object) -> object:
-        self._refresh()
-        return super().__getitem__(key)
-
-    @override
-    def __len__(self) -> int:
-        self._refresh()
-        return super().__len__()
-
-    @override
-    def __iter__(self) -> Iterator[object]:
-        self._refresh()
-        return super().__iter__()
-
-    def _refresh(self) -> None:
-        for optimizer in self._optimizers:
-            super().update(optimizer.state)
 
 
 def _reject_shared_parameters(optimizers: Sequence[Optimizer]) -> None:
@@ -134,8 +101,15 @@ def _route(
 class CompositeOptimizer(Optimizer):
     """Drives several optimizers as one.
 
+    Members own state entries and group topology. The concrete ``state`` dict
+    and ``param_groups`` list keep their identity and alias member values, and
+    each read of either attribute rebuilds both from the members. A container
+    kept from an earlier read goes stale once a member changes, so read the
+    attribute again. Edit topology on members; edit state payloads and group
+    settings through either owner or composite.
+
     Args:
-      optimizers: Members, stepped in the order given. Each parameter should
+      optimizers: Members, stepped in the order given. Each parameter must
         belong to exactly one; overlapping members would apply two updates per
         step.
 
@@ -228,15 +202,25 @@ class CompositeOptimizer(Optimizer):
         # call through and is what turns the rejection on afterwards.
         self._initialized = False
         super().__init__([{"params": []}], {})
-        self._initialized = True
         # The members' OWN group dicts and state, aliased rather than copied:
         # a scheduler writing ``composite.param_groups[i]["lr"]`` must reach the
         # optimizer that will read it, and a copy would silently discard the
         # write. Replaces the placeholder.
-        self.param_groups = [
-            group for optimizer in self.optimizers for group in optimizer.param_groups
-        ]
-        self.state: dict[object, object] = _ChainedState(self.optimizers)
+        self._groups: list[dict[str, object]] = []
+        self._state: dict[object, object] = {}
+        self.param_groups = self._groups
+        self.state: dict[object, object] = self._state
+        self._initialized = True
+
+    # Hidden from type checkers: an override returning ``object`` would make
+    # them accept any attribute name, so a typo would pass basedpyright and ty.
+    if not TYPE_CHECKING:
+
+        @override
+        def __getattribute__(self, name: str) -> object:
+            if name in {"state", "param_groups"} and self._initialized:
+                self._refresh_collections()
+            return super().__getattribute__(name)
 
     @overload
     def step(self, closure: None = None) -> None: ...
@@ -263,7 +247,12 @@ class CompositeOptimizer(Optimizer):
         Returns:
           loss: The closure's value, or None when no closure was given.
 
+        Raises:
+          ValueError: If a member has taken a parameter another member owns,
+            e.g. through its own ``add_param_group``.
+
         """
+        _reject_shared_parameters(self.optimizers)
         loss = closure() if closure is not None else None
         for optimizer in self.optimizers:
             if closure is not None and getattr(optimizer, "requires_closure", False):
@@ -315,13 +304,6 @@ class CompositeOptimizer(Optimizer):
             )
         for optimizer, member_state in zip(self.optimizers, saved, strict=True):
             optimizer.load_state_dict(member_state)
-        # ``Optimizer.load_state_dict`` REPLACES a member's group dicts, which
-        # orphans the aliases captured in __init__: a scheduler writing
-        # ``composite.param_groups[i]["lr"]`` would then reach a dict no member
-        # reads, and a resumed run would silently ignore its schedule.
-        self.param_groups = [
-            group for optimizer in self.optimizers for group in optimizer.param_groups
-        ]
 
     @override
     def add_param_group(self, param_group: dict[str, object]) -> None:
@@ -339,3 +321,13 @@ class CompositeOptimizer(Optimizer):
     def __repr__(self) -> str:
         members = ", ".join(type(o).__name__ for o in self.optimizers)
         return f"{type(self).__name__}({members})"
+
+    def _refresh_collections(self) -> None:
+        state: dict[object, object] = {}
+        groups: list[dict[str, object]] = []
+        for optimizer in self.optimizers:
+            state.update(optimizer.state)
+            groups.extend(optimizer.param_groups)
+        self._state.clear()
+        self._state.update(state)
+        self._groups[:] = groups

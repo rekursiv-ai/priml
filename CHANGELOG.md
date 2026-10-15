@@ -30,6 +30,11 @@ All notable priml changes are documented here. This project follows
 - Costs at `torch.float4_e2m1fn_x2` count two values per byte. Every byte
   count multiplied by `itemsize`, which is one byte per two packed fp4 values,
   so fp4 traffic and cache state were doubled.
+- `CompositeOptimizer.state` reads such as `get`, `items` and `in` see state a
+  member created after construction, and `param_groups` includes groups added
+  through a member's `add_param_group`, so schedules reach them. `step()`
+  raises `ValueError` when a member has taken a parameter another member owns,
+  instead of updating it twice.
 
 ## 0.1.6 - 2026-10-07
 
