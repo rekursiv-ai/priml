@@ -29,6 +29,8 @@ from typing import TYPE_CHECKING, TypedDict, cast, overload, override
 from configgle import Fig, Makeable
 from torch.optim import Optimizer
 
+import torch
+
 from priml.optimizers.parameter_filter import ParameterFilter, everything
 
 
@@ -40,64 +42,6 @@ if TYPE_CHECKING:
     from torch.optim.optimizer import StateDict as OptimizerStateDict
 
 
-def _reject_shared_parameters(optimizers: Sequence[Optimizer]) -> None:
-    """Raise if any parameter belongs to more than one optimizer."""
-    seen: set[int] = set()
-    for optimizer in optimizers:
-        for group in optimizer.param_groups:
-            parameters = cast("list[Parameter]", group["params"])
-            for parameter in parameters:
-                if id(parameter) in seen:
-                    raise ValueError(
-                        "A parameter belongs to more than one optimizer in the "
-                        "composite, so it would be updated twice per step.",
-                    )
-                seen.add(id(parameter))
-
-
-def _route(
-    model: nn.Module,
-    members: Sequence[Callable[..., Optimizer]],
-    filters: Sequence[ParameterFilter],
-    *,
-    require_total: bool,
-    drop_empty: bool,
-) -> list[Optimizer]:
-    """Build each member over the trainable parameters its filter claims."""
-    named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
-    claimed: dict[int, str] = {}
-    groups: list[list[Parameter]] = []
-    kept: list[Callable[..., Optimizer]] = []
-    for index, select in enumerate(filters):
-        group: list[Parameter] = []
-        for name, parameter in named:
-            if not select(name, parameter):
-                continue
-            owner = claimed.get(id(parameter))
-            if owner is not None:
-                raise ValueError(
-                    f"Parameter {name!r} is claimed by filter {owner} and "
-                    f"{index}; it would be updated twice per step.",
-                )
-            claimed[id(parameter)] = str(index)
-            group.append(parameter)
-        if not group:
-            if drop_empty:
-                continue
-            raise ValueError(f"Filter {index} claimed no parameters.")
-        groups.append(group)
-        kept.append(members[index])
-    members = kept
-    if require_total:
-        unclaimed = [n for n, p in named if id(p) not in claimed]
-        if unclaimed:
-            raise ValueError(
-                f"No filter claims {len(unclaimed)} trainable parameter(s), "
-                f"e.g. {unclaimed[0]!r}; they would never be updated.",
-            )
-    return [member(groups[index]) for index, member in enumerate(members)]
-
-
 class CompositeOptimizer(Optimizer):
     """Drives several optimizers as one.
 
@@ -106,7 +50,8 @@ class CompositeOptimizer(Optimizer):
     each read of either attribute rebuilds both from the members. A container
     kept from an earlier read goes stale once a member changes, so read the
     attribute again. Edit topology on members; edit state payloads and group
-    settings through either owner or composite.
+    settings through either owner or composite. Indexing ``state`` with a
+    parameter that has no entry creates it on its member, as torch does.
 
     Args:
       optimizers: Members, stepped in the order given. Each parameter must
@@ -137,11 +82,11 @@ class CompositeOptimizer(Optimizer):
         """Member configs, e.g. ``[Muon.Config(), SignSGD.Config()]``."""
 
         select: list[ParameterFilter] = field(default_factory=list[ParameterFilter])
-        """One filter per member. Empty gives every member every parameter,
-        which is correct only when the members select for themselves."""
+        """One filter per member. Empty gives a single member every parameter."""
 
         require_total: bool = True
-        """Reject a recipe that leaves a trainable parameter unclaimed."""
+        """Reject a recipe that leaves a trainable parameter unclaimed; when
+        off, an unclaimed parameter is frozen."""
 
         drop_empty: bool = False
         """Drop a member whose filter claims nothing, instead of raising.
@@ -160,35 +105,31 @@ class CompositeOptimizer(Optimizer):
               build: Takes an ``nn.Module``, returns the composite.
 
             Raises:
-              ValueError: If no member is configured, or ``select`` is given
-                but does not name exactly one filter per member.
+              ValueError: If no member is configured, a member is itself a
+                composite, or ``select`` does not name one filter per member.
 
             """
             final = self.finalized()
             if not final.optimizers:
                 raise ValueError("CompositeOptimizer.Config needs a member.")
-            if final.select and len(final.select) != len(final.optimizers):
+            if any(isinstance(m, CompositeOptimizer.Config) for m in final.optimizers):
+                raise ValueError(
+                    "CompositeOptimizer.Config cannot hold a composite: a member is "
+                    "built over its parameters, a composite over a model.",
+                )
+            filters = final.select or [everything]
+            if len(filters) != len(final.optimizers):
                 raise ValueError(
                     f"select names {len(final.select)} filters for "
                     f"{len(final.optimizers)} optimizers.",
                 )
-            members = [member.make() for member in final.optimizers]
-            filters = final.select or [everything] * len(members)
-            require_total = final.require_total
-            drop_empty = final.drop_empty
-
-            def compose(model: nn.Module) -> CompositeOptimizer:
-                return CompositeOptimizer(
-                    _route(
-                        model,
-                        members,
-                        filters,
-                        require_total=require_total,
-                        drop_empty=drop_empty,
-                    ),
-                )
-
-            return partial(compose)
+            return partial(
+                _route,
+                members=[member.make() for member in final.optimizers],
+                filters=filters,
+                require_total=final.require_total,
+                drop_empty=final.drop_empty,
+            )
 
     def __init__(self, optimizers: Sequence[Optimizer]) -> None:
         if not optimizers:
@@ -201,13 +142,23 @@ class CompositeOptimizer(Optimizer):
         # group satisfies its non-empty check; ``_initialized`` lets that single
         # call through and is what turns the rejection on afterwards.
         self._initialized = False
-        super().__init__([{"params": []}], {})
+        # Torch's cycling schedulers read ``defaults`` to learn whether every
+        # group carries momentum, so it names what all members share.
+        first = cast("dict[str, object]", optimizers[0].defaults)
+        super().__init__(
+            [{"params": []}],
+            defaults={
+                name: value
+                for name, value in first.items()
+                if all(name in optimizer.defaults for optimizer in optimizers)
+            },
+        )
         # The members' OWN group dicts and state, aliased rather than copied:
         # a scheduler writing ``composite.param_groups[i]["lr"]`` must reach the
         # optimizer that will read it, and a copy would silently discard the
         # write. Replaces the placeholder.
         self._groups: list[dict[str, object]] = []
-        self._state: dict[object, object] = {}
+        self._state: dict[object, object] = _MemberState(self.optimizers)
         self.param_groups = self._groups
         self.state: dict[object, object] = self._state
         self._initialized = True
@@ -221,6 +172,11 @@ class CompositeOptimizer(Optimizer):
             if name in {"state", "param_groups"} and self._initialized:
                 self._refresh_collections()
             return super().__getattribute__(name)
+
+    @property
+    def requires_closure(self) -> bool:
+        """Report whether a member needs the loss-recomputing closure."""
+        return any(getattr(o, "requires_closure", False) for o in self.optimizers)
 
     @overload
     def step(self, closure: None = None) -> None: ...
@@ -240,12 +196,13 @@ class CompositeOptimizer(Optimizer):
             ``requires_closure`` (e.g. exact-Hessian Newton, which needs a
             graph-bearing loss to differentiate twice); a first-order torch
             optimizer executes any closure it is handed, running a wasteful
-            second forward that would also double-count BatchNorm stats. Called
-            once here for the return value, so a member that never sees it still
-            steps against gradients the caller already populated.
+            second forward that would also double-count BatchNorm stats. When
+            no member takes it, it is called once here, with grad enabled as
+            torch optimizers do, for the return value.
 
         Returns:
-          loss: The closure's value, or None when no closure was given.
+          loss: The closure's value -- from the last member that took it, else
+            from the call here -- or None when no closure was given.
 
         Raises:
           ValueError: If a member has taken a parameter another member owns,
@@ -253,10 +210,13 @@ class CompositeOptimizer(Optimizer):
 
         """
         _reject_shared_parameters(self.optimizers)
-        loss = closure() if closure is not None else None
+        loss: Tensor | float | None = None
+        if closure is not None and not self.requires_closure:
+            with torch.enable_grad():
+                loss = closure()
         for optimizer in self.optimizers:
             if closure is not None and getattr(optimizer, "requires_closure", False):
-                optimizer.step(closure)
+                loss = optimizer.step(closure)
             else:
                 optimizer.step()
         return loss
@@ -282,28 +242,46 @@ class CompositeOptimizer(Optimizer):
           state: ``{"optimizers": [<member state>, ...]}``.
 
         """
-        state: CompositeOptimizer.StateDict = {
+        for pre_hook in self._optimizer_state_dict_pre_hooks.values():
+            pre_hook(self)
+        typed: CompositeOptimizer.StateDict = {
             "optimizers": [o.state_dict() for o in self.optimizers],
         }
-        return {**state}
+        state: OptimizerStateDict = {**typed}
+        for post_hook in self._optimizer_state_dict_post_hooks.values():
+            replaced = post_hook(self, state)
+            state = state if replaced is None else replaced
+        return state
 
     @override
     def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
-        """Restore state produced by :meth:`state_dict`.
+        """Restore state produced by :meth:`state_dict`, all members or none.
 
         Raises:
           ValueError: If the checkpoint holds a different number of members,
             which means the recipe changed and the state cannot be matched up.
 
         """
-        saved = cast(CompositeOptimizer.StateDict, state_dict)["optimizers"]
+        loaded: OptimizerStateDict = {**state_dict}
+        for pre_hook in self._optimizer_load_state_dict_pre_hooks.values():
+            replaced = pre_hook(self, loaded)
+            loaded = loaded if replaced is None else replaced
+        saved = cast(CompositeOptimizer.StateDict, loaded)["optimizers"]
         if len(saved) != len(self.optimizers):
             raise ValueError(
                 f"Checkpoint holds {len(saved)} optimizers but this composite "
                 f"has {len(self.optimizers)}; the recipe changed.",
             )
-        for optimizer, member_state in zip(self.optimizers, saved, strict=True):
-            optimizer.load_state_dict(member_state)
+        current = [optimizer.state_dict() for optimizer in self.optimizers]
+        try:
+            for optimizer, member_state in zip(self.optimizers, saved, strict=True):
+                optimizer.load_state_dict(member_state)
+        except Exception:
+            for optimizer, member_state in zip(self.optimizers, current, strict=True):
+                optimizer.load_state_dict(member_state)
+            raise
+        for post_hook in self._optimizer_load_state_dict_post_hooks.values():
+            post_hook(self)
 
     @override
     def add_param_group(self, param_group: dict[str, object]) -> None:
@@ -316,6 +294,15 @@ class CompositeOptimizer(Optimizer):
             "Add the parameter group to one of the composite's members instead; "
             "the composite cannot know which optimizer should own it.",
         )
+
+    @override
+    def __getstate__(self) -> dict[str, object]:
+        """Pickle the members; torch's state would drop them."""
+        return {"optimizers": self.optimizers}
+
+    @override
+    def __setstate__(self, state: dict[str, object]) -> None:
+        self.__init__(cast("list[Optimizer]", state["optimizers"]))
 
     @override
     def __repr__(self) -> str:
@@ -331,3 +318,82 @@ class CompositeOptimizer(Optimizer):
         self._state.clear()
         self._state.update(state)
         self._groups[:] = groups
+
+
+def _route(
+    model: nn.Module,
+    *,
+    members: Sequence[Callable[..., Optimizer]],
+    filters: Sequence[ParameterFilter],
+    require_total: bool,
+    drop_empty: bool,
+) -> CompositeOptimizer:
+    """Build the composite, each member over the trainable parameters it claims."""
+    named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+    claimed: dict[int, int] = {}
+    groups: list[list[Parameter]] = []
+    kept: list[Callable[..., Optimizer]] = []
+    for index, select in enumerate(filters):
+        group: list[Parameter] = []
+        for name, parameter in named:
+            if not select(name, parameter):
+                continue
+            owner = claimed.get(id(parameter))
+            if owner is not None:
+                raise ValueError(
+                    f"Parameter {name!r} is claimed by filter {owner} and "
+                    f"{index}; it would be updated twice per step.",
+                )
+            claimed[id(parameter)] = index
+            group.append(parameter)
+        if not group:
+            if drop_empty:
+                continue
+            raise ValueError(f"Filter {index} claimed no parameters.")
+        groups.append(group)
+        kept.append(members[index])
+    unclaimed = [(n, p) for n, p in named if id(p) not in claimed]
+    if unclaimed and require_total:
+        raise ValueError(
+            f"No filter claims {len(unclaimed)} trainable parameter(s), "
+            f"e.g. {unclaimed[0][0]!r}; they would never be updated.",
+        )
+    # No member zeroes an unclaimed gradient, so left trainable it would grow
+    # every step and inflate the clip norm of the parameters that do train.
+    for _, parameter in unclaimed:
+        parameter.requires_grad = False
+    return CompositeOptimizer(
+        [member(group) for member, group in zip(kept, groups, strict=True)],
+    )
+
+
+def _reject_shared_parameters(optimizers: Sequence[Optimizer]) -> None:
+    """Raise if any parameter belongs to more than one optimizer."""
+    seen: set[int] = set()
+    for optimizer in optimizers:
+        for group in optimizer.param_groups:
+            parameters = cast("list[Parameter]", group["params"])
+            for parameter in parameters:
+                if id(parameter) in seen:
+                    raise ValueError(
+                        "A parameter belongs to more than one optimizer in the "
+                        "composite, so it would be updated twice per step.",
+                    )
+                seen.add(id(parameter))
+
+
+class _MemberState(dict[object, object]):
+    """Every member's state; a parameter's missing entry is made on its member."""
+
+    def __init__(self, optimizers: Sequence[Optimizer]) -> None:
+        super().__init__()
+        self._optimizers = optimizers
+
+    def __missing__(self, key: object) -> object:
+        for optimizer in self._optimizers:
+            for group in optimizer.param_groups:
+                if any(key is p for p in cast("list[Parameter]", group["params"])):
+                    entry = cast(object, optimizer.state[cast("Tensor", key)])
+                    self[key] = entry
+                    return entry
+        raise KeyError(key)

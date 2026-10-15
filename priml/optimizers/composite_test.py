@@ -121,12 +121,7 @@ def test_state_dict_round_trips_every_member() -> None:
 
     restored = split_optimizer(model)
     restored.load_state_dict(saved)
-    for member, other in zip(
-        optimizer.optimizers,
-        restored.optimizers,
-        strict=True,
-    ):
-        assert member.state_dict()["param_groups"] == other.state_dict()["param_groups"]
+    torch.testing.assert_close(restored.state_dict(), saved, rtol=0, atol=0)
 
 
 def test_state_exposes_member_state_after_a_step() -> None:
@@ -173,6 +168,18 @@ def test_state_drops_removed_entries_and_follows_replacement() -> None:
     assert optimizer.state == {}
     member.state = {parameter: {"replacement": 3}}
     assert optimizer.state.get(parameter) is member.state[parameter]
+
+
+def test_state_makes_a_missing_entry_on_its_member() -> None:
+    # Torch's ``state`` is a defaultdict, so callers index it before a step.
+    parameter = nn.Parameter(torch.ones(2))
+    member = torch.optim.Adam([parameter], lr=0.1)
+    optimizer = CompositeOptimizer([member])
+    entry = optimizer.state[parameter]
+    assert parameter in member.state
+    assert entry is member.state[parameter]
+    with pytest.raises(KeyError):
+        _ = optimizer.state[nn.Parameter(torch.ones(2))]
 
 
 def test_member_group_addition_and_load_keep_scheduling_aliases() -> None:
@@ -266,13 +273,30 @@ def test_step_returns_the_closure_value() -> None:
 
 
 def test_closure_is_evaluated_once() -> None:
-    # Forwarding it to each member would recompute the loss per member.
+    # Calling it here as well as in Newton would run a second forward.
+    model = nn.Linear(3, 1, bias=False)
+    optimizer = CompositeOptimizer([Newton(model.parameters(), lr=1.0)])
     calls: list[int] = []
+    _ = optimizer.step(
+        lambda: calls.append(1) or model(torch.ones(2, 3)).square().sum(),
+    )
+    assert len(calls) == 1
+
+
+def test_closure_runs_with_grad_enabled() -> None:
+    # Torch optimizers enable grad around a closure, so it may call backward().
     model = split_model()
     optimizer = split_optimizer(model)
-    backward(model)
-    _ = optimizer.step(lambda: calls.append(1) or 0.0)
-    assert len(calls) == 1
+    with torch.no_grad():
+        _ = optimizer.step(lambda: backward(model) or 0.0)
+    assert all(p.grad is not None for p in model.parameters())
+
+
+def test_requires_closure_follows_the_members() -> None:
+    # The training loop forwards a closure only to an optimizer asking for it.
+    model = nn.Linear(3, 1, bias=False)
+    assert CompositeOptimizer([Newton(model.parameters(), lr=1.0)]).requires_closure
+    assert not split_optimizer(split_model()).requires_closure
 
 
 def test_closure_reaches_a_member_that_requires_it() -> None:
@@ -352,6 +376,66 @@ def test_load_state_dict_rejects_a_different_member_count() -> None:
         single.load_state_dict(saved)
 
 
+def test_a_failed_load_leaves_every_member_unchanged() -> None:
+    first, second, third = (nn.Parameter(torch.ones(2)) for _ in range(3))
+    optimizer = CompositeOptimizer(
+        [torch.optim.SGD([first], lr=0.1), torch.optim.SGD([second, third], lr=0.1)],
+    )
+    regrouped = CompositeOptimizer(
+        [
+            torch.optim.SGD([first], lr=0.5),
+            torch.optim.SGD([{"params": [second]}, {"params": [third]}], lr=0.1),
+        ],
+    )
+    with pytest.raises(ValueError, match="different number of parameter groups"):
+        optimizer.load_state_dict(regrouped.state_dict())
+    assert optimizer.param_groups[0]["lr"] == 0.1
+
+
+def test_checkpoint_hooks_registered_on_the_composite_run() -> None:
+    optimizer = split_optimizer(split_model())
+    replacement = optimizer.state_dict()
+    optimizer.param_groups[0]["lr"] = 0.5
+    calls: list[str] = []
+    _ = optimizer.register_state_dict_pre_hook(lambda _: calls.append("save"))
+    _ = optimizer.register_state_dict_post_hook(lambda _, saved: {**saved, "tag": 1})
+    _ = optimizer.register_load_state_dict_pre_hook(lambda _, __: replacement)
+    _ = optimizer.register_load_state_dict_post_hook(lambda _: calls.append("load"))
+    saved = optimizer.state_dict()
+    optimizer.load_state_dict(saved)
+    assert "tag" in saved
+    assert calls == ["save", "load"]
+    assert optimizer.param_groups[0]["lr"] == 0.1
+
+
+def test_deepcopy_keeps_the_members() -> None:
+    # Torch pickles only defaults, state and param_groups, which drops them.
+    model = split_model()
+    optimizer = split_optimizer(model)
+    backward(model)
+    optimizer.step()
+    copied = deepcopy(optimizer)
+    assert repr(copied) == repr(optimizer)
+    torch.testing.assert_close(
+        copied.state_dict(),
+        optimizer.state_dict(),
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_defaults_hold_what_every_member_shares() -> None:
+    # Torch's cycling schedulers read ``defaults`` to see if momentum exists.
+    sgd = torch.optim.SGD([nn.Parameter(torch.ones(2))], lr=0.1, momentum=0.9)
+    _ = torch.optim.lr_scheduler.CyclicLR(
+        CompositeOptimizer([sgd]),
+        base_lr=0.01,
+        max_lr=0.1,
+    )
+    adamw = torch.optim.AdamW([nn.Parameter(torch.ones(2))], lr=0.1)
+    assert "momentum" not in CompositeOptimizer([sgd, adamw]).defaults
+
+
 def test_add_param_group_is_rejected() -> None:
     optimizer = split_optimizer(split_model())
     with pytest.raises(NotImplementedError, match="one of the composite's members"):
@@ -398,6 +482,31 @@ def test_config_rejects_a_filter_count_mismatch() -> None:
     config.select = [everything, everything]
     with pytest.raises(ValueError, match="select names 2 filters"):
         _ = config.make()
+
+
+def test_config_needs_a_filter_per_member_when_there_are_several() -> None:
+    config = CompositeOptimizer.Config()
+    config.optimizers = [Muon.Config(), Muon.Config()]
+    with pytest.raises(ValueError, match="select names 0 filters for 2 optimizers"):
+        _ = config.make()
+
+
+def test_config_rejects_a_nested_composite() -> None:
+    config = CompositeOptimizer.Config()
+    config.optimizers = [CompositeOptimizer.Config()]
+    with pytest.raises(ValueError, match="cannot hold a composite"):
+        _ = config.make()
+
+
+def test_config_freezes_a_parameter_no_filter_claims() -> None:
+    # A gradient no member zeroes would grow every step and inflate clipping.
+    model = nn.Linear(2, 3)
+    config = CompositeOptimizer.Config()
+    config.optimizers = [PartialConfig(torch.optim.SGD, lr=0.1)]
+    config.select = [matching("weight")]
+    config.require_total = False
+    _ = config.make()(model)
+    assert [p.requires_grad for p in model.parameters()] == [True, False]
 
 
 def test_config_rejects_an_unclaimed_parameter() -> None:

@@ -24,6 +24,14 @@ All notable priml changes are documented here. This project follows
   "matmul", torch.bfloat16]`, is a `KeyError`; read it with `.sum()`, or name
   all four axes on the full table. A three-value `Report` lookup is typed
   `float | Report`: a three-axis report reads a value, `peak()` a sub-table.
+- `CompositeOptimizer.Config` with `require_total=False` freezes the trainable
+  parameters no filter claims, as documented; their gradients used to pile up
+  because no member zeroed them. An empty `select` serves a single member
+  only, and a member that is itself a `CompositeOptimizer.Config` is rejected
+  by `make()`.
+- The filter combinators `matching`, `excluding`, `complement` and
+  `with_ndim` equal only instances of the same class, and their fields cannot
+  be reassigned, so a filter used as a dict key keeps its hash.
 
 ### Fixed
 
@@ -35,6 +43,17 @@ All notable priml changes are documented here. This project follows
   through a member's `add_param_group`, so schedules reach them. `step()`
   raises `ValueError` when a member has taken a parameter another member owns,
   instead of updating it twice.
+- `CompositeOptimizer` keeps torch's `Optimizer` contract. It sets
+  `requires_closure` when a member does, so the training loop hands a Newton
+  member its closure, and that closure runs once per step instead of twice.
+  A closure no member takes runs with grad enabled. Checkpoint hooks
+  registered on the composite run, a failed `load_state_dict` leaves every
+  member unchanged, `deepcopy` and pickle keep the members, and `defaults`
+  lists the hyperparameters every member shares, so `CyclicLR` and
+  `OneCycleLR` accept a momentum composite.
+- Indexing `CompositeOptimizer.state` with a parameter that has no entry yet
+  creates the entry on its member, as torch's defaultdict does, instead of
+  raising `KeyError`. `filter_name` no longer returns a memory address.
 
 ## 0.1.6 - 2026-10-07
 

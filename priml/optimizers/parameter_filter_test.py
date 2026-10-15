@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 from torch import nn
 
+import pytest
 import torch
 
 from priml.optimizers.muon import Muon
@@ -11,6 +14,7 @@ from priml.optimizers.parameter_filter import (
     complement,
     everything,
     excluding,
+    filter_name,
     matching,
     trainable,
     with_ndim,
@@ -91,6 +95,29 @@ def test_filter_reprs_name_functions_without_addresses() -> None:
     assert repr(excluding(everything, "head")) == "excluding(everything, 'head')"
     assert repr(complement(matching("x"))) == "complement(matching('x'))"
     assert repr(excluding(trainable, "head")) == "excluding(trainable, 'head')"
+
+
+def test_filter_name_never_shows_an_address() -> None:
+    class _Callable:
+        def __call__(self, name: str, parameter: nn.Parameter) -> bool:
+            return everything(name, parameter)
+
+    assert filter_name(partial(everything)) == "partial"
+    assert filter_name(_Callable()).endswith("._Callable")
+
+
+def test_filters_are_values_fixed_once_built() -> None:
+    # A filter used as a dict key must keep its hash.
+    select = matching("a")
+    with pytest.raises(AttributeError, match="fixed once set"):
+        select.fragments = ("b",)
+
+    class _Subclass(matching):
+        pass
+
+    assert select != _Subclass("a")
+    assert _Subclass("a") == _Subclass("a")
+    assert hash(_Subclass("a")) == hash(_Subclass("a"))
 
 
 def test_rank_filter_accepts_one_rank_and_compares_by_value() -> None:
