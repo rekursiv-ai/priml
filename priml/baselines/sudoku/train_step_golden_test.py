@@ -1,10 +1,9 @@
 """Replay the recurrent sudoku step bit for bit.
 
 ``testdata/train_step.pt`` records the shared step with deep recurrence and
-the ACT pool through :func:`record`, shrunk by size only. It was recorded from
-the implementation that trained the recipe, so the pool settings that
-reproduce it (no fed-back grid, zero-seeded slots) are pinned in
-:func:`shrunk`.
+the ACT pool through :func:`record`, shrunk by size only. Its pool settings
+(no fed-back grid, zero-seeded slots) are those of the implementation that
+trained the recipe, and are pinned in :func:`shrunk`.
 """
 
 from __future__ import annotations
@@ -55,7 +54,7 @@ TRAIN_STEPS: Final = 3
 
 
 def shrunk() -> SudokuTrainStep.Config:
-    """Return the recurrent step on a 4x4 grid, width 2, two heads, two slots.
+    """Return the recurrent step on a 4x4 grid: width 2, two heads, 2x2 cycles.
 
     The recipe the golden recorded: a post-norm transformer over the grid with
     factored positions and a built-but-unfed feedback channel, deep
@@ -71,6 +70,10 @@ def shrunk() -> SudokuTrainStep.Config:
     model.channels_in = 2
     model.num_layers = 1
     model.recurrence = DeepRecurrence.Config()
+    # Two, not one: every slow cycle but the last runs without grad, so two
+    # keep both paths; line and branch coverage match the recipe's 6 x 9.
+    model.recurrence.slow_cycles = 2
+    model.recurrence.fast_cycles = 2
     positions = FactoredPositions.Config()
     positions.grid_shape = (4, 4)
     positions.box_shape = (2, 2)
