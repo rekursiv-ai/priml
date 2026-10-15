@@ -1,0 +1,113 @@
+"""Check the simulator equations and independent forecasting splits."""
+
+import pytest
+import torch
+
+from priml.baselines.oscillator.data import ForecastData, InitialStates, Oscillator
+
+
+def test_integrator_matches_one_explicit_update() -> None:
+    cfg = Oscillator.Config()
+    cfg.substeps = 1
+    cfg.cubic = 0.4
+    # The simulator's state is always a position/velocity pair.
+    initial = torch.tensor([[0.2, -0.1], [0.4, 0.3], [-0.8, 0.2]])
+    position, velocity = initial.unbind(dim=-1)
+    expected_velocity = velocity + cfg.step_size * (
+        -cfg.stiffness * position - cfg.damping * velocity - cfg.cubic * position.pow(3)
+    )
+    expected_position = position + cfg.step_size * expected_velocity
+    # One output frame isolates a single integration update.
+    actual = cfg.make().forecast(initial, steps=1)
+    assert torch.equal(
+        actual[:, 0],
+        torch.stack((expected_position, expected_velocity), dim=-1),
+    )
+    assert torch.equal(initial[:, 0], position)
+
+
+def test_rollouts_continue_from_last_observation() -> None:
+    simulator = Oscillator.Config().make()
+    initial = InitialStates.Config(count=4).make().sample()
+    full = simulator.forecast(initial, steps=8)
+    prefix = simulator.forecast(initial, steps=5)
+    suffix = simulator.forecast(prefix[:, -1], steps=3)
+    assert torch.equal(full, torch.cat((prefix, suffix), dim=1))
+
+
+def test_sampling_is_repeatable_and_does_not_consume_global_rng() -> None:
+    cfg = InitialStates.Config()
+    cfg.count = 4
+    before = torch.get_rng_state().clone()
+    first = cfg.make().sample()
+    assert torch.equal(first, cfg.make().sample())
+    assert torch.equal(before, torch.get_rng_state())
+    cfg.seed += 1
+    assert not torch.equal(first, cfg.make().sample())
+
+
+def test_forecasting_windows_share_no_trajectory_between_splits() -> None:
+    cfg = ForecastData.Config()
+    cfg.seq_len = 5
+    cfg.pred_len = 3
+    cfg.train.count = 4
+    cfg.validation.count = 6
+    data = cfg.make()
+    train = data.windows(cfg.train, simulator=data.reference)
+    validation = data.windows(cfg.validation, simulator=data.reference)
+    assert train.media.shape == (4, 5, 2)
+    assert train.label.shape == (4, 3, 2)
+    assert (
+        not (train.media[:, None, 0] == validation.media[None, :, 0]).all(dim=-1).any()
+    )
+    expected = data.reference.forecast(train.media[:, -1], steps=cfg.pred_len)
+    assert torch.equal(train.label, expected)
+
+
+def test_identical_simulators_agree_and_missing_force_changes_forecasts() -> None:
+    cfg = ForecastData.Config()
+    cfg.reference = cfg.cheap.copy_tree()
+    data = cfg.make()
+    initial = InitialStates.Config(count=4).make().sample()
+    reference = data.reference.forecast(initial, steps=3)
+    assert torch.equal(reference, data.cheap.forecast(initial, steps=3))
+    cfg.reference.cubic = 0.4
+    assert not torch.equal(reference, cfg.reference.make().forecast(initial, steps=3))
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("step_size", 0.0), ("damping", -0.1), ("cubic", float("nan")), ("substeps", 0)],
+)
+def test_bad_simulator_settings_fail(name: str, value: float) -> None:
+    cfg = Oscillator.Config()
+    setattr(cfg, name, value)
+    with pytest.raises(ValueError, match=r"finite|positive|nonnegative"):
+        cfg.make()
+
+
+def test_duplicate_split_seeds_and_mismatched_time_grids_fail() -> None:
+    cfg = ForecastData.Config()
+    cfg.test.seed = cfg.train.seed
+    with pytest.raises(ValueError, match="separate seed"):
+        cfg.make()
+    cfg = ForecastData.Config()
+    cfg.cheap.step_size *= 2
+    with pytest.raises(ValueError, match="observation grid"):
+        cfg.make()
+
+
+def test_bad_initial_conditions_and_empty_history_fail() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        InitialStates.Config(velocity=float("nan")).make()
+    with pytest.raises(ValueError, match="Invalid"):
+        InitialStates.Config(count=0).make()
+    with pytest.raises(ValueError, match="positive"):
+        ForecastData.Config(seq_len=0).make()
+    simulator = Oscillator.Config().make()
+    with pytest.raises(ValueError, match="pairs"):
+        simulator.forecast(torch.zeros(4, 3), steps=3)
+    with pytest.raises(ValueError, match="finite floating"):
+        simulator.forecast(torch.zeros(4, 2, dtype=torch.int64), steps=3)
+    with pytest.raises(ValueError, match="diverged"):
+        simulator.forecast(torch.full((4, 2), 1e38), steps=3)

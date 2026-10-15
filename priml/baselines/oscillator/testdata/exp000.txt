@@ -1,0 +1,108 @@
+ForecastStudy.Config(
+                experiment_name='exp000',
+                seed=2_021,
+                data=ForecastData.Config(
+                        seq_len=24,
+                        pred_len=12,
+                        cheap=Oscillator.Config(
+                                step_size=0.1,
+                                substeps=4,
+                                stiffness=1.0,
+                                damping=0.15,
+                                cubic=0.0
+                        ),
+                        reference=Oscillator.Config(
+                                step_size=0.1,
+                                substeps=4,
+                                stiffness=1.0,
+                                damping=0.15,
+                                cubic=0.4
+                        ),
+                        train=InitialStates.Config(
+                                seed=101,
+                                count=32,
+                                amplitude=(0.2, 1.5),
+                                velocity=0.5
+                        ),
+                        validation=InitialStates.Config(
+                                seed=202,
+                                count=16,
+                                amplitude=(0.2, 1.5),
+                                velocity=0.5
+                        ),
+                        synthetic=InitialStates.Config(
+                                seed=303,
+                                count=256,
+                                amplitude=(0.2, 1.5),
+                                velocity=0.5
+                        ),
+                        test=InitialStates.Config(
+                                seed=404,
+                                count=64,
+                                amplitude=(0.2, 1.5),
+                                velocity=0.5
+                        ),
+                        shifted=InitialStates.Config(
+                                seed=505,
+                                count=64,
+                                amplitude=(1.5, 2.5),
+                                velocity=0.5
+                        )
+                ),
+                method=DLinearForecast.Config(
+                │       step=Etth1TrainStep.Config(
+                │               model=DLinear.Config(
+                │                       seq_len=24,
+                │                       pred_len=12,
+                │                       channels=2,
+                │                       decomposition=SeriesDecomposition.Config(
+                │                               moving_average=MovingAverage.Config(kernel_size=25)
+                │                       ),
+                │                       seasonal=MeanLinear.Config(
+                │                               channels_in=24,
+                │                               channels_out=12,
+                │                               bias=True
+                │                       ),
+                │                       trend=MeanLinear.Config(
+                │                               channels_in=24,
+                │                               channels_out=12,
+                │                               bias=True
+                │                       ),
+                │                       decoder=ReferenceLinear.Config(
+                │                               channels_in=24,
+                │                               channels_out=12,
+                │                               bias=True
+                │                       )
+                │               ),
+                │               optimizer=PartialConfig(<class 'functools.partial'>, <class 'torch.optim.adam.Adam'>, lr=0.001),
+                │               loss=SimpleLoss.Config(
+                │                       loss_fn=<function priml.loss.simple_loss.mse at 0xdefacedeface>,
+                │                       target_key='label',
+                │                       kwargs={'reduction': 'mean'},
+                │                       channels_out=-1
+                │               ),
+                │               accumulate_grad_batches=1,
+                │               drop_partial_accumulation_on_epoch_end=True,
+                │               train_budget_steps=300,
+                │               train_budget_sec=inf,
+                │               train_budget_epochs=inf,
+                │               lr_schedule=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.constant at 0xdefacedeface>),
+                │               parallelism=NoParallel.Config(device=None),
+                │               model_quantization=NoModelQuantization.Config(),
+                │               activation_memoization=DefaultActivationStorage.Config(),
+                │               compile=None,
+                │               ema=NoEMA.Config(),
+                │               gradient_clip_norm=inf,
+                │               skip_step_on_nonfinite_grad=False,
+                │               device_init='eager',
+                │               dtype_autocast=None,
+                │               autocast_cache_enabled=False,
+                │               seed=2_021
+                │       ),
+                │       updates=300,
+                │       pretrain_updates=0,
+                │       batch_size=8,
+                │       validation_every=25,
+                │       sample_seed=606
+                )
+        )
