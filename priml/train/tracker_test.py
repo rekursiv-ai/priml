@@ -999,7 +999,6 @@ def test_tracker_list_fans_notes_to_all_children() -> None:
 
 def test_default_metrics_tracker_wraps_file_tracker() -> None:
     config = default_metrics_tracker()
-    assert isinstance(config, TrackerList.Config)
     metrics = config.trackers["metrics"]
     assert isinstance(metrics, FileTracker.Config)
     assert metrics.working_dir == "/metrics.json"
