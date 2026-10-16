@@ -78,6 +78,7 @@ def test_the_tiny_recursion_is_frozen_and_the_solution_is_a_sudoku() -> None:
     model = tiny_recursion()
     assert not model.training
     assert model.config.channels_in == 4
+    # sudoku_group_indices uses SudokuSpec's 9x9 row and column geometry.
     grid = sudoku_solution().reshape(9, 9) - 2
     digits = set(range(9))
     assert all(set(row.tolist()) == digits for row in grid)

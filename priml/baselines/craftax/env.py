@@ -627,7 +627,9 @@ class CraftaxEnv:
                 for buffer in range(config.num_buffers)
             )
         ]
-        budget = int(config.spin_seconds * ticks_per_second())
+        budget = (
+            int(config.spin_seconds * ticks_per_second()) if config.spin_seconds else 0
+        )
         # One team per buffer, so two buffers stepping at once never queue
         # behind each other; the calling thread takes the first share.
         self._teams: list[_Team] = []
