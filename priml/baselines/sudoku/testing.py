@@ -1,19 +1,21 @@
 """Test support shared by the evaluation runners' tests: fixtures and tiny configs.
 
 The runner goldens in ``testdata/`` replay frozen evaluation trajectories.
-Every case runs one real runner end to end at tiny size on CPU -- no released
-checkpoint anywhere: generators and verifiers are trained inside the case, so
-the chain is training -> harvest -> verifier fits -> HPS / agreement lock /
-sieve, and the pipeline cases run it all segmented, screened, and triggered as
-exp008 and exp012 do. Each records every array its runner writes, its numeric
-metrics, and the trained weights, compared with ``torch.equal``.
+Every case runs one real runner end to end at tiny size on CPU. The pipeline
+cases (exp008, exp012) train their generators and verifiers inside the case,
+segmented, screened, and triggered as the recipes do. The evaluation cases
+read those same trained fixtures from ``testdata/fixtures.pt``: training is
+the pipelines' code path, so re-running it per evaluation case covers no new
+line and costs most of the case's time. Each records every array its runner
+writes, its numeric metrics, and the trained weights, compared with
+``torch.equal``.
 
-Most goldens were recorded from the reference implementation this baseline was
-ported from. Two are snapshots of this port, minted after the pieces they
-compose matched the reference bit for bit: ``staircase`` (the staircase sieve,
-whose selection round matched the reference selection step) and
-``denoising_fit`` (the denoising verifier fit, which has no reference at this
-corpus).
+Only goldens covering a code path no other test reaches are kept: the
+pipelines (``exp008``, ``exp012``), the staircase sieve (exp011), HPS (exp007),
+the agreement lock, and the denoising fit. Most were recorded from the
+reference implementation this baseline was ported from; ``staircase`` and
+``denoising_fit`` are snapshots of this port, minted after the pieces they
+compose matched the reference bit for bit.
 
 A test that needs the dataset fixture, a tiny generator, or a runner configured
 for it imports it from here rather than from another test module.
@@ -24,20 +26,25 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
+import json
+
 from torch import Tensor
 
 import numpy as np
 import torch
 
 from priml.baselines.sudoku import experiments
-from priml.baselines.sudoku.harvest import Harvest
+from priml.baselines.sudoku.harvest import Harvest, write_npz
 from priml.baselines.sudoku.hypotheses import HypothesisRecursion, WinnerRecompute
 from priml.baselines.sudoku.latent_recursion import LatentRecursion, recipe_block
+from priml.baselines.sudoku.runner import file_sha256, load_eval_weights
 from priml.baselines.sudoku.search import HpsSearch
 from priml.baselines.sudoku.verifier import SudokuVerifier
 from priml.baselines.sudoku.verifier_fit import VerifierFit, VerifierLoss
 from priml.model.swiglu import SwiGLU
+from priml.paths import resolve_working_dir
 from priml.runtime import SingleProcess
+from priml.testing import regenerate
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import read_tensors, stored
 
@@ -51,6 +58,9 @@ if TYPE_CHECKING:
 
 
 _CWD: Final = Path(__file__).resolve().parent
+
+FIXTURES: Final = _CWD / "testdata" / "fixtures.pt"
+"""The evaluation goldens' trained generators, verifiers, and harvest shard."""
 
 
 def write_dataset(root: Path) -> Path:
@@ -87,12 +97,15 @@ def write_dataset(root: Path) -> Path:
 def replay(
     record: Callable[[Harness], dict[str, Tensor]],
     scratch: Path,
+    *,
+    train: bool = True,
 ) -> dict[str, Tensor]:
     """Build the fixture, run ``record`` under host-agnostic numerics, store it.
 
     Args:
       record: One golden's recorder.
       scratch: Empty directory owned by this call.
+      train: Train the fixtures ``record`` asks for; otherwise read the stored ones.
 
     Returns:
       trajectory: Flat name-to-tensor record.
@@ -101,7 +114,40 @@ def replay(
     write_dataset(scratch / "data")
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         torch.manual_seed(0)
-        return {k: stored(v) for k, v in record(Harness(scratch)).items()}
+        harness = Harness(scratch, train=train)
+        return {k: stored(v) for k, v in record(harness).items()}
+
+
+def mint_fixtures(
+    recorders: Mapping[str, Callable[[Harness], dict[str, Tensor]]],
+    scratch: Path,
+) -> dict[str, Tensor]:
+    """Train every fixture ``recorders`` reads and return them, as stored.
+
+    Args:
+      recorders: The goldens that read :data:`FIXTURES`.
+      scratch: Empty directory owned by this call.
+
+    Returns:
+      fixtures: The trained weights and harvest shard, keyed as stored.
+
+    """
+    trained: dict[str, Tensor] = {}
+    for case, record in recorders.items():
+        harness_dir = scratch / case
+        write_dataset(harness_dir / "data")
+        with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+            torch.manual_seed(0)
+            # A fixture an earlier case trained is read back, not retrained:
+            # every case trains it from the same seed, so the bits agree.
+            harness = Harness(harness_dir, train=True, known=trained)
+            record(harness)
+        trained |= harness.trained
+    # The shard is replayed as written, dtypes and all, so it is never narrowed.
+    return {
+        k: v.detach().clone() if k.startswith("harvest/") else stored(v)
+        for k, v in trained.items()
+    }
 
 
 def load_golden(case: str) -> dict[str, Tensor]:
@@ -163,11 +209,30 @@ def sudoku_solution() -> Tensor:
 
 
 class Harness:
-    """Configurations of the runners, rooted at ``scratch``."""
+    """Configurations of the runners, rooted at ``scratch``.
 
-    def __init__(self, scratch: Path) -> None:
+    The fixture methods (:meth:`generator`, :meth:`hypothesis_generator`,
+    :meth:`harvest`, :meth:`verifier`) train when ``train`` is set and
+    otherwise write the weights or shard :data:`FIXTURES` stores for that call,
+    to the paths training would have written. Either way the caller reads the
+    same files; ``--regenerate-b4b`` re-records them from a training run.
+    Under ``train``, a fixture already in ``known`` is written from there instead.
+    """
+
+    def __init__(
+        self,
+        scratch: Path,
+        *,
+        train: bool = True,
+        known: Mapping[str, Tensor] | None = None,
+    ) -> None:
         self.scratch = scratch
         self.data = scratch / "data"
+        self.train = train or regenerate.b4b()
+        self.fixtures: Mapping[str, Tensor] = (
+            (known or {}) if self.train else read_tensors(FIXTURES)
+        )
+        self.trained: dict[str, Tensor] = {}
 
     def model(self) -> LatentRecursion.Config:
         """Return the generator architecture.
@@ -231,8 +296,9 @@ class Harness:
         cfg.step.model = self.hypothesis_model()
         cfg.step.routing = WinnerRecompute.Config()
         cfg.dataset.batch_size = 3
-        cfg.make().run()
-        return f"/runs/{cfg.study_name}/{name}/checkpoints/step_00000003.pt"
+        logical = f"/runs/{cfg.study_name}/{name}/checkpoints/step_00000003.pt"
+        self._checkpoint(name, self.scratch / logical.removeprefix("/"), recipe=cfg)
+        return logical
 
     def search(self) -> HpsSearch.Config:
         """Return the search policy.
@@ -274,8 +340,9 @@ class Harness:
         cfg = self._recipe(name, seed=seed)
         cfg.step.model = self.model()
         cfg.dataset.batch_size = 2
-        cfg.make().run()
-        return f"/runs/{cfg.study_name}/{name}/checkpoints/step_00000003.pt"
+        logical = f"/runs/{cfg.study_name}/{name}/checkpoints/step_00000003.pt"
+        self._checkpoint(name, self.scratch / logical.removeprefix("/"), recipe=cfg)
+        return logical
 
     def harvest(self, checkpoint: str) -> Path:
         """Harvest a tiny corpus from ``checkpoint``; return its directory.
@@ -304,7 +371,15 @@ class Harness:
         cfg.random_starts_per_strength = 1
         cfg.dtype_autocast = None
         cfg.device = "cpu"
-        return cfg.make().run()
+        if self.train and not self._stored("harvest/"):
+            out = cfg.make().run()
+            with cast("NpzFile", np.load(out / "shard-00000.npz")) as shard:
+                self.trained |= {
+                    f"harvest/{key}": torch.from_numpy(np.array(shard[key]))
+                    for key in shard.files
+                }
+            return out
+        return self._stored_harvest(cfg)
 
     def verifier(
         self,
@@ -339,7 +414,13 @@ class Harness:
         cfg.device = "cpu"
         cfg.dtype_autocast = None
         cfg.max_steps = 3
-        return cfg.make().run()
+        if loss is not None:
+            # A custom objective is the fit under test, so it always trains.
+            return cfg.make().run()
+        path = self.scratch / "runs" / cfg.experiment_name / "checkpoints"
+        path /= "step_00000003.pt"
+        self._checkpoint(cfg.experiment_name, path, recipe=cfg)
+        return path
 
     def dumps(self, name: str) -> dict[str, Tensor]:
         """Every array in every npz under a run.
@@ -392,3 +473,61 @@ class Harness:
         cfg.num_steps_eval = float("inf")
         cfg.eval_warmup_batches = 0
         return cfg
+
+    # Stored is each weight the eval-side loader ends up with, once: the EMA shadow
+    # where the run kept one, which overlays the live parameter on load, and the live
+    # value elsewhere. Nothing else in a checkpoint is read by an evaluation.
+    def _checkpoint(
+        self,
+        name: str,
+        path: Path,
+        *,
+        recipe: SudokuTrainLoop | VerifierFit.Config,
+    ) -> None:
+        """Train ``recipe``, or write its stored weights, to the file ``path``."""
+        if self.train and not self._stored(f"{name}/"):
+            recipe.make().run()
+            weights = load_eval_weights(path)
+            self.trained |= {f"{name}/{k}": v for k, v in weights.items()}
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"model": self._stored(f"{name}/")}, path)
+
+    def _stored_harvest(self, config: Harvest.Config) -> Path:
+        """Write the stored shard and the manifest :meth:`Harvest.run` would."""
+        out = Path(
+            resolve_working_dir(
+                self.scratch,
+                str(config.run_dir).format(experiment_name=config.experiment_name),
+            ),
+        )
+        out.mkdir(parents=True, exist_ok=True)
+        arrays = {key: value.numpy() for key, value in self._stored("harvest/").items()}
+        shard = out / "shard-00000.npz"
+        write_npz(shard, arrays)
+        rows = len(arrays["original"])
+        manifest = {
+            "schema_version": 1,
+            "source_checkpoint": str(
+                resolve_working_dir(
+                    self.scratch,
+                    str(config.harvest_source_checkpoint),
+                ),
+            ),
+            "groups_per_shard": 8,
+            "row_count": rows,
+            "shard_count": 1,
+            "shards": [
+                {"file": shard.name, "rows": rows, "sha256": file_sha256(shard)},
+            ],
+        }
+        (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        return out
+
+    def _stored(self, prefix: str) -> dict[str, Tensor]:
+        """Return the stored tensors under ``prefix``, the prefix removed."""
+        return {
+            key.removeprefix(prefix): value
+            for key, value in self.fixtures.items()
+            if key.startswith(prefix)
+        }

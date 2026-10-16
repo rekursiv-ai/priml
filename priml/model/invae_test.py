@@ -38,7 +38,8 @@ if TYPE_CHECKING:
 
 
 def _tiny_autoencoder() -> AutoencoderKL:
-    return AutoencoderKL(channels_latent=2, channel_multipliers=(1, 2))
+    # 32 is the narrowest width the checkpoint's 32-group norms accept.
+    return AutoencoderKL(channels_latent=2, channel_multipliers=(1, 2), channels=32)
 
 
 @pytest.mark.parametrize(
@@ -50,8 +51,11 @@ def test_state_dict_keys_and_shapes_match_the_checkpoint(
     golden: str,
 ) -> None:
     """Recorded from the reference port, so published checkpoints still load."""
+    # Shapes alone: the meta device allocates and initializes nothing.
+    with torch.device("meta"):
+        model = factory()
     listing = "\n".join(
-        f"{key} {tuple(value.shape)}" for key, value in factory().state_dict().items()
+        f"{key} {tuple(value.shape)}" for key, value in model.state_dict().items()
     )
     assert_text_golden(test_file=__file__, name=golden, rendered=listing)
 

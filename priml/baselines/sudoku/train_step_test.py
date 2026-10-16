@@ -21,6 +21,8 @@ from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
 from priml.baselines.sudoku.model import DeepRecurrence
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.baselines.sudoku.train_step import SudokuTrainStep
+from priml.model.attention.attention import Attention
+from priml.model.transformer.block import TransformerBlock
 from priml.train.parallelism import NoParallel
 
 
@@ -401,14 +403,24 @@ def test_eval_scores_the_ema_after_warmup_under_autocast() -> None:
     config.parallelism = NoParallel.Config(device="cpu")
     config.compile = None
     config.total_train_steps = 8
-    config.model.channels_in = 16
+    # bf16 is the recipe under test, and CPU bf16 backward runs a scalar kernel
+    # whose cost grows with every axis: so 4 wide on a 16-cell grid, not 16 on 81.
+    config.model.channels_in = 4
+    assert isinstance(config.model.block, TransformerBlock.Config)
+    attention = config.model.block.attn
+    assert isinstance(attention, Attention.Config)
+    attention.num_heads = 2
     config.model.num_layers = 1
     config.model.vocab_size = 11
-    config.model.embedding = GridEmbedding.Config(grid_shape=(81,))
+    config.model.embedding = GridEmbedding.Config(grid_shape=(16,))
     torch.manual_seed(0)
     step = config.make()
     assert config.dtype_autocast == torch.bfloat16
-    batch = _batch()
+    batch = {
+        "media": torch.randint(2, 11, (3, 16)),
+        "label": torch.randint(2, 11, (3, 16)),
+        "valid_count": 3,
+    }
     for _ in range(2):
         step.train_step(**batch)
     ema_logits = step.call_eval(**batch)

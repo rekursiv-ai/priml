@@ -721,7 +721,7 @@ def _arrays(frames: Frames) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndar
         frames.cells.numpy().reshape(len(frames.cells), CELL_VALUES),
         frames.aux.numpy(),
         frames.reward.numpy(),
-        frames.done.numpy().view(np.uint8),
+        frames.done.view(torch.uint8).numpy(),
     )
 
 

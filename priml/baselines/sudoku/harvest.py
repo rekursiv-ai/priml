@@ -678,7 +678,7 @@ class Harvest:
                     )
                 arrays = existing
             else:
-                _write_npz(path, arrays)
+                write_npz(path, arrays)
             rows = len(arrays["original"])
             shard_summaries.append(
                 {"file": path.name, "rows": rows, "sha256": file_sha256(path)},
@@ -896,6 +896,28 @@ class Harvest:
         )
 
 
+# ``np.savez_compressed`` stamps wall-clock zip entry times, so identical arrays produce
+# different bytes across runs; a fixed epoch keeps shard bytes (and the manifest's
+# sha256 provenance) reproducible. Written via temp file + atomic rename, so a present
+# file is complete.
+def write_npz(path: Path, arrays: dict[str, np.ndarray]) -> None:
+    """Write a compressed npz with fixed zip timestamps (byte-deterministic).
+
+    Args:
+      path: Destination ``.npz``.
+      arrays: Each array, by the name it is stored under.
+
+    """
+    temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, value in arrays.items():
+            info = zipfile.ZipInfo(f"{name}.npy", date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            with archive.open(info, "w", force_zip64=True) as stream:
+                np.save(stream, np.asanyarray(value), allow_pickle=False)
+    temporary.replace(path)
+
+
 @dataclass(slots=True, frozen=True, kw_only=True)
 class _PinTrace:
     """Every bounded fixed-HPS node in deterministic visitation order."""
@@ -1032,19 +1054,3 @@ def _board_rollout(
 ) -> LearnedCheckpointRollout:
     """Bind a from-state rollout to boards-as-feedback (roots and HPS nodes)."""
     return rollout(boards, boards, rows)
-
-
-# ``np.savez_compressed`` stamps wall-clock zip entry times, so identical arrays produce
-# different bytes across runs; a fixed epoch keeps shard bytes (and the manifest's
-# sha256 provenance) reproducible. Written via temp file + atomic rename, so a present
-# file is complete.
-def _write_npz(path: Path, arrays: dict[str, np.ndarray]) -> None:
-    """Write a compressed npz with fixed zip timestamps (byte-deterministic)."""
-    temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
-    with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name, value in arrays.items():
-            info = zipfile.ZipInfo(f"{name}.npy", date_time=(1980, 1, 1, 0, 0, 0))
-            info.compress_type = zipfile.ZIP_DEFLATED
-            with archive.open(info, "w", force_zip64=True) as stream:
-                np.save(stream, np.asanyarray(value), allow_pickle=False)
-    temporary.replace(path)

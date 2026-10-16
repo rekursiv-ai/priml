@@ -134,7 +134,9 @@ def _record_repro_lock(h: Harness) -> dict[str, Tensor]:
 
 
 def _record_repro_sieve(h: Harness) -> dict[str, Tensor]:
-    source = h.generator("source", seed=0)
+    # The frozen source is an input, not the run under test: the generator this
+    # pipeline trains is its own. ``gen_a`` is the same recipe at the same seed.
+    source = Harness(h.scratch, train=False).generator("gen_a", seed=0)
     cfg = _pipeline(h, "repro_sieve")
     cfg.screen = "committee"
     cfg.harvest_source_checkpoint = source

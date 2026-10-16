@@ -1,25 +1,12 @@
-"""Replay frozen training trajectories through the train loop and its routed step.
+"""Drive the train loop and its routed step at a size-only shrink of each recipe.
 
-The goldens in ``testdata/exp0NN.pt`` were recorded from the reference
-implementation this baseline was ported from (``exp000``, ``exp006``), from
-its port once its three training steps matched the reference bit for bit
-(``exp009``, ``exp010``), and from the port's own trainer before the move to
-the train loop (``exp004``). Each recipe runs through the same size-only
-shrink while preserving every numerical choice the experiment makes.
-
-Recorded per recipe, all compared with ``torch.equal``: every parameter and
-persistent buffer after init and a fingerprint of the global RNG; an
-evaluation rollout before and after training; three train steps (the batch the
-dataset served, loss, probe, every metric, the ACT pool); the final state,
-latents, and EMA shadow. Width 4 and batch 2 (latent hypotheses: width 12,
-batch 1): the goldens exercise every code path, not kernel throughput, so they
-stay a few KB each. Only the representative rungs keep a golden
-(``GOLDEN_RECIPES``); every rung still builds and steps on the 9x9 grid.
+Every rung builds, trains, and evaluates on the 9x9 grid; the units below pin
+the step's mechanisms one at a time. The pipeline goldens (``exp008``,
+``exp012``) replay this step bit for bit inside their training segments.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast, override
 
 import json
@@ -40,27 +27,16 @@ from priml.baselines.sudoku.puzzle_spec import SudokuSpec
 from priml.baselines.sudoku.routed_act_step import HaltRelease, RoutedActTrainStep
 from priml.model.swiglu import SwiGLU
 from priml.runtime import SingleProcess
-from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import (
-    assert_tensor_golden,
-    mismatches,
-    put_steps,
-    read_tensors,
-    rng_fingerprint,
-    stored,
-)
 from priml.train.checkpointer import Checkpointer
 from priml.train.ema import EMA, NoEMA
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Callable
+    from pathlib import Path
 
     from priml.baselines.sudoku.train_loop import SudokuTrainLoop
-    from priml.train.train_loop import TrainLoop
 
-
-_CWD: Final = Path(__file__).resolve().parent
 
 RECIPES: Final = (
     "exp000",
@@ -74,12 +50,6 @@ RECIPES: Final = (
     "exp010",
 )
 """Every training rung."""
-
-GOLDEN_RECIPES: Final = ("exp000", "exp004", "exp006", "exp009", "exp010")
-"""The rungs with a frozen trajectory: the baseline, the feedback repair channel,
-the full single-chain recipe, and both latent-hypothesis routings. The other
-rungs between exp000 and exp006 each add one mechanism that exp006 carries, so
-their trajectories are compositions the exp006 golden already freezes."""
 
 TRAIN_STEPS: Final = 3
 
@@ -138,7 +108,9 @@ def port_config(recipe: str, scratch: Path) -> SudokuTrainLoop:
     config.eval_warmup_batches = 0
     step = config.step
     step.total_train_steps = TRAIN_STEPS
-    step.pool.max_steps = 3
+    # Two ACT steps, two slow cycles, one fast: every branch the recipe's sizes
+    # reach (coverage.py lines and arcs, measured), and the fewest ops.
+    step.pool.max_steps = 2
     ema = step.ema
     assert isinstance(ema, EMA.Config)
     ema.update_after_step = min(ema.update_after_step, 2)
@@ -148,7 +120,7 @@ def port_config(recipe: str, scratch: Path) -> SudokuTrainLoop:
     model.num_layers = 1
     model.puzzle_emb_len = 2
     model.slow_cycles = 2
-    model.fast_cycles = 2
+    model.fast_cycles = 1
     model.compile = False
     if model.block is None:
         model.block = recipe_block()
@@ -170,87 +142,6 @@ def port_config(recipe: str, scratch: Path) -> SudokuTrainLoop:
     return config
 
 
-def record(loop: TrainLoop) -> dict[str, Tensor]:
-    """Run the recorded protocol; call inside ``host_agnostic_numerics``.
-
-    Args:
-      loop: A freshly constructed loop.
-
-    Returns:
-      trajectory: Flat name-to-tensor record.
-
-    """
-    step = cast(RoutedActTrainStep, loop.step)
-    out: dict[str, Tensor] = {"rng": rng_fingerprint()}
-    _put(out, "init", _state(step))
-    loader = cast("Iterable[dict[str, object]]", loop.dataset.eval_dataloader())
-    evaluation = step.preprocess_batch(dict(next(iter(loader))))
-    _put(out, "eval_before", flatten(step.eval_loss(**evaluation)))
-    data: list[dict[str, Tensor]] = []
-    train: list[dict[str, Tensor]] = []
-    steps: list[dict[str, Tensor]] = []
-    for _ in range(TRAIN_STEPS):
-        batch = loop._get_next_batch()
-        data.append(flatten(batch))
-        train.append(flatten(step.train_step(**batch)))
-        steps.append({"steps": step.pool.steps.clone()})
-    put_steps(out, "data", data)
-    put_steps(out, "train", train)
-    put_steps(out, "pool", steps)
-    _put(out, "pool/final", pool_state(step))
-    _put(out, "post", _state(step))
-    _put(out, "ema", dict(step.ema_shadow or {}))
-    _put(out, "eval_after", flatten(step.eval_loss(**evaluation)))
-    return out
-
-
-def pool_state(step: RoutedActTrainStep) -> dict[str, Tensor]:
-    """Return the recorded slot state under the golden's names."""
-    pool = step.pool
-    return {
-        "inputs": pool.inputs,
-        "labels": pool.labels,
-        "steps": pool.steps,
-        "halted": pool.halted,
-        "puzzle_ids": pool.puzzle_ids,
-        "feedback": pool.feedback,
-        "z_slow": pool.z_slow,
-        "z_fast": pool.z_fast,
-    }
-
-
-def run(config: SudokuTrainLoop, scratch: Path) -> dict[str, Tensor]:
-    """Write the dataset, build the loop, and record it.
-
-    Args:
-      config: A loop config prepared for the recorded fixture.
-      scratch: The directory the config points at.
-
-    Returns:
-      trajectory: Flat name-to-tensor record.
-
-    """
-    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
-        write_dataset(scratch / "data")
-        loop = config.make()
-        try:
-            return record(loop)
-        finally:
-            loop.close()
-
-
-def golden_path(recipe: str) -> Path:
-    """Where the golden for ``recipe`` lives."""
-    return _CWD / "testdata" / f"{recipe}.pt"
-
-
-@pytest.mark.parametrize("recipe", GOLDEN_RECIPES)
-def test_golden_replays_bit_for_bit(recipe: str, tmp_path: Path) -> None:
-    """The loop and step reproduce the frozen trajectory with zero mismatches."""
-    actual = run(port_config(recipe, tmp_path), tmp_path)
-    assert_tensor_golden(golden_path(recipe), actual)
-
-
 @pytest.mark.parametrize("recipe", RECIPES)
 def test_full_geometry_still_runs(recipe: str, tmp_path: Path) -> None:
     """Every rung builds, trains a step, and evaluates on the 9x9 grid."""
@@ -269,34 +160,6 @@ def test_full_geometry_still_runs(recipe: str, tmp_path: Path) -> None:
         finally:
             loop.close()
     assert evaluation["model"].shape == (media.shape[0], 1 + 81)
-
-
-@pytest.mark.parametrize("recipe", GOLDEN_RECIPES)
-def test_one_ulp_weight_bites(recipe: str, tmp_path: Path) -> None:
-    config = port_config(recipe, tmp_path)
-    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
-        write_dataset(tmp_path / "data")
-        loop = config.make()
-        try:
-            with torch.no_grad():
-                weight = next(cast(RoutedActTrainStep, loop.step).model.parameters())
-                bits = torch.int32 if weight.dtype == torch.float32 else torch.int16
-                weight.view(bits).view(-1)[0] += 1
-            actual = record(loop)
-        finally:
-            loop.close()
-    report = mismatches(read_tensors(golden_path(recipe)), actual)
-    assert any(line.startswith("init/") for line in report), report
-
-
-def test_golden_bites(tmp_path: Path) -> None:
-    """A changed loss weight is reported, not absorbed."""
-    config = port_config("exp006", tmp_path)
-    cardinality = config.step.cardinality
-    assert cardinality is not None
-    cardinality.weight = 0.25
-    report = mismatches(read_tensors(golden_path("exp006")), run(config, tmp_path))
-    assert any(line.startswith("train/loss") for line in report), report
 
 
 def test_a_short_run_checkpoints_evaluates_and_resumes(tmp_path: Path) -> None:
@@ -436,7 +299,7 @@ def test_release_keeps_each_rows_first_confident_step(tmp_path: Path) -> None:
     assert released_metrics["act_steps"] == 1.0
     assert released_metrics["act_cap_frac"] == 0.0
     assert "act_cap_frac" not in capped
-    assert capped["act_steps"] == 3.0
+    assert capped["act_steps"] == float(config.step.pool.max_steps)
     assert torch.equal(
         HaltRelease(HaltRelease.Config(threshold=0.5))(torch.tensor([0.4, 0.5, 0.6])),
         torch.tensor([False, True, True]),
@@ -535,41 +398,6 @@ def test_a_configured_corruption_drives_the_carry(tmp_path: Path) -> None:
     assert isinstance(carry.corruption, CellCorruption)
     assert carry.corruption.config.rate == 0.25
     loop.close()
-
-
-def flatten(values: Mapping[str, object]) -> dict[str, Tensor]:
-    """Tensors as-is, numbers as int64/float64, nested mappings flattened.
-
-    Args:
-      values: A batch or a train/eval step output.
-
-    Returns:
-      flat: Slash-joined keys to tensors.
-
-    """
-    out: dict[str, Tensor] = {}
-    for key, value in values.items():
-        if isinstance(value, dict):
-            nested = cast("dict[str, object]", value)
-            out |= {f"{key}/{k}": v for k, v in flatten(nested).items()}
-        elif isinstance(value, Tensor):
-            out[key] = value
-        elif isinstance(value, int):
-            out[key] = torch.tensor(value, dtype=torch.int64)
-        else:
-            out[key] = torch.tensor(cast(float, value), dtype=torch.float64)
-    return out
-
-
-def _state(step: RoutedActTrainStep) -> dict[str, Tensor]:
-    """Parameters and persistent buffers."""
-    return {k: v for k, v in step.model.state_dict().items() if k != "_dummy"}
-
-
-def _put(out: dict[str, Tensor], prefix: str, values: Mapping[str, Tensor]) -> None:
-    """Store :func:`stored` copies of ``values`` under ``prefix``."""
-    for key, value in values.items():
-        out[f"{prefix}/{key}"] = stored(value)
 
 
 if __name__ == "__main__":

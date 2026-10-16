@@ -38,15 +38,6 @@ def test_verifier_fit_needs_a_positive_step_budget() -> None:
         VerifierFit.Config(max_steps=0).make()
 
 
-def _record_verifier(h: Harness) -> dict[str, Tensor]:
-    h.harvest(h.generator("gen_a", seed=0))
-    state = cast(
-        "dict[str, dict[str, dict[str, Tensor]]]",
-        torch.load(h.verifier(seed=0), weights_only=True),
-    )
-    return weight_tensors("model", state["step"]["model"])
-
-
 def _record_denoising_fit(h: Harness) -> dict[str, Tensor]:
     h.harvest(h.generator("gen_a", seed=0))
     model = DenoisingVerifier.Config()
@@ -93,7 +84,6 @@ def test_denoising_loss_adds_masked_cross_entropy_on_correct_cells() -> None:
 
 
 _RECORDERS: Final[dict[str, Callable[[Harness], dict[str, Tensor]]]] = {
-    "verifier_fit": _record_verifier,
     "denoising_fit": _record_denoising_fit,
 }
 
@@ -108,7 +98,8 @@ def test_golden_replays_bit_for_bit(
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path / "torchinductor"))
     monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton"))
     puzzle_data.dihedral_indices.cache_clear()
-    report = mismatches(load_golden(case), replay(_RECORDERS[case], tmp_path))
+    actual = replay(_RECORDERS[case], tmp_path, train=False)
+    report = mismatches(load_golden(case), actual)
     assert not report, f"{len(report)} mismatches:\n" + "\n".join(report)
 
 
