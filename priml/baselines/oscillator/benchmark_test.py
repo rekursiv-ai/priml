@@ -44,9 +44,14 @@ def test_new_geometry_does_not_change_etth1() -> None:
     assert old.step.model.channels == 7
 
 
-@pytest.mark.compute_training
-def test_test_changes_do_not_change_training_or_reference_budget() -> None:
+@pytest.mark.parametrize(
+    "ridge",
+    [True, pytest.param(False, marks=pytest.mark.compute_training)],
+)
+def test_test_changes_do_not_change_training_or_reference_budget(ridge: bool) -> None:
     cfg = exp_smoke()
+    if ridge:
+        cfg.method = RidgeCorrection.Config()
     before_rng = torch.get_rng_state().clone()
     first = cfg.make().run()
     assert torch.equal(before_rng, torch.get_rng_state())

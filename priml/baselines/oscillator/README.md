@@ -84,13 +84,29 @@ uv --quiet run --frozen pytest priml/baselines/oscillator priml/baselines/etth1 
 ```
 
 Training tests carry the repository's `compute_training` marker. The default
-fast tier skips them. Include the training tier when checking this directory's
-coverage, without changing the repository's marker or coverage rules:
+fast tier skips them and checks the fitting logic with scripted weight updates.
+The command above also runs real optimizer updates. Run the usual checks with:
 
 ```sh
-PYTEST_ADDOPTS="-m 'not ci_smoke and not cuda and not integration and not performance and not cluster'" \
-  uv --quiet run --frozen --group pre-commit pre-commit run \
+uv --quiet run --frozen --group pre-commit pre-commit run \
   --files $(rg --files priml/baselines/oscillator)
+```
+
+The numerical goldens in `testdata/` pin DLinear initialization and two-update
+oscillator runs, with and without cheap-data pretraining. They keep initial
+weights, diagnostic losses, and final state; generated inputs and intermediate
+training tensors are not saved. Replay uses exact equality, with tests that
+deliberately change the learning rate or one output bit to check that it fails.
+These are regression records from this implementation, not an independent
+reference implementation of the oscillator benchmark.
+
+Both recording and replay run through pytest with PRIML's numerical environment
+and `host_agnostic_numerics()`. Only regenerate after an intentional recipe
+change, inspect the new records, then replay without regeneration:
+
+```sh
+BFB_REGENERATE=1 uv --quiet run --frozen pytest priml/baselines/oscillator/regression_test.py -o addopts= -q
+uv --quiet run --frozen pytest priml/baselines/oscillator/regression_test.py -o addopts= -q
 ```
 
 ## Local pilot
@@ -98,14 +114,19 @@ PYTEST_ADDOPTS="-m 'not ci_smoke and not cuda and not integration and not perfor
 The first CPU comparison on October 15, 2026 used the settings above. Mean
 scaled MSE across the three model seeds was:
 
-- With matching simulators, DLinear scored `0.001361` on familiar trajectories
-  and `0.001357` on shifted trajectories. Pretraining scored `0.001309` and
-  `0.001301`. The cheap simulator and its ridge correction had zero error,
-  as expected when the reference uses the same equations and observed state.
-- With mismatched simulators, DLinear scored `0.012306` and `1.586426`.
-  Pretraining scored `0.012438` and `1.596659`. Ridge correction scored
-  `0.000086` and `1.060733`, while the uncorrected cheap simulator scored
-  `0.044674` and `0.395752`.
+| Simulator | Method | Familiar scaled MSE | Shifted scaled MSE |
+| --- | --- | ---: | ---: |
+| Matched | DLinear (`exp000`) | 0.001361 | 0.001357 |
+| Matched | Pretrained DLinear (`exp001`) | 0.001309 | 0.001301 |
+| Matched | Ridge correction (`exp002`) | 0 | 0 |
+| Matched | Cheap simulator | 0 | 0 |
+| Mismatched | DLinear (`exp000`) | 0.012306 | 1.586426 |
+| Mismatched | Pretrained DLinear (`exp001`) | 0.012438 | 1.596659 |
+| Mismatched | Ridge correction (`exp002`) | 0.000086 | 1.060733 |
+| Mismatched | Cheap simulator | 0.044674 | 0.395752 |
+
+Zero error is expected for the matched cheap simulator and ridge correction:
+the reference uses the same equations and observed state.
 
 The simple correction fits familiar conditions well but extrapolates poorly.
 On the shifted test, leaving the cheap simulator alone beats all three fitted
