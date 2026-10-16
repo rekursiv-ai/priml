@@ -201,7 +201,8 @@ def test_golden_replays_bit_for_bit(
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path / "torchinductor"))
     monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton"))
     puzzle_data.dihedral_indices.cache_clear()
-    report = mismatches(load_golden(case), replay(_RECORDERS[case], tmp_path))
+    actual = replay(_RECORDERS[case], tmp_path, train=False)
+    report = mismatches(load_golden(case), actual)
     assert not report, f"{len(report)} mismatches:\n" + "\n".join(report)
 
 

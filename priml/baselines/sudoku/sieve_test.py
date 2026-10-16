@@ -309,40 +309,6 @@ def test_sieve_hps_round_passes_survivors_and_policy(
     assert grids.dtype == torch.int64
 
 
-def _record_sieve(h: Harness) -> dict[str, Tensor]:
-    checkpoint = h.generator("gen_a", seed=0)
-    h.harvest(checkpoint)
-    members = tuple(h.verifier(seed) for seed in range(3))
-    cfg = SieveEval.Config()
-    cfg.experiment_name = "sieve"
-    cfg.base_dir = h.scratch
-    cfg.runtime.device = "cpu"
-    cfg.checkpoint_path = checkpoint
-    cfg.model = h.model()
-    cfg.dataset.working_dir = h.data
-    cfg.dataset.batch_size = 2
-    cfg.search = h.search()
-    cfg.views = NINE_VIEWS[:1]
-    cfg.tail_search = (1, 1, 1, 1)
-    cfg.evaluation_count = 2
-    cfg.verifier_checkpoints = members
-    acceptor = VerifierAcceptor.Config()
-    acceptor.model = h.verifier_model()
-    # Three-step verifiers score every grid near zero, so the recipe's 0 locks
-    # nothing. The threshold is the median committee score on the test
-    # puzzles' givens-only boards, so each round both locks and defers.
-    acceptor.threshold = _committee_median(h, acceptor, members)
-    cfg.acceptor = acceptor
-    metrics = cfg.make().run()
-    rounds = cast("list[dict[str, object]]", metrics["eval/rounds"])
-    per_round = {
-        f"rounds/{i}/{key}": torch.tensor(cast("int", stat[key]), dtype=torch.int64)
-        for i, stat in enumerate(rounds)
-        for key in ("entering", "locked", "deferred")
-    }
-    return {**metric_tensors(metrics), **per_round, **h.dumps("sieve")}
-
-
 def _committee_median(
     h: Harness,
     acceptor: VerifierAcceptor.Config,
@@ -381,7 +347,9 @@ def _record_staircase(h: Harness) -> dict[str, Tensor]:
     cfg.verifier_checkpoints = members
     acceptor = VerifierAcceptor.Config()
     acceptor.model = h.verifier_model()
-    # As in _record_sieve: the median committee score both locks and defers.
+    # Three-step verifiers score every grid near zero, so the recipe's 0 locks
+    # nothing. The threshold is the median committee score on the test
+    # puzzles' givens-only boards, so each round both locks and defers.
     acceptor.threshold = _committee_median(h, acceptor, members)
     cfg.acceptor = acceptor
     metrics = cfg.make().run()
@@ -826,7 +794,6 @@ def test_fitted_sieve_fits_only_missing_members(
 
 
 _RECORDERS: Final[dict[str, Callable[[Harness], dict[str, Tensor]]]] = {
-    "sieve": _record_sieve,
     "staircase": _record_staircase,
 }
 
@@ -841,7 +808,8 @@ def test_golden_replays_bit_for_bit(
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path / "torchinductor"))
     monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton"))
     puzzle_data.dihedral_indices.cache_clear()
-    report = mismatches(load_golden(case), replay(_RECORDERS[case], tmp_path))
+    actual = replay(_RECORDERS[case], tmp_path, train=False)
+    report = mismatches(load_golden(case), actual)
     assert not report, f"{len(report)} mismatches:\n" + "\n".join(report)
 
 

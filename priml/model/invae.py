@@ -293,6 +293,7 @@ class AutoencoderKL(nn.Module):
         *,
         channels_latent: int,
         channel_multipliers: Sequence[int],
+        channels: int = 128,
     ) -> None:
         """Build the autoencoder.
 
@@ -300,14 +301,17 @@ class AutoencoderKL(nn.Module):
           channels_latent: Latent channels.
           channel_multipliers: Per-stage widths; each stage but the last halves
             the spatial size.
+          channels: First-stage width; a multiple of the norms' 32 groups.
 
         """
         super().__init__()
         self.encoder = Encoder(
+            channels=channels,
             channel_multipliers=channel_multipliers,
             channels_latent=channels_latent,
         )
         self.decoder = Decoder(
+            channels=channels,
             channel_multipliers=channel_multipliers,
             channels_latent=channels_latent,
         )

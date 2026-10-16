@@ -1,7 +1,7 @@
 """Tests for winner-take-all training over several fast-latent hypotheses.
 
-The recipes' numerics are pinned by the train step goldens (``exp009``,
-``exp010``); these tests pin each piece's contract on a tiny model.
+The staircase golden replays a trained hypothesis generator through the sieve;
+these tests pin each piece's contract on a tiny model.
 """
 
 from __future__ import annotations
@@ -243,6 +243,25 @@ def test_winner_take_all_trains_the_lowest_loss_hypothesis() -> None:
     assert torch.equal(logits, every[torch.arange(ROWS), winner])
     logits.sum().backward()
     assert model.head.weight.grad is not None
+
+
+def test_a_reseat_redraws_only_the_freshly_seated_slots() -> None:
+    """Slots mid-rollout keep their carried hypotheses; none fresh redraws none."""
+    torch.manual_seed(0)
+    model = tiny_config().make()
+    pool = seated(model)
+    routing = WinnerTakeAll(WinnerTakeAll.Config())
+    routing.seat(model, pool, global_step=7)
+    carried = routing._carried().clone()
+    pool.steps += 1
+    routing.seat(model, pool, global_step=8)
+    assert torch.equal(routing._carried(), carried)
+    pool.steps[1] = 0
+    routing.seat(model, pool, global_step=9)
+    redrawn = model.fresh_fast_states(1, seed=9 * 1_024)
+    expected = carried.clone()
+    expected[1] = redrawn[0]
+    assert torch.equal(routing._carried(), expected)
 
 
 def test_winner_recompute_trains_the_same_winner() -> None:

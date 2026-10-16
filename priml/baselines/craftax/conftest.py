@@ -74,6 +74,14 @@ class _Session(Protocol):
     def items(self) -> Sequence[_Item]: ...
 
 
+# The archive fsyncs every shard file and its directory, 5-30 ms each on a laptop disk;
+# it put 99 of world_model's 108 tests over 100 ms (measured).
+@pytest.fixture(autouse=True)
+def _skip_fsync(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``os.fsync`` a no-op: a unit test never crashes the host it syncs for."""
+    monkeypatch.setattr(os, "fsync", _no_fsync)
+
+
 def pytest_sessionstart(session: _Session) -> None:
     """Compile on the xdist controller, when it loaded this file at startup."""
     session.config.stash[_SEEN_AT_START] = True
@@ -104,6 +112,10 @@ def _needs_kernels(items: Iterable[_Item]) -> bool:
         and item.get_closest_marker("skip") is None
         for item in items
     )
+
+
+def _no_fsync(fd: int) -> None:
+    del fd
 
 
 def _compile(config: _Config) -> None:

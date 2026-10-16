@@ -10,7 +10,6 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.sudoku import puzzle_data
 from priml.baselines.sudoku.harvest import (
     Harvest,
     _exhaustive_pin_trace,
@@ -22,12 +21,11 @@ from priml.baselines.sudoku.harvest import (
     select_harvest_views,
 )
 from priml.baselines.sudoku.rollout import LearnedCheckpointRollout
-from priml.baselines.sudoku.testing import Harness, load_golden, replay
-from priml.testing.golden import mismatches
+from priml.baselines.sudoku.testing import Harness, write_dataset
+from priml.testing.bfb import host_agnostic_numerics
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
     from priml.baselines.sudoku.latent_recursion import LatentRecursion
@@ -46,8 +44,18 @@ def test_harvest_plan_helpers_count_select_and_corrupt() -> None:
         )
         == 29
     )
-    with pytest.raises(ValueError, match="positive"):
-        fixed_hps_node_count(depth=0, candidates=2, cell_attempts=2)
+    # Each dimension's floor is 1, alone: a tree of one candidate is valid.
+    assert fixed_hps_node_count(depth=1, candidates=1, cell_attempts=1) == 1
+    for depth, candidates, cell_attempts in ((0, 2, 2), (2, 0, 2), (2, 2, 0)):
+        with pytest.raises(
+            ValueError,
+            match=r"^fixed HPS dimensions must all be positive\.$",
+        ):
+            fixed_hps_node_count(
+                depth=depth,
+                candidates=candidates,
+                cell_attempts=cell_attempts,
+            )
     with pytest.raises(ValueError, match="nonempty"):
         rows_per_view(
             search_depth=2,
@@ -255,14 +263,38 @@ def test_harvest_resumes_only_onto_a_matching_shard(tmp_path: Path) -> None:
         _offline_harvest(tmp_path, _shard(solved=False)).run()
 
 
+def test_harvest_publishes_the_corpus_training_froze(tmp_path: Path) -> None:
+    """A real rollout from the stored generator writes the stored shard, byte for byte.
+
+    The pipeline goldens harvest end to end; this pins the harvest alone, on
+    the generator the evaluation goldens share, against the shard it froze.
+    """
+    stored = Harness(tmp_path, train=False)
+    write_dataset(stored.data)
+    source = stored.generator("gen_a", seed=0)
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        torch.manual_seed(0)
+        live = Harness(tmp_path / "live", train=True)
+        live.scratch = tmp_path
+        harvested = live.harvest(source)
+    frozen = Harness(tmp_path / "frozen", train=False)
+    write_dataset(frozen.data)
+    expected = frozen.harvest(source)
+    shard = "shard-00000.npz"
+    assert (harvested / shard).read_bytes() == (expected / shard).read_bytes()
+    manifest = json_loads((harvested / "manifest.json").read_text(), dict[str, object])
+    assert manifest["row_count"] == 3 * rows_per_view(
+        search_depth=1,
+        search_candidates=2,
+        search_cell_attempts=1,
+        random_corruption_strengths=(1,),
+        random_starts_per_strength=1,
+    )
+
+
 def test_harvest_needs_a_source_checkpoint() -> None:
     with pytest.raises(ValueError, match="checkpoint"):
         Harvest.Config().make()
-
-
-def _record_harvest(h: Harness) -> dict[str, Tensor]:
-    h.harvest(h.generator("gen_a", seed=0))
-    return h.dumps("harvest")
 
 
 def test_harvest_rejects_an_invalid_plan_before_loading() -> None:
@@ -279,25 +311,6 @@ def test_harvest_rejects_an_invalid_plan_before_loading() -> None:
             setattr(cfg, name, value)
         with pytest.raises(ValueError, match=message):
             cfg.make()
-
-
-_RECORDERS: Final[dict[str, Callable[[Harness], dict[str, Tensor]]]] = {
-    "harvest": _record_harvest,
-}
-
-
-@pytest.mark.parametrize("case", _RECORDERS)
-def test_golden_replays_bit_for_bit(
-    case: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The runner reproduces the frozen evaluation with zero mismatches."""
-    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path / "torchinductor"))
-    monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton"))
-    puzzle_data.dihedral_indices.cache_clear()
-    report = mismatches(load_golden(case), replay(_RECORDERS[case], tmp_path))
-    assert not report, f"{len(report)} mismatches:\n" + "\n".join(report)
 
 
 if __name__ == "__main__":

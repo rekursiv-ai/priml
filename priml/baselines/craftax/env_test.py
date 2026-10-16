@@ -552,6 +552,14 @@ def test_a_share_posted_after_its_helper_stopped_is_not_waited_for() -> None:
     assert status < 0
 
 
+def test_a_zero_spin_budget_needs_no_cycle_counter_calibration() -> None:
+    env = _env()
+    try:
+        assert ticks_per_second.cache_info().misses == 0
+    finally:
+        env.close()
+
+
 def test_the_spin_budget_spans_spin_seconds_of_the_cycle_counter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
