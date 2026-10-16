@@ -27,10 +27,10 @@ __all__ = [
     "EmbeddingConfig",
     "HasAttention",
     "HasDepthIndex",
-    "HasForwardCached",
     "HasResetParameters",
     "HeadGeometry",
     "LatentAttentionKernel",
+    "LayerCache",
     "LookupTable",
     "NumHeads",
     "RotaryConfig",
@@ -40,7 +40,6 @@ __all__ = [
     "TensorModule",
     "WeightedTensorModule",
     "flatten_depth_index",
-    "has_forward_cached",
     "has_weight",
     "infer_same_width",
     "is_cached_attention",
@@ -154,8 +153,21 @@ class RotaryFactors(Protocol):
 
 
 @runtime_checkable
-class HasForwardCached[CacheT](Protocol):
-    """A layer with an explicit cached decode path.
+class LayerCache(Protocol):
+    """Per-layer decode state keyed by each layer's full ``depth_index``."""
+
+    def __getitem__(self, key: DepthIndex, /) -> object:
+        """Return the state for one layer."""
+        ...
+
+    def __contains__(self, key: object, /) -> bool:
+        """Return whether state exists for a layer."""
+        ...
+
+
+@runtime_checkable
+class CachedAttention[CacheT](Protocol):
+    """An attention sublayer that accepts and allocates its cache.
 
     Method-only on purpose: ``isinstance`` against a runtime-checkable Protocol
     resolves data members through ``inspect.getattr_static``, which never sees
@@ -164,26 +176,16 @@ class HasForwardCached[CacheT](Protocol):
     real block; read the attribute with a plain ``getattr`` instead.
     """
 
-    def forward_cached(
+    def __call__(
         self,
         x: Tensor,
+        /,
         *,
-        cache: CacheT,
+        cache: LayerCache,
         **kwargs: object,
-    ) -> tuple[Tensor, CacheT]:
-        """Run the layer while reading and updating ``cache``."""
+    ) -> Tensor:
+        """Apply the attention while reading and updating ``cache``."""
         ...
-
-
-@runtime_checkable
-class CachedAttention[CacheT](HasForwardCached[CacheT], Protocol):
-    """An attention sublayer that also allocates its own cache.
-
-    Two shapes because the two roles differ: a BLOCK has a cached path but
-    delegates allocation to its ``attn`` (which alone knows whether the cache
-    holds K/V, a compressed latent, or a recurrent state), so a block is only a
-    :class:`HasForwardCached`; the attention is the one that allocates.
-    """
 
     def alloc_kv_cache(
         self,
@@ -435,14 +437,9 @@ def flatten_depth_index(depth_index: DepthIndex) -> int:
 
 
 # ``isinstance`` against a generic Protocol leaves ``CacheT`` unsolved, so
-# every downstream cache is Unknown; these guards name the erased parameter.
-def has_forward_cached(module: object) -> TypeGuard[HasForwardCached[object]]:
-    """Check for the cached decode path, with an opaque cache type."""
-    return isinstance(module, HasForwardCached)
-
-
+# every downstream cache is Unknown; this guard names the erased parameter.
 def is_cached_attention(module: object) -> TypeGuard[CachedAttention[object]]:
-    """Check for cache allocation plus the cached decode path."""
+    """Check for cache allocation plus the cache-aware call."""
     return isinstance(module, CachedAttention)
 
 

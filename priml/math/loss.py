@@ -6,18 +6,118 @@ config slot takes one of these directly via ``PartialConfig``.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Literal
+
 from torch import Tensor, nn
 
 import torch
 
+from priml.math.basic import reduction_dims
 from priml.math.numeric import log_modulus
 
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+
 __all__ = [
+    "cross_entropy_logz",
     "cross_entropy_with_batched_smoothing",
     "log_stablemax",
     "stablemax_cross_entropy",
 ]
+
+
+def cross_entropy_logz(
+    input: Tensor,
+    target: Tensor,
+    *,
+    weight: Tensor | None = None,
+    ignore_index: int = -100,
+    reduction: Literal["none", "mean", "sum"] = "mean",
+    label_smoothing: float = 0.0,
+    dim: int | Sequence[int] = 1,
+) -> tuple[Tensor, Tensor]:
+    """``nn.functional.cross_entropy`` that also returns its log-normalizer.
+
+    The log-normalizer ``log Z`` is what z-loss penalizes, ``mean(log Z ** 2)``,
+    which keeps the logits from drifting where bf16 cannot resolve them; one
+    ``logsumexp`` serves both. A ``-inf`` logit takes no probability, so masking
+    entries to ``-inf`` restricts the softmax to the rest.
+
+    ``log Z`` is not recovered from ``F.cross_entropy`` as ``loss + x_t``: that
+    adds the loss's rounding to the logit's, measured up to 5.8x the error of a
+    direct ``logsumexp`` on bfloat16 logits.
+
+    It computes in the logits' dtype. On bfloat16 logits ``log Z`` rounds at its
+    own magnitude before the subtraction, and the gradient through it with it,
+    several times further from exact than ``F.cross_entropy`` on the same input;
+    pass float32 logits where that matters.
+
+    Args:
+      input: Logits; the class axes are ``dim``.
+      target: Class indices, ``input``'s shape without ``dim``. Over several
+        axes, a row-major index into them in ``input``'s axis order.
+      weight: Per-class weight, ``[C]``.
+      ignore_index: Target value that contributes no loss and no gradient.
+      reduction: "none", "mean", or "sum", as in ``F.cross_entropy``.
+      label_smoothing: Mass in ``[0, 1]`` spread uniformly over the classes.
+      dim: Class axis, or axes taking one joint softmax. ``1`` is
+        ``F.cross_entropy``'s; pass ``0`` for unbatched logits.
+
+    Returns:
+      loss: ``F.cross_entropy`` with the same arguments.
+      logz: ``logsumexp`` over ``dim``, shaped like ``target``, never reduced:
+        z-loss squares it first. ``0`` where ``target`` is ignored.
+
+    References:
+      https://arxiv.org/abs/2204.02311
+        Chowdhery et al. 2022. PaLM: z-loss on the softmax normalizer.
+
+    Derivation::
+      With w = weight (or ones), a = label_smoothing, and C classes,
+      -log_softmax(x)_c = log Z - x_c, so
+      nll = w_t * (log Z - x_t)
+      smooth = -sum_c w_c * log_softmax(x)_c / C = (log Z * sum(w) - x @ w) / C
+      loss = lerp(nll, smooth, a)
+
+    """
+    dims = reduction_dims(dim, ndim=input.ndim)
+    # One axis stays in place: moving it last and flattening copies ``input``
+    # for ``F.cross_entropy``'s ``[N, C, ...]`` layout.
+    if len(dims) == 1:
+        (axis,) = dims
+        logits = input
+    else:
+        axis = input.ndim - len(dims)
+        logits = input.movedim(dims, tuple(range(axis, input.ndim))).flatten(axis)
+    logz = logits.logsumexp(axis)
+    valid = target != ignore_index
+    index = torch.where(valid, target, 0)
+    loss = logz - logits.gather(axis, index.unsqueeze(axis)).squeeze(axis)
+    if weight is None:
+        count = valid
+    else:
+        count = torch.where(valid, weight[index], 0.0)
+        loss = count * loss
+    # Skipped at zero, not multiplied by it: one ``-inf`` logit makes ``smooth``
+    # infinite, and ``0 * inf`` is NaN.
+    if label_smoothing:
+        if weight is None:
+            smooth = logz - logits.mean(axis)
+        else:
+            weighted = logits.movedim(axis, -1) @ weight
+            smooth = (logz * weight.sum() - weighted) / logits.shape[axis]
+        loss = loss.lerp(smooth, label_smoothing)
+    # ``where``, not a multiply: an ignored target may sit on a ``-inf`` logit,
+    # and ``inf * 0`` would turn every reduction into NaN.
+    loss = torch.where(valid, loss, 0.0)
+    logz = torch.where(valid, logz, 0.0)
+    if reduction == "none":
+        return loss, logz
+    if reduction == "sum":
+        return loss.sum(), logz
+    return loss.sum() / count.sum(), logz
 
 
 def cross_entropy_with_batched_smoothing(
@@ -26,7 +126,7 @@ def cross_entropy_with_batched_smoothing(
     *,
     weight: Tensor | None = None,
     ignore_index: int = -100,
-    reduction: str = "mean",
+    reduction: Literal["none", "mean", "sum"] = "mean",
     label_smoothing: float | Tensor = 0.0,
 ) -> Tensor:
     """Cross-entropy loss supporting per-element label smoothing.
@@ -62,10 +162,9 @@ def cross_entropy_with_batched_smoothing(
     num_classes = input.shape[1]
     log_probs = input.log_softmax(dim=1)
 
-    # ``ignore_index`` may exceed ``num_classes``; clamp the index used for
-    # gathering and zero those positions out via ``mask`` afterwards.
-    mask = (target != ignore_index).to(input.dtype)
-    safe_target = target.clamp(0, num_classes - 1)
+    # Only ignored targets may be outside the class range; gather rejects others.
+    mask = target != ignore_index
+    safe_target = torch.where(mask, target, 0)
     gathered = log_probs.gather(1, safe_target.unsqueeze(1)).squeeze(1)
 
     # PyTorch weights both the NLL and the smoothing term by the per-class
@@ -87,7 +186,7 @@ def cross_entropy_with_batched_smoothing(
     if reduction == "sum":
         return loss.sum()
     # "mean"
-    return loss.sum() / (target_weight * mask).sum().clamp(min=1)
+    return loss.sum() / (target_weight * mask).sum()
 
 
 def log_stablemax(x: Tensor, dim: int = -1) -> Tensor:
@@ -153,13 +252,14 @@ def stablemax_cross_entropy(
         bf16's own rounding.
 
     """
-    logprobs = log_stablemax(logits, dim=-1)
+    class_dim = logits.ndim - 1
+    logprobs = log_stablemax(logits)
     if valid_mask is None:
         valid_mask = labels != ignore_index
-    transformed_labels = torch.where(valid_mask, labels, 0)
+    transformed_labels = torch.where(valid_mask, labels, torch.zeros_like(labels))
     prediction_logprobs = torch.gather(
         logprobs,
-        index=transformed_labels.to(torch.long).unsqueeze(-1),
-        dim=-1,
-    ).squeeze(-1)
+        index=transformed_labels.unsqueeze(class_dim),
+        dim=class_dim,
+    ).squeeze(class_dim)
     return -torch.where(valid_mask, prediction_logprobs, 0.0)

@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
-from configgle.testing import assert_pprint_golden
 from torch.distributed.tensor import Replicate, Shard
 
 import pytest
@@ -16,6 +15,7 @@ from priml.model import linear
 from priml.model.linear import EnsembleLinear, Linear
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 if TYPE_CHECKING:
@@ -313,6 +313,6 @@ def test_ensemble_linear_cost_is_every_member() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

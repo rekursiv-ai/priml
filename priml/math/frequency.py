@@ -7,10 +7,9 @@ from typing import TYPE_CHECKING
 import functools
 import math
 
-from torch import Tensor
+from torch import Tensor, fft
 
 import torch
-import torch.fft
 
 from priml.memory import convert_to_tensor
 
@@ -40,6 +39,8 @@ def dct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:
 
     """
     x = convert_to_tensor(x)
+    if not x.dtype.is_floating_point:
+        raise TypeError("DCT requires a floating-point input.")
     shape = x.shape
     n = shape[-1]
     x = x.contiguous().view(-1, n)
@@ -47,7 +48,7 @@ def dct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:
     reordered = torch.cat([x[:, ::2], x[:, 1::2].flip([1])], dim=1)
 
     k = -torch.arange(n, dtype=x.dtype, device=x.device)[None, :] * math.pi / (2 * n)
-    y = (torch.fft.fft(reordered, dim=1) * torch.polar(torch.ones_like(k), k)).real
+    y = (fft.fft(reordered) * torch.polar(torch.ones_like(k), k)).real
 
     if normalize:
         y[:, 0] /= n**0.5 * 2
@@ -77,6 +78,8 @@ def idct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:
 
     """
     x = convert_to_tensor(x)
+    if not x.dtype.is_floating_point:
+        raise TypeError("DCT requires a floating-point input.")
     shape = x.shape
     n = shape[-1]
 
@@ -99,14 +102,10 @@ def idct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:
 
     # ``irfft`` needs a contiguous complex input; q.contiguous() is bit-identical
     # to re-wrapping q.real/q.imag and reads more directly.
-    y = torch.fft.irfft(
-        q.contiguous(),
-        n=q.shape[1],
-        dim=1,
-    )
+    y = fft.irfft(q.contiguous(), n=q.shape[1])
     z = y.new_zeros(y.shape)
-    z[:, ::2] += y[:, : n - (n // 2)]
-    z[:, 1::2] += y.flip([1])[:, : n // 2]
+    z[:, ::2] = y[:, : n - (n // 2)]
+    z[:, 1::2] = y.flip([1])[:, : n // 2]
 
     return z.view(*shape).to(x.dtype)
 
@@ -186,7 +185,10 @@ def _normalize_axes(
 ) -> list[int]:
     if axis is None:
         return list(range(ndim))
-    axes = sorted(a % ndim for a in ([axis] if isinstance(axis, int) else axis))
+    requested = [axis] if isinstance(axis, int) else axis
+    if any(a < -ndim or a >= ndim for a in requested):
+        raise IndexError(f"DCT axis {axis!r} is out of range for rank {ndim}.")
+    axes = sorted(a % ndim for a in requested)
     if len(axes) != len(set(axes)):
         raise ValueError(
             f"Duplicate axes after normalization: axis={axis!r} maps to {axes} "

@@ -13,15 +13,16 @@ from typing import TYPE_CHECKING, Self, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
+from torch.nn import functional
 
 import torch
-import torch.nn.functional
 
 from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
     matmul_cost,
+    nbytes,
     reduction_cost,
     resolve_dtype,
 )
@@ -399,7 +400,7 @@ class GatedDeltaNet(nn.Module):
         v_dim = self.num_heads_v * self.channels_v_head
 
         qkv = self.proj_qkv(x)
-        qkv = torch.nn.functional.silu(
+        qkv = functional.silu(
             self.conv1d(qkv.transpose(1, 2))[:, :, :S],
         ).transpose(1, 2)
         q, k, v = qkv.split([k_dim, k_dim, v_dim], dim=-1)
@@ -409,7 +410,7 @@ class GatedDeltaNet(nn.Module):
         z = self.proj_z(x).reshape(-1, S, self.num_heads_v, self.channels_v_head)
         beta = self.proj_b(x).sigmoid()
         a = self.proj_a(x)
-        g = -self.A_log.float().exp() * torch.nn.functional.softplus(
+        g = -self.A_log.float().exp() * functional.softplus(
             a.float() + self.dt_bias,
         )
 
@@ -448,7 +449,7 @@ class GatedDeltaNet(nn.Module):
 
         out = self.norm(
             out.reshape(-1, self.channels_v_head),
-        ) * torch.nn.functional.silu(
+        ) * functional.silu(
             z.reshape(-1, self.channels_v_head).float(),
         ).type_as(out)
         return self.proj_out(out.reshape(-1, S, v_dim)).reshape(*shape[:-1], -1)
@@ -496,18 +497,21 @@ def _chunk_matmul_cost(
 def _delta_gate_cost(*, rows: int, heads: int, dtype: torch.dtype | None) -> Cost:
     """Count the gate map and its two parameter-gradient reductions exactly."""
     dt = resolve_dtype(dtype)
-    itemsize = dt.itemsize
     params = 2 * heads
     return Cost(
         cells={
             ("flops", "primal", "elementwise", dt): (9 * rows + 2) * heads,
             ("flops", "adjoint", "elementwise", dt): 9 * rows * heads,
             ("flops", "adjoint", "reduction", dt): params * (rows - 1),
-            ("bytes", "primal", "elementwise", dt): itemsize
-            * (6 * rows * heads + params),
-            ("bytes", "adjoint", "elementwise", dt): itemsize
-            * (9 * rows * heads + params * rows + params),
-            ("bytes", "adjoint", "reduction", dt): itemsize * (params * rows + params),
+            ("bytes", "primal", "elementwise", dt): nbytes(
+                6 * rows * heads + params,
+                dt,
+            ),
+            ("bytes", "adjoint", "elementwise", dt): nbytes(
+                9 * rows * heads + params * rows + params,
+                dt,
+            ),
+            ("bytes", "adjoint", "reduction", dt): nbytes(params * rows + params, dt),
         },
         params=params,
         params_active=params,

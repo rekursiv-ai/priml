@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 import argparse
 import sys
 
-from priml.lib.custom_json import DictCodec, FloatCodec, loads
+from treekle import from_plain, json_loads
 
 
 if TYPE_CHECKING:
@@ -35,8 +35,11 @@ def read_metrics(path: Path) -> dict[str, float]:
       FileNotFoundError: If ``path`` does not exist.
 
     """
-    decoded = loads(path.read_text())
-    return {k: FloatCodec.coerce(v) for k, v in DictCodec.coerce(decoded).items()}
+    decoded = json_loads(path.read_text())
+    return {
+        k: from_plain(v, float)
+        for k, v in from_plain(decoded, dict[str, object]).items()
+    }
 
 
 def format_summary(

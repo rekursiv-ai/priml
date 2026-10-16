@@ -2,8 +2,6 @@
 
 from pathlib import Path
 
-from configgle.testing import assert_pprint_golden
-
 import pytest
 import torch
 
@@ -12,6 +10,7 @@ from priml.baselines.oscillator.benchmark import forecast_scores
 from priml.baselines.oscillator.experiments import exp000, exp001, exp002, exp_smoke
 from priml.baselines.oscillator.scripts.comparison import main
 from priml.baselines.oscillator.train_step import DLinearForecast, RidgeCorrection
+from priml.testing.golden import assert_pprint_golden
 
 
 def test_config_is_printable_without_running_a_simulator() -> None:

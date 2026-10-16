@@ -25,9 +25,8 @@ The sharding plan is the configgle config tree — not a separate registry.
 - TP was a dead stub: `TensorParallel.__call__` required
   `model.apply_tensor_parallel_plan(mesh)`; zero models implemented it
   (verified by grep).
-- The coordinator initially recommended staging TP to `experimental/`; the
-  owner corrected: **fix TP, make models mesh-native.** This doc reverses the
-  staging.
+- Staging TP outside priml was proposed first; the decision was instead:
+  **fix TP, make models mesh-native.** This doc reverses the staging.
 - Mesh dim `tp` is already plumbed in `runtime.py` (`mesh_topology`); the
   infrastructure is ready, only the consumers are missing.
 
@@ -62,7 +61,7 @@ wired the same way — the parent sets the child's `shard` at the inline
 `.Config(...)` call, fixed by the child's role:
 
 ```python
-class SelfAttention:
+class Attention:
     def __init__(self, config: Config) -> None:
         self.proj_qkv = EnsembleLinear.Config(
             ...,
@@ -84,7 +83,7 @@ code, no naming dependency.
 
 ## The generic applier
 
-One function in `lib/train` (un-staged from `experimental/parallelism/`):
+One function in `lib/train` (no longer staged outside priml):
 
 ```python
 def apply_tensor_parallel(model: nn.Module, mesh: DeviceMesh) -> nn.Module:
@@ -173,7 +172,7 @@ composes correctly (sharded == dense, err 6e-8).
 
 Because `attn_kernel` is a configgle `Makeable` slot, this needs no
 special-casing: **TP models set `attn_kernel=SdpaNaive`.** The applier raises a
-clear error if it shards a `SelfAttention` still using the fused flash kernel,
+clear error if it shards an `Attention` still using the fused flash kernel,
 rather than letting the cryptic deep-aten `NotImplementedError` surface.
 `tp=1` is unaffected (no DTensor, fused flash runs as normal — goldens green).
 
@@ -216,7 +215,7 @@ Under #298 (TP):
    `TensorParallel` to `lib`; wire into `ParallelStrategyProtocol`.
 2. Custom `ParallelStyle` for `EnsembleLinear` (ensemble-dim shard) + spike
    hardened into a test.
-3. Shard styles on `Linear`/`SwiGLU`/`MoE`/`SelfAttention`/`MLA`/`embedding`
+3. Shard styles on `Linear`/`SwiGLU`/`MoE`/`Attention`/`MLA`/`embedding`
    block Configs via `finalize()`.
 4. Multirank cpu:gloo `tp=2` correctness test (sharded == dense) + `tp=1`
    golden-green regression.
@@ -231,7 +230,7 @@ optimizer-DTensor, checkpoint-DCP.
 
 None blocking. Confirm: (a) custom-layer-provides-own-style rule acceptable;
 (b) child partition above; (c) whether to extract the cross-imported
-`TRMTrainStep` from `experimental/sudoku` to `lib` (separate decision).
+`TRMTrainStep` from the sudoku experiment to `lib` (separate decision).
 
 ## Estimate
 

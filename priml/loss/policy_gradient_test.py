@@ -200,6 +200,18 @@ def test_the_rule_refuses_a_coefficient_it_would_run_wrongly(
         config.make()
 
 
+def test_horizon_must_be_positive() -> None:
+    rule = TorchPPO.Config().make()
+    rule.check_horizon(2)
+    rule.check_horizon(1)
+    for horizon in (0, -1):
+        with pytest.raises(
+            ValueError,
+            match=f"horizon must be positive, not {horizon}",
+        ):
+            rule.check_horizon(horizon)
+
+
 def test_log_probs_is_the_masked_log_softmax() -> None:
     batch = random_minibatch(rows=3, horizon=4)
     rule = TorchPPO.Config().make()
@@ -426,6 +438,6 @@ def test_the_reference_rule_matches_its_golden() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

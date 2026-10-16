@@ -14,6 +14,12 @@ import math
 
 from configgle import Fig
 
+from priml.data.pipeline.dataset import add_filter_reason_typed
+from priml.data.processors.utils import (
+    compute_keyframes_as_progressive_bisection,
+)
+from priml.math.basic import ceil_div
+
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -25,16 +31,7 @@ if TYPE_CHECKING:
 else:
     from wrapt import lazy_import
 
-    np = lazy_import("numpy")  # ~90 ms; shape reports and validation use it.
-
-from priml.data.pipeline.dataset import add_filter_reason_typed
-from priml.data.processors.utils import (
-    compute_keyframes_as_progressive_bisection,
-)
-from priml.math.basic import ceil_div
-
-
-logger = logging.getLogger(__name__)
+    np = lazy_import("numpy")  # ~90 ms; only the statistics report uses it.
 
 
 __all__ = [
@@ -45,11 +42,14 @@ __all__ = [
 ]
 
 
-class ImageShapeStatistics:
-    """Track raw pixel density and aspect ratio statistics, report deciles on deletion.
+logger = logging.getLogger(__name__)
 
-    Passthrough processor that collects image dimension statistics and outputs
-    decile distributions when the processor is garbage collected or explicitly deleted.
+
+class ImageShapeStatistics:
+    """Track raw pixel density and aspect ratio statistics; ``report`` logs deciles.
+
+    Passthrough processor that collects image dimension statistics. Nothing is
+    logged until ``report()`` is called.
 
     Tracks:
     - Pixel density (width * height)
@@ -262,16 +262,16 @@ class ImageShapeStatistics:
             (2 / 3, "2:3"),
             (3 / 4, "3:4"),
             (4 / 5, "4:5"),
-            (1 / 1, "1:1 (square)"),
+            (1.0, "1:1 (square)"),
             (5 / 4, "5:4"),
             (4 / 3, "4:3"),
             (3 / 2, "3:2"),
             (8 / 5, "8:5"),
             (5 / 3, "5:3"),
             (16 / 9, "16:9"),
-            (2 / 1, "2:1"),
+            (2.0, "2:1"),
             (2.6, "2.6:1"),
-            (3 / 1, "3:1"),
+            (3.0, "3:1"),
         ]
 
         # Filter to relevant range and find bucket boundaries.
@@ -324,15 +324,16 @@ class CalcResizeDimensions:
         # Before: sample with original dimensions
         sample = {"key": "a", "frames": 1, "width": 1920, "height": 1080}
 
-        # After CalcResizeDimensions: adds target dimensions
+        # After CalcResizeDimensions with the default config: the 240 area
+        # bucket, 8:5 the nearest aspect, sides rounded up to 16.
         sample = {
             "key": "a",
             "frames": 1,
             "width": 1920,
             "height": 1080,
             "target_frames": 1,
-            "target_height": 720,
-            "target_width": 1280,
+            "target_height": 192,
+            "target_width": 304,
         }
 
     """
@@ -369,9 +370,9 @@ class CalcResizeDimensions:
     class Input(TypedDict, total=False):
         """Input required by CalcResizeDimensions."""
 
-        frames: int
-        height: int
-        width: int
+        frames: int | float
+        height: int | float
+        width: int | float
 
     class Output(Input):
         """Output produced by CalcResizeDimensions."""
@@ -409,6 +410,11 @@ class CalcResizeDimensions:
                 aspect_sqrt = aspect**0.5
                 height = round(resolution / aspect_sqrt)
                 width = round(resolution * aspect_sqrt)
+                if height < 1 or width < 1:
+                    raise ValueError(
+                        f"aspects {aspect} at resolution {resolution} rounds a "
+                        "bucket side to zero.",
+                    )
                 buckets.append(
                     (
                         ceil_div(height, compression_height) * compression_height,
@@ -489,9 +495,7 @@ class CalcResizeDimensions:
             )
             return None
 
-        # NaN and inf are checked before the int conversion below, which would
-        # otherwise raise rather than filter. Both reach here despite the int
-        # annotation: a sample is parsed data, not a constructed TypedDict.
+        # NaN and inf are checked before int conversion, which cannot handle them.
         if math.isnan(frames) or math.isnan(height) or math.isnan(width):
             add_filter_reason_typed(
                 sample,
@@ -508,16 +512,17 @@ class CalcResizeDimensions:
             )
             return None
 
-        # Check for invalid values.
-        if frames <= 0 or height <= 0 or width <= 0:
+        # Checked after ``int()``: a fractional 0.5 passes ``> 0`` and then
+        # truncates to 0, which divides by zero in the aspect.
+        dims = int(frames), int(height), int(width)
+        if min(dims) <= 0:
             add_filter_reason_typed(
                 sample,
                 type(self).__name__,
-                f"invalid_dimensions:f={frames}_h={height}_w={width}",
+                f"invalid_dimensions:f={dims[0]}_h={dims[1]}_w={dims[2]}",
             )
             return None
-
-        return (int(frames), int(height), int(width))
+        return dims
 
 
 class SubsampleFramesViaBisection:
@@ -533,14 +538,14 @@ class SubsampleFramesViaBisection:
     making it ideal for capturing key moments across the full video timeline.
 
     Example:
-        # 10 frames, request 5: [0, 2, 4, 7, 9]
+        # 10 frames, request 5: [0, 2, 4, 6, 9]
         config = SubsampleFramesViaBisection.Config(max_num_keyframes=5)
         processor = config.make()
 
         sample = {"media_tensor": torch.randn(3, 10, 224, 224)}
         result = next(processor([sample]))
         # result["media_tensor"].shape == (3, 5, 224, 224)
-        # result["keyframes"] == [0, 2, 4, 7, 9]
+        # result["keyframes"] == [0, 2, 4, 6, 9]
 
     """
 

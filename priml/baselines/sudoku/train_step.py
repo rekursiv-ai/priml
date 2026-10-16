@@ -34,7 +34,7 @@ from torch.nn import functional
 
 import torch
 
-from priml.baselines.sudoku.act import ActPool
+from priml.baselines.sudoku.act import ActPool, PoolConfig, rollout
 from priml.baselines.sudoku.model import SudokuNet
 from priml.optimizers import (
     CompositeOptimizer,
@@ -121,12 +121,12 @@ class SudokuTrainStep(TrainStep):
         lr_min_ratio: float = 0.0
         """Floor of the cosine decay, as a fraction of the base rate."""
 
-        act: ActPool.Config | None = None
+        pool: PoolConfig | None = None
         """Adaptive computation time. ``None`` trains one forward per batch.
 
-        Every knob that only means something under ACT -- pool width, step cap,
-        halt exploration -- lives on this piece, so a plain run's config does
-        not carry them."""
+        Every knob that only means something under ACT -- seating, step cap,
+        halt training, feedback -- lives on this piece, so a plain run's config
+        does not carry them."""
 
         label_smoothing: float = 0.0
         """Cross-entropy label smoothing."""
@@ -145,13 +145,14 @@ class SudokuTrainStep(TrainStep):
 
         @override
         def finalize(self) -> Self:
-            if self.act is not None:
+            if self.pool is not None:
                 # The pool holds one latent state per slot, so it must be built
                 # to the model's shape; pushing it down here keeps the two from
                 # being set independently and silently disagreeing.
-                self.act.grid_len = self.model.grid_len
-                self.act.seq_len = self.model.total_seq_len
-                self.act.channels_hidden = self.model.channels_in
+                self.pool.grid_len = self.model.grid_len
+                self.pool.seq_len = self.model.total_seq_len
+                self.pool.channels_hidden = self.model.channels_in
+                self.pool.dtype = self.model.dtype
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
@@ -177,9 +178,9 @@ class SudokuTrainStep(TrainStep):
         )
         super().__init__(config)
         self.config: SudokuTrainStep.Config = config
-        self.act: ActPool | None = config.act.make() if config.act is not None else None
-        if self.act is not None:
-            self.act.to(self.device)
+        self.pool: ActPool | None = None if config.pool is None else config.pool.make()
+        if self.pool is not None:
+            self.pool.to(self.device)
 
     @property
     def net(self) -> SudokuNet:
@@ -229,14 +230,16 @@ class SudokuTrainStep(TrainStep):
         """
         self.model.train()
         media, labels, active = self._ingest(batch)
+        self._stash_feedback()
         with self._autocast():
-            out = self.net(media, *self._carry(), **_prefix_kwargs(batch))
+            out = self.net(media, *self._carry(), **self._prefix_kwargs(batch))
             loss, metrics = self._loss(
                 out.logits,
                 labels=labels,
                 halt=out.halt,
                 active=active,
             )
+        self._advance_feedback(out.logits, metrics)
         loss.backward()
 
         if math.isfinite(self.config.gradient_clip_norm):
@@ -264,14 +267,7 @@ class SudokuTrainStep(TrainStep):
             self.optimizer.step()
             self.model.zero_grad(set_to_none=True)
             self._ema(self.model)
-        if self.act is not None:
-            self.act.advance(
-                out.z_slow,
-                z_fast=out.z_fast,
-                logits=out.logits,
-                halt=out.halt,
-                media=media,
-            )
+        self._advance_pool(out.z_slow, out.z_fast, halt=out.halt, active=active)
 
         return {
             "loss": loss.detach().reshape(1),
@@ -288,7 +284,7 @@ class SudokuTrainStep(TrainStep):
         labels = batch["label"]
         assert isinstance(labels, Tensor)
         with torch.no_grad(), self._autocast():
-            out = self.net(media, **_prefix_kwargs(batch))
+            out = self.net(media, **_batch_prefix_kwargs(batch))
             active = torch.ones(media.shape[0], dtype=torch.bool, device=media.device)
             loss, metrics = self._loss(
                 out.logits,
@@ -314,7 +310,7 @@ class SudokuTrainStep(TrainStep):
         with self._eval_weights():
             self.model.eval()
             with torch.inference_mode(), self._autocast():
-                logits, halt = self._eval_rollout(media, _prefix_kwargs(batch))
+                logits, halt = self._eval_rollout(media, _batch_prefix_kwargs(batch))
                 active = torch.ones(
                     media.shape[0],
                     dtype=torch.bool,
@@ -343,7 +339,7 @@ class SudokuTrainStep(TrainStep):
         with self._eval_weights():
             self.model.eval()
             with torch.inference_mode(), self._autocast():
-                logits, _ = self._eval_rollout(media, _prefix_kwargs(batch))
+                logits, _ = self._eval_rollout(media, _batch_prefix_kwargs(batch))
         return logits
 
     @override
@@ -351,9 +347,10 @@ class SudokuTrainStep(TrainStep):
         """Do nothing: this step accumulates nothing across a boundary."""
 
     class StateDict(TrainStep.StateDict):
-        """Base state plus the ACT pool's halt bookkeeping; see :meth:`state_dict`."""
+        """Base state plus the pool's dedicated generators; see :meth:`state_dict`."""
 
-        act: NotRequired[ActPool.StateDict]
+        halt_rng: NotRequired[Tensor]
+        corruption_rng: NotRequired[Tensor]
 
     @override
     def state_dict(self) -> StateDict:
@@ -363,17 +360,20 @@ class SudokuTrainStep(TrainStep):
         nested form, because that is the shape ``ema_shadow`` publishes and
         the shape every checkpoint of this baseline already holds.
 
-        The ACT pool is deliberately excluded from the pool's own perspective:
-        it is in-flight state bound to the specific puzzles being solved, and
-        a resumed run continues with the next batch rather than replaying
-        interrupted ones -- but its halt bookkeeping is carried.
+        The pool's slots are deliberately excluded: they are in-flight state
+        bound to the specific puzzles being solved, and a resumed run continues
+        with the next batch rather than replaying interrupted ones. Its
+        dedicated generators are carried, so exploration does not restart.
         """
         state: SudokuTrainStep.StateDict = {**super().state_dict()}
         shadow = self.ema_shadow
         if shadow is not None:
             state["ema"] = dict(shadow)
-        if self.act is not None:
-            state["act"] = self.act.state_dict()
+        pool = self.pool
+        if pool is not None and pool.halting is not None:
+            state["halt_rng"] = pool.halting.generator.get_state()
+        if pool is not None and pool.carry is not None:
+            state["corruption_rng"] = pool.carry.generator.get_state()
         return state
 
     @override
@@ -417,8 +417,12 @@ class SudokuTrainStep(TrainStep):
                     "global_step": self.global_step,
                 },
             )
-        if self.act is not None and "act" in state:
-            self.act.load_state_dict(state["act"])
+        pool = self.pool
+        # ``set_state`` accepts only a CPU byte tensor.
+        if pool is not None and pool.halting is not None and "halt_rng" in state:
+            pool.halting.generator.set_state(state["halt_rng"].cpu())
+        if pool is not None and pool.carry is not None and "corruption_rng" in state:
+            pool.carry.generator.set_state(state["corruption_rng"].cpu())
 
     def _ingest(self, batch: Mapping[str, object]) -> tuple[Tensor, Tensor, Tensor]:
         """Return the ``(media, labels, active)`` this step trains on."""
@@ -429,35 +433,89 @@ class SudokuTrainStep(TrainStep):
         raw_count = batch.get("valid_count", media.shape[0])
         assert isinstance(raw_count, int)
         valid_count = raw_count
-        if self.act is None:
+        pool = self.pool
+        if pool is None:
             active = torch.ones(media.shape[0], dtype=torch.bool, device=media.device)
             return media, labels, active
-        return self.act.refill(
-            media,
+        identifiers = batch.get("puzzle_identifiers")
+        if identifiers is not None and not isinstance(identifiers, Tensor):
+            raise TypeError(
+                f"puzzle_identifiers must be a Tensor; got {type(identifiers)}.",
+            )
+        active = pool.refill(
+            self.net.init_latents,
+            media=media,
             labels=labels,
             valid_count=valid_count,
+            puzzle_ids=identifiers,
             ignore_label_id=self.config.ignore_label_id,
         )
+        return pool.inputs, pool.labels, active
 
     def _carry(self) -> tuple[Tensor, Tensor] | tuple[()]:
         """Return the latent state the pool carries, or nothing when ACT is off."""
-        if self.act is None:
+        if self.pool is None:
             return ()
-        return self.act.latents()
+        return self.pool.z_slow, self.pool.z_fast
 
+    # A slot keeps its puzzle across calls, so its task is the one it was seated
+    # with, not whichever the incoming batch holds in that row.
+    def _prefix_kwargs(self, batch: Mapping[str, object]) -> _PrefixKwargs:
+        """Return the task ids of the rows the forward runs over."""
+        kwargs = _batch_prefix_kwargs(batch)
+        if self.pool is None or "puzzle_identifiers" not in kwargs:
+            return kwargs
+        return {"puzzle_identifiers": self.pool.puzzle_ids}
+
+    def _stash_feedback(self) -> None:
+        """Hand the pool's carried grid to the model for this step's forward."""
+        if self.pool is not None and self.pool.carry is not None:
+            self.net.set_feedback(self.pool.feedback)
+
+    def _advance_feedback(
+        self,
+        logits: Tensor,
+        metrics: dict[str, float | Tensor],
+    ) -> None:
+        """Replace the carried grid with this step's decoded prediction."""
+        if self.pool is None or self.pool.carry is None:
+            return
+        with torch.no_grad():
+            metrics["feedback_corrupt_frac"] = self.pool.advance_feedback(logits)
+
+    def _advance_pool(
+        self,
+        z_slow: Tensor,
+        z_fast: Tensor,
+        *,
+        halt: Tensor,
+        active: Tensor,
+    ) -> None:
+        """Carry the latents, count the step, and act on the halt decision."""
+        pool = self.pool
+        if pool is None:
+            return
+        pool.update_carry(z_slow=z_slow, z_fast=z_fast, active=active)
+        pool.release(self.net.init_latents, halt=pool.halt_mask(halt), active=active)
+
+    # With a pool, every row runs the step cap it trained at, carrying its latents and
+    # fed-back grid: no slots and no halting.
     def _eval_rollout(
         self,
         media: Tensor,
         prefix_kwargs: _PrefixKwargs,
     ) -> tuple[Tensor, Tensor]:
         """Run the model to its full depth, carrying latents when ACT is on."""
-        if self.act is None:
+        pool = self.pool
+        if pool is None:
             out = self.net(media, **prefix_kwargs)
             return out.logits, out.halt
-        return self.act.rollout(
+        return rollout(
             self.net,
             media=media,
-            prefix_kwargs=dict(prefix_kwargs),
+            max_steps=pool.config.max_steps,
+            carry=pool.carry,
+            prefix_kwargs=prefix_kwargs,
         )
 
     # Only active rows contribute, and the mean is over those rows: a pool slot holding
@@ -486,17 +544,47 @@ class SudokuTrainStep(TrainStep):
         lm_loss = torch.where(active, per_sample, torch.zeros_like(per_sample)).sum()
         lm_loss = lm_loss / n_active
         metrics: dict[str, float | Tensor] = {"lm_loss": lm_loss.detach()}
-        if self.act is None:
-            return lm_loss, metrics
-        halt_loss, halt_metrics = self.act.halt_loss(
+        halt_loss, halt_metrics = self._halt_loss(
             logits,
             labels=labels,
             halt=halt,
             active=active,
-            ignore_label_id=ignore,
         )
         metrics.update(halt_metrics)
         return lm_loss + halt_loss, metrics
+
+    def _halt_loss(
+        self,
+        logits: Tensor,
+        *,
+        labels: Tensor,
+        halt: Tensor,
+        active: Tensor,
+    ) -> tuple[Tensor | float, dict[str, float | Tensor]]:
+        """Train the halt head to predict "this grid is already correct"."""
+        pool = self.pool
+        if pool is None or pool.halting is None:
+            return 0.0, {}
+        with torch.no_grad():
+            counted = labels != self.config.ignore_label_id
+            correct_cells = (logits.argmax(dim=-1) == labels) & counted
+            per_row = counted.sum(dim=-1)
+            solved = ((correct_cells.sum(dim=-1) == per_row) & (per_row > 0)).to(
+                halt.dtype,
+            )
+        per_sample = functional.binary_cross_entropy_with_logits(
+            halt,
+            solved,
+            reduction="none",
+        )
+        loss = torch.where(active, per_sample, torch.zeros_like(per_sample)).sum()
+        loss = loss / active.sum().clamp(min=1)
+        steps = torch.where(pool.active, pool.steps, torch.zeros_like(pool.steps))
+        return pool.halting.weight * loss, {
+            "halt_loss": loss.detach(),
+            "halted_frac": pool.halted.float().mean(),
+            "act_steps": steps.sum().float() / pool.active.sum().clamp(min=1),
+        }
 
     # Strictly past: the shadow is seeded by the train step AT the warmup boundary,
     # which runs after that step's evaluation, so an evaluation on the boundary itself
@@ -529,7 +617,7 @@ class SudokuTrainStep(TrainStep):
 
 # A per-puzzle prefix needs to know WHICH puzzle each row is; the grid alone cannot say.
 # Passing the whole batch would instead hand the model its own labels.
-def _prefix_kwargs(batch: dict[str, object]) -> _PrefixKwargs:
+def _batch_prefix_kwargs(batch: Mapping[str, object]) -> _PrefixKwargs:
     """Return the batch fields a prefix module consumes, if any."""
     identifiers = batch.get("puzzle_identifiers")
     return {} if identifiers is None else {"puzzle_identifiers": identifiers}

@@ -7,10 +7,9 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 import math
 
 from torch import Tensor, nn
+from treekle import from_plain
 
 import torch
-
-from priml.lib.custom_json import FloatCodec
 
 
 if TYPE_CHECKING:
@@ -156,4 +155,4 @@ def _scale_lr(group: dict[str, object], scale: float) -> None:
 
 
 def _rate(group: dict[str, object], key: str) -> float:
-    return FloatCodec.coerce(group[key], None)
+    return from_plain(group[key], float)

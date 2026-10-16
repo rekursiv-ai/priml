@@ -39,7 +39,12 @@ from priml.cost import (
 )
 from priml.model.custom_types import ChannelsIn, ChannelsOut
 from priml.model.embedding import Embedding
-from priml.model.init import truncated_normal
+from priml.model.init import (
+    InitFn,
+    call_init,
+    corrected_fan_in_normal,
+    truncated_normal,
+)
 
 
 @runtime_checkable
@@ -384,6 +389,9 @@ class GridEmbedding(nn.Module):
         associative, so reordering changes the trained result. Empty is the
         plain baseline -- token embeddings alone."""
 
+        init_weight: InitFn = corrected_fan_in_normal
+        """Token-table initializer; the runtime rescale brings it to unit scale."""
+
         @property
         def grid_len(self) -> int:
             """Number of grid tokens per puzzle."""
@@ -476,12 +484,7 @@ class GridEmbedding(nn.Module):
         self.config = config
         self.embed_scale: float = config.channels_out**0.5
         self.embed_tokens = _token_table(config).make()
-        truncated_normal(
-            self.embed_tokens.weight,
-            std=1.0 / self.embed_scale,
-            depth_index=(),
-            variance_correction=True,
-        )
+        call_init(config.init_weight, self.embed_tokens.weight)
         # The slot is typed by what a channel DOES (``GridChannel``) while
         # ``ModuleList`` holds what it IS, and iterating one yields a bare
         # ``Module`` whose ``__call__`` says nothing. Keep the typed list beside

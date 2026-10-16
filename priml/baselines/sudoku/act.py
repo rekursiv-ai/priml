@@ -3,95 +3,527 @@
 A recurrent solver should spend more steps on a hard puzzle than an easy one.
 That is awkward at fixed batch shape -- the batch cannot shrink as puzzles
 finish -- so instead the batch IS a pool of slots. Each training call advances
-every occupied slot by one reasoning step, carrying its latent state forward;
-when the model's halt head says a slot is done, that slot is released and the
-next incoming puzzle takes it. An easy puzzle leaves after a few steps, a hard
-one keeps its slot, and the tensor shape never changes.
+every occupied slot by one forward, carrying its latents; a slot leaves when
+its halt head fires or it reaches the step cap, and the next puzzle takes it.
 
-Everything here is meaningless without a recurrence, which is exactly why it is
-a separate injected piece: a plain feedforward experiment's config carries none
-of these fields.
+Four pieces vary independently, so each is its own slot on the pool:
 
-Three mechanisms make the scheme work:
+* the SEATING -- how incoming puzzles reach a slot. :class:`AtomicPool` takes
+  one pool-width batch per call and seats it only where a slot just halted;
+  :class:`StreamingPool` queues every incoming puzzle and seats it in the next
+  free slot.
+* the HALTING -- :class:`HaltTraining`: whether the halt head is trained, how
+  much its loss weighs, and which exploration keeps it from learning only from
+  its own decisions (:class:`SampledMinimum`, :class:`ForcedContinue`).
+* the START -- the latents a newly seated slot begins from: the model's
+  learned initial latents (:class:`LearnedStart`) or zeros
+  (:class:`ZeroStart`).
+* the FEEDBACK -- :class:`FeedbackCarry`: each slot's last detached argmax,
+  fed back through the model's feedback channel, with the puzzle's clues
+  optionally restored and the grid optionally corrupted as a repair curriculum
+  (:class:`CellCorruption`, :class:`SlotScramble`).
 
-* **Halt supervision.** The halt head is trained to predict whether the current
-  grid is already correct, so halting is learned rather than a fixed depth.
-* **Exploration.** A halt head trained only on its own decisions never sees
-  what a deeper rollout would have produced. A fraction of slots are forced to
-  keep going regardless, which supplies that counterfactual.
-* **Prediction feedback.** The decoded grid can be fed back as input for the
-  next step, with the puzzle's given cells clamped back to their true values,
-  so the model refines its own answer instead of re-reading a blank grid.
+The pool never touches the model: a step hands it a :data:`LatentInit` for the
+latents a seated slot starts from, and hands the fed-back grid to the model.
 
-Draw order from the dedicated RNG is a reproducibility contract: the halt
-generator is seeded independently of the ambient global RNG, so two runs from
-identical weights stay identical regardless of what else drew in between.
+Draw order from each dedicated generator is a reproducibility contract: the
+halt and corruption generators are seeded independently of the global RNG, so
+two runs from identical weights stay identical whatever else drew between.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NotRequired, Self, TypedDict, cast, override
+from collections.abc import Callable, Mapping
+from dataclasses import field
+from typing import Protocol, cast, override
 
-from configgle import Fig
-from torch import Tensor, nn
+import abc
+import math
+
+from configgle import Fig, Makeable, Makes
+from torch import Tensor
 
 import torch
 
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    from priml.baselines.sudoku.model import SudokuNet
+type LatentInit = Callable[[int], tuple[Tensor, Tensor]]
+"""Return the initial ``(z_slow, z_fast)`` for a number of puzzles."""
 
 
-class ActPool:
-    """A fixed set of slots, each holding one puzzle mid-solve.
+class Exploration(Protocol):
+    """Decide which slots whose halt head fired may actually halt."""
 
-    See the module docstring for why the pool exists. The pool owns the carried
-    latent state, the per-slot step counter, the halt mask, and the fed-back
-    grid; the model owns the parameters.
+    def __call__(
+        self,
+        fired: Tensor,
+        *,
+        steps: Tensor,
+        max_steps: int,
+        generator: torch.Generator,
+    ) -> Tensor:
+        """Apply to the input."""
+        ...
+
+
+class SampledMinimum:
+    """Hold a random fraction of slots to a sampled minimum depth.
+
+    With probability ``prob`` a slot draws a minimum in ``[2, max_steps]``
+    before its halt head may fire; otherwise the minimum is one step. Draws
+    ``rand`` then ``randint``, both for every slot, and nothing at all when
+    ``prob`` is 0.
     """
 
+    class Config(Fig["SampledMinimum"]):
+        """Exploration rate."""
+
+        prob: float = 0.1
+        """Chance a slot is held to a sampled minimum."""
+
+    def __init__(self, config: Config) -> None:
+        self.prob = config.prob
+
+    def __call__(
+        self,
+        fired: Tensor,
+        *,
+        steps: Tensor,
+        max_steps: int,
+        generator: torch.Generator,
+    ) -> Tensor:
+        """Return ``fired`` masked to slots that have run their minimum."""
+        n = fired.shape[0]
+        device = fired.device
+        if self.prob > 0:
+            explore = torch.rand(n, device=device, generator=generator) < self.prob
+            minimum = torch.where(
+                explore,
+                # randint's high is exclusive: this samples [2, max_steps].
+                torch.randint(
+                    2,
+                    max_steps + 1,
+                    (n,),
+                    device=device,
+                    generator=generator,
+                ),
+                torch.ones(n, dtype=torch.long, device=device),
+            )
+        else:
+            minimum = torch.ones(n, dtype=torch.long, device=device)
+        return fired & (steps >= minimum)
+
+
+class ForcedContinue:
+    """Override a random fraction of halt decisions with one more step."""
+
+    class Config(Fig["ForcedContinue"]):
+        """Exploration rate."""
+
+        prob: float = 0.1
+        """Chance a firing slot is kept for another step."""
+
+    def __init__(self, config: Config) -> None:
+        self.prob = config.prob
+
+    def __call__(
+        self,
+        fired: Tensor,
+        *,
+        steps: Tensor,
+        max_steps: int,
+        generator: torch.Generator,
+    ) -> Tensor:
+        """Return ``fired`` with a random ``prob`` fraction cleared."""
+        del steps, max_steps
+        keep = (
+            torch.rand(fired.shape[0], device=fired.device, generator=generator)
+            < self.prob
+        )
+        return fired & ~keep
+
+
+class HaltTraining:
+    """Train the halt head to predict "this grid is already correct"."""
+
+    class Config(Fig["HaltTraining"]):
+        """Loss weight, exploration, and the exploration generator's seed."""
+
+        weight: float = 0.05
+        """Halt loss weight relative to the token loss."""
+
+        exploration: Makeable[Exploration] = field(
+            default_factory=ForcedContinue.Config,
+        )
+        """Which firing slots may halt."""
+
+        seed: int = 0
+        """Seed for the dedicated exploration generator."""
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.weight = config.weight
+        self.exploration: Exploration = config.exploration.make()
+        self.generator = torch.Generator()
+        self.generator.manual_seed(config.seed)
+
+    def to(self, device: torch.device) -> None:
+        """Rebuild the generator on ``device`` from the seed."""
+        self.generator = torch.Generator(device=device)
+        self.generator.manual_seed(self.config.seed)
+
+
+class Corruption(Protocol):
+    """Replace cells of a fed-back grid, drawing from ``generator``."""
+
+    def __call__(
+        self,
+        grid: Tensor,
+        *,
+        given: Tensor,
+        generator: torch.Generator,
+    ) -> Tensor:
+        """Apply to the input."""
+        ...
+
+
+class CellCorruption:
+    """Replace each cell with a uniform token with probability ``rate``.
+
+    Draws ``rand`` then ``randint``, both over the whole grid. Clue cells are
+    not protected.
+    """
+
+    class Config(Fig["CellCorruption"]):
+        """Rate and replacement token range."""
+
+        rate: float = 0.0
+        """Per-cell replacement probability."""
+
+        low: int = 2
+        """First replacement token (ARC's first color)."""
+
+        high: int = 12
+        """One past the last replacement token (ARC's vocabulary size)."""
+
+    def __init__(self, config: Config) -> None:
+        if math.isnan(config.rate) or config.rate < 0.0 or config.rate > 1.0:
+            raise ValueError(f"rate must be in [0, 1]; got {config.rate}.")
+        self.config = config
+
+    def __call__(
+        self,
+        grid: Tensor,
+        *,
+        given: Tensor,
+        generator: torch.Generator,
+    ) -> Tensor:
+        """Return ``grid`` with the drawn cells replaced."""
+        del given
+        config = self.config
+        hit = torch.rand(grid.shape, device=grid.device, generator=generator)
+        tokens = torch.randint(
+            config.low,
+            config.high,
+            grid.shape,
+            device=grid.device,
+            generator=generator,
+        )
+        return torch.where(hit < config.rate, tokens, grid)
+
+
+class SlotScramble:
+    """Scramble random non-clue cells of a random fraction of slots.
+
+    A slot is selected with probability ``prob``; each of its cells is then
+    replaced with probability ``cells / grid_len`` by a uniform token, clue
+    cells excepted. Draws ``rand`` over slots, ``rand`` over cells, then
+    ``randint`` over cells.
+    """
+
+    class Config(Fig["SlotScramble"]):
+        """Slot rate, expected cells scrambled, and replacement tokens."""
+
+        prob: float = 0.5
+        """Chance a slot's grid is scrambled."""
+
+        cells: int = 12
+        """Expected cells replaced in a scrambled grid."""
+
+        low: int = 2
+        """First replacement token (the first digit)."""
+
+        high: int = 11
+        """One past the last replacement token (the sudoku vocabulary size)."""
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+
+    def __call__(
+        self,
+        grid: Tensor,
+        *,
+        given: Tensor,
+        generator: torch.Generator,
+    ) -> Tensor:
+        """Return ``grid`` with the drawn non-clue cells replaced."""
+        config = self.config
+        rows, grid_len = grid.shape
+        slot = torch.rand(rows, device=grid.device, generator=generator) < config.prob
+        cell = (
+            torch.rand(rows, grid_len, device=grid.device, generator=generator)
+            < config.cells / grid_len
+        )
+        tokens = torch.randint(
+            config.low,
+            config.high,
+            (rows, grid_len),
+            device=grid.device,
+            generator=generator,
+        )
+        return torch.where(slot[:, None] & cell & ~given, tokens, grid)
+
+
+class FeedbackCarry:
+    """Per-slot decoded grid, fed back as the next forward's feedback input.
+
+    Fresh slots restart from their input grid; after every forward the grid
+    becomes the detached argmax, clue cells optionally restored, then
+    optionally corrupted. The objective is unchanged: corruption is a repair
+    curriculum, not a target.
+    """
+
+    class Config(Fig["FeedbackCarry"]):
+        """Clue range, corruption, and the corruption generator's seed."""
+
+        givens: tuple[int, int] | None = None
+        """Inclusive token range restored verbatim from the puzzle; ``None``
+        feeds back the plain argmax."""
+
+        corruption: Makeable[Corruption] | None = None
+        """Repair curriculum applied after decoding; ``None`` feeds back the
+        clean grid."""
+
+        seed: int = 0
+        """Seed for the dedicated corruption generator."""
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.corruption: Corruption | None = (
+            None if config.corruption is None else config.corruption.make()
+        )
+        self.generator = torch.Generator()
+        self.generator.manual_seed(config.seed)
+
+    def to(self, device: torch.device) -> None:
+        """Rebuild the generator on ``device`` from the seed."""
+        self.generator = torch.Generator(device=device)
+        self.generator.manual_seed(self.config.seed)
+
+    def given(self, media: Tensor) -> Tensor:
+        """Return the ``[B, grid_len]`` mask of the puzzle's clue cells."""
+        if self.config.givens is None:
+            return torch.zeros_like(media, dtype=torch.bool)
+        low, high = self.config.givens
+        return (media >= low) & (media <= high)
+
+    def decode(self, logits: Tensor, *, media: Tensor) -> Tensor:
+        """Return the argmax grid with the puzzle's clues restored.
+
+        Args:
+          logits: ``[B, grid_len, V]`` predictions.
+          media: ``[B, grid_len]`` the puzzles those predictions answer.
+
+        Returns:
+          grid: ``[B, grid_len]`` token grid for the next forward.
+
+        """
+        predictions = logits.argmax(dim=-1)
+        if self.config.givens is None:
+            return predictions
+        return torch.where(
+            self.given(media),
+            media.to(predictions.dtype),
+            predictions,
+        )
+
+
+class Start(Protocol):
+    """Return the latents a seated slot begins from."""
+
+    def __call__(self, init: LatentInit, rows: int) -> tuple[Tensor, Tensor]:
+        """Apply to the input."""
+        ...
+
+
+class LearnedStart:
+    """Begin from the model's learned initial latents, as evaluation does."""
+
+    class Config(Fig["LearnedStart"]):
+        """No parameters."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def __call__(self, init: LatentInit, rows: int) -> tuple[Tensor, Tensor]:
+        """Return ``init(rows)``."""
+        return init(rows)
+
+
+class ZeroStart:
+    """Begin from zero latents.
+
+    Training then never sees the learned initial latents that evaluation
+    starts from; kept so runs trained this way replay exactly.
+    """
+
+    class Config(Fig["ZeroStart"]):
+        """No parameters."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def __call__(self, init: LatentInit, rows: int) -> tuple[Tensor, Tensor]:
+        """Return zeros shaped like ``init(rows)``."""
+        z_slow, z_fast = init(rows)
+        return torch.zeros_like(z_slow), torch.zeros_like(z_fast)
+
+
+class Solver(Protocol):
+    """The model surface an evaluation rollout drives."""
+
+    def init_latents(self, batch_size: int, /) -> tuple[Tensor, Tensor]:
+        """Return the initial ``(z_slow, z_fast)``."""
+        ...
+
+    def set_feedback(self, grid: Tensor | None) -> None:
+        """Hand ``grid`` to the model's feedback channel for the next forward."""
+        ...
+
+    def __call__(
+        self,
+        tokens: Tensor,
+        z_slow: Tensor,
+        z_fast: Tensor,
+        *,
+        collect_intermediates: bool,
+        **prefix_kwargs: object,
+    ) -> RolloutStep:
+        """Run one forward."""
+        ...
+
+
+class RolloutStep(Protocol):
+    """What a rollout reads from one forward."""
+
+    @property
+    def logits(self) -> Tensor:
+        """``[B, grid_len, V]`` predictions."""
+        ...
+
+    @property
+    def halt(self) -> Tensor:
+        """``[B]`` halt logits."""
+        ...
+
+    @property
+    def z_slow(self) -> Tensor:
+        """Carried slow latent."""
+        ...
+
+    @property
+    def z_fast(self) -> Tensor:
+        """Carried fast latent."""
+        ...
+
+
+def rollout(
+    model: Solver,
+    *,
+    media: Tensor,
+    max_steps: int,
+    carry: FeedbackCarry | None,
+    prefix_kwargs: Mapping[str, object] | None = None,
+) -> tuple[Tensor, Tensor]:
+    """Run a puzzle batch to the step cap, carrying latents and feedback.
+
+    The evaluation counterpart of the training pool: no slots, no halting,
+    every row simply runs the full depth the model was trained at.
+
+    Args:
+      model: The network to run.
+      media: ``[B, grid_len]`` puzzles.
+      max_steps: Forwards to run.
+      carry: Feedback to thread; ``None`` feeds nothing back.
+      prefix_kwargs: Batch fields a prefix module consumes, if any.
+
+    Returns:
+      logits: Final ``[B, grid_len, V]`` predictions.
+      halt: Final ``[B]`` halt logits.
+
+    Raises:
+      ValueError: If ``max_steps`` is not positive.
+
+    """
+    if max_steps <= 0:
+        raise ValueError(f"max_steps must be positive; got {max_steps}.")
+    kwargs = dict(prefix_kwargs or {})
+    z_slow, z_fast = model.init_latents(media.shape[0])
+    feedback = media if carry is not None else None
+    out = _forward(model, media, z_slow, z_fast, feedback=feedback, kwargs=kwargs)
+    for _ in range(max_steps - 1):
+        if carry is not None:
+            feedback = carry.decode(out.logits, media=media)
+        out = _forward(
+            model,
+            media,
+            out.z_slow,
+            out.z_fast,
+            feedback=feedback,
+            kwargs=kwargs,
+        )
+    return out.logits, out.halt
+
+
+class PoolConfig(Makeable["ActPool"], Protocol):
+    """A config that builds a pool and takes its geometry from the model.
+
+    A train step pushes the model's shape down into these fields before
+    building, so the pool and the model cannot disagree.
+    """
+
+    batch_size: int
+    max_steps: int
+    halting: HaltTraining.Config | None
+    feedback: FeedbackCarry.Config | None
+    start: Makeable[Start]
+    grid_len: int
+    seq_len: int
+    channels_hidden: int
+    dtype: torch.dtype | None
+
+
+class ActPool(abc.ABC):
+    """Slot state shared by every seating policy; see the module docstring."""
+
     class Config(Fig["ActPool"]):
-        """Pool geometry, halting policy, and feedback."""
+        """Pool geometry, halting, and the optional feedback carry."""
 
-        batch_size: int = 384
-        """Slots in the pool; also the incoming batch size per step."""
+        batch_size: int = 192
+        """Slots in the pool."""
 
-        max_steps: int = 32
-        """Reasoning steps a puzzle may take before being forced out."""
+        max_steps: int = 16
+        """Forwards a puzzle may take before it is forced out."""
 
-        halt_weight: float = 0.05
-        """Weight on the halt loss relative to the token loss."""
+        halting: HaltTraining.Config | None = field(
+            default_factory=HaltTraining.Config,
+        )
+        """Halt-head training; ``None`` freezes the head and halts at the cap."""
 
-        halt_exploration_prob: float = 0.1
-        """Chance a slot is forced past its halt decision, to supply the
-        counterfactual a self-supervised halt head never sees."""
+        feedback: FeedbackCarry.Config | None = None
+        """Decoded-grid feedback; requires a feedback channel on the model."""
 
-        halt_exploration_seed: int = 0
-        """Seed for the dedicated halting RNG.
-
-        Separate from the global stream so the training trajectory does not
-        depend on ambient RNG state; two runs from identical weights stay
-        bit-for-bit identical."""
-
-        min_steps_sampled: bool = True
-        """Sample a per-slot minimum step count rather than forcing a single
-        extra step. Spreads exploration over depths instead of always
-        producing one-step-deeper rollouts."""
-
-        feedback: bool = True
-        """Feed the decoded grid back as the next step's input."""
-
-        given_low: int = 2
-        """First token value treated as a puzzle-given clue."""
-
-        given_high: int = 10
-        """Last token value treated as a puzzle-given clue.
-
-        Cells holding a value in ``[given_low, given_high]`` are the puzzle's
-        clues, restored verbatim in the fed-back grid: the model must not be
-        allowed to overwrite what it was told."""
+        start: Makeable[Start] = field(default_factory=LearnedStart.Config)
+        """Latents a newly seated slot begins from."""
 
         grid_len: int = -1
         """Grid tokens per puzzle; inherited from the model."""
@@ -102,13 +534,11 @@ class ActPool:
         channels_hidden: int = -1
         """Latent width; inherited from the model."""
 
-        @override
-        def finalize(self) -> Self:
-            if self.given_low > self.given_high:
-                raise ValueError(
-                    f"given_low {self.given_low} exceeds given_high {self.given_high}.",
-                )
-            return super().finalize()
+        dtype: torch.dtype | None = None
+        """Carried-latent dtype; inherited from the model's storage dtype.
+
+        Float32 masters carry float32 latents, so backward through an autocast
+        forward does not compound half-precision rounding across steps."""
 
     def __init__(self, config: Config) -> None:
         if min(config.grid_len, config.seq_len, config.channels_hidden) <= 0:
@@ -119,73 +549,176 @@ class ActPool:
             )
         self.config = config
         bs = config.batch_size
-        self.device = torch.device("cpu")
-        self._generator = torch.Generator()
-        self._generator.manual_seed(config.halt_exploration_seed)
         self.inputs = torch.zeros(bs, config.grid_len, dtype=torch.long)
         self.labels = torch.zeros_like(self.inputs)
-        self.feedback = torch.zeros_like(self.inputs)
-        self.z_slow = torch.zeros(bs, config.seq_len, config.channels_hidden)
+        self.z_slow = torch.zeros(
+            bs,
+            config.seq_len,
+            config.channels_hidden,
+            dtype=config.dtype,
+        )
         self.z_fast = torch.zeros_like(self.z_slow)
         self.steps = torch.zeros(bs, dtype=torch.long)
-        # Every slot starts halted so the first call fills the whole pool.
+        self.active = torch.zeros(bs, dtype=torch.bool)
+        # All halted, so the first atomic refill seats every slot.
         self.halted = torch.ones(bs, dtype=torch.bool)
+        self.puzzle_ids = torch.zeros(bs, dtype=torch.int32)
+        self.feedback = torch.zeros_like(self.inputs)
+        self.halting = None if config.halting is None else config.halting.make()
+        self.carry = None if config.feedback is None else config.feedback.make()
+        self.start: Start = config.start.make()
 
     def to(self, device: torch.device) -> None:
-        """Move pool state to ``device`` and reseed the RNG there.
+        """Move every slot tensor and generator to ``device``.
 
         Args:
-          device: Target device (CPU or CUDA) for all pool tensors and RNG.
+          device: Target device.
 
         """
-        self.device = device
-        self.inputs = self.inputs.to(device)
-        self.labels = self.labels.to(device)
-        self.feedback = self.feedback.to(device)
-        self.z_slow = self.z_slow.to(device)
-        self.z_fast = self.z_fast.to(device)
-        self.steps = self.steps.to(device)
-        self.halted = self.halted.to(device)
-        self._generator = torch.Generator(device=device)
-        self._generator.manual_seed(self.config.halt_exploration_seed)
+        for name in (
+            "inputs",
+            "labels",
+            "z_slow",
+            "z_fast",
+            "steps",
+            "active",
+            "halted",
+            "puzzle_ids",
+            "feedback",
+        ):
+            setattr(self, name, cast(Tensor, getattr(self, name)).to(device))
+        if self.halting is not None:
+            self.halting.to(device)
+        if self.carry is not None:
+            self.carry.to(device)
 
-    def latents(self) -> tuple[Tensor, Tensor]:
-        """Return the carried ``(z_slow, z_fast)`` for this step's forward."""
-        return self.z_slow, self.z_fast
-
+    @abc.abstractmethod
     def refill(
         self,
-        media: Tensor,
+        init: LatentInit,
         *,
+        media: Tensor,
         labels: Tensor,
         valid_count: int,
+        puzzle_ids: Tensor | None,
         ignore_label_id: int,
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        """Seat incoming puzzles in halted slots; occupied slots keep solving.
+    ) -> Tensor:
+        """Seat incoming puzzles; return the ``[B]`` mask of slots that train.
 
         Args:
+          init: Initial latents for seated slots.
           media: ``[B, grid_len]`` incoming puzzles.
           labels: ``[B, grid_len]`` their solutions.
-          valid_count: Real rows; the tail is padding whose labels are masked
-            out so a short final batch does not train on filler.
-          ignore_label_id: Label value the loss skips.
+          valid_count: Real rows; the rest are loader padding.
+          puzzle_ids: ``[B]`` task ids, when the batch carries them.
+          ignore_label_id: Label the loss skips.
 
         Returns:
-          media: The pool's current puzzles, after seating.
-          labels: Their solutions.
-          active: ``[B]`` mask of slots participating this step (all of them:
-            a slot that just took fresh data still runs this step's forward).
-
-        Raises:
-          ValueError: If the incoming batch is not exactly pool-width.
+          active: ``[B]`` mask of slots that train this call.
 
         """
+
+    @abc.abstractmethod
+    def update_carry(self, *, z_slow: Tensor, z_fast: Tensor, active: Tensor) -> None:
+        """Store this forward's latents and count the step.
+
+        Args:
+          z_slow: Updated slow latent.
+          z_fast: Updated fast latent.
+          active: Slots that trained.
+
+        """
+
+    @abc.abstractmethod
+    def release(self, init: LatentInit, *, halt: Tensor, active: Tensor) -> None:
+        """Act on this step's halt decision.
+
+        Args:
+          init: Initial latents for slots seated from a queue.
+          halt: ``[B]`` slots that stop after this step.
+          active: Slots that trained.
+
+        """
+
+    def halted_this_step(self) -> Tensor | None:
+        """Slots that halted this step, when metrics score only those."""
+        return None
+
+    def advance_feedback(self, logits: Tensor) -> Tensor | float:
+        """Replace the carried grid with the decoded, possibly corrupted, argmax.
+
+        Args:
+          logits: ``[B, grid_len, V]`` this step's predictions.
+
+        Returns:
+          changed: Fraction of cells the corruption changed; 0.0 when clean.
+
+        """
+        carry = self.carry
+        if carry is None:
+            raise ValueError("advance_feedback needs a pool with a feedback carry.")
+        decoded = carry.decode(logits, media=self.inputs).detach()
+        changed: Tensor | float = 0.0
+        if carry.corruption is not None:
+            corrupted = carry.corruption(
+                decoded,
+                given=carry.given(self.inputs),
+                generator=carry.generator,
+            )
+            changed = (corrupted != decoded).float().mean()
+            decoded = corrupted
+        self.feedback = decoded
+        return changed
+
+    def halt_mask(self, halt: Tensor) -> Tensor:
+        """Which slots stop after this step: at the cap, or fired and allowed.
+
+        Args:
+          halt: ``[B]`` halt logits.
+
+        Returns:
+          halt: ``[B]`` slots that stop.
+
+        """
+        at_cap = self.steps >= self.config.max_steps
+        if self.halting is None:
+            return at_cap
+        return at_cap | self.halting.exploration(
+            halt > 0,
+            steps=self.steps,
+            max_steps=self.config.max_steps,
+            generator=self.halting.generator,
+        )
+
+
+class AtomicPool(ActPool):
+    """Seat one pool-width batch per call, only where a slot just halted.
+
+    Every slot trains every call, including ones that were just seated; a
+    batch shorter than the pool is padded by the loader and its tail labels
+    are masked to the ignore label.
+    """
+
+    class Config(Makes["AtomicPool"], ActPool.Config):
+        """Atomic seating."""
+
+    @override
+    def refill(
+        self,
+        init: LatentInit,
+        *,
+        media: Tensor,
+        labels: Tensor,
+        valid_count: int,
+        puzzle_ids: Tensor | None,
+        ignore_label_id: int,
+    ) -> Tensor:
         bs = self.config.batch_size
         if media.shape[0] != bs:
             raise ValueError(
-                f"the pool holds {bs} slots; got a batch of {media.shape[0]}.",
+                f"atomic seating requires a batch of {bs}; got {media.shape[0]}.",
             )
-        incoming = media.to(torch.long)
+        incoming = media.clone().to(torch.long)
         incoming_labels = labels.clone().to(torch.long)
         if valid_count < bs:
             incoming_labels[valid_count:] = ignore_label_id
@@ -193,227 +726,135 @@ class ActPool:
         seat = halted.unsqueeze(-1)
         self.inputs = torch.where(seat, incoming, self.inputs)
         self.labels = torch.where(seat, incoming_labels, self.labels)
-        self.steps = torch.where(halted, torch.zeros_like(self.steps), self.steps)
-        # A fresh slot restarts its latent state and its feedback grid; both
-        # belong to the puzzle that just left, not the one arriving.
+        if puzzle_ids is not None:
+            ids = puzzle_ids.to(torch.int32)
+            if valid_count < bs:
+                ids = ids.clone()
+                ids[valid_count:] = 0
+            self.puzzle_ids = torch.where(halted, ids, self.puzzle_ids)
+        z_slow, z_fast = self.start(init, bs)
         seat_latent = halted.view(-1, 1, 1)
         self.z_slow = torch.where(
             seat_latent,
-            torch.zeros_like(self.z_slow),
+            z_slow.to(self.z_slow.dtype),
             self.z_slow,
         )
         self.z_fast = torch.where(
             seat_latent,
-            torch.zeros_like(self.z_fast),
+            z_fast.to(self.z_fast.dtype),
             self.z_fast,
         )
+        self.steps = torch.where(halted, torch.zeros_like(self.steps), self.steps)
         self.feedback = torch.where(seat, self.inputs, self.feedback)
-        return self.inputs, self.labels, torch.ones_like(halted)
+        self.active = torch.ones_like(halted)
+        return self.active
 
-    def advance(
+    @override
+    def update_carry(self, *, z_slow: Tensor, z_fast: Tensor, active: Tensor) -> None:
+        del active
+        self.z_slow.copy_(z_slow.to(self.z_slow.dtype))
+        self.z_fast.copy_(z_fast.to(self.z_fast.dtype))
+        self.steps.add_(1)
+
+    @override
+    def release(self, init: LatentInit, *, halt: Tensor, active: Tensor) -> None:
+        del init, active
+        self.halted = halt
+
+    @override
+    def halted_this_step(self) -> Tensor | None:
+        return self.halted
+
+
+class StreamingPool(ActPool):
+    """Queue every incoming puzzle and seat it in the next free slot.
+
+    Only a batch's valid rows are queued; a slot trains only while it holds a
+    puzzle, and a halted slot is refilled from the queue at once, so a slot
+    may sit empty only while the queue is. Carried task ids and loader padding
+    are not supported.
+    """
+
+    class Config(Makes["StreamingPool"], ActPool.Config):
+        """Streaming seating."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        # Seating keys off ``active``, so nothing has halted until a slot trains.
+        self.halted = torch.zeros_like(self.halted)
+        self.pending_inputs = torch.zeros(0, config.grid_len, dtype=torch.long)
+        self.pending_labels = torch.zeros_like(self.pending_inputs)
+
+    @override
+    def to(self, device: torch.device) -> None:
+        super().to(device)
+        self.pending_inputs = self.pending_inputs.to(device)
+        self.pending_labels = self.pending_labels.to(device)
+
+    @override
+    def refill(
         self,
-        z_slow: Tensor,
+        init: LatentInit,
         *,
-        z_fast: Tensor,
-        logits: Tensor,
-        halt: Tensor,
         media: Tensor,
-    ) -> None:
-        """Store this step's state and decide which slots are done.
-
-        Args:
-          z_slow: Updated slow latent from the forward.
-          z_fast: Updated fast latent.
-          logits: ``[B, grid_len, V]`` this step's predictions.
-          halt: ``[B]`` halt logits.
-          media: The puzzles just solved against, for clamping givens.
-
-        """
-        self.z_slow = z_slow.to(self.z_slow.dtype)
-        self.z_fast = z_fast.to(self.z_fast.dtype)
-        self.steps = self.steps + 1
-        if self.config.feedback:
-            decoded = logits.argmax(dim=-1).detach()
-            self.feedback = self.clamp_givens(decoded, media=media)
-        self.halted = self._halt_mask(halt)
-
-    def rollout(
-        self,
-        model: SudokuNet,
-        *,
-        media: Tensor,
-        prefix_kwargs: Mapping[str, object] | None = None,
-    ) -> tuple[Tensor, Tensor]:
-        """Run one puzzle batch to the step cap, carrying latents throughout.
-
-        The evaluation counterpart of the training pool: no slots, no halting,
-        every row simply runs the full depth the model was trained at.
-
-        Args:
-          model: The network to run.
-          media: ``[B, grid_len]`` puzzles.
-          prefix_kwargs: Batch fields a prefix module consumes, if any;
-            forwarded verbatim to the model's ``**prefix_kwargs``.
-
-        Returns:
-          logits: Final ``[B, grid_len, V]`` predictions.
-          halt: Final ``[B]`` halt logits.
-
-        """
-        z_slow, z_fast = model.init_latents(media.shape[0])
-        feedback = media if self.config.feedback else None
-        logits = halt = None
-        for _ in range(self.config.max_steps):
-            self._set_feedback(model, feedback=feedback)
-            # Spelled out although it is the default: the unpacked mapping is
-            # ``object``-valued, so a checker otherwise sees it as a candidate
-            # for this ``bool`` keyword.
-            out = model(
-                media,
-                z_slow,
-                z_fast,
-                collect_intermediates=False,
-                **(prefix_kwargs or {}),
-            )
-            z_slow, z_fast = out.z_slow, out.z_fast
-            logits, halt = out.logits, out.halt
-            if feedback is not None:
-                feedback = self.clamp_givens(out.logits.argmax(dim=-1), media=media)
-        if logits is None:
-            raise ValueError("Expected logits is not None.")
-        if halt is None:
-            raise ValueError("Expected halt is not None.")
-        return logits, halt
-
-    def halt_loss(
-        self,
-        logits: Tensor,
-        *,
         labels: Tensor,
-        halt: Tensor,
-        active: Tensor,
+        valid_count: int,
+        puzzle_ids: Tensor | None,
         ignore_label_id: int,
-    ) -> tuple[Tensor, dict[str, float | Tensor]]:
-        """Train the halt head to predict "this grid is already correct".
-
-        Args:
-          logits: ``[B, grid_len, V]`` predictions.
-          labels: ``[B, grid_len]`` solutions.
-          halt: ``[B]`` halt logits.
-          active: ``[B]`` participating slots.
-          ignore_label_id: Label value excluded from correctness.
-
-        Returns:
-          loss: The weighted halt term.
-          metrics: Halt loss and the fraction of slots halting this step.
-
-        """
-        with torch.no_grad():
-            predictions = logits.argmax(dim=-1)
-            counted = labels != ignore_label_id
-            correct_cells = (predictions == labels) & counted
-            per_row = counted.sum(dim=-1)
-            solved = ((correct_cells.sum(dim=-1) == per_row) & (per_row > 0)).to(
-                halt.dtype,
-            )
-        per_sample = nn.functional.binary_cross_entropy_with_logits(
-            halt,
-            solved,
-            reduction="none",
+    ) -> Tensor:
+        del ignore_label_id
+        if puzzle_ids is not None:
+            raise ValueError("streaming seating does not carry task ids.")
+        self.pending_inputs = torch.cat(
+            [self.pending_inputs, media[:valid_count].to(torch.long)],
         )
-        n_active = active.sum().clamp(min=1)
-        loss = (
-            torch.where(active, per_sample, torch.zeros_like(per_sample)).sum()
-            / n_active
+        self.pending_labels = torch.cat(
+            [self.pending_labels, labels[:valid_count].to(torch.long)],
         )
-        weighted = self.config.halt_weight * loss
-        return weighted, {
-            "halt_loss": loss.detach(),
-            "halted_frac": self.halted.float().mean(),
-            "act_steps": self.steps.float().mean(),
-        }
+        self._seat(init)
+        return self.active
 
-    def clamp_givens(self, decoded: Tensor, *, media: Tensor) -> Tensor:
-        """Restore the puzzle's clue cells in a decoded grid.
+    @override
+    def update_carry(self, *, z_slow: Tensor, z_fast: Tensor, active: Tensor) -> None:
+        self.z_slow[active] = z_slow[active].to(self.z_slow.dtype)
+        self.z_fast[active] = z_fast[active].to(self.z_fast.dtype)
+        self.steps[active] += 1
 
-        The model may revise its own guesses freely but must not overwrite what
-        the puzzle told it, so clue cells are copied back verbatim.
+    @override
+    def release(self, init: LatentInit, *, halt: Tensor, active: Tensor) -> None:
+        self.halted = active & halt
+        self.active[self.halted] = False
+        self._seat(init)
 
-        Args:
-          decoded: Model output to restore; clue cells are overwritten in place.
-          media: Raw puzzle tensor with givens in config.given_low..given_high range.
-
-        Returns:
-          result: Tensor with decoded values except clue cells (restored from media).
-
-        """
-        given = (media >= self.config.given_low) & (media <= self.config.given_high)
-        return torch.where(given, media.to(decoded.dtype), decoded)
-
-    class StateDict(TypedDict):
-        """The halting RNG; absent in a checkpoint written before it existed."""
-
-        halt_rng: NotRequired[Tensor]
-
-    def state_dict(self) -> StateDict:
-        """Snapshot the halting RNG.
-
-        The pool's puzzles and latents are deliberately NOT saved: they are
-        in-flight state bound to specific puzzles, and a resumed run continues
-        with the next batch rather than replaying interrupted ones. The RNG is
-        saved because the exploration sequence must not restart.
-
-        Returns:
-          result: Dict with "halt_rng" key holding the generator state tensor.
-
-        """
-        return {"halt_rng": self._generator.get_state()}
-
-    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
-        """Restore the halting RNG produced by :meth:`state_dict`.
-
-        Args:
-          state_dict: State dict.
-
-        """
-        state = cast(ActPool.StateDict, state_dict)
-        if "halt_rng" in state:
-            # ``set_state`` wants a CPU byte tensor; a checkpoint read onto the
-            # compute device would otherwise be rejected here.
-            self._generator.set_state(state["halt_rng"].cpu())
-
-    def _set_feedback(self, model: SudokuNet, *, feedback: Tensor | None) -> None:
-        """Hand the fed-back grid to whichever channel consumes it."""
-        if feedback is None:
+    # Seats in slot order, oldest queued puzzle first.
+    def _seat(self, init: LatentInit) -> None:
+        free = (~self.active).nonzero(as_tuple=True)[0]
+        count = min(len(free), len(self.pending_inputs))
+        if count == 0:
             return
-        for channel in model.embedding.channels:
-            setter = getattr(channel, "set_feedback", None)
-            if setter is not None:
-                setter(feedback)
+        slots = free[:count]
+        self.inputs[slots] = self.pending_inputs[:count]
+        self.labels[slots] = self.pending_labels[:count]
+        z_slow, z_fast = self.start(init, count)
+        self.z_slow[slots] = z_slow.to(self.z_slow.dtype)
+        self.z_fast[slots] = z_fast.to(self.z_fast.dtype)
+        self.steps[slots] = 0
+        self.active[slots] = True
+        self.feedback[slots] = self.inputs[slots]
+        self.pending_inputs = self.pending_inputs[count:]
+        self.pending_labels = self.pending_labels[count:]
 
-    # A slot halts at the step cap unconditionally, or when the halt head fires AND the
-    # slot has run its sampled minimum. The draw order -- ``rand`` then ``randint`` --
-    # is a reproducibility contract.
-    def _halt_mask(self, halt: Tensor) -> Tensor:
-        """Which slots stop after this step."""
-        config = self.config
-        bs = config.batch_size
-        at_cap = self.steps >= config.max_steps
-        fired = halt > 0
-        explore = (
-            torch.rand(bs, device=self.device, generator=self._generator)
-            < config.halt_exploration_prob
-        )
-        if config.min_steps_sampled:
-            # randint's upper bound is exclusive, so max_steps + 1 samples the
-            # inclusive range and never exceeds the cap.
-            sampled = torch.randint(
-                2,
-                config.max_steps + 1,
-                (bs,),
-                device=self.device,
-                generator=self._generator,
-            )
-            minimum = torch.where(explore, sampled, torch.ones_like(sampled))
-            return at_cap | (fired & (self.steps >= minimum))
-        return at_cap | (fired & ~explore)
+
+def _forward(
+    model: Solver,
+    media: Tensor,
+    z_slow: Tensor,
+    z_fast: Tensor,
+    *,
+    feedback: Tensor | None,
+    kwargs: Mapping[str, object],
+) -> RolloutStep:
+    """Stash ``feedback`` when there is one, then run one forward."""
+    if feedback is not None:
+        model.set_feedback(feedback)
+    return model(media, z_slow, z_fast, collect_intermediates=False, **kwargs)

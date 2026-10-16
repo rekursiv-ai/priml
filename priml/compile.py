@@ -12,15 +12,24 @@ the non-lazy version.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import cast, overload
+from typing import Final, cast, overload
 
 import functools
+import logging
 import traceback
 
 import torch
 
 
+logger = logging.getLogger(__name__)
+
+_MAX_TRACES_PER_KEY: Final = 32
+"""Stacks kept per key: enough to diagnose a guard failure, bounded for a run."""
+
+# Process-global by necessity: ``trace_compile`` runs inside compiled code via
+# ``assume_constant_result``, which can thread no state through its arguments.
 _compile_traces = dict[str, list[str]]()
+_compile_counts = dict[str, int]()
 
 
 @overload
@@ -52,7 +61,8 @@ def lazy_torch_compile(
     call, so processes that import but never invoke pay zero cost.
 
     Args:
-      *compile_args: Positional arguments forwarded to torch.compile().
+      *compile_args: The function to decorate when applied bare; any other
+        positional raises ``TypeError``.
       **compile_kwargs: Keyword arguments forwarded to torch.compile().
 
     Returns:
@@ -62,11 +72,13 @@ def lazy_torch_compile(
     """
     # Bare ``@lazy_torch_compile``: the lone positional is the decorated
     # function, not a ``torch.compile`` argument -- decorate it directly.
-    if len(compile_args) == 1 and not compile_kwargs and callable(compile_args[0]):
-        return _make_lazy_compiled(compile_args[0])
+    if compile_args:
+        if len(compile_args) == 1 and callable(compile_args[0]) and not compile_kwargs:
+            return _make_lazy_compiled(compile_args[0])
+        raise TypeError("lazy_torch_compile accepts only keyword compile arguments.")
 
     def decorator(fn: Callable[..., object]) -> Callable[..., object]:
-        return _make_lazy_compiled(fn, *compile_args, **compile_kwargs)
+        return _make_lazy_compiled(fn, **compile_kwargs)
 
     return decorator
 
@@ -106,13 +118,14 @@ def trace_compile(
     key: str,
     *,
     max_compiles: int = -1,
-    always_print: bool = False,
+    always_log: bool = False,
 ) -> int:
     """Track and optionally limit recompilations. Safe to call from compiled code.
 
     Call this inside a compiled function to record each (re)compilation.
-    When ``max_compiles`` is exceeded, raises ``RuntimeError`` with all
-    collected stack traces so you can diagnose guard failures.
+    When ``max_compiles`` is exceeded, raises ``RuntimeError`` with the
+    collected stack traces (the most recent ``_MAX_TRACES_PER_KEY``) so you
+    can diagnose guard failures.
 
     Enable verbose torch recompilation logging with::
 
@@ -121,7 +134,7 @@ def trace_compile(
     Args:
         key: Identifier for this compilation site.
         max_compiles: Raise after this many compiles (-1 = unlimited).
-        always_print: Print the stack trace on every compile.
+        always_log: Log the stack trace at WARNING on every compile.
 
     Returns:
         count: Number of compiles seen so far for this key.
@@ -130,17 +143,18 @@ def trace_compile(
     trace = "".join(traceback.format_stack()[:-1])
     traces = _compile_traces.setdefault(key, [])
     traces.append(trace)
-    if always_print:
-        print(trace)  # noqa: T201 -- CLI output is this function's product.
-    if max_compiles > -1 and len(traces) > max_compiles:
-        traces_str = "" if always_print else ("\n" + "\n--------\n".join(traces))
-        raise RuntimeError(f"Too many compiles ({len(traces)}) for {key}.{traces_str}")
-    return len(traces)
+    del traces[:-_MAX_TRACES_PER_KEY]
+    count = _compile_counts[key] = _compile_counts.get(key, 0) + 1
+    if always_log:
+        logger.warning("Compile %s of %s:\n%s", count, key, trace)
+    if max_compiles > -1 and count > max_compiles:
+        traces_str = "" if always_log else ("\n" + "\n--------\n".join(traces))
+        raise RuntimeError(f"Too many compiles ({count}) for {key}.{traces_str}")
+    return count
 
 
 def _make_lazy_compiled[**P, R](
     fn: Callable[P, R],
-    *compile_args: object,
     **compile_kwargs: object,
 ) -> Callable[P, R]:
     """Wrap ``fn`` so ``torch.compile`` runs on first call, not at decoration."""
@@ -158,7 +172,7 @@ def _make_lazy_compiled[**P, R](
                 Callable[..., Callable[[Callable[P, R]], Callable[P, R]]],
                 torch.compile,
             )
-            target = compile_fn(*compile_args, **compile_kwargs)(fn)
+            target = compile_fn(**compile_kwargs)(fn)
             compiled = target
         return target(*args, **kwargs)
 

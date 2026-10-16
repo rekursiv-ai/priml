@@ -9,46 +9,67 @@ and a limit of 10 epochs / 10,260 updates. It stops early after three epochs
 without matching or improving the best validation score. The full settings
 are in `experiments.py`.
 
-## Run locally
+## Reproduce
 
-Run these commands from the PRIML repository. Data and checkpoints go under
-`/opt/scratch`, the default resource root. To use another root, override
-`base_dir` when training and use the matching paths for preparation and
-evaluation. Use a fresh run directory if the checkpoint path contains an older run.
+Run every command from the root of a fresh clone. `uv` installs the locked
+dependencies on first use.
 
-Install the dependencies and download the data:
+### Prerequisites
 
-```sh
-uv sync --frozen
-uv --quiet run --frozen python -m priml.baselines.etth1.scripts.prepare_data \
-  --directory /opt/scratch/datasets/etth1
-```
+- Hardware: a CPU. `exp000` pins its runtime to the CPU; no GPU is used.
+- Credentials: none; ETTh1 is a public download.
+- Disk: under 10 MB for the CSV and `exp000`'s checkpoints.
 
-Train the baseline:
+### Data
 
 ```sh
-OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 MKL_CBWR=COMPATIBLE \
-  uv --quiet run --frozen python -m priml \
-  priml.baselines.etth1.experiments.exp000
+uv --quiet run --frozen python -m priml.baselines.etth1.scripts.prepare_data
 ```
 
-Evaluate the checkpoint with the best validation score:
+Downloads `ETTh1.csv` from the ETDataset repository at a pinned commit, checks
+its SHA-256, and writes it to `/opt/scratch/datasets/etth1`. An existing file
+is verified instead. If you already have the CSV, add
+`--source /path/to/ETTh1.csv`; it must pass the same check. If downloading
+fails with a certificate error on macOS, prefix the command with
+`SSL_CERT_FILE=/etc/ssl/cert.pem`.
+
+### Experiments
 
 ```sh
-uv --quiet run --frozen python -m priml.baselines.etth1.scripts.evaluate \
-  --directory /opt/scratch/datasets/etth1 \
-  --checkpoint /opt/scratch/runs/etth1/exp000/checkpoints
+uv --quiet run --frozen python -m priml priml.baselines.etth1.experiments.exp_smoke
+OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 MKL_CBWR=COMPATIBLE uv --quiet run --frozen python -m priml priml.baselines.etth1.experiments.exp000
+uv --quiet run --frozen python -m priml.baselines.etth1.scripts.evaluate --checkpoint /opt/scratch/runs/etth1/exp000/checkpoints
 ```
 
-The download script checks the file's checksum. If you already have the CSV,
-add `--source /path/to/ETTh1.csv` to the preparation command. If downloading
-fails with a certificate error on macOS, try adding
-`SSL_CERT_FILE=/etc/ssl/cert.pem` before that command.
+The thread and MKL settings on `exp000` are the ones the recorded result used;
+they fix the floating-point reduction order. `evaluate` scores the checkpoint
+with the best validation score on the held-out test split; it reads the
+`best.json` that `exp000` writes, so it runs after `exp000`. Use a fresh run
+directory if `exp000`'s checkpoint path holds an older run.
 
-Normalization uses only the training data. The split and batch ordering match
-the reference, including dropping incomplete batches. Checkpoints save the
-state needed to resume training. Older checkpoints without that state can
-still be evaluated, but cannot be resumed.
+| Step | Reads | Run after | Output | Result | Hardware |
+|---|---|---|---|---|---|
+| `exp_smoke` | `datasets/etth1` | Data | Log only | Integration check only | CPU |
+| `exp000` | `datasets/etth1` | Data | `runs/etth1/exp000/checkpoints` | Validation MSE 0.6461290121 | Apple Silicon and x86-64 CPUs |
+| `evaluate` | `datasets/etth1`, `runs/etth1/exp000/checkpoints` | `exp000` | Printed JSON | Test MSE 0.3748246133, MAE 0.3994735181 | Apple Silicon and x86-64 CPUs |
+
+Paths in the table are beneath `base_dir`. Normalization uses only the
+training data. The split and batch ordering match the reference, including
+dropping incomplete batches. Checkpoints save the state needed to resume
+training. Older checkpoints without that state can still be evaluated, but
+cannot be resumed.
+
+### The `base_dir` knob
+
+`base_dir` defaults to `/opt/scratch`. Data and run outputs resolve beneath it,
+so one override relocates a whole run; point the Data step and the evaluation
+at the same root:
+
+```sh
+uv --quiet run --frozen python -m priml.baselines.etth1.scripts.prepare_data --directory /data/priml/datasets/etth1
+OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 MKL_CBWR=COMPATIBLE uv --quiet run --frozen python -m priml priml.baselines.etth1.experiments.exp000 --override base_dir=/data/priml
+uv --quiet run --frozen python -m priml.baselines.etth1.scripts.evaluate --directory /data/priml/datasets/etth1 --checkpoint /data/priml/runs/etth1/exp000/checkpoints
+```
 
 ## Tests and reference check
 
@@ -63,28 +84,28 @@ They cover data loading, training, checkpoint resume, and saved reference
 outputs (called goldens) that catch changes to the results.
 
 The reference is [ql-denoising/DLinear](https://github.com/ql-denoising/DLinear)
-at commit `da9e67442b95af76488b8e4e1806cc3185723dd9`. To compare against a local
-checkout, run the following with its pandas, scikit-learn, and matplotlib
-dependencies available:
+at commit `da9e67442b95af76488b8e4e1806cc3185723dd9`. Check out that commit
+next to this repository and apply the NumPy 2 spelling of `np.Inf`, the one
+edit the verifier allows:
 
 ```sh
-uv --quiet run --frozen python -m priml.baselines.etth1.scripts.verify_reference \
-  --reference /path/to/DLinear --directory /opt/scratch/datasets/etth1
+git clone https://github.com/ql-denoising/DLinear ../DLinear
+git -C ../DLinear checkout da9e67442b95af76488b8e4e1806cc3185723dd9
+sed -i.orig 's/np\.Inf/np.inf/g' ../DLinear/utils/tools.py
+uv --quiet run --frozen python -m priml.baselines.etth1.scripts.verify_reference --reference ../DLinear --directory /opt/scratch/datasets/etth1
 ```
 
-This checks the source files and compares small test runs plus three training
-updates on the real data, bit for bit. It allows the NumPy 2 compatibility
-change from `np.Inf` to `np.inf` in `utils/tools.py`.
+The verifier runs the reference's own pandas, scikit-learn, and matplotlib
+code, so those must be importable in the environment. It checks the source
+files and compares small test runs plus three training updates on the real
+data, bit for bit.
 
 The goldens were recorded from the reference after the comparison passed.
 To deliberately regenerate them, use pytest so PRIML's numerical settings
 are loaded before the source capture:
 
 ```sh
-uv --quiet run --frozen pytest \
-  priml/baselines/etth1/scripts/mint_reference_test.py -o addopts= \
-  --etth1-reference /path/to/DLinear \
-  --etth1-directory /opt/scratch/datasets/etth1
+uv --quiet run --frozen pytest priml/baselines/etth1/scripts/mint_reference_test.py -o addopts= --etth1-reference ../DLinear --etth1-directory /opt/scratch/datasets/etth1
 ```
 
 Adding `--mint` to the verifier command above runs the same pytest step.
@@ -106,7 +127,10 @@ final Torch RNG state, and every test prediction exactly. The comparison is
 recorded in `results/local_cpu.json`.
 
 These results were measured on Apple Silicon with Python 3.12.3, PyTorch 2.11.0,
-NumPy 2.5.3, and one Torch thread. GPU/reference-hardware results are still TBD.
+NumPy 2.5.3, and one Torch thread. A run of the Reproduce steps from a fresh
+clone on 2026-10-10, on an x86-64 Linux CPU with Python 3.14.7, PyTorch 2.11.0,
+and NumPy 2.5.3, gave the same three values to every printed digit and the
+same best step. GPU/reference-hardware results are still TBD.
 
 ## exp001: cosine learning-rate decay
 

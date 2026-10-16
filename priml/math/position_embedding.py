@@ -40,8 +40,7 @@ def sincos_position_table(
     """
     if channels % 4:
         raise ValueError("position channels must be divisible by four")
-    half = channels // 2
-    omega = torch.arange(half // 2, dtype=compute_dtype) / (half / 2.0)
+    omega = torch.arange(0, channels, step=4, dtype=compute_dtype) / channels
     omega = 1.0 / 10_000**omega
     steps = torch.arange(grid, dtype=compute_dtype)
     # Width varies fastest; channels encode columns before rows.

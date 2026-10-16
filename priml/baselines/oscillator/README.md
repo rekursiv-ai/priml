@@ -105,7 +105,7 @@ and `host_agnostic_numerics()`. Only regenerate after an intentional recipe
 change, inspect the new records, then replay without regeneration:
 
 ```sh
-BFB_REGENERATE=1 uv --quiet run --frozen pytest priml/baselines/oscillator/regression_test.py -o addopts= -q
+uv --quiet run --frozen pytest priml/baselines/oscillator/regression_test.py -o addopts= -q --regenerate-b4b
 uv --quiet run --frozen pytest priml/baselines/oscillator/regression_test.py -o addopts= -q
 ```
 

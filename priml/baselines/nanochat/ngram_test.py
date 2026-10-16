@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from torch import Tensor, nn
 
 import pytest
@@ -19,16 +21,28 @@ from priml.testing.cost import assert_cost_matches_torch
 
 
 class _FakeKernel:
+    def __init__(self) -> None:
+        self.grid: tuple[int, ...] = ()
+        self.args: tuple[object, ...] = ()
+        self.kwargs: dict[str, object] = {}
+
     def __getitem__(self, grid: tuple[int, ...]) -> _FakeKernel:
-        del grid
+        self.grid = grid
         return self
 
     def __call__(self, *args: object, **kwargs: object) -> None:
-        del args, kwargs
+        self.args = args
+        self.kwargs = kwargs
 
 
 def _fake_kernel() -> _FakeKernel:
     return _FakeKernel()
+
+
+def _kernel_buffers(kernel: _FakeKernel) -> list[Tensor]:
+    value = cast(list[Tensor] | tuple[Tensor, ...], kernel.kwargs["buffers"])
+    assert isinstance(value, (list, tuple))
+    return list(value)
 
 
 def test_ngram_embedding_zeros_incomplete_prefix_and_receives_gradients() -> None:
@@ -210,6 +224,10 @@ def test_table_initialization_transform_preserves_rng_draws() -> None:
         assert torch.equal(torch.get_rng_state(), expected_rng)
         assert torch.count_nonzero(reference.tables[0].weight) > 0
         assert torch.count_nonzero(candidate.tables[0].weight) == 0
+        with torch.no_grad():
+            candidate.tables[0].weight.fill_(1)
+        candidate.reset_parameters()
+        assert torch.count_nonzero(candidate.tables[0].weight) == 0
 
 
 def test_gradient_buffers_follow_placement_without_narrowing() -> None:
@@ -355,6 +373,11 @@ def test_cuda_fused_mix_matches_autograd_and_marks_rows(sources: int) -> None:
 def test_ngram_configs_validate_hash_geometry() -> None:
     with pytest.raises(ValueError, match="divide"):
         HashedNgramTables.Config(channels_out=3, hash_multipliers=((1,), (1,))).make()
+    with pytest.raises(ValueError, match="divide"):
+        HashedNgramTables.Config(channels_out=4, hash_multipliers=()).make()
+    # Rejected at build, so the finalized view still prints its derived width.
+    printed = HashedNgramTables.Config(channels_out=3, hash_multipliers=((1,), (1,)))
+    assert printed.copy_tree().finalize().table.channels_out == 1
     with pytest.raises(ValueError, match="same n-gram"):
         HashedNgramTables.Config(channels_out=4, hash_multipliers=((1,), (1, 2))).make()
 
@@ -485,6 +508,289 @@ def test_cpu_backward_reference_and_empty_sink_clear() -> None:
     clear_marked_sinks([], [])
 
 
+def test_ngram_cuda_dispatch_pins_kernel_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("triton")
+    values = torch.randn(2, 17, 3, 8)
+    gates = [torch.randn(2, 17, 3) for _ in range(2)]
+    weights = [torch.randn(16, 12) for _ in range(4)]
+    indices = [torch.arange(34).reshape(2, 17).remainder(16) for _ in weights]
+    sinks = [torch.zeros_like(weight) for weight in weights]
+    bitmaps = [torch.zeros(16, dtype=torch.uint8) for _ in weights]
+    forward_kernel = _fake_kernel()
+    backward_kernel = _fake_kernel()
+    clear_kernel = _fake_kernel()
+    monkeypatch.setattr(ngram, "_compiled_ngram_forward", lambda: forward_kernel)
+    monkeypatch.setattr(ngram, "_compiled_ngram_backward", lambda: backward_kernel)
+    monkeypatch.setattr(ngram, "_compiled_sink_clear", lambda: clear_kernel)
+
+    ngram._mix_forward_cuda(values, gates, weights, indices)
+    assert forward_kernel.grid == (3,)
+    assert isinstance(forward_kernel.grid[0], int)
+    assert len(forward_kernel.args) == 0
+    forward_buffers = _kernel_buffers(forward_kernel)
+    assert len(forward_buffers) == 12
+    assert forward_buffers[0] is values
+    assert all(forward_buffers[i] is gates[i - 2] for i in (2, 3))
+    assert all(forward_buffers[i] is weights[i - 4] for i in range(4, 8))
+    assert all(forward_buffers[i] is indices[i - 8] for i in range(8, 12))
+    assert all(
+        isinstance(value, int)
+        for value in cast(tuple[int, ...], forward_kernel.kwargs["dimensions"])
+    )
+    assert {
+        key: forward_kernel.kwargs[key]
+        for key in (
+            "n_rows",
+            "n_head",
+            "dimensions",
+            "block",
+            "num_warps",
+            "num_stages",
+        )
+    } == {
+        "n_rows": 34,
+        "n_head": 3,
+        "dimensions": (12, 4, 6, 8, 2),
+        "block": 16,
+        "num_warps": 4,
+        "num_stages": 1,
+    }
+    output = forward_buffers[1]
+    assert output.shape == values.shape
+    assert output.dtype == values.dtype
+
+    ngram._mix_backward_cuda(
+        values,
+        gates,
+        weights,
+        indices,
+        sinks,
+        bitmaps=bitmaps,
+    )
+    assert backward_kernel.grid == (3,)
+    backward_buffers = _kernel_buffers(backward_kernel)
+    assert len(backward_buffers) == 21
+    assert backward_buffers[0] is values
+    assert all(backward_buffers[i] is gates[i - 1] for i in (1, 2))
+    assert all(backward_buffers[i] is weights[i - 3] for i in range(3, 7))
+    assert all(backward_buffers[i] is indices[i - 7] for i in range(7, 11))
+    assert all(backward_buffers[i].shape == gates[i - 11].shape for i in (11, 12))
+    assert backward_buffers[11] is not backward_buffers[12]
+    assert all(backward_buffers[i] is sinks[i - 13] for i in range(13, 17))
+    assert all(backward_buffers[i] is bitmaps[i - 17] for i in range(17, 21))
+    assert all(
+        isinstance(value, int)
+        for value in cast(tuple[int, ...], backward_kernel.kwargs["dimensions"])
+    )
+    assert {
+        key: backward_kernel.kwargs[key]
+        for key in (
+            "mark",
+            "n_rows",
+            "n_head",
+            "dimensions",
+            "block",
+            "num_warps",
+            "num_stages",
+        )
+    } == {
+        "mark": True,
+        "n_rows": 34,
+        "n_head": 3,
+        "dimensions": (12, 4, 6, 8, 2),
+        "block": 16,
+        "num_warps": 4,
+        "num_stages": 1,
+    }
+
+    ngram._mix_backward_cuda(values, gates[:1], weights[:2], indices[:2], sinks[:2])
+    assert backward_kernel.kwargs["mark"] is False
+    backward_buffers = _kernel_buffers(backward_kernel)
+    assert all(backward_buffers[i] is sinks[i - 13] for i in (13, 14))
+    assert all(backward_buffers[i] is sinks[i - 17] for i in (17, 18))
+
+    ngram._clear_marked_sinks_cuda(sinks, bitmaps)
+    assert clear_kernel.grid == (2,)
+    assert isinstance(clear_kernel.grid[0], int)
+    clear_buffers = _kernel_buffers(clear_kernel)
+    assert clear_buffers[0] is sinks[3]
+    assert clear_buffers[1] is bitmaps[3]
+    assert {
+        key: clear_kernel.kwargs[key]
+        for key in ("n_cols", "block", "rows_per_program", "num_warps")
+    } == {
+        "n_cols": 12,
+        "block": 16,
+        "rows_per_program": 8,
+        "num_warps": 1,
+    }
+    with pytest.raises(ValueError, match="shorter than argument"):
+        ngram._clear_marked_sinks_cuda(sinks[:2], bitmaps[:1])
+
+    with pytest.raises(ValueError, match="7 rows is not divisible by 8") as exc_info:
+        ngram._clear_marked_sinks_cuda(
+            [torch.zeros(7, 3)],
+            [torch.zeros(7, dtype=torch.uint8)],
+        )
+    assert str(exc_info.value) == (
+        "7 rows is not divisible by 8; the clear omits a bounds mask and would "
+        "read past the table"
+    )
+
+
+def test_ngram_embedding_reset_redraws_its_contexts() -> None:
+    config = NgramEmbedding.Config()
+    config.channels_in = 5
+    config.channels_out = 2
+    context = NgramEmbedding.Config()
+    context.channels_in = 7
+    config.contexts = {"previous": context}
+    built = config.make()
+    previous = built.contexts["previous"]
+    assert isinstance(previous, NgramEmbedding)
+    assert isinstance(previous.inner, Embedding)
+    with torch.no_grad():
+        previous.inner.weight.fill_(float("nan"))
+    built.reset_parameters()
+    assert bool(torch.isfinite(previous.inner.weight).all())
+
+
+def test_cuda_dispatch_routes_mix_backward_and_clear_to_the_kernels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The custom ops branch on ``is_cuda``; a CPU tensor reporting CUDA takes it."""
+    values = torch.randn(2, 3, 4, 6)
+    gate = torch.randn(2, 3, 4)
+    weights = [torch.randn(16, 12) for _ in range(2)]
+    indices = [torch.tensor([[1, 2, 3], [4, 5, 6]]) for _ in weights]
+    sinks = [torch.zeros_like(weight) for weight in weights]
+    bitmaps = [torch.zeros(16, dtype=torch.uint8) for _ in weights]
+    calls: list[str] = []
+    forward_out = torch.full_like(values, 7.0)
+    gate_grad = torch.full_like(gate, 3.0)
+
+    def forward(*args: object) -> Tensor:
+        del args
+        calls.append("forward")
+        return forward_out
+
+    def backward(*args: object, bitmaps: list[Tensor] | None) -> list[Tensor]:
+        del args
+        calls.append(f"backward:{bitmaps is not None}")
+        return [gate_grad]
+
+    def clear(*args: object) -> None:
+        del args
+        calls.append("clear")
+
+    monkeypatch.setattr(ngram, "_mix_forward_cuda", forward)
+    monkeypatch.setattr(ngram, "_mix_backward_cuda", backward)
+    monkeypatch.setattr(ngram, "_clear_marked_sinks_cuda", clear)
+    monkeypatch.setattr(Tensor, "is_cuda", property(_always_cuda))
+
+    assert ngram_mix(values, [gate], weights, indices, sinks, bitmaps) is forward_out
+    first, second = ngram._mix_backward(values, [gate], weights, indices, sinks, [])
+    assert first is gate_grad
+    assert second.numel() == 0
+    ngram._mix_backward(values, [gate], weights, indices, sinks, bitmaps)
+    clear_marked_sinks(sinks, bitmaps)
+    assert calls == ["forward", "backward:False", "backward:True", "clear"]
+
+
+def test_fake_kernels_report_the_real_output_shapes() -> None:
+    values = torch.randn(2, 3, 4, 6)
+    gates = [torch.randn(2, 3, 4) for _ in range(2)]
+    weights = [torch.randn(13, 12) for _ in range(4)]
+    indices = [torch.tensor([[1, 2, 3], [4, 5, 6]]) for _ in weights]
+    sinks = [torch.zeros_like(weight) for weight in weights]
+    mixed = ngram._mix_fake(values, gates[:1], weights[:2], indices[:2], sinks[:2], [])
+    assert mixed.shape == values.shape
+    assert mixed.dtype == values.dtype
+    one = ngram._mix_backward_fake(values, gates[:1], weights, indices, sinks, [])
+    assert one[0].shape == gates[0].shape
+    assert one[1].numel() == 0
+    two = ngram._mix_backward_fake(values, gates, weights, indices, sinks, [])
+    assert [grad.shape for grad in two] == [gate.shape for gate in gates]
+
+
+def test_compiled_kernels_jit_their_triton_bodies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jitted: list[object] = []
+
+    def record(function: object) -> object:
+        jitted.append(function)
+        return function
+
+    monkeypatch.setattr(ngram, "jit_kernel", record)
+    for compiled in (
+        ngram._compiled_ngram_forward,
+        ngram._compiled_ngram_backward,
+        ngram._compiled_sink_clear,
+    ):
+        compiled.cache_clear()
+    try:
+        assert ngram._compiled_ngram_forward() is ngram._ngram_mix_fwd_triton
+        assert ngram._compiled_ngram_backward() is ngram._ngram_mix_bwd_triton
+        assert ngram._compiled_sink_clear() is ngram._clear_marked_sink_triton
+    finally:
+        for compiled in (
+            ngram._compiled_ngram_forward,
+            ngram._compiled_ngram_backward,
+            ngram._compiled_sink_clear,
+        ):
+            compiled.cache_clear()
+    assert jitted == [
+        ngram._ngram_mix_fwd_triton,
+        ngram._ngram_mix_bwd_triton,
+        ngram._clear_marked_sink_triton,
+    ]
+
+
+def test_prepare_gradient_sinks_allocates_exact_shapes_and_dtypes() -> None:
+    tables = HashedNgramTables.Config(
+        channels_out=4,
+        num_embeddings=7,
+        hash_multipliers=((3, 5), (11, 13)),
+    ).make()
+    tables.prepare_gradient_sinks()
+    assert [sink.shape for sink in tables.gradient_sinks] == [(7, 2), (7, 2)]
+    assert all(sink.dtype == torch.float32 for sink in tables.gradient_sinks)
+    assert all(
+        sink.device == table.weight.device
+        for sink, table in zip(tables.gradient_sinks, tables.tables, strict=True)
+    )
+    assert tables.gradient_bitmaps == []
+
+    tables.prepare_gradient_sinks(dirty_bitmaps=True)
+    assert [bitmap.shape for bitmap in tables.gradient_bitmaps] == [(7,), (7,)]
+    assert all(bitmap.dtype == torch.uint8 for bitmap in tables.gradient_bitmaps)
+    assert all(
+        bitmap.device == table.weight.device
+        for bitmap, table in zip(tables.gradient_bitmaps, tables.tables, strict=True)
+    )
+    tables.to("meta")
+    tables.prepare_gradient_sinks(dirty_bitmaps=True)
+    assert all(sink.device.type == "meta" for sink in tables.gradient_sinks)
+    assert all(bitmap.device.type == "meta" for bitmap in tables.gradient_bitmaps)
+
+
+def test_pad_ngram_sources_repeats_first_source_to_requested_length() -> None:
+    first = torch.tensor([2, 3])
+    second = torch.tensor([5, 7])
+    padded = ngram._pad_ngram_sources([first, second], 4)
+    assert len(padded) == 4
+    assert padded[0] is first
+    assert padded[1] is second
+    assert padded[2] is first
+    assert padded[3] is first
+    padded = ngram._pad_ngram_sources([first], 2)
+    assert len(padded) == 2
+    assert all(value is first for value in padded)
+
+
 def test_ngram_cuda_host_dispatch_accepts_cpu_fixture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -516,7 +822,12 @@ def test_ngram_cuda_host_dispatch_accepts_cpu_fixture(
     ngram._clear_marked_sinks_cuda(sinks, bitmaps)
 
 
+def _always_cuda(tensor: Tensor) -> bool:
+    del tensor
+    return True
+
+
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

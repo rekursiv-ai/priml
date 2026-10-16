@@ -32,14 +32,14 @@ import logging
 import math
 
 from configgle import Fig, Makeable, PartialConfig
-from torch import Tensor, nn
+from torch import Tensor, amp, nn
 
 import torch
-import torch.amp
 import torch.distributed as dist
 
 from priml.loss.custom_types import LossOutput
 from priml.loss.simple_loss import SimpleLoss
+from priml.math.distributed import collective_device
 from priml.math.schedules import Schedule, constant
 from priml.model.special import Identity
 from priml.optimizers.lr import apply_lr_scale, remember_initial_lrs
@@ -502,22 +502,41 @@ class TrainStep:
     def __call__(self, *args: object, **kwargs: object) -> object:
         """Training forward pass (sets train mode, applies autocast, optionally compiles)."""
         self.model.train()
-        if self._compile_fn is not None and self._compiled_model is None:
-            self._compiled_model = self._compile_fn(self.model)
-        forward_model = (
-            self._compiled_model if self._compiled_model is not None else self.model
-        )
-        autocast_ctx = (
-            torch.amp.autocast(
-                device_type=self.device.type,
-                dtype=self.config.dtype_autocast,
-                cache_enabled=self.config.autocast_cache_enabled,
-            )
-            if self.config.dtype_autocast is not None
-            else contextlib.nullcontext()
-        )
-        with self.timer_forward, autocast_ctx:
-            return forward_model(*args, **kwargs)
+        return self._train_forward(*args, **kwargs)
+
+    def call_frozen(self, *args: object, **kwargs: object) -> object:
+        """Forward as a fixed function that gradients flow THROUGH, not into.
+
+        For scoring another model's output with this one -- a GAN's generator
+        phase runs the discriminator here. Eval mode keeps BatchNorm statistics
+        and dropout out of a batch this model is not training on; parameters
+        stop requiring grad so the caller's backward leaves none on them. Unlike
+        :meth:`call_eval` the autograd graph is kept, and the weights are the
+        live ones, not the EMA shadow. Autocast, compilation, and
+        ``timer_forward`` are those of :meth:`__call__`.
+
+        Every module's mode and every parameter's ``requires_grad`` are restored
+        to what they were, so a parameter the user froze stays frozen.
+
+        Args:
+          *args: Positional model inputs.
+          **kwargs: Keyword model inputs.
+
+        Returns:
+          output: The model's forward result, differentiable in its inputs.
+
+        """
+        modes = [(module, module.training) for module in self.model.modules()]
+        requires_grad = [(p, p.requires_grad) for p in self.model.parameters()]
+        self.model.eval()
+        self.model.requires_grad_(False)
+        try:
+            return self._train_forward(*args, **kwargs)
+        finally:
+            for module, training in modes:
+                module.training = training
+            for param, required in requires_grad:
+                param.requires_grad_(required)
 
     def call_eval(self, *args: object, **kwargs: object) -> object:
         """Run the evaluation forward pass under inference_mode and autocast.
@@ -536,29 +555,19 @@ class TrainStep:
           output: The model's forward result under the EMA weights.
 
         """
-        was_training = self.model.training
+        modes = [(module, module.training) for module in self.model.modules()]
         self.model.eval()
-
-        autocast_ctx = (
-            torch.amp.autocast(
-                device_type=self.device.type,
-                dtype=self.config.dtype_autocast,
-                cache_enabled=self.config.autocast_cache_enabled,
-            )
-            if self.config.dtype_autocast is not None
-            else contextlib.nullcontext()
-        )
-
-        with (
-            self.timer_eval,
-            torch.inference_mode(),
-            self.ema.apply_to(self.model),
-            autocast_ctx,
-        ):
-            output = cast(object, self.model(*args, **kwargs))
-
-        self.model.train(was_training)
-        return output
+        try:
+            with (
+                self.timer_eval,
+                torch.inference_mode(),
+                self.ema.apply_to(self.model),
+                self._autocast_scope(),
+            ):
+                return cast(object, self.model(*args, **kwargs))
+        finally:
+            for module, training in modes:
+                module.training = training
 
     def step(self, closure: Callable[[], Tensor | float] | None = None) -> None:
         """Optimization step (clip grads, scale the rate, optimizer.step, EMA).
@@ -659,21 +668,44 @@ class TrainStep:
             (forward output), and any extra loss dict entries.
 
         """
-        # Forward (autocast applied in __call__). The output may be a single
-        # Tensor or a multi-output container; the loss consumes it via the
-        # ModelOutput contract rather than a blind ``cast(Tensor, ...)``.
-        forward_output: object = self(**preprocessed_batch)
-        if not isinstance(forward_output, ModelOutput):
-            raise TypeError(
-                "Model forward output does not satisfy ModelOutput "
-                f"(got {type(forward_output).__name__}); it must be a Tensor or "
-                "an indexable multi-output container the loss can consume.",
-            )
-        output: ModelOutput = forward_output
+        return self.train_on_output(
+            self(**preprocessed_batch),
+            closure=lambda: self._recompute_loss(preprocessed_batch),
+            **preprocessed_batch,
+        )
 
-        # Loss computation (inherits autocast from forward)
-        loss_result = {**self.loss(output, **preprocessed_batch)}
-        loss: Tensor = loss_result["loss"]
+    def train_on_output(
+        self,
+        output: object,
+        /,
+        *,
+        closure: Callable[[], Tensor] | None = None,
+        **preprocessed_batch: object,
+    ) -> TrainStepOutput:
+        """Loss, backprop, and accumulation on a forward output the caller ran.
+
+        :meth:`train_step` minus its forward. For a recipe whose forward
+        output feeds something else before the loss -- a GAN scores the
+        generator's output with the discriminator -- so the model runs once
+        and keys only the loss reads never reach ``forward``.
+
+        Args:
+          output: The model's forward output, from :meth:`__call__` so it
+            carries autocast, compilation, and ``timer_forward``.
+          closure: Recomputes the scalar loss for an optimizer that sets
+            ``requires_closure``; ``None`` when no recomputation exists.
+          **preprocessed_batch: Everything the loss reads.
+
+        Returns:
+          output: Dict with "loss" (per-element unreduced tensor), "model"
+            (``output``), and any extra loss dict entries.
+
+        Raises:
+          ValueError: The loss is reduced to a scalar.
+
+        """
+        result = self._loss_on_output(output, **preprocessed_batch)
+        loss = result["loss"]
 
         # Validate loss is unreduced (per-element)
         if loss.ndim == 0:
@@ -711,12 +743,10 @@ class TrainStep:
                     grad_snapshot.append(param.grad.detach().clone())
             self.last_microbatch_grads = grad_snapshot
 
-            self.step(lambda: self._recompute_loss(preprocessed_batch))
+            self.step(closure)
             self.accumulation_steps = 0
             self.accumulated_samples = 0
 
-        loss_result["model"] = cast(Tensor, output)
-        result = cast(TrainStepOutput, loss_result)
         if self.skip_step_on_nonfinite_grad:
             result.setdefault("metrics", {})["skipped_steps"] = self.skipped_steps
         return result
@@ -733,15 +763,7 @@ class TrainStep:
             (forward output), and any extra loss dict entries.
 
         """
-        # Forward (train mode + autocast via __call__)
-        forward_output: object = self(**preprocessed_batch)
-        assert isinstance(forward_output, ModelOutput)
-        output: ModelOutput = forward_output
-
-        # Loss computation (inherits autocast)
-        result = {**self.loss(output, **preprocessed_batch)}
-        result["model"] = cast(Tensor, output)
-        return cast(TrainStepOutput, result)
+        return self._loss_on_output(self(**preprocessed_batch), **preprocessed_batch)
 
     def eval_loss(self, **preprocessed_batch: object) -> TrainStepOutput:
         """Compute loss in eval mode (uses EMA if available).
@@ -755,15 +777,10 @@ class TrainStep:
             (forward output), and any extra loss dict entries.
 
         """
-        # Forward (eval mode + autocast via call_eval)
-        forward_output = self.call_eval(**preprocessed_batch)
-        assert isinstance(forward_output, ModelOutput)
-        output: ModelOutput = forward_output
-
-        # Loss computation (inherits autocast)
-        result = {**self.loss(output, **preprocessed_batch)}
-        result["model"] = cast(Tensor, output)
-        return cast(TrainStepOutput, result)
+        return self._loss_on_output(
+            self.call_eval(**preprocessed_batch),
+            **preprocessed_batch,
+        )
 
     def on_epoch_end(self) -> None:
         """Flush a partial gradient accumulation at an epoch boundary.
@@ -900,22 +917,48 @@ class TrainStep:
     # which differentiates this via ``autograd.grad``). First-order optimizers never
     # call it. Returns a graph-bearing scalar so the caller can take further
     # derivatives.
+    def _train_forward(self, *args: object, **kwargs: object) -> object:
+        """Run the (compiled, on first use) model under autocast and timer_forward."""
+        if self._compile_fn is not None and self._compiled_model is None:
+            self._compiled_model = self._compile_fn(self.model)
+        forward_model = (
+            self._compiled_model if self._compiled_model is not None else self.model
+        )
+        with self.timer_forward, self._autocast_scope():
+            return forward_model(*args, **kwargs)
+
+    def _autocast_scope(self) -> contextlib.AbstractContextManager[object]:
+        """Autocast at the configured dtype, or a no-op when it is ``None``."""
+        if self.config.dtype_autocast is None:
+            return contextlib.nullcontext()
+        return amp.autocast(
+            device_type=self.device.type,
+            dtype=self.config.dtype_autocast,
+            cache_enabled=self.config.autocast_cache_enabled,
+        )
+
     def _recompute_loss(self, preprocessed_batch: dict[str, object]) -> Tensor:
         """Recompute the scalar training loss on ``preprocessed_batch``."""
-        forward_output: object = self(**preprocessed_batch)
-        assert isinstance(forward_output, ModelOutput)
-        output: ModelOutput = forward_output
-        loss = {**self.loss(output, **preprocessed_batch)}
-        return loss["loss"].sum()
+        output = self(**preprocessed_batch)
+        return self._loss_on_output(output, **preprocessed_batch)["loss"].sum()
 
-
-def _collective_device(group: dist.ProcessGroup | None) -> torch.device:
-    """Return the device this group's backend can reduce on: NCCL CUDA, gloo CPU."""
-    if dist.get_backend(group) == "nccl":
-        # The CURRENT device, not index 0: a shared index would put every
-        # rank's reduction on one GPU.
-        return torch.device("cuda", torch.cuda.current_device())
-    return torch.device("cpu")
+    def _loss_on_output(
+        self,
+        output: object,
+        **preprocessed_batch: object,
+    ) -> TrainStepOutput:
+        """Apply the loss to a forward output and attach that output as "model"."""
+        # A single Tensor or a multi-output container; the loss consumes it via
+        # the ModelOutput contract rather than a blind ``cast(Tensor, ...)``.
+        if not isinstance(output, ModelOutput):
+            raise TypeError(
+                "Model forward output does not satisfy ModelOutput "
+                f"(got {type(output).__name__}); it must be a Tensor or "
+                "an indexable multi-output container the loss can consume.",
+            )
+        result = {**self.loss(output, **preprocessed_batch)}
+        result["model"] = cast(Tensor, output)
+        return cast(TrainStepOutput, result)
 
 
 # The precondition for the ``train_step`` division (derived in its backward comment).
@@ -948,7 +991,7 @@ def _assert_uniform_microbatch_count(accumulated_samples: int) -> None:
     extremes = torch.tensor(
         [accumulated_samples, -accumulated_samples],
         dtype=torch.long,
-        device=_collective_device(group),
+        device=collective_device(group),
     )
     dist.all_reduce(extremes, op=dist.ReduceOp.MAX, group=group)
     count_max = int(extremes[0].item())

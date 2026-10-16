@@ -50,6 +50,8 @@ def euler_maruyama_grid(
     device: torch.device | None = None,
 ) -> Tensor:
     """Return a float64 grid from one to zero with a final deterministic step."""
+    if num_steps < 1:
+        raise ValueError("num_steps must be at least one.")
     grid = torch.linspace(1.0, last_time, num_steps, dtype=torch.float64, device=device)
     return torch.cat([grid, grid.new_zeros(1)])
 
@@ -79,6 +81,8 @@ def integrate_two_streams(
       cls: Integrated CLS stream, in float64.
 
     """
+    if grid.shape[0] < 2:
+        raise ValueError("grid must contain at least two times.")
     latent, cls = media.to(torch.float64), cls_token.to(torch.float64)
     last = grid.shape[0] - 2
     for index in range(last + 1):
@@ -88,10 +92,10 @@ def integrate_two_streams(
         if index == last:
             latent = latent + dt * drift_latent
             cls = cls + dt * drift_cls
-            break
-        noise = torch.randn_like(latent) * torch.sqrt(torch.abs(dt))
-        noise_cls = torch.randn_like(cls) * torch.sqrt(torch.abs(dt))
-        scale = torch.sqrt(diffusion(t_curr))
-        latent = latent + drift_latent * dt + scale * noise
-        cls = cls + drift_cls * dt + scale * noise_cls
+        else:
+            noise = torch.randn_like(latent) * torch.sqrt(torch.abs(dt))
+            noise_cls = torch.randn_like(cls) * torch.sqrt(torch.abs(dt))
+            scale = torch.sqrt(diffusion(t_curr))
+            latent = latent + drift_latent * dt + scale * noise
+            cls = cls + drift_cls * dt + scale * noise_cls
     return latent, cls

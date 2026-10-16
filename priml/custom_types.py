@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CheckpointableProtocol",
+    "Float32MatmulPrecision",
     "HasCost",
     "HasNormalizedWorkingDirPattern",
     "JobProtocol",
@@ -97,6 +98,10 @@ class HasNormalizedWorkingDirPattern(Protocol):
     base_dir: Path | str | None
 
     working_dir: Path | str
+
+
+Float32MatmulPrecision = Literal["highest", "high", "medium"]
+"""``torch.set_float32_matmul_precision`` levels."""
 
 
 # Type aliases for embedding and score data structures.

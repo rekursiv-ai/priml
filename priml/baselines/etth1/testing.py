@@ -142,6 +142,32 @@ def training_record(step: Etth1TrainStep) -> dict[str, Tensor]:
     return record
 
 
+def golden_record(record: Mapping[str, Tensor], *, training: bool) -> dict[str, Tensor]:
+    """Keep initial weights, losses, and the final state for replay.
+
+    Args:
+      record: A full model or training record.
+      training: Whether ``record`` came from ``training_record``.
+
+    Returns:
+      golden: The subset of ``record`` the checked-in golden stores.
+
+    """
+    return {
+        key: value
+        for key, value in record.items()
+        if key.startswith("initial/")
+        or (
+            training
+            and (
+                key in {"step1/loss", "step2/loss", "step3/loss", "step3/rng"}
+                or key.startswith(("step3/parameter/", "step3/optimizer/"))
+            )
+        )
+        or (not training and key in {"output", "rng"})
+    }
+
+
 def _flatten_state(record: dict[str, Tensor], prefix: str, value: object) -> None:
     if isinstance(value, Tensor):
         record[prefix] = value.detach().clone()
@@ -158,20 +184,3 @@ def _flatten_state(record: dict[str, Tensor], prefix: str, value: object) -> Non
             _flatten_state(record, prefix=f"{prefix}/{index}", value=item)
     elif value is not None:
         raise TypeError(f"Unsupported optimizer state: {type(value).__name__}")
-
-
-def golden_record(record: Mapping[str, Tensor], *, training: bool) -> dict[str, Tensor]:
-    """Keep initial weights, losses, and the final state for replay."""
-    return {
-        key: value
-        for key, value in record.items()
-        if key.startswith("initial/")
-        or (
-            training
-            and (
-                key in {"step1/loss", "step2/loss", "step3/loss", "step3/rng"}
-                or key.startswith(("step3/parameter/", "step3/optimizer/"))
-            )
-        )
-        or (not training and key in {"output", "rng"})
-    }

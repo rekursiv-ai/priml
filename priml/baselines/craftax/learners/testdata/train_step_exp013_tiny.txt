@@ -1,0 +1,19 @@
+update 0001 targets torch.float32 (2, 4) 936636aa067ee1169c56883262e9d59f0553fadd2bf76b60bdb49d5a5bfd02cb
+update 0001 learning_rate 0x399d4952 0.0003000000142492354
+update 0001 epsilon 0x3f800000 1.0
+update 0001 loss 0x3db5e29b 0.08881112188100815
+final normalize.weight torch.float32 (8268,) 4a4e11bd83888defe3bbb3073cd7142a8b0ab77baf32f1d4102591b3980588e2
+final normalize.bias torch.float32 (8268,) d09155c540f62cf89a98a4e45e4b5f8666d9bc0eb8dc38cdc999be44367c63e7
+final normalize.running_mean torch.float32 (8268,) 74b5df6cc3733a130b47b1f8bb9f31089663be4b0081ffcfbfd0de3e11ae6cd2
+final normalize.running_var torch.float32 (8268,) f24f715b206f0978c0a6af7b306c6265ee7fca04145977f379eb6213ad93aaf3
+final normalize.steps torch.int64 () 7c9fa136d4413fa6173637e883b6998d32e1d675f88cddff9dcbcf331820f4b8
+final encoder.weight torch.float32 (5, 8268) 7c8bbe46173fa5f880b5542c75bf376e0a04f3210f8bdf6182898c7b12438b21
+final encoder.bias torch.float32 (5,) ef89563aaf7baf93ee975eccb25bf2d902718687d9c89c2204ee8aa7e1633a29
+final encoder_norm.weight torch.float32 (5,) d9e1887ed552157a5c14be567816318587b7e6afaee64d50011cebb7e59f20e9
+final encoder_norm.bias torch.float32 (5,) e54ddbad2ecb0b2147626fee70609d520b6482a006736d1531191d3e93ec37eb
+final cell.weight_ih torch.float32 (20, 48) e151160cad2787b02e12e8e111023bc91068a852cc661050270f5d6f287dacbf
+final cell.weight_hh torch.float32 (20, 5) a41eb71f830ad3130f7a492c09b364d6e507b94929bc96f1a8abc43008c3231e
+final cell.bias_ih torch.float32 (20,) 83462285e419ec8ffa1956f1be6e72fd47ac63fcd81cf2a5da46478c673cba3d
+final cell.bias_hh torch.float32 (20,) a014c2d652bbe94b96b282aab7c1fb888e71a462675295d07705a6e0b5f8c59c
+final head.weight torch.float32 (43, 5) b567927be6cd98685377804c904f70cf558a20b48c626a6cb995c1f3a89f37a1
+final head.bias torch.float32 (43,) 1680c47fbfdb2afa0969836c29e7c5fc2a130b3b2dff382d082bf2dead1f57f3

@@ -1,0 +1,14 @@
+# from-scratch: the policy's own init under torch seed 0
+epoch 0001 learning_rate 0x3b9af4a5 0.004728870932012796
+epoch 0001 policy_loss 0xbd9b568b -0.07584866136312485
+epoch 0001 value_loss 0x3d58b810 0.052909910678863525
+epoch 0001 entropy 0x40703a43 3.7535560131073
+epoch 0001 total_loss 0xbd0f2ab8 -0.03495284914970398
+epoch 0001 old_approx_kl 0xbb238d80 -0.0024956166744232178
+epoch 0001 approx_kl 0x37072000 8.054077625274658e-06
+epoch 0001 clipfrac 0x00000000 0.0
+epoch 0001 importance 0x3f80520a 1.0025036334991455
+epoch 0001 master proj_in.weight torch.float32 (8, 8268) 22b2b3c6e942192f7ad330d3950775f350bf9fbd0f62717cfe82b53f337afe89
+epoch 0001 master proj_out.weight torch.float32 (44, 8) 7aafa9c86a7771c07ccdc4d45a099db9464fa5d89c622513ef9d4ef4479a2c7d
+epoch 0001 master blocks.0.proj_gates.weight torch.float32 (24, 8) 965d10f22164e61263893073584040c217e58f2815f02f5e44216b5368d279b2
+epoch 0001 master blocks.1.proj_gates.weight torch.float32 (24, 8) 44de91f5bb75a38ed745f724f921ee7cdcb1a1200fc18fd064fc5e64a52f3925

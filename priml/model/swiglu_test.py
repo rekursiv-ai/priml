@@ -9,7 +9,6 @@ from typing import Final, cast, override
 
 import functools
 
-from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.parallel import (
@@ -17,17 +16,12 @@ from torch.distributed.tensor.parallel import (
     ParallelStyle,
     RowwiseParallel,
 )
+from treekle import from_plain, to_plain
 
 import pytest
 import torch
 
 from priml.cost import map_cost, set_cost
-from priml.lib.custom_json import (
-    DecodeCapabilities,
-    decode_graph,
-    encode_graph,
-    resolve_import,
-)
 from priml.model.init import kaiming_uniform, unit_fan_in_uniform
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import (
@@ -42,17 +36,15 @@ from priml.model.swiglu import (
 from priml.testing import golden
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent
 
 
 def test_costed_activation_round_trips_as_an_imported_function() -> None:
-    encoded = encode_graph(silu)
-    decoded = decode_graph(
-        encoded,
-        capabilities=DecodeCapabilities(resolve=resolve_import),
-    )
+    encoded = to_plain(silu)
+    decoded = from_plain(encoded, object, allow_imports=True)
 
     assert decoded is silu
 
@@ -387,8 +379,15 @@ def test_tensor_parallel_style_refuses_unsupported_gate_paths(
     message: str,
 ) -> None:
     """TP must reject paths whose hidden-axis arithmetic cannot remain aligned."""
-    with pytest.raises(NotImplementedError, match=message):
+    with pytest.raises(NotImplementedError) as error:
         config.make().tensor_parallel_style()
+    assert str(error.value) == (
+        "SwiGLU tensor parallelism does not support "
+        "split_gate_projection (it reads up_proj.weight directly)."
+        if message == "split_gate_projection"
+        else "SwiGLU tensor parallelism does not support a gate norm "
+        "(it normalizes over the sharded hidden dim)."
+    )
 
 
 def test_tensor_parallel_style_preserves_the_logical_gate_split(
@@ -702,6 +701,6 @@ class _EmptyResettableNorm(nn.Sequential):
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -137,11 +137,10 @@ def build_program(
         pretokens,
         {token: position for position, token in enumerate(candidates)},
     )
-    sizes = torch.tensor([len(piece) for piece in pretokens], dtype=torch.int64)
+    sizes = torch.tensor([len(piece) for piece in pretokens])
     weights = torch.tensor(list(pretokens.values()), dtype=torch.float64)
-    owners = torch.arange(len(sizes))
-    edge_owner = torch.repeat_interleave(owners, _tensor(counts))
-    byte_owner = torch.repeat_interleave(owners, sizes)
+    edge_owner = torch.repeat_interleave(_tensor(counts))
+    byte_owner = torch.repeat_interleave(sizes)
     vertex_start = torch.cumsum(sizes + 1, dim=0) - (sizes + 1)
     byte_offset = (
         torch.arange(len(byte_owner)) - (torch.cumsum(sizes, dim=0) - sizes)[byte_owner]
@@ -160,7 +159,7 @@ def build_program(
         token_ids=_tensor(token_ids),
         byte_start=vertex_start[byte_owner] + byte_offset,
     )
-    flow = torch.zeros(shape.vertices, dtype=torch.float64)
+    flow = torch.zeros(shape.vertices)
     flow[vertex_start] = 1.0
     flow[vertex_start + sizes] = -1.0
     program = LinearProgram(
@@ -171,13 +170,17 @@ def build_program(
         row_lower=torch.cat(
             [
                 flow,
-                torch.full((shape.token_edges + 1,), -math.inf, dtype=torch.float64),
+                torch.full(
+                    (shape.token_edges + 1,),
+                    -math.inf,
+                    dtype=torch.float64,
+                ),
             ],
         ),
         row_upper=torch.cat(
             [
                 flow,
-                torch.zeros(shape.token_edges, dtype=torch.float64),
+                torch.zeros(shape.token_edges),
                 torch.tensor([float(budget)], dtype=torch.float64),
             ],
         ),
@@ -185,7 +188,7 @@ def build_program(
             [
                 weights[edge_owner],
                 weights[byte_owner],
-                torch.zeros(shape.tokens, dtype=torch.float64),
+                torch.zeros(shape.tokens),
             ],
         ),
         lower=torch.zeros(shape.columns, dtype=torch.float64),
@@ -221,13 +224,19 @@ def token_edges(
     for piece in pretokens:
         size = len(piece)
         found = len(token_ids)
-        for length in range(2, size + 1):
+        for length in range(2, size):
             for start in range(size - length + 1):
                 token_id = index.get(piece[start : start + length])
                 if token_id is not None:
                     starts.append(start)
                     lengths.append(length)
                     token_ids.append(token_id)
+        if size >= 2:
+            token_id = index.get(piece)
+            if token_id is not None:
+                starts.append(0)
+                lengths.append(size)
+                token_ids.append(token_id)
         counts.append(len(token_ids) - found)
     return counts, starts, lengths, token_ids
 
@@ -299,7 +308,11 @@ def _constraint_matrix(
         ],
     ).to(torch.float64)
     order = torch.argsort(rows * shape.columns + columns)
-    index_dtype = torch.int32 if max(len(order), shape.columns) < 2**31 else torch.int64
+    index_dtype = (
+        torch.int32
+        if max(len(order), shape.columns) <= torch.iinfo(torch.int32).max
+        else torch.int64
+    )
     crow_indices = torch.zeros(shape.rows + 1, dtype=torch.int64)
     crow_indices[1:] = torch.cumsum(torch.bincount(rows, minlength=shape.rows), dim=0)
     return crow_indices.to(index_dtype), columns[order].to(index_dtype), values[order]

@@ -53,6 +53,7 @@ __all__ = [
     "get_dimensions",
     "get_mime",
     "resize",
+    "resized_dims",
 ]
 
 
@@ -84,7 +85,7 @@ def get_dimensions(image_bytes: bytes) -> tuple[int, int] | None:
       image_bytes: Raw image bytes to measure.
 
     Returns:
-      dimensions: (width, height) tuple, or None if format unsupported/malformed.
+      dimensions: (height, width) tuple, or None if format unsupported/malformed.
 
     """
     w, h = imagesize.get(BytesIO(image_bytes))
@@ -227,19 +228,20 @@ def decode_webp_libwebp(
         if status != lib.VP8_STATUS_OK:
             return None
 
-        rgba = config.output.u.RGBA
-        output_buffer = ffi.buffer(rgba.rgba, rgba.size)
-
-        # Copy before WebPFreeDecBuffer -- output_buffer points into the
-        # libwebp-owned memory that we're about to release.
-        rgb = (
-            np.frombuffer(output_buffer, dtype=np.uint8)
-            .reshape(
-                (int(height), int(width), 3),
+        # Released however the copy ends: a reshape against caller dimensions
+        # that disagree with the bitstream raises, and the broad handler below
+        # would otherwise swallow the leak with it.
+        try:
+            rgba = config.output.u.RGBA
+            # Copy before WebPFreeDecBuffer -- the buffer points into
+            # libwebp-owned memory that the ``finally`` releases.
+            rgb = (
+                np.frombuffer(ffi.buffer(rgba.rgba, rgba.size), dtype=np.uint8)
+                .reshape((int(height), int(width), 3))
+                .copy()
             )
-            .copy()
-        )
-        lib.WebPFreeDecBuffer(ffi.addressof(config.output))
+        finally:
+            lib.WebPFreeDecBuffer(ffi.addressof(config.output))
 
         if crop_coords is not None:
             crop_x, crop_y, crop_w, crop_h = crop_coords
@@ -295,7 +297,9 @@ def decode_image_pil(
         image.load()  # pyright: ignore[reportUnknownMemberType] -- PIL's `core` is rebound to `DeferredError.new() -> Any` in its ImportError fallback, so `load`'s `core.PixelAccess | None` return resolves to Unknown.
 
         if channels_format == "rgb":
-            if image.mode == "RGBA":
+            if image.has_transparency_data:
+                if image.mode != "RGBA":
+                    image = image.convert("RGBA")
                 rgb_image = Image.new("RGB", image.size, (255, 255, 255))
                 rgb_image.paste(image, mask=image.split()[3])
                 image = rgb_image
@@ -375,8 +379,8 @@ def resize(
     # ``max_dim`` / ``max_bytes`` of 0 (or negative) means "no cap" -- a
     # model profile may legitimately declare no per-image limit. Treating 0
     # as a literal ceiling would force a needless re-encode of every image.
-    scale = min(1.0, max_dim / max(width, height)) if max_dim > 0 else 1.0
-    needs_resize = scale < 1.0
+    new_size = resized_dims((width, height), max_dim)
+    needs_resize = new_size != (width, height)
     needs_shrink = max_bytes > 0 and len(data) > max_bytes
 
     if not needs_resize and not needs_shrink:
@@ -387,7 +391,6 @@ def resize(
     # stale original mime.
     fmt = img.format or "PNG"
     if needs_resize:
-        new_size = (int(width * scale), int(height * scale))
         img = img.resize(new_size, Image.Resampling.LANCZOS)
 
     buf = io.BytesIO()
@@ -401,7 +404,9 @@ def resize(
     # the cap is unenforced and a downstream byte guard under-counts.
     # ``max_bytes <= 0`` means no byte cap, so never ramp on that basis.
     if max_bytes > 0 and len(out) > max_bytes:
-        if img.mode in ("RGBA", "P"):
+        # The modes JPEG encodes; everything else (LA, PA, P, RGBA, I;16, ...)
+        # makes ``save`` raise OSError.
+        if img.mode not in ("RGB", "L", "CMYK"):
             img = img.convert("RGB")
         for quality in (85, 70, 55, 40):
             buf = io.BytesIO()
@@ -412,6 +417,31 @@ def resize(
         mime = "image/jpeg"
 
     return out, mime
+
+
+def resized_dims(size: tuple[int, int], max_dim: int) -> tuple[int, int]:
+    """Return the ``(width, height)`` :func:`resize` produces under ``max_dim``.
+
+    The one place the scaled size is computed, so a token estimator counting
+    what will be sent and the encoder that sends it cannot disagree.
+
+    Args:
+      size: Source ``(width, height)`` in pixels, each positive.
+      max_dim: Longest-edge cap; ``0`` (or negative) means no cap.
+
+    Returns:
+      size: Scaled ``(width, height)``, aspect-preserving, each at least 1;
+        ``size`` itself when it already fits.
+
+    """
+    width, height = size
+    longest = max(width, height)
+    if max_dim <= 0 or longest <= max_dim:
+        return size
+    scale = max_dim / longest
+    # Floor, but never to zero: a 1x6001 image under a 6000px cap keeps its
+    # one-pixel axis rather than handing PIL a zero-width resize.
+    return max(1, int(width * scale)), max(1, int(height * scale))
 
 
 def _is_svg(data: bytes) -> bool:
@@ -467,9 +497,9 @@ def _decode_jpeg_region(
             )
         width = -(-lib.tj3Get(handle, 5) // denom)  # TJPARAM_JPEGWIDTH.
         height = -(-lib.tj3Get(handle, 6) // denom)  # TJPARAM_JPEGHEIGHT.
+        right = min(width, -(-(x + w) // denom))
+        bottom = min(height, -(-(y + h) // denom))
         x, y = x // denom, y // denom
-        right = min(width, -(-(x * denom + w) // denom))
-        bottom = min(height, -(-(y * denom + h) // denom))
         w, h = right - x, bottom - y
         # An empty region would size the buffer at zero while libturbojpeg,
         # reading width 0 as "to the right edge", writes a full row into it.
@@ -508,14 +538,17 @@ def _dct_denominator(w: int, h: int, *, min_width: int, min_height: int) -> int:
     if min_width <= 0 or min_height <= 0:
         return 1
     denom = 1
-    while (
-        denom < 8 and w // (2 * denom) >= min_width and h // (2 * denom) >= min_height
-    ):
+    while denom < 8 and w >= min_width * (2 * denom) and h >= min_height * (2 * denom):
         denom *= 2
     return denom
 
 
-def _check_tj(lib: _TurboJpegLib, handle: int, status: int) -> None:
+class _TurboJpegErrorLib(Protocol):
+    def tj3GetErrorCode(self, handle: int, /) -> int: ...  # noqa: N802 -- The C symbol name.
+    def tj3GetErrorStr(self, handle: int, /) -> bytes: ...  # noqa: N802 -- The C symbol name.
+
+
+def _check_tj(lib: _TurboJpegErrorLib, handle: int, status: int) -> None:
     """Raise on a fatal libturbojpeg error; a warning (corrupt data) is decoded."""
     if status != 0 and lib.tj3GetErrorCode(handle) != 0:  # TJERR_WARNING.
         raise RuntimeError(lib.tj3GetErrorStr(handle).decode())
@@ -563,6 +596,11 @@ def _libturbojpeg() -> _TurboJpegLib:
 class _TjRegion(ctypes.Structure):
     """``tjregion``, passed to ``tj3SetCroppingRegion`` by value."""
 
+    x: ClassVar[int]
+    y: ClassVar[int]
+    w: ClassVar[int]
+    h: ClassVar[int]
+
     _fields_: ClassVar = [
         ("x", ctypes.c_int),
         ("y", ctypes.c_int),
@@ -573,6 +611,9 @@ class _TjRegion(ctypes.Structure):
 
 class _TjScalingFactor(ctypes.Structure):
     """``tjscalingfactor``, passed to ``tj3SetScalingFactor`` by value."""
+
+    num: ClassVar[int]
+    denom: ClassVar[int]
 
     _fields_: ClassVar = [("num", ctypes.c_int), ("denom", ctypes.c_int)]
 
@@ -612,24 +653,24 @@ def _parse_crop(
     width: int,
 ) -> tuple[int, int, int, int] | None:
     """Parse crop parameter and return crop coordinates."""
-    match crop:
-        case None:
-            return None
-        case (y, x, h, w):
-            if w > width or h > height:
-                return None
-            return (int(x), int(y), int(w), int(h))
-        case (target_h_raw, target_w_raw):
-            target_h = int(target_h_raw)
-            target_w = int(target_w_raw)
-            if target_w > width and target_h > height:
-                return None
-            target_aspect = target_w / target_h
-            crop_height = int(min(height, width / target_aspect))
-            crop_width = int(min(width, height * target_aspect))
-            crop_x = (width - crop_width) // 2
-            crop_y = (height - crop_height) // 2
-            return (crop_x, crop_y, crop_width, crop_height)
+    if crop is not None:
+        match crop:
+            case (y, x, h, w):
+                if x < 0 or y < 0 or x + w > width or y + h > height:
+                    return None
+                return (int(x), int(y), int(w), int(h))
+            case (target_h_raw, target_w_raw):
+                target_h = int(target_h_raw)
+                target_w = int(target_w_raw)
+                if target_w > width and target_h > height:
+                    return None
+                target_aspect = target_w / target_h
+                crop_height = int(min(height, width / target_aspect))
+                crop_width = int(min(width, height * target_aspect))
+                crop_x = (width - crop_width) // 2
+                crop_y = (height - crop_height) // 2
+                return (crop_x, crop_y, crop_width, crop_height)
+    return None
 
 
 class _Rgba(Protocol):

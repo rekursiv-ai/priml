@@ -6,12 +6,14 @@ __all__ = [
     "StructRefProxy",
     "define_proxy",
     "float64",
+    "get_num_threads",
     "int32",
     "int64",
     "new",
     "njit",
     "prange",
     "register",
+    "set_num_threads",
     "uint8",
 ]
 
@@ -43,6 +45,8 @@ def njit[F: Callable[..., object]](
     parallel: bool = ...,
 ) -> Callable[[F], F]: ...
 def prange(stop: int, /) -> range: ...
+def get_num_threads() -> int: ...
+def set_num_threads(n: int, /) -> None: ...
 def register[T: type[StructRef]](struct_type: T, /) -> T: ...
 def new(struct_type: StructRef, /) -> StructRefProxy: ...
 def define_proxy(

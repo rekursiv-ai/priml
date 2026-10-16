@@ -12,7 +12,7 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.cost import Cost, resolve_dtype
+from priml.cost import Cost, nbytes, resolve_dtype
 from priml.model.custom_types import DepthIndex
 from priml.model.init import InitFn, call_init, kaiming_uniform
 
@@ -500,16 +500,17 @@ def conv_cost(
         cells={
             ("flops", "primal", "matmul", dt): 2 * rows * weights,
             ("flops", "adjoint", "matmul", dt): 2 * rows * weights * gradients,
-            ("bytes", "primal", "matmul", dt): dt.itemsize
-            * (inputs + weights + rows * channels_out),
-            ("bytes", "adjoint", "matmul", dt): dt.itemsize * backward,
+            ("bytes", "primal", "matmul", dt): nbytes(
+                inputs + weights + rows * channels_out,
+                dt,
+            ),
+            ("bytes", "adjoint", "matmul", dt): nbytes(backward, dt),
             ("flops", "primal", "elementwise", dt): rows * biases,
-            ("bytes", "primal", "elementwise", dt): dt.itemsize * biases,
+            ("bytes", "primal", "elementwise", dt): nbytes(biases, dt),
             ("flops", "adjoint", "reduction", dt): biases * (rows - 1)
             if bias_grad
             else 0,
-            ("bytes", "adjoint", "reduction", dt): dt.itemsize
-            * (rows * biases + biases)
+            ("bytes", "adjoint", "reduction", dt): nbytes(rows * biases + biases, dt)
             if bias_grad
             else 0,
         },

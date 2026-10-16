@@ -51,8 +51,8 @@ def random_crop(images: Tensor, crop_size: int) -> Tensor:
     pad = (H - crop_size) // 2
     dy = torch.randint(0, 2 * pad + 1, (B, 1, 1, 1), device=images.device)
     dx = torch.randint(0, 2 * pad + 1, (B, 1, 1, 1), device=images.device)
-    row_idx = dy + torch.arange(crop_size, device=images.device).view(1, 1, -1, 1)
-    col_idx = dx + torch.arange(crop_size, device=images.device).view(1, 1, 1, -1)
+    row_idx = dy + torch.arange(crop_size, device=images.device)[None, None, :, None]
+    col_idx = dx + torch.arange(crop_size, device=images.device)[None, None, None, :]
     flat_idx = (row_idx * W + col_idx).expand(B, C, crop_size, crop_size)
     return (
         images.reshape(B, C, -1)
@@ -79,8 +79,8 @@ def cutout(images: Tensor, size: int) -> Tensor:
     B, _C, H, W = images.shape
     cy = torch.randint(0, H, (B, 1, 1, 1), device=images.device)
     cx = torch.randint(0, W, (B, 1, 1, 1), device=images.device)
-    ys = torch.arange(H, device=images.device).view(1, 1, -1, 1)
-    xs = torch.arange(W, device=images.device).view(1, 1, 1, -1)
+    ys = torch.arange(H, device=images.device)[None, None, :, None]
+    xs = torch.arange(W, device=images.device)[None, None, None, :]
     mask = (ys >= cy) & (ys < cy + size) & (xs >= cx) & (xs < cx + size)
     return images.masked_fill(mask, 0.0)
 

@@ -1,249 +1,216 @@
-"""Tests for the symbolic observation."""
+"""Tests for the observations: the symbolic layout against JAX's renderer, and its slots."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING
 
-from torch import Tensor
-
+import numpy as np
 import pytest
-import torch
 
-from priml.baselines.craftax.conftest import (
-    generated_world,
-    reference,
-    requires_craftax,
+from priml.baselines.craftax.eager import eager
+from priml.baselines.craftax.game import observation
+from priml.baselines.craftax.game.observation import (
+    compute_observations_numba,
+    compute_symbolic_observations_numba,
 )
-from priml.baselines.craftax.game import constants, observation
-from priml.baselines.craftax.game.constants import Action, BlockType, ItemType
-from priml.baselines.craftax.game.state import EnvState, Mobs, empty_state
+from priml.baselines.craftax.game.state import (
+    ATN_DIM,
+    INVENTORY_OBS_SIZE,
+    MAP_SIZE,
+    MAX_RANGED_MOBS,
+    MOB_SLOTS,
+    NUM_BLOCK_TYPES,
+    NUM_ITEM_TYPES,
+    NUM_MOB_TYPES,
+    OBS_COLS,
+    OBS_ROWS,
+    OBS_SIZE,
+    SYMBOLIC_OBS_SIZE,
+    SYMBOLIC_TILE_CHANNELS,
+    VISIBLE_LIGHT_THRESHOLD,
+    env_state,
+    new_states,
+)
+from priml.baselines.craftax.game.testing import small_worlds
+from priml.baselines.craftax.lib.arrays import typed
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Iterator
+
+    from numpy.typing import NDArray
+
+    from priml.baselines.craftax.game.state import Array1, EnvState, Mobs
 
 
-def _state(num_envs: int = 2) -> EnvState:
-    state = empty_state(num_envs=num_envs, device=torch.device("cpu"))
-    state.player_position[:] = torch.tensor([20, 20], dtype=torch.int32)
-    state.player_direction[:] = int(Action.UP)
-    state.map[:] = int(BlockType.GRASS)
-    state.light_map[:] = 1.0
-    state.player_health[:] = 9.0
-    for meter in ("player_food", "player_drink", "player_energy", "player_mana"):
-        getattr(state, meter)[:] = 9
-    state.player_dexterity[:] = 1
-    state.player_strength[:] = 1
-    state.player_intelligence[:] = 1
-    return state
+_CREATURES = (
+    "melee_mobs",
+    "passive_mobs",
+    "ranged_mobs",
+    "mob_projectiles",
+    "player_projectiles",
+)
 
 
-def test_the_observation_has_the_published_width() -> None:
-    # This width is part of the benchmark's contract, not an implementation
-    # detail: a model trained against a different one is not comparable.
-    assert observation.observation_size() == 8_268
-    assert observation.render(_state()).shape == (2, 8_268)
+@pytest.fixture(autouse=True)
+def kernels(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Run the views as Python: a compile costs seconds, one view milliseconds."""
+    with eager(monkeypatch=monkeypatch):
+        yield
 
 
-def test_every_value_is_finite_and_bounded() -> None:
-    rendered = observation.render(_state())
-    assert bool(torch.isfinite(rendered).all())
-    assert float(rendered.min()) >= 0.0
-    assert float(rendered.max()) <= 1.0
+# The C's light rule (a uint8 light above 12, D10) and its creature rule (live, in view
+# and lit; D9) stand in for JAX's float light and scatter.
+def _reference_map(state: EnvState) -> NDArray[np.float32]:
+    """``render_craftax_symbolic``'s view (``renderer.py:9-122``) on a port state."""
+    rows, cols = OBS_ROWS, OBS_COLS
+    view = np.zeros((rows, cols, SYMBOLIC_TILE_CHANNELS), dtype=np.float32)
+    level = int(state.player_level)
+    pr, pc = (int(v) for v in state.player_position)
+    lit = np.zeros((rows, cols), dtype=bool)
+    for r in range(rows):
+        for c in range(cols):
+            row, col = pr + r - rows // 2, pc + c - cols // 2
+            if not (0 <= row < MAP_SIZE and 0 <= col < MAP_SIZE):
+                continue
+            if state.light_map[level, row, col] <= VISIBLE_LIGHT_THRESHOLD:
+                continue
+            lit[r, c] = True
+            view[r, c, state.map[level, row, col]] = 1
+            view[
+                r,
+                c,
+                NUM_BLOCK_TYPES + state.item_map[level, row, col],
+            ] = 1
+            view[r, c, -1] = 1
+    tables = (
+        state.melee_mobs,
+        state.passive_mobs,
+        state.ranged_mobs,
+        state.mob_projectiles,
+        state.player_projectiles,
+    )
+    for mob_class, table in enumerate(tables):
+        mobs = table[level]
+        for slot in range(len(mobs.mask)):
+            r = mobs.position[slot, 0] - pr + rows // 2
+            c = mobs.position[slot, 1] - pc + cols // 2
+            if mobs.mask[slot] and 0 <= r < rows and 0 <= c < cols and lit[r, c]:
+                channel = (
+                    NUM_BLOCK_TYPES
+                    + NUM_ITEM_TYPES
+                    + mob_class * NUM_MOB_TYPES
+                    + mobs.type_id[slot]
+                )
+                view[r, c, channel] = 1
+    return view.reshape(-1)
 
 
-def test_the_view_follows_the_player() -> None:
-    near = _state()
-    near.map[:, 0, 20, 21] = int(BlockType.STONE)
-    far = _state()
-    far.map[:, 0, 40, 40] = int(BlockType.STONE)
-    assert not torch.equal(observation.render(near), observation.render(far))
+@pytest.mark.parametrize(
+    ("seed", "row", "col", "level"),
+    [(0, 2, 3, 0), (1, MAP_SIZE - 3, MAP_SIZE - 2, 2), (2, 24, 25, 8)],
+    ids=["top-left", "bottom-right", "middle"],
+)
+def test_the_symbolic_view_is_jaxs_one_hot_and_the_scalars_match_the_packed_ones(
+    seed: int,
+    row: int,
+    col: int,
+    level: int,
+) -> None:
+    """Random blocks, items, light and creatures around a player, clipped by the map's edge."""
+    states = _random_world(seed, row=row, col=col, level=level)
+    state = env_state(states, 0)
+    packed = np.zeros(OBS_SIZE, dtype=np.float32)
+    symbolic = np.zeros(SYMBOLIC_OBS_SIZE, dtype=np.float32)
+    packed_mask = np.zeros(ATN_DIM, dtype=np.uint8)
+    symbolic_mask = np.zeros(ATN_DIM, dtype=np.uint8)
+    compute_observations_numba(state, packed, packed_mask)
+    compute_symbolic_observations_numba(state, symbolic, symbolic_mask)
+    map_size = symbolic.size - INVENTORY_OBS_SIZE
+    np.testing.assert_array_equal(symbolic[:map_size], _reference_map(state))
+    np.testing.assert_array_equal(
+        symbolic[map_size:], packed[-INVENTORY_OBS_SIZE :],
+    )  # fmt: skip
+    np.testing.assert_array_equal(symbolic_mask, packed_mask)
+    tiles = symbolic[:map_size].reshape(OBS_ROWS * OBS_COLS, -1)
+    # Lit tiles, dark ones, and live creatures in view: the cases the view tells apart.
+    assert 0 < tiles[:, -1].sum() < OBS_ROWS * OBS_COLS
+    assert tiles[:, NUM_BLOCK_TYPES + NUM_ITEM_TYPES : -1].sum() > 0
 
 
-def test_darkness_hides_the_world() -> None:
-    # An unlit tile shows nothing at all, which is what makes a torch matter.
-    lit = _state()
-    lit.map[:, 0, 20, 21] = int(BlockType.STONE)
-    dark = _state()
-    dark.map[:, 0, 20, 21] = int(BlockType.STONE)
-    dark.light_map[:] = 0.0
+def test_the_observation_passes_its_slot_counts_as_plain_int64s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A literal slot count compiles a copy of the creature writer per value.
 
-    assert not torch.equal(observation.render(lit), observation.render(dark))
-    # With the whole floor dark, only the light channel and the player's own
-    # scalars carry information.
-    view_width = observation.observation_size() - constants.INVENTORY_OBS_SIZE
-    assert float(observation.render(dark)[:, :view_width].sum()) == 0.0
-
-
-def test_the_world_edge_is_visible_as_out_of_bounds() -> None:
-    # Padding with zero would read as a legitimate block; the agent must be
-    # able to see where the map stops.
-    middle = _state()
-    corner = _state()
-    corner.player_position[:] = torch.tensor([0, 0], dtype=torch.int32)
-    assert not torch.equal(observation.render(middle), observation.render(corner))
-
-
-def test_inventory_shows_up_in_the_observation() -> None:
-    empty = observation.render(_state())
-    stocked = _state()
-    stocked.inventory.wood[:] = 4
-    assert not torch.equal(empty, observation.render(stocked))
-
-
-def test_counts_are_compressed_so_early_gains_matter_most() -> None:
-    # The first log should move the observation more than the ninetieth.
-    def wood(amount: int) -> Tensor:
-        state = _state()
-        state.inventory.wood[:] = amount
-        return observation.render(state)
-
-    early = (wood(1) - wood(0)).abs().sum()
-    late = (wood(90) - wood(89)).abs().sum()
-    assert float(early) > float(late)
-
-
-def test_a_visible_creature_appears_in_the_view() -> None:
-    plain = observation.render(_state())
-    haunted = _state()
-    haunted.melee_mobs.mask[:, 0, 0] = True
-    haunted.melee_mobs.position[:, 0, 0] = torch.tensor([20, 22], dtype=torch.int32)
-    assert not torch.equal(plain, observation.render(haunted))
-
-
-def test_a_distant_creature_is_not_visible() -> None:
-    """A creature outside the window leaves no mark on the view.
-
-    Only the view is compared: a live creature anywhere on the floor also
-    shields the boss, and that is reported among the player's scalars, so
-    comparing whole observations would conflate the two.
+    LLVM then left those copies out of line in the step (measured on the
+    Xeon). Numba types a module constant as a literal, so each count goes
+    through ``unliteral``, an ``np.int64`` as the Python runs.
     """
-    view_width = observation.observation_size() - constants.INVENTORY_OBS_SIZE
-    plain = observation.render(_state())
-    distant = _state()
-    distant.melee_mobs.mask[:, 0, 0] = True
-    distant.melee_mobs.position[:, 0, 0] = torch.tensor([40, 40], dtype=torch.int32)
-    assert torch.equal(
-        plain[:, :view_width],
-        observation.render(distant)[:, :view_width],
+    counts: list[object] = []
+    write = observation._write_mob_obs_numba
+
+    def record(
+        obs: Array1[np.float32],
+        state: EnvState,
+        mobs: Mobs,
+        slots: int,
+        mob_class: int,
+    ) -> None:
+        counts.append(slots)
+        write(obs, state, mobs, slots, mob_class)
+
+    monkeypatch.setattr(observation, "_write_mob_obs_numba", record)
+    compute_observations_numba(
+        env_state(small_worlds(1), 0),
+        np.zeros(OBS_SIZE, dtype=np.float32),
+        np.zeros(ATN_DIM, dtype=np.uint8),
     )
+    assert [type(count) for count in counts] == [np.int64] * len(_CREATURES)
+    assert counts == [3, 3, 2, 3, 3]
 
 
-def test_creature_classes_are_distinguishable() -> None:
-    def creature(field: str) -> Tensor:
-        state = _state()
-        mobs = cast(Mobs, getattr(state, field))
-        mobs.mask[:, 0, 0] = True
-        mobs.position[:, 0, 0] = torch.tensor([20, 22], dtype=torch.int32)
-        return observation.render(state)
-
-    assert not torch.equal(creature("melee_mobs"), creature("passive_mobs"))
-    assert not torch.equal(creature("melee_mobs"), creature("ranged_mobs"))
-
-
-def test_melee_and_passive_use_their_reference_channels() -> None:
-    melee = _state(num_envs=1)
-    melee.melee_mobs.mask[:, 0, 0] = True
-    melee.melee_mobs.position[:, 0, 0] = torch.tensor([20, 22], dtype=torch.int32)
-    passive = _state(num_envs=1)
-    passive.passive_mobs.mask[:, 0, 0] = True
-    passive.passive_mobs.position[:, 0, 0] = torch.tensor([20, 22], dtype=torch.int32)
-    tile_index = (
-        constants.OBS_DIM[0] // 2 * constants.OBS_DIM[1] + constants.OBS_DIM[1] // 2 + 2
-    ) * observation.CHANNELS_PER_TILE
-    melee_channel = tile_index + len(BlockType) + len(ItemType)
-    passive_channel = melee_channel + 8
-    melee_render = observation.render(melee)[0]
-    passive_render = observation.render(passive)[0]
-
-    assert melee_render[melee_channel] == 1
-    assert melee_render[passive_channel] == 0
-    assert passive_render[melee_channel] == 0
-    assert passive_render[passive_channel] == 1
-
-
-def test_the_facing_direction_is_reported() -> None:
-    facing_up = _state()
-    facing_down = _state()
-    facing_down.player_direction[:] = int(Action.DOWN)
-    assert not torch.equal(
-        observation.render(facing_up),
-        observation.render(facing_down),
-    )
-
-
-def test_items_are_reported_alongside_blocks() -> None:
-    bare = observation.render(_state())
-    laddered = _state()
-    laddered.item_map[:, 0, 20, 21] = int(ItemType.LADDER_DOWN)
-    assert not torch.equal(bare, observation.render(laddered))
-
-
-def test_each_environment_renders_its_own_world() -> None:
-    state = generated_world(num_envs=3, seed=0)
-    rendered = observation.render(state)
-    assert len({tuple(row.tolist()) for row in rendered}) == 3
-
-
-@requires_craftax
-@pytest.mark.compute_jax_jit
-def test_the_width_matches_the_reference_environment() -> None:
-    """The published width, read off a reference env built at minimum size.
-
-    The window is 9x11 whatever the floor is, so the observation width is a
-    property of the VOCABULARIES, not of the world: a 9x9 single-level map with
-    one creature of each class reports the same 8_268 as the benchmark's 48x48
-    nine-level one. Building the small one asserts that independence, where
-    instantiating the full env would tie this test to a world size it is not
-    about.
-
-    The env is constructed rather than calling ``get_flat_map_obs_shape``
-    directly because the shape a caller actually receives comes from
-    ``observation_space``, and a reference change that moved the inventory
-    block out of that space would leave the two module functions agreeing.
-
-    The small env does NOT make this fast, and shrinking it further will not:
-    construction is 3e-05s and the test still takes seconds, all of it
-    importing the reference env module, whose module scope runs ~51 XLA
-    compiles beyond the ``constants`` import the conftest warms. Hence the
-    ``compute_jax_jit`` marker: the JIT is the cost, so it runs in the slow
-    tier.
-    """
-    upstream = cast(
-        _ReferenceModule,
-        reference("craftax.envs.craftax_symbolic_env"),
-    )
-    smallest = upstream.StaticEnvParams(
-        map_size=(9, 9),
-        num_levels=1,
-        max_melee_mobs=1,
-        max_passive_mobs=1,
-        max_ranged_mobs=1,
-        max_mob_projectiles=1,
-        max_player_projectiles=1,
-        max_growing_plants=1,
-    )
-    environment = upstream.CraftaxSymbolicEnvNoAutoReset(smallest)
-    space = environment.observation_space(environment.default_params)
-    assert space.shape == (observation.observation_size(),)
-
-
-class _Space(Protocol):
-    shape: tuple[int, ...]
-
-
-class _Environment(Protocol):
-    default_params: object
-
-    def observation_space(self, params: object) -> _Space: ...
-
-
-class _ReferenceModule(Protocol):
-    StaticEnvParams: Callable[..., object]
-    CraftaxSymbolicEnvNoAutoReset: Callable[[object], _Environment]
+# Every block, item and light level, inventory counts below 10, and each creature slot
+# live or not, of a random species, within 7 tiles of the player: some in view, some
+# past its edge, some on dark tiles.
+def _random_world(seed: int, *, row: int, col: int, level: int) -> NDArray[np.void]:
+    """Return a world whose floor ``level`` is random within 7 tiles of the player."""
+    draws = np.random.default_rng(seed)
+    states = new_states(1)
+    shape = (MAP_SIZE, MAP_SIZE)
+    typed(states["map"], np.uint8)[0, level] = draws.integers(0, NUM_BLOCK_TYPES, shape)
+    items = typed(states["item_map"], np.uint8)
+    items[0, level] = draws.integers(0, NUM_ITEM_TYPES, shape)
+    light = typed(states["light_map"], np.uint8)
+    light[0, level] = draws.integers(0, 256, shape)
+    # Both sides of the threshold, next to the player.
+    light[0, level, row, col] = VISIBLE_LIGHT_THRESHOLD
+    light[0, level, row, col - 1] = VISIBLE_LIGHT_THRESHOLD + 1
+    state = env_state(states, 0)
+    state.player_level = level
+    state.player_position[0] = row
+    state.player_position[1] = col
+    player = np.array([row, col])
+    for name in _CREATURES:
+        offsets = draws.integers(-7, 8, (MOB_SLOTS, 2))
+        positions = typed(states[name]["position"], np.int32)
+        positions[0, level] = np.clip(offsets + player, 0, MAP_SIZE - 1)
+        typed(states[name]["mask"], np.uint8)[0, level] = draws.integers(
+            0,
+            2,
+            MOB_SLOTS,
+        )
+        species = typed(states[name]["type_id"], np.int32)
+        species[0, level] = draws.integers(0, NUM_MOB_TYPES, MOB_SLOTS)
+    # A ranged creature has two slots; the third is never live.
+    typed(states["ranged_mobs"]["mask"], np.uint8)[0, level, MAX_RANGED_MOBS:] = 0
+    for name in ("wood", "stone", "coal", "iron", "diamond", "sapling", "torches"):
+        typed(states["inventory"][name], np.int32)[0] = draws.integers(0, 10)
+    state.player_health = np.float32(draws.integers(1, 10))
+    return states
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -396,7 +396,7 @@ def chunk_gla(
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
-    scale: int | None = ...,
+    scale: float | None = ...,
     initial_state: torch.Tensor = ...,
     output_final_state: bool = ...,
     cu_seqlens: torch.LongTensor | None = ...,

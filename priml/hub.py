@@ -13,10 +13,10 @@ import logging
 import os
 
 from torch import Tensor, nn
+from treekle import from_plain, json_loads
 
 import torch
 
-from priml.lib.custom_json import DictCodec, loads
 from priml.lib.userdirs import cache_dir
 
 
@@ -52,7 +52,7 @@ def get_cache_dir() -> Path:
       models_dir: Path to the model cache directory (created if absent).
 
     """
-    if torch_home := os.environ.get("TORCH_HOME"):
+    if torch_home := os.environ.get("TORCH_HOME", ""):
         models_dir = Path(torch_home)
     else:
         models_dir = cache_dir() / "rekursiv-ai" / "models"
@@ -60,7 +60,12 @@ def get_cache_dir() -> Path:
     return models_dir
 
 
-def load_torch_hub_distributed(repository: str, model: str) -> nn.Module:
+def load_torch_hub_distributed(
+    repository: str,
+    model: str,
+    *,
+    skip_validation: bool = False,
+) -> nn.Module:
     """Let rank zero populate the Hub cache before other ranks load a model.
 
     A rank-zero download failure is broadcast before peers enter ``hub.load``;
@@ -69,6 +74,8 @@ def load_torch_hub_distributed(repository: str, model: str) -> nn.Module:
     Args:
       repository: Torch Hub repository, ``owner/repo[:ref]``.
       model: Entry point name within the repository.
+      skip_validation: Skip torch.hub's check that the ref is a branch or tag head;
+        a commit pin needs it once its branch moves on.
 
     Returns:
       module: The loaded model.
@@ -76,13 +83,19 @@ def load_torch_hub_distributed(repository: str, model: str) -> nn.Module:
     """
     distributed = torch.distributed
     if not distributed.is_available() or not distributed.is_initialized():
-        return cast(nn.Module, torch.hub.load(repository, model))
+        return cast(
+            nn.Module,
+            torch.hub.load(repository, model, skip_validation=skip_validation),
+        )
 
     loaded: nn.Module | None = None
     error: Exception | None = None
     if distributed.get_rank() == 0:
         try:
-            loaded = cast(nn.Module, torch.hub.load(repository, model))
+            loaded = cast(
+                nn.Module,
+                torch.hub.load(repository, model, skip_validation=skip_validation),
+            )
         except Exception as exc:  # noqa: BLE001 -- Every rank must see any rank-zero failure.
             error = exc
     status = [str(error) if error is not None else None]
@@ -92,7 +105,10 @@ def load_torch_hub_distributed(repository: str, model: str) -> nn.Module:
             raise error
         raise RuntimeError(f"rank 0 could not load {repository}/{model}: {status[0]}")
     if loaded is None:
-        loaded = cast(nn.Module, torch.hub.load(repository, model))
+        loaded = cast(
+            nn.Module,
+            torch.hub.load(repository, model, skip_validation=skip_validation),
+        )
     return loaded
 
 
@@ -119,8 +135,8 @@ def load_transformers_model(
                    "AutoImageProcessor"). Using string form delays transformers
                    import to avoid CUDA initialization before fork.
       device: Device to load model on (e.g., "cuda", "cpu")
-      dtype: Data type to load model in (e.g., torch.float16). Converted to
-             torch_dtype parameter for from_pretrained().
+      dtype: Data type to load model in (e.g., torch.float16), passed to
+             from_pretrained() as ``dtype``.
       revision: Git revision to use (default: None = latest)
       trust_remote_code: Whether to trust remote code (default: False)
       force_redownload: Force download from internet, skip cache (default: False)
@@ -225,7 +241,6 @@ def resolve_hf_dtype(name: str) -> torch.dtype:
     return {
         "bfloat16": torch.bfloat16,
         "float16": torch.float16,
-        "float32": torch.float32,
     }.get(name, torch.float32)
 
 
@@ -298,11 +313,8 @@ def load_hf_checkpoint(
 
     """
     path = Path(path_or_repo)
-    if path.is_dir() and (path / "config.json").exists():
-        hf_config = DictCodec.coerce(
-            loads((path / "config.json").read_text()),
-            default=None,
-        )
+    if (path / "config.json").exists():
+        hf_config = json_loads((path / "config.json").read_text(), dict[str, object])
         return hf_config, load_local_state_dict(path)
     hf_model = load_transformers_model(
         str(path_or_repo),
@@ -310,6 +322,6 @@ def load_hf_checkpoint(
         dtype=dtype,
         trust_remote_code=trust_remote_code,
     )
-    return DictCodec.coerce(hf_model.config.to_dict(), default=None), {
+    return from_plain(hf_model.config.to_dict(), dict[str, object]), {
         key: value.detach().cpu() for key, value in hf_model.state_dict().items()
     }

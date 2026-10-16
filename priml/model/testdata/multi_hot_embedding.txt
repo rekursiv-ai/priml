@@ -1,9 +1,9 @@
 MultiHotEmbedding.Config(
-                channels_in=8,
-                channels_out=2,
-                offsets=(0, 2, 4, 6),
-                num_cells=3,
-                num_scalars=2,
-                dtype=torch.bfloat16,
-                init_weight=functools.partial(<function priml.model.init.normal at 0xdefacedeface>, std=1.0)
-        )
+        channels_in=8,
+        channels_out=2,
+        offsets=(0, 2, 4, 6),
+        num_cells=3,
+        num_scalars=2,
+        dtype=torch.bfloat16,
+        init_weight=functools.partial(priml.model.init.normal, std=1.0)
+    )

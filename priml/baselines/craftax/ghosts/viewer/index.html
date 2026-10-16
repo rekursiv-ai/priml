@@ -1,0 +1,242 @@
+<title>Craftax Ghost Runs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&family=Pixelify+Sans:wght@500;700&display=swap">
+<style>
+/* Layout: masthead, run pickers and the tier's numbers, a sticky transport over
+   the floor-occupancy timeline, then the nine floors in reading order (3 x 3 on
+   desktop, 2 on tablets, 1 on phones; or, as "One row", all nine edge to edge
+   across the full window at every width; or, as "Two rows", floors 0-4 over
+   5-8 and the win tally, ten squares edge to edge), the runs' achievement
+   return under them, the policy view when its run is followed, and the legend. */
+:root {
+  --bg: #e6eae8; --surface: #f6f8f6; --ink: #15232a; --muted: #55656c; --line: #c1cbcc;
+  --accent: #1c6880; --accent-ink: #ffffff; --map: #070d11; --death: #d93a30;
+  --floor-0: #4f9a3d; --floor-1: #8b7b67; --floor-2: #b48b3b; --floor-3: #3c8e86; --floor-4: #c9a227;
+  --floor-5: #7f5b9c; --floor-6: #d5582b; --floor-7: #5aa6d5; --floor-8: #6f7192;
+  --font-display: 'Pixelify Sans', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  --font-body: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-data: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1316; --surface: #141d21; --ink: #dce6e9; --muted: #92a3aa; --line: #29383e;
+    --accent: #5db3cf; --accent-ink: #06222c; --death: #ff5a4c; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1316; --surface: #141d21; --ink: #dce6e9; --muted: #92a3aa; --line: #29383e;
+  --accent: #5db3cf; --accent-ink: #06222c; --death: #ff5a4c; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 var(--font-body); }
+.page { --gutter: 24px; max-width: 1440px; margin: 0 auto; padding: 24px var(--gutter) 56px; display: grid; gap: 18px; }
+.page:is(.one-row, .two-rows, .follow-three) { max-width: none; padding-inline: 0; }
+.page:is(.one-row, .two-rows, .follow-three) > :not(.floors) { margin-inline: max(var(--gutter), calc((100% - 1392px) / 2)); }
+h1, h2 { margin: 0; text-wrap: balance; }
+h1 { font: 700 clamp(34px, 5vw, 56px)/1 var(--font-display); letter-spacing: .01em; }
+.eyebrow { margin: 0 0 8px; color: var(--accent); font: 600 12px/1.2 var(--font-data); text-transform: uppercase; letter-spacing: .14em; }
+.lede { margin: 10px 0 0; max-width: 68ch; color: var(--muted); font-size: 16px; }
+.masthead { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: end; gap: 16px; }
+.facts { margin: 0; display: grid; grid-template-columns: auto auto; gap: 2px 14px; font: 13px/1.5 var(--font-data); color: var(--muted); }
+.facts dd { margin: 0; color: var(--ink); text-align: right; font-variant-numeric: tabular-nums; }
+.pickers { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: start; }
+fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
+legend, .label { padding: 0; margin-bottom: 6px; color: var(--muted); font: 600 11px/1.2 var(--font-data); text-transform: uppercase; letter-spacing: .12em; }
+.segmented { display: flex; flex-wrap: wrap; gap: 6px; }
+button, select, input[type="number"] { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 7px 11px; }
+button { cursor: pointer; }
+button:hover, select:hover { border-color: var(--accent); }
+button:focus-visible, select:focus-visible, input:focus-visible, canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button[aria-pressed="true"], button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.choice { display: grid; text-align: left; gap: 1px; padding: 8px 12px; min-width: 132px; }
+.choice strong { font: 700 16px/1.1 var(--font-display); letter-spacing: .02em; }
+.choice span { font: 12px/1.3 var(--font-data); opacity: .85; }
+.count { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
+.stats { display: flex; flex-wrap: wrap; gap: 8px; }
+.stat { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 9px 13px; min-width: 120px; display: grid; gap: 2px; }
+.stat strong { font: 600 20px/1.15 var(--font-data); font-variant-numeric: tabular-nums; }
+.stat span { font-size: 12px; color: var(--muted); }
+.reach { flex: 1 1 360px; }
+.reach-bars { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 4px; align-items: end; height: 46px; }
+.reach-bar { display: grid; align-content: end; height: 100%; }
+.reach-bar i { display: block; background: var(--bar); border-radius: 2px 2px 0 0; min-height: 1px; }
+.reach-bar b { font: 600 10px/1.3 var(--font-data); text-align: center; font-variant-numeric: tabular-nums; }
+.deck { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 2; background: var(--bg); padding-block: 8px; border-bottom: 1px solid var(--line); display: grid; gap: 6px; }
+.transport, .layers { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.readout { margin-left: auto; font: 13px/1.2 var(--font-data); font-variant-numeric: tabular-nums; color: var(--muted); }
+.timeline { display: grid; gap: 2px; }
+#occupancy { display: block; width: 100%; height: 64px; border: 1px solid var(--line); border-radius: 6px; cursor: crosshair; touch-action: none; }
+.seek-wrap { position: relative; }
+#seek { display: block; width: 100%; margin: 0; accent-color: var(--accent); }
+.follow-win { position: absolute; top: -8px; left: calc(8px + (100% - 16px) * var(--at, 0)); width: 15px; height: 15px; transform: translateX(-50%); pointer-events: none;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2.5 8.5l3.5 4L13.5 3' fill='none' stroke='%23000' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M2.5 8.5l3.5 4L13.5 3' fill='none' stroke='%233dff7f' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat; }
+.follow-win[hidden], .toggle[hidden] { display: none; }
+.set-note { margin: 0; max-width: 90ch; color: var(--muted); font-size: 14px; }
+.reward { display: grid; gap: 4px; }
+#reward { display: block; width: 100%; height: 150px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); cursor: crosshair; touch-action: none; }
+.reward-key { margin: 0; color: var(--muted); font: 12px/1.45 var(--font-data); }
+.reward-key i { display: inline-block; width: 16px; height: 3px; margin: 0 4px 0 2px; vertical-align: middle; border-radius: 1px; }
+.policy-panel { display: grid; gap: 6px; justify-items: center; }
+.policy-panel[hidden] { display: none; }
+.policy-panel [data-ghost-policy] { width: min(100%, 560px); }
+.policy-caption { margin: 0; color: var(--muted); font: 12px/1.4 var(--font-data); text-align: center; }
+.layers label, .toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 14px; }
+.layers input[type="number"] { width: 6.5em; padding: 5px 7px; }
+.layers select { padding: 5px 7px; }
+#episode-info { font: 13px/1.3 var(--font-data); color: var(--muted); font-variant-numeric: tabular-nums; }
+#status { margin-block: 0; min-height: 1.4em; color: var(--muted); font: 13px/1.4 var(--font-data); }
+.floors { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.floor { min-width: 0; display: grid; gap: 6px; }
+.floor.wide { grid-column: 1 / -1; }
+.floor header { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.floor h2 { font: 700 17px/1.1 var(--font-display); letter-spacing: .02em; }
+.floor h2 span { display: inline-block; min-width: 1.4em; margin-right: 4px; padding: 1px 4px; border-radius: 3px; background: var(--floor-color); color: #fff; text-align: center; }
+.floor-stats { margin: 0; font: 12px/1.3 var(--font-data); color: var(--muted); font-variant-numeric: tabular-nums; }
+.enlarge { margin-left: auto; padding: 2px 8px; font-size: 12px; }
+.board { position: relative; aspect-ratio: 1; max-width: 100%; background: var(--map); border-radius: 4px; overflow: hidden; }
+.board canvas { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; }
+.board canvas.tally-marks { image-rendering: auto; }
+.floor.tally { display: none; }
+/* The board the followed run stands on, outlined in its bright green. */
+.floor.followed .board canvas.ghosts { outline: 2px solid rgb(61, 255, 127); outline-offset: -2px; }
+.legend { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
+.legend summary { cursor: pointer; font: 600 12px/1.6 var(--font-data); text-transform: uppercase; letter-spacing: .12em; color: var(--muted); }
+.legend-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 8px 18px; margin-top: 8px; font-size: 13px; }
+.key { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.mark { flex: none; width: 22px; height: 16px; display: inline-grid; place-items: center; }
+.sprite { width: 16px; height: 16px; border-radius: 50%; border: 2px solid; background-image: url('sprites.png'); background-size: 256px 128px; image-rendering: pixelated; }
+.ramp { width: 64px; height: 12px; border-radius: 2px; border: 1px solid var(--line); flex: none; }
+.ramp-key { display: inline-flex; align-items: center; gap: 4px; flex: none; font: 10px/1 var(--font-data); color: var(--muted); }
+.ramp-key .ramp { background: var(--map); }
+.swatch { width: 22px; height: 12px; border-radius: 2px; }
+.dark-chip { background: var(--map); border-radius: 3px; padding: 1px; }
+footer { color: var(--muted); font: 12px/1.5 var(--font-data); overflow-wrap: anywhere; }
+@media (max-width: 1080px) { .floors { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 680px) {
+  .page { --gutter: 16px; padding: 16px var(--gutter) 40px; gap: 14px; }
+  .floors { grid-template-columns: minmax(0, 1fr); }
+  .readout { margin-left: 0; width: 100%; }
+  .choice { min-width: 0; flex: 1 1 140px; }
+  #reward { height: 120px; }
+}
+/* One row, two rows and Follow: the boards touch, square, with the floor's
+   name over its top edge; two rows add the win tally as a tenth square;
+   Follow shows a window of three floors that keeps the followed run in view,
+   in a strip clipped to three slots, each board placed by a transform so the
+   strip can slide like a conveyor (ghosts.js updateStrip), with the win count
+   fixed over the right slot. */
+.one-row .floors { grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 0; }
+.two-rows .floors { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0; }
+.follow-three .floors { display: block; position: relative; aspect-ratio: var(--follow-boards, 3) / 1; overflow: hidden; }
+.follow-three .floors .floor { position: absolute; top: 0; left: 0; width: calc(100% / var(--follow-boards, 3)); }
+.two-rows .floor.tally { display: grid; }
+.won-badge { display: none; }
+.follow-three .floor:not(.in-strip), .follow-three .floor.tally { display: none; }
+.follow-three .won-badge { display: block; position: absolute; z-index: 2; top: 26px; right: 8px; padding: 3px 8px; border-radius: 4px; background: rgba(5, 9, 12, .78); color: #7dff6e; font: 600 14px/1.3 var(--font-data); pointer-events: none; }
+:is(.one-row, .two-rows, .follow-three) .floor { position: relative; gap: 0; grid-column: auto; }
+:is(.one-row, .two-rows, .follow-three) .floor header { position: absolute; z-index: 1; inset: 0 0 auto; padding: 2px 4px; background: color-mix(in srgb, var(--floor-color) 60%, transparent); pointer-events: none; }
+:is(.one-row, .two-rows, .follow-three) .floor h2 { font-size: 12px; color: var(--floor-ink, #fff); text-shadow: 0 0 2px var(--floor-halo, #000), 0 0 1px var(--floor-halo, #000), 0 0 1px var(--floor-halo, #000); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:is(.one-row, .two-rows, .follow-three) .floor h2 span { background: none; padding: 0; min-width: 0; color: inherit; }
+/* The followed board's outline, over its floor's band. */
+:is(.one-row, .two-rows, .follow-three) .floor.followed::after { content: ''; position: absolute; z-index: 2; inset: 0; border: 2px solid rgb(61, 255, 127); pointer-events: none; }
+:is(.one-row, .two-rows, .follow-three) .floor-stats, :is(.one-row, .two-rows, .follow-three) .enlarge { display: none; }
+:is(.one-row, .two-rows, .follow-three) .board { border-radius: 0; }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
+</style>
+<main class="page" id="page" data-ghost-page data-follow-seed-wins="13835666153931801129">
+  <header class="masthead">
+    <div>
+      <p class="eyebrow">Craftax · one world, many runs</p>
+      <h1>Craftax Ghost Runs</h1>
+      <p class="lede">Every run starts from the same world and plays its own sampled actions, decision by decision, on all nine floors at once. Where the runs agree the scene is solid; where they split up they fade to ghosts.</p>
+    </div>
+    <dl class="facts" id="facts" data-g="facts"></dl>
+  </header>
+  <section class="pickers" aria-label="Choose runs">
+    <fieldset><legend>Model tier</legend><div class="segmented" id="tiers" data-g="tiers"></div></fieldset>
+    <fieldset id="sets-field" data-g="sets-field"><legend>Runs</legend><div class="segmented" id="sets" data-g="sets"></div></fieldset>
+    <fieldset><legend>Episodes shown</legend><div class="segmented" id="counts" data-g="counts"></div></fieldset>
+  </section>
+  <p class="set-note" id="set-note" data-g="set-note" hidden></p>
+  <section class="stats" id="stats" data-g="stats" aria-label="This tier on this world"></section>
+  <section class="deck" aria-label="Playback">
+    <div class="transport">
+      <button id="restart" data-g="restart" type="button">Start</button>
+      <button id="back" data-g="back" type="button" aria-label="Back one decision">−1</button>
+      <button id="play" data-g="play" type="button" class="primary">Play</button>
+      <button id="forward" data-g="forward" type="button" aria-label="Forward one decision">+1</button>
+      <button id="skip" data-g="skip" type="button" aria-label="Forward 100 decisions">+100</button>
+      <label for="speed">Speed</label>
+      <select id="speed" data-g="speed"></select>
+      <label class="toggle"><input type="checkbox" id="skip-quiet" data-g="skip-quiet" checked> Skip quiet stretches</label>
+      <label class="toggle" hidden><input type="checkbox" id="show-sleep" data-g="show-sleep"> Show sleep (a step per 4 ticks)</label>
+      <span class="readout" id="position" data-g="position">Decision 0</span>
+    </div>
+    <div class="timeline">
+      <canvas id="occupancy" data-g="occupancy" aria-label="Runs on each floor over time and the runs that have won, ticks where runs win and die, dashed where a quiet stretch was skipped; click to seek"></canvas>
+      <div class="seek-wrap"><input id="seek" data-g="seek" type="range" min="0" max="0" value="0" aria-label="Seek to decision"><span class="follow-win" data-g="follow-win" hidden></span></div>
+    </div>
+  </section>
+  <section class="layers" aria-label="Layers">
+    <label for="layout">Layout</label>
+    <select id="layout" data-g="layout"><option value="grid">Grid</option><option value="row">One row</option><option value="two-rows">Two rows</option><option value="follow">Follow (3 boards)</option></select>
+    <label for="heat">Heatmap</label>
+    <select id="heat" data-g="heat"><option value="off">Off</option><option value="movement" selected>Movement</option><option value="interactions">Interactions</option><option value="both">Both</option></select>
+    <label><input type="checkbox" id="show-trails" data-g="show-trails" checked> Trails</label>
+    <label><input type="checkbox" id="show-creatures" data-g="show-creatures" checked> Creatures</label>
+    <label><input type="checkbox" id="show-changes" data-g="show-changes" checked> Map changes</label>
+    <label><input type="checkbox" id="show-deaths" data-g="show-deaths" checked> Deaths &amp; wins</label>
+    <label><input type="checkbox" id="show-fog" data-g="show-fog" checked> Fog of war</label>
+    <label><input type="checkbox" id="show-light" data-g="show-light" checked> Lighting</label>
+    <label for="follow">Follow</label>
+    <select id="follow" data-g="follow"><option value="median">Median return</option><option value="shortest-win">Shortest win</option><option value="best">Best return</option><option value="worst">Worst return</option><option value="longest">Longest</option><option value="random">Random</option><option value="pinned" hidden disabled>Pinned unbroken win</option></select>
+    <label for="episode">Run</label>
+    <input id="episode" data-g="episode" type="number" min="0" value="0">
+    <span id="episode-info" data-g="episode-info"></span>
+  </section>
+  <p id="status" data-g="status" role="status">Loading…</p>
+  <section class="floors" id="floors" data-g="floors" aria-label="The nine floors"></section>
+  <section class="reward" aria-label="Achievement return">
+    <canvas id="reward" data-g="reward" aria-label="Each run's reward over the timeline and the followed run's; click to seek"></canvas>
+    <p class="reward-key">Reward over the timeline above: each run in grey <i style="background:var(--ink);opacity:.5"></i>, the followed run in green <i style="background:rgb(61,255,127)"></i>. Points on the left, share of all 226 on the right.</p>
+  </section>
+  <section class="policy-panel" id="policy-panel" data-g="policy-panel" aria-label="What the followed run's agent saw" hidden>
+    <div data-ghost-policy data-g="policy"></div>
+    <p class="policy-caption" data-g="policy-caption"></p>
+  </section>
+  <details class="legend" open>
+    <summary>Legend</summary>
+    <div class="legend-grid">
+      <span class="key"><span class="mark dark-chip"><span class="sprite" style="border-color:#3fb45a;border-width:1px;background-color:#fff;background-position:-96px -32px"></span></span>Player ghost, outlined thin green, facing its runs' most common way</span>
+      <span class="key"><span class="mark dark-chip"><span class="sprite" style="border-color:#b8c4ff;background-position:-144px -32px"></span></span>Asleep: with Show sleep, a run mid-sleep, a step per 4 game ticks, its creatures as they moved; the followed run also shows a "z"</span>
+      <span class="key"><span class="ramp-key"><span>1</span><span class="ramp" id="ramp-opacity" data-g="ramp-opacity"></span><span>all</span></span>Ghost opacity grows with the runs on a tile</span>
+      <span class="key"><span class="mark"><span class="sprite" style="border-color:#ff4b3e;background-position:0 -80px"></span></span>Melee enemy, outlined red</span>
+      <span class="key"><span class="mark"><span class="sprite" style="border-color:#8bc34a;background-color:#8bc34a;background-position:-128px -80px"></span></span>Passive creature, on a light green disk, no outline</span>
+      <span class="key"><span class="mark"><span class="sprite" style="border-color:#ff4b3e;background-position:-176px -80px"></span></span>Ranged enemy, outlined red</span>
+      <span class="key"><span class="mark"><span class="sprite" style="border-color:#ce93d8;background-position:-48px -96px"></span></span>Enemy projectile</span>
+      <span class="key"><span class="mark"><span class="sprite" style="border-color:#4dd0e1;background-position:-64px -96px"></span></span>Player projectile</span>
+      <span class="key"><span class="mark"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3l10 10M13 3L3 13" stroke="#111" stroke-width="5" stroke-linecap="round"/><path d="M3 3l10 10M13 3L3 13" stroke="var(--death)" stroke-width="3" stroke-linecap="round"/></svg></span>Deaths on a tile; thicker for more runs, count from 3, brighter in the last 500 decisions</span>
+      <span class="key"><span class="mark"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="4" fill="#b0bec5" stroke="#111"/></svg></span>Timed out here</span>
+      <span class="key"><span class="mark"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 8.5l3.5 4L13.5 3" fill="none" stroke="#111" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 8.5l3.5 4L13.5 3" fill="none" stroke="#2fbf4a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Beat the game here (defeated the necromancer); sized and counted as deaths, drawn above everything</span>
+      <span class="key"><span class="mark dark-chip"><span class="swatch" style="background:linear-gradient(90deg,rgba(150,215,255,.15),rgba(150,215,255,.8))"></span></span>Ghost trails: each run's last 240 moves, adding up where runs overlap</span>
+      <span class="key"><span class="mark dark-chip"><span class="swatch" style="background:linear-gradient(90deg,rgba(61,255,127,.15),#3dff7f)"></span></span>Followed run: its last 800 moves and the player, in a ring thicker and brighter than a ghost's, in bright green</span>
+      <span class="key"><span class="ramp-key"><span>1</span><span class="ramp" id="ramp-movement" data-g="ramp-movement"></span><span>most</span></span>Movement heat: player tile entries (creatures excluded) summed over all shown runs through the decision on screen; log scale from one entry to the floor's busiest tile</span>
+      <span class="key"><span class="ramp-key"><span>1</span><span class="ramp" id="ramp-interactions" data-g="ramp-interactions"></span><span>most</span></span>Interaction heat: the player's do, place, shoot and cast on the faced tile, summed over runs; outlines when both heats show</span>
+      <span class="key"><span class="mark dark-chip"><span class="swatch" style="background:#a08560"></span></span>Changed tiles show their most common new block, as opaque as the share of runs that changed them</span>
+      <span class="key"><span class="mark dark-chip"><span class="swatch" style="background:#070d11;opacity:.9;border:1px solid #888"></span></span>Fog of war: tiles no run has had in its 9 by 11 view yet stay near-black</span>
+      <span class="key"><span class="mark dark-chip"><span class="swatch" style="background:linear-gradient(90deg,rgba(7,13,17,.7),rgba(7,13,17,0)),#a08560"></span></span>Lighting: tiles darken up to 70% where the game's light map is dark, lifted by the torches the living runs have placed (the game's own torch light), dark again once their run ends</span>
+      <span class="key"><span class="mark"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1v14" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="2 2"/></svg></span>Timeline: runs on each floor, stacked; dashed lines are skipped quiet stretches</span>
+      <span class="key"><span class="mark"><span class="swatch" style="background:rgba(28,122,58,.9);border-top:2px solid #6fe08a"></span></span>Timeline: the runs that have won by then, stacked on the living runs</span>
+      <span class="key"><span class="mark"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="1" width="2" height="6" fill="#2fbf4a"/><rect x="9" y="1" width="2" height="6" fill="#2fbf4a" opacity=".5"/><rect x="5" y="9" width="2" height="6" fill="var(--death)"/><rect x="11" y="9" width="2" height="6" fill="var(--death)" opacity=".5"/></svg></span>Timeline ticks: wins above, deaths below, more opaque where more fall together</span>
+      <span class="key"><span class="mark"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 8.5l3.5 4L13.5 3" fill="none" stroke="#000" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 8.5l3.5 4L13.5 3" fill="none" stroke="#3dff7f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Where the followed run wins, on the timeline and the seek bar</span>
+      <span class="key"><span class="mark dark-chip"><span class="swatch" style="background:linear-gradient(90deg,#2fbf4a 0 30%,transparent 30% 40%,#2fbf4a 40% 70%,rgba(255,255,255,.15) 70%)"></span></span>Two rows: the tenth square tallies the runs that have won, one mark per winner in the order they win, the followed run's in bright green</span>
+      <span class="key">Follow (3 boards): three floors that keep the followed run in view, its board outlined; they slide on when it goes below them, a new deepest floor on the right, and back only when it climbs above them; the count of runs won over the right board</span>
+      <span class="key">Creatures appear only on a run's own floor; floors a run has left are not drawn. A run that has ended shows only its end mark.</span>
+    </div>
+  </details>
+  <footer id="provenance" data-g="provenance"></footer>
+</main>
+<script src="decode.js"></script>
+<script src="policy_view.js"></script>
+<script src="ghosts.js"></script>

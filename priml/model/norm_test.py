@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Final, cast
 
 from configgle import Fig, Makeable
-from configgle.testing import assert_pprint_golden
 from torch import nn
 
 import pytest
@@ -27,6 +26,7 @@ from priml.model.norm import (
 )
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 def _config_id(value: object) -> str | None:
@@ -122,6 +122,13 @@ def test_centered_rmsnorm_identity_at_init():
     x_f32 = x.float()
     expected = x_f32 * torch.rsqrt(x_f32.pow(2).mean(-1, keepdim=True) + 1e-6)
     assert torch.allclose(out.float(), expected, atol=1e-5)
+
+
+def test_centered_rmsnorm_reset_parameters_restores_zero_scale() -> None:
+    layer = CenteredRMSNorm.Config(4).make()
+    nn.init.constant_(layer.weight, 2.0)
+    layer.reset_parameters()
+    assert torch.equal(layer.weight, torch.zeros(4))
 
 
 def test_centered_rmsnorm_accepts_messages_and_rejects_positional_extras():
@@ -320,7 +327,6 @@ def test_norm_infers_the_missing_width_and_rejects_unequal_widths(
     assert isinstance(config, ChannelsInOut)
     config.channels_out = 8
     finalized = config.copy_tree().finalize()
-    assert isinstance(finalized, ChannelsInOut)
     assert finalized.channels_in == 8
     config.channels_in = 4
     with pytest.raises(ValueError, match="channels_in=4 must equal channels_out=8"):
@@ -734,6 +740,6 @@ def test_rms_norm_cost_counts_unfused_tensor_operands() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

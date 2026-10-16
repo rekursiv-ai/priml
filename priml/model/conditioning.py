@@ -87,9 +87,9 @@ class TimestepEmbedder(nn.Module):
             nn.SiLU() if config.activation is None else config.activation.make()
         )
         self.mlp = nn.Sequential(
-            nn.Linear(config.channels_frequency, config.channels_out, bias=True),
+            nn.Linear(config.channels_frequency, config.channels_out),
             activation,
-            nn.Linear(config.channels_out, config.channels_out, bias=True),
+            nn.Linear(config.channels_out, config.channels_out),
         )
 
     def frequencies(self, t: Tensor) -> Tensor:

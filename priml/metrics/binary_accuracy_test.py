@@ -38,6 +38,16 @@ def test_binary_accuracy_flat_logits() -> None:
     assert metric.total == 3
 
 
+def test_binary_accuracy_threshold_is_strict_and_updates_accumulate() -> None:
+    # Logit 0 sits exactly on the 0.5 threshold, so it counts as negative.
+    metric = BinaryAccuracy(BinaryAccuracy.Config())
+    metric.update(torch.tensor([0.0, 10.0]), label=torch.tensor([1.0, 1.0]))
+    metric.update(torch.tensor([-10.0, 10.0]), label=torch.tensor([0.0, 1.0]))
+
+    assert metric.state_dict() == {"correct": 3, "total": 4}
+    assert metric.compute() == {"accuracy": 3 / 4}
+
+
 def test_binary_accuracy_compute_is_zero_before_any_update() -> None:
     assert BinaryAccuracy(BinaryAccuracy.Config()).compute() == {"accuracy": 0.0}
 
@@ -59,6 +69,6 @@ def test_binary_accuracy_state_round_trips_and_reset_clears_it() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

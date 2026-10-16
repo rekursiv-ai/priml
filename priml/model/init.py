@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Protocol
+from functools import partial
+from typing import Final, Protocol
 
 import inspect
 import math
@@ -169,6 +170,61 @@ def truncated_normal(
     _depth_index_scale(w, depth_index)
 
 
+def fan_in_truncated_normal(
+    w: Tensor,
+    *,
+    variance_correction: bool = False,
+    absolute_bounds: bool = False,
+    depth_index: DepthIndex = (),
+) -> None:
+    """Initialize truncated normal at ``std = 1/sqrt(fan_in)``, fan-in the last axis.
+
+    Depth-independent: ``depth_index`` is accepted for the :data:`InitFn`
+    protocol and discarded.
+
+    Args:
+      w: Tensor to initialize in place.
+      variance_correction: As in :func:`truncated_normal`.
+      absolute_bounds: Truncate at +-2 absolute, as ``nn.init.trunc_normal_``'s
+        defaults do, instead of at +-2 std. At any real width the absolute
+        bounds lie far in the tails, so the draw is nearly untruncated.
+      depth_index: Ignored.
+
+    """
+    del depth_index
+    std = w.shape[-1] ** -0.5
+    bound = 2.0 / std if absolute_bounds else 2.0
+    truncated_normal(
+        w,
+        std=std,
+        lower=-bound,
+        upper=bound,
+        variance_correction=variance_correction,
+    )
+
+
+# One shared object per form: ``partial`` compares by identity, so a config
+# holding an inline ``partial(...)`` would never equal its own rebuild.
+corrected_fan_in_normal: Final = partial(
+    fan_in_truncated_normal,
+    variance_correction=True,
+)
+"""Truncated normal at realized std ``1/sqrt(fan_in)``."""
+
+scaled_normal: Final = partial(fan_in_truncated_normal, absolute_bounds=True)
+"""``nn.init.trunc_normal_`` at std ``1/sqrt(fan_in)``, clipped at +-2 absolute."""
+
+unit_normal: Final = partial(truncated_normal, std=1.0)
+"""Truncated normal at std 1, clipped at 2 std."""
+
+corrected_unit_normal: Final = partial(
+    truncated_normal,
+    std=1.0,
+    variance_correction=True,
+)
+"""Truncated normal at realized std 1."""
+
+
 def unit_fan_in_uniform(w: Tensor, *, depth_index: DepthIndex = ()) -> None:
     """Uniform on ``+-sqrt(3 / fan_in)``, realizing a ``1/sqrt(fan_in)`` std.
 
@@ -213,5 +269,6 @@ def dirac(w: Tensor) -> None:
 
 def _depth_index_scale(w: Tensor, depth_index: DepthIndex) -> None:
     flattened = flatten_depth_index(depth_index)
-    if flattened > 0:
-        w.data /= (flattened + 1) ** 0.5
+    if flattened == -1:
+        return
+    w.data /= (flattened + 1) ** 0.5

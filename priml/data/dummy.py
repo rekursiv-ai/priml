@@ -39,9 +39,8 @@ class DummyDataset:
         num_classes: int = 1000
         """Label range; labels are drawn uniformly below this."""
 
-        device: torch.device | str | None = "auto"
-        """Device batches are delivered on. ``"auto"`` picks the best available,
-        so the default dataset is usable on a CPU-only box."""
+        device: torch.device | str | None = None
+        """Device batches are delivered on; ``None`` is the loop's."""
 
         seed: int = 0
         """Seed for the random data/labels so runs are reproducible."""
@@ -60,16 +59,20 @@ class DummyDataset:
         self.timer_epoch = CheckpointableStepTimer()
         """Passes over the data; ticked by the loop when the loader runs out."""
 
-        # Seed a dedicated generator so the synthetic data is reproducible and
-        # independent of the global torch RNG state.
-        generator = torch.Generator().manual_seed(config.seed)
-        data = torch.randn(config.num_samples, *config.input_shape, generator=generator)
-        labels = torch.randint(
-            0,
-            config.num_classes,
-            (config.num_samples,),
-            generator=generator,
-        )
+        # A dedicated CPU generator keeps the data reproducible across hosts and
+        # independent of the global RNG; batches move to ``config.device`` later.
+        with torch.device("cpu"):
+            generator = torch.Generator().manual_seed(config.seed)
+            data = torch.randn(
+                config.num_samples,
+                *config.input_shape,
+                generator=generator,
+            )
+            labels = torch.randint(
+                config.num_classes,
+                (config.num_samples,),
+                generator=generator,
+            )
 
         self.dataset = TensorDataset(data, labels)
 
@@ -99,7 +102,6 @@ class DummyDataset:
         loader = DataLoader(
             self.dataset,
             batch_size=self.config.batch_size,
-            shuffle=False,
             num_workers=self.config.num_workers,
             collate_fn=self._collate_fn,
         )
@@ -132,7 +134,8 @@ class DummyDataset:
 
     def _collate_fn(self, batch: list[tuple[Tensor, Tensor]]) -> dict[str, Tensor]:
         """Collate batch into dict format."""
-        data_list, label_list = zip(*batch, strict=True)
+        data_list = [sample[0] for sample in batch]
+        label_list = [sample[1] for sample in batch]
         device = get_device(self.config.device)
         return {
             "media": torch.stack(data_list).to(device),

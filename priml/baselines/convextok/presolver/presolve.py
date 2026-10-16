@@ -117,7 +117,7 @@ def new_state(program: LinearProgram, device: torch.device) -> core.Core:
 
     """
     nonzeros = len(program.values)
-    if 2 * nonzeros + 4 * max(program.num_rows, program.num_columns) > 2**31 - 1:
+    if _positions_overflow(program.num_rows, program.num_columns, nonzeros):
         raise ValueError(
             f"A program of {program.num_rows} rows, {program.num_columns} columns and "
             f"{nonzeros} nonzeros overflows PSLP's 32-bit entry positions.",
@@ -165,23 +165,23 @@ def presolve_steps(state: core.Core, device: torch.device) -> Iterator[None]:
 
     """
     before_cycle = after_cycle = core.nnz(state)
-    medium = False
+    fast = True
     while True:
         yield from _trivial(state)
         before_phase = core.nnz(state)
-        if medium:
+        if fast:
+            yield from _fast(state)
+        else:
             yield from _medium(state, device)
             after_cycle = core.nnz(state)
-        else:
-            yield from _fast(state)
         after_phase = core.nnz(state)
-        if medium and after_cycle >= 0.95 * before_cycle:
+        if not fast and after_cycle >= 0.95 * before_cycle:
             break
-        if medium:
-            before_cycle = after_cycle
-            medium = False
+        if fast:
+            fast = after_phase < 0.95 * before_phase
         else:
-            medium = after_phase >= 0.95 * before_phase
+            before_cycle = after_cycle
+            fast = True
     core.problem_clean(state)
     yield
 
@@ -237,6 +237,11 @@ def _medium(state: core.Core, device: torch.device) -> Iterator[None]:
     )
     yield
     yield from _trivial(state)
+
+
+def _positions_overflow(num_rows: int, num_columns: int, nonzeros: int) -> bool:
+    """Whether PSLP's reserved entry positions exceed its signed 32-bit limit."""
+    return nonzeros + 2 * max(num_rows, num_columns) > 2**30 - 1
 
 
 def _kernel_array(tensor: Tensor, dtype: torch.dtype) -> np.ndarray:

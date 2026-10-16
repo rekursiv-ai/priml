@@ -13,7 +13,11 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from priml.baselines.speedrundit.model import ModelOutput, SpeedrunDiT
+from priml.baselines.speedrundit.model import (
+    ModelOutput,
+    SpeedrunDiT,
+    _linear_cost,
+)
 from priml.baselines.speedrundit.objective import SpeedrunObjective
 from priml.baselines.speedrundit.optimizers import speedrundit_optimizer
 from priml.baselines.speedrundit.sampling import sample_latents
@@ -43,6 +47,15 @@ def tiny_model() -> SpeedrunDiT:
         class_dropout_prob=0.1,
     )
     return config.make()
+
+
+def test_linear_cost_preserves_rows_dtype_and_bias() -> None:
+    estimate = _linear_cost(3, 5, 2, dtype=torch.float64)
+    assert estimate.params == 20
+    assert estimate.params_active == 20
+    assert estimate["flops", "primal", "matmul", torch.float64] == 60
+    assert estimate["flops", "primal", "elementwise", torch.float64] == 10
+    assert estimate["bytes", "primal", "matmul", torch.float64] == 248
 
 
 def test_cost_counts_shared_projector_once() -> None:
@@ -354,6 +367,6 @@ def test_zero_cls_guidance_keeps_conditional_cls_drift() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

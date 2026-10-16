@@ -15,9 +15,9 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     apply_activation_checkpointing,
     checkpoint_wrapper,
 )
+from torch.nn import grad
 
 import torch
-import torch.nn.grad
 
 
 if TYPE_CHECKING:
@@ -473,7 +473,7 @@ def _quantized_conv2d_backward(
 
     if isinstance(ctx.padding, str):
         raise TypeError("Expected not isinstance(ctx.padding, str).")
-    grad_input = torch.nn.grad.conv2d_input(
+    grad_input = grad.conv2d_input(
         input.shape,
         weight,
         grad_output,
@@ -482,7 +482,7 @@ def _quantized_conv2d_backward(
         ctx.dilation,
         ctx.groups,
     )
-    grad_weight = torch.nn.grad.conv2d_weight(
+    grad_weight = grad.conv2d_weight(
         input,
         weight.shape,
         grad_output,

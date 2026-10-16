@@ -43,11 +43,10 @@ def transpose_slots(
       n_alloc: Allocated slots, 2 per entry plus 4 per column.
 
     """
-    n_rows = starts.size - 1
-    row_starts = torch.from_numpy(np.asarray(starts[:n_rows], dtype=np.int64)).to(
+    row_starts = torch.from_numpy(np.asarray(starts[:-1], dtype=np.int64)).to(
         device,
     )
-    row_ends = torch.from_numpy(np.asarray(ends[:n_rows], dtype=np.int64)).to(device)
+    row_ends = torch.from_numpy(np.asarray(ends[:-1], dtype=np.int64)).to(device)
     lengths = row_ends - row_starts
     live = _live_positions(row_starts, lengths)
     col = torch.from_numpy(np.asarray(cols)).to(device)[live].to(torch.int64)
@@ -108,7 +107,7 @@ def sort_rows(
     if active.size < 256:
         key = (sp << 32) | (ch + 2**31)
     else:
-        key = ((sp & 0xFFFF_FFFF) - 2**31 << 32) | (ch & 0xFFFF_FFFF)
+        key = ((sp & 0xFFFF_FFFF) ^ 0x8000_0000) << 32 | (ch & 0xFFFF_FFFF)
     order = torch.sort(key, stable=True).indices
     return rows[order].to(torch.int32).cpu().numpy()
 

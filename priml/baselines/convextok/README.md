@@ -17,7 +17,7 @@ presolver with torch, Triton and Numba.
 - [Equivalence](#equivalence)
 - [Performance](#performance)
 - [Layout](#layout)
-- [Training nanochat on it](#training-nanochat-on-it)
+- [Reproduce](#reproduce)
 - [Out of scope](#out-of-scope)
 - [References](#references)
 
@@ -160,6 +160,8 @@ at 56.9 GiB.
 | `rounding.py` | `t`, candidates -> vocabulary (`det`, `bias`, `all_ones`) |
 | `export.py` | vocabulary -> `tokenizer.json` |
 | `prepare.py` | `ConvexTokPreparation`: every stage above, as one config |
+| `measure.py` | `MeasuredFit`: one fit, its `tokenizer.json` and `metrics.json` |
+| `experiments.py` | the fits, as experiments (`exp000`) |
 
 `ConvexTokPreparation.Config` holds its choices as slots, not mode strings:
 `presolve` (`None` solves the program as built), `solver`, and `rounding`, where
@@ -186,17 +188,107 @@ one checks that a kernel keeps a single specialization. The interpreted run is
 also how the kernels' line coverage is measured, since coverage cannot trace
 compiled code.
 
-## Training nanochat on it
+## Reproduce
+
+The fit reads ClimbMix shards that nanochat's preparation downloads at a
+pinned revision, each checked against its SHA-256. Nothing else is an input.
+
+### Prerequisites
+
+- **GPU and host memory.** At paper scale a fit needs the memory under
+  [Performance](#performance): an 80 GB GPU (H100 or H200) and about 60 GiB of
+  host memory.
+- **Network.** The data step downloads ClimbMix shards 0-14 from Hugging
+  Face; no credentials are needed.
+- **Disk.** About 1.4 GB for the fifteen raw shards.
+
+### Data
+
+```bash
+uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data --stage fetch
+```
+
+It writes shards 0-14 to `/opt/scratch/datasets/nanochat/raw`; `exp000` fits
+on shards 0-6.
+
+### Experiments
+
+`experiments.py` holds one fit per experiment. Each returns a
+`MeasuredFit.Config` (`measure.py`), which fits a vocabulary with
+`ConvexTokPreparation` and writes `tokenizer.json` and `metrics.json` to
+`/opt/scratch/runs/convextok/<experiment>`. `exp000` is the port's defaults:
+the paper's corpus, PSLP presolve, PDLP and `det` rounding.
+
+```bash
+uv --quiet run --frozen python -m priml priml.baselines.convextok.experiments.exp000
+```
+
+| Experiment | Reads | Run after | Writes | Recorded result |
+|---|---|---|---|---|
+| `exp000` | `datasets/nanochat/raw/` shards 0-6 | data step | `runs/convextok/exp000/{tokenizer.json,metrics.json}` | One H200: 332 s; 16,374 pieces, optimal at 5,600 PDLP iterations; peak 55.8 GiB GPU, 45.1 GiB host |
+
+| Metric | Meaning |
+|---|---|
+| `seconds` | Wall-clock seconds per stage, and `total` |
+| `peak_gpu_bytes` | Most memory torch held on the solver's GPU |
+| `peak_host_bytes` | This process's peak resident memory, without the pretokenizing workers |
+| `program`, `solved` | Rows, columns and nonzeros, as built and as given to the solver |
+| `objective` | The relaxation's frequency-weighted token count at the solution |
+| `infeasibility` | 2-norm of the solution's row- and variable-bound violations |
+| `iterations`, `optimal` | How the solver stopped, when it reports it (PDLP does) |
+| `pieces`, `missing`, `extra` | Vocabulary size, and its difference from `reference` |
+
+A fork changes one slot of `cfg.preparation` and names exp000's tokenizer as
+its `reference`. The path is logical, like the run directory: it resolves
+beneath the same `base_dir`, so the fork reads what `exp000` wrote wherever
+both ran.
+
+```python
+def exp001() -> MeasuredFit.Config:
+    """Fork exp000 with the following changes.
+
+    - Solve with MySolver instead of PDLP.
+    """
+    cfg = exp000()
+    cfg.experiment_name = "exp001"
+    cfg.preparation.solver = MySolver.Config()
+    cfg.reference = Path("/runs/convextok/exp000/tokenizer.json")
+    return cfg
+```
+
+- `solver` takes any config whose made object maps a `LinearProgram` to a
+  result with a `primal` tensor. A result with `iterations` and `optimal`
+  reports them too.
+- `presolve = None` solves the program as built; `rounding` takes the other
+  schemes in `rounding.py`.
+- `shard_indices = [0]` fits a program about a seventh the size, for faster
+  iteration.
+- `missing == extra == 0` means the fork fits exp000's vocabulary. A fork
+  whose vocabulary differs is judged downstream: put the same preparation in
+  `donor_convextok16k` and train nanochat's `exp023` on it (next section).
+  Compare solvers at matched `infeasibility`.
+
+### Training nanochat on it
 
 The nanochat preparation takes any tokenizer fitting in its tokenizer slot.
 `prepare.donor_convextok16k` is nanochat's Unigram recipe with
 `ConvexTokPreparation` in that slot, fitted on raw shards 0-6 as upstream fits,
-with ten reserved IDs (16,384 in all). nanochat's `exp023` forks `exp022`,
-changing only the prepared inputs.
+with ten reserved IDs (16,384 in all). It prepares into its own root,
+`/opt/scratch/datasets/nanochat-convextok`, where nanochat's `exp023` reads.
+`exp023` forks `exp022`, changing only the prepared inputs; it needs an SM90
+or SM100 GPU, as `exp022` does.
 
 ```bash
-uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data priml.baselines.convextok.prepare.donor_convextok16k --directory /opt/scratch/datasets/nanochat-convextok --stage all
-uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data priml.baselines.convextok.prepare.donor_convextok16k --directory /opt/scratch/datasets/nanochat-convextok --stage train --experiment exp023 --seed 42 --run-directory /opt/scratch/runs/nanochat-exp023-42
+uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data priml.baselines.convextok.prepare.donor_convextok16k --stage all
+uv --quiet run --frozen python -m priml priml.baselines.nanochat.experiments.exp023
+```
+
+The run lands in `/opt/scratch/runs/nanochat/exp023`. For seeds 43 and 44, as
+in the table below, launch through the preparation instead, with a new run
+directory each:
+
+```bash
+uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data priml.baselines.convextok.prepare.donor_convextok16k --stage train --experiment exp023 --seed 43 --run-directory /opt/scratch/runs/nanochat/exp023-seed43
 ```
 
 H200, seeds 42-44, `exp022` controls run on the same node and code:
@@ -209,6 +301,17 @@ H200, seeds 42-44, `exp022` controls run on the same node and code:
 ConvexTok is worse in 5 of 6 seed pairs, but 3 seeds do not settle it (paired
 t of 1.4 and 2.3). It needs 0.7% fewer tokens for the reference bytes, and
 both arms take the same number of steps.
+
+### The base_dir knob
+
+Every default sits beneath `/opt/scratch`. To move everything, pick a root:
+
+- `exp000` and its forks: `--override base_dir=/data/root` moves the shards
+  they read to `/data/root/datasets/nanochat/raw`, the run to
+  `/data/root/runs/convextok`, and a fork's `reference` with them.
+- The data step: `--directory /data/root/datasets/nanochat`.
+- The nanochat corpus: `--directory /data/root/datasets/nanochat-convextok`,
+  and `--override base_dir=/data/root` on the `exp023` launch.
 
 ## Out of scope
 

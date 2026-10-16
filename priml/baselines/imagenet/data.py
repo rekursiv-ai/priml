@@ -210,7 +210,7 @@ def deit_train_data_pipeline() -> DataPipeline.Config:
                 drop_remainder=True,
             ),
             AsTensor.Config(include=["label"]),
-            MixupCutmix.Config(),
+            MixupCutmix.Config(field="image"),
             PrefetchBuffer.Config(size=2),
         ],
     )

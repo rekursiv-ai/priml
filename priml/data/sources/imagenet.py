@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections import deque
 from contextlib import closing
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Self, override
 
@@ -13,7 +13,7 @@ import tarfile
 from configgle import Fig
 from PIL import Image
 
-from priml.data.sources.sharding import shard_and_shuffle
+from priml.data.sources.sharding import interleave_shards, shard_and_shuffle
 from priml.paths import resolve_working_dir
 
 
@@ -49,9 +49,9 @@ class ImageNetSource:
         split: Literal["train", "val", "test"] = "train"
         """Which archive is read; ``test`` carries no labels."""
 
-        validation_labels_file: Path | None = None
+        validation_labels_file: Path | str | None = None
         """Validation-label override; ``None`` reads ``validation_labels.txt``
-        beside ``working_dir``. The ``val`` split has no labels in its archive,
+        inside ``working_dir``. The ``val`` split has no labels in its archive,
         so one of the two must resolve."""
 
         worker_slice: tuple[int, int] | None = None
@@ -69,15 +69,26 @@ class ImageNetSource:
         @override
         def finalize(self) -> Self:
             self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
+            if self.validation_labels_file is not None:
+                self.validation_labels_file = resolve_working_dir(
+                    self.base_dir,
+                    self.validation_labels_file,
+                )
             return super().finalize()
 
     def __init__(self, config: Config):
+        if config.num_concurrently_read_shards < 1:
+            raise ValueError(
+                "num_concurrently_read_shards must be >= 1, got "
+                f"{config.num_concurrently_read_shards}.",
+            )
         self.split = config.split
         self.shuffle = config.shuffle
         self.worker_slice = config.worker_slice
         self.epoch_seed = config.epoch_seed
         self.num_concurrently_read_shards = config.num_concurrently_read_shards
         self.dataset_dir = Path(config.working_dir)
+        self._validation_members: list[tarfile.TarInfo] = []
 
         if not self.dataset_dir.exists():
             raise ValueError(f"Dataset directory does not exist: {self.dataset_dir}")
@@ -92,6 +103,8 @@ class ImageNetSource:
             test_files = list(self.dataset_dir.glob("ILSVRC2012_img_test*.tar"))
             if not test_files:
                 raise ValueError(f"No test tar found in {self.dataset_dir}")
+            if len(test_files) > 1:
+                raise ValueError(f"Multiple test archives found in {self.dataset_dir}")
             self.tar_path = test_files[0]
         else:
             raise ValueError(f"Unknown split: {self.split}")
@@ -103,8 +116,9 @@ class ImageNetSource:
         # missing archive must report itself rather than as a labels error.
         if self.split == "val":
             labels_file = (
-                config.validation_labels_file
-                or self.dataset_dir / "validation_labels.txt"
+                Path(config.validation_labels_file)
+                if config.validation_labels_file is not None
+                else self.dataset_dir / "validation_labels.txt"
             )
             if not labels_file.exists():
                 raise ValueError(
@@ -123,17 +137,13 @@ class ImageNetSource:
     def _load_validation_labels(self, labels_file: Path) -> dict[str, str]:
         """Load validation labels file."""
         # Get sorted list of filenames from tar.
-        with tarfile.open(self.tar_path, "r") as tar:
-            filenames = sorted(tar.getnames())
+        with tarfile.open(self.tar_path) as tar:
+            self._validation_members = [m for m in tar.getmembers() if m.isfile()]
+        filenames = sorted(member.name for member in self._validation_members)
 
         # Load labels (one per line)
         with labels_file.open() as f:
             labels = [line.strip() for line in f]
-
-        if len(filenames) != len(labels):
-            raise ValueError(
-                f"Mismatch: {len(filenames)} files but {len(labels)} labels",
-            )
 
         return dict(zip(filenames, labels, strict=True))
 
@@ -150,7 +160,7 @@ class ImageNetSource:
     # first access pays a full sequential pass over the tar.
     def _iter_train(self) -> Iterator[Sample]:
         """Iterate training split (nested tars) with parallel interleaved reading."""
-        with tarfile.open(self.tar_path, "r") as tar:
+        with tarfile.open(self.tar_path) as tar:
             # Get class tar members. Fold the loader-injected epoch seed into the
             # shuffle so each epoch reshuffles while all workers share the
             # permutation.
@@ -161,44 +171,19 @@ class ImageNetSource:
                 epoch_seed=self.epoch_seed,
             )
 
-            # Parallel interleaved reading.
-            if self.num_concurrently_read_shards > 1:
-                active_shards: deque[Generator[Sample, None, None]] = deque()
-                class_tar_iter = iter(class_tars)
-
-                # Initialize with num_concurrently_read_shards class tars.
-                for _ in range(min(self.num_concurrently_read_shards, len(class_tars))):
-                    try:
-                        class_tar_member = next(class_tar_iter)
-                        active_shards.append(_read_class_tar(tar, class_tar_member))
-                    except StopIteration:
-                        break
-
-                # Round-robin through active shards.
-                while active_shards:
-                    shard = active_shards.popleft()
-                    try:
-                        yield next(shard)
-                        active_shards.append(shard)  # Re-add to end for round-robin.
-                    except StopIteration:
-                        # This shard is exhausted, try to load a new one.
-                        try:
-                            class_tar_member = next(class_tar_iter)
-                            active_shards.append(_read_class_tar(tar, class_tar_member))
-                        except StopIteration:
-                            pass  # No more shards to load.
-            else:
-                # Sequential reading.
-                for class_tar_member in class_tars:
-                    yield from _read_class_tar(tar, class_tar_member)
+            yield from interleave_shards(
+                class_tars,
+                partial(_read_class_tar, tar),
+                num_concurrently_read_shards=self.num_concurrently_read_shards,
+            )
 
     def _iter_val(self) -> Iterator[Sample]:
         """Iterate validation split (flat tar with labels file)."""
-        with tarfile.open(self.tar_path, "r") as tar:
+        with tarfile.open(self.tar_path) as tar:
             # Val is never shuffled; slice deterministically over members so the
             # same sample always maps to the same worker for stable evaluation.
             members = shard_and_shuffle(
-                [m for m in tar.getmembers() if m.isfile()],
+                self._validation_members,
                 worker_slice=self.worker_slice,
             )
 
@@ -224,7 +209,7 @@ class ImageNetSource:
 
     def _iter_test(self) -> Iterator[Sample]:
         """Iterate test split (flat tar, no labels)."""
-        with tarfile.open(self.tar_path, "r") as tar:
+        with tarfile.open(self.tar_path) as tar:
             # Test is never shuffled, mirroring val: deterministic slice only.
             members = shard_and_shuffle(
                 [m for m in tar.getmembers() if m.isfile()],
@@ -249,16 +234,6 @@ class ImageNetSource:
                 except (OSError, Image.DecompressionBombError) as e:
                     logger.warning("Failed to load %s: %s", member.name, e)
 
-    def __len__(self) -> int:
-        """Return approximate number of samples (not exact)."""
-        # ImageNet has ~1.28M train, 50k val, 100k test.
-        if self.split == "train":
-            return 1_281_167
-        if self.split == "val":
-            return 50_000
-        # Test.
-        return 100_000
-
 
 def _read_class_tar(
     tar: tarfile.TarFile,
@@ -278,10 +253,7 @@ def _read_class_tar(
     # tarfile.open(fileobj=...) does not take ownership of it.
     with (
         closing(class_tar_file),
-        tarfile.open(
-            fileobj=class_tar_file,
-            mode="r",
-        ) as class_tar,
+        tarfile.open(fileobj=class_tar_file) as class_tar,
     ):
         for image_member in class_tar.getmembers():
             if not image_member.isfile():

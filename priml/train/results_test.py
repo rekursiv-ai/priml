@@ -6,13 +6,13 @@ from typing import TYPE_CHECKING
 
 import json
 
+import pytest
+
 from priml.train.results import format_summary, read_metrics, summarize
 
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 def _write(tmp_path: Path, metrics: dict[str, float]) -> Path:
@@ -53,6 +53,33 @@ def test_summarize_prints_summary(tmp_path: Path, capsys: pytest.CaptureFixture[
     assert capsys.readouterr().out.strip() == "total_loss=3.045"
 
 
+def test_summarize_defaults_to_metrics_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write(tmp_path, {"eval/loss": 2.5})
+    monkeypatch.chdir(tmp_path)
+
+    assert summarize([]) == 0
+    assert capsys.readouterr().out == "loss=2.5\n"
+
+
+def test_summarize_help_describes_metrics_path(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as error:
+        summarize(["--help"])
+
+    assert error.value.code == 0
+    help_lines = capsys.readouterr().out.splitlines()
+    assert "Read a run's eval metrics." in help_lines
+    assert any(
+        line.rstrip().endswith("Metrics JSON path (default: metrics.json).")
+        for line in help_lines
+    )
+
+
 def test_summarize_missing_file_returns_1(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -74,6 +101,6 @@ def test_summarize_appends_note(tmp_path: Path, capsys: pytest.CaptureFixture[st
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

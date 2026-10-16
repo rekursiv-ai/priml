@@ -1,6 +1,6 @@
 """Windowed causal attention with a per-head value-embedding gate.
 
-Two departures from :class:`~priml.model.attention.self_attention.SelfAttention`, both
+Two departures from :class:`~priml.model.attention.attention.Attention`, both
 from the speedrun recipes rather than from taste:
 
 * **A window.** A layer attends to ``window`` previous positions plus itself.
@@ -35,8 +35,8 @@ from priml.cost import (
     cost,
     elementwise_cost,
     matmul_cost,
+    nbytes,
     reduction_cost,
-    resolve_dtype,
     traffic,
 )
 from priml.model.attention.kernel import attention_kernel_cost
@@ -46,6 +46,7 @@ from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
     DepthIndex,
+    LayerCache,
     TensorModule,
     infer_same_width,
     propagate_attr,
@@ -171,7 +172,7 @@ class ValueGatedAttention(nn.Module):
     """Windowed causal attention with normalized queries/keys and value gating.
 
     Two departures from priml's
-    :class:`~priml.model.attention.self_attention.SelfAttention`, both load-bearing here:
+    :class:`~priml.model.attention.attention.Attention`, both load-bearing here:
 
     * **A window.** A layer attends to ``window`` previous positions plus itself.
       Restricting most layers and leaving a few global keeps attention
@@ -227,12 +228,10 @@ class ValueGatedAttention(nn.Module):
         kernel: Makeable[AttentionKernel] = field(default_factory=SdpaCausal.Config)
         """The attention kernel itself, injected rather than selected.
 
-        A kernel is a different VALUE in this slot, not a mode flag: the
-        reference recipe measured its score on FlashAttention-3, and a fused
-        kernel reduces in a different order than a masked SDPA, so reproducing
-        that number means issuing that kernel. The default runs anywhere; a
-        rung reproducing a published result pins the one it was published
-        with, and inherits its hardware requirement along with it."""
+        A kernel is a different VALUE in this slot, not a mode flag: a fused
+        kernel reduces in a different order than a masked SDPA, so a rung's
+        number depends on which kernel it issues. The default runs anywhere; a
+        rung pinning a fused kernel inherits its hardware requirement."""
 
         window: int = -1
         """Previous positions each query reaches, in addition to itself.
@@ -398,7 +397,7 @@ class ValueGatedAttention(nn.Module):
                         phase="adjoint",
                     )
                 ).tile(rows)
-            return replace(total, bytes_state=resolve_dtype(dtype).itemsize * 2 * inner)
+            return replace(total, bytes_state=nbytes(2 * inner, dtype))
 
     def __init__(self, config: Config) -> None:
         # Only constraints torch cannot state: RoPE pairs the head width, and
@@ -473,6 +472,7 @@ class ValueGatedAttention(nn.Module):
         cos_sin: tuple[Tensor, Tensor],
         value_embedding: Tensor | None = None,
         window: int | None = None,
+        cache: LayerCache | None = None,
         **kwargs: object,
     ) -> Tensor:
         """Attend over this layer's configured window.
@@ -483,12 +483,21 @@ class ValueGatedAttention(nn.Module):
           value_embedding: ``[B, S, num_heads * channels_head]`` added to the
             values through the per-head gate, or ``None`` for this layer.
           window: Attention-window override.
+          cache: The block's decode cache; must be ``None``.
           **kwargs: Open message bus forwarded to the attention kernel.
 
         Returns:
           out: ``[B, S, C]`` attention output.
 
+        Raises:
+          TypeError: If ``cache`` is given.
+
         """
+        # The block addresses ``cache`` to this layer, so it ends here instead of
+        # reaching a kernel that names only its window. With no stored keys, a
+        # decode step would attend to itself alone and return wrong outputs.
+        if cache is not None:
+            raise TypeError(f"{type(self).__name__} keeps no decode cache.")
         config = self.config
         shape = (*x.shape[:-1], config.num_heads, config.channels_head)
         q = self.proj_q(x).view(shape)

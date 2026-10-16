@@ -1,11 +1,11 @@
 """Model building blocks."""
 
+from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaFused, SdpaNaive
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.rope import RoPE, RoPEMixed
-from priml.model.attention.self_attention import SelfAttention
 from priml.model.attention.value_gated_attention import ValueGatedAttention
 from priml.model.conv import Conv1d, Conv2d, Conv3d
 from priml.model.embedding import Embedding
@@ -46,6 +46,7 @@ from priml.model.transformer.transformer import Transformer
 
 __all__ = [
     "AdaLNZero",
+    "Attention",
     "BatchNorm",
     "BatchNorm2d",
     "Conv1d",
@@ -74,7 +75,6 @@ __all__ = [
     "Router",
     "SdpaFused",
     "SdpaNaive",
-    "SelfAttention",
     "Sequential",
     "SigmoidRouter",
     "Skip",

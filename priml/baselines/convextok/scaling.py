@@ -65,8 +65,8 @@ def scale_program(
       scaled: The scaled program and its scaling factors.
 
     """
-    crow = program.crow_indices.to(torch.int64)
-    columns = program.col_indices.to(torch.int64)
+    crow = program.crow_indices.long()
+    columns = program.col_indices.long()
     values = program.values
     rows = torch.repeat_interleave(
         torch.arange(program.num_rows, device=values.device),

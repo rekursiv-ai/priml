@@ -1,0 +1,14 @@
+epoch 0001 learning_rate 0x3b9af4a5 0.004728870932012796
+epoch 0001 policy_loss 0xbdb477aa -0.08811886608600616
+epoch 0001 value_loss 0x3d5f7a30 0.05455988645553589
+epoch 0001 entropy 0x3fe7594a 1.8074123859405518
+epoch 0001 total_loss 0xbd3a65a8 -0.04550710320472717
+epoch 0001 old_approx_kl 0x3a17e200 0.0005793869495391846
+epoch 0001 approx_kl 0x365d8000 3.300607204437256e-06
+epoch 0001 clipfrac 0x00000000 0.0
+epoch 0001 importance 0x3f7fda3f 0.9994239211082458
+epoch 0001 master embedding.weight torch.float32 (154, 16) b4cb2d53138d1c4f795ba2047730544dc33cea3f8a2485642fa5b447d0d9afb8
+epoch 0001 master proj_in.weight torch.float32 (8, 1635) e0bae0edaa758389adc78644bf166688e96300f72227d418c08b1176b184ffb2
+epoch 0001 master proj_out.weight torch.float32 (44, 8) 0c3f853f762a236345381d0eaa190489d623cfc8e3a680949c216ceccbf4d3a3
+epoch 0001 master blocks.0.proj_gates.weight torch.float32 (24, 8) 5a04d3e0c72fc3f6cbb4a10c4c54411cb8547ba593984768607d081b0b60c81e
+epoch 0001 master blocks.1.proj_gates.weight torch.float32 (24, 8) 881addd56542e4ac3efded68227a26af1527835b415d5caf72cf72ef09e2ff83

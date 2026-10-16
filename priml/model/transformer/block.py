@@ -17,14 +17,14 @@ from priml.cost import (
     cost,
     elementwise_cost,
 )
-from priml.model.attention.self_attention import SelfAttention
+from priml.model.attention.attention import Attention
 from priml.model.custom_types import (
-    CachedAttention,
     ChannelsIn,
     ChannelsOut,
     DepthIndex,
     HasDepthIndex,
     HeadGeometry,
+    LayerCache,
     Shardable,
     TensorModule,
     infer_same_width,
@@ -39,6 +39,11 @@ class TransformerBlock(nn.Module):
 
     Module names match sic convention for checkpoint compatibility:
     ``attn``, ``ffn``, and their corresponding ``norm1`` and ``norm2``.
+
+    The attention reads the block's input alone. A stack forwards every message
+    to every block, a ``memory`` too for the blocks that cross-attend to it, so
+    this block keeps the memory from its attention: an ``Attention`` handed one
+    would attend to it instead.
     """
 
     class Config(Fig["TransformerBlock"], kw_only=False):
@@ -50,7 +55,7 @@ class TransformerBlock(nn.Module):
 
         _: KW_ONLY
 
-        attn: Makeable[TensorModule] = field(default_factory=SelfAttention.Config)
+        attn: Makeable[TensorModule] = field(default_factory=Attention.Config)
         """Attention module config."""
 
         ffn: Makeable[TensorModule] = field(default_factory=SwiGLU.Config)
@@ -187,15 +192,17 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: Tensor,
+        *,
+        cache: LayerCache | None = None,
         **kwargs: object,
     ) -> Tensor:
-        # Gate on ``torch.is_grad_enabled()``: activation checkpointing only saves
-        # memory by recomputing in backward, so it is pointless with grad off
-        # (eval / ``torch.no_grad`` / ``torch.inference_mode``) -- and wrapping a
-        # block in ``torch.utils.checkpoint`` under ``inference_mode`` can deadlock
-        # a multi-rank eval. ``is_grad_enabled()`` is the precise condition (a
-        # backward will run); it subsumes the older ``x.requires_grad`` check and
-        # also covers a ``requires_grad`` input inside a ``no_grad`` region.
+        if cache is not None:
+            # In-place cache updates must not be checkpointed: backward
+            # recomputation would append the same keys and values twice.
+            return self._forward(x, cache=cache, **kwargs)
+        # Only a decoding call names a cache: a mixer without a cache slot (a
+        # recurrent or value-gated layer) forwards its kwargs to a kernel that
+        # rejects one.
         if self.checkpoint and torch.is_grad_enabled():
             return torch_checkpoint(
                 partial(self._forward, **kwargs),
@@ -204,53 +211,19 @@ class TransformerBlock(nn.Module):
             )
         return self._forward(x, **kwargs)
 
-    def forward_cached[CacheT](
-        self,
-        x: Tensor,
-        *,
-        cache: CacheT,
-        **kwargs: object,
-    ) -> tuple[Tensor, CacheT]:
-        """Run the block while updating its attention cache.
-
-        Args:
-          x: Input tensor.
-          cache: Attention cache passed to the attention module.
-          **kwargs: Additional arguments forwarded to attention and FFN.
-
-        Returns:
-          output: Output tensor same shape as x.
-          cache: Updated cache after attention.
-
-        """
-        if not isinstance(self.attn, CachedAttention):
-            raise TypeError("The attention module must implement cached attention.")
-        attention = cast(CachedAttention[CacheT], self.attn)
+    def _forward(self, x: Tensor, **kwargs: object) -> Tensor:
+        # Handed the memory a stack sends its cross-attending blocks, this
+        # block's ``Attention`` would attend to it instead of to ``x``.
+        kwargs.pop("memory", None)
+        cache = kwargs.pop("cache", None)
+        attn_kwargs = kwargs if cache is None else {**kwargs, "cache": cache}
         if self.prenorm:
-            attn_out, cache = attention.forward_cached(
-                self.norm1(x, **kwargs),
-                cache=cache,
-                **kwargs,
-            )
+            normed = self.norm1(x, **kwargs)
+            attn_out = self.attn(normed, **attn_kwargs)
             x = x + attn_out
             x = x + self.ffn(self.norm2(x, **kwargs), **kwargs)
         else:
-            attn_out, cache = attention.forward_cached(x, cache=cache, **kwargs)
-            x = self.norm1(x + attn_out, **kwargs)
-            x = self.norm2(x + self.ffn(x, **kwargs), **kwargs)
-        return x, cache
-
-    def _forward(
-        self,
-        x: Tensor,
-        **kwargs: object,
-    ) -> Tensor:
-        if self.prenorm:
-            attn_out = self.attn(self.norm1(x, **kwargs), **kwargs)
-            x = x + attn_out
-            x = x + self.ffn(self.norm2(x, **kwargs), **kwargs)
-        else:
-            attn_out = self.attn(x, **kwargs)
+            attn_out = self.attn(x, **attn_kwargs)
             x = self.norm1(x + attn_out, **kwargs)
             x = self.norm2(x + self.ffn(x, **kwargs), **kwargs)
         return x

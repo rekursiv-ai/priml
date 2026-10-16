@@ -23,7 +23,6 @@ def _fp32(
     *,
     primal: Mapping[str, Mapping[Kernel, int]] | None = None,
     adjoint: Mapping[str, Mapping[Kernel, int]] | None = None,
-    **fields: int,
 ) -> Cost:
     """Build a ``Cost`` from whole-invocation fp32 FLOPs and bytes."""
     cells: dict[tuple[object, ...], int] = {}
@@ -35,7 +34,7 @@ def _fp32(
         for measure in MEASURES:
             for kernel, value in (silos or {}).get(measure, {}).items():
                 cells[(measure, phase, kernel, torch.float32)] = value
-    return Cost(cells=cells, **fields)
+    return Cost(cells=cells)
 
 
 def test_adversarial_loss_is_pointwise_over_batch() -> None:
@@ -117,6 +116,6 @@ def test_adversarial_loss_operand_traffic(dtype: torch.dtype) -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

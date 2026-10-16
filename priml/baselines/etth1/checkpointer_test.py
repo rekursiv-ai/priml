@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import cast
 
-import json
+from treekle import from_plain, json_loads
 
 import pytest
 import torch
@@ -12,11 +12,12 @@ from priml.baselines.etth1.checkpointer import Etth1Checkpointer
 from priml.baselines.etth1.data_test import fixture_config
 from priml.baselines.etth1.experiments import exp_smoke
 from priml.baselines.etth1.train_step import Etth1TrainStep
-from priml.lib.custom_json import DictCodec
 from priml.testing.golden import mismatches
 from priml.train.checkpointer import AsyncLocalStateDictStorer
 
 
+# The asynchronous storer needs a torch.distributed process group, so that case
+# stays in the distributed tier; the synchronous case is the unit test.
 @pytest.mark.parametrize(
     "asynchronous",
     [False, pytest.param(True, marks=pytest.mark.compute_distributed)],
@@ -47,8 +48,9 @@ def test_tied_score_selects_latest_checkpoint(
         assert checker.on_eval(loop, step=1, metrics={"total_loss": 0.7})
         assert checker.on_eval(loop, step=2, metrics={"total_loss": 0.7})
         checker.close()
-        record = DictCodec.coerce(
-            cast(object, json.loads((tmp_path / "checkpoints/best.json").read_text())),
+        record = json_loads(
+            (tmp_path / "checkpoints/best.json").read_text(),
+            dict[str, object],
         )
         assert record["step"] == 2
         assert record["value"] == 0.7
@@ -61,7 +63,28 @@ def test_tied_score_selects_latest_checkpoint(
                 torch.distributed.destroy_process_group()
 
 
-@pytest.mark.compute_training
+def test_failed_tied_save_restores_the_previous_best(tmp_path: Path) -> None:
+    cfg = exp_smoke()
+    cfg.base_dir = tmp_path
+    cfg.dataset = fixture_config(tmp_path / "data")
+    cfg.dataset.base_dir = "/"
+    loop = cfg.make()
+    checker_cfg = Etth1Checkpointer.Config()
+    checker_cfg.working_dir = tmp_path / "checkpoints"
+    checker_cfg.best_metric = "total_loss"
+    checker_cfg.best_mode = "min"
+    checker = checker_cfg.make()
+    try:
+        assert checker.on_eval(loop, step=1, metrics={"total_loss": 0.7})
+        with pytest.raises(ValueError, match="non-negative"):
+            checker.on_eval(loop, step=-1, metrics={"total_loss": 0.7})
+        assert checker.best_value == 0.7
+        assert checker.best_step == 1
+    finally:
+        checker.close()
+        loop.close()
+
+
 def test_epoch_checkpoint_resumes_after_validation(tmp_path: Path) -> None:
     cfg = exp_smoke()
     cfg.base_dir = tmp_path
@@ -83,14 +106,13 @@ def test_epoch_checkpoint_resumes_after_validation(tmp_path: Path) -> None:
         assert loop.current_epoch == 1
         assert len(loop.validation_losses) == 1
         checkpoint = tmp_path / "runs/etth1/exp_smoke/checkpoints/step_00000005.pt"
-        state = DictCodec.coerce(
+        state = from_plain(
             cast(object, torch.load(checkpoint, weights_only=True)),
+            dict[str, object],
         )
+        dataset = from_plain(state["dataset"], dict[str, object])
         assert (
-            DictCodec.coerce(DictCodec.coerce(state["dataset"])["timer_epoch"])[
-                "global_count"
-            ]
-            == 1
+            from_plain(dataset["timer_epoch"], dict[str, object])["global_count"] == 1
         )
         assert len(cast(list[float], state["validation_losses"])) == 1
         loop._do_train_step(next_batch)
@@ -108,8 +130,8 @@ def test_epoch_checkpoint_resumes_after_validation(tmp_path: Path) -> None:
         assert len(resumed.validation_losses) == 1
         actual_batch = resumed._get_next_batch()
         assert not mismatches(
-            DictCodec.coerce(next_batch, torch.Tensor),
-            DictCodec.coerce(actual_batch, torch.Tensor),
+            from_plain(next_batch, dict[str, torch.Tensor]),
+            from_plain(actual_batch, dict[str, torch.Tensor]),
         )
         resumed._do_train_step(actual_batch)
         assert isinstance(resumed.step, Etth1TrainStep)
@@ -117,3 +139,9 @@ def test_epoch_checkpoint_resumes_after_validation(tmp_path: Path) -> None:
         assert torch.equal(rng, torch.get_rng_state())
     finally:
         resumed.close()
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

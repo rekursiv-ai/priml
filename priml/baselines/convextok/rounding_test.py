@@ -6,11 +6,10 @@ must reproduce upstream's vocabulary set exactly.
 """
 
 from pathlib import Path
-from typing import Final, cast
-
-import json
+from typing import Final, Literal, cast
 
 from tokenizers import pre_tokenizers
+from treekle import json_loads
 
 import numpy as np
 import pytest
@@ -22,7 +21,12 @@ from priml.baselines.convextok.rounding import (
     deterministic_rounding,
     integral_rounding,
 )
-from priml.lib.custom_json import DictCodec, IntCodec, ListCodec
+from priml.baselines.convextok.testing import (
+    TESTDATA,
+    Candidates,
+    Corpus,
+    Vocab,
+)
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -38,14 +42,13 @@ _CWD: Final = Path(__file__).resolve().parent
 )
 def test_rounding_matches_upstream_golden(
     rounding: RoundingFn,
-    scheme: str,
+    scheme: Literal["det", "bias", "all_ones"],
 ) -> None:
-    candidates = ListCodec.coerce(
-        _read_json("candidates.json").get("tokens"),
-        str,
-        default=None,
-    )
-    budget = IntCodec.coerce(_read_json("corpus.json").get("budget"), default=None)
+    candidates = json_loads(
+        (TESTDATA / "candidates.json").read_text(),
+        Candidates,
+    )["tokens"]
+    budget = json_loads((TESTDATA / "corpus.json").read_text(), Corpus)["budget"]
     with _npz("program.npz") as program:
         token_edges, byte_edges, _ = (
             int(size) for size in torch.from_numpy(program["sizes"])
@@ -56,7 +59,7 @@ def test_rounding_matches_upstream_golden(
     chosen = rounding(solution[token_edges + byte_edges :], candidates, budget=budget)
     vocabulary = {candidates[int(position)] for position in chosen}
     vocabulary |= set(pre_tokenizers.ByteLevel.alphabet())
-    golden = ListCodec.coerce(_read_json("vocab.json").get(scheme), str, default=None)
+    golden = json_loads((TESTDATA / "vocab.json").read_text(), Vocab)[scheme]
     assert vocabulary == set(golden)
 
 
@@ -64,6 +67,12 @@ def test_deterministic_ties_keep_candidate_order() -> None:
     indicators = torch.tensor([0.5, 1.0, 0.5, 0.5], dtype=torch.float64)
     chosen = deterministic_rounding(indicators, ["a", "b", "c", "d"], budget=2)
     assert chosen.tolist() == [0, 1]
+
+
+def test_many_ties_keep_candidate_order_at_budget_boundary() -> None:
+    indicators = torch.ones(32, dtype=torch.float64)
+    chosen = deterministic_rounding(indicators, [str(i) for i in range(32)], budget=16)
+    assert chosen.tolist() == list(range(16))
 
 
 def test_only_positive_indicators_are_ranked() -> None:
@@ -90,12 +99,7 @@ def _npz(name: str) -> np.lib.npyio.NpzFile:
     return loaded
 
 
-def _read_json(name: str) -> dict[str, object]:
-    raw = cast(object, json.loads((_CWD / "testdata" / name).read_text()))
-    return dict(DictCodec.coerce(raw, default=None))
-
-
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

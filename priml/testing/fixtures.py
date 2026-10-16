@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
+import math
 import sys
 
 import pytest
@@ -21,16 +22,6 @@ else:
     # ``cleanup_cuda`` through ``priml.conftest``, so an eager import here
     # would load torch at collection time for every package in the repo.
     torch = lazy_import("torch")
-
-
-def get_device() -> torch.device:
-    """Return the preferred test device, CUDA when available.
-
-    Returns:
-      device: ``cuda`` if a CUDA device is present, else ``cpu``.
-
-    """
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @pytest.fixture(autouse=True)
@@ -126,7 +117,7 @@ def poison_free_pool(*shapes: tuple[int, ...], blocks: int = 32) -> None:
         # Built and dropped one at a time rather than held in a list: each block
         # has to be freed before the next same-size allocation can receive it.
         for _ in range(blocks):
-            block = torch.full(shape, float("nan"))
+            block = torch.full(shape, math.nan)
             del block
 
 

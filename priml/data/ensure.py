@@ -45,19 +45,19 @@ single node).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from http import client
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
+from urllib import request
 
 import contextlib
 import datetime
 import enum
 import fcntl
 import hashlib
-import http.client
 import logging
 import shutil
 import sys
-import urllib.request
 
 from tqdm import tqdm
 
@@ -192,13 +192,13 @@ def resumable_http_download(*, url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     have = part.stat().st_size if part.exists() else 0
 
-    request = urllib.request.Request(url)  # noqa: S310 -- Dataset builders download only configured public source URLs supplied by the caller.
+    http_request = request.Request(url)  # noqa: S310 -- Dataset builders download only configured public source URLs supplied by the caller.
     if have:
-        request.add_header("Range", f"bytes={have}-")
+        http_request.add_header("Range", f"bytes={have}-")
 
     response = cast(
-        http.client.HTTPResponse,
-        urllib.request.urlopen(request),  # noqa: S310 -- Dataset builders download only configured public source URLs.
+        client.HTTPResponse,
+        request.urlopen(http_request),  # noqa: S310 -- Dataset builders download only configured public source URLs.
     )
     with response:
         resumed = response.status == 206
@@ -225,7 +225,7 @@ def resumable_http_download(*, url: str, dest: Path) -> None:
 
 
 def _content_length(
-    response: http.client.HTTPResponse,
+    response: client.HTTPResponse,
     *,
     already: int,
     resumed: bool,

@@ -6,8 +6,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Final, cast
 
-from configgle.testing import assert_pprint_golden
-
 import pytest
 import torch
 
@@ -17,6 +15,7 @@ from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -175,6 +174,6 @@ def test_mixer_cost_uses_transposed_row_sharing_for_traffic() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

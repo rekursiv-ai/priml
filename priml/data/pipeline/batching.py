@@ -8,8 +8,9 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from collections.abc import Iterable, Iterator
 from dataclasses import field
-from typing import cast
+from typing import Final, cast
 
+import copy
 import logging
 import time
 
@@ -27,16 +28,27 @@ _ShapeKey = tuple[tuple[int, ...] | None, ...]
 
 
 __all__ = [
+    "BATCHED_FIELDS_KEY",
     "Batcher",
     "Unbatcher",
 ]
 
 
-class Batcher:
-    """Batch samples by media_tensor shape (F, H, W, C).
+BATCHED_FIELDS_KEY: Final = "_batched_fields"
+"""Batch key listing the fields indexed by sample along their leading axis.
 
-    Queues samples by their exact media_tensor dimensions, then stacks them
-    into batches of shape (B, F, H, W, C) when queue reaches size.
+The record of which fields are per-sample: the ``Unbatcher`` splits exactly
+these, and a stage that adds or drops samples (``DecodeCropResizeBatch``)
+filters exactly these. A stage writing a new per-sample field appends its name.
+"""
+
+
+class Batcher:
+    """Batch samples by the shapes of their ``field_names`` tensors.
+
+    Queues samples by their exact tensor dimensions -- ``media_tensor`` in
+    decoder layout ``(C, F, H, W)`` by default -- and stacks each full queue
+    into a batch with a leading ``B`` axis.
 
     Samples with filter_reasons are immediately yielded without batching.
     Original samples are preserved in 'raw' field for unbatching, excluding
@@ -47,12 +59,12 @@ class Batcher:
 
     Example:
         # Before: individual samples
-        sample1 = {"key": "a", "media_tensor": tensor1}  # Shape: (1, 512, 512, 3)
-        sample2 = {"key": "b", "media_tensor": tensor2}  # Shape: (1, 512, 512, 3)
+        sample1 = {"key": "a", "media_tensor": tensor1}  # Shape: (3, 1, 512, 512)
+        sample2 = {"key": "b", "media_tensor": tensor2}  # Shape: (3, 1, 512, 512)
 
         # After Batcher: batched samples
         batch = {
-            "media_tensor": stacked_tensor,  # Shape: (2, 1, 512, 512, 3)
+            "media_tensor": stacked_tensor,  # Shape: (2, 3, 1, 512, 512)
             "raw": [{"key": "a"}, {"key": "b"}],  # Batched fields excluded
         }
 
@@ -92,6 +104,8 @@ class Batcher:
     """
 
     def __init__(self, config: Config):
+        if config.size < 1:
+            raise ValueError(f"size must be positive; got {config.size}.")
         self.size = config.size
         self.field_names = config.field_names
         self.drop_remainder = config.drop_remainder
@@ -107,7 +121,9 @@ class Batcher:
           - (tensor fields in field_names) - Tensor fields to batch
 
         Adds:
-          - raw: list[dict] - original samples for unbatching
+          - raw: list[dict] - original samples for unbatching, always present
+          - _batch_size: int - number of samples in the batch
+          - BATCHED_FIELDS_KEY: list[str] - the per-sample fields, raw included
 
         Yields samples with filter_reasons immediately without batching.
 
@@ -165,11 +181,7 @@ class Batcher:
         )
 
         if not self.drop_remainder and num_flushed_samples > 0:
-            avg_batch_size = (
-                num_flushed_samples / num_flushed_batches
-                if num_flushed_batches > 0
-                else 0
-            )
+            avg_batch_size = num_flushed_samples / num_flushed_batches
             logger.info(
                 "flushed %s samples across %s batches (≈ %.1f samples/batch)",
                 num_flushed_samples,
@@ -194,74 +206,56 @@ class Batcher:
         """Create a batched sample by stacking the given samples."""
         batch_size = len(samples)
 
-        # Create batch with preserved raw samples (excluding batched fields)
-        raw_samples = [
-            {k: v for k, v in s.items() if k not in self.field_names} for s in samples
-        ]
-        batch: Batcher.Output = {"_batch_size": batch_size}
-        if any(raw_samples):
-            batch["raw"] = raw_samples
-
-        # Names of fields stacked into per-sample (non-tensor) lists. The
-        # Unbatcher splits a list field only when its name appears here, so a
-        # batch-level list that merely happens to have length B is never
-        # mistaken for per-sample data.
-        batched_list_fields: list[str] = []
+        # ``raw`` is written even when every sample's fields were stacked: it
+        # is what marks this dict as a batch for the Unbatcher and for batched
+        # processors, and an absent one let a whole batch pass as one sample.
+        batch: Batcher.Output = {
+            "_batch_size": batch_size,
+            "raw": [
+                {k: v for k, v in s.items() if k not in self.field_names}
+                for s in samples
+            ],
+        }
+        # Every field indexed by sample, recorded rather than inferred from
+        # shape: a stacked ``(B,)`` label and a batch-level ``(B,)`` vector look
+        # alike, and so do a per-sample list and a batch-level one of length B.
+        batched_fields = ["raw"]
 
         # Stack all fields specified in field_names.
         for field_name in self.field_names:
-            field_values: list[object] = []
-            tensor_values: list[Tensor] = []
-            has_non_tensor = False
+            # ``None`` is kept as a placeholder: dropping it shortened the list
+            # and misaligned every later sample's value.
+            field_values = [sample.get(field_name) for sample in samples]
+            tensor_values = [v for v in field_values if isinstance(v, Tensor)]
+            if tensor_values and len(tensor_values) != len(field_values):
+                raise TypeError(
+                    f"Field '{field_name}' has mixed tensor/non-tensor values",
+                )
+            batched_fields.append(field_name)
+            if tensor_values:
+                t0 = time.perf_counter()
+                batched_tensor = torch.stack(tensor_values)
+                t1 = time.perf_counter()
+                if self.device is not None:
+                    batched_tensor = batched_tensor.to(self.device)
+                t2 = time.perf_counter()
 
-            for sample in samples:
-                field_value = sample.get(field_name)
-                if field_value is not None:
-                    if isinstance(field_value, Tensor):
-                        if has_non_tensor:
-                            raise TypeError(
-                                f"Field '{field_name}' has mixed tensor/non-tensor values",
-                            )
-                        tensor_values.append(field_value)
-                    else:
-                        has_non_tensor = True
-                        if tensor_values:
-                            raise TypeError(
-                                f"Field '{field_name}' has mixed tensor/non-tensor values",
-                            )
-                    field_values.append(field_value)
+                stack_ms = (t1 - t0) * 1000
+                to_ms = (t2 - t1) * 1000
+                if stack_ms > 100 or to_ms > 100:
+                    logger.debug(
+                        "Batcher: batch_size=%s, shape=%s, stack=%.1fms, to=%.1fms",
+                        batch_size,
+                        batched_tensor.shape,
+                        stack_ms,
+                        to_ms,
+                    )
 
-            if field_values:
-                if tensor_values:
-                    t0 = time.perf_counter()
-                    # All values should be tensors, stack them on dim 0.
-                    batched_tensor = torch.stack(tensor_values)
-                    t1 = time.perf_counter()
-                    # Move to device if specified.
-                    if self.device is not None:
-                        batched_tensor = batched_tensor.to(self.device)
-                    t2 = time.perf_counter()
+                batch[field_name] = batched_tensor
+            else:
+                batch[field_name] = field_values
 
-                    stack_ms = (t1 - t0) * 1000
-                    to_ms = (t2 - t1) * 1000
-                    if stack_ms > 100 or to_ms > 100:
-                        logger.debug(
-                            "Batcher: batch_size=%s, shape=%s, stack=%.1fms, to=%.1fms",
-                            batch_size,
-                            batched_tensor.shape,
-                            stack_ms,
-                            to_ms,
-                        )
-
-                    batch[field_name] = batched_tensor
-                else:
-                    # Not tensors, make a list.
-                    batch[field_name] = field_values
-                    batched_list_fields.append(field_name)
-
-        if batched_list_fields:
-            batch["_batched_list_fields"] = batched_list_fields
-
+        batch[BATCHED_FIELDS_KEY] = batched_fields
         return batch
 
 
@@ -274,9 +268,11 @@ class Unbatcher:
     Samples with filter_reasons are passed through unchanged (they were
     never batched).
 
-    For each field in the batch (except 'raw' and 'media_tensor'), if the
-    field has a batch dimension, it gets split and distributed to individual
-    samples.
+    Every field named in ``BATCHED_FIELDS_KEY`` is indexed by sample: list or
+    tensor, element ``i`` goes to sample ``i``. An untagged field -- a later
+    stage's output -- is split when it is a tensor/array with ``ndim >= 2``
+    and a leading axis of the batch size (also per value of a dict field), and
+    is otherwise replicated, each sample getting its own shallow copy.
 
     Example:
         # Input: batch with embeddings
@@ -313,7 +309,7 @@ class Unbatcher:
           - raw: list[dict] - original samples from Batcher (if batched)
 
         Yields:
-          Individual samples with batch results merged in.
+          sample: One per ``raw`` entry, with the batch results merged in.
 
         If no 'raw' field is present, passes through unchanged (not batched).
         If 'filter_reasons' is present in the batch, copies them to each unbatched sample.
@@ -330,7 +326,7 @@ class Unbatcher:
 
     def _unbatch_sample(self, sample: Output) -> Iterator[Output]:
         """Unbatch a single batched sample into individual samples."""
-        raw_samples = sample.get("raw", [])
+        raw_samples = sample["raw"]
         if not isinstance(raw_samples, list):
             raise TypeError("raw must be a list of sample dictionaries")
         raw_items = cast(list[object], raw_samples)
@@ -347,19 +343,16 @@ class Unbatcher:
         batch_filter_reasons = sample.get("filter_reasons")
         if batch_filter_reasons and not isinstance(batch_filter_reasons, Iterable):
             raise TypeError("filter_reasons must be iterable")
-        # Field names the Batcher stacked into per-sample (non-tensor) lists.
-        # Only these list fields are split; any other length-B list is treated
-        # as batch-level metadata and replicated whole.
-        batched_list_value = sample.get("_batched_list_fields", [])
-        if not isinstance(batched_list_value, list):
-            raise TypeError("_batched_list_fields must be a list of strings")
-        typed_batched_list_value = cast(list[object], batched_list_value)
-        if not all(isinstance(name, str) for name in typed_batched_list_value):
-            raise TypeError("_batched_list_fields must be a list of strings")
-        batched_list_fields: set[str] = {
-            name for name in typed_batched_list_value if isinstance(name, str)
-        }
+        batched_value = sample.get(BATCHED_FIELDS_KEY, [])
+        message = f"{BATCHED_FIELDS_KEY} must be a list of strings"
+        if not isinstance(batched_value, list):
+            raise TypeError(message)
+        typed_batched_value = cast(list[object], batched_value)
+        if not all(isinstance(name, str) for name in typed_batched_value):
+            raise TypeError(message)
+        batched_fields = {name for name in typed_batched_value if isinstance(name, str)}
 
+        reserved = ("raw", "filter_reasons", "_batch_size", BATCHED_FIELDS_KEY)
         for idx, raw_sample in enumerate(typed_raw_samples):
             output_sample = dict(raw_sample)
 
@@ -369,11 +362,7 @@ class Unbatcher:
                     output_sample,
                     cast(Iterable[object], batch_filter_reasons),
                 )
-            elif batch_filter_reasons:
-                raise TypeError("filter_reasons must be iterable")
 
-            # Distribute batch fields to this sample.
-            reserved = ("raw", "filter_reasons", "_batch_size", "_batched_list_fields")
             for key, value in list(sample.items()):
                 if key in reserved:
                     continue
@@ -381,7 +370,7 @@ class Unbatcher:
                     value,
                     idx,
                     size_value,
-                    is_batched_list=key in batched_list_fields,
+                    is_batched=key in batched_fields,
                 )
 
             yield output_sample
@@ -392,7 +381,7 @@ class Unbatcher:
         batch_filter_reasons: Iterable[object],
     ) -> None:
         """Merge batch-level filter reasons into output sample."""
-        existing_reasons = output_sample.get("filter_reasons", [])
+        existing_reasons = output_sample.get("filter_reasons")
         if isinstance(existing_reasons, list):
             output_sample["filter_reasons"] = existing_reasons + list(
                 batch_filter_reasons,
@@ -406,9 +395,14 @@ class Unbatcher:
         idx: int,
         size: int,
         *,
-        is_batched_list: bool,
+        is_batched: bool,
     ) -> object:
         """Distribute a batch field value to an individual sample."""
+        if is_batched and isinstance(value, list):
+            return cast(list[object], value)[idx]
+        if is_batched and isinstance(value, (Tensor, np.ndarray)):
+            return value[idx]
+
         # Handle dict fields (e.g., embeddings keyed by frame index)
         if isinstance(value, dict):
             return self._distribute_dict_field(
@@ -417,21 +411,16 @@ class Unbatcher:
                 size,
             )
 
-        # A list is per-sample only when the Batcher tagged it as one; an
-        # untagged length-B list is batch-level metadata, replicated whole.
-        if isinstance(value, list):
-            value_list = cast(list[object], value)
-            return value_list[idx] if is_batched_list else value_list
-
-        # Stacked per-sample tensors/arrays carry a leading batch axis.
+        # Untagged output of a later stage, with a leading batch axis.
         if isinstance(value, (Tensor, np.ndarray)) and self._has_batch_dimension(
             value,
             size,
         ):
             return value[idx]
 
-        # Copy as-is (might be batch-level metadata)
-        return value
+        # Batch-level metadata. A shallow copy per sample, so mutating one
+        # sample's value cannot reach its siblings.
+        return copy.copy(value)
 
     def _distribute_dict_field(
         self,
@@ -454,12 +443,10 @@ class Unbatcher:
                 output_dict[dict_key] = dict_value
         return output_dict
 
-    # A stacked per-sample tensor/array carries the sample's own feature dimensions
-    # under the leading batch axis, so it has ``ndim >= 2``. A bare ``(B,)`` tensor is
-    # treated as batch-level metadata and replicated rather than split into B scalars,
-    # removing the false-positive where unrelated metadata happens to have length B.
-    # Lists are decided by the Batcher's explicit ``_batched_list_fields`` tag, not by
-    # this method.
+    # Applies only to fields the batch does not tag. A per-sample output carries the
+    # sample's own feature dimensions under the leading batch axis, so it has
+    # ``ndim >= 2``; a bare untagged ``(B,)`` tensor is replicated. A stage writing a
+    # per-sample ``(B,)`` field must tag it in ``BATCHED_FIELDS_KEY``.
     def _has_batch_dimension(self, value: object, size: int) -> bool:
         """Check whether a stacked tensor/array is per-sample and should split."""
         if not isinstance(value, (Tensor, np.ndarray)):

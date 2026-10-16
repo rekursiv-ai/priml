@@ -37,8 +37,6 @@ def export_tokenizer(learned: Sequence[str], *, split_pattern: str) -> Tokenizer
     tokenizer = Tokenizer(
         models.Unigram(
             [(piece, -1.0) for piece in [*bytes_in_order, *learned]],
-            unk_id=None,
-            byte_fallback=False,
         ),
     )
     tokenizer.pre_tokenizer = pre_tokenizers.Sequence(

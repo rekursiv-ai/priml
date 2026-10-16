@@ -31,8 +31,10 @@ Original BPE preparation:
     a pickled encoding, and the byte-length table without running a trainer.
 
 Added prepared Unigram workflow:
-    With no BPE flags, the default recipe prepares inputs for exp020-exp022.
-    It fetches pinned source shards, fits the reference BPE vocabulary, moves
+    With no BPE flags, the default recipe prepares the inputs exp012-exp022
+    and exp024 read: raw/ for exp012-exp018, donor-original/ for exp019, and
+    the prepared Unigram rows for the rest. It fetches pinned source shards,
+    each checked against its recorded SHA-256, fits the reference BPE vocabulary, moves
     selected training documents, fits a 16K Unigram vocabulary, and writes
     packed training and evaluation rows. Tokenizer fitting excludes validation
     text. Reference evaluation re-encodes the bytes selected by the BPE
@@ -50,15 +52,17 @@ Added prepared Unigram workflow:
     exp022 unless --experiment selects another recipe, by ladder name or by a
     factory's dotted import path. --train-budget-sec replaces the recipe's
     budget in both its schedule and its stop time. Metrics and the
-    resolved configuration are saved in --run-directory; --save-checkpoint
-    also retains the final model state. --directory relocates the inputs.
+    resolved configuration are saved in --run-directory, which that stage
+    requires; --save-checkpoint also retains the final model state.
+    --directory relocates the inputs; it defaults to the factory's own
+    working_dir, where a default TrainLoop's experiments read them.
 
 Examples:
     uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data --num-train-shards 7
     uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data --num-train-shards 7 --directory /opt/scratch/datasets/my-nanochat
     uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data --print-config
-    uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data --directory /opt/scratch/datasets/nanochat-unigram --stage all
-    uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data --directory /opt/scratch/datasets/nanochat-unigram --stage train --experiment exp022 --seed 42 --run-directory /opt/scratch/runs/nanochat-exp022-42
+    uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data --stage all
+    uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data --stage train --experiment exp022 --seed 43 --run-directory /opt/scratch/runs/nanochat/exp022-seed43
 
 References:
     https://github.com/karpathy/autoresearch
@@ -93,6 +97,7 @@ import json
 import logging
 import os
 import pickle
+import re
 import shutil
 import subprocess
 import sys
@@ -136,25 +141,30 @@ else:
     torch = lazy_import("torch")
 
 from configgle import Fig, Makeable
+from treekle import from_plain
 
+from priml.baselines.nanochat import experiments
 from priml.baselines.nanochat.data import (
     NanoChatData,
     PackedTokenStream,
     PreparedTokenRows,
+    TokenEncoder,
     Tokenizer,
     token_bytes_fingerprint,
 )
 from priml.baselines.nanochat.experiments import NgramTrainLoop
 from priml.baselines.nanochat.scripts.prepare_tokenizer import (
+    SPLIT_PATTERN,
     ByteLevelTokenizer,
     SamplePreparation,
     UnigramPreparation,
     byte_alphabet,
     document_rows,
     read_mapping,
+    shard_path,
     write_mapping,
 )
-from priml.lib.custom_json import DictCodec, IntCodec
+from priml.data.arrays import load_array
 from priml.paths import validated_output_path
 from priml.train.checkpointer import Checkpointer
 from priml.train.tracker import FileTracker, TrackerList
@@ -162,6 +172,8 @@ from priml.train.train_loop import TrainLoop
 
 
 logger = logging.getLogger(__name__)
+
+TRAINING_PROGRESS_INTERVAL: Final = 20_000
 
 
 class _TokenizerToken(Protocol):
@@ -175,24 +187,37 @@ class _TokenizerModel(Protocol):
 _CWD: Final = Path(__file__).resolve().parent
 
 
-SOURCE_URL: Final = (
-    "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve"
-)
-"""Base URL of the source shards.
+RESERVED_TOKENS: Final = tuple(f"<|reserved_{index}|>" for index in range(16))
+"""Tokens appended after the byte-pair merges.
 
-Fetched over plain HTTP rather than through a Hugging Face client: a handful of
-files, nothing a dependency would add. Keeping it stdlib means preparing data
-needs no optional extra."""
+Sixteen rather than one because a vocabulary cannot be extended after the fact
+without renumbering every id: a later task needing a turn separator or a tool
+marker takes one of these instead of invalidating every checkpoint."""
 
-SOURCE_REVISION: Final = "main"
-"""Revision the shards are fetched at.
+BOS_TOKEN: Final = RESERVED_TOKENS[0]
+"""Marks a document's start; every packed row and every document begins with it."""
 
-NOT a pin: this tracks the branch, so a corpus that moves upstream produces
-different shards under the same name. What IS pinned is the vocabulary those
-shards produce -- ``tokenizer_recipe.json`` records the byte-length table by
-digest, so a score measured against one preparation cannot be silently compared
-with a score measured against another. Digest-pinning the shards themselves
-would mean listing every one of them here."""
+TOKEN_ID_LIMIT: Final = 1 << 16
+"""Token ids a prepared ``uint16`` array can hold; a larger vocabulary wraps."""
+
+_BYTE_ALPHABET: Final = byte_alphabet()
+_BYTE_VALUES: Final = {char: value for value, char in _BYTE_ALPHABET.items()}
+
+
+def source_url(shard: int, *, repository: str, revision: str) -> str:
+    """Return the HTTPS URL of one source shard at an immutable revision.
+
+    Args:
+      shard: Source shard index.
+      repository: Hugging Face dataset repository.
+      revision: Commit the shard is fetched at.
+
+    Returns:
+      url: The shard's download URL.
+
+    """
+    name = shard_path(Path(), shard=shard).name
+    return f"https://huggingface.co/datasets/{repository}/resolve/{revision}/{name}"
 
 
 class BpePreparation:
@@ -268,6 +293,10 @@ def prepare(
     Returns:
       directory: Where the corpus and vocabulary live.
 
+    Raises:
+      ValueError: A recipe value is out of range, or ``directory`` is not a
+        usable output path.
+
     """
     if num_train_shards <= 0:
         raise ValueError(f"num_train_shards must be positive; got {num_train_shards}.")
@@ -281,10 +310,17 @@ def prepare(
             "tokenizer_train_chars and tokenizer_doc_cap must be positive; got "
             f"{tokenizer_train_chars} and {tokenizer_doc_cap}.",
         )
-    out = Path(directory) if directory is not None else default_directory()
+    if vocab_size > TOKEN_ID_LIMIT:
+        raise ValueError(
+            f"vocab_size must be at most {TOKEN_ID_LIMIT}; got {vocab_size}.",
+        )
+    out = validated_output_path(
+        directory if directory is not None else default_directory(),
+    )
     out.mkdir(parents=True, exist_ok=True)
+    # The corpus config owns the source; this path has no config of its own.
     shards = (
-        _download(out, count=num_train_shards + 1)
+        _download(out, count=num_train_shards + 1, corpus=CorpusPreparation.Config())
         if download
         else _staged(out, count=num_train_shards + 1)
     )
@@ -299,32 +335,27 @@ def prepare(
     return out
 
 
-def _download(out: Path, *, count: int) -> list[Path]:
-    """Fetch the source shards, skipping any already present."""
-    paths: list[Path] = []
-    for index in range(count):
-        name = f"shard_{index:05d}.parquet"
-        path = out / name
-        if not path.is_file():
-            url = f"{SOURCE_URL}/{SOURCE_REVISION}/{name}"
-            logger.info("downloading %s", url)
-            handle, staged = tempfile.mkstemp(dir=out, prefix=f".{name}.")
-            os.close(handle)
-            staging = Path(staged)
-            # Stream rather than read whole: a shard is hundreds of MB.
-            with (
-                cast(io.BufferedIOBase, request.urlopen(url)) as response,  # noqa: S310 -- The benchmark fetches a URL supplied by its controlled dataset manifest.
-                staging.open("wb") as file,
-            ):
-                shutil.copyfileobj(response, file)
-            staging.replace(path)
-        paths.append(path)
+def _download(
+    out: Path,
+    *,
+    count: int,
+    corpus: CorpusPreparation.Config,
+) -> list[Path]:
+    """Fetch the source shards at the corpus revision, reusing verified copies."""
+    paths = [shard_path(out, shard=index) for index in range(count)]
+    # Every digest is looked up before the first download, so an unpinned shard
+    # is refused before any bytes move.
+    digests = [_pinned_sha256(corpus, shard=index) for index in range(count)]
+    for index, (path, digest) in enumerate(zip(paths, digests, strict=True)):
+        url = source_url(index, repository=corpus.repository, revision=corpus.revision)
+        logger.info("fetching %s", url)
+        fetch_file(url, destination=path, sha256=digest)
     return paths
 
 
 def _staged(out: Path, *, count: int) -> list[Path]:
     """Return shards already present, refusing a short corpus."""
-    paths = [out / f"shard_{index:05d}.parquet" for index in range(count)]
+    paths = [shard_path(out, shard=index) for index in range(count)]
     missing = [path.name for path in paths if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"{out} is missing {missing}.")
@@ -340,6 +371,7 @@ def _fit_vocabulary(
     doc_cap: int,
 ) -> None:
     """Fit a byte-pair vocabulary, or verify the one already fitted."""
+    out = validated_output_path(out, protected=shards)
     out.mkdir(parents=True, exist_ok=True)
     pickled = out / "tokenizer.pkl"
     recipe_path = out / "tokenizer_recipe.json"
@@ -364,32 +396,16 @@ def _fit_vocabulary(
     # hand serves nobody. Only what THIS function writes is replaced; the
     # downloaded shards beside it are never touched.
     recorded = (
-        dict(
-            DictCodec.coerce(
-                cast(object, json.loads(recipe_path.read_text())),
-                default=None,
-            ),
-        )
+        read_mapping(recipe_path)
         if pickled.is_file() and recipe_path.is_file()
         else None
     )
-    # Compared on the REQUESTED keys only: the written recipe also carries the
-    # byte table's fingerprint, which no request states.
-    if (
-        recorded is not None
-        and not _differing(recorded, recipe)
-        and (out / "token_bytes.npy").is_file()
-    ):
+    stale = _stale_reason(recorded, requested=recipe, table=out / "token_bytes.npy")
+    if not stale:
         logger.info("nanochat vocabulary already fitted at %s", out)
         return
     if pickled.is_file():
-        logger.info(
-            "refitting the nanochat vocabulary at %s: %s",
-            out,
-            "no recipe recorded beside it"
-            if recorded is None
-            else f"recipe differs {_differing(recorded, recipe)}",
-        )
+        logger.info("refitting the nanochat vocabulary at %s: %s", out, stale)
     # A missing receipt makes an incomplete refit unusable. The other owned
     # artifacts are replaced below; unrelated directory contents are untouched.
     recipe_path.unlink(missing_ok=True)
@@ -432,6 +448,28 @@ def _fit_vocabulary(
     recipe_staging.write_text(json.dumps(recipe, sort_keys=True))
     recipe_staging.replace(recipe_path)
     logger.info("nanochat vocabulary fitted: %d tokens", encoding.n_vocab)
+
+
+# Compared on the REQUESTED keys, then the byte table against its own recorded digest:
+# a table edited or truncated since the fit would otherwise be reused as the score's
+# denominator.
+def _stale_reason(
+    recorded: dict[str, object] | None,
+    *,
+    requested: dict[str, object],
+    table: Path,
+) -> str:
+    """Return why a fitted vocabulary cannot be reused, or "" when it can."""
+    if recorded is None:
+        return "no recipe recorded beside it"
+    if differing := _differing(recorded, requested):
+        return f"recipe differs {differing}"
+    if not table.is_file():
+        return "no byte table beside it"
+    fingerprint = token_bytes_fingerprint(load_array(table, np.generic))
+    if fingerprint != recorded.get("token_bytes_sha256"):
+        return "byte table differs from its recorded digest"
+    return ""
 
 
 def _differing(
@@ -494,35 +532,17 @@ def _documents(
                     return
 
 
-RESERVED_TOKENS: Final = tuple(f"<|reserved_{index}|>" for index in range(16))
-"""Tokens appended after the byte-pair merges.
-
-Sixteen rather than one because a vocabulary cannot be extended after the fact
-without renumbering every id: a later task needing a turn separator or a tool
-marker takes one of these instead of invalidating every checkpoint."""
-
-BOS_TOKEN: Final = RESERVED_TOKENS[0]
-"""Marks a document's start; every packed row and every document begins with it."""
-
-SPLIT_PATTERN: Final = (
-    r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}"""
-    r"""| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
-)
-"""Regex splitting text before the byte-pair merges are applied.
-
-Caps numbers at two digits and keeps a leading space with its word, both of
-which bound how much the vocabulary spends on rare literals."""
-
-
-def fetch_file(url: str, *, destination: Path) -> None:
+def fetch_file(url: str, *, destination: Path, sha256: str) -> None:
     """Download one HTTPS input, reusing only a copy from the same source.
 
     Args:
       url: Immutable HTTPS input URL.
       destination: Local input cache file.
+      sha256: Hexadecimal SHA-256 the bytes must hash to, cached or downloaded.
 
     Raises:
-      ValueError: The URL is not HTTPS or the cached source identity does not match.
+      ValueError: The URL is not HTTPS, the cached source identity does not
+        match, or the bytes hash to something other than ``sha256``.
 
     """
     if not url.startswith("https://"):
@@ -535,10 +555,21 @@ def fetch_file(url: str, *, destination: Path) -> None:
     with destination.with_name(destination.name + ".lock").open("a") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         if destination.is_file():
-            if not source.is_file() or source.read_text(encoding="utf-8") != url:
+            if not source.is_file():
+                raise ValueError(
+                    f"Cached {destination} has no source receipt, so its revision "
+                    f"is unknown. Delete it to re-download from {url}, or use a "
+                    "fresh download directory.",
+                )
+            if source.read_text(encoding="utf-8") != url:
                 raise ValueError(
                     f"Cached source does not match {url}: {destination}. "
                     "Use a fresh download directory for this source.",
+                )
+            if (observed := _file_sha256(destination)) != sha256:
+                raise ValueError(
+                    f"Cached {destination} hashes to {observed}, not the pinned "
+                    f"{sha256}. Delete it to re-download from {url}.",
                 )
             return
         with tempfile.TemporaryDirectory(
@@ -554,8 +585,30 @@ def fetch_file(url: str, *, destination: Path) -> None:
                 staged.open("wb") as output,
             ):
                 shutil.copyfileobj(response, output)
+            # Checked before the receipt: a receipt beside wrong bytes would
+            # vouch for them on every later reuse.
+            if (observed := _file_sha256(staged)) != sha256:
+                raise ValueError(
+                    f"{url} downloaded bytes hashing to {observed}, not the pinned "
+                    f"{sha256}.",
+                )
             source.write_text(url, encoding="utf-8")
             staged.replace(destination)
+
+
+def _pinned_sha256(corpus: CorpusPreparation.Config, *, shard: int) -> str:
+    """Return the recorded SHA-256 of one source shard, refusing an unpinned one."""
+    if shard not in corpus.shard_sha256:
+        raise ValueError(
+            f"No SHA-256 is recorded for source shard {shard}; add it to "
+            "CorpusPreparation.Config.shard_sha256 before fetching it.",
+        )
+    return corpus.shard_sha256[shard]
+
+
+def _file_sha256(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def copy_input(source: Path, *, destination: Path) -> None:
@@ -587,7 +640,34 @@ class CorpusPreparation:
         """Public Hugging Face dataset repository."""
 
         revision: str = "915333b4f8b8684f39aeaafea600fea6f43fb703"
-        """Immutable upstream source revision."""
+        """Immutable upstream source revision, for both workflows.
+
+        A branch name would let a corpus that moves upstream produce different
+        shards under the same name; a commit cannot move."""
+
+        shard_sha256: dict[int, str] = field(
+            default_factory=lambda: {
+                0: "054ddbd98abf30d773c54de578fc9d579bafeb6c14e04e97bd36aa90e825bf9b",
+                1: "d4cfe1de19f4fd976022a9047458655968bc5583582ec5fa714801ec2be2c93c",
+                2: "5e80d7596d53be648d841ea5811082747281c39f6851e10dd90375a84bc509a7",
+                3: "b349c85d4b993d98e2328833ecfd3734692e0395a592d89858bae34a4ba73c59",
+                4: "87dae96fe1a6116c54c7873aadb81832178a36755991befd1b3b641c76244474",
+                5: "3d9aebf138ef69cff2585a686d7f21585b7ffc0de4655f8e7723590418583bd6",
+                6: "6a3f2afde8f1a39f9283ea9d9e9ee6431634d6881b63798176bf64efc3f33576",
+                7: "731eea337d941e5b18a9a4e2bbe73a517dac45d91bb93ae2e69346c68c5f37f6",
+                8: "e78379132451838afabed9034b5483a2f3bc5a422bed8b55b99f2bbb9a128755",
+                9: "f22410fe8f13b6976a2860a8a82ee71e838f4ee9b605d61584aaa963f966e120",
+                10: "15a7cec1c2ebad771f67a4cb7f7b43c85ae7e3614c35fb09307f4cdafb891a37",
+                11: "abbb0147368515250a5b86716d975cdb6d9c9d88f3b660e48f9b4cc474066279",
+                12: "4402a0dd2d19cc254cfd079603db39842a54f4e80287448c29344e78b7e98244",
+                13: "9f1bd5a03e9c1f85c672c52499dd5fdc74c10e06fef989f47820bf61b85aef84",
+                14: "71ccc90a4a1fc7e5aaa38e632aec3a6e0751f18a1b486838b967d8f2924bf013",
+            },
+        )
+        """SHA-256 of each source shard at ``revision``, checked on every fetch.
+
+        Read from the repository's LFS pointers at that commit. A shard with no
+        entry is refused rather than fetched unverified."""
 
         donor_source_ids: tuple[str, ...] = ()
         """Ordered source shard:row identities moved into earlier training shards."""
@@ -599,13 +679,16 @@ class CorpusPreparation:
         """Rebuilt corpus used for model training."""
 
         train_shard_indices: tuple[int, ...] = (*range(7), *range(8, 15))
-        """Ordered training shards; excludes the heldout shard."""
+        """Ordered training shards; excludes the heldout shard.
+
+        The split's one owner: ``Preparation.finalize`` pushes it to every
+        other stage."""
 
         val_shard: int = 7
         """Unmodified heldout shard."""
 
         donor_destination_shards: int = 5
-        """First shards receiving round-robin donor subsequences."""
+        """Leading entries of ``train_shard_indices`` dealt the donors round-robin."""
 
         row_group_size: int = 1_024
         """Parquet row-group boundaries, also used by tokenization refills."""
@@ -619,23 +702,43 @@ class CorpusPreparation:
             raise ValueError("Validation must be excluded from training.")
         if len(set(config.train_shard_indices)) != len(config.train_shard_indices):
             raise ValueError("Training shard identities must be unique.")
+        if config.donor_source_ids and (
+            config.donor_destination_shards < 1 or not config.train_shard_indices
+        ):
+            raise ValueError(
+                "Donors need at least one training shard to receive them; got "
+                f"donor_destination_shards={config.donor_destination_shards} over "
+                f"{len(config.train_shard_indices)} training shards.",
+            )
 
     def fetch(self) -> None:
         """Download every source shard at the configured revision."""
-        base = (
-            f"https://huggingface.co/datasets/{self.config.repository}/resolve/"
-            f"{self.config.revision}"
-        )
-        for shard in sorted((*self.config.train_shard_indices, self.config.val_shard)):
-            name = f"shard_{shard:05d}.parquet"
-            logger.info("Fetching source %s", name)
+        shards = sorted((*self.config.train_shard_indices, self.config.val_shard))
+        digests = [_pinned_sha256(self.config, shard=shard) for shard in shards]
+        for shard, digest in zip(shards, digests, strict=True):
+            path = shard_path(self.config.raw_dir, shard=shard)
+            logger.info("Fetching source %s", path.name)
             fetch_file(
-                base + "/" + name,
-                destination=self.config.raw_dir / name,
+                source_url(
+                    shard,
+                    repository=self.config.repository,
+                    revision=self.config.revision,
+                ),
+                destination=path,
+                sha256=digest,
             )
 
     def build(self) -> None:
-        """Reproduce stable literal deduplication and the ordered donor moves."""
+        """Reproduce stable literal deduplication and the ordered donor moves.
+
+        Every shard is deduplicated and every donor placed before anything is
+        written, so a selection that cannot be honored publishes nothing.
+
+        Raises:
+          ValueError: A donor is repeated, absent, or not a canonical training
+            document.
+
+        """
         identities = self.config.donor_source_ids
         if len(set(identities)) != len(identities):
             raise ValueError("The donor selection contains repeated identities.")
@@ -645,52 +748,62 @@ class CorpusPreparation:
             self.config.working_dir,
             protected=[self.config.raw_dir],
         )
-        output.mkdir(parents=True, exist_ok=True)
         seen: dict[bytes, tuple[str, str]] = {}
-        for shard in self.config.train_shard_indices:
-            name = f"shard_{shard:05d}.parquet"
-            canonical, _ = unique_rows(
-                document_rows(self.config.raw_dir / name, shard=shard),
+        canonical = {
+            shard: unique_rows(
+                document_rows(
+                    shard_path(self.config.raw_dir, shard=shard),
+                    shard=shard,
+                ),
                 seen=seen,
-            )
-            retained = [
-                (identity, text)
-                for identity, text in canonical
-                if identity not in selected
-            ]
-            additions = (
-                identities[shard :: self.config.donor_destination_shards]
-                if shard < self.config.donor_destination_shards
-                else ()
-            )
-            rows = interleave_rows(
-                retained,
-                additions=[(key, texts_donor[key]) for key in additions],
-            )
-            destination = validated_output_path(
-                output / name,
-                protected=[self.config.raw_dir / name],
-            )
-            with tempfile.TemporaryDirectory(
-                dir=output,
-                prefix="nanochat-shard-",
-            ) as temporary:
-                staged = Path(temporary) / name
-                parquet.write_table(
-                    Table.from_pydict({"text": [text for _, text in rows]}),
-                    staged,
-                    row_group_size=self.config.row_group_size,
-                    compression=self.config.compression,
-                )
-                staged.replace(destination)
-            logger.info("Prepared corpus shard %s: %d rows", shard, len(rows))
-        val_name = f"shard_{self.config.val_shard:05d}.parquet"
-        copy_input(
-            self.config.raw_dir / val_name,
-            destination=output / val_name,
-        )
+            )[0]
+            for shard in self.config.train_shard_indices
+        }
         if selected - {identity for identity, _ in seen.values()}:
             raise ValueError("A selected donor is not a canonical training document.")
+        # Dealt by POSITION among the training shards, not by shard id: an id
+        # beyond the destination count would otherwise drop its donors, which
+        # the canonical check above cannot see.
+        destinations = self.config.train_shard_indices[
+            : self.config.donor_destination_shards
+        ]
+        additions = {
+            shard: identities[position :: len(destinations)]
+            for position, shard in enumerate(destinations)
+        }
+        output.mkdir(parents=True, exist_ok=True)
+        for shard, rows_canonical in canonical.items():
+            rows = interleave_rows(
+                [row for row in rows_canonical if row[0] not in selected],
+                additions=[(key, texts_donor[key]) for key in additions.get(shard, ())],
+            )
+            self._write_shard(output, shard=shard, rows=rows)
+        val = shard_path(self.config.raw_dir, shard=self.config.val_shard)
+        copy_input(val, destination=output / val.name)
+
+    def _write_shard(
+        self,
+        output: Path,
+        *,
+        shard: int,
+        rows: list[tuple[str, str]],
+    ) -> None:
+        """Publish one training shard through a sibling staging directory."""
+        source = shard_path(self.config.raw_dir, shard=shard)
+        destination = validated_output_path(output / source.name, protected=[source])
+        with tempfile.TemporaryDirectory(
+            dir=output,
+            prefix="nanochat-shard-",
+        ) as temporary:
+            staged = Path(temporary) / source.name
+            parquet.write_table(
+                Table.from_pydict({"text": [text for _, text in rows]}),
+                staged,
+                row_group_size=self.config.row_group_size,
+                compression=self.config.compression,
+            )
+            staged.replace(destination)
+        logger.info("Prepared corpus shard %s: %d rows", shard, len(rows))
 
 
 def unique_rows(
@@ -749,10 +862,10 @@ def interleave_rows(
         position = (index + 1) * len(original) // (len(additions) + 1)
         slots.setdefault(position, []).append(row)
     output: list[tuple[str, str]] = []
-    for index in range(len(original) + 1):
+    for index, row in enumerate(original):
         output.extend(slots.get(index, []))
-        if index < len(original):
-            output.append(original[index])
+        output.append(row)
+    output.extend(slots.get(len(original), []))
     return output
 
 
@@ -763,7 +876,7 @@ def _donor_texts(directory: Path, *, identities: set[str]) -> dict[str, str]:
             {
                 key: text
                 for key, text in document_rows(
-                    directory / f"shard_{shard:05d}.parquet",
+                    shard_path(directory, shard=shard),
                     shard=shard,
                 )
                 if key in identities
@@ -832,10 +945,11 @@ class RowPreparation:
             self.config.working_dir,
             protected=[self.config.raw_dir, self.config.tokenizer.path],
         )
-        output.mkdir(parents=True, exist_ok=False)
+        output.mkdir(parents=True)
         (output / "train").mkdir()
         (output / "eval").mkdir()
         encoder = self.config.tokenizer.make()
+        _require_uint16_ids(encoder.token_bytes)
         self._training(output / "train", encoder=encoder)
         self._evaluation(output / "eval", encoder=encoder)
         self._manifests(output, encoder=encoder)
@@ -959,33 +1073,68 @@ class RowPreparation:
                     lengths=lengths,
                     position=position,
                 )
-            if index % 20_000 == 0:
+            if index % TRAINING_PROGRESS_INTERVAL == 0:
                 logger.info("Prepared %d/%d training rows", index, len(rows))
         rows.flush()
 
     def _evaluation(self, output: Path, *, encoder: ByteLevelTokenizer) -> None:
-        stream = PackedTokenStream(
-            paths=[self.config.raw_dir / f"shard_{self.config.val_shard:05d}.parquet"],
-            tokenizer=encoder,
-            token_bytes=torch.from_numpy(encoder.token_bytes),
-            batch_size=self.config.eval_batch_size,
-            max_seq_len=self.config.max_seq_len,
-            buffer_size=self.config.buffer_size,
-            device=torch.device("cpu"),
-            max_batches=self.config.eval_batches,
+        inputs, targets = packed_eval_rows(
+            shard_path(self.config.raw_dir, shard=self.config.val_shard),
+            encoder=encoder,
+            token_bytes=encoder.token_bytes,
+            rows=self.config,
         )
-        inputs: list[ndarray] = []
-        targets: list[ndarray] = []
-        for batch in stream:
-            inputs.append(batch["media"].clone().numpy().astype(uint16))
-            targets.append(batch["label"].clone().numpy().astype(uint16))
-        for name, values in (
-            ("eval_x", concatenate(inputs)),
-            ("eval_y", concatenate(targets)),
-        ):
-            save(output / (name + ".npy"), values)
+        save(output / "eval_x.npy", inputs)
+        save(output / "eval_y.npy", targets)
         save(output / "token_bytes_primary.npy", encoder.token_bytes)
         save(output / "token_bytes_literal.npy", encoder.token_bytes_literal)
+
+
+def packed_eval_rows(
+    source: Path,
+    *,
+    encoder: TokenEncoder,
+    token_bytes: np.ndarray,
+    rows: RowPreparation.Config,
+) -> tuple[ndarray, ndarray]:
+    """Pack the heldout shard into ``uint16`` input and target rows.
+
+    Args:
+      source: Heldout parquet shard.
+      encoder: Tokenizer the rows are encoded through; ids below 65,536.
+      token_bytes: Its byte-length table, for the packer.
+      rows: Evaluation geometry: batch size, length, buffer, batch count.
+
+    Returns:
+      inputs: ``[eval_batches * eval_batch_size, max_seq_len]``.
+      targets: Same shape, shifted one token on.
+
+    """
+    stream = PackedTokenStream(
+        paths=[source],
+        tokenizer=encoder,
+        token_bytes=torch.from_numpy(token_bytes),
+        batch_size=rows.eval_batch_size,
+        max_seq_len=rows.max_seq_len,
+        buffer_size=rows.buffer_size,
+        device=torch.device("cpu"),
+        max_batches=rows.eval_batches,
+    )
+    inputs: list[ndarray] = []
+    targets: list[ndarray] = []
+    for batch in stream:
+        inputs.append(batch["media"].clone().numpy().astype(uint16))
+        targets.append(batch["label"].clone().numpy().astype(uint16))
+    return concatenate(inputs), concatenate(targets)
+
+
+def _require_uint16_ids(token_bytes: np.ndarray) -> None:
+    """Refuse a vocabulary, sized by its byte table, whose ids overflow ``uint16``."""
+    if len(token_bytes) > TOKEN_ID_LIMIT:
+        raise ValueError(
+            f"Prepared rows store uint16 ids; a {len(token_bytes)}-token "
+            f"vocabulary exceeds {TOKEN_ID_LIMIT}.",
+        )
 
 
 def pack_row(
@@ -1008,12 +1157,12 @@ def pack_row(
 
     """
     remaining = len(row) - position
-    best_index = -1
+    best_index: int | None = None
     best_length = 0
     for index, length in enumerate(lengths):
         if best_length < length <= remaining:
             best_index, best_length = index, length
-    if best_index < 0:
+    if best_index is None:
         best_index = min(range(len(lengths)), key=lengths.__getitem__)
         best_length = remaining
     document = buffer.pop(best_index)
@@ -1024,7 +1173,7 @@ def pack_row(
 
 def _document_batches(config: RowPreparation.Config) -> Iterator[list[str]]:
     for shard in config.train_shard_indices:
-        source = parquet.ParquetFile(config.raw_dir / f"shard_{shard:05d}.parquet")
+        source = parquet.ParquetFile(shard_path(config.raw_dir, shard=shard))
         for group in range(source.num_row_groups):
             texts = cast(
                 list[str],
@@ -1107,7 +1256,11 @@ class Preparation:
             self.corpus.raw_dir = self.working_dir / "raw"
             self.corpus.working_dir = self.working_dir / "donor-original"
             self.baseline.raw_dir = self.corpus.raw_dir
-            self.sample.val_shard = self.corpus.val_shard
+            # The corpus owns the split; a stage keeping its own copy would
+            # read validation text the moment the corpus moved it.
+            for stage in (self.sample, self.rows):
+                stage.val_shard = self.corpus.val_shard
+                stage.train_shard_indices = self.corpus.train_shard_indices
             self.sample.raw_dir = self.corpus.raw_dir
             self.sample.working_dir = self.working_dir / "sample"
             if isinstance(self.tokenizer, _FitsSample):
@@ -1131,14 +1284,16 @@ class Preparation:
           stage: CLI preparation stage.
 
         """
-        stages = {
-            "fetch": self.config.corpus.make().fetch,
-            "baseline": self.config.baseline.make().build,
-            "corpus": self.config.corpus.make().build,
-            "sample": self.config.sample.make().build,
-            "tokenizer": self.config.tokenizer.make().build,
-            "rows": self.config.rows.make().build,
-            "verify": self.config.rows.make().verify,
+        # Each stage is built only when it runs, so one stage's constructor
+        # check cannot block another.
+        stages: dict[str, Callable[[], object]] = {
+            "fetch": lambda: self.config.corpus.make().fetch(),
+            "baseline": lambda: self.config.baseline.make().build(),
+            "corpus": lambda: self.config.corpus.make().build(),
+            "sample": lambda: self.config.sample.make().build(),
+            "tokenizer": lambda: self.config.tokenizer.make().build(),
+            "rows": lambda: self.config.rows.make().build(),
+            "verify": lambda: self.config.rows.make().verify(),
             "reference": self.reference,
         }
         selected = (
@@ -1151,31 +1306,26 @@ class Preparation:
 
     def reference(self) -> None:
         """Build both reference-byte replay archives from the original heldout shard."""
-        source = (
-            self.config.corpus.raw_dir
-            / f"shard_{self.config.corpus.val_shard:05d}.parquet"
+        source = shard_path(
+            self.config.corpus.raw_dir,
+            shard=self.config.corpus.val_shard,
         )
         tokenizer_dir = self.config.corpus.raw_dir / "tokenizer"
         encoder = Tokenizer.from_directory(tokenizer_dir)
-        stream = PackedTokenStream(
-            paths=[source],
-            tokenizer=encoder,
-            token_bytes=torch.from_numpy(encoder.token_bytes),
-            batch_size=self.config.rows.eval_batch_size,
-            max_seq_len=self.config.rows.max_seq_len,
-            buffer_size=self.config.rows.buffer_size,
-            device=torch.device("cpu"),
-            max_batches=self.config.rows.eval_batches,
+        _require_uint16_ids(encoder.token_bytes)
+        reference = validated_output_path(
+            self.config.working_dir / "reference-bpe",
+            protected=[source, tokenizer_dir],
         )
-        inputs: list[ndarray] = []
-        targets: list[ndarray] = []
-        for batch in stream:
-            inputs.append(batch["media"].clone().numpy().astype(uint16))
-            targets.append(batch["label"].clone().numpy().astype(uint16))
-        reference = self.config.working_dir / "reference-bpe"
-        reference.mkdir(parents=True, exist_ok=False)
-        save(reference / "eval_x.npy", concatenate(inputs))
-        save(reference / "eval_y.npy", concatenate(targets))
+        reference.mkdir(parents=True)
+        inputs, targets = packed_eval_rows(
+            source,
+            encoder=encoder,
+            token_bytes=encoder.token_bytes,
+            rows=self.config.rows,
+        )
+        save(reference / "eval_x.npy", inputs)
+        save(reference / "eval_y.npy", targets)
         pickled = tokenizer_dir / "tokenizer.pkl"
         copy_input(
             pickled,
@@ -1282,14 +1432,15 @@ class Preparation:
 
         """
         module, _, factory_name = name.rpartition(".")
-        if not module:
-            if name not in {f"exp{index:03d}" for index in range(4, 24)}:
-                raise ValueError(f"Unknown NanoChat experiment: {name}.")
-            module = "priml.baselines.nanochat.experiments"
-        factory = cast(
-            Callable[[], object],
-            getattr(importlib.import_module(module), factory_name),
-        )
+        if module:
+            factory = cast(
+                Callable[[], object],
+                getattr(importlib.import_module(module), factory_name),
+            )
+        elif re.fullmatch(r"exp\d{3}", name) and hasattr(experiments, name):
+            factory = cast(Callable[[], object], getattr(experiments, name))
+        else:
+            raise ValueError(f"Unknown NanoChat experiment: {name}.")
         config = factory()
         if not isinstance(config, NgramTrainLoop.Config):
             raise TypeError("The experiment must return NgramTrainLoop.Config.")
@@ -1347,14 +1498,14 @@ def build_reference_eval(
     )
     unigram = tokenizers.Tokenizer.from_file(str(unigram_path))
     destination = validated_output_path(output, protected=[reference_dir, unigram_path])
-    destination.mkdir(parents=True, exist_ok=False)
+    destination.mkdir(parents=True)
     for name, tokenizer in (("bpe", None), ("unigram", unigram)):
         arrays = prepare_reference_rows(
             inputs,
             targets=targets,
             reference=reference,
             tokenizer=tokenizer,
-            batch_size=IntCodec.coerce(manifest["eval_batch_size"], default=None),
+            batch_size=from_plain(manifest["eval_batch_size"], int),
             reserved_count=reserved_count,
         )
         with (destination / f"{name}.npz").open("xb") as stream:
@@ -1376,31 +1527,29 @@ def encode_fragment(raw: bytes, *, tokenizer: tokenizers.Tokenizer) -> list[int]
       ids: Ordinary tokens reconstructing exactly the selected bytes.
 
     """
-    suffix = b""
+    suffix: bytes | None = None
     try:
-        text = raw.decode("utf-8", errors="strict")
+        text = raw.decode()
     except UnicodeDecodeError as error:
         if error.reason != "unexpected end of data" or error.end != len(raw):
             raise ValueError(
                 "Reference fragment has non-terminal invalid UTF-8.",
             ) from error
-        text = raw[: error.start].decode("utf-8", errors="strict")
+        text = raw[: error.start].decode()
         suffix = raw[error.start :]
     ids: list[int] = tokenizer.encode(text, add_special_tokens=False).ids
-    alphabet = byte_alphabet()
-    if suffix:
+    if suffix is not None:
         ids.extend(
             token.id
             for token in cast(_TokenizerModel, tokenizer.model).tokenize(
-                "".join(alphabet[value] for value in suffix),
+                "".join(_BYTE_ALPHABET[value] for value in suffix),
             )
         )
-    inverse = {char: value for value, char in alphabet.items()}
     pieces = [tokenizer.id_to_token(token) for token in ids]
     if any(piece is None for piece in pieces):
         raise ValueError("Unigram emitted an unknown token.")
     decoded = bytes(
-        inverse[char] for piece in pieces if piece is not None for char in piece
+        _BYTE_VALUES[char] for piece in pieces if piece is not None for char in piece
     )
     if decoded != raw:
         raise ValueError("Unigram replay changed the reference-selected bytes.")
@@ -1428,7 +1577,8 @@ def prepare_reference_rows(
       tokenizer: Frozen Unigram tokenizer; None preserves the reference IDs.
       batch_size: Reference batch size, retained for BPE reduction parity.
       reserved_count: IDs after the tokenizer's pieces, the first being BOS;
-        the reference keeps its own vocabulary, so None ignores it.
+        unused when ``tokenizer`` is None, since the reference keeps its own
+        vocabulary.
 
     Returns:
       arrays: Saveable replay archive with per-window byte accounting.
@@ -1472,7 +1622,6 @@ def prepare_reference_rows(
     for row_index, row in enumerate(cast(Iterator[NDArray[np.int64]], targets)):
         sequence: list[int] = []
         literal_count = 0
-        start = 0
         ends: list[int] = [
             *cast(
                 list[int],
@@ -1483,21 +1632,25 @@ def prepare_reference_rows(
             ),
             len(row),
         ]
-        for end in ends:
+        for fragment_index, end in enumerate(ends):
+            fragment = (
+                row[:end]
+                if fragment_index == 0
+                else row[ends[fragment_index - 1] + 1 : end]
+            )
             raw = b"".join(
-                pieces[int(token)] for token in cast(list[int], row[start:end].tolist())
+                pieces[int(token)] for token in cast(list[int], fragment.tolist())
             )
             fragment_lengths.append(len(raw))
             literal_count += len(raw)
             try:
-                raw.decode("utf-8", errors="strict")
+                raw.decode()
             except UnicodeDecodeError:
                 incomplete_suffixes += 1
             if tokenizer is not None:
                 sequence.extend(
                     [output_bos, *encode_fragment(raw, tokenizer=tokenizer)],
                 )
-            start = int(end) + 1
         if tokenizer is None:
             output.append((inputs[row_index], row, historical[row] > 0))
         else:
@@ -1552,9 +1705,9 @@ def _windows(
     width: int,
 ) -> list[tuple[ndarray, ndarray, ndarray]]:
     """Split a replay into context windows that score each of its targets once."""
-    if len(sequence) <= width + 1:
+    if len(sequence) <= width:
         return [_pad_row(sequence, bos=bos, width=width)]
-    tokens = array(sequence, dtype=int64)
+    tokens = array(sequence)
     windows: list[tuple[ndarray, ndarray, ndarray]] = []
     for scored in range(0, len(sequence) - 1, width):
         end = min(scored + width, len(sequence) - 1)
@@ -1574,14 +1727,14 @@ def _pad_row(
     width: int,
 ) -> tuple[ndarray, ndarray, ndarray]:
     """Pad a complete reference row, excluding padding and document markers."""
-    window = array(sequence, dtype=int64)
-    inputs = full(width, bos, dtype=int64)
+    window = array(sequence)
+    inputs = full(width, bos)
     targets = inputs.copy()
     inputs[: len(window) - 1] = window[:-1]
     targets[: len(window) - 1] = window[1:]
     mask: NDArray[np.bool_] = cast(
         NDArray[np.bool_],
-        (arange(width) < len(window) - 1) & (targets != bos),
+        targets != bos,
     )
     return inputs, targets, mask
 
@@ -2108,7 +2261,7 @@ def launch_training(
         config.checkpointer.save_every = sys.maxsize
         config.checkpointer.resume = False
     directory = validated_output_path(config.working_dir)
-    directory.mkdir(parents=True, exist_ok=False)
+    directory.mkdir(parents=True)
     recipe = directory / "prepared_experiment.py"
     recipe.write_text(
         "from priml.baselines.nanochat.experiments import NgramTrainLoop\n\n"
@@ -2135,7 +2288,7 @@ def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -2145,38 +2298,61 @@ def main() -> int:
     config = factory()
     if not isinstance(config, Preparation.Config):
         raise TypeError("The factory must return Preparation.Config.")
-    config.working_dir = args.directory.expanduser().absolute()
+    if args.directory is not None:
+        config.working_dir = args.directory.expanduser().absolute()
+    # No default run or bundle location: a hidden one would sit outside the
+    # --directory a relocated run names, and a run directory serves one run.
+    for stage, flag, value in (
+        ("train", "--run-directory", args.run_directory),
+        ("dump", "--output", args.output),
+    ):
+        if args.stage == stage and value is None:
+            parser.error(f"--stage {stage} needs {flag}.")
+    bpe = {
+        "num_train_shards": args.num_train_shards,
+        "vocab_size": args.vocab_size,
+        "tokenizer_train_chars": args.tokenizer_train_chars,
+        "tokenizer_doc_cap": args.tokenizer_doc_cap,
+    }
+    if any(value is not None for value in bpe.values()) and (
+        args.stage != "all" or args.print_config
+    ):
+        parser.error(
+            "the BPE flags select the original workflow, which has no stages or "
+            "printed config; drop --stage and --print-config.",
+        )
     if args.print_config:
         config.pprint(hide_default_values=False)
         return 0
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    if any(
-        value is not None
-        for value in (
-            args.num_train_shards,
-            args.vocab_size,
-            args.tokenizer_train_chars,
-            args.tokenizer_doc_cap,
-        )
-    ):
+    if any(value is not None for value in bpe.values()):
+        # The recipe's defaults live on its config; a flag of 0 must reach
+        # ``prepare`` and be refused there, not fall back to a default.
+        recipe = BpePreparation.Config()
+        for field_name, value in (
+            ("num_train_shards", args.num_train_shards),
+            ("vocab_size", args.vocab_size),
+            ("train_chars", args.tokenizer_train_chars),
+            ("doc_cap", args.tokenizer_doc_cap),
+        ):
+            if value is not None:
+                setattr(recipe, field_name, value)
         prepare(
-            args.directory,
-            num_train_shards=args.num_train_shards
-            if args.num_train_shards is not None
-            else 7,
-            vocab_size=args.vocab_size if args.vocab_size is not None else 8_192,
-            tokenizer_train_chars=args.tokenizer_train_chars
-            if args.tokenizer_train_chars is not None
-            else 2_000_000_000,
-            tokenizer_doc_cap=args.tokenizer_doc_cap
-            if args.tokenizer_doc_cap is not None
-            else 10_000,
+            config.working_dir,
+            num_train_shards=recipe.num_train_shards,
+            vocab_size=recipe.vocab_size,
+            tokenizer_train_chars=recipe.train_chars,
+            tokenizer_doc_cap=recipe.doc_cap,
         )
         return 0
     preparation = config.make()
     if args.stage == "dump":
+        if args.output is None:
+            raise ValueError("Expected args.output is not None.")
         preparation.dump(args.output)
     elif args.stage == "train":
+        if args.run_directory is None:
+            raise ValueError("Expected args.run_directory is not None.")
         training = preparation.training_config(
             args.experiment,
             run_directory=args.run_directory,
@@ -2200,7 +2376,7 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--directory",
         type=Path,
-        default=Path("/opt/scratch/datasets/nanochat"),
+        help="Preparation root; defaults to the factory's own working_dir.",
     )
     parser.add_argument(
         "--stage",
@@ -2219,30 +2395,30 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         ),
         default="all",
     )
-    parser.add_argument("--num-train-shards", type=int, default=None)
-    parser.add_argument("--vocab-size", type=int, default=None)
-    parser.add_argument("--tokenizer-train-chars", type=int, default=None)
-    parser.add_argument("--tokenizer-doc-cap", type=int, default=None)
+    parser.add_argument("--num-train-shards", type=int)
+    parser.add_argument("--vocab-size", type=int)
+    parser.add_argument("--tokenizer-train-chars", type=int)
+    parser.add_argument("--tokenizer-doc-cap", type=int)
     parser.add_argument("--print-config", action="store_true")
     parser.add_argument("--experiment", default="exp022")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--train-budget-sec", type=float, default=None)
+    parser.add_argument("--train-budget-sec", type=float)
     parser.add_argument("--save-checkpoint", action="store_true")
     parser.add_argument(
         "--run-directory",
         type=Path,
-        default=Path("/opt/scratch/runs/nanochat-reproduction"),
+        help="New directory for --stage train's run; required by that stage.",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("/opt/scratch/artifacts/nanochat/prepared-inputs.tar"),
+        help="New tar archive for --stage dump; required by that stage.",
     )
 
 
 class _Arguments(Protocol):
     factory: str
-    directory: Path
+    directory: Path | None
     stage: str
     num_train_shards: int | None
     vocab_size: int | None
@@ -2253,8 +2429,8 @@ class _Arguments(Protocol):
     seed: int
     train_budget_sec: float | None
     save_checkpoint: bool
-    run_directory: Path
-    output: Path
+    run_directory: Path | None
+    output: Path | None
 
 
 if __name__ == "__main__":

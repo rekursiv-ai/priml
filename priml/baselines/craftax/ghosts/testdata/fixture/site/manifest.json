@@ -1,0 +1,633 @@
+{
+ "format": "craftax-ghosts/4",
+ "git_commit": "fixture",
+ "game_package_digest": "02065e5a8d32cc7d",
+ "platform": "linux-x86_64-glibc2.39",
+ "world_seed": 1,
+ "start": [
+  0,
+  24,
+  24,
+  3
+ ],
+ "creature_stride": 4,
+ "sleep_stride": 4,
+ "window_decisions": 8192,
+ "counts": [
+  3
+ ],
+ "short_decisions": 160,
+ "quiet": {
+  "per_live": 1,
+  "min_run": 16,
+  "keep": 4
+ },
+ "achievement_rewards": [
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  3,
+  3,
+  3,
+  3,
+  3,
+  5,
+  5,
+  5,
+  8,
+  8,
+  8,
+  3,
+  3,
+  3,
+  3,
+  5,
+  5,
+  5,
+  5,
+  8,
+  8,
+  8,
+  8,
+  8,
+  8,
+  3,
+  3,
+  3,
+  3,
+  3,
+  5,
+  5,
+  5,
+  5,
+  3,
+  3,
+  3,
+  3,
+  5,
+  5,
+  5,
+  5
+ ],
+ "tiers": [
+  {
+   "name": "fixture",
+   "arm": 0,
+   "sources": [
+    {
+     "root": "fixture.py",
+     "capped": false,
+     "episodes": 3,
+     "provenance": {
+      "policy": "ladder trip, then uniform-legal; uniform-legal"
+     }
+    }
+   ],
+   "sets": [
+    {
+     "name": "all",
+     "rule": "The main capture's episodes, by capture ordinal.",
+     "counts": [
+      3
+     ],
+     "episodes": 3,
+     "decisions": 489,
+     "max_decisions": 202,
+     "composition": {
+      "run": 3,
+      "qualified": 3,
+      "deaths": 3,
+      "wins": 0,
+      "timeouts": 0,
+      "truncated": 0,
+      "added_wins": 0,
+      "natural_win_share": 0.0,
+      "death_decisions": [
+       133,
+       202
+      ],
+      "win_decisions": []
+     },
+     "groups": [
+      {
+       "path": "fixture/all/g0",
+       "first": 0,
+       "count": 3,
+       "decisions": 489,
+       "windows": 1
+      }
+     ],
+     "stats": [
+      {
+       "count": 3,
+       "mean_return": 5.666666666666667,
+       "mean_decisions": 163.0,
+       "reached": [
+        3,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "deaths": [
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "timeouts": 0,
+       "wins": 0,
+       "escapes": 0
+      }
+     ],
+     "timelines": [
+      {
+       "count": 3,
+       "path": "fixture/all/timeline-n3.bin.gz",
+       "decisions": 202,
+       "kept": 74,
+       "segments": 3
+      }
+     ],
+     "time_map": null,
+     "sleep_map": null
+    },
+    {
+     "name": "short",
+     "rule": "Every episode that dies or wins within short_decisions, then longer wins, shortest first, until wins reach their share among the uncapped captures' ended episodes; by ordinal, then capture.",
+     "counts": [
+      2
+     ],
+     "episodes": 2,
+     "decisions": 287,
+     "max_decisions": 154,
+     "composition": {
+      "run": 3,
+      "qualified": 2,
+      "deaths": 2,
+      "wins": 0,
+      "timeouts": 0,
+      "truncated": 0,
+      "added_wins": 0,
+      "natural_win_share": 0.0,
+      "death_decisions": [
+       133,
+       154
+      ],
+      "win_decisions": []
+     },
+     "groups": [
+      {
+       "path": "fixture/short/g0",
+       "first": 0,
+       "count": 2,
+       "decisions": 287,
+       "windows": 1
+      }
+     ],
+     "stats": [
+      {
+       "count": 2,
+       "mean_return": 6.0,
+       "mean_decisions": 143.5,
+       "reached": [
+        2,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "deaths": [
+        2,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "timeouts": 0,
+       "wins": 0,
+       "escapes": 0
+      }
+     ],
+     "timelines": [
+      {
+       "count": 2,
+       "path": "fixture/short/timeline-n2.bin.gz",
+       "decisions": 154,
+       "kept": 72,
+       "segments": 5
+      }
+     ],
+     "time_map": null,
+     "sleep_map": null
+    }
+   ]
+  },
+  {
+   "name": "fixture-wins",
+   "arm": 0,
+   "sources": [
+    {
+     "root": "fixture.py",
+     "capped": false,
+     "episodes": 3,
+     "provenance": {
+      "policy": "ladder trip, then uniform-legal; uniform-legal"
+     }
+    }
+   ],
+   "sets": [
+    {
+     "name": "all",
+     "rule": "The main capture's episodes, by capture ordinal.",
+     "counts": [
+      3
+     ],
+     "episodes": 3,
+     "decisions": 394,
+     "max_decisions": 154,
+     "composition": {
+      "run": 3,
+      "qualified": 3,
+      "deaths": 1,
+      "wins": 2,
+      "timeouts": 0,
+      "truncated": 0,
+      "added_wins": 0,
+      "natural_win_share": 0.6666666666666666,
+      "death_decisions": [
+       154,
+       154
+      ],
+      "win_decisions": [
+       118,
+       122
+      ]
+     },
+     "groups": [
+      {
+       "path": "fixture-wins/all/g0",
+       "first": 0,
+       "count": 3,
+       "decisions": 394,
+       "windows": 1
+      }
+     ],
+     "stats": [
+      {
+       "count": 3,
+       "mean_return": 5.666666666666667,
+       "mean_decisions": 131.33333333333334,
+       "reached": [
+        3,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "deaths": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "timeouts": 0,
+       "wins": 2,
+       "escapes": 0
+      }
+     ],
+     "timelines": [
+      {
+       "count": 3,
+       "path": "fixture-wins/all/timeline-n3.bin.gz",
+       "decisions": 154,
+       "kept": 41,
+       "segments": 3
+      }
+     ],
+     "time_map": null,
+     "sleep_map": null
+    },
+    {
+     "name": "short",
+     "rule": "Every episode that dies or wins within short_decisions, then longer wins, shortest first, until wins reach their share among the uncapped captures' ended episodes; by ordinal, then capture.",
+     "counts": [
+      3
+     ],
+     "episodes": 3,
+     "decisions": 394,
+     "max_decisions": 154,
+     "composition": {
+      "run": 3,
+      "qualified": 3,
+      "deaths": 1,
+      "wins": 2,
+      "timeouts": 0,
+      "truncated": 0,
+      "added_wins": 0,
+      "natural_win_share": 0.6666666666666666,
+      "death_decisions": [
+       154,
+       154
+      ],
+      "win_decisions": [
+       118,
+       122
+      ]
+     },
+     "groups": [
+      {
+       "path": "fixture-wins/short/g0",
+       "first": 0,
+       "count": 3,
+       "decisions": 394,
+       "windows": 1
+      }
+     ],
+     "stats": [
+      {
+       "count": 3,
+       "mean_return": 5.666666666666667,
+       "mean_decisions": 131.33333333333334,
+       "reached": [
+        3,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "deaths": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "timeouts": 0,
+       "wins": 2,
+       "escapes": 0
+      }
+     ],
+     "timelines": [
+      {
+       "count": 3,
+       "path": "fixture-wins/short/timeline-n3.bin.gz",
+       "decisions": 154,
+       "kept": 41,
+       "segments": 3
+      }
+     ],
+     "time_map": null,
+     "sleep_map": null
+    },
+    {
+     "name": "wins",
+     "rule": "Every win of the tier's captures, by ordinal, then capture, but for the win pinned to play unbroken, first (time_map.unbroken); each other win shows its progress and a few decisions of each idle stretch (time_map).",
+     "counts": [
+      2
+     ],
+     "episodes": 2,
+     "decisions": 240,
+     "max_decisions": 122,
+     "composition": {
+      "run": 3,
+      "qualified": 2,
+      "deaths": 0,
+      "wins": 2,
+      "timeouts": 0,
+      "truncated": 0,
+      "added_wins": 0,
+      "natural_win_share": 0.6666666666666666,
+      "death_decisions": [],
+      "win_decisions": [
+       118,
+       122
+      ]
+     },
+     "groups": [
+      {
+       "path": "fixture-wins/wins/g0",
+       "first": 0,
+       "count": 2,
+       "decisions": 240,
+       "windows": 1
+      }
+     ],
+     "stats": [
+      {
+       "count": 2,
+       "mean_return": 6.0,
+       "mean_decisions": 120.0,
+       "reached": [
+        2,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "deaths": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "timeouts": 0,
+       "wins": 2,
+       "escapes": 0
+      }
+     ],
+     "timelines": [],
+     "time_map": {
+      "rule": {
+       "steps": 120,
+       "levels": [
+        [
+         1,
+         2
+        ],
+        [
+         0,
+         1
+        ],
+        [
+         0,
+         0
+        ]
+       ]
+      },
+      "steps": 118,
+      "kept": 193,
+      "shortest": 75,
+      "median": 96,
+      "levels": [
+       1,
+       0,
+       0,
+       0
+      ],
+      "unbroken": 0,
+      "whole": 1,
+      "samples": 0
+     },
+     "sleep_map": {
+      "rule": {
+       "steps": 120,
+       "levels": [
+        [
+         1,
+         2
+        ],
+        [
+         0,
+         1
+        ],
+        [
+         0,
+         0
+        ]
+       ]
+      },
+      "steps": 127,
+      "kept": 210,
+      "shortest": 83,
+      "median": 105,
+      "levels": [
+       1,
+       0,
+       0,
+       0
+      ],
+      "unbroken": 0,
+      "whole": 1,
+      "samples": 17
+     }
+    }
+   ]
+  }
+ ],
+ "files": {
+  "world.bin.gz": "9bc10b66853efb46113260215bcf633504e72c463bbae73c8638900b0127c441",
+  "fixture/all/g0/episodes.json": "c45421bce0b067adf498a7717136008e3e2a378ce785df43022a2c0a0d40ec76",
+  "fixture/all/g0/players.bin.gz": "2af320fb3984de3f0ed001ecb6e084d9917973b824c24ecf8e8b1dae711aa981",
+  "fixture/all/g0/events.bin.gz": "01be93bf0253ddbdbabdcb37f58c8193f3711d1cd4e68861b4d3a77db81c269d",
+  "fixture/all/g0/creatures-w0.bin.gz": "635e555900c0fe240c9a35bfe1ae42fe3bf397d5983c421f880705afcfb93b46",
+  "fixture/all/timeline-n3.bin.gz": "9c55aadd3d44358b2771c42612532f2a068ca12d6a0ef292a73d00eb036e5070",
+  "fixture/short/g0/episodes.json": "1aeccd6512fd6a20115dd8b8eed2d397d77ea572233ac1aba96779268a335aa3",
+  "fixture/short/g0/players.bin.gz": "5f5d3ebe1ba68d9e32c57695cce8a78a6c73a62aa80185ccc07a427586433ca0",
+  "fixture/short/g0/events.bin.gz": "a89bd96e30865a980ee8b0c73c0f9a321f21a9288601df66002107561b969c27",
+  "fixture/short/g0/creatures-w0.bin.gz": "9b7236093dfec52ea76e6f171992534f91ef0d78d8d9cde81f7f3cef3f396106",
+  "fixture/short/timeline-n2.bin.gz": "2b405418d74c29594c98ce07a59b9246f885bdc6963fa4fa741467bb2aeac3f8",
+  "fixture-wins/all/g0/episodes.json": "d1136b90568c7a1515ee9a24b10d6377ef50fd40e584929bd10635d88c007f56",
+  "fixture-wins/all/g0/players.bin.gz": "413935ffaa1fa6d214c6e50184fbde7fb0593a0ac40ed70a33f6ff0367c09bdc",
+  "fixture-wins/all/g0/events.bin.gz": "66b928132f2d4711d8cebe89aabe34d5776a9f53a45f22f18235be7fcdd987f4",
+  "fixture-wins/all/g0/creatures-w0.bin.gz": "31714af84ed2b7ac5ef9b81156d8566e90ac52f8730782dcc8e7d8eef77fc7a9",
+  "fixture-wins/all/timeline-n3.bin.gz": "0add44d622dd10198a7711e0f7c9a3c7b880187cde40a0938cd3a406345401c2",
+  "fixture-wins/short/g0/episodes.json": "0383ff1c199375d18c835b1e639a152e2c0bcabeacb7e5d78bf7f7a44636c8c8",
+  "fixture-wins/short/g0/players.bin.gz": "413935ffaa1fa6d214c6e50184fbde7fb0593a0ac40ed70a33f6ff0367c09bdc",
+  "fixture-wins/short/g0/events.bin.gz": "66b928132f2d4711d8cebe89aabe34d5776a9f53a45f22f18235be7fcdd987f4",
+  "fixture-wins/short/g0/creatures-w0.bin.gz": "31714af84ed2b7ac5ef9b81156d8566e90ac52f8730782dcc8e7d8eef77fc7a9",
+  "fixture-wins/short/timeline-n3.bin.gz": "0add44d622dd10198a7711e0f7c9a3c7b880187cde40a0938cd3a406345401c2",
+  "fixture-wins/wins/g0/episodes.json": "ffee7e90f78cf20528d3382758c448509ad87c069bbe5b83b955f1169be63d5c",
+  "fixture-wins/wins/g0/players.bin.gz": "ec8e2ab57be1f9da27085b941d9f15d0a028936582f821d58f78e34794ab987d",
+  "fixture-wins/wins/g0/events.bin.gz": "d00f00deaa58271dc93a035e314fb66f953e42d2bf9202a0d096cbe407dcfa97",
+  "fixture-wins/wins/g0/keeps.bin.gz": "bf6abfcb305d2779ccfdd84f41e63a18a8ef13c726972d3149588710fd9b1e0a",
+  "fixture-wins/wins/g0/keeps-sleep.bin.gz": "bf6abfcb305d2779ccfdd84f41e63a18a8ef13c726972d3149588710fd9b1e0a",
+  "fixture-wins/wins/g0/sleep.bin.gz": "40d42d38c41ae0868d85c5a2de111d96c76b108de1970b9834a58a2f745e3499",
+  "fixture-wins/wins/g0/creatures-w0.bin.gz": "b9a3161294161818ca06fa4a771db5358ad6da098a70265d44798d98b5e45fec"
+ },
+ "sizes": {
+  "world.bin.gz": 4441,
+  "fixture/all/g0/episodes.json": 769,
+  "fixture/all/g0/players.bin.gz": 285,
+  "fixture/all/g0/events.bin.gz": 168,
+  "fixture/all/g0/creatures-w0.bin.gz": 758,
+  "fixture/all/timeline-n3.bin.gz": 118,
+  "fixture/short/g0/episodes.json": 534,
+  "fixture/short/g0/players.bin.gz": 184,
+  "fixture/short/g0/events.bin.gz": 108,
+  "fixture/short/g0/creatures-w0.bin.gz": 442,
+  "fixture/short/timeline-n2.bin.gz": 110,
+  "fixture-wins/all/g0/episodes.json": 769,
+  "fixture-wins/all/g0/players.bin.gz": 239,
+  "fixture-wins/all/g0/events.bin.gz": 148,
+  "fixture-wins/all/g0/creatures-w0.bin.gz": 546,
+  "fixture-wins/all/timeline-n3.bin.gz": 107,
+  "fixture-wins/short/g0/episodes.json": 771,
+  "fixture-wins/short/g0/players.bin.gz": 239,
+  "fixture-wins/short/g0/events.bin.gz": 148,
+  "fixture-wins/short/g0/creatures-w0.bin.gz": 546,
+  "fixture-wins/short/timeline-n3.bin.gz": 107,
+  "fixture-wins/wins/g0/episodes.json": 534,
+  "fixture-wins/wins/g0/players.bin.gz": 157,
+  "fixture-wins/wins/g0/events.bin.gz": 109,
+  "fixture-wins/wins/g0/keeps.bin.gz": 91,
+  "fixture-wins/wins/g0/keeps-sleep.bin.gz": 91,
+  "fixture-wins/wins/g0/sleep.bin.gz": 213,
+  "fixture-wins/wins/g0/creatures-w0.bin.gz": 333
+ }
+}

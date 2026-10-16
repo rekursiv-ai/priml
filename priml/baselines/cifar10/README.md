@@ -4,34 +4,67 @@ Image classification on 50000 32x32 photographs in 10 classes. Small enough
 to train end to end in minutes on one GPU, which makes it the right place to
 read a complete `priml` pipeline before reaching for a larger one.
 
-## Run it
+## Reproduce
+
+Run every command from the root of a fresh clone. `uv` installs the locked
+dependencies on first use.
+
+### Prerequisites
+
+- Hardware: one GPU. The runtime takes CUDA when present, else the CPU.
+  `exp_smoke` finishes on either.
+- Credentials: none; CIFAR-10 is a public download.
+- Disk: about 1 GB under `<base_dir>/datasets/cifar10`.
+
+### Data
 
 ```bash
 uv --quiet run --frozen python -m priml.baselines.cifar10.scripts.prepare_data
-uv --quiet run --frozen python -m priml priml.baselines.cifar10.experiments.exp000
 ```
 
-The first command downloads the dataset and caches it as normalized tensors
-under `/opt/scratch/datasets/cifar10`; it is idempotent, so re-running costs
-nothing. The second trains.
+Downloads the CIFAR-10 archive through `torchvision`, which pins its URL and
+MD5, and writes normalized `train.pt` and `test.pt` to
+`/opt/scratch/datasets/cifar10`. Idempotent.
 
-`--override PATH=VALUE` adapts a run to the machine it lands on -- where the
-data lives, where output goes:
+### Experiments
 
 ```bash
-uv --quiet run --frozen python -m priml priml.baselines.cifar10.experiments.exp000 --override dataset.working_dir=/datasets/my-cifar10
+uv --quiet run --frozen python -m priml priml.baselines.cifar10.experiments.exp_smoke
+uv --quiet run --frozen python -m priml priml.baselines.cifar10.experiments.exp000
+uv --quiet run --frozen python -m priml priml.baselines.cifar10.experiments.exp001
+uv --quiet run --frozen python -m priml priml.baselines.cifar10.experiments.exp002
+uv --quiet run --frozen python -m priml priml.baselines.cifar10.experiments.exp003
+uv --quiet run --frozen python -m priml priml.baselines.cifar10.experiments.exp004
 ```
 
-Path fields are *logical*: `dataset.working_dir` resolves beneath the run's
-`base_dir` (`/opt/scratch` by default), so pass `/datasets/my-cifar10`, not the
-full on-disk path. Override `base_dir` to move the whole tree at once.
+Every experiment reads only the prepared tensors, so each runs after the Data
+step and in any order. Each writes checkpoints to
+`<base_dir>/runs/cifar10/<experiment>/checkpoints` and logs its metrics.
+
+| Experiment | Reads | Run after | Result | Hardware |
+|---|---|---|---|---|
+| `exp_smoke` | `datasets/cifar10` | Data | Installation check only | CPU or one GPU |
+| `exp000` | `datasets/cifar10` | Data | TBD | -- |
+| `exp001` | `datasets/cifar10` | Data | TBD | -- |
+| `exp002` | `datasets/cifar10` | Data | TBD | -- |
+| `exp003` | `datasets/cifar10` | Data | TBD | -- |
+| `exp004` | `datasets/cifar10` | Data | TBD | -- |
+
+`TBD` means not yet measured on reference hardware.
+
+### The `base_dir` knob
+
+`base_dir` defaults to `/opt/scratch`. Data and run outputs resolve beneath it,
+so one override relocates a whole run; point the Data step at the same root:
+
+```bash
+uv --quiet run --frozen python -m priml.baselines.cifar10.scripts.prepare_data --directory /data/priml/datasets/cifar10
+uv --quiet run --frozen python -m priml priml.baselines.cifar10.experiments.exp000 --override base_dir=/data/priml
+```
 
 Hyperparameters are deliberately not shown here. Changing one at launch
 produces a result whose config exists nowhere in the code -- it cannot be
 rerun, and it cannot be compared against `exp000`. Write a fork instead.
-
-To check an installation before committing to a full run, `exp_smoke` is
-`exp000` cut to a single epoch.
 
 ## Experiments
 
@@ -94,7 +127,7 @@ practice rather than only by convention.
 Regenerate them only when a numeric change is intended:
 
 ```bash
-BFB_REGENERATE=1 uv --quiet run --frozen pytest priml/baselines/cifar10
+uv --quiet run --frozen pytest priml/baselines/cifar10 --regenerate-b4b
 ```
 
 Doing so means `exp000` has changed, and its recorded result no longer

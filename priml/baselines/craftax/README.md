@@ -1,133 +1,417 @@
 # Craftax
 
-Open-ended reinforcement learning in a 2D survival game. A player mines wood
-and stone, crafts tools, fights creatures, eats, drinks, sleeps, and descends
-through nine floors; 67 achievements form a tech tree, and the score rewards
-breadth rather than depth. Nothing here is a wrapper -- the game itself is
-reimplemented in PyTorch, so a rollout is one batched tensor program with no
-simulator process and no host round trip.
+PufferLib's Craftax trainer, ported: bit for bit what PufferLib computes, 1.46x
+faster, with no PufferLib and no C. The game steps on CPU threads in Numba; the
+policy and the learner run on the GPU in torch and Triton, captured in CUDA
+graphs. Beside it are Craftax_Baselines' recipes and the recipes of our
+[Craftax blog post](https://rekursiv.ai/blog/craftax/).
 
-It is the counterpart to `cifar10` for RL: where that one reads a supervised
-pipeline end to end, this one shows what an on-policy learner needs that a
-supervised loop does not -- an environment that generates its own data, a
-score computed over whole episodes, and three ways of remembering the past.
+For the blog post, see the [main line](#main-line-exp000-exp004).
 
-## Attribution
+## Table of contents
 
-This is a port. The game, its rules, its constants, and the baseline recipes
-are the work of the Craftax authors; this repository contributes the PyTorch
-implementation and the experiment chain built on it.
+- [Run the baseline](#run-the-baseline)
+- [Results](#results)
+  - [Main line (exp000-exp004)](#main-line-exp000-exp004)
+  - [Side runs (exp005-exp008)](#side-runs-exp005-exp008)
+  - [Published baselines (exp009-exp015)](#published-baselines-exp009-exp015)
+- [World-model experiments (experimental)](#world-model-experiments-experimental)
+- [Reproduce](#reproduce)
+  - [Prerequisites](#prerequisites)
+  - [Data](#data)
+  - [The RL experiments](#the-rl-experiments)
+  - [The world-model chain](#the-world-model-chain)
+  - [The ghost overlay](#the-ghost-overlay)
+  - [Smoke test of the chain](#smoke-test-of-the-chain)
+  - [The base_dir knob](#the-base_dir-knob)
+  - [Not yet reproducible (TODO)](#not-yet-reproducible-todo)
+- [Parity](#parity)
+- [Speed](#speed)
+- [Tests](#tests)
+- [Files](#files)
+- [Acknowledgements](#acknowledgements)
 
-- **Craftax** -- Matthews et al. 2024, *Craftax: A Lightning-Fast Benchmark
-  for Open-Ended Reinforcement Learning*. [arXiv:2402.16801][craftax-paper] ·
-  [MichaelTMatthews/Craftax][craftax-repo] (MIT)
-- **Craftax_Baselines** -- the PPO and PPO-RNN recipes `exp000`--`exp002`
-  reproduce. [MichaelTMatthews/Craftax_Baselines][craftax-baselines] (MIT)
-- **purejaxql** -- the PQN algorithm `exp003` reproduces, from Gallici et al.
-  2024, *Simplifying Deep Temporal Difference Learning*.
-  [arXiv:2407.04811][pqn-paper] · [mttga/purejaxql][pqn-repo]
-- **transformerXL_PPO_JAX** -- the GTrXL architecture `exp013` reproduces.
-  [Reytuag/transformerXL_PPO_JAX][gtrxl-repo]
+## Run the baseline
 
-Craftax is MIT-licensed, which permits this port and its redistribution; the
-notice above is that license's attribution requirement. The game's sprites are
-**not** vendored here -- `game/render/assets.py` downloads them from the
-upstream repository at a pinned tag, so what ships is code.
-
-Craftax itself builds on [Crafter][crafter] (Hafner 2021), from which it takes
-the achievement-based scoring this baseline reports.
-
-## Run it
+From the repository root, after `uv --quiet sync --frozen`:
 
 ```bash
 uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp000
 ```
 
-No preparation step: the environment generates its own worlds, so there is no
-dataset to download. `exp_smoke` is `exp000` cut to a few updates, for checking
-an installation.
+`exp000` is the Craftax baseline of [PufferLib 5.0][pufferlib-5.0]
+([`config/craftax.ini`][pufferlib-craftax] at `6ffa5b10`): a four-layer MinGRU
+policy trained with PPO and Muon on 2,048 environments, for 3.49B transitions
+on one GPU. The policy draws its own init from PufferLib's distributions,
+under PufferLib's seed.
+`exp_smoke` checks a machine in four tiny epochs.
 
-`--override PATH=VALUE` adapts a run to the machine it lands on. Overriding a
-*hyperparameter* is a different matter -- it produces a result whose config
-exists nowhere in the code, so it can neither be rerun nor compared. Write a
-fork instead; that is what they are for.
+A run writes to `/opt/scratch/runs/craftax/{experiment_name}`, so the name
+decides what a launch resumes: a launch under a used name continues from its
+newest checkpoint and logs a `Resuming` warning naming it. Pass
+`--override working_dir=...` to start over. A checkpoint holds the whole
+pipeline, so a resumed run is bit-identical to one that never stopped. The
+world-model experiments write to `/opt/scratch/runs/craftax-world-model-rl/`
+instead, since their names repeat these.
+
+## Results
+
+Scores are perf: the achievement return as a share of its 226 points, over
+about 10,000 episodes of the final evaluation. Every run trained on one H200 and
+16 CPUs; Time is one seed's wall time. With several seeds, Score is their mean.
+
+### Main line (exp000-exp004)
+
+Our best experiments are [`exp003`](experiments.py), the blog post's recipe,
+72.48% over seeds 73-75 at 20B transitions, about 11 hours per seed on one
+H200; and [`exp004`](experiments.py), its fine-tune for the boss fight, 80.06%,
+with 43.5% of its episodes defeating the necromancer.
+
+| Experiment | Change | Score | Transitions | Time | Seeds |
+|---|---|---:|---:|---:|---|
+| [`exp000`](experiments.py) | PufferLib's recipe, from the policy's own init | 47.20% | 3.49B | 31 min | 73 |
+| [`exp001`](experiments.py) | The port's default kernels and fp32 | 50.27% | 3.49B | 31 min | 73 |
+| [`exp002`](experiments.py) | Board encoder, injection, feasibility loss | 52.76% | 20B | 12 h | 73-76 |
+| [`exp003`](experiments.py) | Frontier practice, self-imitation, rewards / 8 | 72.48% | 20B | 11 h | 73-75 |
+| [`exp004`](experiments.py) | exp003 fine-tuned for the boss fight | 80.06% | +3B | -- | 73 |
+
+- The original runs of `exp002` scored 66.83% (seed 73, the best of 15 runs of
+  that family) and 49.90% (seed 74); those of `exp003`, 73.25% (seeds 73-80).
+  Same-seed runs spread by up to about 9 points.
+- `exp004`'s score is its reference's: the original runs' fine-tune of
+  exp003's seed-78 run, its final weights evaluated on the port in their
+  numerics. It has not run on the port.
+- `exp000` and `exp005` once loaded PufferLib's seed-73 init instead of drawing
+  their own. From it they scored 48.45% and 15.22% and equalled PufferLib's
+  runs bit for bit: every checkpoint's weights and the final evaluation, to the
+  last digit.
+
+### Side runs (exp005-exp008)
+
+| Experiment | Change | Score | Transitions | Time | Seeds |
+|---|---|---:|---:|---:|---|
+| [`exp005`](experiments.py) | exp000 at 250M transitions | 15.22% | 250M | 2 min | 73 |
+| [`exp006`](experiments.py) | exp002 at width 2,048 on 1,024 environments x 512 steps | 65.10% | 20B | 16.5 h | 73 |
+| [`exp007`](experiments.py) | exp006 with a ConvNeXt trunk on the board | 62.01% | 20B | 23 h | 73 |
+| [`exp008`](experiments.py) | exp003 with a new world at every reset | 60.66% | 6B | 4.4 h | 73, 74 |
+
+- `exp005`'s score is from PufferLib's init.
+- `exp008` scores at 6B, on exp003's pool.
+
+### Published baselines (exp009-exp015)
+
+Published recipes, restated on original Craftax's rules.
+
+| Experiment | Change | Score | Transitions | Time | Seeds |
+|---|---|---:|---:|---:|---|
+| [`exp009`](experiments.py) | exp000 on original Craftax's rules and observation | 12.48% | 3.49B | 64 min | 73 |
+| [`exp010`](experiments.py) | Craftax_Baselines' 1B PPO recipe | 12.37% | 1B | 50 min | 42-44 |
+| [`exp011`](experiments.py) | Its 1M-interaction geometry | 2.45% | 1M | 14 s | 42 |
+| [`exp012`](experiments.py) | PPO-RNN: a reset-aware GRU | 16.69% | 1B | 1.6 h | 42 |
+| [`exp013`](experiments.py) | PQN: Q-learning with an LSTM | 16.32% | 1B | 3.0 h | 42 |
+| [`exp014`](experiments.py) | exp010 at 100M, a screen | 9.56% | 100M | 5 min | 42 |
+| [`exp015`](experiments.py) | GTrXL: gated Transformer-XL memory | 17.44% | 1B | 2.6 h | 42 |
+
+`exp009` switches back every way PufferLib differs from original Craftax
+(`docs/differences.md`). For comparison, the reference implementations scored:
+
+- `exp010`: 12.16%, Craftax_Baselines' JAX runs (their training return).
+- `exp011`, `exp012`, `exp014`, `exp015`: 2.21%, 16.10%, 8.98% and 18.16%,
+  the earlier JAX port at the same seed.
+- `exp013`: about 16.0%, as purejaxql reports.
+
+Each experiment's docstring holds its result in full: every seed, the episode
+count and the speed.
+
+## World-model experiments (experimental)
+
+These results are experimental and not yet officially published. They are an
+alternative approach, not the baseline's result: the main line above is.
+Each policy here reads a world model fitted to play captured from the
+policies above (`world_model/`): its hidden state at the current observation,
+the input to its behaviour-cloning head. Nothing trains in imagination; every
+policy gradient comes from real environment steps. The factories are in
+[`experiments_world_model.py`](experiments_world_model.py).
+
+A policy starting from random weights, whose only encoder is a frozen world
+model fitted to mature play ([`exp004`](experiments_world_model.py)), scores
+63.2% at 2B steps (76.6% of achievements unlocked), against the recipe's 73%
+at 20B; 69.9% at its latest evaluation, 15.5B. It reaches 50%, 60% and 65% at
+0.75B, 1.5B and 2.75B steps, where the recipe's eight original runs take a
+median 3.5B, 7.5B and 9.9B. It is one run, at seed 73, still training, and
+read mid-run; each step costs about 11 times the recipe's. `exp004` restates
+its config field for field, the 20B budget included.
+
+The arms on the recipe read world models the original runs fitted, which no
+experiment here trains, so they are not reproducible from a fresh clone: their
+factories raise `NotImplementedError`
+([Not yet reproducible](#not-yet-reproducible-todo)). Each docstring holds its
+latest evaluation, with its step and status.
+
+The 250M test, a cheap screen of whether the feature helps at all:
+
+| Experiment | Parent | Change | Score | Transitions | Time | Seeds |
+|---|---|---|---:|---:|---:|---|
+| [`exp000`](experiments_world_model.py) | `experiments.exp007` | 250M of the 20B schedule, evaluated every 50M | 12.17% | 250M | 20 min | 73 |
+| [`exp001`](experiments_world_model.py) | `exp000` | A frozen world model's feature | 42.92% | 250M | 1.6 h | 73 |
+| [`exp002`](experiments_world_model.py) | `exp001` | That world model at its random init | 11.52% | 250M | 1.6 h | 73 |
+
+- Each scores the mean of the 150M, 200M and 250M evaluations; the original
+  runs scored 11.92%, 47.08% and 11.67%.
+- The world model `exp001` reads (`world_model.experiments.exp001`) predicts
+  the next frame's cells at 98.83%, the mean of three seeds; see
+  `world_model/README.md`.
+
+The world model on the recipe, as the policy's only encoder:
+
+| Experiment | Parent | Change | Score | Transitions | State | Seeds |
+|---|---|---|---:|---:|---|---|
+| [`exp003`](experiments_world_model.py) | `experiments.exp003` | A frozen world model of early play | 55.32% | 20B | finished | 73 |
+| [`exp004`](experiments_world_model.py) | `exp003` | A world model of mature play | 69.91% | 15.5B of 20B | training | 73 |
+| [`exp005`](experiments_world_model.py) | `exp003` | The world model trained with the policy | 67.31% | 3.25B of 20B | training | 73 |
+| [`exp006`](experiments_world_model.py) | `exp004` | The world model trained with the policy | 65.20% | 3.25B of 20B | training | 73 |
+| [`exp007`](experiments_world_model.py) | `exp003` | Stopped after 1B, the 20B schedule kept | 37.51% | 1B | finished | 73 |
+| [`exp008`](experiments_world_model.py) | `exp005` | Stopped after 1B, the 20B schedule kept | 52.10% | 1B | finished | 73 |
+
+- A finished run scores its final evaluation; a run still training, its
+  latest, at the transitions shown.
+- `exp003` reaches the Ice Realm in at most 0.01% of episodes at any
+  evaluation; `exp004` reaches it in 47% at 15.5B.
+- The frozen arms train at about 46k transitions/s, the arms that train the
+  world model at about 5.9k, against `experiments.exp003`'s 509k: `exp003`
+  took 145 hours, `exp007` 6.5 and `exp008` 46.
+
+## Reproduce
+
+From a fresh clone, at the repository root, after
+`uv --quiet sync --frozen`. Every command is copy-paste exact and runs its
+experiment as the config states it. Where Seeds above lists one seed, the
+config runs it; where it lists several, the config runs the first, and the
+others were the same config with every seed field set to that seed.
+
+### Prerequisites
+
+- Linux and an NVIDIA GPU: the policy's kernels are Triton, so every run,
+  `exp_smoke` included, needs CUDA. Every record is from one H200 with 16
+  CPUs per run.
+- FlashAttention 4 (`flash-attn-4`, Linux only) for the world model and for
+  the world-model experiments, whose feature runs it.
+- A W&B login (`wandb login`) for every run but the smoke runs, or
+  `WANDB_MODE=offline` to log locally.
+- Disk: a run keeps its newest two checkpoints, 2.6 GB for exp000 and 18 GB
+  for exp009; a capture archive takes about 0.7 bytes per decision, a few GB
+  for the 3.5B decisions of `archive-v1`.
+
+### Data
+
+Nothing to download or prepare. The game generates its worlds, and the world
+model's corpus is captured from the RL policies (below).
+
+### The RL experiments
+
+Each command trains one experiment into
+`/opt/scratch/runs/craftax/{experiment}/`: its checkpoints,
+`checkpoints/step_{epoch:08d}.pt` (the newest two, the last at the final
+epoch), and `metrics.json`, the final evaluation. The world-model experiments
+train into `/opt/scratch/runs/craftax-world-model-rl/{experiment}/`.
+
+```bash
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp000
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp001
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp002
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp003
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp004
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp005
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp006
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp007
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp008
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp009
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp010
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp011
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp012
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp013
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp014
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp015
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments_world_model.exp000
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments_world_model.exp001
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments_world_model.exp002
+```
+
+Every experiment reads nothing but its config, except:
+
+| Experiment | Reads | Run first |
+|---|---|---|
+| `exp004` | `/opt/scratch/runs/craftax/exp003/checkpoints/step_00038146.pt` | `exp003` |
+| `experiments_world_model.exp001` | `/opt/scratch/runs/craftax-world-model/exp001/checkpoints/step_00001525.pt` | world-model `exp001` ([the chain](#the-world-model-chain), step 4) |
+
+exp004's reference fine-tuned exp003's seed-78 run, and
+`experiments_world_model.exp001`'s record read world-model exp001's seed-0
+run. exp004 trains 3B more transitions, 5,722 epochs, about 1.7 hours at
+exp003's speed. The records and times are the Results tables'.
+
+### The world-model chain
+
+The world model trains on play captured from three RL policies. Four steps,
+in order:
+
+1. **Train the policies.** `exp003` (11 h), `exp002` (12 h) and `exp000`
+   (31 min), as above, one H200 each. The published archive's policies were
+   exp003's seed-74 run, exp002's seed-73 run and exp000's run.
+2. **Capture.** Each of the four arms runs four workers, one per seed range,
+   beside one verifier that replays a sample of every shard; each job takes
+   one GPU. A launch id names the launch's markers and verifier log, and is
+   never reused:
+
+   ```bash
+   m=priml.baselines.craftax.world_model.capture.experiments
+   id=v1-$(date -u +%Y%m%dT%H%M%SZ)
+   uv --quiet run --frozen python -m priml $m.verifier --override launch=$id --override workers=16 &
+   for arm in arm0 arm1 arm2 arm3; do for worker in 0 1 2 3; do uv --quiet run --frozen python -m priml $m.$arm --override worker=$worker --override launch=$id; done; done; wait
+   ```
+
+   `arm0` and `arm1` read exp003's final checkpoint,
+   `/opt/scratch/runs/craftax/exp003/checkpoints/step_00038146.pt`; `arm2`
+   exp002's, `step_00038146.pt`; `arm3` exp000's, `step_00006662.pt`. They
+   write `/opt/scratch/datasets/craftax/world-model/archive-v1`. One H200
+   captured 831k decisions/s from exp003 and 1.16M/s from exp000 (rollout
+   only), about 1.2 GPU-hours for the 3.5B decisions.
+3. **Freeze the base corpus**, 50M training decisions in the arms' shares,
+   into `archive-v1/corpora/base.json`:
+
+   ```bash
+   priml/baselines/craftax/world_model/scripts/freeze_corpus.py /opt/scratch/datasets/craftax/world-model/archive-v1 --corpus base --decisions 50_000_000
+   ```
+
+4. **Train the world model** into
+   `/opt/scratch/runs/craftax-world-model/{experiment}/`:
+
+   ```bash
+   uv --quiet run --frozen python -m torch.distributed.run --standalone --nproc_per_node=8 -m priml priml.baselines.craftax.world_model.experiments.exp000
+   uv --quiet run --frozen python -m priml priml.baselines.craftax.world_model.experiments.exp001
+   uv --quiet run --frozen python -m priml priml.baselines.craftax.world_model.experiments.exp002
+   uv --quiet run --frozen python -m priml priml.baselines.craftax.world_model.experiments.exp010
+   uv --quiet run --frozen python -m priml priml.baselines.craftax.world_model.experiments.exp011
+   uv --quiet run --frozen python -m priml priml.baselines.craftax.world_model.experiments.exp012
+   uv --quiet run --frozen python -m priml priml.baselines.craftax.world_model.experiments.exp013
+   ```
+
+   Each reads the base corpus. exp000 runs on one node of 8 GPUs; the rest
+   on one H200, where an update of exp001 takes about 4.1 s, its 1,525
+   updates about 1.7 hours, and exp010, exp012 and exp013 ran in 7,051 s,
+   6,593 s and 6,579 s. Their recorded results, in each docstring, were
+   measured on the original implementation's capture of the same mixture.
+   The rest wait for producers ([Not yet reproducible](#not-yet-reproducible-todo)).
+
+Then `experiments_world_model.exp001` reads world-model exp001's final
+checkpoint. `world_model/README.md` covers the corpus tools and the evaluation
+report.
+
+### The ghost overlay
+
+The blog post's ghost overlay plays three policies' episodes on one world
+(`ghosts/experiments.py`, `ghosts/FORMAT.md`). Its tiers read the final
+checkpoints of `exp005`, `exp002` and `exp003`, so those train first. The
+published page's medium and high tiers were exp002's seed-73 and exp003's
+seed-74 runs. Its boss tier reads exp004's, so exp004 trains first; the
+published page's was the original runs' fine-tune, in their numerics.
+
+```bash
+m=priml.baselines.craftax.ghosts.experiments
+g=priml/baselines/craftax/ghosts
+a=/opt/scratch/artifacts/craftax/ghosts/capture
+id=pilot-$(date -u +%Y%m%dT%H%M%SZ)
+uv --quiet run --frozen python -m priml $m.pilot_verifier --override launch=$id --override workers=3 &
+for tier in pilot_early pilot_medium pilot_high; do uv --quiet run --frozen python -m priml $m.$tier --override launch=$id; done; wait
+$g/select_world.py $a/pilot --tier early:0:/opt/scratch/runs/craftax/exp005/metrics.json --tier medium:1:/opt/scratch/runs/craftax/exp002/metrics.json --tier high:2:/opt/scratch/runs/craftax/exp003/metrics.json --output $a/world.json
+id=w15-$(date -u +%Y%m%dT%H%M%SZ)
+uv --quiet run --frozen python -m priml $m.capture_verifier --override launch=$id --override workers=3 &
+for tier in capture_early capture_medium capture_high; do uv --quiet run --frozen python -m priml $m.$tier --override launch=$id; done; wait
+$g/build.py $a/w15 /opt/scratch/artifacts/craftax/ghosts/site-data --tier early=0 --tier medium=1 --tier high=2
+```
+
+The captures play world 15, the world `select_world.py` chose from the
+pilots; `capture_boss` adds the boss tier the same way, `extra_<tier>` and
+`extra_verifier` the episodes of the short set, and `endings.py` reports how
+each tier's episodes end.
+
+### Smoke test of the chain
+
+The whole chain at minimum size, on one CUDA GPU in minutes: a four-epoch
+policy, a 20,000-decision capture of it, its corpus, and the world model's
+four-step `exp_smoke` on the CPU:
+
+```bash
+uv --quiet run --frozen python -m priml priml.baselines.craftax.experiments.exp_smoke
+uv --quiet run --frozen python -m priml priml.baselines.craftax.world_model.capture.experiments.smoke
+priml/baselines/craftax/world_model/scripts/freeze_corpus.py /opt/scratch/datasets/craftax/world-model/smoke --corpus smoke --all
+uv --quiet run --frozen python -m priml priml.baselines.craftax.world_model.experiments.exp_smoke
+```
+
+The capture reads
+`/opt/scratch/runs/craftax/exp_smoke/checkpoints/step_00000004.pt` and writes
+`/opt/scratch/datasets/craftax/world-model/smoke`, whose corpus `smoke` the
+world model reads.
+
+### The base_dir knob
+
+Every path above is `/opt/scratch` joined with a logical path: runs under
+`/runs`, captures and corpora under `/datasets`, reports under `/artifacts`.
+`--override base_dir=DIR` moves all of one job's paths beneath `DIR`, its
+inputs included, so give every job of a chain the same one. The scripts take
+their directories as arguments: substitute `DIR` for `/opt/scratch` in them.
+
+### Not yet reproducible (TODO)
+
+These experiments read an input no step here produces. Each factory raises
+`NotImplementedError`; its docstring keeps the record and names the step to
+add, the TODO.
+
+| Experiment | Missing producer |
+|---|---|
+| `experiments_world_model.exp003`, `exp005`, `exp007`, `exp008` | A world model fitted to 100M decisions of early-training exp003 play: its capture, corpus and world-model experiment |
+| `experiments_world_model.exp004`, `exp006` | A world model fitted to 100M decisions of a 20B exp003 policy's play: its capture, corpus and world-model experiment |
+| world-model `exp003` to `exp005` | The small corpus: a capture and freeze of 10M decisions |
+| world-model `exp014`, `exp015` | Frame shards of the capture archive, which writes replay shards only |
+| world-model `exp020` | The scale-up corpus: capture jobs at budgets above the arms' and a freeze of every shard |
+| capture `arm0_branch` to `arm3_branch` | The branch pools: `scripts/branch_pool.py`'s arguments per arm and worker |
+
+## Parity
+
+The port was checked against fixtures PufferLib (pin `6ffa5b10`) minted, byte
+for byte, with no tolerance. `exp000` selects the kernel classes of
+`lib/compat.py`, which round as PufferLib's kernels do, and keeps PufferLib's
+bf16 carry, outputs and stored rollouts; the defaults use Triton's standard
+arithmetic and fp32. The fixtures are not distributed, so the suite that
+reads them lives beside them; it builds PufferLib's seed-73 init, which the
+full runs below start from, from PufferLib's source at the pin. The goldens
+in `testdata/` run with this package's tests.
+
+| What | Checked |
+|---|---|
+| Full runs | exp000 (all 34 checkpoints and the final eval) and exp005, from PufferLib's seed-73 init |
+| Training | Epochs 1, 2, 4, 200 and 201; a resume; an eval between epochs |
+| Learner | 18 minibatches at epochs 0, 1 and 200; Muon; each PPO kernel |
+| Actor | The policy step, scan and embedding; the sampler; the rollouts |
+| Environment | 2,048 envs x 10,000 steps; all 8,192 pool worlds; every step phase |
+| Original Craftax | Against JAX on all nine floors, in distribution |
+| Recipe policies | exp002's encoder and exp007's trunk, at init and at 20B, CPU and H200 |
+
+The recipe-policy fixtures carry two deviations: the encoder's dead
+previous-action input, and the gradient-scale wrapper at scale 1, whose
+round trips are identities in real arithmetic but round the board in bf16.
 
 ## Speed
 
-On a GPU a step of this environment is thousands of kernels, each too small to
-occupy the device, so launching them -- not running them -- is what a step
-costs. The environment's step, the policy's action step, and the whole PPO
-update (every epoch, minibatch, and optimizer step) are therefore captured once
-as CUDA graphs and replayed. The environment's graphs run the same kernels and
-draw the same random numbers as stepping eagerly, so they are bit-identical to
-it. The update's graph runs Adam in its capturable form, which rounds
-differently in the last bit. ``cuda_graphs = False`` on the environment or the
-step runs eagerly; on a CPU there is nothing to capture.
+PufferLib and the port interleaved in one allocation: one H200 and 16 CPUs,
+the median of two runs each.
 
-Generating fresh worlds for finished workers is the other large cost, and it is
-paid per call rather than per world. ``restart`` chooses when it is paid:
-``RestartFromReserve`` (the default) generates a pool at a time and deals from
-it until it runs out; ``RestartOnDemand`` generates exactly the worlds each
-step needs and is what every golden was minted with. Both deal worlds from the
-same generator and the same distribution, and exp011 trained to scores within
-seed noise of each other under the two; they consume the random numbers in a
-different order, so they do not reproduce each other bit for bit. The
-evaluation always draws on demand.
+| | PufferLib | Port | Port / PufferLib |
+|---|---:|---:|---:|
+| Training, transitions/s | 1,322,762 | 1,936,186 | 1.46x |
+| Eval, 10,000 episodes, s | 30.37 | 23.00 | 0.76x |
 
-## Experiments
-
-`exp000` is the baseline and is frozen: improvements land as forks, never as
-edits, so a number measured against it stays comparable. Each fork applies one
-named change, and its docstring carries a **Hypothesis**, **References**, and
-**Results**.
-
-| Experiment | Parent | Change |
-|---|---|---|
-| `exp000` | -- | PPO, 1M interactions, 256 envs x 16 steps |
-| `exp001` | `exp000` | The published 1B recipe: 1024 envs x 64 steps, lr 2e-4 |
-| `exp002` | `exp001` | A policy with memory, cheaply: a reset-aware GRU |
-| `exp003` | `exp001` | No policy at all: Q-learning with an LSTM |
-| `exp011` | `exp001` | The 1B geometry at 100M, as a screening budget |
-| `exp013` | `exp001` | A policy with memory, expensively: GTrXL |
-
-The three memory experiments are the point of the chain. `exp002` carries one
-vector forward, so remembering costs the same at step 1 and step 10,000;
-`exp013` keeps 128 steps individually addressable and pays for it; `exp003`
-asks whether the policy gradient was needed at all.
-
-Names match the JAX study these were ported from, so a torch number can be read
-against its counterpart. Where a treatment did not survive the port, the
-factory's docstring says so under **Not carried over from the JAX ...** -- all
-of them were workarounds for XLA's static shapes, which do not exist here.
-
-## Layout
-
-| Path | Contents |
-|---|---|
-| `game/` | The game: rules, world generation, and the symbolic observation |
-| `game/render/` | Watching it: sprites, a pygame viewer, keyboard play, video |
-| `env.py` | The learner's view: batched reset, step, and auto-restart |
-| `restart.py` | When finished workers' fresh worlds are generated |
-| `cuda_graph.py` | Replaying a step's thousands of kernels as one CUDA graph |
-| `model.py`, `rnn.py`, `gtrxl.py`, `pqn.py` | The four networks |
-| `*_train_step.py` | PPO, recurrent PPO, windowed PPO, and Q-learning |
-| `metric.py` | Normalized return and the Crafter achievement score |
-| `data.py` | The dataset seam for an environment that generates its own data |
-| `experiments.py` | The configs above |
-
-`game/` depends on nothing above it -- it advances a world and encodes what the
-player sees, knowing nothing of policies or optimizers. Everything else depends
-on it.
-
-Watching a policy play needs the optional viewer dependencies:
-
-```bash
-uv --quiet run --frozen --group render python -c "
-from priml.baselines.craftax.game.render.play import play; play(seed=0)"
-```
-
-WASD moves, space acts, digits craft. `record()` writes an mp4 from a trained
-policy instead.
+On original Craftax's 1B PPO recipe (`exp010`), the port trains at about 332k
+transitions/s against Craftax_Baselines' 155k in JAX: 2.1x.
 
 ## Tests
 
@@ -135,33 +419,61 @@ policy instead.
 uv --quiet run --frozen pytest priml/baselines/craftax
 ```
 
-Runs on CPU in half a minute, offline. Three kinds of evidence sit alongside
-the unit tests:
+Unit tests run offline on CPU; those marked `gpu_triton` skip without CUDA.
+The Triton classes refuse CPU tensors, so a CPU run selects their torch
+counterparts (`TorchPPO`, `TorchPhiloxSampler`, `TorchScan`), whose bits
+differ.
 
-- **Parity tests** compare tables, formulas, and generated worlds against the
-  reference implementation, and skip cleanly when the optional `craftax`
-  dependency is absent. They are what makes "this is the same game" checkable.
-- **`testdata/`** holds a bit-for-bit snapshot of a complete PPO update --
-  rollout, advantages, clipped loss, gradient clip, and Adam. A change that
-  moves one floating-point bit fails it.
-- **The learning rule** is compared against the reference implementation
-  directly: identical inputs to both advantage recursions, both sets of PPO
-  terms, and both Q(lambda) targets. End-to-end equality is not achievable --
-  the two draw from different random streams and diverge from the first
-  tile -- so the mathematics is isolated and checked exactly, which is the
-  only honest cross-implementation comparison available.
+## Files
 
-Regenerate the golden only when a numeric change is intended, which means
-`exp000` has changed and its recorded result no longer describes the code:
+| Path | Contents |
+|---|---|
+| `experiments.py` | The configs: the main line, its side runs and the published baselines |
+| `experiments_world_model.py` | The world-model experiments' configs (experimental) |
+| `game/` | The game: rules, world generation, the observation. Numba, CPU |
+| `env.py` | The learner's view: 2,048 envs in four buffers on worker threads |
+| `model.py` | The MinGRU policy |
+| `rollout.py` | Action sampling and the actor's CUDA graphs |
+| `train_step.py` | One PPO epoch |
+| `metric.py`, `evaluation.py` | The score and the eval protocol |
+| `data.py` | The loop's cadence: one tick per epoch |
+| `policies/` | The other policies: exp002's encoder, exp010's MLPs, the GRU, PQN and GTrXL |
+| `learners/` | The other learners, frontier practice and self-imitation |
+| `lib/` | PufferLib's kernel arithmetic, Adam, typed array reads, cost helpers |
+| `world_model/` | The world model, its full loop and the frozen feature; its own README |
+| `ghosts/` | The blog post's ghost overlay; `ghosts/FORMAT.md` |
+| `scripts/` | The references the game's kernels are checked against, and the joint world-model smoke |
+| `testdata/` | Goldens |
+| `docs/differences.md` | Every way PufferLib differs from original Craftax |
 
-```bash
-BFB_REGENERATE=1 uv --quiet run --frozen pytest priml/baselines/craftax
-```
+`isolation_test.py` checks that the port imports no other baseline and that
+every public name is read inside the package.
 
+## Acknowledgements
+
+We thank [PufferAI](https://puffer.ai) and Joseph Suarez for
+[PufferLib][pufferlib]. This package ports its Craftax environment and trainer,
+and its recipe and speed are the bar the port was built to match.
+
+This is a port. The game and the recipe are other people's work:
+
+- **PufferLib** -- Joseph Suarez, the Craftax environment and trainer this
+  package reproduces: release 5.0, pin `6ffa5b10`,
+  [`config/craftax.ini`][pufferlib-craftax].
+  [PufferAI/PufferLib][pufferlib] (MIT)
+- **Craftax** -- Matthews et al. 2024, *Craftax: A Lightning-Fast Benchmark
+  for Open-Ended Reinforcement Learning*, from which PufferLib's environment is
+  ported. [arXiv:2402.16801][craftax-paper] ·
+  [MichaelTMatthews/Craftax][craftax-repo] (MIT)
+- **Craftax_Baselines** -- the same authors' PPO baseline, whose 1B recipe and
+  actor-critic `exp010` restates, commit `7ce36fa`.
+  [MichaelTMatthews/Craftax_Baselines][craftax-baselines] (MIT)
+
+All three are MIT-licensed, which permits this port.
+
+[pufferlib]: https://github.com/PufferAI/PufferLib
+[pufferlib-5.0]: https://github.com/PufferAI/PufferLib/releases/tag/5.0-experiments
+[pufferlib-craftax]: https://github.com/PufferAI/PufferLib/blob/6ffa5b10dbbbe4d1e8288367c7d9d3acd3bad4a2/config/craftax.ini
 [craftax-paper]: https://arxiv.org/abs/2402.16801
 [craftax-repo]: https://github.com/MichaelTMatthews/Craftax
 [craftax-baselines]: https://github.com/MichaelTMatthews/Craftax_Baselines
-[pqn-paper]: https://arxiv.org/abs/2407.04811
-[pqn-repo]: https://github.com/mttga/purejaxql
-[gtrxl-repo]: https://github.com/Reytuag/transformerXL_PPO_JAX
-[crafter]: https://arxiv.org/abs/2109.06780

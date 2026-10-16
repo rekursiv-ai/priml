@@ -99,7 +99,8 @@ def portable_minibatch(*, rows: int, horizon: int) -> dict[str, Tensor]:
     action_mask = rand(rows, horizon, num_actions) > 0.2
     action_mask[..., 0] = True
     # The legal action with the largest draw.
-    scores = torch.where(action_mask, rand(rows, horizon, num_actions), -1.0)
+    # Action zero is legal, so zero-filled masked entries cannot win argmax.
+    scores = rand(rows, horizon, num_actions) * action_mask
     rewards = uniform(rows, horizon, bound=1.0)
     return {
         "decoded": uniform(rows, horizon, num_actions + 1, bound=0.25).bfloat16(),

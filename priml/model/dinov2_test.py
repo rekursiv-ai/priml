@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
-from torch import nn
+from typing import TYPE_CHECKING
+
+import hashlib
+import re
+
+from torch import Tensor, nn
+from torch.nn import functional
 
 import pytest
 import torch
 
 from priml.hub import load_torch_hub_distributed
 from priml.model.dinov2 import DinoV2Teacher
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_frozen_teacher_cost_has_no_backward_work() -> None:
@@ -24,8 +34,8 @@ def test_rank_zero_populates_hub_before_other_ranks(
     rank = 0
     encoder = nn.Identity()
 
-    def load(repository: str, variant: str) -> nn.Module:
-        del repository, variant
+    def load(repository: str, variant: str, *, skip_validation: bool) -> nn.Module:
+        del repository, variant, skip_validation
         events.append(f"load:{rank}")
         return encoder
 
@@ -59,14 +69,50 @@ def test_dino_cost_rejects_unknown_variant() -> None:
         config.cost(batch_size=2, dtype=torch.float32)
 
 
+def test_dino_teacher_requires_patch_aligned_image_size() -> None:
+    config = DinoV2Teacher.Config()
+    config.image_size = 255
+    with pytest.raises(
+        ValueError,
+        match="image_size must be divisible by 16",
+    ) as error:
+        DinoV2Teacher(config)
+    assert str(error.value) == "image_size must be divisible by 16"
+
+
+def test_dino_teacher_repository_is_pinned_to_a_commit() -> None:
+    repository = DinoV2Teacher.Config().repository
+    assert re.fullmatch(r"facebookresearch/dinov2:[0-9a-f]{40}", repository)
+
+
+def test_dino_teacher_refuses_weights_with_another_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def load(repository: str, variant: str, *, skip_validation: bool) -> nn.Module:
+        del repository, variant, skip_validation
+        return nn.Identity()
+
+    config = DinoV2Teacher.Config()
+    _cached_weights(tmp_path, monkeypatch, config=config)
+    monkeypatch.setattr("priml.model.dinov2.load_torch_hub_distributed", load)
+    with pytest.raises(ValueError, match="not the pinned"):
+        DinoV2Teacher(config)
+
+
 def test_dino_teacher_resizes_position_and_clamps_layers(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class TinyEncoder(nn.Module):
         def __init__(self) -> None:
             super().__init__()
             # DINO's learned position table is batch-one by production contract.
-            self.pos_embed = nn.Parameter(torch.randn(1, 5, 3))
+            # DINO's learned position table is [batch=1, tokens, channels].
+            self.pos_embed = nn.Parameter(
+                torch.arange(30, dtype=torch.float32).reshape(1, 10, 3),
+            )
+            self.probe = nn.Parameter(torch.ones(2))
             self.blocks = nn.ModuleList([nn.Identity(), nn.Identity()])
 
         def get_intermediate_layers(
@@ -87,19 +133,84 @@ def test_dino_teacher_resizes_position_and_clamps_layers(
                 for index in n
             )
 
-    def load(repository: str, variant: str) -> TinyEncoder:
-        del repository, variant
+    hub_loads: list[tuple[str, str, bool]] = []
+
+    def load(repository: str, variant: str, *, skip_validation: bool) -> TinyEncoder:
+        hub_loads.append((repository, variant, skip_validation))
         return TinyEncoder()
+
+    interpolation_kwargs: list[
+        tuple[tuple[int, int], str, bool | None, bool | None]
+    ] = []
+    original_interpolate = functional.interpolate
+
+    def record_interpolate(
+        input: Tensor,
+        *,
+        size: tuple[int, int],
+        mode: str,
+        align_corners: bool | None = None,
+        antialias: bool | None = False,
+    ) -> Tensor:
+        interpolation_kwargs.append((size, mode, align_corners, antialias))
+        if align_corners is None:
+            if antialias is None:
+                return original_interpolate(input, size=size, mode=mode)
+            return original_interpolate(
+                input,
+                size=size,
+                mode=mode,
+                antialias=antialias,
+            )
+        if antialias is None:
+            return original_interpolate(
+                input,
+                size=size,
+                mode=mode,
+                align_corners=align_corners,
+            )
+        return original_interpolate(
+            input,
+            size=size,
+            mode=mode,
+            align_corners=align_corners,
+            antialias=antialias,
+        )
 
     monkeypatch.setattr(
         "priml.model.dinov2.load_torch_hub_distributed",
         load,
     )
+    monkeypatch.setattr(functional, "interpolate", record_interpolate)
     config = DinoV2Teacher.Config()
+    config.variant = "tiny-test"
     config.image_size = 256
     config.layer_indices = (-3, 0, 9)
+    config.weights_sha256 = _cached_weights(tmp_path, monkeypatch, config=config)
     teacher = DinoV2Teacher(config)
+    assert hub_loads == [(config.repository, "tiny-test", True)]
     assert teacher.encoder.pos_embed.shape == (1, 257, 3)
+    assert not teacher.encoder.pos_embed.requires_grad
+    assert isinstance(teacher.encoder, nn.Module)
+    assert all(
+        not parameter.requires_grad for parameter in teacher.encoder.parameters()
+    )
+    assert interpolation_kwargs == [((16, 16), "bicubic", False, True)]
+    # DINO position tables use a batch-one token-by-channel contract.
+    source = torch.arange(30, dtype=torch.float32).reshape(1, 10, 3)
+    # DINO position interpolation reshapes the patch tokens to a square grid.
+    patch = original_interpolate(
+        source[:, 1:].reshape(1, 3, 3, 3).permute(0, 3, 1, 2),
+        size=(16, 16),
+        mode="bicubic",
+        align_corners=False,
+        antialias=True,
+    )
+    expected_position = torch.cat(
+        (source[:, :1], patch.flatten(2).transpose(1, 2)),
+        dim=1,
+    )
+    assert torch.equal(teacher.encoder.pos_embed, expected_position)
     # The teacher explicitly requires square image_size x image_size inputs.
     output = teacher(torch.zeros(2, 3, 256, 256, dtype=torch.uint8))
     assert len(output) == 3
@@ -117,8 +228,8 @@ def test_rank_zero_hub_failure_reaches_other_ranks(
     rank = 0
     status_message = None
 
-    def load(repository: str, variant: str) -> nn.Module:
-        del repository, variant
+    def load(repository: str, variant: str, *, skip_validation: bool) -> nn.Module:
+        del repository, variant, skip_validation
         raise OSError("hub unavailable")
 
     def broadcast(status: list[str | None], *, src: int) -> None:
@@ -145,7 +256,21 @@ def test_rank_zero_hub_failure_reaches_other_ranks(
         load_torch_hub_distributed("facebookresearch/dinov2", "dinov2_vitb14")
 
 
+def _cached_weights(
+    hub_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    config: DinoV2Teacher.Config,
+) -> str:
+    """Cache stand-in weights where torch.hub would, and return their SHA-256."""
+    monkeypatch.setattr(torch.hub, "get_dir", lambda: str(hub_dir))
+    weights = hub_dir / "checkpoints" / config.weights_file
+    weights.parent.mkdir()
+    weights.write_bytes(b"weights")
+    return hashlib.sha256(b"weights").hexdigest()
+
+
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

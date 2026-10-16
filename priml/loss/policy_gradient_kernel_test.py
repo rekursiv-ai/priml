@@ -8,17 +8,29 @@ golden in ``policy_gradient_test.py``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from functools import partial
+from typing import TYPE_CHECKING, Protocol
 
+import inspect
+
+from triton.runtime import interpreter, jit
+
+import numpy as np
 import pytest
 import torch
+import triton
 
+from priml.loss import policy_gradient_kernel
 from priml.loss.policy_gradient import LogProbs, TorchPPO
 from priml.loss.policy_gradient_kernel import TritonPPO, _require_cuda
 from priml.testing.policy_gradient import random_minibatch
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing_extensions import TypeIs
+
+    from numpy.typing import NDArray
     from torch import Tensor
 
 
@@ -54,17 +66,35 @@ def test_invalid_horizon_and_cpu_tensor_are_refused_without_cuda() -> None:
         rule.check_horizon(0)
     with pytest.raises(ValueError, match="positive multiple"):
         rule.check_horizon(TritonPPO.Config.ADVANTAGE_WIDTH + 1)
-    with pytest.raises(ValueError, match="runs on a CUDA device"):
+    with pytest.raises(
+        ValueError,
+        match=r"^TritonPPO runs on a CUDA device, not cpu; select TorchPPO to run the rule elsewhere$",
+    ):
         _require_cuda(torch.zeros(2))
+
+
+def test_loss_sums_are_added_across_program_blocks() -> None:
+    rule = TritonPPO.Config().make()
+    partials = torch.tensor(
+        [[1, 2, 3, 4, 5, 6, 7, 8], [10, 20, 30, 40, 50, 60, 70, 80]],
+        dtype=torch.float32,
+    )
+    assert torch.equal(
+        rule.sum_blocks(partials),
+        torch.tensor([11, 22, 33, 44, 55, 66, 77, 88], dtype=torch.float32),
+    )
 
 
 def test_the_kernels_take_the_reference_rules_coefficients() -> None:
     config = TritonPPO.Config()
     assert isinstance(config, TorchPPO.Config)
     config.entropy_coefficient = 0.25
+    config.block = 128
+    config.num_warps = 4
     rule = config.make()
-    assert isinstance(rule, TritonPPO)
     assert rule.entropy_coefficient == 0.25
+    assert rule.block == 128
+    assert rule.num_warps == 4
 
 
 @pytest.mark.parametrize(("block", "num_warps"), [(100, 8), (256, 3)])
@@ -91,6 +121,153 @@ def test_a_horizon_the_advantage_kernel_cannot_tile_is_refused(horizon: int) -> 
         match=f"multiple of {TritonPPO.Config.ADVANTAGE_WIDTH}",
     ):
         rule.check_horizon(horizon)
+
+
+def test_the_kernels_match_the_torch_reference_under_the_triton_interpreter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Triton's CPU interpreter runs each launch's host code and kernel body.
+
+    Four rows of four lanes make the loss kernel write four blocks of partial sums.
+    """
+    monkeypatch.setenv("TRITON_INTERPRET", "1")
+    monkeypatch.setattr(policy_gradient_kernel, "_require_cuda", _accept_any_device)
+    monkeypatch.setattr(
+        jit,
+        "_normalize_ty",
+        partial(_normalize_postponed_constexpr, normalize=jit._normalize_ty),
+    )
+    monkeypatch.setattr(
+        interpreter,
+        "_patch_lang_tensor",
+        partial(_patch_scalar_index, patch=interpreter._patch_lang_tensor),
+    )
+    # Triton jits its own library functions when first imported; an import
+    # before the variable was set left them compiled-mode, which the
+    # interpreter refuses to call.
+    for module in (triton.language, triton.language.standard):
+        for name, value in inspect.getmembers(module, _is_jit):
+            monkeypatch.setattr(
+                module,
+                name,
+                interpreter.InterpretedFunction(value.fn),
+            )
+    policy_gradient_kernel._kernels.cache_clear()
+    # The logsumexp's ``where`` evaluates the rescale it discards, whose ``exp``
+    # overflows to inf on a GPU as well; numpy would otherwise raise it.
+    try:
+        with np.errstate(over="ignore"):
+            _assert_kernels_match_reference()
+    finally:
+        policy_gradient_kernel._kernels.cache_clear()
+
+
+def _accept_any_device(tensor: Tensor) -> None:
+    del tensor
+
+
+# The interpreter finds constexpr parameters by their normalized annotation text, and
+# the module's postponed annotations spell it ``language.constexpr``.
+def _normalize_postponed_constexpr(
+    annotation: object,
+    *,
+    normalize: Callable[[object], str],
+) -> str:
+    return "constexpr" if annotation == "language.constexpr" else normalize(annotation)
+
+
+# The interpreter holds a scalar as a one-element array, which numpy 2.5 no longer
+# converts with ``int``; a runtime loop bound such as ``range(segments)`` needs it.
+def _patch_scalar_index(
+    tensor: type,
+    scope: _PatchScope,
+    *,
+    patch: Callable[[type, _PatchScope], None],
+) -> None:
+    patch(tensor, scope)
+    scope.set_attr(tensor, "__index__", _scalar_index)
+
+
+def _scalar_index(tensor: _InterpretedTensor) -> int:
+    return int(tensor.handle.data.item())
+
+
+def _is_jit(value: object) -> TypeIs[jit.JITFunction[..., object]]:
+    return isinstance(value, jit.JITFunction)
+
+
+class _PatchScope(Protocol):
+    def set_attr(self, obj: object, name: str, value: object) -> None: ...
+
+
+class _InterpretedHandle(Protocol):
+    data: NDArray[np.integer]
+
+
+class _InterpretedTensor(Protocol):
+    handle: _InterpretedHandle
+
+
+def _assert_kernels_match_reference() -> None:
+    batch = random_minibatch(
+        rows=2,
+        horizon=TritonPPO.Config.ADVANTAGE_WIDTH,
+        num_actions=3,
+        seed=3,
+    )
+    reference = TorchPPO.Config().make()
+    config = TritonPPO.Config()
+    config.block = 4
+    config.num_warps = 1
+    triton_ppo = config.make()
+    inputs = (batch["decoded"], batch["actions"], batch["action_mask"])
+    expected = reference.log_probs(*inputs)
+    actual = triton_ppo.log_probs(*inputs)
+    assert torch.equal(actual.values, expected.values)
+    torch.testing.assert_close(actual.logps, expected.logps, rtol=1e-5, atol=1e-4)
+    torch.testing.assert_close(actual.new_lp, expected.new_lp, rtol=1e-5, atol=1e-4)
+
+    expected_adv, expected_ret = reference.advantage(
+        expected.values,
+        batch["rewards"],
+        batch["terminals"],
+    )
+    actual_adv, actual_ret = triton_ppo.advantage(
+        expected.values,
+        batch["rewards"],
+        batch["terminals"],
+    )
+    torch.testing.assert_close(actual_adv, expected_adv)
+    torch.testing.assert_close(actual_ret, expected_ret)
+
+    loss_inputs = {
+        "decoded": batch["decoded"],
+        "actions": batch["actions"],
+        "old_logprobs": batch["old_logprobs"],
+        "advantages": expected_adv,
+        "values": batch["values"],
+        "returns": expected_ret,
+    }
+    expected_loss = reference.loss(expected, **loss_inputs)
+    actual_loss = triton_ppo.loss(expected, **loss_inputs)
+    torch.testing.assert_close(
+        actual_loss.grad_logits,
+        expected_loss.grad_logits,
+        rtol=1e-3,
+        atol=1e-7,
+    )
+    torch.testing.assert_close(
+        actual_loss.grad_values,
+        expected_loss.grad_values,
+        rtol=1e-5,
+        atol=1e-7,
+    )
+    torch.testing.assert_close(
+        actual_loss.losses,
+        expected_loss.losses,
+        rtol=1e-3,
+        atol=1e-5,
+    )
 
 
 def _cuda_batch(rows: int, horizon: int) -> dict[str, Tensor]:
@@ -189,6 +366,6 @@ def test_the_advantage_kernel_stores_the_dtype_its_inputs_promote_to() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -30,14 +30,14 @@ time budget, and evaluator all run as written.
 
 Examples:
   CUDA_VISIBLE_DEVICES=0 karpathy_race.py
-  CUDA_VISIBLE_DEVICES=0 karpathy_race.py --rows 16 --corpus /opt/scratch/datasets/nanochat-priml
+  CUDA_VISIBLE_DEVICES=0 karpathy_race.py --rows 16 --corpus /opt/scratch/datasets/nanochat
 
 Example Output:
 
 ````
 $ CUDA_VISIBLE_DEVICES=0 karpathy_race.py
 upstream:  /opt/scratch/karpathy-autoresearch/train.py
-corpus:    /opt/scratch/datasets/nanochat-priml
+corpus:    /opt/scratch/datasets/nanochat
 kernel:    their_attention (SDPA; FA3 needs SM90)
 rows/pass: 32 (theirs is 128; 45 GiB on H100)
 vocab:     8,192
@@ -78,9 +78,7 @@ RESULT: {
 ```
 
 See Also:
-  CUDA_VISIBLE_DEVICES=1 uv --quiet run --frozen python -m priml priml.baselines.nanochat.experiments.exp001 --override cfg.step.rows_per_pass=64
-  # 26-08-17 20:40:26.175900 | INFO | priml.train.train_loop | _maybe_eval:1249 | RESULT: steps=221 | time=345.1s | train_sec=300.0s | train_unbilled_sec=17.7s | eval_sec=24.9s | other_sec=2.5s | mean_batch_time=0.3088 | total_loss=3.1983 | val_bpb=1.1426
-  # 26-08-17 20:40:26.176222 | INFO | priml.launch | main:133 | Total program time: 347.2s
+  CUDA_VISIBLE_DEVICES=1 uv --quiet run --frozen python -m priml priml.baselines.nanochat.experiments.exp001
 
 '''
 # fmt: on
@@ -93,88 +91,22 @@ from typing import TYPE_CHECKING, Protocol, cast
 import argparse
 import json
 import re
-import subprocess
 import sys
 import time
-import types
-
-from torch import Tensor
-
-import torch
-
-from priml.model.attention.value_gated_attention import sdpa_attention
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    import torch
+else:
+    from wrapt import lazy_import
 
+    torch = lazy_import("torch")  # ~1050 ms; only ``main`` reaches it.
 
-def their_attention(
-    q: Tensor,
-    k: Tensor,
-    v: Tensor,
-    *,
-    causal: bool,
-    window_size: tuple[int, int],
-) -> Tensor:
-    """``exp001``'s own kernel, behind FlashAttention-3's call signature.
-
-    Args:
-      q: ``[B, S, heads, channels_head]`` queries.
-      k: Keys, same shape.
-      v: Values, same shape.
-      causal: Whether the mask is causal; the recipe always passes True.
-      window_size: ``(history, future)``; the recipe always passes future 0.
-
-    Returns:
-      out: Attention output, same shape as ``q``.
-
-    """
-    if not causal:
-        raise ValueError("the recipe attends causally")
-    if window_size[1] != 0:
-        raise ValueError(f"unexpected future window {window_size[1]}")
-    return sdpa_attention(q, k, v, window=window_size[0])
-
-
-def clone_upstream(
-    root: Path,
-    *,
-    url: str = "https://github.com/karpathy/autoresearch.git",
-    commit: str = "b11d6f283f866eb7e10fb776a4b8553fef873fd5",
-) -> Path:
-    """Clone the reference at its pinned commit, or verify an existing clone.
-
-    Args:
-      root: Directory the clone lives in.
-      url: Repository to clone.
-      commit: Revision this run is of.
-
-    Returns:
-      path: The clone's path.
-
-    Raises:
-      RuntimeError: The clone is dirty or at another commit, so what it holds
-        is no longer the reference this run claims to be.
-
-    """
-    if not (root / ".git").is_dir():
-        root.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(  # noqa: S603 -- The script invokes the fixed git command for the pinned repository.
-            ["git", "clone", "--quiet", url, str(root)],  # noqa: S607 -- The script invokes the fixed git executable.
-            check=True,
-        )
-        subprocess.run(  # noqa: S603 -- The script invokes the fixed git command for the pinned repository.
-            ["git", "checkout", "--quiet", commit],  # noqa: S607 -- The script invokes the fixed git executable.
-            cwd=root,
-            check=True,
-        )
-    head = _git(root, "rev-parse", "HEAD")
-    if head != commit:
-        raise RuntimeError(f"clone is at {head}, expected {commit}")
-    if dirty := _git(root, "status", "--porcelain"):
-        raise RuntimeError(f"clone has local modifications:\n{dirty}")
-    return root
+from priml.baselines.nanochat.scripts.karpathy_upstream import (
+    clone_upstream,
+    kernels_stub,
+    their_attention,
+)
 
 
 def main() -> int:
@@ -185,7 +117,7 @@ def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -193,7 +125,7 @@ def main() -> int:
     root = clone_upstream(flags.clone)
 
     sys.path.insert(0, str(root))
-    sys.modules["kernels"] = cast(types.ModuleType, _kernels_stub())
+    sys.modules["kernels"] = kernels_stub()
 
     # Their corpus location, and the microbatch this card can hold. Both are
     # module-level constants their script reads at import, so they are set
@@ -254,7 +186,7 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--corpus",
         type=Path,
-        default=Path("/opt/scratch/datasets/nanochat-priml"),
+        default=Path("/opt/scratch/datasets/nanochat"),
         help="Prepared shards and tokenizer, read by both sides.",
     )
     # Measured on this card: 32 peaks at 22.9 GiB of 31.4, and 64 OOMs. The
@@ -311,37 +243,6 @@ def _import_prepare(corpus: Path) -> _Prepare:
     return prepare
 
 
-def _kernels_stub() -> _KernelModule:
-    """Return a ``kernels`` module whose ``get_kernel`` yields the portable kernel."""
-    module = cast(_KernelModule, types.ModuleType("kernels"))
-
-    def get_kernel(name: str) -> _Kernel:
-        if "flash-attention-3" not in name:
-            raise ValueError(name)
-        return cast(
-            _Kernel,
-            types.SimpleNamespace(
-                flash_attn_interface=types.SimpleNamespace(
-                    flash_attn_func=their_attention,
-                ),
-            ),
-        )
-
-    module.get_kernel = get_kernel
-    return module
-
-
-def _git(root: Path, *arguments: str) -> str:
-    """Run a read-only git command in the clone."""
-    return subprocess.run(  # noqa: S603 -- The helper invokes git read-only subcommands without a shell.
-        ["git", *arguments],  # noqa: S607 -- The script invokes the fixed git executable.
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-
-
 class _Tokenizer(Protocol):
     """The tokenizer API used by the upstream preparation module."""
 
@@ -373,24 +274,6 @@ class _Prepare(Protocol):
     DATA_DIR: str
     TOKENIZER_DIR: str
     Tokenizer: _TokenizerClass
-
-
-class _FlashAttentionInterface(Protocol):
-    """The upstream kernel interface used by the training script."""
-
-    flash_attn_func: Callable[..., Tensor]
-
-
-class _Kernel(Protocol):
-    """The upstream kernel object slice used by the training script."""
-
-    flash_attn_interface: _FlashAttentionInterface
-
-
-class _KernelModule(Protocol):
-    """The dynamically injected kernels module slice."""
-
-    get_kernel: Callable[[str], _Kernel]
 
 
 if __name__ == "__main__":

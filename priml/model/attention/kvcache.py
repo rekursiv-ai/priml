@@ -2,11 +2,29 @@
 
 from __future__ import annotations
 
-from typing import override
+from typing import TYPE_CHECKING, Protocol, override
 
-from torch import Tensor
+from torch import Tensor, nn
 
 import torch
+
+from priml.model.custom_types import (
+    DepthIndex,
+    HasDepthIndex,
+    is_cached_attention,
+)
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+
+class HasModules(Protocol):
+    """A module tree, walked to find every cached attention."""
+
+    def modules(self) -> Iterator[nn.Module]:
+        """Yield every submodule, the root included."""
+        ...
 
 
 class KVCache:
@@ -99,7 +117,8 @@ class KVCache:
         """Write new KV pairs into the cache and return the valid slice.
 
         If the cache is full, shifts old entries out (FIFO) to make room.
-        Uses sliced copy instead of torch.roll for torch.compile compat.
+        Uses sliced copy instead of torch.roll for torch.compile compat. A
+        rejected update leaves the cache as it was.
 
         Args:
           k: New key tensor of shape [..., seq_len, channels_head].
@@ -109,13 +128,35 @@ class KVCache:
           k: Valid key-cache slice after the update.
           v: Valid value-cache slice after the update.
 
+        Raises:
+          ValueError: ``k`` and ``v`` differ in length, or either cannot be
+            written into the cache.
+
         """
         s = k.shape[-2]
+        if v.shape[-2] != s:
+            raise ValueError(
+                f"Got {s} keys and {v.shape[-2]} values; keys and values pair "
+                "up one per token.",
+            )
         if s > self.max_seq:
             raise ValueError(
                 f"Update length {s} exceeds cache capacity {self.max_seq}.",
             )
         overflow = self.length + s - self.max_seq
+        # Checked before eviction moves anything; a failed write would otherwise
+        # leave the cache shifted.
+        for new, store in ((k, self.k), (v, self.v)):
+            slot = store[..., :s, :].shape
+            try:
+                fits = torch.broadcast_shapes(new.shape, slot) == slot
+            except RuntimeError:
+                fits = False
+            if not fits:
+                raise ValueError(
+                    f"Cannot write {tuple(new.shape)} into the cache's "
+                    f"{tuple(slot)} slot.",
+                )
         if overflow > 0:
             keep = self.length - overflow
             self.k[..., :keep, :] = self.k[..., overflow : self.length, :].clone()
@@ -127,6 +168,56 @@ class KVCache:
         self.length = end
         self.seen += s
         return self.k[..., :end, :], self.v[..., :end, :]
+
+
+def alloc_layer_cache(
+    model: HasModules,
+    *,
+    batch: int | tuple[int, ...],
+    max_seq: int,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype | None = None,
+) -> dict[DepthIndex, object]:
+    """Allocate one cache slot for every cached attention in ``model``.
+
+    Args:
+      model: Module tree containing cached attentions.
+      batch: Batch size or batch shape.
+      max_seq: Maximum sequence length.
+      device: Device for allocated tensors.
+      dtype: Dtype for allocated tensors.
+
+    Returns:
+      cache: Mutable state keyed by each attention's full depth index.
+
+    """
+    result: dict[DepthIndex, object] = {}
+    owners: dict[DepthIndex, str] = {}
+    for module_index, module in enumerate(model.modules()):
+        name = f"{type(module).__name__}[{module_index}]"
+        if not is_cached_attention(module):
+            continue
+        if not isinstance(module, HasDepthIndex):
+            raise TypeError(
+                f"Cached attention {name} has no depth_index.",
+            )
+        key = module.depth_index
+        if not key:
+            raise ValueError(
+                f"Cached attention {name} has an empty depth_index.",
+            )
+        if key in result:
+            raise ValueError(
+                f"Duplicate depth_index {key}: {owners[key]!r} and {name!r}.",
+            )
+        result[key] = module.alloc_kv_cache(
+            batch=batch,
+            max_seq=max_seq,
+            device=device,
+            dtype=dtype,
+        )
+        owners[key] = name
+    return result
 
 
 class _FrozenKVCache(KVCache):

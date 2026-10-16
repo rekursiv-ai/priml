@@ -94,6 +94,11 @@ def test_email_content_methods_are_annotated(
     assert found == methods
 
 
+def test_the_patch_leaves_inspect_unwrap_alone() -> None:
+    # ``unwrap`` follows ``__wrapped__`` to a different object, so ``-> _F`` lies.
+    assert "stdlib/inspect.pyi" not in _PATCH.read_text()
+
+
 def test_installed_tree_matches_the_installed_checkers() -> None:
     """A checker bump without a package rebuild leaves the tree stale."""
     bundle_commit = (
@@ -178,6 +183,6 @@ def test_wheel_build_removes_its_temp_tree(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

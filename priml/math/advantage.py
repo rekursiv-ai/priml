@@ -50,13 +50,16 @@ def generalized_advantage(
         generalized advantage estimation.
 
     """
-    not_done = 1.0 - dones.to(values.dtype)
+    # Selected, not multiplied by a 0/1 mask: 0 * nan is nan, so a value from
+    # past a terminal would otherwise leak into the episode that ended.
+    done = dones.bool()
     advantages = torch.empty_like(values)
     trace = torch.zeros_like(last_value)
     next_value = last_value
     for step in range(values.shape[0] - 1, -1, -1):
-        residual = rewards[step] + discount * next_value * not_done[step] - values[step]
-        trace = residual + discount * trace_decay * not_done[step] * trace
+        bootstrap = torch.where(done[step], 0.0, discount * next_value)
+        residual = rewards[step] + bootstrap - values[step]
+        trace = residual + torch.where(done[step], 0.0, discount * trace_decay * trace)
         advantages[step] = trace
         next_value = values[step]
     return advantages, advantages + values
@@ -171,17 +174,18 @@ def q_lambda_targets(
     if q_values.shape[0] != rewards.shape[0] + 1:
         raise ValueError("Q(lambda) requires one more Q-value step than rewards")
 
-    not_done = 1.0 - dones.to(rewards.dtype)
     greedy = q_values.max(dim=-1).values
     targets = torch.empty_like(rewards)
 
-    carried = rewards[-1] + discount * not_done[-1] * greedy[-1]
+    carried = torch.where(
+        dones[-1].bool(),
+        rewards[-1],
+        rewards[-1] + discount * greedy[-1],
+    )
     targets[-1] = carried
     for step in range(rewards.shape[0] - 2, -1, -1):
-        bootstrap = rewards[step] + discount * not_done[step] * greedy[step + 1]
-        carried = bootstrap + discount * trace_decay * not_done[step] * (
-            carried - greedy[step + 1]
-        )
+        bootstrap = rewards[step] + discount * greedy[step + 1]
+        carried = bootstrap + discount * trace_decay * (carried - greedy[step + 1])
         targets[step] = torch.where(dones[step].bool(), rewards[step], carried)
         carried = targets[step]
     return targets

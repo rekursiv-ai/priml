@@ -5,11 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
-from torch import Tensor
+from torch import Tensor, linalg
 
 import torch
-import torch.linalg
 
+from priml.math.basic import reduction_dims
 from priml.math.distributed import logmeanexp_all_to_all
 from priml.math.numeric import logmeanexp
 from priml.memory import convert_to_tensor
@@ -27,8 +27,9 @@ all satisfy it, and a caller can supply its own. Tuning knobs belong to one
 implementation, so they ride in a ``partial`` rather than on ``pca``.
 
 Returns:
-  eigenvalues: Ascending, shape ``(D,)``.
-  eigenvectors: Columns are the components, shape ``(D, D)``.
+  eigenvalues: Ascending, shape ``(K,)``; K is D for covariance decompositions
+    and min(N, D) for a thin SVD.
+  eigenvectors: Columns are the components, shape ``(D, K)``.
 """
 
 
@@ -57,23 +58,20 @@ def cov(
         x = convert_to_tensor(x)
     else:
         x, y = convert_to_tensor(x, y)
-    # A 1-D input is a single variable's observations; numpy.cov treats it as
-    # one row and returns the scalar variance.
-    scalar = x.ndim == 1
-    if scalar:
-        x = x.unsqueeze(0)
-        if y is not None:
-            y = y.unsqueeze(0)
-        rowvar = True
-    obs_dim = -1 if rowvar else -2
+    if x.ndim == 1:
+        x_centered = x - x.mean()
+        y_values = x_centered if y is None else y - y.mean()
+        observations = x.shape[0] - int(not bias)
+        return (x_centered * y_values).sum() / observations
+    obs_dim = x.ndim - (1 if rowvar else 2)
     x = x - x.mean(dim=obs_dim, keepdim=True)
-    y = x if y is None else (y - y.mean(dim=obs_dim, keepdim=True))
-    eq = "...ij,...kj->...ik" if rowvar else "...ji,...jk->...ik"
-    n = x.shape[obs_dim]
-    if n > 1 and not bias:
-        n = n - 1
-    result = torch.einsum(eq, x, y) / n
-    return result.squeeze() if scalar else result
+    y = x if y is None else y - y.mean(dim=obs_dim, keepdim=True)
+    observations = x.shape[obs_dim] - int(not bias)
+    if rowvar:
+        result = x @ y.transpose(-1, -2)
+    else:
+        result = x.transpose(-1, -2) @ y
+    return result / observations
 
 
 def entropy_logits(
@@ -99,9 +97,13 @@ def entropy_logits(
         y = x
     else:
         x, y = convert_to_tensor(x, y)
-    p = torch.softmax(x, dim=dim)
-    log_q = torch.log_softmax(y, dim=dim)
-    return -torch.sum(p * log_q, dim=dim, keepdim=keepdim)
+    dims = reduction_dims(dim, ndim=x.ndim)
+    p, log_q = _event_distributions(x, y, dims)
+    return -torch.sum(
+        p * torch.where(p == 0, 0.0, log_q),
+        dim=dims,
+        keepdim=keepdim,
+    )
 
 
 def entropy_probs(
@@ -127,12 +129,32 @@ def entropy_probs(
         q_t = p
     else:
         p, q_t = convert_to_tensor(p, q)
-    tiny = torch.finfo(q_t.dtype).tiny
-    return -torch.sum(
-        torch.where(p > 0, p * torch.log(q_t.clamp(min=tiny)), 0.0),
-        dim=dim,
-        keepdim=keepdim,
-    )
+    safe_q = torch.where(p == 0, 1.0, q_t)
+    dims = reduction_dims(dim, ndim=p.ndim)
+    return -torch.sum(p * torch.log(safe_q), dim=dims, keepdim=keepdim)
+
+
+def total_variation(
+    p: Tensorable,
+    q: Tensorable,
+    dim: int | Sequence[int] = -1,
+    keepdim: bool = False,
+) -> Tensor:
+    """Total-variation distance between two distributions, ``0.5 sum |p - q|``.
+
+    Args:
+      p: Probability distribution (elements sum to 1 along dim).
+      q: Probability distribution, shaped like ``p``.
+      dim: Dimension(s) over which to sum.
+      keepdim: If True, reduced dimensions are kept with size 1.
+
+    Returns:
+      distance: In ``[0, 1]``, reduced over ``dim``.
+
+    """
+    p, q = convert_to_tensor(p, q)
+    dims = reduction_dims(dim, ndim=p.ndim)
+    return 0.5 * (p - q).abs().sum(dims, keepdim=keepdim)
 
 
 def jsd(
@@ -158,13 +180,11 @@ def jsd(
 
     """
     logp = convert_to_tensor(logp)
-    ensemble_dim = (
-        (ensemble_dim,) if isinstance(ensemble_dim, int) else tuple(ensemble_dim)
-    )
-    event_dim = (event_dim,) if isinstance(event_dim, int) else tuple(event_dim)
+    ensemble_dim = reduction_dims(ensemble_dim, ndim=logp.ndim)
+    event_dim = reduction_dims(event_dim, ndim=logp.ndim)
 
     def _entropy(lp: Tensor) -> Tensor:
-        safe = torch.where(torch.isneginf(lp), 0.0, lp)
+        safe = torch.where(torch.isneginf(lp), torch.zeros_like(lp), lp)
         return -torch.sum(lp.exp() * safe, dim=event_dim, keepdim=True)
 
     # H(mean_p): entropy of the mixture.
@@ -210,19 +230,27 @@ def entropy_logits_mean_all_to_all(
         y = x
     else:
         x, y = convert_to_tensor(x, y)
-    if dim_mean is None:
-        dim_iter = (dim,) if isinstance(dim, int) else dim
-        dim_mean = tuple(set(range(x.ndim)) - {a % x.ndim for a in dim_iter})
-    p = torch.softmax(x, dim=dim)
-    mean_p = torch.mean(p, dim=dim_mean, keepdim=keepdim_mean)
-    log_q = torch.log_softmax(y, dim=dim)
+    event_axes = reduction_dims(dim, ndim=x.ndim)
+    mean_axes = (
+        tuple(sorted(set(range(x.ndim)) - set(event_axes)))
+        if dim_mean is None
+        else reduction_dims(dim_mean, ndim=x.ndim)
+    )
+    p, log_q = _event_distributions(x, y, event_axes)
+    mean_p = torch.mean(p, dim=mean_axes, keepdim=keepdim_mean)
     log_mean_q = logmeanexp_all_to_all(
         log_q,
-        dim=dim_mean,
+        dim=mean_axes,
         keepdim=keepdim_mean,
         world_size=world_size,
     )
-    return -torch.sum(mean_p * log_mean_q, dim=dim, keepdim=keepdim)
+    if not keepdim_mean:
+        event_axes = tuple(
+            axis - sum(mean_axis < axis for mean_axis in mean_axes)
+            for axis in event_axes
+        )
+    safe_log_q = torch.where(mean_p == 0, 0.0, log_mean_q)
+    return -torch.sum(mean_p * safe_log_q, dim=event_axes, keepdim=keepdim)
 
 
 def pca_eigh(x_centered: Tensor) -> tuple[Tensor, Tensor]:
@@ -239,7 +267,7 @@ def pca_eigh(x_centered: Tensor) -> tuple[Tensor, Tensor]:
 
     """
     sigma = (x_centered.T @ x_centered) / len(x_centered)
-    return torch.linalg.eigh(sigma)
+    return linalg.eigh(sigma)
 
 
 def pca_svd(x_centered: Tensor) -> tuple[Tensor, Tensor]:
@@ -251,9 +279,9 @@ def pca_svd(x_centered: Tensor) -> tuple[Tensor, Tensor]:
       x_centered: Mean-centered observations of shape ``(N, D)``.
 
     Returns:
-      eigenvalues: Ascending eigenvalues of shape ``(D,)``, flipped from
+      eigenvalues: Ascending eigenvalues of shape ``(min(N, D),)``, flipped from
         SVD's descending order to match the ``eigh`` convention.
-      eigenvectors: Columns are the corresponding eigenvectors ``(D, D)``.
+      eigenvectors: Right singular vectors as columns, shape ``(D, min(N, D))``.
 
     Raises:
       RuntimeError: If the input lives on an MPS device.
@@ -261,8 +289,7 @@ def pca_svd(x_centered: Tensor) -> tuple[Tensor, Tensor]:
     """
     if x_centered.device.type == "mps":
         raise RuntimeError("pca_svd is not supported on MPS; use pca_power instead.")
-    _U, s, vh = torch.linalg.svd(x_centered, full_matrices=False)
-    del _U
+    _, s, vh = linalg.svd(x_centered, full_matrices=False)
     eigenvalues = s * s / len(x_centered)
     eigenvectors = vh.T
     return eigenvalues.flip(0), eigenvectors.flip(1)
@@ -290,19 +317,17 @@ def pca_power(
 
     """
     sigma = (x_centered.T @ x_centered) / len(x_centered)
-    d = sigma.shape[0]
-    basis = torch.randn(d, d, device=sigma.device, dtype=sigma.dtype)
+    basis = torch.randn(*sigma.shape, device=sigma.device, dtype=sigma.dtype)
     basis, _ = _householder_qr(basis)
-    prev = (basis * (sigma @ basis)).sum(dim=0)
+    prev = _rayleigh(sigma, basis)
     for _ in range(num_iters):
         basis, _ = _householder_qr(sigma @ basis)
         if tol > 0:
-            eigenvalues = (basis * (sigma @ basis)).sum(dim=0)
+            eigenvalues = _rayleigh(sigma, basis)
             if (eigenvalues - prev).abs().max() < tol:
-                prev = eigenvalues
                 break
             prev = eigenvalues
-    eigenvalues = (basis * (sigma @ basis)).sum(dim=0)
+    eigenvalues = _rayleigh(sigma, basis)
     idx = eigenvalues.argsort()
     return eigenvalues[idx], basis[:, idx]
 
@@ -347,15 +372,25 @@ def pca(
             pca(x, decompose=functools.partial(pca_power, num_iters=50))
 
     Returns:
-      eigenvalues: Shape ``(D,)``, ascending order.
-      eigenvectors: Shape ``(D, D)``, columns are principal components.
-        If ``whiten=True``, columns are scaled by ``1/sqrt(λ + eps)``.
+      eigenvalues: Shape ``(K,)``, ascending order; K is D for covariance
+        decompositions and min(N, D) for a thin SVD.
+      eigenvectors: Shape ``(D, K)``, columns are principal components.
+        If ``whiten=True``, columns are scaled by ``1/sqrt(max(λ, 0) + eps)``;
+        zero-variance columns are zero when eps is zero.
 
     """
     x_t = convert_to_tensor(x).float()
-    eigenvalues, eigenvectors = decompose(x_t - x_t.mean(dim=0, keepdim=True))
+    centered = x_t - x_t.mean(dim=0)
+    eigenvalues, eigenvectors = decompose(centered)
     if whiten:
-        eigenvectors = eigenvectors * torch.rsqrt(eigenvalues.unsqueeze(0) + eps)
+        variance = eigenvalues.clamp(min=0) + eps
+        positive = variance > 0
+        inverse_scale = torch.where(
+            positive,
+            torch.rsqrt(torch.where(positive, variance, 1.0)),
+            0.0,
+        )
+        eigenvectors = eigenvectors * inverse_scale.unsqueeze(0)
     return eigenvalues, eigenvectors
 
 
@@ -371,7 +406,10 @@ def quantile_normalize(x: Tensorable, q: float = 1e-3) -> Tensor:
 
     """
     x_t = convert_to_tensor(x)
-    bounds = torch.quantile(x_t.reshape(-1), torch.tensor([q, 1 - q]))
+    bounds = torch.quantile(
+        x_t.reshape(-1),
+        torch.tensor([q, 1 - q], dtype=x_t.dtype, device=x_t.device),
+    )
     lo, hi = bounds[0], bounds[1]
     span = hi - lo
     # Constant (or near-constant) input collapses the range; map it to 0
@@ -379,6 +417,32 @@ def quantile_normalize(x: Tensorable, q: float = 1e-3) -> Tensor:
     # keeps the unused ``where`` branch NaN-free so gradients stay clean.
     safe_span = torch.where(span > 0, span, 1.0)
     return torch.where(span > 0, (x_t - lo) / safe_span, 0.0)
+
+
+def holm(p_values: Tensorable) -> Tensor:
+    """Adjust a family of p-values by Holm's step-down procedure.
+
+    The ``k``-th smallest of ``n`` p-values is multiplied by ``n - k + 1``,
+    clamped at 1, and raised to the largest adjusted value ranked before it.
+    Rejecting each test whose adjusted p-value is at most ``alpha`` holds the
+    family-wise error rate at ``alpha``; the threshold stays the caller's.
+
+    Args:
+      p_values: Raw p-values ``[..., n]``, one family along the last axis;
+        Python floats become float64.
+
+    Returns:
+      adjusted: Adjusted p-values, in the input's order and shape.
+
+    References:
+      Holm 1979, "A simple sequentially rejective multiple test procedure."
+
+    """
+    p = convert_to_tensor(p_values, dtype_hint=torch.float64)
+    ordered, order = p.sort(dim=-1, stable=True)
+    scale = torch.arange(p.shape[-1], 0, -1, dtype=p.dtype, device=p.device)
+    adjusted = (ordered * scale).clamp(max=1).cummax(-1).values
+    return torch.empty_like(adjusted).scatter_(-1, order, adjusted)
 
 
 def ema_update(current: float, new_value: float, alpha: float = 0.3) -> float:
@@ -446,23 +510,50 @@ class SlidingWindow:
         return (items + self.pseudocount) / (elapsed + self.pseudotime)
 
 
+def _event_distributions(
+    x: Tensor,
+    y: Tensor,
+    event_axes: tuple[int, ...],
+) -> tuple[Tensor, Tensor]:
+    """Normalize joint event dimensions while preserving their original axes."""
+    if len(event_axes) == 1:
+        return (
+            torch.softmax(x, dim=event_axes[0]),
+            torch.log_softmax(y, dim=event_axes[0]),
+        )
+    leading_axes = tuple(axis for axis in range(x.ndim) if axis not in event_axes)
+    permutation = leading_axes + event_axes
+    inverse = tuple(permutation.index(axis) for axis in range(x.ndim))
+    leading_shape = tuple(x.shape[axis] for axis in leading_axes)
+    event_shape = tuple(x.shape[axis] for axis in event_axes)
+    x_flat = x.permute(permutation).reshape(*leading_shape, -1)
+    y_flat = y.permute(permutation).reshape(*leading_shape, -1)
+    p = torch.softmax(x_flat, dim=-1).reshape(*leading_shape, *event_shape)
+    log_q = torch.log_softmax(y_flat, dim=-1).reshape(*leading_shape, *event_shape)
+    return p.permute(inverse), log_q.permute(inverse)
+
+
 # Returns (q, r) where q is orthogonal and r is upper triangular.
 def _householder_qr(mat: Tensor) -> tuple[Tensor, Tensor]:
     """Householder QR decomposition (MPS-native)."""
     m, n = mat.shape
     q = torch.eye(m, device=mat.device, dtype=mat.dtype)
     r = mat.clone()
+    threshold = torch.finfo(mat.dtype).eps * mat.norm()
     for k in range(min(m, n)):
         x = r[k:, k]
-        alpha = -torch.sign(x[0]) * x.norm()
+        alpha = -torch.where(x[0] >= 0, 1.0, -1.0) * x.norm()
         v = x.clone()
         v[0] = v[0] - alpha
         v_norm = v.norm()
-        # Skip the reflection when the column is already (near) axis-aligned;
-        # scale the dtype epsilon by the row count for the accumulated error.
-        if v_norm < torch.finfo(mat.dtype).eps * mat.shape[0]:
+        if v_norm <= threshold:
             continue
         v = v / v_norm
         r[k:, k:] = r[k:, k:] - 2 * v.unsqueeze(0).T @ (v.unsqueeze(0) @ r[k:, k:])
         q[:, k:] = q[:, k:] - 2 * (q[:, k:] @ v.unsqueeze(0).T) @ v.unsqueeze(0)
     return q, r
+
+
+def _rayleigh(sigma: Tensor, basis: Tensor) -> Tensor:
+    """Estimate eigenvalues along the basis columns."""
+    return (basis * (sigma @ basis)).sum(dim=0)

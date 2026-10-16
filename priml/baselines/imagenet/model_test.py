@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Final
 
 from configgle import PartialConfig
 from torch import nn
-from torchvision.models import resnet18, resnet50
+from torchvision.models import resnet, resnet50
 
 import pytest
 import torch
@@ -49,6 +49,59 @@ def strided_net(num_classes: int) -> nn.Module:
             flatten=nn.Flatten(),
             fc=nn.Linear(4, num_classes),
         ),
+    )
+
+
+def basic_block_net(num_classes: int) -> nn.Module:
+    """Return torchvision's stem, pooling, and BasicBlocks at 16-32 channels.
+
+    ResNet-18's layer classes at 16-32 channels instead of 64-512, including a
+    blurred stride-2 block and its downsample.
+    """
+    return nn.Sequential(
+        nn.Conv2d(3, 16, 7, stride=2, padding=3, bias=False),
+        nn.BatchNorm2d(16),
+        nn.ReLU(inplace=True),
+        nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+        resnet.BasicBlock(16, 16),
+        resnet.BasicBlock(
+            16,
+            32,
+            stride=2,
+            downsample=nn.Sequential(
+                nn.Conv2d(16, 32, 1, stride=2, bias=False),
+                nn.BatchNorm2d(32),
+            ),
+        ),
+        nn.AdaptiveAvgPool2d(1),
+        nn.Flatten(),
+        nn.Linear(32, num_classes),
+    )
+
+
+def bottleneck_net(num_classes: int) -> nn.Module:
+    """Return torchvision's stem, pooling, and one strided Bottleneck.
+
+    ResNet-50's block at 16 bottleneck channels instead of 64-512; its strided
+    3x3 and its downsample have 16 or more inputs, so both are blurred.
+    """
+    return nn.Sequential(
+        nn.Conv2d(3, 32, 7, stride=2, padding=3, bias=False),
+        nn.BatchNorm2d(32),
+        nn.ReLU(inplace=True),
+        nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+        resnet.Bottleneck(
+            32,
+            16,
+            stride=2,
+            downsample=nn.Sequential(
+                nn.Conv2d(32, 64, 1, stride=2, bias=False),
+                nn.BatchNorm2d(64),
+            ),
+        ),
+        nn.AdaptiveAvgPool2d(1),
+        nn.Flatten(),
+        nn.Linear(64, num_classes),
     )
 
 
@@ -104,18 +157,24 @@ def test_forward_maps_images_to_logits() -> None:
 
 @pytest.mark.parametrize(
     "arch",
-    [strided_net, resnet18, resnet50],
-    ids=["strided_net", "resnet18", "resnet50"],
+    [
+        strided_net,
+        basic_block_net,
+        bottleneck_net,
+        # exp000's own network, whose 25M parameters take 0.4 s to build.
+        pytest.param(resnet50, marks=pytest.mark.compute_large_fixture),
+    ],
+    ids=["strided_net", "basic_block_net", "bottleneck_net", "resnet50"],
 )
 def test_cost_matches_what_torch_dispatches(arch: Callable[..., nn.Module]) -> None:
     """Every conv, blur, and head matmul is costed, and every parameter owned."""
     config = TorchvisionResNet.Config()
     config.channels_out = 3
-    config.image_size = (32, 24)
+    config.image_size = (8, 7)
     config.arch = PartialConfig(arch)
     analytical = assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randn(2, 3, 32, 24, requires_grad=True),
+        build_input=lambda: torch.randn(2, 3, 8, 7, requires_grad=True),
         batch_size=2,
         dtype=None,
     )
@@ -149,6 +208,6 @@ def test_resnet_bfb() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

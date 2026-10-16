@@ -1,12 +1,11 @@
 """Tests that evaluation reports preserve their checkpoint inputs."""
 
 from pathlib import Path
-from typing import cast
 
-import json
 import sys
 
 from configgle.launch import resolve_config
+from treekle import json_loads
 
 import pytest
 import torch
@@ -14,7 +13,7 @@ import torch
 from priml.baselines.etth1 import experiments
 from priml.baselines.etth1.data_test import fixture_config
 from priml.baselines.etth1.experiments import exp_smoke
-from priml.baselines.etth1.scripts import evaluation as evaluate
+from priml.baselines.etth1.scripts import evaluation
 from priml.baselines.etth1.train_step import Etth1TrainLoop
 
 
@@ -65,7 +64,7 @@ def test_output_cannot_replace_best_selector(
         ],
     )
     with pytest.raises(ValueError, match="protected input artifact"):
-        evaluate.main()
+        evaluation.main()
     assert selector.read_bytes() == before
 
 
@@ -87,7 +86,7 @@ def test_evaluation_uses_selected_recipe(
         {"step": {"model": model.state_dict(), "timer_step": {"global_count": 0}}},
         f=checkpoint,
     )
-    expected = evaluate.evaluate(model, batches=cfg.dataset.make().test_dataloader())
+    expected = evaluation.evaluate(model, batches=cfg.dataset.make().test_dataloader())
     monkeypatch.setattr(experiments, name, lambda: cfg)
     monkeypatch.setattr(
         sys,
@@ -100,14 +99,14 @@ def test_evaluation_uses_selected_recipe(
             str(checkpoint),
         ],
     )
-    assert evaluate.main() == 0
-    report = cast(dict[str, object], json.loads(capsys.readouterr().out))
+    assert evaluation.main() == 0
+    report = json_loads(capsys.readouterr().out, dict[str, object])
     assert report["experiment"] == name
     assert report["mse"] == expected["mse"]
     assert report["mae"] == expected["mae"]
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

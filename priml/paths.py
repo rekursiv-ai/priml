@@ -105,7 +105,7 @@ def validated_output_path(
         raise ValueError(f"runtime output path must not be root: {path}")
     if Path(os.path.normpath(destination)) != destination:
         raise ValueError(f"runtime output path must be normalized: {path}")
-    resolved = destination.resolve(strict=False)
+    resolved = destination.resolve()
     if resolved == Path(resolved.anchor):
         raise ValueError(f"runtime output path must not be root: {path}")
     entries = protected if isinstance(protected, Iterable) else protected()

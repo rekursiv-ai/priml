@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import override
+from typing import TYPE_CHECKING, override
 
 import functools
 
@@ -29,6 +29,10 @@ from priml.math.diffusion.target import (
     target_x,
 )
 from priml.testing.cost import assert_cost_matches_torch
+
+
+if TYPE_CHECKING:
+    from priml.math.custom_types import Tensorable
 
 
 def _per_sample(config: DiffusionLoss.Config) -> Cost:
@@ -392,6 +396,50 @@ def test_diffusion_loss_min_snr_gamma_gradient_flow() -> None:
     assert model.w.grad is not None
 
 
+def test_diffusion_loss_time_transform_moves_log_t_before_the_schedule() -> None:
+    """A transform sending every ``log_t`` to ``0`` pins ``log_snr`` at its ``t = 1``."""
+    config = DiffusionLoss.Config(time_transform=_to_zero_log_time)
+    result = config.make()(denoiser=_zero_denoiser, x0=torch.randn(2, 3, 4))
+    # log_t broadcasts over x0's (3, 4) feature dims, so the trailing dims are 1.
+    expected = config.logsnr_fn(torch.zeros(2, 1, 1))
+    assert torch.equal(result["log_snr"], expected)
+
+
+@pytest.mark.parametrize("missing", ["target", "predict"])
+def test_diffusion_loss_rejects_a_target_fn_without_target_or_prediction(
+    missing: str,
+) -> None:
+    def target_partial(
+        model: Tensor,
+        x_noisy: Tensor,
+        log_snr: Tensor,
+        log_sigma: Tensor,
+        *,
+        x_original: Tensor | None = None,
+        eps_original: Tensor | None = None,
+    ) -> TargetResult:
+        del x_noisy, log_snr, log_sigma, x_original, eps_original
+        return TargetResult(
+            None if missing == "target" else model,
+            None if missing == "predict" else model,
+            model,
+            model,
+        )
+
+    loss_fn = DiffusionLoss.Config(target_fn=target_partial).make()
+    with pytest.raises(ValueError, match=rf"^Expected {missing} is not None\.$"):
+        loss_fn(denoiser=_zero_denoiser, x0=torch.randn(2, 3, 4))
+
+
+def _to_zero_log_time(log_t: Tensorable) -> Tensor:
+    return torch.zeros_like(torch.as_tensor(log_t))
+
+
+def _zero_denoiser(x: Tensor, sigma: Tensor) -> Tensor:
+    del sigma
+    return torch.zeros_like(x)
+
+
 def test_diffusion_loss_cost_counts_the_complete_batch() -> None:
     """Count per-element work and each sample's scalar work exactly."""
     scale = torch.ones((), requires_grad=True)
@@ -525,6 +573,6 @@ def test_diffusion_loss_operand_traffic(dtype: torch.dtype) -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

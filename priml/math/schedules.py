@@ -72,10 +72,7 @@ def multiply_schedules[ProgressT](
     """
 
     def combined(progress: ProgressT) -> float:
-        result = 1.0
-        for schedule in schedules:
-            result *= schedule(progress)
-        return result
+        return math.prod(schedule(progress) for schedule in schedules)
 
     return combined
 
@@ -154,6 +151,8 @@ def polynomial(progress: float, *, power: float = 1.0) -> float:
       multiplier: The rate's share of its initial value.
 
     """
+    if power < 0 or not math.isfinite(power):
+        raise ValueError(f"power must be finite and nonnegative; got {power}.")
     return float((1.0 - _clamped(progress)) ** power)
 
 
@@ -314,7 +313,7 @@ def one_cycle(
         )
     spent = _clamped(progress)
     if spent < warmup_fraction:
-        rising = spent / warmup_fraction if warmup_fraction else 1.0
+        rising = spent / warmup_fraction
         # The rising leg is the falling cosine read backwards, so both legs
         # meet at exactly 1.0 and the peak has no discontinuity.
         return initial + (1.0 - initial) * (1.0 - cosine(rising))

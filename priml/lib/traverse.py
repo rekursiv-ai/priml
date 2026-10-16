@@ -39,11 +39,16 @@ def recursively_iterate_over_object_descendants(
     mappings, sets, and object attributes while tracking paths, avoiding cycles,
     and yielding (path, value) tuples.
 
+    Every path is visited: an object reachable along two paths (a shared list,
+    or an interned small int) is yielded under each. Only a cycle -- an object
+    that is its own ancestor -- stops the descent.
+
     Args:
       value: The root value to traverse.
       recurse: Predicate (path, obj) -> bool. If True, yields obj and recurses
         into children. If False, skips. Defaults to always recursing.
-      seen: Object IDs already visited (for cycle detection). Created if None.
+      seen: Object IDs never to enter, plus the current ancestors while the
+        walk is inside them. Created if None.
       path: Current path to this value (tuple of indices/keys from root).
 
     Yields:
@@ -55,73 +60,19 @@ def recursively_iterate_over_object_descendants(
         seen = set()
 
     value_id = id(value)
-    if value_id in seen:
-        return
-    seen.add(value_id)
-
-    if not recurse(path, value):
+    if value_id in seen or not recurse(path, value):
         return
 
     yield path, value
 
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        for i, item in enumerate(value):
-            yield from recursively_iterate_over_object_descendants(
-                item,
-                recurse=recurse,
-                seen=seen,
-                path=(*path, i),
-            )
-    elif isinstance(value, Mapping):
-        for k, v in cast(Mapping[str, object], value).items():
-            yield from recursively_iterate_over_object_descendants(
-                v,
-                recurse=recurse,
-                seen=seen,
-                path=(*path, k),
-            )
-    elif isinstance(value, AbstractSet):
-        for i, item in enumerate(value):
-            yield from recursively_iterate_over_object_descendants(
-                item,
-                recurse=recurse,
-                seen=seen,
-                path=(*path, i),
-            )
-    else:
-        # Handle objects with __slots__ and/or __dict__.
-        if hasattr(type(value), "__slots__"):
-            seen_slots = set[str]()
-            for cls in type(value).__mro__:
-                slots = getattr(cls, "__slots__", ())
-                if isinstance(slots, str):
-                    slots = (slots,)
-                for slot in slots:
-                    if slot in seen_slots or slot == "__dict__":
-                        continue
-                    seen_slots.add(slot)
-                    try:
-                        slot_value: object = getattr(value, slot)  # pyright: ignore[reportAny] -- The traversed value is arbitrary; getattr_static would yield the slot descriptor, not the value.
-                    except AttributeError:
-                        continue
-                    yield from recursively_iterate_over_object_descendants(
-                        slot_value,
-                        recurse=recurse,
-                        seen=seen,
-                        path=(*path, slot),
-                    )
-        if hasattr(value, "__dict__"):
-            for key in sorted(vars(value)):
-                try:
-                    attr_value: object = getattr(value, key)  # pyright: ignore[reportAny] -- The traversed value is arbitrary.
-                except AttributeError:
-                    continue
-                yield from recursively_iterate_over_object_descendants(
-                    attr_value,
-                    recurse=recurse,
-                    seen=seen,
-                    path=(*path, key),
-                )
+    # Ancestors only: marking every visited id once suppressed each later path
+    # to an equal interned atom or a shared list, even one first reached under
+    # a pruned branch.
+    seen.add(value_id)
+    try:
+        yield from _iterate_children(value, recurse=recurse, seen=seen, path=path)
+    finally:
+        seen.discard(value_id)
 
 
 def path_matches_pattern(
@@ -233,3 +184,71 @@ def should_recurse_for_patterns(
         return True
 
     return any(could_path_lead_to_pattern(path_str, p) for p in include)
+
+
+def _iterate_children(
+    value: object,
+    *,
+    recurse: Callable[[tuple[int | str, ...], object], bool],
+    seen: set[int],
+    path: tuple[int | str, ...],
+) -> Iterator[tuple[tuple[int | str, ...], object]]:
+    """Recurse into each child of ``value``, keyed by index, key, or attribute."""
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        for i, item in enumerate(value):
+            yield from recursively_iterate_over_object_descendants(
+                item,
+                recurse=recurse,
+                seen=seen,
+                path=(*path, i),
+            )
+    elif isinstance(value, Mapping):
+        for k, v in cast(Mapping[str, object], value).items():
+            yield from recursively_iterate_over_object_descendants(
+                v,
+                recurse=recurse,
+                seen=seen,
+                path=(*path, k),
+            )
+    elif isinstance(value, AbstractSet):
+        for i, item in enumerate(value):
+            yield from recursively_iterate_over_object_descendants(
+                item,
+                recurse=recurse,
+                seen=seen,
+                path=(*path, i),
+            )
+    else:
+        # Handle objects with __slots__ and/or __dict__.
+        if hasattr(type(value), "__slots__"):
+            seen_slots = set[str]()
+            for cls in type(value).__mro__:
+                slots = getattr(cls, "__slots__", ())
+                if isinstance(slots, str):
+                    slots = (slots,)
+                for slot in slots:
+                    if slot in seen_slots or slot == "__dict__":
+                        continue
+                    seen_slots.add(slot)
+                    try:
+                        slot_value: object = getattr(value, slot)  # pyright: ignore[reportAny] -- The traversed value is arbitrary; getattr_static would yield the slot descriptor, not the value.
+                    except AttributeError:
+                        continue
+                    yield from recursively_iterate_over_object_descendants(
+                        slot_value,
+                        recurse=recurse,
+                        seen=seen,
+                        path=(*path, slot),
+                    )
+        if hasattr(value, "__dict__"):
+            for key in sorted(vars(value)):
+                try:
+                    attr_value: object = getattr(value, key)  # pyright: ignore[reportAny] -- The traversed value is arbitrary.
+                except AttributeError:
+                    continue
+                yield from recursively_iterate_over_object_descendants(
+                    attr_value,
+                    recurse=recurse,
+                    seen=seen,
+                    path=(*path, key),
+                )
