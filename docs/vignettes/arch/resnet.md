@@ -32,7 +32,7 @@ y     = f(x) + x                   ∈ ℝᵇ        # no gate
 Highway, but:
 
 1. del `K`; transform and carry weights both fixed at 1, not `k` and `1 − k`.
-2. so `y` is not a convex mix: `‖y‖` can grow with depth.
+2. so `y` is not a convex mix: `‖y‖₂` can grow with depth.
 
 He et al., arXiv:1603.05027 §3.1: gating the shortcut trained worse
 than plain identity.

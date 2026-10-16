@@ -32,8 +32,8 @@ Write rules are ways of fitting the operator to the pairs seen so far
 | write | fits | interference |
 |-------|------|--------------|
 | add | nothing; sums pairs | pairs with overlapping keys blend |
-| delta | one gradient step on `‖Sᵀ kₜ − vₜ‖²` | old pairs drift as new ones fit |
-| least squares | all pairs, `argmin Σₛ ‖Sᵀ kₛ − vₛ‖²` | minimal for a linear map |
+| delta | one gradient step on `‖Sᵀ kₜ − vₜ‖₂²` | old pairs drift as new ones fit |
+| least squares | all pairs, `argmin Σₛ ‖Sᵀ kₛ − vₛ‖₂²` | minimal for a linear map |
 
 ## Notation
 
@@ -76,7 +76,7 @@ yₜ    = Sₜᵀ qₜ                                            ∈ ℝᵈ
 
 ```
 GDN-2, εₜ = 0, ωₜ = 1                      = GLA
-GDN-2, αₜ = 1, εₜ = ωₜ = βₜ 1, ‖kₜ‖ = 1    = DeltaNet
+GDN-2, αₜ = 1, εₜ = ωₜ = βₜ 1, ‖kₜ‖₂ = 1    = DeltaNet
 GLA, one value dim, vₜ = 1,
      αₜ = 1 − uₜ, kₜ = uₜ ⊙ h̃ₜ             = minGRU
 ```
@@ -108,6 +108,23 @@ The rows above take one fitting step per token. Two rules fit harder:
 Toy (T = 256 random items, 4,096-number memory): additive write recall
 0.39, least-squares write 0.85. The least-squares write is the ceiling for
 a linear memory of that size.
+
+## What is kept
+
+Every memory decides which past tokens survive, and whether exactly or
+blended into a state:
+
+| keeps | exact (cache) | blended (state) |
+|---|---|---|
+| everything | attention | linear attention, no fade |
+| recent | sliding window: hard cutoff after `L` | minGRU, GLA, Mamba: fade |
+| chosen | H2O, LoLA, EM-LLM: by importance or surprise | DeltaNet, KDA: erase by key |
+
+- Columns: a kept token is stored itself, or mixed into one state.
+- Rows: all tokens survive, the most recent, or ones a rule picks.
+- Caches: [lola.md](lola.md). States that are networks: [ttt.md](ttt.md).
+- Raven (arXiv:2607.25357) writes each token to the top-`K` of `M` slots by a
+  learned router and freezes the rest: a blended state with chosen writes.
 
 ## Limits shared by all rows
 

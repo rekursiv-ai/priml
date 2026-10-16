@@ -8,6 +8,7 @@ Vaswani et al., "Attention Is All You Need", arXiv:1706.03762.
 t                                  ∈ 1..n      # time step; n = sequence length
 xₜ                                 ∈ ℝᶜ        # input
 d                                              # head dim
+softmaxₛ(aⱼ : j ∈ J) = exp(aₛ) / Σ(exp(aⱼ) : j ∈ J)  ∈ (0,1)  # s ∈ J
 ```
 
 ## One head (causal)
@@ -17,7 +18,7 @@ Q,K,V                              ∈ ℝᵈˣᶜ      # Linear operators
 qₜ    = Q xₜ                       ∈ ℝᵈ        # query
 kₜ    = K xₜ                       ∈ ℝᵈ        # key
 vₜ    = V xₜ                       ∈ ℝᵈ        # value
-wₜₛ   = exp(qₜᵀ kₛ/√d) / Σᵣ₌₁ᵗ exp(qₜᵀ kᵣ/√d) ∈ (0,1) # s ≤ t; Σₛ wₜₛ = 1
+wₜₛ   = softmaxₛ(qₜᵀ kⱼ / √d : j ≤ t) ∈ (0,1)   # s ≤ t
 oₜ    = Σₛ₌₁ᵗ wₜₛ vₛ               ∈ ℝᵈ        # weighted average of past values
 ```
 

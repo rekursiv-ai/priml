@@ -9,10 +9,14 @@ reads back `v + v′`, not `v′` ([gla.md](gla.md)).
 
 ## DeltaNet
 
-Notation (`xₜ`, `d`, `qₜ`, `kₜ`, `vₜ`, `Sₜ`) as in [gla.md](gla.md).
-
 ```
-kₜ                                 ∈ ℝᵈ        # L2-normalized: ‖kₜ‖ = 1
+xₜ                                 ∈ ℝᶜ        # input
+d                                              # head dim
+Q,K,V                              ∈ ℝᵈˣᶜ      # Linear operators
+qₜ    = Q xₜ                       ∈ ℝᵈ        # query
+kₜ    = K xₜ / ‖K xₜ‖₂             ∈ ℝᵈ        # key, L2-normalized: ‖kₜ‖₂ = 1
+vₜ    = V xₜ                       ∈ ℝᵈ        # value
+Sₜ                                 ∈ ℝᵈˣᵈ      # state: key → value table
 B                                  ∈ ℝ¹ˣᶜ      # Linear operator
 βₜ    = σ(B xₜ)                    ∈ (0,1)     # write strength
 Sₜ    = (I − βₜ kₜ kₜᵀ) Sₜ₋₁ + βₜ kₜ vₜᵀ ∈ ℝᵈˣᵈ # erase at kₜ, then write
@@ -21,7 +25,7 @@ yₜ    = Sₜᵀ qₜ                     ∈ ℝᵈ
 ```
 
 - `βₜ = 1`: `Sₜᵀ kₜ = vₜ` exactly; the old value is gone.
-- One SGD step on `½ ‖Sᵀ kₜ − vₜ‖²` with learning rate `βₜ`.
+- One SGD step on `½ ‖Sᵀ kₜ − vₜ‖₂²` with learning rate `βₜ`.
 
 ## Gated DeltaNet
 

@@ -26,7 +26,7 @@ yₜ    = Sₜᵀ qₜ = Σₛ₌₁ᵗ (qₜᵀ kₛ) vₛ ∈ ℝᵈ        # 
 ```
 A₁                                 ∈ ℝ¹⁶ˣᶜ     # low-rank gate projection
 A₂                                 ∈ ℝᵈˣ¹⁶
-αₜ    = σ(A₂ A₁ xₜ)^(1/τ)          ∈ (0,1)ᵈ    # τ = 16 slows forgetting
+αₜ    = σ(A₂ A₁ xₜ)^(1 / τ)          ∈ (0,1)ᵈ    # τ = 16 slows forgetting
 Sₜ    = Diag(αₜ) Sₜ₋₁ + kₜ vₜᵀ     ∈ ℝᵈˣᵈ      # fade each key channel, then add
 yₜ    = Sₜᵀ qₜ                     ∈ ℝᵈ
 ```

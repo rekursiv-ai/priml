@@ -12,6 +12,8 @@ notation, the computation as aligned equations with shapes, then a
   - [minLSTM](minlstm.md)
 - State-space models
   - [Mamba and Mamba-2](mamba.md)
+- Networks as memory
+  - [TTT and Titans](ttt.md)
 - Training
   - [Parallel scan](scan.md)
 
@@ -20,6 +22,7 @@ notation, the computation as aligned equations with shapes, then a
 - Softmax
   - [Attention and multi-head attention](attention.md)
   - [Multi-head latent attention (MLA)](mla.md)
+  - [LoLA and sparse caches (H2O, EM-LLM)](lola.md)
 - Linear
   - [Gated linear attention (GLA)](gla.md)
   - [Gated DeltaNet](deltanet.md)

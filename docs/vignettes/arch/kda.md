@@ -4,9 +4,16 @@ Kimi Team, "Kimi Linear: An Expressive, Efficient Attention Architecture", arXiv
 
 ## KDA
 
-Notation (`qₜ`, `kₜ`, `vₜ`, `βₜ`, `Sₜ ∈ ℝᵈˣᵈ`) as in [deltanet.md](deltanet.md).
-
 ```
+xₜ                                 ∈ ℝᶜ        # input
+d                                              # head dim
+Q,K,V                              ∈ ℝᵈˣᶜ      # Linear operators
+qₜ    = Q xₜ                       ∈ ℝᵈ        # query
+kₜ    = K xₜ / ‖K xₜ‖₂             ∈ ℝᵈ        # key, L2-normalized: ‖kₜ‖₂ = 1
+vₜ    = V xₜ                       ∈ ℝᵈ        # value
+Sₜ                                 ∈ ℝᵈˣᵈ      # state: key → value table
+B                                  ∈ ℝ¹ˣᶜ      # Linear operator
+βₜ    = σ(B xₜ)                    ∈ (0,1)     # write strength
 αₜ                                 ∈ (0,1)ᵈ    # decay: one per key channel
 Sₜ    = (I − βₜ kₜ kₜᵀ) Diag(αₜ) Sₜ₋₁ + βₜ kₜ vₜᵀ ∈ ℝᵈˣᵈ # paper eq. 1
 yₜ    = Sₜᵀ qₜ                     ∈ ℝᵈ

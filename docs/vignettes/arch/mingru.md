@@ -110,7 +110,7 @@ Backward is the same scan reversed, since the per-step Jacobian is known
 once forward is done.
 
 ```
-∂hₜ₊₁/∂hₜ = diag(1 − uₜ₊₁)                     ∈ ℝᵇˣᵇ      # known after forward; reverse scan, log n steps
+∂hₜ₊₁ / ∂hₜ = diag(1 − uₜ₊₁)                     ∈ ℝᵇˣᵇ      # known after forward; reverse scan, log n steps
 ```
 
 Sequential steps per training step:
