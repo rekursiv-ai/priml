@@ -15,6 +15,7 @@ import time
 
 from treekle import to_plain
 
+from priml.baselines.oscillator.benchmark import StudyRecord
 from priml.baselines.oscillator.experiments import exp000, exp001, exp002, exp_smoke
 from priml.paths import validated_output_path
 
@@ -60,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         (exp_smoke,) if flags.smoke else (exp000, exp001, exp002)
     )
     seeds = (2021,) if flags.smoke else (2021, 2022, 2023)
-    records: list[dict[str, object]] = []
+    records: list[ComparisonRecord] = []
     for matched in (True, False):
         for seed in seeds:
             for recipe in recipes:
@@ -74,9 +75,11 @@ def main(argv: list[str] | None = None) -> int:
                     cfg.pformat(hide_default_values=False) + "\n",
                 )
                 started = time.perf_counter()
-                record = cfg.make().run()
-                record["case"] = case
-                record["elapsed_seconds"] = time.perf_counter() - started
+                record: ComparisonRecord = {
+                    **cfg.make().run(),
+                    "case": case,
+                    "elapsed_seconds": time.perf_counter() - started,
+                }
                 records.append(record)
                 _write_json(directory / f"{label}.json", record)
                 print(f"Finished {label}", flush=True)
@@ -105,6 +108,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(directory / "comparison.json")
     return 0
+
+
+class ComparisonRecord(StudyRecord):
+    """One study run, labelled by simulator case and timed."""
+
+    case: str
+    elapsed_seconds: float
 
 
 class _Flags(Protocol):

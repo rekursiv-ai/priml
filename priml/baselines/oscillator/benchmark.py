@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import Self, override
+from typing import Self, TypedDict, override
 
 from configgle import Fig, Makeable
 from torch import Tensor
@@ -13,10 +13,33 @@ import torch
 from priml.baselines.oscillator.data import ForecastData
 from priml.baselines.oscillator.train_step import (
     DLinearForecast,
+    FitReport,
     ForecastGeometry,
     ForecastMethod,
 )
 from priml.model.custom_types import propagate_attr
+
+
+class ForecastScores(TypedDict):
+    """Errors of one forecaster on one held-out split."""
+
+    mse: float
+    mae: float
+    scaled_mse: float
+
+
+class StudyRecord(TypedDict):
+    """One fitted method's budget, fit report, and held-out scores."""
+
+    experiment: str
+    seed: int
+    reference_fit_trajectories: int
+    reference_validation_trajectories: int
+    reference_budget: int
+    cheap_training_trajectories: int
+    timesteps_per_query: int
+    training: FitReport
+    scores: dict[str, dict[str, ForecastScores]]
 
 
 class ForecastStudy:
@@ -55,7 +78,7 @@ class ForecastStudy:
         self.config = config
         self.data = config.data.make()
 
-    def run(self) -> dict[str, object]:
+    def run(self) -> StudyRecord:
         """Fit the method, then score it on each held-out split.
 
         Returns:
@@ -80,7 +103,7 @@ class ForecastStudy:
                 synthetic=synthetic,
                 simulator=self.data.cheap,
             )
-        scores: dict[str, dict[str, dict[str, float]]] = {}
+        scores: dict[str, dict[str, ForecastScores]] = {}
         for name, states in (
             ("familiar", cfg.data.test),
             ("shifted", cfg.data.shifted),
@@ -116,7 +139,7 @@ def forecast_scores(
     *,
     target: Tensor,
     scale: Tensor,
-) -> dict[str, float]:
+) -> ForecastScores:
     """Score every forecast cell using a scale fitted on reference training data.
 
     Nonfinite predictions propagate into the scores rather than being checked

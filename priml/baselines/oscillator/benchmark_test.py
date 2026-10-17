@@ -5,7 +5,11 @@ import math
 import pytest
 import torch
 
-from priml.baselines.oscillator.benchmark import forecast_scores
+from priml.baselines.oscillator.benchmark import (
+    ForecastScores,
+    StudyRecord,
+    forecast_scores,
+)
 from priml.baselines.oscillator.experiments import exp_smoke
 from priml.baselines.oscillator.train_step import DLinearForecast, RidgeCorrection
 
@@ -28,6 +32,18 @@ def test_test_changes_do_not_change_training_or_reference_budget(ridge: bool) ->
     assert first["scores"] != second["scores"]
     assert first["reference_budget"] == cfg.data.train.count + cfg.data.validation.count
     assert first["timesteps_per_query"] == cfg.data.seq_len + cfg.data.pred_len
+
+
+def test_run_record_matches_its_schema() -> None:
+    cfg = exp_smoke()
+    cfg.method = RidgeCorrection.Config()
+    record = cfg.make().run()
+    assert set(record) == StudyRecord.__required_keys__
+    assert set(record["scores"]) == {"familiar", "shifted"}
+    for split in record["scores"].values():
+        assert set(split) == {"method", "cheap_simulator", "last_value"}
+        for scores in split.values():
+            assert set(scores) == ForecastScores.__required_keys__
 
 
 def test_study_supplies_geometry_only_to_methods_that_declare_it() -> None:
@@ -62,7 +78,9 @@ def test_scores_reject_broadcasting_and_propagate_nonfinite_outputs() -> None:
     target = prediction.clone()
     prediction[0, 0, 0] = float("nan")
     scores = forecast_scores(prediction, target=target, scale=scale)
-    assert all(math.isnan(value) for value in scores.values())
+    assert math.isnan(scores["mse"])
+    assert math.isnan(scores["mae"])
+    assert math.isnan(scores["scaled_mse"])
 
 
 if __name__ == "__main__":

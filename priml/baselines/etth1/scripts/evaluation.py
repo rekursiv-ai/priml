@@ -11,7 +11,7 @@ import json
 
 from configgle.launch import resolve_config
 from torch import Tensor, nn
-from treekle import from_plain, json_loads
+from treekle import from_plain, json_loads, to_plain
 
 import numpy as np
 import torch
@@ -119,12 +119,12 @@ def main() -> int:
         "dataset_sha256": hashlib.sha256(
             (directory / "ETTh1.csv").read_bytes(),
         ).hexdigest(),
-        "torch": torch.__version__,
+        "torch": str(torch.__version__),
         "numpy": np.__version__,
         "step": from_plain(step["timer_step"], dict[str, object])["global_count"],
         **metrics,
     }
-    rendered = json.dumps(result, indent=2) + "\n"
+    rendered = json.dumps(to_plain(result), indent=2) + "\n"
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(rendered)

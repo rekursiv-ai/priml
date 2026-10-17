@@ -81,12 +81,15 @@ def test_identical_simulators_agree_and_missing_force_changes_forecasts() -> Non
 
 
 @pytest.mark.parametrize(
-    ("name", "value"),
-    [("step_size", 0.0), ("damping", -0.1), ("cubic", float("nan")), ("substeps", 0)],
+    "cfg",
+    [
+        Oscillator.Config(step_size=0.0),
+        Oscillator.Config(damping=-0.1),
+        Oscillator.Config(cubic=float("nan")),
+        Oscillator.Config(substeps=0),
+    ],
 )
-def test_bad_simulator_settings_fail(name: str, value: float) -> None:
-    cfg = Oscillator.Config()
-    setattr(cfg, name, value)
+def test_bad_simulator_settings_fail(cfg: Oscillator.Config) -> None:
     with pytest.raises(ValueError, match=r"finite|positive|nonnegative"):
         cfg.make()
 

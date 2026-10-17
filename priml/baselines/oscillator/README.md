@@ -73,8 +73,7 @@ using model seeds 2021, 2022, and 2023. Data seeds stay fixed, so this measures
 training-seed variation, not uncertainty across independent task populations.
 Ridge is deterministic; its repeated rows are not independent evidence.
 
-Add `--smoke` for two tiny integration runs. On a laptop, use a writable
-`--directory` such as a folder under Documents. Existing run directories are
+Add `--smoke` for two tiny integration runs. Existing run directories are
 never overwritten. The output includes each finalized config and per-run scores,
 plus `comparison.json` with environment details, source hashes, and Git status.
 These short pilot runs start fresh and do not implement checkpoint resumption.
@@ -89,7 +88,7 @@ The command above also runs real optimizer updates. Run the usual checks with:
 
 ```sh
 uv --quiet run --frozen --group pre-commit pre-commit run \
-  --files $(rg --files priml/baselines/oscillator)
+  --files $(git ls-files priml/baselines/oscillator)
 ```
 
 The numerical goldens in `testdata/` pin DLinear initialization and two-update
