@@ -97,8 +97,10 @@ ForecastStudy.Config(
         │       device_init='eager',
         │       dtype_autocast=None,
         │       autocast_cache_enabled=False,
-        │       seed=2_021
+        │       seed=None
         │   ),
+        │   seq_len=24,
+        │   pred_len=12,
         │   updates=300,
         │   pretrain_updates=0,
         │   batch_size=8,

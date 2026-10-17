@@ -61,8 +61,10 @@ def test_rate_experiments_change_only_the_starting_rate(
     base = exp000()
     fork = factory()
     assert fork.step.optimizer == PartialConfig(torch.optim.Adam, lr=learning_rate)
+    adam = fork.step.optimizer
+    assert isinstance(adam, PartialConfig)
+    adam.lr = 1e-4
     fork.experiment_name = base.experiment_name
-    fork.step.optimizer = base.step.optimizer.copy_tree()
     assert fork == base
     assert fork.copy_tree().finalize() == base.copy_tree().finalize()
 
@@ -121,8 +123,11 @@ def test_compact_experiment_changes_only_the_projections() -> None:
     base = exp003()
     fork = exp004()
     assert fork.experiment_name == "exp004"
-    assert fork.step.model.seasonal == LowRankProjection.Config(rank=32)
-    assert fork.step.model.trend == LowRankProjection.Config(rank=32)
+    assert fork.step.model.seasonal == LowRankProjection.Config()
+    assert fork.step.model.trend == LowRankProjection.Config()
+    resolved = fork.copy_tree().finalize().step.model.seasonal
+    assert isinstance(resolved, LowRankProjection.Config)
+    assert resolved.channels_hidden == 32
     fork.experiment_name = base.experiment_name
     fork.step.model.seasonal = base.step.model.seasonal.copy_tree()
     fork.step.model.trend = base.step.model.trend.copy_tree()

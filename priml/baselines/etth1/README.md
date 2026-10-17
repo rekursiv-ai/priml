@@ -176,15 +176,13 @@ Cosine decay did not improve validation MSE: it was about 0.043% higher.
 `exp000` remains the preferred recipe from this comparison. Test scores were
 measured after that decision and were not used to pick the experiment.
 This is one seed on a local CPU, not evidence of a general improvement.
-Reference-hardware results are still TBD. Full validation histories, settings,
-and checkpoint hashes are in `results/exp001_local_cpu.json`.
+Reference-hardware results are still TBD.
 
 ## Further experiments
 
 The search tried 45 validation-only candidates, including learning rates,
-weight penalties, input lengths, averaging, and smaller projections. Trial IDs
-in `results/experiment_search_cpu.json` record that search; they are not public
-experiment names. The retained recipes each make one change to a named parent:
+weight penalties, input lengths, averaging, and smaller projections. The
+retained recipes each make one change to a named parent:
 
 | Experiment | Parent | Change |
 | --- | --- | --- |
@@ -202,7 +200,7 @@ settings were fixed before evaluating the held-out test split.
 
 Each forecast projection starts from the input mean and learns a correction
 through two narrow linear layers. The final layer starts at zero, so the model
-initially predicts the mean. The rank is configurable, both child layers can
+initially predicts the mean. The hidden width is configurable, both child layers can
 be replaced, and their costs use the same config tree as the model. The unused
 reference decoder is retained.
 
@@ -262,18 +260,7 @@ microbenchmark measured about 0.86 ms per baseline training update and
 0.92 ms per compact update. These are warm, synthetic-batch timings, not
 end-to-end training times or GPU benchmarks.
 
-For paired runs, override `seed` and use a fresh `base_dir` for each seed.
-Set `dataset.working_dir` to the prepared CSV directory so all runs use the
-same data. For example, append these arguments to the training command:
-
-```sh
---override seed=2022 \
---override base_dir=/opt/scratch/etth1-seed-2022 \
---override dataset.working_dir=/opt/scratch/datasets/etth1
-```
-
-Select each run's `best.json` checkpoint using validation only. The full
-histories, scores, checkpoint hashes, environment, costs, and limitations
-are in `results/exp004_local_cpu.json`. The smaller cosine comparison remains
-in `results/exp001_local_cpu.json`. No canonical source goldens were changed.
-GPU/reference-hardware results remain TBD.
+Each seed's run used its own `base_dir` and the shared prepared CSV
+directory, and was scored from its validation-selected `best.json`
+checkpoint. No canonical source goldens were changed. GPU/reference-hardware
+results remain TBD.

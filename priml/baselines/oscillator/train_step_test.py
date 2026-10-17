@@ -7,14 +7,41 @@ from torch import Tensor
 import pytest
 import torch
 
-from priml.baselines.oscillator.data import Windows
+from priml.baselines.oscillator.data import ForecastData, Windows
 from priml.baselines.oscillator.experiments import exp_smoke
-from priml.baselines.oscillator.train_step import DLinearForecast, RidgeCorrection
+from priml.baselines.oscillator.train_step import (
+    DLinearForecast,
+    FitReport,
+    RidgeCorrection,
+)
 from priml.train.custom_types import TrainStepOutput
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+
+class _ScriptedUpdates:
+    """Replace optimizer updates with fixed weights, recording each batch."""
+
+    def __init__(self, method: DLinearForecast) -> None:
+        self.method = method
+        self.train_loss: Callable[..., TrainStepOutput] = method.step.train_loss
+        self.batches: list[tuple[Tensor, Tensor]] = []
+
+    def __call__(self, **batch: object) -> TrainStepOutput:
+        media, label = batch["media"], batch["label"]
+        assert isinstance(media, Tensor)
+        assert isinstance(label, Tensor)
+        self.batches.append((media.clone(), label.clone()))
+        step = self.method.step
+        step.timer_step.global_count += 1
+        # Make the last weights worse so keeping them would fail this test.
+        value = 100.0 if step.global_step == self.method.config.updates else 0.0
+        with torch.no_grad():
+            for parameter in step.model.parameters():
+                parameter.fill_(value)
+        return self.train_loss(**batch)
 
 
 @pytest.mark.parametrize("pretrain_updates", [0, 1])
@@ -29,34 +56,17 @@ def test_fit_restores_best_weights_and_checks_the_final_update(
     cfg.method.validation_every = 2
     cfg = cfg.finalize()
     assert isinstance(cfg.method, DLinearForecast.Config)
-    data = cfg.data.make()
-    train = data.windows(cfg.data.train, simulator=data.reference)
-    validation = data.windows(cfg.data.validation, simulator=data.reference)
-    synthetic = data.windows(cfg.data.synthetic, simulator=data.cheap)
+    train, validation, synthetic, data = _splits(cfg.data)
     method = cfg.method.make()
-    batches: list[tuple[Tensor, Tensor]] = []
+    scripted = _ScriptedUpdates(method)
     validation_steps: list[int] = []
     predict = method.predict
-    train_loss: Callable[..., TrainStepOutput] = method.step.train_loss
-
-    def scripted_update(**batch: object) -> TrainStepOutput:
-        media, label = batch["media"], batch["label"]
-        assert isinstance(media, Tensor)
-        assert isinstance(label, Tensor)
-        batches.append((media.clone(), label.clone()))
-        method.step.timer_step.global_count += 1
-        # Make the last weights worse so keeping them would fail this test.
-        value = 100.0 if method.step.global_step == method.config.updates else 0.0
-        with torch.no_grad():
-            for parameter in method.step.model.parameters():
-                parameter.fill_(value)
-        return train_loss(**batch)
 
     def record_validation(media: Tensor) -> Tensor:
         validation_steps.append(method.step.global_step)
         return predict(media)
 
-    monkeypatch.setattr(method.step, "train_step", scripted_update)
+    monkeypatch.setattr(method.step, "train_step", scripted)
     monkeypatch.setattr(method, "predict", record_validation)
     report = method.fit(
         train,
@@ -68,12 +78,11 @@ def test_fit_restores_best_weights_and_checks_the_final_update(
     assert report["updates"] == cfg.method.updates
     assert report["best_update"] == pretrain_updates + 2
     assert report["pretrain_updates"] == pretrain_updates
+    assert "validation_scaled_mse" in report
     assert all(
         torch.count_nonzero(value) == 0 for value in method.step.model.parameters()
     )
-    values = torch.cat((train.media, train.label), dim=1)
-    mean = values.mean(dim=(0, 1), keepdim=True)
-    scale = values.std(dim=(0, 1), correction=0, keepdim=True)
+    mean, scale = train.channel_stats()
     assert torch.equal(predict(validation.media), mean.expand_as(validation.label))
     assert report["validation_scaled_mse"] == pytest.approx(
         float(((mean - validation.label) / scale).square().mean()),
@@ -81,7 +90,9 @@ def test_fit_restores_best_weights_and_checks_the_final_update(
     for offset, source in ((0, train), (1, synthetic)):
         generator = torch.Generator().manual_seed(cfg.method.sample_seed + offset)
         selected = (
-            batches[pretrain_updates:] if offset == 0 else batches[:pretrain_updates]
+            scripted.batches[pretrain_updates:]
+            if offset == 0
+            else scripted.batches[:pretrain_updates]
         )
         for media, label in selected:
             indices = torch.randint(
@@ -110,10 +121,7 @@ def test_budget_includes_pretraining_and_final_validation(
     cfg.method.pretrain_updates = pretrain_updates
     cfg = cfg.finalize()
     assert isinstance(cfg.method, DLinearForecast.Config)
-    data = cfg.data.make()
-    train = data.windows(cfg.data.train, simulator=data.reference)
-    validation = data.windows(cfg.data.validation, simulator=data.reference)
-    synthetic = data.windows(cfg.data.synthetic, simulator=data.cheap)
+    train, validation, synthetic, data = _splits(cfg.data)
     method = cfg.method.make()
     report = method.fit(
         train,
@@ -123,35 +131,51 @@ def test_budget_includes_pretraining_and_final_validation(
     )
     assert report["updates"] == cfg.method.updates
     assert report["best_update"] == cfg.method.updates
-    values = torch.cat((train.media, train.label), dim=1)
+    mean, scale = train.channel_stats()
     assert method.mean is not None
     assert method.scale is not None
-    assert torch.equal(method.mean, values.mean(dim=(0, 1), keepdim=True))
-    assert torch.equal(method.scale, values.std(dim=(0, 1), correction=0, keepdim=True))
+    assert torch.equal(method.mean, mean)
+    assert torch.equal(method.scale, scale)
     before = {
         name: value.clone() for name, value in method.step.model.state_dict().items()
     }
     assert torch.isfinite(method.predict(validation.media)).all()
     for name, value in method.step.model.state_dict().items():
         assert torch.equal(before[name], value)
-    with pytest.raises(RuntimeError, match="fresh forecaster"):
-        method.fit(
-            train,
-            validation=validation,
-            synthetic=synthetic,
-            simulator=data.cheap,
-        )
+
+
+def test_fit_reports_share_one_schema() -> None:
+    assert FitReport.__required_keys__ == {
+        "updates",
+        "best_update",
+        "pretrain_updates",
+    }
+    assert FitReport.__optional_keys__ == {"validation_scaled_mse"}
+
+
+def test_building_a_forecaster_does_not_reseed_global_rng() -> None:
+    cfg = exp_smoke().copy_tree().finalize()
+    assert isinstance(cfg.method, DLinearForecast.Config)
+    assert cfg.method.step.seed is None
+    torch.manual_seed(1)
+    first = cfg.method.make().step.model.state_dict()
+    torch.manual_seed(2)
+    second = cfg.method.make().step.model.state_dict()
+    assert any(not torch.equal(first[key], second[key]) for key in first)
 
 
 def test_ridge_correction_is_zero_when_simulator_matches() -> None:
     cfg = exp_smoke()
     cfg.data.reference = cfg.data.cheap.copy_tree()
-    data = cfg.data.make()
-    train = data.windows(cfg.data.train, simulator=data.reference)
-    validation = data.windows(cfg.data.validation, simulator=data.reference)
-    synthetic = data.windows(cfg.data.synthetic, simulator=data.cheap)
+    train, validation, synthetic, data = _splits(cfg.data)
     method = RidgeCorrection.Config().make()
-    method.fit(train, validation=validation, synthetic=synthetic, simulator=data.cheap)
+    report = method.fit(
+        train,
+        validation=validation,
+        synthetic=synthetic,
+        simulator=data.cheap,
+    )
+    assert report == {"updates": 0, "best_update": 0, "pretrain_updates": 0}
     assert torch.equal(method.predict(validation.media), validation.label)
 
 
@@ -172,9 +196,10 @@ def test_ridge_correction_learns_a_constant_residual_without_validation_targets(
     torch.testing.assert_close(method.predict(validation.media), expected)
 
 
-def test_pretraining_cannot_exceed_total_budget() -> None:
+@pytest.mark.parametrize("pretrain_updates", [-1, 300])
+def test_pretraining_must_leave_a_reference_update(pretrain_updates: int) -> None:
     cfg = DLinearForecast.Config()
-    cfg.pretrain_updates = cfg.updates
+    cfg.pretrain_updates = pretrain_updates
     with pytest.raises(ValueError, match="leave at least one"):
         cfg.make()
 
@@ -196,35 +221,23 @@ def test_unfitted_models_and_invalid_training_counts_fail() -> None:
         DLinearForecast.Config(updates=0).make()
 
 
-@pytest.mark.parametrize(
-    "optimize",
-    [False, pytest.param(True, marks=pytest.mark.compute_training)],
-)
-@pytest.mark.parametrize("split", ["train", "validation", "shape"])
-def test_bad_training_data_cannot_produce_a_report(
+@pytest.mark.parametrize("split", ["validation", "shape"])
+def test_bad_development_data_cannot_produce_a_report(
     split: str,
-    optimize: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cfg = exp_smoke().copy_tree().finalize()
-    data = cfg.data.make()
-    train = data.windows(cfg.data.train, simulator=data.reference)
-    validation = data.windows(cfg.data.validation, simulator=data.reference)
-    synthetic = data.windows(cfg.data.synthetic, simulator=data.cheap)
-    if split == "train":
-        train.label.fill_(float("nan"))
-        message = "nonfinite loss"
-    elif split == "validation":
+    train, validation, synthetic, data = _splits(cfg.data)
+    if split == "validation":
         validation.label.fill_(float("nan"))
         message = "finite validation checkpoint"
     else:
-        train.media = train.media[:, :-1]
+        train = Windows(media=train.media[:, :-1], label=train.label)
         message = "dimensions"
     method = cfg.method.make()
     assert isinstance(method, DLinearForecast)
-    if not optimize:
-        # Input checks also run without an optimizer update.
-        monkeypatch.setattr(method.step, "train_step", method.step.train_loss)
+    # Input checks also run without an optimizer update.
+    monkeypatch.setattr(method.step, "train_step", method.step.train_loss)
     with pytest.raises(ValueError, match=message):
         method.fit(
             train,
@@ -232,3 +245,36 @@ def test_bad_training_data_cannot_produce_a_report(
             synthetic=synthetic,
             simulator=data.cheap,
         )
+
+
+@pytest.mark.compute_training
+def test_nonfinite_training_data_leaves_no_finite_checkpoint() -> None:
+    cfg = exp_smoke().copy_tree().finalize()
+    train, validation, synthetic, data = _splits(cfg.data)
+    train.label.fill_(float("nan"))
+    method = cfg.method.make()
+    with pytest.raises(ValueError, match="finite validation checkpoint"):
+        method.fit(
+            train,
+            validation=validation,
+            synthetic=synthetic,
+            simulator=data.cheap,
+        )
+
+
+def _splits(
+    cfg: ForecastData.Config,
+) -> tuple[Windows, Windows, Windows, ForecastData]:
+    data = cfg.make()
+    return (
+        data.windows(cfg.train, simulator=data.reference),
+        data.windows(cfg.validation, simulator=data.reference),
+        data.windows(cfg.synthetic, simulator=data.cheap),
+        data,
+    )
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

@@ -11,31 +11,44 @@ from torch import Tensor
 import torch
 
 from priml.baselines.oscillator.data import ForecastData
-from priml.baselines.oscillator.train_step import DLinearForecast, ForecastMethod
+from priml.baselines.oscillator.train_step import (
+    DLinearForecast,
+    ForecastGeometry,
+    ForecastMethod,
+)
+from priml.model.custom_types import propagate_attr
 
 
 class ForecastStudy:
     """Fit a baseline before exposing either test split."""
 
     class Config(Fig["ForecastStudy"]):
-        experiment_name: str = "exp000"
-        """Name of the baseline recipe."""
+        experiment_name: str = ""
+        """Name of the recipe; each experiment factory sets its own."""
+
         seed: int = 2021
-        """Model seed; comparison runs vary this to measure training variance."""
+        """Model seed; the comparison varies it to measure training variance."""
+
         data: ForecastData.Config = field(default_factory=ForecastData.Config)
         """Simulators, independent splits, and forecasting geometry."""
+
         method: Makeable[ForecastMethod] = field(default_factory=DLinearForecast.Config)
         """Forecasting method given the same reference-data budget."""
 
         @override
         def finalize(self) -> Self:
-            if isinstance(self.method, DLinearForecast.Config):
-                self.method.step.seed = self.seed
-                self.method.step.train_budget_steps = self.method.updates
-                self.method.step.model.seq_len = self.data.seq_len
-                self.method.step.model.pred_len = self.data.pred_len
-                # Oscillator states contain position and velocity.
-                self.method.step.model.channels = 2
+            propagate_attr(
+                self.method,
+                "seq_len",
+                self.data.seq_len,
+                protocol=ForecastGeometry,
+            )
+            propagate_attr(
+                self.method,
+                "pred_len",
+                self.data.pred_len,
+                protocol=ForecastGeometry,
+            )
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
@@ -43,7 +56,13 @@ class ForecastStudy:
         self.data = config.data.make()
 
     def run(self) -> dict[str, object]:
-        """Return separate scores without using held-out targets during fitting."""
+        """Fit the method, then score it on each held-out split.
+
+        Returns:
+          record: The recipe, its reference-data budget, the method's fit
+            report, and per-split scores for the method and both controls.
+
+        """
         cfg = self.config
         train = self.data.windows(cfg.data.train, simulator=self.data.reference)
         validation = self.data.windows(
@@ -51,8 +70,7 @@ class ForecastStudy:
             simulator=self.data.reference,
         )
         synthetic = self.data.windows(cfg.data.synthetic, simulator=self.data.cheap)
-        values = torch.cat((train.media, train.label), dim=1)
-        scale = values.std(dim=(0, 1), correction=0, keepdim=True).clamp_min(1e-6)
+        _, scale = train.channel_stats()
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(cfg.seed)
             method = cfg.method.make()
@@ -62,7 +80,7 @@ class ForecastStudy:
                 synthetic=synthetic,
                 simulator=self.data.cheap,
             )
-        scores = {}
+        scores: dict[str, dict[str, dict[str, float]]] = {}
         for name, states in (
             ("familiar", cfg.data.test),
             ("shifted", cfg.data.shifted),
@@ -99,13 +117,28 @@ def forecast_scores(
     target: Tensor,
     scale: Tensor,
 ) -> dict[str, float]:
-    """Score every forecast cell using a scale fitted on reference training data."""
+    """Score every forecast cell using a scale fitted on reference training data.
+
+    Nonfinite predictions propagate into the scores rather than being checked
+    here, so a diverged forecast reports NaN or inf.
+
+    Args:
+      prediction: Forecasts shaped (trajectories, pred_len, channels).
+      target: Reference values with the same shape.
+      scale: Per-channel training scale shaped (1, 1, channels).
+
+    Returns:
+      scores: ``mse`` and ``mae`` in original units, and ``scaled_mse``.
+
+    Raises:
+      ValueError: The shapes differ, ``target`` is empty, or ``scale`` is not
+        one value per channel.
+
+    """
     if target.ndim != 3 or prediction.shape != target.shape or target.numel() == 0:
         raise ValueError("Predictions and targets must have the same nonempty shape.")
-    if scale.shape != (1, 1, target.shape[-1]) or not (scale > 0).all():
-        raise ValueError("Expected a positive training scale for each channel.")
-    if not all(torch.isfinite(value).all() for value in (prediction, target, scale)):
-        raise ValueError("Scoring requires finite predictions, targets, and scales.")
+    if scale.shape != (1, 1, target.shape[-1]):
+        raise ValueError("Expected one training scale per channel.")
     error = prediction.double() - target.double()
     return {
         "mse": float(error.square().mean()),

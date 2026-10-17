@@ -3,7 +3,12 @@
 import pytest
 import torch
 
-from priml.baselines.oscillator.data import ForecastData, InitialStates, Oscillator
+from priml.baselines.oscillator.data import (
+    ForecastData,
+    InitialStates,
+    Oscillator,
+    Windows,
+)
 
 
 def test_integrator_matches_one_explicit_update() -> None:
@@ -107,7 +112,38 @@ def test_bad_initial_conditions_and_empty_history_fail() -> None:
     simulator = Oscillator.Config().make()
     with pytest.raises(ValueError, match="pairs"):
         simulator.forecast(torch.zeros(4, 3), steps=3)
-    with pytest.raises(ValueError, match="finite floating"):
+    with pytest.raises(ValueError, match="floating-point"):
         simulator.forecast(torch.zeros(4, 2, dtype=torch.int64), steps=3)
-    with pytest.raises(ValueError, match="diverged"):
-        simulator.forecast(torch.full((4, 2), 1e38), steps=3)
+
+
+def test_divergence_propagates_as_nonfinite_values() -> None:
+    values = Oscillator.Config().make().forecast(torch.full((4, 2), 1e38), steps=3)
+    assert values.shape == (4, 3, 2)
+    assert not torch.isfinite(values).all()
+
+
+def test_amplitude_bounds_must_be_ordered_and_nonnegative() -> None:
+    with pytest.raises(ValueError, match="Invalid"):
+        InitialStates.Config(amplitude=(-0.1, 1.0)).make()
+    with pytest.raises(ValueError, match="Invalid"):
+        InitialStates.Config(amplitude=(1.0, 1.0)).make()
+
+
+def test_channel_stats_use_histories_and_targets() -> None:
+    # Two channels: the simulator's position/velocity pair (STATE_CHANNELS).
+    media = torch.arange(3 * 4 * 2, dtype=torch.float32).reshape(3, 4, 2)
+    label = -torch.arange(3 * 5 * 2, dtype=torch.float32).reshape(3, 5, 2)
+    mean, scale = Windows(media=media, label=label).channel_stats()
+    values = torch.cat((media, label), dim=1)
+    assert torch.equal(mean, values.mean(dim=(0, 1), keepdim=True))
+    assert torch.equal(scale, values.std(dim=(0, 1), correction=0, keepdim=True))
+    constant = Windows(media=torch.ones(3, 4, 2), label=torch.ones(3, 5, 2))
+    _, floored = constant.channel_stats()
+    # channel_stats keeps singleton axes so the scale broadcasts over windows.
+    assert torch.equal(floored, torch.full((1, 1, 2), 1e-6))
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

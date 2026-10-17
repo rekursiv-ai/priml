@@ -132,8 +132,8 @@ The simple correction fits familiar conditions well but extrapolates poorly.
 On the shifted test, leaving the cheap simulator alone beats all three fitted
 recipes. This is a reason to keep that control in future comparisons, not
 evidence that an agent will solve the problem. No settings were tuned after
-inspecting these test scores. Per-run measurements and provenance are in
-`results/local_cpu.json`.
+inspecting these test scores. Rerunning the command above writes the per-run
+measurements and provenance to its `--directory`.
 
 ## What this establishes
 

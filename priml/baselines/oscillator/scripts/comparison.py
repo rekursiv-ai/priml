@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import argparse
 import hashlib
@@ -13,29 +13,54 @@ import shutil
 import subprocess
 import time
 
-import torch
+from treekle import to_plain
 
 from priml.baselines.oscillator.experiments import exp000, exp001, exp002, exp_smoke
+from priml.paths import validated_output_path
 
 
-class _Flags(Protocol):
-    directory: Path
-    smoke: bool
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    import torch
+
+    from priml.baselines.oscillator.benchmark import ForecastStudy
+else:
+    from wrapt import lazy_import
+
+    torch = lazy_import("torch")
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run fixed recipes, refusing to overwrite an earlier result."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    """Run fixed recipes, refusing to overwrite an earlier result.
+
+    Args:
+      argv: Command-line arguments; ``None`` reads ``sys.argv``.
+
+    Returns:
+      code: 0 on success.
+
+    Raises:
+      RuntimeError: Git is not installed.
+
+    """
+    parser = argparse.ArgumentParser(description=(__doc__ or "").strip())
     _add_arguments(parser)
     flags = cast(_Flags, parser.parse_args(argv))
     git = shutil.which("git")
     if git is None:
         raise RuntimeError("Git is needed to record the code revision.")
-    flags.directory.mkdir(parents=True, exist_ok=False)
-    root = Path(__file__).resolve().parents[4]
-    records: list[dict[str, object]] = []
-    recipes = (exp_smoke,) if flags.smoke else (exp000, exp001, exp002)
+    directory = validated_output_path(flags.directory)
+    directory.mkdir(mode=0o755, parents=True, exist_ok=False)
+    root = _CWD.parents[3]
+    recipes: tuple[Callable[[], ForecastStudy.Config], ...] = (
+        (exp_smoke,) if flags.smoke else (exp000, exp001, exp002)
+    )
     seeds = (2021,) if flags.smoke else (2021, 2022, 2023)
+    records: list[dict[str, object]] = []
     for matched in (True, False):
         for seed in seeds:
             for recipe in recipes:
@@ -45,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
                     cfg.data.reference = cfg.data.cheap.copy_tree()
                 case = "matched" if matched else "mismatched"
                 label = f"{case}-{cfg.experiment_name}-{seed}"
-                (flags.directory / f"{label}.txt").write_text(
+                (directory / f"{label}.txt").write_text(
                     cfg.pformat(hide_default_values=False) + "\n",
                 )
                 started = time.perf_counter()
@@ -53,43 +78,38 @@ def main(argv: list[str] | None = None) -> int:
                 record["case"] = case
                 record["elapsed_seconds"] = time.perf_counter() - started
                 records.append(record)
-                (flags.directory / f"{label}.json").write_text(
-                    json.dumps(record, indent=2, allow_nan=False) + "\n",
-                )
+                _write_json(directory / f"{label}.json", record)
                 print(f"Finished {label}", flush=True)
-    sources = sorted(Path(__file__).resolve().parents[1].rglob("*.py"))
+    sources = sorted(_CWD.parent.rglob("*.py"))
     sources.extend(
         root / "priml/baselines/etth1" / name for name in ("model.py", "train_step.py")
     )
-    report = {
-        "status": "preliminary synthetic pilot; no agent or real-data evaluation",
-        "python": platform.python_version(),
-        "torch": torch.__version__,
-        "platform": platform.platform(),
-        "torch_threads": torch.get_num_threads(),
-        "git_head": subprocess.check_output(  # noqa: S603 -- Resolved Git executable and fixed read-only arguments.
-            [git, "rev-parse", "HEAD"],
-            cwd=root,
-            text=True,
-        ).strip(),
-        "git_status": subprocess.check_output(  # noqa: S603 -- Resolved Git executable and fixed read-only arguments.
-            [git, "status", "--short"],
-            cwd=root,
-            text=True,
-        ).strip(),
-        "source_sha256": {
-            str(path.relative_to(root)): hashlib.sha256(
-                path.read_bytes(),
-            ).hexdigest()
-            for path in sources
+    _write_json(
+        directory / "comparison.json",
+        {
+            "status": "preliminary synthetic pilot; no agent or real-data evaluation",
+            "python": platform.python_version(),
+            "torch": str(torch.__version__),
+            "platform": platform.platform(),
+            "torch_threads": torch.get_num_threads(),
+            "git_head": _git(git, "rev-parse", "HEAD", cwd=root),
+            "git_status": _git(git, "status", "--short", cwd=root),
+            "source_sha256": {
+                str(path.relative_to(root)): hashlib.sha256(
+                    path.read_bytes(),
+                ).hexdigest()
+                for path in sources
+            },
+            "runs": records,
         },
-        "runs": records,
-    }
-    (flags.directory / "comparison.json").write_text(
-        json.dumps(report, indent=2, allow_nan=False) + "\n",
     )
-    print(flags.directory / "comparison.json")
+    print(directory / "comparison.json")
     return 0
+
+
+class _Flags(Protocol):
+    directory: Path
+    smoke: bool
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -97,9 +117,22 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         "--directory",
         type=Path,
         default=Path("/opt/scratch/runs/oscillator/pilot"),
+        help="New run directory; an existing one is never overwritten.",
     )
     parser.add_argument(
         "--smoke",
         action="store_true",
         help="Check the wiring with two tiny runs.",
     )
+
+
+def _git(git: str, *args: str, cwd: Path) -> str:
+    return subprocess.check_output(  # noqa: S603 -- Resolved Git executable and fixed read-only arguments.
+        [git, *args],
+        cwd=cwd,
+        text=True,
+    ).strip()
+
+
+def _write_json(path: Path, value: object) -> None:
+    path.write_text(json.dumps(to_plain(value), indent=2, allow_nan=False) + "\n")

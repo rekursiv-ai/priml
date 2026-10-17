@@ -1,7 +1,8 @@
 """Pin oscillator initialization and short training runs."""
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Final
 
 from configgle import PartialConfig
 from torch import Tensor
@@ -22,15 +23,27 @@ from priml.testing.golden import (
 from priml.train.custom_types import TrainStepOutput
 
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
+_CWD: Final = Path(__file__).resolve().parent
+MAX_GOLDEN_BYTES: Final = 32 * 1024
+
+
+class _RecordedUpdates:
+    """Wrap a train step, keeping each update's output."""
+
+    def __init__(self, train_step: Callable[..., TrainStepOutput]) -> None:
+        self.train_step = train_step
+        self.outputs: list[TrainStepOutput] = []
+
+    def __call__(self, **batch: object) -> TrainStepOutput:
+        output = self.train_step(**batch)
+        self.outputs.append(output)
+        return output
 
 
 def test_model_matches_golden() -> None:
-    actual = _model_record()
-    path = Path(__file__).parent / "testdata" / "dlinear_model.pt"
-    assert_tensor_golden(path, actual)
-    assert path.stat().st_size <= 32768
+    path = _CWD / "testdata" / "dlinear_model.pt"
+    assert_tensor_golden(path, _model_record())
+    assert path.stat().st_size <= MAX_GOLDEN_BYTES
 
 
 def test_model_golden_detects_one_changed_bit() -> None:
@@ -39,10 +52,7 @@ def test_model_golden_detects_one_changed_bit() -> None:
     actual["output"] = actual["output"].contiguous()
     actual["output"].view(torch.int32).flatten()[0] += 1
     with expect_golden_mismatch("output"):
-        assert_tensor_golden(
-            Path(__file__).parent / "testdata" / "dlinear_model.pt",
-            actual,
-        )
+        assert_tensor_golden(_CWD / "testdata" / "dlinear_model.pt", actual)
 
 
 @pytest.mark.compute_training
@@ -54,23 +64,21 @@ def test_fit_matches_golden(
     cfg = exp_smoke()
     assert isinstance(cfg.method, DLinearForecast.Config)
     cfg.method.pretrain_updates = pretrain_updates
-    actual = _fit_record(cfg, monkeypatch=monkeypatch)
-    path = Path(__file__).parent / "testdata" / f"dlinear_fit{pretrain_updates}.pt"
-    assert_tensor_golden(path, actual)
-    assert path.stat().st_size <= 32768
+    path = _CWD / "testdata" / f"dlinear_fit{pretrain_updates}.pt"
+    assert_tensor_golden(path, _fit_record(cfg, monkeypatch=monkeypatch))
+    assert path.stat().st_size <= MAX_GOLDEN_BYTES
 
 
 @pytest.mark.compute_training
 def test_fit_golden_detects_changed_recipe(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = exp_smoke()
     assert isinstance(cfg.method, DLinearForecast.Config)
-    cfg.method.step.optimizer = PartialConfig(torch.optim.Adam, lr=2e-3)
+    adam = cfg.method.step.optimizer
+    assert isinstance(adam, PartialConfig)
+    adam.lr = 2e-3
     actual = _fit_record(cfg, monkeypatch=monkeypatch)
     with expect_golden_mismatch("final/parameter/"):
-        assert_tensor_golden(
-            Path(__file__).parent / "testdata" / "dlinear_fit0.pt",
-            actual,
-        )
+        assert_tensor_golden(_CWD / "testdata" / "dlinear_fit0.pt", actual)
 
 
 def _model_record() -> dict[str, Tensor]:
@@ -108,24 +116,15 @@ def _fit_record(
             f"initial/{key}": value.detach().clone()
             for key, value in method.step.model.state_dict().items()
         }
-        losses: list[Tensor] = []
-        outputs: list[TrainStepOutput] = []
-        train_step: Callable[..., TrainStepOutput] = method.step.train_step
-
-        def record_update(**batch: object) -> TrainStepOutput:
-            output = train_step(**batch)
-            outputs.append(output)
-            losses.append(output["loss"].clone())
-            return output
-
-        monkeypatch.setattr(method.step, "train_step", record_update)
+        recorded = _RecordedUpdates(method.step.train_step)
+        monkeypatch.setattr(method.step, "train_step", recorded)
         report = method.fit(
             data.windows(cfg.data.train, simulator=data.reference),
             validation=data.windows(cfg.data.validation, simulator=data.reference),
             synthetic=data.windows(cfg.data.synthetic, simulator=data.cheap),
             simulator=data.cheap,
         )
-        last_output = outputs[-1]
+        last_output = recorded.outputs[-1]
         final = update_record(
             method.step.model,
             optimizer=method.step.optimizer,
@@ -143,7 +142,7 @@ def _fit_record(
         assert method.scale is not None
         # DLinearForecast.fit keeps singleton axes for channel scaling.
         record.update(mean=method.mean.clone(), scale=method.scale.clone())
-        record["losses"] = torch.cat(losses)
+        record["losses"] = torch.cat([output["loss"] for output in recorded.outputs])
         record.update(
             {f"report/{key}": torch.tensor(value) for key, value in report.items()},
         )
@@ -151,3 +150,9 @@ def _fit_record(
             key: value.float() if value.is_floating_point() else value
             for key, value in record.items()
         }
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

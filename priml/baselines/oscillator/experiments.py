@@ -1,8 +1,8 @@
 """Initial controls for learning from an imperfect simulator."""
 
-from configgle import PartialConfig
+from __future__ import annotations
 
-import torch
+from configgle import PartialConfig
 
 from priml.baselines.oscillator.benchmark import ForecastStudy
 from priml.baselines.oscillator.train_step import DLinearForecast, RidgeCorrection
@@ -23,8 +23,11 @@ def exp000() -> ForecastStudy.Config:
 
     """
     cfg = ForecastStudy.Config()
+    cfg.experiment_name = "exp000"
     assert isinstance(cfg.method, DLinearForecast.Config)
-    cfg.method.step.optimizer = PartialConfig(torch.optim.Adam, lr=1e-3)
+    adam = cfg.method.step.optimizer
+    assert isinstance(adam, PartialConfig)
+    adam.lr = 1e-3
     return cfg
 
 

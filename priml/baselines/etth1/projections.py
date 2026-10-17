@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import Self, cast, override
+from typing import Self, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -11,7 +11,12 @@ from torch import Tensor, nn
 import torch
 
 from priml.cost import Cost, cost, elementwise_cost, reduction_cost, traffic
-from priml.model.custom_types import ChannelsIn, ChannelsOut, propagate_attr
+from priml.model.custom_types import (
+    ChannelsIn,
+    ChannelsOut,
+    TensorModule,
+    propagate_attr,
+)
 from priml.model.linear import Linear
 
 
@@ -27,13 +32,13 @@ class LowRankProjection(nn.Module):
 
         _: KW_ONLY
 
-        rank: int = 32
+        channels_hidden: int = 32
         """Width between the two projections."""
 
-        down: Makeable[nn.Module] = field(default_factory=Linear.Config)
+        proj_in: Makeable[TensorModule] = field(default_factory=Linear.Config)
         """Compress the input window."""
 
-        up: Makeable[nn.Module] = field(
+        proj_out: Makeable[TensorModule] = field(
             default_factory=lambda: Linear.Config(
                 bias=True,
                 init_weight=nn.init.zeros_,
@@ -43,11 +48,9 @@ class LowRankProjection(nn.Module):
 
         @override
         def finalize(self) -> Self:
-            if min(self.channels_in, self.channels_out, self.rank) <= 0:
-                raise ValueError("Projection widths and rank must be positive.")
             for child, inputs, outputs in (
-                (self.down, self.channels_in, self.rank),
-                (self.up, self.rank, self.channels_out),
+                (self.proj_in, self.channels_in, self.channels_hidden),
+                (self.proj_out, self.channels_hidden, self.channels_out),
             ):
                 propagate_attr(child, "channels_in", inputs, protocol=ChannelsIn)
                 propagate_attr(child, "channels_out", outputs, protocol=ChannelsOut)
@@ -61,18 +64,29 @@ class LowRankProjection(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Count both projections, the mean, and their gradient join."""
+            """Count both projections, the mean, and their gradient join.
+
+            Args:
+              seq_len: Rows projected per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: Forwarded to both child costs.
+
+            Returns:
+              cost: Forward and adjoint operations and parameters of one call.
+
+            """
             rows = seq_len * batch_size
             return (
                 cost(
-                    self.down,
+                    self.proj_in,
                     seq_len=seq_len,
                     batch_size=batch_size,
                     dtype=dtype,
                     **kwargs,
                 )
                 + cost(
-                    self.up,
+                    self.proj_out,
                     seq_len=seq_len,
                     batch_size=batch_size,
                     dtype=dtype,
@@ -128,11 +142,12 @@ class LowRankProjection(nn.Module):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        self.down = config.down.make()
-        self.up = config.up.make()
+        if min(config.channels_in, config.channels_out, config.channels_hidden) <= 0:
+            raise ValueError("Projection widths must be positive.")
+        self.proj_in = config.proj_in.make()
+        self.proj_out = config.proj_out.make()
 
     @override
     def forward(self, x: Tensor) -> Tensor:
         """Predict the correction and restore the window's average."""
-        hidden = cast(Tensor, self.down(x))
-        return cast(Tensor, self.up(hidden)) + x.mean(dim=-1, keepdim=True)
+        return self.proj_out(self.proj_in(x)) + x.mean(dim=-1, keepdim=True)

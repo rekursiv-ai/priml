@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import TYPE_CHECKING, Protocol
+from typing import (
+    TYPE_CHECKING,
+    Protocol,
+    Self,
+    TypedDict,
+    override,
+    runtime_checkable,
+)
 
 import math
 
@@ -13,10 +20,23 @@ from torch import Tensor
 import torch
 
 from priml.baselines.etth1.train_step import Etth1TrainStep
+from priml.baselines.oscillator.data import STATE_CHANNELS
 
 
 if TYPE_CHECKING:
     from priml.baselines.oscillator.data import Oscillator, Windows
+
+
+class _FitCounts(TypedDict):
+    updates: int
+    best_update: int
+    pretrain_updates: int
+
+
+class FitReport(_FitCounts, total=False):
+    """What a forecasting method reports after fitting."""
+
+    validation_scaled_mse: float
 
 
 class ForecastMethod(Protocol):
@@ -29,13 +49,41 @@ class ForecastMethod(Protocol):
         validation: Windows,
         synthetic: Windows,
         simulator: Oscillator,
-    ) -> dict[str, float | int]:
-        """Fit using only the supplied development data."""
+    ) -> FitReport:
+        """Fit using only the supplied development data.
+
+        Args:
+          train: Reference trajectories available for fitting.
+          validation: Reference trajectories available for model selection.
+          synthetic: Cheap-simulator trajectories available for pretraining.
+          simulator: The cheap simulator.
+
+        Returns:
+          report: Update counts; a method that selects weights on validation
+            adds its best score.
+
+        """
         ...
 
     def predict(self, media: Tensor) -> Tensor:
-        """Forecast from the observed history."""
+        """Forecast from the observed history.
+
+        Args:
+          media: Histories shaped (trajectories, seq_len, channels).
+
+        Returns:
+          prediction: Forecasts shaped (trajectories, pred_len, channels).
+
+        """
         ...
+
+
+@runtime_checkable
+class ForecastGeometry(Protocol):
+    """A method config that must match the study's history and horizon."""
+
+    seq_len: int
+    pred_len: int
 
 
 class DLinearForecast:
@@ -44,21 +92,40 @@ class DLinearForecast:
     class Config(Fig["DLinearForecast"]):
         step: Etth1TrainStep.Config = field(default_factory=Etth1TrainStep.Config)
         """Existing DLinear training code and optimizer."""
+
+        seq_len: int = -1
+        """Observed timesteps; -1 until the study supplies its geometry."""
+
+        pred_len: int = -1
+        """Forecast timesteps; -1 until the study supplies its geometry."""
+
         updates: int = 300
         """Total updates, including any simulator pretraining."""
+
         pretrain_updates: int = 0
         """Initial updates using cheap trajectories instead of reference data."""
+
         batch_size: int = 8
         """Trajectories sampled per training update."""
+
         validation_every: int = 25
         """Reference-training updates between validation checks."""
+
         sample_seed: int = 606
         """Random stream for training-batch selection."""
+
+        @override
+        def finalize(self) -> Self:
+            self.step.model.seq_len = self.seq_len
+            self.step.model.pred_len = self.pred_len
+            self.step.model.channels = STATE_CHANNELS
+            self.step.train_budget_steps = self.updates
+            return super().finalize()
 
     def __init__(self, config: Config) -> None:
         if min(config.updates, config.batch_size, config.validation_every) <= 0:
             raise ValueError("Training counts must be positive.")
-        if not 0 <= config.pretrain_updates < config.updates:
+        if config.pretrain_updates < 0 or config.pretrain_updates >= config.updates:
             raise ValueError("Pretraining must leave at least one reference update.")
         self.config = config
         self.step = config.step.make()
@@ -72,8 +139,24 @@ class DLinearForecast:
         validation: Windows,
         synthetic: Windows,
         simulator: Oscillator,
-    ) -> dict[str, float | int]:
-        """Select weights using validation, never test trajectories."""
+    ) -> FitReport:
+        """Select weights using validation, never test trajectories.
+
+        Args:
+          train: Reference trajectories; they alone set the normalization.
+          validation: Reference trajectories scored to choose the weights.
+          synthetic: Cheap trajectories for the first ``pretrain_updates``.
+          simulator: Unused; DLinear sees only trajectories.
+
+        Returns:
+          report: Update counts, the chosen update, and its validation score.
+
+        Raises:
+          RuntimeError: The forecaster was already fitted.
+          ValueError: The data does not match DLinear's geometry, or no
+            validation score was finite.
+
+        """
         del simulator
         if self.step.global_step:
             raise RuntimeError("Build a fresh forecaster for each run.")
@@ -86,30 +169,24 @@ class DLinearForecast:
             ):
                 raise ValueError("Data dimensions do not match DLinear.")
         # Keep validation and test data out of normalization.
-        values = torch.cat((train.media, train.label), dim=1)
-        self.mean = values.mean(dim=(0, 1), keepdim=True)
-        self.scale = values.std(dim=(0, 1), correction=0, keepdim=True).clamp_min(1e-6)
+        self.mean, self.scale = train.channel_stats()
         train_generator = torch.Generator().manual_seed(cfg.sample_seed)
         cheap_generator = torch.Generator().manual_seed(cfg.sample_seed + 1)
         best_loss = math.inf
         best_update = 0
         best_weights: dict[str, Tensor] = {}
         for update in range(cfg.updates):
-            source = synthetic if update < cfg.pretrain_updates else train
-            generator = (
-                cheap_generator if update < cfg.pretrain_updates else train_generator
-            )
+            pretraining = update < cfg.pretrain_updates
+            source = synthetic if pretraining else train
             indices = torch.randint(
                 len(source.media),
                 (cfg.batch_size,),
-                generator=generator,
+                generator=cheap_generator if pretraining else train_generator,
             )
-            result = self.step.train_step(
+            self.step.train_step(
                 media=(source.media[indices] - self.mean) / self.scale,
                 label=(source.label[indices] - self.mean) / self.scale,
             )
-            if not torch.isfinite(result["loss"]).all():
-                raise ValueError("Training produced a nonfinite loss.")
             reference_updates = update + 1 - cfg.pretrain_updates
             if reference_updates > 0 and (
                 reference_updates % cfg.validation_every == 0
@@ -138,7 +215,18 @@ class DLinearForecast:
         }
 
     def predict(self, media: Tensor) -> Tensor:
-        """Return forecasts in the original units."""
+        """Return forecasts in the original units.
+
+        Args:
+          media: Histories shaped (trajectories, seq_len, channels).
+
+        Returns:
+          prediction: Forecasts shaped (trajectories, pred_len, channels).
+
+        Raises:
+          RuntimeError: ``fit`` has not run.
+
+        """
         if self.mean is None or self.scale is None:
             raise RuntimeError("Fit the model before predicting.")
         self.step.model.eval()
@@ -173,8 +261,19 @@ class RidgeCorrection:
         validation: Windows,
         synthetic: Windows,
         simulator: Oscillator,
-    ) -> dict[str, float | int]:
-        """Use reference training residuals without tuning on validation or test."""
+    ) -> FitReport:
+        """Use reference training residuals without tuning on validation or test.
+
+        Args:
+          train: Reference trajectories whose residuals the correction fits.
+          validation: Unused; the penalty is fixed rather than tuned.
+          synthetic: Unused; the correction learns from reference data only.
+          simulator: The cheap simulator whose forecasts are corrected.
+
+        Returns:
+          report: Zero update counts; a direct solve takes no updates.
+
+        """
         del validation, synthetic
         self.simulator = simulator
         self.horizon = train.label.shape[1]
@@ -200,10 +299,21 @@ class RidgeCorrection:
             gram + self.config.penalty * torch.eye(gram.shape[0], dtype=gram.dtype),
             features.T @ targets,
         )
-        return {"updates": 0}
+        return {"updates": 0, "best_update": 0, "pretrain_updates": 0}
 
     def predict(self, media: Tensor) -> Tensor:
-        """Add the learned correction to the cheap forecast."""
+        """Add the learned correction to the cheap forecast.
+
+        Args:
+          media: Histories shaped (trajectories, seq_len, channels).
+
+        Returns:
+          prediction: Corrected forecasts shaped (trajectories, horizon, channels).
+
+        Raises:
+          RuntimeError: ``fit`` has not run.
+
+        """
         if (
             self.simulator is None
             or self.weights is None

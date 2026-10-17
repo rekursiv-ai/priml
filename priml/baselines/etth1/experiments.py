@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from configgle import PartialConfig
 
-import torch
-
 from priml.baselines.etth1.checkpointer import Etth1Checkpointer
 from priml.baselines.etth1.metrics import ForecastMSE
 from priml.baselines.etth1.projections import LowRankProjection
@@ -122,7 +120,9 @@ def exp002() -> Etth1TrainLoop.Config:
     """
     cfg = exp000()
     cfg.experiment_name = "exp002"
-    cfg.step.optimizer = PartialConfig(torch.optim.Adam, lr=3e-4)
+    adam = cfg.step.optimizer
+    assert isinstance(adam, PartialConfig)
+    adam.lr = 3e-4
     return cfg
 
 
@@ -144,7 +144,9 @@ def exp003() -> Etth1TrainLoop.Config:
     """
     cfg = exp000()
     cfg.experiment_name = "exp003"
-    cfg.step.optimizer = PartialConfig(torch.optim.Adam, lr=1e-3)
+    adam = cfg.step.optimizer
+    assert isinstance(adam, PartialConfig)
+    adam.lr = 1e-3
     return cfg
 
 
@@ -168,8 +170,8 @@ def exp004() -> Etth1TrainLoop.Config:
     """
     cfg = exp003()
     cfg.experiment_name = "exp004"
-    cfg.step.model.seasonal = LowRankProjection.Config(rank=32)
-    cfg.step.model.trend = LowRankProjection.Config(rank=32)
+    cfg.step.model.seasonal = LowRankProjection.Config()
+    cfg.step.model.trend = LowRankProjection.Config()
     return cfg
 
 
