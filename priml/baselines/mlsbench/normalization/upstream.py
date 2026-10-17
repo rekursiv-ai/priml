@@ -43,18 +43,6 @@ EDITS: Final = Path("tasks/dl-normalization/edits")
 EDITED: Final = ("group_norm", "batch_instance_norm", "switchable_norm")
 """The baselines, each named as its edit file and as its port's variant."""
 
-SETTINGS: Final = (
-    "lr",
-    "initial_lr",
-    "momentum",
-    "dampening",
-    "weight_decay",
-    "nesterov",
-    "maximize",
-    "differentiable",
-)
-"""Parameter-group entries compared between the two optimizers."""
-
 FEATURES_SHAPE: Final = (2, 5, 3, 4)
 """Batch, channels, height and width of the norm run's input."""
 
@@ -219,7 +207,7 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
 
     """
     task = cast(Script, cast(object, script))
-    criterion = _CriterionSpy()
+    criterion = upstream.CriterionSpy()
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
     with reference.seeded(reference.SEED), host_agnostic_numerics():
@@ -278,7 +266,7 @@ def upstream_record(
     pristine = traces["batch_norm"]
     record["schedule/lr"] = torch.tensor(pristine.rates, dtype=torch.float64)
     record["optimizer/settings"] = torch.tensor(
-        [pristine.settings[name] for name in SETTINGS],
+        [pristine.settings[name] for name in reference.HYPERPARAMETERS],
         dtype=torch.float64,
     )
     record["best/accuracy"] = torch.tensor(pristine.best, dtype=torch.float64)
@@ -287,19 +275,3 @@ def upstream_record(
     for values, _ in lockstep.values():
         record |= values
     return record
-
-
-class _CriterionSpy:
-    """Cross-entropy, as ``main`` builds it, keeping what it saw."""
-
-    def __init__(self) -> None:
-        self.criterion = torch.nn.CrossEntropyLoss()
-        self.losses: list[Tensor] = []
-        self.logits: list[Tensor] = []
-
-    def __call__(self, logits: Tensor, targets: Tensor) -> Tensor:
-        """Return the batch's loss."""
-        loss = self.criterion(logits, targets)
-        self.losses.append(loss.detach())
-        self.logits.append(logits.detach())
-        return loss

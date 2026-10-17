@@ -10,8 +10,9 @@ edit of it from a clone of the benchmark, runs the port on the same inputs under
 the same pins, and compares with exact equality: every weighting's weights and
 weighted loss with its gradient, the class counts and weights ``main`` builds
 for the ``resnet32-cifar100lt`` setting, the positions its long-tail cut keeps
-of CIFAR-100's training split (real when ``--cifar100`` holds it, else of the
-label layout alone), the rate of all 200 epochs, the optimizer, ResNet-32's
+of CIFAR-100's label layout (and of the real training split, when
+``--cifar100`` names a root ``prepare_data`` has filled), the rate of all 200
+epochs, the optimizer, ResNet-32's
 initial state and forward, where the generator stands after building it, every
 pixel the long-tailed loaders produce, and every parameter after each update of
 a short run per weighting. Any mismatch is printed and the exit code is 1;
@@ -28,7 +29,7 @@ Examples:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import Protocol, cast
 
 import argparse
 import tempfile
@@ -42,12 +43,9 @@ from priml.baselines.mlsbench.pytorch_vision.scripts import (
 )
 from priml.baselines.mlsbench.weighting import reference, upstream
 from priml.baselines.mlsbench.weighting.data import long_tail_indices
+from priml.baselines.mlsbench.weighting.experiments import exp000
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import mismatches, write_tensors
-
-
-if TYPE_CHECKING:
-    from torch import Tensor
+from priml.testing.golden import mismatches
 
 
 def main() -> int:
@@ -70,8 +68,7 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    flags.out.mkdir(parents=True, exist_ok=True)
-    write_tensors(flags.out / "reference.pt", captured.record)
+    vision_capture.write_records(flags.out, {"reference.pt": captured.record})
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
@@ -82,9 +79,9 @@ def capture(root: Path, scratch: Path, *, cifar100: Path | None) -> vision.Captu
     Args:
       root: Clone of the benchmark.
       scratch: Directory the edited scripts and the loader split go to.
-      cifar100: Directory holding CIFAR-100's raw ``train``, ``test`` and
-        ``meta`` files, whose training split is cut on both sides; ``None``
-        skips that comparison.
+      cifar100: torchvision's CIFAR-100 root, holding ``cifar-100-python`` as
+        ``prepare_data`` leaves it, whose training split is cut on both sides;
+        ``None`` skips that comparison.
 
     Returns:
       captured: The script's values, keyed as the port's are.
@@ -111,10 +108,13 @@ def capture(root: Path, scratch: Path, *, cifar100: Path | None) -> vision.Captu
     port = reference.port_record(scratch)
     report += mismatches(record, port)
     report += mismatches({"main/indices": trace.indices}, {"main/indices": indices})
-    report += compare_lockstep(lockstep)
+    report += vision_capture.compare_lockstep(
+        lockstep,
+        run=reference.lockstep_record,
+    )
     report += vision_capture.compare_loaders(batches, reference.loader_batches(scratch))
     if cifar100 is not None:
-        report += compare_real(pristine, cifar100, scratch)
+        report += compare_real(pristine, cifar100)
     return vision.Captured(record=record, sites={}, report=report)
 
 
@@ -131,7 +131,7 @@ def compare_full_size(script: upstream.Script, trace: upstream.Trace) -> list[st
     """
     state = trace.main.state
     with vision.seeded(vision.SEED), host_agnostic_numerics():
-        ours = reference.full_step().model
+        ours = vision.full_step(exp000).model
         theirs = script.ResNet(script.BasicBlock, [5, 5, 5], reference.CLASSES)
         theirs.load_state_dict(state)
         report = vision_capture.compare_states(state, ours.state_dict())
@@ -146,22 +146,18 @@ def compare_full_size(script: upstream.Script, trace: upstream.Trace) -> list[st
     return report
 
 
-def compare_real(script: upstream.Script, cifar100: Path, scratch: Path) -> list[str]:
+def compare_real(script: upstream.Script, cifar100: Path) -> list[str]:
     """Cut the real training split on both sides and compare positions and counts.
 
     Args:
       script: The pristine script.
-      cifar100: Directory holding the raw ``train``, ``test`` and ``meta`` files.
-      scratch: Directory the root torchvision expects is linked under.
+      cifar100: torchvision's CIFAR-100 root, holding ``cifar-100-python``.
 
     Returns:
       report: One line per tensor that differs.
 
     """
-    data_root = scratch / "cifar"
-    data_root.mkdir()
-    (data_root / "cifar-100-python").symlink_to(cifar100.resolve())
-    indices, counts, label = upstream.real_subset(script, data_root)
+    indices, counts, label = upstream.real_subset(script, cifar100)
     ours, our_counts = long_tail_indices(
         label,
         imbalance_ratio=reference.RATIO,
@@ -174,34 +170,12 @@ def compare_real(script: upstream.Script, cifar100: Path, scratch: Path) -> list
     )
 
 
-def compare_lockstep(lockstep: dict[str, vision_upstream.Lockstep]) -> list[str]:
-    """Compare every parameter and buffer after each update of every weighting.
-
-    Args:
-      lockstep: Each weighting's :func:`upstream.upstream_lockstep`.
-
-    Returns:
-      report: One line per tensor that differs after any update.
-
-    """
-    report: list[str] = []
-    for name, (_, theirs) in lockstep.items():
-        ours: list[dict[str, Tensor]] = []
-        _ = reference.lockstep_record(name, states=ours)
-        for index, (want, got) in enumerate(zip(theirs, ours, strict=True), start=1):
-            report += [
-                f"lockstep/{name}/{index}: {line}"
-                for line in vision_capture.compare_states(want, got)
-            ]
-    return report
-
-
 class _Flags(Protocol):
     """Parsed command-line flags."""
 
     root: Path
     out: Path
-    cifar100: Path
+    cifar100: Path | None
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -221,8 +195,11 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--cifar100",
         type=Path,
-        default=Path("/opt/scratch/datasets/cifar100"),
-        help="CIFAR-100's raw train, test and meta files, for the real cut.",
+        default=None,
+        help=(
+            "torchvision's CIFAR-100 root (holding cifar-100-python, as "
+            "prepare_data leaves it), to compare the real cut too."
+        ),
     )
 
 

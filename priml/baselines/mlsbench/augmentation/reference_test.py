@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.augmentation import reference
+from priml.baselines.mlsbench.augmentation.experiments import exp000
 from priml.baselines.mlsbench.pytorch_vision import reference as vision
 from priml.testing.golden import mismatches, read_tensors
 
@@ -49,7 +50,7 @@ def test_the_test_pipeline_only_normalizes_as_the_script_does() -> None:
 def test_the_schedule_and_optimizer_match_the_script() -> None:
     assert_exact(
         stored("schedule/") | stored("optimizer/"),
-        reference.schedule_record() | reference.optimizer_record(),
+        vision.schedule_record(exp000) | vision.optimizer_record(exp000),
     )
 
 
@@ -75,9 +76,16 @@ def test_the_golden_bites_on_one_wrong_mirror() -> None:
     ]
 
 
-def test_the_stored_lockstep_omits_only_the_batches() -> None:
-    record = reference.lockstep_record("cutout")
+def test_the_stored_lockstep_omits_only_the_batches_and_can_keep_states() -> None:
+    states: list[dict[str, Tensor]] = []
+    record = reference.lockstep_record("cutout", states=states)
     assert set(record) - set(reference.stored(record)) == {"lockstep/cutout/media"}
+    assert len(states) == vision.STEPS
+    assert not torch.equal(states[0]["head.weight"], states[1]["head.weight"])
+
+
+def test_the_whole_port_record_matches_the_golden() -> None:
+    assert_exact(stored(""), reference.port_record())
 
 
 def test_loaders_run_each_augmentation_over_the_synthetic_split(

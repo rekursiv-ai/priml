@@ -14,6 +14,7 @@ import torch
 
 from priml.baselines.mlsbench.pytorch_vision import reference as vision
 from priml.baselines.mlsbench.weighting import reference
+from priml.baselines.mlsbench.weighting.experiments import exp000
 from priml.testing.golden import mismatches, read_tensors
 
 
@@ -53,7 +54,7 @@ def test_the_synthetic_cut_keeps_the_scripts_images_in_its_order() -> None:
 def test_the_schedule_and_optimizer_match_the_script() -> None:
     assert_exact(
         stored("schedule/") | stored("optimizer/"),
-        reference.schedule_record() | reference.optimizer_record(),
+        vision.schedule_record(exp000) | vision.optimizer_record(exp000),
     )
 
 

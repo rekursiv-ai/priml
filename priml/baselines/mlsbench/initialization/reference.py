@@ -25,10 +25,8 @@ from priml.baselines.mlsbench.initialization.experiments import (
     exp003,
 )
 from priml.baselines.mlsbench.pytorch_vision import reference
-from priml.baselines.mlsbench.pytorch_vision.train_step import VisionTrainStep
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import rng_fingerprint
-from priml.train.parallelism import NoParallel
 
 
 if TYPE_CHECKING:
@@ -44,23 +42,6 @@ INITIALIZATIONS: Final[dict[str, Callable[[], VisionTrainLoop]]] = {
     "orthogonal": exp003,
 }
 """The experiment that carries each initialization, keyed as the script's variants."""
-
-
-def full_step(factory: Callable[[], VisionTrainLoop]) -> VisionTrainStep:
-    """Build the step of ``factory`` at full size on the CPU.
-
-    Args:
-      factory: The experiment whose network is built.
-
-    Returns:
-      step: ResNet-56 with 100 classes, initialized as the experiment says.
-
-    """
-    config = factory().step
-    config.parallelism = NoParallel.Config(device="cpu")
-    step = config.make()
-    assert isinstance(step, VisionTrainStep)
-    return step
 
 
 def tiny_model(name: str) -> nn.Module:
@@ -111,7 +92,7 @@ def draws_record() -> dict[str, Tensor]:
     record: dict[str, Tensor] = {}
     for name, factory in INITIALIZATIONS.items():
         with reference.seeded(reference.SEED), host_agnostic_numerics():
-            _ = full_step(factory)
+            _ = reference.full_step(factory)
             record[f"draws/{name}"] = rng_fingerprint()
     return record
 

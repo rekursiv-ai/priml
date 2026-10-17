@@ -42,8 +42,8 @@ def test_every_norm_matches_its_script_forward_and_backward() -> None:
 def test_the_schedule_optimizer_and_accuracy_match_the_script() -> None:
     assert_exact(
         stored("schedule/") | stored("optimizer/") | stored("best/"),
-        reference.schedule_record()
-        | reference.optimizer_record()
+        vision.schedule_record(reference.NORMS["batch_norm"])
+        | vision.optimizer_record(reference.NORMS["batch_norm"])
         | vision.best_record(),
     )
 
@@ -57,6 +57,14 @@ def test_every_full_network_leaves_the_generator_where_the_script_does() -> None
 @pytest.mark.parametrize("name", list(reference.NORMS))
 def test_two_updates_with_each_norm_match_the_script(name: str) -> None:
     assert_exact(stored(f"lockstep/{name}/"), reference.lockstep_record(name))
+
+
+def test_the_golden_bites_on_one_ulp() -> None:
+    key = "norm/switchable_norm/train"
+    value = stored(key)[key].clone()
+    value.view(-1)[0] = torch.nextafter(value.view(-1)[0], torch.tensor(0.0))
+    port = {key: reference.norm_record()[key]}
+    assert mismatches({key: value}, port) == [f"{key}: 1/120 differ"]
 
 
 if __name__ == "__main__":

@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+import pytest
 import torch
 
 from priml.baselines.mlsbench.pytorch_vision.draws import recorded_draws
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def test_counts_a_sampler_by_api_and_calling_function() -> None:
@@ -50,6 +57,26 @@ def test_the_samplers_are_restored_afterwards() -> None:
     with recorded_draws():
         pass
     assert (torch.randint, torch.Tensor.uniform_) == before
+
+
+@pytest.mark.parametrize(
+    "draw",
+    [
+        lambda: torch.randn(1),
+        lambda: torch.normal(torch.zeros(1), 1.0),
+        lambda: torch.bernoulli(torch.full((1,), 0.5)),
+        lambda: torch.multinomial(torch.ones(2), 1),
+        lambda: torch.empty(1).exponential_(),
+        lambda: torch.empty(1).bernoulli_(0.5),
+        lambda: torch.randint_like(torch.zeros(1), 3),
+        lambda: torch.rand_like(torch.zeros(1)),
+        lambda: torch.randn_like(torch.zeros(1)),
+    ],
+)
+def test_every_torch_sampler_is_counted(draw: Callable[[], object]) -> None:
+    with recorded_draws() as counts:
+        _ = draw()
+    assert sum(counts.values()) == 1
 
 
 if __name__ == "__main__":

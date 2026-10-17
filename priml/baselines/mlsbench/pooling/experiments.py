@@ -73,7 +73,7 @@ def exp001() -> VisionTrainLoop:
       fills only part of the grid.
 
     References:
-      https://arxiv.org/abs/1411.6228
+      https://doi.org/10.1109/CVPR.2015.7298668
         Oquab et al. 2015, "Is object localization for free? Weakly-supervised
         learning with convolutional neural networks."
       https://github.com/Imbernoulli/MLS-Bench
@@ -86,7 +86,6 @@ def exp001() -> VisionTrainLoop:
     """
     cfg = exp000()
     cfg.experiment_name = "exp001"
-
     assert isinstance(cfg.step.model, ResNet.Config)
     cfg.step.model.pool = GlobalMaxPool.Config()
     return cfg
@@ -113,7 +112,6 @@ def exp002() -> VisionTrainLoop:
     """
     cfg = exp000()
     cfg.experiment_name = "exp002"
-
     assert isinstance(cfg.step.model, ResNet.Config)
     cfg.step.model.pool = GeneralizedMeanPool.Config()
     return cfg
@@ -127,8 +125,6 @@ def exp003() -> VisionTrainLoop:
       gives the head both, which should be more robust than either alone.
 
     References:
-      https://arxiv.org/abs/1807.06521
-        Woo et al. 2018, "CBAM: Convolutional Block Attention Module."
       https://github.com/Imbernoulli/MLS-Bench
         Baseline ``avg_max`` of ``cv-pooling-aggregation`` at commit
         80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
@@ -139,7 +135,6 @@ def exp003() -> VisionTrainLoop:
     """
     cfg = exp000()
     cfg.experiment_name = "exp003"
-
     assert isinstance(cfg.step.model, ResNet.Config)
     cfg.step.model.pool = AvgMaxPool.Config()
     return cfg

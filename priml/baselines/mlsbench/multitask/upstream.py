@@ -229,7 +229,7 @@ def pin_shared(module: nn.Module, loss_fine: Tensor) -> list[str]:
 
 
 def combination_record(make: Callable[[], nn.Module], name: str) -> dict[str, Tensor]:
-    """Run a combination on the fixed calls of :func:`reference.combination_calls`.
+    """Run a combination on the fixed calls of :func:`reference.run_combination`.
 
     Args:
       make: Builds the combination.

@@ -28,16 +28,17 @@ The run reports `test_acc_best` and `test_acc_final` each epoch. The reference
 publishes the best accuracy over all epochs, which selects the epoch with the
 test labels; `test_acc_final` is the number without that selection.
 
-`TrainLoop` salts its seed, so a run is deterministic but is not the stream
-that `torch.manual_seed(42)` gives the reference. Parity is established at the
-component level below.
+`exp000` seeds the loop with the reference's 42. `TrainLoop` salts its seed, so
+the stream is not the one `torch.manual_seed(42)` gives the reference, and
+`deterministic` is off, so GPU kernels may still vary between runs. Parity is
+established at the component level below.
 
 ## Layout
 
 | File | Holds |
 |---|---|
 | `data.py` | Uint8 CIFAR-100, shuffle and augmentation with the reference loader's draws |
-| `model.py` | `ResNet` and `BasicBlock`; depth is `blocks_per_stage` |
+| `model.py` | `ResNet`, its `block`, `norm`, `pool`, `activation` and init slots, and `BasicBlock` |
 | `train_step.py` | The step, the `loss` and `schedule` slots, the four losses |
 | `metrics.py` | Best and final test accuracy |
 | `experiments.py` | `exp000` to `exp003` |
@@ -68,26 +69,8 @@ Not yet ported, same task: `vgg16bn-cifar100`, `mobilenetv2-fmnist` (new
 `model.py` classes behind the same `model` slot; the data path is shared, with
 Fashion-MNIST repeating its channel).
 
-The tasks do not share one training script: each ships its own pristine copy
-(`custom_augment.py`, `custom_activation.py`, ...). These ten follow this
-recipe's structure, and the slot each one becomes is listed:
-
-| Task | Slot |
-|---|---|
-| `cv-data-augmentation` | `dataset` augmentation function |
-| `cv-multitask-loss` | `step.loss` with auxiliary heads |
-| `cv-pooling-aggregation` | `model.pool` |
-| `cv-sample-weighting` | `step.loss` weights |
-| `dl-activation-function` | `model.activation` |
-| `dl-lr-schedule` | `step.schedule` |
-| `dl-normalization` | `model.norm` |
-| `dl-regularization` | `step.optimizer` and `step.loss` terms |
-| `dl-residual-connection` | `model.block` |
-| `dl-weight-initialization` | `model.init_conv`, `init_head`, `init_bias` |
-
-Each port proves itself with a capture run against its own pristine script,
-and checks the recipe first: a script that differs in a detail (optimizer,
-schedule, augmentation) gets that detail as a value, not as a reuse of this one.
+The ten sibling tasks are ported in the sibling packages of `mlsbench/`; its
+README lists the slot each one became.
 
 Five more tasks use the `pytorch-vision` package but have scripts that differ
 and need their own recipe check before anything here is reused:

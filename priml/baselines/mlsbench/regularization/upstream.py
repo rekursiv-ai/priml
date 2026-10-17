@@ -217,7 +217,7 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
     """
     task = cast(Script, cast(object, script))
     spy = _RegularizationSpy(task.compute_regularization)
-    criterion = _CriterionSpy()
+    criterion = upstream.CriterionSpy()
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
     with (
@@ -361,19 +361,3 @@ class _RegularizationSpy:
         self.values.append(value.detach())
         self.configs.append(dict(config))
         return value
-
-
-class _CriterionSpy:
-    """Cross-entropy, as ``main`` builds it, keeping what it saw."""
-
-    def __init__(self) -> None:
-        self.criterion = torch.nn.CrossEntropyLoss()
-        self.losses: list[Tensor] = []
-        self.logits: list[Tensor] = []
-
-    def __call__(self, logits: Tensor, targets: Tensor) -> Tensor:
-        """Return the batch's loss."""
-        loss = self.criterion(logits, targets)
-        self.losses.append(loss.detach())
-        self.logits.append(logits.detach())
-        return loss

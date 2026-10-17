@@ -23,12 +23,16 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.baselines.mlsbench.pytorch_vision.model import BasicBlock, NormFn
+from priml.baselines.mlsbench.pytorch_vision.model import (
+    BasicBlock,
+    BatchNorm,
+    NormFn,
+    built_activation,
+    conv2d_cost,
+    norm_cost,
+)
 from priml.cost import Cost, cost, elementwise_cost
-from priml.math.custom_types import TensorFn
-from priml.model.conv import conv_cost
 from priml.model.custom_types import ActivationFn
-from priml.model.norm import BatchNorm2d
 from priml.model.swiglu import relu
 
 
@@ -64,7 +68,7 @@ class PreActivationBlock(nn.Module):
         activation: ActivationFn = relu
         """Activation after each of the two normalizations."""
 
-        norm: NormFn = nn.BatchNorm2d
+        norm: NormFn = BatchNorm
         """Builds each normalization: before each convolution and in the projection."""
 
         scale: float = 0.1
@@ -101,11 +105,25 @@ class PreActivationBlock(nn.Module):
             side, side_out = _sides(seq_len, self.stride)
             c_in, c_out = self.channels_in, self.channels_out
             rows_in, rows_out = batch_size * side**2, batch_size * side_out**2
-            norm_out = _norm_cost(c_out, side_out, batch_size, dtype, **kwargs)
+            norm_out = norm_cost(
+                self.norm,
+                channels=c_out,
+                side=side_out,
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
+            )
             total = (
-                _norm_cost(c_in, side, batch_size, dtype, **kwargs)
+                norm_cost(
+                    self.norm,
+                    channels=c_in,
+                    side=side,
+                    batch_size=batch_size,
+                    dtype=dtype,
+                    **kwargs,
+                )
                 + cost(self.activation, channels=c_in * rows_in, dtype=dtype)
-                + _conv_cost(
+                + conv2d_cost(
                     c_in,
                     c_out,
                     kernel_size=3,
@@ -116,7 +134,7 @@ class PreActivationBlock(nn.Module):
                 )
                 + norm_out
                 + cost(self.activation, channels=c_out * rows_out, dtype=dtype)
-                + _conv_cost(
+                + conv2d_cost(
                     c_out,
                     c_out,
                     kernel_size=3,
@@ -130,7 +148,7 @@ class PreActivationBlock(nn.Module):
             )
             if self.stride != 1 or c_in != c_out:
                 total += (
-                    _conv_cost(
+                    conv2d_cost(
                         c_in,
                         c_out,
                         kernel_size=1,
@@ -163,7 +181,7 @@ class PreActivationBlock(nn.Module):
             bias=False,
         )
         self.scale = nn.Parameter(torch.tensor(config.scale))
-        self.act = _built(config.activation)
+        self.act = built_activation(config.activation)
         self.shortcut = (
             nn.Sequential(
                 nn.Conv2d(
@@ -253,7 +271,9 @@ class StochasticDepthBlock(BasicBlock):
     num_layers) * (1 - survival_last)``, decided by one ``torch.rand(1)``
     draw from the global generator after the shortcut runs, so every training
     forward takes exactly one draw. In evaluation the branch is scaled by that
-    probability instead. The cost is the basic block's: the surviving path.
+    probability instead. The cost is the basic block's: the surviving path. As
+    a ``ResNet`` template it numbers its own copies through
+    :meth:`Config.place`, so one config serves any depth.
 
     References:
       https://arxiv.org/abs/1603.09382
@@ -272,6 +292,46 @@ class StochasticDepthBlock(BasicBlock):
 
         survival_last: float = 0.5
         """Survival probability of the deepest block."""
+
+        reset_width: int = 16
+        """Width at which a stride-1 block from and to it restarts the position count.
+
+        Upstream's own constant: its block counter resets on every block from
+        16 to 16 channels at stride 1, the first block of a CIFAR ResNet."""
+
+        def place(self, blocks: Sequence[Makeable[nn.Module]]) -> None:
+            """Set each sized copy's position as upstream's block counter counts it.
+
+            The count restarts at every stride-1 copy from and to
+            ``reset_width`` channels, so in a first stage of that width every
+            block is at position 1. The count's last value is every copy's
+            ``num_layers``, as upstream reads it in the forward.
+
+            Args:
+              blocks: The copies, sized, in network order.
+
+            """
+            copies = [b for b in blocks if isinstance(b, StochasticDepthBlock.Config)]
+            depth = 0
+            for block in copies:
+                if block.stride == 1 and (
+                    block.channels_in == block.channels_out == self.reset_width
+                ):
+                    depth = 0
+                depth += 1
+                block.depth = depth
+            for block in copies:
+                block.num_layers = depth
+
+        @override
+        def finalize(self) -> Self:
+            if self.num_layers < 1:
+                raise ValueError(
+                    f"num_layers must be at least 1; got {self.num_layers}.",
+                )
+            if self.depth < 1:
+                raise ValueError(f"depth must be at least 1; got {self.depth}.")
+            return super().finalize()
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
@@ -304,111 +364,12 @@ class StochasticDepthBlock(BasicBlock):
         return self.act(shortcut)
 
 
-def stochastic_depth(
-    channels_hidden: Sequence[int],
-    blocks_per_stage: Sequence[int],
-    *,
-    survival_last: float,
-) -> list[Makeable[nn.Module]]:
-    """Return one stochastic-depth block per position of a network, in order.
-
-    Positions are numbered as the reference numbers them: the count restarts
-    at every stride-1 block whose input and output both have the stem's width,
-    so in a first stage as wide as the stem every block is at depth 1, and
-    counting resumes from 2 in the second stage. The count's last value sets
-    every block's ``num_layers``, as the reference reads it in the forward.
-
-    Args:
-      channels_hidden: Width of each stage; the first is the stem's.
-      blocks_per_stage: Blocks in each stage.
-      survival_last: Survival probability of the deepest block.
-
-    Returns:
-      blocks: ``sum(blocks_per_stage)`` configs for ``ResNet.Config.block``.
-
-    """
-    depths: list[int] = []
-    depth = 0
-    channels = channels_hidden[0]
-    for index, (width, count) in enumerate(
-        zip(channels_hidden, blocks_per_stage, strict=True),
-    ):
-        for position in range(count):
-            # The stride ResNet gives this position: 2 on each later stage's first.
-            stride = 2 if index and not position else 1
-            if stride == 1 and channels == width == channels_hidden[0]:
-                depth = 0
-            depth += 1
-            depths.append(depth)
-            channels = width
-    blocks: list[Makeable[nn.Module]] = []
-    for position_depth in depths:
-        block = StochasticDepthBlock.Config()
-        block.depth = position_depth
-        block.num_layers = depth
-        block.survival_last = survival_last
-        blocks.append(block)
-    return blocks
-
-
-def _built(activation: ActivationFn) -> TensorFn:
-    """Build an activation from a config, or pass a callable through."""
-    if isinstance(activation, Makeable):
-        # ``Makeable`` is runtime-checkable, so isinstance erases its type
-        # parameter: ``make`` reads as returning ``object`` without the cast.
-        return cast(TensorFn, activation.make())
-    return activation
-
-
 def _sides(seq_len: int, stride: int) -> tuple[int, int]:
     """Return the side of a square input grid and of the strided output grid."""
     side = math.isqrt(seq_len)
     if side * side != seq_len:
         raise ValueError(f"A block needs a square input grid; got {seq_len}.")
     return side, (side - 1) // stride + 1
-
-
-def _conv_cost(
-    channels_in: int,
-    channels_out: int,
-    *,
-    kernel_size: int,
-    side: int,
-    stride: int,
-    batch_size: int,
-    dtype: torch.dtype | None,
-) -> Cost:
-    """Cost one bias-free, same-padded convolution over a square grid."""
-    return conv_cost(
-        channels_in=channels_in,
-        channels_out=channels_out,
-        kernel_size=kernel_size,
-        ndim=2,
-        groups=1,
-        bias=False,
-        input_grid=(side, side),
-        batch_size=batch_size,
-        stride=stride,
-        padding=kernel_size // 2,
-        dtype=dtype,
-    )
-
-
-def _norm_cost(
-    channels: int,
-    side: int,
-    batch_size: int,
-    dtype: torch.dtype | None,
-    **kwargs: object,
-) -> Cost:
-    """Cost one affine batch norm over a square grid."""
-    return cost(
-        BatchNorm2d.Config(channels, elementwise_affine=True),
-        seq_len=side**2,
-        batch_size=batch_size,
-        dtype=dtype,
-        **kwargs,
-    )
 
 
 def _scale_cost(channels: int, rows: int, dtype: torch.dtype | None) -> Cost:

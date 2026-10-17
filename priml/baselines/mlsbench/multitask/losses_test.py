@@ -60,6 +60,14 @@ def test_dwa_resets_to_equal_weights_whenever_the_epoch_is_zero() -> None:
     assert module(torch.tensor(1.0), torch.tensor(1.0), 0, 3).item() == 2.0
 
 
+def test_dwa_moves_a_restored_history_to_the_losses_device() -> None:
+    dwa = DynamicWeightAverage.Config().make()
+    dwa.set_extra_state(torch.tensor([1.0, 2.0]))
+    meta = torch.device("meta")
+    loss = dwa(torch.tensor(1.0, device=meta), torch.tensor(2.0, device=meta), 1, 3)
+    assert loss.device == meta
+
+
 def test_pcgrad_leaves_agreeing_gradients_summed() -> None:
     w = torch.tensor([1.0, 2.0], requires_grad=True)
     module = PCGrad.Config().make()

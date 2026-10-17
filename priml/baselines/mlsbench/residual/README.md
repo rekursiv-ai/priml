@@ -14,10 +14,10 @@ exp000  basic block (pristine)
   +-- exp003  stochastic depth, deepest block survives with probability 0.5
 ```
 
-`exp003` sets one block per position: upstream numbers its blocks with a
-class-wide counter that restarts on every 16-to-16-channel block, so in
-ResNet-56 all nine first-stage blocks sit at position 1 and the rest at 2
-to 19. `blocks.stochastic_depth` reproduces that numbering.
+Upstream numbers its stochastic-depth blocks with a class-wide counter that
+restarts on every 16-to-16-channel block, so in ResNet-56 all nine
+first-stage blocks sit at position 1 and the rest at 2 to 19.
+`StochasticDepthBlock.Config.place` reproduces that numbering at any depth.
 
 The unpublished `bottleneck` and `se_block` edits are not ported.
 

@@ -15,7 +15,17 @@ import math
 
 
 def constant(epoch: int, /, *, base_lr: float, total_epochs: int) -> float:
-    """Return ``base_lr`` for every epoch: the task's pristine schedule."""
+    """Hold the rate at ``base_lr``: the task's pristine schedule.
+
+    Args:
+      epoch: Unused.
+      base_lr: The rate of every epoch.
+      total_epochs: Unused.
+
+    Returns:
+      lr: ``base_lr``.
+
+    """
     del epoch, total_epochs
     return base_lr
 

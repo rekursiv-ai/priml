@@ -40,6 +40,8 @@ class MultiTaskStep(VisionTrainStep):
     class Config(VisionTrainStep.Config):
         """The vision step's slots plus the combination of the two losses."""
 
+        # Not ``Makes["MultiTaskStep"]``: the base already derives from
+        # ``Makes["VisionTrainStep"]``, and the two give no consistent MRO.
         if TYPE_CHECKING:
 
             @override
@@ -61,8 +63,10 @@ class MultiTaskStep(VisionTrainStep):
         mtl_loss = config.mtl_loss.make()
         assert isinstance(mtl_loss, nn.Module)
         self.mtl_loss: nn.Module = mtl_loss
-        self.mtl_epochs = int(config.train_budget_epochs)
+        self.optimized: Optimized
+        """What the optimizer is built over; set by :meth:`build_optimizer`."""
         super().__init__(config)
+        self.mtl_epochs = int(config.train_budget_epochs)
 
     @override
     def build_optimizer(self, model: nn.Module) -> OptimizerProtocol:
@@ -72,11 +76,13 @@ class MultiTaskStep(VisionTrainStep):
           model: The placed network.
 
         Returns:
-          optimizer: Over ``model``'s parameters, then ``mtl_loss``'s.
+          optimizer: Over :attr:`optimized`, whose parameters are named
+            ``model.*`` then ``mtl_loss.*``.
 
         """
         self.mtl_loss = self.mtl_loss.to(self.device)
-        return super().build_optimizer(nn.ModuleList([model, self.mtl_loss]))
+        self.optimized = Optimized(model=model, mtl_loss=self.mtl_loss)
+        return super().build_optimizer(self.optimized)
 
     @override
     def train_step(self, **batch: object) -> TrainStepOutput:
@@ -101,15 +107,19 @@ class MultiTaskStep(VisionTrainStep):
         self.optimizer.zero_grad(set_to_none=True)
         self.mtl_loss.train()
         logits, logits_coarse = cast(tuple[Tensor, Tensor], self(media=media))
+        loss_fine = self.loss(logits, label=label, context=self._context(logits))[
+            "loss"
+        ]
+        loss_coarse = self.loss(
+            logits_coarse,
+            label=label_coarse,
+            context=self._context(logits_coarse),
+        )["loss"]
         loss = cast(
             object,
             self.mtl_loss(
-                self.loss(logits, label=label, context=self._context(logits))["loss"],
-                self.loss(
-                    logits_coarse,
-                    label=label_coarse,
-                    context=self._context(logits_coarse),
-                )["loss"],
+                loss_fine,
+                loss_coarse,
                 self.timer_epoch.global_count,
                 self.mtl_epochs,
             ),
@@ -118,8 +128,10 @@ class MultiTaskStep(VisionTrainStep):
         loss.backward()
         with self.timer_step:
             self.optimizer.step()
+        # Reported as the plain sum, whatever was backpropagated: PCGrad returns a
+        # surrogate whose value is not a loss.
         return {
-            "loss": loss.detach(),
+            "loss": (loss_fine + loss_coarse).detach(),
             "model": torch.cat([logits, logits_coarse], dim=-1).detach(),
         }
 
@@ -173,17 +185,33 @@ class MultiTaskStep(VisionTrainStep):
 
         Args:
           state_dict: Checkpoint from :meth:`state_dict`.
-          strict: Require exact key matches.
+          strict: Require exact key matches, the combination's entry included.
           load_optimizer: Restore the optimizer and EMA too.
           remap: Transforms the saved model dict before loading.
 
+        Raises:
+          KeyError: ``strict`` and the checkpoint holds no ``"mtl_loss"``.
+
         """
+        state = cast(MultiTaskStep.StateDict, state_dict)
+        if strict and "mtl_loss" not in state:
+            raise KeyError("The checkpoint holds no 'mtl_loss' state.")
         super().load_state_dict(
             state_dict,
             strict=strict,
             load_optimizer=load_optimizer,
             remap=remap,
         )
-        state = cast(MultiTaskStep.StateDict, state_dict)
         if "mtl_loss" in state:
             self.mtl_loss.load_state_dict(state["mtl_loss"], strict=strict)
+
+
+class Optimized(nn.Module):
+    """The network and the combination, under the names their parameters carry."""
+
+    def __init__(self, *, model: nn.Module, mtl_loss: nn.Module) -> None:
+        super().__init__()
+        # Registered in this order: the optimizer's parameter order is the
+        # reference's ``list(model.parameters()) + list(mtl_loss.parameters())``.
+        self.model = model
+        self.mtl_loss = mtl_loss

@@ -9,14 +9,13 @@ repeats ``main``'s epoch loop on the shallowest network. Nothing runs on a GPU.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
+
+from torch import Tensor
 
 import torch
 
-from priml.baselines.mlsbench.activation.reference import (
-    ACTIVATIONS,
-    fixed_inputs,
-)
+from priml.baselines.mlsbench.activation.reference import fixed_inputs
 from priml.baselines.mlsbench.pytorch_vision import reference, upstream
 from priml.testing.bfb import host_agnostic_numerics
 
@@ -24,13 +23,14 @@ from priml.testing.bfb import host_agnostic_numerics
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
-    from torch import Tensor, nn
+    from torch import nn
 
     from priml.baselines.mlsbench.pytorch_vision.upstream import (
         Lockstep,
         MainTrace,
         Upstream,
     )
+    from priml.math.custom_types import TensorFn
 
 PRISTINE: Final = Path(
     "harbor/tasks-docker/mls-bench__dl-activation-function/tests/meta/pristine"
@@ -40,6 +40,9 @@ PRISTINE: Final = Path(
 
 EDITS: Final = Path("tasks/dl-activation-function/edits")
 """Directory of the task's baseline edits, relative to the clone."""
+
+EDITED: Final = ("gelu", "silu", "mish")
+"""The baselines, each named as its edit file and as its port's variant."""
 
 ARCH: Final = "resnet20"
 """The ``--arch`` of the ``resnet20-cifar10`` setting."""
@@ -51,6 +54,7 @@ CLASSES: Final = 10
 """Classes of the ``resnet20-cifar10`` setting."""
 
 
+@runtime_checkable
 class Script(Protocol):
     """The part of the ``dl-activation-function`` script the capture uses."""
 
@@ -58,7 +62,7 @@ class Script(Protocol):
 
     ResNet: Callable[[type[nn.Module], list[int], int], nn.Module]
 
-    CustomActivation: Callable[[], nn.Module]
+    CustomActivation: Callable[[], TensorFn]
 
     def initialize_weights(self, model: nn.Module) -> None:
         """Initialize in place."""
@@ -83,8 +87,7 @@ def variants(root: Path, scratch: Path) -> dict[str, Upstream]:
       scratch: Directory the edited scripts are written to.
 
     Returns:
-      scripts: Keyed as :data:`~priml.baselines.mlsbench.activation.reference.ACTIVATIONS`;
-        ``relu`` is the pristine script, each other an edit of that name.
+      scripts: ``relu`` (the pristine script) and each of :data:`EDITED`.
 
     """
     pristine = upstream.load_script(root / PRISTINE)
@@ -96,7 +99,7 @@ def variants(root: Path, scratch: Path) -> dict[str, Upstream]:
             pristine=PRISTINE,
             edits=EDITS,
         )
-        for name in list(ACTIVATIONS)[1:]
+        for name in EDITED
     }
 
 
@@ -124,14 +127,15 @@ def upstream_activation(script: Upstream, name: str) -> dict[str, Tensor]:
       record: The activation's values and its gradient at every input.
 
     """
-    task = cast(Script, cast(object, script))
+    task = _task(script)
     leaf = fixed_inputs().requires_grad_()
     with host_agnostic_numerics():
-        value = cast(torch.Tensor, task.CustomActivation()(leaf))
+        value = task.CustomActivation()(leaf)
         value.sum().backward()
+    assert isinstance(leaf.grad, Tensor)
     return {
         f"activation/{name}/value": value.detach(),
-        f"activation/{name}/grad": cast(torch.Tensor, leaf.grad),
+        f"activation/{name}/grad": leaf.grad,
     }
 
 
@@ -148,8 +152,8 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
         afterwards; and the model's whole state after each update.
 
     """
-    task = cast(Script, cast(object, script))
-    criterion = _CriterionSpy()
+    task = _task(script)
+    criterion = upstream.CriterionSpy()
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
     with reference.seeded(reference.SEED), host_agnostic_numerics():
@@ -159,7 +163,9 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
             model.parameters(),
             lr=trace.settings["lr"],
             momentum=trace.settings["momentum"],
+            dampening=trace.settings["dampening"],
             weight_decay=trace.settings["weight_decay"],
+            nesterov=bool(trace.settings["nesterov"]),
         )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
@@ -214,17 +220,10 @@ def upstream_record(
     return record
 
 
-class _CriterionSpy:
-    """Cross-entropy, as ``main`` builds it, keeping what it saw."""
-
-    def __init__(self) -> None:
-        self.criterion = torch.nn.CrossEntropyLoss()
-        self.losses: list[Tensor] = []
-        self.logits: list[Tensor] = []
-
-    def __call__(self, logits: Tensor, targets: Tensor) -> Tensor:
-        """Return the batch's loss."""
-        loss = self.criterion(logits, targets)
-        self.losses.append(loss.detach())
-        self.logits.append(logits.detach())
-        return loss
+# The capture shares the vision port's ``Upstream`` type with its helpers, but this
+# script has no ``compute_loss`` and its ``train_epoch`` takes a criterion; narrowing
+# from ``object`` checks the members this module uses instead of intersecting both.
+def _task(script: object) -> Script:
+    """Narrow an imported script to the members this module calls."""
+    assert isinstance(script, Script)
+    return script

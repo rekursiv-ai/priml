@@ -87,7 +87,7 @@ def cutout(
     holes: int,
     length: int,
 ) -> Tensor:
-    """Zero ``holes`` squares of side ``length`` centred at random pixels.
+    """Zero ``holes`` squares of side ``2 * (length // 2)`` centred at random pixels.
 
     Each hole draws its centre's row, then its column. Zeroing the uint8
     pixels before normalizing equals the reference's mask on scaled pixels,
@@ -97,7 +97,9 @@ def cutout(
       image: ``(C, H, W)`` uint8 pixels.
       stream: Generator the draws come from, advanced in place.
       holes: Squares to zero.
-      length: Side of each square; it is clipped where it leaves the image.
+      length: Nominal side; the square spans ``length // 2`` pixels each side
+        of its centre, so an odd length zeroes one pixel fewer. It is clipped
+        where it leaves the image.
 
     Returns:
       image: ``(C, H, W)`` uint8 pixels.

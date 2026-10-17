@@ -19,11 +19,18 @@ from priml.baselines.mlsbench.weighting.data import (
     long_tail_indices,
 )
 from priml.baselines.mlsbench.weighting.experiments import exp000, exp001
-from priml.baselines.mlsbench.weighting.loss import ClassWeightedCrossEntropy
+from priml.baselines.mlsbench.weighting.loss import (
+    BindsClassCounts,
+    ClassWeightedCrossEntropy,
+)
 
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from torch import Tensor
+
+    from priml.loss.custom_types import LossOutput
 
 
 def test_counts_decay_from_class_zero_to_the_ratio_and_floor_at_one() -> None:
@@ -103,9 +110,28 @@ def test_a_step_whose_loss_takes_no_counts_is_left_alone(tmp_path: Path) -> None
     data = config.make()
     assert isinstance(data, LongTailCifar100Data)
     step = vision.tiny_step(vision_exp000, blocks=(1, 1, 1), classes=3, epochs=1)
-    loss = step.loss
     data.bind_step(step)
-    assert step.loss is loss
+    assert not isinstance(step.loss, BindsClassCounts)
+    bound: list[Tensor] = []
+    step.loss = Recorder(bound)
+    data.bind_step(step)
+    assert len(bound) == 1
+    assert torch.equal(bound[0], data.class_counts)
+
+
+class Recorder:
+    """A loss that only records the counts it is bound to."""
+
+    def __init__(self, bound: list[Tensor]) -> None:
+        self.bound = bound
+
+    def bind_class_counts(self, class_counts: Tensor) -> None:
+        """Record ``class_counts``."""
+        self.bound.append(class_counts)
+
+    def __call__(self, logits: Tensor, **_batch: object) -> LossOutput:
+        """Return a zero loss; never called here."""
+        return {"loss": logits.sum() * 0}
 
 
 if __name__ == "__main__":

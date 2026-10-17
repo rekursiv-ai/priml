@@ -13,9 +13,7 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.pytorch_vision import reference as vision
-from priml.baselines.mlsbench.pytorch_vision.model import ResNet
 from priml.baselines.mlsbench.residual import reference
-from priml.baselines.mlsbench.residual.blocks import StochasticDepthBlock
 from priml.testing.golden import mismatches, read_tensors
 
 
@@ -84,17 +82,6 @@ def test_the_port_record_holds_every_stored_key_of_its_variants(
         or k.split("/")[1] == "basic"
     }
     assert reference.port_record().keys() == expected
-
-
-def test_resizing_rebuilds_the_survival_schedule_for_the_new_depth() -> None:
-    model = reference.resized(reference.VARIANTS["stochastic_depth"], blocks=(1, 1, 1))
-    assert isinstance(model.model, ResNet.Config)
-    assert isinstance(model.model.block, list)
-    assert [
-        (b.depth, b.num_layers)
-        for b in model.model.block
-        if isinstance(b, StochasticDepthBlock.Config)
-    ] == [(1, 3), (2, 3), (3, 3)]
 
 
 def test_the_golden_bites_on_one_ulp() -> None:

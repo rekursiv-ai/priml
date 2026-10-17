@@ -14,16 +14,23 @@ zero, the values these layers are built with, so no initializer is needed.
 
 from __future__ import annotations
 
-from typing import override
+from typing import Final, override
 
 from torch import Tensor, nn
 from torch.nn import functional
 
 import torch
 
+from priml.cost import Cost, cost, elementwise_cost, reduction_cost
+from priml.model.norm import GroupNorm2d
+
+
+MAX_GROUPS: Final = 32
+"""Most groups :class:`GroupNorm` divides the channels into, as the reference caps it."""
+
 
 class GroupNorm(nn.GroupNorm):
-    """Group normalization with the most groups, up to ``max_groups``, dividing the channels.
+    """Group normalization with the most groups, up to :data:`MAX_GROUPS`, dividing the channels.
 
     References:
       https://arxiv.org/abs/1803.08494
@@ -31,11 +38,50 @@ class GroupNorm(nn.GroupNorm):
 
     """
 
-    def __init__(self, num_features: int, *, max_groups: int = 32) -> None:
-        groups = min(max_groups, num_features)
-        while num_features % groups:
-            groups -= 1
-        super().__init__(groups, num_features)
+    def __init__(self, num_features: int) -> None:
+        super().__init__(groups_for(num_features), num_features)
+
+    @staticmethod
+    def cost(
+        *,
+        channels: int,
+        seq_len: int,
+        batch_size: int,
+        dtype: torch.dtype | None,
+        **kwargs: object,
+    ) -> Cost:
+        """Cost one affine group norm over ``seq_len`` positions per image.
+
+        Args:
+          channels: Normalized channels.
+          seq_len: Spatial positions per image.
+          batch_size: Images in this invocation.
+          dtype: Activation dtype; ``None`` is torch's default.
+          **kwargs: The open bus, forwarded.
+
+        Returns:
+          cost: Whole-invocation FLOPs, logical bytes and ownership.
+
+        """
+        return cost(
+            GroupNorm2d.Config(
+                channels,
+                num_groups=groups_for(channels),
+                elementwise_affine=True,
+            ),
+            seq_len=seq_len,
+            batch_size=batch_size,
+            dtype=dtype,
+            **kwargs,
+        )
+
+
+def groups_for(num_features: int) -> int:
+    """Return the most groups, up to :data:`MAX_GROUPS`, that divide ``num_features``."""
+    groups = min(MAX_GROUPS, num_features)
+    while num_features % groups:
+        groups -= 1
+    return groups
 
 
 class BatchInstanceNorm(nn.Module):
@@ -50,6 +96,42 @@ class BatchInstanceNorm(nn.Module):
         Style-Invariant Neural Networks."
 
     """
+
+    @staticmethod
+    def cost(
+        *,
+        channels: int,
+        seq_len: int,
+        batch_size: int,
+        dtype: torch.dtype | None,
+        **kwargs: object,
+    ) -> Cost:
+        """Cost batch and instance statistics, the gated mix and the affine.
+
+        Per element the forward centers and scales twice, squares twice for the
+        variances, mixes three ways and applies the affine: 13 operations,
+        twice that backward.
+
+        Args:
+          channels: Normalized channels.
+          seq_len: Spatial positions per image.
+          batch_size: Images in this invocation.
+          dtype: Activation dtype; ``None`` is torch's default.
+          **kwargs: The open bus; unused.
+
+        Returns:
+          cost: Whole-invocation FLOPs, logical bytes and ``3 * channels`` owned.
+
+        """
+        del kwargs
+        return _mixed_norm_cost(
+            channels=channels,
+            rows=seq_len * batch_size,
+            per_element=13,
+            groups=(channels, channels * batch_size),
+            params=3 * channels,
+            dtype=dtype,
+        )
 
     def __init__(self, num_features: int, *, eps: float = 1e-5) -> None:
         super().__init__()
@@ -84,6 +166,43 @@ class SwitchableNorm(nn.Module):
 
     """
 
+    @staticmethod
+    def cost(
+        *,
+        channels: int,
+        seq_len: int,
+        batch_size: int,
+        dtype: torch.dtype | None,
+        **kwargs: object,
+    ) -> Cost:
+        """Cost instance, layer and batch statistics, the mixture and the affine.
+
+        Per element the forward squares three times for the variances,
+        centers, scales and applies the affine: 10 operations, twice that
+        backward.
+
+        Args:
+          channels: Normalized channels.
+          seq_len: Spatial positions per image.
+          batch_size: Images in this invocation.
+          dtype: Activation dtype; ``None`` is torch's default.
+          **kwargs: The open bus; unused.
+
+        Returns:
+          cost: Whole-invocation FLOPs, logical bytes and ``2 * channels + 6``
+            owned.
+
+        """
+        del kwargs
+        return _mixed_norm_cost(
+            channels=channels,
+            rows=seq_len * batch_size,
+            per_element=10,
+            groups=(channels * batch_size, batch_size, channels),
+            params=2 * channels + 6,
+            dtype=dtype,
+        )
+
     def __init__(self, num_features: int, *, eps: float = 1e-5) -> None:
         super().__init__()
         self.eps = eps
@@ -106,3 +225,33 @@ class SwitchableNorm(nn.Module):
         var = var_w[0] * var_in + var_w[1] * var_ln + var_w[2] * var_bn
         x_norm = (x - mean) / (var + self.eps).sqrt()
         return x_norm * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
+
+
+def _mixed_norm_cost(
+    *,
+    channels: int,
+    rows: int,
+    per_element: int,
+    groups: tuple[int, ...],
+    params: int,
+    dtype: torch.dtype | None,
+) -> Cost:
+    """Cost a norm mixing several statistics: one mean and variance per entry of ``groups``."""
+    elements = channels * rows
+    total = elementwise_cost(
+        primal=per_element * elements,
+        adjoint=2 * per_element * elements,
+        channels=channels,
+        params=params,
+        rows=rows,
+        dtype=dtype,
+    )
+    for count in groups:
+        for phase in ("primal", "adjoint"):
+            total += reduction_cost(
+                input_elements=elements,
+                output_groups=count,
+                dtype=dtype,
+                phase=phase,
+            ).tile(2)
+    return total

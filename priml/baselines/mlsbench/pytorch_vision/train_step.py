@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol, cast, override
+from typing import TYPE_CHECKING, Final, Protocol, cast, override
 
 import math
 
@@ -57,6 +57,16 @@ class LearningRateSchedule(Protocol):
         raise NotImplementedError
 
 
+UNSUPPORTED: Final = (
+    "accumulate_grad_batches",
+    "lr_schedule",
+    "ema",
+    "gradient_clip_norm",
+    "skip_step_on_nonfinite_grad",
+)
+"""Inherited settings the base applies in ``step``, which this update bypasses."""
+
+
 class VisionTrainStep(TrainStep):
     """Model plus optimization for one MLS-Bench vision experiment."""
 
@@ -90,6 +100,22 @@ class VisionTrainStep(TrainStep):
                 "train_budget_epochs must be finite: the schedule and the loss "
                 f"context both read it; got {config.train_budget_epochs}.",
             )
+        if config.train_budget_epochs < 1 or config.train_budget_epochs % 1:
+            raise ValueError(
+                "train_budget_epochs must be a whole number of passes; got "
+                f"{config.train_budget_epochs}.",
+            )
+        defaults = VisionTrainStep.Config()
+        ignored = [
+            name
+            for name in UNSUPPORTED
+            if getattr(config, name) != getattr(defaults, name)
+        ]
+        if ignored:
+            raise ValueError(
+                f"{type(self).__name__} runs the reference's bare update, which "
+                f"has no {', '.join(ignored)}; leave them at their defaults.",
+            )
         super().__init__(config)
         self.config: VisionTrainStep.Config = config
         self.schedule: LearningRateSchedule = config.schedule.make()
@@ -113,11 +139,41 @@ class VisionTrainStep(TrainStep):
         self.optimizer.zero_grad(set_to_none=True)
         logits = self(media=media)
         assert isinstance(logits, Tensor)
-        loss = self.loss(logits, label=label, context=self._context(logits))["loss"]
+        loss = self.objective(
+            logits,
+            media=media,
+            label=label,
+            context=self._context(logits),
+        )
         loss.backward()
         with self.timer_step:
             self.optimizer.step()
         return {"loss": loss.detach(), "model": logits.detach()}
+
+    def objective(
+        self,
+        logits: Tensor,
+        *,
+        media: Tensor,
+        label: Tensor,
+        context: LossContext,
+    ) -> Tensor:
+        """Return the scalar the update backpropagates: the loss slot's.
+
+        A recipe that adds a term to the loss overrides this, and only this.
+
+        Args:
+          logits: ``(B, C)`` class scores of the batch.
+          media: ``(B, C_in, H, W)`` the images; the loss slot does not read them.
+          label: ``(B,)`` target classes.
+          context: What the loss may read besides the logits and the labels.
+
+        Returns:
+          loss: The scalar the optimizer descends.
+
+        """
+        del media
+        return self.loss(logits, label=label, context=context)["loss"]
 
     @override
     def eval_loss(self, **batch: object) -> TrainStepOutput:

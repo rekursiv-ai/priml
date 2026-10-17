@@ -25,8 +25,6 @@ from priml.baselines.mlsbench.regularization.regularizers import zero
 if TYPE_CHECKING:
     from torch import nn
 
-    from priml.train.custom_types import TrainStepOutput
-
 
 class Regularizer(Protocol):
     """Maps the network and one batch's forward to a scalar added to the loss."""
@@ -68,35 +66,31 @@ class RegularizedTrainStep(VisionTrainStep):
         self.regularization: Regularizer = config.regularization.make()
 
     @override
-    def train_step(self, **batch: object) -> TrainStepOutput:
-        """Run one update on the loss plus the regularization term.
+    def objective(
+        self,
+        logits: Tensor,
+        *,
+        media: Tensor,
+        label: Tensor,
+        context: LossContext,
+    ) -> Tensor:
+        """Return the loss slot's scalar plus the regularization term.
 
         Args:
-          **batch: Preprocessed batch with ``media`` and ``label``.
+          logits: ``(B, C)`` class scores of the batch.
+          media: The batch's images, which the regularizer may read.
+          label: ``(B,)`` target classes.
+          context: What the loss and the regularizer may read about the run.
 
         Returns:
-          result: ``loss`` (the scalar minimized) and ``model`` (logits).
+          loss: The scalar the optimizer descends.
 
         """
-        media = batch["media"]
-        assert isinstance(media, Tensor)
-        label = batch["label"]
-        assert isinstance(label, Tensor)
-        self._apply_schedule()
-        self.optimizer.zero_grad(set_to_none=True)
-        logits = self(media=media)
-        assert isinstance(logits, Tensor)
-        context = self._context(logits)
-        ce = self.loss(logits, label=label, context=context)["loss"]
-        reg = self.regularization(
+        ce = super().objective(logits, media=media, label=label, context=context)
+        return ce + self.regularization(
             self.model,
             media=media,
             logits=logits,
             label=label,
             context=context,
         )
-        loss = ce + reg
-        loss.backward()
-        with self.timer_step:
-            self.optimizer.step()
-        return {"loss": loss.detach(), "model": logits.detach()}

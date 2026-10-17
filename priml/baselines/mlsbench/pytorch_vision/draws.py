@@ -29,10 +29,10 @@ else:
 
 @contextmanager
 def recorded_draws() -> Generator[dict[str, int]]:
-    """Count the random draws made inside the block.
+    """Count the draws torch's samplers make inside the block.
 
     Draws made in other processes, such as the workers of a data loader, are
-    not seen.
+    not seen, nor are draws from numpy's or Python's generators.
 
     Yields:
       counts: Maps ``"<api>@<file>:<function>"``, the sampler and the last two
@@ -41,14 +41,34 @@ def recorded_draws() -> Generator[dict[str, int]]:
     """
     counts: dict[str, int] = {}
     with ExitStack() as stack:
-        for api in ("randint", "rand", "randperm"):
+        for api in (
+            "randint",
+            "rand",
+            "randperm",
+            "randn",
+            "normal",
+            "bernoulli",
+            "multinomial",
+            "rand_like",
+            "randn_like",
+            "randint_like",
+        ):
             counted = _Counted(
                 cast("Callable[..., object]", getattr(torch, api)),
                 api,
                 counts,
             )
             stack.enter_context(mock.patch.object(torch, api, counted))
-        for api in ("uniform_", "normal_", "random_"):
+        for api in (
+            "uniform_",
+            "normal_",
+            "random_",
+            "bernoulli_",
+            "exponential_",
+            "geometric_",
+            "log_normal_",
+            "cauchy_",
+        ):
             counted = _Counted(
                 cast("Callable[..., object]", getattr(torch.Tensor, api)),
                 api,

@@ -1,4 +1,4 @@
-# MLS-Bench `cv-sample-weighting`
+# MLS-Bench `cv-sample-weighting`, as priml experiments
 
 ResNet-32 on long-tailed CIFAR-100 (`resnet32-cifar100lt`, imbalance ratio
 100). The task's editable `compute_class_weights` is the slot
@@ -40,8 +40,9 @@ uv --quiet run --frozen python priml/baselines/mlsbench/weighting/scripts/captur
 Runs the pristine script and each baseline's edit from the clone and compares
 with exact equality: each weighting's weights, loss and gradient; the counts,
 weights and kept positions `main` builds over CIFAR-100's label layout; the
-kept positions and counts of the real training split (`--cifar100`, default
-`/opt/scratch/datasets/cifar100`); ResNet-32's initial state and forward; the
+kept positions and counts of the real training split when `--cifar100` names
+torchvision's CIFAR-100 root (`/opt/scratch/datasets/cifar100` once
+`prepare_data` has run); ResNet-32's initial state and forward; the
 200 rates; the optimizer; every pixel of the long-tailed loaders; and every
 parameter after two updates per weighting. `reference_test.py` replays the
 stored values.

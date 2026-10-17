@@ -44,6 +44,7 @@ def test_capture_names_what_the_stand_in_does_differently(tmp_path: Path) -> Non
     assert not keys & {"schedule/lr", "optimizer/settings", "best/accuracy"}
     assert {"norm/group_norm/groups", "norm/switchable_norm/train"} <= keys
     assert "draws/batch_norm" in keys
+    assert not any(key.startswith("norm/batch_norm/") for key in keys)
     assert any(line.startswith("full/group_norm: state: ") for line in report)
     assert any(line.startswith("lockstep/batch_norm/1: ") for line in report)
     assert any(line.startswith("loader/train/") for line in report)

@@ -37,3 +37,9 @@ compares with exact equality, per initialization: ResNet-56's state after
 afterwards; the shallowest network's state and forward; every parameter after
 each of two updates. It also compares the learning rates, the optimizer and
 every pixel the loaders produce. `reference_test.py` replays the stored values.
+
+Not compared here: the best-accuracy bookkeeping (`best/accuracy`), which the
+script shares unchanged with `cv-classification-loss` and is proven by that
+capture. The capture runs `main` at the script's argparse defaults, not the
+launch `.sh`; `experiments_test.py` pins the `.sh` values (lr, momentum,
+weight decay, batch size, epochs) against `exp000`.

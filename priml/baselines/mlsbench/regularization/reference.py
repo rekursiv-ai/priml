@@ -10,11 +10,10 @@ regularizer and the step that adds it.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Final, cast, override
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Final, override
 
 from torch import Tensor, nn
-from treekle import from_plain
 
 import torch
 
@@ -32,7 +31,6 @@ from priml.baselines.mlsbench.regularization.train_step import (
 )
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import joined, rng_fingerprint
-from priml.train.parallelism import NoParallel
 
 
 if TYPE_CHECKING:
@@ -136,34 +134,6 @@ def regularizer_record() -> dict[str, Tensor]:
     return record
 
 
-def schedule_record() -> dict[str, Tensor]:
-    """Return the learning rate of each of the 200 epochs of ``exp000``.
-
-    Returns:
-      record: The 200 rates, as float64.
-
-    """
-    step = reference.tiny_step(exp000, blocks=(1, 1, 1), classes=3, epochs=200)
-    base_lr = from_plain(cast(object, step.optimizer.param_groups[0]["lr"]), float)
-    rates = [
-        step.schedule(epoch, base_lr=base_lr, total_epochs=200) for epoch in range(200)
-    ]
-    return {"schedule/lr": torch.tensor(rates, dtype=torch.float64)}
-
-
-def optimizer_record() -> dict[str, Tensor]:
-    """Return the settings of the optimizer ``exp000`` builds.
-
-    Returns:
-      record: The entries of ``HYPERPARAMETERS``, as float64.
-
-    """
-    step = reference.tiny_step(exp000, blocks=(1, 1, 1), classes=3, epochs=200)
-    group = cast(Mapping[str, object], step.optimizer.param_groups[0])
-    values = [float(cast(float, group[name])) for name in reference.HYPERPARAMETERS]
-    return {"optimizer/settings": torch.tensor(values, dtype=torch.float64)}
-
-
 def draws_record() -> dict[str, Tensor]:
     """Return where the generator stands after building the full ``exp000`` step.
 
@@ -171,10 +141,8 @@ def draws_record() -> dict[str, Tensor]:
       record: The next eight draws.
 
     """
-    config = exp000().step
-    config.parallelism = NoParallel.Config(device="cpu")
     with reference.seeded(reference.SEED), host_agnostic_numerics():
-        _ = config.make()
+        _ = reference.full_step(exp000)
         return {"draws/exp000": rng_fingerprint()}
 
 
@@ -234,6 +202,21 @@ def lockstep_record(
     }
 
 
+def setting_batch_size(argv: list[str]) -> Tensor:
+    """Return the ``--batch-size`` the setting passes, once per loader.
+
+    ``main`` hands it to ``get_dataloaders``, which builds both loaders with it.
+    """
+    size = int(argv[argv.index("--batch-size") + 1])
+    return torch.tensor([size, size])
+
+
+def port_batch_size() -> Tensor:
+    """Return the training and evaluation batch sizes of ``exp000``."""
+    dataset = exp000().dataset
+    return torch.tensor([dataset.batch_size, dataset.eval_batch_size])
+
+
 def port_record() -> dict[str, Tensor]:
     """Run every port-side comparison and return all their values.
 
@@ -243,8 +226,8 @@ def port_record() -> dict[str, Tensor]:
     """
     record = (
         regularizer_record()
-        | schedule_record()
-        | optimizer_record()
+        | reference.schedule_record(exp000)
+        | reference.optimizer_record(exp000)
         | draws_record()
         | reference.best_record()
     )

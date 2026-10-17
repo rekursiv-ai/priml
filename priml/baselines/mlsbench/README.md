@@ -32,7 +32,7 @@ upstream commit `80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c`.
 | [`augmentation/`](augmentation/README.md) | `cv-data-augmentation` | `dataset.augment` |
 
 `pytorch_vision/` also holds the data, model and step the other vision tasks
-reuse; its README lists the tasks still to port and the slot each becomes.
+reuse; its README lists the settings and tasks not yet ported.
 
 ## Proof against upstream
 

@@ -45,7 +45,7 @@ from priml.baselines.mlsbench.pytorch_vision.scripts import (
     capture_reference as vision_capture,
 )
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import mismatches, write_tensors
+from priml.testing.golden import mismatches
 
 
 if TYPE_CHECKING:
@@ -72,8 +72,7 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    flags.out.mkdir(parents=True, exist_ok=True)
-    write_tensors(flags.out / "reference.pt", captured.record)
+    vision_capture.write_records(flags.out, {"reference.pt": captured.record})
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
@@ -100,7 +99,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         batches = upstream.upstream_batches(scripts["sum"])
         report = compare_wiring(traces) + compare_full_size(scripts, traces["sum"])
     report += mismatches(record, reference.port_record())
-    report += compare_lockstep(lockstep)
+    report += vision_capture.compare_lockstep(lockstep, run=reference.lockstep_record)
     report += vision_capture.compare_loaders(
         batches,
         reference.loader_batches(scratch),
@@ -160,28 +159,6 @@ def compare_full_size(
             )
     theirs.train()
     return report + upstream.check_walk(scripts["pcgrad"], theirs)
-
-
-def compare_lockstep(lockstep: dict[str, upstream.Lockstep]) -> list[str]:
-    """Compare every parameter and buffer after each update of every combination.
-
-    Args:
-      lockstep: Each combination's :func:`upstream.upstream_lockstep`.
-
-    Returns:
-      report: One line per tensor that differs after any update.
-
-    """
-    report: list[str] = []
-    for name, (_, theirs) in lockstep.items():
-        ours: list[dict[str, Tensor]] = []
-        _ = reference.lockstep_record(name, states=ours)
-        for index, (want, got) in enumerate(zip(theirs, ours, strict=True), start=1):
-            report += [
-                f"lockstep/{name}/{index}: {line}"
-                for line in vision_capture.compare_states(want, got)
-            ]
-    return report
 
 
 class _Flags(Protocol):

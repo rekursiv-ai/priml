@@ -77,6 +77,7 @@ class ClassWeightedCrossEntropy:
 
         Raises:
           RuntimeError: No counts were bound.
+          ValueError: The bound weights and the logits count different classes.
 
         """
         del context
@@ -85,5 +86,11 @@ class ClassWeightedCrossEntropy:
                 "ClassWeightedCrossEntropy was called before bind_class_counts; "
                 "its dataset must bind the training split's class counts.",
             )
-        weight = self.weight.to(logits.device)
-        return {"loss": functional.cross_entropy(logits, label, weight=weight)}
+        if self.weight.numel() != logits.shape[-1]:
+            raise ValueError(
+                f"ClassWeightedCrossEntropy holds {self.weight.numel()} class "
+                f"weights but the logits have {logits.shape[-1]} classes.",
+            )
+        if self.weight.device != logits.device:
+            self.weight = self.weight.to(logits.device)
+        return {"loss": functional.cross_entropy(logits, label, weight=self.weight)}

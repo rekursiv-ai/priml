@@ -139,9 +139,9 @@ def exp003() -> VisionTrainLoop:
     """exp000 + class weights linear in the log-frequency gap, rarest at 5x.
 
     Hypothesis:
-      Balanced Softmax shifts each logit by the log prior; expressed as a class
-      weight, a class's distance below the head in log count sets its weight,
-      a gentler ramp than inverse frequency.
+      Weighting each class by its distance below the head in log count, a
+      heuristic upstream draws from Balanced Softmax's log-prior logit shift
+      but not equivalent to it, is a gentler ramp than inverse frequency.
 
     References:
       https://arxiv.org/abs/2007.10740

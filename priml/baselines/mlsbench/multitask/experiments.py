@@ -21,6 +21,7 @@ The task is pinned to MLS-Bench commit ``80cf5c5cc8f70fb1b09f185e59ebf5eca04f610
 from __future__ import annotations
 
 from dataclasses import field
+from typing import Self, override
 
 from configgle import Makes
 
@@ -51,6 +52,11 @@ class MultiTaskTrainLoop(
         default_factory=MultiTaskCifar100Data.Config,
     )
     """Prepared CIFAR-100 tensors with each image's superclass."""
+
+    @override
+    def finalize(self) -> Self:
+        vision.check_reference_loop(self, budget_epochs=self.step.train_budget_epochs)
+        return super().finalize()
 
 
 def exp000() -> MultiTaskTrainLoop:
@@ -157,7 +163,10 @@ def exp003() -> MultiTaskTrainLoop:
 
     Hypothesis:
       Removing the component of each task's gradient that opposes the other's
-      stops the two heads from undoing each other's updates to the trunk.
+      stops the two heads from undoing each other's updates to the trunk. As
+      upstream, the surgery covers the fine loss's leaves only, so the coarse
+      head is never updated, ``test_acc_coarse`` scores its initialization,
+      and the logged training loss is the surrogate, not a cross-entropy.
 
     References:
       https://arxiv.org/abs/2001.06782

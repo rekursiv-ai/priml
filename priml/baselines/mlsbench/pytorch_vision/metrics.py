@@ -36,22 +36,16 @@ class BestAccuracy:
         self.correct = 0
         self.total = 0
 
-    def update(
-        self,
-        logits: Tensor,
-        *,
-        label: object = None,
-        **_kwargs: object,
-    ) -> None:
+    def update(self, logits: Tensor, **batch: object) -> None:
         """Count the batch's correct predictions.
 
         Args:
           logits: Model predictions ``(B, C)``.
-          label: Ground-truth classes ``(B,)``.
+          **batch: The batch; ``label`` holds the ``(B,)`` ground-truth classes.
 
         """
-        if not isinstance(label, Tensor):
-            raise TypeError(f"label must be a Tensor, got {type(label)}.")
+        label = batch["label"]
+        assert isinstance(label, Tensor)
         self.correct += int(logits.max(1).indices.eq(label).sum())
         self.total += len(label)
 
@@ -63,6 +57,8 @@ class BestAccuracy:
             ``best`` the highest of this and every earlier one.
 
         """
+        if not self.total:
+            raise ValueError("The evaluation saw no examples.")
         final = 100.0 * self.correct / self.total
         self.best = max(self.best, final)
         return {"final": final, "best": self.best}

@@ -38,6 +38,7 @@ def returning[T](value: T) -> Callable[..., T]:
     return call
 
 
+@pytest.mark.slow
 def test_capture_names_what_the_stand_in_does_differently(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -54,7 +55,7 @@ def test_capture_names_what_the_stand_in_does_differently(
     report = capture_reference.capture(
         root,
         scratch,
-        cifar100=tmp_path / "cifar-100-python",
+        cifar100=tmp_path,
     ).report
     keys = {line.split(":")[0] for line in report}
     shared = {

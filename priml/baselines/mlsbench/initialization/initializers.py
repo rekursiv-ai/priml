@@ -48,7 +48,8 @@ def fixup(model: nn.Module) -> None:
 
     Each block's second convolution is multiplied by ``L ** -0.5`` for ``L``
     blocks, and the scale of the normalization after it is set to zero, so
-    every block starts as the identity on its shortcut. Draws nothing.
+    every residual branch starts at its bias and a block passes on its
+    activated shortcut. Draws nothing.
 
     Args:
       model: A built network; its :class:`BasicBlock` s are changed in place.
@@ -63,6 +64,8 @@ def fixup(model: nn.Module) -> None:
 
     """
     blocks = [m for m in model.modules() if isinstance(m, BasicBlock)]
+    if not blocks:
+        raise ValueError(f"fixup needs BasicBlocks; {type(model).__name__} has none.")
     scale = len(blocks) ** (-0.5)
     for block in blocks:
         block.conv2.weight.data.mul_(scale)

@@ -18,6 +18,7 @@ import torch
 from priml.baselines.mlsbench.pytorch_vision import reference
 from priml.baselines.mlsbench.pytorch_vision.data import Cifar100Data, normalize
 from priml.baselines.mlsbench.pytorch_vision.experiments import exp000
+from priml.baselines.mlsbench.pytorch_vision.scripts import capture_reference
 from priml.testing.golden import mismatches, read_tensors
 
 
@@ -28,9 +29,6 @@ if TYPE_CHECKING:
 _CWD: Final = Path(__file__).resolve().parent
 
 _DATA: Final = _CWD / "testdata"
-
-CEILING: Final = 32_768
-"""Largest binary golden, in bytes."""
 
 
 def stored(prefix: str = "") -> dict[str, torch.Tensor]:
@@ -102,10 +100,11 @@ def test_the_port_reaches_the_same_random_call_sites(tmp_path: Path) -> None:
 
 
 def test_the_reference_reached_its_random_call_sites() -> None:
-    lines = (_DATA / "reference_sites.txt").read_text().splitlines()
-    sides = {line.split()[0] for line in lines}
-    assert sides == {"reference", "port"}
-    assert all(int(line.split()[2]) > 0 for line in lines)
+    sides: dict[str, dict[str, int]] = {"reference": {}, "port": {}}
+    for line in (_DATA / "reference_sites.txt").read_text().splitlines():
+        side, key, count = line.split()
+        sides[side][key] = int(count)
+    assert capture_reference.check_sites(sides["reference"], sides["port"]) == []
 
 
 @pytest.mark.parametrize(
@@ -113,7 +112,7 @@ def test_the_reference_reached_its_random_call_sites() -> None:
     ["reference.pt", "reference_train_pipeline.pt", "reference_test_pipeline.pt"],
 )
 def test_captured_goldens_fit_the_size_ceiling(name: str) -> None:
-    assert (_DATA / name).stat().st_size <= CEILING
+    assert (_DATA / name).stat().st_size <= capture_reference.CEILING
 
 
 def test_the_comparison_sees_a_change_of_one_ulp() -> None:

@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.lr_schedule import reference
+from priml.baselines.mlsbench.lr_schedule.experiments import exp000
 from priml.baselines.mlsbench.pytorch_vision import reference as vision
 from priml.testing.golden import mismatches, read_tensors
 
@@ -47,7 +48,11 @@ def test_the_optimizer_matches_the_script() -> None:
 
 
 def test_the_full_network_leaves_the_generator_where_the_script_does() -> None:
-    assert_exact(stored("draws/"), vision.draws_record())
+    assert_exact(stored("draws/"), vision.draws_record(exp000))
+
+
+def test_the_reported_accuracy_matches_the_script() -> None:
+    assert_exact(stored("best/"), vision.best_record())
 
 
 @pytest.mark.parametrize("name", list(reference.SCHEDULES))

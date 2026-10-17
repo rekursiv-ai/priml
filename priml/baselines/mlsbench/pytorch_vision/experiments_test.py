@@ -83,8 +83,8 @@ def shrink(config: VisionTrainLoop, *, directory: Path) -> VisionTrainLoop:
     return config
 
 
-def write_dataset(directory: Path) -> None:
-    """Write a miniature dataset in the prepared format."""
+def write_dataset(directory: Path, *, classes: int = 100) -> None:
+    """Write a miniature dataset in the prepared format, labels below ``classes``."""
     generator = torch.Generator().manual_seed(0)
     for split in ("train", "test"):
         torch.save(
@@ -92,7 +92,7 @@ def write_dataset(directory: Path) -> None:
                 "media": torch.randint(0, 256, (8, 3, 8, 10), generator=generator).to(
                     torch.uint8,
                 ),
-                "label": torch.randint(0, 100, (8,), generator=generator),
+                "label": torch.randint(0, classes, (8,), generator=generator),
             },
             directory / f"{split}.pt",
         )
@@ -185,7 +185,7 @@ def test_exp000_pins_the_reference_recipe() -> None:
     assert cfg.dataset.batch_size == 128
     assert cfg.dataset.num_streams == 4
     assert cfg.dataset.translate_pad == 4
-    assert cfg.seed is None
+    assert cfg.seed == 42
 
 
 def test_exp000_trains_with_cross_entropy_for_200_epochs() -> None:
@@ -303,6 +303,25 @@ def _flatten(config: DataclassInstance, prefix: str = "") -> dict[str, object]:
         else:
             flat[dotted] = value
     return flat
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_epochs", 201),
+        ("num_steps_eval", 100),
+        ("eval_warmup_batches", 1),
+        ("eval_only", True),
+    ],
+)
+def test_a_loop_that_would_leave_the_references_draws_is_refused(
+    field: str,
+    value: object,
+) -> None:
+    config = exp000()
+    setattr(config, field, value)
+    with pytest.raises(ValueError, match=field):
+        config.copy_tree().finalize()
 
 
 if __name__ == "__main__":

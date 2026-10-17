@@ -6,8 +6,12 @@ from typing import TYPE_CHECKING, cast
 
 import functools
 
+from configgle import Makeable, PartialConfig
+
+import pytest
 import torch
 
+from priml.baselines.mlsbench.pytorch_vision import reference
 from priml.baselines.mlsbench.pytorch_vision.train_step import LossContext
 from priml.baselines.mlsbench.pytorch_vision.train_step_test import (
     CLASSES,
@@ -15,8 +19,15 @@ from priml.baselines.mlsbench.pytorch_vision.train_step_test import (
     batch,
     tiny_config,
 )
-from priml.baselines.mlsbench.regularization.regularizers import zero
-from priml.baselines.mlsbench.regularization.train_step import RegularizedTrainStep
+from priml.baselines.mlsbench.regularization.experiments import exp001
+from priml.baselines.mlsbench.regularization.regularizers import (
+    spatial_coactivation,
+    zero,
+)
+from priml.baselines.mlsbench.regularization.train_step import (
+    RegularizedTrainStep,
+    Regularizer,
+)
 
 
 if TYPE_CHECKING:
@@ -81,6 +92,69 @@ def test_the_term_is_added_to_the_loss_and_sees_the_batch() -> None:
     assert context == LossContext(num_classes=CLASSES, epoch=3, total_epochs=EPOCHS)
     plain = torch.nn.functional.cross_entropy(result["model"], data["label"])
     assert torch.equal(result["loss"], plain + 2.5)
+
+
+def test_settings_the_bare_update_bypasses_are_refused() -> None:
+    cfg = config()
+    cfg.gradient_clip_norm = 1.0
+    with pytest.raises(ValueError, match="gradient_clip_norm"):
+        cfg.make()
+
+
+def test_an_active_dropblock_term_is_positive_and_reaches_the_gradient() -> None:
+    def updated(regularization: Makeable[Regularizer]) -> tuple[float, list[Tensor]]:
+        cfg = config()
+        cfg.regularization = regularization
+        with reference.seeded(reference.SEED):
+            step = cfg.make()
+        step.timer_epoch.global_count = EPOCHS - 1
+        step.regularization = spy = _Spy(step.regularization)
+        _ = step.train_step(**batch())
+        (value,) = spy.values
+        return value, [p.detach().clone() for p in step.model.parameters()]
+
+    dropblock = exp001().step
+    assert isinstance(dropblock, RegularizedTrainStep.Config)
+    off = PartialConfig(spatial_coactivation)
+    off.block_size = 3
+    off.strength = 0.0
+    off.delay = 0.2
+    (value, with_term), (none, without) = (
+        updated(dropblock.regularization),
+        updated(off),
+    )
+    assert value > 0
+    assert none == 0
+    assert any(not torch.equal(a, b) for a, b in zip(with_term, without, strict=True))
+
+
+class _Spy:
+    """Forwards to a regularizer and keeps each value it returned."""
+
+    def __init__(self, regularizer: Regularizer) -> None:
+        self.regularizer = regularizer
+        self.values: list[float] = []
+
+    def __call__(
+        self,
+        model: nn.Module,
+        /,
+        *,
+        media: Tensor,
+        logits: Tensor,
+        label: Tensor,
+        context: LossContext,
+    ) -> Tensor:
+        """Return the wrapped term and note its value."""
+        value = self.regularizer(
+            model,
+            media=media,
+            logits=logits,
+            label=label,
+            context=context,
+        )
+        self.values.append(value.item())
+        return value
 
 
 if __name__ == "__main__":

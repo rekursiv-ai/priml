@@ -65,12 +65,6 @@ def test_ties_between_classes_resolve_to_the_first() -> None:
     assert metric.compute()["final"] == 50.0
 
 
-def test_update_requires_a_tensor_label() -> None:
-    metric = BestAccuracy.Config().make()
-    with pytest.raises(TypeError, match="label must be a Tensor, got <class 'list'>"):
-        metric.update(torch.zeros(2, CLASSES), label=[0, 1])
-
-
 def test_state_dict_round_trips_counts_and_best() -> None:
     metric = BestAccuracy.Config().make()
     feed(metric, correct=3, total=4)
@@ -81,6 +75,12 @@ def test_state_dict_round_trips_counts_and_best() -> None:
     restored.load_state_dict(metric.state_dict())
     assert restored.state_dict() == {"correct": 1, "total": 2, "best": 75.0}
     assert restored.compute() == {"final": 50.0, "best": 75.0}
+
+
+def test_an_empty_evaluation_is_refused() -> None:
+    metric = BestAccuracy.Config().make()
+    with pytest.raises(ValueError, match="no examples"):
+        metric.compute()
 
 
 if __name__ == "__main__":

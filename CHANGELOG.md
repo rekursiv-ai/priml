@@ -18,6 +18,14 @@ All notable priml changes are documented here. This project follows
   `resnet56-cifar100` as native priml experiments, `exp000` (cross-entropy)
   to `exp003`, each loss a fork of one slot. `scripts/capture_reference.py`
   proves the port bit-for-bit against the upstream script.
+- Baselines `mlsbench.lr_schedule`, `pooling`, `normalization`,
+  `initialization`, `activation`, `regularization`, `multitask`, `weighting`,
+  `residual` and `augmentation`: ten more MLS-Bench tasks, each `exp000` the
+  pristine recipe and each published baseline a fork of the task's slot, each
+  proven bit-for-bit by its own `scripts/capture_reference.py`.
+- `mlsbench.pytorch_vision` gains the slots those tasks fill:
+  `ResNet.Config.norm`, `pool`, `init` and a per-position `block` list, and
+  `Cifar100Data.Config.augment`.
 
 ### Changed
 

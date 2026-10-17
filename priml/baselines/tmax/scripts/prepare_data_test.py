@@ -726,7 +726,8 @@ def test_a_fully_staged_dataset_is_left_alone(
 ) -> None:
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "train-00000-of-00001.parquet").write_text(
-        "", encoding="utf-8"
+        "",
+        encoding="utf-8",
     )
     (tmp_path / "task-data.tar.gz").write_text("", encoding="utf-8")
     (tmp_path / prepare_data.TASK_DATA_DIRNAME).mkdir()

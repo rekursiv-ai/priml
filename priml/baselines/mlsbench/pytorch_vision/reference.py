@@ -254,14 +254,17 @@ def tiny_step(
     return _built(config)
 
 
-def full_step() -> VisionTrainStep:
-    """Build the step of ``exp000`` at full size on the CPU.
+def full_step(factory: Callable[[], VisionTrainLoop] = exp000) -> VisionTrainStep:
+    """Build an experiment's step at full size on the CPU.
+
+    Args:
+      factory: The experiment; ``exp000`` by default.
 
     Returns:
-      step: ResNet-56 with 100 classes.
+      step: Its network, at the experiment's depth and width.
 
     """
-    config = exp000().step
+    config = factory().step
     config.parallelism = NoParallel.Config(device="cpu")
     return _built(config)
 
@@ -286,14 +289,19 @@ def loss_record() -> dict[str, Tensor]:
     return record
 
 
-def schedule_record() -> dict[str, Tensor]:
-    """Return the learning rate of each of the 200 epochs of ``exp000``.
+def schedule_record(
+    factory: Callable[[], VisionTrainLoop] = exp000,
+) -> dict[str, Tensor]:
+    """Return the learning rate of each of the 200 epochs of an experiment.
+
+    Args:
+      factory: The experiment; ``exp000`` by default.
 
     Returns:
       record: The 200 rates, as float64.
 
     """
-    step = tiny_step(exp000, blocks=(1, 1, 1), classes=CLASSES, epochs=200)
+    step = tiny_step(factory, blocks=(1, 1, 1), classes=CLASSES, epochs=200)
     base_lr = from_plain(cast(object, step.optimizer.param_groups[0]["lr"]), float)
     rates = [
         step.schedule(epoch, base_lr=base_lr, total_epochs=200) for epoch in range(200)
@@ -301,14 +309,19 @@ def schedule_record() -> dict[str, Tensor]:
     return {"schedule/lr": torch.tensor(rates, dtype=torch.float64)}
 
 
-def optimizer_record() -> dict[str, Tensor]:
-    """Return the settings of the optimizer ``exp000`` builds.
+def optimizer_record(
+    factory: Callable[[], VisionTrainLoop] = exp000,
+) -> dict[str, Tensor]:
+    """Return the settings of the optimizer an experiment builds.
+
+    Args:
+      factory: The experiment; ``exp000`` by default.
 
     Returns:
       record: The entries of :data:`HYPERPARAMETERS`, as float64.
 
     """
-    step = tiny_step(exp000, blocks=(1, 1, 1), classes=CLASSES, epochs=200)
+    step = tiny_step(factory, blocks=(1, 1, 1), classes=CLASSES, epochs=200)
     group = cast(Mapping[str, object], step.optimizer.param_groups[0])
     values = [float(cast(float, group[name])) for name in HYPERPARAMETERS]
     return {"optimizer/settings": torch.tensor(values, dtype=torch.float64)}
@@ -338,16 +351,22 @@ def network_record() -> dict[str, Tensor]:
     }
 
 
-def draws_record() -> dict[str, Tensor]:
-    """Return where the generator stands after building the full ``exp000`` network.
+def draws_record(
+    factory: Callable[[], VisionTrainLoop] = exp000,
+) -> dict[str, Tensor]:
+    """Return where the generator stands after building an experiment's full network.
+
+    Args:
+      factory: The experiment; ``exp000`` by default.
 
     Returns:
-      record: The next eight draws.
+      record: The next eight draws, under ``draws/<experiment_name>``.
 
     """
+    key = f"draws/{factory().experiment_name}"
     with seeded(SEED), host_agnostic_numerics():
-        _ = full_step()
-        return {"draws/exp000": rng_fingerprint()}
+        _ = full_step(factory)
+        return {key: rng_fingerprint()}
 
 
 def lockstep_record(

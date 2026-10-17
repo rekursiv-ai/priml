@@ -51,7 +51,12 @@ def schedule_record() -> dict[str, Tensor]:
     """
     record: dict[str, Tensor] = {}
     for name, factory in SCHEDULES.items():
-        step = reference.tiny_step(factory, blocks=(1, 1, 1), classes=3, epochs=200)
+        step = reference.tiny_step(
+            factory,
+            blocks=(1, 1, 1),
+            classes=reference.CLASSES,
+            epochs=200,
+        )
         base_lr = from_plain(cast(object, step.optimizer.param_groups[0]["lr"]), float)
         record[f"schedule/{name}"] = torch.tensor(
             [
@@ -70,7 +75,12 @@ def optimizer_record() -> dict[str, Tensor]:
       record: The entries of :data:`SETTINGS`, as float64.
 
     """
-    step = reference.tiny_step(exp000, blocks=(1, 1, 1), classes=3, epochs=200)
+    step = reference.tiny_step(
+        exp000,
+        blocks=(1, 1, 1),
+        classes=reference.CLASSES,
+        epochs=200,
+    )
     group = cast(Mapping[str, object], step.optimizer.param_groups[0])
     values = [float(cast(float, group[name])) for name in SETTINGS]
     return {"optimizer/settings": torch.tensor(values, dtype=torch.float64)}
@@ -137,7 +147,7 @@ def port_record() -> dict[str, Tensor]:
       record: The union of the records above, keyed as the stored golden is.
 
     """
-    record = schedule_record() | optimizer_record()
+    record = schedule_record() | optimizer_record() | reference.best_record()
     for name in SCHEDULES:
         record |= lockstep_record(name)
     return record

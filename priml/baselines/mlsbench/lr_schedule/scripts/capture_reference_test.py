@@ -1,8 +1,9 @@
 """Tests for the ``dl-lr-schedule`` capture, against a stand-in clone.
 
-The stand-in's network differs from ResNet-56 and its baselines' schedules are
-not the real ones, so a capture of it must name those and nothing it shares
-with the port: the pristine constant schedule and the optimizer.
+The stand-in's network differs from ResNet-56 and two of its baselines'
+schedules are not the real ones, so a capture of it must name those and
+nothing it shares with the port: the pristine constant schedule, the real
+cosine expression and the optimizer.
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ def test_capture_names_what_the_stand_in_does_differently(tmp_path: Path) -> Non
     report = capture_reference.capture(root, scratch).report
     keys = {line.split(":")[0] for line in report}
     assert "schedule/constant" not in keys
+    assert "schedule/cosine" not in keys
     assert "optimizer/settings" not in keys
     assert {"schedule/warmup_cosine", "schedule/one_cycle", "draws/exp000"} <= keys
     assert any(line.startswith("lockstep/constant/1: ") for line in report)

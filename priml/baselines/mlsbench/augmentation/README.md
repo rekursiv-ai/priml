@@ -34,5 +34,5 @@ compares with exact equality: every pixel of each training pipeline over 160
 images and of the test pipeline, every pixel and label of each variant's
 loaders over two passes, ResNet-56's initial state and forward, the generator
 after building it, the 200 rates, the optimizer, and every parameter after two
-updates per variant. It fails if any policy operation, with either sign, is
-never reached on either side. `reference_test.py` replays the stored golden.
+updates per variant. It fails if any policy operation, and each signed one with
+both signs, is never reached on either side. `reference_test.py` replays the stored golden.

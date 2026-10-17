@@ -19,12 +19,9 @@ from priml.baselines.mlsbench.pytorch_vision.experiments_test import (
     shrink,
     write_dataset,
 )
-from priml.baselines.mlsbench.pytorch_vision.model import ResNet
+from priml.baselines.mlsbench.pytorch_vision.model import ResNet, sized_blocks
 from priml.baselines.mlsbench.residual import experiments
-from priml.baselines.mlsbench.residual.blocks import (
-    StochasticDepthBlock,
-    stochastic_depth,
-)
+from priml.baselines.mlsbench.residual.blocks import StochasticDepthBlock
 from priml.baselines.mlsbench.residual.experiments import (
     exp000,
     exp001,
@@ -57,8 +54,18 @@ def test_exp000_is_the_vision_recipe() -> None:
     [
         (exp001, {"step.model.block", "step.model.block.scale"}),
         (exp002, {"step.model.block", "step.model.block.gate"}),
+        (
+            exp003,
+            {
+                "step.model.block",
+                "step.model.block.depth",
+                "step.model.block.num_layers",
+                "step.model.block.survival_last",
+                "step.model.block.reset_width",
+            },
+        ),
     ],
-    ids=["exp001", "exp002"],
+    ids=["exp001", "exp002", "exp003"],
 )
 def test_a_fork_changes_only_the_block(
     factory: ExperimentFactory[VisionTrainLoop],
@@ -67,28 +74,26 @@ def test_a_fork_changes_only_the_block(
     assert changed_fields(exp000(), factory()) == {"experiment_name", *changed}
 
 
-def test_exp003_changes_only_the_block_into_one_per_position() -> None:
-    changed = changed_fields(exp000(), exp003()) - {"experiment_name"}
-    assert changed
-    assert all(path.startswith("step.model.block") for path in changed)
+def test_exp003_places_its_template_at_upstreams_resnet56_positions() -> None:
     model = exp003().step.model
     assert isinstance(model, ResNet.Config)
-    assert model.block == stochastic_depth(
-        (16, 32, 64),
-        (9, 9, 9),
-        survival_last=0.5,
-    )
-    assert isinstance(model.block, list)
-    blocks = [b for b in model.block if isinstance(b, StochasticDepthBlock.Config)]
-    assert len(blocks) == 27
+    template = model.block
+    assert isinstance(template, StochasticDepthBlock.Config)
+    assert template.survival_last == 0.5
+    blocks = [
+        b
+        for stage in sized_blocks(model)
+        for b, _ in stage
+        if isinstance(b, StochasticDepthBlock.Config)
+    ]
     assert [b.depth for b in blocks] == [1] * 9 + list(range(2, 20))
     assert {b.num_layers for b in blocks} == {19}
 
 
 @pytest.mark.parametrize(
     "factory",
-    [exp000, exp001, exp002],
-    ids=["exp000", "exp001", "exp002"],
+    ALL_EXPERIMENTS,
+    ids=[f.__name__ for f in ALL_EXPERIMENTS],
 )
 def test_experiment_trains_at_minimum_size(
     factory: ExperimentFactory[VisionTrainLoop],
@@ -99,22 +104,6 @@ def test_experiment_trains_at_minimum_size(
     loop.train()
     assert loop.step.global_step == 2
     assert factory().experiment_name == factory.__name__
-
-
-def test_exp003_trains_at_minimum_size(tmp_path: Path) -> None:
-    write_dataset(tmp_path)
-    config = shrink(exp003(), directory=tmp_path)
-    model = config.step.model
-    assert isinstance(model, ResNet.Config)
-    model.block = stochastic_depth(
-        model.channels_hidden,
-        model.blocks_per_stage,
-        survival_last=0.5,
-    )
-    loop = config.make()
-    loop.train()
-    assert loop.step.global_step == 2
-    assert exp003().experiment_name == "exp003"
 
 
 @pytest.mark.parametrize(

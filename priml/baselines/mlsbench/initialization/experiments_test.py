@@ -103,6 +103,17 @@ def test_each_fork_names_its_parent_in_the_first_line() -> None:
         assert (inspect.getdoc(child) or "").startswith("exp000 + "), child.__name__
 
 
+def test_exp000_runs_with_the_launch_scripts_settings() -> None:
+    # The capture traces ``main`` at the script's argparse defaults. These are the
+    # values ``tasks/dl-weight-initialization/scripts/resnet56_cifar100.sh`` passes
+    # at the pinned commit, so a recipe drifting from the launch is caught here.
+    cfg = exp000()
+    group = cfg.step.make().optimizer.param_groups[0]
+    assert (group["lr"], group["momentum"], group["weight_decay"]) == (0.1, 0.9, 5e-4)
+    assert cfg.dataset.batch_size == 128
+    assert cfg.max_epochs == cfg.step.train_budget_epochs == 200
+
+
 def test_exp000_matches_its_golden_config() -> None:
     assert_pprint_golden(test_file=__file__, name="exp000", config=exp000())
 

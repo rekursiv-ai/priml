@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final, cast, override
 
 import copy
 import itertools
@@ -26,6 +26,7 @@ from priml.baselines.mlsbench.pytorch_vision.train_step import (
     label_smoothing,
     poly,
 )
+from priml.train.ema import EMA
 from priml.train.parallelism import NoParallel
 
 
@@ -44,7 +45,11 @@ CONTEXT: Final = LossContext(num_classes=4, epoch=0, total_epochs=2)
 
 def tiny_config() -> VisionTrainStep.Config:
     """Return a CPU step small enough to run in a few milliseconds."""
-    config = VisionTrainStep.Config()
+    return sized(VisionTrainStep.Config())
+
+
+def sized[C: VisionTrainStep.Config](config: C) -> C:
+    """Shrink ``config`` to a CPU step that runs in a few milliseconds."""
     model = config.model = ResNet.Config()
     model.channels_in = 3
     model.channels_out = CLASSES
@@ -73,6 +78,26 @@ def built(config: VisionTrainStep.Config | None = None) -> VisionTrainStep:
     step = (config or tiny_config()).make()
     assert isinstance(step, VisionTrainStep)
     return step
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("accumulate_grad_batches", 2),
+        ("lr_schedule", PartialConfig(cosine_annealing)),
+        ("ema", EMA.Config()),
+        ("gradient_clip_norm", 1.0),
+        ("skip_step_on_nonfinite_grad", True),
+    ],
+)
+def test_a_setting_the_bare_update_would_ignore_is_refused(
+    name: str,
+    value: object,
+) -> None:
+    config = tiny_config()
+    setattr(config, name, value)
+    with pytest.raises(ValueError, match=name):
+        built(config)
 
 
 def logits() -> tuple[Tensor, Tensor]:
@@ -324,6 +349,54 @@ def test_poly_loss_with_epsilon_zero_is_cross_entropy() -> None:
     scores, label = logits()
     plain = cross_entropy(scores, label=label, context=CONTEXT)["loss"]
     assert poly(scores, label=label, context=CONTEXT, epsilon=0.0)["loss"] == plain
+
+
+class DoubledStep(VisionTrainStep):
+    """A step whose objective is twice its loss."""
+
+    class Config(VisionTrainStep.Config, kw_only=True):
+        """The vision step's fields."""
+
+        if TYPE_CHECKING:
+
+            @override
+            def make(self) -> DoubledStep:
+                """Build this step."""
+                ...
+
+    @override
+    def objective(
+        self,
+        logits: Tensor,
+        *,
+        media: Tensor,
+        label: Tensor,
+        context: LossContext,
+    ) -> Tensor:
+        return 2 * super().objective(
+            logits,
+            media=media,
+            label=label,
+            context=context,
+        )
+
+
+def test_the_objective_is_what_the_update_backpropagates() -> None:
+    plain = built()
+    doubled = sized(DoubledStep.Config()).make()
+    assert isinstance(doubled, DoubledStep)
+    doubled.load_state_dict(plain.state_dict())
+    first = plain.train_step(**batch())["loss"]
+    second = doubled.train_step(**batch())["loss"]
+    assert torch.equal(second, 2 * first)
+
+
+@pytest.mark.parametrize("epochs", [2.5, 0.0])
+def test_a_budget_that_is_not_a_positive_whole_number_is_refused(epochs: float) -> None:
+    config = tiny_config()
+    config.train_budget_epochs = epochs
+    with pytest.raises(ValueError, match="train_budget_epochs"):
+        built(config)
 
 
 if __name__ == "__main__":

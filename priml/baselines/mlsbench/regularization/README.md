@@ -1,4 +1,4 @@
-# MLS-Bench `dl-regularization`
+# MLS-Bench `dl-regularization`, as priml experiments
 
 The task's editable `compute_regularization(model, inputs, outputs, targets,
 config)` returns a scalar added to cross-entropy every step. Here it is the

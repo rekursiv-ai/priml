@@ -28,8 +28,8 @@ from typing import Protocol, cast
 import argparse
 import logging
 
-from priml.baselines.mlsbench.activation.data import prepare
 from priml.baselines.mlsbench.activation.experiments import exp000
+from priml.baselines.mlsbench.pytorch_vision.data import prepare
 from priml.train.train_loop import TrainLoop
 
 
@@ -47,7 +47,7 @@ def main() -> int:
     _add_arguments(parser)
     flags = cast(_Flags, parser.parse_args())
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    prepare(flags.directory)
+    prepare(flags.directory, dataset="cifar10")
     return 0
 
 

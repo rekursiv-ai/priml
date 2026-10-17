@@ -26,7 +26,7 @@ from priml.baselines.mlsbench.pytorch_vision.model import ResNet
 from priml.baselines.mlsbench.residual.blocks import (
     GatedResidualBlock,
     PreActivationBlock,
-    stochastic_depth,
+    StochasticDepthBlock,
 )
 
 
@@ -60,7 +60,6 @@ def exp000() -> VisionTrainLoop:
     """
     cfg = vision.exp000()
     cfg.study_name = "dl_residual_connection"
-    cfg.experiment_name = "exp000"
     return cfg
 
 
@@ -122,9 +121,9 @@ def exp002() -> VisionTrainLoop:
 def exp003() -> VisionTrainLoop:
     """exp000 + stochastic depth, survival decaying linearly to 0.5 at the deepest block.
 
-    One block config per position, since each position's survival differs. The
-    positions follow the reference's counter, which restarts on every
-    first-stage block: all nine there sit at position 1, the rest at 2 to 19.
+    The template numbers its copies as the reference's counter does, which
+    restarts on every first-stage block: all nine there sit at position 1, the
+    rest at 2 to 19.
 
     Hypothesis:
       Dropping whole branches at random trains an implicit ensemble of
@@ -145,11 +144,6 @@ def exp003() -> VisionTrainLoop:
     cfg = exp000()
     cfg.experiment_name = "exp003"
 
-    model = cfg.step.model
-    assert isinstance(model, ResNet.Config)
-    model.block = stochastic_depth(
-        model.channels_hidden,
-        model.blocks_per_stage,
-        survival_last=0.5,
-    )
+    assert isinstance(cfg.step.model, ResNet.Config)
+    cfg.step.model.block = StochasticDepthBlock.Config()
     return cfg

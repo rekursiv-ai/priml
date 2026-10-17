@@ -292,6 +292,21 @@ def test_loading_state_before_the_loader_exists_applies_it_to_the_next_one(
     assert loader_state["next_batch"] == 1
 
 
+def test_loading_a_fresh_state_resets_a_live_loader_to_a_new_pass(
+    tmp_path: Path,
+) -> None:
+    _ = write_split(tmp_path)
+    fresh = make_data(tmp_path).state_dict()
+    target = make_data(tmp_path)
+    live = target.train_dataloader()
+    seed(0)
+    _ = next(iter(live))
+    target.load_state_dict(fresh)
+    seed(0)
+    labels = torch.cat([b["label"] for b in live])
+    assert torch.equal(labels.sort().values, torch.arange(COUNT))
+
+
 def test_loading_state_into_a_live_loader_resumes_it_at_once(tmp_path: Path) -> None:
     _ = write_split(tmp_path)
     source = make_data(tmp_path)
@@ -369,6 +384,33 @@ def test_prepare_leaves_a_prepared_split_alone(
     assert (tmp_path / "train.pt").read_bytes() == b"kept"
     assert _FakeCifar100.calls == [(str(tmp_path), False, True)]
     assert "train already prepared" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("num_streams", 0), ("batch_size", 0), ("eval_batch_size", 0)],
+)
+def test_a_batch_or_stream_count_below_one_is_refused(
+    tmp_path: Path,
+    field: str,
+    value: int,
+) -> None:
+    _ = write_split(tmp_path)
+    config = Cifar100Data.Config()
+    config.base_dir = None
+    config.working_dir = tmp_path
+    setattr(config, field, value)
+    with pytest.raises(ValueError, match=field):
+        config.make()
+
+
+def test_prepare_fetches_cifar10_when_asked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(datasets, "CIFAR10", _FakeCifar100)
+    prepare(tmp_path, dataset="cifar10")
+    assert (tmp_path / "train.pt").exists()
 
 
 if __name__ == "__main__":

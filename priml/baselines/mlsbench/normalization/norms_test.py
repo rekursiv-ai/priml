@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, cast, override
+
+from configgle import Fig
+from torch import nn
 
 import pytest
 import torch
@@ -12,10 +15,39 @@ from priml.baselines.mlsbench.normalization.norms import (
     GroupNorm,
     SwitchableNorm,
 )
+from priml.baselines.mlsbench.pytorch_vision.model import (
+    BatchNorm,
+    NormFn,
+    ResNet,
+)
+from priml.cost import Cost, cost
+from priml.testing.cost import assert_cost_matches_torch
 
 
 SHAPE: Final = (2, 3, 4, 5)
 """Batch, channels, height and width of every test input."""
+
+
+class Norm(nn.Module):
+    """One norm from a builder, so the cost harness can build and price it."""
+
+    class Config(Fig["Norm"]):
+        """The builder and the channels it normalizes."""
+
+        norm: NormFn = BatchNorm
+        channels: int = SHAPE[1]
+
+        def cost(self, **bus: object) -> Cost:
+            """Return the builder's cost for ``bus``."""
+            return cost(self.norm, **bus)
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.layer = config.norm(config.channels)
+
+    @override
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return cast(torch.Tensor, self.layer(x))
 
 
 def features() -> torch.Tensor:
@@ -64,6 +96,41 @@ def test_one_dominant_importance_picks_its_statistics(statistic: int) -> None:
         torch.nn.functional.batch_norm(x, None, None, training=True),
     ][statistic]
     torch.testing.assert_close(got, expected)
+
+
+@pytest.mark.parametrize(
+    "norm",
+    [BatchNorm, GroupNorm, BatchInstanceNorm, SwitchableNorm],
+    ids=["batch", "group", "batch_instance", "switchable"],
+)
+def test_every_norm_costs_what_it_owns_and_issues_no_matmul(
+    norm: NormFn,
+) -> None:
+    analytical = assert_cost_matches_torch(
+        Norm.Config(norm=norm),
+        build_input=lambda: torch.randn(SHAPE, requires_grad=True),
+        channels=SHAPE[1],
+        seq_len=SHAPE[2] * SHAPE[3],
+        batch_size=SHAPE[0],
+        dtype=None,
+    )
+    assert analytical["flops", "primal", "matmul"].sum() == 0
+    assert analytical["flops", "primal", "elementwise"].sum() > 0
+
+
+@pytest.mark.parametrize(
+    "norm",
+    [BatchNorm, GroupNorm, BatchInstanceNorm, SwitchableNorm],
+    ids=["batch", "group", "batch_instance", "switchable"],
+)
+def test_resnet_cost_owns_exactly_the_parameters_its_norm_slot_builds(
+    norm: NormFn,
+) -> None:
+    config = ResNet.Config(channels_in=3, channels_out=5, blocks_per_stage=(1, 1, 1))
+    config.norm = norm
+    finalized = config.copy_tree().finalize()
+    owned = sum(p.numel() for p in finalized.make().parameters())
+    assert finalized.cost(batch_size=2, dtype=None).params == owned
 
 
 def test_parameters_register_in_the_reference_order() -> None:

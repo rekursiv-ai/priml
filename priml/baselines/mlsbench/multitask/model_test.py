@@ -33,7 +33,7 @@ def test_both_heads_score_the_same_pooled_features() -> None:
     assert fine.shape == (2, CLASSES)
     assert coarse.shape == (2, COARSE)
     media = torch.ones(2, 3, 6, 7)
-    features = model.features(media)
+    features = model.trunk.features(media)
     assert torch.equal(model.trunk.head(features), model(media)[0])
     assert torch.equal(model.head(features), model(media)[1])
 

@@ -260,7 +260,7 @@ def upstream_lockstep(script: Script, name: str, trace: Trace) -> Lockstep:
         script.initialize_weights(model)
         counts = torch.tensor(reference.LOCKSTEP_COUNTS)
         weight = script.compute_class_weights(counts, len(counts), dict(CONFIG))
-        criterion = _CriterionSpy(nn.CrossEntropyLoss(weight=weight))
+        criterion = vision_upstream.CriterionSpy(nn.CrossEntropyLoss(weight=weight))
         optimizer = torch.optim.SGD(
             model.parameters(),
             lr=settings["lr"],
@@ -457,9 +457,7 @@ class _MainSpy:
             main.state = {k: v.clone() for k, v in model.state_dict().items()}
             main.draws = rng_fingerprint()
             main.settings = {
-                name: float(cast(float, group[name]))
-                for name in vision.HYPERPARAMETERS
-                if name in group
+                name: float(cast(float, group[name])) for name in vision.HYPERPARAMETERS
             }
             self.trace.weight = cast(Tensor, criterion.weight).clone()
         main.rates.append(from_plain(group["lr"], float))
@@ -469,22 +467,6 @@ class _MainSpy:
         """Report the next scripted accuracy, whatever the script passes."""
         del args
         return 0.0, 100.0 * next(self.scripted) / vision.SCRIPTED_TOTAL
-
-
-class _CriterionSpy:
-    """Forwards to the script's criterion and keeps what it saw."""
-
-    def __init__(self, criterion: nn.CrossEntropyLoss) -> None:
-        self.criterion = criterion
-        self.losses: list[Tensor] = []
-        self.logits: list[Tensor] = []
-
-    def __call__(self, logits: Tensor, targets: Tensor) -> Tensor:
-        """Return the batch's loss."""
-        loss = self.criterion(logits, targets)
-        self.losses.append(loss.detach())
-        self.logits.append(logits.detach())
-        return loss
 
 
 class _LabelsOnly:

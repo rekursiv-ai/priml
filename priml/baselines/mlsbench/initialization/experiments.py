@@ -76,8 +76,8 @@ def exp001() -> VisionTrainLoop:
     """exp000 + Kaiming normal: fan-out for convolutions, fan-in for the head.
 
     Hypothesis:
-      Drawing each weight with variance ``2 / fan`` keeps the activations'
-      scale constant through ReLU layers, which should train faster than a
+      Drawing each weight with variance ``2 / fan`` keeps the gradients'
+      scale (fan-out) and the logits' (fan-in) constant through ReLU layers, which should train faster than a
       fixed 0.01 that ignores each layer's width.
 
     References:
@@ -104,10 +104,12 @@ def exp002() -> VisionTrainLoop:
     """exp000 + Fixup: Kaiming normal, then shrink every residual branch.
 
     Hypothesis:
-      Scaling each block's last convolution by ``L ** -0.5`` and zeroing the
-      normalization after it starts every block as the identity, so the
-      variance of a 27-block network does not grow with depth. The Kaiming
-      draw is Fixup's base, so the two are one change.
+      Zeroing the scale of each block's last normalization starts every
+      residual branch at its bias, so a block passes on its activated
+      shortcut and the variance of a 27-block network does not grow with
+      depth. Behind batch norm the ``L ** -0.5`` scaling of the last
+      convolution changes only that layer's effective learning rate. The
+      Kaiming draw is Fixup's base, so the two are one change.
 
     References:
       https://arxiv.org/abs/1901.09321

@@ -196,7 +196,10 @@ class DynamicWeightAverage(nn.Module):
         if self.prev_losses is None or epoch == 0:
             weights = torch.ones(2, device=losses.device)
         else:
-            ratios = losses.detach() / (self.prev_losses + self.eps)
+            # A checkpoint restores the history on the CPU whatever device it
+            # was saved from.
+            previous = self.prev_losses.to(losses.device)
+            ratios = losses.detach() / (previous + self.eps)
             weights = 2 * functional.softmax(ratios / self.temperature, dim=0)
         self.prev_losses = losses.detach().clone()
         return (weights * losses).sum()
@@ -367,10 +370,10 @@ def _walk(
         if cid in seen:
             continue
         seen.add(cid)
-        if hasattr(child, "variable"):
-            p = cast(Tensor, child.variable)  # pyright: ignore[reportAttributeAccessIssue] -- Only an AccumulateGrad node has ``variable``; hasattr just checked it.
-            if p.requires_grad:
-                params.append(p)
+        # Only an AccumulateGrad node carries ``variable``: the leaf it feeds.
+        p = cast(object, getattr(child, "variable", None))
+        if isinstance(p, Tensor) and p.requires_grad:
+            params.append(p)
         _walk(child, params, seen, alive)
 
 

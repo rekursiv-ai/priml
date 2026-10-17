@@ -28,6 +28,7 @@ from priml.baselines.mlsbench.pytorch_vision import experiments as vision
 from priml.baselines.mlsbench.pytorch_vision.experiments_test import (
     changed_fields,
     shrink,
+    write_dataset,
 )
 from priml.baselines.mlsbench.pytorch_vision.model import ResNet
 from priml.cost import cost
@@ -127,17 +128,7 @@ def test_experiment_trains_at_minimum_size(
     factory: ExperimentFactory[VisionTrainLoop],
     tmp_path: Path,
 ) -> None:
-    generator = torch.Generator().manual_seed(0)
-    for split in ("train", "test"):
-        torch.save(
-            {
-                "media": torch.randint(0, 256, (8, 3, 8, 10), generator=generator).to(
-                    torch.uint8,
-                ),
-                "label": torch.randint(0, 10, (8,), generator=generator),
-            },
-            tmp_path / f"{split}.pt",
-        )
+    write_dataset(tmp_path, classes=10)
     loop = shrink(factory(), directory=tmp_path).make()
     loop.train()
     assert loop.step.global_step == 2

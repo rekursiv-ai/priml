@@ -107,11 +107,5 @@ class TwoHeadResNet(nn.Module):
           logits_added: ``(B, channels_out)`` scores of the added head.
 
         """
-        features = self.features(media)
+        features = self.trunk.features(media)
         return self.trunk.head(features), self.head(features)
-
-    def features(self, media: Tensor) -> Tensor:
-        """Return the pooled ``(B, C)`` features both heads read."""
-        trunk = self.trunk
-        x = trunk.stages(trunk.act(cast(Tensor, trunk.norm(trunk.stem(media)))))
-        return cast(Tensor, trunk.pool(x))

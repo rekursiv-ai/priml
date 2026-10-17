@@ -14,9 +14,7 @@ import torch
 
 from priml.baselines.mlsbench.pytorch_vision import reference as vision
 from priml.baselines.mlsbench.regularization import reference
-from priml.baselines.mlsbench.regularization.scripts.capture_reference import (
-    port_batch_size,
-)
+from priml.baselines.mlsbench.regularization.experiments import exp000
 from priml.testing.golden import mismatches, read_tensors
 
 
@@ -45,12 +43,15 @@ def test_every_regularizer_and_its_gradients_match_the_script() -> None:
 def test_the_schedule_and_optimizer_match_the_setting() -> None:
     assert_exact(
         stored("schedule/") | stored("optimizer/"),
-        reference.schedule_record() | reference.optimizer_record(),
+        vision.schedule_record(exp000) | vision.optimizer_record(exp000),
     )
 
 
 def test_the_batch_size_matches_the_setting() -> None:
-    assert_exact(stored("setting/"), {"setting/batch_size": port_batch_size()})
+    assert_exact(
+        stored("setting/"),
+        {"setting/batch_size": reference.port_batch_size()},
+    )
 
 
 def test_the_full_step_leaves_the_generator_where_the_script_does() -> None:

@@ -46,6 +46,33 @@ def test_uniform_weights_are_plain_cross_entropy() -> None:
     )
 
 
+def test_the_loss_refuses_logits_of_another_class_count() -> None:
+    loss = ClassWeightedCrossEntropy.Config().make()
+    loss.bind_class_counts(torch.tensor([4.0, 2.0, 1.0]))
+    with pytest.raises(ValueError, match="3 class weights but the logits have 2"):
+        loss(torch.zeros(4, 2), label=torch.tensor([0, 1, 0, 1]), context=CONTEXT)
+
+
+def test_the_weights_move_to_the_logits_device_once() -> None:
+    loss = ClassWeightedCrossEntropy.Config().make()
+    loss.bind_class_counts(torch.tensor([4.0, 2.0, 1.0]))
+    logits = torch.zeros(2, 3, device="meta")
+    _ = loss(
+        logits,
+        label=torch.zeros(2, dtype=torch.int64, device="meta"),
+        context=CONTEXT,
+    )
+    moved = loss.weight
+    assert moved is not None
+    assert moved.device.type == "meta"
+    _ = loss(
+        logits,
+        label=torch.zeros(2, dtype=torch.int64, device="meta"),
+        context=CONTEXT,
+    )
+    assert loss.weight is moved
+
+
 def test_the_loss_refuses_to_run_without_counts() -> None:
     loss = ClassWeightedCrossEntropy.Config().make()
     with pytest.raises(RuntimeError, match="bind_class_counts"):

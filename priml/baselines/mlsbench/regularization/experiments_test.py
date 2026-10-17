@@ -119,6 +119,7 @@ def test_every_experiment_states_its_hypothesis_sources_and_pending_results(
 ) -> None:
     doc = inspect.getdoc(factory) or ""
     assert "Hypothesis:" in doc
+    assert "References:" in doc
     assert "80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c" in doc
     assert doc.rstrip().endswith("Results:\n  TBD.")
     assert factory.__name__ in (inspect.getdoc(experiments) or "")

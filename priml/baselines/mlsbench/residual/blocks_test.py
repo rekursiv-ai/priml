@@ -7,12 +7,17 @@ from typing import Final, cast
 import pytest
 import torch
 
-from priml.baselines.mlsbench.pytorch_vision.model import BasicBlock
+from priml.baselines.mlsbench.normalization.norms import GroupNorm
+from priml.baselines.mlsbench.pytorch_vision.model import (
+    BasicBlock,
+    ResNet,
+    sized_blocks,
+)
+from priml.baselines.mlsbench.pytorch_vision.reference import seeded
 from priml.baselines.mlsbench.residual.blocks import (
     GatedResidualBlock,
     PreActivationBlock,
     StochasticDepthBlock,
-    stochastic_depth,
 )
 from priml.testing.cost import assert_cost_matches_torch
 
@@ -84,46 +89,91 @@ def test_stochastic_depth_draws_once_per_training_forward_and_never_in_eval() ->
         block.norm2,
         block.conv2(block.act(apply(block.norm1, block.conv1(x)))),
     )
-    state = torch.get_rng_state()
-    torch.manual_seed(1)
-    draws = torch.rand(3)
-    torch.manual_seed(1)
-    for draw in draws:
-        expected = block.act(kept + x) if draw.item() < 0.75 else block.act(x)
-        # Training mode only for the draw; evaluation-mode norms keep it comparable.
-        block.train()
-        block.norm1.eval()
-        block.norm2.eval()
-        torch.testing.assert_close(block(x), expected)
+    with seeded(1):
+        draws = torch.rand(3)
+    with seeded(1):
+        for draw in draws:
+            expected = block.act(kept + x) if draw.item() < 0.75 else block.act(x)
+            # Training mode only for the draw; evaluation-mode norms keep it comparable.
+            block.train()
+            block.norm1.eval()
+            block.norm2.eval()
+            torch.testing.assert_close(block(x), expected)
+        position = torch.get_rng_state()
+        block.eval()
+        torch.testing.assert_close(block(x), block.act(0.75 * kept + x))
+        assert torch.equal(torch.get_rng_state(), position)
     assert {d.item() < 0.75 for d in draws} == {True, False}
-    position = torch.get_rng_state()
-    block.eval()
-    torch.testing.assert_close(block(x), block.act(0.75 * kept + x))
-    assert torch.equal(torch.get_rng_state(), position)
-    torch.set_rng_state(state)
 
 
-def test_stochastic_depth_restarts_its_count_on_every_stem_width_block() -> None:
-    blocks = stochastic_depth((16, 32, 64), (3, 2, 2), survival_last=0.25)
-    assert all(isinstance(b, StochasticDepthBlock.Config) for b in blocks)
-    depths = [b.depth for b in blocks if isinstance(b, StochasticDepthBlock.Config)]
-    assert depths == [1, 1, 1, 2, 3, 4, 5]
-    assert {
-        (b.num_layers, b.survival_last)
-        for b in blocks
+@pytest.mark.parametrize(
+    ("depth", "num_layers", "match"),
+    [(0, 3, "depth"), (2, 0, "num_layers")],
+)
+def test_stochastic_depth_rejects_a_position_before_the_first_or_an_empty_schedule(
+    depth: int,
+    num_layers: int,
+    match: str,
+) -> None:
+    config = StochasticDepthBlock.Config(channels_in=3, channels_out=3)
+    config.depth, config.num_layers = depth, num_layers
+    with pytest.raises(ValueError, match=match):
+        config.finalize()
+
+
+def placed(
+    channels_hidden: tuple[int, ...],
+    blocks_per_stage: tuple[int, ...],
+    *,
+    reset_width: int = 16,
+) -> list[tuple[int, int]]:
+    """Size a stochastic-depth template in a ResNet; return each copy's position."""
+    model = ResNet.Config()
+    model.channels_hidden = channels_hidden
+    model.blocks_per_stage = blocks_per_stage
+    template = model.block = StochasticDepthBlock.Config()
+    template.reset_width = reset_width
+    copies = [block for stage in sized_blocks(model) for block, _ in stage]
+    assert all(isinstance(b, StochasticDepthBlock.Config) for b in copies)
+    return [
+        (b.depth, b.num_layers)
+        for b in copies
         if isinstance(b, StochasticDepthBlock.Config)
-    } == {(5, 0.25)}
+    ]
 
 
-def test_a_later_stage_at_the_stem_width_restarts_the_count_too() -> None:
-    blocks = stochastic_depth((4, 4), (2, 2), survival_last=0.5)
+def test_stochastic_depth_restarts_its_count_on_every_reset_width_block() -> None:
+    assert placed((16, 32, 64), (3, 2, 2)) == [(1, 5)] * 3 + [
+        (d, 5) for d in range(2, 6)
+    ]
+
+
+def test_resnet56_positions_are_upstreams() -> None:
+    assert placed((16, 32, 64), (9, 9, 9)) == [(1, 19)] * 9 + [
+        (d, 19) for d in range(2, 20)
+    ]
+
+
+def test_a_later_stage_at_the_reset_width_restarts_the_count_too() -> None:
     # The deepest position is the counter's last value, as upstream reads it,
     # even when an earlier block stands deeper.
-    assert [
-        (b.depth, b.num_layers)
-        for b in blocks
-        if isinstance(b, StochasticDepthBlock.Config)
-    ] == [(1, 1), (1, 1), (2, 1), (1, 1)]
+    assert placed((4, 4), (2, 2), reset_width=4) == [(1, 1), (1, 1), (2, 1), (1, 1)]
+
+
+def test_a_network_without_a_reset_width_block_counts_every_block() -> None:
+    assert placed((4, 5, 6), (1, 1, 1)) == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_placing_leaves_the_template_and_its_survival_alone() -> None:
+    model = ResNet.Config()
+    model.blocks_per_stage = (2, 1, 1)
+    template = model.block = StochasticDepthBlock.Config()
+    template.survival_last = 0.25
+    copies = [block for stage in sized_blocks(model) for block, _ in stage]
+    assert (template.depth, template.num_layers) == (1, 1)
+    assert {
+        b.survival_last for b in copies if isinstance(b, StochasticDepthBlock.Config)
+    } == {0.25}
 
 
 def test_pre_activation_cost_counts_every_matmul() -> None:
@@ -136,6 +186,21 @@ def test_pre_activation_cost_counts_every_matmul() -> None:
     )
     conv1, conv2, shortcut = 5 * 3 * 9, 5 * 5 * 9, 5 * 3
     assert analytical.params == conv1 + conv2 + shortcut + 2 * 3 + 2 * 2 * 5 + 1
+
+
+def test_pre_activation_costs_the_norm_its_slot_holds() -> None:
+    config = PreActivationBlock.Config(channels_in=4, channels_out=6, stride=2)
+    config.norm = GroupNorm
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(BATCH, 4, 6, 6, requires_grad=True),
+        seq_len=6 * 6,
+        batch_size=BATCH,
+        dtype=None,
+    )
+    block = config.make()
+    assert isinstance(block.norm1, GroupNorm)
+    assert analytical.params == sum(p.numel() for p in block.parameters())
 
 
 def test_an_identity_pre_activation_block_costs_no_shortcut() -> None:

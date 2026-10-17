@@ -111,13 +111,14 @@ def variants(root: Path, scratch: Path) -> dict[str, Upstream]:
     }
 
 
-def upstream_lockstep(script: Upstream, name: str, *, base_lr: float) -> Lockstep:
+def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep:
     """Repeat ``main``'s epoch loop on the shallowest network for two epochs.
 
     Args:
       script: The script carrying the schedule under test.
       name: Which schedule, for the record's keys.
-      base_lr: The ``--lr`` ``main`` passes to ``get_lr``.
+      trace: The pristine ``main``'s run, whose optimizer settings, ``--lr``
+        included, the loop builds its own from.
 
     Returns:
       lockstep: Per update the rate, the loss, its logits and a probe's logits
@@ -132,11 +133,12 @@ def upstream_lockstep(script: Upstream, name: str, *, base_lr: float) -> Lockste
     with reference.seeded(reference.SEED), host_agnostic_numerics():
         model = task.ResNet(task.BasicBlock, [1, 1, 1], reference.CLASSES)
         task.initialize_weights(model)
+        base_lr = trace.settings["lr"]
         optimizer = torch.optim.SGD(
             model.parameters(),
             lr=base_lr,
-            momentum=0.9,
-            weight_decay=5e-4,
+            momentum=trace.settings["momentum"],
+            weight_decay=trace.settings["weight_decay"],
         )
         for index in range(reference.STEPS):
             rate = task.get_lr(index, reference.EPOCHS, base_lr, dict(CONFIG))
@@ -182,6 +184,7 @@ def upstream_record(
         [traces["constant"].settings[name] for name in SETTINGS],
         dtype=torch.float64,
     )
+    record["best/accuracy"] = torch.tensor(traces["constant"].best, dtype=torch.float64)
     for values, _ in lockstep.values():
         record |= values
     return record

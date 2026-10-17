@@ -215,7 +215,7 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
         for i in range(reference.STEPS)
     ]
     task = cast(Script, cast(object, script))
-    criterion = _CriterionSpy()
+    criterion = upstream.CriterionSpy()
     probes: list[Tensor] = []
     states: list[dict[str, Tensor]] = []
     with reference.seeded(reference.SEED), host_agnostic_numerics():
@@ -287,22 +287,6 @@ class _OpSpy:
         key = f"{OPS[op_name]}{'-' if magnitude < 0 else '+'}"
         self.counts[key] = self.counts.get(key, 0) + 1
         return self.original(img, op_name, magnitude, interpolation, fill)
-
-
-class _CriterionSpy:
-    """Cross-entropy, as ``main`` builds it, keeping what it saw."""
-
-    def __init__(self) -> None:
-        self.criterion = torch.nn.CrossEntropyLoss()
-        self.losses: list[Tensor] = []
-        self.logits: list[Tensor] = []
-
-    def __call__(self, logits: Tensor, targets: Tensor) -> Tensor:
-        """Return the batch's loss."""
-        loss = self.criterion(logits, targets)
-        self.losses.append(loss.detach())
-        self.logits.append(logits.detach())
-        return loss
 
 
 class _Recorded:

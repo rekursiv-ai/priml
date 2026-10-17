@@ -165,7 +165,9 @@ class _BuildUpstream:
         return cast("_Settable", self._record("streaming", _Settable(["<stop>"])))
 
     def setup_datasets(
-        self, *_args: object, **_kwargs: object
+        self,
+        *_args: object,
+        **_kwargs: object,
     ) -> tuple[object, object]:
         return "train-dataset", None
 
@@ -296,7 +298,8 @@ def test_build_session_requires_the_task_data(tmp_path: Path) -> None:
     (tmp_path / "tasks").rmdir()
     with pytest.raises(FileNotFoundError, match="task data are missing"):
         build_session(
-            config, _build_api(_BuildUpstream(), _BuildRay(), actor_manager=None)
+            config,
+            _build_api(_BuildUpstream(), _BuildRay(), actor_manager=None),
         )
 
 

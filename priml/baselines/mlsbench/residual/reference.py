@@ -21,12 +21,7 @@ import torch
 
 from priml.baselines.mlsbench.pytorch_vision import reference
 from priml.baselines.mlsbench.pytorch_vision.model import BasicBlock, ResNet
-from priml.baselines.mlsbench.pytorch_vision.train_step import VisionTrainStep
-from priml.baselines.mlsbench.residual.blocks import (
-    PreActivationBlock,
-    StochasticDepthBlock,
-    stochastic_depth,
-)
+from priml.baselines.mlsbench.residual.blocks import PreActivationBlock
 from priml.baselines.mlsbench.residual.experiments import (
     exp000,
     exp001,
@@ -56,49 +51,16 @@ VARIANTS: Final[dict[str, Callable[[], VisionTrainLoop]]] = {
 """The experiment that carries each block, keyed as the script's variants."""
 
 
-def resized(
-    factory: Callable[[], VisionTrainLoop],
-    *,
-    blocks: tuple[int, ...],
-) -> VisionTrainStep.Config:
-    """Return the step of ``factory`` with ``blocks`` blocks per stage on the CPU.
-
-    A per-position block list is rebuilt for the new depth with the same
-    survival schedule, since its length and depths follow the block count.
-
-    Args:
-      factory: The experiment whose recipe is kept.
-      blocks: Blocks per stage; the widths stay the reference's.
-
-    Returns:
-      config: The step's config, unbuilt.
-
-    """
-    config = factory().step
-    config.parallelism = NoParallel.Config(device="cpu")
-    model = config.model
-    assert isinstance(model, ResNet.Config)
-    model.blocks_per_stage = blocks
-    if isinstance(model.block, list):
-        first = model.block[0]
-        assert isinstance(first, StochasticDepthBlock.Config)
-        model.block = stochastic_depth(
-            model.channels_hidden,
-            blocks,
-            survival_last=first.survival_last,
-        )
-    return config
-
-
-def block_of(name: str, *, channels_out: int, stride: int, depth: int) -> nn.Module:
+def block_of(name: str, *, channels_out: int, stride: int) -> nn.Module:
     """Build the block of experiment :data:`VARIANTS` ``[name]`` alone.
+
+    A stochastic-depth template built alone keeps its defaults, position 1 of
+    1, as upstream's counter stands for a block built alone.
 
     Args:
       name: A key of :data:`VARIANTS`.
       channels_out: Output channels; the input has ``FEATURES[1]``.
       stride: Stride of the block.
-      depth: Position, and deepest position, on a survival schedule: a block
-        built alone is the only one its schedule counts.
 
     Returns:
       block: Built from the experiment's block config.
@@ -106,14 +68,11 @@ def block_of(name: str, *, channels_out: int, stride: int, depth: int) -> nn.Mod
     """
     model = VARIANTS[name]().step.model
     assert isinstance(model, ResNet.Config)
-    template = model.block[0] if isinstance(model.block, list) else model.block
-    config = copy_tree(template)
+    config = copy_tree(model.block)
     assert isinstance(config, BasicBlock.Config | PreActivationBlock.Config)
     config.channels_in = FEATURES[1]
     config.channels_out = channels_out
     config.stride = stride
-    if isinstance(config, StochasticDepthBlock.Config):
-        config.depth = config.num_layers = depth
     return config.make()
 
 
@@ -133,7 +92,6 @@ def block_record() -> dict[str, Tensor]:
                     name,
                     channels_out=channels_out,
                     stride=stride,
-                    depth=1,
                 ),
                 f"block/{name}/{kind}",
             )
@@ -178,13 +136,13 @@ def lockstep_record(
     losses: list[Tensor] = []
     logits: list[Tensor] = []
     probes: list[Tensor] = []
-    config = resized(VARIANTS[name], blocks=(1, 1, 1))
-    assert isinstance(config.model, ResNet.Config)
-    config.model.channels_out = reference.CLASSES
-    config.train_budget_epochs = reference.EPOCHS
     with reference.seeded(reference.SEED), host_agnostic_numerics():
-        step = config.make()
-        assert isinstance(step, VisionTrainStep)
+        step = reference.tiny_step(
+            VARIANTS[name],
+            blocks=(1, 1, 1),
+            classes=reference.CLASSES,
+            epochs=reference.EPOCHS,
+        )
         for index in range(reference.STEPS):
             step.timer_epoch.global_count = index
             result = step.train_step(

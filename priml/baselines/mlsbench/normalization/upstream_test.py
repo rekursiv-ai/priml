@@ -151,7 +151,7 @@ def test_the_record_holds_every_norm_and_the_recipe(tmp_path: Path) -> None:
     record = upstream.upstream_record(variants, traces, lockstep)
     assert {k.split("/")[1] for k in record if k.startswith("draws/")} == set(variants)
     assert record["schedule/lr"].shape == (200,)
-    assert record["optimizer/settings"].shape == (len(upstream.SETTINGS),)
+    assert record["optimizer/settings"].shape == (len(reference.HYPERPARAMETERS),)
     assert "lockstep/switchable_norm/loss" in record
 
 

@@ -27,7 +27,6 @@ from priml.baselines.mlsbench.pytorch_vision import reference
 from priml.baselines.mlsbench.pytorch_vision.model import ResNet
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import rng_fingerprint
-from priml.train.parallelism import NoParallel
 
 
 if TYPE_CHECKING:
@@ -77,10 +76,8 @@ def draws_record() -> dict[str, Tensor]:
     """
     record: dict[str, Tensor] = {}
     for name, factory in POOLS.items():
-        config = factory().step
-        config.parallelism = NoParallel.Config(device="cpu")
         with reference.seeded(reference.SEED), host_agnostic_numerics():
-            _ = config.make()
+            _ = reference.full_step(factory)
             record[f"draws/{name}"] = rng_fingerprint()
     return record
 

@@ -228,7 +228,11 @@ def test_main_writes_the_goldens_when_every_comparison_is_exact(
     assert (out / "reference_sites.txt").read_text() == "port a@b.py:c 2\n"
 
 
-def test_a_golden_over_the_ceiling_is_refused(tmp_path: Path) -> None:
+def test_a_golden_over_the_ceiling_is_refused_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    previous = tmp_path / "reference.pt"
+    previous.write_bytes(b"previous")
     record = {
         "transform/train": torch.zeros(capture_reference.CEILING),
         "transform/test": torch.zeros(2),
@@ -238,6 +242,8 @@ def test_a_golden_over_the_ceiling_is_refused(tmp_path: Path) -> None:
             tmp_path,
             reference.Captured(record=record, sites={}, report=[]),
         )
+    assert previous.read_bytes() == b"previous"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["reference.pt"]
 
 
 def test_help_describes_the_command(
@@ -321,6 +327,24 @@ def test_a_lockstep_run_that_matches_reports_nothing_and_one_that_drifts_is_name
     assert capture_reference.compare_lockstep({"cross_entropy": ({}, drifted)}) == [
         "lockstep/cross_entropy/2: stem.weight: 1/432 differ",
     ]
+
+
+def test_a_lockstep_comparison_runs_the_port_it_is_given() -> None:
+    state = {"w": torch.zeros(2)}
+    calls: list[str] = []
+
+    def run(
+        name: str,
+        *,
+        states: list[dict[str, torch.Tensor]],
+    ) -> dict[str, torch.Tensor]:
+        calls.append(name)
+        states.append({"w": torch.ones(2)})
+        return {}
+
+    report = capture_reference.compare_lockstep({"x": ({}, [state])}, run=run)
+    assert calls == ["x"]
+    assert report == ["lockstep/x/1: w: 2/2 differ"]
 
 
 def test_the_full_size_comparison_names_a_network_that_has_another_shape(

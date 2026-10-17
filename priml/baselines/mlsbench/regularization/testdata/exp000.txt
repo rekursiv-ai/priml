@@ -16,10 +16,10 @@ VisionTrainLoop(
         │           channels_out=-1,
         │           stride=1,
         │           activation=priml.model.swiglu.relu,
-        │           norm=<class 'torch.nn.modules.batchnorm.BatchNorm2d'>
+        │           norm=<class 'priml.baselines.mlsbench.pytorch_vision.model.BatchNorm'>
         │       ),
         │       activation=priml.model.swiglu.relu,
-        │       norm=<class 'torch.nn.modules.batchnorm.BatchNorm2d'>,
+        │       norm=<class 'priml.baselines.mlsbench.pytorch_vision.model.BatchNorm'>,
         │       pool=GlobalAvgPool.Config(),
         │       init_conv=priml.baselines.mlsbench.pytorch_vision.model.kaiming_normal_fan_out,
         │       init_head=priml.baselines.mlsbench.pytorch_vision.model.kaiming_normal_fan_in,
@@ -112,7 +112,7 @@ VisionTrainLoop(
         eval_warmup_batches=0,
         eval_only=False,
         restore_rng_state=True,
-        seed=None,
+        seed=42,
         num_steps_garbage_collect=inf,
         mesh_dim_model_seed='pp',
         mesh_dim_data_seed='dp',

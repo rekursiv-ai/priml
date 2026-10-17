@@ -40,7 +40,7 @@ from priml.baselines.mlsbench.pytorch_vision.scripts import (
     capture_reference as vision_capture,
 )
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import mismatches, write_tensors
+from priml.testing.golden import mismatches
 
 
 if TYPE_CHECKING:
@@ -67,8 +67,7 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    flags.out.mkdir(parents=True, exist_ok=True)
-    write_tensors(flags.out / "reference.pt", captured.record)
+    vision_capture.write_records(flags.out, {"reference.pt": captured.record})
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
@@ -110,7 +109,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         ]
     report += mismatches(record, reference.port_record())
     report += compare_networks({name: state for name, (_, state) in networks.items()})
-    report += compare_lockstep(lockstep)
+    report += vision_capture.compare_lockstep(lockstep, run=reference.lockstep_record)
     report += vision_capture.compare_loaders(batches, vision.loader_batches(scratch))
     return vision.Captured(record=record, sites={}, report=report)
 
@@ -132,7 +131,7 @@ def compare_full_size(
 
     """
     with vision.seeded(vision.SEED), host_agnostic_numerics():
-        ours = reference.full_step(reference.INITIALIZATIONS[name]).model
+        ours = vision.full_step(reference.INITIALIZATIONS[name]).model
         theirs = script.ResNet(script.BasicBlock, [9, 9, 9], 100)
         theirs.load_state_dict(trace.state)
         report = vision_capture.compare_states(trace.state, ours.state_dict())
@@ -165,28 +164,6 @@ def compare_networks(theirs: dict[str, dict[str, Tensor]]) -> list[str]:
             f"network/{name}/state: {line}"
             for line in vision_capture.compare_states(want, ours[0])
         ]
-    return report
-
-
-def compare_lockstep(lockstep: dict[str, vision_upstream.Lockstep]) -> list[str]:
-    """Compare every parameter and buffer after each update of every initialization.
-
-    Args:
-      lockstep: Each initialization's :func:`upstream.upstream_lockstep`.
-
-    Returns:
-      report: One line per tensor that differs after any update.
-
-    """
-    report: list[str] = []
-    for name, (_, theirs) in lockstep.items():
-        ours: list[dict[str, Tensor]] = []
-        _ = reference.lockstep_record(name, states=ours)
-        for index, (want, got) in enumerate(zip(theirs, ours, strict=True), start=1):
-            report += [
-                f"lockstep/{name}/{index}: {line}"
-                for line in vision_capture.compare_states(want, got)
-            ]
     return report
 
 

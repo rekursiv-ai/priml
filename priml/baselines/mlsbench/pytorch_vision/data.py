@@ -19,6 +19,7 @@ from dataclasses import field
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
+    Literal,
     NotRequired,
     Protocol,
     Self,
@@ -104,6 +105,11 @@ class Cifar100Data:
 
         @override
         def finalize(self) -> Self:
+            for name in ("batch_size", "eval_batch_size", "num_streams"):
+                if getattr(self, name) < 1:
+                    raise ValueError(
+                        f"{name} must be at least 1; got {getattr(self, name)}.",
+                    )
             self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
             return super().finalize()
 
@@ -180,12 +186,17 @@ class Cifar100Data:
         state = cast(Cifar100Data.StateDict, state_dict)
         if "timer_epoch" in state:
             self.timer_epoch.load_state_dict(state["timer_epoch"])
-        loader_state = state.get("loader")
-        if loader_state is not None:
-            self._pending_loader_state = loader_state
-            if self._live is not None:
-                self._live.load_state_dict(loader_state)
-                self._pending_loader_state = None
+        # A checkpoint taken before any pass carries no cursor; restoring it
+        # starts the next pass afresh rather than keeping this dataset's own.
+        loader_state = state.get("loader") or _TrainLoader.StateDict(
+            order=None,
+            streams=[],
+            next_batch=0,
+        )
+        self._pending_loader_state = loader_state
+        if self._live is not None:
+            self._live.load_state_dict(loader_state)
+            self._pending_loader_state = None
 
 
 def normalize(images: Tensor, *, mean: Tensor, std: Tensor) -> Tensor:
@@ -271,8 +282,12 @@ def pad_crop_flip(images: Tensor, stream: torch.Generator, *, pad: int) -> Tenso
     return torch.stack(views)
 
 
-def prepare(directory: Path | str) -> None:
-    """Download CIFAR-100 and cache its 8-bit tensors under ``directory``.
+def prepare(
+    directory: Path | str,
+    *,
+    dataset: Literal["cifar10", "cifar100"] = "cifar100",
+) -> None:
+    """Download CIFAR and cache its 8-bit tensors under ``directory``.
 
     Idempotent: a split whose ``.pt`` file already exists is left untouched, so
     this is safe to call at the start of every run. Pixels are stored as
@@ -281,23 +296,25 @@ def prepare(directory: Path | str) -> None:
 
     Args:
       directory: Destination for ``train.pt`` and ``test.pt``.
+      dataset: Which CIFAR; the loader reads either.
 
     """
+    fetch = datasets.CIFAR10 if dataset == "cifar10" else datasets.CIFAR100
     destination = Path(directory)
     destination.mkdir(parents=True, exist_ok=True)
     for split, train in (("train", True), ("test", False)):
         path = destination / f"{split}.pt"
         if path.exists():
-            logger.info("cifar100: %s already prepared at %s", split, path)
+            logger.info("%s: %s already prepared at %s", dataset, split, path)
             continue
-        source = datasets.CIFAR100(str(destination), train=train, download=True)
+        source = fetch(str(destination), train=train, download=True)
         media = torch.as_tensor(source.data).moveaxis(-1, -3).contiguous()
         # Write to a sibling then rename: an interrupted download must not leave
         # a truncated .pt that the existence check above would later accept.
         staging = path.with_suffix(".pt.partial")
         torch.save({"media": media, "label": torch.as_tensor(source.targets)}, staging)
         staging.replace(path)
-        logger.info("cifar100: wrote %d %s images to %s", len(media), split, path)
+        logger.info("%s: wrote %d %s images to %s", dataset, len(media), split, path)
 
 
 class _EvalLoader:

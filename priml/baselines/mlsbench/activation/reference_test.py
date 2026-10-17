@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.activation import reference
+from priml.baselines.mlsbench.activation.experiments import exp000
 from priml.baselines.mlsbench.pytorch_vision import reference as vision
 from priml.testing.golden import mismatches, read_tensors
 
@@ -42,11 +43,11 @@ def test_every_activation_and_its_gradient_match_the_script() -> None:
 
 
 def test_the_learning_rate_of_all_200_epochs_matches_the_script() -> None:
-    assert_exact(stored("schedule/"), reference.schedule_record())
+    assert_exact(stored("schedule/"), vision.schedule_record(exp000))
 
 
 def test_the_optimizer_matches_the_script() -> None:
-    assert_exact(stored("optimizer/"), reference.optimizer_record())
+    assert_exact(stored("optimizer/"), vision.optimizer_record(exp000))
 
 
 def test_the_best_accuracy_matches_the_script() -> None:

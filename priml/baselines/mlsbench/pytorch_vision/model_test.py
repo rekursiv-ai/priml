@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 
 from configgle import InlineConfig, Makeable
 from torch import Tensor, nn
@@ -16,9 +16,14 @@ from priml.baselines.mlsbench.pytorch_vision.model import (
     ResNet,
     kaiming_normal_fan_in,
     kaiming_normal_fan_out,
+    sized_blocks,
 )
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -216,16 +221,27 @@ def test_the_init_hook_runs_after_the_per_tensor_initializers() -> None:
     assert torch.eq(stem, 1).all()
 
 
-def test_a_block_list_gives_each_position_its_own_config() -> None:
+class Numbered(BasicBlock.Config):
+    """A basic block template that numbers its sized copies in network order."""
+
+    def place(self, blocks: Sequence[Makeable[nn.Module]]) -> None:
+        """Give each copy its zero-based position as its stride's companion."""
+        for index, block in enumerate(blocks):
+            assert isinstance(block, Numbered)
+            block.position = index
+
+    position: int = -1
+
+
+def test_a_positioned_template_sees_every_sized_copy_in_order() -> None:
     config = tiny()
-    marked: Makeable[nn.Module] = InlineConfig(nn.Identity)
-    config.block = [BasicBlock.Config(), marked, BasicBlock.Config()]
-    model = config.make()
-    kinds = [type(stage[0]) for stage in model.stages]
-    assert kinds == [BasicBlock, nn.Identity, BasicBlock]
-    config.block = [marked, marked]
-    with pytest.raises(ValueError, match="block lists 2 configs"):
-        config.make()
+    config.blocks_per_stage = (2, 1, 1)
+    config.block = Numbered()
+    stages = sized_blocks(config)
+    copies = [block for stage in stages for block, _ in stage]
+    assert [cast(Numbered, b).position for b in copies] == [0, 1, 2, 3]
+    assert [cast(Numbered, b).channels_out for b in copies] == [4, 4, 5, 6]
+    assert config.block.position == -1
 
 
 def test_building_leaves_the_block_template_untouched() -> None:
@@ -247,13 +263,6 @@ def test_a_block_infers_the_width_it_is_not_given() -> None:
     assert config.copy_tree().finalize().channels_out == 4
     config = BasicBlock.Config(channels_out=5)
     assert config.copy_tree().finalize().channels_in == 5
-
-
-def test_stage_lists_must_match() -> None:
-    config = tiny()
-    config.blocks_per_stage = (1, 1)
-    with pytest.raises(ValueError, match="shorter"):
-        config.make()
 
 
 def test_every_stage_needs_a_block() -> None:
@@ -332,6 +341,29 @@ def test_resnet_bfb() -> None:
         build_input=lambda: torch.randn(BATCH, 3, HEIGHT, WIDTH),
         seed=0,
     )
+
+
+def test_features_are_what_the_head_reads() -> None:
+    model = tiny().make()
+    media = torch.randn(BATCH, 3, HEIGHT, WIDTH)
+    features = model.features(media)
+    assert features.shape == (BATCH, 6)
+    assert torch.equal(model(media), model.head(features))
+
+
+def test_an_empty_network_is_refused_by_name() -> None:
+    config = tiny()
+    config.blocks_per_stage = ()
+    config.channels_hidden = ()
+    with pytest.raises(ValueError, match="Every stage needs a block"):
+        config.make()
+
+
+def test_stage_lists_of_unequal_length_are_refused_by_name() -> None:
+    config = tiny()
+    config.blocks_per_stage = (1, 1)
+    with pytest.raises(ValueError, match="2 stage depths for 3 stage widths"):
+        config.make()
 
 
 if __name__ == "__main__":

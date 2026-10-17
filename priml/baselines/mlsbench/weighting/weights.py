@@ -111,6 +111,6 @@ def log_frequency_gap(
     weights = torch.where(
         max_gap > 0,
         1.0 + spread * (gap / max_gap),
-        torch.ones(num_classes),
+        torch.ones(num_classes, device=gap.device),
     )
     return weights / weights.sum() * num_classes

@@ -83,8 +83,23 @@ def write_dataset(directory: Path) -> None:
         )
 
 
+MULTITASK_SLOTS: Final = (
+    "dataset",
+    "metrics_eval",
+    "step",
+)
+"""Where the multitask recipe differs from the vision one: data, heads, metrics.
+
+``step`` covers the two-head model and the combination; the trunk is pinned
+below to equal the vision network, so the delta cannot hide a trunk change."""
+
+
 def test_exp000_is_the_vision_recipe_with_a_second_head() -> None:
-    assert changed_fields(vision.exp000(), exp000()) >= {"study_name"}
+    changed = changed_fields(vision.exp000(), exp000())
+    assert {p for p in changed if not p.startswith(MULTITASK_SLOTS)} == {
+        "(class)",
+        "study_name",
+    }
     cfg = exp000()
     assert isinstance(cfg.step.model, TwoHeadResNet.Config)
     assert cfg.step.model.trunk == vision.exp000().step.model
@@ -156,6 +171,13 @@ def test_each_fork_names_its_parent_in_the_first_line() -> None:
 
 def test_exp000_matches_its_golden_config() -> None:
     assert_pprint_golden(test_file=__file__, name="exp000", config=exp000())
+
+
+def test_a_loop_that_would_leave_the_references_draws_is_refused() -> None:
+    config = exp000()
+    config.eval_warmup_batches = 1
+    with pytest.raises(ValueError, match="eval_warmup_batches"):
+        config.copy_tree().finalize()
 
 
 if __name__ == "__main__":

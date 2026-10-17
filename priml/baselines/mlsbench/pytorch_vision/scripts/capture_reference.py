@@ -28,9 +28,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import argparse
+import io
 import tempfile
 
+import torch
+
 from priml.baselines.mlsbench.pytorch_vision import reference, upstream
+from priml.baselines.mlsbench.pytorch_vision.experiments import exp000
 from priml.baselines.mlsbench.pytorch_vision.upstream import (
     PRISTINE,
     VARIANTS,
@@ -40,13 +44,15 @@ from priml.baselines.mlsbench.pytorch_vision.upstream import (
     Upstream,
 )
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import mismatches, write_tensors
+from priml.testing.golden import mismatches, pack
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from torch import Tensor
+
+    from priml.baselines.mlsbench.pytorch_vision.experiments import VisionTrainLoop
 
 
 CEILING: Final = 32_768
@@ -152,26 +158,53 @@ def write_goldens(out: Path, captured: reference.Captured) -> None:
       ValueError: A golden exceeds :data:`CEILING`.
 
     """
-    out.mkdir(parents=True, exist_ok=True)
     record = captured.record
-    files = {
-        "reference.pt": {
-            k: v for k, v in record.items() if not k.startswith("transform/")
+    write_records(
+        out,
+        {
+            "reference.pt": {
+                k: v for k, v in record.items() if not k.startswith("transform/")
+            },
+            "reference_train_pipeline.pt": {
+                "transform/train": record["transform/train"],
+            },
+            "reference_test_pipeline.pt": {"transform/test": record["transform/test"]},
         },
-        "reference_train_pipeline.pt": {"transform/train": record["transform/train"]},
-        "reference_test_pipeline.pt": {"transform/test": record["transform/test"]},
-    }
-    for name, values in files.items():
-        write_tensors(out / name, values)
-        size = (out / name).stat().st_size
-        if size > CEILING:
-            raise ValueError(f"{name} is {size} bytes; the ceiling is {CEILING}.")
+    )
     lines = [
         f"{side} {key} {count}"
         for side, counts in captured.sites.items()
         for key, count in sorted(counts.items())
     ]
     (out / "reference_sites.txt").write_text("\n".join(lines) + "\n")
+
+
+def write_records(out: Path, files: Mapping[str, Mapping[str, Tensor]]) -> None:
+    """Write each record as a tensor golden, or none of them if any is too large.
+
+    Every file is serialized in memory and measured before the first is
+    written, so a refused capture leaves the previous goldens in place.
+
+    Args:
+      out: The ``testdata`` directory.
+      files: File name to the record it holds.
+
+    Raises:
+      ValueError: A golden exceeds :data:`CEILING`.
+
+    """
+    encoded: dict[str, bytes] = {}
+    for name, values in files.items():
+        buffer = io.BytesIO()
+        torch.save(pack(values), buffer)
+        encoded[name] = buffer.getvalue()
+        if len(encoded[name]) > CEILING:
+            raise ValueError(
+                f"{name} is {len(encoded[name])} bytes; the ceiling is {CEILING}.",
+            )
+    out.mkdir(parents=True, exist_ok=True)
+    for name, data in encoded.items():
+        (out / name).write_bytes(data)
 
 
 def check_sites(
@@ -217,19 +250,24 @@ def compare_wiring(trace: MainTrace) -> list[str]:
     return [] if trace.configs == expected else ["main: loss configuration differs"]
 
 
-def compare_full_size(script: Upstream, trace: MainTrace) -> list[str]:
+def compare_full_size(
+    script: Upstream,
+    trace: MainTrace,
+    factory: Callable[[], VisionTrainLoop] = exp000,
+) -> list[str]:
     """Compare ResNet-56's initial state and forward with the reference's.
 
     Args:
       script: The pristine reference script.
       trace: Its ``main``'s initial state, taken after its own seeding.
+      factory: The port's experiment; ``exp000`` by default.
 
     Returns:
       report: One line per tensor that differs.
 
     """
     with reference.seeded(reference.SEED), host_agnostic_numerics():
-        ours = reference.full_step().model
+        ours = reference.full_step(factory).model
         theirs = script.ResNet(script.BasicBlock, [9, 9, 9], 100)
         theirs.load_state_dict(trace.state)
         report = compare_states(trace.state, ours.state_dict())
@@ -273,11 +311,29 @@ def compare_states(
     return report
 
 
-def compare_lockstep(lockstep: dict[str, Lockstep]) -> list[str]:
-    """Compare every parameter and buffer after each update of every loss.
+class LockstepRun(Protocol):
+    """A port's lockstep run: a variant's record, its states appended to ``states``."""
+
+    def __call__(
+        self,
+        name: str,
+        *,
+        states: list[dict[str, Tensor]],
+    ) -> dict[str, Tensor]:
+        """Run variant ``name``."""
+        raise NotImplementedError
+
+
+def compare_lockstep(
+    lockstep: Mapping[str, Lockstep],
+    *,
+    run: LockstepRun = reference.lockstep_record,
+) -> list[str]:
+    """Compare every parameter and buffer after each update of every variant.
 
     Args:
-      lockstep: Each loss's :func:`upstream.upstream_lockstep`.
+      lockstep: Each variant's upstream lockstep run.
+      run: The port's lockstep run; this task's by default.
 
     Returns:
       report: One line per tensor that differs after any update.
@@ -286,7 +342,7 @@ def compare_lockstep(lockstep: dict[str, Lockstep]) -> list[str]:
     report: list[str] = []
     for name, (_, theirs) in lockstep.items():
         ours: list[dict[str, Tensor]] = []
-        _ = reference.lockstep_record(name, states=ours)
+        _ = run(name, states=ours)
         for index, (want, got) in enumerate(zip(theirs, ours, strict=True), start=1):
             report += [
                 f"lockstep/{name}/{index}: {line}" for line in compare_states(want, got)

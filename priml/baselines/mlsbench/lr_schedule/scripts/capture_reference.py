@@ -31,6 +31,7 @@ import argparse
 import tempfile
 
 from priml.baselines.mlsbench.lr_schedule import reference, upstream
+from priml.baselines.mlsbench.lr_schedule.experiments import exp000
 from priml.baselines.mlsbench.pytorch_vision import (
     reference as vision,
     upstream as vision_upstream,
@@ -38,7 +39,7 @@ from priml.baselines.mlsbench.pytorch_vision import (
 from priml.baselines.mlsbench.pytorch_vision.scripts import (
     capture_reference as vision_capture,
 )
-from priml.testing.golden import mismatches, write_tensors
+from priml.testing.golden import mismatches
 
 
 if TYPE_CHECKING:
@@ -65,8 +66,7 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    flags.out.mkdir(parents=True, exist_ok=True)
-    write_tensors(flags.out / "reference.pt", captured.record)
+    vision_capture.write_records(flags.out, {"reference.pt": captured.record})
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
@@ -87,9 +87,8 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         traces = {
             name: vision_upstream.trace_main(script) for name, script in scripts.items()
         }
-        base_lr = traces["constant"].settings["lr"]
         lockstep = {
-            name: upstream.upstream_lockstep(script, name, base_lr=base_lr)
+            name: upstream.upstream_lockstep(script, name, traces["constant"])
             for name, script in scripts.items()
         }
         record = upstream.upstream_record(traces, lockstep)
@@ -98,8 +97,9 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         report = vision_capture.compare_full_size(
             scripts["constant"],
             traces["constant"],
+            exp000,
         )
-    port = reference.port_record() | vision.draws_record()
+    port = reference.port_record() | vision.draws_record(exp000)
     report += mismatches(record, port)
     report += compare_lockstep(lockstep)
     report += vision_capture.compare_loaders(batches, vision.loader_batches(scratch))

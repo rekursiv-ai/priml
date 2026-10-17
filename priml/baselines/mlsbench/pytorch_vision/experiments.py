@@ -21,7 +21,7 @@ The task is pinned to MLS-Bench commit ``80cf5c5cc8f70fb1b09f185e59ebf5eca04f610
 from __future__ import annotations
 
 from dataclasses import field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self, override
 
 from configgle import Makes, PartialConfig
 
@@ -63,6 +63,44 @@ class VisionTrainLoop(
     dataset: Cifar100Data.Config = field(default_factory=Cifar100Data.Config)
     """Prepared CIFAR-100 tensors, shuffled and augmented per pass."""
 
+    @override
+    def finalize(self) -> Self:
+        check_reference_loop(self, budget_epochs=self.step.train_budget_epochs)
+        return super().finalize()
+
+
+def check_reference_loop(config: TrainLoop.Config, *, budget_epochs: float) -> None:
+    """Refuse loop settings that would take the reference's run off its draws.
+
+    Every evaluation pass takes one draw from the global generator, as the
+    reference's loader does, so an evaluation the reference never runs moves
+    every shuffle after it. The cosine recurrence divides by zero one epoch past
+    its horizon, so the run may not outlast it.
+
+    Args:
+      config: The loop.
+      budget_epochs: The step's schedule horizon.
+
+    Raises:
+      ValueError: A setting adds an evaluation pass or outruns the horizon.
+
+    """
+    if config.max_epochs > budget_epochs:
+        raise ValueError(
+            f"max_epochs ({config.max_epochs}) exceeds the schedule's "
+            f"train_budget_epochs ({budget_epochs}).",
+        )
+    extra = {
+        "num_steps_eval": config.num_steps_eval != -1,
+        "eval_warmup_batches": config.eval_warmup_batches != 0,
+        "eval_only": config.eval_only,
+    }
+    for name in (name for name, added in extra.items() if added):
+        raise ValueError(
+            f"{name} adds an evaluation pass the reference never runs, and "
+            "its draw would move every later shuffle.",
+        )
+
 
 def exp000() -> VisionTrainLoop:
     """ResNet-56 on CIFAR-100, cross-entropy, SGD with cosine annealing.
@@ -88,6 +126,8 @@ def exp000() -> VisionTrainLoop:
     cfg = VisionTrainLoop()
     cfg.study_name = "cv_classification_loss"
     cfg.experiment_name = "exp000"
+    # The reference's ``--seed``; the loop salts it, so the stream still differs.
+    cfg.seed = 42
 
     assert isinstance(cfg.step.model, ResNet.Config)
     cfg.step.model.channels_in = 3

@@ -471,6 +471,22 @@ def upstream_sites(script: Upstream) -> dict[str, int]:
     return counts
 
 
+class CriterionSpy:
+    """A script's criterion, unweighted cross-entropy by default, keeping what it saw."""
+
+    def __init__(self, criterion: nn.CrossEntropyLoss | None = None) -> None:
+        self.criterion = criterion or nn.CrossEntropyLoss()
+        self.losses: list[Tensor] = []
+        self.logits: list[Tensor] = []
+
+    def __call__(self, logits: Tensor, targets: Tensor) -> Tensor:
+        """Return the batch's loss."""
+        loss = self.criterion(logits, targets)
+        self.losses.append(loss.detach())
+        self.logits.append(logits.detach())
+        return loss
+
+
 class _MainSpy:
     """Stands in for the reference's heavy calls while its ``main`` runs."""
 

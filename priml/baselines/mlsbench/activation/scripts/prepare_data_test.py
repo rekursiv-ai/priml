@@ -16,15 +16,19 @@ def test_default_directory_matches_the_loop_resolution() -> None:
     assert prepare_data.default_directory() == Path("/opt/scratch/datasets/cifar10")
 
 
-def test_main_prepares_the_requested_directory(
+def test_main_prepares_cifar10_in_the_requested_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    called: list[Path] = []
-    monkeypatch.setattr(prepare_data, "prepare", called.append)
+    called: list[tuple[Path | str, str]] = []
+
+    def record(directory: Path | str, *, dataset: str) -> None:
+        called.append((directory, dataset))
+
+    monkeypatch.setattr(prepare_data, "prepare", record)
     monkeypatch.setattr(sys, "argv", ["prepare_data", "--directory", str(tmp_path)])
     assert prepare_data.main() == 0
-    assert called == [tmp_path]
+    assert called == [(tmp_path, "cifar10")]
 
 
 def test_main_help_describes_the_command(

@@ -9,8 +9,7 @@ port's, already proven there; this task adds only the normalization layer.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 from torch import Tensor
 
@@ -25,18 +24,16 @@ from priml.baselines.mlsbench.normalization.experiments import (
 from priml.baselines.mlsbench.normalization.norms import GroupNorm
 from priml.baselines.mlsbench.normalization.upstream import (
     GROUP_CHANNELS,
-    SETTINGS,
     norm_run,
 )
 from priml.baselines.mlsbench.pytorch_vision import reference
 from priml.baselines.mlsbench.pytorch_vision.model import ResNet
-from priml.baselines.mlsbench.pytorch_vision.train_step import VisionTrainStep
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import rng_fingerprint
-from priml.train.parallelism import NoParallel
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from torch import nn
 
     from priml.baselines.mlsbench.pytorch_vision.experiments import VisionTrainLoop
@@ -83,64 +80,17 @@ def norm_record() -> dict[str, Tensor]:
     return record
 
 
-def schedule_record() -> dict[str, Tensor]:
-    """Return the learning rate of each of the 200 epochs of ``exp000``.
-
-    Returns:
-      record: The 200 rates, as float64.
-
-    """
-    step = reference.tiny_step(exp000, blocks=(1, 1, 1), classes=3, epochs=200)
-    base_lr = cast(float, step.optimizer.param_groups[0]["lr"])
-    rates = [
-        step.schedule(epoch, base_lr=base_lr, total_epochs=200) for epoch in range(200)
-    ]
-    return {"schedule/lr": torch.tensor(rates, dtype=torch.float64)}
-
-
-def optimizer_record() -> dict[str, Tensor]:
-    """Return the settings of the optimizer ``exp000`` builds.
-
-    Returns:
-      record: The entries of :data:`SETTINGS`, as float64.
-
-    """
-    step = reference.tiny_step(exp000, blocks=(1, 1, 1), classes=3, epochs=200)
-    group = cast(Mapping[str, object], step.optimizer.param_groups[0])
-    values = [float(cast(float, group[name])) for name in SETTINGS]
-    return {"optimizer/settings": torch.tensor(values, dtype=torch.float64)}
-
-
-def full_step(factory: Callable[[], VisionTrainLoop]) -> VisionTrainStep:
-    """Build an experiment's step at full size on the CPU.
-
-    Args:
-      factory: The experiment.
-
-    Returns:
-      step: ResNet-56 with 100 classes and the experiment's normalization.
-
-    """
-    config = factory().step
-    config.parallelism = NoParallel.Config(device="cpu")
-    step = config.make()
-    assert isinstance(step, VisionTrainStep)
-    return step
-
-
 def draws_record() -> dict[str, Tensor]:
     """Return where the generator stands after building each full network.
 
     Returns:
-      record: ``draws/<name>``, the next eight draws.
+      record: ``draws/<name>``, keyed as :data:`NORMS`, the next eight draws.
 
     """
-    record: dict[str, Tensor] = {}
-    for name, factory in NORMS.items():
-        with reference.seeded(reference.SEED), host_agnostic_numerics():
-            _ = full_step(factory)
-            record[f"draws/{name}"] = rng_fingerprint()
-    return record
+    return {
+        f"draws/{name}": next(iter(reference.draws_record(factory).values()))
+        for name, factory in NORMS.items()
+    }
 
 
 def lockstep_record(
@@ -202,8 +152,8 @@ def port_record() -> dict[str, Tensor]:
     """
     record = (
         norm_record()
-        | schedule_record()
-        | optimizer_record()
+        | reference.schedule_record(exp000)
+        | reference.optimizer_record(exp000)
         | draws_record()
         | reference.best_record()
     )

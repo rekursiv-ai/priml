@@ -14,12 +14,14 @@ from priml.baselines.mlsbench.initialization.initializers import (
     orthogonal_relu,
     small_normal,
 )
+from priml.baselines.mlsbench.pytorch_vision import reference
 from priml.baselines.mlsbench.pytorch_vision.model import BasicBlock, ResNet
 
 
 def test_small_normal_draws_at_one_hundredth() -> None:
     w = torch.empty(64, 65)
-    small_normal(w)
+    with reference.seeded(reference.SEED):
+        small_normal(w)
     assert w.mean().item() == pytest.approx(0.0, abs=1e-3)
     assert w.std().item() == pytest.approx(0.01, rel=0.05)
 
@@ -31,6 +33,11 @@ def test_orthogonal_relu_rows_are_orthogonal_at_relus_gain() -> None:
     # Float32 storage of an orthogonal draw leaves rounding near 1e-7 per entry.
     gram = flat @ flat.T
     assert gram == pytest.approx(2 * torch.eye(2, dtype=torch.float64), abs=1e-6)
+
+
+def test_fixup_refuses_a_network_without_basic_blocks() -> None:
+    with pytest.raises(ValueError, match="BasicBlocks"):
+        fixup(torch.nn.Sequential(torch.nn.Conv2d(3, 3, 3)))
 
 
 def test_fixup_scales_each_last_conv_and_zeros_its_norm_only() -> None:

@@ -63,7 +63,8 @@ def _record(*, mask: tuple[int, ...] | None = (1, 0)) -> RolloutRecord:
 def test_group_advantages_matches_the_recorded_advantage_fixture() -> None:
     """Centered advantages reproduce the published fixture exactly."""
     payload = json_loads(
-        (ROOT / "testdata" / "recorded_advantages.json").read_text(), dict[str, object]
+        (ROOT / "testdata" / "recorded_advantages.json").read_text(),
+        dict[str, object],
     )
     groups = cast(list[dict[str, object]], payload["groups"])
     group = groups[0]

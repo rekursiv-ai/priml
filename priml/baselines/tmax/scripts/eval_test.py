@@ -535,7 +535,8 @@ def test_a_failed_harbor_run_records_the_failure_and_stops_vllm(
     server = _RunningServer()
 
     def fail(
-        command: Sequence[str], **_kwargs: object
+        command: Sequence[str],
+        **_kwargs: object,
     ) -> subprocess.CompletedProcess[bytes]:
         return subprocess.CompletedProcess(args=list(command), returncode=2)
 

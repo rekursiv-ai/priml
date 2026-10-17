@@ -54,9 +54,10 @@ class MultiTaskCifar100Data:
         base_dir: Path | str | None = None
         """Resource root supplied during parent finalization, pushed to ``data``."""
 
+        # The loop pushes base_dir only into a config with working_dir too
+        # (HasNormalizedWorkingDirPattern); without it ``data`` stays unresolved.
         working_dir: Path | str = "/datasets"
-        """Unused location; declared so the loop recognizes a path-owning config
-        and supplies ``base_dir``, which ``data`` resolves its own path beneath."""
+        """Unread; ``data`` resolves its own path beneath ``base_dir``."""
 
         data: Cifar100Data.Config = field(default_factory=Cifar100Data.Config)
         """Where the prepared tensors live and how batches are made."""

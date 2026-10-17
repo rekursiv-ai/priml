@@ -40,6 +40,11 @@ def test_log_frequency_gap_ramps_from_one_to_one_plus_spread() -> None:
     torch.testing.assert_close(weights, raw / raw.sum() * 3)
 
 
+def test_log_frequency_gap_stays_on_the_counts_device() -> None:
+    counts = torch.tensor([4.0, 2.0, 1.0], device="meta")
+    assert log_frequency_gap(counts, num_classes=3, spread=4.0).device == counts.device
+
+
 def test_log_frequency_gap_of_equal_counts_is_uniform() -> None:
     weights = log_frequency_gap(torch.full((3,), 2.0), num_classes=3, spread=4.0)
     assert torch.equal(weights, torch.ones(3))

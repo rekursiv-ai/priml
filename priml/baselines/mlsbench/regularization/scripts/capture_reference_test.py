@@ -15,7 +15,7 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.pytorch_vision import reference as vision
-from priml.baselines.mlsbench.regularization import upstream
+from priml.baselines.mlsbench.regularization import reference, upstream
 from priml.baselines.mlsbench.regularization.scripts import capture_reference
 from priml.baselines.mlsbench.regularization.upstream_test import write_clone
 from priml.testing.golden import read_tensors
@@ -66,8 +66,8 @@ def test_a_pristine_regularizer_that_returns_is_reported(tmp_path: Path) -> None
 def test_the_batch_size_is_the_settings_for_both_loaders() -> None:
     argv = ["script.py", "--batch-size", "128", "--lr", "0.1"]
     assert torch.equal(
-        capture_reference.setting_batch_size(argv),
-        capture_reference.port_batch_size(),
+        reference.setting_batch_size(argv),
+        reference.port_batch_size(),
     )
 
 

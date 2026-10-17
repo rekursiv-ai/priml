@@ -10,11 +10,10 @@ already proven there; this task adds the activation and the
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
+from configgle import Makeable
 from torch import Tensor
-from treekle import from_plain
 
 import torch
 
@@ -26,18 +25,16 @@ from priml.baselines.mlsbench.activation.experiments import (
 )
 from priml.baselines.mlsbench.pytorch_vision import reference
 from priml.baselines.mlsbench.pytorch_vision.model import ResNet
-from priml.baselines.mlsbench.pytorch_vision.train_step import VisionTrainStep
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import rng_fingerprint
-from priml.train.parallelism import NoParallel
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from priml.baselines.mlsbench.pytorch_vision.experiments import VisionTrainLoop
     from priml.baselines.mlsbench.pytorch_vision.upstream import Batches
-    from priml.math.custom_types import TensorFn
 
 
 ACTIVATIONS: Final[dict[str, Callable[[], VisionTrainLoop]]] = {
@@ -73,56 +70,16 @@ def activation_record() -> dict[str, Tensor]:
     for name, factory in ACTIVATIONS.items():
         model = factory().step.model
         assert isinstance(model, ResNet.Config)
-        activation = cast("TensorFn", model.activation)
+        activation = model.activation
+        assert not isinstance(activation, Makeable)
         leaf = fixed_inputs().requires_grad_()
         with host_agnostic_numerics():
             value = activation(leaf)
             value.sum().backward()
+        assert isinstance(leaf.grad, Tensor)
         record[f"activation/{name}/value"] = value.detach()
-        record[f"activation/{name}/grad"] = cast(Tensor, leaf.grad)
+        record[f"activation/{name}/grad"] = leaf.grad
     return record
-
-
-def schedule_record() -> dict[str, Tensor]:
-    """Return the learning rate of each of the 200 epochs of ``exp000``.
-
-    Returns:
-      record: The 200 rates, as float64.
-
-    """
-    step = reference.tiny_step(exp000, blocks=(1, 1, 1), classes=3, epochs=200)
-    base_lr = from_plain(cast(object, step.optimizer.param_groups[0]["lr"]), float)
-    rates = [
-        step.schedule(epoch, base_lr=base_lr, total_epochs=200) for epoch in range(200)
-    ]
-    return {"schedule/lr": torch.tensor(rates, dtype=torch.float64)}
-
-
-def optimizer_record() -> dict[str, Tensor]:
-    """Return the settings of the optimizer ``exp000`` builds.
-
-    Returns:
-      record: The entries of the vision port's ``HYPERPARAMETERS``, as float64.
-
-    """
-    step = reference.tiny_step(exp000, blocks=(1, 1, 1), classes=3, epochs=200)
-    group = cast(Mapping[str, object], step.optimizer.param_groups[0])
-    values = [float(cast(float, group[name])) for name in reference.HYPERPARAMETERS]
-    return {"optimizer/settings": torch.tensor(values, dtype=torch.float64)}
-
-
-def full_step() -> VisionTrainStep:
-    """Build the step of ``exp000`` at full size on the CPU.
-
-    Returns:
-      step: ResNet-20 with 10 classes.
-
-    """
-    config = exp000().step
-    config.parallelism = NoParallel.Config(device="cpu")
-    step = config.make()
-    assert isinstance(step, VisionTrainStep)
-    return step
 
 
 def draws_record() -> dict[str, Tensor]:
@@ -133,7 +90,7 @@ def draws_record() -> dict[str, Tensor]:
 
     """
     with reference.seeded(reference.SEED), host_agnostic_numerics():
-        _ = full_step()
+        _ = reference.full_step(exp000)
         return {"draws/exp000": rng_fingerprint()}
 
 
@@ -222,8 +179,8 @@ def port_record() -> dict[str, Tensor]:
     """
     record = (
         activation_record()
-        | schedule_record()
-        | optimizer_record()
+        | reference.schedule_record(exp000)
+        | reference.optimizer_record(exp000)
         | draws_record()
         | reference.best_record()
     )

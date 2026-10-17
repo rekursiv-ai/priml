@@ -12,9 +12,9 @@ the order parameters are summed in, so reordering is not a refactor.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import KW_ONLY, field
-from typing import Self, cast, override
+from typing import Protocol, Self, cast, override, runtime_checkable
 
 import math
 
@@ -86,7 +86,55 @@ class GlobalAvgPool(nn.Module):
 
 
 type NormFn = Callable[[int], nn.Module]
-"""Builds a normalization layer for a channel count; a class such as ``nn.BatchNorm2d``."""
+"""Builds a normalization layer for a channel count, such as :class:`BatchNorm`.
+
+The network's cost calls ``cost(norm, channels=, seq_len=, batch_size=,
+dtype=)``, so a builder carries that as a static ``cost``; one without is
+refused there, never costed as some other layer."""
+
+
+class BatchNorm(nn.BatchNorm2d):
+    """``nn.BatchNorm2d`` with the cost :data:`NormFn` asks of a builder."""
+
+    @staticmethod
+    def cost(
+        *,
+        channels: int,
+        seq_len: int,
+        batch_size: int,
+        dtype: torch.dtype | None,
+        **kwargs: object,
+    ) -> Cost:
+        """Cost one affine batch norm over ``seq_len`` positions per image.
+
+        Args:
+          channels: Normalized channels.
+          seq_len: Spatial positions per image.
+          batch_size: Images in this invocation.
+          dtype: Activation dtype; ``None`` is torch's default.
+          **kwargs: The open bus, forwarded.
+
+        Returns:
+          cost: Whole-invocation FLOPs, logical bytes and ownership.
+
+        """
+        return cost(
+            BatchNorm2d.Config(channels, elementwise_affine=True),
+            seq_len=seq_len,
+            batch_size=batch_size,
+            dtype=dtype,
+            **kwargs,
+        )
+
+
+@runtime_checkable
+class Positioned(Protocol):
+    """A block template whose copies need fields that depend on the whole network."""
+
+    def place(self, blocks: Sequence[Makeable[nn.Module]]) -> None:
+        """Set fields on this template's sized copies, given in network order."""
+        raise NotImplementedError
+
 
 type ModelInitFn = Callable[[nn.Module], object]
 """Initializes a built network in place, from its whole structure."""
@@ -137,7 +185,7 @@ class BasicBlock(nn.Module):
         activation: ActivationFn = relu
         """Activation after the first normalization and after the sum."""
 
-        norm: NormFn = nn.BatchNorm2d
+        norm: NormFn = BatchNorm
         """Builds each normalization: after each convolution and in the projection."""
 
         @override
@@ -177,10 +225,17 @@ class BasicBlock(nn.Module):
             c_in, c_out, stride = self.channels_in, self.channels_out, self.stride
             side_out = (side - 1) // stride + 1
             rows_out = batch_size * side_out**2
-            norm = _norm_cost(c_out, side_out, batch_size, dtype, **kwargs)
+            norm = norm_cost(
+                self.norm,
+                channels=c_out,
+                side=side_out,
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
+            )
             act = cost(self.activation, channels=c_out * rows_out, dtype=dtype)
             total = (
-                _conv_cost(
+                conv2d_cost(
                     c_in,
                     c_out,
                     kernel_size=3,
@@ -191,7 +246,7 @@ class BasicBlock(nn.Module):
                 )
                 + norm
                 + act
-                + _conv_cost(
+                + conv2d_cost(
                     c_out,
                     c_out,
                     kernel_size=3,
@@ -215,7 +270,7 @@ class BasicBlock(nn.Module):
             )
             if stride != 1 or c_in != c_out:
                 total += (
-                    _conv_cost(
+                    conv2d_cost(
                         c_in,
                         c_out,
                         kernel_size=1,
@@ -249,7 +304,7 @@ class BasicBlock(nn.Module):
         self.norm2 = config.norm(config.channels_out)
         # Before the shortcut, as upstream registers it: an activation with
         # parameters draws its initialization in this position.
-        self.act = _activation(config.activation)
+        self.act = built_activation(config.activation)
         self.shortcut = (
             nn.Sequential(
                 nn.Conv2d(
@@ -294,18 +349,17 @@ class ResNet(nn.Module):
         blocks_per_stage: tuple[int, ...] = (3, 3, 3)
         """Blocks in each stage, one entry per entry of ``channels_hidden``."""
 
-        block: Makeable[nn.Module] | list[Makeable[nn.Module]] = field(
-            default_factory=BasicBlock.Config,
-        )
-        """Block template copied per position, or one config per position in order.
+        block: Makeable[nn.Module] = field(default_factory=BasicBlock.Config)
+        """Block template, copied and sized per position.
 
-        Either way each is sized from its stage. A list gives a block its own
-        position-dependent values (stochastic depth's survival)."""
+        A template that is :class:`Positioned` then sees every sized copy in
+        network order, to set what depends on a block's place in the network
+        (stochastic depth's survival)."""
 
         activation: ActivationFn = relu
         """Activation of the stem and, pushed down, of every block."""
 
-        norm: NormFn = nn.BatchNorm2d
+        norm: NormFn = BatchNorm
         """Builds the stem's normalization and, pushed down, every block's."""
 
         pool: Makeable[nn.Module] = field(default_factory=GlobalAvgPool.Config)
@@ -322,6 +376,19 @@ class ResNet(nn.Module):
 
         init: ModelInitFn = keep_initialization
         """Runs on the built network after the per-tensor initializers."""
+
+        @override
+        def finalize(self) -> Self:
+            if len(self.blocks_per_stage) != len(self.channels_hidden):
+                raise ValueError(
+                    f"{len(self.blocks_per_stage)} stage depths for "
+                    f"{len(self.channels_hidden)} stage widths.",
+                )
+            if min(self.blocks_per_stage, default=0) < 1:
+                raise ValueError(
+                    f"Every stage needs a block; got {self.blocks_per_stage}.",
+                )
+            return super().finalize()
 
         def cost(
             self,
@@ -344,7 +411,7 @@ class ResNet(nn.Module):
             side = self.image_size
             width = self.channels_hidden[0]
             total = (
-                _conv_cost(
+                conv2d_cost(
                     self.channels_in,
                     width,
                     kernel_size=3,
@@ -353,14 +420,21 @@ class ResNet(nn.Module):
                     batch_size=batch_size,
                     dtype=dtype,
                 )
-                + _norm_cost(width, side, batch_size, dtype, **kwargs)
+                + norm_cost(
+                    self.norm,
+                    channels=width,
+                    side=side,
+                    batch_size=batch_size,
+                    dtype=dtype,
+                    **kwargs,
+                )
                 + cost(
                     self.activation,
                     channels=width * batch_size * side**2,
                     dtype=dtype,
                 )
             )
-            for stage in _stages(self):
+            for stage in sized_blocks(self):
                 for block, stride in stage:
                     total += cost(
                         block,
@@ -400,11 +474,11 @@ class ResNet(nn.Module):
             bias=False,
         )
         self.norm = config.norm(config.channels_hidden[0])
-        self.act = _activation(config.activation)
+        self.act = built_activation(config.activation)
         self.stages = nn.Sequential(
             *(
                 nn.Sequential(*(block.make() for block, _ in stage))
-                for stage in _stages(config)
+                for stage in sized_blocks(config)
             ),
         )
         # Registered between the stages and the head, as upstream's ``CustomPool``
@@ -433,11 +507,15 @@ class ResNet(nn.Module):
           logits: ``(B, channels_out)`` class scores.
 
         """
+        return self.head(self.features(media))
+
+    def features(self, media: Tensor) -> Tensor:
+        """Return the pooled ``(B, channels_hidden[-1])`` features the head reads."""
         x = self.stages(self.act(cast(Tensor, self.norm(self.stem(media)))))
-        return self.head(self.pool(x))
+        return cast(Tensor, self.pool(x))
 
 
-def _conv_cost(
+def conv2d_cost(
     channels_in: int,
     channels_out: int,
     *,
@@ -463,16 +541,32 @@ def _conv_cost(
     )
 
 
-def _norm_cost(
+def norm_cost(
+    norm: NormFn,
+    *,
     channels: int,
     side: int,
     batch_size: int,
     dtype: torch.dtype | None,
     **kwargs: object,
 ) -> Cost:
-    """Cost one affine batch norm over a square grid."""
+    """Cost the layer ``norm`` builds for ``channels`` over a square grid.
+
+    Args:
+      norm: The builder in the slot; must carry ``cost``.
+      channels: Normalized channels.
+      side: Side of the square grid.
+      batch_size: Images in this invocation.
+      dtype: Activation dtype; ``None`` is torch's default.
+      **kwargs: The open bus, forwarded.
+
+    Returns:
+      cost: Whole-invocation FLOPs, logical bytes and ownership.
+
+    """
     return cost(
-        BatchNorm2d.Config(channels, elementwise_affine=True),
+        norm,
+        channels=channels,
         seq_len=side**2,
         batch_size=batch_size,
         dtype=dtype,
@@ -482,7 +576,7 @@ def _norm_cost(
 
 # An ``nn.Module`` activation satisfies ``TensorFn``; naming the callable type rather
 # than the union keeps ``self.act(x)`` inferring ``Tensor``.
-def _activation(activation: ActivationFn) -> TensorFn:
+def built_activation(activation: ActivationFn) -> TensorFn:
     """Build an activation from a config, or pass a callable through."""
     if isinstance(activation, Makeable):
         # ``Makeable`` is runtime-checkable, so isinstance erases its type
@@ -493,21 +587,18 @@ def _activation(activation: ActivationFn) -> TensorFn:
 
 # A shared template would be mutated once per block and every block would end up
 # carrying the last stage's width, so each position gets its own copy.
-def _stages(
+def sized_blocks(
     config: ResNet.Config,
 ) -> list[list[tuple[Makeable[nn.Module], int]]]:
-    """Size one block config per position and pair it with its stride."""
-    if min(config.blocks_per_stage) < 1:
-        raise ValueError(f"Every stage needs a block; got {config.blocks_per_stage}.")
-    total = sum(config.blocks_per_stage)
-    templates = (
-        config.block if isinstance(config.block, list) else [config.block] * total
-    )
-    if len(templates) != total:
-        raise ValueError(
-            f"block lists {len(templates)} configs; blocks_per_stage needs {total}.",
-        )
-    configs = iter(templates)
+    """Size one copy of the block template per position and pair it with its stride.
+
+    Args:
+      config: The network.
+
+    Returns:
+      stages: Per stage, each position's block config and stride.
+
+    """
     stages: list[list[tuple[Makeable[nn.Module], int]]] = []
     channels = config.channels_hidden[0]
     for index, (width, count) in enumerate(
@@ -515,7 +606,7 @@ def _stages(
     ):
         stage: list[tuple[Makeable[nn.Module], int]] = []
         for position in range(count):
-            block = copy_tree(next(configs))
+            block = copy_tree(config.block)
             propagate_attr(block, "channels_in", channels, protocol=ChannelsIn)
             propagate_attr(block, "channels_out", width, protocol=ChannelsOut)
             channels = width
@@ -527,4 +618,6 @@ def _stages(
             propagate_attr(block, "norm", config.norm)
             stage.append((block, stride))
         stages.append(stage)
+    if isinstance(config.block, Positioned):
+        config.block.place([block for stage in stages for block, _ in stage])
     return stages

@@ -18,6 +18,9 @@ import torch
 from priml.baselines.mlsbench.augmentation.scripts import capture_reference
 from priml.baselines.mlsbench.augmentation.upstream_test import write_clone
 from priml.baselines.mlsbench.pytorch_vision import reference as vision
+from priml.baselines.mlsbench.pytorch_vision.scripts import (
+    capture_reference as vision_capture,
+)
 from priml.testing.golden import read_tensors
 
 
@@ -35,6 +38,7 @@ def returning[T](value: T) -> Callable[..., T]:
     return call
 
 
+@pytest.mark.slow
 def test_capture_names_what_the_stand_in_does_differently(tmp_path: Path) -> None:
     root = tmp_path / "clone"
     write_clone(root)
@@ -76,7 +80,7 @@ def test_main_prints_the_report_and_writes_nothing_when_something_differs(
     assert not out.exists()
 
 
-@pytest.mark.parametrize(("size", "code"), [(3, 0), (capture_reference.CEILING, 1)])
+@pytest.mark.parametrize(("size", "code"), [(3, 0), (vision_capture.CEILING, 1)])
 def test_main_writes_the_golden_and_refuses_one_past_the_ceiling(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -88,6 +92,8 @@ def test_main_writes_the_golden_and_refuses_one_past_the_ceiling(
     result = vision.Captured(record=record, sites={}, report=[])
     monkeypatch.setattr(capture_reference, "capture", returning(result))
     out = tmp_path / "out"
+    out.mkdir()
+    (out / "reference.pt").write_bytes(b"previous")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -97,6 +103,7 @@ def test_main_writes_the_golden_and_refuses_one_past_the_ceiling(
     printed = capsys.readouterr().out
     if code:
         assert "the ceiling is" in printed
+        assert (out / "reference.pt").read_bytes() == b"previous"
     else:
         assert f"0 mismatches; wrote 1 values to {out}." in printed
         assert read_tensors(out / "reference.pt").keys() == {"x"}

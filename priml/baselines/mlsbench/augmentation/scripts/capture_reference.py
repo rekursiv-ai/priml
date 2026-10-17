@@ -13,7 +13,7 @@ every pixel and label each variant's loaders produce over two passes,
 ResNet-56's initial state and forward, where the generator stands after
 building it, the 200 learning rates, the optimizer, and every parameter after
 each update of a short run per variant. It also checks that every policy
-operation was reached with each sign, on both sides. Any mismatch is printed
+operation, and each signed one with both signs, was reached on both sides. Any mismatch is printed
 and the exit code is 1; otherwise the values the default test replays are
 written under ``--out``.
 
@@ -44,16 +44,13 @@ from priml.baselines.mlsbench.pytorch_vision.data import normalize
 from priml.baselines.mlsbench.pytorch_vision.scripts import (
     capture_reference as vision_capture,
 )
-from priml.testing.golden import mismatches, write_tensors
+from priml.testing.golden import mismatches
 
 
 if TYPE_CHECKING:
     from torch import Tensor
 
     from priml.baselines.mlsbench.pytorch_vision.upstream import Lockstep, Upstream
-
-CEILING: Final = 32_768
-"""Largest binary golden, in bytes."""
 
 POLICIES: Final = ("randaugment", "trivialaugment")
 """The variants whose operations the census counts."""
@@ -79,11 +76,10 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    flags.out.mkdir(parents=True, exist_ok=True)
-    path = flags.out / "reference.pt"
-    write_tensors(path, captured.record)
-    if path.stat().st_size > CEILING:
-        print(f"{path} is {path.stat().st_size} bytes; the ceiling is {CEILING}.")
+    try:
+        vision_capture.write_records(flags.out, {"reference.pt": captured.record})
+    except ValueError as error:
+        print(error)
         return 1
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
@@ -204,18 +200,30 @@ def compare_lockstep(lockstep: dict[str, Lockstep]) -> list[str]:
       report: One line per tensor that differs.
 
     """
-    report: list[str] = []
-    for name, (record, theirs) in lockstep.items():
-        ours: list[dict[str, Tensor]] = []
-        port = reference.lockstep_record(name, states=ours)
+    run = _Recorded()
+    report = vision_capture.compare_lockstep(lockstep, run=run)
+    for name, (theirs, _) in lockstep.items():
         key = f"lockstep/{name}/media"
-        report += mismatches({key: record[key]}, {key: port[key]})
-        for index, (want, got) in enumerate(zip(theirs, ours, strict=True), start=1):
-            report += [
-                f"lockstep/{name}/{index}: {line}"
-                for line in vision_capture.compare_states(want, got)
-            ]
+        report += mismatches({key: theirs[key]}, {key: run.record[key]})
     return report
+
+
+class _Recorded:
+    """The port's lockstep run, keeping every record it returned."""
+
+    def __init__(self) -> None:
+        self.record: dict[str, Tensor] = {}
+
+    def __call__(
+        self,
+        name: str,
+        *,
+        states: list[dict[str, Tensor]] | None = None,
+    ) -> dict[str, Tensor]:
+        """Run ``name``'s lockstep and keep its record."""
+        record = reference.lockstep_record(name, states=states)
+        self.record |= record
+        return record
 
 
 class _Flags(Protocol):

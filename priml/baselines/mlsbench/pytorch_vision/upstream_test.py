@@ -330,6 +330,19 @@ def test_the_stand_in_draws_from_the_samplers_it_uses(tmp_path: Path) -> None:
     )
 
 
+def test_the_criterion_spy_is_cross_entropy_and_keeps_what_it_saw() -> None:
+    spy = upstream.CriterionSpy()
+    logits, targets = reference.fixed_logits()
+    loss = spy(logits, targets)
+    assert torch.equal(loss, torch.nn.functional.cross_entropy(logits, targets))
+    weighted = upstream.CriterionSpy(
+        torch.nn.CrossEntropyLoss(weight=torch.ones(4) * 2),
+    )
+    assert torch.equal(weighted(logits, targets), loss)
+    assert [x.shape for x in spy.logits] == [logits.shape]
+    assert spy.losses[0].requires_grad is False
+
+
 if __name__ == "__main__":
     from priml.lib.testing.runner import test_main
 

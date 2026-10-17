@@ -108,8 +108,13 @@ def test_each_variant_carries_its_baselines_schedule(tmp_path: Path) -> None:
 
 
 def test_lockstep_sets_the_rate_before_each_update(tmp_path: Path) -> None:
-    script = scripts(tmp_path)["one_cycle"]
-    record, states = upstream.upstream_lockstep(script, "one_cycle", base_lr=0.1)
+    variants = scripts(tmp_path)
+    trace = vision_upstream.trace_main(variants["constant"])
+    record, states = upstream.upstream_lockstep(
+        variants["one_cycle"],
+        "one_cycle",
+        trace,
+    )
     assert record["lockstep/one_cycle/lr"].tolist() == [0.1, 0.2]
     assert record["lockstep/one_cycle/loss"].shape == (reference.STEPS,)
     assert record["lockstep/one_cycle/probe"].shape == (
@@ -121,13 +126,29 @@ def test_lockstep_sets_the_rate_before_each_update(tmp_path: Path) -> None:
     assert not torch.equal(states[0]["fc.weight"], states[1]["fc.weight"])
 
 
+def test_lockstep_builds_its_optimizer_from_mains_settings(tmp_path: Path) -> None:
+    variants = scripts(tmp_path)
+    trace = vision_upstream.trace_main(variants["constant"])
+    record, _ = upstream.upstream_lockstep(variants["constant"], "constant", trace)
+    trace.settings["momentum"] = 0.0
+    changed, _ = upstream.upstream_lockstep(variants["constant"], "constant", trace)
+    assert torch.equal(
+        record["lockstep/constant/loss"][:1],
+        changed["lockstep/constant/loss"][:1],
+    )
+    assert not torch.equal(
+        record["lockstep/constant/probe"],
+        changed["lockstep/constant/probe"],
+    )
+
+
 def test_the_record_holds_every_schedule_and_the_optimizer(tmp_path: Path) -> None:
     variants = scripts(tmp_path)
     traces = {
         name: vision_upstream.trace_main(script) for name, script in variants.items()
     }
     lockstep = {
-        name: upstream.upstream_lockstep(script, name, base_lr=0.1)
+        name: upstream.upstream_lockstep(script, name, traces["constant"])
         for name, script in variants.items()
     }
     record = upstream.upstream_record(traces, lockstep)
