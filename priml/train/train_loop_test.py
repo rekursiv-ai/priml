@@ -43,6 +43,7 @@ from treekle import from_plain
 
 from priml.cost import Cost, matmul_cost
 from priml.data.dummy import DummyDataset
+from priml.distributed.testing import WorkerPool
 from priml.math.seed import RngState, get_rng_state, salt
 from priml.metrics.binary_accuracy import BinaryAccuracy
 from priml.metrics.topk import TopK
@@ -4246,10 +4247,12 @@ class _SeedMesh:
         return _MeshAxis({"pp": 1, "dp": 2}[name])
 
 
-def test_a_mesh_salts_the_model_seed_by_stage_and_the_data_seed_by_replica(
+@pytest.mark.parametrize("data_seed", ["dp", None])
+def test_a_mesh_salts_model_seed_and_optionally_reseeds_data(
     monkeypatch: pytest.MonkeyPatch,
+    data_seed: str | None,
 ) -> None:
-    """One broadcast fixes the base seed; every later derivation is local."""
+    """A None data axis keeps the post-model RNG stream intact."""
     seeded: list[tuple[object, ...]] = []
 
     def set_seed_distributed(
@@ -4276,13 +4279,90 @@ def test_a_mesh_salts_the_model_seed_by_stage_and_the_data_seed_by_replica(
     config.checkpointer = None
     config.max_steps = 0
     config.seed = 42
+    if data_seed is None:
+        config.mesh_dim_data_seed = None
 
     config.make()
 
-    assert seeded == [
-        ("distributed", 42, 1, True),
-        ("local", salt("rank", 2, salt("dp", 7))),
-    ]
+    expected: list[tuple[object, ...]] = [("distributed", 42, 1, True)]
+    if data_seed is not None:
+        expected.append(("local", salt("rank", 2, salt(data_seed, 7))))
+    assert seeded == expected
+
+
+def _check_source_torch_seeded_loop_by_rank(mesh: DeviceMesh) -> None:
+    """Build a real loop and compare each rank's model and following draw."""
+    rank = torch.distributed.get_rank()
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(13 + rank)
+        expected = _LinearModel(2, 3).state_dict()
+        expected_next = torch.rand(4)
+
+    step = TrainStep.Config()
+    step.model = _LinearModel.Config(in_features=2, out_features=3)
+    step.optimizer = PartialConfig(torch.optim.Adam, lr=0.1)
+    step.loss = PartialConfig(_cross_entropy)
+    step.parallelism = NoParallel.Config(device="cpu")
+    step.compile = None
+    config = TrainLoop.Config(
+        step=step,
+        dataset=_WarmupDataset.Config(),
+    )
+    config.checkpointer = None
+    config.max_steps = 0
+    config.seed = 13
+    config.mesh_dim_data_seed = None
+    config.model_torch_seed = torch.manual_seed
+    config.runtime = SingleProcess.Config(device="cpu")
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(train_loop, "global_device_mesh", lambda: mesh)
+        patcher.setattr(train_loop, "runtime_initialized", lambda: True)
+        loop = config.make()
+    try:
+        assert isinstance(loop.step, TrainStep)
+        for name, expected_value in expected.items():
+            assert torch.equal(loop.step.model.state_dict()[name], expected_value)
+        assert torch.equal(torch.rand(4), expected_next)
+    finally:
+        loop.close()
+
+
+def test_model_torch_seed_matches_source_seed_and_keeps_each_rank_stream() -> None:
+    """Each Gloo rank uses seed plus global rank at actual loop startup."""
+    with WorkerPool.Config(mesh_dims={"dp": 2, "pp": 1}).make() as workers:
+        workers(_check_source_torch_seeded_loop_by_rank)
+
+
+def test_model_torch_seed_uses_rank_zero_without_process_group() -> None:
+    """A single-process loop seeds its model without querying a process group."""
+    assert not torch.distributed.is_initialized()
+    step = TrainStep.Config()
+    step.model = _LinearModel.Config(in_features=2, out_features=3)
+    step.optimizer = PartialConfig(torch.optim.Adam, lr=0.1)
+    step.loss = PartialConfig(_cross_entropy)
+    step.parallelism = NoParallel.Config(device="cpu")
+    step.compile = None
+    config = TrainLoop.Config(step=step, dataset=_WarmupDataset.Config())
+    config.checkpointer = None
+    config.max_steps = 0
+    config.seed = 13
+    config.mesh_dim_data_seed = None
+    config.model_torch_seed = torch.manual_seed
+    config.runtime = SingleProcess.Config(device="cpu")
+
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(13)
+        expected = _LinearModel(2, 3).state_dict()
+        expected_next = torch.rand(4)
+        loop = config.make()
+        try:
+            assert isinstance(loop.step, TrainStep)
+            for name, expected_value in expected.items():
+                assert torch.equal(loop.step.model.state_dict()[name], expected_value)
+            assert torch.equal(torch.rand(4), expected_next)
+        finally:
+            loop.close()
 
 
 def test_a_finite_gc_cadence_disables_automatic_collection_while_training(

@@ -23,7 +23,7 @@ Order- and name-sensitive invariants (do not reorder):
   a contract with :mod:`~priml.baselines.sudoku.latent_recursion`.
 
 arcagi's ``PooledActTrainStep`` runs the same pool on a different model
-(``SudokuNet``: attribute outputs, ``halt_head``, ``init_latents``), and this
+(``GridSolver``: attribute outputs, ``halt_head``, ``init_latents``), and this
 baseline cannot import arcagi, which imports it; this step drives
 :class:`~priml.baselines.sudoku.latent_recursion.LatentRecursion`, whose
 flat reference keys every evaluation runner loads.

@@ -1,4 +1,4 @@
-"""Tests for the sudoku model and its recurrence."""
+"""Tests for the generic grid solver and its recurrence."""
 
 from __future__ import annotations
 
@@ -14,25 +14,32 @@ from torch.utils.checkpoint import checkpoint
 import pytest
 import torch
 
-from priml.baselines.sudoku import model
-from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
-from priml.baselines.sudoku.model import (
+from priml.cost import Cost, cost, elementwise_cost
+from priml.model import grid_solver
+from priml.model.attention.attention import Attention
+from priml.model.attention.kernel import SdpaNaive
+from priml.model.attention.rope import RoPE, RoPEMixed
+from priml.model.conv import Conv1d, SequenceConv1d
+from priml.model.custom_types import CoreOutput, ForwardOutput
+from priml.model.embedding import Embedding
+from priml.model.grid_embedding import GridEmbedding, PredictionFeedback
+from priml.model.grid_solver import (
     CoreCompile,
-    CoreOutput,
-    DeepRecurrence,
-    ForwardOutput,
-    SudokuNet,
+    GridSolver,
+    SingleLatentGridSolver,
+    _halt_head,
     _latent_init,
     lattice_positions,
 )
-from priml.baselines.sudoku.prefix import RegisterTokens
-from priml.cost import Cost, cost
-from priml.model.attention.attention import Attention
-from priml.model.attention.kernel import SdpaNaive
-from priml.model.attention.rope import RoPE
 from priml.model.init import kaiming_uniform, truncated_normal, unit_normal
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
+from priml.model.prefix import ComposedSparsePrefix, RegisterTokens
+from priml.model.recurrence import (
+    DeepRecurrence,
+    SingleLatentRecurrence,
+    two_latent_refine,
+)
 from priml.model.special import Identity
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
@@ -43,27 +50,42 @@ from priml.testing.cost import assert_cost_matches_torch
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from priml.baselines.sudoku.model import GridConfig
-    from priml.baselines.sudoku.prefix import PrefixConfig
+    from priml.model.grid_solver import GridConfig
+    from priml.model.prefix import PrefixConfig
 
 
 _CWD: Final = Path(__file__).resolve().parent
+_GOLDEN_DIR: Final = _CWD.parent / "baselines" / "sudoku" / "testdata"
 
 
 def test_unfilled_vocabulary_is_rejected() -> None:
     with pytest.raises(
         ValueError,
-        match=r"^SudokuNet requires vocab_size from the dataset\.$",
+        match=r"^GridSolver requires vocab_size from the dataset\.$",
     ):
-        SudokuNet.Config(channels_in=4, num_layers=1).make()
+        GridSolver.Config(channels_in=4, num_layers=1).make()
+
+
+def test_grid_solver_device_and_checkpoint_include_empty_state() -> None:
+    model = _config().make()
+    state = model.state_dict()
+
+    assert model.device == torch.device("cpu")
+    assert "_dummy" in state
+    assert state["_dummy"].shape == (0,)
+
+    model.to("meta")
+
+    assert model.device == torch.device("meta")
+    assert model.state_dict()["_dummy"].device.type == "meta"
 
 
 def test_vocab_size_one_is_valid_and_zero_is_rejected() -> None:
-    assert isinstance(_config(vocab_size=1).make(), SudokuNet)
+    assert isinstance(_config(vocab_size=1).make(), GridSolver)
     config = _config(vocab_size=0)
     with pytest.raises(
         ValueError,
-        match=r"^SudokuNet requires vocab_size from the dataset\.$",
+        match=r"^GridSolver requires vocab_size from the dataset\.$",
     ):
         config.make()
 
@@ -73,7 +95,7 @@ def test_rope_requires_grid_shape_with_its_contract_message() -> None:
     config.rope = RoPE.Config(channels_head=2)
     with pytest.raises(
         ValueError,
-        match=r"^SudokuNet requires rope_grid_shape from the dataset\.$",
+        match=r"^GridSolver requires rope_grid_shape from the dataset\.$",
     ):
         config.make()
 
@@ -87,13 +109,53 @@ def test_empty_grid_is_rejected_with_its_contract_message() -> None:
         def make(self) -> GridEmbedding:
             return cast(GridEmbedding, nn.Identity())
 
-    config = SudokuNet.Config(channels_in=4, vocab_size=2, num_layers=1)
+    config = GridSolver.Config(channels_in=4, vocab_size=2, num_layers=1)
     config.embedding = cast("GridConfig", EmptyGrid())
     with pytest.raises(
         ValueError,
-        match=r"^SudokuNet requires embedding grid_shape from the dataset\.$",
+        match=r"^GridSolver requires embedding grid_shape from the dataset\.$",
     ):
-        SudokuNet(config)
+        GridSolver(config)
+
+
+@pytest.mark.parametrize(
+    ("vocab_size", "grid_shape", "message"),
+    [
+        (0, (2,), "GridSolver requires vocab_size from the dataset"),
+        (3, (), "GridEmbedding requires grid_shape from the dataset"),
+    ],
+)
+def test_single_latent_solver_rejects_missing_dataset_geometry(
+    vocab_size: int,
+    grid_shape: tuple[int, ...],
+    message: str,
+) -> None:
+    config = SingleLatentGridSolver.Config(
+        channels_in=4,
+        vocab_size=vocab_size,
+        num_layers=1,
+        rope=None,
+    )
+    config.embedding = GridEmbedding.Config(grid_shape=grid_shape)
+    with pytest.raises(ValueError, match=message):
+        config.make()
+
+
+def test_single_latent_solver_rejects_a_rope_lattice_that_misses_the_grid() -> None:
+    config = _single_latent_validation_config()
+    config.rope_grid_shape = (2, 2)
+
+    with pytest.raises(ValueError, match="rope_grid_shape"):
+        config.make()
+
+
+def test_single_latent_solver_rejects_checkpoint_fraction_above_one() -> None:
+    config = _single_latent_validation_config()
+    config.block_checkpoint_fraction = 1.5
+
+    message = "block_checkpoint_fraction must be in [0, 1], got 1.5."
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        config.make()
 
 
 def test_one_cell_grid_is_valid() -> None:
@@ -107,8 +169,8 @@ def _config(
     channels_in: int = 4,
     vocab_size: int = 2,
     grid_shape: tuple[int, ...] = (2,),
-) -> SudokuNet.Config:
-    config = SudokuNet.Config(
+) -> GridSolver.Config:
+    config = GridSolver.Config(
         channels_in=channels_in,
         vocab_size=vocab_size,
         num_layers=1,
@@ -148,6 +210,20 @@ def _config(
     return config
 
 
+def _single_latent_validation_config() -> SingleLatentGridSolver.Config:
+    config = SingleLatentGridSolver.Config(
+        channels_in=4,
+        vocab_size=3,
+        num_layers=1,
+        prefix=None,
+        rope=RoPE.Config(channels_head=2),
+    )
+    config.embedding = GridEmbedding.Config(grid_shape=(2, 3))
+    config.rope_grid_shape = (2, 3)
+    config.block = _config().block
+    return config
+
+
 def _model(
     *,
     recurrent: bool = False,
@@ -155,7 +231,7 @@ def _model(
     channels_in: int = 4,
     vocab_size: int = 2,
     grid_shape: tuple[int, ...] = (2,),
-) -> SudokuNet:
+) -> GridSolver:
     torch.manual_seed(0)
     return _config(
         recurrent=recurrent,
@@ -350,13 +426,466 @@ def test_plain_forward_bfb() -> None:
     every shape and name intact.
     """
     assert_bfb_against_golden(
-        golden_dir=_CWD / "testdata",
+        golden_dir=_GOLDEN_DIR,
         golden_name="plain",
         build_module=_config().make,
         build_input=_tiny_tokens,
         seed=0,
         run=_logits,
     )
+
+
+def test_plain_solver_runs_one_fast_and_one_slow_latent_update() -> None:
+    """The no-recurrence core still refines both latents through two mixes."""
+    network = _config().make()
+    tokens = _tiny_tokens()
+    z_slow, z_fast = network.init_latents(tokens.shape[0])
+    input_emb = network.embedding(tokens)
+    cos_sin = network._cos_sin(input_emb)
+    expected_slow, expected_fast = two_latent_refine(
+        network._mix,
+        input_emb,
+        z_slow,
+        z_fast,
+        cos_sin,
+        fast_cycles=1,
+    )
+    calls = 0
+
+    def count_stack(*_: object) -> None:
+        nonlocal calls
+        calls += 1
+
+    handle = network.reasoning.register_forward_hook(count_stack)
+    output = network(tokens, z_slow=z_slow, z_fast=z_fast)
+    handle.remove()
+
+    assert calls == 2
+    assert torch.equal(output.z_slow, expected_slow)
+    assert torch.equal(output.z_fast, expected_fast)
+
+
+def test_grid_solver_cost_respects_recurrence_execution_counts() -> None:
+    """The recurrence slot supplies actual forward and grad-bearing passes."""
+    config = _config()
+    recurrence = SingleLatentRecurrence.Config(
+        slow_cycles=3,
+        fast_cycles=2,
+        inner_grad_loops=4,
+    )
+    config.recurrence = recurrence
+    config.finalize()
+    batch_size = 2
+    dtype = torch.float32
+    sequence = config.total_seq_len
+    stack = cost(
+        config.block,
+        seq_len=sequence,
+        batch_size=batch_size,
+        dtype=dtype,
+    ).tile(config.num_layers, copies=config.num_layers)
+    rows = sequence * batch_size
+    additions = elementwise_cost(
+        primal=recurrence.forward_passes * rows * config.channels_in,
+        adjoint=recurrence.grad_passes * rows * config.channels_in,
+        channels=config.channels_in,
+        rows=rows,
+        inputs=2,
+        dtype=dtype,
+    )
+    embedding = cost(
+        config.embedding,
+        seq_len=config.grid_len,
+        batch_size=batch_size,
+        dtype=dtype,
+    )
+    head = cost(
+        config.head,
+        seq_len=sequence,
+        batch_size=batch_size,
+        dtype=dtype,
+    )
+    halt = cost(
+        _halt_head(config),
+        seq_len=1,
+        batch_size=batch_size,
+        dtype=dtype,
+    )
+    expected_primal = (
+        _flops(embedding, "primal")
+        + _flops(stack, "primal") * recurrence.slow_cycles * recurrence.forward_passes
+        + _flops(additions, "primal") * recurrence.slow_cycles
+        + _flops(head, "primal") * recurrence.slow_cycles
+        + _flops(halt, "primal") * recurrence.slow_cycles
+    )
+    expected_adjoint = (
+        _flops(embedding, "adjoint")
+        + _flops(stack, "adjoint") * recurrence.grad_passes
+        + _flops(additions, "adjoint")
+        + _flops(halt, "adjoint")
+        + _flops(head, "adjoint")
+    )
+    actual = config.cost(batch_size=batch_size, dtype=dtype)
+
+    assert _flops(actual, "primal") == expected_primal
+    assert _flops(actual, "adjoint") == expected_adjoint
+
+
+def test_grid_solver_reset_matches_constructor_state_and_rng() -> None:
+    """Reset draws every state tensor in the constructor's registration order."""
+    config = _config()
+    config.prefix = ComposedSparsePrefix.Config(channels_out=4, num_tokens=1)
+    config.prefix.residual.num_puzzles = 5
+    config.prefix.residual.batch_size = 3
+    config.rope = RoPEMixed.Config(channels_head=2, num_heads=2, learnable=True)
+    config.rope_grid_shape = (2,)
+    config.dtype = torch.bfloat16
+    torch.manual_seed(913)
+    model = config.make()
+
+    torch.manual_seed(271)
+    expected_model = config.copy_tree().make()
+    expected_state = {
+        key: value.clone() for key, value in expected_model.state_dict().items()
+    }
+    expected_rng = torch.get_rng_state()
+
+    torch.manual_seed(271)
+    model.reset_parameters()
+
+    assert torch.get_rng_state().equal(expected_rng)
+    assert model.state_dict().keys() == expected_state.keys()
+    for name, value in model.state_dict().items():
+        assert torch.equal(value, expected_state[name]), name
+
+
+@pytest.mark.parametrize("single_latent", [False, True])
+def test_solver_reset_rejects_a_missing_halt_bias(single_latent: bool) -> None:
+    if single_latent:
+        config = SingleLatentGridSolver.Config(
+            channels_in=4,
+            vocab_size=3,
+            num_layers=1,
+            rope=None,
+            prefix=None,
+        )
+        config.embedding = GridEmbedding.Config(grid_shape=(2,))
+        config.block = _config().block
+        model: GridSolver | SingleLatentGridSolver = config.make()
+    else:
+        model = _config().make()
+    model.halt_head.register_parameter("bias", None)
+    with pytest.raises(ValueError, match=r"Expected halt_head\.bias to be present"):
+        model.reset_parameters()
+
+
+def test_single_latent_reset_matches_constructor_state_and_rng() -> None:
+    """The one-state specialization resets in its constructor draw order."""
+    config = SingleLatentGridSolver.Config(
+        channels_in=4,
+        vocab_size=3,
+        num_layers=1,
+        rope=RoPE.Config(channels_head=2),
+    )
+    config.embedding = GridEmbedding.Config(grid_shape=(2,))
+    config.prefix = ComposedSparsePrefix.Config(channels_out=4, num_tokens=1)
+    config.prefix.residual.num_puzzles = 3
+    config.prefix.residual.batch_size = 2
+    config.rope_grid_shape = (2,)
+    config.dtype = torch.bfloat16
+    config.block = _config().block
+
+    torch.manual_seed(913)
+    model = config.make()
+
+    torch.manual_seed(271)
+    expected_model = config.copy_tree().make()
+    expected_state = {
+        key: value.clone() for key, value in expected_model.state_dict().items()
+    }
+    expected_latents = tuple(value.clone() for value in expected_model.init_latents(1))
+    expected_rng = torch.get_rng_state()
+
+    torch.manual_seed(271)
+    model.reset_parameters()
+
+    assert torch.get_rng_state().equal(expected_rng)
+    assert model.state_dict().keys() == expected_state.keys()
+    for name, value in model.state_dict().items():
+        assert torch.equal(value, expected_state[name]), name
+    for actual, expected in zip(model.init_latents(1), expected_latents, strict=True):
+        assert torch.equal(actual, expected)
+
+
+def test_single_latent_finalize_preserves_injected_child_values() -> None:
+    """Source defaults belong to children; explicit child choices survive."""
+    config = SingleLatentGridSolver.Config(
+        channels_in=8,
+        vocab_size=3,
+        num_layers=0,
+        prefix=None,
+        rope=RoPE.Config(channels_head=3),
+    )
+    embedding = GridEmbedding.Config(grid_shape=(2,), embed_scale=2.0)
+    embedding.token_table = Embedding.Config(lookup_dtype=torch.float32)
+    config.embedding = embedding
+    prefix = ComposedSparsePrefix.Config(
+        channels_out=8,
+        forward_dtype=torch.float32,
+    )
+    prefix.residual.dtype = torch.float32
+    prefix.residual.dtype_scale = torch.float32
+    config.prefix = prefix
+    ffn = SwiGLU.Config(channels_in=8, channels_out=8, channels_hidden=4)
+    ffn.middle = SequenceConv1d.Config(
+        conv=Conv1d.Config(
+            channels_in=4,
+            channels_out=4,
+            groups=1,
+            dtype=torch.float32,
+        ),
+    )
+    config.block = TransformerBlock.Config(
+        channels_in=8,
+        channels_out=8,
+        attn=Attention.Config(num_heads=2, channels_head=4),
+        ffn=ffn,
+    )
+
+    config.finalize()
+
+    assert embedding.embed_scale == 2.0
+    assert embedding.token_table.lookup_dtype is torch.float32
+    assert prefix.forward_dtype is torch.float32
+    assert prefix.residual.dtype is torch.float32
+    assert prefix.residual.dtype_scale is torch.float32
+    assert config.rope is not None
+    assert config.rope.channels_head == 3
+    assert isinstance(ffn.middle, SequenceConv1d.Config)
+    assert ffn.middle.conv.groups == 1
+    assert ffn.middle.conv.dtype is torch.float32
+
+
+def test_single_latent_rope_uses_attention_width_only_for_default_sentinel() -> None:
+    """The default RoPE sentinel follows the attention head width."""
+    config = SingleLatentGridSolver.Config(
+        channels_in=8,
+        vocab_size=3,
+        num_layers=0,
+        prefix=None,
+    )
+    config.embedding = GridEmbedding.Config(grid_shape=(2,))
+    config.block = TransformerBlock.Config(
+        channels_in=8,
+        channels_out=8,
+        attn=Attention.Config(num_heads=2, channels_head=4),
+        ffn=SwiGLU.Config(channels_hidden=4),
+    )
+
+    config.finalize()
+
+    assert config.rope is not None
+    assert config.rope.channels_head == 4
+
+
+def test_single_latent_without_recurrence_updates_the_fast_latent() -> None:
+    """The no-recurrence path retains the shared two-latent core behavior."""
+    config = SingleLatentGridSolver.Config(
+        channels_in=4,
+        vocab_size=3,
+        num_layers=1,
+        prefix=None,
+        rope=None,
+        recurrence=None,
+    )
+    config.embedding = GridEmbedding.Config(grid_shape=(2,))
+    config.finalize()
+    model = config.make()
+    tokens = torch.tensor([[0, 1]])
+    z_slow, z_fast = model.init_latents(tokens.shape[0])
+    input_emb = model._embed(tokens, {})
+    expected_slow, expected_fast = two_latent_refine(
+        model._mix,
+        input_emb,
+        z_slow,
+        z_fast,
+        None,
+        fast_cycles=1,
+    )
+
+    output = model(tokens, z_slow=z_slow, z_fast=z_fast)
+
+    assert torch.equal(output.z_slow, expected_slow)
+    assert torch.equal(output.z_fast, expected_fast)
+    assert not torch.equal(output.z_fast, z_fast)
+
+    sequence = config.total_seq_len
+    batch_size = tokens.shape[0]
+    dtype = input_emb.dtype
+    stack_cost = cost(
+        config.block,
+        seq_len=sequence,
+        batch_size=batch_size,
+        dtype=dtype,
+    ).tile(config.num_layers, copies=config.num_layers)
+    additions = elementwise_cost(
+        primal=3 * sequence * batch_size * config.channels_in,
+        adjoint=3 * sequence * batch_size * config.channels_in,
+        channels=3 * config.channels_in,
+        inputs=2,
+        rows=sequence * batch_size,
+        dtype=dtype,
+    )
+    expected_flops = (
+        _flops(
+            cost(
+                config.embedding,
+                seq_len=config.grid_len,
+                batch_size=batch_size,
+                dtype=dtype,
+            ),
+            "primal",
+        )
+        + 2 * _flops(stack_cost, "primal")
+        + _flops(additions, "primal")
+        + _flops(
+            cost(config.head, seq_len=sequence, batch_size=batch_size, dtype=dtype),
+            "primal",
+        )
+        + _flops(
+            cost(config.halt_head, seq_len=1, batch_size=batch_size, dtype=dtype),
+            "primal",
+        )
+    )
+    assert _flops(config.cost(batch_size=batch_size, dtype=dtype), "primal") == (
+        expected_flops
+    )
+
+
+@pytest.mark.parametrize("recurrent", [False, True])
+def test_single_latent_cost_uses_actual_recurrence_passes(recurrent: bool) -> None:
+    """Both phases price the selected schedule and embedding gradients."""
+    config = SingleLatentGridSolver.Config(
+        channels_in=4,
+        vocab_size=3,
+        num_layers=1,
+        prefix=None,
+        rope=None,
+    )
+    config.embedding = GridEmbedding.Config(grid_shape=(2,))
+    config.block = _config().block
+    if recurrent:
+        config.recurrence = SingleLatentRecurrence.Config(
+            slow_cycles=3,
+            fast_cycles=2,
+            inner_grad_loops=4,
+        )
+    config.finalize()
+    schedule = config.recurrence
+    outer = 1 if schedule is None else schedule.slow_cycles
+    forward_passes = 2 if schedule is None else schedule.forward_passes
+    grad_passes = 2 if schedule is None else schedule.grad_passes
+    forward_additions = 3 if schedule is None else schedule.forward_additions
+    grad_additions = 3 if schedule is None else schedule.grad_additions
+    batch_size = 2
+    dtype = torch.float32
+    sequence = config.total_seq_len
+    rows = sequence * batch_size
+    stack = cost(
+        config.block,
+        seq_len=sequence,
+        batch_size=batch_size,
+        dtype=dtype,
+    ).tile(config.num_layers, copies=config.num_layers)
+    additions = elementwise_cost(
+        primal=outer * forward_additions * rows * config.channels_in,
+        adjoint=grad_additions * rows * config.channels_in,
+        channels=max(forward_additions, grad_additions) * config.channels_in,
+        inputs=2,
+        rows=rows,
+        dtype=dtype,
+    )
+    embedding = cost(
+        config.embedding,
+        seq_len=config.grid_len,
+        batch_size=batch_size,
+        dtype=dtype,
+    )
+    head = cost(config.head, seq_len=sequence, batch_size=batch_size, dtype=dtype)
+    halt = cost(
+        config.halt_head,
+        seq_len=1,
+        batch_size=batch_size,
+        dtype=dtype,
+    )
+    expected_primal = (
+        _flops(embedding, "primal")
+        + _flops(stack, "primal") * outer * forward_passes
+        + _flops(additions, "primal")
+        + _flops(head, "primal") * outer
+        + _flops(halt, "primal") * outer
+    )
+    expected_adjoint = (
+        _flops(embedding, "adjoint")
+        + _flops(stack, "adjoint") * grad_passes
+        + _flops(additions, "adjoint")
+        + _flops(head, "adjoint")
+        + _flops(halt, "adjoint")
+    )
+
+    actual = config.cost(batch_size=batch_size, dtype=dtype)
+
+    assert _flops(actual, "primal") == expected_primal
+    assert _flops(actual, "adjoint") == expected_adjoint
+
+
+def test_single_latent_cost_matches_runtime_parameter_and_buffer_ownership() -> None:
+    config = SingleLatentGridSolver.Config(
+        channels_in=4,
+        vocab_size=3,
+        num_layers=1,
+        prefix=None,
+        rope=None,
+    )
+    config.embedding = GridEmbedding.Config(grid_shape=(2,))
+    config.block = _config().block
+    model = config.make()
+    actual = config.cost(batch_size=2, dtype=torch.float32)
+    runtime_parameters = sum(parameter.numel() for parameter in model.parameters())
+
+    assert actual.params == runtime_parameters
+    assert actual.bytes_state == 2 * config.channels_in * torch.bfloat16.itemsize
+
+
+def test_single_latent_cost_includes_prefix_and_rotary_ownership() -> None:
+    """Optional memory and rotary slots contribute their own cost exactly once."""
+    config = SingleLatentGridSolver.Config(
+        channels_in=4,
+        vocab_size=3,
+        num_layers=1,
+        rope=RoPE.Config(channels_head=2),
+    )
+    config.embedding = GridEmbedding.Config(grid_shape=(2,))
+    config.block = TransformerBlock.Config(
+        channels_in=4,
+        channels_out=4,
+        attn=Attention.Config(num_heads=2, channels_head=2),
+        ffn=SwiGLU.Config(channels_hidden=4),
+    )
+    prefix = ComposedSparsePrefix.Config(channels_out=4, num_tokens=1)
+    prefix.residual.num_puzzles = 3
+    prefix.residual.batch_size = 2
+    config.prefix = prefix
+    config.finalize()
+
+    total = config.cost(batch_size=2, dtype=torch.float32)
+
+    assert total.params > 0
+    assert total.bytes_state > 0
+
+
+def _flops(value: Cost, phase: str) -> int:
+    return value.only(phase).only("flops").sum()
 
 
 def test_recurrent_forward_bfb() -> None:
@@ -366,7 +895,7 @@ def test_recurrent_forward_bfb() -> None:
     value, so a change to the recurrence would leave the plain golden green.
     """
     assert_bfb_against_golden(
-        golden_dir=_CWD / "testdata",
+        golden_dir=_GOLDEN_DIR,
         golden_name="recurrent",
         build_module=lambda: _config(recurrent=True).make(),
         build_input=_tiny_tokens,
@@ -461,9 +990,9 @@ def test_cost_halt_bias_reduction_uses_puzzle_batch_geometry() -> None:
     assert costed["flops", "adjoint", "reduction"].sum() == 2 * (4 - 1)
 
 
-def _cost_config(*, prefix: bool) -> SudokuNet.Config:
+def _cost_config(*, prefix: bool) -> GridSolver.Config:
     """Build a two-cell solver whose attention torch can count."""
-    config = SudokuNet.Config(channels_in=16, num_layers=1, vocab_size=11)
+    config = GridSolver.Config(channels_in=16, num_layers=1, vocab_size=11)
     config.embedding = GridEmbedding.Config(grid_shape=(2,))
     config.block = TransformerBlock.Config(
         prenorm=False,
@@ -607,7 +1136,7 @@ def test_zero_block_checkpoint_fraction_skips_ceil(
         pytest.fail("zero checkpoint fraction must not calculate a count")
 
     monkeypatch.setattr(math, "ceil", fail)
-    assert len(model._checkpointed_blocks(_config())) == 1
+    assert len(grid_solver._checkpointed_blocks(_config())) == 1
 
 
 def test_block_checkpoint_fraction_marks_an_even_subset() -> None:
@@ -641,7 +1170,7 @@ def test_block_checkpoint_fraction_marks_an_even_subset() -> None:
 def test_checkpointed_block_copies_are_deep_and_independent() -> None:
     config = _config()
     config.num_layers = 2
-    blocks = model._checkpointed_blocks(config)
+    blocks = grid_solver._checkpointed_blocks(config)
 
     assert all(isinstance(block, TransformerBlock.Config) for block in blocks)
     first, second = cast(tuple[TransformerBlock.Config, ...], tuple(blocks))
@@ -683,7 +1212,7 @@ def test_checkpoint_core_forwards_rotary_factors(
             use_reentrant=use_reentrant,
         )
 
-    monkeypatch.setattr(model, "torch_checkpoint", tracking_checkpoint)
+    monkeypatch.setattr(grid_solver, "torch_checkpoint", tracking_checkpoint)
     embedded = network.embedding(torch.tensor([[0, 1, 2, 3, 4, 5]]))
     z_slow, z_fast = network.init_latents(1)
     cos_sin = network._cos_sin(embedded)
@@ -732,7 +1261,7 @@ def test_checkpoint_core_never_enters_checkpoint_without_grad(
         entered.append(torch.is_grad_enabled())
         raise AssertionError("checkpoint entered")
 
-    monkeypatch.setattr(model, "torch_checkpoint", refuse)
+    monkeypatch.setattr(grid_solver, "torch_checkpoint", refuse)
     config = _config(recurrent=True, channels_in=4)
     config.checkpoint_core = True
     torch.manual_seed(0)
@@ -790,7 +1319,7 @@ def test_latent_init_preserves_dtype_and_variance(dtype: torch.dtype) -> None:
         depth_index=(),
         variance_correction=True,
     )
-    config = SudokuNet.Config()
+    config = GridSolver.Config()
     config.channels_in = 257
     config.dtype_latent_init = dtype
     torch.manual_seed(0)
@@ -848,7 +1377,7 @@ def test_two_latent_refine_forwards_rotary_factors_to_every_mix() -> None:
         return z + 1
 
     x = torch.zeros(2, 3, 4)
-    model.two_latent_refine(mix, x, x, x, factors, fast_cycles=2)
+    two_latent_refine(mix, x, x, x, factors, fast_cycles=2)
     assert len(received) == 3
     assert all(value is factors for value in received)
 
@@ -954,9 +1483,16 @@ def test_model_initial_buffers_are_explicitly_persistent(
     original_buffer = nn.Buffer
     persistent_flags: list[bool] = []
 
-    def track_buffer(tensor: Tensor, *, persistent: bool) -> Tensor:
+    def track_buffer(
+        tensor: Tensor | None = None,
+        *,
+        persistent: bool,
+    ) -> Tensor:
         persistent_flags.append(persistent)
-        return original_buffer(tensor, persistent=persistent)
+        return original_buffer(
+            torch.empty(0) if tensor is None else tensor,
+            persistent=persistent,
+        )
 
     monkeypatch.setattr(nn, "Buffer", track_buffer)
     config = _config()
@@ -1091,7 +1627,7 @@ def test_cos_sin_builds_rope_positions_on_the_input_device(
         del positions
         return factors
 
-    monkeypatch.setattr(model, "lattice_positions", positions)
+    monkeypatch.setattr(grid_solver, "lattice_positions", positions)
     assert network.rope is not None
     monkeypatch.setattr(network.rope, "forward", rotary)
     input_emb = torch.zeros(2, 8, 4)
@@ -1202,7 +1738,7 @@ def test_model_parameter_count_log_uses_exact_millions_divisor(
     def record(message: object, *args: object) -> None:
         records.append((message, args))
 
-    monkeypatch.setattr(model.logger, "info", record)
+    monkeypatch.setattr(grid_solver.logger, "info", record)
     network = _config().make()
     parameter_count = sum(parameter.numel() for parameter in network.parameters())
     assert records == [

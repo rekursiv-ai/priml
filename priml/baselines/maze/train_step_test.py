@@ -19,12 +19,12 @@ from torch import Tensor
 import pytest
 import torch
 
-from priml.baselines.arcagi.model import ConvSwiGLU, SingleLatentRecurrence
+from priml.baselines.arcagi.model import ConvSwiGLU
 from priml.baselines.maze import experiments
-from priml.baselines.sudoku.model import DeepRecurrence
-from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE, RoPEMixed
+from priml.model.prefix import SparsePuzzleEmbedding
+from priml.model.recurrence import DeepRecurrence, SingleLatentRecurrence
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import host_agnostic_numerics

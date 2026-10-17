@@ -23,9 +23,9 @@ from priml.baselines.arcagi.model import RotaryBlock
 from priml.baselines.arcagi.parity.record_test import assert_matches, load, reduce
 from priml.baselines.arcagi.parity.train_step import ArcTrainStep
 from priml.baselines.sudoku.act import FeedbackCarry
-from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
-from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.model.attention.attention import Attention
+from priml.model.grid_embedding import GridEmbedding, PredictionFeedback
+from priml.model.prefix import SparsePuzzleEmbedding
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import joined, mismatches, put_steps

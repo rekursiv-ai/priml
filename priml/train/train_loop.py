@@ -234,7 +234,13 @@ class TrainLoop:
         """Restore checkpoint RNG state; cross-GPU-count eval may disable it."""
 
         seed: int | None = None
-        """Base seed for every RNG; ``None`` draws one from OS entropy."""
+        """Seed process-global Python, NumPy, and Torch RNGs; ``None`` draws
+        one from OS entropy. Component-owned RNGs follow their own seed contracts."""
+
+        model_torch_seed: Callable[[int], object] | None = None
+        """Optional Torch-only seed called with the resolved seed plus rank
+        immediately before model construction. ``None`` keeps the existing
+        distributed seed stream unchanged."""
 
         num_steps_garbage_collect: float = math.inf
         """Manual-GC cadence; finite values disable automatic collection."""
@@ -242,8 +248,8 @@ class TrainLoop:
         mesh_dim_model_seed: str = "pp"
         """Mesh dimension across which model seeds differ."""
 
-        mesh_dim_data_seed: str = "dp"
-        """Mesh dimension across which data seeds differ."""
+        mesh_dim_data_seed: str | None = "dp"
+        """Mesh axis for data seeds; None preserves the post-model RNG stream."""
 
         runtime: Makeable[RuntimeProtocol] = field(default_factory=SingleProcess.Config)
         """Process-global device, distribution, and determinism setup."""
@@ -353,6 +359,9 @@ class TrainLoop:
                 base_seed = set_seed_local(config.seed)
 
             self.phase_timer = config.phase_timer.make()
+            if config.model_torch_seed is not None:
+                rank = dist.get_rank() if dist.is_initialized() else 0
+                config.model_torch_seed(base_seed + rank)
             with (
                 self.phase_timer.phase("model_init"),
                 torch.device(self.runtime.device),
@@ -378,7 +387,7 @@ class TrainLoop:
                 for metric in self.metrics_train.values()
             )
 
-            if mesh:
+            if mesh and config.mesh_dim_data_seed is not None:
                 data_local_rank = mesh[config.mesh_dim_data_seed].get_local_rank()
                 set_seed_local(
                     salt(

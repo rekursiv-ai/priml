@@ -26,17 +26,13 @@ from priml.baselines.sudoku.act import (
     PoolConfig,
     SampledMinimum,
 )
-from priml.baselines.sudoku.embedding import GridEmbedding
-from priml.baselines.sudoku.model import (
-    DeepRecurrence,
-    GridConfig,
-    RecurrenceConfig,
-    SudokuNet,
-)
-from priml.baselines.sudoku.prefix import PrefixConfig, SparsePuzzleEmbedding
 from priml.baselines.sudoku.train_step import SudokuTrainStep
 from priml.math.loss import stablemax_cross_entropy
 from priml.model.custom_types import TensorModule
+from priml.model.grid_embedding import GridEmbedding
+from priml.model.grid_solver import GridConfig, GridSolver
+from priml.model.prefix import PrefixConfig, SparsePuzzleEmbedding
+from priml.model.recurrence import DeepRecurrence, RecurrenceConfig
 from priml.optimizers import (
     AdamATan2,
     SignSGD,
@@ -53,7 +49,7 @@ if TYPE_CHECKING:
     from priml.train.custom_types import TrainStepOutput
 
 
-class ArcModelConfig(Makes["SudokuNet"], SudokuNet.Config):
+class ArcModelConfig(Makes["GridSolver"], GridSolver.Config):
     """Reference TRM assembled from the shared puzzle solver's slots."""
 
     embedding: GridConfig = field(default_factory=GridEmbedding.Config)
@@ -89,7 +85,7 @@ class ArcTrainStep(SudokuTrainStep):
                 """Build this nested configuration's ARC2 trainer."""
                 ...
 
-        model: SudokuNet.Config = field(default_factory=ArcModelConfig)
+        model: GridSolver.Config = field(default_factory=ArcModelConfig)
         """Shared puzzle solver with ARC2-specific slot defaults."""
 
         optimizer: Makeable[Callable[..., torch.optim.Optimizer]] = field(

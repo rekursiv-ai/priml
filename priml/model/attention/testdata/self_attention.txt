@@ -12,6 +12,8 @@ Attention.Config(
         share_qk_norm=True,
         norm_out=None,
         split_qkv_projection=False,
+        proj_qkv=None,
+        proj_out=None,
         init_weight=priml.model.init.kaiming_uniform,
         depth_index=(),
         attn_kernel=SdpaFused.Config()

@@ -88,6 +88,74 @@ def test_ema_lerps_parameters_after_warmup() -> None:
     torch.testing.assert_close(shadow.weight, torch.full_like(model.weight, 2.0))
 
 
+def test_ema_initialize_seeds_before_first_optimizer_update() -> None:
+    """Explicit initialization captures weights before the first update."""
+    model = nn.Linear(2, 3)
+    assert model.bias is not None
+    with torch.no_grad():
+        model.weight.fill_(1.0)
+        model.bias.fill_(2.0)
+    ema = EMA.Config(decay=0.25).make()
+
+    ema.initialize(model)
+    ema.initialize(model)
+    with torch.no_grad():
+        model.weight.fill_(5.0)
+        model.bias.fill_(6.0)
+    ema(model)
+
+    assert ema.shadow_model is not None
+    shadow = cast(nn.Linear, ema.shadow_model)
+    torch.testing.assert_close(shadow.weight, torch.full_like(model.weight, 4.0))
+    torch.testing.assert_close(shadow.bias, torch.full_like(model.bias, 5.0))
+
+
+def test_ema_initialize_can_reseed_loaded_model_weights() -> None:
+    """An explicit reseed replaces stale shadows without advancing counters."""
+    model = nn.Linear(2, 3)
+    ema = EMA.Config(decay=0.25).make()
+    ema.initialize(model)
+    ema.global_step = 7
+    ema.local_step = 5
+    with torch.no_grad():
+        model.weight.fill_(3.0)
+        assert model.bias is not None
+        model.bias.fill_(4.0)
+
+    ema.initialize(model, reset=True)
+
+    assert ema.shadow_model is not None
+    shadow = cast(nn.Linear, ema.shadow_model)
+    assert shadow.bias is not None
+    assert model.bias is not None
+    assert torch.equal(shadow.weight, model.weight)
+    assert torch.equal(shadow.bias, model.bias)
+    assert (ema.global_step, ema.local_step) == (7, 5)
+
+
+def _source_order_update(shadow: Tensor, live: Tensor, decay: float) -> None:
+    """Apply the source multiply/add expression without in-place reordering."""
+    shadow.copy_((1 - decay) * live + decay * shadow)
+
+
+def test_ema_accepts_an_explicit_update_expression() -> None:
+    """An injected expression controls shadow arithmetic while seeding stays."""
+    model = nn.Linear(2, 3)
+    ema = EMA.Config(decay=0.25, update_fn=_source_order_update).make()
+    ema.initialize(model)
+    assert ema.shadow_model is not None
+    shadow = cast(nn.Linear, ema.shadow_model)
+    expected = shadow.weight.detach().clone()
+    live = torch.arange(6, dtype=model.weight.dtype).reshape_as(model.weight)
+    with torch.no_grad():
+        model.weight.copy_(live)
+    expected.copy_((1 - 0.25) * live + 0.25 * expected)
+
+    ema(model)
+
+    assert torch.equal(shadow.weight, expected)
+
+
 def test_ema_respects_update_after_step() -> None:
     model = nn.Linear(1, 1)
     with torch.no_grad():

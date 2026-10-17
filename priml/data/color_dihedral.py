@@ -117,6 +117,43 @@ class ColorDihedral:
 
         return name.partition(separator)[0], transform
 
+    def apply_explicit(
+        self,
+        grid: NDArray[np.uint8],
+        *,
+        tid: int,
+        colorperm_slots: tuple[int, ...],
+    ) -> NDArray[np.uint8]:
+        """Apply one recorded D4 id and color-slot permutation."""
+        permutation = _explicit_color_permutation(colorperm_slots)
+        return dihedral_transform(permutation[grid], tid=tid)
+
+    def inverse_explicit(
+        self,
+        grid: NDArray[np.uint8],
+        *,
+        tid: int,
+        colorperm_slots: tuple[int, ...],
+    ) -> NDArray[np.uint8]:
+        """Restore a canonical grid from its recorded D4 and color view.
+
+        Args:
+          grid: Augmented colors in transformed spatial order.
+          tid: Recorded dihedral transform index.
+          colorperm_slots: Source color-slot ordering, with background omitted.
+
+        Returns:
+          canonical: Restored two-dimensional ARC color grid.
+
+        """
+        if tid < 0 or tid > 7:
+            raise ValueError(f"Invalid dihedral tid={tid}; must be in 0..7.")
+        inverse_tid = (0, 3, 2, 1, 4, 5, 6, 7)[tid]
+        inverse_colors = np.argsort(
+            _explicit_color_permutation(colorperm_slots),
+        ).astype(np.uint8)
+        return inverse_colors[dihedral_transform(grid, tid=inverse_tid)]
+
     def augment_tokens(
         self,
         inputs: Tensor,
@@ -206,6 +243,13 @@ def dihedral_transform[T: np.generic](arr: NDArray[T], *, tid: int) -> NDArray[T
     if tid == 7:
         return np.fliplr(np.rot90(arr))
     raise ValueError(f"Invalid dihedral tid={tid}; must be in 0..7.")
+
+
+def _explicit_color_permutation(colorperm_slots: tuple[int, ...]) -> NDArray[np.uint8]:
+    """Return a validated map from original colors to explicit color slots."""
+    if len(colorperm_slots) != 9 or set(colorperm_slots) != set(range(9)):
+        raise ValueError("colorperm_slots must be a permutation of 0..8.")
+    return np.array([0, *(slot + 1 for slot in colorperm_slots)], dtype=np.uint8)
 
 
 @functools.cache

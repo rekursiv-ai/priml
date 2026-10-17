@@ -41,11 +41,11 @@ from priml.baselines.arcagi.train_step import (
     _empty_eval,
 )
 from priml.baselines.sudoku.act import AtomicPool
-from priml.baselines.sudoku.embedding import GridEmbedding
-from priml.baselines.sudoku.model import DeepRecurrence, SudokuNet
-from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.model.attention.attention import Attention
+from priml.model.grid_embedding import GridEmbedding
 from priml.model.norm import RMSNorm
+from priml.model.prefix import SparsePuzzleEmbedding
+from priml.model.recurrence import DeepRecurrence
 from priml.model.swiglu import SwiGLU
 from priml.runtime import MultiProcess
 from priml.testing.bfb import host_agnostic_numerics
@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
     from priml.distributed.testing import WarmPoolGetter
+    from priml.model.grid_solver import GridSolver
     from priml.train.custom_types import TrainStepOutput
 
 
@@ -600,7 +601,7 @@ def test_a_whole_model_compile_is_rejected() -> None:
         PooledActTrainStep(config.finalize())
 
 
-def shrink_model(model: SudokuNet.Config) -> None:
+def shrink_model(model: GridSolver.Config) -> None:
     """Configure the compact model without changing recipe behavior."""
     model.channels_in = 4
     model.vocab_size = 4

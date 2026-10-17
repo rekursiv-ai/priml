@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 
 import logging
 
-from configgle import Fig
+from configgle import Fig, Makes
 from torch import Tensor, nn
 from torch.distributed._composable.fsdp import (
     MixedPrecisionPolicy,
@@ -37,11 +37,13 @@ from torch.distributed.tensor import DTensor
 from torch.nn.modules.batchnorm import _BatchNorm
 
 import torch
+import torch.distributed as dist
 
 from priml.runtime import get_device, global_device_mesh
 
 
 if TYPE_CHECKING:
+    from torch.distributed import ProcessGroup
     from torch.distributed.device_mesh import DeviceMesh
 
 
@@ -52,8 +54,10 @@ __all__ = [
     "DataParallel",
     "FullySharded",
     "HybridSharded",
+    "ManualDataParallel",
     "NoParallel",
     "RecursiveSharded",
+    "SumGradients",
     "materialize_meta",
     "named_meta_state",
     "place",
@@ -142,6 +146,76 @@ class DataParallel:
             self.gradient_as_bucket_view,
         )
         return model
+
+
+class ManualDataParallel:
+    """Place and broadcast replicas without registering DDP gradient hooks."""
+
+    class Config(Makes["ManualDataParallel"], Fig["ManualDataParallel"]):
+        """Data-mesh dimension whose replicas share initial model state."""
+
+        mesh_dim: str = "dp"
+        """Mesh dimension for replicas."""
+
+    def __init__(self, config: Config) -> None:
+        mesh = _require_mesh("ManualDataParallel")
+        _require_mesh_dimension(mesh, config.mesh_dim)
+        self.device = _mesh_device(mesh)
+        self.process_group = mesh.get_group(config.mesh_dim)
+        self.source_rank = dist.get_global_rank(self.process_group, 0)
+
+    def __call__(self, model: nn.Module) -> nn.Module:
+        """Place the model and broadcast parameters and buffers from rank zero."""
+        model = place(model, self.device)
+        with torch.no_grad():
+            for tensor in [*model.parameters(), *model.buffers()]:
+                dist.broadcast(tensor, src=self.source_rank, group=self.process_group)
+        return model
+
+
+class SumGradients:
+    """Sum dense replica gradients in parameter registration order."""
+
+    class Config(Makes["SumGradients"], Fig["SumGradients"]):
+        """Data-mesh dimension whose local gradients are summed."""
+
+        mesh_dim: str = "dp"
+        """Mesh dimension to reduce across."""
+
+    def __init__(self, config: Config) -> None:
+        mesh = global_device_mesh()
+        if mesh is None:
+            if dist.is_initialized():
+                raise RuntimeError(
+                    "SumGradients requires a device mesh when distributed mode is "
+                    "initialized.",
+                )
+            self.process_group: ProcessGroup | None = None
+            return
+        _require_mesh_dimension(mesh, config.mesh_dim)
+        self.process_group = mesh.get_group(config.mesh_dim)
+
+    def __call__(self, model: nn.Module) -> None:
+        """Replace gradients with cross-rank sums, including locally missing ones."""
+        parameters = tuple(model.parameters())
+        if self.process_group is None or not parameters:
+            return
+        present = torch.tensor(
+            [parameter.grad is not None for parameter in parameters],
+            dtype=torch.int32,
+            device=parameters[0].device,
+        )
+        dist.all_reduce(present, op=dist.ReduceOp.SUM, group=self.process_group)
+        for index, parameter in enumerate(parameters):
+            if present[index].item() == 0:
+                continue
+            if parameter.grad is None:
+                parameter.grad = torch.zeros_like(parameter)
+            dist.all_reduce(
+                parameter.grad,
+                op=dist.ReduceOp.SUM,
+                group=self.process_group,
+            )
 
 
 class FullySharded:

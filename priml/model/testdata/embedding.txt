@@ -4,6 +4,7 @@ Embedding.Config(
         padding_idx=None,
         device=None,
         dtype=None,
+        lookup_dtype=None,
         shard=None,
         depth_index=(),
         init_weight=functools.partial(priml.model.init.truncated_normal, std=0.02)

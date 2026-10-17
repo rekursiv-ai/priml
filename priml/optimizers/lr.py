@@ -13,7 +13,7 @@ import torch
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
 
 @runtime_checkable
@@ -90,9 +90,58 @@ def apply_lr_scale(
         ``remember_initial_lrs`` after constructing optimizers.
 
     """
+    apply_lr_schedule(optimizers, lambda initial_lr: initial_lr * scale)
+
+
+def apply_lr_schedule(
+    optimizers: Iterable[HasParamGroups],
+    schedule: Callable[[float], float],
+) -> None:
+    """Set rates from each group's remembered initial rate.
+
+    Unlike :func:`apply_lr_scale`, ``schedule`` controls the operation order
+    used to produce the complete rate. This matters for schedules whose
+    specified arithmetic is ``(base_rate * step) / warmup_steps``.
+
+    Args:
+      optimizers: Optimizers whose parameter-group ``lr`` values are updated.
+      schedule: Maps a group's remembered ``initial_lr`` to its scheduled rate.
+
+    Raises:
+      KeyError: If a group has no ``initial_lr``. Call
+        ``remember_initial_lrs`` after constructing optimizers.
+
+    """
     for optimizer in optimizers:
         for group in optimizer.param_groups:
-            _scale_lr(group, scale)
+            group["lr"] = schedule(_rate(group, "initial_lr"))
+
+
+def cosine_warmup_lr(
+    initial_lr: float,
+    *,
+    step: int,
+    total_steps: int,
+    warmup_steps: int,
+    min_ratio: float = 0.0,
+) -> float:
+    """Return a cosine schedule rate with direct source-order warmup math.
+
+    Args:
+      initial_lr: The group's remembered rate before scheduling.
+      step: Current schedule step.
+      total_steps: Total number of training steps.
+      warmup_steps: Number of linear warmup steps.
+      min_ratio: Minimum rate as a fraction of ``initial_lr``.
+
+    Returns:
+      rate: Scheduled rate computed directly from ``initial_lr``.
+
+
+    """
+    if step < warmup_steps:
+        return (initial_lr * float(step)) / float(max(1, warmup_steps))
+    return initial_lr * lr_scale(step, total_steps, warmup_steps, min_ratio)
 
 
 def learning_rate(optimizer: HasParamGroups, *, group_index: int = 0) -> float:
@@ -148,10 +197,6 @@ def clip_grad_norm(
 
 def _remember_initial_lr(group: dict[str, object]) -> None:
     group.setdefault("initial_lr", group["lr"])
-
-
-def _scale_lr(group: dict[str, object], scale: float) -> None:
-    group["lr"] = _rate(group, "initial_lr") * scale
 
 
 def _rate(group: dict[str, object], key: str) -> float:

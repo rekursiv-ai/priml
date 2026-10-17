@@ -9,15 +9,22 @@ from torch import Tensor, nn
 import pytest
 import torch
 
-from priml.baselines.sudoku.prefix import (
+from priml.model.conditioning import (
+    CategorySlotFiLM,
+    SigmoidResidualGate,
+    WeightedProjectionConfig,
+)
+from priml.model.prefix import (
+    ComposedSparsePrefix,
     PrefixStack,
     RegisterTokens,
     SparsePuzzleEmbedding,
 )
+from priml.model.special import Identity
 
 
 if TYPE_CHECKING:
-    from priml.baselines.sudoku.prefix import PrefixConfig
+    from priml.model.prefix import PrefixConfig
 from priml.cost import cost
 from priml.model.norm import RMSNorm
 from priml.testing.cost import assert_cost_matches_torch
@@ -123,6 +130,20 @@ def test_gradient_buffer_survives_a_device_move() -> None:
     """
     module = _sparse()
     module.to(torch.float64)
+    assert module.local_weights.requires_grad
+
+
+def test_sparse_embedding_reset_clears_grad_buffer_without_breaking_autograd() -> None:
+    module = _sparse(init_std=0.0)
+    module.train()
+    module(4, puzzle_identifiers=torch.arange(4, dtype=torch.int32)).sum().backward()
+    assert module.local_weights.grad is not None
+
+    module.reset_parameters()
+
+    assert bool((module.weights == 0).all())
+    assert bool((module.local_weights == 0).all())
+    assert bool((module.local_ids == 0).all())
     assert module.local_weights.requires_grad
 
 
@@ -324,6 +345,141 @@ def _run_prefix(module: nn.Module, identifiers: Tensor) -> Tensor:
     out = cast(object, module(identifiers.shape[0], puzzle_identifiers=identifiers))
     assert isinstance(out, Tensor)
     return out
+
+
+def test_register_tokens_reset_replays_the_constructor_initializer() -> None:
+    config = RegisterTokens.Config(num_tokens=2, channels_out=4)
+    torch.manual_seed(17)
+    module = config.make()
+    expected = module.register_tokens.detach().clone()
+    torch.manual_seed(23)
+    module.reset_parameters()
+    actual_rng = torch.get_rng_state()
+
+    torch.manual_seed(23)
+    expected_module = config.make()
+    expected_reset_rng = torch.get_rng_state()
+
+    assert torch.equal(module.register_tokens, expected_module.register_tokens)
+    assert actual_rng.equal(expected_reset_rng)
+    assert not torch.equal(module.register_tokens, expected)
+
+
+def test_prefix_stack_reset_materializes_and_resets_its_parts() -> None:
+    config = PrefixStack.Config(
+        parts=[RegisterTokens.Config(num_tokens=2, channels_out=4)],
+        channels_out=4,
+    )
+    module = config.make().to("meta")
+    registers = module.parts[0]
+    assert isinstance(registers, RegisterTokens)
+    module.to_empty(device="cpu")
+    with torch.no_grad():
+        registers.register_tokens.fill_(float("nan"))
+
+    module.reset_parameters()
+
+    assert torch.isfinite(registers.register_tokens).all()
+
+
+def test_prefix_stack_finalizes_child_widths_and_reports_token_count() -> None:
+    config = PrefixStack.Config(
+        parts=[RegisterTokens.Config(num_tokens=2)],
+        channels_out=4,
+    )
+    final = config.copy_tree().finalize()
+    first_part = final.parts[0]
+    assert isinstance(first_part, RegisterTokens.Config)
+    assert first_part.channels_out == 4
+    assert final.num_tokens == 2
+
+
+@pytest.mark.parametrize("residual_gate", [True, False])
+def test_composed_sparse_prefix_builds_padded_prefix(residual_gate: bool) -> None:
+    config = _composed_config(residual_gate=residual_gate)
+    module = config.make()
+    module.eval()
+    output = module(
+        5,
+        category_indices=torch.tensor([0, 1, 2, 0, 1]),
+        augmentation_indices=torch.tensor([1, 0, 1, 0, 1]),
+        slot_permutation=torch.tensor([[0, 1], [1, 0], [0, 1], [1, 0], [0, 1]]),
+        puzzle_identifiers=torch.tensor([1, 2, 3, 4, 5]),
+    )
+    assert output.shape == (5, 3, 4)
+    assert output.dtype is torch.bfloat16
+    assert torch.equal(output[:, 1:], torch.zeros_like(output[:, 1:]))
+
+
+def test_composed_sparse_prefix_reset_reinitializes_each_owned_child() -> None:
+    module = _composed_config(residual_gate=True).make()
+    assert isinstance(module.composition, CategorySlotFiLM)
+    assert isinstance(module.residual_gate, SigmoidResidualGate)
+    with torch.no_grad():
+        module.composition.category_embed.weight.fill_(1)
+        module.residual.weights.fill_(1)
+        assert module.residual_gate is not None
+        module.residual_gate.linear.weight.fill_(1)
+
+    module.reset_parameters()
+
+    assert torch.equal(
+        module.composition.category_embed.weight,
+        torch.zeros_like(module.composition.category_embed.weight),
+    )
+    assert torch.equal(
+        module.residual.weights,
+        torch.zeros_like(module.residual.weights),
+    )
+    assert module.residual_gate is not None
+    assert torch.equal(
+        module.residual_gate.linear.weight,
+        torch.zeros_like(module.residual_gate.linear.weight),
+    )
+
+
+def test_composed_sparse_prefix_rejects_invalid_construction() -> None:
+    config = _composed_config(residual_gate=False)
+    config.channels_out = -1
+    with pytest.raises(ValueError, match="positive channels_out"):
+        config.make()
+
+    config = _composed_config(residual_gate=False)
+    config.num_tokens = 0
+    with pytest.raises(ValueError, match="num_tokens must be positive"):
+        config.make()
+
+    config = _composed_config(residual_gate=False)
+    config.residual_projection = cast(
+        WeightedProjectionConfig,
+        Identity.Config(channels_in=4, channels_out=4),
+    )
+    with pytest.raises(TypeError, match="must expose a weight tensor"):
+        config.make()
+
+    assert ComposedSparsePrefix.Config(num_tokens=5).num_prefix_tokens == 5
+
+
+def test_composed_sparse_prefix_requires_tensor_task_ids() -> None:
+    module = _composed_config(residual_gate=False).make()
+    with pytest.raises(TypeError, match="category_indices"):
+        module(5, category_indices=[0, 1, 2, 0, 1])
+
+
+def _composed_config(*, residual_gate: bool) -> ComposedSparsePrefix.Config:
+    config = ComposedSparsePrefix.Config(channels_out=4, num_tokens=3)
+    config.composition = CategorySlotFiLM.Config(
+        num_categories=3,
+        num_augmentations=2,
+        num_slots=2,
+        channels_out=4,
+    )
+    config.residual.num_puzzles = 7
+    config.residual.batch_size = 5
+    config.residual.channels_out = 4
+    if not residual_gate:
+        config.residual_gate = None
+    return config
 
 
 if __name__ == "__main__":

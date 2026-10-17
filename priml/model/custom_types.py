@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Literal, Protocol, Self, TypeGuard, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Literal,
+    NamedTuple,
+    Protocol,
+    Self,
+    TypeGuard,
+    runtime_checkable,
+)
 from typing_extensions import ParamSpec, TypeVar
 
 from configgle import Makeable
@@ -11,6 +19,12 @@ from torch import Tensor, nn
 import torch
 
 from priml.math.custom_types import TensorFn
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from torch.utils.hooks import RemovableHandle
 
 
 __all__ = [
@@ -22,16 +36,22 @@ __all__ = [
     "ChannelsInOut",
     "ChannelsInOutConfig",
     "ChannelsOut",
+    "CoreFn",
+    "CoreOutput",
     "DeepModelConfig",
+    "DenseLinearProjection",
     "DepthIndex",
     "EmbeddingConfig",
+    "ForwardOutput",
     "HasAttention",
     "HasDepthIndex",
     "HasResetParameters",
     "HeadGeometry",
     "LatentAttentionKernel",
     "LayerCache",
+    "LinearProjection",
     "LookupTable",
+    "MixFn",
     "NumHeads",
     "RotaryConfig",
     "RotaryFactors",
@@ -45,6 +65,64 @@ __all__ = [
     "is_cached_attention",
     "propagate_attr",
 ]
+
+
+class CoreOutput(NamedTuple):
+    """One application of a reasoning core."""
+
+    logits: Tensor
+    """``[B, S, V]`` token logits over the whole sequence."""
+
+    halt: Tensor
+    """``[B]`` halt logit read at the readout position."""
+
+    z_slow: Tensor
+    """``[B, S, C]`` updated slow latent."""
+
+    z_fast: Tensor
+    """``[B, S, C]`` updated fast latent."""
+
+
+class ForwardOutput(NamedTuple):
+    """One full forward: the final core output plus per-cycle intermediates."""
+
+    logits: Tensor
+    """``[B, grid_len, V]`` final logits, prefix tokens stripped."""
+
+    halt: Tensor
+    """``[B]`` final halt logit."""
+
+    z_slow: Tensor
+    """``[B, S, C]`` final slow latent, detached for carrying."""
+
+    z_fast: Tensor
+    """``[B, S, C]`` final fast latent, detached for carrying."""
+
+    all_logits: tuple[Tensor, ...] = ()
+    """Per-cycle logits when the caller asked for intermediates."""
+
+
+class CoreFn(Protocol):
+    """One application of a reasoning core."""
+
+    def __call__(
+        self,
+        input_emb: Tensor,
+        z_slow: Tensor,
+        z_fast: Tensor,
+        cos_sin: tuple[Tensor, Tensor] | None = None,
+    ) -> CoreOutput:
+        """Apply to the input."""
+        ...
+
+
+class MixFn(Protocol):
+    """One pass of the block stack over a latent state."""
+
+    def __call__(self, z: Tensor, cos_sin: tuple[Tensor, Tensor] | None) -> Tensor:
+        """Apply to the input."""
+        ...
+
 
 _Kwargs = ParamSpec("_Kwargs", default=...)
 """The open keyword bus a module accepts beyond its positional contract.
@@ -120,6 +198,62 @@ class WeightedTensorModule(TensorModule[_Kwargs], Protocol[_Kwargs]):
     """
 
     weight: Tensor
+
+
+class LinearProjection(Protocol):
+    """A configurable linear projection with explicit parameter geometry."""
+
+    depth_index: DepthIndex
+    training: bool
+
+    @property
+    def weight(self) -> Tensor:
+        """Projection weight, rank two or three for ensemble heads."""
+        ...
+
+    @property
+    def bias(self) -> Tensor | None:
+        """Optional projection bias."""
+        ...
+
+    @property
+    def shard(self) -> ShardStyle | None:
+        """Tensor-parallel shard style, if configured."""
+        ...
+
+    def __call__(self, x: Tensor, /, **kwargs: object) -> Tensor:
+        """Apply the projection."""
+        ...
+
+    def reset_parameters(self) -> None:
+        """Reset parameters in place."""
+        ...
+
+    def train(self, mode: bool = True) -> Self:
+        """Set module training mode."""
+        ...
+
+    def eval(self) -> Self:
+        """Set module evaluation mode."""
+        ...
+
+    def register_forward_hook(
+        self,
+        hook: Callable[..., object],
+        *,
+        prepend: bool = False,
+        with_kwargs: bool = False,
+        always_call: bool = False,
+    ) -> RemovableHandle:
+        """Register a forward hook."""
+        ...
+
+
+class DenseLinearProjection(LinearProjection, Protocol):
+    """A linear projection with dense input/output feature attributes."""
+
+    in_features: int
+    out_features: int
 
 
 class RotaryConfig(Makeable["RotaryFactors"], Protocol):

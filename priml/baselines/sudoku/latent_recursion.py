@@ -26,10 +26,10 @@ are its L-cycles)::
 last. :meth:`LatentRecursion.act_step` is the eval unit: one full ``slow_cycles`` forward
 per ACT step, exactly the unit training carries latents across.
 
-The per-puzzle prefix is the shared :class:`~priml.baselines.sudoku.prefix.
+The per-puzzle prefix is the shared :class:`~priml.model.prefix.
 SparsePuzzleEmbedding`, so the cost model prices the module that runs. The
 position and feedback tables stay local: composing
-:mod:`~priml.baselines.sudoku.embedding` would nest their state_dict keys
+:mod:`~priml.model.grid_embedding` would nest their state_dict keys
 under a slot name, and this class exists to load the reference checkpoints,
 whose keys are flat.
 
@@ -67,15 +67,15 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.baselines.sudoku.embedding import FactoredPositions, PredictionFeedback
-from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.cost import Cost, cost, elementwise_cost, traffic
 from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE
 from priml.model.embedding import Embedding
+from priml.model.grid_embedding import FactoredPositions, PredictionFeedback
 from priml.model.init import truncated_normal
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
+from priml.model.prefix import SparsePuzzleEmbedding
 from priml.model.sequential import Sequential
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
@@ -221,7 +221,7 @@ class LatentRecursion(nn.Module):
         def cost(self, *, batch_size: int, dtype: torch.dtype | None) -> Cost:
             """Cost one forward (``slow_cycles`` core applications) and its backward.
 
-            Mirrors :meth:`SudokuNet.Config.cost`: every slow cycle runs the core
+            Mirrors :meth:`GridSolver.Config.cost`: every slow cycle runs the core
             forward, only the last runs backward, and one core runs the block
             stack ``fast_cycles + 1`` times over weights owned once.
 

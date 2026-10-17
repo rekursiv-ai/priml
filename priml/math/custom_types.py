@@ -20,6 +20,8 @@ import numpy as np
 
 
 __all__ = [
+    "LinearFn",
+    "LogNormalizerFn",
     "Numeric",
     "TensorFn",
     "TensorNest",
@@ -58,6 +60,14 @@ arbitrary category. Both words are avoided: they are fancier than the thing they
 name, and a reader who looks one up learns nothing that ``Tensor -> Tensor`` did
 not already say.
 """
+
+
+type LinearFn = Callable[[Tensor, Tensor, Tensor | None], Tensor]
+"""A linear projection from input, weight, and optional bias tensors."""
+
+
+type LogNormalizerFn = Callable[[Tensor, int], Tensor]
+"""Normalize tensor logits over one axis and return their log probabilities."""
 
 
 type TensorableFn = Callable[[Tensorable], Tensor]

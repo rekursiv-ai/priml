@@ -42,6 +42,8 @@ SudokuTrainLoop(
         │   │   │       share_qk_norm=True,
         │   │   │       norm_out=None,
         │   │   │       split_qkv_projection=False,
+        │   │   │       proj_qkv=None,
+        │   │   │       proj_out=None,
         │   │   │       init_weight=priml.baselines.sudoku.latent_recursion.truncated_normal_corrected,
         │   │   │       depth_index=(),
         │   │   │       attn_kernel=SdpaFused.Config()
@@ -67,6 +69,9 @@ SudokuTrainLoop(
         │   │   │       depth_index=(),
         │   │   │       init_weight=priml.baselines.sudoku.latent_recursion.truncated_normal_corrected,
         │   │   │       init_weight_out=priml.baselines.sudoku.latent_recursion.truncated_normal_corrected,
+        │   │   │       up_proj=None,
+        │   │   │       middle=None,
+        │   │   │       down_proj=None,
         │   │   │       shard='colwise'
         │   │   │   ),
         │   │   │   norm1=RMSNorm.Config(
@@ -109,6 +114,8 @@ SudokuTrainLoop(
         │               ns_steps=3,
         │               reference_numerics=False,
         │               adjust_lr_fn=priml.optimizers.muon.adjust_lr_original,
+        │               momentum_update_fn=None,
+        │               matrix_signum_fn=None,
         │               ensemble_dims=0
         │           ),
         │           Muon.Config(
@@ -121,6 +128,8 @@ SudokuTrainLoop(
         │               ns_steps=3,
         │               reference_numerics=False,
         │               adjust_lr_fn=priml.optimizers.muon.adjust_lr_original,
+        │               momentum_update_fn=None,
+        │               matrix_signum_fn=None,
         │               ensemble_dims=1
         │           )
         │       ],
@@ -156,7 +165,8 @@ SudokuTrainLoop(
         │       shadow_kind='param_dict',
         │       warmup_seed=True,
         │       decay_schedule=priml.train.ema.constant_decay,
-        │       select=priml.optimizers.parameter_filter.trainable
+        │       select=priml.optimizers.parameter_filter.trainable,
+        │       update_fn=None
         │   ),
         │   gradient_clip_norm=1.0,
         │   skip_step_on_nonfinite_grad=False,
@@ -181,6 +191,7 @@ SudokuTrainLoop(
         │       grid_len=81,
         │       seq_len=97,
         │       channels_hidden=32,
+        │       steps_dtype=torch.int64,
         │       dtype=None
         │   ),
         │   routing=SingleChain.Config(),
@@ -248,6 +259,7 @@ SudokuTrainLoop(
         eval_only=False,
         restore_rng_state=True,
         seed=0,
+        model_torch_seed=None,
         num_steps_garbage_collect=inf,
         mesh_dim_model_seed='pp',
         mesh_dim_data_seed='dp',

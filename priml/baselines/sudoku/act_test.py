@@ -16,6 +16,7 @@ from priml.baselines.sudoku.act import (
     CellCorruption,
     FeedbackCarry,
     ForcedContinue,
+    GlobalSampledMinimum,
     HaltTraining,
     SampledMinimum,
     SlotScramble,
@@ -74,6 +75,111 @@ def test_atomic_first_refill_seats_every_slot() -> None:
     assert torch.equal(subject.inputs, media)
     assert bool(active.all())
     assert bool((subject.z_slow == 7.0).all())
+
+
+def test_pool_config_selects_int32_step_counters() -> None:
+    """Allow a pool to match models whose source counters are int32."""
+    subject = pool(AtomicPool.Config(steps_dtype=torch.int32))
+
+    assert subject.steps.dtype is torch.int32
+
+
+def test_global_sampled_minimum_matches_source_draw_order() -> None:
+    """Use halt-logit draws followed by int32 minimum-depth draws."""
+    halt_logits = torch.tensor([0.25, -0.5, 0.75], dtype=torch.bfloat16)
+    steps = torch.tensor([1, 2, 3], dtype=torch.int32)
+    with torch.random.fork_rng():
+        torch.manual_seed(731)
+        expected_explore = torch.rand_like(halt_logits) < 0.1
+        expected_minimum = torch.randint_like(steps, low=2, high=4)
+        expected = (halt_logits > 0) & (steps >= (expected_explore * expected_minimum))
+        expected_next = torch.rand(())
+    with torch.random.fork_rng():
+        torch.manual_seed(731)
+        actual = GlobalSampledMinimum.Config().make()(
+            halt_logits > 0,
+            steps=steps,
+            max_steps=3,
+            generator=torch.Generator(),
+            halt_logits=halt_logits,
+        )
+        actual_next = torch.rand(())
+
+    assert torch.equal(actual, expected)
+    assert torch.equal(actual_next, expected_next)
+
+
+def test_global_sampled_minimum_skips_draws_at_one_step_cap() -> None:
+    """Avoid source exploration draws when the loop cannot continue."""
+    subject = GlobalSampledMinimum.Config().make()
+    halt_logits = torch.ones(SLOTS)
+    steps = torch.ones(SLOTS, dtype=torch.int32)
+    with torch.random.fork_rng():
+        torch.manual_seed(812)
+        expected_next = torch.rand(())
+    with torch.random.fork_rng():
+        torch.manual_seed(812)
+        actual = subject(
+            halt_logits > 0,
+            steps=steps,
+            max_steps=1,
+            generator=torch.Generator(),
+            halt_logits=halt_logits,
+        )
+        actual_next = torch.rand(())
+
+    assert bool(actual.all())
+    assert torch.equal(actual_next, expected_next)
+
+
+def test_atomic_reset_clears_carry_and_reopens_every_slot() -> None:
+    """Reset every atomic slot before a checkpoint-restart refill."""
+    subject = pool(AtomicPool.Config())
+    media, labels = batch(2)
+    subject.refill(
+        init,
+        media=media,
+        labels=labels,
+        valid_count=SLOTS,
+        puzzle_ids=torch.tensor([3, 4, 5]),
+        ignore_label_id=-100,
+    )
+    subject.steps.fill_(2)
+    subject.z_slow.fill_(11.0)
+    subject.halted.fill_(False)
+
+    subject.reset()
+
+    assert bool(subject.halted.all())
+    assert not bool(subject.active.any())
+    assert not bool(subject.steps.any())
+    assert not bool(subject.inputs.any())
+    assert not bool(subject.labels.any())
+    assert not bool(subject.puzzle_ids.any())
+    assert not bool(subject.z_slow.any())
+    assert not bool(subject.z_fast.any())
+
+
+def test_streaming_reset_drops_queued_rows_and_reopens_every_slot() -> None:
+    """Reset clears both live streaming slots and the pending queue."""
+    subject = streaming(StreamingPool.Config(halting=None))
+    media, labels = batch(2, rows=SLOTS + 1)
+    subject.refill(
+        init,
+        media=media,
+        labels=labels,
+        valid_count=SLOTS + 1,
+        puzzle_ids=None,
+        ignore_label_id=-100,
+    )
+
+    subject.reset()
+
+    assert subject.pending_inputs.shape == (0, GRID)
+    assert subject.pending_labels.shape == (0, GRID)
+    assert not bool(subject.active.any())
+    assert not bool(subject.steps.any())
+    assert not bool(subject.halted.any())
 
 
 def test_a_zero_start_seats_slots_at_zero() -> None:
@@ -164,6 +270,20 @@ def test_slots_halt_at_the_step_cap() -> None:
         advance(subject, active, halt=never)
     assert bool(subject.halted.all())
     assert subject.steps.tolist() == [3, 3, 3]
+
+
+def test_pool_does_not_keep_forward_graphs_in_carried_latents() -> None:
+    """Detach recurrent states before storing them between optimizer steps."""
+    subject = pool(AtomicPool.Config())
+    active = torch.ones(SLOTS, dtype=torch.bool)
+    z_slow = torch.ones(SLOTS, SEQ, WIDTH, requires_grad=True)
+    z_fast = torch.full((SLOTS, SEQ, WIDTH), 2.0, requires_grad=True)
+
+    subject.update_carry(z_slow=z_slow, z_fast=z_fast, active=active)
+
+    assert not subject.z_slow.requires_grad
+    assert not subject.z_fast.requires_grad
+    assert subject.steps.tolist() == [1, 1, 1]
 
 
 def test_without_halting_only_the_cap_releases() -> None:

@@ -17,10 +17,10 @@ from priml.baselines.arcagi.model import PuzzleEmbedding, RotaryBlock
 from priml.baselines.arcagi.parity.record_test import assert_matches, load, reduce
 from priml.baselines.arcagi.parity.train_step import ArcModelConfig
 from priml.baselines.arcagi.parity.train_step_test import training_config
-from priml.baselines.sudoku.embedding import GridEmbedding
-from priml.baselines.sudoku.model import SudokuNet
 from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive
+from priml.model.grid_embedding import GridEmbedding
+from priml.model.grid_solver import GridSolver
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.golden import mismatches, rng_fingerprint
@@ -74,13 +74,13 @@ def port_token_init() -> Tensor:
 
 def port_latents(model: nn.Module) -> tuple[Tensor, Tensor]:
     """Slow and fast latent inits of the port."""
-    assert isinstance(model, SudokuNet)
+    assert isinstance(model, GridSolver)
     return model.slow_init, model.fast_init
 
 
 def port_forward(model: nn.Module, tokens: Tensor, identifiers: Tensor) -> Tensor:
     """Forward logits of the port."""
-    assert isinstance(model, SudokuNet)
+    assert isinstance(model, GridSolver)
     return model(tokens, puzzle_identifiers=identifiers).logits
 
 
@@ -135,7 +135,7 @@ def test_full_model_cost_matches_torch() -> None:
     config.block.attn.attn_kernel = SdpaNaive.Config()
 
     def run(module: nn.Module, tokens: Tensor) -> Tensor:
-        assert isinstance(module, SudokuNet)
+        assert isinstance(module, GridSolver)
         output = module(tokens, puzzle_identifiers=torch.tensor([0, 1]))
         return output.logits.sum() + output.halt.sum()
 

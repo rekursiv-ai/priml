@@ -17,9 +17,9 @@ import pytest
 from priml.baselines.arcagi import experiments
 from priml.baselines.arcagi.data import PuzzleData
 from priml.baselines.arcagi.scripts import prepare_data
-from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.data.arrays import load_array
 from priml.lib.testing.checks import assert_help_without_docstring
+from priml.model.prefix import SparsePuzzleEmbedding
 
 
 if TYPE_CHECKING:

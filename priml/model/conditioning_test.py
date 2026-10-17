@@ -10,7 +10,12 @@ import pytest
 import torch
 
 from priml.math.diffusion.conditioning import timestep_embedding
-from priml.model.conditioning import LabelEmbedder, TimestepEmbedder
+from priml.model.conditioning import (
+    CategorySlotFiLM,
+    LabelEmbedder,
+    SigmoidResidualGate,
+    TimestepEmbedder,
+)
 
 
 def test_timestep_embedder_features_forward_and_cost() -> None:
@@ -80,6 +85,8 @@ def test_label_embedder_forced_and_training_drop_paths() -> None:
     dropped = embedder.token_drop(labels)
     assert dropped.shape == labels.shape
     assert torch.all((dropped == labels) | (dropped == 5))
+    torch.manual_seed(0)
+    assert torch.equal(embedder(labels), embedder.embedding_table(dropped))
     estimate = config.cost(batch_size=3, dtype=torch.float32)
     assert estimate.params == 24
 
@@ -89,6 +96,92 @@ def test_label_embedder_without_dropout_has_no_null_row() -> None:
     embedder = config.make()
     assert config.num_rows == 5
     assert embedder(torch.tensor([1, 3])).shape == (2, 4)
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        (
+            CategorySlotFiLM.Config(num_categories=0, channels_out=4),
+            "Category, augmentation, and slot counts",
+        ),
+        (
+            CategorySlotFiLM.Config(channels_out=-2),
+            "CategorySlotFiLM requires positive channels_out",
+        ),
+    ],
+)
+def test_category_slot_film_rejects_invalid_config_geometry(
+    config: CategorySlotFiLM.Config,
+    message: str,
+) -> None:
+    config.finalize()
+    with pytest.raises(ValueError, match=message):
+        config.make()
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        (
+            CategorySlotFiLM.Config(channels_out=0),
+            "CategorySlotFiLM requires positive channels_out",
+        ),
+        (
+            CategorySlotFiLM.Config(num_slots=0, channels_out=4),
+            "Category, augmentation, and slot counts",
+        ),
+    ],
+)
+def test_category_slot_film_constructor_checks_raw_geometry(
+    config: CategorySlotFiLM.Config,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        CategorySlotFiLM(config)
+
+
+def test_category_slot_film_composes_slots_and_resets_semantic_tables() -> None:
+    config = CategorySlotFiLM.Config(
+        num_categories=3,
+        num_augmentations=2,
+        num_slots=2,
+        channels_out=6,
+    )
+    module = config.make()
+    category = torch.tensor([0, 2, 1])
+    augmentation = torch.tensor([1, 0, 1])
+    permutation = torch.tensor([[1, 0], [0, 1], [1, 0]])
+    output = module(category, augmentation, permutation)
+    assert output.shape == (3, 6)
+    assert torch.isfinite(output).all()
+    with torch.no_grad():
+        module.category_embed.weight.fill_(1)
+        module.augmentation_embed.weight.fill_(1)
+        module.slot_base.fill_(1)
+        module.slot_embeddings.fill_(1)
+    module.reset_parameters()
+    assert torch.equal(
+        module.category_embed.weight,
+        torch.zeros_like(module.category_embed.weight),
+    )
+    assert torch.equal(
+        module.augmentation_embed.weight,
+        torch.zeros_like(module.augmentation_embed.weight),
+    )
+    assert torch.equal(module.slot_base, torch.zeros_like(module.slot_base))
+    assert torch.equal(module.slot_embeddings, torch.zeros_like(module.slot_embeddings))
+
+
+def test_sigmoid_residual_gate_resets_with_bias_two_and_open_probability() -> None:
+    module = SigmoidResidualGate.Config(channels_out=4).make()
+    with torch.no_grad():
+        module.linear.weight.fill_(3)
+        assert module.linear.bias is not None
+        module.linear.bias.zero_()
+    module.reset_parameters()
+    output = module(torch.zeros(2, 4))
+    assert torch.equal(output, torch.sigmoid(torch.full_like(output, 2.0)))
 
 
 if __name__ == "__main__":

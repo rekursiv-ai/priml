@@ -36,7 +36,7 @@ from priml.baselines.arcagi.parity.train_step_test import (
     training_config,
 )
 from priml.baselines.arcagi.train_step import ArcDataParallel
-from priml.baselines.sudoku.embedding import GridEmbedding
+from priml.model.grid_embedding import GridEmbedding
 from priml.runtime import MultiProcess
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import joined, mismatches, put_steps

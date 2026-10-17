@@ -63,6 +63,25 @@ def test_dihedral_transforms_have_exact_orientation() -> None:
         dihedral_transform(grid, tid=8)
 
 
+def test_explicit_view_applies_and_inverts_source_color_slots() -> None:
+    """Apply CHARM's explicit color slots around each shared D4 transform."""
+    policy = ColorDihedral.Config().make()
+    grid = np.array([[0, 1, 2], [3, 4, 5]], dtype=np.uint8)
+    slots = (2, 0, 1, 3, 4, 5, 6, 7, 8)
+    mapping = np.array([0, 3, 1, 2, 4, 5, 6, 7, 8, 9], dtype=np.uint8)
+    for tid in range(8):
+        view = policy.apply_explicit(
+            grid,
+            tid=tid,
+            colorperm_slots=slots,
+        )
+        assert np.array_equal(view, dihedral_transform(mapping[grid], tid=tid))
+        assert np.array_equal(
+            policy.inverse_explicit(view, tid=tid, colorperm_slots=slots),
+            grid,
+        )
+
+
 def test_token_augmentation_passes_input_device_to_symmetry_builder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

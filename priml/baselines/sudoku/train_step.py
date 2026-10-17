@@ -35,7 +35,7 @@ from torch.nn import functional
 import torch
 
 from priml.baselines.sudoku.act import ActPool, PoolConfig, rollout
-from priml.baselines.sudoku.model import SudokuNet
+from priml.model.grid_solver import GridSolver
 from priml.optimizers import (
     CompositeOptimizer,
     apply_lr_scale,
@@ -91,14 +91,14 @@ class SudokuTrainStep(TrainStep):
 
     class Config(
         Makes["SudokuTrainStep"],
-        TrainStep.Config[SudokuNet.Config],
+        TrainStep.Config[GridSolver.Config],
         kw_only=True,
     ):
         """Model, optimization, schedule, loss, and the optional ACT pool."""
 
         # ---- Inherited slots, re-defaulted for this recipe. ----
 
-        model: SudokuNet.Config = field(default_factory=SudokuNet.Config)
+        model: GridSolver.Config = field(default_factory=GridSolver.Config)
         """Network to train."""
 
         optimizer: Makeable[Callable[..., torch.optim.Optimizer]] = field(
@@ -183,14 +183,14 @@ class SudokuTrainStep(TrainStep):
             self.pool.to(self.device)
 
     @property
-    def net(self) -> SudokuNet:
+    def net(self) -> GridSolver:
         """The model under its concrete type.
 
         A read-only view rather than a narrowed ``model`` attribute: a mutable
         attribute is invariant, so redeclaring the base's ``nn.Module`` as
-        ``SudokuNet`` is rejected outright.
+        ``GridSolver`` is rejected outright.
         """
-        return cast(SudokuNet, self.model)
+        return cast(GridSolver, self.model)
 
     @property
     def _ema(self) -> EMA | NoEMA:

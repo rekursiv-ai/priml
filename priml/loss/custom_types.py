@@ -10,7 +10,9 @@ from torch import Tensor
 
 __all__ = [
     "LossOutput",
+    "Reduction",
     "SimpleLossFn",
+    "TokenLoss",
 ]
 
 
@@ -22,6 +24,22 @@ class LossOutput(TypedDict, extra_items=Tensor):
     """
 
     loss: Tensor
+
+
+class TokenLoss(Protocol):
+    """Map token logits and labels to one loss per token."""
+
+    def __call__(self, logits: Tensor, labels: Tensor, *, ignore_index: int) -> Tensor:
+        """Return per-token losses with ignored positions zeroed."""
+        ...
+
+
+class Reduction(Protocol):
+    """Reduce per-sample losses over the rows active in one optimizer step."""
+
+    def __call__(self, per_sample: Tensor, *, active: Tensor) -> Tensor:
+        """Return one scalar objective for the active samples."""
+        ...
 
 
 class SimpleLossFn(Protocol):

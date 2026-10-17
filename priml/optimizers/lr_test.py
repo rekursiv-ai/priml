@@ -10,7 +10,9 @@ import torch
 
 from priml.optimizers.lr import (
     apply_lr_scale,
+    apply_lr_schedule,
     clip_grad_norm,
+    cosine_warmup_lr,
     learning_rate,
     lr_scale,
     remember_initial_lrs,
@@ -57,6 +59,38 @@ def test_learning_rate_requires_initial_rate_before_scaling() -> None:
     optimizer = torch.optim.SGD([nn.Parameter(torch.zeros(2))], lr=0.3)
     with pytest.raises(KeyError, match="initial_lr"):
         apply_lr_scale([optimizer], 0.5)
+
+
+def test_learning_rate_schedule_preserves_direct_warmup_operation_order() -> None:
+    """A direct schedule keeps source multiply-then-divide rounding."""
+    optimizer = torch.optim.SGD([nn.Parameter(torch.zeros(2, 3))], lr=1e-2)
+    remember_initial_lrs([optimizer])
+    source_rate = (1e-2 * 3.0) / 2000.0
+
+    apply_lr_schedule(
+        [optimizer],
+        lambda initial_rate: cosine_warmup_lr(
+            initial_rate,
+            step=3,
+            total_steps=100,
+            warmup_steps=2000,
+        ),
+    )
+
+    assert optimizer.param_groups[0]["lr"] == source_rate
+    apply_lr_scale([optimizer], 3.0 / 2000.0)
+    assert optimizer.param_groups[0]["lr"] != source_rate
+
+
+def test_cosine_warmup_rate_decays_after_warmup() -> None:
+    """The direct schedule follows the cosine floor after linear warmup."""
+    assert cosine_warmup_lr(
+        0.2,
+        step=6,
+        total_steps=10,
+        warmup_steps=2,
+        min_ratio=0.1,
+    ) == pytest.approx(0.11)
 
 
 def test_learning_rate_rejects_a_non_numeric_group_value() -> None:

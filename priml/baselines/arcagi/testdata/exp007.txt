@@ -5,7 +5,7 @@ Arc2TrainLoop(
         working_dir=PosixPath('/opt/scratch/runs/arcagi/exp007'),
         doc='',
         step=PooledActTrainStep.Config(
-        │   model=SudokuNet.Config(
+        │   model=GridSolver.Config(
         │   │   channels_in=512,
         │   │   num_layers=2,
         │   │   embedding=GridEmbedding.Config(
@@ -13,7 +13,9 @@ Arc2TrainLoop(
         │   │       channels_out=512,
         │   │       grid_shape=(900,),
         │   │       channels=[],
-        │   │       init_weight=functools.partial(priml.model.init.fan_in_truncated_normal, variance_correction=True)
+        │   │       init_weight=functools.partial(priml.model.init.fan_in_truncated_normal, variance_correction=True),
+        │   │       token_table=None,
+        │   │       embed_scale=-1.0
         │   │   ),
         │   │   block=RotaryBlock.Config(
         │   │   │   channels_in=512,
@@ -32,6 +34,8 @@ Arc2TrainLoop(
         │   │   │       share_qk_norm=True,
         │   │   │       norm_out=None,
         │   │   │       split_qkv_projection=False,
+        │   │   │       proj_qkv=None,
+        │   │   │       proj_out=None,
         │   │   │       init_weight=functools.partial(priml.model.init.fan_in_truncated_normal, variance_correction=True),
         │   │   │       depth_index=(),
         │   │   │       attn_kernel=SdpaFused.Config()
@@ -50,6 +54,9 @@ Arc2TrainLoop(
         │   │   │       depth_index=(),
         │   │   │       init_weight=functools.partial(priml.model.init.fan_in_truncated_normal, variance_correction=True),
         │   │   │       init_weight_out=functools.partial(priml.model.init.fan_in_truncated_normal, variance_correction=True),
+        │   │   │       up_proj=None,
+        │   │   │       middle=None,
+        │   │   │       down_proj=None,
         │   │   │       shard='colwise'
         │   │   │   ),
         │   │   │   norm1=RMSNorm.Config(
@@ -101,6 +108,7 @@ Arc2TrainLoop(
         │   │       dtype=None,
         │   │       init_weight=functools.partial(priml.model.init.fan_in_truncated_normal, variance_correction=True),
         │   │       init_bias=torch.nn.init.zeros_,
+        │   │       linear_fn=<built-in function linear>,
         │   │       shard=None
         │   │   ),
         │   │   init_latent=functools.partial(priml.model.init.truncated_normal, std=1.0, variance_correction=True),
@@ -144,7 +152,8 @@ Arc2TrainLoop(
         │       shadow_kind='param_dict',
         │       warmup_seed=True,
         │       decay_schedule=priml.train.ema.constant_decay,
-        │       select=priml.optimizers.parameter_filter.trainable
+        │       select=priml.optimizers.parameter_filter.trainable,
+        │       update_fn=None
         │   ),
         │   gradient_clip_norm=inf,
         │   skip_step_on_nonfinite_grad=False,
@@ -169,9 +178,12 @@ Arc2TrainLoop(
         │       grid_len=900,
         │       seq_len=916,
         │       channels_hidden=512,
+        │       steps_dtype=torch.int64,
         │       dtype=None
         │   ),
-        │   token_loss=StablemaxTokens.Config(),
+        │   token_loss=StablemaxTokens.Config(
+        │       log_normalizer=priml.math.loss.log_stablemax
+        │   ),
         │   reduction=MeanOverBatch.Config(batch_size=256),
         │   signals=None,
         │   ignore_label_id=-100,
@@ -332,6 +344,7 @@ Arc2TrainLoop(
         eval_only=False,
         restore_rng_state=True,
         seed=0,
+        model_torch_seed=None,
         num_steps_garbage_collect=inf,
         mesh_dim_model_seed='pp',
         mesh_dim_data_seed='dp',

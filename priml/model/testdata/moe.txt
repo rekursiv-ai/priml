@@ -22,6 +22,9 @@ MoE.Config(
             depth_index=(),
             init_weight=priml.model.init.unit_fan_in_uniform,
             init_weight_out=torch.nn.init.zeros_,
+            up_proj=None,
+            middle=None,
+            down_proj=None,
             shard='colwise'
         ),
         num_shared_experts=0,
@@ -39,6 +42,9 @@ MoE.Config(
             depth_index=(),
             init_weight=priml.model.init.unit_fan_in_uniform,
             init_weight_out=torch.nn.init.zeros_,
+            up_proj=None,
+            middle=None,
+            down_proj=None,
             shard='colwise'
         ),
         aux_loss_weight=0.01,

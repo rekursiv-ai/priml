@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from priml.optimizers.adam_atan2 import AdamATan2
+from priml.optimizers.aux_adam import AuxAdam
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.fused_adamw import FusedAdamW
 from priml.optimizers.fused_muon import FusedMuon
 from priml.optimizers.lr import (
     HasParamGroups,
     apply_lr_scale,
+    apply_lr_schedule,
     clip_grad_norm,
+    cosine_warmup_lr,
     learning_rate,
     lr_scale,
     remember_initial_lrs,
@@ -24,6 +27,7 @@ from priml.optimizers.sign_sgd import SignSGD
 
 __all__ = [
     "AdamATan2",
+    "AuxAdam",
     "CompositeOptimizer",
     "FusedAdamW",
     "FusedMuon",
@@ -33,7 +37,9 @@ __all__ = [
     "NorMuon",
     "SignSGD",
     "apply_lr_scale",
+    "apply_lr_schedule",
     "clip_grad_norm",
+    "cosine_warmup_lr",
     "learning_rate",
     "lr_scale",
     "remember_initial_lrs",

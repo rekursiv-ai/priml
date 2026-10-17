@@ -8,6 +8,7 @@ Transformer.Config(
             padding_idx=None,
             device=None,
             dtype=None,
+            lookup_dtype=None,
             shard='vocab',
             depth_index=(),
             init_weight=functools.partial(priml.model.init.truncated_normal, std=0.02)
@@ -30,6 +31,8 @@ Transformer.Config(
         │           share_qk_norm=True,
         │           norm_out=None,
         │           split_qkv_projection=False,
+        │           proj_qkv=None,
+        │           proj_out=None,
         │           init_weight=priml.model.init.kaiming_uniform,
         │           depth_index=((0, 1),),
         │           attn_kernel=SdpaFused.Config()
@@ -48,6 +51,9 @@ Transformer.Config(
         │           depth_index=((0, 1),),
         │           init_weight=priml.model.init.unit_fan_in_uniform,
         │           init_weight_out=torch.nn.init.zeros_,
+        │           up_proj=None,
+        │           middle=None,
+        │           down_proj=None,
         │           shard='colwise'
         │       ),
         │       norm1=RMSNorm.Config(
@@ -92,6 +98,7 @@ Transformer.Config(
                     dtype=None,
                     init_weight=priml.model.init.kaiming_uniform,
                     init_bias=torch.nn.init.zeros_,
+                    linear_fn=<built-in function linear>,
                     shard='vocab'
                 )
             ],

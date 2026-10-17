@@ -60,6 +60,7 @@ class Exploration(Protocol):
         steps: Tensor,
         max_steps: int,
         generator: torch.Generator,
+        halt_logits: Tensor | None = None,
     ) -> Tensor:
         """Apply to the input."""
         ...
@@ -90,8 +91,10 @@ class SampledMinimum:
         steps: Tensor,
         max_steps: int,
         generator: torch.Generator,
+        halt_logits: Tensor | None = None,
     ) -> Tensor:
         """Return ``fired`` masked to slots that have run their minimum."""
+        del halt_logits
         n = fired.shape[0]
         device = fired.device
         if self.prob > 0:
@@ -113,6 +116,53 @@ class SampledMinimum:
         return fired & (steps >= minimum)
 
 
+class GlobalSampledMinimum:
+    """Sample a minimum depth from the global RNG in source draw order.
+
+    The probability controls which sampled minimum is applied. The source
+    path always draws one same-shaped uniform tensor and then an integer
+    minimum tensor when the step cap exceeds one, including probability zero.
+    """
+
+    class Config(Fig["GlobalSampledMinimum"]):
+        """Probability that a slot uses its sampled minimum depth."""
+
+        prob: float = 0.1
+        """Chance a firing slot is held to the sampled minimum."""
+
+    def __init__(self, config: Config) -> None:
+        self.prob = config.prob
+
+    def __call__(
+        self,
+        fired: Tensor,
+        *,
+        steps: Tensor,
+        max_steps: int,
+        generator: torch.Generator,
+        halt_logits: Tensor | None = None,
+    ) -> Tensor:
+        """Return firing slots that have reached the sampled minimum.
+
+        Args:
+          fired: ``[B]`` slots whose halt logits are positive.
+          steps: ``[B]`` int32 or int64 counters after the current forward.
+          max_steps: Inclusive maximum depth.
+          generator: Unused; this policy deliberately uses the global RNG.
+          halt_logits: Original halt logits, preserving source draw dtype.
+
+        """
+        del generator
+        if max_steps <= 1:
+            return fired
+        if halt_logits is None:
+            raise ValueError("GlobalSampledMinimum requires the original halt logits.")
+        explore = torch.rand_like(halt_logits) < self.prob
+        sampled_minimum = torch.randint_like(steps, low=2, high=max_steps + 1)
+        minimum_steps = explore * sampled_minimum
+        return fired & (steps >= minimum_steps)
+
+
 class ForcedContinue:
     """Override a random fraction of halt decisions with one more step."""
 
@@ -132,9 +182,10 @@ class ForcedContinue:
         steps: Tensor,
         max_steps: int,
         generator: torch.Generator,
+        halt_logits: Tensor | None = None,
     ) -> Tensor:
         """Return ``fired`` with a random ``prob`` fraction cleared."""
-        del steps, max_steps
+        del steps, max_steps, halt_logits
         keep = (
             torch.rand(fired.shape[0], device=fired.device, generator=generator)
             < self.prob
@@ -534,6 +585,9 @@ class ActPool(abc.ABC):
         channels_hidden: int = -1
         """Latent width; inherited from the model."""
 
+        steps_dtype: torch.dtype = torch.long
+        """Integer dtype for per-slot step counters."""
+
         dtype: torch.dtype | None = None
         """Carried-latent dtype; inherited from the model's storage dtype.
 
@@ -547,6 +601,11 @@ class ActPool(abc.ABC):
                 "normally inherited from the model during finalize. Got "
                 f"{config.grid_len}, {config.seq_len}, {config.channels_hidden}.",
             )
+        if config.steps_dtype not in (torch.int32, torch.int64):
+            raise ValueError(
+                f"steps_dtype must be torch.int32 or torch.int64; got "
+                f"{config.steps_dtype}.",
+            )
         self.config = config
         bs = config.batch_size
         self.inputs = torch.zeros(bs, config.grid_len, dtype=torch.long)
@@ -558,7 +617,7 @@ class ActPool(abc.ABC):
             dtype=config.dtype,
         )
         self.z_fast = torch.zeros_like(self.z_slow)
-        self.steps = torch.zeros(bs, dtype=torch.long)
+        self.steps = torch.zeros(bs, dtype=config.steps_dtype)
         self.active = torch.zeros(bs, dtype=torch.bool)
         # All halted, so the first atomic refill seats every slot.
         self.halted = torch.ones(bs, dtype=torch.bool)
@@ -591,6 +650,19 @@ class ActPool(abc.ABC):
             self.halting.to(device)
         if self.carry is not None:
             self.carry.to(device)
+
+    def reset(self) -> None:
+        """Clear carried tensors and make every atomic slot available again."""
+        with torch.no_grad():
+            self.inputs.zero_()
+            self.labels.zero_()
+            self.z_slow.zero_()
+            self.z_fast.zero_()
+            self.steps.zero_()
+            self.active.zero_()
+            self.halted.fill_(True)
+            self.puzzle_ids.zero_()
+            self.feedback.zero_()
 
     @abc.abstractmethod
     def refill(
@@ -688,6 +760,7 @@ class ActPool(abc.ABC):
             steps=self.steps,
             max_steps=self.config.max_steps,
             generator=self.halting.generator,
+            halt_logits=halt,
         )
 
 
@@ -752,9 +825,10 @@ class AtomicPool(ActPool):
     @override
     def update_carry(self, *, z_slow: Tensor, z_fast: Tensor, active: Tensor) -> None:
         del active
-        self.z_slow.copy_(z_slow.to(self.z_slow.dtype))
-        self.z_fast.copy_(z_fast.to(self.z_fast.dtype))
-        self.steps.add_(1)
+        with torch.no_grad():
+            self.z_slow.copy_(z_slow.detach().to(self.z_slow.dtype))
+            self.z_fast.copy_(z_fast.detach().to(self.z_fast.dtype))
+            self.steps.add_(1)
 
     @override
     def release(self, init: LatentInit, *, halt: Tensor, active: Tensor) -> None:
@@ -792,6 +866,14 @@ class StreamingPool(ActPool):
         self.pending_labels = self.pending_labels.to(device)
 
     @override
+    def reset(self) -> None:
+        """Clear carried tensors, pending rows, and live-slot markers."""
+        super().reset()
+        self.halted.zero_()
+        self.pending_inputs = self.pending_inputs.new_empty((0, self.config.grid_len))
+        self.pending_labels = self.pending_labels.new_empty((0, self.config.grid_len))
+
+    @override
     def refill(
         self,
         init: LatentInit,
@@ -816,9 +898,10 @@ class StreamingPool(ActPool):
 
     @override
     def update_carry(self, *, z_slow: Tensor, z_fast: Tensor, active: Tensor) -> None:
-        self.z_slow[active] = z_slow[active].to(self.z_slow.dtype)
-        self.z_fast[active] = z_fast[active].to(self.z_fast.dtype)
-        self.steps[active] += 1
+        with torch.no_grad():
+            self.z_slow[active] = z_slow[active].detach().to(self.z_slow.dtype)
+            self.z_fast[active] = z_fast[active].detach().to(self.z_fast.dtype)
+            self.steps[active] += 1
 
     @override
     def release(self, init: LatentInit, *, halt: Tensor, active: Tensor) -> None:

@@ -46,7 +46,6 @@ from typing import TYPE_CHECKING, Final, Self, override
 from configgle import Makes, PartialConfig
 
 from priml.baselines.arcagi.data import PuzzleData
-from priml.baselines.arcagi.loss import MeanOverBatch, StablemaxTokens
 from priml.baselines.arcagi.metric import (
     CanonicalPassK,
     PerOutputPass,
@@ -56,7 +55,6 @@ from priml.baselines.arcagi.model import (
     ConvSwiGLU,
     PuzzleEmbedding,
     RotaryBlock,
-    SingleLatentRecurrence,
     depthwise_shift,
 )
 from priml.baselines.arcagi.puzzle_data import Arc2PuzzleDataset
@@ -75,20 +73,18 @@ from priml.baselines.sudoku.act import (
     HaltTraining,
     SampledMinimum,
 )
-from priml.baselines.sudoku.embedding import (
+from priml.loss.token import MeanOverBatch, StablemaxTokens
+from priml.model.attention.attention import Attention
+from priml.model.attention.rope import RoPE
+from priml.model.grid_embedding import (
     GridEmbedding,
     PredictionFeedback,
 )
-from priml.baselines.sudoku.model import (
-    CoreCompile,
-    DeepRecurrence,
-    SudokuNet,
-)
-from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
-from priml.model.attention.attention import Attention
-from priml.model.attention.rope import RoPE
+from priml.model.grid_solver import CoreCompile, GridSolver
 from priml.model.init import corrected_fan_in_normal
 from priml.model.norm import RMSNorm
+from priml.model.prefix import SparsePuzzleEmbedding
+from priml.model.recurrence import DeepRecurrence, SingleLatentRecurrence
 from priml.model.swiglu import SwiGLU
 from priml.optimizers import AdamATan2
 from priml.optimizers.composite import CompositeOptimizer
@@ -214,7 +210,7 @@ def exp000() -> Arc1TrainLoop:
 
     batch_size = 256
     # Master weights stay float32; the step autocasts forwards to bfloat16.
-    model = cfg.step.model = SudokuNet.Config()
+    model = cfg.step.model = GridSolver.Config()
     model.channels_in = 512
     model.num_layers = 2
     model.embedding = GridEmbedding.Config()

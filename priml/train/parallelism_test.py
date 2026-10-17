@@ -17,6 +17,7 @@ from torch.distributed.tensor import DTensor
 
 import pytest
 import torch
+import torch.distributed as dist
 
 from priml import runtime
 from priml.model.attention.gated_delta_net import GatedDeltaNet
@@ -26,8 +27,10 @@ from priml.train.parallelism import (
     DataParallel,
     FullySharded,
     HybridSharded,
+    ManualDataParallel,
     NoParallel,
     RecursiveSharded,
+    SumGradients,
     _create_mp_policy,
     _mesh_device,
     _module_mp_policy,
@@ -119,6 +122,56 @@ class _TwoLinear(nn.Module):
         return self.fc2(self.fc1(x))
 
 
+def _record_broadcast(
+    tensor: Tensor,
+    *,
+    src: int,
+    group: object,
+    values: list[Tensor],
+) -> None:
+    del src, group
+    values.append(tensor)
+
+
+def _record_sum(
+    tensor: Tensor,
+    *,
+    op: dist.ReduceOp,
+    group: object,
+    calls: list[tuple[Tensor, dist.ReduceOp, object]],
+) -> None:
+    calls.append((tensor, op, group))
+    tensor.add_(2)
+
+
+def _record_sum_with_remote_presence(
+    tensor: Tensor,
+    *,
+    op: dist.ReduceOp,
+    group: object,
+    calls: list[Tensor],
+    remote_presence: list[int],
+    remote_gradients: list[Tensor],
+) -> None:
+    """Simulate one peer's presence mask and gradients for a collective."""
+    del op, group
+    calls.append(tensor)
+    if tensor.dtype is torch.int32:
+        tensor.add_(torch.tensor(remote_presence, dtype=torch.int32))
+    else:
+        tensor.add_(remote_gradients.pop(0))
+
+
+def _return_group(name: str, *, group: object) -> object:
+    del name
+    return group
+
+
+def _local_rank(group: object, rank: int) -> int:
+    del group
+    return rank
+
+
 def test_no_parallel_places_on_device():
     model = SimpleModel()
     config = NoParallel.Config(device="cpu")
@@ -198,6 +251,135 @@ def test_data_parallel_forwards_configuration_and_returns_placed_model(
         "Applied DataParallel: mesh_dim=tp, bucket_cap_mb=7, "
         "gradient_as_bucket_view=True"
     )
+
+
+def test_manual_data_parallel_broadcasts_parameters_and_buffers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Place and broadcast initial state without installing DDP hooks."""
+    values: list[Tensor] = []
+    mesh = _FakeMesh()
+    process_group = object()
+    monkeypatch.setattr(parallelism, "global_device_mesh", lambda: mesh)
+    monkeypatch.setattr(
+        mesh,
+        "get_group",
+        functools.partial(_return_group, group=process_group),
+    )
+    monkeypatch.setattr(dist, "get_global_rank", _local_rank)
+    monkeypatch.setattr(
+        dist,
+        "broadcast",
+        functools.partial(_record_broadcast, values=values),
+    )
+    model = SimpleModel()
+    model.register_buffer("tracked", torch.ones(1))
+
+    placed = ManualDataParallel.Config().make()(model)
+
+    assert placed is model
+    assert len(values) == len(tuple(model.parameters())) + len(tuple(model.buffers()))
+
+
+def test_sum_gradients_reduces_registered_parameters_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sum each present gradient in model registration order."""
+    mesh = _FakeMesh()
+    process_group = object()
+    monkeypatch.setattr(parallelism, "global_device_mesh", lambda: mesh)
+    monkeypatch.setattr(
+        mesh,
+        "get_group",
+        functools.partial(_return_group, group=process_group),
+    )
+    monkeypatch.setattr(mesh, "size", lambda: 2)
+    calls: list[tuple[Tensor, dist.ReduceOp, object]] = []
+    monkeypatch.setattr(
+        dist,
+        "all_reduce",
+        functools.partial(_record_sum, calls=calls),
+    )
+    model = _TwoLinear()
+    gradients: list[Tensor] = []
+    for index, parameter in enumerate(model.parameters(), start=1):
+        parameter.grad = torch.full_like(parameter, float(index))
+        gradients.append(parameter.grad)
+
+    SumGradients.Config().make()(model)
+
+    assert calls[0][0].dtype is torch.int32
+    assert [call[0] for call in calls[1:]] == gradients
+    assert all(call[1] is dist.ReduceOp.SUM for call in calls)
+    assert all(call[2] is process_group for call in calls)
+    assert [gradient.flatten()[0].item() for gradient in gradients] == [3, 4, 5, 6]
+
+
+def test_sum_gradients_keeps_the_single_process_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local source replica needs no mesh or collective."""
+    monkeypatch.setattr(parallelism, "global_device_mesh", lambda: None)
+    monkeypatch.setattr(dist, "is_initialized", lambda: False)
+    model = _TwoLinear()
+    parameters = tuple(model.parameters())
+    for index, parameter in enumerate(parameters, start=1):
+        parameter.grad = torch.full_like(parameter, float(index))
+
+    SumGradients.Config().make()(model)
+
+    values: list[float] = []
+    for parameter in parameters:
+        gradient = parameter.grad
+        assert gradient is not None
+        values.append(gradient.flatten()[0].item())
+    assert values == [1, 2, 3, 4]
+
+
+def test_sum_gradients_reduces_different_local_gradient_masks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep collective order when replicas use different parameter subsets."""
+    mesh = _FakeMesh()
+    process_group = object()
+    monkeypatch.setattr(parallelism, "global_device_mesh", lambda: mesh)
+    monkeypatch.setattr(
+        mesh,
+        "get_group",
+        functools.partial(_return_group, group=process_group),
+    )
+    model = _TwoLinear()
+    parameters = tuple(model.parameters())
+    parameters[0].grad = torch.ones_like(parameters[0])
+    parameters[2].grad = torch.full_like(parameters[2], 3.0)
+    calls: list[Tensor] = []
+    remote_gradients = [
+        torch.zeros_like(parameters[0]),
+        torch.full_like(parameters[1], 10.0),
+        torch.full_like(parameters[2], 20.0),
+    ]
+    monkeypatch.setattr(
+        dist,
+        "all_reduce",
+        functools.partial(
+            _record_sum_with_remote_presence,
+            calls=calls,
+            remote_presence=[0, 1, 1, 0],
+            remote_gradients=remote_gradients,
+        ),
+    )
+
+    SumGradients.Config().make()(model)
+
+    assert calls[0].tolist() == [1, 1, 2, 0]
+    assert len(calls) == 4
+    reduced: list[float] = []
+    for parameter in parameters[:3]:
+        gradient = parameter.grad
+        assert gradient is not None
+        reduced.append(gradient.flatten()[0].item())
+    assert reduced == [1, 10, 23]
+    assert parameters[3].grad is None
 
 
 class _BufferOnly(nn.Module):

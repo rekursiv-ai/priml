@@ -4,7 +4,7 @@ Each call seats incoming puzzles in the pool, runs ONE forward over it, and
 takes one optimizer step. Everything a recipe varies is an injected piece:
 the pool -- its seating, halt training, and feedback carry
 (:mod:`~priml.baselines.sudoku.act`) -- the token loss and its reduction
-(:mod:`~priml.baselines.arcagi.loss`), the body optimizer, and the EMA.
+(:mod:`~priml.loss.token`), the body optimizer, and the EMA.
 The task table, when the model has one, trains through its own sparse SignSGD.
 
 Evaluation runs every row to the step cap, carrying latents, under the EMA
@@ -37,16 +37,15 @@ from torch._inductor import config as inductor_config
 import torch
 import torch.distributed as dist
 
-from priml.baselines.arcagi.loss import (
+from priml.baselines.sudoku.act import ActPool, AtomicPool, PoolConfig
+from priml.loss.custom_types import Reduction, TokenLoss
+from priml.loss.token import (
     CrossEntropyTokens,
     MeanOverActive,
     MeanOverBatch,
-    Reduction,
-    TokenLoss,
 )
-from priml.baselines.sudoku.act import ActPool, AtomicPool, PoolConfig
-from priml.baselines.sudoku.model import SudokuNet
-from priml.baselines.sudoku.prefix import PrefixStack, SparsePuzzleEmbedding
+from priml.model.grid_solver import GridSolver
+from priml.model.prefix import PrefixStack, SparsePuzzleEmbedding
 from priml.optimizers import AdamATan2, SignSGD, apply_lr_scale, lr_scale
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.muon import Muon
@@ -129,12 +128,12 @@ class PooledActTrainStep(TrainStep):
 
     class Config(
         Makes["PooledActTrainStep"],
-        TrainStep.Config[SudokuNet.Config],
+        TrainStep.Config[GridSolver.Config],
         kw_only=True,
     ):
         """Pool, halting, loss, schedule, and the sparse table's optimizer."""
 
-        model: SudokuNet.Config = field(default_factory=SudokuNet.Config)
+        model: GridSolver.Config = field(default_factory=GridSolver.Config)
         """Network to train."""
 
         optimizer: Makeable[Callable[..., torch.optim.Optimizer]] = field(
@@ -245,14 +244,14 @@ class PooledActTrainStep(TrainStep):
     def build_optimizer(self, model: nn.Module) -> OptimizerProtocol:
         """Freeze an untrained halt head first, so no optimizer claims it."""
         if self.config.pool.halting is None:
-            for parameter in cast(SudokuNet, model).halt_head.parameters():
+            for parameter in cast(GridSolver, model).halt_head.parameters():
                 parameter.requires_grad_(False)
         return super().build_optimizer(model)
 
     @property
-    def net(self) -> SudokuNet:
+    def net(self) -> GridSolver:
         """The model under its concrete type."""
-        return cast(SudokuNet, self.model)
+        return cast(GridSolver, self.model)
 
     @property
     def puzzle_table(self) -> SparsePuzzleEmbedding | None:
@@ -310,7 +309,12 @@ class PooledActTrainStep(TrainStep):
                 collect_intermediates=False,
                 **self._prefix_kwargs(pool.puzzle_ids),
             )
-        loss, metrics, correctness = self._train_loss(out.logits, out.halt, active)
+        loss, metrics, correctness = self._train_loss(
+            out.logits,
+            halt=out.halt,
+            labels=pool.labels,
+            active=active,
+        )
         if pool.carry is not None:
             with torch.no_grad():
                 metrics["feedback_corrupt_frac"] = pool.advance_feedback(out.logits)
@@ -524,11 +528,12 @@ class PooledActTrainStep(TrainStep):
     def _train_loss(
         self,
         logits: Tensor,
+        *,
         halt: Tensor,
+        labels: Tensor,
         active: Tensor,
     ) -> tuple[Tensor, dict[str, float | Tensor], _Correctness | None]:
         """Token loss plus the halt term; returns the correctness it scored."""
-        labels = self.pool.labels
         ignore = self.config.ignore_label_id
         per_token = self.token_loss(logits, labels, ignore_index=ignore)
         counted = (labels != ignore).sum(dim=-1).clamp(min=1)
