@@ -73,7 +73,11 @@ def exp001() -> MlsbenchEval:
       TBD.
 
     """
-    return mlsbench_experiment("causal-discovery-discrete", "ges", seed=42)
+    return mlsbench_experiment(
+        "causal-discovery-discrete",
+        "ges",  # codespell:ignore ges
+        seed=42,
+    )
 
 
 def exp002() -> MlsbenchEval:
@@ -147,7 +151,7 @@ def exp004() -> MlsbenchEval:
 
 INDEX: Final[dict[str, tuple[str, str, int]]] = {
     "exp000": ("causal-discovery-discrete", "pc", 42),
-    "exp001": ("causal-discovery-discrete", "ges", 42),
+    "exp001": ("causal-discovery-discrete", "ges", 42),  # codespell:ignore ges
     "exp002": ("causal-discovery-discrete", "grasp", 42),
     "exp003": ("causal-discovery-discrete", "boss", 42),
     "exp004": ("causal-discovery-discrete", "hc", 42),

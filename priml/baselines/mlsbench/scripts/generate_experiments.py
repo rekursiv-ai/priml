@@ -71,6 +71,9 @@ NATIVE: Final = {
 }
 """Tasks ported as native priml baselines, to their experiments module; never generated."""
 
+CODESPELL_HITS: Final = frozenset({"ges"})  # codespell:ignore ges
+"""Upstream baseline names codespell misreads; their lines carry an inline ignore."""
+
 Row = tuple[str, str, int]
 """One experiment: (task, baseline, seed)."""
 
@@ -216,11 +219,14 @@ def render(rows: Sequence[Row], entry: TaskEntry) -> str:
             "      TBD.",
             "",
             '    """',
-            *_wrap(
-                "return mlsbench_experiment",
-                [_lit(task), _lit(baseline), f"seed={seed}"],
-                "",
-                "    ",
+            *_spelled(
+                _wrap(
+                    "return mlsbench_experiment",
+                    [_lit(task), _lit(baseline), f"seed={seed}"],
+                    "",
+                    "    ",
+                ),
+                baseline,
             ),
             "",
         ]
@@ -229,7 +235,7 @@ def render(rows: Sequence[Row], entry: TaskEntry) -> str:
         "INDEX: Final[dict[str, tuple[str, str, int]]] = {",
     ]
     for i, (task, baseline, seed) in enumerate(rows):
-        out += _index_entry(i, task, baseline, seed)
+        out += _spelled(_index_entry(i, task, baseline, seed), baseline)
     out += ["}", '"""Function name to (task, baseline, seed)."""', ""]
     return "\n".join(out)
 
@@ -417,6 +423,28 @@ def _index_entry(i: int, task: str, baseline: str, seed: int) -> list[str]:
         f"        {seed},",
         "    ),",
     ]
+
+
+def _spelled(lines: list[str], baseline: str) -> list[str]:
+    """Append an inline codespell ignore to each line naming a misread baseline.
+
+    A one-line call that would overflow with the comment is split one argument per
+    line first, so the comment lands on the baseline's own line.
+    """
+    if baseline not in CODESPELL_HITS:
+        return lines
+    lit = _lit(baseline)
+    note = f"  # codespell:ignore {baseline}"
+    if len(lines) == 1 and len(lines[0] + note) > WIDTH:
+        head, _, rest = lines[0].partition("(")
+        indent = head[: len(head) - len(head.lstrip())]
+        args, _, tail = rest.rpartition(")")
+        lines = [
+            f"{head}(",
+            *(f"{indent}    {a}," for a in args.split(", ")),
+            f"{indent}){tail}",
+        ]
+    return [f"{ln}{note}" if lit in ln else ln for ln in lines]
 
 
 class _Flags(Protocol):
