@@ -1,10 +1,13 @@
 """Tests for the ETTh1 experiment setup and training loop."""
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
 import copy
+import math
 
+from configgle import PartialConfig
 from torch import Tensor
 from treekle import from_plain, json_loads
 
@@ -13,13 +16,123 @@ import torch
 
 from priml.baselines.etth1.checkpointer import Etth1Checkpointer
 from priml.baselines.etth1.data_test import fixture_config
-from priml.baselines.etth1.experiments import dlinear_type1, exp000, exp_smoke
+from priml.baselines.etth1.experiments import (
+    dlinear_type1,
+    exp000,
+    exp001,
+    exp002,
+    exp003,
+    exp004,
+    exp_smoke,
+)
+from priml.baselines.etth1.projections import LowRankProjection
 from priml.baselines.etth1.train_step import Etth1TrainLoop, Etth1TrainStep
 from priml.testing.golden import assert_pprint_golden, mismatches
 
 
 def test_canonical_config_golden() -> None:
     assert_pprint_golden(test_file=__file__, name="exp000", config=exp000())
+
+
+def test_exp001_changes_only_the_schedule(tmp_path: Path) -> None:
+    base = exp000()
+    fork = exp001()
+    assert fork.experiment_name == "exp001"
+    assert fork.step.lr_schedule != base.step.lr_schedule
+    fork.base_dir = tmp_path
+    resolved = fork.copy_tree().finalize()
+    assert resolved.working_dir == tmp_path / "runs/etth1/exp001"
+    assert not tmp_path.joinpath("runs").exists()
+    fork.base_dir = base.base_dir
+    fork.experiment_name = base.experiment_name
+    fork.step.lr_schedule = base.step.lr_schedule.copy_tree()
+    assert fork == base
+    assert fork.copy_tree().finalize() == base.copy_tree().finalize()
+
+
+@pytest.mark.parametrize(
+    ("factory", "learning_rate"),
+    [(exp002, 3e-4), (exp003, 1e-3)],
+)
+def test_rate_experiments_change_only_the_starting_rate(
+    factory: Callable[[], Etth1TrainLoop.Config],
+    learning_rate: float,
+) -> None:
+    base = exp000()
+    fork = factory()
+    assert fork.step.optimizer == PartialConfig(torch.optim.Adam, lr=learning_rate)
+    adam = fork.step.optimizer
+    assert isinstance(adam, PartialConfig)
+    adam.lr = 1e-4
+    fork.experiment_name = base.experiment_name
+    assert fork == base
+    assert fork.copy_tree().finalize() == base.copy_tree().finalize()
+
+
+@pytest.mark.compute_training
+@pytest.mark.parametrize(
+    ("factory", "second_epoch_rate"),
+    [(exp001, 1e-4 * (1 + math.cos(math.pi / 10)) / 2), (exp004, 1e-3)],
+)
+def test_fork_schedule_and_resume(
+    tmp_path: Path,
+    factory: Callable[[], Etth1TrainLoop.Config],
+    second_epoch_rate: float,
+) -> None:
+    cfg = factory()
+    cfg.base_dir = tmp_path
+    cfg.dataset = fixture_config(tmp_path / "data")
+    cfg.dataset.base_dir = "/"
+    cfg.max_epochs = 2
+    cfg.max_steps = 10
+    cfg.checkpointer = None
+    loop = cfg.make()
+    assert isinstance(loop.step, Etth1TrainStep)
+    try:
+        for _ in range(5):
+            loop._do_train_step(loop._get_next_batch())
+            assert (
+                loop.step.optimizer.param_groups[0]["lr"]
+                == loop.step.optimizer.param_groups[0]["initial_lr"]
+            )
+        state = copy.deepcopy(loop.state_dict())
+        loop.train()
+        expected = copy.deepcopy(loop.step.model.state_dict())
+        expected_rng = torch.get_rng_state()
+    finally:
+        loop.close()
+    resumed = cfg.make()
+    assert isinstance(resumed.step, Etth1TrainStep)
+    try:
+        resumed.load_state_dict(state)
+        resumed.train()
+        assert resumed.step.optimizer.param_groups[0]["lr"] == pytest.approx(
+            second_epoch_rate,
+        )
+        assert resumed.validation_losses == loop.validation_losses
+        assert len(resumed.validation_losses) == 2
+        assert resumed.current_epoch == 2
+        assert resumed.step.global_step == 10
+        assert not mismatches(expected, resumed.step.model.state_dict())
+        assert torch.equal(expected_rng, torch.get_rng_state())
+    finally:
+        resumed.close()
+
+
+def test_compact_experiment_changes_only_the_projections() -> None:
+    base = exp003()
+    fork = exp004()
+    assert fork.experiment_name == "exp004"
+    assert fork.step.model.seasonal == LowRankProjection.Config()
+    assert fork.step.model.trend == LowRankProjection.Config()
+    resolved = fork.copy_tree().finalize().step.model.seasonal
+    assert isinstance(resolved, LowRankProjection.Config)
+    assert resolved.channels_hidden == 32
+    fork.experiment_name = base.experiment_name
+    fork.step.model.seasonal = base.step.model.seasonal.copy_tree()
+    fork.step.model.trend = base.step.model.trend.copy_tree()
+    assert fork == base
+    assert fork.copy_tree().finalize() == base.copy_tree().finalize()
 
 
 def test_geometry_and_seed_propagation_without_data(tmp_path: Path) -> None:

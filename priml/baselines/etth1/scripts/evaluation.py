@@ -1,4 +1,4 @@
-"""Score exp000's best checkpoint on the held-out ETTh1 test split."""
+"""Score a DLinear checkpoint on the held-out ETTh1 test split."""
 
 from __future__ import annotations
 
@@ -9,13 +9,15 @@ import argparse
 import hashlib
 import json
 
+from configgle.launch import resolve_config
 from torch import Tensor, nn
-from treekle import from_plain, json_loads
+from treekle import from_plain, json_loads, to_plain
 
 import numpy as np
 import torch
 
-from priml.baselines.etth1.experiments import exp000
+from priml.baselines.etth1 import experiments
+from priml.baselines.etth1.train_step import Etth1TrainLoop
 from priml.paths import validated_output_path
 
 
@@ -72,12 +74,16 @@ def main() -> int:
       code: 0 on success.
 
     """
-    cfg = exp000()
     parser = argparse.ArgumentParser(description=(__doc__ or "").strip())
     _add_arguments(parser)
     flags = cast(_Flags, parser.parse_args())
+    cfg = resolve_config(f"{experiments.__name__}.{flags.experiment}")
+    if not isinstance(cfg, Etth1TrainLoop.Config):
+        raise TypeError("Expected an ETTh1 experiment configuration.")
+    cfg = cfg.copy_tree().finalize()
+    directory = flags.directory or Path(cfg.dataset.working_dir)
     checkpoint = flags.checkpoint
-    protected = [flags.directory / "ETTh1.csv"]
+    protected = [directory / "ETTh1.csv"]
     if checkpoint.is_dir():
         selector = checkpoint / "best.json"
         protected.append(selector)
@@ -100,23 +106,25 @@ def main() -> int:
     )
     step = from_plain(state["step"], dict[str, object])
     cfg.dataset.base_dir = None
-    cfg.dataset.working_dir = flags.directory
+    cfg.dataset.working_dir = directory
     dataset = cfg.dataset.make()
     model = cfg.step.model.make()
     model.load_state_dict(from_plain(step["model"], dict[str, Tensor]))
     torch.set_num_threads(1)
+    metrics = evaluate(model, batches=dataset.test_dataloader())
     result: dict[str, object] = {
+        "experiment": flags.experiment,
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
         "dataset_sha256": hashlib.sha256(
-            (flags.directory / "ETTh1.csv").read_bytes(),
+            (directory / "ETTh1.csv").read_bytes(),
         ).hexdigest(),
-        "torch": torch.__version__,
+        "torch": str(torch.__version__),
         "numpy": np.__version__,
         "step": from_plain(step["timer_step"], dict[str, object])["global_count"],
-        **evaluate(model, batches=dataset.test_dataloader()),
+        **metrics,
     }
-    rendered = json.dumps(result, indent=2) + "\n"
+    rendered = json.dumps(to_plain(result), indent=2) + "\n"
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(rendered)
@@ -126,6 +134,11 @@ def main() -> int:
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
+        "--experiment",
+        default="exp000",
+        help="ETTh1 recipe used to train the checkpoint (default: exp000).",
+    )
+    parser.add_argument(
         "--checkpoint",
         type=Path,
         required=True,
@@ -134,12 +147,13 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--directory",
         type=Path,
-        default=Path(exp000().copy_tree().finalize().dataset.working_dir),
+        help="Data directory; defaults to the selected experiment's directory.",
     )
     parser.add_argument("--output", type=Path)
 
 
 class _Flags(Protocol):
+    experiment: str
     checkpoint: Path
-    directory: Path
+    directory: Path | None
     output: Path | None

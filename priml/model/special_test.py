@@ -24,6 +24,7 @@ from priml.model.custom_types import (
     ChannelsOut,
     HasDepthIndex,
     TensorModule,
+    has_weight,
     propagate_attr,
 )
 from priml.model.embedding import Embedding
@@ -295,6 +296,42 @@ def test_tied_linear_table_borrows_the_head() -> None:
     assert torch.equal(model.embed(tokens), model.head.weight[tokens])
     assert model(tokens).shape == (1, 3, 17)
     assert [name for name, _ in model.named_parameters()] == ["head.weight"]
+
+
+def test_tied_linear_exposes_the_borrowed_weight_in_linear_layout() -> None:
+    """``weight`` is ``[out, in]`` like ``nn.Linear``, so ``x @ weight.T`` is the map."""
+    config = _LanguageModel.Config()
+    config.embed = Embedding.Config(channels_out=8, channels_in=17)
+    config.head = TiedLinear.Config(tied="embed")
+    model = config.make()
+    assert isinstance(model.embed, Embedding)
+    assert isinstance(model.head, TiedLinear)
+    assert has_weight(model.head)
+    assert model.head.weight is model.embed.weight
+    hidden = torch.randn(2, 3, 8)
+    assert torch.equal(model.head(hidden), hidden @ model.head.weight.T)
+
+    config = _LanguageModel.Config()
+    config.embed = TiedLinear.Config(tied="head", transpose=False)
+    config.head = Linear.Config(8, 17)
+    model = config.make()
+    assert isinstance(model.embed, TiedLinear)
+    assert isinstance(model.head, Linear)
+    assert torch.equal(model.embed.weight, model.head.weight.T)
+
+
+def test_an_unbound_tied_linear_has_no_weight() -> None:
+    """Unbound means no weight: ``has_weight`` answers False instead of raising."""
+    head = TiedLinear(TiedLinear.Config(tied="embed"))
+    assert not has_weight(head)
+    with pytest.raises(AttributeError):
+        _ = head.weight
+
+
+def test_an_unbound_tied_linear_refuses_to_run() -> None:
+    head = TiedLinear(TiedLinear.Config(tied="embed"))
+    with pytest.raises(RuntimeError, match="unbound"):
+        head(torch.randn(2, 3))
 
 
 def test_tied_linear_rejects_a_source_without_a_weight() -> None:

@@ -132,7 +132,135 @@ clone on 2026-10-10, on an x86-64 Linux CPU with Python 3.14.7, PyTorch 2.11.0,
 and NumPy 2.5.3, gave the same three values to every printed digit and the
 same best step. GPU/reference-hardware results are still TBD.
 
-For the next experiment, derive `exp001()` from `exp000()` and change one thing.
-Keep the data split, scoring, seed, and maximum compute budget fixed so results
-can be compared. Use validation scores to choose changes; leave the test split
-for final evaluation.
+## exp001: cosine learning-rate decay
+
+`exp001` starts from `exp000` and replaces its halving schedule with PRIML's
+cosine schedule, without restarts. The idea is to keep learning later in the
+run, when the original rate has become small. The rate is still updated at
+epoch boundaries, using the same ten-epoch schedule horizon.
+
+The model, initial learning rate, data split, scoring, seed, early stopping,
+and maximum training budget stay the same. Validation chooses the best
+checkpoint; the test split is used only for final evaluation.
+
+Train the experiment:
+
+```sh
+OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 MKL_CBWR=COMPATIBLE \
+  uv --quiet run --frozen python -m priml \
+  priml.baselines.etth1.experiments.exp001
+```
+
+Evaluate its best checkpoint. Select the same experiment used for training:
+
+```sh
+uv --quiet run --frozen python -m priml.baselines.etth1.scripts.evaluate \
+  --directory /opt/scratch/datasets/etth1 \
+  --experiment exp001 \
+  --checkpoint /opt/scratch/runs/etth1/exp001/checkpoints
+```
+
+### Local comparison
+
+Fresh CPU runs on 2026-10-06 used the same environment listed above and seed
+2021. Both stopped after 5 epochs / 5,130 updates, choosing step 2,052 by
+validation score:
+
+| Metric | exp000 | exp001 |
+| --- | --- | --- |
+| Best validation MSE | 0.6461290121 | 0.6464084983 |
+| Test MSE | 0.3748246133 | 0.3747777343 |
+| Test MAE | 0.3994735181 | 0.3994295299 |
+
+Cosine decay did not improve validation MSE: it was about 0.043% higher.
+`exp000` remains the preferred recipe from this comparison. Test scores were
+measured after that decision and were not used to pick the experiment.
+This is one seed on a local CPU, not evidence of a general improvement.
+Reference-hardware results are still TBD.
+
+## Further experiments
+
+The search tried 45 validation-only candidates, including learning rates,
+weight penalties, input lengths, averaging, and smaller projections. The
+retained recipes each make one change to a named parent:
+
+| Experiment | Parent | Change |
+| --- | --- | --- |
+| exp001 | exp000 | Cosine learning-rate decay |
+| exp002 | exp000 | Starting learning rate `3e-4` |
+| exp003 | exp000 | Starting learning rate `1e-3` |
+| exp004 | exp003 | Rank-32 seasonal and trend projections |
+
+The higher rate in `exp002` improved the first seed's validation MSE by 1.82%,
+but the gain was small and inconsistent across five seeds. The compact model
+in `exp004` was selected using validation scores and parameter count. Its
+settings were fixed before evaluating the held-out test split.
+
+### exp004: smaller forecast projections
+
+Each forecast projection starts from the input mean and learns a correction
+through two narrow linear layers. The final layer starts at zero, so the model
+initially predicts the mean. The hidden width is configurable, both child layers can
+be replaced, and their costs use the same config tree as the model. The unused
+reference decoder is retained.
+
+Train and evaluate it with:
+
+```sh
+OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 MKL_CBWR=COMPATIBLE \
+  uv --quiet run --frozen python -m priml \
+  priml.baselines.etth1.experiments.exp004
+
+uv --quiet run --frozen python -m priml.baselines.etth1.scripts.evaluate \
+  --experiment exp004 \
+  --directory /opt/scratch/datasets/etth1 \
+  --checkpoint /opt/scratch/runs/etth1/exp004/checkpoints
+```
+
+Use `--experiment exp004` when scoring these checkpoints so the evaluator
+builds the compact model. The default remains `exp000`. The three rate-only
+forks also work with their own experiment names.
+
+### Five-seed CPU comparison
+
+Both recipes used seeds 2021--2025, the same split, 336-hour history,
+96-hour forecast, batch size 8, ten-epoch cap, and validation-based early
+stopping. Every finished `exp004` run reproduced the selected research run's
+validation history, best model weights, and test metrics exactly.
+
+| Mean metric across five seeds | exp000 | exp004 |
+| --- | --- | --- |
+| Best validation MSE | 0.64887383 | 0.64470326 |
+| Test MSE | 0.37299972 | 0.37695379 |
+| Test MAE | 0.39705042 | 0.40350056 |
+
+| Seed | exp000 test MSE | exp004 test MSE |
+| --- | --- | --- |
+| 2021 | 0.37482461 | 0.37302694 |
+| 2022 | 0.37117931 | 0.37325835 |
+| 2023 | 0.37500045 | 0.37942612 |
+| 2024 | 0.37278536 | 0.37639061 |
+| 2025 | 0.37120888 | 0.38266692 |
+
+Validation MSE improved by 0.64% on average, with wins on four of five seeds.
+Held-out MSE was 1.06% worse and MAE was 1.62% worse, with only one test win.
+This is a model-size tradeoff, not a demonstrated accuracy improvement.
+Keep `exp000` as the accuracy baseline.
+
+| Model cost at batch 8 | exp000 | exp004 |
+| --- | --- | --- |
+| Active parameters | 64,704 | 27,840 |
+| Total parameters, including unused decoder | 97,056 | 60,192 |
+| Forward FLOPs | 7,730,688 | 3,650,304 |
+| Forward + backward FLOPs | 23,151,552 | 10,862,016 |
+
+The compact model has 56.97% fewer active parameters and 52.78% fewer forward
+FLOPs. This does not establish a speedup: a local single-thread CPU
+microbenchmark measured about 0.86 ms per baseline training update and
+0.92 ms per compact update. These are warm, synthetic-batch timings, not
+end-to-end training times or GPU benchmarks.
+
+Each seed's run used its own `base_dir` and the shared prepared CSV
+directory, and was scored from its validation-selected `best.json`
+checkpoint. No canonical source goldens were changed. GPU/reference-hardware
+results remain TBD.

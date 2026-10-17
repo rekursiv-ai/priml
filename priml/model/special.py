@@ -248,6 +248,22 @@ class TiedLinear(nn.Module, LateBound):
     def reset_parameters(self) -> None:
         """Nothing owned; the source resets its own weight."""
 
+    @property
+    def weight(self) -> Tensor:
+        """The borrowed weight in ``nn.Linear``'s ``[out, in]`` layout.
+
+        A head tied to an embedding returns the table itself, so readers that
+        take ``weight.T`` as the ``[in, out]`` projection treat both alike.
+
+        Raises:
+          AttributeError: No ``make()`` has bound the source yet, so there is
+            no weight; ``has_weight`` reads this as absent.
+
+        """
+        if self._source is None:
+            raise AttributeError(f"TiedLinear for {self.tied!r} is unbound.")
+        return self._source.weight if self.transpose else self._source.weight.T
+
     @override
     def forward(self, x: Tensor, **kwargs: object) -> Tensor:
         del kwargs
@@ -256,7 +272,6 @@ class TiedLinear(nn.Module, LateBound):
                 f"TiedLinear is unbound; a make() must build the root holding "
                 f"{self.tied!r}.",
             )
-        weight = self._source.weight.T if self.transpose else self._source.weight
         if x.dtype.is_floating_point:
-            return x @ weight
-        return functional.embedding(x, weight)
+            return x @ self.weight.T
+        return functional.embedding(x, self.weight.T)

@@ -1,0 +1,29 @@
+from collections.abc import Mapping
+from dataclasses import dataclass
+
+from torch import Tensor, nn
+from torch.distributed.tensor import DTensor
+from torch.nn.modules.module import _IncompatibleKeys
+
+__all__ = ["StateDictOptions", "ValueType", "set_model_state_dict"]
+
+type _Leaf = DTensor | Tensor | int | float | str
+type ValueType = _Leaf | list[_Leaf] | tuple[_Leaf, ...] | dict[str, ValueType]
+
+@dataclass
+class StateDictOptions:
+    full_state_dict: bool = ...
+    cpu_offload: bool = ...
+    ignore_frozen_params: bool = ...
+    keep_submodule_prefixes: bool = ...
+    strict: bool = ...
+    broadcast_from_rank0: bool = ...
+    flatten_optimizer_state_dict: bool = ...
+    dsd_fqn_modifiers: str = ...
+
+def set_model_state_dict(
+    model: nn.Module,
+    model_state_dict: Mapping[str, ValueType],
+    *,
+    options: StateDictOptions | None = ...,
+) -> _IncompatibleKeys: ...

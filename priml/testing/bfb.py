@@ -671,7 +671,7 @@ def _replay_golden[InputT](
     run: Callable[[nn.Module, InputT], Tensor],
 ) -> None:
     """Load a golden, rerun, and assert output and post-run state match."""
-    torch.use_deterministic_algorithms(True)
+    _set_deterministic(True)
     _seed_bfb(seed)
     module = build_module()
     device = _module_device(module)
@@ -1382,6 +1382,14 @@ class _Float64Compute(TorchDispatchMode):
     upcast.
     """
 
+    # Torch otherwise wraps ``__torch_dispatch__`` in ``torch._dynamo.disable``,
+    # importing Dynamo on the first eager dispatch (~0.4 s, billed to the first
+    # golden). Only a compiled caller needs the wrap, and it has Dynamo loaded.
+    @classmethod
+    @override
+    def _should_skip_dynamo(cls) -> bool:
+        return False
+
     @override
     def __torch_dispatch__(
         self,
@@ -1390,7 +1398,18 @@ class _Float64Compute(TorchDispatchMode):
         args: tuple[object, ...] = (),
         kwargs: dict[str, object] | None = None,
     ) -> object:
-        kwargs = kwargs or {}
+        del types
+        if torch.compiler.is_compiling():
+            return torch.compiler.disable(self._dispatch)(func, args, kwargs or {})
+        return self._dispatch(func, args, kwargs or {})
+
+    def _dispatch(
+        self,
+        func: OpOverload[..., object],
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+    ) -> object:
+        """Upcast, run, and narrow one op; see the class docstring."""
         if func.namespace in _COLLECTIVE_NAMESPACES:
             return func(*args, **kwargs)
         exact = _is_view(func) or (
@@ -1478,11 +1497,17 @@ def _capture_torch_process_state() -> _TorchProcessState:
 
 def _restore_torch_process_state(state: _TorchProcessState) -> None:
     """Restore every process-global setting changed by the BFB harness."""
-    torch.use_deterministic_algorithms(
-        state.algorithms_enabled,
-        warn_only=state.warn_only_enabled,
-    )
+    _set_deterministic(state.algorithms_enabled, warn_only=state.warn_only_enabled)
     torch.set_rng_state(state.rng_state)
+
+
+# ``torch.use_deterministic_algorithms`` also imports ``torch._inductor.config`` to
+# set its ``deterministic`` flag: 304 modules, measured 1.6 s cold, billed to
+# whichever golden runs first. Goldens run eagerly and never compile, so only the
+# ATen flag matters; a caller that compiles sets Inductor's own.
+def _set_deterministic(mode: bool, *, warn_only: bool = False) -> None:
+    """Set the ATen deterministic-algorithms flag without importing Inductor."""
+    torch._C._set_deterministic_algorithms(mode, warn_only=warn_only)  # noqa: SLF001 -- The public setter imports Inductor; this is the flag it sets.
 
 
 def _seed_bfb(seed: int) -> None:
@@ -1501,7 +1526,7 @@ def _write_golden[InputT](
     run: Callable[[nn.Module, InputT], Tensor],
 ) -> None:
     """Build, randomize, run; store the pre-run state, input, output, and changes."""
-    torch.use_deterministic_algorithms(True)
+    _set_deterministic(True)
     _seed_bfb(seed)
     module = build_module()
     device = _module_device(module)

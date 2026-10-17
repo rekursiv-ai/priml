@@ -6,7 +6,9 @@ from configgle import PartialConfig
 
 from priml.baselines.etth1.checkpointer import Etth1Checkpointer
 from priml.baselines.etth1.metrics import ForecastMSE
+from priml.baselines.etth1.projections import LowRankProjection
 from priml.baselines.etth1.train_step import Etth1TrainLoop
+from priml.math.schedules import cosine
 from priml.runtime import SingleProcess
 
 
@@ -72,6 +74,104 @@ def exp000() -> Etth1TrainLoop.Config:
 
     cfg.runtime = SingleProcess.Config(device="cpu")
 
+    return cfg
+
+
+def exp001() -> Etth1TrainLoop.Config:
+    """exp000 with cosine learning-rate decay.
+
+    Hypothesis:
+      Keeping the rate higher later in training may lower validation error
+      within the same budget. Only the learning-rate schedule changes.
+
+    Returns:
+      cfg: DLinear with one cosine decay over the ten-epoch budget.
+
+    References:
+      exp000.
+      https://arxiv.org/abs/1608.03983
+      Loshchilov and Hutter. SGDR. Cosine decay only, without restarts.
+
+    Results:
+      Reference-hardware benchmark: TBD. See README.md for local CPU results.
+
+    """
+    cfg = exp000()
+    cfg.experiment_name = "exp001"
+    cfg.step.lr_schedule = PartialConfig(cosine)
+    return cfg
+
+
+def exp002() -> Etth1TrainLoop.Config:
+    """exp000 with a starting learning rate of 3e-4.
+
+    Hypothesis:
+      Larger updates may learn more before the rate drops each epoch.
+
+    Returns:
+      cfg: DLinear with only the starting rate changed.
+
+    References:
+      exp000.
+
+    Results:
+      Reference-hardware benchmark: TBD. See README.md for local CPU results.
+
+    """
+    cfg = exp000()
+    cfg.experiment_name = "exp002"
+    adam = cfg.step.optimizer
+    assert isinstance(adam, PartialConfig)
+    adam.lr = 3e-4
+    return cfg
+
+
+def exp003() -> Etth1TrainLoop.Config:
+    """exp000 with a starting learning rate of 1e-3.
+
+    Hypothesis:
+      A tenfold rate increase may reach a better fit within the same budget.
+
+    Returns:
+      cfg: DLinear with only the starting rate changed.
+
+    References:
+      exp000.
+
+    Results:
+      Reference-hardware benchmark: TBD. See README.md for local CPU results.
+
+    """
+    cfg = exp000()
+    cfg.experiment_name = "exp003"
+    adam = cfg.step.optimizer
+    assert isinstance(adam, PartialConfig)
+    adam.lr = 1e-3
+    return cfg
+
+
+def exp004() -> Etth1TrainLoop.Config:
+    """exp003 with smaller seasonal and trend projections.
+
+    Hypothesis:
+      A narrow pair of linear layers may learn useful corrections to the
+      input mean with fewer weights and matrix operations.
+
+    Returns:
+      cfg: DLinear with rank-32 residual projections.
+
+    References:
+      exp003.
+      exp000 for the data, training budget, and validation rule.
+
+    Results:
+      Reference-hardware benchmark: TBD. See README.md for local CPU results.
+
+    """
+    cfg = exp003()
+    cfg.experiment_name = "exp004"
+    cfg.step.model.seasonal = LowRankProjection.Config()
+    cfg.step.model.trend = LowRankProjection.Config()
     return cfg
 
 

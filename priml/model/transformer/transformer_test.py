@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, override
+from typing import TYPE_CHECKING, Final, cast, override
 from unittest.mock import Mock
 
 import warnings
@@ -33,6 +34,8 @@ from priml.testing.golden import assert_pprint_golden
 
 
 if TYPE_CHECKING:
+    from configgle import Makeable
+
     from priml.model.custom_types import DepthIndex, TensorModule
 
 
@@ -264,6 +267,32 @@ def test_transformer_reports_the_head_width_when_composed() -> None:
 
     assert finalized.channels_out == 99
     assert config.make()(torch.zeros(2, 3, dtype=torch.long)).shape == (2, 3, 99)
+
+
+@dataclass(kw_only=True, slots=True)
+class _OutputOnlyProjection:
+    """A projection config that reports its output width and nothing else."""
+
+    channels_out: int
+
+
+def test_input_width_is_read_from_a_projection_that_only_reports_its_output() -> None:
+    """A ``proj_in`` exposing only ``channels_out`` still sets the stack width."""
+    config = _tiny_config()
+    config.channels_in = -1
+    config.proj_in = cast(
+        "Makeable[TensorModule]",
+        cast(object, _OutputOnlyProjection(channels_out=32)),
+    )
+    assert config.finalize().channels_in == 32
+
+
+def test_construction_requires_a_finalized_block_list() -> None:
+    config = _tiny_config().copy_tree().finalize()
+    assert isinstance(config.block, list)
+    config.block = config.block[0]
+    with pytest.raises(TypeError, match="must contain a block list"):
+        Transformer(config)
 
 
 def test_num_layers_materialized():

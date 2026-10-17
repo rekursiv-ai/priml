@@ -54,12 +54,7 @@ def remap_hf_state_dict(
         raise ValueError("Expected exactly one text embedding namespace.")
     prefix = prefixes[0]
     remaining = set(state)
-    with torch.device("meta"):
-        expected_module = config.make()
-    if not isinstance(expected_module, nn.Module):
-        raise TypeError("A deep model config must build an nn.Module.")
-    expected = expected_module.state_dict()
-    finalized = config.copy_tree().finalize()
+    expected, finalized = _native_layout(config)
     assert isinstance(finalized.block, list)
     blocks = finalized.block
     mapped: dict[str, Tensor] = {}
@@ -109,6 +104,70 @@ def remap_hf_state_dict(
     if remaining:
         raise ValueError(f"Unexpected checkpoint weights: {sorted(remaining)}.")
     return mapped
+
+
+def export_hf_state_dict(
+    state: dict[str, Tensor],
+    config: DeepModelConfig,
+    *,
+    prefix: str = "model.",
+) -> dict[str, Tensor]:
+    """Map all native parameters to Hugging Face names, splitting fused gates.
+
+    The exact inverse of :func:`remap_hf_state_dict`. Both directions derive
+    their names from :func:`_sources`, so the two maps cannot drift apart. A
+    tied head emits no ``lm_head.weight``: the native module stores the shared
+    tensor once under the embedding, safetensors refuses a duplicate, and the
+    config's ``tie_word_embeddings`` carries the sharing downstream.
+
+    Args:
+      state: Native parameters, keyed as the built module's ``state_dict``.
+      config: The native configuration that built the module.
+      prefix: Text-namespace prefix for the emitted names. The flat text
+        layout (``model.``) is what ``transformers`` and vLLM serve.
+
+    Returns:
+      mapped: HF text-checkpoint tensors, preserving source dtype and device.
+
+    Raises:
+      ValueError: Missing, unexpected, or incorrectly shaped weights.
+      TypeError: A custom block cannot be mapped to the HF architecture.
+
+    """
+    expected, finalized = _native_layout(config)
+    assert isinstance(finalized.block, list)
+    blocks = finalized.block
+    remaining = set(state)
+    mapped: dict[str, Tensor] = {}
+    for target, template in expected.items():
+        sources = _sources(target, prefix=prefix, blocks=blocks)
+        value = _take(
+            state,
+            remaining=remaining,
+            name=target,
+            shape=tuple(template.shape),
+        )
+        if len(sources) == 2:
+            # ``_take`` matched the template, whose fused rows are 2x hidden.
+            half = value.shape[0] // 2
+            mapped[sources[0]] = value[:half]
+            mapped[sources[1]] = value[half:]
+        else:
+            mapped[sources[0]] = value
+    if remaining:
+        raise ValueError(f"Unexpected checkpoint weights: {sorted(remaining)}.")
+    return mapped
+
+
+def _native_layout(
+    config: DeepModelConfig,
+) -> tuple[dict[str, Tensor], DeepModelConfig]:
+    """Return the meta-device native state dict and the finalized config."""
+    with torch.device("meta"):
+        module = config.make()
+    if not isinstance(module, nn.Module):
+        raise TypeError("A deep model config must build an nn.Module.")
+    return module.state_dict(), config.copy_tree().finalize()
 
 
 def _take(

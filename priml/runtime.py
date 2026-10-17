@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import TYPE_CHECKING, Protocol
 
 import math
@@ -271,6 +272,9 @@ class MultiProcess:
         backend: str | None = None
         """Distributed backend (None = auto: nccl for CUDA, gloo for CPU)."""
 
+        process_group_timeout_sec: float | None = None
+        """Process-group timeout in seconds (None = PyTorch default)."""
+
         mesh_topology: dict[str, int] = field(
             default_factory=lambda: {"dp": -1, "pp": 1, "tp": 1},
         )
@@ -288,6 +292,8 @@ class MultiProcess:
         self.float32_matmul_precision: Float32MatmulPrecision | None = (
             config.float32_matmul_precision
         )
+        _validate_process_group_timeout(config.process_group_timeout_sec)
+        self.process_group_timeout_sec = config.process_group_timeout_sec
         _validate_mesh_topology(config.mesh_topology)
         self.mesh_topology = dict(config.mesh_topology)
 
@@ -299,6 +305,7 @@ class MultiProcess:
             mesh_topology=self.mesh_topology,
             deterministic=self.deterministic,
             float32_matmul_precision=self.float32_matmul_precision,
+            process_group_timeout_sec=self.process_group_timeout_sec,
         )
         self.device = _bind_local_cuda_device(self.device)
 
@@ -352,6 +359,7 @@ def initialize_global_device_mesh(
     mesh_topology: dict[str, int],
     deterministic: bool = False,
     float32_matmul_precision: Float32MatmulPrecision | None = None,
+    process_group_timeout_sec: float | None = None,
 ) -> DeviceMesh:
     """Initialize global device mesh and distributed runtime (process group + device mesh).
 
@@ -361,6 +369,7 @@ def initialize_global_device_mesh(
         mesh_topology: Mesh dimensions e.g. {"dp": 2, "tp": 4}.
         deterministic: Enable deterministic CUDA ops.
         float32_matmul_precision: Float32 matmul precision override.
+        process_group_timeout_sec: Process-group timeout in seconds.
 
     Returns:
         mesh: The initialized DeviceMesh.
@@ -373,16 +382,20 @@ def initialize_global_device_mesh(
         raise RuntimeError("Runtime already initialized.")
     _process_group_owned = False
 
-    # Validate the topology BEFORE acquiring anything. These checks used to run
-    # after init_process_group, so a config error left an initialized process
-    # group behind that nothing owned -- _runtime_initialized stays False on
-    # the raise path, so no later destroy() would tear it down.
+    # Validate before creating a process group that would need cleanup.
+    _validate_process_group_timeout(process_group_timeout_sec)
     if not mesh_topology:
         raise ValueError(
             "mesh_topology cannot be empty. "
             "Specify dimensions, e.g., {'dp': -1, 'pp': 1, 'tp': 1}",
         )
     _validate_mesh_topology(mesh_topology)
+    process_group_preexisting = torch.distributed.is_initialized()
+    if process_group_preexisting and process_group_timeout_sec is not None:
+        raise RuntimeError(
+            "process_group_timeout_sec only applies when creating the process "
+            "group; a process group is already initialized.",
+        )
 
     device = get_device(device)
     if backend is None:
@@ -391,7 +404,6 @@ def initialize_global_device_mesh(
     # Every process-global change below happens inside the ``try``, so a failed
     # initialization hands the process back as it found it -- torch settings
     # and the bound CUDA device included, not only the process group.
-    process_group_preexisting = torch.distributed.is_initialized()
     cuda_device_before = (
         torch.cuda.current_device() if torch.cuda.is_initialized() else None
     )
@@ -405,7 +417,11 @@ def initialize_global_device_mesh(
         if not process_group_preexisting:
             torch.distributed.init_process_group(
                 backend=backend,
-                timeout=torch.distributed.default_pg_timeout,
+                timeout=(
+                    torch.distributed.default_pg_timeout
+                    if process_group_timeout_sec is None
+                    else timedelta(seconds=process_group_timeout_sec)
+                ),
                 device_id=device if device.type == "cuda" else None,
             )
 
@@ -505,6 +521,14 @@ def _validate_mesh_topology(mesh_topology: dict[str, int]) -> None:
             "Mesh topology dimensions must be positive except for at most "
             f"one -1 (auto); got {mesh_topology}.",
         )
+
+
+def _validate_process_group_timeout(timeout_sec: float | None) -> None:
+    """Reject a timeout that is NaN, non-positive, or infinite."""
+    if timeout_sec is not None and (
+        math.isnan(timeout_sec) or timeout_sec <= 0 or timeout_sec == math.inf
+    ):
+        raise ValueError("process_group_timeout_sec must be finite and greater than 0.")
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

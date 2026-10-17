@@ -3084,6 +3084,46 @@ def _deterministic_identity() -> nn.Module:
     return nn.Identity()
 
 
+def test_bfb_sets_determinism_without_importing_inductor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``torch.use_deterministic_algorithms`` imports ``torch._inductor.config``
+    # on every call: 304 modules, 1.6 s cold, billed to the first bfb test.
+    def refuse(mode: bool, *, warn_only: bool = False) -> None:
+        del mode, warn_only
+        raise AssertionError("bfb called torch.use_deterministic_algorithms")
+
+    monkeypatch.setattr(torch, "use_deterministic_algorithms", refuse)
+    for check in (regenerate_golden, assert_bfb_against_golden):
+        check(
+            golden_dir=tmp_path,
+            golden_name="no_inductor",
+            build_module=_deterministic_identity,
+            build_input=lambda: torch.zeros(2, 3),
+        )
+
+
+def test_eager_host_agnostic_dispatch_skips_dynamo() -> None:
+    # Torch's default wrap imports Dynamo on the first eager dispatch.
+    assert "__wrapped__" not in vars(bfb._Float64Compute.__torch_dispatch__)
+
+
+def test_host_agnostic_numerics_survives_a_compiled_region() -> None:
+    # Torch wraps the mode's dispatch in ``torch._dynamo.disable``. Opting out to
+    # skip that import (~0.4 s on the first golden) let Dynamo trace into the
+    # dispatch, and this compiled call raised.
+    x = torch.linspace(-2.0, 2.0, 6).reshape(2, 3)
+    with host_agnostic_numerics():
+        eager = _tanh_row_sum(x)
+        compiled = torch.compile(_tanh_row_sum, backend="eager")(x)
+    assert torch.equal(compiled, eager)
+
+
+def _tanh_row_sum(x: Tensor) -> Tensor:
+    return torch.tanh(x).sum(dim=-1)
+
+
 def test_bfb_builds_under_deterministic_algorithms(tmp_path: Path) -> None:
     before = torch.are_deterministic_algorithms_enabled()
     try:

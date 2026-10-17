@@ -333,6 +333,8 @@ class TrainLoop:
         self.profiler: ProfilerProtocol | None = None
         self._close_step: Callable[[], None] | None = None
         """The step's ``close`` when it owns resources; set once the step exists."""
+        self._close_dataset: Callable[[], None] | None = None
+        """The dataset's ``close`` when it owns external runtime resources."""
         self._gc_disabled = False
         self._closed = False
         self._training = False
@@ -395,6 +397,8 @@ class TrainLoop:
                 torch.device(device or self.runtime.device),
             ):
                 self.dataset = config.dataset.make()
+            if isinstance(self.dataset, Closeable):
+                self._close_dataset = self.dataset.close
             _bind_dataset_step(self.dataset, self.step)
             # Dataset and step share one checkpointed epoch counter.
             step = self.step
@@ -1016,6 +1020,8 @@ class TrainLoop:
         # checkpointer, the tracker and the runtime they may use go away.
         if self._close_step is not None:
             actions.append(self._close_step)
+        if self._close_dataset is not None:
+            actions.append(self._close_dataset)
         if self.checkpointer is not None:
             actions.append(self.checkpointer.close)
         if self.tracker is not None:
