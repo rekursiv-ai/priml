@@ -80,6 +80,8 @@ def test_scores_weight_all_cells_and_keep_original_units() -> None:
 
 def test_scores_reject_broadcasting_and_propagate_nonfinite_outputs() -> None:
     prediction = torch.zeros(4, 3, 2)
+    # The unit dims are forced: forecast_scores rejects any scale not shaped
+    # (1, 1, channels), since one fitted scale serves every trajectory and step.
     scale = torch.ones(1, 1, 2)
     with pytest.raises(ValueError, match="same nonempty shape"):
         forecast_scores(prediction, target=prediction[:1], scale=scale)

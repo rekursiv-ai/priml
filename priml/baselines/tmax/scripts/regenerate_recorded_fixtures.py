@@ -15,9 +15,11 @@ log-probability archives. These fixtures test the rollout format and advantage
 calculation without loading the 9B model. They are not training data for the
 4B ``exp000`` run, which must collect fresh rollouts from its own policy.
 
-- ``recorded_rollout.jsonl`` is the exact JSONL record for step 91,
+- ``recorded_rollout.jsonl.gz`` is the exact JSONL record for step 91,
   ``sample_idx`` 216, and ``prompt_idx`` 6. It preserves the published format,
-  including the missing ``tool_mask``.
+  including the missing ``tool_mask``. It is gzipped because even the shard's
+  smallest record, this one at 38,436 bytes, exceeds the 32 KiB limit on
+  committed testdata.
 - ``recorded_advantages.json`` groups all 1,024 records by step and prompt.
   It copies the published rewards and advantages so ``rollouts_test.py`` can
   check PriML's centered-advantage calculation against upstream TMax.
@@ -45,6 +47,7 @@ from typing import Final, Protocol, cast
 from urllib import request
 
 import argparse
+import gzip
 import hashlib
 import json
 import tarfile
@@ -93,7 +96,7 @@ def main() -> int:
     records = [_record(line) for line in lines]
 
     ok_line = _check_or_write(
-        flags.fixtures / "recorded_rollout.jsonl",
+        flags.fixtures / "recorded_rollout.jsonl.gz",
         _recorded_line(lines, records) + b"\n",
         write=flags.write,
     )
@@ -148,14 +151,10 @@ def _archive(explicit: Path | None) -> Path:
 
 def _verify_sha256(archive: Path) -> None:
     """Fail unless the archive matches the pinned sha256."""
-    digest = hashlib.sha256()
     with archive.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    if digest.hexdigest() != ARCHIVE_SHA256:
-        raise ValueError(
-            f"{archive} is not the pinned archive: {digest.hexdigest()}",
-        )
+        digest = hashlib.file_digest(stream, hashlib.sha256).hexdigest()
+    if digest != ARCHIVE_SHA256:
+        raise ValueError(f"{archive} is not the pinned archive: {digest}")
 
 
 def _shard_lines(archive: Path) -> list[bytes]:
@@ -247,9 +246,17 @@ def _advantages_bytes(records: list[dict[str, object]]) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
 
+# A ``.gz`` fixture is compared by its content: the compressed bytes depend on the
+# zlib build, so comparing them would report drift that is not there. It is written
+# with a zero mtime so that rewriting unchanged content reproduces the file.
 def _check_or_write(path: Path, rebuilt: bytes, *, write: bool) -> bool:
     """Compare the rebuilt bytes with the committed fixture, or rewrite it."""
-    if path.exists() and path.read_bytes() == rebuilt:
+    gzipped = path.suffix == ".gz"
+    if (
+        path.exists()
+        and (gzip.decompress(path.read_bytes()) if gzipped else path.read_bytes())
+        == rebuilt
+    ):
         print(
             f"{path.name}: identical",
         )
@@ -260,7 +267,9 @@ def _check_or_write(path: Path, rebuilt: bytes, *, write: bool) -> bool:
             f"{path.name}: {state}; pass --write to regenerate it",
         )
         return False
-    path.write_bytes(rebuilt)
+    path.write_bytes(
+        gzip.compress(rebuilt, compresslevel=9, mtime=0) if gzipped else rebuilt,
+    )
     print(
         f"{path.name}: rewrote {len(rebuilt)} bytes",
     )

@@ -122,6 +122,16 @@ def _no_executable(name: str) -> None:
     del name
 
 
+def test_records_are_indented_json_with_a_final_newline_and_a_tagged_nan(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "record.json"
+    comparison._write_json(path, value={"case": "matched", "mse": float("nan")})
+    assert path.read_text() == (
+        '{\n  "case": "matched",\n  "mse": {\n    "py/float": "nan"\n  }\n}\n'
+    )
+
+
 if __name__ == "__main__":
     from priml.lib.testing.runner import test_main
 

@@ -41,6 +41,7 @@ def assert_pprint_golden(
     name: str,
     config: Maker[object],
     normalize: Callable[[str], str] = str,
+    width: int = 80,
 ) -> None:
     """Assert a config's full finalized pprint matches its test-local golden.
 
@@ -52,6 +53,7 @@ def assert_pprint_golden(
       name: Golden filename without its extension.
       config: Config to finalize and render with every field visible.
       normalize: Maps rendered text to its host-independent form.
+      width: Maximum line width of the render.
 
     Raises:
       AssertionError: The golden was missing, or the render differs; the
@@ -64,6 +66,7 @@ def assert_pprint_golden(
             finalize=True,
             mask_memory_addresses=True,
             hide_default_values=False,
+            width=width,
         )
         + "\n",
     )

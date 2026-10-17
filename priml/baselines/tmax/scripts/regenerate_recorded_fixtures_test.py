@@ -5,11 +5,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from urllib import request
 
+import gzip
 import hashlib
 import io
 import json
 import tarfile
 import tempfile
+import time
 
 from treekle import json_loads
 
@@ -90,7 +92,7 @@ def test_write_then_verify_round_trips(
     fixtures.mkdir()
     assert _run(monkeypatch, archive, fixtures, "--write") == 0
     assert "rewrote" in capsys.readouterr().out
-    line = (fixtures / "recorded_rollout.jsonl").read_bytes()
+    line = gzip.decompress((fixtures / "recorded_rollout.jsonl.gz").read_bytes())
     assert json.loads(line) == _records()[1]
     payload = json_loads(
         (fixtures / "recorded_advantages.json").read_bytes(),
@@ -117,14 +119,51 @@ def test_verify_fails_on_missing_or_drifted_fixtures(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    (tmp_path / "recorded_rollout.jsonl").write_bytes(b"stale\n")
+    stale = gzip.compress(b"stale\n")
+    (tmp_path / "recorded_rollout.jsonl.gz").write_bytes(stale)
     with pytest.raises(SystemExit) as exit_info:
         _run(monkeypatch, archive, tmp_path)
     assert exit_info.value.code == 1
     out = capsys.readouterr().out
-    assert "recorded_rollout.jsonl: differs from the committed fixture" in out
+    assert "recorded_rollout.jsonl.gz: differs from the committed fixture" in out
     assert "recorded_advantages.json: missing" in out
-    assert (tmp_path / "recorded_rollout.jsonl").read_bytes() == b"stale\n"
+    assert (tmp_path / "recorded_rollout.jsonl.gz").read_bytes() == stale
+
+
+def test_verify_compares_the_gzipped_record_by_content(
+    archive: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Accept a gzip that holds the same record under different compression."""
+    assert _run(monkeypatch, archive, tmp_path, "--write") == 0
+    fixture = tmp_path / "recorded_rollout.jsonl.gz"
+    content = gzip.decompress(fixture.read_bytes())
+    recompressed = gzip.compress(content, compresslevel=1, mtime=1)
+    assert recompressed != fixture.read_bytes()
+    fixture.write_bytes(recompressed)
+    capsys.readouterr()
+
+    assert _run(monkeypatch, archive, tmp_path) == 0
+    assert "recorded_rollout.jsonl.gz: identical" in capsys.readouterr().out
+
+
+def test_write_is_reproducible(
+    archive: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rewrite the same record to the same gzip bytes at a different time."""
+    fixture = tmp_path / "recorded_rollout.jsonl.gz"
+    # Two writes in the same second would match even with a timestamped header.
+    monkeypatch.setattr(time, "time", lambda: 1.0)
+    assert _run(monkeypatch, archive, tmp_path, "--write") == 0
+    first = fixture.read_bytes()
+    fixture.unlink()
+    monkeypatch.setattr(time, "time", lambda: 2.0)
+    assert _run(monkeypatch, archive, tmp_path, "--write") == 0
+    assert fixture.read_bytes() == first
 
 
 def test_main_refuses_a_shard_with_the_wrong_record_count(

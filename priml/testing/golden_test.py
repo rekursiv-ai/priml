@@ -75,6 +75,17 @@ class _Example:
         del config
 
 
+class _PformatSpy:
+    """Stand in for ``Maker.pformat`` and record the keyword arguments it got."""
+
+    def __init__(self) -> None:
+        self.kwargs: dict[str, object] = {}
+
+    def __call__(self, **kwargs: object) -> str:
+        self.kwargs = kwargs
+        return "rendered"
+
+
 def test_assert_pprint_golden_reads_full_finalized_config(tmp_path: Path) -> None:
     test_file = tmp_path / "owner_test.py"
     testdata = tmp_path / "testdata"
@@ -98,14 +109,8 @@ def test_assert_pprint_golden_pins_rendering_policy(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    seen: dict[str, object] = {}
-
-    def pformat(config: Maker[object], **kwargs: object) -> str:
-        del config
-        seen.update(kwargs)
-        return "rendered"
-
-    monkeypatch.setattr(Maker, "pformat", pformat)
+    spy = _PformatSpy()
+    monkeypatch.setattr(Maker, "pformat", spy)
     test_file = tmp_path / "owner_test.py"
     testdata = tmp_path / "testdata"
     testdata.mkdir()
@@ -117,11 +122,33 @@ def test_assert_pprint_golden_pins_rendering_policy(
         config=_Example.Config(),
     )
 
-    assert seen == {
+    assert spy.kwargs == {
         "finalize": True,
         "hide_default_values": False,
         "mask_memory_addresses": True,
+        "width": 80,
     }
+
+
+def test_assert_pprint_golden_renders_at_the_requested_width(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    spy = _PformatSpy()
+    monkeypatch.setattr(Maker, "pformat", spy)
+    test_file = tmp_path / "owner_test.py"
+    testdata = tmp_path / "testdata"
+    testdata.mkdir()
+    (testdata / "example.txt").write_text("rendered\n", encoding="utf-8")
+
+    assert_pprint_golden(
+        test_file=str(test_file),
+        name="example",
+        config=_Example.Config(),
+        width=81,
+    )
+
+    assert spy.kwargs["width"] == 81
 
 
 def test_assert_pprint_golden_normalizes_rendered_text(tmp_path: Path) -> None:

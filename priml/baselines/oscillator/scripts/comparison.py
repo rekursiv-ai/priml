@@ -60,7 +60,9 @@ def main(argv: list[str] | None = None) -> int:
             raise TypeError(f"{name} does not build an oscillator study.")
         recipes.append(recipe)
     directory.mkdir(mode=0o755, parents=True, exist_ok=False)
-    root = _CWD.parents[3]
+    # The export drops the monorepo prefix from this path literal, so the depth to
+    # the repository root follows each layout; a fixed ``parents[3]`` fell one short.
+    root = _CWD.parents[len(Path("priml/baselines/oscillator/scripts").parts) - 1]
     records: list[ComparisonRecord] = []
     for matched in (True, False):
         for seed in flags.seeds:
@@ -156,4 +158,4 @@ def _git(git: str, *args: str, cwd: Path) -> str:
 
 
 def _write_json(path: Path, value: object) -> None:
-    path.write_text(json.dumps(to_plain(value), indent=2, allow_nan=False) + "\n")
+    path.write_text(json.dumps(to_plain(value), indent=2) + "\n")

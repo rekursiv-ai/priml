@@ -43,10 +43,10 @@ ROOT = _CWD
 SMOKE_FIXTURE = ROOT / "testdata" / "smoke_rollout.jsonl"
 
 
-def test_data_cadence_reads_a_real_published_rollout() -> None:
+def test_data_cadence_reads_a_real_published_rollout(recorded_rollout: Path) -> None:
     """Read and pack one real record from the published rollout archive."""
     config = TMaxRolloutData.Config()
-    config.working_dir = ROOT / "testdata" / "recorded_rollout.jsonl"
+    config.working_dir = recorded_rollout
     config.records_per_update = 1
     config.num_samples_per_prompt = 1
     config.mask_tool_use = False
@@ -78,7 +78,12 @@ def _starved_refusal(config: TMaxRolloutData.Config) -> str:
     return "no-refusal"
 
 
-def _shard_worker(result_dir: str, smoke_path: str, mesh: DeviceMesh) -> None:
+def _shard_worker(
+    result_dir: str,
+    smoke_path: str,
+    recorded_path: str,
+    mesh: DeviceMesh,
+) -> None:
     """Worker: verify this rank's contiguous slice, shared denominator, refusal."""
     result_path = Path(result_dir)
     rank = mesh.get_rank()
@@ -100,7 +105,7 @@ def _shard_worker(result_dir: str, smoke_path: str, mesh: DeviceMesh) -> None:
             == expected_tail
         )
         starved = TMaxRolloutData.Config()
-        starved.working_dir = ROOT / "testdata" / "recorded_rollout.jsonl"
+        starved.working_dir = recorded_path
         starved.records_per_update = 1
         starved.num_samples_per_prompt = 1
         starved.mask_tool_use = False
@@ -118,11 +123,21 @@ def _shard_worker(result_dir: str, smoke_path: str, mesh: DeviceMesh) -> None:
 
 
 @pytest.mark.cli_python_subprocess
-def test_rows_are_sharded_across_the_dp_world(warm_pools: WarmPoolGetter) -> None:
+def test_rows_are_sharded_across_the_dp_world(
+    warm_pools: WarmPoolGetter,
+    recorded_rollout: Path,
+) -> None:
     """Each rank trains a disjoint contiguous slice of the same packed update."""
     pool = warm_pools({"dp": 2})
     with tempfile.TemporaryDirectory() as tmp:
-        pool(functools.partial(_shard_worker, tmp, str(SMOKE_FIXTURE)))
+        pool(
+            functools.partial(
+                _shard_worker,
+                tmp,
+                str(SMOKE_FIXTURE),
+                str(recorded_rollout),
+            ),
+        )
         results = {p.name: p.read_text() for p in Path(tmp).iterdir() if p.is_file()}
     assert results == {"rank_0": "ok", "rank_1": "ok"}, results
 
@@ -217,10 +232,10 @@ def test_the_same_loader_rewinds_for_the_next_epoch() -> None:
         )
 
 
-def test_an_incomplete_final_update_is_refused() -> None:
+def test_an_incomplete_final_update_is_refused(recorded_rollout: Path) -> None:
     """Reject a trailing partial update instead of training it."""
     config = TMaxRolloutData.Config()
-    config.working_dir = ROOT / "testdata" / "recorded_rollout.jsonl"
+    config.working_dir = recorded_rollout
     config.records_per_update = 2
     config.num_samples_per_prompt = 1
     config.mask_tool_use = False
@@ -778,13 +793,16 @@ def test_an_empty_rollout_directory_is_refused(tmp_path: Path) -> None:
         next(iter(config.make().train_dataloader()))
 
 
-def test_a_tool_mask_sidecar_supplies_the_omitted_masks(tmp_path: Path) -> None:
+def test_a_tool_mask_sidecar_supplies_the_omitted_masks(
+    tmp_path: Path,
+    recorded_rollout: Path,
+) -> None:
     """Supply masks missing from older released records through a sidecar.
 
     Live ``exp000`` records include ``tool_mask`` directly; the published
     fixture predates that field.
     """
-    record = read_rollout_records(ROOT / "testdata" / "recorded_rollout.jsonl")[0]
+    record = read_rollout_records(recorded_rollout)[0]
     sidecar = tmp_path / "masks.jsonl"
     sidecar.write_text(
         json.dumps(
@@ -798,7 +816,7 @@ def test_a_tool_mask_sidecar_supplies_the_omitted_masks(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     config = TMaxRolloutData.Config()
-    config.working_dir = ROOT / "testdata" / "recorded_rollout.jsonl"
+    config.working_dir = recorded_rollout
     config.tool_mask_path = sidecar
     config.records_per_update = 1
     config.num_samples_per_prompt = 1

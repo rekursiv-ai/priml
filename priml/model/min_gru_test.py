@@ -397,9 +397,9 @@ def test_min_gru_without_highway_emits_its_carry_and_projects_two_slices() -> No
     config.num_layers = 2
     config.highway = None
     model = config.make()
-    inputs = torch.randn(2, 5, 3)
-    reset = torch.rand(2, 5) < 0.3
-    state = torch.randn(2, 2, 4)
+    inputs = torch.randn(6, 5, 3)
+    reset = torch.rand(6, 5) < 0.3
+    state = torch.randn(2, 6, 4)
 
     outputs, final = model(inputs, state=state, reset=reset)
     expected_outputs, expected_final = _sequential_min_gru(
