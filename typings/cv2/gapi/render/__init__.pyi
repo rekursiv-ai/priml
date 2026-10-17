@@ -1,3 +1,0 @@
-from cv2.gapi.render import ocv as ocv
-
-__all__: list[str] = ...

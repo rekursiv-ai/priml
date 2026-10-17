@@ -1,6 +1,7 @@
 """The Numba API the presolver uses; ``__init__.pyi`` narrows it for the checkers.
 
-``typings/numba`` types a compiled kernel as a ``Dispatcher``; the presolver's
+The ``numba-stubs`` stub package (rekursiv-ai-typings) types a compiled kernel
+as a ``Dispatcher``; the presolver's
 declarations type it as its Python function, and bind only its own imports.
 """
 

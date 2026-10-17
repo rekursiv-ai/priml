@@ -74,7 +74,7 @@ def archive(tmp_path_factory: pytest.TempPathFactory) -> Path:
     # Random play rarely passes 375 decisions; seeds 311 and 364 (375 and 346)
     # give the first shard two episodes past the 256-decision snapshot.
     episodes = [
-        replay.record(world_seed=seed, sampling_seed=seed, max_decisions=1_000)
+        replay.record(world_seed=seed, sampling_seed=seed, max_decisions=400)
         for seed in (311, 2, 364, 154, 209, 143, 160, 349, 331)
     ]
     entries: list[tuple[Path, ManifestLine]] = []

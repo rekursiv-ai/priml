@@ -35,7 +35,7 @@ import pytest
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Iterator, Sequence
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -75,11 +75,14 @@ class _Session(Protocol):
 
 
 # The archive fsyncs every shard file and its directory, 5-30 ms each on a laptop disk;
-# it put 99 of world_model's 108 tests over 100 ms (measured).
-@pytest.fixture(autouse=True)
-def _skip_fsync(monkeypatch: pytest.MonkeyPatch) -> None:
+# it put 99 of world_model's 108 tests over 100 ms (measured). Session-scoped, so a
+# module-scoped fixture, which sets up before any function-scoped one, skips it too.
+@pytest.fixture(autouse=True, scope="session")
+def _skip_fsync() -> Iterator[None]:
     """Make ``os.fsync`` a no-op: a unit test never crashes the host it syncs for."""
-    monkeypatch.setattr(os, "fsync", _no_fsync)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "fsync", _no_fsync)
+        yield
 
 
 def pytest_sessionstart(session: _Session) -> None:

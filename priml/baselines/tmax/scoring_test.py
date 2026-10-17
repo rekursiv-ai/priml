@@ -224,8 +224,8 @@ def test_chunked_head_rejects_non_positive_temperature() -> None:
     with pytest.raises(ValueError, match="temperature must be positive"):
         score_hidden_labels(
             torch.nn.Linear(4, 8, bias=False),
-            torch.randn(1, 3, 4),
-            torch.tensor([[1, 2]]),
+            torch.randn(2, 3, 4),
+            torch.tensor([[1, 2], [2, 3]]),
             temperature=0.0,
             chunk_size=None,
             fp32_head=False,
@@ -236,8 +236,8 @@ def test_the_fp32_head_rejects_a_biased_head() -> None:
     with pytest.raises(TypeError, match="biased head"):
         score_hidden_labels(
             torch.nn.Linear(4, 8, bias=True),
-            torch.randn(1, 3, 4),
-            torch.tensor([[1, 2]]),
+            torch.randn(2, 3, 4),
+            torch.tensor([[1, 2], [2, 3]]),
             temperature=1.0,
             chunk_size=None,
             fp32_head=True,

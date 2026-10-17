@@ -1,9 +1,0 @@
-from typing import Any
-
-from torch import nn
-
-logger = ...
-
-class GradientCheckpointingLayer(nn.Module):
-    gradient_checkpointing = ...
-    def __call__(self, *args, **kwargs) -> Any: ...

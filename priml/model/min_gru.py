@@ -11,7 +11,10 @@ step. The two variants compute it differently, so their bits differ and
 neither stands in for the other:
 
 - :class:`MinGRU` is a stack of layers in fp32, differentiated by autograd.
-  Each layer's carry is solved for every step at once by a parallel scan.
+  Each layer's carry is solved for every step at once by a parallel scan. Its
+  ``highway`` slot is PufferLib's mix above by default; without one, a layer
+  emits ``h`` itself and projects only ``hidden`` and ``gate`` -- the paper's
+  minGRU (Feng et al., arXiv:2410.01201).
 - :class:`MinGRUBlock` is one layer between low-precision boundaries. Its
   :class:`Scan` walks time sequentially in fp32 and rounds the carry to the
   state dtype -- the initial carry's -- before each next step; the projection,
@@ -56,7 +59,7 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.cost import Cost, elementwise_cost
+from priml.cost import Cost, elementwise_cost, matmul_cost
 from priml.kernel import jit_kernel, require_power_of_two
 from priml.model.linear import Linear
 
@@ -74,29 +77,137 @@ else:
     language = lazy_import("triton.language")
 
 
+class Highway(Protocol):
+    """Mixes a layer's carry with its input, steered by one projected slice."""
+
+    def __call__(self, carry: Tensor, *, inputs: Tensor, logit: Tensor) -> Tensor:
+        """Return the layer output from carry, input and gate logit, all ``[B, T, c]``."""
+        ...
+
+
+class SigmoidHighway:
+    """PufferLib's highway: ``out = s * h + (1 - s) * x`` with ``s = sigma(logit)``."""
+
+    class Config(Fig["SigmoidHighway"]):
+        """Nothing to configure; the gate's logit is a slice of the layer projection."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def __call__(self, carry: Tensor, *, inputs: Tensor, logit: Tensor) -> Tensor:
+        """Return ``(1 - s) * inputs + s * carry``."""
+        strength = torch.sigmoid(logit)
+        return (1 - strength) * inputs + strength * carry
+
+
 class MinGRU(nn.Module):
-    """Apply a gated highway recurrence to ``[batch,time,channels]`` inputs.
+    """Apply a gated recurrence, highway-mixed or not, to ``[batch,time,channels]``."""
 
-    Args:
-      input_channels: Width of the first recurrent layer's inputs.
-      channels: Width of every recurrent state.
-      layers: Number of stacked recurrent layers.
+    class Config(Fig["MinGRU"]):
+        """Widths, depth, and how each layer's carry reaches its output."""
 
-    """
+        channels_in: int = -1
+        """Width of the first recurrent layer's inputs."""
 
-    def __init__(self, input_channels: int, channels: int, layers: int = 1) -> None:
+        channels_hidden: int = -1
+        """Width of every recurrent state; -1 takes ``channels_in``."""
+
+        num_layers: int = 1
+        """Stacked recurrent layers."""
+
+        highway: Makeable[Highway] | None = field(default_factory=SigmoidHighway.Config)
+        """Mixes each carry with its layer input; None emits the carry itself."""
+
+        RECURRENCE_OPS: ClassVar[int] = 16
+        """Operations per carry channel per step without the highway: the
+        candidate 7, the gate sigmoid 4, the reset-masked decay 2, the
+        innovation 1 and one affine step 2. The parallel scan reassociates the
+        affine steps; its work is counted as the sequential recurrence's."""
+
+        HIGHWAY_OPS: ClassVar[int] = 8
+        """The highway's sigmoid 4 and mix 4, per carry channel per step."""
+
+        @override
+        def finalize(self) -> Self:
+            if self.channels_hidden == -1:
+                self.channels_hidden = self.channels_in
+            return super().finalize()
+
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
+            """Cost the input projection and every layer's projection and recurrence.
+
+            Everything runs in fp32 under a disabled autocast, so ``dtype`` is
+            ignored.
+
+            Args:
+              seq_len: Steps per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; unused, the module computes in fp32.
+              **kwargs: The open bus; unused.
+
+            Returns:
+              cost: Integer FLOPs and logical bytes for the complete invocation.
+
+            """
+            del dtype, kwargs
+            rows = seq_len * batch_size
+            channels = self.channels_hidden
+            slices = 2 if self.highway is None else 3
+            ops = self.RECURRENCE_OPS + (
+                0 if self.highway is None else self.HIGHWAY_OPS
+            )
+            elements = rows * channels
+            layer = matmul_cost(
+                channels_in=channels,
+                channels_out=slices * channels,
+                rows=rows,
+                dtype=torch.float32,
+            ) + elementwise_cost(
+                primal=ops * elements,
+                adjoint=2 * ops * elements,
+                channels=channels,
+                rows=rows,
+                dtype=torch.float32,
+                inputs=slices + 1,
+                outputs=1,
+                adjoint_inputs=slices + 2,
+                adjoint_outputs=slices + 1,
+            )
+            total = layer.tile(self.num_layers, copies=self.num_layers)
+            if self.channels_in != channels:
+                total += matmul_cost(
+                    channels_in=self.channels_in,
+                    channels_out=channels,
+                    rows=rows,
+                    dtype=torch.float32,
+                )
+            return total
+
+    def __init__(self, config: Config) -> None:
         super().__init__()
-        if input_channels <= 0 or channels <= 0 or layers <= 0:
+        input_channels, channels = config.channels_in, config.channels_hidden
+        if input_channels <= 0 or channels <= 0 or config.num_layers <= 0:
             raise ValueError("MinGRU widths and layer count must be positive.")
         self.input_channels = input_channels
         self.channels = channels
+        self.highway = None if config.highway is None else config.highway.make()
+        # `hidden` and gate, plus the highway's logit when there is one.
+        slices = 2 if self.highway is None else 3
         self.input_projection = (
             nn.Identity()
             if input_channels == channels
             else nn.Linear(input_channels, channels, bias=False)
         )
         self.layers = nn.ModuleList(
-            nn.Linear(channels, 3 * channels, bias=False) for _ in range(layers)
+            nn.Linear(channels, slices * channels, bias=False)
+            for _ in range(config.num_layers)
         )
 
     def initial_state(
@@ -184,7 +295,7 @@ class MinGRU(nn.Module):
             carries: list[Tensor] = []
             for layer_index, layer in enumerate(self.layers):
                 combined = layer(value).float()
-                hidden, gate, highway = combined.chunk(3, dim=-1)
+                hidden, gate, *logit = combined.split(self.channels, dim=-1)
                 candidate = torch.where(
                     hidden >= 0,
                     hidden + 0.5,
@@ -197,8 +308,11 @@ class MinGRU(nn.Module):
                     innovation=update * candidate,
                     initial=state[layer_index].float(),
                 )
-                strength = torch.sigmoid(highway)
-                value = (1 - strength) * value + strength * carry
+                value = (
+                    carry
+                    if self.highway is None
+                    else self.highway(carry, inputs=value, logit=logit[0])
+                )
                 carries.append(carry[:, -1])
             return value, torch.stack(carries)
 
@@ -792,11 +906,13 @@ class MinGRUBlock(nn.Module):
 
 
 __all__ = [
+    "Highway",
     "MinGRU",
     "MinGRUBlock",
     "Scan",
     "ScanBackward",
     "ScanForward",
+    "SigmoidHighway",
     "TorchScan",
     "TritonScan",
 ]

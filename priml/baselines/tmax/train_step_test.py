@@ -16,7 +16,7 @@ import pytest
 import torch
 
 from priml import hub, runtime
-from priml.baselines.tmax import train_step as train_step_module
+from priml.baselines.tmax import train_step
 from priml.baselines.tmax.train_step import (
     TMaxDPPOTrainStep,
     _cluster_attention,
@@ -196,8 +196,8 @@ def test_full_checkpoint_uses_the_distributed_loader_for_dtensors(
         """Record the distributed state-load call."""
         captured.update(target=target, values=values, options=options)
 
-    monkeypatch.setattr(train_step_module, "DTensor", Tensor)
-    monkeypatch.setattr(train_step_module, "set_model_state_dict", load)
+    monkeypatch.setattr(train_step, "DTensor", Tensor)
+    monkeypatch.setattr(train_step, "set_model_state_dict", load)
     _load_checkpoint_state(model, state)
 
     assert captured["target"] is model
@@ -501,7 +501,7 @@ def test_export_writes_only_on_rank_zero(
 ) -> None:
     """Every rank gathers the policy; only rank zero writes the directory."""
     step = _staged_step(tmp_path)
-    monkeypatch.setattr(train_step_module, "is_rank_zero", lambda: False)
+    monkeypatch.setattr(train_step, "is_rank_zero", lambda: False)
     assert step.export_checkpoint(tmp_path / "export") is None
     assert not (tmp_path / "export").exists()
 
@@ -528,7 +528,7 @@ def test_the_staged_tokenizer_must_resolve_a_pad_id(
 ) -> None:
     (tmp_path / "tokenizer_config.json").write_text(tokenizer_config, encoding="utf-8")
     with pytest.raises(ValueError, match=match):
-        train_step_module._tokenizer_pad_token_id(tmp_path)
+        train_step._tokenizer_pad_token_id(tmp_path)
 
 
 def test_the_pad_token_may_be_an_added_token_record(tmp_path: Path) -> None:
@@ -541,7 +541,7 @@ def test_the_pad_token_may_be_an_added_token_record(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    assert train_step_module._tokenizer_pad_token_id(tmp_path) == 7
+    assert train_step._tokenizer_pad_token_id(tmp_path) == 7
 
 
 def test_export_derives_the_text_only_config(tmp_path: Path) -> None:

@@ -47,7 +47,7 @@ LoaderThroughput.Config(
         │           non_blocking=False,
         │           stream_field='pending_tensorizations'
         │       ),
-        │       PrefetchBuffer.Config(size=2, fill_first=False)
+        │       PrefetchBuffer.Config(size=2, fill_first=False, poll_sec=0.1)
         │   ],
         │   filters_shortcircuit=True,
         │   enable_cache=False,
@@ -102,7 +102,7 @@ LoaderThroughput.Config(
         │           non_blocking=False,
         │           stream_field='pending_tensorizations'
         │       ),
-        │       PrefetchBuffer.Config(size=2, fill_first=False)
+        │       PrefetchBuffer.Config(size=2, fill_first=False, poll_sec=0.1)
         │   ],
         │   filters_shortcircuit=True,
         │   enable_cache=False,

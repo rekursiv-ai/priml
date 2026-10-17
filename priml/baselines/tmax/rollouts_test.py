@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final, cast
 
+import gzip
 import json
 
 from treekle import json_loads
@@ -29,8 +30,9 @@ ROOT = _CWD
 
 def _published_payload() -> dict[str, object]:
     """Return the first released rollout record, decoded."""
+    packed = (ROOT / "testdata" / "recorded_rollout.jsonl.gz").read_bytes()
     return json_loads(
-        (ROOT / "testdata" / "recorded_rollout.jsonl").read_text().splitlines()[0],
+        gzip.decompress(packed).decode().splitlines()[0],
         dict[str, object],
     )
 
@@ -111,9 +113,11 @@ def test_packing_keeps_tool_mask_and_shifts_nothing_early() -> None:
     assert row.advantages.tolist() == [0.0, 0.0, 0.5, 0.0, 0.0, 0.0, -0.5]
 
 
-def test_packing_refuses_published_records_without_tool_masks() -> None:
+def test_packing_refuses_published_records_without_tool_masks(
+    recorded_rollout: Path,
+) -> None:
     """Refuse tool masking when a published record has no tool mask."""
-    record = read_rollout_records(ROOT / "testdata" / "recorded_rollout.jsonl")[0]
+    record = read_rollout_records(recorded_rollout)[0]
     assert record.tool_mask is None
     with pytest.raises(ValueError, match="tool_mask"):
         pack_rollouts(
@@ -125,9 +129,11 @@ def test_packing_refuses_published_records_without_tool_masks() -> None:
         )
 
 
-def test_published_record_is_read_without_rewriting_its_schema() -> None:
+def test_published_record_is_read_without_rewriting_its_schema(
+    recorded_rollout: Path,
+) -> None:
     """Parse the published shard without renaming or remapping fields."""
-    record = read_rollout_records(ROOT / "testdata" / "recorded_rollout.jsonl")[0]
+    record = read_rollout_records(recorded_rollout)[0]
     assert len(record.prompt_tokens) == 1_484
     assert len(record.response_tokens) == len(record.logprobs) == 1_370
     assert record.step == 91

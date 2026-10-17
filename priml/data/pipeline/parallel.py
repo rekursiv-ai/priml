@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import functools
 import logging
+import math
 import queue
 import threading
 
@@ -97,6 +98,9 @@ class ParMap:
         max_output_queue_size: int = -1
         """Maximum results waiting to be yielded (-1 = unbounded)."""
 
+        poll_sec: float = 0.1
+        """Longest a blocked queue wait runs before it rechecks the stop signals."""
+
         processors: list[Makeable[Processor[Any, Any]]] = field(  # pyright: ignore[reportExplicitAny] -- Stages are typed pairwise; a list of them has no expressible element type.
             default_factory=list[Makeable[Processor[Any, Any]]],  # pyright: ignore[reportExplicitAny] -- Stages are typed pairwise; a list of them has no expressible element type.
         )
@@ -105,9 +109,12 @@ class ParMap:
     def __init__(self, config: Config):
         if config.num_threads < 0:
             raise ValueError(f"num_threads must be >= 0; got {config.num_threads}.")
+        if config.poll_sec <= 0 or math.isnan(config.poll_sec):
+            raise ValueError(f"poll_sec must be > 0; got {config.poll_sec}.")
         self.num_threads = config.num_threads
         self.max_input_queue_size = config.max_input_queue_size
         self.max_output_queue_size = config.max_output_queue_size
+        self.poll_sec = config.poll_sec
         self.processors: list[Processor[Any, Any]] = [  # pyright: ignore[reportExplicitAny] -- Stages are typed pairwise; a list of them has no expressible element type.
             p.make() for p in config.processors
         ]
@@ -137,6 +144,7 @@ class ParMap:
             output_queue=queue.Queue(
                 maxsize=max(self.max_output_queue_size, 0),
             ),
+            poll_sec=self.poll_sec,
         )
         threads = [
             threading.Thread(target=run.work, daemon=True)
@@ -197,12 +205,18 @@ class PrefetchBuffer:
         fill_first: bool = False
         """If True, fill buffer before yielding (prevents model thrashing). Also disables background thread when size<0."""
 
+        poll_sec: float = 0.1
+        """Longest a blocked put waits before it rechecks that the consumer is reading."""
+
     Input = dict[str, object]
     Output = Input
 
     def __init__(self, config: Config):
+        if config.poll_sec <= 0 or math.isnan(config.poll_sec):
+            raise ValueError(f"poll_sec must be > 0; got {config.poll_sec}.")
         self.size = config.size
         self.fill_first = config.fill_first
+        self.poll_sec = config.poll_sec
 
     def __call__(self, samples: Iterator[Input]) -> Iterator[Output]:
         """Prefetch samples in background thread.
@@ -234,6 +248,7 @@ class PrefetchBuffer:
         run = _PrefetchRun(
             items=queue.Queue(maxsize=max(self.size, 0)),
             fill_bound=self.size if self.fill_first else 0,
+            poll_sec=self.poll_sec,
         )
         threading.Thread(
             target=functools.partial(run.produce, samples),
@@ -274,6 +289,9 @@ class _ParMapRun:
     processors: list[Processor[Any, Any]]  # pyright: ignore[reportExplicitAny] -- Stages are typed pairwise; a list of them has no expressible element type.
     input_queue: queue.Queue[dict[str, object] | _End]
     output_queue: queue.Queue[dict[str, object] | _End]
+    poll_sec: float
+    """Longest a blocked queue wait runs before it rechecks the stop signals."""
+
     errors: list[Exception] = field(default_factory=list[Exception])
     stop_event: threading.Event = field(default_factory=threading.Event)
     """Set on any failure or on close: workers and the feeder stop."""
@@ -294,7 +312,12 @@ class _ParMapRun:
         """
         try:
             for result in _chain(self.processors, self._inputs()):
-                _put_until_stopped(self.output_queue, result, self.stop_event)
+                _put_until_stopped(
+                    self.output_queue,
+                    result,
+                    self.stop_event,
+                    self.poll_sec,
+                )
         except Exception as e:  # noqa: BLE001 -- Worker failures must stop the run and reach the consumer through the shared exception channel.
             self.errors.append(e)
             self.stop_event.set()
@@ -311,7 +334,12 @@ class _ParMapRun:
             for sample in samples:
                 if self.stop_event.is_set():
                     return
-                _put_until_stopped(self.input_queue, sample, self.stop_event)
+                _put_until_stopped(
+                    self.input_queue,
+                    sample,
+                    self.stop_event,
+                    self.poll_sec,
+                )
                 self.peak_input_queue_size = max(
                     self.peak_input_queue_size,
                     self.input_queue.qsize(),
@@ -323,13 +351,28 @@ class _ParMapRun:
             # One end marker per worker, each waited for: a worker left without
             # one blocks forever and so does the end of the stream.
             for _ in range(num_workers):
-                _put_until_stopped(self.input_queue, _END, self.stop_event)
+                _put_until_stopped(
+                    self.input_queue,
+                    _END,
+                    self.stop_event,
+                    self.poll_sec,
+                )
 
     def finish(self, workers: list[threading.Thread]) -> None:
-        """Wait for every worker, then end the output stream."""
+        """Wait for every worker, then end the output stream.
+
+        Args:
+          workers: The worker threads to join.
+
+        """
         for worker in workers:
             worker.join()
-        _put_until_stopped(self.output_queue, _END, self.consumer_closed)
+        _put_until_stopped(
+            self.output_queue,
+            _END,
+            self.consumer_closed,
+            self.poll_sec,
+        )
 
     def drain(self) -> Iterator[dict[str, object]]:
         """Yield worker results until the end marker; raise the first failure.
@@ -354,7 +397,7 @@ class _ParMapRun:
         """Yield queued samples until this worker's end marker or a stop."""
         while not self.stop_event.is_set():
             try:
-                item = self.input_queue.get(timeout=0.1)
+                item = self.input_queue.get(timeout=self.poll_sec)
             except queue.Empty:
                 continue
             if isinstance(item, _End):
@@ -369,6 +412,9 @@ class _PrefetchRun:
     items: queue.Queue[dict[str, object] | _End]
     fill_bound: int
     """Items buffered before ``buffer_ready``; 0 releases it at once."""
+
+    poll_sec: float
+    """Longest a blocked put waits before it rechecks ``consumer_closed``."""
 
     error: list[Exception] = field(default_factory=list[Exception])
     buffer_ready: threading.Event = field(default_factory=threading.Event)
@@ -387,7 +433,12 @@ class _PrefetchRun:
             for sample in samples:
                 if self.consumer_closed.is_set():
                     return
-                _put_until_stopped(self.items, sample, self.consumer_closed)
+                _put_until_stopped(
+                    self.items,
+                    sample,
+                    self.consumer_closed,
+                    self.poll_sec,
+                )
                 self.peak_queue_size = max(self.peak_queue_size, self.items.qsize())
                 if self.fill_bound and self.items.qsize() >= self.fill_bound:
                     self.buffer_ready.set()
@@ -395,7 +446,12 @@ class _PrefetchRun:
             self.error.append(e)
         finally:
             self.buffer_ready.set()
-            _put_until_stopped(self.items, _END, self.consumer_closed)
+            _put_until_stopped(
+                self.items,
+                _END,
+                self.consumer_closed,
+                self.poll_sec,
+            )
 
     def drain(self) -> Iterator[dict[str, object]]:
         """Yield buffered samples until the end marker; raise an upstream failure.
@@ -431,11 +487,12 @@ def _put_until_stopped[T](
     input_queue: queue.Queue[T],
     sample: T,
     stop_event: threading.Event,
+    poll_sec: float,
 ) -> None:
     """Put ``sample`` on the queue, retrying until it lands or ``stop_event`` is set."""
     while not stop_event.is_set():
         try:
-            input_queue.put(sample, timeout=0.1)
+            input_queue.put(sample, timeout=poll_sec)
             return
         except queue.Full:
             continue

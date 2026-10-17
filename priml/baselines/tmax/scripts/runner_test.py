@@ -19,11 +19,7 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.tmax.scripts import (
-    custom_types,
-    runner as runner_module,
-    upstream,
-)
+from priml.baselines.tmax.scripts import custom_types, runner, upstream
 from priml.baselines.tmax.scripts.rollout_writer import RolloutWriter
 from priml.baselines.tmax.scripts.runner import (
     CollectionSession,
@@ -322,7 +318,7 @@ def test_upstream_import_enables_released_reset_handling(
         return ModuleType(name)
 
     monkeypatch.setattr(importlib, "import_module", import_module)
-    runner_module.load_upstream_api(tmp_path)
+    runner.load_upstream_api(tmp_path)
     assert observed == ["1"]
 
 
@@ -345,7 +341,7 @@ def test_ray_init_forwards_only_the_runtime_allowlist(
     # Ray workers get the allowlist only; ambient credentials never travel.
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "do-not-forward")
     ray = _FakeRay(initialized=False)
-    assert runner_module._initialize_ray(RunnerConfig(), ray)
+    assert runner._initialize_ray(RunnerConfig(), ray)
     assert ray.init_calls == [{"env_vars": RayRuntimePolicy().env_vars()}]
     assert "AWS_SECRET_ACCESS_KEY" not in cast(
         "dict[str, str]",
@@ -356,10 +352,10 @@ def test_ray_init_forwards_only_the_runtime_allowlist(
 def test_existing_ray_requires_a_matching_runtime_policy() -> None:
     # An already-running Ray job must carry the same runtime policy.
     ray = _FakeRay(runtime_env={"env_vars": RayRuntimePolicy().env_vars()})
-    assert not runner_module._initialize_ray(RunnerConfig(), ray)
+    assert not runner._initialize_ray(RunnerConfig(), ray)
     ray.runtime_env = {}
     with pytest.raises(RuntimeError, match="already initialized"):
-        runner_module._initialize_ray(RunnerConfig(), ray)
+        runner._initialize_ray(RunnerConfig(), ray)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -391,7 +387,7 @@ class _InventoryProbe:
 
 
 def _probe_task(target: object) -> custom_types.RemoteFunction:
-    assert target is runner_module._checkpoint_inventory
+    assert target is runner._checkpoint_inventory
     return _InventoryProbe()
 
 
@@ -417,7 +413,7 @@ def _staged_checkpoint(tmp_path: Path, contents: str = "{}") -> Path:
 def test_checkpoint_must_match_on_every_live_ray_node(tmp_path: Path) -> None:
     # vLLM actors load this path remotely; a driver-local checkpoint is not enough.
     checkpoint = _staged_checkpoint(tmp_path)
-    expected = runner_module._checkpoint_inventory(str(checkpoint))
+    expected = runner._checkpoint_inventory(str(checkpoint))
     ray = _probe_ray(
         [
             {"Alive": True, "NodeManagerAddress": "10.0.0.1"},
@@ -427,20 +423,20 @@ def test_checkpoint_must_match_on_every_live_ray_node(tmp_path: Path) -> None:
         lambda node: expected if node == "10.0.0.1" else None,
     )
     with pytest.raises(RuntimeError, match=r"10\.0\.0\.2.*shared storage"):
-        runner_module._require_checkpoint_on_ray_nodes(checkpoint, ray)
+        runner._require_checkpoint_on_ray_nodes(checkpoint, ray)
 
 
 def test_checkpoint_probe_accepts_the_same_inventory_on_every_node(
     tmp_path: Path,
 ) -> None:
     checkpoint = _staged_checkpoint(tmp_path)
-    expected = runner_module._checkpoint_inventory(str(checkpoint))
+    expected = runner._checkpoint_inventory(str(checkpoint))
     assert expected is not None
     ray = _probe_ray(
         [{"Alive": True, "NodeManagerAddress": "10.0.0.1"}],
         lambda _node: expected,
     )
-    runner_module._require_checkpoint_on_ray_nodes(checkpoint, ray)
+    runner._require_checkpoint_on_ray_nodes(checkpoint, ray)
 
 
 def test_checkpoint_probe_rejects_same_size_different_contents(
@@ -448,10 +444,10 @@ def test_checkpoint_probe_rejects_same_size_different_contents(
 ) -> None:
     checkpoint = _staged_checkpoint(tmp_path, "left")
     config = checkpoint / "config.json"
-    expected = runner_module._checkpoint_inventory(str(checkpoint))
+    expected = runner._checkpoint_inventory(str(checkpoint))
     assert expected is not None
     config.write_text("rite", encoding="utf-8")
-    different = runner_module._checkpoint_inventory(str(checkpoint))
+    different = runner._checkpoint_inventory(str(checkpoint))
     assert different is not None
     assert [(name, size) for name, size, _digest in expected] == [
         (name, size) for name, size, _digest in different
@@ -463,7 +459,7 @@ def test_checkpoint_probe_rejects_same_size_different_contents(
         lambda _node: different,
     )
     with pytest.raises(RuntimeError, match=r"differs.*10\.0\.0\.1"):
-        runner_module._require_checkpoint_on_ray_nodes(checkpoint, ray)
+        runner._require_checkpoint_on_ray_nodes(checkpoint, ray)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -1053,9 +1049,9 @@ def test_run_primes_collects_and_closes_its_ray_runtime(
         events.append("collect")
         return paths
 
-    monkeypatch.setattr(runner_module, "build_session", build)
-    monkeypatch.setattr(runner_module, "prime_prompts", prime)
-    monkeypatch.setattr(runner_module, "run_updates", collect)
+    monkeypatch.setattr(runner, "build_session", build)
+    monkeypatch.setattr(runner, "prime_prompts", prime)
+    monkeypatch.setattr(runner, "run_updates", collect)
 
     assert run(RunnerConfig(output_dir=tmp_path), api) == paths
     assert events == ["build", "prime", "collect", "shutdown"]
@@ -1076,7 +1072,7 @@ def test_run_resolves_paths_before_loading_upstream(
         observed.append(root)
         raise RuntimeError("stop after observing the path")
 
-    monkeypatch.setattr(runner_module, "load_upstream_api", load)
+    monkeypatch.setattr(runner, "load_upstream_api", load)
 
     with pytest.raises(RuntimeError, match="stop after observing"):
         run(config)
@@ -1112,13 +1108,13 @@ def test_runner_cli_resolves_defaults_under_base_dir(
         captured.append(config)
         return [tmp_path / "shard.jsonl"]
 
-    monkeypatch.setattr(runner_module, "run", run)
+    monkeypatch.setattr(runner, "run", run)
     monkeypatch.setattr(
         "sys.argv",
         ["runner", "--base-dir", str(tmp_path)],
     )
 
-    assert runner_module.main() == 0
+    assert runner.main() == 0
     assert capsys.readouterr().out == f"{tmp_path / 'shard.jsonl'}\n"
     assert len(captured) == 1
     config = captured[0]
@@ -1169,7 +1165,7 @@ def test_session_failure_only_shuts_down_owned_ray(
         del checkpoint, ray
         raise RuntimeError("setup failed")
 
-    monkeypatch.setattr(runner_module, "_require_checkpoint_on_ray_nodes", fail)
+    monkeypatch.setattr(runner, "_require_checkpoint_on_ray_nodes", fail)
 
     with pytest.raises(RuntimeError, match="setup failed"):
         build_session(config, api)

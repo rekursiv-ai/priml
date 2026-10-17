@@ -38,6 +38,14 @@ from priml.testing.golden import assert_pprint_golden
 _CWD: Final = Path(__file__).resolve().parent
 
 
+def _min_gru(input_channels: int, channels: int, layers: int = 1) -> MinGRU:
+    config = MinGRU.Config()
+    config.channels_in = input_channels
+    config.channels_hidden = channels
+    config.num_layers = layers
+    return config.make()
+
+
 def _allow_cpu_scan(combined: Tensor) -> None:
     del combined
 
@@ -83,7 +91,7 @@ class _LinearSpy(torch.nn.Linear):
 
 
 def test_min_gru_matches_hand_forward_and_returns_layer_state() -> None:
-    model = MinGRU(input_channels=5, channels=6, layers=2)
+    model = _min_gru(5, 6, layers=2)
     with torch.no_grad():
         model.input_projection.weight.zero_()
         for layer in model.layers:
@@ -130,13 +138,13 @@ def test_min_gru_passes_false_for_each_projection_bias(
     _LinearSpy.bias_arguments.clear()
     monkeypatch.setattr(torch.nn, "Linear", _LinearSpy)
 
-    MinGRU(input_channels=3, channels=4, layers=2)
+    _min_gru(3, 4, layers=2)
 
     assert _LinearSpy.bias_arguments == [False, False, False]
 
 
 def test_min_gru_zero_hidden_uses_shifted_identity_gradient() -> None:
-    model = MinGRU(input_channels=4, channels=4)
+    model = _min_gru(4, 4)
     with torch.no_grad():
         model.layers[0].weight.zero_()
     inputs = torch.ones(3, 2, 4)
@@ -154,7 +162,7 @@ def test_min_gru_zero_hidden_uses_shifted_identity_gradient() -> None:
 
 def test_min_gru_repeated_step_equals_sequence() -> None:
     torch.manual_seed(0)
-    model = MinGRU(input_channels=3, channels=4, layers=2)
+    model = _min_gru(3, 4, layers=2)
     inputs = torch.randn(2, 5, 3)
     reset = torch.zeros(2, 5, dtype=torch.bool)
     sequence, state = model(inputs, reset=reset)
@@ -172,7 +180,7 @@ def test_min_gru_repeated_step_equals_sequence() -> None:
 
 
 def test_min_gru_reset_discards_previous_state() -> None:
-    model = MinGRU(input_channels=4, channels=5, layers=1)
+    model = _min_gru(4, 5, layers=1)
     inputs = torch.randn(3, 2, 4)
     reset = torch.tensor([[False, True], [False, True], [False, True]])
     outputs, _ = model(inputs, reset=reset)
@@ -187,7 +195,7 @@ def test_min_gru_reset_discards_previous_state() -> None:
 
 def test_min_gru_rejects_an_empty_time_dimension() -> None:
     """Reject T=0 at the public boundary before stacked outputs fail incidentally."""
-    model = MinGRU(input_channels=2, channels=2)
+    model = _min_gru(2, 2)
 
     with pytest.raises(ValueError, match="time"):
         # Degenerate zero-time input is intentional for this pytest.raises case.
@@ -200,16 +208,16 @@ def test_min_gru_validates_constructor_and_call_shapes() -> None:
             ValueError,
             match=r"\AMinGRU widths and layer count must be positive\.\Z",
         ):
-            MinGRU(values[0], values[1], values[2])
-    single_width = MinGRU(1, 1)
+            _min_gru(values[0], values[1], values[2])
+    single_width = _min_gru(1, 1)
     assert len(single_width.layers) == 1
     assert isinstance(single_width.input_projection, torch.nn.Identity)
-    default_model = MinGRU(2, 3)
+    default_model = _min_gru(2, 3)
     assert len(default_model.layers) == 1
     assert isinstance(default_model.input_projection, torch.nn.Linear)
     assert default_model.input_projection.bias is None
     assert default_model.layers[0].bias is None
-    model = MinGRU(2, 4, layers=2)
+    model = _min_gru(2, 4, layers=2)
     inputs = torch.randn(3, 5, 2)
     with pytest.raises(ValueError, match="shape"):
         model(inputs[..., 0])
@@ -228,14 +236,14 @@ def test_min_gru_validates_constructor_and_call_shapes() -> None:
 
 
 def test_min_gru_initial_state_preserves_device_and_fp32_dtype() -> None:
-    model = MinGRU(2, 3)
+    model = _min_gru(2, 3)
     initial = model.initial_state(2)
     assert initial.shape == (1, 2, 3)
     assert initial.dtype == torch.float32
     assert initial.device == next(model.parameters()).device
     assert torch.equal(initial, torch.zeros_like(initial))
 
-    meta_model = MinGRU(2, 3).to("meta")
+    meta_model = _min_gru(2, 3).to("meta")
     assert meta_model.initial_state(2).device == torch.device("meta")
     assert model.initial_state(2, device="meta").device == torch.device("meta")
 
@@ -245,6 +253,36 @@ def test_min_gru_initial_state_preserves_device_and_fp32_dtype() -> None:
         assert model.initial_state(2).dtype == torch.float32
     finally:
         torch.set_default_dtype(default_dtype)
+
+
+@pytest.mark.parametrize(
+    ("channels_in", "highway"),
+    [(3, True), (4, True), (3, False)],
+    ids=["projected", "identity", "no-highway"],
+)
+def test_min_gru_cost_counts_the_parameters_it_builds(
+    channels_in: int,
+    *,
+    highway: bool,
+) -> None:
+    config = MinGRU.Config()
+    config.channels_in = channels_in
+    config.channels_hidden = 4
+    config.num_layers = 2
+    if not highway:
+        config.highway = None
+    config.finalize()
+
+    estimate = config.cost(seq_len=5, batch_size=6, dtype=torch.float32)
+
+    assert estimate.params == sum(p.numel() for p in config.make().parameters())
+    # Per layer and step: projection 2*4*(slices*4) plus 24 elementwise ops per
+    # channel with the highway (16 without), over 5*6 rows and 2 layers.
+    slices, ops = (3, 24) if highway else (2, 16)
+    projection_in = 2 * channels_in * 4 if channels_in != 4 else 0
+    expected = 30 * (projection_in + 2 * (2 * 4 * slices * 4 + ops * 4))
+    primal = estimate["flops", "primal"]
+    assert primal.sum() == expected
 
 
 def test_scan_config_cost_and_triton_cpu_dispatch() -> None:
@@ -308,7 +346,7 @@ def test_scan_private_metadata_paths() -> None:
 
 
 def test_min_gru_has_gradient_through_inputs_and_parameters() -> None:
-    model = MinGRU(input_channels=3, channels=4, layers=2)
+    model = _min_gru(3, 4, layers=2)
     inputs = torch.randn(2, 4, 3, requires_grad=True)
     outputs, _ = model(inputs)
     outputs.square().mean().backward()
@@ -333,7 +371,7 @@ def test_min_gru_vectorized_scan_matches_sequential_reference(
 ) -> None:
     """The doubling scan must reproduce the loop it replaced, resets included."""
     torch.manual_seed(0)
-    model = MinGRU(input_channels=channels, channels=channels, layers=layers)
+    model = _min_gru(channels, channels, layers=layers)
     inputs = torch.randn(batch, time, channels)
     reset = torch.rand(batch, time) < 0.3
     state = torch.randn(layers, batch, channels)
@@ -350,10 +388,37 @@ def test_min_gru_vectorized_scan_matches_sequential_reference(
     torch.testing.assert_close(final, expected_final, atol=1e-5, rtol=1e-5)
 
 
+def test_min_gru_without_highway_emits_its_carry_and_projects_two_slices() -> None:
+    """The paper's minGRU: no highway logit, and each layer's output is ``h``."""
+    torch.manual_seed(2)
+    config = MinGRU.Config()
+    config.channels_in = 3
+    config.channels_hidden = 4
+    config.num_layers = 2
+    config.highway = None
+    model = config.make()
+    inputs = torch.randn(6, 5, 3)
+    reset = torch.rand(6, 5) < 0.3
+    state = torch.randn(2, 6, 4)
+
+    outputs, final = model(inputs, state=state, reset=reset)
+    expected_outputs, expected_final = _sequential_min_gru(
+        model,
+        inputs=inputs,
+        state=state,
+        reset=reset,
+    )
+
+    assert [layer.weight.shape for layer in model.layers] == [(8, 4), (8, 4)]
+    torch.testing.assert_close(outputs, expected_outputs, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(final, expected_final, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(outputs[:, -1], final[-1])
+
+
 def test_min_gru_forced_fp32_ignores_an_ambient_bf16_autocast() -> None:
     """MinGRU's carry must not degrade under a caller's bf16 autocast region."""
     torch.manual_seed(1)
-    model = MinGRU(input_channels=4, channels=4, layers=2)
+    model = _min_gru(4, 4, layers=2)
     inputs = torch.randn(2, 6, 4)
     reset = torch.rand(2, 6) < 0.3
 
@@ -950,7 +1015,7 @@ def _sequential_min_gru(
     carries: list[torch.Tensor] = []
     for layer_index, layer in enumerate(model.layers):
         combined = layer(value).float()
-        hidden, gate, highway = combined.chunk(3, dim=-1)
+        hidden, gate, *highway = combined.split(model.channels, dim=-1)
         carry = state[layer_index].float()
         outputs: list[torch.Tensor] = []
         for step in range(time):
@@ -961,7 +1026,10 @@ def _sequential_min_gru(
                 torch.sigmoid(hidden[:, step]),
             )
             carry = torch.lerp(carry, candidate, torch.sigmoid(gate[:, step]))
-            strength = torch.sigmoid(highway[:, step])
+            if not highway:
+                outputs.append(carry)
+                continue
+            strength = torch.sigmoid(highway[0][:, step])
             outputs.append((1 - strength) * value[:, step] + strength * carry)
         value = torch.stack(outputs, dim=1)
         carries.append(carry)

@@ -92,7 +92,15 @@ def test_module_docstring_lists_every_experiment() -> None:
 
 def test_exp000_matches_its_golden_config() -> None:
     """Pin the complete finalized exp000 config."""
-    assert_pprint_golden(test_file=__file__, name="exp000", config=exp000())
+    # The public export drops the monorepo prefix from every class path, so each
+    # is five characters shorter there; at width 80 the ``module_types`` tuple
+    # wraps only here. 81 is the narrowest width that renders the public golden.
+    assert_pprint_golden(
+        test_file=__file__,
+        name="exp000",
+        config=exp000(),
+        width=81,
+    )
 
 
 def test_exp000_names_the_artifact_backed_cluster_recipe() -> None:

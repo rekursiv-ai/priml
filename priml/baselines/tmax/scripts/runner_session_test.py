@@ -13,10 +13,7 @@ import importlib
 
 import pytest
 
-from priml.baselines.tmax.scripts import (
-    runner as runner_module,
-    upstream,
-)
+from priml.baselines.tmax.scripts import runner, upstream
 from priml.baselines.tmax.scripts.runner import (
     CollectionSession,
     RayRuntimePolicy,
@@ -250,7 +247,7 @@ def test_build_session_wires_upstream_with_the_released_settings(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runner_module, "_require_checkpoint_on_ray_nodes", _unused_ok)
+    monkeypatch.setattr(runner, "_require_checkpoint_on_ray_nodes", _unused_ok)
     fake = _BuildUpstream()
     ray = _BuildRay()
     config = _staged(tmp_path)
@@ -283,7 +280,7 @@ def test_build_session_requires_the_actor_manager_module(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runner_module, "_require_checkpoint_on_ray_nodes", _unused_ok)
+    monkeypatch.setattr(runner, "_require_checkpoint_on_ray_nodes", _unused_ok)
     ray = _BuildRay()
     with pytest.raises(RuntimeError, match="does not expose ActorManager"):
         build_session(
@@ -304,7 +301,7 @@ def test_build_session_requires_the_task_data(tmp_path: Path) -> None:
 
 
 def test_a_ray_context_without_a_runtime_env_reads_as_empty() -> None:
-    assert runner_module._initialized_runtime_env(_BuildRay(initialized=True)) == {}
+    assert runner._initialized_runtime_env(_BuildRay(initialized=True)) == {}
 
 
 @dataclass(kw_only=True, slots=True)
@@ -324,25 +321,25 @@ def test_a_ray_context_exposing_get_runtime_env_is_read(
     expected: dict[str, object],
 ) -> None:
     ray = _BuildRay(initialized=True, context=_GetterContext(value=value))
-    assert runner_module._initialized_runtime_env(ray) == expected
+    assert runner._initialized_runtime_env(ray) == expected
 
 
 def test_a_checkpoint_missing_on_the_driver_is_refused(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="missing or empty on the driver"):
-        runner_module._require_checkpoint_on_ray_nodes(tmp_path / "absent", _BuildRay())
+        runner._require_checkpoint_on_ray_nodes(tmp_path / "absent", _BuildRay())
 
 
 def test_a_cluster_without_live_nodes_is_refused(tmp_path: Path) -> None:
     (tmp_path / "config.json").write_text("{}", encoding="utf-8")
     with pytest.raises(RuntimeError, match="no live inference nodes"):
-        runner_module._require_checkpoint_on_ray_nodes(tmp_path, _BuildRay())
+        runner._require_checkpoint_on_ray_nodes(tmp_path, _BuildRay())
 
 
 def test_a_node_without_an_address_is_refused(tmp_path: Path) -> None:
     (tmp_path / "config.json").write_text("{}", encoding="utf-8")
     ray = _BuildRay(live_nodes=[{"Alive": True}])
     with pytest.raises(RuntimeError, match="no NodeManagerAddress"):
-        runner_module._require_checkpoint_on_ray_nodes(tmp_path, ray)
+        runner._require_checkpoint_on_ray_nodes(tmp_path, ray)
 
 
 # -- config -------------------------------------------------------------------
@@ -350,7 +347,7 @@ def test_a_node_without_an_address_is_refused(tmp_path: Path) -> None:
 
 def test_the_released_system_prompt_lives_in_the_checkout() -> None:
     config = RunnerConfig()
-    assert config.system_prompt() == config.upstream_root / runner_module.SYSTEM_PROMPT
+    assert config.system_prompt() == config.upstream_root / runner.SYSTEM_PROMPT
     assert config.max_model_len == config.max_prompt_tokens + config.response_length
 
 
@@ -400,7 +397,7 @@ def test_upstream_import_binds_vllms_weight_transfer_engine(
     monkeypatch.setattr(upstream, "verify_checkout", checkout)
     monkeypatch.setattr(upstream, "open_instruct", checkout)
     monkeypatch.setattr(importlib, "import_module", ModuleType)
-    api = runner_module.load_upstream_api(tmp_path)
+    api = runner.load_upstream_api(tmp_path)
     assert api.weight_transfer is not None
     base, nccl = api.weight_transfer
     assert cast("ModuleType", base).__name__.endswith("weight_transfer.base")
@@ -504,7 +501,7 @@ def test_the_released_runtime_policy_is_applied_once(
     policy: Callable[[], dict[str, str]] = RayRuntimePolicy().env_vars
     monkeypatch.delenv("VLLM_USE_V1", raising=False)
     ray = _BuildRay()
-    assert runner_module._initialize_ray(RunnerConfig(), ray)
+    assert runner._initialize_ray(RunnerConfig(), ray)
     assert policy()["VLLM_USE_V1"] == "1"
 
 

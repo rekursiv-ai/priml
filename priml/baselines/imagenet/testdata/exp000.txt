@@ -76,52 +76,56 @@ ImageNetTrainLoop(
         │   │       epoch_seed=0
         │   │   ),
         │   │   processors=[
-        │   │       GetBytesFromFile.Config(),
-        │   │       GetDimensionsFromBytes.Config(),
-        │   │       ImagenetSynsetToIndex.Config(
-        │   │           labels_file='labels_imagenet.txt'
-        │   │       ),
-        │   │       GetRandomResizedCropBoxFromDimensions.Config(
-        │   │           size=(160, 160),
-        │   │           scale=(0.08, 1.0),
-        │   │           ratio=(0.75, 1.3333333333333333)
-        │   │       ),
-        │   │       FieldRenameKeys.Config(
-        │   │           mappings={   'media': 'media',
-        │   │               'crop': 'crop',
-        │   │               'target_height': 'target_height',
-        │   │               'target_width': 'target_width',
-        │   │               'label': 'label',
-        │   │               '*': None}
-        │   │       ),
-        │   │       Batcher.Config(
-        │   │           size=512,
-        │   │           field_names=[
-        │   │               'media',
-        │   │               'crop',
-        │   │               'target_height',
-        │   │               'target_width',
-        │   │               'label'
-        │   │           ],
-        │   │           drop_remainder=True,
-        │   │           device=None
-        │   │       ),
-        │   │       DecodeCropResizeBatch.Config(
-        │   │           num_threads=2,
-        │   │           flip_p=0.5,
-        │   │           scale_to_target=False,
-        │   │           fast_dct=True
-        │   │       ),
-        │   │       AsTensor.Config(
-        │   │           device=None,
-        │   │           dtype=torch.int64,
-        │   │           include=['label'],
-        │   │           exclude=['raw'],
-        │   │           pin_memory=False,
-        │   │           non_blocking=False,
-        │   │           stream_field='pending_tensorizations'
-        │   │       ),
-        │   │       PrefetchBuffer.Config(size=2, fill_first=False)
+        │   │   │   GetBytesFromFile.Config(),
+        │   │   │   GetDimensionsFromBytes.Config(),
+        │   │   │   ImagenetSynsetToIndex.Config(
+        │   │   │       labels_file='labels_imagenet.txt'
+        │   │   │   ),
+        │   │   │   GetRandomResizedCropBoxFromDimensions.Config(
+        │   │   │       size=(160, 160),
+        │   │   │       scale=(0.08, 1.0),
+        │   │   │       ratio=(0.75, 1.3333333333333333)
+        │   │   │   ),
+        │   │   │   FieldRenameKeys.Config(
+        │   │   │       mappings={   'media': 'media',
+        │   │   │           'crop': 'crop',
+        │   │   │           'target_height': 'target_height',
+        │   │   │           'target_width': 'target_width',
+        │   │   │           'label': 'label',
+        │   │   │           '*': None}
+        │   │   │   ),
+        │   │   │   Batcher.Config(
+        │   │   │       size=512,
+        │   │   │       field_names=[
+        │   │   │           'media',
+        │   │   │           'crop',
+        │   │   │           'target_height',
+        │   │   │           'target_width',
+        │   │   │           'label'
+        │   │   │       ],
+        │   │   │       drop_remainder=True,
+        │   │   │       device=None
+        │   │   │   ),
+        │   │   │   DecodeCropResizeBatch.Config(
+        │   │   │       num_threads=2,
+        │   │   │       flip_p=0.5,
+        │   │   │       scale_to_target=False,
+        │   │   │       fast_dct=True
+        │   │   │   ),
+        │   │   │   AsTensor.Config(
+        │   │   │       device=None,
+        │   │   │       dtype=torch.int64,
+        │   │   │       include=['label'],
+        │   │   │       exclude=['raw'],
+        │   │   │       pin_memory=False,
+        │   │   │       non_blocking=False,
+        │   │   │       stream_field='pending_tensorizations'
+        │   │   │   ),
+        │   │   │   PrefetchBuffer.Config(
+        │   │   │       size=2,
+        │   │   │       fill_first=False,
+        │   │   │       poll_sec=0.1
+        │   │   │   )
         │   │   ],
         │   │   filters_shortcircuit=True,
         │   │   enable_cache=False,
@@ -139,51 +143,55 @@ ImageNetTrainLoop(
         │   │       epoch_seed=0
         │   │   ),
         │   │   processors=[
-        │   │       ImagenetSynsetToIndex.Config(
-        │   │           labels_file='labels_imagenet.txt'
-        │   │       ),
-        │   │       GetBytesFromFile.Config(),
-        │   │       GetDimensionsFromBytes.Config(),
-        │   │       GetCenterCropBoxFromDimensions.Config(
-        │   │           size=(256, 256),
-        │   │           ratio=0.875
-        │   │       ),
-        │   │       FieldRenameKeys.Config(
-        │   │           mappings={   'media': 'media',
-        │   │               'crop': 'crop',
-        │   │               'target_height': 'target_height',
-        │   │               'target_width': 'target_width',
-        │   │               'label': 'label',
-        │   │               '*': None}
-        │   │       ),
-        │   │       Batcher.Config(
-        │   │           size=512,
-        │   │           field_names=[
-        │   │               'media',
-        │   │               'crop',
-        │   │               'target_height',
-        │   │               'target_width',
-        │   │               'label'
-        │   │           ],
-        │   │           drop_remainder=False,
-        │   │           device=None
-        │   │       ),
-        │   │       DecodeCropResizeBatch.Config(
-        │   │           num_threads=2,
-        │   │           flip_p=0.0,
-        │   │           scale_to_target=False,
-        │   │           fast_dct=True
-        │   │       ),
-        │   │       AsTensor.Config(
-        │   │           device=None,
-        │   │           dtype=torch.int64,
-        │   │           include=['label'],
-        │   │           exclude=['raw'],
-        │   │           pin_memory=False,
-        │   │           non_blocking=False,
-        │   │           stream_field='pending_tensorizations'
-        │   │       ),
-        │   │       PrefetchBuffer.Config(size=4, fill_first=False)
+        │   │   │   ImagenetSynsetToIndex.Config(
+        │   │   │       labels_file='labels_imagenet.txt'
+        │   │   │   ),
+        │   │   │   GetBytesFromFile.Config(),
+        │   │   │   GetDimensionsFromBytes.Config(),
+        │   │   │   GetCenterCropBoxFromDimensions.Config(
+        │   │   │       size=(256, 256),
+        │   │   │       ratio=0.875
+        │   │   │   ),
+        │   │   │   FieldRenameKeys.Config(
+        │   │   │       mappings={   'media': 'media',
+        │   │   │           'crop': 'crop',
+        │   │   │           'target_height': 'target_height',
+        │   │   │           'target_width': 'target_width',
+        │   │   │           'label': 'label',
+        │   │   │           '*': None}
+        │   │   │   ),
+        │   │   │   Batcher.Config(
+        │   │   │       size=512,
+        │   │   │       field_names=[
+        │   │   │           'media',
+        │   │   │           'crop',
+        │   │   │           'target_height',
+        │   │   │           'target_width',
+        │   │   │           'label'
+        │   │   │       ],
+        │   │   │       drop_remainder=False,
+        │   │   │       device=None
+        │   │   │   ),
+        │   │   │   DecodeCropResizeBatch.Config(
+        │   │   │       num_threads=2,
+        │   │   │       flip_p=0.0,
+        │   │   │       scale_to_target=False,
+        │   │   │       fast_dct=True
+        │   │   │   ),
+        │   │   │   AsTensor.Config(
+        │   │   │       device=None,
+        │   │   │       dtype=torch.int64,
+        │   │   │       include=['label'],
+        │   │   │       exclude=['raw'],
+        │   │   │       pin_memory=False,
+        │   │   │       non_blocking=False,
+        │   │   │       stream_field='pending_tensorizations'
+        │   │   │   ),
+        │   │   │   PrefetchBuffer.Config(
+        │   │   │       size=4,
+        │   │   │       fill_first=False,
+        │   │   │       poll_sec=0.1
+        │   │   │   )
         │   │   ],
         │   │   filters_shortcircuit=True,
         │   │   enable_cache=False,

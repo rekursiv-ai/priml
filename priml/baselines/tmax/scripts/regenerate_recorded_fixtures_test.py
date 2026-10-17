@@ -5,17 +5,19 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from urllib import request
 
+import gzip
 import hashlib
 import io
 import json
 import tarfile
 import tempfile
+import time
 
 from treekle import json_loads
 
 import pytest
 
-from priml.baselines.tmax.scripts import regenerate_recorded_fixtures as regen
+from priml.baselines.tmax.scripts import regenerate_recorded_fixtures
 
 
 if TYPE_CHECKING:
@@ -56,10 +58,10 @@ def archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         tmp_path / "rollouts.tar",
         {"r/shard.jsonl": b"\n".join(_lines(_records())) + b"\n"},
     )
-    monkeypatch.setattr(regen, "ARCHIVE_SHA256", _sha256(path))
-    monkeypatch.setattr(regen, "SHARD_RECORDS", 4)
-    monkeypatch.setattr(regen, "GROUP_SIZE", 2)
-    monkeypatch.setattr(regen, "RECORDED_KEY", (1, 1, 0))
+    monkeypatch.setattr(regenerate_recorded_fixtures, "ARCHIVE_SHA256", _sha256(path))
+    monkeypatch.setattr(regenerate_recorded_fixtures, "SHARD_RECORDS", 4)
+    monkeypatch.setattr(regenerate_recorded_fixtures, "GROUP_SIZE", 2)
+    monkeypatch.setattr(regenerate_recorded_fixtures, "RECORDED_KEY", (1, 1, 0))
     return path
 
 
@@ -77,7 +79,7 @@ def _run(
         "sys.argv",
         ["regen", "--archive", str(archive), "--fixtures", str(fixtures), *extra],
     )
-    return regen.main()
+    return regenerate_recorded_fixtures.main()
 
 
 def test_write_then_verify_round_trips(
@@ -90,7 +92,7 @@ def test_write_then_verify_round_trips(
     fixtures.mkdir()
     assert _run(monkeypatch, archive, fixtures, "--write") == 0
     assert "rewrote" in capsys.readouterr().out
-    line = (fixtures / "recorded_rollout.jsonl").read_bytes()
+    line = gzip.decompress((fixtures / "recorded_rollout.jsonl.gz").read_bytes())
     assert json.loads(line) == _records()[1]
     payload = json_loads(
         (fixtures / "recorded_advantages.json").read_bytes(),
@@ -117,14 +119,51 @@ def test_verify_fails_on_missing_or_drifted_fixtures(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    (tmp_path / "recorded_rollout.jsonl").write_bytes(b"stale\n")
+    stale = gzip.compress(b"stale\n")
+    (tmp_path / "recorded_rollout.jsonl.gz").write_bytes(stale)
     with pytest.raises(SystemExit) as exit_info:
         _run(monkeypatch, archive, tmp_path)
     assert exit_info.value.code == 1
     out = capsys.readouterr().out
-    assert "recorded_rollout.jsonl: differs from the committed fixture" in out
+    assert "recorded_rollout.jsonl.gz: differs from the committed fixture" in out
     assert "recorded_advantages.json: missing" in out
-    assert (tmp_path / "recorded_rollout.jsonl").read_bytes() == b"stale\n"
+    assert (tmp_path / "recorded_rollout.jsonl.gz").read_bytes() == stale
+
+
+def test_verify_compares_the_gzipped_record_by_content(
+    archive: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Accept a gzip that holds the same record under different compression."""
+    assert _run(monkeypatch, archive, tmp_path, "--write") == 0
+    fixture = tmp_path / "recorded_rollout.jsonl.gz"
+    content = gzip.decompress(fixture.read_bytes())
+    recompressed = gzip.compress(content, compresslevel=1, mtime=1)
+    assert recompressed != fixture.read_bytes()
+    fixture.write_bytes(recompressed)
+    capsys.readouterr()
+
+    assert _run(monkeypatch, archive, tmp_path) == 0
+    assert "recorded_rollout.jsonl.gz: identical" in capsys.readouterr().out
+
+
+def test_write_is_reproducible(
+    archive: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rewrite the same record to the same gzip bytes at a different time."""
+    fixture = tmp_path / "recorded_rollout.jsonl.gz"
+    # Two writes in the same second would match even with a timestamped header.
+    monkeypatch.setattr(time, "time", lambda: 1.0)
+    assert _run(monkeypatch, archive, tmp_path, "--write") == 0
+    first = fixture.read_bytes()
+    fixture.unlink()
+    monkeypatch.setattr(time, "time", lambda: 2.0)
+    assert _run(monkeypatch, archive, tmp_path, "--write") == 0
+    assert fixture.read_bytes() == first
 
 
 def test_main_refuses_a_shard_with_the_wrong_record_count(
@@ -132,13 +171,15 @@ def test_main_refuses_a_shard_with_the_wrong_record_count(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(regen, "SHARD_RECORDS", 5)
+    monkeypatch.setattr(regenerate_recorded_fixtures, "SHARD_RECORDS", 5)
     with pytest.raises(ValueError, match="Expected 5 records, found 4"):
         _run(monkeypatch, archive, tmp_path)
 
 
 def test_archive_prefers_an_explicit_path(tmp_path: Path) -> None:
-    assert regen._archive(tmp_path / "a.tar") == tmp_path / "a.tar"
+    assert (
+        regenerate_recorded_fixtures._archive(tmp_path / "a.tar") == tmp_path / "a.tar"
+    )
 
 
 def test_archive_downloads_once_into_the_temp_cache(
@@ -153,17 +194,17 @@ def test_archive_downloads_once_into_the_temp_cache(
         target.write_bytes(b"x")
 
     monkeypatch.setattr(request, "urlretrieve", fake_retrieve)
-    first = regen._archive(None)
-    second = regen._archive(None)
+    first = regenerate_recorded_fixtures._archive(None)
+    second = regenerate_recorded_fixtures._archive(None)
     assert first == second == tmp_path / "tmax_rollouts_part000.tar.zst"
-    assert fetched == [(regen.ARCHIVE_URL, first)]
+    assert fetched == [(regenerate_recorded_fixtures.ARCHIVE_URL, first)]
 
 
 def test_verify_sha256_rejects_an_unpinned_archive(tmp_path: Path) -> None:
     path = tmp_path / "other.tar"
     path.write_bytes(b"not it")
     with pytest.raises(ValueError, match="is not the pinned archive"):
-        regen._verify_sha256(path)
+        regenerate_recorded_fixtures._verify_sha256(path)
 
 
 @pytest.mark.parametrize("count", [0, 2])
@@ -174,21 +215,21 @@ def test_shard_lines_requires_exactly_one_jsonl_member(
     members = {f"r/{index}.jsonl": b"{}\n" for index in range(count)}
     path = _tar(tmp_path / "a.tar", {"r/readme.txt": b"hi", **members})
     with pytest.raises(ValueError, match=f"found {count}"):
-        regen._shard_lines(path)
+        regenerate_recorded_fixtures._shard_lines(path)
 
 
 def test_int_refuses_a_non_int_field() -> None:
     with pytest.raises(TypeError, match="step must be an int, got str"):
-        regen._int({"step": "1"}, "step")
+        regenerate_recorded_fixtures._int({"step": "1"}, "step")
 
 
 def test_recorded_line_requires_exactly_one_match(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     records = _records()
-    monkeypatch.setattr(regen, "RECORDED_KEY", (9, 9, 9))
+    monkeypatch.setattr(regenerate_recorded_fixtures, "RECORDED_KEY", (9, 9, 9))
     with pytest.raises(LookupError, match="found 0"):
-        regen._recorded_line(_lines(records), records)
+        regenerate_recorded_fixtures._recorded_line(_lines(records), records)
 
 
 @pytest.mark.parametrize(
@@ -205,13 +246,13 @@ def test_advantages_refuse_a_malformed_group(
 ) -> None:
     del archive
     with pytest.raises(ValueError, match="ascending file order"):
-        regen._advantages_bytes(records)
+        regenerate_recorded_fixtures._advantages_bytes(records)
 
 
 def test_advantages_refuse_the_wrong_group_count(archive: Path) -> None:
     del archive
     with pytest.raises(ValueError, match="Expected 2 groups, built 1"):
-        regen._advantages_bytes(_records()[:2])
+        regenerate_recorded_fixtures._advantages_bytes(_records()[:2])
 
 
 if __name__ == "__main__":
