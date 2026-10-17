@@ -31,7 +31,8 @@ Five things stand in for what Python cannot run as Numba does:
 - Each intrinsic, which Python cannot call, has a Python stand-in:
   ``popcount``, ``trailing_zeros``, ``prefetch`` (nothing), the daylight
   table (each light computed on demand by ``daylight_numba``'s source, the
-  table's own recipe), and ``step._training`` (the record itself).
+  table's own recipe), ``step._training`` (the record itself), and the cycle
+  counter ``env.ticks`` (``time.perf_counter_ns``, a monotonic clock too).
 - The two FNV-1a kernels hash with Python ints, remembered by content: the
   same integers, 4x faster than numpy's uint64 scalars over a State's 80,248
   bytes, and a State replay hashes again costs nothing more.
@@ -57,11 +58,13 @@ import ctypes
 import operator
 import sys
 import threading
+import time
 
 from numba.core.dispatcher import Dispatcher
 
 import numpy as np
 
+from priml.baselines.craftax import env
 from priml.baselines.craftax.game import jit, rules, step
 from priml.baselines.craftax.game.rules import GRAVE_BLOCKS, LAND_BLOCKS
 from priml.baselines.craftax.game.state import (
@@ -347,6 +350,7 @@ def _stand_ins() -> dict[int, Callable[..., object]]:
         id(jit.popcount): _popcount,
         id(jit.trailing_zeros): _trailing_zeros,
         id(jit.prefetch): _prefetch,
+        id(env.ticks): time.perf_counter_ns,
         id(rules.daylight_table): lambda: table,
         id(step._training): _record,  # noqa: SLF001 -- The intrinsic the step calls; its stand-in is the identity it compiles to.
     }
@@ -510,8 +514,7 @@ class _Fields:
                 whole if kind.base.names is None else _Records(whole.view(np.recarray))
             )
         else:
-            one = self._array[name][self._index : self._index + 1]
-            value = _fields_type(kind)(one.view(np.recarray), 0)
+            value = _fields_type(kind)(self._array[name].view(np.recarray), self._index)
         object.__setattr__(self, name, value)
         return value
 

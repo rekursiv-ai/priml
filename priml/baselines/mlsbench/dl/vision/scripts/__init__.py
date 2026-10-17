@@ -1,1 +1,1 @@
-"""Command-line tools for the MLS-Bench vision baseline."""
+"""Command-line tools for the MLS-Bench vision scaffold."""

@@ -6,13 +6,14 @@ exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" 
 Capture the reference's values and prove the port reproduces them.
 
 Runs the pristine MLS-Bench vision code from a clone of the benchmark, runs the
-port on the same inputs under the same pins, and compares every component with
-exact equality: the initial state and forward of the full ResNet-56, the four
-losses, the learning rates of all 200 epochs, the optimizer, the image
-pipelines, every pixel the loaders produce, and every parameter after each
-update of a short run per loss. It also counts the random draws on both sides.
-Any mismatch is printed and the exit code is 1; otherwise the values the
-default test replays are written under ``--out``.
+shared port on the same inputs under the same pins, and compares every
+component with exact equality: the initial state and forward of the full
+ResNet-56, what ``main`` tells its loss each epoch, the learning rates of all
+200 epochs, the optimizer, the reported accuracy, the image pipelines and every
+pixel the loaders produce. It also counts the random draws on both sides. Any
+mismatch is printed and the exit code is 1; otherwise the values the default
+test replays are written under ``--out``. Each task package's own capture
+proves its slot and the updates.
 
 The reference is imported from the clone, not vendored. Nothing runs on a GPU.
 
@@ -31,13 +32,10 @@ import argparse
 import io
 import tempfile
 
-import torch
-
 from priml.baselines.mlsbench.dl.vision import reference, upstream
 from priml.baselines.mlsbench.dl.vision.experiments import exp000
 from priml.baselines.mlsbench.dl.vision.upstream import (
     PRISTINE,
-    VARIANTS,
     Batches,
     Lockstep,
     MainTrace,
@@ -52,7 +50,13 @@ if TYPE_CHECKING:
 
     from torch import Tensor
 
+    import torch
+
     from priml.baselines.mlsbench.dl.vision.experiments import VisionTrainLoop
+else:
+    from wrapt import lazy_import
+
+    torch = lazy_import("torch")
 
 
 CEILING: Final = 32_768
@@ -110,31 +114,22 @@ def capture(root: Path, scratch: Path) -> reference.Captured:
 
     Args:
       root: Clone of the benchmark.
-      scratch: Directory the edited scripts and the loader splits go to.
+      scratch: Directory the loader splits go to.
 
     Returns:
       captured: The reference's values, keyed as the port's are.
 
     """
     pristine = upstream.load_script(root / PRISTINE)
-    variants = {"cross_entropy": pristine} | {
-        name: upstream.edited_script(root, file, scratch)
-        for name, file in VARIANTS.items()
-    }
     with upstream.hidden_accelerators():
         trace = upstream.trace_main(pristine)
-        lockstep = {
-            name: upstream.upstream_lockstep(script, name, trace)
-            for name, script in variants.items()
-        }
         batches = upstream.upstream_batches(pristine)
-        record = upstream.upstream_record(variants, trace, lockstep, batches[0])
+        record = upstream.upstream_record(pristine, trace, batches[0])
         sites = upstream.upstream_sites(pristine)
         report = compare_wiring(trace) + compare_full_size(pristine, trace)
     port = reference.port_record(scratch)
     port_sites = reference.draw_sites(scratch)
     report += mismatches(record, port)
-    report += compare_lockstep(lockstep)
     report += compare_loaders(batches, reference.loader_batches(scratch))
     report += check_sites(sites, port_sites)
     return reference.Captured(
@@ -327,13 +322,13 @@ class LockstepRun(Protocol):
 def compare_lockstep(
     lockstep: Mapping[str, Lockstep],
     *,
-    run: LockstepRun = reference.lockstep_record,
+    run: LockstepRun,
 ) -> list[str]:
     """Compare every parameter and buffer after each update of every variant.
 
     Args:
       lockstep: Each variant's upstream lockstep run.
-      run: The port's lockstep run; this task's by default.
+      run: The task's port-side lockstep run.
 
     Returns:
       report: One line per tensor that differs after any update.

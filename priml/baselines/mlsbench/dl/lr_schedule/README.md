@@ -2,8 +2,10 @@
 
 The learning-rate schedule as a config slot, `step.schedule`, on the
 `resnet56-cifar100` setting. The task's script is the `cv-classification-loss`
-script with its scheduler removed, so the network, data and loss are
-[`vision/`](../vision/README.md)'s, already proven there.
+script with its scheduler removed, so the network and data are
+[`vision/`](../vision/README.md)'s and the loss is
+[`classification_loss/`](../classification_loss/README.md)'s, each already
+proven there.
 
 ```
 exp000  constant (pristine)

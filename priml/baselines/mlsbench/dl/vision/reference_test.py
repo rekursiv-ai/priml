@@ -2,9 +2,9 @@
 
 ``testdata/reference*.pt`` hold what the pristine MLS-Bench script produced,
 written by ``scripts/capture_reference.py``, which also compares the port with
-the script live and in full: every parameter of the ResNet-56 and of each
-update, and every pixel of the loaders. These tests replay the pieces whose
-values fit in a golden. Equality is exact; there is no tolerance.
+the script live and in full: every parameter of the ResNet-56 and every pixel
+of the loaders. These tests replay the pieces whose values fit in a golden.
+Equality is exact; there is no tolerance.
 """
 
 from __future__ import annotations
@@ -46,10 +46,6 @@ def assert_exact(
     assert mismatches(expected, actual) == []
 
 
-def test_every_loss_and_its_gradient_match_the_reference() -> None:
-    assert_exact(stored("loss/"), reference.loss_record())
-
-
 def test_the_learning_rate_of_all_200_epochs_matches_the_reference() -> None:
     expected = stored("schedule/")
     assert expected["schedule/lr"].shape == (200,)
@@ -70,11 +66,6 @@ def test_the_shallowest_network_initializes_and_runs_like_the_reference() -> Non
 
 def test_the_full_network_leaves_the_generator_where_the_reference_does() -> None:
     assert_exact(stored("draws/"), reference.draws_record())
-
-
-@pytest.mark.parametrize("name", list(reference.LOSSES))
-def test_two_updates_with_each_loss_match_the_reference(name: str) -> None:
-    assert_exact(stored(f"lockstep/{name}/"), reference.lockstep_record(name))
 
 
 def test_the_pipelines_match_the_reference_on_fixed_images() -> None:
@@ -116,11 +107,12 @@ def test_captured_goldens_fit_the_size_ceiling(name: str) -> None:
 
 
 def test_the_comparison_sees_a_change_of_one_ulp() -> None:
-    expected = stored("loss/cross_entropy/value")
+    expected = stored("best/accuracy")
     bumped = {
-        k: torch.nextafter(v, torch.tensor(torch.inf)) for k, v in expected.items()
+        k: torch.nextafter(v, torch.tensor(torch.inf, dtype=v.dtype))
+        for k, v in expected.items()
     }
-    assert mismatches(expected, bumped) == ["loss/cross_entropy/value: 1/1 differ"]
+    assert mismatches(expected, bumped) == ["best/accuracy: 1/1 differ"]
 
 
 def test_decoding_recovers_the_offsets_and_mirror_of_a_crop() -> None:
@@ -162,13 +154,6 @@ def test_seeding_is_scoped_to_the_block() -> None:
         assert torch.equal(torch.rand(1), inside)
 
 
-def test_a_lockstep_run_hands_back_the_state_after_each_update() -> None:
-    states: list[dict[str, torch.Tensor]] = []
-    _ = reference.lockstep_record("cross_entropy", states=states)
-    assert len(states) == reference.STEPS
-    assert not torch.equal(states[0]["stem.weight"], states[1]["stem.weight"])
-
-
 def test_the_tiny_network_keeps_the_reference_widths() -> None:
     step = reference.tiny_step(
         exp000,
@@ -183,6 +168,20 @@ def test_the_tiny_network_keeps_the_reference_widths() -> None:
     ] == [16, 32, 64]
 
 
+def test_the_tiny_network_is_built_on_the_cpu_whatever_the_default_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Meta stands in for an accelerator a host makes torch's default.
+    monkeypatch.setattr(torch, "get_default_device", lambda: torch.device("meta"))
+    step = reference.tiny_step(
+        exp000,
+        blocks=(1, 1, 1),
+        classes=reference.CLASSES,
+        epochs=reference.EPOCHS,
+    )
+    assert {p.device.type for p in step.model.parameters()} == {"cpu"}
+
+
 def test_the_record_joins_every_component(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -190,8 +189,7 @@ def test_the_record_joins_every_component(
     def fake(name: str) -> Callable[..., dict[str, torch.Tensor]]:
         return lambda *_: {name: torch.zeros(1)}
 
-    for name in (
-        "loss_record",
+    components = (
         "schedule_record",
         "optimizer_record",
         "network_record",
@@ -199,25 +197,10 @@ def test_the_record_joins_every_component(
         "best_record",
         "transform_record",
         "loader_record",
-    ):
+    )
+    for name in components:
         monkeypatch.setattr(reference, name, fake(name))
-
-    def lockstep(name: str) -> dict[str, torch.Tensor]:
-        return {f"lockstep/{name}": torch.zeros(1)}
-
-    monkeypatch.setattr(reference, "lockstep_record", lockstep)
-    record = reference.port_record(tmp_path)
-    assert set(record) == {
-        "loss_record",
-        "schedule_record",
-        "optimizer_record",
-        "network_record",
-        "draws_record",
-        "best_record",
-        "transform_record",
-        "loader_record",
-        *(f"lockstep/{name}" for name in reference.LOSSES),
-    }
+    assert set(reference.port_record(tmp_path)) == set(components)
 
 
 def test_fixed_inputs_are_the_patterns_the_reference_was_run_on() -> None:
@@ -250,15 +233,6 @@ def test_the_synthetic_split_names_the_position_of_every_pixel() -> None:
         torch.arange(1, 33).expand(reference.LOADER_IMAGES, 32),
     )
     assert (media[2, 2] == 3).all()
-
-
-def test_the_loss_record_holds_a_value_and_a_gradient_per_loss() -> None:
-    record = reference.loss_record()
-    assert set(record) == {
-        f"loss/{name}/{kind}" for name in reference.LOSSES for kind in ("value", "grad")
-    }
-    assert record["loss/poly/grad"].shape == (3, 4)
-    assert record["loss/poly/value"].shape == ()
 
 
 def test_scripted_evaluations_are_not_monotone() -> None:

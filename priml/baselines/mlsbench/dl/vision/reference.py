@@ -1,9 +1,11 @@
-"""Inputs and port-side runs the reference capture and its test share.
+"""Inputs and port-side runs the reference captures and their tests share.
 
 ``scripts/capture_reference.py`` runs the pristine reference code and this
 module's port-side runs on the same inputs under the same pins, compares them
 bit for bit, and stores the reference's values under ``testdata/``.
 ``reference_test.py`` replays the port-side runs against those stored values.
+Each task package's capture builds its own runs from the inputs, pins and steps
+here.
 
 Every input is rebuilt from integers and powers of two, so it is exact in
 float32 and the same on every host. Every run that computes does so under
@@ -35,16 +37,10 @@ from priml.baselines.mlsbench.dl.vision.draws import recorded_draws
 from priml.baselines.mlsbench.dl.vision.experiments import (
     VisionTrainLoop,
     exp000,
-    exp001,
-    exp002,
-    exp003,
 )
 from priml.baselines.mlsbench.dl.vision.metrics import BestAccuracy
 from priml.baselines.mlsbench.dl.vision.model import ResNet
-from priml.baselines.mlsbench.dl.vision.train_step import (
-    LossContext,
-    VisionTrainStep,
-)
+from priml.baselines.mlsbench.dl.vision.train_step import VisionTrainStep
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import rng_fingerprint
 from priml.train.parallelism import NoParallel
@@ -53,8 +49,6 @@ from priml.train.parallelism import NoParallel
 if TYPE_CHECKING:
     from collections.abc import Generator
     from pathlib import Path
-
-    from priml.loss.custom_types import LossOutput
 
 SEED: Final = 42
 """Seed of every pinned run, the task's own."""
@@ -91,14 +85,6 @@ HYPERPARAMETERS: Final = (
     "differentiable",
 )
 """Parameter-group entries compared between the two optimizers."""
-
-LOSSES: Final[dict[str, Callable[[], VisionTrainLoop]]] = {
-    "cross_entropy": exp000,
-    "label_smoothing": exp001,
-    "focal": exp002,
-    "poly": exp003,
-}
-"""The experiment that carries each loss, so its own settings are compared."""
 
 SCRIPTED_CORRECT: Final = tuple((2 * epoch**2 + epoch) % 7 for epoch in range(200))
 """Correct predictions out of ``SCRIPTED_TOTAL`` that a scripted evaluation reports."""
@@ -287,26 +273,6 @@ def full_step(factory: Callable[[], VisionTrainLoop] = exp000) -> VisionTrainSte
     return _built(config)
 
 
-def loss_record() -> dict[str, Tensor]:
-    """Run every loss on fixed logits, forward and backward.
-
-    Returns:
-      record: Each loss's value and its gradient with respect to the logits.
-
-    """
-    logits, label = fixed_logits()
-    record: dict[str, Tensor] = {}
-    with host_agnostic_numerics():
-        for name, factory in LOSSES.items():
-            leaf = logits.clone().requires_grad_()
-            context = LossContext(num_classes=4, epoch=0, total_epochs=1)
-            loss = factory().step.loss.make()(leaf, label=label, context=context)
-            loss["loss"].backward()
-            record[f"loss/{name}/value"] = loss["loss"].detach()
-            record[f"loss/{name}/grad"] = cast(Tensor, leaf.grad)
-    return record
-
-
 def schedule_record(
     factory: Callable[[], VisionTrainLoop] = exp000,
 ) -> dict[str, Tensor]:
@@ -385,55 +351,6 @@ def draws_record(
     with seeded(SEED), host_agnostic_numerics():
         _ = full_step(factory)
         return {key: rng_fingerprint()}
-
-
-def lockstep_record(
-    name: str,
-    *,
-    states: list[dict[str, Tensor]] | None = None,
-) -> dict[str, Tensor]:
-    """Train the shallowest network for ``STEPS`` updates, one per epoch.
-
-    Args:
-      name: A key of :data:`LOSSES`.
-      states: When given, receives a copy of the model's whole state after
-        each update.
-
-    Returns:
-      record: Per update the loss, the logits it came from, the logits of a
-        fixed probe in evaluation mode afterwards, and what the loss was given.
-
-    """
-    losses: list[Tensor] = []
-    logits: list[Tensor] = []
-    probes: list[Tensor] = []
-    contexts: list[LossContext] = []
-    with seeded(SEED), host_agnostic_numerics():
-        step = tiny_step(LOSSES[name], blocks=(1, 1, 1), classes=CLASSES, epochs=EPOCHS)
-        step.loss = _ContextSpy(step.loss, contexts)
-        for index in range(STEPS):
-            step.timer_epoch.global_count = index
-            result = step.train_step(
-                media=fixed_media(index),
-                label=fixed_label(index),
-            )
-            losses.append(result["loss"])
-            logits.append(result["model"])
-            probe = step.call_eval(media=fixed_media(STEPS))
-            assert isinstance(probe, Tensor)
-            probes.append(probe)
-            if states is not None:
-                states.append(
-                    {k: v.clone() for k, v in step.model.state_dict().items()},
-                )
-    return {
-        f"lockstep/{name}/loss": torch.stack(losses),
-        f"lockstep/{name}/logits": torch.stack(logits),
-        f"lockstep/{name}/probe": torch.stack(probes),
-        f"lockstep/{name}/context": torch.tensor(
-            [[c.num_classes, c.epoch, c.total_epochs] for c in contexts],
-        ),
-    }
 
 
 def transform_record() -> dict[str, Tensor]:
@@ -541,9 +458,8 @@ def port_record(directory: Path) -> dict[str, Tensor]:
       record: The union of the records above, keyed as the stored goldens are.
 
     """
-    record = (
-        loss_record()
-        | schedule_record()
+    return (
+        schedule_record()
         | optimizer_record()
         | network_record()
         | draws_record()
@@ -551,9 +467,6 @@ def port_record(directory: Path) -> dict[str, Tensor]:
         | transform_record()
         | loader_record(directory)
     )
-    for name in LOSSES:
-        record |= lockstep_record(name)
-    return record
 
 
 def decode_batches(
@@ -604,29 +517,6 @@ def draw_sites(directory: Path) -> dict[str, int]:
         _ = transform_record()
         _ = loader_record(directory)
     return counts
-
-
-class _ContextSpy:
-    """Forwards to a loss and keeps what it was told about the run."""
-
-    def __init__(
-        self,
-        loss: Callable[..., LossOutput],
-        contexts: list[LossContext],
-    ) -> None:
-        self.loss = loss
-        self.contexts = contexts
-
-    def __call__(
-        self,
-        logits: Tensor,
-        *,
-        label: Tensor,
-        context: LossContext,
-    ) -> LossOutput:
-        """Record ``context`` and return the wrapped loss."""
-        self.contexts.append(context)
-        return self.loss(logits, label=label, context=context)
 
 
 def _built(config: VisionTrainStep.Config) -> VisionTrainStep:

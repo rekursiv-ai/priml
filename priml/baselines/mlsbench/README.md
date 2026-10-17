@@ -52,7 +52,7 @@ tasks.
 
 | Package | Task | Slot |
 |---|---|---|
-| [`dl/vision/`](dl/vision/README.md) | `cv-classification-loss` | `step.loss` |
+| [`dl/classification_loss/`](dl/classification_loss/README.md) | `cv-classification-loss` | `step.loss` |
 | [`dl/lr_schedule/`](dl/lr_schedule/README.md) | `dl-lr-schedule` | `step.schedule` |
 | [`dl/pooling/`](dl/pooling/README.md) | `cv-pooling-aggregation` | `step.model.pool` |
 | [`dl/normalization/`](dl/normalization/README.md) | `dl-normalization` | `step.model.norm` |
@@ -64,8 +64,9 @@ tasks.
 | [`dl/residual/`](dl/residual/README.md) | `dl-residual-connection` | `step.model.block` |
 | [`dl/augmentation/`](dl/augmentation/README.md) | `cv-data-augmentation` | `dataset.augment` |
 
-`dl/vision/` also holds the data, model and step the other DL tasks reuse; its
-README lists the settings and tasks not yet ported.
+[`dl/vision/`](dl/vision/README.md) is no task: it holds the data, model, step
+and `exp000` recipe every DL task reuses, and its README lists the settings and
+tasks not yet ported.
 
 ## Proof against upstream
 

@@ -117,13 +117,61 @@ def test_the_fixed_point_path_refuses_a_map_beyond_its_range() -> None:
         ops.affine(image(), [1.0, 0.5, 40_000.0, 0.0, 1.0, 0.0])
 
 
-@pytest.mark.parametrize("factor", [0.0, 1.0, 0.3, 1.7, -0.4])
-def test_blend_matches_pillow_inside_and_outside_unit_range(factor: float) -> None:
+@pytest.mark.parametrize("factor", [0.0, 1.0, 0.3, 0.7])
+def test_blend_matches_pillow_inside_the_unit_range(factor: float) -> None:
     degenerate = image(1)
     assert torch.equal(
         ops.blend(degenerate, image(), factor),
         pixels(Image.blend(pil(degenerate), pil(image()), factor)),
     )
+
+
+# Pillow extrapolates in float32 as ``in1 + alpha * (in2 - in1)``, truncated and
+# clipped. Its x86-64 build, where MLS-Bench runs, rounds the product and the sum
+# apart; its aarch64 build fuses them into one FMA, and the two truncate to
+# different integers on the first three pixels at 1.7 and the 9th to 14th at -0.4.
+# So the expected values are x86-64 Pillow 11.3's, not the host's.
+@pytest.mark.parametrize(
+    ("factor", "x86"),
+    [
+        (
+            1.7,
+            [
+                [1, 2, 3, 13, 24, 38, 60, 73, 22, 32, 33, 43],
+                [44, 53, 102, 168, 255, 0, 100, 255, 0, 19, 255, 0],
+            ],
+        ),
+        (
+            -0.4,
+            [
+                [22, 23, 24, 34, 45, 59, 81, 94, 1, 1, 2, 1],
+                [2, 1, 50, 82, 0, 255, 100, 0, 255, 153, 0, 255],
+            ],
+        ),
+    ],
+)
+def test_blend_extrapolates_as_x86_64_pillow(
+    factor: float,
+    x86: list[list[int]],
+) -> None:
+    def rgb(rows: list[list[int]]) -> Tensor:
+        return torch.tensor(rows, dtype=torch.uint8).view(2, 4, 3).permute(2, 0, 1)
+
+    # Two rows of four RGB pixels each, channels last, as ``Image.fromarray`` reads.
+    degenerate = rgb(
+        [
+            [18, 19, 20, 30, 41, 55, 77, 90, 5, 7, 8, 9],
+            [10, 11, 60, 99, 0, 255, 100, 37, 200, 128, 3, 250],
+        ],
+    )
+    image = rgb(
+        [
+            [8, 9, 10, 20, 31, 45, 67, 80, 15, 22, 23, 29],
+            [30, 36, 85, 140, 255, 0, 100, 200, 37, 64, 252, 4],
+        ],
+    )
+    blended = ops.blend(degenerate, image, factor)
+    assert blended.permute(1, 2, 0).reshape(2, 12).tolist() == x86
 
 
 def test_grayscale_matches_pillows_conversion() -> None:

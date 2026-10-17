@@ -58,6 +58,9 @@ All notable priml changes are documented here. This project follows
 
 ### Changed
 
+- `cv-classification-loss` moved from `mlsbench.dl.vision` to its own baseline,
+  `mlsbench.dl.classification_loss`; `vision` keeps the shared scaffold and
+  `exp000`, now under study `mlsbench_dl_vision`.
 - `priml.model.invae` moved to `priml.model.ae.invae`. `AutoencoderKL`,
   `VAE_F16D32`, `VAE_F8D4`, `vae_models`, `encode_image`, `decode_latents`,
   and `load_invae` are removed; build `INVAE.Config().make()` and call

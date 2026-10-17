@@ -1,8 +1,8 @@
 VisionTrainLoop(
-        study_name='cv_classification_loss',
+        study_name='mlsbench_dl_vision',
         experiment_name='exp000',
         base_dir='/opt/scratch',
-        working_dir=PosixPath('/opt/scratch/runs/cv_classification_loss/exp000'),
+        working_dir=PosixPath('/opt/scratch/runs/mlsbench_dl_vision/exp000'),
         doc='',
         step=VisionTrainStep.Config(
         │   model=ResNet.Config(
@@ -71,8 +71,8 @@ VisionTrainLoop(
         metrics_train={},
         metrics_eval={'test_acc': BestAccuracy.Config()},
         checkpointer=Checkpointer.Config(
-            base_dir=PosixPath('/opt/scratch/runs/cv_classification_loss/exp000'),
-            working_dir=PosixPath('/opt/scratch/runs/cv_classification_loss/exp000/checkpoints'),
+            base_dir=PosixPath('/opt/scratch/runs/mlsbench_dl_vision/exp000'),
+            working_dir=PosixPath('/opt/scratch/runs/mlsbench_dl_vision/exp000/checkpoints'),
             filename='step_{step:08d}.pt',
             save_every=1_000,
             keep_last_n=-1,
@@ -88,8 +88,8 @@ VisionTrainLoop(
         phase_timer=PhaseTimer.Config(
             enabled=False,
             torch_profile=False,
-            base_dir=PosixPath('/opt/scratch/runs/cv_classification_loss/exp000'),
-            working_dir=PosixPath('/opt/scratch/runs/cv_classification_loss/exp000/profiling'),
+            base_dir=PosixPath('/opt/scratch/runs/mlsbench_dl_vision/exp000'),
+            working_dir=PosixPath('/opt/scratch/runs/mlsbench_dl_vision/exp000/profiling'),
             heartbeat_interval_sec=20.0,
             fault_dump_interval_sec=40.0,
             cuda_events=False

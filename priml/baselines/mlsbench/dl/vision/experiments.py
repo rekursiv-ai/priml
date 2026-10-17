@@ -1,21 +1,16 @@
-r"""MLS-Bench ``cv-classification-loss``: ResNet-56 on CIFAR-100.
+r"""The recipe every MLS-Bench DL task forks: ResNet-56 on CIFAR-100.
 
-``exp000`` is the task's reference recipe with plain cross-entropy. Every later
-experiment forks it and changes the loss, the one slot the task lets an edit
-touch. The loss is a value, not a mode, so adding a loss means writing a
-function and a fork; nothing in the step or the loop changes.
+``exp000`` is the recipe of the pristine ``cv-classification-loss`` script at
+its ``resnet56-cifar100`` setting: cross-entropy, SGD with cosine annealing.
+Every DL task's script is a variant of that script, so each task's ``exp000``
+forks this one under the task's own study name, and the task's baselines fork
+that.
 
-    exp000  cross-entropy
-      +-- exp001  label smoothing
-      +-- exp002  focal loss
-      +-- exp003  PolyLoss
-
-Prepare the data once, then launch::
+Prepare the data once, then launch a task's ``exp000``::
 
     uv --quiet run --frozen python -m priml.baselines.mlsbench.dl.vision.scripts.prepare_data
-    uv --quiet run --frozen python -m priml priml.baselines.mlsbench.dl.vision.experiments.exp000
 
-The task is pinned to MLS-Bench commit ``80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c``.
+The recipe is pinned to MLS-Bench commit ``80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c``.
 """
 
 from __future__ import annotations
@@ -31,9 +26,6 @@ from priml.baselines.mlsbench.dl.vision.model import ResNet
 from priml.baselines.mlsbench.dl.vision.train_step import (
     VisionTrainStep,
     cross_entropy,
-    focal,
-    label_smoothing,
-    poly,
 )
 from priml.train.train_loop import TrainLoop
 
@@ -105,12 +97,14 @@ def check_reference_loop(config: TrainLoop.Config, *, budget_epochs: float) -> N
 def exp000() -> VisionTrainLoop:
     """ResNet-56 on CIFAR-100, cross-entropy, SGD with cosine annealing.
 
-    The reference recipe of the task's ``resnet56-cifar100`` setting and the
-    one every fork is measured against. Frozen: improvements belong in a fork,
-    never in an edit here.
+    The reference recipe of the ``cv-classification-loss`` script's
+    ``resnet56-cifar100`` setting, which every DL task's ``exp000`` forks under
+    its own study name. Frozen: improvements belong in a task's fork, never in
+    an edit here.
 
     Hypothesis:
-      Plain cross-entropy is the bar a loss must clear to earn its complexity.
+      The unedited recipe is the bar any task's edit must clear to earn its
+      complexity.
 
     References:
       https://github.com/Imbernoulli/MLS-Bench
@@ -124,7 +118,7 @@ def exp000() -> VisionTrainLoop:
 
     """
     cfg = VisionTrainLoop()
-    cfg.study_name = "cv_classification_loss"
+    cfg.study_name = "mlsbench_dl_vision"
     cfg.experiment_name = "exp000"
     # The reference's ``--seed``; the loop salts it, so the stream still differs.
     cfg.seed = 42
@@ -147,87 +141,4 @@ def exp000() -> VisionTrainLoop:
     # generator, so one inside an epoch would move every shuffle after it.
     cfg.num_steps_eval = -1
     cfg.metrics_eval["test_acc"] = BestAccuracy.Config()
-    return cfg
-
-
-def exp001() -> VisionTrainLoop:
-    """exp000 + label smoothing 0.1.
-
-    Hypothesis:
-      Moving a tenth of the target mass off the true class stops the logits
-      growing without bound, which should regularize a 56-layer network that
-      fits CIFAR-100's training split.
-
-    References:
-      https://arxiv.org/abs/1512.00567
-        Szegedy et al. 2016, "Rethinking the Inception Architecture for
-        Computer Vision."
-      https://github.com/Imbernoulli/MLS-Bench
-        Baseline ``label_smoothing`` of ``cv-classification-loss`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
-
-    Results:
-      TBD.
-
-    """
-    cfg = exp000()
-    cfg.experiment_name = "exp001"
-
-    loss = cfg.step.loss = PartialConfig(label_smoothing)
-    loss.smoothing = 0.1
-    return cfg
-
-
-def exp002() -> VisionTrainLoop:
-    """exp000 + focal loss with gamma 2.
-
-    Hypothesis:
-      Scaling each example's loss by ``(1 - p) ** 2`` shifts the gradient to
-      the examples the network still gets wrong, which should help on a
-      100-way problem where most of the training split is soon fit.
-
-    References:
-      https://arxiv.org/abs/1708.02002
-        Lin et al. 2017, "Focal Loss for Dense Object Detection."
-      https://github.com/Imbernoulli/MLS-Bench
-        Baseline ``focal_loss`` of ``cv-classification-loss`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
-
-    Results:
-      TBD.
-
-    """
-    cfg = exp000()
-    cfg.experiment_name = "exp002"
-
-    loss = cfg.step.loss = PartialConfig(focal)
-    loss.gamma = 2.0
-    return cfg
-
-
-def exp003() -> VisionTrainLoop:
-    """exp000 + PolyLoss with epsilon 2.
-
-    Hypothesis:
-      Adding ``2 * (1 - p)`` to cross-entropy raises the weight of the first
-      polynomial term of the loss's expansion, which PolyLoss reports as a
-      gain for image classification when the leading coefficient is tuned.
-
-    References:
-      https://arxiv.org/abs/2204.12511
-        Leng et al. 2022, "PolyLoss: A Polynomial Expansion Perspective of
-        Classification Loss Functions."
-      https://github.com/Imbernoulli/MLS-Bench
-        Baseline ``poly_loss`` of ``cv-classification-loss`` at commit
-        80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c.
-
-    Results:
-      TBD.
-
-    """
-    cfg = exp000()
-    cfg.experiment_name = "exp003"
-
-    loss = cfg.step.loss = PartialConfig(poly)
-    loss.epsilon = 2.0
     return cfg

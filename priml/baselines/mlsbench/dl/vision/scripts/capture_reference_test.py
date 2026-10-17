@@ -55,46 +55,21 @@ def stand_in(clone: Path) -> tuple[upstream.Upstream, upstream.MainTrace]:
         return script, upstream.trace_main(script)
 
 
-def test_the_stand_in_shares_the_recipes_loss_schedule_and_optimizer(
+def test_the_stand_in_shares_the_recipes_schedule_optimizer_and_loss_wiring(
     clone: Path,
-    tmp_path: Path,
 ) -> None:
     script, trace = stand_in(clone)
-    scratch = tmp_path / "scratch"
-    scratch.mkdir()
-    variants = {"cross_entropy": script} | {
-        name: upstream.edited_script(clone, file, scratch)
-        for name, file in upstream.VARIANTS.items()
+    record = upstream.upstream_record(script, trace, [])
+    shared = {
+        k: v for k, v in record.items() if k.startswith(("schedule/", "optimizer/"))
     }
-    record = upstream.upstream_record(variants, trace, {}, [])
-    port = (
-        reference.loss_record()
-        | reference.schedule_record()
-        | reference.optimizer_record()
-    )
-    # The stand-in's focal and poly edits are not the real ones, so those differ.
-    same = ("loss/cross_entropy/", "loss/label_smoothing/", "schedule/", "optimizer/")
-    shared = {k: v for k, v in record.items() if k.startswith(same)}
-    assert (
-        mismatches(
-            shared,
-            {k: v for k, v in port.items() if k in shared},
-        )
-        == []
-    )
-    other = {
-        k: v for k, v in record.items() if k.startswith(("loss/focal/", "loss/poly/"))
-    }
-    assert mismatches(
-        other,
-        {k: v for k, v in port.items() if k in other},
-    )
+    port = reference.schedule_record() | reference.optimizer_record()
+    assert shared.keys() == port.keys()
+    assert mismatches(shared, port) == []
     assert capture_reference.compare_wiring(trace) == []
 
 
-def test_the_stand_in_differs_in_the_network_the_draws_and_the_updates(
-    clone: Path,
-) -> None:
+def test_the_stand_in_differs_in_the_network_and_the_draws(clone: Path) -> None:
     script, trace = stand_in(clone)
     network = mismatches(
         upstream.upstream_network(script),
@@ -110,8 +85,6 @@ def test_the_stand_in_differs_in_the_network_the_draws_and_the_updates(
         reference.draws_record(),
     )
     assert draws == ["draws/exp000: 8/8 differ"]
-    lockstep = upstream.upstream_lockstep(script, "cross_entropy", trace)
-    assert capture_reference.compare_lockstep({"cross_entropy": lockstep})
 
 
 def test_the_stand_in_loader_draws_other_streams_than_the_ports(
@@ -148,11 +121,6 @@ def test_capture_assembles_both_sides_into_one_report(
         "compare_full_size",
         returning(["full size differs"]),
     )
-    monkeypatch.setattr(
-        capture_reference,
-        "compare_lockstep",
-        returning(["lockstep differs"]),
-    )
     captured = capture_reference.capture(clone, scratch)
     assert captured.record.keys() == stored.keys() | {
         "transform/train",
@@ -162,16 +130,9 @@ def test_capture_assembles_both_sides_into_one_report(
     assert captured.sites["reference"]
     lines = captured.report
     assert lines[0] == "full size differs"
-    assert "lockstep differs" in lines
     assert [line for line in lines if line.startswith("network/")]
     assert [line for line in lines if line.startswith("loader/")]
-    assert not [
-        line
-        for line in lines
-        if line.startswith(
-            ("loss/cross_entropy", "loss/label_smoothing", "schedule/", "optimizer/"),
-        )
-    ]
+    assert not [line for line in lines if line.startswith(("schedule/", "optimizer/"))]
     assert any(line.startswith("port: random call site") for line in lines)
 
 
@@ -311,21 +272,6 @@ def test_loader_passes_are_compared_pixel_by_pixel() -> None:
     }
     assert capture_reference.compare_loaders(passes, ([[moved]], [[batch]])) == [
         "loader/train/0: 0/media: 6/6 differ",
-    ]
-
-
-def test_a_lockstep_run_that_matches_reports_nothing_and_one_that_drifts_is_named() -> (
-    None
-):
-    ours: list[dict[str, torch.Tensor]] = []
-    _ = reference.lockstep_record("cross_entropy", states=ours)
-    assert capture_reference.compare_lockstep({"cross_entropy": ({}, ours)}) == []
-    drifted = [dict(state) for state in ours]
-    weight = drifted[1]["stem.weight"].clone()
-    weight.view(-1)[0] = torch.nextafter(weight.view(-1)[0], torch.tensor(torch.inf))
-    drifted[1]["stem.weight"] = weight
-    assert capture_reference.compare_lockstep({"cross_entropy": ({}, drifted)}) == [
-        "lockstep/cross_entropy/2: stem.weight: 1/432 differ",
     ]
 
 

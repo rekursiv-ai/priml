@@ -13,7 +13,10 @@ from numba.core.dispatcher import Dispatcher
 import numpy as np
 import pytest
 
-from priml.baselines.craftax import eager as eager_module
+from priml.baselines.craftax import (
+    eager as eager_module,
+    env,
+)
 from priml.baselines.craftax.eager import (
     LADDER_DOWN,
     LADDER_UP,
@@ -215,6 +218,14 @@ def test_the_intrinsics_and_the_libm_stand_in_and_a_name_adds_one() -> None:
     ]
 
 
+def test_the_cycle_counter_reads_a_monotonic_clock_in_python() -> None:
+    # ``ticks_per_second`` is cached per process, so the first eager caller to
+    # size a spin budget reads the counter through ``clock_numba``'s source.
+    with eager():
+        first = env.clock_numba()
+        assert env.clock_numba() >= first
+
+
 def test_a_structured_argument_reaches_the_kernel_as_records() -> None:
     with eager(world=tiny_world):
         states, rng = replay.reset_world(5)
@@ -331,9 +342,16 @@ def test_a_structured_arrays_records_read_once_and_write_back() -> None:
     cast("EnvState", first).timestep = 5
     records[1] = first
     # A field of records reads as records too: a floor's creatures.
+    assert isinstance(cast("EnvState", first).passive_mobs, eager_module._Records)
     cows = cast("EnvState", first).passive_mobs[3]
     cows.health[1] = np.float32(2.0)
     assert typed(states["passive_mobs"]["health"], np.float32)[0, 3, 1] == 2.0
+    # A record field reads and writes its own record's, not the first record's.
+    states["inventory"]["wood"] = [4, 7]
+    second = cast("EnvState", records[1])
+    assert second.inventory.wood == 7
+    second.inventory.wood = 9
+    assert typed(states["inventory"]["wood"], np.int32).tolist() == [4, 9]
     assert typed(states["timestep"], np.int32).tolist() == [5, 5]
     assert len(records) == 2
     assert records.dtype == states.dtype

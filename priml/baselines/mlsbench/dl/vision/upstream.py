@@ -46,17 +46,7 @@ PRISTINE: Final = Path(
     "harbor/tasks-docker/mls-bench__cv-classification-loss/tests/meta/pristine"
     "/pytorch-vision/custom_loss.py",
 )
-"""The unedited training script, relative to the clone."""
-
-EDITS: Final = Path("tasks/cv-classification-loss/edits")
-"""Directory of the task's baseline edits, relative to the clone."""
-
-VARIANTS: Final = {
-    "label_smoothing": "label_smoothing",
-    "focal": "focal_loss",
-    "poly": "poly_loss",
-}
-"""Maps each non-default loss of :data:`reference.LOSSES` to its edit file."""
+"""The unedited ``cv-classification-loss`` script, relative to the clone."""
 
 DATASETS: Final = {"cifar10": "CIFAR10", "cifar100": "CIFAR100"}
 """The torchvision class each ``--dataset`` the loaders are run with reads."""
@@ -165,8 +155,8 @@ def edited_script(
     name: str,
     scratch: Path,
     *,
-    pristine: Path = PRISTINE,
-    edits: Path = EDITS,
+    pristine: Path,
+    edits: Path,
 ) -> Upstream:
     """Apply a baseline's edit to the pristine script and import the result.
 
@@ -263,17 +253,15 @@ def trace_main(
 
 
 def upstream_record(
-    variants: dict[str, Upstream],
+    script: Upstream,
     trace: MainTrace,
-    lockstep: dict[str, Lockstep],
     train_batches: Batches,
 ) -> dict[str, Tensor]:
     """Return the reference's value of every quantity the default test replays.
 
     Args:
-      variants: The script carrying each loss, keyed as :data:`reference.LOSSES`.
-      trace: A run of ``main``.
-      lockstep: Each loss's :func:`upstream_lockstep`.
+      script: The pristine reference script.
+      trace: A run of its ``main``.
       train_batches: The training passes of :func:`upstream_batches`.
 
     Returns:
@@ -281,15 +269,6 @@ def upstream_record(
 
     """
     record: dict[str, Tensor] = {}
-    logits, label = reference.fixed_logits()
-    with host_agnostic_numerics():
-        for name, script in variants.items():
-            leaf = logits.clone().requires_grad_()
-            config = {"num_classes": 4, "epoch": 0, "total_epochs": 1}
-            loss = script.compute_loss(leaf, label, config)
-            loss.backward()
-            record[f"loss/{name}/value"] = loss.detach()
-            record[f"loss/{name}/grad"] = cast(Tensor, leaf.grad)
     record["schedule/lr"] = torch.tensor(trace.rates, dtype=torch.float64)
     record["optimizer/settings"] = torch.tensor(
         [trace.settings[name] for name in reference.HYPERPARAMETERS],
@@ -297,10 +276,8 @@ def upstream_record(
     )
     record["draws/exp000"] = trace.draws
     record["best/accuracy"] = torch.tensor(trace.best, dtype=torch.float64)
-    record |= upstream_network(variants["cross_entropy"])
-    for values, _ in lockstep.values():
-        record |= values
-    record |= upstream_pipelines(variants["cross_entropy"])
+    record |= upstream_network(script)
+    record |= upstream_pipelines(script)
     record |= reference.decode_batches(
         train_batches,
         translate_pad=Cifar100Data.Config().translate_pad,
@@ -332,69 +309,6 @@ def upstream_network(script: Upstream) -> dict[str, Tensor]:
         "network/train": train.detach(),
         "network/eval": evaluated.detach(),
     }
-
-
-def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep:
-    """Train the shallowest network for two updates, one per epoch.
-
-    Args:
-      script: The reference script carrying the loss under test.
-      name: Which loss, for the record's keys.
-      trace: Source of the optimizer settings ``main`` used.
-
-    Returns:
-      lockstep: Per update the loss, its logits, a probe's logits afterwards
-        and the configuration the loss was given; and the model's whole state
-        after each update.
-
-    """
-    spy = _LossSpy(script)
-    probes: list[Tensor] = []
-    states: list[dict[str, Tensor]] = []
-    with (
-        reference.seeded(reference.SEED),
-        host_agnostic_numerics(),
-        mock.patch.object(script, "compute_loss", spy),
-    ):
-        model = script.ResNet(script.BasicBlock, [1, 1, 1], reference.CLASSES)
-        script.initialize_weights(model)
-        optimizer = torch.optim.SGD(
-            model.parameters(),
-            lr=trace.settings["lr"],
-            momentum=trace.settings["momentum"],
-            dampening=trace.settings["dampening"],
-            weight_decay=trace.settings["weight_decay"],
-            nesterov=bool(trace.settings["nesterov"]),
-        )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=reference.EPOCHS,
-        )
-        config = {
-            "num_classes": reference.CLASSES,
-            "epoch": 0,
-            "total_epochs": reference.EPOCHS,
-        }
-        for index in range(reference.STEPS):
-            config["epoch"] = index
-            batch = [(reference.fixed_media(index), reference.fixed_label(index))]
-            script.train_epoch(model, batch, optimizer, torch.device("cpu"), config)
-            model.eval()
-            with torch.no_grad():
-                probes.append(
-                    reference.logits_of(model, reference.fixed_media(reference.STEPS)),
-                )
-            states.append({k: v.clone() for k, v in model.state_dict().items()})
-            scheduler.step()
-    record = {
-        f"lockstep/{name}/loss": torch.stack(spy.losses),
-        f"lockstep/{name}/logits": torch.stack(spy.logits),
-        f"lockstep/{name}/probe": torch.stack(probes),
-        f"lockstep/{name}/context": torch.tensor(
-            [[c["num_classes"], c["epoch"], c["total_epochs"]] for c in spy.configs],
-        ),
-    }
-    return record, states
 
 
 def upstream_batches(
@@ -548,29 +462,6 @@ class _MainSpy:
         """Report the next scripted accuracy, whatever the script passes."""
         del args
         return 0.0, 100.0 * next(self.scripted) / reference.SCRIPTED_TOTAL
-
-
-class _LossSpy:
-    """Forwards to the reference's loss and keeps what it saw."""
-
-    def __init__(self, script: Upstream) -> None:
-        self.compute_loss = script.compute_loss
-        self.losses: list[Tensor] = []
-        self.logits: list[Tensor] = []
-        self.configs: list[dict[str, int]] = []
-
-    def __call__(
-        self,
-        logits: Tensor,
-        targets: Tensor,
-        config: dict[str, int],
-    ) -> Tensor:
-        """Return the reference's loss for the batch."""
-        loss = self.compute_loss(logits, targets, config)
-        self.losses.append(loss.detach())
-        self.logits.append(logits.detach())
-        self.configs.append(dict(config))
-        return loss
 
 
 class _FakeCifar100:
