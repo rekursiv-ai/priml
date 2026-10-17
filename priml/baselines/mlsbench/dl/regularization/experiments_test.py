@@ -20,7 +20,9 @@ from priml.baselines.mlsbench.dl.regularization.experiments import (
     exp002,
     exp003,
 )
-from priml.baselines.mlsbench.dl.regularization.train_step import RegularizedTrainStep
+from priml.baselines.mlsbench.dl.regularization.train_step import (
+    RegularizedTrainStep,
+)
 from priml.baselines.mlsbench.dl.vision import experiments as vision
 from priml.baselines.mlsbench.dl.vision.experiments_test import (
     changed_fields,

@@ -14,7 +14,6 @@ import pickle
 from torchvision.datasets import cifar
 
 import numpy as np
-import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.vision import reference as vision
@@ -24,6 +23,8 @@ from priml.baselines.mlsbench.dl.weighting import reference, upstream
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import pytest
 
 WEIGHTS: Final = (
     "def compute_class_weights(class_counts, num_classes, config):\n"

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Final
-
-from configgle import Makeable
+from typing import TYPE_CHECKING, Final
 
 import pytest
 import torch
@@ -16,6 +14,10 @@ from priml.baselines.mlsbench.dl.pooling.pools import (
 )
 from priml.baselines.mlsbench.dl.vision.model import GlobalAvgPool, ResNet
 from priml.testing.cost import assert_cost_matches_torch
+
+
+if TYPE_CHECKING:
+    from configgle import Makeable
 
 
 SHAPE: Final = (2, 3, 4, 5)

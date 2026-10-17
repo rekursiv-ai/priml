@@ -13,7 +13,6 @@ from dataclasses import field
 from typing import TYPE_CHECKING, Protocol, override
 
 from configgle import Makeable, PartialConfig
-from torch import Tensor
 
 from priml.baselines.mlsbench.dl.regularization.regularizers import zero
 from priml.baselines.mlsbench.dl.vision.train_step import (
@@ -23,7 +22,7 @@ from priml.baselines.mlsbench.dl.vision.train_step import (
 
 
 if TYPE_CHECKING:
-    from torch import nn
+    from torch import Tensor, nn
 
 
 class Regularizer(Protocol):

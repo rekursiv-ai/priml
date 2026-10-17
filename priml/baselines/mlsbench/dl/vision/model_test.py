@@ -155,6 +155,7 @@ def test_initializer_slots_reach_the_layers_they_name() -> None:
 
 
 def test_fan_out_and_fan_in_scale_a_convolution_differently() -> None:
+    # A 3x3 kernel, as every convolution of ``BasicBlock`` has.
     weight = torch.empty(64, 32, 3, 3)
     torch.manual_seed(0)
     kaiming_normal_fan_out(weight)
@@ -281,6 +282,7 @@ def test_every_stage_needs_a_block() -> None:
 
 def test_a_projected_block_runs_its_convolutions_on_the_strided_grid() -> None:
     analytical = assert_cost_matches_torch(
+        # ``BasicBlock.cost`` takes a square grid only.
         BasicBlock.Config(channels_in=4, channels_out=6, stride=2),
         build_input=lambda: torch.randn(BATCH, 4, 6, 6, requires_grad=True),
         seq_len=6 * 6,
@@ -296,6 +298,7 @@ def test_a_projected_block_runs_its_convolutions_on_the_strided_grid() -> None:
 
 def test_an_identity_block_owns_no_shortcut() -> None:
     analytical = assert_cost_matches_torch(
+        # ``BasicBlock.cost`` takes a square grid only.
         BasicBlock.Config(channels_in=5, channels_out=5),
         build_input=lambda: torch.randn(BATCH, 5, 4, 4, requires_grad=True),
         seq_len=4 * 4,
@@ -316,6 +319,7 @@ def test_a_block_cannot_be_costed_on_a_grid_that_is_not_square() -> None:
 
 def test_the_network_cost_counts_every_matmul_the_forward_issues() -> None:
     config = tiny()
+    # ``ResNet.cost`` reads one ``image_size``: the grid is square.
     config.image_size = 8
     analytical = assert_cost_matches_torch(
         config,

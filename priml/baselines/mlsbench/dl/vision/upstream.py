@@ -415,7 +415,7 @@ def upstream_batches(
     """
     train: Batches = []
     evaluation: Batches = []
-    with reference.seeded(reference.SEED):
+    with reference.seeded(reference.SEED), reference.script_workers():
         train_loader, test_loader = _loaders(
             script,
             num_workers=4,

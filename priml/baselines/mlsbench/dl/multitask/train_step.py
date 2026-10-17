@@ -17,7 +17,6 @@ from __future__ import annotations
 from dataclasses import field
 from typing import TYPE_CHECKING, NotRequired, cast, override
 
-from configgle import Makeable
 from torch import Tensor, nn
 from torch.nn import functional
 
@@ -30,6 +29,8 @@ from priml.baselines.mlsbench.dl.vision.train_step import VisionTrainStep
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+
+    from configgle import Makeable
 
     from priml.train.custom_types import OptimizerProtocol, TrainStepOutput
 

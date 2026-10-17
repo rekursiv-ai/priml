@@ -25,7 +25,10 @@ from typing import Self, override
 
 from configgle import Makes
 
-from priml.baselines.mlsbench.dl.multitask.data import NUM_COARSE, MultiTaskCifar100Data
+from priml.baselines.mlsbench.dl.multitask.data import (
+    NUM_COARSE,
+    MultiTaskCifar100Data,
+)
 from priml.baselines.mlsbench.dl.multitask.losses import (
     DynamicWeightAverage,
     PCGrad,

@@ -67,6 +67,7 @@ def test_confidence_penalty_is_minus_beta_times_the_mean_entropy() -> None:
 def test_orthogonal_is_zero_on_orthonormal_rows_and_skips_unselected() -> None:
     model = nn.Sequential(nn.Conv2d(2, 2, 1, bias=False), nn.Linear(3, 2))
     with torch.no_grad():
+        # A 1x1 convolution's weight; identity rows are orthonormal.
         model[0].weight.copy_(torch.eye(2).reshape(2, 2, 1, 1))
         model[1].weight.fill_(1.0)
     value = orthogonal(

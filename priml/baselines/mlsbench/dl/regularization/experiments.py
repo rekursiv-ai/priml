@@ -28,7 +28,9 @@ from priml.baselines.mlsbench.dl.regularization.regularizers import (
     orthogonal,
     spatial_coactivation,
 )
-from priml.baselines.mlsbench.dl.regularization.train_step import RegularizedTrainStep
+from priml.baselines.mlsbench.dl.regularization.train_step import (
+    RegularizedTrainStep,
+)
 from priml.baselines.mlsbench.dl.vision import experiments as vision
 from priml.optimizers.parameter_filter import everything, excluding, with_ndim
 

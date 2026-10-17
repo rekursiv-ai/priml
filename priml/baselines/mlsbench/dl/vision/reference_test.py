@@ -145,6 +145,7 @@ def test_decoding_recovers_the_offsets_and_mirror_of_a_crop() -> None:
 
 def test_decoding_rejects_an_image_that_is_no_crop_of_its_source() -> None:
     batch = {
+        # One 32x32 CIFAR image, the size of every crop of the source.
         "media": torch.zeros(1, 3, 32, 32),
         "label": torch.zeros(1, dtype=torch.int64),
     }

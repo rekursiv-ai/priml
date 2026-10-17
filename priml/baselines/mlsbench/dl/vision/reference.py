@@ -19,6 +19,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, cast
 
+import warnings
+
 from torch import Tensor, nn
 from treekle import from_plain
 
@@ -132,6 +134,22 @@ def seeded(seed: int) -> Generator[None]:
         yield
     finally:
         torch.set_rng_state(state)
+
+
+@contextmanager
+def script_workers() -> Generator[None]:
+    """Let a script's four loader workers run on a host with fewer CPUs.
+
+    Yields:
+      nothing: Used as a context manager.
+
+    """
+    with warnings.catch_warnings():
+        # `torch` warns when a loader asks for more workers than the host has
+        # CPUs. The count is the script's, and a worker's draws do not
+        # depend on the CPUs, so the warning says nothing about the comparison.
+        warnings.filterwarnings("ignore", message=".*worker processes in total.*")
+        yield
 
 
 def fixed_logits() -> tuple[Tensor, Tensor]:

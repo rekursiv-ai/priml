@@ -98,6 +98,7 @@ def test_cutout_matches_the_masked_pipeline() -> None:
     )
     want = torchvision_pipeline([], batch, last=[Cutout()])
     assert torch.equal(got, want)
+    # One black pixel, broadcast over the batch: what Cutout's patch normalizes to.
     assert (
         got == normalize(torch.zeros(1, 3, 1, 1, dtype=torch.uint8), **statistics())
     ).any()

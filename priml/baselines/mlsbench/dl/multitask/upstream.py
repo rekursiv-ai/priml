@@ -40,7 +40,7 @@ from priml.baselines.mlsbench.dl.multitask import reference
 from priml.baselines.mlsbench.dl.multitask.losses import graph_leaves
 from priml.baselines.mlsbench.dl.vision import (
     reference as vision,
-    upstream as vision_upstream,
+    upstream,
 )
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import rng_fingerprint
@@ -154,8 +154,8 @@ def variants(root: Path, scratch: Path) -> dict[str, Script]:
       scripts: ``sum`` (the pristine script) and each of :data:`EDITED`.
 
     """
-    scripts = {"sum": vision_upstream.load_script(root / PRISTINE)} | {
-        name: vision_upstream.edited_script(
+    scripts = {"sum": upstream.load_script(root / PRISTINE)} | {
+        name: upstream.edited_script(
             root,
             name,
             scratch,
@@ -246,7 +246,8 @@ def combination_record(make: Callable[[], nn.Module], name: str) -> dict[str, Te
         name,
         before_first=lambda loss_fine: report.extend(pin_shared(module, loss_fine)),
     )
-    assert not report, report
+    if report:
+        raise ValueError(report)
     return record
 
 
@@ -326,7 +327,8 @@ def upstream_lockstep(script: Script, name: str, trace: Trace) -> Lockstep:
             probes.append(torch.cat([fine, coarse], dim=-1))
             states.append({k: v.clone() for k, v in model.state_dict().items()})
             scheduler.step()
-    assert not report, report
+    if report:
+        raise ValueError(report)
     return reference.spy_record(name, spy, probes, inner), states
 
 
@@ -382,6 +384,7 @@ def upstream_batches(script: Script) -> tuple[reference.Batches, reference.Batch
     forked = functools.partial(data.DataLoader, multiprocessing_context="fork")
     with (
         vision.seeded(vision.SEED),
+        vision.script_workers(),
         mock.patch.object(script.torchvision.datasets, "CIFAR100", _FakeCifar100),
         mock.patch.object(data, "DataLoader", forked),
     ):
@@ -463,7 +466,21 @@ class _MainSpy:
         epoch: int,
         total_epochs: int,
     ) -> tuple[float, float]:
-        """Record the state before the first epoch and the rate of every one."""
+        """Record the state before the first epoch and the rate of every one.
+
+        Args:
+          model: The script's network, whose state is recorded once.
+          loader: Unused; no epoch runs.
+          mtl_loss: Unused; no epoch runs.
+          optimizer: The script's optimizer, whose settings and rate are recorded.
+          device: Unused; no epoch runs.
+          epoch: The script's epoch index.
+          total_epochs: The script's epoch count.
+
+        Returns:
+          metrics: Zero loss and zero accuracy.
+
+        """
         del loader, mtl_loss, device
         group = cast(dict[str, object], optimizer.param_groups[0])
         groups = cast(list[dict[str, list[Tensor]]], optimizer.param_groups)

@@ -89,7 +89,7 @@ def write_dataset(directory: Path, *, classes: int = 100) -> None:
     for split in ("train", "test"):
         torch.save(
             {
-                "media": torch.randint(0, 256, (8, 3, 8, 10), generator=generator).to(
+                "media": torch.randint(0, 256, (8, 3, 6, 10), generator=generator).to(
                     torch.uint8,
                 ),
                 "label": torch.randint(0, classes, (8,), generator=generator),

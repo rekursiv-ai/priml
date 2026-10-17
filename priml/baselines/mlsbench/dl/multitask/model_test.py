@@ -111,6 +111,7 @@ def both_heads(model: nn.Module, media: torch.Tensor) -> torch.Tensor:
 
 def test_the_cost_counts_both_heads_and_matches_torch() -> None:
     cfg = config()
+    # The trunk's ``BasicBlock.cost`` takes a square grid only.
     cfg.trunk.image_size = 8
     analytical = assert_cost_matches_torch(
         cfg,

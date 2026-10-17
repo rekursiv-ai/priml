@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 
 import sys
 
-import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.activation.scripts import capture_reference
@@ -23,6 +22,8 @@ from priml.testing.golden import read_tensors
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    import pytest
 
 
 def returning[T](value: T) -> Callable[..., T]:

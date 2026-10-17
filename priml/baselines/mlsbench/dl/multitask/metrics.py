@@ -8,12 +8,15 @@ beside it so the second task's progress is visible.
 
 from __future__ import annotations
 
-from typing import override
+from typing import TYPE_CHECKING, override
 
 from configgle import Makes
-from torch import Tensor
 
 from priml.baselines.mlsbench.dl.vision.metrics import BestAccuracy
+
+
+if TYPE_CHECKING:
+    from torch import Tensor
 
 
 class HeadAccuracy(BestAccuracy):

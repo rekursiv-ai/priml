@@ -25,15 +25,10 @@ from priml.testing.cost import assert_cost_matches_torch
 BATCH: Final = 2
 
 
-def apply(module: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
-    """Run a tensor-to-tensor module, typed as one."""
-    return cast(torch.Tensor, module(x))
-
-
 def features(channels: int) -> torch.Tensor:
-    """Return ``(BATCH, channels, 4, 4)`` signed features."""
-    count = BATCH * channels * 4 * 4
-    return ((torch.arange(count) * 7 % 23 - 11) / 8).reshape(BATCH, channels, 4, 4)
+    """Return ``(BATCH, channels, 4, 6)`` signed features."""
+    count = BATCH * channels * 4 * 6
+    return ((torch.arange(count) * 7 % 23 - 11) / 8).reshape(BATCH, channels, 4, 6)
 
 
 def test_pre_activation_scales_the_branch_and_projects_the_raw_input() -> None:
@@ -42,7 +37,14 @@ def test_pre_activation_scales_the_branch_and_projects_the_raw_input() -> None:
     assert block.scale.item() == pytest.approx(0.1)
     x = features(3)
     branch = block.conv2(
-        torch.relu(apply(block.norm2, block.conv1(torch.relu(apply(block.norm1, x))))),
+        torch.relu(
+            cast(
+                torch.Tensor,
+                block.norm2(
+                    block.conv1(torch.relu(cast(torch.Tensor, block.norm1(x)))),
+                ),
+            ),
+        ),
     )
     torch.testing.assert_close(block(x), block.shortcut(x) + 0.1 * branch)
     # A module's own parameters come before its children's, upstream's ``alpha`` too.
@@ -85,9 +87,11 @@ def test_stochastic_depth_draws_once_per_training_forward_and_never_in_eval() ->
     assert block.survival == 0.75
     x = features(3)
     block.eval()
-    kept = apply(
-        block.norm2,
-        block.conv2(block.act(apply(block.norm1, block.conv1(x)))),
+    kept = cast(
+        torch.Tensor,
+        block.norm2(
+            block.conv2(block.act(cast(torch.Tensor, block.norm1(block.conv1(x))))),
+        ),
     )
     with seeded(1):
         draws = torch.rand(3)
@@ -177,6 +181,7 @@ def test_placing_leaves_the_template_and_its_survival_alone() -> None:
 
 
 def test_pre_activation_cost_counts_every_matmul() -> None:
+    # ``_sides`` in ``blocks.py`` takes a square grid only.
     analytical = assert_cost_matches_torch(
         PreActivationBlock.Config(channels_in=3, channels_out=5, stride=2),
         build_input=lambda: torch.randn(BATCH, 3, 6, 6, requires_grad=True),
@@ -191,6 +196,7 @@ def test_pre_activation_cost_counts_every_matmul() -> None:
 def test_pre_activation_costs_the_norm_its_slot_holds() -> None:
     config = PreActivationBlock.Config(channels_in=4, channels_out=6, stride=2)
     config.norm = GroupNorm
+    # ``_sides`` in ``blocks.py`` takes a square grid only.
     analytical = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randn(BATCH, 4, 6, 6, requires_grad=True),
@@ -204,6 +210,7 @@ def test_pre_activation_costs_the_norm_its_slot_holds() -> None:
 
 
 def test_an_identity_pre_activation_block_costs_no_shortcut() -> None:
+    # ``_sides`` in ``blocks.py`` takes a square grid only.
     analytical = assert_cost_matches_torch(
         PreActivationBlock.Config(channels_in=4, channels_out=4),
         build_input=lambda: torch.randn(BATCH, 4, 4, 4, requires_grad=True),
@@ -215,6 +222,7 @@ def test_an_identity_pre_activation_block_costs_no_shortcut() -> None:
 
 
 def test_gated_cost_adds_the_gate_to_the_basic_block() -> None:
+    # ``_sides`` in ``blocks.py`` takes a square grid only.
     gated = assert_cost_matches_torch(
         GatedResidualBlock.Config(channels_in=3, channels_out=5, stride=2),
         build_input=lambda: torch.randn(BATCH, 3, 6, 6, requires_grad=True),

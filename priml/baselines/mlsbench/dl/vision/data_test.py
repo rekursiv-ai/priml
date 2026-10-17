@@ -81,18 +81,13 @@ def make_data(
 
 
 def test_normalize_scales_to_the_unit_interval_then_standardizes() -> None:
-    images = torch.zeros(2, CHANNELS, 2, 2, dtype=torch.uint8)
+    images = torch.zeros(2, CHANNELS, 4, 5, dtype=torch.uint8)
     images[0] = 255
     mean, std = torch.tensor([0.5, 0.25, 0.0]), torch.tensor([0.25, 0.5, 2.0])
     out = normalize(images, mean=mean, std=std)
-    assert torch.equal(
-        out[0],
-        torch.tensor([2.0, 1.5, 0.5]).view(3, 1, 1).expand(3, 2, 2),
-    )
-    assert torch.equal(
-        out[1],
-        torch.tensor([-2.0, -0.5, 0.0]).view(3, 1, 1).expand(3, 2, 2),
-    )
+    # Each channel's value, white image then black, broadcast over the grid.
+    want = torch.tensor([[2.0, 1.5, 0.5], [-2.0, -0.5, 0.0]]).view(2, 3, 1, 1)
+    assert torch.equal(out, want.expand(2, 3, 4, 5))
 
 
 def test_pad_crop_flip_draws_top_then_left_then_mirror_per_image() -> None:
@@ -333,6 +328,7 @@ def test_working_dir_resolves_beneath_the_base_dir() -> None:
 class _FakeCifar100:
     """Two images in the layout torchvision's dataset exposes."""
 
+    # torchvision's CIFAR-100 holds 32x32 images, channels last.
     data: ClassVar = (
         np.arange(2 * 32 * 32 * 3, dtype=np.uint32)
         .astype(np.uint8)

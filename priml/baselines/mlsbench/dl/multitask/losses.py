@@ -13,16 +13,19 @@ algebraically equal rewrite is not a refactor.
 
 from __future__ import annotations
 
-from typing import cast, override
+from typing import TYPE_CHECKING, cast, override
 
 from configgle import Fig
 from torch import Tensor, nn
-from torch.autograd.graph import Node
 from torch.nn import functional
 
 import torch
 
 from priml.cost import Cost, elementwise_cost
+
+
+if TYPE_CHECKING:
+    from torch.autograd.graph import Node
 
 
 class SumLoss(nn.Module):

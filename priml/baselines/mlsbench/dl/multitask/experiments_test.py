@@ -70,12 +70,12 @@ def shrink(config: MultiTaskTrainLoop, *, directory: Path) -> MultiTaskTrainLoop
 
 
 def write_dataset(directory: Path) -> None:
-    """Write six 6x7 images per split in the prepared format."""
+    """Write six 5x7 images per split in the prepared format."""
     for split in ("train", "test"):
         torch.save(
             {
-                "media": (torch.arange(6 * 3 * 6 * 7) % 251)
-                .reshape(6, 3, 6, 7)
+                "media": (torch.arange(6 * 3 * 5 * 7) % 251)
+                .reshape(6, 3, 5, 7)
                 .to(torch.uint8),
                 "label": torch.tensor([0, 17, 42, 99, 5, 63]),
             },

@@ -16,7 +16,7 @@ import torch
 
 from priml.baselines.mlsbench.dl.residual.scripts import capture_reference
 from priml.baselines.mlsbench.dl.residual.upstream_test import write_clone
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference
 from priml.testing.golden import read_tensors
 
 
@@ -34,7 +34,7 @@ def returning[T](value: T) -> Callable[..., T]:
     return call
 
 
-@pytest.mark.slow
+@pytest.mark.compute_training
 def test_capture_names_what_the_stand_in_does_differently(tmp_path: Path) -> None:
     root = tmp_path / "clone"
     write_clone(root)
@@ -75,7 +75,7 @@ def test_main_prints_the_report_and_writes_nothing_when_something_differs(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    result = vision.Captured(record={}, sites={}, report=["a differs"])
+    result = reference.Captured(record={}, sites={}, report=["a differs"])
     monkeypatch.setattr(capture_reference, "capture", returning(result))
     out = tmp_path / "out"
     argv = ["capture", "--root", str(tmp_path), "--out", str(out)]
@@ -91,7 +91,7 @@ def test_main_writes_the_golden_when_every_comparison_is_exact(
     tmp_path: Path,
 ) -> None:
     record = {"x": torch.arange(3)}
-    result = vision.Captured(record=record, sites={}, report=[])
+    result = reference.Captured(record=record, sites={}, report=[])
     monkeypatch.setattr(capture_reference, "capture", returning(result))
     out = tmp_path / "out"
     argv = ["capture", "--root", str(tmp_path), "--out", str(out)]
