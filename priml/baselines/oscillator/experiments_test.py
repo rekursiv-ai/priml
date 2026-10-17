@@ -6,7 +6,12 @@ import torch
 
 from priml.baselines.etth1.experiments import exp000 as etth1_exp000
 from priml.baselines.oscillator.benchmark import ForecastStudy
-from priml.baselines.oscillator.experiments import exp000, exp001, exp002, exp_smoke
+from priml.baselines.oscillator.experiments import (
+    exp000,
+    exp001,
+    exp002,
+    exp_smoke,
+)
 from priml.baselines.oscillator.train_step import DLinearForecast, RidgeCorrection
 from priml.testing.golden import assert_pprint_golden
 

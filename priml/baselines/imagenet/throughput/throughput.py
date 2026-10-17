@@ -15,56 +15,68 @@ tensor golden in ``throughput_test.py``, which a change to shared decode or
 crop code fails; a fork that changes the reference to match itself is caught
 there, not here.
 
-Each pass runs in a fresh spawned process, so nothing a pipeline caches in
-memory survives into the next pass, and the reference is never computed in a
-timed process. The window opens before the pipeline's config is unpickled
-(so its modules' import-time work counts) and closes when the last batch is
-in hand; construction and the first batch are inside it.
+Each pass runs :func:`timed_pass.drain` in a fresh spawned process, so
+nothing a pipeline caches in memory survives into the next pass, and the
+reference is never computed in a timed process. The wall clock
+(``images_per_sec``, ``first_batch_sec``) starts before the pipeline's config
+is unpickled and stops when the last batch is in hand; construction and the
+first batch are inside it. ``timed_pass`` imports no pipeline code, so every
+pipeline, ``exp000``'s included, pays for its own modules' import.
 
 CPU time is read by this process with ``getrusage(RUSAGE_CHILDREN)`` around
-starting and joining the pass process. It covers every thread of the pass
-process and every descendant process that was waited for before its parent
-exited, which is how ``multiprocessing``, process pools, and
-``subprocess.run`` end. The pass process reports, and this process subtracts,
-its own CPU before the window opened (interpreter start, harness imports) and
-the main thread's CPU spent comparing after it closed. Not counted: a
-descendant nobody waits for. The pass process leads its own process group,
-and a run whose group still has a live process after the pass refuses to
-report; a descendant that leaves the group, or exits without being waited
-for, is beyond what ``getrusage`` can see, and the rules forbid both.
+starting the pass process and reaping its process tree, so it spans the pass
+process's whole life. It covers every thread of the pass process and every
+descendant: one waited for by its parent, as ``multiprocessing``, process
+pools, and ``subprocess.run`` do, and one orphaned, which this process (a
+child subreaper) adopts and reaps. The pass process reports, and this
+process subtracts, two spans of its own: its CPU before the clock started
+(interpreter start, harness imports) and its main thread's CPU spent
+comparing. Everything else is charged, sending the result, freeing the
+batches, and interpreter teardown included, so a pipeline whose shutdown is
+costly pays for it.
+
+The pass process leads its own process group. After it reports, it has
+``survivor_grace_sec`` to exit, and its group as long again to empty; past
+either, the group is killed and the run refuses to report. A descendant that
+leaves the group is beyond this check, and the rules forbid it. A pass whose
+process exits nonzero is a failure even if it sent a result. If this process
+is interrupted mid-pass, it kills the pass's group before unwinding.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Self, cast, override
+from typing import TYPE_CHECKING, Final, Self, cast, override
 
+import contextlib
+import ctypes
 import logging
+import math
 import multiprocessing
 import os
 import pickle
 import resource
+import signal
 import statistics
 import tempfile
 import time
-import traceback
 
 from configgle import Fig, Makeable
-from torch import Tensor
-
-import numpy as np
-import torch
 
 from priml.baselines.imagenet.data import ffcv_train_data_pipeline
+from priml.baselines.imagenet.throughput import timed_pass
 from priml.custom_types import HasNormalizedWorkingDirPattern
 from priml.data.pipeline.dataset import DataPipeline
-from priml.math.seed import set_seed_local
 from priml.paths import resolve_working_dir
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from multiprocessing.connection import Connection
+    from multiprocessing.process import BaseProcess
+
+    from priml.baselines.imagenet.throughput.timed_pass import PassResult
 
 
 logger = logging.getLogger(__name__)
@@ -73,7 +85,16 @@ logger = logging.getLogger(__name__)
 __all__ = ["LoaderThroughput", "PixelTolerance", "ThroughputReport"]
 
 
-@dataclass(frozen=True)
+POLL_SEC: Final = 0.05
+"""How often a wait on the pass process rechecks that it is alive."""
+
+NO_RESULT: Final = "the pass process exited without a result"
+
+PR_SET_CHILD_SUBREAPER: Final = 36
+"""From ``<linux/prctl.h>``."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ThroughputReport:
     """What one :meth:`LoaderThroughput.measure` call observed."""
 
@@ -85,7 +106,7 @@ class ThroughputReport:
     """Wall-clock rate per pass; reported, not scored."""
 
     first_batch_sec: list[float]
-    """Seconds from the window opening to the first batch, per pass."""
+    """Seconds from the clock starting to the first batch, per pass."""
 
     num_images: int
     """Images in each pass, every batch counted."""
@@ -94,11 +115,13 @@ class ThroughputReport:
     """Every batch field outside the correctness tier; empty when it holds."""
 
     max_abs_diff: float
-    """Largest per-value difference from the reference across every pass; 0
-    under the exact tier, where differing batches are already mismatches."""
+    """Largest per-value difference from the reference in a tolerance field,
+    across every pass; inf for a NaN on one side. 0 under the exact tier,
+    where differing batches are already mismatches."""
 
     max_fraction_differing: float
-    """Largest fraction of one batch field's values that differ."""
+    """Largest fraction of one tolerance field's values that differ in one
+    batch; 0 under the exact tier."""
 
 
 class PixelTolerance:
@@ -119,6 +142,15 @@ class PixelTolerance:
         """Keys the tolerance applies to; every other compared key stays exact."""
 
     def __init__(self, config: Config) -> None:
+        if math.isnan(config.max_abs_diff) or config.max_abs_diff < 0:
+            raise ValueError(
+                f"max_abs_diff must be a nonnegative number; got {config.max_abs_diff}.",
+            )
+        fraction = config.max_fraction_differing
+        if math.isnan(fraction) or fraction < 0 or fraction > 1:
+            raise ValueError(
+                f"max_fraction_differing must lie in [0, 1]; got {fraction}.",
+            )
         self.config = config
 
     def admits(self, max_abs_diff: float, fraction_differing: float) -> bool:
@@ -158,7 +190,8 @@ class LoaderThroughput:
         """Timed passes over the data; the report keeps every one."""
 
         survivor_grace_sec: float = 5.0
-        """How long a pass's process group may take to empty after the pass exits."""
+        """How long the pass process may take to exit after it reports, and
+        its process group to empty after that."""
 
         base_dir: Path | str | None = "/opt/scratch"
         """Resource root the pipelines resolve beneath."""
@@ -180,8 +213,17 @@ class LoaderThroughput:
     def __init__(self, config: Config) -> None:
         if config.num_repeats <= 0:
             raise ValueError(f"num_repeats must be positive; got {config.num_repeats}.")
+        if not config.fields:
+            raise ValueError("fields must name at least one batch key; got [].")
         self.config = config
         self.tolerance = None if config.tolerance is None else config.tolerance.make()
+        if self.tolerance is not None:
+            uncompared = sorted(set(self.tolerance.config.fields) - set(config.fields))
+            if uncompared:
+                raise ValueError(
+                    f"tolerance names fields that are not compared: {uncompared}; "
+                    f"compared fields are {config.fields}.",
+                )
 
     def run(self, *args: str) -> None:
         """Measure, log the rates, and fail if any batch left its tier.
@@ -190,14 +232,16 @@ class LoaderThroughput:
           *args: Ignored; accepted so launcher passthrough arguments never raise.
 
         Raises:
-          AssertionError: A batch is outside the correctness tier.
+          RuntimeError: A batch is outside the correctness tier, or a pass
+            raised, exited nonzero, or left a process running.
+          ValueError: A pass yielded no batch.
 
         """
         if args:
             logger.info("Ignoring launcher passthrough args: %r.", args)
         report = self.measure()
         if report.mismatches:
-            raise AssertionError(
+            raise RuntimeError(
                 f"{len(report.mismatches)} batch mismatches against the reference:\n"
                 + "\n".join(report.mismatches),
             )
@@ -236,21 +280,24 @@ class LoaderThroughput:
           report: Per-pass rates and every batch outside the correctness tier.
 
         Raises:
-          ValueError: A pass yielded no batch.
+          ValueError: The reference or a pass yielded no batch.
+          RuntimeError: A pass raised, exited nonzero, or left a process running.
 
         """
         cfg = self.config
-        with tempfile.TemporaryDirectory() as scratch:
-            _ = _run_pass(cfg.reference, cfg, save_dir=scratch)
-            passes = [
-                _run_pass(cfg.pipeline, cfg, compare_dir=scratch)
-                for _ in range(cfg.num_repeats)
-            ]
+        _become_subreaper()
+        passes: list[tuple[PassResult, float]] = []
+        with tempfile.TemporaryDirectory(prefix="throughput-") as scratch:
+            reference, _ = _run_pass(cfg.reference, cfg, save_dir=scratch)
+            if reference.num_images == 0:
+                raise ValueError("The reference yielded no batch.")
+            for repeat in range(cfg.num_repeats):
+                passes.append(_run_pass(cfg.pipeline, cfg, compare_dir=scratch))
+                if passes[-1][0].num_images == 0:
+                    raise ValueError(f"Pass {repeat} yielded no batch.")
         mismatches: list[str] = []
         worst_diff, worst_fraction = 0.0, 0.0
         for repeat, (result, _) in enumerate(passes):
-            if result.num_images == 0:
-                raise ValueError(f"Pass {repeat} yielded no batch.")
             lines, diff, fraction = self._check(result, repeat)
             mismatches += lines
             worst_diff, worst_fraction = (
@@ -267,7 +314,11 @@ class LoaderThroughput:
             max_fraction_differing=worst_fraction,
         )
 
-    def _check(self, result: _Pass, repeat: int) -> tuple[list[str], float, float]:
+    def _check(
+        self,
+        result: PassResult,
+        repeat: int,
+    ) -> tuple[list[str], float, float]:
         """Return one line per field outside its tier, and the worst drift."""
         lines: list[str] = []
         if result.num_batches != result.num_reference_batches:
@@ -294,45 +345,21 @@ class LoaderThroughput:
         return lines, worst_diff, worst_fraction
 
 
-@dataclass(frozen=True)
-class _Diff:
-    """How one batch field differs from the reference's."""
-
-    num_differing: int
-    numel: int
-    max_abs_diff: float
-    first_index: tuple[int, ...]
-
-
-@dataclass(frozen=True)
-class _Pass:
-    """What one pass process sends back."""
-
-    diffs: dict[tuple[int, str], _Diff | str]
-    """Each (batch, field) that differs from the reference: how, or why the
-    two cannot be compared (dtype or shape)."""
-    num_batches: int
-    num_reference_batches: int
-    num_images: int
-    elapsed_sec: float
-    first_batch_sec: float
-    cpu_outside_sec: float
-    """The pass process's own CPU outside the window, which is not scored."""
-
-
+# Any exception here, ``KeyboardInterrupt`` included, kills the pass's process group and
+# reaps the pass process before it propagates.
 def _run_pass(
     pipeline: Makeable[DataPipeline],
     cfg: LoaderThroughput.Config,
     *,
     save_dir: str | None = None,
     compare_dir: str | None = None,
-) -> tuple[_Pass, float]:
+) -> tuple[PassResult, float]:
     """Drain ``pipeline`` once in a fresh process; return it and its CPU sec."""
     context = multiprocessing.get_context("spawn")
     receiver, sender = context.Pipe(duplex=False)
     process = context.Process(
-        target=_pass,
-        # Pickled here and unpickled inside the window, so whatever the
+        target=timed_pass.drain,
+        # Pickled here and unpickled on the clock, so whatever the
         # pipeline's own modules do at import is timed.
         args=(pickle.dumps(pipeline),),
         kwargs={
@@ -346,135 +373,115 @@ def _run_pass(
     started_cpu = _children_cpu_sec()
     process.start()
     sender.close()
+    group = process.pid
+    if group is None:
+        raise ValueError("Expected group is not None.")
     try:
-        # A _Pass, or the pass's traceback if it raised.
-        result = cast("_Pass | str", receiver.recv())
-    except EOFError:
-        result = "the pass process exited without a result"
-    process.join()
-    cpu = _children_cpu_sec() - started_cpu
-    if isinstance(result, str):
-        raise RuntimeError(  # noqa: TRY004 -- The string is the pass's traceback, not a caller passing the wrong type.
-            f"Pass failed (exit code {process.exitcode}):\n{result}",
-        )
-    assert process.pid is not None
-    _require_empty_group(process.pid, cfg.survivor_grace_sec)
-    return result, cpu - result.cpu_outside_sec
-
-
-def _pass(
-    pipeline: bytes,
-    *,
-    seed: int,
-    fields: list[str],
-    save_dir: str | None,
-    compare_dir: str | None,
-    connection: Connection,
-) -> None:
-    """Run in a fresh process: drain one pass, then compare it outside the window."""
-    os.setpgid(0, 0)
-    try:
-        cpu_before = _self_cpu_sec()
-        started = time.perf_counter()
-        first_batch_sec = 0.0
-        batches: list[dict[str, Tensor]] = []
-        set_seed_local(seed)
-        made = cast("Makeable[DataPipeline]", pickle.loads(pipeline))  # noqa: S301 -- Pickled by the parent.
-        for batch in made.make():
-            batches.append(_kept(batch, fields))
-            if len(batches) == 1:
-                first_batch_sec = time.perf_counter() - started
-        elapsed = time.perf_counter() - started
-
-        # Only this thread's CPU from here on is subtracted: a pipeline thread
-        # still running is the pipeline's cost.
-        comparing_started = time.thread_time()
-        diffs: dict[tuple[int, str], _Diff | str] = {}
-        num_reference_batches = 0
-        for index, batch in enumerate(batches):
-            if save_dir is not None:
-                torch.save(batch, Path(save_dir) / f"{index}.pt")
-        if compare_dir is not None:
-            num_reference_batches = len(list(Path(compare_dir).glob("*.pt")))
-            for index, batch in enumerate(batches[:num_reference_batches]):
-                want = cast(
-                    "dict[str, Tensor]",
-                    torch.load(Path(compare_dir) / f"{index}.pt", weights_only=True),
-                )
-                for name in fields:
-                    diff = _diff(want[name], batch[name])
-                    if diff is not None:
-                        diffs[index, name] = diff
-        result = _Pass(
-            diffs=diffs,
-            num_batches=len(batches),
-            num_reference_batches=num_reference_batches,
-            num_images=sum(len(b[fields[0]]) for b in batches),
-            elapsed_sec=elapsed,
-            first_batch_sec=first_batch_sec,
-            cpu_outside_sec=cpu_before + time.thread_time() - comparing_started,
-        )
+        result = _receive(receiver, process)
+        # A pass process exits only once its non-daemon children are joined.
+        process.join(cfg.survivor_grace_sec)
+        hung = process.exitcode is None
+        if hung:
+            _kill(process, group)
+        survived = _group_survives(group, cfg.survivor_grace_sec) or hung
     except BaseException:
-        connection.send(traceback.format_exc())
+        _kill(process, group)
         raise
-    connection.send(result)
+    finally:
+        receiver.close()
+    cpu = _children_cpu_sec() - started_cpu
+    passed = _verdict(result, exitcode=process.exitcode, survived=survived)
+    return passed, cpu - passed.cpu_outside_sec
 
 
-def _diff(want: Tensor, got: Tensor) -> _Diff | str | None:
-    """Return how ``got`` differs from ``want``, or None when the bits match."""
-    if (want.dtype, want.shape) != (got.dtype, got.shape):
-        return f"{got.dtype}{list(got.shape)} vs {want.dtype}{list(want.shape)}"
-    # numpy, not torch: its elementwise ops stay on this thread, whose CPU is
-    # subtracted. Compared as bytes so a NaN equals itself; float64 holds every
-    # difference of two values of the integer dtypes a batch carries exactly.
-    a, b = want.contiguous().numpy(), got.contiguous().numpy()
-    if a.tobytes() == b.tobytes():
-        return None
-    differing = a != b  # pyright: ignore[reportAny] -- numpy comparisons are dtype-erased.
-    where = np.argwhere(differing)  # pyright: ignore[reportAny] -- numpy indexing is dtype-erased.
-    return _Diff(
-        num_differing=int(np.count_nonzero(differing)),  # pyright: ignore[reportAny] -- numpy comparisons are dtype-erased.
-        numel=a.size,
-        max_abs_diff=float(np.abs(a.astype(np.float64) - b.astype(np.float64)).max()),  # pyright: ignore[reportAny] -- numpy reductions are dtype-erased.
-        # Empty when only the bytes differ (a signed zero): the count says 0.
-        first_index=tuple(int(i) for i in where[0]) if len(where) else (),  # pyright: ignore[reportAny] -- numpy indexing is dtype-erased.
-    )
+# Liveness is rechecked between polls: a descendant still holding the sending end would
+# keep ``recv`` from ever seeing the pass process die.
+def _receive(receiver: Connection, process: BaseProcess) -> PassResult | str:
+    """Return the pass's result or traceback, or why it sent neither."""
+    alive = True
+    while alive:
+        alive = process.is_alive()
+        if receiver.poll(POLL_SEC if alive else 0):
+            try:
+                return cast("PassResult | str", receiver.recv())
+            except EOFError:
+                break
+    return NO_RESULT
 
 
-def _require_empty_group(group: int, grace_sec: float) -> None:
-    """Raise if any process of the pass's group outlives ``grace_sec``."""
+def _kill(process: BaseProcess, group: int) -> None:
+    """Kill the pass process and its group, then reap the pass process."""
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(group, signal.SIGKILL)
+    # The pass process may not have made its group yet.
+    process.kill()
+    process.join()
+
+
+def _verdict(
+    result: PassResult | str,
+    *,
+    exitcode: int | None,
+    survived: bool,
+) -> PassResult:
+    """Return ``result`` if the pass may be scored; raise every reason it may not."""
+    reasons: list[str] = []
+    if isinstance(result, str) or exitcode != 0:
+        reasons.append(
+            f"Pass failed (exit code {exitcode}):\n"
+            f"{result if isinstance(result, str) else 'it sent a result first'}",
+        )
+    if survived:
+        reasons.append(
+            "A process the pipeline started outlived its pass; its CPU "
+            "time cannot be counted, so no rate is reported.",
+        )
+    if reasons:
+        raise RuntimeError("\n".join(reasons))
+    return cast("PassResult", result)
+
+
+def _become_subreaper() -> None:
+    """Adopt every orphaned descendant, so its CPU is charged when it is reaped."""
+    prctl = cast("Callable[..., int]", ctypes.CDLL(None, use_errno=True).prctl)
+    if prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+        errno = ctypes.get_errno()
+        raise OSError(errno, f"prctl(PR_SET_CHILD_SUBREAPER): {os.strerror(errno)}")
+
+
+# Must run only once the pass process is reaped: it reaps every exited member of
+# ``group`` this process adopted, which would steal the pass process's exit status from
+# ``multiprocessing``.
+def _group_survives(group: int, grace_sec: float) -> bool:
+    """Return whether the pass's group outlived ``grace_sec``, killing it if so."""
     deadline = time.monotonic() + grace_sec
     while True:
+        _reap(group)
         try:
             os.killpg(group, 0)
         except ProcessLookupError:
-            return
+            return False
         if time.monotonic() > deadline:
-            raise RuntimeError(
-                "A process the pipeline started outlived its pass; its CPU "
-                "time cannot be counted, so no rate is reported.",
-            )
-        time.sleep(0.05)
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError:
+                return False
+            _reap(group)
+            return True
+        time.sleep(POLL_SEC)
+
+
+def _reap(group: int) -> None:
+    """Reap every exited child of this process in ``group``, charging its CPU."""
+    while True:
+        try:
+            pid, _ = os.waitpid(-group, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            return
 
 
 def _children_cpu_sec() -> float:
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     return usage.ru_utime + usage.ru_stime
-
-
-def _self_cpu_sec() -> float:
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    return usage.ru_utime + usage.ru_stime
-
-
-def _kept(batch: dict[str, object], fields: list[str]) -> dict[str, Tensor]:
-    """Return the compared fields of ``batch``."""
-    kept: dict[str, Tensor] = {}
-    for name in fields:
-        value = batch[name]
-        if not isinstance(value, Tensor):
-            raise TypeError(
-                f"Batch field {name!r} is {type(value).__name__}, not a Tensor.",
-            )
-        kept[name] = value
-    return kept

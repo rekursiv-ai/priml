@@ -1,3 +1,0 @@
-import torch
-
-def tensor_already_casted_to_fp8(tensor: torch.Tensor) -> bool: ...

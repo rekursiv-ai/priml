@@ -14,7 +14,11 @@ from priml.baselines.tmax.objective import (
     dppo_token_loss,
     importance_ratio,
 )
-from priml.baselines.tmax.rollouts import RolloutRecord, group_advantages, pack_rollouts
+from priml.baselines.tmax.rollouts import (
+    RolloutRecord,
+    group_advantages,
+    pack_rollouts,
+)
 from priml.baselines.tmax.scoring import log_softmax_and_gather
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import read_tensors

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast, override
+from typing import TYPE_CHECKING, Final, cast, override
 
 import logging
 import queue
@@ -25,6 +25,9 @@ if TYPE_CHECKING:
 
 
 type TestSample = dict[str, object]
+
+# A stop or close is seen within one poll; the tests that wait on one keep it short.
+_POLL_SEC: Final = 0.002
 
 
 def _samples(count: int) -> Iterator[TestSample]:
@@ -276,6 +279,7 @@ def test_parmap_surfaces_a_source_exception_from_the_feeder() -> None:
 
     config = ParMap.Config(
         num_threads=2,
+        poll_sec=_POLL_SEC,
         processors=[SlowProcessor.Config(delay_ms=0)],
     )
     with pytest.raises(ValueError, match=r"^upstream$"):
@@ -318,6 +322,7 @@ def test_parmap_preserves_base_exceptions_while_sending_poison_pills(
     parmap = ParMap.Config(
         num_threads=1,
         max_input_queue_size=1,
+        poll_sec=_POLL_SEC,
         processors=[FailingProcessor.Config()],
     ).make()
 
@@ -795,11 +800,12 @@ def test_parmap_limits_poison_pill_waits(
     parmap = ParMap.Config(
         num_threads=2,
         max_input_queue_size=2,
+        poll_sec=_POLL_SEC,
         processors=[SlowProcessor.Config(delay_ms=0)],
     ).make()
 
     assert len(list(parmap(_samples(2)))) == 2
-    assert created[0].poison_timeouts == [0.1, 0.1]
+    assert created[0].poison_timeouts == [_POLL_SEC, _POLL_SEC]
 
 
 def test_bounded_queue_put_retries_after_a_full_queue_is_drained() -> None:
@@ -826,7 +832,7 @@ def test_bounded_queue_put_retries_after_a_full_queue_is_drained() -> None:
     stop_event = threading.Event()
 
     def put_later() -> None:
-        _put_until_stopped(items, "late", stop_event)
+        _put_until_stopped(items, "late", stop_event, _POLL_SEC)
         completed.set()
 
     worker = threading.Thread(target=put_later, daemon=True)
@@ -846,7 +852,7 @@ def test_bounded_queue_put_observes_stop_while_full() -> None:
     stop_event = threading.Event()
     worker = threading.Thread(
         target=_put_until_stopped,
-        args=(items, "late", stop_event),
+        args=(items, "late", stop_event, _POLL_SEC),
         daemon=True,
     )
     worker.start()
@@ -1087,6 +1093,7 @@ def test_parmap_end_of_stream_reaches_every_worker_when_pills_wait(
     parmap = ParMap.Config(
         num_threads=2,
         max_input_queue_size=1,
+        poll_sec=_POLL_SEC,
         processors=[GatedProcessor.Config()],
     ).make()
     results: list[TestSample] = []
@@ -1136,6 +1143,7 @@ def test_parmap_close_stops_every_thread(monkeypatch: pytest.MonkeyPatch) -> Non
         num_threads=2,
         max_input_queue_size=1,
         max_output_queue_size=1,
+        poll_sec=_POLL_SEC,
         processors=[SlowProcessor.Config(delay_ms=0)],
     ).make()
     stream = parmap(_endless())
@@ -1146,6 +1154,60 @@ def test_parmap_close_stops_every_thread(monkeypatch: pytest.MonkeyPatch) -> Non
     for thread in threads:
         thread.join(timeout=2)
     assert [thread.is_alive() for thread in threads] == [False] * len(threads)
+
+
+@pytest.mark.parametrize(
+    ("samples", "blocked_on_a_sample"),
+    [(_endless, True), (lambda: _samples(2), False)],
+    ids=["sample", "end_marker"],
+)
+def test_prefetchbuffer_close_frees_a_producer_blocked_on_a_full_queue(
+    monkeypatch: pytest.MonkeyPatch,
+    samples: Callable[[], Iterator[TestSample]],
+    *,
+    blocked_on_a_sample: bool,
+) -> None:
+    real_queue = queue.Queue
+    blocked = threading.Event()
+
+    class ObservedQueue(real_queue[dict[str, object] | None]):
+        @override
+        def put(
+            self,
+            item: dict[str, object] | None,
+            block: bool = True,
+            timeout: float | None = None,
+        ) -> None:
+            # Sample 1 may wait only until the consumer takes sample 0; a later
+            # put waits on a consumer that never reads again.
+            later = item["id"] != 1 if isinstance(item, dict) else True
+            if self.full() and later and isinstance(item, dict) == blocked_on_a_sample:
+                blocked.set()
+            super().put(item, block=block, timeout=timeout)
+
+    def make_queue(*, maxsize: int = 0) -> ObservedQueue:
+        return ObservedQueue(maxsize=maxsize)
+
+    monkeypatch.setattr("priml.data.pipeline.parallel.queue.Queue", make_queue)
+    threads = _capture_threads(monkeypatch)
+    stream = PrefetchBuffer.Config(size=1, poll_sec=_POLL_SEC).make()(samples())
+
+    _ = next(stream)
+    assert blocked.wait(timeout=1), "the producer never waited on a full queue"
+    cast("Generator[TestSample, None, None]", stream).close()
+
+    threads[0].join(timeout=1)
+    assert not threads[0].is_alive()
+
+
+@pytest.mark.parametrize("poll_sec", [0.0, -1.0, float("nan")])
+def test_parmap_and_prefetchbuffer_reject_a_non_positive_poll(
+    poll_sec: float,
+) -> None:
+    with pytest.raises(ValueError, match=r"^poll_sec must be > 0; got"):
+        ParMap.Config(poll_sec=poll_sec).make()
+    with pytest.raises(ValueError, match=r"^poll_sec must be > 0; got"):
+        PrefetchBuffer.Config(poll_sec=poll_sec).make()
 
 
 def test_prefetchbuffer_reraises_an_upstream_exception() -> None:
@@ -1165,7 +1227,7 @@ def test_prefetchbuffer_close_stops_the_producer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     threads = _capture_threads(monkeypatch)
-    stream = PrefetchBuffer.Config(size=1).make()(_endless())
+    stream = PrefetchBuffer.Config(size=1, poll_sec=_POLL_SEC).make()(_endless())
 
     _ = next(stream)
     cast("Generator[TestSample, None, None]", stream).close()

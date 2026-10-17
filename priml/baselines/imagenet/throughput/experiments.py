@@ -21,11 +21,12 @@ Objective:
 Score:
   Images per CPU-second, the median over ``num_repeats`` passes. Each pass
   runs in a fresh spawned process and is charged for the CPU of its whole
-  process tree, from before the pipeline's config is unpickled to the last
-  batch, construction and the first batch included (``throughput.py`` says
-  exactly what is and is not counted). Wall images/sec and first-batch
-  latency are logged beside it and not scored: thread count alone moves wall
-  time, and on a shared machine it is the noisier number.
+  process tree, from before the pipeline's config is unpickled to the pass
+  process's exit, construction, the first batch, and teardown included
+  (``throughput.py`` says exactly what is and is not counted). Wall
+  images/sec and first-batch latency are logged beside it and not scored:
+  thread count alone moves wall time, and on a shared machine it is the
+  noisier number.
 
 Correctness:
   Exact (the default): every batch's ``image`` and ``label`` tensors equal
