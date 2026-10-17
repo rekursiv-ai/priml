@@ -38,6 +38,6 @@ def test_exp000_times_the_training_pipeline_on_its_own_image_set() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)
