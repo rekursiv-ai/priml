@@ -109,6 +109,29 @@ def test_graph_leaves_finds_every_parameter_once_in_walk_order() -> None:
     assert leaves[0] is net[2].bias
 
 
+@pytest.mark.parametrize(
+    ("config", "params"),
+    [
+        (SumLoss.Config(), 0),
+        (UncertaintyLoss.Config(), 2),
+        (DynamicWeightAverage.Config(), 0),
+        (PCGrad.Config(), 0),
+    ],
+    ids=["sum", "uncertainty", "dwa", "pcgrad"],
+)
+def test_every_combination_costs_a_few_scalar_ops_and_owns_its_parameters(
+    config: SumLoss.Config
+    | UncertaintyLoss.Config
+    | DynamicWeightAverage.Config
+    | PCGrad.Config,
+    params: int,
+) -> None:
+    cost = config.cost(batch_size=7, dtype=None)
+    assert cost.params == params == sum(p.numel() for p in config.make().parameters())
+    assert cost == config.cost(batch_size=128, dtype=None)  # O(1) in the batch.
+    assert cost["flops", "primal", "matmul"].sum() == 0
+
+
 if __name__ == "__main__":
     from priml.lib.testing.runner import test_main
 

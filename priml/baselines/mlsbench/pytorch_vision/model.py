@@ -46,6 +46,36 @@ class GlobalAvgPool(nn.Module):
     class Config(Fig["GlobalAvgPool"]):
         """No parameters; a config so the pool is a slot a fork can fill."""
 
+        def cost(
+            self,
+            *,
+            channels: int,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
+            """Cost one global average over a ``seq_len``-position grid per channel.
+
+            Args:
+              channels: Pooled channels.
+              seq_len: Spatial positions averaged per channel.
+              batch_size: Images in this invocation.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus; unused.
+
+            Returns:
+              cost: Whole-invocation FLOPs and logical bytes; owns nothing.
+
+            """
+            del kwargs
+            return avg_pool_cost(
+                channels=channels,
+                positions=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+            )
+
     def __init__(self, config: Config) -> None:
         del config
         super().__init__()
@@ -343,11 +373,13 @@ class ResNet(nn.Module):
             channels = self.channels_hidden[-1]
             return (
                 total
-                + avg_pool_cost(
+                + cost(
+                    self.pool,
                     channels=channels,
-                    positions=side**2,
+                    seq_len=side**2,
                     batch_size=batch_size,
                     dtype=dtype,
+                    **kwargs,
                 )
                 + matmul_cost(
                     channels_in=channels,

@@ -22,12 +22,33 @@ from torch.nn import functional
 
 import torch
 
+from priml.cost import Cost, elementwise_cost
+
 
 class SumLoss(nn.Module):
     """Add the two losses: the task's pristine combination."""
 
     class Config(Fig["SumLoss"]):
         """No parameters; a config so the combination is a slot a fork can fill."""
+
+        def cost(
+            self,
+            *,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
+            """Cost one scalar addition.
+
+            Args:
+              dtype: Loss dtype; ``None`` is torch's default.
+              **kwargs: The open bus; unused.
+
+            Returns:
+              cost: A few scalar operations on the two losses.
+
+            """
+            del kwargs
+            return _combination_cost(params=0, dtype=dtype)
 
     def __init__(self, config: Config) -> None:
         del config
@@ -58,6 +79,25 @@ class UncertaintyLoss(nn.Module):
 
     class Config(Fig["UncertaintyLoss"]):
         """No parameters besides the learned log-variances, which start at zero."""
+
+        def cost(
+            self,
+            *,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
+            """Cost the weighted sum and the two learned log-variances.
+
+            Args:
+              dtype: Loss dtype; ``None`` is torch's default.
+              **kwargs: The open bus; unused.
+
+            Returns:
+              cost: A few scalar operations on the two losses, owning the log-variances.
+
+            """
+            del kwargs
+            return _combination_cost(params=2, dtype=dtype)
 
     def __init__(self, config: Config) -> None:
         del config
@@ -104,6 +144,25 @@ class DynamicWeightAverage(nn.Module):
 
         eps: float = 1e-8
         """Added to the previous losses before dividing by them."""
+
+        def cost(
+            self,
+            *,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
+            """Cost the softmax-weighted sum of two scalars.
+
+            Args:
+              dtype: Loss dtype; ``None`` is torch's default.
+              **kwargs: The open bus; unused.
+
+            Returns:
+              cost: A few scalar operations on the two losses.
+
+            """
+            del kwargs
+            return _combination_cost(params=0, dtype=dtype)
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -185,6 +244,25 @@ class PCGrad(nn.Module):
         eps: float = 1e-12
         """Added to each squared norm before dividing by it."""
 
+        def cost(
+            self,
+            *,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
+            """Cost the projection's scalar bookkeeping; its gradients are the step's backward.
+
+            Args:
+              dtype: Loss dtype; ``None`` is torch's default.
+              **kwargs: The open bus; unused.
+
+            Returns:
+              cost: A few scalar operations on the two losses.
+
+            """
+            del kwargs
+            return _combination_cost(params=0, dtype=dtype)
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.eps = config.eps
@@ -235,6 +313,18 @@ class PCGrad(nn.Module):
             surrogate = surrogate + (chunk * p).sum()
             offset += numel
         return surrogate
+
+
+def _combination_cost(*, params: int, dtype: torch.dtype | None) -> Cost:
+    """Cost combining two scalar losses, owning ``params`` trained parameters."""
+    return elementwise_cost(
+        primal=2,
+        adjoint=2,
+        channels=2,
+        params=params,
+        dtype=dtype,
+        inputs=2,
+    )
 
 
 def graph_leaves(loss: Tensor) -> list[Tensor]:

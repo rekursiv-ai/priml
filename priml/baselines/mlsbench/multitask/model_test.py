@@ -9,6 +9,7 @@ from torch import nn
 import torch
 
 from priml.baselines.mlsbench.multitask.model import TwoHeadResNet, keep_default
+from priml.testing.cost import assert_cost_matches_torch
 
 
 CLASSES: Final = 3
@@ -100,6 +101,26 @@ def test_the_trunk_config_is_not_mutated_by_the_build() -> None:
     before = cfg.trunk.init_conv
     _ = cfg.make()
     assert cfg.trunk.init_conv is before
+
+
+def both_heads(model: nn.Module, media: torch.Tensor) -> torch.Tensor:
+    """Join both heads' logits, so one backward reaches every parameter."""
+    assert isinstance(model, TwoHeadResNet)
+    return torch.cat(model(media), dim=-1)
+
+
+def test_the_cost_counts_both_heads_and_matches_torch() -> None:
+    cfg = config()
+    cfg.trunk.image_size = 8
+    analytical = assert_cost_matches_torch(
+        cfg,
+        build_input=lambda: torch.randn(2, 3, 8, 8, requires_grad=True),
+        run=both_heads,
+        batch_size=2,
+        dtype=None,
+    )
+    trunk = cfg.trunk.cost(batch_size=2, dtype=None)
+    assert analytical.params == trunk.params + 5 * COARSE + COARSE
 
 
 if __name__ == "__main__":

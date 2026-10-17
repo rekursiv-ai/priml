@@ -18,7 +18,10 @@ from configgle import Fig
 from configgle.walk import copy_tree
 from torch import Tensor, nn
 
+import torch
+
 from priml.baselines.mlsbench.pytorch_vision.model import ResNet, keep_initialization
+from priml.cost import Cost, matmul_cost
 from priml.model.init import call_init
 
 
@@ -44,6 +47,36 @@ class TwoHeadResNet(nn.Module):
         Its ``init_conv``, ``init_head``, ``init_bias`` and ``init`` are applied
         here, after the added head exists: ``init_head`` and ``init_bias`` to
         both heads, ``init`` to the trunk."""
+
+        def cost(
+            self,
+            *,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
+            """Cost the trunk and its head, then the added head on the same features.
+
+            Args:
+              batch_size: Images in this invocation.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to the trunk.
+
+            Returns:
+              cost: Whole-invocation FLOPs, logical bytes and ownership.
+
+            """
+            return self.trunk.cost(
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
+            ) + matmul_cost(
+                channels_in=self.trunk.channels_hidden[-1],
+                channels_out=self.channels_out,
+                bias=True,
+                rows=batch_size,
+                dtype=dtype,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()

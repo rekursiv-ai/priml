@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from configgle import Makeable
+
 import pytest
 import torch
 
@@ -12,6 +14,8 @@ from priml.baselines.mlsbench.pooling.pools import (
     GeneralizedMeanPool,
     GlobalMaxPool,
 )
+from priml.baselines.mlsbench.pytorch_vision.model import GlobalAvgPool, ResNet
+from priml.testing.cost import assert_cost_matches_torch
 
 
 SHAPE: Final = (2, 3, 4, 5)
@@ -69,6 +73,40 @@ def test_parameter_free_pools_hold_no_parameters(
     config: GlobalMaxPool.Config | AvgMaxPool.Config,
 ) -> None:
     assert list(config.make().parameters()) == []
+
+
+@pytest.mark.parametrize(
+    ("config", "params"),
+    [
+        (GlobalMaxPool.Config(), 0),
+        (GeneralizedMeanPool.Config(), 1),
+        (AvgMaxPool.Config(), 0),
+        (GlobalAvgPool.Config(), 0),
+    ],
+    ids=["max", "gem", "avg_max", "avg"],
+)
+def test_every_pool_costs_what_it_owns_and_issues_no_matmul(
+    config: Makeable[torch.nn.Module],
+    params: int,
+) -> None:
+    channels, height, width = SHAPE[1:]
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.rand(SHAPE, requires_grad=True),
+        channels=channels,
+        seq_len=height * width,
+        batch_size=SHAPE[0],
+        dtype=None,
+    )
+    assert analytical.params == params
+    assert analytical["flops", "primal", "matmul"].sum() == 0
+
+
+def test_resnet_cost_follows_its_pool_slot() -> None:
+    model = ResNet.Config(channels_in=3, channels_out=5, blocks_per_stage=(1, 1, 1))
+    baseline = model.cost(batch_size=2, dtype=None)
+    model.pool = GeneralizedMeanPool.Config()
+    assert model.cost(batch_size=2, dtype=None).params == baseline.params + 1
 
 
 if __name__ == "__main__":
