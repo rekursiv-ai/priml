@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from torch import Tensor
 
-import torch
+if TYPE_CHECKING:
+    from torch import Tensor
+
+    import torch
 
 
 @runtime_checkable

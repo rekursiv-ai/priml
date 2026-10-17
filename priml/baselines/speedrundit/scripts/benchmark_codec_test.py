@@ -13,7 +13,10 @@ import torch
 from priml.baselines.speedrundit.corpus import CorpusMismatchError
 from priml.baselines.speedrundit.latent_codec import FloatCodec, ScalarTableCodec
 from priml.baselines.speedrundit.scripts import benchmark_codec, prepare_data
-from priml.baselines.speedrundit.scripts.prepare_data_test import _imagenet, _source
+from priml.baselines.speedrundit.scripts.prepare_data_test import (
+    _imagenet,
+    _source,
+)
 from priml.model.ae.latent_norm import ScaleLatents
 
 

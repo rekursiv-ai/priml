@@ -17,7 +17,12 @@ import re
 from configgle import Fig, Makeable
 from treekle import json_loads
 
-from priml.data.ensure import DataSpec, FileSpec, ensure_data, resumable_http_download
+from priml.data.ensure import (
+    DataSpec,
+    FileSpec,
+    ensure_data,
+    resumable_http_download,
+)
 from priml.hub import get_cache_dir
 
 
