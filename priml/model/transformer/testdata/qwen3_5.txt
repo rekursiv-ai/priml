@@ -84,7 +84,7 @@ Qwen35.Config(
         │               channels_head=4,
         │               reduction_mode='cat',
         │               frequencies=HuggingFaceFrequencies.Config(base=10000.0),
-        │               dtype=torch.float32,
+        │               dtype=torch.float32
         │           ),
         │           attn_kernel=SdpaNaive.Config(),
         │           init_weight=functools.partial(torch.nn.init.normal_, std=0.02),

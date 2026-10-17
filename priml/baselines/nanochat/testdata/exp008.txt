@@ -50,6 +50,9 @@ NgramTrainLoop.Config(
         │   │   │           depth_index=((0, 5),),
         │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
         │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           up_proj=None,
+        │   │   │           middle=None,
+        │   │   │           down_proj=None,
         │   │   │           shard='colwise'
         │   │   │       ),
         │   │   │       norm1=RMSNorm.Config(
@@ -111,6 +114,9 @@ NgramTrainLoop.Config(
         │   │   │           depth_index=((1, 5),),
         │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
         │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           up_proj=None,
+        │   │   │           middle=None,
+        │   │   │           down_proj=None,
         │   │   │           shard='colwise'
         │   │   │       ),
         │   │   │       norm1=RMSNorm.Config(
@@ -172,6 +178,9 @@ NgramTrainLoop.Config(
         │   │   │           depth_index=((2, 5),),
         │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
         │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           up_proj=None,
+        │   │   │           middle=None,
+        │   │   │           down_proj=None,
         │   │   │           shard='colwise'
         │   │   │       ),
         │   │   │       norm1=RMSNorm.Config(
@@ -233,6 +242,9 @@ NgramTrainLoop.Config(
         │   │   │           depth_index=((3, 5),),
         │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
         │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           up_proj=None,
+        │   │   │           middle=None,
+        │   │   │           down_proj=None,
         │   │   │           shard='colwise'
         │   │   │       ),
         │   │   │       norm1=RMSNorm.Config(
@@ -294,6 +306,9 @@ NgramTrainLoop.Config(
         │   │   │           depth_index=((4, 5),),
         │   │   │           init_weight=priml.model.init.unit_fan_in_uniform,
         │   │   │           init_weight_out=torch.nn.init.zeros_,
+        │   │   │           up_proj=None,
+        │   │   │           middle=None,
+        │   │   │           down_proj=None,
         │   │   │           shard='colwise'
         │   │   │       ),
         │   │   │       norm1=RMSNorm.Config(
@@ -328,6 +343,7 @@ NgramTrainLoop.Config(
         │   │   │       padding_idx=None,
         │   │   │       device=None,
         │   │   │       dtype=None,
+        │   │   │       lookup_dtype=None,
         │   │   │       shard=None,
         │   │   │       depth_index=(),
         │   │   │       init_weight=functools.partial(priml.model.init.normal, std=1.0)
@@ -344,6 +360,7 @@ NgramTrainLoop.Config(
         │   │   │               padding_idx=None,
         │   │   │               device=None,
         │   │   │               dtype=None,
+        │   │   │               lookup_dtype=None,
         │   │   │               shard=None,
         │   │   │               depth_index=(),
         │   │   │               init_weight=torch.nn.init.zeros_
@@ -362,6 +379,7 @@ NgramTrainLoop.Config(
         │   │   │               padding_idx=None,
         │   │   │               device=None,
         │   │   │               dtype=None,
+        │   │   │               lookup_dtype=None,
         │   │   │               shard=None,
         │   │   │               depth_index=(),
         │   │   │               init_weight=torch.nn.init.zeros_
@@ -392,6 +410,7 @@ NgramTrainLoop.Config(
         │   │           dtype=None,
         │   │           init_weight=functools.partial(priml.model.init.normal, std=0.001),
         │   │           init_bias=torch.nn.init.zeros_,
+        │   │           linear_fn=<built-in function linear>,
         │   │           shard=None
         │   │       ),
         │   │       dtype=torch.float32
@@ -651,6 +670,7 @@ NgramTrainLoop.Config(
         eval_only=False,
         restore_rng_state=True,
         seed=42,
+        model_torch_seed=None,
         num_steps_garbage_collect=inf,
         mesh_dim_model_seed='pp',
         mesh_dim_data_seed='dp',

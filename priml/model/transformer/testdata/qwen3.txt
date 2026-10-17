@@ -30,7 +30,7 @@ Qwen3.Config(
         │               channels_head=6,
         │               reduction_mode='cat',
         │               frequencies=HuggingFaceFrequencies.Config(base=1000000.0),
-        │               dtype=torch.float32,
+        │               dtype=torch.float32
         │           ),
         │           norm_qk=RMSNorm.Config(
         │               channels_in=6,

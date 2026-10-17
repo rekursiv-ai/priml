@@ -127,6 +127,7 @@ MultiTaskTrainLoop(
         eval_only=False,
         restore_rng_state=True,
         seed=42,
+        model_torch_seed=None,
         num_steps_garbage_collect=inf,
         mesh_dim_model_seed='pp',
         mesh_dim_data_seed='dp',

@@ -17,6 +17,7 @@ MinGRUPolicy.Config(
         │           padding_idx=None,
         │           device=None,
         │           dtype=None,
+        │           lookup_dtype=None,
         │           shard=None,
         │           depth_index=(),
         │           init_weight=functools.partial(priml.model.init.normal, std=1.0)
@@ -34,6 +35,7 @@ MinGRUPolicy.Config(
         │               dtype=None,
         │               init_weight=priml.model.init.kaiming_uniform,
         │               init_bias=torch.nn.init.zeros_,
+        │               linear_fn=<built-in function linear>,
         │               shard=None
         │           ),
         │           activation=torch.nn.functional.silu,
@@ -46,6 +48,7 @@ MinGRUPolicy.Config(
         │               dtype=None,
         │               init_weight=torch.nn.init.zeros_,
         │               init_bias=torch.nn.init.zeros_,
+        │               linear_fn=<built-in function linear>,
         │               shard=None
         │           )
         │       ),
@@ -118,6 +121,7 @@ MinGRUPolicy.Config(
         │   │   │       dtype=None,
         │   │   │       init_weight=priml.model.init.kaiming_uniform,
         │   │   │       init_bias=torch.nn.init.zeros_,
+        │   │   │       linear_fn=<built-in function linear>,
         │   │   │       shard=None
         │   │   │   ),
         │   │   │   depthwise=Conv2d.Config(
@@ -199,6 +203,7 @@ MinGRUPolicy.Config(
             dtype=None,
             init_weight=priml.model.init.kaiming_uniform,
             init_bias=torch.nn.init.zeros_,
+            linear_fn=<built-in function linear>,
             shard=None
         ),
         block=MinGRUBlock.Config(
@@ -212,6 +217,7 @@ MinGRUPolicy.Config(
                 dtype=None,
                 init_weight=priml.model.init.kaiming_uniform,
                 init_bias=torch.nn.init.zeros_,
+                linear_fn=<built-in function linear>,
                 shard=None
             ),
             scan=TorchScan.Config(),
@@ -229,6 +235,7 @@ MinGRUPolicy.Config(
             dtype=None,
             init_weight=priml.model.init.kaiming_uniform,
             init_bias=torch.nn.init.zeros_,
+            linear_fn=<built-in function linear>,
             shard=None
         ),
         dtype=torch.bfloat16,
@@ -247,6 +254,7 @@ MinGRUPolicy.Config(
                 dtype=None,
                 init_weight=priml.model.init.kaiming_uniform,
                 init_bias=torch.nn.init.zeros_,
+                linear_fn=<built-in function linear>,
                 shard=None
             ),
             activation=torch.nn.functional.silu,
@@ -259,6 +267,7 @@ MinGRUPolicy.Config(
                 dtype=None,
                 init_weight=torch.nn.init.zeros_,
                 init_bias=torch.nn.init.zeros_,
+                linear_fn=<built-in function linear>,
                 shard=None
             )
         ),
@@ -274,6 +283,7 @@ MinGRUPolicy.Config(
                 dtype=None,
                 init_weight=priml.model.init.kaiming_uniform,
                 init_bias=torch.nn.init.zeros_,
+                linear_fn=<built-in function linear>,
                 shard=None
             ),
             observation_size=843,

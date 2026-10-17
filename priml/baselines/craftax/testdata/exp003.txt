@@ -24,6 +24,7 @@ CraftaxTrainLoop(
         │   │   │           padding_idx=None,
         │   │   │           device=None,
         │   │   │           dtype=None,
+        │   │   │           lookup_dtype=None,
         │   │   │           shard=None,
         │   │   │           depth_index=(),
         │   │   │           init_weight=functools.partial(priml.model.init.normal, std=1.0)
@@ -41,6 +42,7 @@ CraftaxTrainLoop(
         │   │   │               dtype=None,
         │   │   │               init_weight=priml.model.init.kaiming_uniform,
         │   │   │               init_bias=torch.nn.init.zeros_,
+        │   │   │               linear_fn=<built-in function linear>,
         │   │   │               shard=None
         │   │   │           ),
         │   │   │           activation=torch.nn.functional.silu,
@@ -53,6 +55,7 @@ CraftaxTrainLoop(
         │   │   │               dtype=None,
         │   │   │               init_weight=torch.nn.init.zeros_,
         │   │   │               init_bias=torch.nn.init.zeros_,
+        │   │   │               linear_fn=<built-in function linear>,
         │   │   │               shard=None
         │   │   │           )
         │   │   │       ),
@@ -125,6 +128,7 @@ CraftaxTrainLoop(
         │   │   │   │   │       dtype=None,
         │   │   │   │   │       init_weight=priml.model.init.kaiming_uniform,
         │   │   │   │   │       init_bias=torch.nn.init.zeros_,
+        │   │   │   │   │       linear_fn=<built-in function linear>,
         │   │   │   │   │       shard=None
         │   │   │   │   │   ),
         │   │   │   │   │   depthwise=Conv2d.Config(
@@ -206,6 +210,7 @@ CraftaxTrainLoop(
         │   │       dtype=None,
         │   │       init_weight=priml.model.init.kaiming_uniform,
         │   │       init_bias=torch.nn.init.zeros_,
+        │   │       linear_fn=<built-in function linear>,
         │   │       shard=None
         │   │   ),
         │   │   block=MinGRUBlock.Config(
@@ -219,6 +224,7 @@ CraftaxTrainLoop(
         │   │           dtype=None,
         │   │           init_weight=priml.model.init.kaiming_uniform,
         │   │           init_bias=torch.nn.init.zeros_,
+        │   │           linear_fn=<built-in function linear>,
         │   │           shard=None
         │   │       ),
         │   │       scan=TritonScan.Config(block=256, num_warps=8),
@@ -236,6 +242,7 @@ CraftaxTrainLoop(
         │   │       dtype=None,
         │   │       init_weight=priml.model.init.kaiming_uniform,
         │   │       init_bias=torch.nn.init.zeros_,
+        │   │       linear_fn=<built-in function linear>,
         │   │       shard=None
         │   │   ),
         │   │   dtype=torch.bfloat16,
@@ -254,6 +261,7 @@ CraftaxTrainLoop(
         │   │           dtype=None,
         │   │           init_weight=priml.model.init.kaiming_uniform,
         │   │           init_bias=torch.nn.init.zeros_,
+        │   │           linear_fn=<built-in function linear>,
         │   │           shard=None
         │   │       ),
         │   │       activation=torch.nn.functional.silu,
@@ -266,6 +274,7 @@ CraftaxTrainLoop(
         │   │           dtype=None,
         │   │           init_weight=torch.nn.init.zeros_,
         │   │           init_bias=torch.nn.init.zeros_,
+        │   │           linear_fn=<built-in function linear>,
         │   │           shard=None
         │   │       )
         │   │   ),
@@ -281,6 +290,7 @@ CraftaxTrainLoop(
         │   │           dtype=None,
         │   │           init_weight=priml.model.init.kaiming_uniform,
         │   │           init_bias=torch.nn.init.zeros_,
+        │   │           linear_fn=<built-in function linear>,
         │   │           shard=None
         │   │       ),
         │   │       observation_size=843,
@@ -474,6 +484,7 @@ CraftaxTrainLoop(
         eval_only=False,
         restore_rng_state=True,
         seed=73,
+        model_torch_seed=None,
         num_steps_garbage_collect=inf,
         mesh_dim_model_seed='pp',
         mesh_dim_data_seed='dp',
