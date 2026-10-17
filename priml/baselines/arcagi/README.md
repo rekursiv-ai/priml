@@ -34,8 +34,10 @@ see [Reproduce](#reproduce) for the steps and
 - One node with eight 80 GB GPUs for every numbered experiment. The record
   ran on H100s; `exp_smoke` runs on one GPU or on CPU.
 - Disk: 6.8 GB for the ARC-AGI-1 tree, 7.4 GB for its spatial tree, and about
-  9 GB for each ARC-AGI-2 tree an experiment builds.
-- `git` and network access to GitHub. Every tree is built from
+  9 GB for each ARC-AGI-2 tree an experiment builds. The seven CHARM v2
+  Parquet files need about 311 MiB.
+- `git` and network access to GitHub for prepared trees, and Hugging Face
+  for CHARM's released Parquet files. Prepared trees are built from
   [TinyRecursiveModels](https://github.com/SamsungSAILMontreal/TinyRecursiveModels)
   at a pinned commit, which the builder verifies.
 - Weights & Biases credentials are optional. Without them a run still writes
@@ -52,7 +54,7 @@ uv --quiet run --frozen python -m priml.baselines.arcagi.scripts.prepare_data --
 
 The first is the tree `exp000`-`exp004` and `exp_smoke` read; the second adds
 the translated/rescaled views `exp005` and `exp006` read. The ARC-AGI-2
-experiments build their own trees on first use.
+experiments `exp007` and `exp008` build their own trees on first use.
 
 CHARM's `exp009` and `exp010` read the augmented v2 Parquet files from the
 [pinned data release](https://huggingface.co/datasets/water-vapor-vx/charm-arc-agi/tree/937316c8f766920724293600bdfd8ed3d45ebdc6).
@@ -116,8 +118,10 @@ Fresh full-training results for these two recipes remain unmeasured. The
 
 Everything resolves beneath one root, `base_dir`, which defaults to
 `/opt/scratch`. Trees land in `<base_dir>/datasets/`; experiment `expNNN`
-writes its checkpoints, `metrics.json`, and evaluation dumps to
-`<base_dir>/runs/arcagi/expNNN/`. To use another root, pass it to both steps:
+writes its checkpoints and `metrics.json` to
+`<base_dir>/runs/arcagi/expNNN/`. Evaluation dumps are also written by
+`exp004`, `exp005`, `exp006`, and `exp008`. To use another root, pass it to
+both steps:
 
 ```bash
 uv --quiet run --frozen python -m priml.baselines.arcagi.scripts.prepare_data --experiment exp000 --base-dir /data/scratch
@@ -214,17 +218,26 @@ The source revision is
 and the data/checkpoint revision is
 [`937316c8f766920724293600bdfd8ed3d45ebdc6`](https://huggingface.co/datasets/water-vapor-vx/charm-arc-agi/tree/937316c8f766920724293600bdfd8ed3d45ebdc6).
 
+See the [third-party licensing notice](../../../LICENSES/README.md) for
+CHARM's upstream license status.
+
 ## Evaluation
 
-Every test input is evaluated under up to 1,000 color and dihedral views, and,
-from `exp005` on, two spatial views of each. Predictions are mapped back to the
-canonical frame and voted; pass@K counts an input solved when its answer is
-among the K most-voted grids. One wrong cell fails the grid.
+In `exp000`-`exp008`, each test input is evaluated under up to 1,000 color
+and dihedral views, with two spatial views of each in `exp005`, `exp006`,
+and `exp008`. Predictions are mapped back to the canonical frame and voted;
+pass@K counts an input solved when its answer is among the K most-voted
+grids. One wrong cell fails the grid.
 
-`CanonicalPassK` reports three slices of one evaluation pass from `exp005` on:
+`CanonicalPassK` reports three slices in `exp005`, `exp006`, and `exp008`:
 the non-spatial views (the headline), every view at the non-spatial view
 budget (`spatial_eq`), and every view (`spatial_big`). The ARC-AGI-2 rungs add
 the strict and per-output rules.
+
+`exp009` and `exp010` use `ParquetPassK` over the released ordered Parquet
+views. It retains ballots across evaluation events, ranks canonical
+predictions by vote count and mean halt confidence, and averages per-output
+success within each puzzle, then across puzzles.
 
 ## Tests
 
