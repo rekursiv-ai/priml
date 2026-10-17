@@ -1,0 +1,84 @@
+#!/bin/sh
+# ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
+# fmt: off
+'''' 2>/dev/null #
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+Download CIFAR-10 and cache it as 8-bit tensors.
+
+Run once before the first experiment. Idempotent: a split already present is
+left alone, so re-running costs nothing.
+
+The default destination is the one ``exp000``'s dataset resolves under a
+default ``TrainLoop``, so preparing and training agree without either naming a
+path. Point both elsewhere with ``--directory`` here and
+``--override dataset.working_dir=...`` at launch.
+
+Examples:
+  prepare_data.py
+  prepare_data.py --directory /datasets/my-cifar10
+
+'''
+# fmt: on
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Protocol, cast
+
+import argparse
+import logging
+
+from priml.baselines.mlsbench.dl.activation.experiments import exp000
+from priml.baselines.mlsbench.dl.vision.data import prepare
+from priml.train.train_loop import TrainLoop
+
+
+def main() -> int:
+    """Prepare the dataset; return the process exit code.
+
+    Returns:
+      code: 0 on success.
+
+    """
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_arguments(parser)
+    flags = cast(_Flags, parser.parse_args())
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    prepare(flags.directory, dataset="cifar10")
+    return 0
+
+
+def default_directory() -> Path:
+    """Return the dataset directory ``exp000`` resolves under a default ``TrainLoop``.
+
+    Returns:
+      directory: Prepared-tensor location shared by the preparer and the loop.
+
+    """
+    config = exp000().dataset
+    config.base_dir = TrainLoop.Config().base_dir
+    return Path(config.copy_tree().finalize().working_dir)
+
+
+def _add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register flags on ``parser``."""
+    parser.add_argument(
+        "--directory",
+        type=Path,
+        default=default_directory(),
+        help="Destination for train.pt and test.pt.",
+    )
+
+
+class _Flags(Protocol):
+    """Parsed command-line flags."""
+
+    directory: Path
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+# vim: ft=python

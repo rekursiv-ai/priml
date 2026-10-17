@@ -1,0 +1,186 @@
+"""Tests for the augmentation baselines, against torchvision's pipelines on PIL images.
+
+torchvision draws from the global generator and the port from a stream; both
+are seeded alike, so equal pixels mean equal draws in equal order.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Final, cast
+
+from PIL import Image
+from torchvision import transforms
+
+import pytest
+import torch
+
+from priml.baselines.mlsbench.dl.augmentation import augment
+from priml.baselines.mlsbench.dl.vision.data import Cifar100Data, normalize
+from priml.baselines.mlsbench.dl.vision.reference import seeded
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from torch import Tensor
+
+SEED: Final = 3
+CONFIG: Final = Cifar100Data.Config()
+
+
+def images(count: int, *, seed: int = 0) -> Tensor:
+    """Return ``count`` uint8 images of 8x10 random pixels."""
+    generator = torch.Generator().manual_seed(seed)
+    return torch.randint(0, 256, (count, 3, 8, 10), generator=generator).to(torch.uint8)
+
+
+def statistics() -> dict[str, Tensor]:
+    return {"mean": torch.tensor(CONFIG.mean), "std": torch.tensor(CONFIG.std)}
+
+
+def torchvision_pipeline(
+    first: list[Callable[..., object]],
+    batch: Tensor,
+    *,
+    last: list[Callable[..., object]] | None = None,
+) -> Tensor:
+    """Run ``first`` + crop, mirror, ToTensor + ``last`` + Normalize per image."""
+    pipeline = transforms.Compose(
+        [
+            *first,
+            transforms.RandomCrop((8, 10), padding=CONFIG.translate_pad),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            *(last or []),
+            transforms.Normalize(CONFIG.mean, CONFIG.std),
+        ],
+    )
+    with seeded(SEED):
+        return torch.stack(
+            [
+                pipeline(Image.fromarray(image.permute(1, 2, 0).numpy()))
+                for image in batch
+            ],
+        )
+
+
+def table(policy: object, *args: object) -> object:
+    """Return a torchvision policy's operation table, which it keeps private."""
+    method = cast("Callable[..., object]", vars(type(policy))["_augmentation_space"])
+    return method(policy, *args)
+
+
+class Cutout:
+    """The Cutout edit's mask, on a float tensor after ``ToTensor``."""
+
+    def __call__(self, img: Tensor) -> Tensor:
+        height, width = img.size(1), img.size(2)
+        mask = torch.ones_like(img)
+        y = int(torch.randint(0, height, (1,)).item())
+        x = int(torch.randint(0, width, (1,)).item())
+        mask[
+            :,
+            max(0, y - 2) : min(height, y + 2),
+            max(0, x - 2) : min(width, x + 2),
+        ] = 0
+        return img * mask
+
+
+def test_cutout_matches_the_masked_pipeline() -> None:
+    batch = images(5)
+    got = augment.cutout_normalize(
+        batch,
+        torch.Generator().manual_seed(SEED),
+        pad=CONFIG.translate_pad,
+        holes=1,
+        length=4,
+        **statistics(),
+    )
+    want = torchvision_pipeline([], batch, last=[Cutout()])
+    assert torch.equal(got, want)
+    assert (
+        got == normalize(torch.zeros(1, 3, 1, 1, dtype=torch.uint8), **statistics())
+    ).any()
+
+
+def test_randaugment_matches_torchvision() -> None:
+    batch = images(16)
+    got = augment.randaugment_normalize(
+        batch,
+        torch.Generator().manual_seed(SEED),
+        pad=CONFIG.translate_pad,
+        num_ops=2,
+        magnitude=9,
+        num_magnitude_bins=31,
+        **statistics(),
+    )
+    want = torchvision_pipeline(
+        [transforms.RandAugment(num_ops=2, magnitude=9)],
+        batch,
+    )
+    assert torch.equal(got, want)
+
+
+def test_trivialaugment_matches_torchvision() -> None:
+    batch = images(16)
+    got = augment.trivialaugment_normalize(
+        batch,
+        torch.Generator().manual_seed(SEED),
+        pad=CONFIG.translate_pad,
+        num_magnitude_bins=31,
+        **statistics(),
+    )
+    want = torchvision_pipeline([transforms.TrivialAugmentWide()], batch)
+    assert torch.equal(got, want)
+
+
+@pytest.mark.parametrize(
+    ("space", "theirs"),
+    [
+        (
+            augment.randaugment_space(31, height=8, width=10),
+            cast(
+                "dict[str, tuple[Tensor, bool]]",
+                table(transforms.RandAugment(), 31, (8, 10)),
+            ),
+        ),
+        (
+            augment.trivialaugment_space(31),
+            cast(
+                "dict[str, tuple[Tensor, bool]]",
+                table(transforms.TrivialAugmentWide(), 31),
+            ),
+        ),
+    ],
+    ids=["randaugment", "trivialaugment"],
+)
+def test_each_space_lists_torchvisions_operations_and_bins_in_order(
+    space: augment.Space,
+    theirs: dict[str, tuple[Tensor, bool]],
+) -> None:
+    assert len(space) == len(theirs)
+    for (_, magnitudes, signed), (want, want_signed) in zip(
+        space,
+        theirs.values(),
+        strict=True,
+    ):
+        assert signed == want_signed
+        assert torch.equal(magnitudes, want)
+
+
+def test_every_operation_of_both_spaces_runs_on_an_image() -> None:
+    image = images(1)[0]
+    for space in (
+        augment.randaugment_space(31, height=8, width=10),
+        augment.trivialaugment_space(31),
+    ):
+        assert len(space) == 14
+        for op, magnitudes, _ in space:
+            value = float(magnitudes[-1]) if magnitudes.ndim > 0 else 0.0
+            assert op(image, -value).shape == image.shape
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)
