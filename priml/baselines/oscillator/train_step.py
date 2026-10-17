@@ -6,9 +6,8 @@ from dataclasses import field
 from typing import (
     TYPE_CHECKING,
     Protocol,
-    Self,
     TypedDict,
-    override,
+    cast,
     runtime_checkable,
 )
 
@@ -19,6 +18,7 @@ from torch import Tensor
 
 import torch
 
+from priml.baselines.etth1.model import DLinear
 from priml.baselines.etth1.train_step import Etth1TrainStep
 from priml.baselines.oscillator.data import STATE_CHANNELS
 
@@ -90,17 +90,13 @@ class DLinearForecast:
     """Train DLinear within a fixed total update budget."""
 
     class Config(Fig["DLinearForecast"]):
-        step: Etth1TrainStep.Config = field(default_factory=Etth1TrainStep.Config)
-        """Existing DLinear training code and optimizer."""
-
-        seq_len: int = -1
-        """Observed timesteps; -1 until the study supplies its geometry."""
-
-        pred_len: int = -1
-        """Forecast timesteps; -1 until the study supplies its geometry."""
-
-        updates: int = 300
-        """Total updates, including any simulator pretraining."""
+        step: Etth1TrainStep.Config = field(
+            default_factory=lambda: Etth1TrainStep.Config(
+                model=DLinear.Config(channels=STATE_CHANNELS),
+                train_budget_steps=300,
+            ),
+        )
+        """DLinear training code; ``train_budget_steps`` is the total update count."""
 
         pretrain_updates: int = 0
         """Initial updates using cheap trajectories instead of reference data."""
@@ -114,15 +110,36 @@ class DLinearForecast:
         sample_seed: int = 606
         """Random stream for training-batch selection."""
 
-        @override
-        def finalize(self) -> Self:
-            self.step.model.seq_len = self.seq_len
-            self.step.model.pred_len = self.pred_len
-            self.step.model.channels = STATE_CHANNELS
-            self.step.train_budget_steps = self.updates
-            return super().finalize()
+        @property
+        def seq_len(self) -> int:
+            """Observed timesteps, read from and written to the model."""
+            return cast(int, self.step.model.seq_len)  # pyright: ignore[reportUnnecessaryCast] -- ty infers @Todo for a field read inside a Fig property.
+
+        @seq_len.setter
+        def seq_len(self, value: int) -> None:
+            self.step.model.seq_len = value
+
+        @property
+        def pred_len(self) -> int:
+            """Forecast timesteps, read from and written to the model."""
+            return cast(int, self.step.model.pred_len)  # pyright: ignore[reportUnnecessaryCast] -- ty infers @Todo for a field read inside a Fig property.
+
+        @pred_len.setter
+        def pred_len(self, value: int) -> None:
+            self.step.model.pred_len = value
+
+        @property
+        def updates(self) -> int:
+            """Total updates, including pretraining; the step's schedule horizon."""
+            return int(self.step.train_budget_steps)
+
+        @updates.setter
+        def updates(self, value: int) -> None:
+            self.step.train_budget_steps = value
 
     def __init__(self, config: Config) -> None:
+        if not math.isfinite(config.step.train_budget_steps):
+            raise ValueError("The step budget must be a finite update count.")
         if min(config.updates, config.batch_size, config.validation_every) <= 0:
             raise ValueError("Training counts must be positive.")
         if config.pretrain_updates < 0 or config.pretrain_updates >= config.updates:

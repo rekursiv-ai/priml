@@ -73,8 +73,8 @@ using model seeds 2021, 2022, and 2023. Data seeds stay fixed, so this measures
 training-seed variation, not uncertainty across independent task populations.
 Ridge is deterministic; its repeated rows are not independent evidence.
 
-Add `--smoke` for two tiny integration runs. Existing run directories are
-never overwritten. The output includes each finalized config and per-run scores,
+Pass `--experiments exp_smoke --seeds 2021` for two tiny integration runs.
+Existing run directories are never overwritten. The output includes each finalized config and per-run scores,
 plus `comparison.json` with environment details, source hashes, and Git status.
 These short pilot runs start fresh and do not implement checkpoint resumption.
 

@@ -2,6 +2,9 @@
 
 from typing import TYPE_CHECKING
 
+import dataclasses
+import math
+
 from torch import Tensor
 
 import pytest
@@ -196,6 +199,42 @@ def test_ridge_correction_learns_a_constant_residual_without_validation_targets(
     torch.testing.assert_close(method.predict(validation.media), expected)
 
 
+def test_geometry_lives_only_on_the_model() -> None:
+    names = {item.name for item in dataclasses.fields(DLinearForecast.Config)}
+    assert names.isdisjoint({"seq_len", "pred_len"})
+    cfg = DLinearForecast.Config()
+    cfg.seq_len = 5
+    cfg.pred_len = 3
+    assert (cfg.step.model.seq_len, cfg.step.model.pred_len) == (5, 3)
+    assert (cfg.seq_len, cfg.pred_len) == (5, 3)
+
+
+def test_update_budget_lives_only_on_the_step() -> None:
+    names = {item.name for item in dataclasses.fields(DLinearForecast.Config)}
+    assert "updates" not in names
+    cfg = DLinearForecast.Config()
+    assert cfg.step.train_budget_steps == 300
+    assert cfg.updates == 300
+    cfg.updates = 7
+    assert cfg.step.train_budget_steps == 7
+    cfg.step.train_budget_steps = 9
+    assert cfg.updates == 9
+
+
+def test_finalize_keeps_explicit_step_settings() -> None:
+    cfg = DLinearForecast.Config()
+    assert cfg.step.model.channels == 2
+    cfg.step.model.channels = 3
+    assert cfg.copy_tree().finalize().step.model.channels == 3
+
+
+def test_update_budget_must_be_a_finite_count() -> None:
+    cfg = DLinearForecast.Config()
+    cfg.step.train_budget_steps = math.inf
+    with pytest.raises(ValueError, match="finite update count"):
+        cfg.make()
+
+
 @pytest.mark.parametrize("pretrain_updates", [-1, 300])
 def test_pretraining_must_leave_a_reference_update(pretrain_updates: int) -> None:
     cfg = DLinearForecast.Config()
@@ -217,8 +256,10 @@ def test_unfitted_models_and_invalid_training_counts_fail() -> None:
         cfg.method.make().predict(media)
     with pytest.raises(RuntimeError, match="before predicting"):
         RidgeCorrection.Config().make().predict(media)
+    zero = DLinearForecast.Config()
+    zero.updates = 0
     with pytest.raises(ValueError, match="positive"):
-        DLinearForecast.Config(updates=0).make()
+        zero.make()
 
 
 @pytest.mark.parametrize("split", ["validation", "shape"])

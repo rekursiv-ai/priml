@@ -17,6 +17,7 @@ from priml.baselines.oscillator.train_step import (
     ForecastGeometry,
     ForecastMethod,
 )
+from priml.math.seed import make_seed
 from priml.model.custom_types import propagate_attr
 
 
@@ -49,8 +50,8 @@ class ForecastStudy:
         experiment_name: str = ""
         """Name of the recipe; each experiment factory sets its own."""
 
-        seed: int = 2021
-        """Model seed; the comparison varies it to measure training variance."""
+        seed: int | None = None
+        """Model seed; ``None`` draws one from OS entropy and records it."""
 
         data: ForecastData.Config = field(default_factory=ForecastData.Config)
         """Simulators, independent splits, and forecasting geometry."""
@@ -94,8 +95,9 @@ class ForecastStudy:
         )
         synthetic = self.data.windows(cfg.data.synthetic, simulator=self.data.cheap)
         _, scale = train.channel_stats()
+        seed = make_seed() if cfg.seed is None else cfg.seed
         with torch.random.fork_rng(devices=[]):
-            torch.manual_seed(cfg.seed)
+            torch.manual_seed(seed)
             method = cfg.method.make()
             training = method.fit(
                 train,
@@ -123,7 +125,7 @@ class ForecastStudy:
             }
         return {
             "experiment": cfg.experiment_name,
-            "seed": cfg.seed,
+            "seed": seed,
             "reference_fit_trajectories": cfg.data.train.count,
             "reference_validation_trajectories": cfg.data.validation.count,
             "reference_budget": cfg.data.train.count + cfg.data.validation.count,

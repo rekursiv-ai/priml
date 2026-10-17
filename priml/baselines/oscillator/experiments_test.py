@@ -20,6 +20,12 @@ def test_only_experiments_name_a_run() -> None:
     assert exp000().experiment_name == "exp000"
 
 
+def test_no_experiment_pins_a_seed() -> None:
+    assert ForecastStudy.Config().seed is None
+    for factory in (exp000, exp001, exp002, exp_smoke):
+        assert factory().seed is None
+
+
 def test_exp000_changes_only_the_starting_rate() -> None:
     cfg = exp000()
     assert isinstance(cfg.method, DLinearForecast.Config)
@@ -54,6 +60,7 @@ def test_smoke_shrinks_only_sizes() -> None:
     assert isinstance(cfg.method, DLinearForecast.Config)
     assert isinstance(base.method, DLinearForecast.Config)
     assert cfg.method.updates == 2
+    cfg.method.updates = base.method.updates
     assert cfg.method.step == base.method.step
 
 

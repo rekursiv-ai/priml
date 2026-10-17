@@ -20,6 +20,7 @@ from priml.baselines.oscillator.train_step import DLinearForecast, RidgeCorrecti
 )
 def test_test_changes_do_not_change_training_or_reference_budget(ridge: bool) -> None:
     cfg = exp_smoke()
+    cfg.seed = 7
     if ridge:
         cfg.method = RidgeCorrection.Config()
     before_rng = torch.get_rng_state().clone()
@@ -32,6 +33,15 @@ def test_test_changes_do_not_change_training_or_reference_budget(ridge: bool) ->
     assert first["scores"] != second["scores"]
     assert first["reference_budget"] == cfg.data.train.count + cfg.data.validation.count
     assert first["timesteps_per_query"] == cfg.data.seq_len + cfg.data.pred_len
+
+
+def test_unseeded_run_records_the_seed_it_drew() -> None:
+    cfg = exp_smoke()
+    cfg.method = RidgeCorrection.Config()
+    drawn = cfg.make().run()["seed"]
+    assert drawn != cfg.make().run()["seed"]
+    cfg.seed = drawn
+    assert cfg.make().run()["seed"] == drawn
 
 
 def test_run_record_matches_its_schema() -> None:

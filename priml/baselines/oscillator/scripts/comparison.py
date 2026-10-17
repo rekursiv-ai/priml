@@ -13,19 +13,16 @@ import shutil
 import subprocess
 import time
 
+from configgle.launch import resolve_config
 from treekle import to_plain
 
-from priml.baselines.oscillator.benchmark import StudyRecord
-from priml.baselines.oscillator.experiments import exp000, exp001, exp002, exp_smoke
+from priml.baselines.oscillator import experiments
+from priml.baselines.oscillator.benchmark import ForecastStudy, StudyRecord
 from priml.paths import validated_output_path
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     import torch
-
-    from priml.baselines.oscillator.benchmark import ForecastStudy
 else:
     from wrapt import lazy_import
 
@@ -46,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
 
     Raises:
       RuntimeError: Git is not installed.
+      TypeError: A named experiment does not build an oscillator study.
 
     """
     parser = argparse.ArgumentParser(description=(__doc__ or "").strip())
@@ -55,17 +53,19 @@ def main(argv: list[str] | None = None) -> int:
     if git is None:
         raise RuntimeError("Git is needed to record the code revision.")
     directory = validated_output_path(flags.directory)
+    recipes: list[ForecastStudy.Config] = []
+    for name in flags.experiments:
+        recipe = resolve_config(f"{experiments.__name__}.{name}")
+        if not isinstance(recipe, ForecastStudy.Config):
+            raise TypeError(f"{name} does not build an oscillator study.")
+        recipes.append(recipe)
     directory.mkdir(mode=0o755, parents=True, exist_ok=False)
     root = _CWD.parents[3]
-    recipes: tuple[Callable[[], ForecastStudy.Config], ...] = (
-        (exp_smoke,) if flags.smoke else (exp000, exp001, exp002)
-    )
-    seeds = (2021,) if flags.smoke else (2021, 2022, 2023)
     records: list[ComparisonRecord] = []
     for matched in (True, False):
-        for seed in seeds:
+        for seed in flags.seeds:
             for recipe in recipes:
-                cfg = recipe()
+                cfg = recipe.copy_tree()
                 cfg.seed = seed
                 if matched:
                     cfg.data.reference = cfg.data.cheap.copy_tree()
@@ -91,6 +91,8 @@ def main(argv: list[str] | None = None) -> int:
         directory / "comparison.json",
         {
             "status": "preliminary synthetic pilot; no agent or real-data evaluation",
+            "experiments": flags.experiments,
+            "seeds": flags.seeds,
             "python": platform.python_version(),
             "torch": str(torch.__version__),
             "platform": platform.platform(),
@@ -119,7 +121,8 @@ class ComparisonRecord(StudyRecord):
 
 class _Flags(Protocol):
     directory: Path
-    smoke: bool
+    experiments: list[str]
+    seeds: list[int]
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -130,9 +133,17 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         help="New run directory; an existing one is never overwritten.",
     )
     parser.add_argument(
-        "--smoke",
-        action="store_true",
-        help="Check the wiring with two tiny runs.",
+        "--experiments",
+        nargs="+",
+        default=["exp000", "exp001", "exp002"],
+        help="Recipes from priml.baselines.oscillator.experiments; exp_smoke checks wiring.",
+    )
+    parser.add_argument(
+        "--seeds",
+        nargs="+",
+        type=int,
+        default=[2021, 2022, 2023],
+        help="Model seeds applied to every recipe.",
     )
 
 

@@ -25,6 +25,7 @@ from priml.train.custom_types import TrainStepOutput
 
 _CWD: Final = Path(__file__).resolve().parent
 MAX_GOLDEN_BYTES: Final = 32 * 1024
+GOLDEN_SEED: Final = 2021
 
 
 class _RecordedUpdates:
@@ -84,7 +85,7 @@ def test_fit_golden_detects_changed_recipe(monkeypatch: pytest.MonkeyPatch) -> N
 def _model_record() -> dict[str, Tensor]:
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         cfg = exp_smoke().finalize()
-        torch.manual_seed(cfg.seed)
+        torch.manual_seed(GOLDEN_SEED)
         assert isinstance(cfg.method, DLinearForecast.Config)
         method = cfg.method.make()
         data = cfg.data.make()
@@ -108,7 +109,7 @@ def _fit_record(
 ) -> dict[str, Tensor]:
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         cfg = cfg.finalize()
-        torch.manual_seed(cfg.seed)
+        torch.manual_seed(GOLDEN_SEED)
         assert isinstance(cfg.method, DLinearForecast.Config)
         method = cfg.method.make()
         data = cfg.data.make()

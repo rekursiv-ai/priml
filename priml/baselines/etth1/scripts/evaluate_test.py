@@ -104,6 +104,7 @@ def test_evaluation_uses_selected_recipe(
     assert evaluation.main() == 0
     report = json_loads(capsys.readouterr().out, dict[str, object])
     assert report["experiment"] == name
+    assert report["torch"] == str(torch.__version__)
     assert report["mse"] == expected["mse"]
     assert report["mae"] == expected["mae"]
 

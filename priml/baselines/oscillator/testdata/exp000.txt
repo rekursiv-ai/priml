@@ -1,6 +1,6 @@
 ForecastStudy.Config(
         experiment_name='exp000',
-        seed=2_021,
+        seed=None,
         data=ForecastData.Config(
             seq_len=24,
             pred_len=12,
@@ -99,9 +99,6 @@ ForecastStudy.Config(
         │       autocast_cache_enabled=False,
         │       seed=None
         │   ),
-        │   seq_len=24,
-        │   pred_len=12,
-        │   updates=300,
         │   pretrain_updates=0,
         │   batch_size=8,
         │   validation_every=25,

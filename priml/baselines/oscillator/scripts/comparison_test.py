@@ -1,8 +1,9 @@
 """Check the comparison CLI's outputs, refusals, and flags."""
 
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
+import argparse
 import re
 import shutil
 
@@ -10,7 +11,9 @@ from treekle import from_plain, json_loads
 
 import pytest
 
+from priml.baselines.oscillator import experiments
 from priml.baselines.oscillator.scripts import comparison
+from priml.baselines.oscillator.train_step import RidgeCorrection
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -24,8 +27,9 @@ def test_smoke_run_writes_configs_records_and_provenance(
 ) -> None:
     monkeypatch.setattr(comparison, "_git", _fake_git)
     directory = tmp_path / "run"
-    assert comparison.main(["--directory", str(directory), "--smoke"]) == 0
-    labels = [f"{case}-exp_smoke-2021" for case in ("matched", "mismatched")]
+    argv = ["--directory", str(directory), "--experiments", "exp_smoke", "--seeds", "7"]
+    assert comparison.main(argv) == 0
+    labels = [f"{case}-exp_smoke-7" for case in ("matched", "mismatched")]
     assert sorted(path.name for path in directory.iterdir()) == sorted(
         [f"{label}.{suffix}" for label in labels for suffix in ("json", "txt")]
         + ["comparison.json"],
@@ -34,6 +38,8 @@ def test_smoke_run_writes_configs_records_and_provenance(
         (directory / "comparison.json").read_text(),
         dict[str, object],
     )
+    assert report["experiments"] == ["exp_smoke"]
+    assert report["seeds"] == [7]
     assert isinstance(report["torch"], str)
     assert report["git_head"] == "rev-parse HEAD"
     assert report["git_status"] == "status --short"
@@ -62,20 +68,40 @@ def test_git_reports_the_checkout_revision() -> None:
 
 def test_cli_refuses_to_overwrite_a_run(tmp_path: Path) -> None:
     with pytest.raises(FileExistsError):
-        comparison.main(["--directory", str(tmp_path), "--smoke"])
+        comparison.main(["--directory", str(tmp_path)])
 
 
 def test_cli_rejects_an_unnormalized_directory(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="normalized"):
-        comparison.main(["--directory", f"{tmp_path}/a/../run", "--smoke"])
+        comparison.main(["--directory", f"{tmp_path}/a/../run"])
     assert not (tmp_path / "run").exists()
 
 
 def test_cli_requires_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shutil, "which", _no_executable)
     with pytest.raises(RuntimeError, match="Git"):
-        comparison.main(["--directory", str(tmp_path / "run"), "--smoke"])
+        comparison.main(["--directory", str(tmp_path / "run")])
     assert not (tmp_path / "run").exists()
+
+
+def test_cli_rejects_a_non_study_experiment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(experiments, "exp_ridge", RidgeCorrection.Config, raising=False)
+    with pytest.raises(TypeError, match="oscillator study"):
+        comparison.main(
+            ["--directory", str(tmp_path / "run"), "--experiments", "exp_ridge"],
+        )
+    assert not (tmp_path / "run").exists()
+
+
+def test_cli_defaults_name_the_pilot_recipes_and_seeds() -> None:
+    parser = argparse.ArgumentParser()
+    comparison._add_arguments(parser)
+    flags = cast(comparison._Flags, parser.parse_args([]))
+    assert flags.experiments == ["exp000", "exp001", "exp002"]
+    assert flags.seeds == [2021, 2022, 2023]
 
 
 def test_cli_help_and_unknown_flags() -> None:
