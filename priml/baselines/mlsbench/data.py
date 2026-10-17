@@ -69,6 +69,9 @@ class SettingBatches:
     def train_dataloader(self) -> Iterator[dict[str, object]]:
         """Refuse: nothing here is trained.
 
+        Returns:
+          batches: Never; it raises.
+
         Raises:
           NotImplementedError: Always.
 

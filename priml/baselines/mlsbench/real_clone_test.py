@@ -8,7 +8,7 @@ through the whole metric path with a canned-log executor and the real parser.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 import importlib
 import json
@@ -18,17 +18,13 @@ import tempfile
 
 import pytest
 
+from priml.baselines.mlsbench import tasks as task_pkg
 from priml.baselines.mlsbench.executor import FakeExecutor
 from priml.baselines.mlsbench.experiments import mlsbench_experiment
-from priml.baselines.mlsbench.metric import MlsbenchSuite, expected_columns
-from priml.baselines.mlsbench.scripts.generate_experiments import NATIVE
-from priml.baselines.mlsbench.task import TaskSpec, load_all
-from priml.baselines.mlsbench.workspace import materialize
-from priml.baselines.mlsbench.workspace_harbor import (
-    ADAPTED_EVAL_SCRIPTS,
-    NORMALISED_ONLY,
+from priml.baselines.mlsbench.harbor import (
     EvalScriptsError,
     MissingBundleError,
+    adapted_scripts,
     allow_internet,
     bundle_dir,
     check_eval_scripts,
@@ -36,8 +32,15 @@ from priml.baselines.mlsbench.workspace_harbor import (
     load_bundle,
     normalise_harbor_script,
 )
+from priml.baselines.mlsbench.metric import MlsbenchSuite
+from priml.baselines.mlsbench.scripts.generate_experiments import NATIVE
+from priml.baselines.mlsbench.setting import expected_columns
+from priml.baselines.mlsbench.task import TaskSpec, load_all
+from priml.baselines.mlsbench.workspace import materialize
 from priml.train.results import read_metrics
 
+
+_CWD: Final = Path(__file__).resolve().parent
 
 WARNED_BASELINES = frozenset(
     {
@@ -123,7 +126,7 @@ def test_every_task_and_baseline_materializes_edits_and_passes_the_guard() -> No
     # The sweep covers exactly the registry's 480 baselines, none skipped.
     registry = cast(
         "dict[str, dict[str, list[object]]]",
-        json.loads((Path(__file__).parent / "registry.json").read_text()),
+        json.loads((_CWD / "registry.json").read_text()),
     )
     assert len(swept) == len(set(swept)) == N_BASELINES
     assert {(t, str(b)) for t, v in registry.items() for b in v["baselines"]} == {
@@ -167,7 +170,7 @@ def test_harbor_adapted_eval_scripts_are_the_pinned_set() -> None:
             for v in found
         ):
             normalised.add(t.name)
-    assert diff == ADAPTED_EVAL_SCRIPTS
+    assert diff == adapted_scripts()["adapted"]
     assert len(diff) == 32
     assert len(sh_only) == 29
     assert sorted(set(diff) - sh_only) == [
@@ -175,7 +178,7 @@ def test_harbor_adapted_eval_scripts_are_the_pinned_set() -> None:
         "quant-graph-stock",
         "quant-stock-prediction",
     ]
-    assert normalised == NORMALISED_ONLY
+    assert normalised == adapted_scripts()["normalised_only"]
     assert len(normalised) == 12
 
 
@@ -186,8 +189,8 @@ def test_check_eval_scripts_accepts_every_pinned_task_and_refuses_a_swap(
     for t in load_all(_root()):
         hb = load_bundle(bundle_dir(t.name, root=_root()))
         got = check_eval_scripts(t.name, hb, t.root / "scripts")
-        assert got == ADAPTED_EVAL_SCRIPTS.get(t.name, ())
-    # a copy of one script tree with a swapped script is refused
+        assert got == adapted_scripts()["adapted"].get(t.name, ())
+    # A copy of one script tree with a swapped script is refused.
     t = next(t for t in load_all(_root()) if t.name == "llm-dllm-demask-strategy")
     copy = tmp_path / "scripts"
     shutil.copytree(t.root / "scripts", copy)
@@ -218,7 +221,7 @@ def _canned(task: TaskSpec) -> dict[str, str]:
     out: dict[str, str] = {}
     for s in task.settings:
         cols = expected_columns(task, s.label)
-        if task.name == "cv-diffusion-cfg":  # this parser reads its own line format
+        if task.name == "cv-diffusion-cfg":  # This parser reads its own line format.
             out[s.label] = f"GENERATION_METRICS model={s.label.split('-')[0]} fid=0.5\n"
             continue
         pairs = " ".join(f"{c.removesuffix('_' + s.label)}=0.5" for c in cols)
@@ -260,8 +263,6 @@ N_EXPERIMENTS = 563
 
 @needs_clone
 def test_every_generated_experiment_materializes_with_its_edit_and_guards() -> None:
-    from priml.baselines.mlsbench import tasks as task_pkg  # noqa: PLC0415
-
     tasks = {t.name: t for t in load_all(_root()) if t.name not in NATIVE}
     seen: set[tuple[str, str, int]] = set()
     no_edit: list[tuple[str, str, int]] = []
@@ -307,3 +308,9 @@ def test_every_generated_experiment_materializes_with_its_edit_and_guards() -> N
         ]
     )
     assert {(t, b) for t, b, _ in no_edit} >= set(NOOP_BASELINES)
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

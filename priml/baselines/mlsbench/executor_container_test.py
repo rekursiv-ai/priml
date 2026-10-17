@@ -6,8 +6,6 @@ Runs a *fake* task whose scripts use the relative-path patterns of the real ones
 materialized workspace. Marked ``integration``; skipped when anything is missing.
 """
 
-# ruff: noqa: S603
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -22,12 +20,15 @@ import subprocess
 import pytest
 
 from priml.baselines.mlsbench.executor import (
-    _TESTDATA,  # pyright: ignore[reportPrivateUsage]
+    TESTDATA,
     LocalDocker,
     Outcome,
     RunRequest,
 )
 from priml.baselines.mlsbench.executor_test import typed_request
+from priml.baselines.mlsbench.setting import inputgen_dir, package_env
+from priml.baselines.mlsbench.task import load_task
+from priml.baselines.mlsbench.workspace import materialize
 
 
 pytestmark = pytest.mark.integration
@@ -39,16 +40,20 @@ def _image() -> str:
     docker = shutil.which("docker")
     if docker is None:
         pytest.skip("docker binary not found")
-    if subprocess.run([docker, "info"], capture_output=True, check=False).returncode:
+    if subprocess.run(  # noqa: S603 -- fixed docker argv.
+        [docker, "info"],
+        capture_output=True,
+        check=False,
+    ).returncode:
         pytest.skip("docker daemon not running")
     lock = cast(
         "dict[str, str]",
-        json.loads((_TESTDATA / "image_lock.json").read_text()),
+        json.loads((TESTDATA / "image_lock.json").read_text()),
     )
     ref = lock.get(_PKG)
     if (
         ref is None
-        or subprocess.run(
+        or subprocess.run(  # noqa: S603 -- fixed docker argv.
             [docker, "image", "inspect", ref],
             capture_output=True,
             check=False,
@@ -119,15 +124,15 @@ def test_fake_task_with_real_script_patterns(tmp_path: Path) -> None:
     )
     log = res.log_path.read_text()
     assert res.outcome is Outcome.OK, log
-    assert "data payload" in log  # /workspace/_task/data resolves
-    assert "custom /workspace ['--seed', '42'" in log  # ran from /workspace
-    assert "custom /workspace/gplearn ['--relative']" in log  # relative to the pkg dir
-    assert "gplearn/genetic.py" in log  # the image's package source stayed visible
+    assert "data payload" in log  # /workspace/_task/data resolves.
+    assert "custom /workspace ['--seed', '42'" in log  # Ran from /workspace.
+    assert "custom /workspace/gplearn ['--relative']" in log  # Relative to the pkg dir.
+    assert "gplearn/genetic.py" in log  # The image's package source stayed visible.
     assert "pkgdir=/workspace/gplearn task=/workspace/_task env=lab" in log
-    assert "EDIT_WRITABLE=no" in log  # laid-over files are read-only
+    assert "EDIT_WRITABLE=no" in log  # laid-over files are read-only.
     assert (
         tmp_path / "logs" / "lab.out" / "res.txt"
-    ).read_text() == "ok"  # $OUTPUT_DIR
+    ).read_text() == "ok"  # $OUTPUT_DIR.
     assert (ws / "gplearn" / "custom.py").read_text().startswith("import os")
 
 
@@ -137,8 +142,6 @@ def test_real_task_script_resolves(tmp_path: Path) -> None:
     root = os.environ.get("MLSBENCH_ROOT", "")
     if not root:
         pytest.skip("MLSBENCH_ROOT not set")
-    from priml.baselines.mlsbench.task import load_task  # noqa: PLC0415
-    from priml.baselines.mlsbench.workspace import materialize  # noqa: PLC0415
 
     task = load_task("ml-symbolic-regression", root=Path(root))
     ws = materialize(
@@ -181,12 +184,6 @@ def test_real_task_gets_its_held_out_inputs_and_package_env(tmp_path: Path) -> N
     root = os.environ.get("MLSBENCH_ROOT", "")
     if not root:
         pytest.skip("MLSBENCH_ROOT not set")
-    from priml.baselines.mlsbench.metric import (  # noqa: PLC0415
-        inputgen_dir,
-        package_env,
-    )
-    from priml.baselines.mlsbench.task import load_task  # noqa: PLC0415
-    from priml.baselines.mlsbench.workspace import materialize  # noqa: PLC0415
 
     bundle = Path(root) / "harbor/tasks-docker/mls-bench__ml-symbolic-regression"
     task = load_task("ml-symbolic-regression", root=Path(root))
@@ -207,3 +204,9 @@ def test_real_task_gets_its_held_out_inputs_and_package_env(tmp_path: Path) -> N
     assert res.outcome is Outcome.OK, (res.outcome, res.detail, log[-1500:])
     assert res.returncode == 0
     assert "FileNotFoundError" not in log, log[-1500:]
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

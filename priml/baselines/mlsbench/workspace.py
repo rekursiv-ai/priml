@@ -2,18 +2,19 @@
 
 ``materialize`` copies the task's editable files into ``<run_dir>/workspace``
 (and a reference copy into ``<run_dir>/pristine``), runs an edit script
-against the workspace in a sanitised subprocess, then runs :func:`check_diff`.
+against the workspace in a sanitised subprocess, then guards the result: with a
+Harbor bundle by its byte-segment and manifest guard (:func:`guard`), without
+one by the synthetic line-diff guard (:func:`check_diff`).
 
-The diff guard works in *pristine* line coordinates: a hunk of the edited file
-is legal iff the pristine lines it replaces (or, for a pure insertion, the gap
-it is inserted into) lie within one allowed range. Working in pristine
-coordinates is equivalent to re-anchoring later ranges after earlier length
-changes: a range grows or shrinks with its own edits and never shifts into a
-neighbour. An insertion is legal at the range boundaries (directly before its
-first line or directly after its last).
+The line-diff guard works in *pristine* line coordinates: a hunk of the edited
+file is legal iff the pristine lines it replaces (or, for a pure insertion, the
+gap it is inserted into) lie within one allowed range, so a range grows or
+shrinks with its own edits and never shifts into a neighbour. An insertion is
+legal at the range boundaries (directly before its first line or directly after
+its last).
+
+The Harbor bundle reader and its byte-segment guard live in :mod:`.harbor`.
 """
-
-# ruff: noqa: S603, N818
 
 from __future__ import annotations
 
@@ -23,13 +24,13 @@ from typing import Final, Literal, cast
 
 import difflib
 import hashlib
-import json
 import shutil
 import subprocess
 import sys
 
-from priml.baselines.mlsbench.task import EditableFile, TaskSpec
-from priml.baselines.mlsbench.workspace_harbor import (
+from treekle import json_loads
+
+from priml.baselines.mlsbench.harbor import (
     BundleError,
     HarborBundle,
     MissingBundleError,
@@ -40,9 +41,7 @@ from priml.baselines.mlsbench.workspace_harbor import (
     sanitised_env,
     sha256_file,
 )
-
-
-_SAFE_PATH: Final = "/usr/bin:/bin"
+from priml.baselines.mlsbench.task import EditableFile, TaskSpec
 
 
 class EditError(RuntimeError):
@@ -54,7 +53,7 @@ ViolationKind = Literal[
     "unlisted_file_changed",
     "file_deleted",
     "file_added",
-    # Harbor-bundle guard kinds (workspace_harbor.HarborViolation.kind)
+    # Harbor-bundle guard kinds (HarborViolation.kind)
     "symlink",
     "deleted",
     "pristine_missing",
@@ -63,16 +62,16 @@ ViolationKind = Literal[
 ]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class Violation:
     """One breach of the edit surface."""
 
     path: str
     kind: ViolationKind
-    line: int | None = None  # 1-indexed pristine line; None for whole-file kinds
+    line: int | None = None  # 1-indexed pristine line; None for whole-file kinds.
 
 
-class DiffGuardViolation(RuntimeError):
+class DiffGuardError(RuntimeError):
     """Raised by ``materialize`` when the edit leaves the allowed line ranges."""
 
     def __init__(self, violations: tuple[Violation, ...]) -> None:
@@ -86,7 +85,7 @@ class DiffGuardViolation(RuntimeError):
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class Workspace:
     """A materialized (optionally edited) workspace and its content digest."""
 
@@ -96,26 +95,9 @@ class Workspace:
     digest: str
     warnings: tuple[str, ...] = ()
     """Non-fatal findings (a manifest hash upstream itself ignores)."""
+
     files: tuple[tuple[str, str], ...] = ()
     """``(relative path, hash)`` snapshot behind ``digest``, for :func:`workspace_changes`."""
-
-
-class WorkspaceChangedError(RuntimeError):
-    """The materialized workspace no longer matches its recorded digest."""
-
-    def __init__(self, changes: tuple[str, ...]) -> None:
-        self.changes = changes
-        super().__init__("workspace changed since materialize: " + "; ".join(changes))
-
-
-def _sha(path: Path) -> str:
-    if path.is_symlink():
-        return "symlink:" + str(path.readlink())
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def manifest(root: Path) -> dict[str, str]:
@@ -127,19 +109,19 @@ def manifest(root: Path) -> dict[str, str]:
     }
 
 
-def _digest(m: dict[str, str]) -> str:
-    h = hashlib.sha256()
-    for k in sorted(m):
-        h.update(f"{k}\0{m[k]}\n".encode())
-    return h.hexdigest()
-
-
 def workspace_changes(ws: Workspace) -> tuple[str, ...]:
     """Return ``kind:path`` for every recorded file that changed since materialize.
 
     Files the run *adds* (outputs written by a setting into the mounted workspace) are
     not changes; a recorded file that was modified, deleted or replaced by a symlink is.
     A workspace built without a snapshot falls back to the whole-tree digest.
+
+    Args:
+      ws: The materialized workspace.
+
+    Returns:
+      changes: ``deleted:<path>`` or ``modified:<path>`` per changed file.
+
     """
     if not ws.files:
         now = _digest(manifest(ws.root))
@@ -154,41 +136,26 @@ def workspace_changes(ws: Workspace) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _lines(path: Path) -> list[str]:
-    return (
-        path.read_bytes()
-        .decode("utf-8", errors="surrogateescape")
-        .splitlines(keepends=True)
-    )
-
-
-def _hunk_legal(i1: int, i2: int, ef: EditableFile) -> bool:
-    """Report whether pristine span ``[i1, i2)`` (0-indexed, half-open) fits one range.
-
-    ``end == -1`` extends to EOF and ``(-1, -1)`` is the whole file (see ``task.py``).
-    """
-    for s, end in ef.ranges:  # 1-indexed inclusive -> 0-indexed half-open [s-1, e)
-        if (s, end) == (-1, -1):
-            return True
-        e = sys.maxsize if end == -1 else end
-        if i1 == i2:
-            if s - 1 <= i1 <= e:
-                return True
-        elif s - 1 <= i1 and i2 <= e:
-            return True
-    return False
-
-
 def check_diff(task: TaskSpec, pristine: Path, edited: Path) -> tuple[Violation, ...]:
-    """Return violations of the edit surface between two trees (empty when clean)."""
+    """Return violations of the edit surface between two trees (empty when clean).
+
+    Args:
+      task: The parsed task; its files give the editable ranges.
+      pristine: The reference tree.
+      edited: The workspace after the edit.
+
+    Returns:
+      violations: One per breach, in path order.
+
+    """
     editable = {f.path: f for f in task.files}
     pm, em = manifest(pristine), manifest(edited)
     out: list[Violation] = []
     for path in sorted(set(pm) | set(em)):
         if path not in em:
-            out.append(Violation(path, "file_deleted", None))
+            out.append(Violation(path=path, kind="file_deleted", line=None))
         elif path not in pm:
-            out.append(Violation(path, "file_added", None))
+            out.append(Violation(path=path, kind="file_added", line=None))
         elif pm[path] != em[path]:
             ef = editable.get(path)
             if (
@@ -196,79 +163,27 @@ def check_diff(task: TaskSpec, pristine: Path, edited: Path) -> tuple[Violation,
                 or pm[path].startswith("symlink:")
                 or em[path].startswith("symlink:")
             ):
-                out.append(Violation(path, "unlisted_file_changed", None))
+                out.append(
+                    Violation(path=path, kind="unlisted_file_changed", line=None),
+                )
                 continue
             a, b = _lines(pristine / path), _lines(edited / path)
             sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
             for tag, i1, i2, _j1, _j2 in sm.get_opcodes():
                 if tag != "equal" and not _hunk_legal(i1, i2, ef):
-                    out.append(Violation(path, "outside_range", i1 + 1))
+                    out.append(Violation(path=path, kind="outside_range", line=i1 + 1))
     return tuple(out)
 
 
 def check_bundle(hb: HarborBundle, workspace: Path) -> tuple[Violation, ...]:
     """Run the Harbor byte-segment / manifest guard on a partial (declared-files) workspace."""
     return tuple(
-        Violation(v.path, cast(ViolationKind, v.kind), None)
+        Violation(path=v.path, kind=cast(ViolationKind, v.kind), line=None)
         for v in guard(hb, workspace, check_deletions=False)
     )
 
 
-def _missing_bundle(task: TaskSpec, rel: str, src: Path) -> FileNotFoundError:
-    """Explain a missing editable file when no Harbor bundle was supplied.
-
-    Real upstream tasks do not ship their editable files under ``tasks/<t>/``; the
-    pristine bytes live in the Harbor bundle. A synthetic task simply lacks the file.
-    """
-    root = task.root.parent.parent
-    has_harbor = (root / "harbor").is_dir()
-    found = find_bundle(task.name, root=root)
-    if found is None and not has_harbor:
-        return FileNotFoundError(f"{src}: editable file {rel} not found")
-    expected = root / "harbor" / "tasks-docker" / f"mls-bench__{task.name}"
-    what = (
-        f"the bundle exists at {found} but was not passed; call with bundle={found}"
-        if found is not None
-        else f"the clone has no Harbor bundle at {expected}; point mlsbench_root at "
-        "a full upstream clone that includes harbor/tasks-docker"
-    )
-    return MissingBundleError(
-        f"{task.name}: editable file {rel} is not in {task.root} and no Harbor bundle "
-        f"was given (bundle=None): {what}.",
-    )
-
-
-def _check_bundle_matches_task(task: TaskSpec, hb: HarborBundle) -> None:
-    """Refuse a bundle that declares other files than the task, or other ranges.
-
-    The task declares ranges in upstream's source coordinates while the bundle's
-    pristine snapshot already has the package ``pre_edit`` and the task's
-    ``mid_edit`` applied (its ranges are the live-shifted ones), so the file set
-    must agree and each range may only have moved (same length), or the task has
-    a ``mid_edit``, which may also resize a range.
-    """
-    mine = {f.path: tuple((int(r[0]), int(r[1])) for r in f.ranges) for f in task.files}
-    if mine == hb.editable:
-        return
-    if set(mine) == set(hb.editable) and (
-        task.mid_edit is not None
-        or all(_shifted(mine[k], hb.editable[k]) for k in mine)
-    ):
-        return
-    raise BundleError(
-        f"{task.name}: task files/ranges {mine} disagree with bundle {hb.editable}",
-    )
-
-
-def _shifted(a: tuple[tuple[int, int], ...], b: tuple[tuple[int, int], ...]) -> bool:
-    """Report whether ``b`` is ``a`` moved down by package pre_edit ops (same lengths)."""
-    return len(a) == len(b) and all(
-        e1 - s1 == e2 - s2 and (s1, e1) != (-1, -1)
-        for (s1, e1), (s2, e2) in zip(a, b, strict=True)
-    )
-
-
-_RUNNER = """\
+_RUNNER: Final = """\
 import json, runpy, sys
 edit, ws, out = sys.argv[1:4]
 sys.argv = [edit, ws]
@@ -281,20 +196,8 @@ if ops is not None:
 """Loads an edit script in a sanitised interpreter: legacy scripts edit ``argv[1]``
 themselves; upstream ``*.edit.py`` files only define ``OPS`` and hand it back as JSON."""
 
-_OP_KEYS = frozenset({"replace", "insert", "delete", "create"})
 
-
-def _target(ws: Path, rel: object) -> Path:
-    if not isinstance(rel, str) or not rel:
-        raise EditError(f"op has no file: {rel!r}")
-    parts = Path(rel).parts
-    if Path(rel).is_absolute() or ".." in parts:
-        raise EditError(f"unsafe op path: {rel}")
-    path = ws / rel
-    for i in range(len(parts)):
-        if (ws.joinpath(*parts[: i + 1])).is_symlink():
-            raise EditError(f"op path crosses a symlink: {rel}")
-    return path
+_OP_KEYS: Final = frozenset({"replace", "insert", "delete", "create"})
 
 
 def apply_ops(ws: Path, ops: object) -> int:
@@ -304,6 +207,10 @@ def apply_ops(ws: Path, ops: object) -> int:
     ``delete`` are inclusive, ``insert`` goes after ``after_line``, content gets a
     trailing newline, ops run top to bottom against the file as the previous op
     left it (upstream orders them bottom-to-top).
+
+    Args:
+      ws: The workspace to edit.
+      ops: The edit script's ``OPS``.
 
     Returns:
       count: Number of ops applied.
@@ -370,6 +277,18 @@ def materialize(
     ``strict=False`` is for *published baseline* edits only (trusted upstream scripts
     that upstream itself never runs through its verifier): guard violations are
     recorded in ``Workspace.warnings`` instead of raising. Agent edits stay strict.
+
+    Args:
+      task: The parsed task.
+      run_dir: Where ``workspace/`` and ``pristine/`` are written.
+      edit: The edit script, or ``None`` for a pristine workspace.
+      edit_timeout: Seconds the edit script may run.
+      bundle: The Harbor bundle, or ``None`` for the line-diff guard.
+      strict: Raise on a guard violation rather than record it.
+
+    Returns:
+      ws: The workspace, its digest, file snapshot and warnings.
+
     """
     run_dir = Path(run_dir)
     ws, ref = run_dir / "workspace", run_dir / "pristine"
@@ -424,7 +343,7 @@ def materialize(
         try:
             ops_file = run_dir / "edit_ops.json"
             ops_file.unlink(missing_ok=True)
-            proc = subprocess.run(
+            proc = subprocess.run(  # noqa: S603 -- our interpreter running our runner.
                 [
                     sys.executable,
                     "-I",
@@ -435,7 +354,7 @@ def materialize(
                     str(ops_file),
                 ],
                 cwd=ws,
-                env=sanitised_env() if hb is not None else {"PATH": _SAFE_PATH},
+                env=sanitised_env() if hb is not None else {"PATH": "/usr/bin:/bin"},
                 capture_output=True,
                 text=True,
                 timeout=edit_timeout,
@@ -448,11 +367,10 @@ def materialize(
                 f"{edit.name}: exit {proc.returncode}: {proc.stderr.strip()[-2000:]}",
             )
         if ops_file.is_file():
-            ops = cast("object", json.loads(ops_file.read_text()))
-            apply_ops(ws, ops)
+            apply_ops(ws, json_loads(ops_file.read_text()))
     violations = check_bundle(hb, ws) if hb is not None else check_diff(task, ref, ws)
     if violations and strict:
-        raise DiffGuardViolation(violations)
+        raise DiffGuardError(violations)
     warnings.extend(
         f"guard(baseline) {v.kind} {v.path}"
         + (f":{v.line}" if v.line is not None else "")
@@ -467,3 +385,102 @@ def materialize(
         warnings=tuple(warnings),
         files=tuple(sorted(snapshot.items())),
     )
+
+
+def _digest(m: dict[str, str]) -> str:
+    h = hashlib.sha256()
+    for k in sorted(m):
+        h.update(f"{k}\0{m[k]}\n".encode())
+    return h.hexdigest()
+
+
+def _lines(path: Path) -> list[str]:
+    return (
+        path.read_bytes()
+        .decode("utf-8", errors="surrogateescape")
+        .splitlines(keepends=True)
+    )
+
+
+# ``end == -1`` extends to EOF and ``(-1, -1)`` is the whole file (see ``task.py``).
+def _hunk_legal(i1: int, i2: int, ef: EditableFile) -> bool:
+    """Report whether pristine span ``[i1, i2)`` (0-indexed, half-open) fits one range."""
+    for s, end in ef.ranges:  # 1-indexed inclusive -> 0-indexed half-open [s-1, e)
+        if (s, end) == (-1, -1):
+            return True
+        e = sys.maxsize if end == -1 else end
+        if i1 == i2:
+            if s - 1 <= i1 <= e:
+                return True
+        elif s - 1 <= i1 and i2 <= e:
+            return True
+    return False
+
+
+# Real upstream tasks do not ship their editable files under ``tasks/<t>/``; the
+# pristine bytes live in the Harbor bundle. A synthetic task simply lacks the file.
+def _missing_bundle(task: TaskSpec, rel: str, src: Path) -> FileNotFoundError:
+    """Explain a missing editable file when no Harbor bundle was supplied."""
+    root = task.root.parent.parent
+    has_harbor = (root / "harbor").is_dir()
+    found = find_bundle(task.name, root=root)
+    if found is None and not has_harbor:
+        return FileNotFoundError(f"{src}: editable file {rel} not found")
+    expected = root / "harbor" / "tasks-docker" / f"mls-bench__{task.name}"
+    what = (
+        f"the bundle exists at {found} but was not passed; call with bundle={found}"
+        if found is not None
+        else f"the clone has no Harbor bundle at {expected}; point mlsbench_root at "
+        "a full upstream clone that includes harbor/tasks-docker"
+    )
+    return MissingBundleError(
+        f"{task.name}: editable file {rel} is not in {task.root} and no Harbor bundle "
+        f"was given (bundle=None): {what}.",
+    )
+
+
+# The task declares ranges in upstream's source coordinates while the bundle's pristine
+# snapshot already has the package ``pre_edit`` and the task's ``mid_edit`` applied (its
+# ranges are the live-shifted ones), so the file set must agree and each range may only
+# have moved (same length), or the task has a ``mid_edit``, which may also resize a
+# range.
+def _check_bundle_matches_task(task: TaskSpec, hb: HarborBundle) -> None:
+    """Refuse a bundle that declares other files than the task, or other ranges."""
+    mine = {f.path: tuple((int(r[0]), int(r[1])) for r in f.ranges) for f in task.files}
+    if mine == hb.editable:
+        return
+    if set(mine) == set(hb.editable) and (
+        task.mid_edit is not None
+        or all(_shifted(mine[k], hb.editable[k]) for k in mine)
+    ):
+        return
+    raise BundleError(
+        f"{task.name}: task files/ranges {mine} disagree with bundle {hb.editable}",
+    )
+
+
+def _shifted(a: tuple[tuple[int, int], ...], b: tuple[tuple[int, int], ...]) -> bool:
+    """Report whether ``b`` is ``a`` moved down by package pre_edit ops (same lengths)."""
+    return len(a) == len(b) and all(
+        e1 - s1 == e2 - s2 and (s1, e1) != (-1, -1)
+        for (s1, e1), (s2, e2) in zip(a, b, strict=True)
+    )
+
+
+def _target(ws: Path, rel: object) -> Path:
+    if not isinstance(rel, str) or not rel:
+        raise EditError(f"op has no file: {rel!r}")
+    parts = Path(rel).parts
+    if Path(rel).is_absolute() or ".." in parts:
+        raise EditError(f"unsafe op path: {rel}")
+    path = ws / rel
+    for i in range(len(parts)):
+        if (ws.joinpath(*parts[: i + 1])).is_symlink():
+            raise EditError(f"op path crosses a symlink: {rel}")
+    return path
+
+
+def _sha(path: Path) -> str:
+    if path.is_symlink():
+        return "symlink:" + str(path.readlink())
+    return sha256_file(path)

@@ -20,7 +20,7 @@ def test_hidden_settings_run_too(tmp_path: Path) -> None:
         SettingBatches.Config(task="toy-task", mlsbench_root=str(r)),
     )
     labels = [b["setting"] for b in batches.eval_dataloader()]
-    assert labels == ["a-x", "b"]  # "b" is hidden
+    assert labels == ["a-x", "b"]  # "b" is hidden.
 
 
 def test_settings_subset_selects_and_validates(tmp_path: Path) -> None:
@@ -49,3 +49,9 @@ def test_state_dict_round_trips() -> None:
     b = SettingBatches(SettingBatches.Config(task="t"))
     b.load_state_dict(a.state_dict())
     assert b.state_dict() == a.state_dict()
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

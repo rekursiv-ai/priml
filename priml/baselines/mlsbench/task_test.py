@@ -1,6 +1,5 @@
 """Tests for strict TaskSpec parsing (synthetic fixtures; the real clone is opt-in below)."""
 
-# ruff: noqa: PT018, PT006
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -52,13 +51,15 @@ def test_round_trip(tmp_path: Path):
     assert a.compute_for("H200") == 0.5
     assert b.compute_for("H100") == 1.0
     assert b.compute_for("H200") == 2.0
-    assert b.h200 is not None and b.h200.env == {"BATCH_SIZE": "64"}
+    assert b.h200 is not None
+    assert b.h200.env == {"BATCH_SIZE": "64"}
     assert t.visible_settings() == (a,)
     base = t.baseline("base1")
     assert base.edit == t.root / "edits/base1.edit.py"
     assert (base.cmd, dict(base.env), base.labels) == (None, {}, None)
     assert t.row("base1").values == {"accuracy_a-x": 0.5, "loss_b": 1.25}
-    assert t.score_spec is None and t.parser.name == "parser.py"
+    assert t.score_spec is None
+    assert t.parser.name == "parser.py"
     assert t.packages == ("toy-pkg",)
 
 
@@ -66,7 +67,8 @@ def test_absent_seeds_default_to_42(tmp_path: Path):
     cfg = default_config()
     del cfg["seeds"]
     t = load_task("toy-task", root=build_task(tmp_path, config=cfg))
-    assert t.seeds == (42,) and not t.seeds_declared
+    assert t.seeds == (42,)
+    assert not t.seeds_declared
 
 
 def test_optional_task_flags(tmp_path: Path):
@@ -144,7 +146,7 @@ def test_spread_comes_from_the_seed_rows(tmp_path: Path):
 
 
 def test_columns_need_not_end_in_a_setting_label(tmp_path: Path):
-    # upstream parsers name their own columns; some do not end in the label
+    # Upstream parsers name their own columns; some do not end in the label.
     lb = leaderboard_csv(["pass_rate_deepseek"], [("base1", 42, [0.3])])
     t = load_task("toy-task", root=build_task(tmp_path, leaderboard=lb))
     assert t.row("base1").values == {"pass_rate_deepseek": 0.3}
@@ -179,7 +181,7 @@ def _bad(tmp_path: Path, mutate: Mutate) -> None:
 
 _UNKNOWN_FIELDS: Final[list[Mutate]] = [
     lambda c: c.update(extra=1),
-    lambda c: c.update(name="toy-task"),  # not a real key
+    lambda c: c.update(name="toy-task"),  # Not a real key.
     lambda c: _d(c, "files", 0).update(oops=1),
     lambda c: _d(c, "files", 0, "edit", 0).update(oops=1),
     lambda c: _d(c, "test_cmds", 0).update(oops=1),
@@ -228,6 +230,8 @@ _VIOLATIONS: Final[list[tuple[Mutate, str]]] = [
         "stand alone",
     ),
     (lambda c: _d(c, "files", 0).update(filename="../x"), "relative"),
+    (lambda c: _d(c, "files", 0).update(filename=""), "empty string"),
+    (lambda c: _d(c, "test_cmds", 0).update(compute=float("inf")), "not finite"),
     (lambda c: _d(c, "files", 0).update(read=[{"start": 0, "end": 3}]), "start <= end"),
     (lambda c: _d(c, "test_cmds", 0).update(time="1:00"), "H:MM:SS"),
     (lambda c: _d(c, "test_cmds", 0).update(time="0:00:00"), "> 0"),
@@ -248,7 +252,7 @@ _VIOLATIONS: Final[list[tuple[Mutate, str]]] = [
 ]
 
 
-@pytest.mark.parametrize("mutate,msg", _VIOLATIONS)
+@pytest.mark.parametrize(("mutate", "msg"), _VIOLATIONS)
 def test_schema_violations(
     tmp_path: Path,
     mutate: Mutate,
@@ -259,7 +263,7 @@ def test_schema_violations(
 
 
 @pytest.mark.parametrize(
-    "text,seconds",
+    ("text", "seconds"),
     [
         ("0:00:01", 1.0),
         ("4:00:00", 14400.0),
@@ -297,22 +301,50 @@ def test_missing_script_edit_cmd_and_mid_edit(tmp_path: Path):
 
 
 def test_editable_files_need_not_exist_in_the_task_dir(tmp_path: Path):
-    # they live in the package codebase (the image), not in tasks/<name>/
+    # They live in the package codebase (the image), not in tasks/<name>/.
     root = build_task(tmp_path)
     (root / "tasks/toy-task/run.py").unlink()
     assert load_task("toy-task", root=root).files[0].path == "run.py"
 
 
 @pytest.mark.parametrize(
-    "lb,msg",
+    ("lb", "msg"),
     [
         ("name,acc\nbase1,1\n", "header"),
         (leaderboard_csv(["a"], [("other", 42, [1.0])]), "no leaderboard row"),
+        (leaderboard_csv(["a", "a"], [("base1", 42, [1.0, 1.0])]), "duplicate columns"),
     ],
 )
 def test_leaderboard_problems(tmp_path: Path, lb: str, msg: str):
     with pytest.raises(TaskSpecError, match=msg):
         load_task("toy-task", root=build_task(tmp_path, leaderboard=lb))
+
+
+def test_blank_leaderboard_lines_and_comments_are_skipped(tmp_path: Path):
+    cfg = default_config()
+    _d(cfg, "files", 0).update(_comment="why")
+    _d(cfg, "files", 0, "edit", 0).update(_comment="why")
+    lb = leaderboard_csv(["a"], [("base1", 42, [1.0])]) + "\n"
+    task = load_task("toy-task", root=build_task(tmp_path, config=cfg, leaderboard=lb))
+    assert task.leaderboard[0].values == {"a": 1.0}
+
+
+def test_missing_leaderboard_and_parser(tmp_path: Path):
+    root = build_task(tmp_path)
+    (root / "tasks/toy-task/parser.py").unlink()
+    with pytest.raises(MissingFileError, match=r"parser\.py"):
+        load_task("toy-task", root=root)
+    (root / "tasks/toy-task/parser.py").write_text("")
+    (root / "tasks/toy-task/leaderboard.csv").unlink()
+    with pytest.raises(MissingFileError, match=r"leaderboard\.csv"):
+        load_task("toy-task", root=root)
+
+
+def test_a_non_object_config_is_refused(tmp_path: Path):
+    root = build_task(tmp_path)
+    (root / "tasks/toy-task/config.json").write_text("[]")
+    with pytest.raises(TaskSpecError, match="expected object"):
+        load_task("toy-task", root=root)
 
 
 def test_bad_json_and_missing_task(tmp_path: Path):
@@ -433,5 +465,12 @@ def test_real_dllm_task_matches_the_briefing(real: tuple[TaskSpec, ...]):
     assert [(f.path, f.ranges) for f in t.files] == [
         ("LLaDA/custom_demask_eval.py", ((59, 151),)),
     ]
-    assert t.seeds == (42,) and t.package == "LLaDA"
+    assert t.seeds == (42,)
+    assert t.package == "LLaDA"
     assert t.row("topk_margin").values["accuracy_llada-math"] == 0.322
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

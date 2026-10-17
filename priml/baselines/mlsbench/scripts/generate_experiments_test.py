@@ -1,4 +1,4 @@
-"""Tests that the generated experiment modules match ``registry.json`` x seeds."""
+"""Tests for the generator and the modules it wrote from ``registry.json``."""
 
 from __future__ import annotations
 
@@ -10,13 +10,7 @@ import sys
 import pytest
 
 from priml.baselines.mlsbench import tasks
-from priml.baselines.mlsbench.experiments import (
-    REGISTRY,
-    MlsbenchEval,
-    TaskEntry,
-    task_entry,
-)
-from priml.baselines.mlsbench.metric import MlsbenchSuite
+from priml.baselines.mlsbench.experiments import MlsbenchEval, TaskEntry, snapshot
 from priml.baselines.mlsbench.scripts import generate_experiments as gen
 
 
@@ -40,11 +34,11 @@ def _all() -> list[tuple[str, str, tuple[str, str, int]]]:
 
 ALL: Final = _all()
 
-REGISTRY_RAW: Final = gen.load_registry()
+REGISTRY: Final = snapshot()
 
 
 def _entry(task: str) -> TaskEntry:
-    return cast("TaskEntry", task_entry(task))
+    return REGISTRY[task]
 
 
 def test_generated_files_are_up_to_date() -> None:
@@ -98,8 +92,8 @@ def test_names_are_sequential_within_a_task() -> None:
 
 
 def test_numbering_does_not_depend_on_other_tasks() -> None:
-    full = gen.plan(REGISTRY_RAW)
-    for task, entry in REGISTRY_RAW.items():
+    full = gen.plan(REGISTRY)
+    for task, entry in REGISTRY.items():
         m = gen.module_of(task)
         assert gen.plan({task: entry}) == {m: full[m]}
 
@@ -123,29 +117,6 @@ def test_multi_seed_and_hidden_registry_facts() -> None:
     assert sum(len(_entry(t).hidden) for t in REGISTRY) == 134
     for t in REGISTRY:
         assert set(_entry(t).hidden) <= set(_entry(t).settings), t
-
-
-@pytest.mark.parametrize(
-    ("mod", "fn", "ident"),
-    ALL,
-    ids=[f"{f}.{n}" for f, n, _ in ALL],
-)
-def test_every_function_constructs_its_experiment(
-    mod: str,
-    fn: str,
-    ident: tuple[str, str, int],
-) -> None:
-    task, baseline, seed = ident
-    factory = tasks.resolve(f"{mod}.{fn}")
-    cfg = factory()
-    assert isinstance(cfg, MlsbenchEval)
-    suite = cfg.metrics_eval[""]
-    assert isinstance(suite, MlsbenchSuite.Config)
-    assert (suite.task, suite.baseline, suite.seed) == ident
-    assert cfg.dataset.task == task
-    assert cfg.experiment_name == f"{task}/{baseline}/seed{seed}"
-    assert cfg.max_eval_time == _entry(task).max_eval_time
-    assert cfg.eval_only is True
 
 
 def test_resolve_rejects_unknown_names() -> None:
@@ -190,13 +161,18 @@ def test_module_of_maps_dashes_and_rejects_non_identifiers() -> None:
 
 def test_plan_rejects_two_tasks_with_one_module_name() -> None:
     with pytest.raises(ValueError, match="share"):
-        _ = gen.plan({"a-b": {"baselines": ["x"]}, "a_b": {"baselines": ["y"]}})
+        _ = gen.plan(
+            {
+                "a-b": TaskEntry(baselines=("x",), settings={}),
+                "a_b": TaskEntry(baselines=("y",), settings={}),
+            },
+        )
 
 
 def test_plan_sorts_by_task_baseline_order_then_seed() -> None:
     reg = {
-        "x-b": {"baselines": ["z", "a"], "seeds": [2, 1]},
-        "x-a": {"baselines": ["m"]},
+        "x-b": TaskEntry(baselines=("z", "a"), settings={}, seeds=(2, 1)),
+        "x-a": TaskEntry(baselines=("m",), settings={}),
     }
     assert gen.plan(reg) == {
         "x_a": [("x-a", "m", 42)],
@@ -212,3 +188,9 @@ def test_plan_sorts_by_task_baseline_order_then_seed() -> None:
 def test_callable_type_of_resolve() -> None:
     fn: Callable[[], MlsbenchEval] = tasks.resolve(f"{ALL[0][0]}.{ALL[0][1]}")
     assert fn().experiment_name.endswith("/seed42")
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

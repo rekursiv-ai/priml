@@ -37,9 +37,6 @@ Editable files live in the package codebase (the task image), not in the task
 directory, so their existence is not checked here.
 """
 
-# ruff: noqa: TRY301
-# (errors are raised from helpers by design)
-
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -49,17 +46,16 @@ from typing import Final, cast
 
 import csv
 import itertools
-import json
 import math
 import re
 import statistics
 
+from treekle import json_loads
+
 
 _TIME: Final = re.compile(r"^(\d+):([0-5]\d):([0-5]\d)$")
-_MEAN: Final = "mean"
 _MODEL_PREFIX: Final = "baseline:"
 _LB_FIXED: Final = ("timestamp", "model", "is_final", "seed")
-_DEFAULT_SEEDS: Final = (42,)
 
 
 class TaskSpecError(ValueError):
@@ -74,7 +70,7 @@ class MissingFileError(TaskSpecError, FileNotFoundError):
     """A required file or directory is absent."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class EditableFile:
     """One declared file: package-relative path, editable and readable line ranges."""
 
@@ -89,7 +85,7 @@ class EditableFile:
     """Ranges shown to the agent, same conventions."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class H200Override:
     """A setting's override when the job runs on H200 cards."""
 
@@ -97,7 +93,7 @@ class H200Override:
     env: Mapping[str, str] = field(default_factory=dict[str, str])
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class Setting:
     """One evaluation setting: a script, its label, and its budget."""
 
@@ -116,7 +112,15 @@ class Setting:
     h200: H200Override | None = None
 
     def compute_for(self, hardware: str = "H100") -> float:
-        """Return the compute share on ``hardware`` (``"H100"`` or ``"H200"``)."""
+        """Return the compute share on ``hardware`` (``"H100"`` or ``"H200"``).
+
+        Args:
+          hardware: ``"H100"`` or ``"H200"``.
+
+        Returns:
+          compute: GPUs' worth of compute on that hardware.
+
+        """
         if (
             hardware == "H200"
             and self.h200 is not None
@@ -126,7 +130,7 @@ class Setting:
         return self.compute
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class Baseline:
     """A published baseline: leaderboard row name and how it is produced."""
 
@@ -141,7 +145,7 @@ class Baseline:
     labels: tuple[str, ...] | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class LeaderboardRow:
     """One baseline's published values, aggregated over its published seeds."""
 
@@ -160,7 +164,7 @@ class LeaderboardRow:
     is_final: bool = True
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class TaskSpec:
     """A fully parsed and cross-validated task."""
 
@@ -189,7 +193,15 @@ class TaskSpec:
     )
 
     def setting(self, label: str) -> Setting:
-        """Return the setting with this label."""
+        """Return the setting with this label.
+
+        Args:
+          label: A setting label.
+
+        Returns:
+          setting: The setting with that label.
+
+        """
         for s in self.settings:
             if s.label == label:
                 return s
@@ -198,7 +210,15 @@ class TaskSpec:
         )
 
     def baseline(self, name: str) -> Baseline:
-        """Baseline by name."""
+        """Baseline by name.
+
+        Args:
+          name: A baseline name.
+
+        Returns:
+          baseline: The baseline with that name.
+
+        """
         for b in self.baselines:
             if b.name == name:
                 return b
@@ -226,137 +246,17 @@ class TaskSpec:
 # -- strict json helpers ---------------------------------------------------
 
 
-def _obj(
-    v: object,
-    where: str,
-    required: set[str],
-    optional: frozenset[str] | set[str] = frozenset(),
-) -> dict[str, object]:
-    if not isinstance(v, dict):
-        raise TaskSpecError(f"{where}: expected object, got {type(v).__name__}")
-    d = cast("dict[str, object]", v)  # json object keys are strings
-    extra = set(d) - required - set(optional)
-    if extra:
-        raise UnknownFieldError(f"{where}: unknown field(s) {sorted(extra)}")
-    missing = required - set(d)
-    if missing:
-        raise TaskSpecError(f"{where}: missing field(s) {sorted(missing)}")
-    return d
-
-
-def _check(v: object, typ: type | tuple[type, ...], where: str) -> None:
-    ok = isinstance(v, typ) and not (
-        isinstance(v, bool) and bool not in (typ if isinstance(typ, tuple) else (typ,))
-    )
-    if not ok:
-        raise TaskSpecError(f"{where}: expected {typ}, got {v!r}")
-
-
-def _typed[T](v: object, typ: type[T], where: str) -> T:
-    _check(v, typ, where)
-    return cast("T", v)
-
-
-def _str(v: object, where: str) -> str:
-    s = _typed(v, str, where)
-    if not s:
-        raise TaskSpecError(f"{where}: empty string")
-    return s
-
-
-def _num(v: object, where: str) -> float:
-    _check(v, (int, float), where)
-    n = float(cast("float", v))
-    if not math.isfinite(n):
-        raise TaskSpecError(f"{where}: not finite")
-    return n
-
-
-def _int(v: object, where: str) -> int:
-    return _typed(v, int, where)
-
-
-def _bool(v: object, where: str) -> bool:
-    return _typed(v, bool, where)
-
-
-def _list(v: object, where: str) -> list[object]:
-    _check(v, list, where)
-    return cast("list[object]", v)
-
-
-def _dict(v: object, where: str) -> dict[object, object]:
-    _check(v, dict, where)
-    return cast("dict[object, object]", v)
-
-
-def _strs(v: object, where: str) -> tuple[str, ...]:
-    return tuple(_str(x, f"{where}[{i}]") for i, x in enumerate(_list(v, where)))
-
-
-def _env(v: object, where: str) -> dict[str, str]:
-    d = _dict(v, where)
-    return {
-        _str(k, f"{where}.key"): _typed(x, str, f"{where}.{k}") for k, x in d.items()
-    }
-
-
-def _relpath(v: object, where: str) -> str:
-    path = _str(v, where)
-    if Path(path).is_absolute() or ".." in Path(path).parts:
-        raise TaskSpecError(
-            f"{where}: must be relative and inside its dir, got {path!r}",
-        )
-    return path
-
-
-def _ranges(raw: object, where: str) -> tuple[tuple[int, int], ...]:
-    out: list[tuple[int, int]] = []
-    for j, r in enumerate(_list(raw, where)):
-        rw = f"{where}[{j}]"
-        d = _obj(r, rw, {"start", "end"}, {"_comment"})
-        if "_comment" in d:
-            _ = _typed(d["_comment"], str, f"{rw}._comment")
-        a, b = _int(d["start"], f"{rw}.start"), _int(d["end"], f"{rw}.end")
-        whole = (a, b) == (-1, -1)
-        if not whole and (a < 1 or (b != -1 and a > b)):
-            raise TaskSpecError(
-                f"{rw}: need 1 <= start <= end (or end -1), got [{a}, {b}]",
-            )
-        out.append((a, b))
-    if len(out) > 1 and (-1, -1) in out:
-        raise TaskSpecError(f"{where}: (-1, -1) whole-file range must stand alone")
-    out.sort()
-    for (_, e1), (s2, _) in itertools.pairwise(out):
-        if e1 == -1 or s2 <= e1:
-            raise TaskSpecError(f"{where}: overlapping ranges")
-    return tuple(out)
-
-
-def _parse_files(raw: object, where: str) -> tuple[EditableFile, ...]:
-    out: list[EditableFile] = []
-    seen: set[str] = set()
-    for i, item in enumerate(_list(raw, where)):
-        w = f"{where}[{i}]"
-        d = _obj(item, w, {"filename", "read"}, {"edit", "_comment"})
-        if "_comment" in d:
-            _ = _typed(d["_comment"], str, f"{w}._comment")
-        path = _relpath(d["filename"], f"{w}.filename")
-        if path in seen:
-            raise TaskSpecError(f"{w}.filename: duplicate {path!r}")
-        seen.add(path)
-        out.append(
-            EditableFile(
-                path,
-                _ranges(d.get("edit", []), f"{w}.edit"),
-                _ranges(d["read"], f"{w}.read"),
-            ),
-        )
-    return tuple(out)
-
-
 def parse_time(v: object, where: str = "time") -> float:
-    """Parse ``H:MM:SS`` into seconds; anything else is an error."""
+    """Parse ``H:MM:SS`` into seconds; anything else is an error.
+
+    Args:
+      v: The raw ``time`` value.
+      where: JSON path for error messages.
+
+    Returns:
+      seconds: The duration; always positive.
+
+    """
     m = _TIME.match(_str(v, where))
     if m is None:
         raise TaskSpecError(f"{where}: expected H:MM:SS, got {v!r}")
@@ -365,100 +265,6 @@ def parse_time(v: object, where: str = "time") -> float:
     if seconds <= 0:
         raise TaskSpecError(f"{where}: must be > 0")
     return float(seconds)
-
-
-def _parse_settings(raw: object, where: str) -> tuple[Setting, ...]:
-    out: list[Setting] = []
-    labels: set[str] = set()
-    items = _list(raw, where)
-    if not items:
-        raise TaskSpecError(f"{where}: empty")
-    for i, item in enumerate(items):
-        w = f"{where}[{i}]"
-        d = _obj(
-            item,
-            w,
-            {"cmd", "label", "group", "compute", "time", "package"},
-            {"hidden", "h200", "mem"},
-        )
-        label = _str(d["label"], f"{w}.label")
-        if label in labels:
-            raise TaskSpecError(f"{w}.label: duplicate setting label {label!r}")
-        labels.add(label)
-        cp = _num(d["compute"], f"{w}.compute")
-        if cp < 0:
-            raise TaskSpecError(f"{w}.compute: must be >= 0 (0 is CPU-only)")
-        h200: H200Override | None = None
-        if "h200" in d:
-            hd = _obj(d["h200"], f"{w}.h200", set(), {"compute", "env"})
-            hc = _num(hd["compute"], f"{w}.h200.compute") if "compute" in hd else None
-            if hc is not None and hc <= 0:
-                raise TaskSpecError(f"{w}.h200.compute: must be > 0")
-            h200 = H200Override(hc, _env(hd.get("env", {}), f"{w}.h200.env"))
-        mem = _int(d["mem"], f"{w}.mem") if "mem" in d else None
-        if mem is not None and mem <= 0:
-            raise TaskSpecError(f"{w}.mem: must be > 0")
-        out.append(
-            Setting(
-                label=label,
-                script=_relpath(d["cmd"], f"{w}.cmd"),
-                time_limit=parse_time(d["time"], f"{w}.time"),
-                compute=cp,
-                group=_int(d["group"], f"{w}.group"),
-                package=_str(d["package"], f"{w}.package"),
-                hidden=_bool(d.get("hidden", False), f"{w}.hidden"),
-                mem=mem,
-                h200=h200,
-            ),
-        )
-    return tuple(out)
-
-
-def _parse_baselines(
-    raw: object,
-    where: str,
-    task_dir: Path,
-    labels: set[str],
-) -> tuple[Baseline, ...]:
-    out: list[Baseline] = []
-    for name, item in _dict(raw, where).items():
-        bw = f"{where}.{name}"
-        d = _obj(item, bw, set(), {"edit_ops", "cmd", "env", "labels"})
-        edit = _relpath(d["edit_ops"], f"{bw}.edit_ops") if "edit_ops" in d else None
-        cmd = _relpath(d["cmd"], f"{bw}.cmd") if "cmd" in d else None
-        bl = _strs(d["labels"], f"{bw}.labels") if "labels" in d else None
-        if bl is not None:
-            unknown = set(bl) - labels
-            if unknown:
-                raise TaskSpecError(f"{bw}.labels: not settings: {sorted(unknown)}")
-        out.append(
-            Baseline(
-                _str(name, f"{where}.<name>"),
-                None if edit is None else task_dir / edit,
-                cmd,
-                _env(d.get("env", {}), f"{bw}.env"),
-                bl,
-            ),
-        )
-    return tuple(out)
-
-
-def _cells(path: Path, n: int, header: list[str], cells: list[str]) -> dict[str, float]:
-    vals: dict[str, float] = {}
-    for col, cell in zip(header[4:], cells[4:], strict=True):
-        text = cell.strip()
-        if not text:
-            continue
-        try:
-            x = float(text)
-        except ValueError as e:
-            raise TaskSpecError(
-                f"{path}:{n}: column {col!r}: non-numeric {text!r}",
-            ) from e
-        if not math.isfinite(x):
-            raise TaskSpecError(f"{path}:{n}: column {col!r}: not finite")
-        vals[col] = x
-    return vals
 
 
 def parse_leaderboard(path: Path) -> tuple[LeaderboardRow, ...]:
@@ -513,7 +319,7 @@ def parse_leaderboard(path: Path) -> tuple[LeaderboardRow, ...]:
             final[name] = final.get(name, True) and cells[2] == "true"
             per_seed.setdefault(name, {})
             vals = _cells(path, n, header, cells)
-            if cells[3] == _MEAN:
+            if cells[3] == "mean":
                 means[name] = vals
             else:
                 try:
@@ -535,26 +341,28 @@ def parse_leaderboard(path: Path) -> tuple[LeaderboardRow, ...]:
             for c in cols
             if len(xs := [v[c] for v in seeds.values() if c in v]) > 1
         }
-        rows.append(LeaderboardRow(name, values, spread, seeds, final[name]))
+        rows.append(
+            LeaderboardRow(
+                name=name,
+                values=values,
+                spread=spread,
+                seeds=seeds,
+                is_final=final[name],
+            ),
+        )
     return tuple(rows)
 
 
-def _parse_inline_leaderboard(
-    raw: object,
-    where: str,
-) -> dict[str, dict[str, float]]:
-    out: dict[str, dict[str, float]] = {}
-    for name, metrics in _dict(raw, where).items():
-        m = _dict(metrics, f"{where}.{name}")
-        out[_str(name, where)] = {
-            _str(k, f"{where}.{name}"): _num(v, f"{where}.{name}.{k}")
-            for k, v in m.items()
-        }
-    return out
-
-
 def task_names(root: Path) -> tuple[str, ...]:
-    """Sorted names of every task directory (one holding a ``config.json``)."""
+    """Sorted names of every task directory (one holding a ``config.json``).
+
+    Args:
+      root: The upstream clone.
+
+    Returns:
+      names: Task directory names, sorted.
+
+    """
     base = Path(root)
     tasks = base / "tasks"
     if not tasks.is_dir():
@@ -571,15 +379,24 @@ def load_all(root: Path) -> tuple[TaskSpec, ...]:
 
 
 def load_task(name: str, *, root: Path) -> TaskSpec:
-    """Parse ``<root>/tasks/<name>`` of the upstream clone ``root``."""
+    """Parse ``<root>/tasks/<name>`` of the upstream clone ``root``.
+
+    Args:
+      name: Task directory name.
+      root: The upstream clone.
+
+    Returns:
+      task: The parsed and cross-validated task.
+
+    """
     base = Path(root)
     task_dir = (base / "tasks" / name).resolve()
     cfg_path = task_dir / "config.json"
     if not cfg_path.is_file():
         raise MissingFileError(f"{cfg_path}: missing")
     try:
-        raw = cast("object", json.loads(cfg_path.read_text()))
-    except json.JSONDecodeError as e:
+        raw = json_loads(cfg_path.read_text())
+    except ValueError as e:
         raise TaskSpecError(f"{cfg_path}: invalid json: {e}") from e
     w = "config.json"
     try:
@@ -601,16 +418,7 @@ def load_task(name: str, *, root: Path) -> TaskSpec:
             },
         )
         seeds_declared = "seeds" in d
-        seeds = (
-            tuple(
-                _int(s, f"{w}.seeds[{i}]")
-                for i, s in enumerate(_list(d["seeds"], f"{w}.seeds"))
-            )
-            if seeds_declared
-            else _DEFAULT_SEEDS
-        )
-        if not seeds or len(set(seeds)) != len(seeds):
-            raise TaskSpecError(f"{w}.seeds: empty or duplicated")
+        seeds = _seeds(d["seeds"], f"{w}.seeds") if seeds_declared else (42,)
         files = _parse_files(d["files"], f"{w}.files")
         settings = _parse_settings(d["test_cmds"], f"{w}.test_cmds")
         baselines = _parse_baselines(
@@ -619,11 +427,9 @@ def load_task(name: str, *, root: Path) -> TaskSpec:
             task_dir,
             {s.label for s in settings},
         )
-        if not baselines:
-            raise TaskSpecError(f"{w}.baselines: empty")
         mid = _relpath(d["mid_edit"], f"{w}.mid_edit") if "mid_edit" in d else None
         flags = {
-            k: _bool(d.get(k, False), f"{w}.{k}")
+            k: _typed(d.get(k, False), bool, f"{w}.{k}")
             for k in (
                 "allow_create",
                 "rigorous_codebase",
@@ -692,3 +498,249 @@ def load_task(name: str, *, root: Path) -> TaskSpec:
         inline_leaderboard=inline,
         **flags,
     )
+
+
+def _obj(
+    v: object,
+    where: str,
+    required: set[str],
+    optional: frozenset[str] | set[str] = frozenset(),
+) -> dict[str, object]:
+    if not isinstance(v, dict):
+        raise TaskSpecError(f"{where}: expected object, got {type(v).__name__}")
+    d = cast("dict[str, object]", v)  # Json object keys are strings.
+    extra = set(d) - required - set(optional)
+    if extra:
+        raise UnknownFieldError(f"{where}: unknown field(s) {sorted(extra)}")
+    missing = required - set(d)
+    if missing:
+        raise TaskSpecError(f"{where}: missing field(s) {sorted(missing)}")
+    return d
+
+
+def _check(v: object, typ: type | tuple[type, ...], where: str) -> None:
+    ok = isinstance(v, typ) and not (
+        isinstance(v, bool) and bool not in (typ if isinstance(typ, tuple) else (typ,))
+    )
+    if not ok:
+        raise TaskSpecError(f"{where}: expected {typ}, got {v!r}")
+
+
+def _typed[T](v: object, typ: type[T], where: str) -> T:
+    _check(v, typ, where)
+    return cast("T", v)
+
+
+def _str(v: object, where: str) -> str:
+    s = _typed(v, str, where)
+    if not s:
+        raise TaskSpecError(f"{where}: empty string")
+    return s
+
+
+def _num(v: object, where: str) -> float:
+    _check(v, (int, float), where)
+    n = float(cast("float", v))
+    if not math.isfinite(n):
+        raise TaskSpecError(f"{where}: not finite")
+    return n
+
+
+def _int(v: object, where: str) -> int:
+    return _typed(v, int, where)
+
+
+def _list(v: object, where: str) -> list[object]:
+    _check(v, list, where)
+    return cast("list[object]", v)
+
+
+def _dict(v: object, where: str) -> dict[object, object]:
+    _check(v, dict, where)
+    return cast("dict[object, object]", v)
+
+
+def _strs(v: object, where: str) -> tuple[str, ...]:
+    return tuple(_str(x, f"{where}[{i}]") for i, x in enumerate(_list(v, where)))
+
+
+def _env(v: object, where: str) -> dict[str, str]:
+    d = _dict(v, where)
+    return {
+        _str(k, f"{where}.key"): _typed(x, str, f"{where}.{k}") for k, x in d.items()
+    }
+
+
+def _relpath(v: object, where: str) -> str:
+    path = _str(v, where)
+    if Path(path).is_absolute() or ".." in Path(path).parts:
+        raise TaskSpecError(
+            f"{where}: must be relative and inside its dir, got {path!r}",
+        )
+    return path
+
+
+def _ranges(raw: object, where: str) -> tuple[tuple[int, int], ...]:
+    out: list[tuple[int, int]] = []
+    for j, r in enumerate(_list(raw, where)):
+        rw = f"{where}[{j}]"
+        d = _obj(r, rw, {"start", "end"}, {"_comment"})
+        if "_comment" in d:
+            _ = _typed(d["_comment"], str, f"{rw}._comment")
+        a, b = _int(d["start"], f"{rw}.start"), _int(d["end"], f"{rw}.end")
+        whole = (a, b) == (-1, -1)
+        if not whole and (a < 1 or (b != -1 and a > b)):
+            raise TaskSpecError(
+                f"{rw}: need 1 <= start <= end (or end -1), got [{a}, {b}]",
+            )
+        out.append((a, b))
+    if len(out) > 1 and (-1, -1) in out:
+        raise TaskSpecError(f"{where}: (-1, -1) whole-file range must stand alone")
+    out.sort()
+    for (_, e1), (s2, _) in itertools.pairwise(out):
+        if e1 == -1 or s2 <= e1:
+            raise TaskSpecError(f"{where}: overlapping ranges")
+    return tuple(out)
+
+
+def _seeds(raw: object, where: str) -> tuple[int, ...]:
+    seeds = tuple(_int(s, f"{where}[{i}]") for i, s in enumerate(_list(raw, where)))
+    if not seeds or len(set(seeds)) != len(seeds):
+        raise TaskSpecError(f"{where}: empty or duplicated")
+    return seeds
+
+
+def _parse_files(raw: object, where: str) -> tuple[EditableFile, ...]:
+    out: list[EditableFile] = []
+    seen: set[str] = set()
+    for i, item in enumerate(_list(raw, where)):
+        w = f"{where}[{i}]"
+        d = _obj(item, w, {"filename", "read"}, {"edit", "_comment"})
+        if "_comment" in d:
+            _ = _typed(d["_comment"], str, f"{w}._comment")
+        path = _relpath(d["filename"], f"{w}.filename")
+        if path in seen:
+            raise TaskSpecError(f"{w}.filename: duplicate {path!r}")
+        seen.add(path)
+        out.append(
+            EditableFile(
+                path=path,
+                ranges=_ranges(d.get("edit", []), f"{w}.edit"),
+                read_ranges=_ranges(d["read"], f"{w}.read"),
+            ),
+        )
+    return tuple(out)
+
+
+def _parse_settings(raw: object, where: str) -> tuple[Setting, ...]:
+    out: list[Setting] = []
+    labels: set[str] = set()
+    items = _list(raw, where)
+    if not items:
+        raise TaskSpecError(f"{where}: empty")
+    for i, item in enumerate(items):
+        w = f"{where}[{i}]"
+        d = _obj(
+            item,
+            w,
+            {"cmd", "label", "group", "compute", "time", "package"},
+            {"hidden", "h200", "mem"},
+        )
+        label = _str(d["label"], f"{w}.label")
+        if label in labels:
+            raise TaskSpecError(f"{w}.label: duplicate setting label {label!r}")
+        labels.add(label)
+        cp = _num(d["compute"], f"{w}.compute")
+        if cp < 0:
+            raise TaskSpecError(f"{w}.compute: must be >= 0 (0 is CPU-only)")
+        h200: H200Override | None = None
+        if "h200" in d:
+            hd = _obj(d["h200"], f"{w}.h200", set(), {"compute", "env"})
+            hc = _num(hd["compute"], f"{w}.h200.compute") if "compute" in hd else None
+            if hc is not None and hc <= 0:
+                raise TaskSpecError(f"{w}.h200.compute: must be > 0")
+            h200 = H200Override(
+                compute=hc,
+                env=_env(hd.get("env", {}), f"{w}.h200.env"),
+            )
+        mem = _int(d["mem"], f"{w}.mem") if "mem" in d else None
+        if mem is not None and mem <= 0:
+            raise TaskSpecError(f"{w}.mem: must be > 0")
+        out.append(
+            Setting(
+                label=label,
+                script=_relpath(d["cmd"], f"{w}.cmd"),
+                time_limit=parse_time(d["time"], f"{w}.time"),
+                compute=cp,
+                group=_int(d["group"], f"{w}.group"),
+                package=_str(d["package"], f"{w}.package"),
+                hidden=_typed(d.get("hidden", False), bool, f"{w}.hidden"),
+                mem=mem,
+                h200=h200,
+            ),
+        )
+    return tuple(out)
+
+
+def _parse_baselines(
+    raw: object,
+    where: str,
+    task_dir: Path,
+    labels: set[str],
+) -> tuple[Baseline, ...]:
+    items = _dict(raw, where)
+    if not items:
+        raise TaskSpecError(f"{where}: empty")
+    out: list[Baseline] = []
+    for name, item in items.items():
+        bw = f"{where}.{name}"
+        d = _obj(item, bw, set(), {"edit_ops", "cmd", "env", "labels"})
+        edit = _relpath(d["edit_ops"], f"{bw}.edit_ops") if "edit_ops" in d else None
+        cmd = _relpath(d["cmd"], f"{bw}.cmd") if "cmd" in d else None
+        bl = _strs(d["labels"], f"{bw}.labels") if "labels" in d else None
+        if bl is not None:
+            unknown = set(bl) - labels
+            if unknown:
+                raise TaskSpecError(f"{bw}.labels: not settings: {sorted(unknown)}")
+        out.append(
+            Baseline(
+                name=_str(name, f"{where}.<name>"),
+                edit=None if edit is None else task_dir / edit,
+                cmd=cmd,
+                env=_env(d.get("env", {}), f"{bw}.env"),
+                labels=bl,
+            ),
+        )
+    return tuple(out)
+
+
+def _cells(path: Path, n: int, header: list[str], cells: list[str]) -> dict[str, float]:
+    vals: dict[str, float] = {}
+    for col, cell in zip(header[4:], cells[4:], strict=True):
+        text = cell.strip()
+        if not text:
+            continue
+        try:
+            x = float(text)
+        except ValueError as e:
+            raise TaskSpecError(
+                f"{path}:{n}: column {col!r}: non-numeric {text!r}",
+            ) from e
+        if not math.isfinite(x):
+            raise TaskSpecError(f"{path}:{n}: column {col!r}: not finite")
+        vals[col] = x
+    return vals
+
+
+def _parse_inline_leaderboard(
+    raw: object,
+    where: str,
+) -> dict[str, dict[str, float]]:
+    out: dict[str, dict[str, float]] = {}
+    for name, metrics in _dict(raw, where).items():
+        m = _dict(metrics, f"{where}.{name}")
+        out[_str(name, where)] = {
+            _str(k, f"{where}.{name}"): _num(v, f"{where}.{name}.{k}")
+            for k, v in m.items()
+        }
+    return out

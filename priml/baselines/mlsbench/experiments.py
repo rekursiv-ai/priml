@@ -19,22 +19,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, NotRequired, Self, TypedDict, cast, override
+from typing import TYPE_CHECKING, Final, Self, override
 
 import functools
-import json
 
 from configgle import Makes
+from treekle import json_loads
 
 from priml.baselines.mlsbench.data import SettingBatches
 from priml.baselines.mlsbench.executor import FakeExecutor
 from priml.baselines.mlsbench.metric import MlsbenchSuite, budget_seconds
-from priml.baselines.mlsbench.scripts.prepare_data import (
-    DATASETS_DIR,
-    SMOKE_DIR,
-    STAGED_DIR,
-    UPSTREAM_DIR,
-)
 from priml.baselines.mlsbench.testing import SYNTH_TASK
 from priml.baselines.mlsbench.train_step import NullStep
 from priml.paths import resolve_working_dir
@@ -43,16 +37,22 @@ from priml.train.tracker import FileTracker
 from priml.train.train_loop import TrainLoop
 
 
+_THIS: Final = Path(__file__).resolve()
+_CWD: Final = _THIS.parent
+
 if TYPE_CHECKING:
     from configgle import Makeable
 
     from priml.baselines.mlsbench.executor import Executor
 
-REGISTRY_PATH: Final = Path(__file__).with_name("registry.json")
+REGISTRY_PATH: Final = _THIS.with_name("registry.json")
 """Committed snapshot of the pinned clone: names and budgets, nothing else."""
 
+SMOKE_DIR: Final = "/mlsbench_smoke"
+"""Logical location of the synthetic clone ``exp_smoke`` runs against."""
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class TaskEntry:
     """What a config needs to know about one task, without the clone."""
 
@@ -74,45 +74,23 @@ class TaskEntry:
         return round(budget_seconds(self.settings.values()), 3)
 
 
-class _RegistryRow(TypedDict):
-    """One task of ``registry.json``."""
-
-    baselines: list[str]
-    settings: dict[str, float]
-    seeds: NotRequired[list[int]]
-    hidden: NotRequired[list[str]]
-
-
 @functools.cache
-def _snapshot() -> dict[str, TaskEntry]:
-    raw = cast("dict[str, _RegistryRow]", json.loads(REGISTRY_PATH.read_text()))
-    return {
-        name: TaskEntry(
-            tuple(d["baselines"]),
-            {k: float(v) for k, v in d["settings"].items()},
-            tuple(int(x) for x in d.get("seeds", (42,))),
-            tuple(str(x) for x in d.get("hidden", ())),
-        )
-        for name, d in raw.items()
-    }
-
-
-def registry() -> dict[str, tuple[str, ...]]:
-    """Return task name to baseline names, from the committed snapshot.
+def snapshot() -> Mapping[str, TaskEntry]:
+    """Return task name to its entry, read once from the committed ``registry.json``.
 
     Pure and host-independent: it never reads the clone. An opt-in test checks
     it against one (``scripts/generate_experiments.py --registry`` rewrites it).
+
+    Returns:
+      entries: Every generated task, by name.
+
     """
-    return {name: e.baselines for name, e in _snapshot().items()}
+    return json_loads(REGISTRY_PATH.read_text(), dict[str, TaskEntry])
 
 
 def task_entry(task: str) -> TaskEntry | None:
     """Return the snapshot entry of ``task``, or ``None`` for an unlisted task."""
-    return _snapshot().get(task)
-
-
-REGISTRY: Final[dict[str, tuple[str, ...]]] = registry()
-"""Task to baseline names for all upstream tasks (see :func:`registry`)."""
+    return snapshot().get(task)
 
 
 class MlsbenchEval(
@@ -121,7 +99,7 @@ class MlsbenchEval(
 ):
     """An eval-only loop with the null step and the per-setting batches in place.
 
-    The upstream clone and the data directories are resources shared by every
+    The upstream clone and the data directory are resources shared by every
     run, so they are fields of the root, resolved beneath ``base_dir`` (as the
     dataset's paths are) and handed to the dataset and the suite at finalize.
     The metrics' own ``base_dir`` is the run directory, which is why the suite
@@ -134,14 +112,11 @@ class MlsbenchEval(
     dataset: SettingBatches.Config = field(default_factory=SettingBatches.Config)
     """One batch per setting of the task."""
 
-    mlsbench_root: Path | str = UPSTREAM_DIR
+    mlsbench_root: Path | str = "/mlsbench"
     """Logical directory of the read-only upstream clone."""
 
-    data_root: Path | str = DATASETS_DIR
+    data_root: Path | str = "/datasets/mlsbench"
     """Logical ``{data_root}`` of upstream's package configs (datasets, weights)."""
-
-    staged_data: Path | str = STAGED_DIR
-    """Logical ``scripts/prepare_data.py`` destination (each task's ``data/``)."""
 
     @override
     def finalize(self) -> Self:
@@ -155,11 +130,6 @@ class MlsbenchEval(
                 metric.mlsbench_root = root
             if not str(metric.data_root):
                 metric.data_root = resolve_working_dir(self.base_dir, self.data_root)
-            if not str(metric.staged_data):
-                metric.staged_data = resolve_working_dir(
-                    self.base_dir,
-                    self.staged_data,
-                )
             if str(metric.edit_path):
                 metric.edit_path = resolve_working_dir(self.base_dir, metric.edit_path)
         return super().finalize()
@@ -251,6 +221,43 @@ def candidate_experiment(
     return cfg
 
 
+SMOKE_LOGS: Final[dict[str, str]] = {
+    "set-a": "accuracy=0.3220\navg_steps=256.0\n",
+    "set-b": "pass_at_1=0.3902\navg_steps=256.0\n",
+    "set-c": "gen_ppl=237.0499\nmauve=0.1124\nentropy=5.9261\nrep2=0.0254\navg_steps=224.0\n",
+}
+"""Canned ``key=value`` logs for the synthetic fixture task, for the fake executor."""
+
+
+def exp_smoke() -> MlsbenchEval:
+    """Check the plumbing end to end with canned logs; no container, no GPU.
+
+    The fake executor replays ``key=value`` logs, which a real upstream
+    ``parser.py`` need not accept, so the run reads a synthetic clone whose
+    parser does: ``scripts/prepare_data.py`` builds it.
+
+    Hypothesis:
+      None: it measures nothing and is not a result. It fails if the harness
+      cannot carry a setting from batch to ``metrics.json``.
+
+    Returns:
+      cfg: The ``base_a`` loop with a fake executor.
+
+    References:
+      ``testing.build_synth_task``: the synthetic task.
+
+    Results:
+      TBD.
+
+    """
+    fake = FakeExecutor.Config()
+    fake.outputs = dict(SMOKE_LOGS)
+    cfg = mlsbench_experiment(SYNTH_TASK, "base_a", executor=fake)
+    cfg.experiment_name = "exp_smoke"
+    cfg.mlsbench_root = SMOKE_DIR
+    return cfg
+
+
 def _eval_loop(
     task: str,
     name: str,
@@ -285,41 +292,4 @@ def _eval_loop(
 
     if entry is not None:
         cfg.max_eval_time = entry.max_eval_time
-    return cfg
-
-
-SMOKE_LOGS: Final[dict[str, str]] = {
-    "set-a": "accuracy=0.3220\navg_steps=256.0\n",
-    "set-b": "pass_at_1=0.3902\navg_steps=256.0\n",
-    "set-c": "gen_ppl=237.0499\nmauve=0.1124\nentropy=5.9261\nrep2=0.0254\navg_steps=224.0\n",
-}
-"""Canned ``key=value`` logs for the synthetic fixture task, for the fake executor."""
-
-
-def exp_smoke() -> MlsbenchEval:
-    """Check the plumbing end to end with canned logs; no container, no GPU.
-
-    The fake executor replays ``key=value`` logs, which a real upstream
-    ``parser.py`` need not accept, so the run reads a synthetic clone whose
-    parser does: ``scripts/prepare_data.py --smoke`` builds it.
-
-    Hypothesis:
-      None: it measures nothing and is not a result. It fails if the harness
-      cannot carry a setting from batch to ``metrics.json``.
-
-    Returns:
-      cfg: The ``base_a`` loop with a fake executor.
-
-    References:
-      ``testing.build_synth_task``: the synthetic task.
-
-    Results:
-      TBD.
-
-    """
-    fake = FakeExecutor.Config()
-    fake.outputs = dict(SMOKE_LOGS)
-    cfg = mlsbench_experiment(SYNTH_TASK, "base_a", executor=fake)
-    cfg.experiment_name = "exp_smoke"
-    cfg.mlsbench_root = SMOKE_DIR
     return cfg

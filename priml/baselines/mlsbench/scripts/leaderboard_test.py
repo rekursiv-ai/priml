@@ -1,4 +1,4 @@
-"""Tests for :mod:`priml.baselines.mlsbench.leaderboard` (synthetic fixtures only)."""
+"""Tests for :mod:`priml.baselines.mlsbench.scripts.leaderboard` (synthetic fixtures only)."""
 
 from __future__ import annotations
 
@@ -7,47 +7,47 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, override
 
 import json
-import sys
-import types
 
 import pytest
 
-from priml.baselines.mlsbench import leaderboard as lb
-from priml.baselines.mlsbench.leaderboard import (
+from priml.baselines.mlsbench.scripts import leaderboard as lb
+from priml.baselines.mlsbench.scripts.leaderboard import (
     MetricKind,
-    PublishedRow,
     TaskOverrides,
     Verdict,
     classify,
     compare,
     format_report,
     headline,
-    read_leaderboard_csv,
     read_metrics_file,
 )
+from priml.baselines.mlsbench.task import LeaderboardRow, parse_leaderboard
 
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class _Task:
     name: str
-    rows: Mapping[str, PublishedRow]
+    rows: Mapping[str, LeaderboardRow]
 
-    def row(self, name: str) -> PublishedRow:
+    def row(self, name: str) -> LeaderboardRow:
         return self.rows[name]
 
 
 def _task(values: dict[str, float], spread: dict[str, float] | None = None) -> _Task:
-    return _Task("t", {"r": PublishedRow("r", values, spread or {})})
+    return _Task(
+        name="t",
+        rows={"r": LeaderboardRow(name="r", values=values, spread=spread or {})},
+    )
 
 
 def _one(
     task: _Task,
     runs: list[dict[str, float]],
-    overrides: TaskOverrides = TaskOverrides(),  # noqa: B008
+    overrides: TaskOverrides = TaskOverrides(),  # noqa: B008 -- frozen, so a shared default is safe.
 ) -> lb.Comparison:
     (c,) = compare(task, "r", runs, overrides).comparisons
     return c
@@ -120,7 +120,7 @@ def test_missing_values_unverified() -> None:
 
 
 def test_unpublished_columns_neither_fail_nor_hold_back_the_row() -> None:
-    # llm-pretrain parsers also emit hidden-split metrics the leaderboard omits
+    # llm-pretrain parsers also emit hidden-split metrics the leaderboard omits.
     rep = compare(
         _task({"accuracy_s": 0.3}),
         "r",
@@ -138,16 +138,16 @@ def test_unpublished_columns_neither_fail_nor_hold_back_the_row() -> None:
 
 def test_multi_seed() -> None:
     t = _task({"accuracy_s": 0.30}, {"accuracy_s": 0.03})
-    # single run with published spread: 0.03 is wider than the 0.02 default
+    # Single run with published spread: 0.03 is wider than the 0.02 default.
     assert _one(t, [{"accuracy_s": 0.33}]).verdict is Verdict.OK
     c = _one(t, [{"accuracy_s": 0.34}])
     assert c.verdict is Verdict.DIVERGED
     assert c.kind is MetricKind.MULTI_SEED
-    # several runs: mean, and sample std widens the tolerance
+    # Several runs: mean, and sample std widens the tolerance.
     runs = [{"accuracy_s": 0.20}, {"accuracy_s": 0.40}, {"accuracy_s": 0.36}]
     c = _one(_task({"accuracy_s": 0.30}), runs)
     assert c.measured == pytest.approx(0.32)
-    assert c.verdict is Verdict.OK  # std ~0.107
+    assert c.verdict is Verdict.OK  # Std ~0.107.
     runs = [{"accuracy_s": 0.50}, {"accuracy_s": 0.50}]
     assert _one(_task({"accuracy_s": 0.30}), runs).verdict is Verdict.DIVERGED
 
@@ -196,7 +196,7 @@ def test_read_csv_single_seed_and_blank_cells(tmp_path: Path) -> None:
         + _row("x", 42, "0.5,10")
         + _row("y", 42, ",12"),
     )
-    x, y = read_leaderboard_csv(p)
+    x, y = parse_leaderboard(p)
     assert x.values == {"accuracy_a": 0.5, "avg_steps_a": 10.0}
     assert x.spread == {}
     assert x.seeds == {42: {"accuracy_a": 0.5, "avg_steps_a": 10.0}}
@@ -215,23 +215,23 @@ def test_read_csv_multi_seed_uses_the_mean_row_and_the_seed_std(tmp_path: Path) 
         + _row("z", 1, "1.0")
         + _row("z", 2, "3.0"),
     )
-    x, z = read_leaderboard_csv(p)
-    assert x.values == {"score": 0.4001}  # the published mean row wins
+    x, z = parse_leaderboard(p)
+    assert x.values == {"score": 0.4001}  # The published mean row wins.
     assert x.spread["score"] == pytest.approx(0.2)
-    assert z.values == {"score": 2.0}  # no mean row: mean of the seeds
+    assert z.values == {"score": 2.0}  # No mean row: mean of the seeds.
     assert set(z.seeds) == {1, 2}
 
 
 def test_read_csv_flags_unfinished_baselines(tmp_path: Path) -> None:
     p = tmp_path / "leaderboard.csv"
     p.write_text(_H + "a\n" + _row("x", 42, "1", final="false"))
-    assert read_leaderboard_csv(p)[0].is_final is False
+    assert parse_leaderboard(p)[0].is_final is False
 
 
 @pytest.mark.parametrize(
     "text",
     [
-        "name,a\nx,1\n",  # the old wide format
+        "name,a\nx,1\n",  # The old wide format.
         _H + "a\n" + _row("x", 42, "abc"),
         _H + "a\n" + _row("x", 42, "1") + _row("x", 42, "2"),
         _H + "a\n" + _row("x", 42, "1,2"),
@@ -244,8 +244,8 @@ def test_read_csv_flags_unfinished_baselines(tmp_path: Path) -> None:
 def test_read_csv_rejects(tmp_path: Path, text: str) -> None:
     p = tmp_path / "l.csv"
     p.write_text(text)
-    with pytest.raises(ValueError):  # noqa: PT011
-        read_leaderboard_csv(p)
+    with pytest.raises(ValueError):  # noqa: PT011 -- each case raises its own message.
+        parse_leaderboard(p)
 
 
 def test_read_metrics_file(tmp_path: Path) -> None:
@@ -255,24 +255,26 @@ def test_read_metrics_file(tmp_path: Path) -> None:
     assert read_metrics_file(tmp_path) == {"accuracy_a": 0.5}
 
 
-def test_main(
+def test_main_judges_runs_on_disk(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, kw_only=True, slots=True)
     class _Spec(_Task):
         baselines: tuple[_B, ...] = ()
 
-    spec = _Spec("t", {"r": PublishedRow("r", {"accuracy_s": 0.3}, {})}, (_B("r"),))
-    fake = types.ModuleType("priml.baselines.mlsbench.task")
+    spec = _Spec(
+        name="t",
+        rows={"r": LeaderboardRow(name="r", values={"accuracy_s": 0.3}, spread={})},
+        baselines=(_B(name="r"),),
+    )
 
     def _load_task(name: str, root: Path | None = None) -> object:
         del name, root
         return spec
 
-    vars(fake)["load_task"] = _load_task
-    monkeypatch.setitem(sys.modules, "priml.baselines.mlsbench.task", fake)
+    monkeypatch.setattr(lb, "load_task", _load_task)
     runs = tmp_path / "runs"
     (runs / "r" / "seed42").mkdir(parents=True)
     (runs / "r" / "seed42" / "metrics.json").write_text(
@@ -284,12 +286,12 @@ def test_main(
     )
     assert lb.main(["--task", "t", "--runs", str(runs), "--row", "r"]) == 1
     assert "diverged" in capsys.readouterr().out
-    # a base_dir is accepted as well as the runs directory itself
+    # A base_dir is accepted as well as the runs directory itself.
     nested = tmp_path / "base" / "runs" / "mlsbench" / "t" / "r" / "seed42"
     nested.mkdir(parents=True)
     (nested / "metrics.json").write_text(json.dumps({"eval/accuracy_s": 0.3}))
     assert lb.main(["--task", "t", "--runs", str(tmp_path / "base"), "--row", "r"]) == 0
-    # a candidate's runs are judged against the published row
+    # A candidate's runs are judged against the published row.
     cand = tmp_path / "base" / "runs" / "mlsbench" / "t" / "my-idea" / "seed42"
     cand.mkdir(parents=True)
     (cand / "metrics.json").write_text(json.dumps({"eval/accuracy_s": 0.9}))
@@ -299,7 +301,7 @@ def test_main(
     out = capsys.readouterr().out
     assert "0.9000" in out
     assert "0.3000" in out
-    assert lb.main([*argv, "--candidate", "nobody"]) == 0  # nothing measured
+    assert lb.main([*argv, "--candidate", "nobody"]) == 0  # Nothing measured.
     with pytest.raises(SystemExit):
         _ = lb.main(["--task", "t", "--runs", str(runs), "--candidate", "my-idea"])
     with pytest.raises(SystemExit):
@@ -309,22 +311,22 @@ def test_main(
 # ---- whole-benchmark aggregation (synthetic runs) ----
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class _B:
     name: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class _Spec:
     name: str
-    rows: Mapping[str, PublishedRow]
+    rows: Mapping[str, LeaderboardRow]
     seeds: tuple[int, ...] = (42,)
 
     @property
     def baselines(self) -> tuple[_B, ...]:
-        return tuple(_B(n) for n in self.rows)
+        return tuple(_B(name=n) for n in self.rows)
 
-    def row(self, name: str) -> PublishedRow:
+    def row(self, name: str) -> LeaderboardRow:
         return self.rows[name]
 
 
@@ -337,23 +339,50 @@ def _write_run(root: Path, task: str, row: str, seed: int, **m: float) -> None:
 def _specs() -> list[_Spec]:
     return [
         _Spec(
-            "a-one",
-            {
-                "good": PublishedRow("good", {"accuracy_s": 0.5}, {}),
-                "bad": PublishedRow("bad", {"accuracy_s": 0.5}, {}),
-                "idle": PublishedRow("idle", {"accuracy_s": 0.5}, {}),
+            name="a-one",
+            rows={
+                "good": LeaderboardRow(
+                    name="good",
+                    values={"accuracy_s": 0.5},
+                    spread={},
+                ),
+                "bad": LeaderboardRow(
+                    name="bad",
+                    values={"accuracy_s": 0.5},
+                    spread={},
+                ),
+                "idle": LeaderboardRow(
+                    name="idle",
+                    values={"accuracy_s": 0.5},
+                    spread={},
+                ),
             },
         ),
         _Spec(
-            "b-multi",
-            {
-                "full": PublishedRow("full", {"score_s": 1.0}, {"score_s": 0.3}),
-                "part": PublishedRow("part", {"score_s": 1.0}, {"score_s": 0.3}),
-                "far": PublishedRow("far", {"score_s": 1.0}, {"score_s": 0.3}),
+            name="b-multi",
+            rows={
+                "full": LeaderboardRow(
+                    name="full",
+                    values={"score_s": 1.0},
+                    spread={"score_s": 0.3},
+                ),
+                "part": LeaderboardRow(
+                    name="part",
+                    values={"score_s": 1.0},
+                    spread={"score_s": 0.3},
+                ),
+                "far": LeaderboardRow(
+                    name="far",
+                    values={"score_s": 1.0},
+                    spread={"score_s": 0.3},
+                ),
             },
             seeds=(42, 123, 456),
         ),
-        _Spec("c-idle", {"x": PublishedRow("x", {"accuracy_s": 0.5}, {})}),
+        _Spec(
+            name="c-idle",
+            rows={"x": LeaderboardRow(name="x", values={"accuracy_s": 0.5}, spread={})},
+        ),
     ]
 
 
@@ -366,7 +395,7 @@ def test_aggregate_counts_per_task_and_overall(tmp_path: Path) -> None:
     for seed in (42, 123, 456):
         _write_run(tmp_path, "b-multi", "far", seed, score_s=5.0)
     one, multi, idle = lb.aggregate(_specs(), tmp_path)
-    assert one.counts == (1, 1, 1)  # good ok, bad diverged, idle never run
+    assert one.counts == (1, 1, 1)  # Good ok, bad diverged, idle never run.
     assert [r.verdict for r in one.reports] == [
         Verdict.OK,
         Verdict.DIVERGED,
@@ -375,10 +404,10 @@ def test_aggregate_counts_per_task_and_overall(tmp_path: Path) -> None:
     assert one.reports[2].seed_count == 0
     assert multi.counts == (1, 1, 1)
     full, part, far = multi.reports
-    # mean 1.0333 vs published 1.0: inside the published spread 0.3
+    # Mean 1.0333 vs published 1.0: inside the published spread 0.3.
     assert (full.verdict, full.seed_count) == (Verdict.OK, 3)
     assert full.comparisons[0].kind is MetricKind.MULTI_SEED
-    # a single seed of a three-seed task never reaches ok
+    # A single seed of a three-seed task never reaches ok.
     assert part.verdict is Verdict.UNVERIFIED
     assert multi.missing_seeds == {"part": (123, 456)}
     assert far.verdict is Verdict.DIVERGED
@@ -393,17 +422,20 @@ def test_a_partial_multi_seed_row_that_diverges_stays_diverged(tmp_path: Path) -
 
 
 def test_a_row_without_a_published_cell_source_is_unverified(tmp_path: Path) -> None:
-    spec = _Spec("t-x", {})
-    spec_bad = _Spec("t-x", {"r": PublishedRow("r", {}, {})})
+    spec = _Spec(name="t-x", rows={})
+    spec_bad = _Spec(
+        name="t-x",
+        rows={"r": LeaderboardRow(name="r", values={}, spread={})},
+    )
 
     class _NoRow(_Spec):
         @property
         @override
         def baselines(self) -> tuple[_B, ...]:
-            return (_B("ghost"),)
+            return (_B(name="ghost"),)
 
     _write_run(tmp_path, "t-x", "ghost", 42, accuracy_s=0.5)
-    (s,) = lb.aggregate([_NoRow("t-x", {})], tmp_path)
+    (s,) = lb.aggregate([_NoRow(name="t-x", rows={})], tmp_path)
     assert s.reports[0].verdict is Verdict.UNVERIFIED
     assert s.reports[0].seed_count == 1
     assert lb.aggregate([spec], tmp_path)[0].reports == ()
@@ -433,8 +465,6 @@ def test_main_aggregates_a_base_dir(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from priml.baselines.mlsbench import task as task_mod  # noqa: PLC0415
-
     specs = {s.name: s for s in _specs()}
 
     def _load_task(name: str, root: Path) -> object:
@@ -445,8 +475,8 @@ def test_main_aggregates_a_base_dir(
         del root
         return tuple(specs)
 
-    monkeypatch.setattr(task_mod, "load_task", _load_task)
-    monkeypatch.setattr(task_mod, "task_names", _task_names)
+    monkeypatch.setattr(lb, "load_task", _load_task)
+    monkeypatch.setattr(lb, "task_names", _task_names)
     runs = tmp_path / "runs" / "mlsbench"
     _write_run(runs, "a-one", "good", 42, accuracy_s=0.5)
     assert lb.main(["--all", "--runs", str(tmp_path), "--root", str(tmp_path)]) == 0
@@ -466,18 +496,24 @@ def test_main_aggregates_a_base_dir(
 
 
 def test_a_partial_run_is_judged_against_its_own_published_seeds() -> None:
-    # published mean 0.33 with spread 0.02, but seed 42 alone scored 0.99
-    row = PublishedRow(
-        "r",
-        {"score_s": 0.33},
-        {"score_s": 0.02},
-        {42: {"score_s": 0.99}, 123: {"score_s": 0.0}, 456: {"score_s": 0.0}},
+    # Published mean 0.33 with spread 0.02, but seed 42 alone scored 0.99.
+    row = LeaderboardRow(
+        name="r",
+        values={"score_s": 0.33},
+        spread={"score_s": 0.02},
+        seeds={42: {"score_s": 0.99}, 123: {"score_s": 0.0}, 456: {"score_s": 0.0}},
     )
-    task = _Task("t", {"r": row})
+    task = _Task(name="t", rows={"r": row})
     run = [{"score_s": 0.99}]
     assert lb.compare(task, "r", run).verdict is Verdict.DIVERGED
     got = lb.compare(task, "r", run, seeds=[42])
     assert got.verdict is Verdict.OK
     assert got.comparisons[0].published == pytest.approx(0.99)
-    # an unpublished seed falls back to the all-seed mean
+    # An unpublished seed falls back to the all-seed mean.
     assert lb.compare(task, "r", run, seeds=[7]).verdict is Verdict.DIVERGED
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

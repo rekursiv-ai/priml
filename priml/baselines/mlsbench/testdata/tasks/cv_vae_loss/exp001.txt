@@ -18,7 +18,6 @@ MlsbenchEval(
                 seed=42,
                 mlsbench_root=PosixPath('/opt/scratch/mlsbench'),
                 data_root=PosixPath('/opt/scratch/datasets/mlsbench'),
-                staged_data=PosixPath('/opt/scratch/datasets/mlsbench_staged'),
                 bundle='',
                 base_dir=PosixPath('/opt/scratch/runs/mlsbench/cv-vae-loss/perceptual/seed42'),
                 working_dir=PosixPath('/opt/scratch/runs/mlsbench/cv-vae-loss/perceptual/seed42/runs'),
@@ -74,6 +73,5 @@ MlsbenchEval(
             float32_matmul_precision=None
         ),
         mlsbench_root='/mlsbench',
-        data_root='/datasets/mlsbench',
-        staged_data='/datasets/mlsbench_staged'
+        data_root='/datasets/mlsbench'
     )

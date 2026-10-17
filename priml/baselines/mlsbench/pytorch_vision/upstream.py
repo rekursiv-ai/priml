@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from importlib import util
+from importlib import machinery, util
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 from unittest import mock
@@ -81,7 +81,6 @@ class Upstream(Protocol):
 
     def initialize_weights(self, model: nn.Module) -> None:
         """Initialize in place."""
-        ...
 
     def compute_loss(
         self,
@@ -90,7 +89,7 @@ class Upstream(Protocol):
         config: dict[str, int],
     ) -> Tensor:
         """Return the scalar training loss."""
-        ...
+        raise NotImplementedError
 
     def get_dataloaders(
         self,
@@ -104,7 +103,7 @@ class Upstream(Protocol):
         int,
     ]:
         """Build the loaders."""
-        ...
+        raise NotImplementedError
 
     def train_epoch(
         self,
@@ -115,11 +114,10 @@ class Upstream(Protocol):
         config: dict[str, int],
     ) -> tuple[float, float]:
         """Train for one pass over ``loader``."""
-        ...
+        raise NotImplementedError
 
     def main(self) -> None:
         """Run the whole script."""
-        ...
 
 
 @dataclass(slots=True, kw_only=True)
@@ -554,13 +552,11 @@ class _FakeCifar100:
 
 def _load_module(path: Path) -> ModuleType:
     """Import a script from its file."""
-    spec = util.spec_from_file_location(path.stem, path)
-    if spec is None:
-        raise ValueError("Expected spec is not None.")
-    if spec.loader is None:
-        raise ValueError("Expected spec.loader is not None.")
+    loader = machinery.SourceFileLoader(path.stem, str(path))
+    spec = machinery.ModuleSpec(path.stem, loader, origin=str(path))
+    spec.has_location = True
     module = util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    loader.exec_module(module)
     return module
 
 

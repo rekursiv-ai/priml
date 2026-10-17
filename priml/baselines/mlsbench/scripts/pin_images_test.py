@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
+from urllib import error, request
 
 import hashlib
 import json
 import os
 import re
 import subprocess
-import urllib.error
-import urllib.request
 
 import pytest
 
@@ -94,7 +93,7 @@ def test_pin_merges_keeps_existing_and_reports_failures(tmp_path: Path) -> None:
     lock.write_text(json.dumps({"alpha": "old@sha256:11", "zzz": "z@sha256:22"}))
     d = _Docker(fail={"beta"})
     out, errs = pi.pin(root, lock, None, runner=d)
-    assert out["alpha"] == "old@sha256:11"  # kept, not re-pulled
+    assert out["alpha"] == "old@sha256:11"  # Kept, not re-pulled.
     assert set(errs) == {"beta"}
     assert not any("alpha" in c[-1] for c in d.calls)
     out, errs = pi.pin(root, lock, ["alpha"], repin=True, runner=_Docker())
@@ -113,7 +112,7 @@ def test_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     root, lock = _tree(tmp_path), tmp_path / "l.json"
     assert pi.main(["--root", str(root), "--lock", str(lock), "--list"]) == 0
     assert capsys.readouterr().out.count("unpinned") == 2
-    assert pi.main(["--root", str(root), "--lock", str(lock)]) == 2  # nothing asked
+    assert pi.main(["--root", str(root), "--lock", str(lock)]) == 2  # Nothing asked.
     missing = str(tmp_path / "no-clone")
     assert pi.main(["--root", missing, "--lock", str(lock), "--list"]) == 2
 
@@ -228,9 +227,10 @@ def test_resolve_registry_errors() -> None:
         pi.resolve_registry("bohanlyu2022/mlsbench-harbor-alpha:latest", bad)
 
     def no_token(
-        _url: str,
-        _headers: dict[str, str],
+        url: str,
+        headers: dict[str, str],
     ) -> tuple[int, dict[str, str], bytes]:
+        del url, headers
         return 401, {}, b""
 
     with pytest.raises(pi.PinError, match="token"):
@@ -243,7 +243,7 @@ def test_pin_registry_writes_lock_and_platforms(tmp_path: Path) -> None:
     hub = _Hub({"mlsbench-harbor-beta": _LIST})
     out, errs = pi.pin_registry(root, lock, None, platforms_path=plats, fetch=hub)
     assert not errs
-    assert out["alpha"] == "old@sha256:11"  # kept
+    assert out["alpha"] == "old@sha256:11"  # Kept.
     assert out["beta"] == f"bohanlyu2022/mlsbench-harbor-beta@{_sha(_LIST)}"
     assert cast("object", json.loads(lock.read_text())) == out
     assert list(cast("dict[str, object]", json.loads(plats.read_text()))) == ["beta"]
@@ -252,7 +252,7 @@ def test_pin_registry_writes_lock_and_platforms(tmp_path: Path) -> None:
 
 def test_pin_registry_records_failures_and_continues(tmp_path: Path) -> None:
     root, lock = _tree(tmp_path), tmp_path / "l.json"
-    hub = _Hub({"mlsbench-harbor-beta": _SINGLE})  # alpha -> 404
+    hub = _Hub({"mlsbench-harbor-beta": _SINGLE})  # Alpha -> 404.
     out, errs = pi.pin_registry(root, lock, None, fetch=hub)
     assert set(errs) == {"alpha"}
     assert "404" in errs["alpha"]
@@ -263,16 +263,17 @@ def test_urllib_fetch_retries_then_raises(monkeypatch: pytest.MonkeyPatch) -> No
     calls: list[str] = []
 
     class _Opener:
-        def open(self, _req: object, timeout: float) -> object:
+        def open(self, req: object, timeout: float) -> object:
+            del req
             del timeout
             calls.append("x")
-            raise urllib.error.URLError("boom")
+            raise error.URLError("boom")
 
     def _build_opener(*handlers: object) -> _Opener:
         del handlers
         return _Opener()
 
-    monkeypatch.setattr(urllib.request, "build_opener", _build_opener)
+    monkeypatch.setattr(request, "build_opener", _build_opener)
     sleeps: list[float] = []
     with pytest.raises(pi.PinError, match="after 3 attempts"):
         pi.urllib_fetch("https://x/", {}, attempts=3, sleep=sleeps.append)
@@ -303,7 +304,13 @@ def test_real_lock_is_fully_pinned_and_consumable() -> None:
     lock = pi.read_lock(pi.DEFAULT_LOCK)
     if len(lock) < 65:
         pytest.skip("lock not fully pinned")
-    ex = LocalDocker(LocalDocker.Config())  # type: ignore[call-arg]
+    ex = LocalDocker(LocalDocker.Config())
     for pkg, ref in lock.items():
         assert ex.image_ref(pkg) == ref
         assert re.fullmatch(rf"{pi.BASE_PREFIX}{pkg}@sha256:[0-9a-f]{{64}}", ref)
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

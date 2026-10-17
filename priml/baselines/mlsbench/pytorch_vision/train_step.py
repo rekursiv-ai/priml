@@ -54,7 +54,7 @@ class LearningRateSchedule(Protocol):
 
     def __call__(self, epoch: int, /, *, base_lr: float, total_epochs: int) -> float:
         """Return the learning rate of ``epoch`` for a group starting at ``base_lr``."""
-        ...
+        raise NotImplementedError
 
 
 class VisionTrainStep(TrainStep):

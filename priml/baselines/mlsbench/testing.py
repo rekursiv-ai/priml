@@ -4,20 +4,27 @@ Copies nothing from upstream; the layout is the one documented in
 :mod:`priml.baselines.mlsbench.task`.
 """
 
-# ruff: noqa: TC003
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Final
 
 import json
 
 
-RUN_PY = "".join(f"line{i}\n" for i in range(1, 21))  # 20 lines
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
-def default_config() -> dict[str, Any]:  # pyright: ignore[reportExplicitAny]
-    """Return a config in the schema upstream really uses (see :mod:`...task`)."""
+RUN_PY: Final = "".join(f"line{i}\n" for i in range(1, 21))  # 20 lines.
+
+
+def default_config() -> dict[str, object]:
+    """Return a config in the schema upstream really uses (see :mod:`...task`).
+
+    Returns:
+      config: A two-setting, one-baseline ``config.json`` as plain data.
+
+    """
     return {
         "allow_create": False,
         "seeds": [42],
@@ -52,8 +59,7 @@ def default_config() -> dict[str, Any]:  # pyright: ignore[reportExplicitAny]
     }
 
 
-LB_HEADER = "timestamp,model,is_final,seed,"
-_TS = "2026-01-01T00:00:00+00:00"
+LB_HEADER: Final = "timestamp,model,is_final,seed,"
 
 
 def leaderboard_csv(
@@ -66,17 +72,17 @@ def leaderboard_csv(
     out = LB_HEADER + ",".join(columns) + "\n"
     for name, seed, cells in rows:
         vals = ",".join("" if c is None else repr(c) for c in cells)
-        out += f"{_TS},baseline:{name},{'true' if final else 'false'},{seed},{vals}\n"
+        out += f"{'2026-01-01T00:00:00+00:00'},baseline:{name},{'true' if final else 'false'},{seed},{vals}\n"
     return out
 
 
-EDIT_OK = """import sys, pathlib
+EDIT_OK: Final = """import sys, pathlib
 p = pathlib.Path(sys.argv[1]) / "run.py"
 p.write_text(p.read_text().replace("line6\\n", "LINE6\\nextra\\n"))
 """
 
 
-KV_PARSER = """class _Result:
+KV_PARSER: Final = """class _Result:
     def __init__(self, feedback, metrics):
         self.feedback = feedback
         self.metrics = metrics
@@ -97,14 +103,19 @@ Same contract as upstream: ``Parser().parse(cmd_label, raw_output)`` returns an
 object with ``metrics`` already keyed ``<metric>_<label>``.
 """
 
-SYNTH_TASK = "synth-three-setting"
+SYNTH_TASK: Final = "synth-three-setting"
 """Name of the neutral fixture task; deliberately absent from ``registry.json``."""
-SYNTH_LABELS = ("set-a", "set-b", "set-c")
-SYNTH_BASELINES = ("base_a", "base_b", "base_c")
+SYNTH_LABELS: Final = ("set-a", "set-b", "set-c")
+SYNTH_BASELINES: Final = ("base_a", "base_b", "base_c")
 
 
-def synth_config() -> dict[str, Any]:  # pyright: ignore[reportExplicitAny]
-    """Return a config with three settings and three baselines (synthetic)."""
+def synth_config() -> dict[str, object]:
+    """Return a config with three settings and three baselines (synthetic).
+
+    Returns:
+      config: A three-setting, three-baseline ``config.json`` as plain data.
+
+    """
     cmds = [
         {
             "cmd": f"scripts/{lab}.sh",
@@ -132,7 +143,15 @@ def synth_config() -> dict[str, Any]:  # pyright: ignore[reportExplicitAny]
 
 
 def build_synth_task(root: Path) -> Path:
-    """Build a synthetic neutral three-setting task under ``root``."""
+    """Build a synthetic neutral three-setting task under ``root``.
+
+    Args:
+      root: Directory to hold the synthetic clone.
+
+    Returns:
+      root: ``root``, to pass as ``load_task(root=...)``.
+
+    """
     cfg = synth_config()
     cols = ["accuracy_set-a", "avg_steps_set-a", "pass_at_1_set-b"]
     lb = leaderboard_csv(cols, [(n, 42, [0.322, 256.0, 0.39]) for n in SYNTH_BASELINES])
@@ -154,13 +173,26 @@ def build_synth_task(root: Path) -> Path:
 def build_task(
     root: Path,
     *,
-    config: dict[str, Any] | None = None,  # pyright: ignore[reportExplicitAny]
+    config: dict[str, object] | None = None,
     leaderboard: str | None = None,
     edit_source: str = EDIT_OK,
     parser_source: str = "def parse(log_text, setting):\n    return {}\n",
     dirname: str = "toy-task",
 ) -> Path:
-    """Write ``<root>/tasks/toy-task``; returns ``root`` (pass as ``load_task(root=...)``)."""
+    """Write ``<root>/tasks/toy-task``; returns ``root`` (pass as ``load_task(root=...)``).
+
+    Args:
+      root: Directory to hold the synthetic clone.
+      config: ``config.json`` contents; ``None`` is :func:`default_config`.
+      leaderboard: ``leaderboard.csv`` text; ``None`` is one ``base1`` row.
+      edit_source: Source of ``edits/base1.edit.py``.
+      parser_source: Source of ``parser.py``.
+      dirname: Task directory name.
+
+    Returns:
+      root: ``root``, to pass as ``load_task(root=...)``.
+
+    """
     d = root / "tasks" / dirname
     (d / "scripts").mkdir(parents=True)
     (d / "edits").mkdir()

@@ -22,7 +22,9 @@ import zipfile
 import pytest
 
 
-_PKG: Final = Path(__file__).resolve().parent
+_CWD: Final = Path(__file__).resolve().parent
+
+_PKG: Final = _CWD
 _REPO: Final = _PKG.parents[2]
 _PYPROJECT: Final = _REPO / "pyproject.toml"
 _REL: Final = "priml/baselines/mlsbench"
@@ -30,6 +32,7 @@ _REL: Final = "priml/baselines/mlsbench"
 # Files read at import/runtime (test_runtime_data_matches_source_scan derives this).
 _RUNTIME_DATA: Final = (
     "eval_script_pins.json",
+    "harbor_adapted.json",
     "registry.json",
     "testdata/image_lock.json",
     "testdata/image_platforms.json",
@@ -63,10 +66,6 @@ def _config(*keys: str) -> object:
     return value
 
 
-def _wheel_cfg(key: str) -> list[str]:
-    return cast("list[str]", _config("tool", "hatch", "build", "targets", "wheel", key))
-
-
 def _data_files() -> list[Path]:
     return sorted(
         p
@@ -79,17 +78,26 @@ def _data_files() -> list[Path]:
 
 def test_backend_is_hatchling_with_package_root() -> None:
     assert _config("build-system", "build-backend") == "hatchling.build"
-    assert "priml" in _wheel_cfg("packages")
+    assert "priml" in cast(
+        "list[str]",
+        _config("tool", "hatch", "build", "targets", "wheel", "packages"),
+    )
 
 
 def test_wheel_excludes_only_tests_not_data() -> None:
-    excludes = [_glob_re(e) for e in _wheel_cfg("exclude")]
+    excludes = [
+        _glob_re(e)
+        for e in cast(
+            "list[str]",
+            _config("tool", "hatch", "build", "targets", "wheel", "exclude"),
+        )
+    ]
     data = _data_files()
     assert data, "no data files found"
     for f in data:
         rel = f"priml/{f.relative_to(_PKG.parent.parent).as_posix()}"
         assert not any(e.match(rel) for e in excludes), f"wheel excludes {rel}"
-    # sanity: the exclude patterns do drop this very test file
+    # Sanity: the exclude patterns do drop this very test file.
     assert any(e.match(f"{_REL}/packaging_test.py") for e in excludes)
 
 
@@ -126,14 +134,14 @@ def test_data_files_not_gitignored() -> None:
     if git is None or not (_REPO / ".git").exists():
         pytest.skip("no git checkout")
     rels = [str(f.relative_to(_REPO)) for f in _data_files()]
-    r = subprocess.run(  # noqa: S603
+    r = subprocess.run(  # noqa: S603 -- fixed argv from shutil.which.
         [git, "check-ignore", "--", *rels],
         cwd=_REPO,
         capture_output=True,
         text=True,
         check=False,
     )
-    # hatchling honours .gitignore: an ignored file would be dropped from builds.
+    # Hatchling honours .gitignore: an ignored file would be dropped from builds.
     assert r.returncode == 1, f"ignored data files:\n{r.stdout}"
 
 
@@ -143,7 +151,7 @@ def test_real_build_contains_data_and_omits_tests(tmp_path: Path) -> None:
     uv = shutil.which("uv")
     if uv is None:
         pytest.skip("uv not on PATH")
-    r = subprocess.run(  # noqa: S603
+    r = subprocess.run(  # noqa: S603 -- fixed argv from shutil.which.
         [uv, "build", "--out-dir", str(tmp_path)],
         cwd=_REPO,
         capture_output=True,
@@ -165,3 +173,9 @@ def test_real_build_contains_data_and_omits_tests(tmp_path: Path) -> None:
         snames = t.getnames()
     for rel in _RUNTIME_DATA:
         assert any(n.endswith(f"{_REL}/{rel}") for n in snames), rel
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

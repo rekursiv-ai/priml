@@ -6,15 +6,17 @@ from pathlib import Path
 from typing import cast
 
 import json
-import os
 import shutil
-import sys
 
 import pytest
 import torch
 
-from priml.baselines.mlsbench import leaderboard
-from priml.baselines.mlsbench.executor import FakeExecutor, Outcome, RunRequest
+from priml.baselines.mlsbench.executor import (
+    FakeExecutor,
+    Outcome,
+    RunRequest,
+    RunResult,
+)
 from priml.baselines.mlsbench.experiments import (
     SMOKE_LOGS,
     MlsbenchEval,
@@ -22,18 +24,16 @@ from priml.baselines.mlsbench.experiments import (
     exp_smoke,
     mlsbench_experiment,
 )
-from priml.baselines.mlsbench.leaderboard import compare, read_metrics_file
-from priml.baselines.mlsbench.metric import (
-    MlsbenchSuite,
-    ParseError,
+from priml.baselines.mlsbench.harbor import EvalScriptsError
+from priml.baselines.mlsbench.harbor_test import make_bundle
+from priml.baselines.mlsbench.metric import MlsbenchSuite, time_budget
+from priml.baselines.mlsbench.scripts import leaderboard, prepare_data
+from priml.baselines.mlsbench.scripts.leaderboard import compare, read_metrics_file
+from priml.baselines.mlsbench.setting import (
+    PackageConfigError,
     data_mounts,
-    elapsed_columns,
-    expand_env,
-    expected_columns,
     inputgen_dir,
-    package_env,
-    run_parser,
-    time_budget,
+    pkg_config,
 )
 from priml.baselines.mlsbench.task import load_task
 from priml.baselines.mlsbench.testing import (
@@ -43,13 +43,7 @@ from priml.baselines.mlsbench.testing import (
     default_config,
     leaderboard_csv,
 )
-from priml.baselines.mlsbench.workspace_harbor import EvalScriptsError
-from priml.baselines.mlsbench.workspace_harbor_test import make_bundle
 from priml.train.results import read_metrics
-
-
-def _read_json(path: Path) -> dict[str, object]:
-    return cast("dict[str, object]", json.loads(path.read_text()))
 
 
 @pytest.fixture
@@ -125,7 +119,7 @@ def test_run_reaches_a_leaderboard_verdict(tmp_path: Path, root: Path) -> None:
     by = {c.column: c for c in report.comparisons}
     assert by["accuracy_set-a"].verdict == "ok"
     assert by["avg_steps_set-a"].verdict == "ok"
-    # 0.3902 vs 0.39 published, within the 2-point accuracy tolerance
+    # 0.3902 vs 0.39 published, within the 2-point accuracy tolerance.
     assert by["pass_at_1_set-b"].verdict == "ok"
     # Measured columns with no published cell (set-c) are shown as unverified
     # but are not the row's to judge: the published cells all reproduce.
@@ -189,7 +183,7 @@ def test_parser_failure_is_recorded_and_absent(
     err = suite.runs[0].error
     assert err is not None
     assert err.startswith(("parse:", "missing_metric:"))
-    if bad != "junk\nx=y\n":  # a non-finite cell is missing, not a parse failure
+    if bad != "junk\nx=y\n":  # A non-finite cell is missing, not a parse failure.
         assert err == "missing_metric:accuracy_set-a"
 
 
@@ -205,147 +199,11 @@ def test_a_non_finite_metric_keeps_the_settings_other_metrics(
     assert suite.runs[0].error == "missing_metric:accuracy_set-a"
 
 
-def test_a_raising_parser_is_a_parse_error(tmp_path: Path) -> None:
-    src = (
-        "class Parser:\n"
-        "    def parse(self, cmd_label, raw_output):\n"
-        "        raise RuntimeError('boom')\n"
-    )
-    task = load_task("toy-task", root=build_task(tmp_path / "up", parser_source=src))
-    with pytest.raises(ParseError, match="boom"):
-        run_parser(task, "", "a-x")
-
-
-def test_a_parser_without_a_parser_class_is_rejected(tmp_path: Path) -> None:
-    r = build_task(tmp_path / "up", parser_source="x = 1\n")
-    with pytest.raises(ParseError, match="no class Parser"):
-        run_parser(load_task("toy-task", root=r), "", "a-x")
-
-
-def test_a_parser_without_parse_is_rejected(tmp_path: Path) -> None:
-    r = build_task(tmp_path / "up", parser_source="class Parser:\n    pass\n")
-    with pytest.raises(ParseError, match="no parse"):
-        run_parser(load_task("toy-task", root=r), "", "a-x")
-
-
-def test_a_result_without_metrics_is_rejected(tmp_path: Path) -> None:
-    src = (
-        "class Parser:\n    def parse(self, cmd_label, raw_output):\n        return 3\n"
-    )
-    r = build_task(tmp_path / "up", parser_source=src)
-    with pytest.raises(ParseError, match="no metrics mapping"):
-        run_parser(load_task("toy-task", root=r), "", "a-x")
-
-
-def test_the_parser_gets_label_then_log_and_its_keys_pass_through(
-    tmp_path: Path,
-) -> None:
-    src = (
-        "class Parser:\n"
-        "    def parse(self, cmd_label, raw_output):\n"
-        "        class R:\n"
-        "            metrics = {'acc_' + cmd_label: float(raw_output)}\n"
-        "        return R()\n"
-    )
-    task = load_task("toy-task", root=build_task(tmp_path / "up", parser_source=src))
-    assert run_parser(task, "0.25", "a-x") == {"acc_a-x": 0.25}
-
-
-def test_a_non_finite_value_drops_that_column_only(tmp_path: Path) -> None:
-    src = (
-        "class Parser:\n"
-        "    def parse(self, cmd_label, raw_output):\n"
-        "        class R:\n"
-        "            metrics = {'acc_' + cmd_label: 0.5, 'loss_' + cmd_label: float('nan'),\n"
-        "                       'ppl_' + cmd_label: float('inf')}\n"
-        "        return R()\n"
-    )
-    task = load_task("toy-task", root=build_task(tmp_path / "up", parser_source=src))
-    assert run_parser(task, "", "a-x") == {"acc_a-x": 0.5}
-
-
-def test_the_parser_may_import_from_the_clone_src_dir(tmp_path: Path) -> None:
-    src = (
-        "from toy_upstream_helper import VALUE\n"
-        "class Parser:\n"
-        "    def parse(self, cmd_label, raw_output):\n"
-        "        class R:\n"
-        "            metrics = {'v_' + cmd_label: VALUE}\n"
-        "        return R()\n"
-    )
-    root = build_task(tmp_path / "up", parser_source=src)
-    (root / "src").mkdir()
-    (root / "src" / "toy_upstream_helper.py").write_text("VALUE = 7.0\n")
-    before = list(sys.path)
-    assert run_parser(load_task("toy-task", root=root), "", "b") == {"v_b": 7.0}
-    assert sys.path == before  # the clone's src is not left on the path
-
-
-def test_the_parser_may_import_host_modules_from_the_bundle_meta(
-    tmp_path: Path,
-) -> None:
-    src = (
-        "import dgp\n"
-        "class Parser:\n"
-        "    def parse(self, cmd_label, raw_output):\n"
-        "        class R:\n"
-        "            metrics = {'r2_' + cmd_label: dgp.truth(cmd_label)}\n"
-        "        return R()\n"
-    )
-    root = build_task(tmp_path / "up", parser_source=src)
-    task = load_task("toy-task", root=root)
-    with pytest.raises(ParseError, match="No module named 'dgp'"):
-        run_parser(task, "", "b")
-    meta = tmp_path / "bundle" / "tests" / "meta"
-    meta.mkdir(parents=True)
-    (meta / "dgp.py").write_text("def truth(label):\n    return 0.5\n")
-    before = list(sys.path)
-    assert run_parser(task, "", "b", meta=meta) == {"r2_b": 0.5}
-    assert sys.path == before
-    assert "dgp" not in sys.modules  # another task's dgp must not be reused
-
-
-def test_the_parser_may_import_inside_parse(tmp_path: Path) -> None:
-    # optimization-variance-reduction imports dgp lazily, from within parse()
-    src = (
-        "class Parser:\n"
-        "    def parse(self, cmd_label, raw_output):\n"
-        "        import dgp\n"
-        "        import toy_lazy_helper\n"
-        "        class R:\n"
-        "            metrics = {'r2_' + cmd_label: dgp.truth(cmd_label),\n"
-        "                       'v_' + cmd_label: toy_lazy_helper.VALUE}\n"
-        "        return R()\n"
-    )
-    root = build_task(tmp_path / "up", parser_source=src)
-    (root / "src").mkdir()
-    (root / "src" / "toy_lazy_helper.py").write_text("VALUE = 7.0\n")
-    meta = tmp_path / "bundle" / "tests" / "meta"
-    meta.mkdir(parents=True)
-    (meta / "dgp.py").write_text("def truth(label):\n    return 0.5\n")
-    before = list(sys.path)
-    task = load_task("toy-task", root=root)
-    assert run_parser(task, "", "b", meta=meta) == {"r2_b": 0.5, "v_b": 7.0}
-    assert sys.path == before
-    assert "dgp" not in sys.modules
-
-
-def test_elapsed_columns_are_the_runners_not_the_parsers(tmp_path: Path) -> None:
-    lb = leaderboard_csv(
-        ["accuracy_a-x", "elapsed_a-x", "loss_b"],
-        [("base1", 42, [0.5, 12.0, 1.25])],
-    )
-    task = load_task("toy-task", root=build_task(tmp_path / "up", leaderboard=lb))
-    assert expected_columns(task, "a-x") == ("accuracy_a-x",)
-    assert elapsed_columns(task, "a-x") == ("elapsed_a-x",)
-    assert elapsed_columns(task, "b") == ()
-
-
 def test_a_baseline_cmd_replaces_the_script_and_the_package_follows_the_setting(
     tmp_path: Path,
 ) -> None:
     cfg = default_config()
-    cfg["test_cmds"][1]["package"] = "other-pkg"
+    cast("list[dict[str, object]]", cfg["test_cmds"])[1]["package"] = "other-pkg"
     cfg["baselines"] = {"viacmd": {"cmd": "scripts/alt.sh", "labels": ["b"]}}
     root = build_task(
         tmp_path / "up",
@@ -377,7 +235,10 @@ def test_a_baseline_cmd_replaces_the_script_and_the_package_follows_the_setting(
         ("a-x", "scripts/a.sh", None),
         ("b", "scripts/alt.sh", "scripts/alt.sh"),
     ):
-        rec = _read_json(tmp_path / f"w/logs/{label}.request.json")
+        rec = cast(
+            "dict[str, object]",
+            json.loads((tmp_path / f"w/logs/{label}.request.json").read_text()),
+        )
         assert (rec["script"], rec["cmd"], rec["baseline"]) == (script, cmd, "viacmd")
         assert (rec["SEED"], rec["ENV"], rec["OUTPUT_DIR"]) == ("42", label, "/output")
         assert str(rec["output_dir_host"]).endswith(f"logs/{label}.out")
@@ -456,18 +317,25 @@ def test_config_validation() -> None:
         MlsbenchSuite.Config(task="t", baseline="b", edit_path="e.py").finalize()
 
 
+def test_update_needs_a_setting_and_a_clone(tmp_path: Path) -> None:
+    suite = MlsbenchSuite.Config(
+        task="t",
+        mlsbench_root="",
+        working_dir=tmp_path,
+        executor=_fake(),
+    ).make()
+    with pytest.raises(TypeError, match="'setting' batch entry"):
+        suite.update(torch.empty(0))
+    with pytest.raises(ValueError, match="needs mlsbench_root"):
+        suite.update(torch.empty(0), setting="set-a")
+
+
 def test_state_dict_round_trips(tmp_path: Path, root: Path) -> None:
     _, suite = _run(_cfg(tmp_path, root, _fake()), tmp_path)
     state = suite.state_dict()
     other = MlsbenchSuite(MlsbenchSuite.Config(task="t"))
     other.load_state_dict(state)
     assert other.runs == suite.runs
-
-
-def test_expected_columns_prefer_the_longest_label(tmp_path: Path) -> None:
-    task = load_task("toy-task", root=build_task(tmp_path / "up"))
-    assert expected_columns(task, "a-x") == ("accuracy_a-x",)
-    assert expected_columns(task, "b") == ("loss_b",)
 
 
 def test_time_budget_sums_limits_with_slack(tmp_path: Path) -> None:
@@ -477,41 +345,13 @@ def test_time_budget_sums_limits_with_slack(tmp_path: Path) -> None:
 
 
 def test_smoke_experiment_runs_end_to_end(tmp_path: Path) -> None:
-    from priml.baselines.mlsbench.scripts import prepare_data as pd  # noqa: PLC0415
-
-    # The documented flow: ``prepare_data --smoke`` then ``python -m priml``.
-    assert pd.main(["--smoke", str(tmp_path / "out/mlsbench_smoke")]) == 0
+    # The documented flow: ``prepare_data`` then ``python -m priml``.
+    assert prepare_data.main(["--directory", str(tmp_path / "out/mlsbench_smoke")]) == 0
     cfg = exp_smoke()
     cfg.base_dir = tmp_path / "out"
     cfg.make().run()
     metrics = read_metrics(tmp_path / "out/runs/mlsbench/exp_smoke/metrics.json")
     assert metrics["eval/accuracy_set-a"] == 0.322
-
-
-# -- opt-in: the real upstream parser --------------------------------------
-# Upstream ships no sample logs, so the log below is built from the parser's
-# own documented shape (TRAIN_METRICS progress lines, one TEST_METRICS line).
-
-_CLONE = os.environ.get("MLSBENCH_ROOT", "")
-
-
-@pytest.mark.integration
-@pytest.mark.skipif(not _CLONE, reason="set MLSBENCH_ROOT to a read-only clone")
-def test_a_real_upstream_parser_runs_through_run_parser() -> None:
-    task = load_task("llm-dllm-demask-strategy", root=Path(_CLONE))
-    log = (
-        "noise\nTRAIN_METRICS step=1 total=2\n"
-        "TEST_METRICS accuracy=0.322 avg_steps=256.0 n_samples=500\n"
-    )
-    assert run_parser(task, log, "llada-math") == {
-        "accuracy_llada-math": 0.322,
-        "avg_steps_llada-math": 256.0,
-    }
-    assert run_parser(task, "crash\n", "llada-math") == {}
-    columns = {c for r in task.leaderboard for c in r.values}
-    assert set(expected_columns(task, "llada-math")) <= columns
-    for setting in task.settings:
-        assert expected_columns(task, setting.label), setting.label
 
 
 def _bundled(
@@ -585,7 +425,7 @@ def test_a_workspace_changed_between_settings_fails_that_setting_only(
     assert isinstance(suite, MlsbenchSuite)
     suite.update(torch.zeros(1), setting="set-a")
     ws = next((tmp_path / "out").rglob("workspace/run.py"))
-    # outputs a setting adds are fine; rewriting the edit surface is not
+    # Outputs a setting adds are fine; rewriting the edit surface is not.
     (ws.parent / "outputs.txt").write_text("fine\n")
     suite.update(torch.zeros(1), setting="set-b")
     ws.write_text(ws.read_text() + "tampered\n")
@@ -646,74 +486,6 @@ def test_the_workspace_change_marker_reaches_the_metrics_file(
 # -- real-run wiring: package env, data mounts, held-out inputs, seeds ---------
 
 
-def test_expand_env_mirrors_harbor_templates() -> None:
-    base = {"A": "1"}
-    assert expand_env("/w:${PYTHONPATH}", base) == "/w:"  # unset -> empty
-    assert expand_env("$A-${A}-${A:-9}-${B:-9}", base) == "1-1-1-"  # default ignored
-    assert expand_env("plain", base) == "plain"
-
-
-def _bundle_with_envs(tmp_path: Path, envs: dict[str, dict[str, str]]) -> Path:
-    bundle = make_bundle(tmp_path / "b", declared="run.py", ranges=[[5, 10]])
-    (bundle / "tests/meta/package_envs.json").write_text(json.dumps(envs))
-    return bundle
-
-
-def test_package_env_follows_the_setting_package_then_the_task_default(
-    tmp_path: Path,
-    root: Path,
-) -> None:
-    task = load_task(SYNTH_TASK, root=root)  # default package: synth-pkg
-    bundle = _bundle_with_envs(
-        tmp_path,
-        {
-            "synth-pkg": {
-                "HF_HOME": "/opt/hf",
-                "PYTHONPATH": "/workspace/SynthPkg:${PYTHONPATH}",
-                "HOME": "/root/${X}",
-            },
-            "other": {"HF_HOME": "/other"},
-        },
-    )
-    got = dict(package_env(task, "synth-pkg", bundle))
-    assert got["HF_HOME"] == "/opt/hf"
-    assert got["PYTHONPATH"] == "/workspace/SynthPkg:"  # Harbor unsets the base one
-    assert got["HOME"] == "/root/${X}"  # HOME is taken literally
-    assert got["DATA_ROOT"] == "/data"
-    assert dict(package_env(task, "other", bundle))["HF_HOME"] == "/other"
-    # a package with no block falls back to the task's default package's
-    assert dict(package_env(task, "unlisted", bundle))["HF_HOME"] == "/opt/hf"
-
-
-def test_a_baseline_env_overlays_and_expands_against_the_package_env(
-    tmp_path: Path,
-    root: Path,
-) -> None:
-    task = load_task(SYNTH_TASK, root=root)
-    bundle = _bundle_with_envs(tmp_path, {"synth-pkg": {"BASE": "/b"}})
-    got = dict(
-        package_env(
-            task,
-            "synth-pkg",
-            bundle,
-            overlay={"X": "${BASE}/x", "BASE": "/c"},
-        ),
-    )
-    assert got["X"] == "/b/x"
-    assert got["BASE"] == "/c"
-
-
-def test_package_env_falls_back_to_the_native_pkg_config_without_a_bundle(
-    root: Path,
-) -> None:
-    cfg = root / "vendor/pkg_configs/Synth-pkg"
-    cfg.mkdir(parents=True)
-    (cfg / "config.json").write_text(json.dumps({"env": {"HF_HUB_OFFLINE": "1"}}))
-    task = load_task(SYNTH_TASK, root=root)
-    assert dict(package_env(task, "synth-pkg", None))["HF_HUB_OFFLINE"] == "1"
-    assert dict(package_env(task, "no-such", None)) == {"DATA_ROOT": "/data"}
-
-
 def _suite(
     tmp_path: Path,
     root: Path,
@@ -722,7 +494,6 @@ def _suite(
     seed: int = 42,
     baseline: str = "base_a",
     data_root: Path | str = "",
-    staged_data: Path | str = "",
 ) -> MlsbenchSuite:
     return MlsbenchSuite.Config(
         task=SYNTH_TASK,
@@ -730,7 +501,6 @@ def _suite(
         seed=seed,
         mlsbench_root=str(root),
         data_root=data_root,
-        staged_data=staged_data,
         bundle="" if bundle is None else str(bundle),
         working_dir=tmp_path / f"w{seed}",
         executor=_fake(),
@@ -758,77 +528,65 @@ def test_every_request_carries_the_package_env(tmp_path: Path, root: Path) -> No
         env = dict(call.env)
         assert env["HF_HOME"] == "/opt/hf"
         assert env["P"] == "/w:"
-    record = _read_json(tmp_path / "w42/logs/set-a.request.json")
+    record = cast(
+        "dict[str, object]",
+        json.loads((tmp_path / "w42/logs/set-a.request.json").read_text()),
+    )
     assert cast("dict[str, str]", record["env"])["HF_HOME"] == "/opt/hf"
     assert record["seed"] == 42
 
 
-def test_data_root_and_staged_data_become_request_binds(
-    tmp_path: Path,
-    root: Path,
-) -> None:
-    from priml.baselines.mlsbench.scripts import prepare_data as pd  # noqa: PLC0415
-
+def test_data_root_becomes_request_binds(tmp_path: Path, root: Path) -> None:
     dr = tmp_path / "datasets"
     (dr / "weights").mkdir(parents=True)
-    cfg = root / "vendor/pkg_configs/synth-pkg"
-    cfg.mkdir(parents=True)
-    (cfg / "config.json").write_text(
-        json.dumps(
-            {
-                "data_deps": [
-                    {
-                        "host_path": "{data_root}/weights",
-                        "container_path": "/data/w",
-                    },
-                    {"host_path": "{data_root}/absent", "container_path": "/data/x"},
-                ],
-            },
-        ),
+    _pkg(
+        root,
+        "synth-pkg",
+        {
+            "data_deps": [
+                {"host_path": "{data_root}/weights", "container_path": "/data/w"},
+                {"host_path": "{data_root}/absent", "container_path": "/data/x"},
+            ],
+        },
     )
-    (root / "tasks" / SYNTH_TASK / "data").mkdir()
-    (root / "tasks" / SYNTH_TASK / "data" / "d.txt").write_text("d")
-    staged = tmp_path / "staged"
-    pd.stage_task(root, SYNTH_TASK, staged)
-    suite = _suite(tmp_path, root, data_root=dr, staged_data=staged)
+    suite = _suite(tmp_path, root, data_root=dr)
     suite.update(torch.empty(0), setting="set-a")
     (call,) = fake_calls(suite)
-    assert f"{dr}/weights:/data/w" in call.binds
-    assert not any("absent" in b for b in call.binds)  # never bind a missing dir
-    assert any(b.endswith(":/workspace/_task/data:ro") for b in call.binds)
-    rec = _read_json(tmp_path / "w42/logs/set-a.request.json")
+    assert call.binds == (f"{dr}/weights:/data/w",)  # Never bind a missing dir.
+    rec = cast(
+        "dict[str, object]",
+        json.loads((tmp_path / "w42/logs/set-a.request.json").read_text()),
+    )
     assert rec["skipped_binds"] == [f"{dr}/absent:/data/x"]
 
 
-def test_a_tampered_staged_copy_is_a_typed_missing_input(
+def test_a_broken_pkg_config_is_a_typed_missing_input(
     tmp_path: Path,
     root: Path,
 ) -> None:
-    from priml.baselines.mlsbench.scripts import prepare_data as pd  # noqa: PLC0415
-
-    (root / "tasks" / SYNTH_TASK / "data").mkdir()
-    (root / "tasks" / SYNTH_TASK / "data" / "d.txt").write_text("d")
-    staged = tmp_path / "staged"
-    pd.stage_task(root, SYNTH_TASK, staged)
-    (staged / SYNTH_TASK / "data" / "d.txt").write_text("evil")
-    suite = _suite(tmp_path, root, staged_data=staged)
+    d = root / "vendor/pkg_configs/synth-pkg"
+    d.mkdir(parents=True)
+    (d / "config.json").write_text("{")
+    task = load_task(SYNTH_TASK, root=root)
+    assert data_mounts(task, "synth-pkg", data_root=tmp_path).missing.startswith(
+        "pkg config: synth-pkg: unreadable",
+    )
+    (d / "config.json").write_text("[]")
+    with pytest.raises(PackageConfigError, match="not an object"):
+        pkg_config(root, "synth-pkg")
+    suite = _suite(tmp_path, root, data_root=tmp_path)
+    (d / "config.json").write_text("{")
     suite.update(torch.empty(0), setting="set-a")
-    assert fake_calls(suite) == []  # the script never ran
+    assert fake_calls(suite) == []  # The script never ran.
     (run,) = suite.runs
     assert run.outcome is Outcome.MISSING_INPUT
-    assert run.error is not None
-    assert run.error.startswith("missing_input:staged data:")
-    assert suite.compute() == {}  # absent, never NaN
+    assert suite.compute() == {}  # Absent, never NaN.
 
 
-def test_data_mounts_without_configuration_are_empty(root: Path) -> None:
-    task = load_task(SYNTH_TASK, root=root)
-    assert data_mounts(task, "synth-pkg") == data_mounts(
-        task,
-        "synth-pkg",
-        data_root="",
-    )
-    assert data_mounts(task, "synth-pkg").binds == ()
+def _pkg(root: Path, name: str, cfg: dict[str, object]) -> None:
+    d = root / "vendor" / "pkg_configs" / name
+    d.mkdir(parents=True)
+    (d / "config.json").write_text(json.dumps(cfg))
 
 
 def test_ephemeral_inputs_without_a_generator_are_a_typed_missing_input(
@@ -866,7 +624,7 @@ def test_a_bundle_generator_is_handed_to_the_executor(
     suite.update(torch.empty(0), setting="set-a")
     (call,) = fake_calls(suite)
     assert call.inputgen == gen
-    # a bundle without one hands over nothing
+    # A bundle without one hands over nothing.
     (gen / "apply.py").unlink()
     other = _suite(tmp_path / "o", root, bundle=bundle)
     other.update(torch.empty(0), setting="set-a")
@@ -882,15 +640,13 @@ def test_a_missing_input_from_the_executor_is_recorded_typed(
     ex = suite.executor
     assert isinstance(ex, FakeExecutor)
 
-    def run(request: RunRequest) -> object:
-        from priml.baselines.mlsbench.executor import RunResult  # noqa: PLC0415
-
+    def run(request: RunRequest) -> RunResult:
         return RunResult(
-            Outcome.MISSING_INPUT,
-            None,
-            request.log_path,
-            0.1,
-            "inputgen exited 3",
+            outcome=Outcome.MISSING_INPUT,
+            returncode=None,
+            log_path=request.log_path,
+            seconds=0.1,
+            detail="inputgen exited 3",
         )
 
     monkeypatch.setattr(ex, "run", run)
@@ -923,7 +679,10 @@ def test_each_seed_is_its_own_env_and_run_dir(tmp_path: Path) -> None:
         (call,) = fake_calls(suite)
         assert call.seed == seed
         seen[seed] = (cfg.experiment_name, str(suite_cfg.working_dir))
-        ws = _read_json(Path(suite_cfg.working_dir) / "workspace.json")
+        ws = cast(
+            "dict[str, object]",
+            json.loads((Path(suite_cfg.working_dir) / "workspace.json").read_text()),
+        )
         assert ws["seed"] == seed
     assert seen[42][0].endswith("seed42")
     assert seen[123][0].endswith("seed123")
@@ -932,7 +691,7 @@ def test_each_seed_is_its_own_env_and_run_dir(tmp_path: Path) -> None:
 
 
 def test_a_seed_the_task_does_not_publish_is_refused(tmp_path: Path) -> None:
-    root = build_task(tmp_path / "up")  # seeds [42]
+    root = build_task(tmp_path / "up")  # Seeds [42].
     suite = MlsbenchSuite.Config(
         task="toy-task",
         seed=7,
@@ -942,3 +701,9 @@ def test_a_seed_the_task_does_not_publish_is_refused(tmp_path: Path) -> None:
     ).make()
     with pytest.raises(ValueError, match=r"seed 7 is not one of toy-task's seeds"):
         suite.update(torch.empty(0), setting="a-x")
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

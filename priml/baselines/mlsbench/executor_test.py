@@ -1,7 +1,5 @@
 """Tests for the executor seam. No docker: ``subprocess.run`` is mocked."""
 
-# ruff: noqa: S603
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, BinaryIO, cast
@@ -120,10 +118,6 @@ def _docker(
     )
 
 
-def _stdout(kw: dict[str, object]) -> BinaryIO:
-    return cast("BinaryIO", kw["stdout"])
-
-
 def _ok(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[bytes]:
     del kw
     return subprocess.CompletedProcess(cmd, 0)
@@ -148,7 +142,7 @@ def _fake_which(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     if cast("pytest.Item", request.node).get_closest_marker("integration"):
-        return  # real docker: keep the real PATH lookup
+        return  # Real docker: keep the real PATH lookup.
 
     def which(binary: str) -> str:
         return f"/usr/bin/{binary}"
@@ -182,7 +176,7 @@ def test_local_docker_command_and_capture(
 
     def fake_run(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[bytes]:
         seen.update(cmd=cmd, **kw)
-        _stdout(kw).write(b"hello log")
+        cast("BinaryIO", kw["stdout"]).write(b"hello log")
         return subprocess.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -198,7 +192,7 @@ def test_local_docker_command_and_capture(
     assert "X=1" in cmd
     assert cmd[cmd.index("--gpus") + 1] == "all"
     assert cmd[-2:] == ["bash", f"{ex._TASK_MOUNT}/scripts/s1.sh"]
-    assert 4.0 < cast("float", seen["timeout"]) <= 5.0  # the budget, minus elapsed
+    assert 4.0 < cast("float", seen["timeout"]) <= 5.0  # The budget, minus elapsed.
     assert env["PATH"] == "/usr/bin:/bin"
     assert "MLSBENCH_ROOT" not in env
     assert seen["stderr"] == subprocess.STDOUT
@@ -324,9 +318,9 @@ def test_missing_lock_file(tmp_path: Path) -> None:
 def test_shipped_lock_is_digest_only() -> None:
     lock = cast(
         "dict[str, str]",
-        json.loads((ex._TESTDATA / "image_lock.json").read_text()),
+        json.loads((ex.TESTDATA / "image_lock.json").read_text()),
     )
-    assert len(lock) <= 65  # one digest per upstream base image (65 published)
+    assert len(lock) <= 65  # One digest per upstream base image (65 published)
     assert lock
     assert all("@sha256:" in v and ":latest" not in v for v in lock.values())
     d = LocalDocker(LocalDocker.Config())
@@ -352,7 +346,7 @@ def test_isolation_flags_and_argv_order(tmp_path: Path) -> None:
     assert "--platform" not in cmd
     assert cmd[cmd.index("-w") + 1] == "/workspace"
     assert cmd.index("repo/img@sha256:abc") < cmd.index("bash")
-    assert not any(c.endswith(":/workspace") for c in cmd)  # never hide the image's
+    assert not any(c.endswith(":/workspace") for c in cmd)  # Never hide the image's.
 
 
 def _layout_request(tmp_path: Path, package: str = "SynthPkg") -> RunRequest:
@@ -381,7 +375,7 @@ def test_native_layout_task_script_package_cwd_and_files(tmp_path: Path) -> None
     req = _layout_request(
         tmp_path,
         package="synthpkg",
-    )  # config says SynthPkg; case differs
+    )  # Config says SynthPkg; case differs.
     cmd = _docker(
         tmp_path,
         lock={"synthpkg": "r/i@sha256:1"},
@@ -390,14 +384,14 @@ def test_native_layout_task_script_package_cwd_and_files(tmp_path: Path) -> None
     mounts = [cmd[i + 1] for i, c in enumerate(cmd) if c == "-v"]
     ws = (tmp_path / "ws").resolve()
     task = (tmp_path / "task").resolve()
-    # the script lives in the task dir, mounted at /workspace/_task (not in the workspace)
+    # The script lives in the task dir, mounted at /workspace/_task (not in the workspace)
     assert f"{task}:/workspace/_task:ro" in mounts
     assert cmd[-2:] == ["bash", "/workspace/_task/scripts/m.sh"]
-    # cwd is the package dir; only files (not dirs) are laid over the image, read-only
+    # Cwd is the package dir; only files (not dirs) are laid over the image, read-only.
     assert cmd[cmd.index("-w") + 1] == "/workspace/SynthPkg"
     assert f"{ws}/SynthPkg/custom.py:/workspace/SynthPkg/custom.py:ro" in mounts
     assert f"{ws}/SynthPkg/pkg/b.py:/workspace/SynthPkg/pkg/b.py:ro" in mounts
-    assert not any("link.py" in m for m in mounts)  # symlinks are never followed
+    assert not any("link.py" in m for m in mounts)  # Symlinks are never followed.
     assert not any(m.endswith((":/workspace", ":/workspace/SynthPkg")) for m in mounts)
     assert "/h/d:/data:ro" in mounts
     out = (tmp_path / "logs" / "set-a.out").resolve()
@@ -448,7 +442,7 @@ def test_daemon_down_and_image_pull_failure(
             cmd: list[str],
             **kw: object,
         ) -> subprocess.CompletedProcess[bytes]:
-            _stdout(kw).write(msg)
+            cast("BinaryIO", kw["stdout"]).write(msg)
             return subprocess.CompletedProcess(cmd, 125)
 
         return fake_run
@@ -479,7 +473,7 @@ def test_a_missing_image_is_pulled_outside_the_time_budget(
         calls.append(cmd)
         timeouts.append(kw.get("timeout"))
         if cmd[1] == "pull":
-            clock[0] += 10 * req.setting.time_limit  # a slow first pull
+            clock[0] += 10 * req.setting.time_limit  # A slow first pull.
         return subprocess.CompletedProcess(cmd, 1 if cmd[1] == "image" else 0)
 
     def monotonic() -> float:
@@ -502,19 +496,19 @@ def test_a_failed_pull_is_an_executor_error(
 
     def fake_run(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[bytes]:
         calls.append(cmd)
-        _stdout(kw).write(b"pull access denied")
+        cast("BinaryIO", kw["stdout"]).write(b"pull access denied")
         return subprocess.CompletedProcess(cmd, 1)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     with pytest.raises(ExecutorError, match="pull access denied") as info:
         _docker(tmp_path).run(_request(tmp_path))
     assert not isinstance(info.value, ExecutorUnavailable)
-    assert [c[1] for c in calls] == ["image", "pull"]  # the script never ran
+    assert [c[1] for c in calls] == ["image", "pull"]  # The script never ran.
 
 
 # --- real docker (opt-in: ``-m integration``; skipped without a daemon/image) ---
 
-_LOCK = ex._TESTDATA / "image_lock.json"
+_LOCK = ex.TESTDATA / "image_lock.json"
 
 
 def _local_cpu_image() -> str:
@@ -522,11 +516,15 @@ def _local_cpu_image() -> str:
     docker = shutil.which("docker")
     if docker is None:
         pytest.skip("docker binary not found")
-    if subprocess.run([docker, "info"], capture_output=True, check=False).returncode:
+    if subprocess.run(  # noqa: S603 -- fixed docker argv.
+        [docker, "info"],
+        capture_output=True,
+        check=False,
+    ).returncode:
         pytest.skip("docker daemon not running")
     lock = cast("dict[str, str]", json.loads(_LOCK.read_text()))
     for ref in lock.values():
-        if not subprocess.run(
+        if not subprocess.run(  # noqa: S603 -- fixed docker argv.
             [docker, "image", "inspect", ref],
             capture_output=True,
             check=False,
@@ -582,8 +580,8 @@ def test_real_docker_end_to_end(tmp_path: Path, real: tuple[LocalDocker, Path]) 
     assert res.outcome is Outcome.OK, log
     assert "/workspace\n" in log
     assert "seed=42" in log
-    assert f"\n{os.getuid()}\n" in log  # non-root, host uid
-    assert "err" in log  # stderr captured in the same log
+    assert f"\n{os.getuid()}\n" in log  # non-root, host uid.
+    assert "err" in log  # Stderr captured in the same log.
     assert "NET=no" in log
     assert (tmp_path / "logs" / "s.out" / "out.txt").read_text() == "written\n"
 
@@ -601,7 +599,7 @@ def test_real_docker_crash_and_timeout(
     assert res.outcome is Outcome.TIMEOUT
     assert res.seconds < 60
     docker = shutil.which("docker") or "docker"
-    ps = subprocess.run(
+    ps = subprocess.run(  # noqa: S603 -- fixed docker argv.
         [docker, "ps", "-q", "--filter", "name=mlsbench-"],
         capture_output=True,
         text=True,
@@ -613,7 +611,7 @@ def test_real_docker_crash_and_timeout(
 def test_auto_network_follows_the_bundle_and_defaults_to_none(tmp_path: Path) -> None:
     d = _docker(tmp_path, gpus="")
     req = _request(tmp_path)
-    assert d.network_for(req) == "none"  # no bundle information
+    assert d.network_for(req) == "none"  # No bundle information.
     for value, want in ((True, "bridge"), (False, "none"), (None, "none")):
         req = dataclasses.replace(req, allow_internet=value)
         cmd = d.command(req, "repo/img@sha256:abc", "n")
@@ -652,13 +650,13 @@ def test_package_env_cannot_override_harness_owned_variables(tmp_path: Path) -> 
         "n",
     )
     env = _env_of(cmd)
-    assert env["OUTPUT_DIR"] == "/output"  # as in Harbor: the harness sets it last
+    assert env["OUTPUT_DIR"] == "/output"  # As in Harbor: the harness sets it last.
     assert env["SEED"] == "7"
     assert env["SAVE_PATH"] == "/output"
     assert env["ENV"] == "set-a"
     assert env["MLSBENCH_PKG_DIR"] == "/workspace/SynthPkg"
-    assert env["HF_HOME"] == "/opt/hf"  # everything else passes through
-    assert env["HOME"] == "/tmp"  # noqa: S108 - /root is unwritable for the host uid
+    assert env["HF_HOME"] == "/opt/hf"  # Everything else passes through.
+    assert env["HOME"] == "/tmp"  # noqa: S108 -- asserted value, not a path we write; /root is unwritable for the host uid.
     assert cmd.count("HOME=/tmp") == 1
     assert not any(c.startswith("HOME=/root") for c in cmd)
 
@@ -692,7 +690,7 @@ def test_request_binds_follow_the_task_mount_and_the_global_binds(
     assert mounts.index(task) < mounts.index("/h/d:/data:ro")
     assert mounts.index("/h/d:/data:ro") < mounts.index(
         "/h/staged:/workspace/_task/data:ro",
-    )  # the staged data overlays the clone's
+    )  # The staged data overlays the clone's.
 
 
 def test_generated_inputs_are_laid_over_the_workspace_read_only(
@@ -730,9 +728,9 @@ def test_inputgen_container_is_isolated_and_stages_outside_the_image(
     mounts = [cmd[i + 1] for i, c in enumerate(cmd) if c == "-v"]
     assert (
         f"{req.inputgen}:/tests/eval/_inputgen:ro" in mounts
-    )  # bundle stays read-only
+    )  # Bundle stays read-only.
     assert f"{stage.resolve()}:/stage" in mounts
-    assert cmd[cmd.index("--network") + 1] == "none"  # generator code gets no network
+    assert cmd[cmd.index("--network") + 1] == "none"  # Generator code gets no network.
     assert cmd[cmd.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
     assert cmd[-3:] == ["/tests/eval/_inputgen/apply.py", "SynthPkg", "/stage"]
     assert cmd[-4] == "python"
@@ -753,7 +751,7 @@ def test_inputs_are_generated_then_mounted_and_a_failure_is_typed(
             stage = req.log_path.with_suffix(".inputs")
             (stage / "SynthPkg" / "_in").mkdir(parents=True)
             (stage / "SynthPkg" / "_in" / "x.b64").write_text("blob")
-            _stdout(kw).write(b"[inputgen] 1 file")
+            cast("BinaryIO", kw["stdout"]).write(b"[inputgen] 1 file")
         return subprocess.CompletedProcess(cmd, next(rcs))
 
     monkeypatch.setattr(subprocess, "run", _local_image(fake_run))
@@ -768,12 +766,12 @@ def test_inputs_are_generated_then_mounted_and_a_failure_is_typed(
     )
     assert "bash" in calls[1]
 
-    # a generator failure never runs the script
+    # A generator failure never runs the script.
     calls.clear()
 
     def failing_gen(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[bytes]:
         calls.append(cmd)
-        _stdout(kw).write(b"Traceback")
+        cast("BinaryIO", kw["stdout"]).write(b"Traceback")
         return subprocess.CompletedProcess(cmd, 3)
 
     monkeypatch.setattr(subprocess, "run", _local_image(failing_gen))
@@ -797,7 +795,7 @@ def test_inputgen_daemon_down_and_pull_failure_are_executor_errors(
             **kw: object,
         ) -> subprocess.CompletedProcess[bytes]:
             calls.append(cmd)
-            _stdout(kw).write(msg)
+            cast("BinaryIO", kw["stdout"]).write(msg)
             return subprocess.CompletedProcess(cmd, 125)
 
         return fake_run
@@ -815,7 +813,7 @@ def test_inputgen_daemon_down_and_pull_failure_are_executor_errors(
     with pytest.raises(ExecutorError, match="manifest unknown") as info:
         docker.run(req)
     assert not isinstance(info.value, ExecutorUnavailable)
-    assert all("apply.py" in " ".join(c) for c in calls)  # the script never ran
+    assert all("apply.py" in " ".join(c) for c in calls)  # The script never ran.
 
 
 def test_a_generator_that_writes_nothing_is_a_missing_input(
@@ -881,12 +879,78 @@ def test_inputgen_and_script_share_one_time_budget(
     assert docker.run(req).outcome is Outcome.OK
     assert timeouts == [limit, limit - spent]
 
-    # a generator that uses the whole budget leaves none for the script
+    # A generator that uses the whole budget leaves none for the script.
     timeouts.clear()
     spent = limit
     res = docker.run(req)
     assert res.outcome is Outcome.TIMEOUT
-    assert timeouts == [limit]  # the script never ran
+    assert timeouts == [limit]  # The script never ran.
+
+
+def test_inputgen_command_needs_inputgen_and_honours_platform(tmp_path: Path) -> None:
+    docker = _docker(
+        tmp_path,
+        lock={"SynthPkg": "r/i@sha256:1"},
+        platform="linux/arm64",
+    )
+    plain = _layout_request(tmp_path)
+    with pytest.raises(ValueError, match="inputgen"):
+        docker.inputgen_command(plain, "r/i@sha256:1", "n", tmp_path)
+    req = dataclasses.replace(plain, inputgen=tmp_path / "gen")
+    cmd = docker.inputgen_command(req, "r/i@sha256:1", "n", tmp_path)
+    assert cmd[cmd.index("--platform") + 1] == "linux/arm64"
+
+
+@pytest.mark.parametrize("stage", ["image", "stage", "bash"])
+def test_an_unexecutable_docker_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    def fake_run(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[bytes]:
+        del kw
+        kind = "image" if cmd[1] == "image" else cmd[-1].rsplit("/", 1)[-1]
+        kind = "bash" if kind.endswith(".sh") else kind
+        if kind == stage:
+            raise FileNotFoundError(cmd[0])
+        if kind == "stage":
+            gen = tmp_path / "logs" / "set-a.inputs" / "SynthPkg"
+            gen.mkdir(parents=True, exist_ok=True)
+            (gen / "x").write_text("blob")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    docker = _docker(tmp_path, lock={"SynthPkg": "r/i@sha256:1"})
+    with pytest.raises(ExecutorUnavailable, match="cannot execute docker"):
+        docker.run(_inputgen_request(tmp_path))
+
+
+def test_a_docker_failure_starting_the_script_is_an_executor_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[bytes]:
+        cast("BinaryIO", kw["stdout"]).write(b"OCI runtime create failed")
+        return subprocess.CompletedProcess(cmd, 125)
+
+    monkeypatch.setattr(subprocess, "run", _local_image(fake_run))
+    with pytest.raises(ExecutorError, match="OCI runtime create failed"):
+        _docker(tmp_path).run(_request(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("text", "match"),
+    [('["x"]', "must map package"), ("{", "not valid JSON")],
+)
+def test_a_malformed_lock_file_is_an_executor_error(
+    tmp_path: Path,
+    text: str,
+    match: str,
+) -> None:
+    lock = tmp_path / "lock.json"
+    lock.write_text(text)
+    with pytest.raises(ExecutorError, match=match):
+        LocalDocker(LocalDocker.Config(image_lock=lock)).image_ref("synth-pkg")
 
 
 def test_fake_executor_models_missing_input(tmp_path: Path) -> None:
@@ -894,3 +958,9 @@ def test_fake_executor_models_missing_input(tmp_path: Path) -> None:
     res = fake.run(_request(tmp_path))
     assert res.outcome is Outcome.MISSING_INPUT
     assert res.returncode is None
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

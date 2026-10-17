@@ -1,4 +1,9 @@
-"""Pin upstream Harbor base images to content digests in ``image_lock.json``.
+#!/bin/sh
+# ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
+# fmt: off
+'''' 2>/dev/null #
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+Pin upstream Harbor base images to content digests in ``image_lock.json``.
 
 Finds every ``FROM bohanlyu2022/mlsbench-harbor-<pkg>[:tag]`` line under
 ``<clone>/harbor/tasks-docker/*/environment/Dockerfile``, pulls the tag,
@@ -22,15 +27,24 @@ records the ``Docker-Content-Digest`` of the top-level manifest (the
 manifest list / index when multi-platform, else the single manifest). It
 also writes per-platform digests to ``image_platforms.json``. Network access
 happens only in this CLI path; tests inject a fake fetcher.
-"""
 
-# ruff: noqa: S603
+'''
+# fmt: on
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast, override
+from typing import (
+    TYPE_CHECKING,
+    Final,
+    NotRequired,
+    Protocol,
+    TypedDict,
+    cast,
+    override,
+)
+from urllib import error, parse, request
 
 import argparse
 import hashlib
@@ -40,22 +54,24 @@ import shutil
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 
-from priml.baselines.mlsbench.scripts.prepare_data import UPSTREAM_DIR, default_path
+from treekle import json_loads
 
+from priml.baselines.mlsbench.experiments import MlsbenchEval
+from priml.paths import resolve_working_dir
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
-    from http.client import HTTPResponse
+    from http.client import HTTPMessage, HTTPResponse
+    from typing import IO
 
 
-_TESTDATA: Final = Path(__file__).resolve().parent.parent / "testdata"
+_TESTDATA: Final = _CWD.parent / "testdata"
 DEFAULT_LOCK: Final = _TESTDATA / "image_lock.json"
 DEFAULT_PLATFORMS: Final = _TESTDATA / "image_platforms.json"
 _AUTH_URL: Final = "https://auth.docker.io/token"
-_REGISTRY_URL: Final = "https://registry-1.docker.io/v2"
 _ACCEPT: Final = ", ".join(
     (
         "application/vnd.oci.image.index.v1+json",
@@ -87,11 +103,17 @@ class PinError(RuntimeError):
 
 
 def _run(cmd: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, capture_output=True, text=True, check=False)
+    return subprocess.run(cmd, capture_output=True, text=True, check=False)  # noqa: S603 -- docker argv built here, no shell.
 
 
 def find_bases(root: Path) -> dict[str, str]:
     """Return ``package -> "repo:tag"`` for every Harbor base under ``root``.
+
+    Args:
+      root: The upstream clone.
+
+    Returns:
+      bases: Package to ``repo:tag``.
 
     Raises:
       PinError: No Dockerfile found, or one package appears with two refs.
@@ -118,6 +140,14 @@ def find_bases(root: Path) -> dict[str, str]:
 def pin_one(ref: str, docker: str = "docker", runner: Runner = _run) -> str:
     """Pull ``ref`` and return its ``repo@sha256:...``.
 
+    Args:
+      ref: ``repo:tag`` to pull.
+      docker: The docker binary.
+      runner: Runs one argv (injected by tests).
+
+    Returns:
+      ref: ``repo@sha256:...``.
+
     Raises:
       PinError: The pull failed or the image has no digest for that repo.
 
@@ -135,34 +165,34 @@ def pin_one(ref: str, docker: str = "docker", runner: Runner = _run) -> str:
             f"docker image inspect {ref} failed: {insp.stderr.strip()[-500:]}",
         )
     try:
-        digests = cast("object", json.loads(insp.stdout))
-    except json.JSONDecodeError as e:
+        digests = json_loads(insp.stdout, list[str])
+    except ValueError as e:
         raise PinError(f"unparseable RepoDigests for {ref}: {insp.stdout!r}") from e
     repo = (
         ref.split("@", maxsplit=1)[0].rsplit(":", 1)[0]
         if ":" in ref.rsplit("/", 1)[-1]
         else ref
     )
-    for d in _as_list(digests):
-        if isinstance(d, str) and d.startswith(repo + "@sha256:"):
+    for d in digests:
+        if d.startswith(repo + "@sha256:"):
             return d
     raise PinError(f"{ref} has no RepoDigest for {repo} (got {digests})")
 
 
-class _DropAuthOnRedirect(urllib.request.HTTPRedirectHandler):
+class _DropAuthOnRedirect(request.HTTPRedirectHandler):
     """Blob downloads redirect to a CDN that must not see the registry token."""
 
     @override
     def redirect_request(
         self,
-        req: urllib.request.Request,
-        fp: object,
+        req: request.Request,
+        fp: IO[bytes],
         code: int,
         msg: str,
-        headers: object,
+        headers: HTTPMessage,
         newurl: str,
-    ) -> urllib.request.Request | None:
-        new = super().redirect_request(req, fp, code, msg, headers, newurl)  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType]
+    ) -> request.Request | None:
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new is not None:
             new.remove_header("Authorization")
         return new
@@ -177,18 +207,25 @@ def urllib_fetch(
 ) -> tuple[int, dict[str, str], bytes]:
     """GET ``url`` with retries on 429/5xx and network errors (CLI path only).
 
+    Args:
+      url: The URL to fetch.
+      headers: Request headers.
+      attempts: Tries before giving up.
+      sleep: Backoff between tries (injected by tests).
+
     Returns:
-      ``(status, lower-cased headers, body)``; 4xx other than 429 are returned,
-      not raised.
+      status: HTTP status; a 4xx other than 429 is returned, not raised.
+      headers: Response headers, keys lower-cased.
+      body: Response body.
 
     Raises:
       PinError: Still failing after ``attempts`` tries.
 
     """
-    opener = urllib.request.build_opener(_DropAuthOnRedirect)
+    opener = request.build_opener(_DropAuthOnRedirect)
     last = ""
     for i in range(attempts):
-        req = urllib.request.Request(url, headers=headers)  # noqa: S310
+        req = request.Request(url, headers=headers)  # noqa: S310 -- callers pass fixed https registry URLs.
         try:
             with cast("HTTPResponse", opener.open(req, timeout=30)) as r:
                 return (
@@ -196,12 +233,12 @@ def urllib_fetch(
                     {str(k).lower(): str(v) for k, v in r.headers.items()},
                     bytes(r.read()),
                 )
-        except urllib.error.HTTPError as e:
+        except error.HTTPError as e:
             body = e.read()
             if e.code != 429 and e.code < 500:
                 return e.code, {k.lower(): v for k, v in e.headers.items()}, body
             last = f"HTTP {e.code}"
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
+        except (error.URLError, TimeoutError, OSError) as e:
             last = f"{type(e).__name__}: {e}"
         if i + 1 < attempts:
             sleep(2.0**i)
@@ -218,48 +255,6 @@ class Resolved:
         """``"os/arch[/variant]" -> sha256:...`` of the per-platform manifests."""
 
 
-def _token(repo: str, fetch: Fetcher) -> str:
-    q = urllib.parse.urlencode(
-        {
-            "service": "registry.docker.io",
-            "scope": f"repository:{repo}:pull",
-        },
-    )
-    status, _, body = fetch(f"{_AUTH_URL}?{q}", {})
-    if status != 200:
-        raise PinError(f"token request for {repo} failed: HTTP {status}")
-    try:
-        return str(cast("dict[str, object]", json.loads(body))["token"])
-    except (ValueError, KeyError, TypeError) as e:
-        raise PinError(f"token response for {repo} has no token") from e
-
-
-def _get(
-    repo: str,
-    kind: str,
-    ref: str,
-    token: str,
-    fetch: Fetcher,
-) -> tuple[dict[str, str], bytes]:
-    url = f"{_REGISTRY_URL}/{repo}/{kind}/{ref}"
-    status, hdrs, body = fetch(
-        url,
-        {"Authorization": f"Bearer {token}", "Accept": _ACCEPT},
-    )
-    if status != 200:
-        detail = body[:200].decode(errors="replace")
-        raise PinError(f"GET {url} -> HTTP {status}: {detail}")
-    return hdrs, body
-
-
-def _checked_digest(hdrs: dict[str, str], body: bytes, what: str) -> str:
-    actual = "sha256:" + hashlib.sha256(body).hexdigest()
-    claimed = hdrs.get("docker-content-digest", "")
-    if claimed and claimed != actual:
-        raise PinError(f"{what}: Docker-Content-Digest {claimed} != body {actual}")
-    return actual
-
-
 def resolve_registry(ref: str, fetch: Fetcher = urllib_fetch) -> Resolved:
     """Resolve ``repo:tag`` through the Docker Hub HTTP API, pulling no layers.
 
@@ -267,11 +262,18 @@ def resolve_registry(ref: str, fetch: Fetcher = urllib_fetch) -> Resolved:
     against the sha256 of the manifest body. For a single-platform manifest
     the platform comes from its config blob.
 
+    Args:
+      ref: ``repo:tag`` or ``repo@sha256:...``.
+      fetch: GETs one URL (injected by tests).
+
+    Returns:
+      resolved: The top-level digest and the per-platform digests.
+
     Raises:
       PinError: Auth, HTTP, JSON or digest-consistency failure.
 
     """
-    if "@" in ref:  # repo@sha256:<hex>: the digest is the manifest reference
+    if "@" in ref:  # repo@sha256:<hex>: the digest is the manifest reference.
         repo, _, tag = ref.partition("@")
     else:
         repo, _, tag = ref.partition(":")
@@ -280,49 +282,42 @@ def resolve_registry(ref: str, fetch: Fetcher = urllib_fetch) -> Resolved:
     hdrs, body = _get(repo, "manifests", tag, token, fetch)
     digest = _checked_digest(hdrs, body, ref)
     try:
-        doc = _as_dict(cast("object", json.loads(body)))
+        doc = json_loads(body, _Manifest)
     except ValueError as e:
         raise PinError(f"{ref}: manifest is not JSON") from e
     platforms: dict[str, str] = {}
     media = doc.get("mediaType") or hdrs.get("content-type", "")
     if media in _INDEX_TYPES or "manifests" in doc:
-        for m in map(_as_dict, _as_list(doc.get("manifests", []))):
-            p = _as_dict(m.get("platform"))
-            os_, arch = p.get("os", "?"), p.get("architecture", "?")
-            if os_ == "unknown" or arch == "unknown":
-                continue  # attestation manifests
-            name = f"{os_}/{arch}" + (f"/{p['variant']}" if p.get("variant") else "")
-            platforms[name] = str(m["digest"])
-    else:
-        cfg = _as_dict(doc.get("config")).get("digest")
-        if cfg:
-            _, cbody = _get(repo, "blobs", str(cfg), token, fetch)
-            c = _as_dict(cast("object", json.loads(cbody)))
-            name = f"{c.get('os', '?')}/{c.get('architecture', '?')}" + (
-                f"/{c['variant']}" if c.get("variant") else ""
-            )
-            platforms[name] = digest
+        for m in doc.get("manifests", []):
+            p = m.get("platform", _Platform())
+            if p.get("os") == "unknown" or p.get("architecture") == "unknown":
+                continue  # Attestation manifests.
+            platforms[_platform_name(p)] = m["digest"]
+    elif cfg := doc.get("config", _Blob()).get("digest", ""):
+        _, cbody = _get(repo, "blobs", cfg, token, fetch)
+        try:
+            platforms[_platform_name(json_loads(cbody, _Platform))] = digest
+        except ValueError as e:
+            raise PinError(f"{ref}: image config is not JSON") from e
     return Resolved(digest, platforms)
 
 
-def _as_dict(x: object) -> dict[str, object]:
-    """``x`` if it is a JSON object, else empty."""
-    return cast("dict[str, object]", x) if isinstance(x, dict) else {}
-
-
-def _as_list(x: object) -> list[object]:
-    """``x`` if it is a JSON array, else empty."""
-    return cast("list[object]", x) if isinstance(x, list) else []
-
-
 def read_lock(path: Path) -> dict[str, str]:
-    """Read the lock; a missing file is an empty lock."""
+    """Read the lock; a missing file is an empty lock.
+
+    Args:
+      path: The lock file.
+
+    Returns:
+      lock: Package to ``repo@sha256:...``.
+
+    """
     if not path.exists():
         return {}
-    raw = cast("object", json.loads(path.read_text() or "{}"))
-    if not isinstance(raw, dict):
-        raise PinError(f"lock must be a JSON object: {path}")
-    return {str(k): str(v) for k, v in cast("dict[object, object]", raw).items()}
+    try:
+        return json_loads(path.read_text() or "{}", dict[str, str])
+    except ValueError as e:
+        raise PinError(f"lock must map package to ref: {path}") from e
 
 
 def write_lock(path: Path, lock: dict[str, str]) -> None:
@@ -345,6 +340,19 @@ def pin(
 
     The lock is written after each success, so an interrupted run keeps
     its progress. A failing package is reported in ``errors``, not raised.
+
+    Args:
+      root: The upstream clone.
+      lock_path: The lock file.
+      packages: Packages to pin; ``None`` is every one.
+      repin: Re-pin packages already in the lock.
+      docker: The docker binary.
+      runner: Runs one argv (injected by tests).
+
+    Returns:
+      lock: The lock after this run.
+      errors: Package to why it failed.
+
     """
     bases = find_bases(root)
     wanted = list(bases) if packages is None else list(packages)
@@ -379,6 +387,19 @@ def pin_registry(
     Writes ``repo@<top-level digest>`` per package to the lock and, when
     ``platforms_path`` is given, ``package -> {platform: digest}`` there.
     The lock is rewritten after each success. Failures go to ``errors``.
+
+    Args:
+      root: The upstream clone.
+      lock_path: The lock file.
+      packages: Packages to pin; ``None`` is every one.
+      repin: Re-pin packages already in the lock.
+      platforms_path: Where per-platform digests go; ``None`` writes none.
+      fetch: GETs one URL (injected by tests).
+
+    Returns:
+      lock: The lock after this run.
+      errors: Package to why it failed.
+
     """
     bases = find_bases(root)
     wanted = list(bases) if packages is None else list(packages)
@@ -388,9 +409,9 @@ def pin_registry(
     lock = read_lock(lock_path)
     plats: dict[str, dict[str, str]] = {}
     if platforms_path is not None and platforms_path.exists():
-        plats = cast(
-            "dict[str, dict[str, str]]",
-            json.loads(platforms_path.read_text() or "{}"),
+        plats = json_loads(
+            platforms_path.read_text() or "{}",
+            dict[str, dict[str, str]],
         )
     errors: dict[str, str] = {}
     for pkg in wanted:
@@ -421,34 +442,21 @@ def write_lock_like(path: Path, data: dict[str, dict[str, str]]) -> None:
     tmp.replace(path)
 
 
-class _Flags(Protocol):
-    root: str
-    lock: Path
-    package: list[str]
-    all: bool
-    list: bool
-    repin: bool
-    docker: str
-    registry: bool
-    platforms: Path
-
-
 def main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry point."""
-    ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
-    ap.add_argument("--root", default=str(default_path(UPSTREAM_DIR)))
-    ap.add_argument("--lock", type=Path, default=DEFAULT_LOCK)
-    ap.add_argument("--package", action="append", default=[])
-    ap.add_argument("--all", action="store_true", help="pin every package (huge pulls)")
-    ap.add_argument("--list", action="store_true", help="list packages and pin status")
-    ap.add_argument("--repin", action="store_true")
-    ap.add_argument("--docker", default="docker")
-    ap.add_argument(
-        "--registry",
-        action="store_true",
-        help="resolve digests via the Docker Hub HTTP API (no pull, no docker)",
+    """CLI entry point.
+
+    Args:
+      argv: Command-line arguments; ``None`` is ``sys.argv``.
+
+    Returns:
+      code: 0 on success, 1 if a package failed, 2 on a usage or setup error.
+
+    """
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("--platforms", type=Path, default=DEFAULT_PLATFORMS)
+    _add_arguments(ap)
     args = cast("_Flags", ap.parse_args(argv))
     root = Path(args.root).expanduser()
     try:
@@ -495,5 +503,119 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 1 if errors else 0
 
 
+def _add_arguments(ap: argparse.ArgumentParser) -> None:
+    ap.add_argument(
+        "--root",
+        default=str(_default_clone()),
+    )
+    ap.add_argument("--lock", type=Path, default=DEFAULT_LOCK)
+    ap.add_argument("--package", action="append", default=[])
+    ap.add_argument("--all", action="store_true", help="pin every package (huge pulls)")
+    ap.add_argument("--list", action="store_true", help="list packages and pin status")
+    ap.add_argument("--repin", action="store_true")
+    ap.add_argument("--docker", default="docker")
+    ap.add_argument(
+        "--registry",
+        action="store_true",
+        help="resolve digests via the Docker Hub HTTP API (no pull, no docker)",
+    )
+    ap.add_argument("--platforms", type=Path, default=DEFAULT_PLATFORMS)
+
+
+def _token(repo: str, fetch: Fetcher) -> str:
+    q = parse.urlencode(
+        {
+            "service": "registry.docker.io",
+            "scope": f"repository:{repo}:pull",
+        },
+    )
+    status, _, body = fetch(f"{_AUTH_URL}?{q}", {})
+    if status != 200:
+        raise PinError(f"token request for {repo} failed: HTTP {status}")
+    try:
+        return json_loads(body, _Token)["token"]
+    except ValueError as e:
+        raise PinError(f"token response for {repo} has no token") from e
+
+
+def _get(
+    repo: str,
+    kind: str,
+    ref: str,
+    token: str,
+    fetch: Fetcher,
+) -> tuple[dict[str, str], bytes]:
+    url = f"https://registry-1.docker.io/v2/{repo}/{kind}/{ref}"
+    status, hdrs, body = fetch(
+        url,
+        {"Authorization": f"Bearer {token}", "Accept": _ACCEPT},
+    )
+    if status != 200:
+        detail = body[:200].decode(errors="replace")
+        raise PinError(f"GET {url} -> HTTP {status}: {detail}")
+    return hdrs, body
+
+
+def _checked_digest(hdrs: dict[str, str], body: bytes, what: str) -> str:
+    actual = "sha256:" + hashlib.sha256(body).hexdigest()
+    claimed = hdrs.get("docker-content-digest", "")
+    if claimed and claimed != actual:
+        raise PinError(f"{what}: Docker-Content-Digest {claimed} != body {actual}")
+    return actual
+
+
+class _Flags(Protocol):
+    root: str
+    lock: Path
+    package: list[str]
+    all: bool
+    list: bool
+    repin: bool
+    docker: str
+    registry: bool
+    platforms: Path
+
+
+def _default_clone() -> Path:
+    """Return the upstream clone a default ``MlsbenchEval`` resolves."""
+    cfg = MlsbenchEval()
+    return resolve_working_dir(cfg.base_dir, cfg.mlsbench_root)
+
+
+def _platform_name(p: _Platform) -> str:
+    """Return ``os/arch[/variant]``, ``?`` for an absent part."""
+    name = f"{p.get('os', '?')}/{p.get('architecture', '?')}"
+    variant = p.get("variant", "")
+    return f"{name}/{variant}" if variant else name
+
+
+class _Token(TypedDict):
+    token: str
+
+
+class _Platform(TypedDict, total=False):
+    os: str
+    architecture: str
+    variant: str
+
+
+class _Blob(TypedDict, total=False):
+    digest: str
+
+
+class _Entry(TypedDict):
+    digest: str
+    platform: NotRequired[_Platform]
+
+
+class _Manifest(TypedDict, total=False):
+    """The fields of a registry manifest (index or single) this script reads."""
+
+    mediaType: str
+    manifests: list[_Entry]
+    config: _Blob
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
+# vim: ft=python

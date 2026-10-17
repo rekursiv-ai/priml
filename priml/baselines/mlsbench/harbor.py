@@ -1,4 +1,4 @@
-"""Reader and verifier for Harbor bundle pristine manifests (read at runtime, never copied).
+"""Reader and verifier for Harbor bundles (read at runtime, never copied).
 
 A Harbor bundle (``<clone>/harbor/tasks-docker/mls-bench__<task>/``) carries
 under ``tests/meta/``:
@@ -29,19 +29,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, NotRequired, TypedDict, cast
 
 import difflib
+import filecmp
+import functools
 import hashlib
-import json
 import re
-import sys
 import tomllib
 
-from priml.baselines.mlsbench.scripts.prepare_data import UPSTREAM_DIR, default_path
+from treekle import json_loads
 
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 SAFE_PATH: Final = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
 _SCRUB: Final = (
     "PYTHONPATH",
     "PYTHONHOME",
@@ -55,6 +63,8 @@ _SCRUB: Final = (
     "DYLD_INSERT_LIBRARIES",
     "DYLD_LIBRARY_PATH",
 )
+
+
 _EXEMPT_TOP: Final = frozenset({"_task"})
 
 
@@ -62,7 +72,7 @@ class BundleError(RuntimeError):
     """The Harbor bundle is missing or malformed (the guard fails closed)."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class HarborViolation:
     """One breach found by :func:`guard`; ``kind`` is a stable slug."""
 
@@ -71,13 +81,13 @@ class HarborViolation:
     detail: str = ""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class HarborBundle:
     """Parsed ``tests/meta`` of one Harbor bundle."""
 
     root: Path
     manifest: dict[str, str]
-    editable: dict[str, tuple[tuple[int, int], ...]]  # () = declared read-only
+    editable: dict[str, tuple[tuple[int, int], ...]]  # () = declared read-only.
     guard_exclude: tuple[str, ...]
     pristine_root: Path
 
@@ -105,45 +115,49 @@ def bundle_dir(task: str, *, root: Path, flavor: str = "docker") -> Path:
     return path
 
 
-def _safe_rel(rel: object) -> str:
-    if not isinstance(rel, str) or not rel or "\\" in rel:
-        raise BundleError(f"unsafe path {rel!r}")
-    p = PurePosixPath(rel)
-    if p.is_absolute() or ".." in p.parts:
-        raise BundleError(f"unsafe path {rel!r}")
-    return p.as_posix()
-
-
 def load_bundle(bundle: Path) -> HarborBundle:
-    """Read ``tests/meta`` from a bundle directory; raise :class:`BundleError` if unusable."""
+    """Read ``tests/meta`` from a bundle directory; raise :class:`BundleError` if unusable.
+
+    Args:
+      bundle: The bundle directory.
+
+    Returns:
+      hb: Its manifest, editable ranges, guard excludes and pristine root.
+
+    """
     meta = Path(bundle) / "tests" / "meta"
     try:
-        raw = cast("object", json.loads((meta / "pristine_manifest.json").read_text()))
+        raw = json_loads(
+            (meta / "pristine_manifest.json").read_text(),
+            dict[str, str],
+        )
     except FileNotFoundError as e:
         raise BundleError("pristine_manifest.json missing: refusing to verify") from e
-    except json.JSONDecodeError as e:
+    except ValueError as e:
         raise BundleError("pristine_manifest.json malformed") from e
-    if not isinstance(raw, dict) or not raw:
+    if not raw:
         raise BundleError("pristine_manifest.json empty: refusing to verify")
-    entries = cast("dict[str, object]", raw)
-    manifest: dict[str, str] = {}
-    for k, v in entries.items():
-        if not (isinstance(v, str) and len(v) == 64):
-            raise BundleError("pristine_manifest.json: values must be sha256 hex")
-        manifest[_safe_rel(k)] = v
+    if not all(len(v) == 64 for v in raw.values()):
+        raise BundleError("pristine_manifest.json: values must be sha256 hex")
+    manifest = {_safe_rel(k): v for k, v in raw.items()}
     try:
-        cfg = cast("dict[str, object]", json.loads((meta / "config.json").read_text()))
-    except (FileNotFoundError, json.JSONDecodeError) as e:
+        cfg = json_loads((meta / "config.json").read_text(), _BundleConfig)
+    except (FileNotFoundError, ValueError) as e:
         raise BundleError(f"config.json unusable: {e}") from e
-    editable: dict[str, tuple[tuple[int, int], ...]] = {}
-    for f in cast("list[dict[str, object]]", cfg.get("files", [])):
-        ranges = cast("list[dict[str, int]] | None", f.get("edit"))
-        editable[_safe_rel(cast("str", f["filename"]))] = tuple(
-            (int(r["start"]), int(r["end"])) for r in (ranges or [])
+    editable = {
+        _safe_rel(f["filename"]): tuple(
+            (r["start"], r["end"]) for r in f.get("edit") or []
         )
-    guard = cast("list[str] | None", cfg.get("guard_exclude", []))
-    excl = tuple(_safe_rel(e) for e in guard or [])
-    return HarborBundle(Path(bundle), manifest, editable, excl, meta / "pristine")
+        for f in cfg.get("files", [])
+    }
+    excl = tuple(_safe_rel(e) for e in cfg.get("guard_exclude") or [])
+    return HarborBundle(
+        root=Path(bundle),
+        manifest=manifest,
+        editable=editable,
+        guard_exclude=excl,
+        pristine_root=meta / "pristine",
+    )
 
 
 def find_bundle(task: str, *, root: Path) -> Path | None:
@@ -151,6 +165,14 @@ def find_bundle(task: str, *, root: Path) -> Path | None:
 
     ``None`` means the checkout has no bundle for it (a synthetic fixture, or a
     clone without ``harbor/``); it is not an error here, the caller decides.
+
+    Args:
+      task: Task name.
+      root: The upstream clone.
+
+    Returns:
+      bundle: ``harbor/tasks-docker/mls-bench__<task>``, or ``None``.
+
     """
     try:
         return bundle_dir(task, root=root)
@@ -164,6 +186,14 @@ def pristine_source(hb: HarborBundle, rel: str) -> Path | None:
     Order: ``tests/meta/pristine/<rel>``, then the image scaffold
     ``environment/_scaffold/<rel>`` (whole-file editable files that a task ships
     empty are only in the scaffold). The caller checks the manifest hash.
+
+    Args:
+      hb: The parsed bundle.
+      rel: Path of the declared file, relative to the workspace.
+
+    Returns:
+      path: The pristine copy, or ``None`` when the bundle has none.
+
     """
     for base in (hb.pristine_root, hb.root / "environment" / "_scaffold"):
         p = base / rel
@@ -174,6 +204,9 @@ def pristine_source(hb: HarborBundle, rel: str) -> Path | None:
 
 def bundle_gpus(bundle: Path) -> int | None:
     """Read ``[environment] gpus`` from the bundle's ``task.toml``.
+
+    Args:
+      bundle: The bundle directory.
 
     Returns:
       gpus: The declared GPU count; ``0`` for a CPU-only task and, as in
@@ -195,6 +228,9 @@ def bundle_gpus(bundle: Path) -> int | None:
 def allow_internet(bundle: Path) -> bool | None:
     """Read ``[environment] allow_internet`` from the bundle's ``task.toml``.
 
+    Args:
+      bundle: The bundle directory.
+
     Returns:
       allow: The declared value, or ``None`` when absent or unreadable (callers
         must treat that as *no network*).
@@ -211,8 +247,9 @@ def allow_internet(bundle: Path) -> bool | None:
 
 
 def sha256_file(path: Path) -> str:
-    """Hex sha256 of a file's bytes."""
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """Hex sha256 of a file's bytes, streamed."""
+    with path.open("rb") as f:
+        return hashlib.file_digest(f, "sha256").hexdigest()
 
 
 def check_segments(
@@ -224,6 +261,15 @@ def check_segments(
 
     ``ranges`` are 1-indexed inclusive pristine lines; ``(-1, -1)`` is whole-file editable,
     an ``end`` of -1 means to EOF, and an empty tuple means read-only.
+
+    Args:
+      pristine: The pristine file's bytes.
+      current: The edited file's bytes.
+      ranges: Editable ranges, as described above.
+
+    Returns:
+      why: ``None`` when the edit stays in range, else the first violation.
+
     """
     if pristine == current:
         return None
@@ -260,20 +306,22 @@ def check_segments(
             return "trailing fixed segment changed"
         span[-1] = (len(current) - len(segs[-1]), len(current))
     limit = len(current)
+    found: list[tuple[int, int]] = []
     for i in range(len(segs) - 1, -1, -1):
         got = span[i]
         if got is None:
             idx = current.rfind(segs[i], 0, limit)
             if idx < 0:
                 return f"fixed segment #{i + 1} missing or out of order"
-            got = span[i] = (idx, idx + len(segs[i]))
+            got = (idx, idx + len(segs[i]))
+        found.append(got)
         limit = got[0]
+    found.reverse()
     prev = 0
-    for i, got in enumerate(span):
-        assert got is not None
-        if got[0] < prev:
+    for i, (start, end) in enumerate(found):
+        if start < prev:
             return f"fixed segment #{i + 1} overlaps an earlier one"
-        prev = got[1]
+        prev = end
     if len(merged) == 1:
         return None
     editable = {ln for s, e in merged for ln in range(s, e + 1)}
@@ -292,20 +340,6 @@ def check_segments(
     return None
 
 
-def _excluded(rel: str, excl: tuple[str, ...]) -> bool:
-    return any(rel == e or rel.startswith(e + "/") for e in excl)
-
-
-def _symlinked(root: Path, rel: str) -> bool:
-    """Report whether ``rel`` or any parent under ``root`` is a symlink."""
-    p = root
-    for part in PurePosixPath(rel).parts:
-        p = p / part
-        if p.is_symlink():
-            return True
-    return False
-
-
 def guard(
     hb: HarborBundle,
     workspace: Path,
@@ -315,6 +349,15 @@ def guard(
     """Verify ``workspace`` against a Harbor bundle; empty result means clean.
 
     ``check_deletions=False`` is for partial workspaces that only hold the declared files.
+
+    Args:
+      hb: The parsed bundle.
+      workspace: The materialized workspace.
+      check_deletions: Report manifest files missing from ``workspace``.
+
+    Returns:
+      violations: One per breach, sorted by path within each check.
+
     """
     ws = Path(workspace)
     out: list[HarborViolation] = []
@@ -329,9 +372,9 @@ def guard(
         if _symlinked(ws, rel):
             out.append(
                 HarborViolation(
-                    rel,
-                    "symlink",
-                    "guarded path is or sits under a symlink",
+                    path=rel,
+                    kind="symlink",
+                    detail="guarded path is or sits under a symlink",
                 ),
             )
 
@@ -341,18 +384,28 @@ def guard(
             continue
         pri = hb.pristine_root / rel
         if not p.is_file():
-            out.append(HarborViolation(rel, "deleted", "declared file missing"))
+            out.append(
+                HarborViolation(
+                    path=rel,
+                    kind="deleted",
+                    detail="declared file missing",
+                ),
+            )
             continue
         if not pri.is_file():
             if not any(r == (-1, -1) for r in ranges):
                 out.append(
-                    HarborViolation(rel, "pristine_missing", "no pristine snapshot"),
+                    HarborViolation(
+                        path=rel,
+                        kind="pristine_missing",
+                        detail="no pristine snapshot",
+                    ),
                 )
             continue
         why = check_segments(pri.read_bytes(), p.read_bytes(), ranges)
         if why is not None:
-            kind = "read_only_modified" if not ranges else "outside_range"
-            out.append(HarborViolation(rel, kind, why))
+            kind = "outside_range" if ranges else "read_only_modified"
+            out.append(HarborViolation(path=rel, kind=kind, detail=why))
 
     for rel, sha in sorted(hb.manifest.items()):
         if rel in hb.editable or _excluded(rel, hb.guard_exclude):
@@ -362,10 +415,20 @@ def guard(
         p = ws / rel
         if not p.is_file():
             if check_deletions:
-                out.append(HarborViolation(rel, "deleted", "manifest file missing"))
+                out.append(
+                    HarborViolation(
+                        path=rel,
+                        kind="deleted",
+                        detail="manifest file missing",
+                    ),
+                )
         elif sha256_file(p) != sha:
             out.append(
-                HarborViolation(rel, "modified_unlisted", "hash differs from manifest"),
+                HarborViolation(
+                    path=rel,
+                    kind="modified_unlisted",
+                    detail="hash differs from manifest",
+                ),
             )
     return tuple(out)
 
@@ -382,7 +445,7 @@ def guard(
 # leaderboard's provenance. Decision: the container runs the NATIVE
 # ``tasks/<t>/scripts``, and Harbor's copy is the tamper reference: an executed
 # script that is not byte-identical to Harbor's is refused unless upstream
-# itself ships that exact file as adapted (``ADAPTED_EVAL_SCRIPTS``, measured
+# itself ships that exact file as adapted (``harbor_adapted.json``, measured
 # against the pinned commit; see ``real_clone_test``). Adapted tasks are still
 # logged as ``harbor_adapted_scripts`` in workspace.json.
 #
@@ -394,188 +457,29 @@ def guard(
 # (runtime races, ephemeral inputs, label guards): Harbor's copy cannot vouch for
 # them, so the file *set* that differs is pinned AND the sha256 of every native
 # ``tasks/<t>/scripts`` file is pinned in ``eval_script_pins.json`` (see
-# ``EVAL_SCRIPT_PINS``); the executed native bytes must match the pin.
-ADAPTED_EVAL_SCRIPTS: Final[dict[str, tuple[str, ...]]] = {
-    "causal-discovery-discrete": (
-        "eval_alarm.sh",
-        "eval_cancer.sh",
-        "eval_child.sh",
-        "eval_hailfinder.sh",
-        "eval_win95pts.sh",
-    ),
-    "causal-observational-linear-gaussian": (
-        "eval_er10.sh",
-        "eval_er10_hard.sh",
-        "eval_er10_noisy.sh",
-        "eval_er20.sh",
-        "eval_er20_hard.sh",
-        "eval_er20_noisy.sh",
-        "eval_sf50.sh",
-        "eval_sf50_hard.sh",
-        "eval_sf50_noisy.sh",
-    ),
-    "causal-observational-linear-non-gaussian": (
-        "eval_er10.sh",
-        "eval_er15.sh",
-        "eval_er20_dense.sh",
-        "eval_er30.sh",
-        "eval_er50.sh",
-        "eval_er50_lowsample.sh",
-        "eval_sf100.sh",
-        "eval_sf12.sh",
-    ),
-    "causal-observational-nonlinear": (
-        "eval_er12_gp.sh",
-        "eval_er12_lowsample.sh",
-        "eval_er15_sigmoid.sh",
-        "eval_er20_gauss.sh",
-        "eval_er20_mixed.sh",
-        "eval_er8_mlp.sh",
-        "eval_sf10_mixed.sh",
-        "eval_sf20_gp.sh",
-    ),
-    "causal-treatment-effect": (
-        "acic_synth.sh",
-        "ihdp_synth.sh",
-        "jobs_synth.sh",
-    ),
-    "cv-dbm-sampler": ("_runtime_patch.sh",),
-    "cv-dbm-scheduler": (
-        "_runtime_patch.sh",
-        "run_DIODE.sh",
-        "run_Imagenet.sh",
-        "run_e2h.sh",
-    ),
-    "cv-diffusion-conditioning": (
-        "_runtime_patch.sh",
-        "train_large.sh",
-        "train_medium.sh",
-        "train_small.sh",
-    ),
-    "cv-vae-loss": (
-        "_runtime_patch.sh",
-        "train_large.sh",
-        "train_medium.sh",
-        "train_small.sh",
-    ),
-    "llm-rl-advantage": ("train.sh",),
-    "llm-rl-importance-sampling": ("train.sh",),
-    "llm-rl-kl-estimator": ("train.sh",),
-    "llm-rl-reward-normalization": ("train.sh",),
-    "meta-inner-loop-optimizer": (
-        "_runtime_patch.sh",
-        "cifar_fs_5shot.sh",
-        "mini_imagenet_1shot.sh",
-        "mini_imagenet_5shot.sh",
-    ),
-    "meta-rl": (
-        "_runtime_patch.sh",
-        "cheetah_vel.sh",
-        "point_robot.sh",
-        "sparse_point_robot.sh",
-    ),
-    "ml-anomaly-detection": (
-        "cardio.sh",
-        "satellite.sh",
-        "shuttle.sh",
-        "thyroid.sh",
-    ),
-    "ml-clustering-algorithm": (
-        "blobs.sh",
-        "digits.sh",
-        "moons.sh",
-        "varied_density.sh",
-    ),
-    "ml-ensemble-boosting": (
-        "breast_cancer.sh",
-        "california_housing.sh",
-        "diabetes.sh",
-    ),
-    "ml-missing-data-imputation": (
-        "breast_cancer.sh",
-        "california.sh",
-        "wine.sh",
-    ),
-    "ml-symbolic-regression": (
-        "koza3.sh",
-        "nguyen10.sh",
-        "nguyen7.sh",
-    ),
-    "optimization-diagonal-net": (
-        "d10000_k50_a1e0.sh",
-        "d200_k20_a1e3.sh",
-        "d500_k10_a1e3.sh",
-        "d500_k10_a5e1.sh",
-    ),
-    "optimization-multi-objective": (
-        "dtlz1.sh",
-        "dtlz2.sh",
-        "zdt1.sh",
-        "zdt3.sh",
-    ),
-    "optimization-nas": (
-        "cifar10.sh",
-        "cifar100.sh",
-        "imagenet16.sh",
-    ),
-    "optimization-parity": (
-        "eval.sh",
-        "eval_n16_k4.sh",
-        "eval_n50_k8.sh",
-        "eval_n64_k12.sh",
-        "eval_n64_k8.sh",
-    ),
-    "optimization-variance-reduction": (
-        "conditioned.sh",
-        "logistic.sh",
-        "mlp.sh",
-    ),
-    "quant-concept-drift": ("_label_guard.py",),
-    "quant-graph-stock": ("_label_guard.py",),
-    "quant-stock-prediction": ("_label_guard.py",),
-    "rl-reward-learning": (
-        "_runtime_patch.sh",
-        "halfcheetah.sh",
-        "hopper.sh",
-        "walker2d.sh",
-    ),
-    "robo-diffusion-guidance": (
-        "_runtime_patch.sh",
-        "train_halfcheetah.sh",
-        "train_hopper.sh",
-        "train_walker2d.sh",
-    ),
-    "robo-diffusion-policy": (
-        "_runtime_patch.sh",
-        "train_halfcheetah.sh",
-        "train_hopper.sh",
-        "train_walker2d.sh",
-    ),
-    "robo-diffusion-sampling-method": (
-        "_runtime_patch.sh",
-        "train_halfcheetah.sh",
-        "train_hopper.sh",
-        "train_walker2d.sh",
-    ),
-}
+# ``eval_script_pins``); the executed native bytes must match the pin.
+ADAPTED_PATH: Final = _CWD / "harbor_adapted.json"
+"""``adapted``: task to the scripts Harbor ships patched; ``normalised_only``: the
+tasks whose patches are only the documented additions (``_HARBOR_ADDITIONS``)."""
 
-NORMALISED_ONLY: Final = frozenset(
-    {
-        "causal-discovery-discrete",
-        "causal-observational-linear-gaussian",
-        "causal-observational-linear-non-gaussian",
-        "causal-observational-nonlinear",
-        "causal-treatment-effect",
-        "ml-anomaly-detection",
-        "ml-clustering-algorithm",
-        "ml-ensemble-boosting",
-        "ml-missing-data-imputation",
-        "ml-symbolic-regression",
-        "optimization-multi-objective",
-        "optimization-variance-reduction",
-    },
-)
-"""Adapted tasks whose Harbor scripts differ only by the documented additions."""
+
+class AdaptedScripts(TypedDict):
+    """Which tasks Harbor adapts, measured against the pinned commit."""
+
+    adapted: dict[str, tuple[str, ...]]
+    normalised_only: frozenset[str]
+
+
+@functools.cache
+def adapted_scripts() -> AdaptedScripts:
+    """Return the committed table of Harbor-adapted eval scripts.
+
+    Returns:
+      table: Read once from ``harbor_adapted.json``.
+
+    """
+    return json_loads(ADAPTED_PATH.read_text(), AdaptedScripts)
+
 
 _HARBOR_ADDITIONS: Final = (
     re.compile(r"^cd /workspace(/[\w.\-]+)?\s*$"),
@@ -583,33 +487,54 @@ _HARBOR_ADDITIONS: Final = (
 )
 
 
-PINS_PATH: Final = Path(__file__).resolve().parent / "eval_script_pins.json"
+PINS_PATH: Final = _CWD / "eval_script_pins.json"
 
 
-def load_pins(path: Path = PINS_PATH) -> dict[str, dict[str, str]]:
-    """Read ``{task: {relpath: sha256}}`` (digests only, no script contents)."""
-    raw = cast("dict[str, dict[str, str]]", json.loads(path.read_text()))
-    return {t: dict(files) for t, files in raw.items()}
+@functools.cache
+def eval_script_pins() -> Mapping[str, Mapping[str, str]]:
+    """Return the native ``tasks/<t>/scripts`` digests of the substantively adapted tasks.
+
+    Returns:
+      pins: Task to ``{relative path: sha256}``, read once from ``eval_script_pins.json``.
+
+    """
+    return json_loads(PINS_PATH.read_text(), dict[str, dict[str, str]])
 
 
-EVAL_SCRIPT_PINS: Final[dict[str, dict[str, str]]] = load_pins()
-"""Native ``tasks/<t>/scripts`` digests of the substantively adapted tasks."""
+def pinned_tasks(table: AdaptedScripts | None = None) -> frozenset[str]:
+    """Return the tasks whose native scripts are byte-pinned.
+
+    Args:
+      table: Adapted-script table; ``None`` is :func:`adapted_scripts`.
+
+    Returns:
+      tasks: Adapted and not normalised-only.
+
+    """
+    t = adapted_scripts() if table is None else table
+    return frozenset(t["adapted"]) - t["normalised_only"]
 
 
-def pinned_tasks() -> frozenset[str]:
-    """Tasks whose native scripts are byte-pinned: adapted and not normalised-only."""
-    return frozenset(ADAPTED_EVAL_SCRIPTS) - NORMALISED_ONLY
-
-
-def generate_pins(root: Path) -> dict[str, dict[str, str]]:
+def generate_pins(
+    root: Path,
+    table: AdaptedScripts | None = None,
+) -> dict[str, dict[str, str]]:
     """Hash every native script file of the pinned tasks under a clone ``root``.
 
     Regenerate after a deliberate upstream bump (review the diff first)::
 
-        uv --quiet run --frozen python -m priml.baselines.mlsbench.workspace_harbor pin [--root DIR] [--out FILE]  # noqa: E501
+        uv --quiet run --frozen python -m priml.baselines.mlsbench.scripts.pin_eval_scripts [--root DIR] [--out FILE]  # noqa: E501 -- one line for copy-paste.
+
+    Args:
+      root: The upstream clone.
+      table: Adapted-script table; ``None`` is :func:`adapted_scripts`.
+
+    Returns:
+      pins: Task to ``{relative path: sha256}`` of its native scripts.
+
     """
     out: dict[str, dict[str, str]] = {}
-    for task in sorted(pinned_tasks()):
+    for task in sorted(pinned_tasks(table)):
         d = Path(root) / "tasks" / task / "scripts"
         out[task] = {
             p.relative_to(d).as_posix(): sha256_file(p)
@@ -622,47 +547,39 @@ def generate_pins(root: Path) -> dict[str, dict[str, str]]:
 def check_native_pins(
     task: str,
     scripts_dir: Path,
-    pins: dict[str, dict[str, str]] | None = None,
+    pins: Mapping[str, Mapping[str, str]] | None = None,
 ) -> tuple[HarborViolation, ...]:
-    """Verify a native scripts tree byte-for-byte against the pinned digests."""
-    table = EVAL_SCRIPT_PINS if pins is None else pins
+    """Verify a native scripts tree byte-for-byte against the pinned digests.
+
+    Args:
+      task: Task name.
+      scripts_dir: The task's native ``scripts`` directory.
+      pins: Digest table; ``None`` is :func:`eval_script_pins`.
+
+    Returns:
+      violations: Missing, mismatched and unpinned files; empty when intact.
+
+    """
+    table = eval_script_pins() if pins is None else pins
     want = table.get(task, {})
     if not want:
-        return (HarborViolation("eval_script_pins", "eval_script_unpinned"),)
+        return (HarborViolation(path="eval_script_pins", kind="eval_script_unpinned"),)
     base = Path(scripts_dir)
     out: list[HarborViolation] = []
     for rel, digest in sorted(want.items()):
         q = base / rel
         if q.is_symlink() or not q.is_file():
-            out.append(HarborViolation(rel, "eval_script_missing"))
+            out.append(HarborViolation(path=rel, kind="eval_script_missing"))
         elif sha256_file(q) != digest:
-            out.append(HarborViolation(rel, "eval_script_pin_mismatch"))
+            out.append(HarborViolation(path=rel, kind="eval_script_pin_mismatch"))
     out.extend(
-        HarborViolation(rel, "eval_script_unpinned")
+        HarborViolation(path=rel, kind="eval_script_unpinned")
         for p in sorted(base.rglob("*"))
         if (p.is_file() or p.is_symlink())
         and "__pycache__" not in p.parts
         and (rel := p.relative_to(base).as_posix()) not in want
     )
     return tuple(out)
-
-
-def main(argv: list[str] | None = None) -> int:
-    """``pin`` subcommand: write ``eval_script_pins.json`` from a clone."""
-    import argparse  # noqa: PLC0415
-
-    ap = argparse.ArgumentParser(prog="workspace_harbor")
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    pin = sub.add_parser("pin", help="regenerate eval_script_pins.json")
-    pin.add_argument("--root", default=str(default_path(UPSTREAM_DIR)))
-    pin.add_argument("--out", default=str(PINS_PATH))
-    args = ap.parse_args(argv)
-    root = cast("str", args.root)
-    out = cast("str", args.out)
-    pins = generate_pins(Path(root))
-    Path(out).write_text(json.dumps(pins, indent=1, sort_keys=True) + "\n")
-    print(f"wrote {sum(map(len, pins.values()))} digests for {len(pins)} tasks")  # noqa: T201
-    return 0
 
 
 class EvalScriptsError(BundleError):
@@ -697,6 +614,14 @@ def eval_scripts_intact(
 
     Every regular file of the reference is compared byte for byte (not only ``*.sh``:
     helper modules such as ``_label_guard.py`` are executed too).
+
+    Args:
+      hb: The parsed bundle.
+      scripts_dir: The scripts about to run.
+
+    Returns:
+      violations: One per missing or modified file; empty when identical.
+
     """
     ref = hb.root / "tests" / "eval" / "scripts"
     out: list[HarborViolation] = []
@@ -704,9 +629,9 @@ def eval_scripts_intact(
         rel = p.relative_to(ref).as_posix()
         q = Path(scripts_dir) / rel
         if q.is_symlink() or not q.is_file():
-            out.append(HarborViolation(rel, "eval_script_missing"))
-        elif sha256_file(q) != sha256_file(p):
-            out.append(HarborViolation(rel, "eval_script_modified"))
+            out.append(HarborViolation(path=rel, kind="eval_script_missing"))
+        elif not filecmp.cmp(q, p, shallow=False):
+            out.append(HarborViolation(path=rel, kind="eval_script_modified"))
     return tuple(out)
 
 
@@ -714,6 +639,8 @@ def check_eval_scripts(
     task: str,
     hb: HarborBundle,
     scripts_dir: Path,
+    pins: Mapping[str, Mapping[str, str]] | None = None,
+    table: AdaptedScripts | None = None,
 ) -> tuple[str, ...]:
     """Refuse an edited or swapped eval script; return the names of adapted ones.
 
@@ -721,7 +648,14 @@ def check_eval_scripts(
     byte for byte; a normalised-only task must match after :func:`normalise_harbor_script`
     and differ on exactly the pinned files; a substantively adapted task must differ
     on exactly the pinned files and match the pinned sha256 of every native file
-    (:data:`EVAL_SCRIPT_PINS`).
+    (:func:`eval_script_pins`).
+
+    Args:
+      task: Task name.
+      hb: The parsed bundle.
+      scripts_dir: The scripts about to run.
+      pins: Digest table; ``None`` is :func:`eval_script_pins`.
+      table: Adapted-script table; ``None`` is :func:`adapted_scripts`.
 
     Returns:
       adapted: Sorted names of scripts that differ from Harbor's, all expected.
@@ -730,31 +664,68 @@ def check_eval_scripts(
       EvalScriptsError: Any deviation from the policy.
 
     """
+    t = adapted_scripts() if table is None else table
     found = eval_scripts_intact(hb, scripts_dir)
     names = tuple(sorted(v.path for v in found))
-    expected = ADAPTED_EVAL_SCRIPTS.get(task, ())
+    expected = t["adapted"].get(task, ())
     bad: list[HarborViolation] = [v for v in found if v.path not in expected]
-    if task in ADAPTED_EVAL_SCRIPTS:
-        # a pinned file that now matches Harbor's also signals drift (or a swap)
+    if task in t["adapted"]:
+        # A pinned file that now matches Harbor's also signals drift, or a swap.
         bad += [
-            HarborViolation(n, "eval_script_expected_adapted")
+            HarborViolation(path=n, kind="eval_script_expected_adapted")
             for n in expected
             if n not in names
         ]
-    if task in NORMALISED_ONLY:
+    if task in t["normalised_only"]:
         ref = hb.root / "tests" / "eval" / "scripts"
         for v in found:
             q = Path(scripts_dir) / v.path
             if v.kind == "eval_script_modified" and normalise_harbor_script(
                 (ref / v.path).read_text(errors="replace"),
             ) != normalise_harbor_script(q.read_text(errors="replace")):
-                bad.append(HarborViolation(v.path, "eval_script_modified"))
-    if task in pinned_tasks():
-        bad += check_native_pins(task, scripts_dir)
+                bad.append(HarborViolation(path=v.path, kind="eval_script_modified"))
+    if task in pinned_tasks(t):
+        bad += check_native_pins(task, scripts_dir, pins)
     if bad:
         raise EvalScriptsError(task, tuple(bad))
     return names
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+def _safe_rel(rel: object) -> str:
+    if not isinstance(rel, str) or not rel or "\\" in rel:
+        raise BundleError(f"unsafe path {rel!r}")
+    p = PurePosixPath(rel)
+    if p.is_absolute() or ".." in p.parts:
+        raise BundleError(f"unsafe path {rel!r}")
+    return p.as_posix()
+
+
+def _excluded(rel: str, excl: tuple[str, ...]) -> bool:
+    return any(rel == e or rel.startswith(e + "/") for e in excl)
+
+
+def _symlinked(root: Path, rel: str) -> bool:
+    """Report whether ``rel`` or any parent under ``root`` is a symlink."""
+    p = root
+    for part in PurePosixPath(rel).parts:
+        p = p / part
+        if p.is_symlink():
+            return True
+    return False
+
+
+class _BundleRange(TypedDict):
+    start: int
+    end: int
+
+
+class _BundleFile(TypedDict):
+    filename: str
+    edit: NotRequired[list[_BundleRange] | None]
+
+
+class _BundleConfig(TypedDict):
+    """The fields of ``tests/meta/config.json`` the guard reads; others pass."""
+
+    files: NotRequired[list[_BundleFile]]
+    guard_exclude: NotRequired[list[str] | None]

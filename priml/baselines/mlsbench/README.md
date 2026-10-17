@@ -18,16 +18,14 @@ MLS-Bench at the pinned commit `80cf5c5c` when the run starts.
 ```bash
 git clone https://github.com/Imbernoulli/MLS-Bench.git /opt/scratch/mlsbench
 git -C /opt/scratch/mlsbench checkout 80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c
-uv --quiet run --frozen python -m priml.baselines.mlsbench.scripts.prepare_data --all
 uv --quiet run --frozen python -m priml priml.baselines.mlsbench.tasks.llm_dllm_demask_strategy.exp002
 ```
 
 The clone is about 1.4 GB and needs no GPU. A different commit can change
 tasks under the registry, the goldens and the eval-script pins, so stay on the
-pinned one. The third command stages the data that tasks ship in their
-`data/` directories under `/opt/scratch/datasets/mlsbench_staged`, with a
-digest for every file. It is idempotent. The fourth runs one row, here
-`llm-dllm-demask-strategy` with baseline `klass`.
+pinned one. Data a task ships in `tasks/<task>/data` needs no staging: each
+setting's container mounts the task directory read-only. The third command
+runs one row, here `llm-dllm-demask-strategy` with baseline `klass`.
 
 Every setting runs in its upstream image, `bohanlyu2022/mlsbench-harbor-<package>`,
 pinned by digest in `testdata/image_lock.json`. Docker must be running. The first run of a
@@ -41,10 +39,9 @@ setting in the task's `config.json`). The settings of a task run one after anoth
 uv --quiet run --frozen python -m priml priml.baselines.mlsbench.tasks.llm_dllm_demask_strategy.exp002 --override base_dir=/data/me --override mlsbench_root=/clones/mls-bench
 ```
 
-Path fields are *logical*. `mlsbench_root` (the clone, `/mlsbench`),
-`data_root` (dataset binds, `/datasets/mlsbench`) and `staged_data`
-(`/datasets/mlsbench_staged`) resolve beneath the run's `base_dir`
-(`/opt/scratch` by default). Pass `/clones/mls-bench`, not the full on-disk
+Path fields are *logical*. `mlsbench_root` (the clone, `/mlsbench`) and
+`data_root` (dataset binds, `/datasets/mlsbench`) resolve beneath the run's
+`base_dir` (`/opt/scratch` by default). Pass `/clones/mls-bench`, not the full on-disk
 path. To move the whole tree at once, override `base_dir`. Task, baseline and
 seed are not overridable: each row is its own experiment.
 
@@ -53,7 +50,7 @@ It is a synthetic three-setting task with a fake executor that returns canned
 logs:
 
 ```bash
-uv --quiet run --frozen python -m priml.baselines.mlsbench.scripts.prepare_data --smoke
+uv --quiet run --frozen python -m priml.baselines.mlsbench.scripts.prepare_data
 uv --quiet run --frozen python -m priml priml.baselines.mlsbench.experiments.exp_smoke
 ```
 
@@ -61,8 +58,8 @@ Runs land in `<base_dir>/runs/mlsbench/<task>/<baseline>/seed<SEED>/metrics.json
 The verdict against the published row:
 
 ```bash
-uv --quiet run --frozen python -m priml.baselines.mlsbench.leaderboard --task llm-dllm-demask-strategy --row klass --runs /opt/scratch
-uv --quiet run --frozen python -m priml.baselines.mlsbench.leaderboard --all --runs /opt/scratch --include-missing
+uv --quiet run --frozen python -m priml.baselines.mlsbench.scripts.leaderboard --task llm-dllm-demask-strategy --row klass --runs /opt/scratch
+uv --quiet run --frozen python -m priml.baselines.mlsbench.scripts.leaderboard --all --runs /opt/scratch --include-missing
 ```
 
 Each row gets a verdict: `ok`, `diverged` or `unverified`, the worst over the
@@ -120,7 +117,7 @@ numbers against a published row. There, `diverged` only means the numbers
 differ from the row. Read the deltas against the task's metric directions.
 
 ```bash
-uv --quiet run --frozen python -m priml.baselines.mlsbench.leaderboard --task llm-dllm-demask-strategy --row klass --candidate my-idea --runs /opt/scratch
+uv --quiet run --frozen python -m priml.baselines.mlsbench.scripts.leaderboard --task llm-dllm-demask-strategy --row klass --candidate my-idea --runs /opt/scratch
 ```
 
 After an upstream bump, re-pin and regenerate:
@@ -128,6 +125,7 @@ After an upstream bump, re-pin and regenerate:
 ```bash
 uv --quiet run --frozen python -m priml.baselines.mlsbench.scripts.generate_experiments --registry
 uv --quiet run --frozen python -m priml.baselines.mlsbench.scripts.generate_experiments --write
+uv --quiet run --frozen python -m priml.baselines.mlsbench.scripts.pin_eval_scripts
 uv --quiet run --frozen python -m priml.baselines.mlsbench.scripts.pin_images --list
 uv --quiet run --frozen python -m priml.baselines.mlsbench.scripts.pin_images --package <package> --repin
 ```
@@ -139,16 +137,20 @@ uv --quiet run --frozen python -m priml.baselines.mlsbench.scripts.pin_images --
 | `task.py` | Parse a task from the clone: settings, baselines, leaderboard |
 | `data.py` | One `metric_only` batch per setting |
 | `train_step.py` | `NullStep`: the score comes from the metric, not a model |
-| `metric.py` | `MlsbenchSuite`: materialize, run each setting, parse its log |
+| `metric.py` | `MlsbenchSuite`: materialize, run each setting, record its numbers |
+| `setting.py` | A setting's env, data mounts and columns; the upstream parser |
 | `executor.py` | `LocalDocker` (the real run) and `FakeExecutor` (tests, `exp_smoke`) |
-| `workspace.py`, `workspace_harbor.py` | Apply an edit; guard the edit surface and the eval scripts |
-| `leaderboard.py` | Verdicts against the published rows; whole-benchmark aggregate |
+| `workspace.py` | Apply an edit and guard the edit surface |
+| `harbor.py` | Read Harbor bundles; guard eval scripts against their copy and the pins |
 | `experiments.py` | `MlsbenchEval`, `mlsbench_experiment(task, baseline, seed=)`, `exp_smoke` |
 | `tasks/` | The generated per-task modules; do not edit |
 | `registry.json` | Snapshot of the clone the generator reads |
 | `eval_script_pins.json` | Hashes of every task's eval scripts |
+| `harbor_adapted.json` | Tasks whose eval scripts Harbor ships patched |
 | `testing.py` | Synthetic MLS-Bench-shaped tasks |
-| `scripts/prepare_data.py` | Stage shipped task data; build the `exp_smoke` clone |
+| `scripts/prepare_data.py` | Build the `exp_smoke` clone |
+| `scripts/leaderboard.py` | Verdicts against the published rows; whole-benchmark aggregate |
+| `scripts/pin_eval_scripts.py` | Hashes in `eval_script_pins.json` |
 | `scripts/generate_experiments.py` | Registry and per-task modules |
 | `scripts/pin_images.py` | Image digests in `testdata/image_lock.json` |
 

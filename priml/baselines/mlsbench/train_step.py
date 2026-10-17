@@ -8,7 +8,7 @@ each loss entry point refuses loudly rather than return a fake one.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from configgle import Fig
 
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from priml.train.custom_types import TrainStepOutput
 
 
-_EVAL_ONLY = (
+_EVAL_ONLY: Final = (
     "The mlsbench harness evaluates edits by running task scripts; run it with "
     "TrainLoop eval_only=True. Every batch is metric-only, so the loop never "
     "asks the step for a loss."

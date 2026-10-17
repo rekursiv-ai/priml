@@ -16,10 +16,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Final, NoReturn, Protocol, runtime_checkable
 
 import contextlib
-import json
 import os
 import shutil
 import subprocess
@@ -27,35 +26,40 @@ import time
 import uuid
 
 from configgle import Fig
+from treekle import ReadError, json_loads
 
+
+_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from priml.baselines.mlsbench.task import Setting, TaskSpec  # noqa: TC004
-    from priml.baselines.mlsbench.workspace import Workspace  # noqa: TC004
+    from priml.baselines.mlsbench.task import (  # noqa: TC004 -- RunRequest field types resolve at runtime.
+        Setting,
+        TaskSpec,
+    )
+    from priml.baselines.mlsbench.workspace import (
+        Workspace,  # noqa: TC004 -- RunRequest field types resolve at runtime.
+    )
 
 
-_TESTDATA = Path(__file__).parent / "testdata"
-_SANITISED_PATH = "/usr/bin:/bin"
-_PASSTHROUGH_ENV = ("HOME", "DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT")
-_CONTAINER_ROOT = "/workspace"
+TESTDATA: Final = _CWD / "testdata"
+_CONTAINER_ROOT: Final = "/workspace"
 """Where the image keeps its package sources; also the container's working root."""
-_TASK_MOUNT = f"{_CONTAINER_ROOT}/_task"
+_TASK_MOUNT: Final = f"{_CONTAINER_ROOT}/_task"
 """Native runs bind the task directory here (scripts read ``/workspace/_task/data``)."""
-_OUTPUT_MOUNT = "/output"
-_INPUTGEN_MOUNT = "/tests/eval/_inputgen"
+OUTPUT_MOUNT: Final = "/output"
+_INPUTGEN_MOUNT: Final = "/tests/eval/_inputgen"
 """Where Harbor's verifier mounts the held-out input generator."""
-_DOCKER_FAILED = 125
+_DOCKER_FAILED: Final = 125
 """``docker run`` exits 125 when docker itself (not the container) fails."""
-_DAEMON_DOWN = ("cannot connect to the docker daemon", "is the docker daemon running")
 
 
 class ExecutorError(RuntimeError):
     """The executor could not run the request (not a timeout or a crash)."""
 
 
-class ExecutorUnavailable(ExecutorError):  # noqa: N818
+class ExecutorUnavailable(ExecutorError):  # noqa: N818 -- a subclass of ExecutorError; the suffix is on the base.
     """The docker binary is missing or its daemon is down."""
 
 
@@ -70,7 +74,7 @@ class Outcome(StrEnum):
     be materialized; the script was never run. ``RunResult.detail`` says which."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class RunRequest:
     """One setting of one task, in a materialized workspace."""
 
@@ -109,7 +113,7 @@ class RunRequest:
     them over ``/workspace`` read-only. Read at run time, never copied into a tree."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class RunResult:
     """What happened. ``returncode`` is ``None`` on timeout."""
 
@@ -127,23 +131,7 @@ class Executor(Protocol):
 
     def run(self, request: RunRequest) -> RunResult:
         """Run ``request`` and return its outcome."""
-        ...
-
-
-def _read_lock(path: Path) -> dict[str, str]:
-    try:
-        raw = cast("object", json.loads(path.read_text()))
-    except FileNotFoundError as e:
-        raise ExecutorError(f"image lock file not found: {path}") from e
-    except json.JSONDecodeError as e:
-        raise ExecutorError(f"image lock file is not valid JSON: {path}: {e}") from e
-    if not isinstance(raw, dict):
-        raise ExecutorError(f"image lock must map package -> ref: {path}")
-    lock = cast("dict[object, object]", raw)
-    out = {k: v for k, v in lock.items() if isinstance(k, str) and isinstance(v, str)}
-    if len(out) != len(lock):
-        raise ExecutorError(f"image lock must map package -> ref: {path}")
-    return out
+        raise NotImplementedError
 
 
 class LocalDocker:
@@ -192,13 +180,19 @@ class LocalDocker:
     def image_ref(self, package: str) -> str:
         """Return the digest-pinned image for ``package``.
 
+        Args:
+          package: The task package; matched as given, then lowercased.
+
+        Returns:
+          ref: ``repo@sha256:...``.
+
         Raises:
           ExecutorError: The lock has no digest for it. Never falls back to a tag.
 
         """
         lock = Path(self.config.image_lock)
         if not lock.is_absolute():
-            lock = _TESTDATA / lock
+            lock = TESTDATA / lock
         entries = _read_lock(lock)
         # Task configs say "LLaDA"; upstream image repos are lowercase ("llada").
         ref = entries.get(package) or entries.get(package.lower())
@@ -217,16 +211,29 @@ class LocalDocker:
         return found
 
     def _env(self) -> dict[str, str]:
-        env = {"PATH": _SANITISED_PATH}
-        env.update({k: os.environ[k] for k in _PASSTHROUGH_ENV if k in os.environ})
+        env = {"PATH": "/usr/bin:/bin"}
+        env.update(
+            {
+                k: os.environ[k]
+                for k in ("HOME", "DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT")
+                if k in os.environ
+            },
+        )
         return env
 
-    @staticmethod
-    def wants_gpus(request: RunRequest) -> bool:
+    @classmethod
+    def wants_gpus(cls, request: RunRequest) -> bool:
         """Whether the setting gets ``--gpus``: not for a CPU-only task.
 
         The bundle's GPU count decides (``compute`` can be a CPU share on a CPU-only
         task); without a bundle, a setting with ``compute == 0`` is CPU-only.
+
+        Args:
+          request: The setting to run.
+
+        Returns:
+          wanted: ``True`` when the container should get ``--gpus``.
+
         """
         if request.gpus is not None:
             return request.gpus > 0
@@ -278,15 +285,15 @@ class LocalDocker:
         owned = {
             "SEED": str(request.seed),
             "ENV": request.setting.label,
-            "OUTPUT_DIR": _OUTPUT_MOUNT,
-            "SAVE_PATH": _OUTPUT_MOUNT,
+            "OUTPUT_DIR": OUTPUT_MOUNT,
+            "SAVE_PATH": OUTPUT_MOUNT,
             "MLSBENCH_TASK_DIR": _TASK_MOUNT,
         }
         if pkg_dir:
             owned["MLSBENCH_PKG_DIR"] = workdir
         requested = dict(request.env)
         if user:
-            requested.pop("HOME", None)  # the host uid cannot write /root
+            requested.pop("HOME", None)  # The host uid cannot write /root.
         env = {**owned, **cfg.extra_env, **requested, **owned}
         for k, v in env.items():
             cmd += ["-e", f"{k}={v}"]
@@ -295,16 +302,14 @@ class LocalDocker:
         # and the script is ``bash /workspace/_task/<script>`` run from the package dir.
         for rel, src in self.workspace_files(request):
             cmd += ["-v", f"{src}:{_CONTAINER_ROOT}/{rel}:ro"]
-        task_root = cast("Path | None", getattr(request.task, "root", None))
-        if task_root is not None:
-            cmd += ["-v", f"{Path(task_root).resolve()}:{_TASK_MOUNT}:ro"]
-        cmd += ["-v", f"{out.resolve()}:{_OUTPUT_MOUNT}"]
+        cmd += ["-v", f"{request.task.root.resolve()}:{_TASK_MOUNT}:ro"]
+        cmd += ["-v", f"{out.resolve()}:{OUTPUT_MOUNT}"]
         for rel, src in generated:
             cmd += ["-v", f"{src}:{_CONTAINER_ROOT}/{rel}:ro"]
         for spec in (*cfg.binds, *request.binds):
             cmd += ["-v", spec]
         script = request.setting.script
-        if task_root is not None and not Path(script).is_absolute():
+        if not Path(script).is_absolute():
             script = f"{_TASK_MOUNT}/{script}"
         cmd += ["-w", workdir, image, "bash", script]
         return cmd
@@ -321,6 +326,13 @@ class LocalDocker:
         Files are mounted one by one so the image's own ``/workspace/<pkg>`` sources
         stay visible: the workspace holds only the task's declared files, and a
         directory mount would hide the rest of the package. Symlinks are skipped.
+
+        Args:
+          request: The setting to run.
+
+        Returns:
+          files: ``(relative path, host path)`` pairs, sorted.
+
         """
         root = Path(request.workspace.root).resolve()
         return [
@@ -333,6 +345,13 @@ class LocalDocker:
         """Top-level workspace directory of the setting's package, or ``""``.
 
         Matched like native runs do (case, ``-`` and ``_`` insensitive).
+
+        Args:
+          request: The setting to run.
+
+        Returns:
+          name: The matching directory name, or ``""``.
+
         """
 
         def norm(n: str) -> str:
@@ -358,8 +377,19 @@ class LocalDocker:
         Harbor's eval scripts, but writes into ``stage`` (mounted at ``/stage``) because
         the image's package directory is not writable by the host uid. The bundle's
         ``_inputgen`` directory is mounted read-only at ``/tests/eval/_inputgen``.
+
+        Args:
+          request: The setting to run; ``inputgen`` must be set.
+          image: Digest-pinned image reference.
+          name: Container name.
+          stage: Host directory the inputs are written to.
+
+        Returns:
+          argv: The full ``docker run`` argv.
+
         """
-        assert request.inputgen is not None
+        if request.inputgen is None:
+            raise ValueError("Expected request.inputgen is not None.")
         cfg = self.config
         cmd = [self._docker(), "run", "--rm", "--name", name]
         cmd += ["--security-opt", "no-new-privileges", "--network", "none"]
@@ -382,6 +412,11 @@ class LocalDocker:
     ) -> tuple[list[tuple[str, Path]], str]:
         """Materialize the bundle's held-out input blobs under ``<log>.inputs``.
 
+        Args:
+          request: The setting to run; ``inputgen`` must be set.
+          image: Digest-pinned image reference.
+          env: The sanitised environment docker runs under.
+
         Returns:
           files: ``(path relative to /workspace, host path)`` of every generated file.
           error: ``""`` on success, else why materialization failed (output goes to
@@ -396,7 +431,7 @@ class LocalDocker:
         request.log_path.parent.mkdir(parents=True, exist_ok=True)
         with request.log_path.open("wb") as log:
             try:
-                proc = subprocess.run(  # noqa: S603
+                proc = subprocess.run(  # noqa: S603 -- docker argv built here, no shell.
                     cmd,
                     stdout=log,
                     stderr=subprocess.STDOUT,
@@ -428,6 +463,12 @@ class LocalDocker:
         With ``request.inputgen`` the held-out inputs are materialized first; a failure
         there is ``Outcome.MISSING_INPUT`` (the script is not run).
 
+        Args:
+          request: The setting to run.
+
+        Returns:
+          result: The outcome, return code, log path and seconds.
+
         Raises:
           ExecutorUnavailable: docker is missing or its daemon is down.
           ExecutorError: No pinned image, or docker failed to start the container.
@@ -446,26 +487,26 @@ class LocalDocker:
             generated, error = self.generate_inputs(request, image, env)
             if error:
                 return RunResult(
-                    Outcome.MISSING_INPUT,
-                    None,
-                    request.log_path,
-                    time.monotonic() - start,
-                    error,
+                    outcome=Outcome.MISSING_INPUT,
+                    returncode=None,
+                    log_path=request.log_path,
+                    seconds=time.monotonic() - start,
+                    detail=error,
                 )
             # The log now holds the generator's output; the script's replaces it.
         remaining = request.setting.time_limit - (time.monotonic() - start)
         if remaining <= 0:
             return RunResult(
-                Outcome.TIMEOUT,
-                None,
-                request.log_path,
-                time.monotonic() - start,
+                outcome=Outcome.TIMEOUT,
+                returncode=None,
+                log_path=request.log_path,
+                seconds=time.monotonic() - start,
             )
         cmd = self.command(request, image, name, generated)
         request.log_path.parent.mkdir(parents=True, exist_ok=True)
         with request.log_path.open("wb") as log:
             try:
-                proc = subprocess.run(  # noqa: S603
+                proc = subprocess.run(  # noqa: S603 -- docker argv built here, no shell.
                     cmd,
                     stdout=log,
                     stderr=subprocess.STDOUT,
@@ -476,10 +517,10 @@ class LocalDocker:
             except subprocess.TimeoutExpired:
                 self._kill(name, env)
                 return RunResult(
-                    Outcome.TIMEOUT,
-                    None,
-                    request.log_path,
-                    time.monotonic() - start,
+                    outcome=Outcome.TIMEOUT,
+                    returncode=None,
+                    log_path=request.log_path,
+                    seconds=time.monotonic() - start,
                 )
             except FileNotFoundError as e:
                 raise ExecutorUnavailable(f"cannot execute docker: {e}") from e
@@ -488,7 +529,12 @@ class LocalDocker:
         if rc == _DOCKER_FAILED:
             self._raise_docker_failed(request.log_path, image)
         outcome = Outcome.OK if rc == 0 else Outcome.CRASHED
-        return RunResult(outcome, rc, request.log_path, seconds)
+        return RunResult(
+            outcome=outcome,
+            returncode=rc,
+            log_path=request.log_path,
+            seconds=seconds,
+        )
 
     def _ensure_image(
         self,
@@ -496,13 +542,7 @@ class LocalDocker:
         image: str,
         env: dict[str, str],
     ) -> None:
-        """Pull ``image`` unless it is already local; its output goes to the log.
-
-        Raises:
-          ExecutorUnavailable: docker is missing or its daemon is down.
-          ExecutorError: The pull failed.
-
-        """
+        """Pull ``image`` unless it is already local; its output goes to the log."""
         docker = self._docker()
         request.log_path.parent.mkdir(parents=True, exist_ok=True)
         with request.log_path.open("wb") as log:
@@ -511,7 +551,7 @@ class LocalDocker:
                     [docker, "image", "inspect", image],
                     [docker, "pull", image],
                 ):
-                    proc = subprocess.run(  # noqa: S603
+                    proc = subprocess.run(  # noqa: S603 -- docker argv built here, no shell.
                         cmd,
                         stdout=log,
                         stderr=subprocess.STDOUT,
@@ -524,18 +564,24 @@ class LocalDocker:
                 raise ExecutorUnavailable(f"cannot execute docker: {e}") from e
         self._raise_docker_failed(request.log_path, image)
 
-    @staticmethod
-    def _raise_docker_failed(log_path: Path, image: str) -> NoReturn:
+    @classmethod
+    def _raise_docker_failed(cls, log_path: Path, image: str) -> NoReturn:
         """Classify a docker-level failure (rc 125, or a failed pull): daemon down or not."""
         tail = log_path.read_text(errors="replace")[-2000:]
-        if any(s in tail.lower() for s in _DAEMON_DOWN):
+        if any(
+            s in tail.lower()
+            for s in (
+                "cannot connect to the docker daemon",
+                "is the docker daemon running",
+            )
+        ):
             raise ExecutorUnavailable(f"docker daemon unavailable: {tail.strip()}")
         raise ExecutorError(f"docker failed to run {image}: {tail.strip()}")
 
     def _kill(self, name: str, env: dict[str, str]) -> None:
         """Best-effort ``docker kill``; the client process is already dead."""
         with contextlib.suppress(subprocess.TimeoutExpired, OSError):
-            subprocess.run(  # noqa: S603
+            subprocess.run(  # noqa: S603 -- docker argv built here, no shell.
                 [self._docker(), "kill", name],
                 capture_output=True,
                 env=env,
@@ -564,7 +610,15 @@ class FakeExecutor:
         self.calls: list[RunRequest] = []
 
     def run(self, request: RunRequest) -> RunResult:
-        """Write the canned log and return the canned outcome."""
+        """Write the canned log and return the canned outcome.
+
+        Args:
+          request: The setting to run.
+
+        Returns:
+          result: The canned outcome for the setting's label.
+
+        """
         self.calls.append(request)
         label = request.setting.label
         outcome = Outcome(self.config.outcomes.get(label, Outcome.OK))
@@ -576,4 +630,20 @@ class FakeExecutor:
             Outcome.CRASHED: 1,
             Outcome.MISSING_INPUT: None,
         }[outcome]
-        return RunResult(outcome, rc, request.log_path, self.config.seconds)
+        return RunResult(
+            outcome=outcome,
+            returncode=rc,
+            log_path=request.log_path,
+            seconds=self.config.seconds,
+        )
+
+
+def _read_lock(path: Path) -> dict[str, str]:
+    try:
+        return json_loads(path.read_text(), dict[str, str])
+    except FileNotFoundError as e:
+        raise ExecutorError(f"image lock file not found: {path}") from e
+    except ReadError as e:
+        raise ExecutorError(f"image lock must map package -> ref: {path}") from e
+    except ValueError as e:
+        raise ExecutorError(f"image lock file is not valid JSON: {path}: {e}") from e

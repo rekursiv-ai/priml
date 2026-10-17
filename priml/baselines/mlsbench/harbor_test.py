@@ -1,6 +1,5 @@
-"""Tests for the Harbor pristine-manifest reader and byte-segment guard (synthetic bundles)."""
+"""Tests for the Harbor bundle reader, its guard and the eval-script pins."""
 
-# ruff: noqa: S603
 from __future__ import annotations
 
 from pathlib import Path
@@ -17,32 +16,31 @@ import tempfile
 
 import pytest
 
-from priml.baselines.mlsbench.task import TaskSpec, load_task
-from priml.baselines.mlsbench.testing import RUN_PY, build_task
-from priml.baselines.mlsbench.workspace import DiffGuardViolation, materialize
-from priml.baselines.mlsbench.workspace_harbor import (
-    ADAPTED_EVAL_SCRIPTS,
-    EVAL_SCRIPT_PINS,
-    NORMALISED_ONLY,
+from priml.baselines.mlsbench import harbor
+from priml.baselines.mlsbench.harbor import (
+    AdaptedScripts,
     BundleError,
     EvalScriptsError,
     HarborBundle,
+    adapted_scripts,
     allow_internet,
     bundle_dir,
     bundle_gpus,
     check_eval_scripts,
     check_native_pins,
     check_segments,
+    eval_script_pins,
     eval_scripts_intact,
     find_bundle,
     generate_pins,
     guard,
     load_bundle,
-    main,
     normalise_harbor_script,
     pinned_tasks,
     sanitised_env,
 )
+from priml.baselines.mlsbench.scripts import pin_eval_scripts
+from priml.baselines.mlsbench.testing import RUN_PY
 
 
 def _sha(b: bytes) -> str:
@@ -80,15 +78,20 @@ def make_bundle(
     return b
 
 
+def _table(*, normalised: bool = False) -> AdaptedScripts:
+    """Return an adapted-script table naming only ``toy``'s ``a.sh``."""
+    return AdaptedScripts(
+        adapted={"toy": ("a.sh",)},
+        normalised_only=frozenset({"toy"} if normalised else ()),
+    )
+
+
 def make_ws(root: Path, extra: dict[str, bytes], declared: str = "pkg/run.py") -> Path:
     ws = root / "ws"
     for k, v in {declared: RUN_PY.encode(), **extra}.items():
         (ws / k).parent.mkdir(parents=True, exist_ok=True)
         (ws / k).write_bytes(v)
     return ws
-
-
-# -- check_segments -----------------------------------------------------------
 
 
 def _sub(n: int, new: bytes) -> bytes:
@@ -125,7 +128,9 @@ def test_segments_fixed_deleted_with_duplicate_in_edit_fails():
 
 def test_segments_crlf_not_normalised():
     p = b"a\nb\nc\nd\n"
-    assert check_segments(p, b"a\r\nb\nc\nd\n", ((2, 3),)) is not None  # line a altered
+    assert (
+        check_segments(p, b"a\r\nb\nc\nd\n", ((2, 3),)) is not None
+    )  # Line a altered.
     assert check_segments(p, b"a\nB\r\nc\nd\n", ((2, 3),)) is None
 
 
@@ -146,7 +151,40 @@ def test_segments_swapped_order_fails():
     assert check_segments(p, cur, ((2, 2), (4, 4))) is not None
 
 
-# -- bundle reader ------------------------------------------------------------
+def test_segments_overlap_merge_and_fixed_line_checks():
+    assert check_segments(b"a\nb\na\n", b"a\n", ((2, 2),)) is not None
+    p = b"a\nb\nc\nd\ne\n"
+    assert check_segments(p, b"a\nX\nY\nZ\ne\n", ((2, 3), (3, 4))) is None
+    got = check_segments(b"A\ne\nB\ne\nC\n", b"A\nB\nA\ne\nC\n", ((2, 2), (4, 4)))
+    assert got == "fixed line(s) [3] changed"
+
+
+@pytest.mark.parametrize(
+    "files",
+    [[{"filename": 3}], [{"filename": ""}], [{"filename": "a\\b"}]],
+)
+def test_config_rejects_unsafe_filenames(tmp_path: Path, files: list[object]):
+    b = make_bundle(tmp_path)
+    (b / "tests/meta/config.json").write_text(json.dumps({"files": files}))
+    with pytest.raises(BundleError):
+        load_bundle(b)
+
+
+def test_config_unusable_fails_closed(tmp_path: Path):
+    b = make_bundle(tmp_path)
+    (b / "tests/meta/config.json").unlink()
+    with pytest.raises(BundleError, match=r"config\.json unusable"):
+        load_bundle(b)
+
+
+def test_guard_declared_file_without_pristine(tmp_path: Path):
+    b = make_bundle(tmp_path)
+    (b / "tests/meta/pristine/pkg/run.py").unlink()
+    ws = make_ws(tmp_path, {})
+    assert [v.kind for v in guard(load_bundle(b), ws)] == ["pristine_missing"]
+    whole = load_bundle(make_bundle(tmp_path / "w", ranges=[[-1, -1]]))
+    (whole.pristine_root / "pkg/run.py").unlink()
+    assert guard(whole, ws) == ()
 
 
 def test_load_bundle(tmp_path: Path):
@@ -182,9 +220,6 @@ def test_bundle_dir_lookup(tmp_path: Path):
     assert bundle_dir("toy", root=root).name == "mls-bench__toy"
     with pytest.raises(BundleError):
         bundle_dir("nope", root=root)
-
-
-# -- tamper cases through guard ----------------------------------------------
 
 
 @pytest.fixture
@@ -244,7 +279,7 @@ def test_guard_deleted_file(hb: HarborBundle, tmp_path: Path):
 def test_guard_symlink_swap_unlisted(hb: HarborBundle, tmp_path: Path):
     ws = make_ws(tmp_path, _EXTRA)
     (ws / "pkg/eval.py").unlink()
-    (tmp_path / "evil.py").write_bytes(b"score()\n")  # same content as pristine!
+    (tmp_path / "evil.py").write_bytes(b"score()\n")  # Same content as pristine!
     (ws / "pkg/eval.py").symlink_to(tmp_path / "evil.py")
     assert [v.kind for v in guard(hb, ws)] == ["symlink"]
 
@@ -341,77 +376,82 @@ def test_check_eval_scripts_refuses_a_swapped_or_removed_script(
 def test_check_eval_scripts_normalised_task_allows_only_documented_additions(
     hb: HarborBundle,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setitem(ADAPTED_EVAL_SCRIPTS, "toy", ("a.sh",))
-    monkeypatch.setattr(
-        "priml.baselines.mlsbench.workspace_harbor.NORMALISED_ONLY",
-        NORMALISED_ONLY | {"toy"},
-    )
+    table = _table(normalised=True)
     harbor = hb.root / "tests/eval/scripts/a.sh"
     harbor.write_text(
         "cd /workspace\n"
         'python "/tests/eval/_inputgen/apply.py" "toy" /workspace\n'
         "cd /workspace/pkg\necho eval\n",
     )
-    assert check_eval_scripts("toy", hb, _scripts(tmp_path)) == ("a.sh",)
+    assert check_eval_scripts("toy", hb, _scripts(tmp_path), table=table) == ("a.sh",)
     with pytest.raises(EvalScriptsError, match=r"eval_script_modified a.sh"):
-        check_eval_scripts("toy", hb, _scripts(tmp_path, "echo evil\n"))
-    # an undocumented extra line on the Harbor side is not normalised away
+        check_eval_scripts("toy", hb, _scripts(tmp_path, "echo evil\n"), table=table)
+    # An undocumented extra line on the Harbor side is not normalised away.
     harbor.write_text("cd /workspace\nrm -rf x\necho eval\n")
     with pytest.raises(EvalScriptsError, match=r"eval_script_modified a.sh"):
-        check_eval_scripts("toy", hb, _scripts(tmp_path))
+        check_eval_scripts("toy", hb, _scripts(tmp_path), table=table)
 
 
 def test_check_eval_scripts_substantive_task_pins_the_differing_files(
     hb: HarborBundle,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setitem(ADAPTED_EVAL_SCRIPTS, "toy", ("a.sh",))
-    monkeypatch.setitem(EVAL_SCRIPT_PINS, "toy", {"a.sh": _sha(b"echo native\n")})
-    assert check_eval_scripts("toy", hb, _scripts(tmp_path, "echo native\n")) == (
-        "a.sh",
-    )
-    # a pinned adaptation that vanished is drift and refuses too
+    table = _table()
+    pins = {"toy": {"a.sh": _sha(b"echo native\n")}}
+    assert check_eval_scripts(
+        "toy",
+        hb,
+        _scripts(tmp_path, "echo native\n"),
+        pins,
+        table,
+    ) == ("a.sh",)
+    # A pinned adaptation that vanished is drift and refuses too.
     with pytest.raises(EvalScriptsError, match=r"eval_script_expected_adapted a.sh"):
-        check_eval_scripts("toy", hb, _scripts(tmp_path))
-    # a different file differing is a swap
+        check_eval_scripts("toy", hb, _scripts(tmp_path), pins, table)
+    # A different file differing is a swap.
     (hb.root / "tests/eval/scripts/b.sh").write_text("echo b\n")
     (tmp_path / "scripts/a.sh").write_text("echo native\n")
     (tmp_path / "scripts/b.sh").write_text("echo swapped\n")
     with pytest.raises(EvalScriptsError, match=r"eval_script_modified b.sh"):
-        check_eval_scripts("toy", hb, _scripts(tmp_path, "echo native\n"))
+        check_eval_scripts("toy", hb, _scripts(tmp_path, "echo native\n"), pins, table)
 
 
 def test_substantive_task_bytes_are_pinned_not_just_the_file_set(
     hb: HarborBundle,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setitem(ADAPTED_EVAL_SCRIPTS, "toy", ("a.sh",))
-    monkeypatch.setitem(EVAL_SCRIPT_PINS, "toy", {"a.sh": _sha(b"echo native\n")})
-    assert check_eval_scripts("toy", hb, _scripts(tmp_path, "echo native\n")) == (
-        "a.sh",
-    )
-    # same differing-file set, different bytes: refused
+    table = _table()
+    pins = {"toy": {"a.sh": _sha(b"echo native\n")}}
+    assert check_eval_scripts(
+        "toy",
+        hb,
+        _scripts(tmp_path, "echo native\n"),
+        pins,
+        table,
+    ) == ("a.sh",)
+    # Same differing-file set, different bytes: refused.
     with pytest.raises(EvalScriptsError, match=r"eval_script_pin_mismatch a.sh"):
-        check_eval_scripts("toy", hb, _scripts(tmp_path, "echo native \n"))
-    # an extra, unpinned file is refused
+        check_eval_scripts("toy", hb, _scripts(tmp_path, "echo native \n"), pins, table)
+    # An extra, unpinned file is refused.
     d = _scripts(tmp_path, "echo native\n")
     (d / "extra.sh").write_text("echo x\n")
     with pytest.raises(EvalScriptsError, match=r"eval_script_unpinned extra.sh"):
-        check_eval_scripts("toy", hb, d)
+        check_eval_scripts("toy", hb, d, pins, table)
 
 
 def test_substantive_task_without_a_pin_fails_closed(
     hb: HarborBundle,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setitem(ADAPTED_EVAL_SCRIPTS, "toy", ("a.sh",))
     with pytest.raises(EvalScriptsError, match=r"eval_script_unpinned"):
-        check_eval_scripts("toy", hb, _scripts(tmp_path, "echo native\n"))
+        check_eval_scripts(
+            "toy",
+            hb,
+            _scripts(tmp_path, "echo native\n"),
+            pins={},
+            table=_table(),
+        )
 
 
 def test_check_native_pins_reports_missing_and_symlinked(tmp_path: Path):
@@ -423,9 +463,9 @@ def test_check_native_pins_reports_missing_and_symlinked(tmp_path: Path):
 
 
 def test_shipped_pins_cover_exactly_the_substantive_tasks():
-    assert set(EVAL_SCRIPT_PINS) == pinned_tasks()
+    assert set(eval_script_pins()) == pinned_tasks()
     assert len(pinned_tasks()) == 20
-    for task, files in EVAL_SCRIPT_PINS.items():
+    for task, files in eval_script_pins().items():
         assert files, task
         assert all(re.fullmatch(r"[0-9a-f]{64}", h) for h in files.values()), task
 
@@ -434,22 +474,16 @@ def test_generate_pins_and_pin_cli_roundtrip(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr(
-        "priml.baselines.mlsbench.workspace_harbor.ADAPTED_EVAL_SCRIPTS",
-        {"toy": ("a.sh",)},
-    )
-    monkeypatch.setattr(
-        "priml.baselines.mlsbench.workspace_harbor.NORMALISED_ONLY",
-        frozenset[str](),
-    )
+    monkeypatch.setattr(harbor, "adapted_scripts", _table)
     sd = tmp_path / "clone/tasks/toy/scripts"
     (sd / "sub").mkdir(parents=True)
     (sd / "a.sh").write_bytes(b"A")
     (sd / "sub/b.py").write_bytes(b"B")
     want = {"toy": {"a.sh": _sha(b"A"), "sub/b.py": _sha(b"B")}}
-    assert generate_pins(tmp_path / "clone") == want
+    assert generate_pins(tmp_path / "clone", _table()) == want
     out = tmp_path / "pins.json"
-    assert main(["pin", "--root", str(tmp_path / "clone"), "--out", str(out)]) == 0
+    argv = ["--root", str(tmp_path / "clone"), "--out", str(out)]
+    assert pin_eval_scripts.main(argv) == 0
     assert json.loads(out.read_text()) == want
 
 
@@ -468,13 +502,11 @@ def test_normalise_harbor_script_strips_only_documented_lines():
 
 
 def test_adapted_table_is_consistent():
-    assert len(ADAPTED_EVAL_SCRIPTS) == 32
-    assert set(ADAPTED_EVAL_SCRIPTS) >= NORMALISED_ONLY
-    assert len(NORMALISED_ONLY) == 12
-    assert all(files for files in ADAPTED_EVAL_SCRIPTS.values())
-
-
-# -- PATH shadowing -----------------------------------------------------------
+    table = adapted_scripts()
+    assert len(table["adapted"]) == 32
+    assert set(table["adapted"]) >= table["normalised_only"]
+    assert len(table["normalised_only"]) == 12
+    assert all(files for files in table["adapted"].values())
 
 
 def test_sanitised_env_drops_shadowing():
@@ -494,90 +526,6 @@ def test_sanitised_env_drops_shadowing():
     assert env["PYTHONNOUSERSITE"] == "1"
 
 
-def test_edit_subprocess_ignores_shadow_path(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    shim = tmp_path / "shim"
-    shim.mkdir()
-    (shim / "python3").write_text(f"#!/bin/sh\ntouch {tmp_path}/pwned\n")
-    (shim / "python3").chmod(0o755)
-    monkeypatch.setenv("PATH", f"{shim}:{os.environ['PATH']}")
-    monkeypatch.setenv("PYTHONSTARTUP", str(shim / "s.py"))
-    up = build_task(tmp_path / "up")
-    task = load_task("toy-task", root=up)
-    bdl = make_bundle(tmp_path / "b", declared="run.py")
-    probe = tmp_path / "probe.edit.py"
-    probe.write_text(
-        "import os, shutil, sys\n"
-        "assert str(sys.argv[0]) and 'PYTHONSTARTUP' not in os.environ\n"
-        "assert 'shim' not in os.environ['PATH']\n"
-        f"assert shutil.which('python3') != {str(shim / 'python3')!r}\n",
-    )
-    materialize(task, tmp_path / "run", edit=probe, bundle=bdl)
-    assert not (tmp_path / "pwned").exists()
-    assert subprocess.run(  # sanity: the un-sanitised env would have found the shim
-        ["/bin/sh", "-c", "command -v python3"],
-        capture_output=True,
-        text=True,
-        check=False,
-    ).stdout.startswith(str(shim))
-
-
-# -- materialize with bundle ---------------------------------------------------
-
-
-@pytest.fixture
-def toy(tmp_path: Path) -> tuple[TaskSpec, Path]:
-    task = load_task("toy-task", root=build_task(tmp_path / "up"))
-    return task, make_bundle(tmp_path / "b", declared="run.py")
-
-
-def test_materialize_bundle_ok(toy: tuple[TaskSpec, Path], tmp_path: Path):
-    task, b = toy
-    ws = materialize(task, tmp_path / "r", edit=None, bundle=b)
-    assert (ws.root / "run.py").read_bytes() == RUN_PY.encode()
-
-
-def test_materialize_bundle_violation(toy: tuple[TaskSpec, Path], tmp_path: Path):
-    task, b = toy
-    bad = tmp_path / "bad.edit.py"
-    bad.write_text(
-        "import sys, pathlib\np = pathlib.Path(sys.argv[1]) / 'run.py'\n"
-        "p.write_bytes(b'X\\n' + p.read_bytes())\n",
-    )
-    with pytest.raises(DiffGuardViolation) as ei:
-        materialize(task, tmp_path / "r", edit=bad, bundle=b)
-    assert ei.value.violations[0].kind == "outside_range"
-
-
-def test_materialize_bundle_symlink_swap(toy: tuple[TaskSpec, Path], tmp_path: Path):
-    task, b = toy
-    sw = tmp_path / "sw.edit.py"
-    sw.write_text(
-        "import sys, pathlib\nd = pathlib.Path(sys.argv[1])\n"
-        "t = d.parent / 'tgt.py'; t.write_bytes((d / 'run.py').read_bytes())\n"
-        "(d / 'run.py').unlink(); (d / 'run.py').symlink_to(t)\n",
-    )
-    with pytest.raises(DiffGuardViolation) as ei:
-        materialize(task, tmp_path / "r", edit=sw, bundle=b)
-    assert "symlink" in {v.kind for v in ei.value.violations}
-
-
-def test_materialize_bundle_source_tamper(toy: tuple[TaskSpec, Path], tmp_path: Path):
-    task, b = toy
-    (b / "tests/meta/pristine/run.py").write_text("tampered\n")
-    with pytest.raises(BundleError, match="differs"):
-        materialize(task, tmp_path / "r", edit=None, bundle=b)
-
-
-def test_materialize_bundle_range_mismatch(tmp_path: Path):
-    task = load_task("toy-task", root=build_task(tmp_path / "up"))
-    b = make_bundle(tmp_path / "b", declared="run.py", ranges=[[1, 20]])
-    with pytest.raises(BundleError, match="disagree"):
-        materialize(task, tmp_path / "r", edit=None, bundle=b)
-
-
 def test_python_still_runs_guard_module_isolated():
     # The module must import without touching upstream or the network.
     r = subprocess.run(
@@ -585,16 +533,13 @@ def test_python_still_runs_guard_module_isolated():
             sys.executable,
             "-I",
             "-c",
-            "import priml.baselines.mlsbench.workspace_harbor",
+            "import priml.baselines.mlsbench.workspace",
         ],
         capture_output=True,
         check=False,
         env=sanitised_env({"HOME": os.environ.get("HOME", "/")}),
     )
     assert r.returncode in {0, 1}
-
-
-# -- opt-in: real Harbor bundle -------------------------------------------------
 
 
 @pytest.mark.integration
@@ -610,7 +555,7 @@ def test_real_bundle_dllm():
     assert _sha(pristine) == hb.manifest[rel]
     assert len(hb.manifest) > 1000
 
-    # pristine workspace: only the declared file is present -> clean w/o deletion check
+    # Pristine workspace: only the declared file is present -> clean w/o deletion check.
     with tempfile.TemporaryDirectory() as td:
         ws = Path(td) / "ws"
         (ws / rel).parent.mkdir(parents=True)
@@ -625,7 +570,7 @@ def test_real_bundle_dllm():
             "outside_range",
         ]
 
-    # every baseline edit script must yield a clean guard on the declared file
+    # Every baseline edit script must yield a clean guard on the declared file.
     scripts = sorted((bd / "tests/meta/edits").glob("*.edit.py"))
     assert scripts
     for s in scripts:
@@ -633,7 +578,7 @@ def test_real_bundle_dllm():
             ws = Path(td)
             (ws / rel).parent.mkdir(parents=True)
             (ws / rel).write_bytes(pristine)
-            r = subprocess.run(
+            r = subprocess.run(  # noqa: S603 -- fixed interpreter and test-owned argv.
                 [sys.executable, "-I", str(s), str(ws)],
                 cwd=ws,
                 env=sanitised_env(),
@@ -653,25 +598,25 @@ def test_real_clone_pins_match_and_one_byte_change_is_refused(tmp_path: Path):
     """Pins equal the clone's native scripts; a one-byte change is refused.
 
     A deliberate upstream bump regenerates them: ``python -m
-    priml.baselines.mlsbench.workspace_harbor pin`` (see ``generate_pins``); review the
+    priml.baselines.mlsbench.scripts.pin_eval_scripts`` (see ``generate_pins``); review the
     JSON diff before accepting.
     """
     root = os.environ.get("MLSBENCH_ROOT", "")
     if not root:
         pytest.skip("MLSBENCH_ROOT not set")
-    assert generate_pins(Path(root)) == EVAL_SCRIPT_PINS
+    assert generate_pins(Path(root)) == eval_script_pins()
     for task in sorted(pinned_tasks()):
         sd = Path(root) / "tasks" / task / "scripts"
         assert check_native_pins(task, sd) == (), task
     task = (
         "llm-dllm-demask-strategy"
-        if "llm-dllm-demask-strategy" in EVAL_SCRIPT_PINS
-        else min(EVAL_SCRIPT_PINS)
+        if "llm-dllm-demask-strategy" in eval_script_pins()
+        else min(eval_script_pins())
     )
     src = Path(root) / "tasks" / task / "scripts"
     copy = tmp_path / "scripts"
     shutil.copytree(src, copy)
-    victim = copy / min(EVAL_SCRIPT_PINS[task])
+    victim = copy / min(eval_script_pins()[task])
     victim.write_bytes(victim.read_bytes() + b"\n")
     hb = load_bundle(bundle_dir(task, root=Path(root)))
     with pytest.raises(EvalScriptsError, match=r"eval_script_pin_mismatch"):
@@ -696,6 +641,12 @@ def test_bundle_gpus_reads_task_toml(tmp_path: Path) -> None:
     (tmp_path / "task.toml").write_text("[environment]\ngpus = 3\n")
     assert bundle_gpus(tmp_path) == 3
     (tmp_path / "task.toml").write_text("[environment]\ncpus = 8\n")
-    assert bundle_gpus(tmp_path) == 0  # Harbor's default: no GPU
+    assert bundle_gpus(tmp_path) == 0  # Harbor's default: no GPU.
     (tmp_path / "task.toml").write_text("[environment]\ngpus = 'two'\n")
     assert bundle_gpus(tmp_path) is None
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

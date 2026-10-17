@@ -1,4 +1,9 @@
-"""Place a run's metrics back on an MLS-Bench task's published leaderboard.
+#!/bin/sh
+# ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
+# fmt: off
+'''' 2>/dev/null #
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+Place a run's metrics back on an MLS-Bench task's published leaderboard.
 
 Verdict layer of the mlsbench harness. For one leaderboard row it compares the
 measured ``<metric>_<setting>`` values with the published cells and says, per
@@ -27,9 +32,11 @@ be ``diverged`` but never ``ok`` (the missing seeds are listed).
 
 Torch-free. Run::
 
-    uv --quiet run --frozen python -m priml.baselines.mlsbench.leaderboard --task T --runs DIR [--row R]
-    uv --quiet run --frozen python -m priml.baselines.mlsbench.leaderboard --all --runs BASE_DIR [--include-missing]
-"""
+    uv --quiet run --frozen python -m priml.baselines.mlsbench.scripts.leaderboard --task T --runs DIR [--row R]
+    uv --quiet run --frozen python -m priml.baselines.mlsbench.scripts.leaderboard --all --runs BASE_DIR [--include-missing]
+
+'''
+# fmt: on
 
 from __future__ import annotations
 
@@ -40,12 +47,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import argparse
+import functools
 import math
 import statistics
-import sys
 
-from priml.baselines.mlsbench.scripts.prepare_data import UPSTREAM_DIR, default_path
-from priml.baselines.mlsbench.task import LeaderboardRow, parse_leaderboard
+from priml.baselines.mlsbench.experiments import MlsbenchEval
+from priml.baselines.mlsbench.task import load_task, task_names
+from priml.paths import resolve_working_dir
 from priml.train.results import read_metrics
 
 
@@ -70,7 +78,7 @@ class MetricKind(StrEnum):
     MULTI_SEED = "multi_seed"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class Tolerance:
     """A metric kind and its absolute tolerance."""
 
@@ -84,10 +92,6 @@ DEFAULT_TOLERANCES: Final[Mapping[MetricKind, float]] = {
 }
 """Plan defaults: exact for deterministic counts, 2 points for accuracy."""
 
-_EXACT_PREFIXES: Final = ("avg_steps", "steps", "num_")
-_ACCURACY_PREFIXES: Final = ("accuracy", "pass", "acc")
-_REL_EPS: Final = 1e-9
-
 
 def classify(metric: str) -> MetricKind:
     """Classify a metric (or ``<metric>_<setting>`` column) by its name.
@@ -100,14 +104,14 @@ def classify(metric: str) -> MetricKind:
         names, else ``CONTINUOUS`` (unknown names included).
 
     """
-    if metric.startswith(_EXACT_PREFIXES):
+    if metric.startswith(("avg_steps", "steps", "num_")):
         return MetricKind.EXACT
-    if metric.startswith(_ACCURACY_PREFIXES):
+    if metric.startswith(("accuracy", "pass", "acc")):
         return MetricKind.ACCURACY
     return MetricKind.CONTINUOUS
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class TaskOverrides:
     """Per-task adjustments, keyed by leaderboard column name.
 
@@ -126,7 +130,7 @@ class TaskOverrides:
     scale: Mapping[str, float] = field(default_factory=dict[str, float])
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class Comparison:
     """One column, measured against its published cell."""
 
@@ -140,7 +144,7 @@ class Comparison:
     reason: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class RowReport:
     """All comparisons for one leaderboard row; ``verdict`` is worst-of its published columns."""
 
@@ -149,10 +153,6 @@ class RowReport:
     seed_count: int
     comparisons: tuple[Comparison, ...]
     verdict: Verdict
-
-
-PublishedRow = LeaderboardRow
-"""One parsed ``leaderboard.csv`` baseline (mean over seeds, spread, per-seed values)."""
 
 
 class _RowLike(Protocol):
@@ -170,29 +170,6 @@ class _TaskLike(Protocol):
     def row(self, name: str) -> _RowLike: ...
 
 
-def read_leaderboard_csv(path: Path) -> tuple[LeaderboardRow, ...]:
-    """Read a task's ``leaderboard.csv`` (upstream's long format).
-
-    Header is ``timestamp,model,is_final,seed,<columns>``; ``model`` is
-    ``baseline:<name>`` and ``seed`` an integer or ``mean``. One
-    :class:`LeaderboardRow` per baseline: ``values`` is the ``mean`` row (or the
-    mean of the seed rows), ``spread`` the sample standard deviation over seeds.
-    Empty cells mean "no published value" and are omitted.
-
-    Args:
-      path: The csv file.
-
-    Returns:
-      rows: One per baseline, in file order.
-
-    Raises:
-      MissingFileError: ``path`` does not exist.
-      TaskSpecError: Bad header, model, seed, duplicate row or non-numeric cell.
-
-    """
-    return parse_leaderboard(path)
-
-
 def read_metrics_file(run_dir: Path) -> dict[str, float]:
     """Read ``<run_dir>/metrics.json``; keep ``eval/*`` keys, prefix stripped.
 
@@ -207,108 +184,11 @@ def read_metrics_file(run_dir: Path) -> dict[str, float]:
     return {k.removeprefix("eval/"): v for k, v in raw.items() if k.startswith("eval/")}
 
 
-def _within(delta: float, atol: float) -> bool:
-    return abs(delta) <= atol * (1 + _REL_EPS) + 1e-12
-
-
-def _judge(  # noqa: PLR0917
-    column: str,
-    published: float | None,
-    values: list[float],
-    spread: float | None,
-    overrides: TaskOverrides,
-    n_runs: int,
-) -> Comparison:
-    kind = overrides.kinds.get(column, classify(column))
-    multi = kind != MetricKind.EXACT and (n_runs > 1 or spread is not None)
-    if multi:
-        kind = MetricKind.MULTI_SEED
-
-    def out(
-        verdict: Verdict,
-        reason: str,
-        measured: float | None = None,
-        atol: float | None = None,
-    ) -> Comparison:
-        delta = None if measured is None or published is None else measured - published
-        return Comparison(
-            column,
-            published,
-            measured,
-            delta,
-            kind,
-            atol,
-            verdict,
-            reason,
-        )
-
-    measured = statistics.fmean(values) if values else None
-    if published is None:
-        return out(Verdict.UNVERIFIED, "no published value", measured)
-    if measured is None:
-        return out(Verdict.UNVERIFIED, "not measured")
-    delta = measured - published
-
-    if kind == MetricKind.MULTI_SEED:
-        std = statistics.stdev(values) if len(values) > 1 else None
-        candidates = [x for x in (spread, std) if x is not None]
-        if not candidates:
-            return out(Verdict.UNVERIFIED, "no seed spread available", measured)
-        tol = max(candidates)
-        if _within(delta, tol):
-            return out(Verdict.OK, f"within seed spread {tol:g}", measured, tol)
-        return out(
-            Verdict.DIVERGED,
-            f"|delta|={abs(delta):g} exceeds seed spread {tol:g}",
-            measured,
-            tol,
-        )
-
-    if kind == MetricKind.CONTINUOUS:
-        atol = overrides.continuous_atol.get(column)
-        if atol is None:
-            return out(Verdict.UNVERIFIED, "noise not measured", measured)
-    elif kind == MetricKind.ACCURACY:
-        atol = DEFAULT_TOLERANCES[MetricKind.ACCURACY] * overrides.scale.get(
-            column,
-            1.0,
-        )
-    else:
-        atol = DEFAULT_TOLERANCES[MetricKind.EXACT]
-    if _within(delta, atol):
-        return out(Verdict.OK, f"within {atol:g}", measured, atol)
-    return out(
-        Verdict.DIVERGED,
-        f"|delta|={abs(delta):g} exceeds {atol:g}",
-        measured,
-        atol,
-    )
-
-
-def _worst(verdicts: Sequence[Verdict]) -> Verdict:
-    if Verdict.DIVERGED in verdicts:
-        return Verdict.DIVERGED
-    if Verdict.UNVERIFIED in verdicts or not verdicts:
-        return Verdict.UNVERIFIED
-    return Verdict.OK
-
-
-def _published_for(row: _RowLike, seeds: Sequence[int] | None) -> Mapping[str, float]:
-    if seeds is None or len(seeds) == 0 or any(s not in row.seeds for s in seeds):
-        return row.values
-    out = dict(row.values)
-    for col in row.values:
-        cells = [row.seeds[s].get(col) for s in seeds]
-        if all(c is not None for c in cells):
-            out[col] = statistics.fmean(c for c in cells if c is not None)
-    return out
-
-
 def compare(
     task: TaskSpec | _TaskLike,
     row: str,
     runs: Sequence[Mapping[str, float]],
-    overrides: TaskOverrides = TaskOverrides(),  # noqa: B008
+    overrides: TaskOverrides = TaskOverrides(),  # noqa: B008 -- frozen, so a shared default is safe.
     seeds: Sequence[int] | None = None,
 ) -> RowReport:
     """Compare measured runs of one row with the published row.
@@ -371,10 +251,6 @@ def headline(reports: Sequence[RowReport]) -> tuple[int, int, int]:
     return ok, diverged, len(reports) - ok - diverged
 
 
-def _fmt(value: float | None) -> str:
-    return "-" if value is None else f"{value:.4f}"
-
-
 def format_report(reports: Sequence[RowReport]) -> str:
     """Render reports as aligned tables plus a headline line.
 
@@ -404,6 +280,278 @@ def format_report(reports: Sequence[RowReport]) -> str:
     ok, diverged, unverified = headline(reports)
     lines.append(f"headline: ok={ok} diverged={diverged} unverified={unverified}")
     return "\n".join(lines)
+
+
+class _SpecLike(_TaskLike, Protocol):
+    @property
+    def seeds(self) -> Sequence[int]: ...
+    @property
+    def baselines(self) -> Sequence[_HasName]: ...
+
+
+class _HasName(Protocol):
+    @property
+    def name(self) -> str: ...
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class TaskSummary:
+    """One task's row reports and the seeds each row lacks.
+
+    Attributes:
+      task: Task name.
+      reports: One report per baseline, in the task's baseline order.
+      missing_seeds: Baseline to the task's seeds that have no run (only rows
+        with at least one run and at least one missing seed appear).
+
+    """
+
+    task: str
+    reports: tuple[RowReport, ...]
+    missing_seeds: Mapping[str, tuple[int, ...]] = field(
+        default_factory=dict[str, tuple[int, ...]],
+    )
+
+    @property
+    def counts(self) -> tuple[int, int, int]:
+        """``(ok, diverged, unverified)`` over this task's rows."""
+        return headline(self.reports)
+
+
+def find_seed_runs(runs_dir: Path, task: str, row: str) -> dict[int, dict[str, float]]:
+    """Return seed to metrics for ``<runs>/<task>/<row>/seed<N>/metrics.json``.
+
+    Also accepts the flat ``<runs>/<row>/seed<N>`` layout of :func:`main`.
+
+    Args:
+      runs_dir: ``<base_dir>/runs/mlsbench``.
+      task: Task name.
+      row: Leaderboard row (or candidate) name.
+
+    Returns:
+      runs: Seed to its ``<metric>_<setting>`` metrics.
+
+    """
+    for base in (runs_dir / task / row, runs_dir / row):
+        found: dict[int, dict[str, float]] = {}
+        for path in sorted(base.glob("seed*/metrics.json")):
+            digits = path.parent.name.removeprefix("seed")
+            if digits.lstrip("-").isdigit():
+                found[int(digits)] = read_metrics_file(path.parent)
+        if found:
+            return found
+    return {}
+
+
+def discover_tasks(runs_dir: Path) -> list[str]:
+    """Return the task names that have a ``<task>/<row>/seed*/metrics.json``."""
+    return sorted({p.parts[-4] for p in runs_dir.glob("*/*/seed*/metrics.json")})
+
+
+def aggregate(
+    specs: Sequence[_SpecLike],
+    runs_dir: Path,
+    overrides: Mapping[str, TaskOverrides] | None = None,
+) -> tuple[TaskSummary, ...]:
+    """Judge every baseline of every task in ``specs`` against its runs.
+
+    Args:
+      specs: Parsed tasks (``TaskSpec`` or anything shaped like it).
+      runs_dir: ``<base_dir>/runs/mlsbench``.
+      overrides: Task name to its tolerance overrides.
+
+    Returns:
+      summaries: One per task, in ``specs`` order.
+
+    """
+    return tuple(
+        _summarize(spec, runs_dir, (overrides or {}).get(spec.name)) for spec in specs
+    )
+
+
+def overall(summaries: Sequence[TaskSummary]) -> tuple[int, int, int]:
+    """Return ``(ok, diverged, unverified)`` over every row of every task."""
+    return headline([r for s in summaries for r in s.reports])
+
+
+def format_summary(summaries: Sequence[TaskSummary], *, verbose: bool = False) -> str:
+    """Render per-task counts, optionally each row, and the overall headline.
+
+    Args:
+      summaries: One per task.
+      verbose: Also list each row's verdict.
+
+    Returns:
+      text: The rendered table.
+
+    """
+    width = max((len(s.task) for s in summaries), default=4)
+    lines = [f"{'task':<{width}}  {'ok':>4}  {'diverged':>8}  {'unverified':>10}"]
+    for s in summaries:
+        ok, diverged, unverified = s.counts
+        lines.append(f"{s.task:<{width}}  {ok:>4}  {diverged:>8}  {unverified:>10}")
+        if verbose:
+            for r in s.reports:
+                extra = s.missing_seeds.get(r.row, ())
+                note = f"  missing seeds {list(extra)}" if extra else ""
+                lines.append(f"    [{r.verdict}] {r.row} ({r.seed_count} run(s)){note}")
+    ok, diverged, unverified = overall(summaries)
+    lines.append(
+        f"overall: tasks={len(summaries)} rows={ok + diverged + unverified} "
+        f"ok={ok} diverged={diverged} unverified={unverified}",
+    )
+    return "\n".join(lines)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Diff runs on disk against a task's published leaderboard.
+
+    Args:
+      argv: ``--task``, ``--runs``, optional ``--row`` and ``--root``; or
+        ``--all`` (also the default without ``--task``) to aggregate every task
+        under ``--runs`` (a base_dir or its ``runs/mlsbench``), with
+        ``--include-missing`` to count runless clone tasks as unverified.
+
+    Returns:
+      code: 0 iff no row diverged (overall, in aggregate mode).
+
+    """
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_arguments(parser)
+    flags = cast("_Flags", parser.parse_args(argv))
+    if flags.all or flags.task is None:
+        if flags.task is not None or flags.row or flags.candidate:
+            parser.error("--all takes none of --task, --row and --candidate")
+        runs_root = _runs_root(Path(flags.runs))
+        root = Path(flags.root)
+        names = discover_tasks(runs_root)
+        if flags.include_missing:
+            names = task_names(root)
+        specs = [load_task(n, root=root) for n in names]
+        summaries = aggregate(specs, runs_root)
+        print(format_summary(summaries, verbose=flags.verbose))
+        return 1 if overall(summaries)[1] else 0
+    if flags.candidate and not flags.row:
+        parser.error("--candidate needs --row, the published row to judge it against")
+    spec = load_task(flags.task, root=Path(flags.root))
+    names = [flags.row] if flags.row else [b.name for b in spec.baselines]
+    runs_dir = _runs_root(Path(flags.runs))
+    reports = [
+        _compare_on_disk(spec, runs_dir, flags.task, name, flags.candidate)
+        for name in names
+    ]
+    print(format_report(reports))
+    _, diverged, _ = headline(reports)
+    return 1 if diverged else 0
+
+
+def _within(delta: float, atol: float) -> bool:
+    return abs(delta) <= atol * (1 + 1e-9) + 1e-12
+
+
+def _judge(  # noqa: PLR0917 -- every caller passes the six facts of one column.
+    column: str,
+    published: float | None,
+    values: list[float],
+    spread: float | None,
+    overrides: TaskOverrides,
+    n_runs: int,
+) -> Comparison:
+    kind = overrides.kinds.get(column, classify(column))
+    multi = kind != MetricKind.EXACT and (n_runs > 1 or spread is not None)
+    if multi:
+        kind = MetricKind.MULTI_SEED
+
+    out = functools.partial(_comparison, column, published, kind)
+    measured = statistics.fmean(values) if values else None
+    if published is None:
+        return out(Verdict.UNVERIFIED, "no published value", measured)
+    if measured is None:
+        return out(Verdict.UNVERIFIED, "not measured")
+    delta = measured - published
+
+    if kind == MetricKind.MULTI_SEED:
+        std = statistics.stdev(values) if len(values) > 1 else None
+        candidates = [x for x in (spread, std) if x is not None]
+        if not candidates:
+            return out(Verdict.UNVERIFIED, "no seed spread available", measured)
+        tol = max(candidates)
+        if _within(delta, tol):
+            return out(Verdict.OK, f"within seed spread {tol:g}", measured, tol)
+        return out(
+            Verdict.DIVERGED,
+            f"|delta|={abs(delta):g} exceeds seed spread {tol:g}",
+            measured,
+            tol,
+        )
+
+    if kind == MetricKind.CONTINUOUS:
+        atol = overrides.continuous_atol.get(column)
+        if atol is None:
+            return out(Verdict.UNVERIFIED, "noise not measured", measured)
+    elif kind == MetricKind.ACCURACY:
+        atol = DEFAULT_TOLERANCES[MetricKind.ACCURACY] * overrides.scale.get(
+            column,
+            1.0,
+        )
+    else:
+        atol = DEFAULT_TOLERANCES[MetricKind.EXACT]
+    if _within(delta, atol):
+        return out(Verdict.OK, f"within {atol:g}", measured, atol)
+    return out(
+        Verdict.DIVERGED,
+        f"|delta|={abs(delta):g} exceeds {atol:g}",
+        measured,
+        atol,
+    )
+
+
+def _comparison(  # noqa: PLR0917 -- partially applied by _judge, positionally.
+    column: str,
+    published: float | None,
+    kind: MetricKind,
+    verdict: Verdict,
+    reason: str,
+    measured: float | None = None,
+    atol: float | None = None,
+) -> Comparison:
+    """Build one column's comparison; ``delta`` is derived from the two values."""
+    return Comparison(
+        column=column,
+        published=published,
+        measured=measured,
+        delta=None if measured is None or published is None else measured - published,
+        kind=kind,
+        atol=atol,
+        verdict=verdict,
+        reason=reason,
+    )
+
+
+def _worst(verdicts: Sequence[Verdict]) -> Verdict:
+    if Verdict.DIVERGED in verdicts:
+        return Verdict.DIVERGED
+    if Verdict.UNVERIFIED in verdicts or not verdicts:
+        return Verdict.UNVERIFIED
+    return Verdict.OK
+
+
+def _published_for(row: _RowLike, seeds: Sequence[int] | None) -> Mapping[str, float]:
+    if seeds is None or len(seeds) == 0 or any(s not in row.seeds for s in seeds):
+        return row.values
+    out = dict(row.values)
+    for col in row.values:
+        cells = [row.seeds[s].get(col) for s in seeds]
+        if all(c is not None for c in cells):
+            out[col] = statistics.fmean(c for c in cells if c is not None)
+    return out
+
+
+def _fmt(value: float | None) -> str:
+    return "-" if value is None else f"{value:.4f}"
 
 
 def _find_runs(runs_dir: Path, task: str, row: str) -> list[dict[str, float]]:
@@ -436,65 +584,14 @@ def _compare_on_disk(
     return compare(spec, row, _find_runs(runs_dir, task, name))
 
 
-class _SpecLike(_TaskLike, Protocol):
-    @property
-    def seeds(self) -> Sequence[int]: ...
-    @property
-    def baselines(self) -> Sequence[_HasName]: ...
-
-
-class _HasName(Protocol):
-    @property
-    def name(self) -> str: ...
-
-
-@dataclass(frozen=True)
-class TaskSummary:
-    """One task's row reports and the seeds each row lacks.
-
-    Attributes:
-      task: Task name.
-      reports: One report per baseline, in the task's baseline order.
-      missing_seeds: Baseline to the task's seeds that have no run (only rows
-        with at least one run and at least one missing seed appear).
-
-    """
-
-    task: str
-    reports: tuple[RowReport, ...]
-    missing_seeds: Mapping[str, tuple[int, ...]] = field(
-        default_factory=dict[str, tuple[int, ...]],
-    )
-
-    @property
-    def counts(self) -> tuple[int, int, int]:
-        """``(ok, diverged, unverified)`` over this task's rows."""
-        return headline(self.reports)
-
-
-def find_seed_runs(runs_dir: Path, task: str, row: str) -> dict[int, dict[str, float]]:
-    """Return seed to metrics for ``<runs>/<task>/<row>/seed<N>/metrics.json``.
-
-    Also accepts the flat ``<runs>/<row>/seed<N>`` layout of :func:`main`.
-    """
-    for base in (runs_dir / task / row, runs_dir / row):
-        found: dict[int, dict[str, float]] = {}
-        for path in sorted(base.glob("seed*/metrics.json")):
-            digits = path.parent.name.removeprefix("seed")
-            if digits.lstrip("-").isdigit():
-                found[int(digits)] = read_metrics_file(path.parent)
-        if found:
-            return found
-    return {}
-
-
-def discover_tasks(runs_dir: Path) -> list[str]:
-    """Return the task names that have a ``<task>/<row>/seed*/metrics.json``."""
-    return sorted({p.parts[-4] for p in runs_dir.glob("*/*/seed*/metrics.json")})
-
-
 def _unrun(task: str, row: str) -> RowReport:
-    return RowReport(task, row, 0, (), Verdict.UNVERIFIED)
+    return RowReport(
+        task=task,
+        row=row,
+        seed_count=0,
+        comparisons=(),
+        verdict=Verdict.UNVERIFIED,
+    )
 
 
 def _summarize(
@@ -517,61 +614,21 @@ def _summarize(
                 overrides or TaskOverrides(),
                 sorted(seeds),
             )
-        except (KeyError, ValueError):  # no published row to compare with
-            rep = RowReport(spec.name, base.name, len(seeds), (), Verdict.UNVERIFIED)
+        except (KeyError, ValueError):  # No published row to compare with.
+            rep = RowReport(
+                task=spec.name,
+                row=base.name,
+                seed_count=len(seeds),
+                comparisons=(),
+                verdict=Verdict.UNVERIFIED,
+            )
         lacking = tuple(s for s in spec.seeds if s not in seeds)
         if lacking:
             missing[base.name] = lacking
             if rep.verdict == Verdict.OK:
                 rep = replace(rep, verdict=Verdict.UNVERIFIED)
         reports.append(rep)
-    return TaskSummary(spec.name, tuple(reports), missing)
-
-
-def aggregate(
-    specs: Sequence[_SpecLike],
-    runs_dir: Path,
-    overrides: Mapping[str, TaskOverrides] | None = None,
-) -> tuple[TaskSummary, ...]:
-    """Judge every baseline of every task in ``specs`` against its runs.
-
-    Args:
-      specs: Parsed tasks (``TaskSpec`` or anything shaped like it).
-      runs_dir: ``<base_dir>/runs/mlsbench``.
-      overrides: Task name to its tolerance overrides.
-
-    Returns:
-      summaries: One per task, in ``specs`` order.
-
-    """
-    return tuple(
-        _summarize(spec, runs_dir, (overrides or {}).get(spec.name)) for spec in specs
-    )
-
-
-def overall(summaries: Sequence[TaskSummary]) -> tuple[int, int, int]:
-    """Return ``(ok, diverged, unverified)`` over every row of every task."""
-    return headline([r for s in summaries for r in s.reports])
-
-
-def format_summary(summaries: Sequence[TaskSummary], *, verbose: bool = False) -> str:
-    """Render per-task counts, optionally each row, and the overall headline."""
-    width = max((len(s.task) for s in summaries), default=4)
-    lines = [f"{'task':<{width}}  {'ok':>4}  {'diverged':>8}  {'unverified':>10}"]
-    for s in summaries:
-        ok, diverged, unverified = s.counts
-        lines.append(f"{s.task:<{width}}  {ok:>4}  {diverged:>8}  {unverified:>10}")
-        if verbose:
-            for r in s.reports:
-                extra = s.missing_seeds.get(r.row, ())
-                note = f"  missing seeds {list(extra)}" if extra else ""
-                lines.append(f"    [{r.verdict}] {r.row} ({r.seed_count} run(s)){note}")
-    ok, diverged, unverified = overall(summaries)
-    lines.append(
-        f"overall: tasks={len(summaries)} rows={ok + diverged + unverified} "
-        f"ok={ok} diverged={diverged} unverified={unverified}",
-    )
-    return "\n".join(lines)
+    return TaskSummary(task=spec.name, reports=tuple(reports), missing_seeds=missing)
 
 
 def _runs_root(runs: Path) -> Path:
@@ -591,75 +648,41 @@ class _Flags(Protocol):
     verbose: bool
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Diff runs on disk against a task's published leaderboard.
-
-    Args:
-      argv: ``--task``, ``--runs``, optional ``--row`` and ``--root``; or
-        ``--all`` (also the default without ``--task``) to aggregate every task
-        under ``--runs`` (a base_dir or its ``runs/mlsbench``), with
-        ``--include-missing`` to count runless clone tasks as unverified.
-
-    Returns:
-      code: 0 iff no row diverged (overall, in aggregate mode).
-
-    """
-    from priml.baselines.mlsbench.task import load_task  # noqa: PLC0415
-
-    parser = argparse.ArgumentParser(description="Diff mlsbench runs to leaderboard.")
-    _ = parser.add_argument("--task", default=None)
-    _ = parser.add_argument(
+def _add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register flags on ``parser``."""
+    parser.add_argument("--task", default=None)
+    parser.add_argument(
         "--all",
         action="store_true",
         help="aggregate every task found under --runs",
     )
-    _ = parser.add_argument(
+    parser.add_argument(
         "--include-missing",
         action="store_true",
         help="with --all: also count every clone task that has no run as unverified",
     )
-    _ = parser.add_argument("--verbose", action="store_true")
-    _ = parser.add_argument("--runs", required=True)
-    _ = parser.add_argument("--row", default="")
-    _ = parser.add_argument(
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--runs", required=True)
+    parser.add_argument("--row", default="")
+    parser.add_argument(
         "--candidate",
         default="",
         help="with --task and --row: judge this run name (a candidate_experiment) "
         "against the row's published values instead of the row's own runs",
     )
-    _ = parser.add_argument(
+    parser.add_argument(
         "--root",
-        default=str(default_path(UPSTREAM_DIR)),
+        default=str(_default_clone()),
         help="the upstream clone",
     )
-    flags = cast("_Flags", parser.parse_args(argv))
-    if flags.all or flags.task is None:
-        if flags.task is not None or flags.row or flags.candidate:
-            parser.error("--all takes none of --task, --row and --candidate")
-        from priml.baselines.mlsbench.task import task_names  # noqa: PLC0415
 
-        runs_root = _runs_root(Path(flags.runs))
-        root = Path(flags.root)
-        names = discover_tasks(runs_root)
-        if flags.include_missing:
-            names = task_names(root)
-        specs = [load_task(n, root=root) for n in names]
-        summaries = aggregate(specs, runs_root)
-        print(format_summary(summaries, verbose=flags.verbose))  # noqa: T201
-        return 1 if overall(summaries)[1] else 0
-    if flags.candidate and not flags.row:
-        parser.error("--candidate needs --row, the published row to judge it against")
-    spec = load_task(flags.task, root=Path(flags.root))
-    names = [flags.row] if flags.row else [b.name for b in spec.baselines]
-    runs_dir = _runs_root(Path(flags.runs))
-    reports = [
-        _compare_on_disk(spec, runs_dir, flags.task, name, flags.candidate)
-        for name in names
-    ]
-    print(format_report(reports))  # noqa: T201
-    _, diverged, _ = headline(reports)
-    return 1 if diverged else 0
+
+def _default_clone() -> Path:
+    """Return the upstream clone a default ``MlsbenchEval`` resolves."""
+    cfg = MlsbenchEval()
+    return resolve_working_dir(cfg.base_dir, cfg.mlsbench_root)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
+# vim: ft=python

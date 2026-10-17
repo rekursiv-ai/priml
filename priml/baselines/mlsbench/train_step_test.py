@@ -22,3 +22,9 @@ def test_null_step_passes_batches_through_and_keeps_no_state() -> None:
     assert step.state_dict() == {}
     step.load_state_dict({"x": 1})
     assert step.state_dict() == {}
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)
