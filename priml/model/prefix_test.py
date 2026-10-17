@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 from torch import Tensor, nn
+from torch.nn import functional
 
 import pytest
 import torch
@@ -409,6 +410,151 @@ def test_composed_sparse_prefix_builds_padded_prefix(residual_gate: bool) -> Non
     assert output.shape == (5, 3, 4)
     assert output.dtype is torch.bfloat16
     assert torch.equal(output[:, 1:], torch.zeros_like(output[:, 1:]))
+
+
+@pytest.mark.parametrize("gated", [False, True])
+def test_composed_prefix_matches_nonzero_closed_form_and_gradients(
+    gated: bool,
+) -> None:
+    """Check nonzero FiLM, slot, sparse residual, gate, and gradient paths."""
+    config = ComposedSparsePrefix.Config(channels_out=21, num_tokens=2)
+    config.forward_dtype = torch.float32
+    config.composition = CategorySlotFiLM.Config(
+        num_categories=5,
+        num_augmentations=8,
+        num_slots=9,
+        channels_out=21,
+    )
+    config.residual.num_puzzles = 7
+    config.residual.channels_in = 2
+    config.residual.channels_out = 4
+    config.residual.num_tokens = 2
+    config.residual.batch_size = 3
+    config.residual.embed_scale = 1.0
+    config.residual.dtype = torch.float32
+    config.residual_projection.channels_in = 4
+    config.residual_projection.channels_out = 21
+    config.residual_gate = SigmoidResidualGate.Config() if gated else None
+    module = config.make()
+    composition = module.composition
+    assert isinstance(composition, CategorySlotFiLM)
+    with torch.no_grad():
+        composition.category_embed.weight.copy_(
+            torch.arange(105, dtype=torch.float32).reshape(5, 21) / 16,
+        )
+        composition.augmentation_embed.weight.copy_(
+            torch.arange(168, dtype=torch.float32).reshape(8, 21) / 32,
+        )
+        composition.slot_base.copy_(torch.arange(3).reshape(1, 3) / 8)
+        composition.slot_embeddings.copy_(torch.arange(18).reshape(1, 9, 2) / 8)
+        composition.film_gamma.weight.copy_(
+            torch.arange(882, dtype=torch.float32).reshape(21, 42) / 512,
+        )
+        assert composition.film_gamma.bias is not None
+        composition.film_gamma.bias.copy_(torch.arange(21) / 16)
+        composition.film_beta.weight.copy_(
+            torch.arange(882, dtype=torch.float32).flip(0).reshape(21, 42) / 512,
+        )
+        assert composition.film_beta.bias is not None
+        composition.film_beta.bias.copy_(-torch.arange(21) / 32)
+        module.residual.weights.copy_(torch.arange(28).reshape(7, 4) / 16)
+        module.residual_projection.weight.copy_(
+            torch.arange(84, dtype=torch.float32).reshape(21, 4) / 32,
+        )
+        if module.residual_gate is not None:
+            assert isinstance(module.residual_gate, SigmoidResidualGate)
+            module.residual_gate.linear.weight.copy_(
+                torch.arange(441, dtype=torch.float32).reshape(21, 21) / 50_000_000,
+            )
+            assert module.residual_gate.linear.bias is not None
+            module.residual_gate.linear.bias.copy_(
+                torch.arange(21, dtype=torch.float32) / 1_600_000 - 0.00000625,
+            )
+
+    inputs = {
+        "category_indices": torch.tensor([1, 4, 0]),
+        "augmentation_indices": torch.tensor([7, 2, 5]),
+        "slot_permutation": torch.tensor(
+            [
+                [8, 1, 6, 3, 0, 5, 2, 7, 4],
+                [2, 5, 8, 1, 4, 7, 0, 3, 6],
+                [4, 0, 7, 2, 6, 1, 8, 5, 3],
+            ],
+        ),
+        "puzzle_identifiers": torch.tensor([4, 1, 3]),
+    }
+    actual = module(3, **inputs)
+    puzzle = composition.category_embed(inputs["category_indices"])
+    dih = composition.augmentation_embed(inputs["augmentation_indices"])
+    slots = composition.slot_embeddings.expand(3, -1, -1, -1)
+    indices = (
+        inputs["slot_permutation"]
+        .unsqueeze(1)
+        .unsqueeze(-1)
+        .expand(
+            -1,
+            1,
+            -1,
+            2,
+        )
+    )
+    slots = torch.gather(slots, 2, indices)
+    colorperm = torch.cat(
+        [composition.slot_base.expand(3, -1), slots.flatten(start_dim=2).squeeze(1)],
+        dim=-1,
+    )
+    augmentation = torch.cat([dih, colorperm], dim=-1)
+    combined = (
+        1 + composition.film_gamma(augmentation)
+    ) * puzzle + composition.film_beta(augmentation)
+    residual_config = module.residual.config
+    residual = module.residual.local_weights.to(residual_config.dtype)
+    residual = residual.reshape(
+        residual_config.batch_size,
+        residual_config.num_tokens,
+        residual_config.channels_token,
+    )
+    if residual_config.dtype_scale is not None:
+        residual = residual.to(residual_config.dtype_scale)
+    residual = (module.residual.embed_scale * residual).flatten(start_dim=1)
+    residual = residual.to(module.residual_projection.weight.dtype)
+    residual = module.residual_projection(residual).to(combined.dtype)
+    if module.residual_gate is not None:
+        residual = residual * torch.sigmoid(module.residual_gate.linear(combined))
+    expected = functional.pad(
+        (combined + residual).to(module.forward_dtype).unsqueeze(1),
+        (0, 0, 0, 1),
+    )
+
+    assert actual.shape == (3, 2, 21)
+    assert torch.equal(actual, expected)
+    assert torch.count_nonzero(actual[:, 0]) > 0
+    assert torch.equal(actual[:, 1], torch.zeros(3, 21))
+    actual.sum().backward()
+    actual_gradients = {
+        name: parameter.grad.detach().clone()
+        for name, parameter in module.named_parameters()
+        if parameter.grad is not None
+    }
+    actual_sparse_gradient = module.residual.local_weights.grad
+    assert actual_sparse_gradient is not None
+    actual_sparse_gradient = actual_sparse_gradient.detach().clone()
+    for parameter in module.parameters():
+        parameter.grad = None
+    module.residual.local_weights.grad = None
+
+    expected.sum().backward()
+
+    assert actual_gradients.keys() == {
+        name
+        for name, parameter in module.named_parameters()
+        if parameter.grad is not None
+    }
+    for name, parameter in module.named_parameters():
+        assert parameter.grad is not None, name
+        assert torch.equal(actual_gradients[name], parameter.grad), name
+    assert module.residual.local_weights.grad is not None
+    assert torch.equal(actual_sparse_gradient, module.residual.local_weights.grad)
 
 
 def test_composed_sparse_prefix_reset_reinitializes_each_owned_child() -> None:

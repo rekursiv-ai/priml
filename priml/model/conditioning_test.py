@@ -131,6 +131,10 @@ def test_category_slot_film_rejects_invalid_config_geometry(
             CategorySlotFiLM.Config(num_slots=0, channels_out=4),
             "Category, augmentation, and slot counts",
         ),
+        (
+            CategorySlotFiLM.Config(num_slots=4, channels_out=4),
+            "channels_out must provide a channel for each slot and the base",
+        ),
     ],
 )
 def test_category_slot_film_constructor_checks_raw_geometry(
@@ -171,6 +175,19 @@ def test_category_slot_film_composes_slots_and_resets_semantic_tables() -> None:
     )
     assert torch.equal(module.slot_base, torch.zeros_like(module.slot_base))
     assert torch.equal(module.slot_embeddings, torch.zeros_like(module.slot_embeddings))
+
+
+def test_category_slot_film_cost_caps_active_rows_to_reachable_tables() -> None:
+    """Active parameter ownership counts unique tasks, views, and color slots."""
+    measured = CategorySlotFiLM.Config(
+        num_categories=2,
+        num_augmentations=8,
+        num_slots=9,
+        channels_out=12,
+    ).cost(seq_len=1, batch_size=16, dtype=torch.bfloat16)
+
+    assert measured.params == 732
+    assert measured.params_active == 732
 
 
 def test_sigmoid_residual_gate_resets_with_bias_two_and_open_probability() -> None:

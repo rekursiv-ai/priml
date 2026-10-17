@@ -428,6 +428,11 @@ class CategorySlotFiLM(nn.Module):
             raise ValueError(
                 "Category, augmentation, and slot counts must be positive.",
             )
+        if config.channels_out < config.num_slots + 1:
+            raise ValueError(
+                "CategorySlotFiLM channels_out must provide a channel for each "
+                "slot and the base.",
+            )
         self.channels_out = config.channels_out
         self.category_embed = Embedding.Config(
             channels_in=config.num_categories,

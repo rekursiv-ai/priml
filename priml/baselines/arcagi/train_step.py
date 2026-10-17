@@ -7,47 +7,66 @@ the pool -- its seating, halt training, and feedback carry
 (:mod:`~priml.loss.token`), the body optimizer, and the EMA.
 The task table, when the model has one, trains through its own sparse SignSGD.
 
-Evaluation runs every row to the step cap, carrying latents, under the EMA
-weights once past warmup; :class:`EvalSignals` additionally packs the
+Training and evaluation honor the configured pool transition boundary: the
+default advances carry after the optimizer update, while source recipes can
+advance it before backward. Evaluation runs every row to the step cap under
+the EMA weights once past warmup; :class:`EvalSignals` additionally packs the
 label-free selection signals an offline reranker reads.
 :class:`ArcDataParallel` replicates the step across ranks.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import field
+from functools import partial
 from typing import (
     TYPE_CHECKING,
     NamedTuple,
     NotRequired,
+    Protocol,
     Self,
-    TypedDict,
     cast,
     override,
 )
 
 import math
 
-from configgle import Fig, Makeable, Makes
+from configgle import Fig, Makeable, Makes, PartialConfig
 from torch import Tensor, nn
 from torch._inductor import config as inductor_config
 
 import torch
 import torch.distributed as dist
 
-from priml.baselines.sudoku.act import ActPool, AtomicPool, PoolConfig
+from priml.baselines.sudoku.act import (
+    ActPool,
+    AtomicPool,
+    PoolConfig,
+    rollout as act_rollout,
+)
+from priml.loss.act import ACTLoss
 from priml.loss.custom_types import Reduction, TokenLoss
 from priml.loss.token import (
     CrossEntropyTokens,
     MeanOverActive,
     MeanOverBatch,
 )
-from priml.model.grid_solver import GridSolver
-from priml.model.prefix import PrefixStack, SparsePuzzleEmbedding
-from priml.optimizers import AdamATan2, SignSGD, apply_lr_scale, lr_scale
+from priml.math.schedules import constant
+from priml.model.grid_solver import GridSolver, SingleLatentGridSolver
+from priml.model.prefix import SparsePuzzleEmbedding
+from priml.optimizers import (
+    AdamATan2,
+    SignSGD,
+    apply_lr_scale,
+    apply_lr_schedule,
+    cosine_warmup_lr,
+    lr_scale,
+    remember_initial_lrs,
+)
 from priml.optimizers.composite import CompositeOptimizer
+from priml.optimizers.lr import HasParamGroups
 from priml.optimizers.muon import Muon
 from priml.train.ema import EMA
 from priml.train.grad_clip import clip_grad_norm_, total_grad_norm
@@ -58,6 +77,8 @@ from priml.train.train_step import TrainStep
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from priml.baselines.arcagi.data import ArcInstanceMetadata
+    from priml.model.custom_types import ForwardOutput
     from priml.train.custom_types import OptimizerProtocol, TrainStepOutput
 
 
@@ -76,10 +97,6 @@ class ArcDataParallel(DataParallel):
             for tensor in [*model.parameters(), *model.buffers()]:
                 dist.broadcast(tensor, src=source, group=self.process_group)
         return super().__call__(model)
-
-
-class _PrefixKwargs(TypedDict, total=False):
-    puzzle_identifiers: Tensor
 
 
 class EvalSignals:
@@ -123,6 +140,117 @@ def _atomic_pool() -> PoolConfig:
     return AtomicPool.Config()
 
 
+class PoolTransition(Protocol):
+    """Choose when the pooled carry and halt decision advance."""
+
+    def before_backward(self, advance: Callable[[], None]) -> None:
+        """Run a pool transition before backward, when the policy requires it."""
+        ...
+
+    def after_optimizer(self, advance: Callable[[], None]) -> None:
+        """Run a pool transition after the update, when the policy requires it."""
+        ...
+
+
+def scale_body_optimizer_lr(
+    body: HasParamGroups,
+    sparse: HasParamGroups | None,
+    scale: float,
+    schedule: Callable[[float], float],
+) -> None:
+    """Scale the body optimizer, preserving the reference-step default.
+
+    Args:
+      body: Dense optimizer groups to scale.
+      sparse: Sparse optimizer, unused by the legacy policy.
+      scale: Multiplier computed by the legacy step schedule.
+      schedule: Direct rate function, unused by the legacy policy.
+
+    """
+    del sparse, schedule
+    apply_lr_scale([body], scale)
+
+
+def apply_direct_schedule_to_body_and_sparse_optimizer_lrs(
+    body: HasParamGroups,
+    sparse: HasParamGroups | None,
+    scale: float,
+    schedule: Callable[[float], float],
+) -> None:
+    """Apply direct scheduled rates to body and sparse optimizer groups.
+
+    Args:
+      body: Dense optimizer groups to update.
+      sparse: Optional sparse optimizer groups to update.
+      scale: Legacy schedule multiplier, unused by direct application.
+      schedule: Direct function applied to each group's initial rate.
+
+    """
+    del scale
+    apply_lr_schedule([body], schedule)
+    if sparse is not None:
+        remember_initial_lrs([sparse])
+        apply_lr_schedule([sparse], schedule)
+
+
+class GradientReduction(Protocol):
+    """Reduce dense gradients after backward and before the optimizer."""
+
+    def __call__(self, model: nn.Module) -> None:
+        """Apply the configured replica reduction to ``model`` gradients."""
+        ...
+
+
+class MetricReporter(Protocol):
+    """Turn raw step metrics into values the generic loop can log directly."""
+
+    def __call__(self, metrics: Mapping[str, Tensor | float]) -> dict[str, float]:
+        """Return already reduced, normalized scalar metrics."""
+        ...
+
+
+class AfterOptimizerPoolTransition:
+    """Preserve the reference pooled step's post-update pool transition."""
+
+    class Config(
+        Makes["AfterOptimizerPoolTransition"],
+        Fig["AfterOptimizerPoolTransition"],
+    ):
+        """No parameters."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def before_backward(self, advance: Callable[[], None]) -> None:
+        """Leave carried state untouched until the optimizer has stepped."""
+        del advance
+
+    def after_optimizer(self, advance: Callable[[], None]) -> None:
+        """Advance carry after the update."""
+        advance()
+
+
+class BeforeBackwardPoolTransition:
+    """Advance source ACT carry and halting before the backward pass."""
+
+    class Config(
+        Makes["BeforeBackwardPoolTransition"],
+        Fig["BeforeBackwardPoolTransition"],
+    ):
+        """No parameters."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def before_backward(self, advance: Callable[[], None]) -> None:
+        """Advance source pool state before backward begins."""
+        advance()
+
+    def after_optimizer(self, advance: Callable[[], None]) -> None:
+        """Leave the already advanced state unchanged after the update."""
+        del advance
+
+
 class PooledActTrainStep(TrainStep):
     """One pooled ACT step of the reference TRM recipe; see the module docstring."""
 
@@ -150,6 +278,12 @@ class PooledActTrainStep(TrainStep):
         )
         """Updates the rows of a sparse task table; unused without one."""
 
+        optimizer_lr_policy: Callable[
+            [HasParamGroups, HasParamGroups | None, float, Callable[[float], float]],
+            None,
+        ] = scale_body_optimizer_lr
+        """Selects optimizer groups and schedule arithmetic for each update."""
+
         compile: (
             Makeable[Callable[[Callable[..., object]], Callable[..., object]]] | None
         ) = None
@@ -163,10 +297,27 @@ class PooledActTrainStep(TrainStep):
         pool: PoolConfig = field(default_factory=_atomic_pool)
         """Slot seating, halt training, and the optional feedback carry."""
 
+        pool_transition: Makeable[PoolTransition] = field(
+            default_factory=AfterOptimizerPoolTransition.Config,
+        )
+        """Side-effect boundary for carrying latents and deciding halting."""
+
+        ema_initialization: Callable[[EMA, nn.Module], None] | None = None
+        """Optionally initialize an EMA shadow when this step is constructed."""
+
+        gradient_reduction: Makeable[GradientReduction] | None = None
+        """Optional post-backward reducer for manually synchronized replicas."""
+
+        metric_reporter: Makeable[MetricReporter] | None = None
+        """Optional conversion for raw metrics needing non-mean aggregation."""
+
         token_loss: Makeable[TokenLoss] = field(
             default_factory=CrossEntropyTokens.Config,
         )
         """Per-token loss."""
+
+        objective: Makeable[ACTLoss] | None = None
+        """Optional sequence-normalized token plus summed ACT halt objective."""
 
         reduction: Makeable[Reduction] = field(default_factory=MeanOverActive.Config)
         """How per-sample training losses become one number."""
@@ -179,6 +330,12 @@ class PooledActTrainStep(TrainStep):
 
         total_train_steps: int = 36_000
         """Schedule horizon."""
+
+        backward_loss_scale: float = 1.0
+        """Scale the objective before backward; metrics keep their raw values."""
+
+        lr_step_offset: int = 0
+        """Offset the optimizer schedule step when a recipe counts updates from one."""
 
         warmup_steps: int = 0
         """Linear warmup before the cosine decay."""
@@ -209,7 +366,12 @@ class PooledActTrainStep(TrainStep):
             pool.grid_len = self.model.grid_len
             pool.seq_len = self.model.total_seq_len
             pool.channels_hidden = self.model.channels_in
-            pool.dtype = self.model.dtype
+            if pool.dtype is None:
+                pool.dtype = (
+                    self.model.forward_dtype
+                    if isinstance(self.model, SingleLatentGridSolver.Config)
+                    else self.model.dtype
+                )
             if (
                 isinstance(self.reduction, MeanOverBatch.Config)
                 and self.reduction.batch_size == -1
@@ -223,14 +385,43 @@ class PooledActTrainStep(TrainStep):
                 "PooledActTrainStep never calls the compiled model; set "
                 "model.compile_core to compile the recurrent core instead.",
             )
+        if config.accumulate_grad_batches != 1:
+            raise ValueError(
+                "PooledActTrainStep requires accumulate_grad_batches=1.",
+            )
+        if config.skip_step_on_nonfinite_grad:
+            raise ValueError(
+                "PooledActTrainStep does not support skip_step_on_nonfinite_grad.",
+            )
+        if config.lr_schedule != PartialConfig(constant):
+            raise ValueError(
+                "PooledActTrainStep uses its own schedule fields; "
+                "lr_schedule must keep the generic constant default.",
+            )
+        objective = None if config.objective is None else config.objective.make()
+        if objective is not None and objective.ignore_index != config.ignore_label_id:
+            raise ValueError(
+                "PooledActTrainStep.ignore_label_id must match ACTLoss.ignore_index.",
+            )
         inductor_config.emulate_precision_casts = config.emulate_precision_casts
         super().__init__(config)
         self.config: PooledActTrainStep.Config = config
         self.pool: ActPool = config.pool.make()
         self.pool.to(self.device)
+        self.pool_transition: PoolTransition = config.pool_transition.make()
+        self.gradient_reduction = (
+            None
+            if config.gradient_reduction is None
+            else config.gradient_reduction.make()
+        )
+        self.metric_reporter = (
+            None if config.metric_reporter is None else config.metric_reporter.make()
+        )
         self.token_loss: TokenLoss = config.token_loss.make()
+        self.objective = objective
         self.reduction: Reduction = config.reduction.make()
         self.signals = None if config.signals is None else config.signals.make()
+        self._prefix_metadata: dict[str, Tensor] | None = None
         table = self.puzzle_table
         self.sparse_optimizer = (
             None
@@ -239,6 +430,9 @@ class PooledActTrainStep(TrainStep):
                 [{"params": list(table.buffers()), "sparse_embedding": True}],
             )
         )
+        if config.ema_initialization is not None:
+            assert isinstance(self.ema, EMA)
+            config.ema_initialization(self.ema, self.model)
 
     @override
     def build_optimizer(self, model: nn.Module) -> OptimizerProtocol:
@@ -257,11 +451,41 @@ class PooledActTrainStep(TrainStep):
     def puzzle_table(self) -> SparsePuzzleEmbedding | None:
         """The sparse per-task table in the model's prefix, if any."""
         prefix = self.net.prefix
-        parts = prefix.parts if isinstance(prefix, PrefixStack) else [prefix]
-        for part in parts:
+        if prefix is None:
+            return None
+        for part in prefix.modules():
             if isinstance(part, SparsePuzzleEmbedding):
                 return part
         return None
+
+    def bind_instance_metadata(
+        self,
+        metadata: Sequence[ArcInstanceMetadata | None],
+    ) -> None:
+        """Bind source semantics for each stable instance id.
+
+        Args:
+          metadata: Row zero is padding; other rows map instance ids to their
+            semantic task, augmentation, and nine color-slot indices.
+
+        """
+        self._prefix_metadata = {
+            "category_indices": torch.tensor(
+                [0 if row is None else row.task_id for row in metadata],
+                dtype=torch.int64,
+                device=self.device,
+            ),
+            "augmentation_indices": torch.tensor(
+                [0 if row is None else row.dih_idx for row in metadata],
+                dtype=torch.int64,
+                device=self.device,
+            ),
+            "slot_permutation": torch.tensor(
+                [(0,) * 9 if row is None else row.colorperm_slots for row in metadata],
+                dtype=torch.int64,
+                device=self.device,
+            ),
+        }
 
     @property
     def ema_shadow(self) -> dict[str, Tensor] | None:
@@ -270,7 +494,7 @@ class PooledActTrainStep(TrainStep):
 
     @override
     def train_step(self, **batch: object) -> TrainStepOutput:
-        """Seat, forward, update, then carry the latents and decide halting.
+        """Seat and update one pooled batch at the configured transition boundary.
 
         Args:
           **batch: ``media``, ``label``, and optionally ``valid_count`` and
@@ -297,39 +521,45 @@ class PooledActTrainStep(TrainStep):
             puzzle_ids=ids,
             ignore_label_id=self.config.ignore_label_id,
         )
-        self._before_forward(active)
+        # These values become saved autograd inputs. A before-backward pool
+        # transition may mutate the backing buffers while releasing slots.
+        active_slots = active.clone()
+        labels = pool.labels.clone()
+        inputs = pool.inputs.clone()
+        z_slow = pool.z_slow.clone()
+        z_fast = pool.z_fast.clone()
+        self._before_forward(active_slots)
         self.model.train()
         if pool.carry is not None:
-            self.net.set_feedback(pool.feedback)
+            self.net.set_feedback(pool.feedback.clone())
         with self._autocast():
             out = self.net(
-                pool.inputs,
-                pool.z_slow,
-                pool.z_fast,
+                inputs,
+                z_slow,
+                z_fast,
                 collect_intermediates=False,
                 **self._prefix_kwargs(pool.puzzle_ids),
             )
         loss, metrics, correctness = self._train_loss(
             out.logits,
             halt=out.halt,
-            labels=pool.labels,
-            active=active,
+            labels=labels,
+            active=active_slots,
         )
+        objective_loss = loss
+        loss = loss * self.config.backward_loss_scale
         if pool.carry is not None:
             with torch.no_grad():
                 metrics["feedback_corrupt_frac"] = pool.advance_feedback(out.logits)
+        advance_pool = partial(self._advance_pool, out=out, active=active_slots)
+        self.pool_transition.before_backward(advance_pool)
         loss.backward()
         self._update(metrics)
-        pool.update_carry(z_slow=out.z_slow, z_fast=out.z_fast, active=active)
-        pool.release(
-            self.net.init_latents,
-            halt=pool.halt_mask(out.halt),
-            active=active,
-        )
+        self.pool_transition.after_optimizer(advance_pool)
         halted = pool.halted_this_step()
         if correctness is not None and halted is not None:
             # The reference definition: score only slots halting this step.
-            scored = halted & active & (correctness.loss_counts > 0)
+            scored = halted & active_slots & (correctness.loss_counts > 0)
             metrics.update(
                 _accuracy_metrics(
                     correctness,
@@ -339,18 +569,39 @@ class PooledActTrainStep(TrainStep):
                 ),
             )
             metrics["halted_frac"] = scored.float().mean()
-        return {
-            "loss": loss.detach().unsqueeze(0),
+            if self.metric_reporter is not None and self.objective is not None:
+                metrics.update(
+                    self._raw_act_metrics(
+                        correctness,
+                        halt=out.halt,
+                        active=active_slots,
+                        halted=halted,
+                        lm_loss=cast(Tensor, metrics["lm_loss"]),
+                        halt_loss=cast(Tensor, metrics["q_halt_loss"]),
+                    ),
+                )
+        reported_metrics = (
+            metrics if self.metric_reporter is None else self.metric_reporter(metrics)
+        )
+        result: TrainStepOutput = {
+            "loss": (
+                objective_loss / pool.config.batch_size
+                if self.objective is not None
+                else loss
+            )
+            .detach()
+            .unsqueeze(0),
             "model": out.logits[:1, :1].detach(),
-            "metrics": metrics,
+            "metrics": cast(dict[str, float | Tensor], reported_metrics),
         }
+        return result
 
     @override
     def eval_loss(self, **batch: object) -> TrainStepOutput:
         """Roll every row to the step cap and score the final prediction.
 
         Args:
-          **batch: ``media``, ``label``, and optionally ``valid_count`` and
+          **batch: ``media`` and optionally ``label``, ``valid_count``, and
             ``puzzle_identifiers``.
 
         Returns:
@@ -358,9 +609,8 @@ class PooledActTrainStep(TrainStep):
             ``[halt, (signals), *preds]`` model output, and metrics.
 
         """
-        media, labels = batch["media"], batch["label"]
+        media = batch["media"]
         assert isinstance(media, Tensor)
-        assert isinstance(labels, Tensor)
         valid = batch.get("valid_count", media.shape[0])
         assert isinstance(valid, int)
         rows = media.shape[0]
@@ -376,6 +626,32 @@ class PooledActTrainStep(TrainStep):
                 self.device,
                 signals=self.signals is not None,
             )
+        if "label" not in batch:
+            if self.signals is not None:
+                raise ValueError("Label-free evaluation cannot produce label signals.")
+            with self._eval_weights(), self._eval_compile():
+                self.model.eval()
+                with torch.inference_mode(), self._autocast():
+                    logits, halt = act_rollout(
+                        self.net,
+                        media=media,
+                        max_steps=self.pool.config.max_steps,
+                        carry=self.pool.carry,
+                        prefix_kwargs=self._prefix_kwargs(
+                            batch.get("puzzle_identifiers"),
+                        ),
+                    )
+                    predictions = logits.argmax(dim=-1)
+                    return {
+                        "loss": torch.zeros(1, device=self.device),
+                        "model": torch.cat(
+                            [halt.reshape(rows, 1).float(), predictions.float()],
+                            dim=-1,
+                        ),
+                        "metrics": {"q_continue_loss": 0.0},
+                    }
+        labels = batch["label"]
+        assert isinstance(labels, Tensor)
         with self._eval_weights(), self._eval_compile():
             self.model.eval()
             with torch.inference_mode(), self._autocast():
@@ -453,7 +729,13 @@ class PooledActTrainStep(TrainStep):
         assert isinstance(media, Tensor)
         self.model.eval()
         with self._eval_compile(), torch.inference_mode(), self._autocast():
-            return self._rollout(media, None, batch.get("puzzle_identifiers")).logits
+            return act_rollout(
+                self.net,
+                media=media,
+                max_steps=self.pool.config.max_steps,
+                carry=self.pool.carry,
+                prefix_kwargs=self._prefix_kwargs(batch.get("puzzle_identifiers")),
+            )[0]
 
     @override
     def on_epoch_end(self) -> None:
@@ -494,6 +776,7 @@ class PooledActTrainStep(TrainStep):
             load_optimizer=load_optimizer,
             remap=remap,
         )
+        self.pool.reset()
         state = cast(PooledActTrainStep.StateDict, state_dict)
         # ``set_state`` accepts only a CPU byte tensor.
         if self.pool.halting is not None and "halt_rng" in state:
@@ -507,19 +790,46 @@ class PooledActTrainStep(TrainStep):
         ):
             self.sparse_optimizer.load_state_dict(dict(state["sparse_optimizer"]))
 
-    def _prefix_kwargs(self, identifiers: object) -> _PrefixKwargs:
+    def _prefix_kwargs(self, identifiers: object) -> dict[str, Tensor]:
         """Return ``identifiers`` as prefix arguments when the model has a table."""
+        if self._prefix_metadata is not None:
+            if not isinstance(identifiers, Tensor):
+                raise TypeError("Source prefix metadata needs puzzle_identifiers.")
+            rows = identifiers.to(device=self.device, dtype=torch.int64)
+            return {
+                "category_indices": self._prefix_metadata["category_indices"][rows],
+                "augmentation_indices": self._prefix_metadata["augmentation_indices"][
+                    rows
+                ],
+                "slot_permutation": self._prefix_metadata["slot_permutation"][rows],
+                "puzzle_identifiers": rows,
+            }
         if self.puzzle_table is None:
             return {}
         if not isinstance(identifiers, Tensor):
             raise TypeError("A model with a task table needs puzzle_identifiers.")
-        return {"puzzle_identifiers": identifiers}
+        return {"puzzle_identifiers": identifiers.clone()}
 
     # Anything built here enters autograd before the forward's graph, so its gradients
     # accumulate first -- part of the numerics, not just the order of side effects.
     def _before_forward(self, active: Tensor) -> None:
         """Run work between seating and the forward; a no-op here."""
         del active
+
+    def _advance_pool(
+        self,
+        *,
+        out: ForwardOutput,
+        active: Tensor,
+    ) -> None:
+        """Store carried latents and release slots using this forward's halt."""
+        pool = self.pool
+        pool.update_carry(z_slow=out.z_slow, z_fast=out.z_fast, active=active)
+        pool.release(
+            self.net.init_latents,
+            halt=pool.halt_mask(out.halt),
+            active=active,
+        )
 
     def _halt_weight(self) -> float:
         halting = self.pool.halting
@@ -534,6 +844,28 @@ class PooledActTrainStep(TrainStep):
         active: Tensor,
     ) -> tuple[Tensor, dict[str, float | Tensor], _Correctness | None]:
         """Token loss plus the halt term; returns the correctness it scored."""
+        if self.objective is not None:
+            output = self.objective(
+                logits=logits,
+                labels=labels,
+                halt_logits=halt,
+                active=active,
+            )
+            counted = (labels != self.objective.ignore_index) & active.unsqueeze(-1)
+            is_correct = (logits.argmax(dim=-1) == labels) & counted
+            correctness = _Correctness(
+                is_correct,
+                output.loss_counts,
+                output.correct.to(torch.float32),
+            )
+            return (
+                output.loss,
+                {
+                    "lm_loss": output.lm_loss.detach(),
+                    "q_halt_loss": output.halt_loss.detach(),
+                },
+                correctness,
+            )
         ignore = self.config.ignore_label_id
         per_token = self.token_loss(logits, labels, ignore_index=ignore)
         counted = (labels != ignore).sum(dim=-1).clamp(min=1)
@@ -573,9 +905,45 @@ class PooledActTrainStep(TrainStep):
         loss = lm_loss + halting.weight * halt_loss
         return loss, metrics, correctness
 
+    def _raw_act_metrics(
+        self,
+        correctness: _Correctness,
+        *,
+        halt: Tensor,
+        active: Tensor,
+        halted: Tensor,
+        lm_loss: Tensor,
+        halt_loss: Tensor,
+    ) -> dict[str, Tensor]:
+        """Return source ACT metric numerators before distributed normalization."""
+        counts = correctness.loss_counts
+        scored = halted & active & (counts > 0)
+        per_sample_accuracy = (
+            correctness.is_correct.float() / counts.clamp_min(1).unsqueeze(-1)
+        ).sum(dim=-1)
+        return {
+            "count": scored.sum().detach(),
+            "accuracy": torch.where(
+                scored,
+                per_sample_accuracy,
+                torch.zeros_like(per_sample_accuracy),
+            )
+            .sum()
+            .detach(),
+            "exact_accuracy": (scored & correctness.correct.bool()).sum().detach(),
+            "q_halt_accuracy": (scored & ((halt >= 0) == correctness.correct.bool()))
+            .sum()
+            .detach(),
+            "steps": torch.where(scored, self.pool.steps, 0).sum().detach(),
+            "lm_loss": lm_loss.detach(),
+            "q_halt_loss": halt_loss.detach(),
+        }
+
     def _update(self, metrics: dict[str, float | Tensor]) -> None:
         """Clip, schedule, step both optimizers, zero, and advance the EMA."""
         config = self.config
+        if self.gradient_reduction is not None:
+            self.gradient_reduction(self.model)
         # The task table is buffers, so every trainable parameter is body.
         body = [p for p in self.model.parameters() if p.requires_grad]
         step = self.global_step + 1
@@ -598,18 +966,30 @@ class PooledActTrainStep(TrainStep):
                 torch.stack([p.detach().norm(2.0) for p in body]).norm(2.0).detach()
             )
         with self.timer_step:
+            step = self.global_step + config.lr_step_offset
             scale = lr_scale(
-                self.global_step,
+                step,
                 config.total_train_steps,
                 config.warmup_steps,
                 config.lr_min_ratio,
             )
-            apply_lr_scale([self.optimizer], scale)
+            schedule = partial(
+                cosine_warmup_lr,
+                step=step,
+                total_steps=config.total_train_steps,
+                warmup_steps=config.warmup_steps,
+                min_ratio=config.lr_min_ratio,
+            )
+            config.optimizer_lr_policy(
+                self.optimizer,
+                self.sparse_optimizer,
+                scale,
+                schedule,
+            )
             metrics["lr"] = self.optimizer.param_groups[0]["lr"]
             muon = _first_muon(self.optimizer)
             if muon is not None:
                 metrics["muon_lr"] = muon.param_groups[0]["lr"]
-            self.optimizer.step()
             table = self.puzzle_table
             if (
                 self.sparse_optimizer is not None
@@ -621,6 +1001,7 @@ class PooledActTrainStep(TrainStep):
                     table.local_ids.detach(),
                 )
                 table.local_weights.grad = None
+            self.optimizer.step()
             self.model.zero_grad(set_to_none=True)
             self.ema(self.model)
 
