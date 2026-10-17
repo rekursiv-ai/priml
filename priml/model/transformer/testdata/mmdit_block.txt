@@ -37,6 +37,9 @@ MMDiTBlock.Config(
             depth_index=(),
             init_weight=priml.model.init.unit_fan_in_uniform,
             init_weight_out=torch.nn.init.zeros_,
+            up_proj=None,
+            middle=None,
+            down_proj=None,
             shard=None
         ),
         depth_index=()

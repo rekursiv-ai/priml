@@ -23,6 +23,7 @@ from priml.math.numeric import (
     logerfc,
     logmeanexp,
     logsubexp,
+    matrix_signum_via_coefficients,
     matrix_signum_via_newtonschulz,
     mesh_arange,
     power_transform,
@@ -1013,9 +1014,21 @@ def test_power_transform_out_of_domain_is_finite() -> None:
 
 
 def test_log_modulus_values() -> None:
-    x = torch.tensor([-1.0, 0.0, 1.0], dtype=torch.float64)
-    expected = torch.tensor([-math.log(2.0), 0.0, math.log(2.0)], dtype=torch.float64)
+    x = torch.tensor([-1.0, 0.0, 0.5, 1.0], dtype=torch.float64)
+    expected = torch.tensor(
+        [-math.log(2.0), 0.0, math.log(1.5), math.log(2.0)],
+        dtype=torch.float64,
+    )
     torch.testing.assert_close(log_modulus(x), expected)
+
+
+def test_log_modulus_zero_uses_nonnegative_branch_for_second_derivative() -> None:
+    """At zero, the implementation selects its documented nonnegative side."""
+    x = torch.tensor([0.0], dtype=torch.float64, requires_grad=True)
+    first = torch.autograd.grad(log_modulus(x), x, create_graph=True)[0]
+    second = torch.autograd.grad(first, x)[0]
+
+    assert torch.equal(second, torch.tensor([-1.0], dtype=second.dtype))
 
 
 def test_log_modulus_is_odd() -> None:
@@ -1545,6 +1558,61 @@ def test_safe_log_masks_zero_before_logarithm_backward() -> None:
     assert x.grad[0] == 0
 
 
+def test_safe_log_explicit_neutral_operand_preserves_values_and_higher_gradients() -> (
+    None
+):
+    """A dtype-matched neutral input preserves every masked-log branch exactly."""
+    for dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
+        subnormal = torch.tensor(torch.finfo(dtype).tiny / 2, dtype=dtype)
+        values = torch.stack(
+            (
+                subnormal,
+                torch.zeros((), dtype=dtype),
+                -subnormal,
+                torch.tensor(math.inf, dtype=dtype),
+                torch.tensor(-math.inf, dtype=dtype),
+                torch.tensor(math.nan, dtype=dtype),
+            ),
+        )
+        actual_input = values.clone().requires_grad_()
+        expected_input = values.clone().requires_grad_()
+        actual = safe_log(actual_input)
+        valid = expected_input > 0
+        legacy_operand = torch.where(valid, expected_input, 1.0)
+        fallback = torch.where(expected_input.isnan(), math.nan, -math.inf)
+        expected = torch.where(valid, torch.log(legacy_operand), fallback)
+        actual_gradient = torch.autograd.grad(
+            actual.sum(),
+            actual_input,
+            create_graph=True,
+        )[0]
+        expected_gradient = torch.autograd.grad(
+            expected.sum(),
+            expected_input,
+            create_graph=True,
+        )[0]
+        actual_second = torch.autograd.grad(actual_gradient.sum(), actual_input)[0]
+        expected_second = torch.autograd.grad(expected_gradient.sum(), expected_input)[
+            0
+        ]
+
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0, equal_nan=True)
+        torch.testing.assert_close(
+            actual_gradient,
+            expected_gradient,
+            rtol=0,
+            atol=0,
+            equal_nan=True,
+        )
+        torch.testing.assert_close(
+            actual_second,
+            expected_second,
+            rtol=0,
+            atol=0,
+            equal_nan=True,
+        )
+
+
 def test_smoothstep_inverse_preserves_domain_on_dense_interior() -> None:
     y = torch.linspace(0.02, 0.98, 17, dtype=torch.float64)
     actual = smoothstep_inverse(y)
@@ -1649,6 +1717,38 @@ def test_matrix_signum_rank_two_uses_same_fused_arithmetic() -> None:
         rtol=0,
         atol=0,
     )
+
+
+def test_matrix_signum_via_coefficients_preserves_ordered_float32_updates() -> None:
+    """Apply each polynomial coefficient triple in float32 operation order."""
+    matrix = torch.tensor(
+        [[0.125, -0.75], [1.25, 0.5], [-0.25, 1.5]],
+        dtype=torch.float32,
+    )
+    coefficients = ((2.25, -0.5, 0.125), (1.75, -0.25, 0.0625))
+    normalized = matrix.float()
+    transposed = normalized.size(-2) > normalized.size(-1)
+    if transposed:
+        normalized = normalized.mT
+    normalized = normalized / normalized.norm(
+        dim=(-2, -1),
+        keepdim=True,
+    ).clamp_min(1e-7)
+    for a, b, c in coefficients:
+        gram = normalized @ normalized.mT
+        polynomial = torch.addmm(gram, gram, gram, alpha=c, beta=b)
+        normalized = torch.addmm(normalized, polynomial, normalized, alpha=1.0, beta=a)
+    expected = normalized.mT if transposed else normalized
+
+    actual = matrix_signum_via_coefficients(
+        matrix,
+        coefficients=coefficients,
+        steps=2,
+        eps=1e-7,
+    )
+
+    assert actual.dtype == torch.float32
+    assert torch.equal(actual, expected)
 
 
 def test_safe_xlogy_preserves_nan_with_zero_multiplier() -> None:

@@ -29,7 +29,6 @@ from priml.baselines.arcagi.augmentation import (
     SpatialAugmentation,
 )
 from priml.baselines.arcagi.data import PuzzleData
-from priml.baselines.arcagi.loss import MeanOverBatch, StablemaxTokens
 from priml.baselines.arcagi.metric import (
     CanonicalPassK,
     PerOutputPass,
@@ -39,7 +38,6 @@ from priml.baselines.arcagi.model import (
     ConvSwiGLU,
     PuzzleEmbedding,
     RotaryBlock,
-    SingleLatentRecurrence,
     depthwise_conv,
     depthwise_shift,
 )
@@ -59,19 +57,16 @@ from priml.baselines.sudoku.act import (
     HaltTraining,
     SampledMinimum,
 )
-from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
-from priml.baselines.sudoku.model import (
-    CoreCompile,
-    DeepRecurrence,
-    SudokuNet,
-    lattice_positions,
-)
-from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.data.color_dihedral import ColorDihedral
+from priml.loss.token import MeanOverBatch, StablemaxTokens
 from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE
+from priml.model.grid_embedding import GridEmbedding, PredictionFeedback
+from priml.model.grid_solver import CoreCompile, GridSolver, lattice_positions
 from priml.model.init import corrected_fan_in_normal
 from priml.model.norm import RMSNorm
+from priml.model.prefix import SparsePuzzleEmbedding
+from priml.model.recurrence import DeepRecurrence, SingleLatentRecurrence
 from priml.model.swiglu import SwiGLU
 from priml.optimizers import AdamATan2
 from priml.optimizers.composite import CompositeOptimizer
@@ -504,7 +499,7 @@ def test_the_muon_recipe_filters_and_rates() -> None:
 
 def test_exp000_states_the_reference_architecture() -> None:
     model = experiments.exp000().step.model
-    assert isinstance(model, SudokuNet.Config)
+    assert isinstance(model, GridSolver.Config)
     assert model.channels_in == 512
     assert model.num_layers == 2
     assert isinstance(model.embedding, GridEmbedding.Config)

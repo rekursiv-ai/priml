@@ -466,6 +466,59 @@ def matrix_signum_via_newtonschulz(
     return x.reshape(original_shape).to(orig_dtype)
 
 
+def matrix_signum_via_coefficients(
+    x: Tensor,
+    *,
+    coefficients: Sequence[tuple[float, float, float]],
+    steps: int,
+    eps: float,
+    compute_dtype: torch.dtype = torch.float32,
+) -> Tensor:
+    """Apply a per-iteration Newton-Schulz coefficient schedule to one matrix.
+
+    Unlike :func:`matrix_signum_via_newtonschulz`, this form preserves the
+    chosen matrix dtype and uses separate ``addmm`` operations for each
+    polynomial update. The schedule's last triple is reused when ``steps``
+    exceeds its length.
+
+    Args:
+      x: Rank-2 matrix.
+      coefficients: Nonempty ``(a, b, c)`` polynomial schedule.
+      steps: Number of iterations to run.
+      eps: Minimum divisor for the Frobenius norm.
+      compute_dtype: Arithmetic dtype for normalization and iterations.
+
+    Returns:
+      result: Matrix sign approximation, restored to ``x.dtype``.
+
+    Raises:
+      ValueError: The matrix rank, schedule, step count, or epsilon is invalid.
+
+    """
+    if x.ndim != 2:
+        raise ValueError(f"Expected a rank-2 matrix, got shape {tuple(x.shape)}.")
+    if not coefficients:
+        raise ValueError("At least one coefficient triple is required.")
+    if steps < 1:
+        raise ValueError(f"steps must be positive, got {steps}.")
+    if not math.isfinite(eps) or eps <= 0:
+        raise ValueError(f"eps must be finite and positive, got {eps}.")
+
+    matrix = x.to(compute_dtype)
+    transpose = matrix.size(-2) > matrix.size(-1)
+    if transpose:
+        matrix = matrix.mT
+    matrix = matrix / matrix.norm(dim=(-2, -1), keepdim=True).clamp_min(eps)
+    for index in range(steps):
+        a, b, c = coefficients[min(index, len(coefficients) - 1)]
+        gram = matrix @ matrix.mT
+        polynomial = torch.addmm(gram, gram, gram, alpha=c, beta=b)
+        matrix = torch.addmm(matrix, polynomial, matrix, alpha=1.0, beta=a)
+    if transpose:
+        matrix = matrix.mT
+    return matrix.to(x.dtype)
+
+
 def log_cumsum_exp(x: Tensorable, dim: int = -1) -> Tensor:
     """Numerically stable cumulative logsumexp along a dimension.
 

@@ -16,11 +16,11 @@ from priml.baselines.sudoku.latent_recursion import (
     recipe_block,
     truncated_normal_corrected,
 )
-from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.cost import cost
 from priml.model.attention.attention import Attention
 from priml.model.init import truncated_normal
 from priml.model.norm import RMSNorm
+from priml.model.prefix import SparsePuzzleEmbedding
 from priml.model.swiglu import SwiGLU
 from priml.testing.golden import assert_pprint_golden
 
@@ -51,6 +51,12 @@ def _config(**overrides: object) -> LatentRecursion.Config:
 def test_finalized_config_pprint() -> None:
     """Pins every recipe default the block factory sets, after propagation."""
     assert_pprint_golden(test_file=__file__, name="latent_recursion", config=_config())
+
+
+def test_config_cost_prices_the_full_grid_and_prefix() -> None:
+    config = _config().finalize()
+    priced = config.cost(batch_size=2, dtype=None)
+    assert priced.params > 0
 
 
 def test_config_finalizes_recipe_and_rejects_invalid_geometry() -> None:
@@ -795,6 +801,32 @@ def test_runtime_puzzle_embedding_is_the_shared_module_the_cost_prices() -> None
     priced = cost(table, seq_len=1, batch_size=3, dtype=None)
     assert priced["flops", "primal", "elementwise"].sum() == 3 * 2 * 12
     assert "puzzle_emb.weights" in model.state_dict()
+
+
+def test_config_cost_requires_finalized_block() -> None:
+    config = _config()
+    config.block = None
+
+    with pytest.raises(ValueError, match=r"^cost\(\) needs a finalized config\.$"):
+        config.cost(batch_size=2, dtype=torch.float32)
+
+
+def test_config_cost_includes_optional_factored_positions() -> None:
+    with_positions = _config().finalize().cost(batch_size=2, dtype=torch.float32)
+    without_positions = (
+        _config(pos2d_grid_shape=None)
+        .finalize()
+        .cost(
+            batch_size=2,
+            dtype=torch.float32,
+        )
+    )
+
+    assert (
+        with_positions["flops", "primal"].sum()
+        > without_positions["flops", "primal"].sum()
+    )
+    assert with_positions.params > without_positions.params
 
 
 def test_rope_follows_an_explicit_attention_head_width() -> None:

@@ -10,6 +10,7 @@ AdaLNZero.Config(
             dtype=None,
             init_weight=torch.nn.init.zeros_,
             init_bias=torch.nn.init.zeros_,
+            linear_fn=<built-in function linear>,
             shard=None
         )
     )

@@ -19,17 +19,16 @@ import pytest
 
 from priml.baselines.arcagi.model import (
     ConvSwiGLU,
-    SingleLatentRecurrence,
     depthwise_conv,
     depthwise_shift,
 )
 from priml.baselines.maze import experiments
 from priml.baselines.maze.data import CANONICAL, ORIGINAL
 from priml.baselines.maze.scripts.prepare_data import DEFAULT_DIRECTORY
-from priml.baselines.sudoku.embedding import GridEmbedding
-from priml.baselines.sudoku.model import DeepRecurrence
-from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.model.attention.rope import RoPE, RoPEMixed
+from priml.model.grid_embedding import GridEmbedding
+from priml.model.prefix import SparsePuzzleEmbedding
+from priml.model.recurrence import DeepRecurrence, SingleLatentRecurrence
 from priml.model.transformer.block import TransformerBlock
 from priml.optimizers import AdamATan2
 from priml.optimizers.composite import CompositeOptimizer

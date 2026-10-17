@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Protocol, Self, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
+from torch.nn import functional
 
 import torch
 
@@ -35,13 +36,21 @@ from priml.cost import (
     elementwise_cost,
     traffic,
 )
-from priml.model.custom_types import ChannelsOut
+from priml.model.conditioning import (
+    CategorySlotFiLM,
+    ResidualGateConfig,
+    SigmoidResidualGate,
+    TaskComposerConfig,
+    WeightedProjectionConfig,
+)
+from priml.model.custom_types import ChannelsOut, HasResetParameters, has_weight
 from priml.model.init import (
     InitFn,
     call_init,
     corrected_fan_in_normal,
     truncated_normal,
 )
+from priml.model.linear import Linear
 
 
 if TYPE_CHECKING:
@@ -147,6 +156,16 @@ class RegisterTokens(nn.Module):
             if config.learnable
             else nn.Buffer(tokens, persistent=True)
         )
+
+    def reset_parameters(self) -> None:
+        """Reset the shared register basis in place."""
+        with torch.no_grad():
+            initial = torch.empty(
+                self.register_tokens.shape,
+                device=self.register_tokens.device,
+            )
+            call_init(self.config.init_weight, initial)
+            self.register_tokens.copy_(initial)
 
     @override
     def forward(self, batch_size: int, **kwargs: object) -> Tensor:
@@ -292,13 +311,6 @@ class SparsePuzzleEmbedding(nn.Module):
             config.channels_token**0.5 if config.embed_scale < 0 else config.embed_scale
         )
         table = torch.zeros(config.num_puzzles, config.channels_out)
-        if config.init_std > 0:
-            truncated_normal(
-                table,
-                std=config.init_std,
-                depth_index=(),
-                variance_correction=True,
-            )
         # A buffer, not a Parameter: autograd must not build a dense gradient
         # for a table this size. The sparse optimizer writes it directly.
         self.weights = nn.Buffer(table, persistent=True)
@@ -310,6 +322,21 @@ class SparsePuzzleEmbedding(nn.Module):
             torch.zeros(config.batch_size, dtype=torch.int32),
             persistent=False,
         )
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        """Reset the master table and empty the per-batch gradient buffer."""
+        with torch.no_grad():
+            self.weights.zero_()
+            if self.config.init_std > 0:
+                truncated_normal(
+                    self.weights,
+                    std=self.config.init_std,
+                    depth_index=(),
+                    variance_correction=True,
+                )
+            self.local_weights.zero_()
+            self.local_ids.zero_()
 
     @override
     def forward(self, batch_size: int, **kwargs: object) -> Tensor:
@@ -467,8 +494,225 @@ class PrefixStack(nn.Module):
             built.append(module)
         self.parts = nn.ModuleList(built)
 
+    def reset_parameters(self) -> None:
+        """Reset every prefix part that owns initialized state."""
+        for part in self.parts:
+            if isinstance(part, HasResetParameters):
+                part.reset_parameters()
+
     @override
     def forward(self, batch_size: int, **kwargs: object) -> Tensor:
         """Concatenate every part's tokens along the sequence axis."""
         pieces = [part(batch_size, **kwargs) for part in self.parts]
         return torch.cat(pieces, dim=1)
+
+
+class ComposedSparsePrefix(nn.Module):
+    """Build CoSE memory vectors and place them in a padded model prefix."""
+
+    class Config(Fig["ComposedSparsePrefix"]):
+        """Composition, sparse residual, prefix length, and compute dtype."""
+
+        channels_out: int = -1
+        """Task-vector width; inherited from the model."""
+
+        num_tokens: int = 16
+        """Prefix tokens; the task vector occupies the first token."""
+
+        forward_dtype: torch.dtype = torch.bfloat16
+        """Dtype used before prefix padding; the model owner scales the sequence."""
+
+        composition: TaskComposerConfig = field(default_factory=CategorySlotFiLM.Config)
+        """Injectable compositional task-memory behavior."""
+
+        residual: SparsePuzzleEmbedding.Config = field(
+            default_factory=lambda: SparsePuzzleEmbedding.Config(
+                channels_in=-1,
+                channels_out=32,
+                num_tokens=1,
+                batch_size=384,
+                embed_scale=1.0,
+                dtype=torch.bfloat16,
+                dtype_scale=torch.bfloat16,
+            ),
+        )
+        """Sparse instance table; semantic task count is configured separately."""
+
+        residual_projection: WeightedProjectionConfig = field(
+            default_factory=lambda: Linear.Config(channels_in=-1, bias=False),
+        )
+        """Injectable projection from the sparse lookup boundary to task width."""
+
+        residual_gate: ResidualGateConfig | None = field(
+            default_factory=SigmoidResidualGate.Config,
+        )
+        """Optional sigmoid gate; ``None`` adds the residual ungated."""
+
+        @property
+        def num_prefix_tokens(self) -> int:
+            """Tokens emitted by this prefix."""
+            return self.num_tokens
+
+        @override
+        def finalize(self) -> Self:
+            if self.composition.channels_out == -1:
+                self.composition.channels_out = self.channels_out
+            lookup_width = self.residual.num_tokens * self.residual.channels_token
+            if self.residual_projection.channels_in == -1:
+                self.residual_projection.channels_in = lookup_width
+            if self.residual_projection.channels_out == -1:
+                self.residual_projection.channels_out = self.channels_out
+            if (
+                isinstance(self.residual_gate, ChannelsOut)
+                and self.residual_gate.channels_out == -1
+            ):
+                self.residual_gate.channels_out = self.channels_out
+            return super().finalize()
+
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
+            """Cost composed memory, sparse lookup, projection, and padded prefix.
+
+            Args:
+              seq_len: Ignored; the prefix has its own configured token count.
+              batch_size: Puzzles in the complete invocation.
+              dtype: Activation dtype for composition and prefix output.
+              **kwargs: Open cost bus forwarded to each injectable child.
+
+            Returns:
+              cost: Whole-batch FLOPs, logical bytes, and parameter ownership.
+
+            """
+            del seq_len
+            total = cost(
+                self.composition,
+                seq_len=1,
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
+            )
+            total += cost(
+                self.residual,
+                seq_len=1,
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
+            )
+            total += cost(
+                self.residual_projection,
+                seq_len=1,
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
+            )
+            if self.residual_gate is not None:
+                total += cost(
+                    self.residual_gate,
+                    seq_len=1,
+                    batch_size=batch_size,
+                    dtype=dtype,
+                    **kwargs,
+                )
+            total += elementwise_cost(
+                primal=batch_size
+                * self.channels_out
+                * (1 + int(self.residual_gate is not None)),
+                adjoint=batch_size
+                * self.channels_out
+                * (2 if self.residual_gate is not None else 1),
+                channels=self.channels_out * (1 + int(self.residual_gate is not None)),
+                inputs=2 if self.residual_gate is not None else 1,
+                rows=batch_size,
+                dtype=dtype,
+            )
+            total += traffic(
+                "primal",
+                "selection",
+                elements=batch_size * self.channels_out
+                + batch_size * self.num_tokens * self.channels_out,
+                dtype=dtype,
+            )
+            return total
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        if config.channels_out <= 0:
+            raise ValueError("ComposedSparsePrefix requires positive channels_out.")
+        if config.num_tokens < 1:
+            raise ValueError("num_tokens must be positive.")
+        self.channels_out = config.channels_out
+        self.num_tokens = config.num_tokens
+        self.forward_dtype = config.forward_dtype
+        self.composition = config.composition.make()
+        self.residual_gate = (
+            None if config.residual_gate is None else config.residual_gate.make()
+        )
+        self.residual = config.residual.make()
+        projection = config.residual_projection.make()
+        if not has_weight(projection):
+            raise TypeError("residual_projection must expose a weight tensor.")
+        self.residual_projection = projection
+
+    def reset_parameters(self) -> None:
+        """Reset each injectable child that owns initialization state."""
+        self.composition.reset_parameters()
+        if self.residual_gate is not None:
+            self.residual_gate.reset_parameters()
+        self.residual.reset_parameters()
+        self.residual_projection.reset_parameters()
+
+    @override
+    def forward(self, batch_size: int, **kwargs: object) -> Tensor:
+        """Return an unscaled, padded task prefix for a complete batch.
+
+        Args:
+          batch_size: Number of puzzle rows; training must fill the sparse buffer.
+          **kwargs: Must include ``category_indices:[B]`` semantic category IDs,
+            ``augmentation_indices:[B]`` augmentation IDs, ``slot_permutation``
+            with shape ``[B, num_slots]``, and ``puzzle_identifiers:[B]`` sparse
+            instance-row IDs.
+            Semantic task IDs select shared composition rows; instance IDs select
+            rows in the separately sized sparse residual table.
+
+        Returns:
+          prefix: Unscaled ``[B, num_tokens, channels_out]`` output. The task
+            vector occupies token 0; remaining tokens are zeros. The model owner
+            applies its hidden-width scale once after concatenating the sequence.
+
+        """
+        category_indices = _tensor_arg(kwargs, name="category_indices")
+        augmentation_indices = _tensor_arg(kwargs, name="augmentation_indices")
+        slot_permutation = _tensor_arg(kwargs, name="slot_permutation")
+        puzzle_identifiers = _tensor_arg(kwargs, name="puzzle_identifiers")
+        composed = self.composition(
+            category_indices=category_indices,
+            augmentation_indices=augmentation_indices,
+            slot_permutation=slot_permutation,
+        )
+        residual = self.residual(
+            batch_size,
+            puzzle_identifiers=puzzle_identifiers,
+        ).flatten(start_dim=1)
+        residual = residual.to(self.residual_projection.weight.dtype)
+        residual = self.residual_projection(residual).to(composed.dtype)
+        if self.residual_gate is not None:
+            residual = residual * self.residual_gate(composed)
+        composed = composed + residual
+        prefix = composed.to(self.forward_dtype).unsqueeze(1)
+        if self.num_tokens > 1:
+            prefix = functional.pad(prefix, (0, 0, 0, self.num_tokens - 1))
+        return prefix
+
+
+def _tensor_arg(kwargs: dict[str, object], *, name: str) -> Tensor:
+    """Read a required tensor-valued prefix keyword."""
+    value = kwargs.get(name)
+    if not isinstance(value, Tensor):
+        raise TypeError(f"ComposedSparsePrefix requires tensor kwarg {name!r}.")
+    return value

@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from priml.cost import cost, matmul_cost
+from priml.math.linear import cast_parameters_to_input
 from priml.model.attention.attention import (
     Attention,
     AttentionProjections,
@@ -92,6 +93,57 @@ def test_self_attention_registers_a_custom_rope() -> None:
 
     assert "rope" in dict(module.named_modules())
     assert "rope.scale" in dict(module.named_parameters())
+
+
+def test_attention_accepts_flat_qkv_projection() -> None:
+    module = Attention.Config(
+        channels_in=7,
+        num_heads=2,
+        num_heads_kv=1,
+        channels_head=3,
+        proj_qkv=Linear.Config(
+            7,
+            12,
+            bias=True,
+            linear_fn=cast_parameters_to_input,
+        ),
+        proj_out=Linear.Config(
+            6,
+            7,
+            bias=True,
+            linear_fn=cast_parameters_to_input,
+        ),
+        attn_kernel=SdpaNaive.Config(),
+    ).make()
+    inputs = torch.randn(2, 5, 7)
+
+    expected = (
+        module.proj_qkv(inputs)
+        .reshape(2, 5, 4, 3)
+        .split(
+            [2, 1, 1],
+            dim=-2,
+        )
+    )
+    queries, keys, values = module.split_qkv(inputs)
+
+    assert torch.equal(queries, expected[0])
+    assert torch.equal(keys, expected[1])
+    assert torch.equal(values, expected[2])
+    assert torch.equal(module.project_queries(inputs), expected[0])
+    memory_keys, memory_values = module.project_memory(inputs)
+    assert torch.equal(memory_keys, expected[1])
+    assert torch.equal(memory_values, expected[2])
+    assert module(inputs).shape == inputs.shape
+
+    unbatched = inputs[0]
+    unbatched_expected = (
+        module.proj_qkv(unbatched).reshape(5, 4, 3).split([2, 1, 1], dim=-2)
+    )
+    unbatched_queries, unbatched_keys, unbatched_values = module.split_qkv(unbatched)
+    assert torch.equal(unbatched_queries, unbatched_expected[0])
+    assert torch.equal(unbatched_keys, unbatched_expected[1])
+    assert torch.equal(unbatched_values, unbatched_expected[2])
 
 
 def test_self_attention():
@@ -1054,6 +1106,29 @@ def test_attention_projections_cost_is_its_projections_and_slots() -> None:
         + norm_out["flops", "primal", "elementwise"].sum()
     )
     assert model_cost.bytes_state == 0
+
+
+def test_rank_two_cross_attention_costs_the_injected_projection_calls() -> None:
+    config = Attention.Config(
+        channels_in=8,
+        num_heads=2,
+        channels_head=4,
+    )
+    config.proj_qkv = Linear.Config(channels_in=8, channels_out=16, bias=True)
+    config.proj_out = Linear.Config(channels_in=8, channels_out=8, bias=True)
+    config.attn_kernel = SdpaNaive.Config()
+
+    model_cost = config.finalize().cost(
+        seq_len=3,
+        memory_len=5,
+        batch_size=2,
+        dtype=None,
+    )
+
+    qkv = 2 * 3 * 8 * 16 + 2 * 5 * 8 * 16
+    output = 2 * 3 * 8 * 8
+    assert model_cost["flops", "primal", "matmul"].sum() >= qkv + output
+    assert model_cost.params == 16 * 8 + 16 + 8 * 8 + 8
 
 
 def test_gqa_cost_caches_only_kv_heads() -> None:

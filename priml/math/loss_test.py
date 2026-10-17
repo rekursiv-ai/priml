@@ -15,6 +15,7 @@ from priml.math.loss import (
     cross_entropy_logz,
     cross_entropy_with_batched_smoothing,
     log_stablemax,
+    log_stablemax_via_probabilities,
     stablemax_cross_entropy,
 )
 
@@ -299,6 +300,132 @@ def test_log_stablemax_normalizes() -> None:
     # exp(logp) should sum to 1 per row.
     sums = logp.exp().sum(dim=-1)
     assert torch.allclose(sums, torch.ones_like(sums), atol=1e-12)
+
+
+def test_log_stablemax_differs_from_probability_normalization() -> None:
+    """Measure the source operation-order gap before adding an injected path."""
+    logits = torch.tensor(
+        [
+            [
+                [-2.0, 0.5, 3.0, -0.25],
+                [1.0, -4.0, 0.25, 2.0],
+                [0.0, 2.0, -1.0, 0.5],
+            ],
+            [
+                [3.0, -2.0, 0.25, 1.5],
+                [-0.5, 2.0, 1.0, -3.0],
+                [1.25, 0.5, -2.5, 3.5],
+            ],
+        ],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    stable = torch.where(
+        logits < 0,
+        1 / (1 - logits + 1e-30),
+        logits + 1,
+    )
+    expected = (stable / stable.sum(dim=-1, keepdim=True)).log()
+
+    assert not torch.equal(log_stablemax(logits), expected)
+
+
+def test_log_stablemax_via_probabilities_matches_values_and_gradients() -> None:
+    """Normalize stablemax values before taking logs, including gradients."""
+    logits = torch.tensor(
+        [
+            [
+                [-2.0, 0.5, 3.0, -0.25],
+                [1.0, -4.0, 0.25, 2.0],
+                [0.0, 2.0, -1.0, 0.5],
+            ],
+            [
+                [3.0, -2.0, 0.25, 1.5],
+                [-0.5, 2.0, 1.0, -3.0],
+                [1.25, 0.5, -2.5, 3.5],
+            ],
+        ],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    stable = torch.where(
+        logits < 0,
+        1 / (1 - logits + 1e-30),
+        logits + 1,
+    )
+    expected = (stable / stable.sum(dim=-1, keepdim=True)).log()
+
+    actual = log_stablemax_via_probabilities(logits)
+
+    assert torch.equal(actual, expected)
+    actual_grad = torch.autograd.grad(actual.sum(), logits)[0]
+    expected_grad = torch.autograd.grad(expected.sum(), logits)[0]
+    assert torch.equal(actual_grad, expected_grad)
+
+
+def test_log_stablemax_via_probabilities_has_finite_fp32_second_derivatives() -> None:
+    """The masked reciprocal branch must not poison float32 backward."""
+    logits = torch.tensor(
+        [[1.0, 0.5, -0.5], [0.0, -1.0, 2.0]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    safe_negative = torch.where(logits < 0, logits, torch.zeros_like(logits))
+    stable = torch.where(
+        logits < 0,
+        1 / (1 - safe_negative + 1e-30),
+        logits + 1,
+    )
+    expected = (stable / stable.sum(dim=-1, keepdim=True)).log()
+
+    actual = log_stablemax_via_probabilities(logits)
+
+    assert torch.equal(actual, expected)
+    (actual_gradient,) = torch.autograd.grad(actual.sum(), logits, create_graph=True)
+    (expected_gradient,) = torch.autograd.grad(
+        expected.sum(),
+        logits,
+        create_graph=True,
+    )
+    assert torch.isfinite(actual_gradient).all(), actual_gradient
+    assert torch.equal(actual_gradient, expected_gradient)
+    (actual_second,) = torch.autograd.grad(actual_gradient.sum(), logits)
+    (expected_second,) = torch.autograd.grad(expected_gradient.sum(), logits)
+    assert torch.isfinite(actual_second).all(), actual_second
+    assert torch.equal(actual_second, expected_second)
+
+
+def test_stablemax_cross_entropy_injects_its_log_normalizer() -> None:
+    """Apply a caller-selected stablemax normalizer before target gathering."""
+    logits = torch.tensor(
+        [
+            [
+                [-2.0, 0.5, 3.0, -0.25],
+                [1.0, -4.0, 0.25, 2.0],
+                [0.0, 2.0, -1.0, 0.5],
+            ],
+            [
+                [3.0, -2.0, 0.25, 1.5],
+                [-0.5, 2.0, 1.0, -3.0],
+                [1.25, 0.5, -2.5, 3.5],
+            ],
+        ],
+        dtype=torch.float64,
+    )
+    labels = torch.tensor([[2, 0, -100], [0, 1, 3]])
+    counted = labels != -100
+    safe_labels = labels.masked_fill(~counted, 0)
+    log_probabilities = log_stablemax_via_probabilities(logits)
+    selected = log_probabilities.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
+    expected = -torch.where(counted, selected, 0.0)
+
+    actual = stablemax_cross_entropy(
+        logits,
+        labels,
+        log_normalizer=log_stablemax_via_probabilities,
+    )
+
+    assert torch.equal(actual, expected)
 
 
 def test_log_stablemax_matches_the_literal_definition() -> None:

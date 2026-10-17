@@ -10,15 +10,15 @@ import torch
 from priml.baselines.arcagi.model import (
     ConvSwiGLU,
     RotaryBlock,
-    SingleLatentRecurrence,
     depthwise_conv,
     depthwise_shift,
 )
-from priml.baselines.sudoku.embedding import GridEmbedding
-from priml.baselines.sudoku.model import SudokuNet
 from priml.cost import cost
 from priml.model.attention.attention import Attention
+from priml.model.grid_embedding import GridEmbedding
+from priml.model.grid_solver import GridSolver
 from priml.model.norm import RMSNorm
+from priml.model.recurrence import SingleLatentRecurrence
 from priml.model.swiglu import SwiGLU
 from priml.testing.cost import assert_cost_matches_torch
 
@@ -82,6 +82,35 @@ def test_shifted_taps_match_the_convolution(
     torch.testing.assert_close(shifted, reference)
 
 
+@pytest.mark.parametrize("causal", [False, True])
+def test_depthwise_conv_casts_bfloat_weights_and_restores_input_dtype(
+    causal: bool,
+) -> None:
+    """Use weight precision and return the input precision."""
+    conv = nn.Conv1d(4, out_channels=4, kernel_size=3, groups=4, bias=True).to(
+        torch.bfloat16,
+    )
+    x = torch.arange(2 * 5 * 4, dtype=torch.float32).reshape(2, 5, 4) / 7
+    channel_first = x.transpose(1, 2)
+    if causal:
+        padded = nn.functional.pad(channel_first, (2, 0))
+    else:
+        padded = nn.functional.pad(channel_first, (1, 1))
+    expected = (
+        nn.functional.silu(
+            conv(padded.to(conv.weight.dtype))[..., : x.shape[1]],
+        )
+        .transpose(1, 2)
+        .to(x.dtype)
+    )
+
+    actual = depthwise_conv(conv, x, causal=causal)
+
+    assert actual.dtype is torch.float32
+    assert actual.shape == x.shape
+    assert torch.equal(actual, expected)
+
+
 def test_the_gate_norm_changes_the_output() -> None:
     """With a norm the gate is ``sigmoid(g) * norm(g * u)``, not ``silu(g) * u``."""
     plain = ConvSwiGLU.Config(channels_in=4, channels_hidden=4).make()
@@ -99,7 +128,7 @@ def test_the_gate_norm_changes_the_output() -> None:
 def test_single_latent_recurrence_leaves_the_other_latent_untouched(
     inner_grad_loops: int,
 ) -> None:
-    config = SudokuNet.Config(channels_in=8, num_layers=1, vocab_size=5)
+    config = GridSolver.Config(channels_in=8, num_layers=1, vocab_size=5)
     config.embedding = GridEmbedding.Config(grid_shape=(4,))
     config.block = SwiGLU.Config(channels_hidden=8, round_to=1)
     config.recurrence = SingleLatentRecurrence.Config(

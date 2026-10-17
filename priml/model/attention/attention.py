@@ -24,9 +24,11 @@ from priml.model.attention.window import causal_chunk_mask, window_mask
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
+    ChannelsOut,
     DepthIndex,
     HasResetParameters,
     LayerCache,
+    LinearProjection,
     RotaryConfig,
     TensorModule,
     infer_same_width,
@@ -100,6 +102,12 @@ class AttentionProjections(nn.Module):
         where matching HF's operation order avoids small floating-point drift.
         """
 
+        proj_qkv: Makeable[LinearProjection] | None = None
+        """Optional fused QKV projection; its config owns geometry and initialization."""
+
+        proj_out: Makeable[LinearProjection] | None = None
+        """Optional output projection; its config owns geometry and initialization."""
+
         init_weight: InitFn = kaiming_uniform
         """Weight initialization function."""
 
@@ -125,6 +133,28 @@ class AttentionProjections(nn.Module):
             ):
                 self.norm_out.channels_in = self.num_heads * self.channels_head
             infer_same_width(self)
+            if (
+                isinstance(self.proj_qkv, ChannelsIn)
+                and self.proj_qkv.channels_in == -1
+            ):
+                self.proj_qkv.channels_in = self.channels_in
+            if (
+                isinstance(self.proj_qkv, ChannelsOut)
+                and self.proj_qkv.channels_out == -1
+            ):
+                self.proj_qkv.channels_out = (
+                    self.num_heads + 2 * self.num_heads_kv
+                ) * self.channels_head
+            if (
+                isinstance(self.proj_out, ChannelsIn)
+                and self.proj_out.channels_in == -1
+            ):
+                self.proj_out.channels_in = self.num_heads * self.channels_head
+            if (
+                isinstance(self.proj_out, ChannelsOut)
+                and self.proj_out.channels_out == -1
+            ):
+                self.proj_out.channels_out = self.channels_out
             return super().finalize()
 
         def cost(
@@ -158,37 +188,69 @@ class AttentionProjections(nn.Module):
             rows = seq_len * batch_size
             dt = dtype
             inner = self.num_heads * self.channels_head
-            if memory_len < 0:
-                projection_heads = (
-                    (self.num_heads, self.num_heads_kv, self.num_heads_kv)
-                    if self.split_qkv_projection
-                    else (self.num_heads + 2 * self.num_heads_kv,)
-                )
-                projections = [(heads, rows) for heads in projection_heads]
-            else:
-                projections = [
-                    (self.num_heads, rows),
-                    (2 * self.num_heads_kv, memory_len * batch_size),
-                ]
-            qkv = sum(
-                (
-                    matmul_cost(
-                        channels_in=self.channels_in,
-                        channels_out=heads * self.channels_head,
-                        bias=self.bias,
-                        dtype=dt,
-                        rows=projected,
+            if self.proj_qkv is None:
+                if memory_len < 0:
+                    projection_heads = (
+                        (self.num_heads, self.num_heads_kv, self.num_heads_kv)
+                        if self.split_qkv_projection
+                        else (self.num_heads + 2 * self.num_heads_kv,)
                     )
-                    for heads, projected in projections
-                ),
-                Cost(),
-            )
-            out = matmul_cost(
-                channels_in=inner,
-                channels_out=self.channels_in,
-                bias=self.bias,
-                dtype=dt,
-                rows=rows,
+                    projections = [(heads, rows) for heads in projection_heads]
+                else:
+                    projections = [
+                        (self.num_heads, rows),
+                        (2 * self.num_heads_kv, memory_len * batch_size),
+                    ]
+                qkv = sum(
+                    (
+                        matmul_cost(
+                            channels_in=self.channels_in,
+                            channels_out=heads * self.channels_head,
+                            bias=self.bias,
+                            dtype=dt,
+                            rows=projected,
+                        )
+                        for heads, projected in projections
+                    ),
+                    Cost(),
+                )
+            else:
+                qkv = cost(
+                    self.proj_qkv,
+                    seq_len=seq_len,
+                    batch_size=batch_size,
+                    dtype=dt,
+                    **kwargs,
+                )
+                if memory_len >= 0:
+                    memory_projection = cost(
+                        self.proj_qkv,
+                        seq_len=memory_len,
+                        batch_size=batch_size,
+                        dtype=dt,
+                        **kwargs,
+                    )
+                    qkv += replace(
+                        memory_projection,
+                        params=0,
+                        params_active=0,
+                    )
+            out = (
+                matmul_cost(
+                    channels_in=inner,
+                    channels_out=self.channels_in,
+                    bias=self.bias,
+                    dtype=dt,
+                    rows=rows,
+                )
+                if self.proj_out is None
+                else cost(
+                    self.proj_out,
+                    seq_len=seq_len,
+                    batch_size=batch_size,
+                    dtype=dt,
+                    **kwargs,
+                )
             )
             total = qkv + out
             if self.norm_qk is not None and memory_len >= 0:
@@ -274,23 +336,31 @@ class AttentionProjections(nn.Module):
         # proj_out maps the concatenated num_heads back to it.
         inner = config.num_heads * config.channels_head
         # Fused QKV: one EnsembleLinear, each head orthogonalized independently by Muon.
-        self.proj_qkv = EnsembleLinear.Config(
-            channels_in=c,
-            channels_out=config.channels_head,
-            num_ensemble=config.num_heads + 2 * config.num_heads_kv,
-            bias=config.bias,
-            depth_index=config.depth_index,
-            init_weight=config.init_weight,
-            shard="colwise",
-        ).make()
-        self.proj_out = Linear.Config(
-            channels_in=inner,
-            channels_out=c,
-            bias=config.bias,
-            depth_index=config.depth_index,
-            init_weight=config.init_weight,
-            shard="rowwise",
-        ).make()
+        self.proj_qkv: LinearProjection = (
+            config.proj_qkv.make()
+            if config.proj_qkv is not None
+            else EnsembleLinear.Config(
+                channels_in=c,
+                channels_out=config.channels_head,
+                num_ensemble=config.num_heads + 2 * config.num_heads_kv,
+                bias=config.bias,
+                depth_index=config.depth_index,
+                init_weight=config.init_weight,
+                shard="colwise",
+            ).make()
+        )
+        self.proj_out: LinearProjection = (
+            config.proj_out.make()
+            if config.proj_out is not None
+            else Linear.Config(
+                channels_in=inner,
+                channels_out=c,
+                bias=config.bias,
+                depth_index=config.depth_index,
+                init_weight=config.init_weight,
+                shard="rowwise",
+            ).make()
+        )
 
         if config.norm_qk is None:
             self.norm_q: TensorModule | None = None
@@ -322,6 +392,17 @@ class AttentionProjections(nn.Module):
         c = self.channels_head
         q_end = self.num_heads
         k_end = q_end + self.num_heads_kv
+        if self.proj_qkv.weight.ndim == 2:
+            heads = self.proj_qkv(x).reshape(
+                *x.shape[:-1],
+                self.num_heads + 2 * self.num_heads_kv,
+                c,
+            )
+            q, k, v = heads.split(
+                [self.num_heads, self.num_heads_kv, self.num_heads_kv],
+                dim=-2,
+            )
+            return q, k, v
         w = self.proj_qkv.weight.to(x.dtype)
         bias = self.proj_qkv.bias
         b = bias.to(x.dtype) if bias is not None else None
@@ -583,6 +664,12 @@ class Attention(AttentionProjections):
 
         """
         w = self.proj_qkv.weight.to(x.dtype)[: self.num_heads]
+        if self.proj_qkv.weight.ndim == 2:
+            return self.proj_qkv(x).reshape(
+                *x.shape[:-1],
+                self.num_heads + 2 * self.num_heads_kv,
+                self.channels_head,
+            )[..., : self.num_heads, :]
         q = torch.matmul(x, w.reshape(-1, w.shape[-1]).T)
         bias = self.proj_qkv.bias
         if bias is not None:
@@ -602,6 +689,14 @@ class Attention(AttentionProjections):
           v: Values, shaped like ``k``.
 
         """
+        if self.proj_qkv.weight.ndim == 2:
+            kv = self.proj_qkv(memory).reshape(
+                *memory.shape[:-1],
+                self.num_heads + 2 * self.num_heads_kv,
+                self.channels_head,
+            )[..., self.num_heads :, :]
+            k, v = kv.split([self.num_heads_kv, self.num_heads_kv], dim=-2)
+            return k, v
         w = self.proj_qkv.weight.to(memory.dtype)[self.num_heads :]
         kv = torch.matmul(memory, w.reshape(-1, w.shape[-1]).T)
         bias = self.proj_qkv.bias
@@ -652,6 +747,16 @@ class Attention(AttentionProjections):
             k, v = self.project_memory(memory)
         elif self.split_qkv_projection:
             q, k, v = self.split_qkv(x)
+        elif self.proj_qkv.weight.ndim == 2:
+            q, k, v = (
+                self.proj_qkv(x)
+                .reshape(
+                    *x.shape[:-1],
+                    self.num_heads + 2 * self.num_heads_kv,
+                    self.channels_head,
+                )
+                .split([self.num_heads, self.num_heads_kv, self.num_heads_kv], dim=-2)
+            )
         else:
             q, k, v = (
                 t.contiguous()

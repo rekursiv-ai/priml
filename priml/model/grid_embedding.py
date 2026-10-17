@@ -37,7 +37,7 @@ from priml.cost import (
     reduction_cost,
     traffic,
 )
-from priml.model.custom_types import ChannelsIn, ChannelsOut
+from priml.model.custom_types import ChannelsIn, ChannelsOut, HasResetParameters
 from priml.model.embedding import Embedding
 from priml.model.init import (
     InitFn,
@@ -87,9 +87,9 @@ class FactoredPositions(nn.Module):
     ``(rows + cols + boxes) * C`` parameters against ``rows * cols * C`` for a
     dense table, and share statistics across cells that share a constraint.
 
-    Set ``box_shape`` to ``(1, 1)`` for a puzzle with no box structure; the box
-    table then degenerates to one entry per cell and the sum is row + column
-    positions plus a constant.
+    Set ``box_shape`` to the full ``grid_shape`` for a puzzle with no box
+    structure; the box table then has one entry shared by every cell and the
+    sum is row + column positions plus a constant.
     """
 
     class Config(Fig["FactoredPositions"]):
@@ -210,21 +210,39 @@ class FactoredPositions(nn.Module):
         self.embed_scale: float = (
             config.channels_out**0.5 if config.embed_scale < 0 else config.embed_scale
         )
-        cell = torch.arange(rows * cols)
+        num_boxes = (rows // box_rows) * (cols // box_cols)
+        width = config.channels_out
+        self.embed_pos_row = nn.Parameter(
+            torch.empty(rows, width, dtype=torch.float32),
+        )
+        self.embed_pos_col = nn.Parameter(
+            torch.empty(cols, width, dtype=torch.float32),
+        )
+        self.embed_pos_box = nn.Parameter(
+            torch.empty(num_boxes, width, dtype=torch.float32),
+        )
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        """Reset position tables and reconstruct their nonpersistent indices."""
+        rows, cols = self.config.grid_shape
+        box_rows, box_cols = self.config.box_shape
+        cell = torch.arange(rows * cols, device=self.embed_pos_row.device)
         row = cell // cols
         col = cell % cols
-        box = (row // box_rows) * (cols // box_cols) + col // box_cols
-        self.row_index = nn.Buffer(row, persistent=False)
-        self.col_index = nn.Buffer(col, persistent=False)
-        self.box_index = nn.Buffer(box, persistent=False)
-        num_boxes = (rows // box_rows) * (cols // box_cols)
-        # Init order is a checkpoint-parity contract: row, then column, then
-        # box. Each draws from the global RNG, so reordering changes every
-        # seeded run's weights.
-        width, std = config.channels_out, config.init_std
-        self.embed_pos_row = _table(rows, channels_out=width, init_std=std)
-        self.embed_pos_col = _table(cols, channels_out=width, init_std=std)
-        self.embed_pos_box = _table(num_boxes, channels_out=width, init_std=std)
+        with torch.no_grad():
+            self.row_index = nn.Buffer(row, persistent=False)
+            self.col_index = nn.Buffer(col, persistent=False)
+            self.box_index = nn.Buffer(
+                (row // box_rows) * (cols // box_cols) + col // box_cols,
+                persistent=False,
+            )
+            for table in (self.embed_pos_row, self.embed_pos_col, self.embed_pos_box):
+                _initialize_table_(
+                    table,
+                    init_std=self.config.init_std,
+                    channels_out=self.config.channels_out,
+                )
 
     @override
     def forward(self, tokens: Tensor, embeddings: Tensor) -> Tensor:
@@ -330,6 +348,16 @@ class PredictionFeedback(nn.Module):
         )
         self._feedback_ids: Tensor | None = None
 
+    def reset_parameters(self) -> None:
+        """Reset the feedback table and discard any pending input grid."""
+        with torch.no_grad():
+            _initialize_table_(
+                self.embed_feedback,
+                init_std=self.config.init_std,
+                channels_out=self.config.channels_out,
+            )
+        self._feedback_ids = None
+
     def set_feedback(self, feedback_ids: Tensor | None) -> None:
         """Stash the decoded grid the NEXT forward consumes.
 
@@ -392,6 +420,12 @@ class GridEmbedding(nn.Module):
         init_weight: InitFn = corrected_fan_in_normal
         """Token-table initializer; the runtime rescale brings it to unit scale."""
 
+        token_table: Embedding.Config | None = None
+        """Optional table child; when set, it owns initialization and lookup dtype."""
+
+        embed_scale: float = -1.0
+        """Runtime scale; a negative value derives ``sqrt(channels_out)``."""
+
         @property
         def grid_len(self) -> int:
             """Number of grid tokens per puzzle."""
@@ -399,6 +433,11 @@ class GridEmbedding(nn.Module):
 
         @override
         def finalize(self) -> Self:
+            if self.token_table is not None:
+                if self.token_table.channels_in == -1:
+                    self.token_table.channels_in = self.channels_in
+                if self.token_table.channels_out == -1:
+                    self.token_table.channels_out = self.channels_out
             for channel in self.channels:
                 if isinstance(channel, ChannelsOut) and channel.channels_out == -1:
                     channel.channels_out = self.channels_out
@@ -433,8 +472,9 @@ class GridEmbedding(nn.Module):
 
             """
             width = self.channels_out
+            table = self.token_table or _token_table(self)
             total = cost(
-                _token_table(self),
+                table,
                 seq_len=seq_len,
                 batch_size=batch_size,
                 dtype=dtype,
@@ -482,9 +522,12 @@ class GridEmbedding(nn.Module):
         if not config.grid_shape:
             raise ValueError("GridEmbedding requires grid_shape from the dataset.")
         self.config = config
-        self.embed_scale: float = config.channels_out**0.5
-        self.embed_tokens = _token_table(config).make()
-        call_init(config.init_weight, self.embed_tokens.weight)
+        self.embed_scale = (
+            config.channels_out**0.5 if config.embed_scale < 0 else config.embed_scale
+        )
+        self.embed_tokens = (config.token_table or _token_table(config)).make()
+        if config.token_table is None:
+            call_init(config.init_weight, self.embed_tokens.weight)
         # The slot is typed by what a channel DOES (``GridChannel``) while
         # ``ModuleList`` holds what it IS, and iterating one yields a bare
         # ``Module`` whose ``__call__`` says nothing. Keep the typed list beside
@@ -498,6 +541,15 @@ class GridEmbedding(nn.Module):
             built.append(channel)
             self._channels.append(channel)
         self.channels = nn.ModuleList(built)
+
+    def reset_parameters(self) -> None:
+        """Reset the token table and every additive channel that supports reset."""
+        self.embed_tokens.reset_parameters()
+        if self.config.token_table is None:
+            call_init(self.config.init_weight, self.embed_tokens.weight)
+        for channel in self.channels:
+            if isinstance(channel, HasResetParameters):
+                channel.reset_parameters()
 
     @override
     def forward(self, tokens: Tensor) -> Tensor:
@@ -528,12 +580,32 @@ def _table(
     init_std: float,
 ) -> nn.Parameter:
     """Return a learned table whose REALIZED std is ``init_std`` after rescaling."""
-    w = torch.zeros(num_embeddings, channels_out)
-    if init_std > 0:
-        truncated_normal(
-            w,
-            std=init_std / channels_out**0.5,
-            depth_index=(),
-            variance_correction=True,
-        )
+    w = torch.empty(num_embeddings, channels_out, dtype=torch.float32)
+    _initialize_table_(w, init_std=init_std, channels_out=channels_out)
     return nn.Parameter(w)
+
+
+def _initialize_table_(
+    table: Tensor,
+    *,
+    init_std: float,
+    channels_out: int,
+) -> None:
+    """Draw an FP32 table initialization and copy it into owned storage."""
+    with torch.no_grad():
+        initial = (
+            table
+            if table.dtype is torch.float32
+            else torch.empty(table.shape, device=table.device, dtype=torch.float32)
+        )
+        if init_std > 0:
+            truncated_normal(
+                initial,
+                std=init_std / channels_out**0.5,
+                depth_index=(),
+                variance_correction=True,
+            )
+        else:
+            initial.zero_()
+        if initial is not table:
+            table.copy_(initial)

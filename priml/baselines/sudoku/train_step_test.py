@@ -17,11 +17,11 @@ from priml.baselines.sudoku.act import (
     HaltTraining,
     StreamingPool,
 )
-from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
-from priml.baselines.sudoku.model import DeepRecurrence
-from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.baselines.sudoku.train_step import SudokuTrainStep
 from priml.model.attention.attention import Attention
+from priml.model.grid_embedding import GridEmbedding, PredictionFeedback
+from priml.model.prefix import SparsePuzzleEmbedding
+from priml.model.recurrence import DeepRecurrence
 from priml.model.transformer.block import TransformerBlock
 from priml.train.parallelism import NoParallel
 

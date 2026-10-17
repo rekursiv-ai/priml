@@ -6,6 +6,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+import math
 import tempfile
 
 from torch import Tensor, nn
@@ -23,7 +24,9 @@ from priml.optimizers.muon import (
     adjust_lr_conv_heuristic,
     adjust_lr_match_rms_adamw,
     adjust_lr_original,
+    momentum_add_update,
 )
+from priml.testing.bfb import host_agnostic_numerics
 
 
 if TYPE_CHECKING:
@@ -32,6 +35,12 @@ if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
     from priml.distributed.testing import WarmPoolGetter
+
+
+def _fixed_adjustment(lr: float, param: Tensor, ensemble_dims: int) -> float:
+    """Return a fixed rate for the injected Muon operation test."""
+    del lr, param, ensemble_dims
+    return 0.05
 
 
 class TestLrScale:
@@ -213,6 +222,55 @@ class TestMuon:
         }
         expected_parameter = before * (1 - 0.2 * 0.25) - projected * 0.1
         torch.testing.assert_close(parameter, expected_parameter)
+
+    @pytest.mark.parametrize(
+        ("parameter_shape", "expected_signum_shape"),
+        [((2, 3), (2, 3)), ((2, 3, 4, 5), (1, 2, 3 * 4 * 5))],
+    )
+    def test_config_injects_momentum_and_orthogonalization_updates(
+        self,
+        parameter_shape: tuple[int, ...],
+        expected_signum_shape: tuple[int, ...],
+    ) -> None:
+        """Allow an optimizer recipe to inject exact tensor update operations."""
+        del self
+        indices = torch.arange(math.prod(parameter_shape)).reshape(parameter_shape)
+        parameter = nn.Parameter((indices % 7 - 3) / 4)
+        old_buffer = (indices % 11 - 5) / 8
+        gradient = (indices % 13 - 6) / 16
+        parameter.grad = gradient.clone()
+        signum_inputs: list[tuple[int, ...]] = []
+
+        def record_signum_input(matrix: Tensor) -> Tensor:
+            signum_inputs.append(tuple(matrix.shape))
+            return matrix
+
+        optimizer = Muon.Config(
+            lr=0.1,
+            weight_decay=None,
+            momentum=0.6,
+            matrix_signum_fn=record_signum_input,
+            momentum_update_fn=momentum_add_update,
+            adjust_lr_fn=_fixed_adjustment,
+        ).make()([parameter])
+        optimizer.state[parameter]["momentum_buffer"] = old_buffer.clone()
+
+        with host_agnostic_numerics():
+            expected_buffer = old_buffer.clone()
+            expected_buffer.mul_(0.6).add_(gradient)
+            expected_direction = gradient.clone()
+            expected_direction.add_(expected_buffer, alpha=0.6)
+            before = parameter.detach().clone()
+            expected_parameter = before.clone()
+            expected_parameter.add_(expected_direction, alpha=-0.05)
+
+            optimizer.step()
+
+            actual_buffer = cast(Tensor, optimizer.state[parameter]["momentum_buffer"])
+            assert torch.equal(actual_buffer, expected_buffer)
+            assert signum_inputs == [expected_signum_shape]
+            assert torch.equal(parameter.grad, gradient)
+            assert torch.equal(parameter, expected_parameter)
 
     def test_step_group_applies_tensor_adjusted_rate(
         self,

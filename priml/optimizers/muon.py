@@ -30,6 +30,34 @@ a shape-only rule; a 0-dim ``Tensor`` for a data-dependent one, which keeps the
 value on device rather than forcing a GPU->CPU sync mid-step.
 """
 
+type MomentumUpdateFn = Callable[[Tensor, Tensor, float, bool], Tensor]
+"""Updates the momentum buffer and returns the direction to orthogonalize."""
+
+type MatrixSignumFn = Callable[[Tensor], Tensor]
+"""Maps a matrix-shaped update to its orthogonalized direction."""
+
+
+def momentum_add_update(
+    buffer: Tensor,
+    gradient: Tensor,
+    momentum: float,
+    nesterov: bool,
+) -> Tensor:
+    """Use explicit multiply/add order for momentum and Nesterov direction.
+
+    Args:
+      buffer: Persistent momentum tensor, updated in place.
+      gradient: Current gradient, unchanged when forming the Nesterov direction.
+      momentum: Momentum coefficient.
+      nesterov: Whether to add momentum to the current gradient.
+
+    Returns:
+      direction: The update direction to orthogonalize.
+
+    """
+    buffer.mul_(momentum).add_(gradient)
+    return gradient.add(buffer, alpha=momentum) if nesterov else buffer
+
 
 def adjust_lr_original(lr: float, param: Tensor, ensemble_dims: int = 0) -> float:
     """Keller Jordan's scaling: ``sqrt(max(1, fan_out / fan_in))``.
@@ -174,6 +202,19 @@ class Muon(Optimizer):
         adjust_lr_fn: AdjustLrFn = adjust_lr_original
         """Rescales the step for a parameter's shape; see :data:`AdjustLrFn`."""
 
+        momentum_update_fn: MomentumUpdateFn | None = None
+        """Optional momentum and Nesterov tensor-operation implementation."""
+
+        matrix_signum_fn: MatrixSignumFn | None = None
+        """Optional orthogonalizer for the momentum-updated direction.
+
+        It receives the pre-orthogonalization direction as ``(out, in)`` when
+        the update has rank 2 and ``ensemble_dims=0``. Otherwise, it receives
+        ``(prod(leading ensemble dimensions), fan_out, flattened fan_in)``.
+        Its result is reshaped to the parameter shape and overrides the built-in
+        Newton-Schulz settings.
+        """
+
         ensemble_dims: int = 0
         """Leading dimensions treated as an ensemble, not as matrix axes.
 
@@ -196,6 +237,8 @@ class Muon(Optimizer):
                 reference_numerics=final.reference_numerics,
                 adjust_lr_fn=final.adjust_lr_fn,
                 ensemble_dims=final.ensemble_dims,
+                momentum_update_fn=final.momentum_update_fn,
+                matrix_signum_fn=final.matrix_signum_fn,
             )
 
     def __init__(
@@ -212,6 +255,8 @@ class Muon(Optimizer):
         reference_numerics: bool = False,
         adjust_lr_fn: AdjustLrFn = adjust_lr_original,
         ensemble_dims: int = 0,
+        momentum_update_fn: MomentumUpdateFn | None = None,
+        matrix_signum_fn: MatrixSignumFn | None = None,
     ) -> None:
         if not math.isfinite(lr) or lr < 0.0:
             raise ValueError(f"Learning rate must be finite and nonnegative: {lr}.")
@@ -237,6 +282,8 @@ class Muon(Optimizer):
         # is a property of the run's code, not of its state, so it is rebuilt
         # from config on resume rather than restored.
         self.adjust_lr_fn = adjust_lr_fn
+        self.momentum_update_fn = momentum_update_fn
+        self.matrix_signum_fn = matrix_signum_fn
         defaults = {
             "lr": lr,
             "weight_decay": weight_decay,
@@ -306,20 +353,35 @@ class Muon(Optimizer):
 
             buf = state["momentum_buffer"]
             assert isinstance(buf, Tensor)
-            buf.lerp_(g, 1 - momentum)
-            g = g.lerp(buf, momentum) if nesterov else buf
+            if self.momentum_update_fn is None:
+                buf.lerp_(g, 1 - momentum)
+                g = g.lerp(buf, momentum) if nesterov else buf
+            else:
+                g = self.momentum_update_fn(buf, g, momentum, nesterov)
 
-            msgn_g = matrix_signum_via_newtonschulz(
-                g.reshape(
-                    math.prod(g.shape[:ensemble_dims]),
-                    g.shape[ensemble_dims],
-                    -1,
-                ),
-                coefficients=ns_coefficients,
-                steps=ns_steps,
-                eps=eps,
-                reference_numerics=reference_numerics,
-            ).reshape(g.shape)
+            if self.matrix_signum_fn is None:
+                msgn_g = matrix_signum_via_newtonschulz(
+                    g.reshape(
+                        math.prod(g.shape[:ensemble_dims]),
+                        g.shape[ensemble_dims],
+                        -1,
+                    ),
+                    coefficients=ns_coefficients,
+                    steps=ns_steps,
+                    eps=eps,
+                    reference_numerics=reference_numerics,
+                ).reshape(g.shape)
+            else:
+                signum_input = (
+                    g
+                    if ensemble_dims == 0 and g.ndim == 2
+                    else g.reshape(
+                        math.prod(g.shape[:ensemble_dims]),
+                        g.shape[ensemble_dims],
+                        -1,
+                    )
+                )
+                msgn_g = self.matrix_signum_fn(signum_input).reshape(g.shape)
 
             if weight_decay is not None:
                 p.data.mul_(1 - lr * weight_decay)

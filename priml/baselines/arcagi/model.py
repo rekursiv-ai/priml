@@ -1,6 +1,6 @@
 """Reference-TRM pieces the ARC recipes inject into the shared puzzle solver.
 
-The solver is :class:`~priml.baselines.sudoku.model.SudokuNet`; everything
+The solver is :class:`~priml.model.grid_solver.GridSolver`; everything
 here fills one of its slots:
 
 * :class:`RotaryBlock` -- the reference TRM's post-norm transformer block,
@@ -27,8 +27,6 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.baselines.sudoku.model import DeepRecurrence
-from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.cost import Cost, cost, elementwise_cost
 from priml.math.basic import ceil_multiple
 from priml.model.attention.attention import Attention
@@ -38,12 +36,12 @@ from priml.model.custom_types import ChannelsIn, TensorModule
 from priml.model.init import InitFn, corrected_fan_in_normal, kaiming_uniform
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
+from priml.model.prefix import SparsePuzzleEmbedding
 from priml.model.swiglu import SwiGLU, silu
 from priml.model.transformer.block import TransformerBlock
 
 
 if TYPE_CHECKING:
-    from priml.baselines.sudoku.model import MixFn
     from priml.model.custom_types import LayerCache
 
 
@@ -86,7 +84,7 @@ class RotaryBlock(TransformerBlock):
         """Rotary encoding, with the same head width as the attention slot.
 
         ``None`` leaves positions to the caller: every forward must then pass
-        ``cos_sin``, as :class:`SudokuNet` does when it owns the ``rope``."""
+        ``cos_sin``, as :class:`GridSolver` does when it owns the ``rope``."""
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
@@ -415,55 +413,3 @@ class ConvSwiGLU(nn.Module):
         else:
             gated = torch.sigmoid(gate) * self.norm(gate * up)
         return self.down_proj(self.short_conv(self.conv, gated, causal=self.causal))
-
-
-class SingleLatentRecurrence(DeepRecurrence):
-    """Refine ONE latent by ``fast_cycles`` block passes per core application.
-
-    The state rides in the ``z_slow`` slot, which the heads read; ``z_fast`` is
-    carried through untouched so the two-latent pool contract holds. Truncated
-    backprop is the parent's ``slow_cycles`` split by default; with
-    ``inner_grad_loops`` it moves inside the core instead.
-
-    References:
-      https://arxiv.org/abs/2512.14693
-        Gao et al. Universal Reasoning Model.
-
-    """
-
-    class Config(Makes["SingleLatentRecurrence"], DeepRecurrence.Config):
-        """Cycle counts plus the in-core truncation length."""
-
-        inner_grad_loops: int = 0
-        """Passes that carry gradient inside one core application.
-
-        0 keeps every pass differentiable, so truncation is the parent's
-        ``slow_cycles`` split. Positive runs the first
-        ``fast_cycles - inner_grad_loops`` passes without gradient, the
-        paper's in-core truncation; pair it with ``slow_cycles=1``."""
-
-    @override
-    def refine(
-        self,
-        mix: MixFn,
-        input_emb: Tensor,
-        z_slow: Tensor,
-        z_fast: Tensor,
-        cos_sin: tuple[Tensor, Tensor] | None,
-    ) -> tuple[Tensor, Tensor]:
-        """Re-inject the input before every pass over the single state."""
-        config = self.config
-        assert isinstance(config, SingleLatentRecurrence.Config)
-        h = z_slow
-        grad_loops = config.inner_grad_loops
-        if grad_loops > 0:
-            with torch.no_grad():
-                for _ in range(max(config.fast_cycles - grad_loops, 0)):
-                    h = mix(h.detach() + input_emb.detach(), cos_sin)
-            h = h.detach()
-            for _ in range(grad_loops):
-                h = mix(h + input_emb, cos_sin)
-        else:
-            for _ in range(config.fast_cycles):
-                h = mix(h + input_emb, cos_sin)
-        return h, z_fast

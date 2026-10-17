@@ -9,7 +9,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
-from priml.baselines.sudoku.embedding import (
+from priml.model.grid_embedding import (
     FactoredPositions,
     GridChannel,
     GridEmbedding,
@@ -74,6 +74,23 @@ def test_unfilled_position_geometry_is_rejected() -> None:
         GridEmbedding.Config(channels_in=6, channels_out=4).make()
 
 
+def test_factored_positions_requires_a_positive_output_width() -> None:
+    with pytest.raises(ValueError, match="channels_out must be positive"):
+        FactoredPositions.Config(
+            grid_shape=(2, 3),
+            box_shape=(2, 3),
+            channels_out=0,
+        ).make()
+
+
+def test_feedback_requires_positive_vocabulary_and_output_widths() -> None:
+    with pytest.raises(
+        ValueError,
+        match="channels_in and channels_out must be positive",
+    ):
+        PredictionFeedback.Config(channels_in=4, channels_out=0).make()
+
+
 def test_factored_positions_share_a_row() -> None:
     """Cells in one row get the same row component, which is the point."""
     embedding = _embedding(FactoredPositions.Config())
@@ -94,6 +111,106 @@ def test_box_shape_must_tile_the_grid() -> None:
     config.channels_out = 8
     with pytest.raises(ValueError, match="does not tile"):
         config.make()
+
+
+def test_factored_positions_reset_restores_parameters_and_indices() -> None:
+    config = FactoredPositions.Config(grid_shape=(2, 3), box_shape=(2, 3))
+    config.channels_out = 4
+    module = config.make()
+    expected_indices = (
+        module.row_index.clone(),
+        module.col_index.clone(),
+        module.box_index.clone(),
+    )
+    with torch.no_grad():
+        module.embed_pos_row.fill_(float("nan"))
+        module.embed_pos_col.fill_(float("nan"))
+        module.embed_pos_box.fill_(float("nan"))
+        module.row_index.fill_(-1)
+        module.col_index.fill_(-1)
+        module.box_index.fill_(-1)
+    torch.manual_seed(17)
+    module.reset_parameters()
+    assert all(
+        torch.isfinite(value).all()
+        for value in (
+            module.embed_pos_row,
+            module.embed_pos_col,
+            module.embed_pos_box,
+        )
+    )
+    for actual, expected in zip(
+        (module.row_index, module.col_index, module.box_index),
+        expected_indices,
+        strict=True,
+    ):
+        assert torch.equal(actual, expected)
+    actual_rng = torch.get_rng_state()
+    torch.manual_seed(17)
+    expected_module = config.make()
+    expected_rng = torch.get_rng_state()
+    for actual, expected in zip(
+        (module.embed_pos_row, module.embed_pos_col, module.embed_pos_box),
+        (
+            expected_module.embed_pos_row,
+            expected_module.embed_pos_col,
+            expected_module.embed_pos_box,
+        ),
+        strict=True,
+    ):
+        assert torch.equal(actual, expected)
+    assert actual_rng.equal(expected_rng)
+
+
+def test_factored_positions_meta_reset_rebuilds_nonpersistent_indices() -> None:
+    config = FactoredPositions.Config(grid_shape=(2, 3), box_shape=(2, 3))
+    config.channels_out = 4
+    module = config.make().to("meta")
+    module.to_empty(device="cpu")
+    module.row_index.fill_(-1)
+    module.col_index.fill_(-1)
+    module.box_index.fill_(-1)
+    module.reset_parameters()
+    assert torch.equal(module.row_index, torch.tensor([0, 0, 0, 1, 1, 1]))
+    assert torch.equal(module.col_index, torch.tensor([0, 1, 2, 0, 1, 2]))
+    assert torch.equal(module.box_index, torch.zeros(6, dtype=torch.long))
+
+
+def test_factored_positions_reset_preserves_bf16_storage_and_fp32_draws() -> None:
+    config = FactoredPositions.Config(grid_shape=(2, 3), box_shape=(2, 3))
+    config.channels_out = 4
+    module = config.make().to(torch.bfloat16)
+    tables = (
+        module.embed_pos_row,
+        module.embed_pos_col,
+        module.embed_pos_box,
+    )
+    identities = tuple(id(table) for table in tables)
+
+    torch.manual_seed(17)
+    module.reset_parameters()
+    actual_rng = torch.get_rng_state()
+
+    torch.manual_seed(17)
+    expected_module = config.make().to(torch.bfloat16)
+    expected_rng = torch.get_rng_state()
+
+    expected_tables = (
+        expected_module.embed_pos_row,
+        expected_module.embed_pos_col,
+        expected_module.embed_pos_box,
+    )
+    assert all(table.dtype is torch.bfloat16 for table in tables)
+    assert tuple(id(table) for table in tables) == identities
+    assert all(
+        torch.equal(actual, expected)
+        for actual, expected in zip(
+            tables,
+            expected_tables,
+            strict=True,
+        )
+    )
+    assert actual_rng.equal(expected_rng)
 
 
 def test_feedback_is_inert_until_stashed_and_consumed_once() -> None:
@@ -119,6 +236,33 @@ def test_feedback_is_inert_until_stashed_and_consumed_once() -> None:
     feedback.set_feedback(torch.randint(0, 11, (2, 81)))
     assert not torch.equal(embedding(tokens), base)
     assert torch.equal(embedding(tokens), base)  # `stash` already consumed.
+
+
+def test_prediction_feedback_reset_clears_parameters_and_stash() -> None:
+    module = PredictionFeedback.Config(channels_in=11, channels_out=8).make()
+    module.set_feedback(torch.ones(2, 3, dtype=torch.long))
+    with torch.no_grad():
+        module.embed_feedback.fill_(2)
+    module.reset_parameters()
+    assert torch.equal(module.embed_feedback, torch.zeros_like(module.embed_feedback))
+    assert module._feedback_ids is None
+
+
+def test_grid_embedding_reset_resets_owned_channels() -> None:
+    embedding = _embedding(PredictionFeedback.Config())
+    feedback = embedding.channels[0]
+    assert isinstance(feedback, PredictionFeedback)
+    feedback.set_feedback(torch.ones(2, 3, dtype=torch.long))
+    with torch.no_grad():
+        feedback.embed_feedback.fill_(2)
+
+    embedding.reset_parameters()
+
+    assert torch.equal(
+        feedback.embed_feedback,
+        torch.zeros_like(feedback.embed_feedback),
+    )
+    assert feedback._feedback_ids is None
 
 
 def test_channel_order_changes_the_result() -> None:

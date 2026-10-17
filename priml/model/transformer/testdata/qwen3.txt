@@ -8,6 +8,7 @@ Qwen3.Config(
             padding_idx=None,
             device=None,
             dtype=None,
+            lookup_dtype=None,
             shard='vocab',
             depth_index=(),
             init_weight=functools.partial(torch.nn.init.normal_, std=0.02)
@@ -42,6 +43,8 @@ Qwen3.Config(
         │           share_qk_norm=False,
         │           norm_out=None,
         │           split_qkv_projection=False,
+        │           proj_qkv=None,
+        │           proj_out=None,
         │           init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
         │           depth_index=((0, 1),),
         │           attn_kernel=SdpaFused.Config()
@@ -60,6 +63,9 @@ Qwen3.Config(
         │           depth_index=((0, 1),),
         │           init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
         │           init_weight_out=functools.partial(torch.nn.init.normal_, std=0.02),
+        │           up_proj=None,
+        │           middle=None,
+        │           down_proj=None,
         │           shard='colwise'
         │       ),
         │       norm1=RMSNorm.Config(
@@ -104,6 +110,7 @@ Qwen3.Config(
                     dtype=None,
                     init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
                     init_bias=torch.nn.init.zeros_,
+                    linear_fn=<built-in function linear>,
                     shard='vocab'
                 )
             ],

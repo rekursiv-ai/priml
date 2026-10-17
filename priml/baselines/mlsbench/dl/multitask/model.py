@@ -84,7 +84,6 @@ class TwoHeadResNet(nn.Module):
         held.init_conv = held.init_head = held.init_bias = keep_default
         held.init = keep_initialization
         trunk = held.make()
-        assert isinstance(trunk, ResNet)
         self.trunk: ResNet = trunk
         self.head = nn.Linear(config.trunk.channels_hidden[-1], config.channels_out)
         for module in self.modules():

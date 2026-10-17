@@ -4,16 +4,17 @@ The network reads a token grid and predicts a token grid. Three things vary
 independently, so each is a slot rather than a flag:
 
 * ``embedding`` -- what signals are added to the input (see
-  :mod:`priml.baselines.sudoku.embedding`).
+  :mod:`priml.model.grid_embedding`).
 * ``block`` -- how tokens mix. Any module accepting ``(x, *args, **kwargs)``
   works; :class:`~priml.model.transformer.block.TransformerBlock` and
   :class:`~priml.model.mlpmixer.MLPMixerBlock` both do.
-* ``recurrence`` -- ``None`` runs the stack once; a
-  :class:`Recurrence` runs it many times over a carried latent state, which is
+* ``recurrence`` -- ``None`` uses one fast and one slow latent update; a
+  :class:`priml.model.recurrence.Recurrence` runs it many times over a carried latent state, which is
   what makes the model a Tiny Recursive Model.
 
-Without a recurrence this is a plain encoder: embed, mix, project. With one, a
-forward becomes ``slow_cycles`` applications of a core that refines two latent
+Without a recurrence the core makes two stack passes, refining the fast latent
+once and then the slow latent once. With one, a forward becomes ``slow_cycles``
+applications of a core that refines two latent
 states, gradient flowing only through the last -- so a fixed parameter budget
 buys more computation per puzzle. The two share every other component, which is
 why the comparison is a config delta rather than a second model.
@@ -32,7 +33,6 @@ from dataclasses import field
 from typing import (
     TYPE_CHECKING,
     Literal,
-    NamedTuple,
     Protocol,
     Self,
     cast,
@@ -45,29 +45,51 @@ import functools
 import logging
 import math
 
-from configgle import Fig, Makeable
+from configgle import Fig, Makeable, Makes
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 import torch
 
-from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
-from priml.baselines.sudoku.prefix import PrefixConfig
 from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
+    nbytes,
     traffic,
 )
-from priml.model.attention.rope import RoPE
-from priml.model.custom_types import ChannelsIn, ChannelsOut, TensorModule
+from priml.math.linear import cast_parameters_to_input
+from priml.model.attention.attention import Attention
+from priml.model.attention.rope import RoPE, rotation_cost
+from priml.model.conv import Conv1d, SequenceConv1d
+from priml.model.custom_types import (
+    ChannelsIn,
+    ChannelsOut,
+    CoreFn,
+    CoreOutput,
+    ForwardOutput,
+    HasResetParameters,
+    MixFn,
+    TensorModule,
+)
+from priml.model.embedding import Embedding
+from priml.model.grid_embedding import GridEmbedding, PredictionFeedback
 from priml.model.init import (
     InitFn,
     corrected_fan_in_normal,
     corrected_unit_normal,
 )
 from priml.model.linear import Linear
+from priml.model.norm import RMSNorm
+from priml.model.prefix import ComposedSparsePrefix, PrefixConfig
+from priml.model.recurrence import (
+    Recurrence,
+    RecurrenceConfig,
+    SingleLatentRecurrence,
+    two_latent_refine,
+)
 from priml.model.sequential import Sequential
+from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 
 
@@ -76,41 +98,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-
-class CoreOutput(NamedTuple):
-    """One application of the reasoning core."""
-
-    logits: Tensor
-    """``[B, S, V]`` token logits over the whole sequence."""
-
-    halt: Tensor
-    """``[B]`` halt logit read at the readout position."""
-
-    z_slow: Tensor
-    """``[B, S, C]`` updated slow latent."""
-
-    z_fast: Tensor
-    """``[B, S, C]`` updated fast latent."""
-
-
-class ForwardOutput(NamedTuple):
-    """One full forward: the final core output plus per-cycle intermediates."""
-
-    logits: Tensor
-    """``[B, grid_len, V]`` final logits, prefix tokens stripped."""
-
-    halt: Tensor
-    """``[B]`` final halt logit."""
-
-    z_slow: Tensor
-    """``[B, S, C]`` final slow latent, detached for carrying."""
-
-    z_fast: Tensor
-    """``[B, S, C]`` final fast latent, detached for carrying."""
-
-    all_logits: tuple[Tensor, ...] = ()
-    """Per-cycle logits when the caller asked for intermediates."""
 
 
 type CompileMode = Literal[
@@ -173,20 +160,6 @@ class GridConfig(Makeable[GridEmbedding], Protocol):
         ...
 
 
-class CoreFn(Protocol):
-    """One application of the reasoning core."""
-
-    def __call__(
-        self,
-        input_emb: Tensor,
-        z_slow: Tensor,
-        z_fast: Tensor,
-        cos_sin: tuple[Tensor, Tensor] | None = None,
-    ) -> CoreOutput:
-        """Apply to the input."""
-        ...
-
-
 @runtime_checkable
 class RotaryFactors(Protocol):
     """A block whose rotary factors the model may precompute once per forward.
@@ -241,216 +214,16 @@ def lattice_positions(
     return torch.cat([prefix, grid])
 
 
-class MixFn(Protocol):
-    """One pass of the block stack over a latent state."""
-
-    def __call__(self, z: Tensor, cos_sin: tuple[Tensor, Tensor] | None) -> Tensor:
-        """Apply to the input."""
-        ...
-
-
-@runtime_checkable
-class Recurrence(Protocol):
-    """Drives repeated applications of a core over carried latent state.
-
-    A recurrence decides HOW MANY times the reasoning core runs per forward,
-    which of those applications carry gradient, and how one application
-    updates the latents. It owns no parameters -- the core it drives does.
-    """
-
-    def refine(
-        self,
-        mix: MixFn,
-        input_emb: Tensor,
-        z_slow: Tensor,
-        z_fast: Tensor,
-        cos_sin: tuple[Tensor, Tensor] | None,
-    ) -> tuple[Tensor, Tensor]:
-        """Update ``(z_slow, z_fast)`` once; the readout reads ``z_slow``.
-
-        Args:
-          mix: One pass of the model's block stack.
-          input_emb: ``[B, S, C]`` prefix-prepended input embedding.
-          z_slow: ``[B, S, C]`` slow latent.
-          z_fast: ``[B, S, C]`` fast latent.
-          cos_sin: Optional rotary pair forwarded to ``mix``.
-
-        Returns:
-          z_slow: Updated slow latent, which the heads read.
-          z_fast: Updated fast latent.
-
-        """
-        ...
-
-    def forward(
-        self,
-        core: CoreFn,
-        input_emb: Tensor,
-        z_slow: Tensor,
-        z_fast: Tensor,
-        cos_sin: tuple[Tensor, Tensor] | None,
-        *,
-        collect_intermediates: bool,
-    ) -> ForwardOutput:
-        """Run the core to completion for one forward pass.
-
-        Args:
-          core: One core application: a block-stack pass over the latents.
-          input_emb: ``[B, S, C]`` prefix-prepended input embedding.
-          z_slow: ``[B, S, C]`` slow latent.
-          z_fast: ``[B, S, C]`` fast latent.
-          cos_sin: Rotary tables, or ``None`` without rotary positions.
-          collect_intermediates: Whether to record per-cycle latents.
-
-        Returns:
-          out: Logits, halt logit, and both updated latents.
-
-        """
-        ...
-
-
-class RecurrenceConfig(Makeable[Recurrence], Protocol):
-    """A config that builds a :class:`Recurrence` and declares its cycle counts.
-
-    The model costs and runs the core by these numbers, so a recurrence that
-    cannot say how often it runs the core cannot fill the slot.
-    """
-
-    slow_cycles: int
-    """Core applications per forward; the model costs every one."""
-
-    fast_cycles: int
-    """Inner block-stack passes per core application."""
-
-
-class DeepRecurrence(nn.Module):
-    """Refine two latent states over ``slow_cycles`` x ``fast_cycles`` passes.
-
-    Each slow cycle runs the block stack ``fast_cycles`` times over the fast
-    latent, then once more to refresh the slow latent. Only the LAST slow cycle
-    carries gradient; the rest run under ``no_grad`` on detached inputs. That is
-    what makes deep recurrence affordable -- the backward graph is one cycle
-    deep regardless of how many cycles ran forward.
-
-    References:
-      https://arxiv.org/abs/2510.04871
-        Jolicoeur-Martineau. Less is More: Recursive Reasoning with Tiny
-        Networks.
-
-    """
-
-    class Config(Fig["DeepRecurrence"]):
-        """Cycle counts for the two nested loops."""
-
-        slow_cycles: int = 6
-        """Outer iterations per forward; all but the last run without grad."""
-
-        fast_cycles: int = 9
-        """Inner iterations refining the fast latent per slow cycle."""
-
-        def cost(self, **kwargs: object) -> Cost:
-            """Cost nothing: the schedule owns no weights and does no arithmetic.
-
-            The core it repeats is the model's, which costs every cycle.
-
-            Args:
-              **kwargs: The open bus, unread.
-
-            Returns:
-              cost: Zero.
-
-            """
-            del kwargs
-            return Cost()
-
-    def __init__(self, config: Config) -> None:
-        super().__init__()
-        if config.slow_cycles < 1 or config.fast_cycles < 1:
-            raise ValueError(
-                f"slow_cycles and fast_cycles must be >= 1; got "
-                f"{config.slow_cycles} and {config.fast_cycles}.",
-            )
-        self.config = config
-
-    def refine(
-        self,
-        mix: MixFn,
-        input_emb: Tensor,
-        z_slow: Tensor,
-        z_fast: Tensor,
-        cos_sin: tuple[Tensor, Tensor] | None,
-    ) -> tuple[Tensor, Tensor]:
-        """Refine the fast latent ``fast_cycles`` times, then the slow one once.
-
-        Args:
-          mix: One pass of the model's block stack.
-          input_emb: ``[B, S, C]`` input embedding.
-          z_slow: ``[B, S, C]`` slow latent.
-          z_fast: ``[B, S, C]`` fast latent.
-          cos_sin: Optional rotary pair forwarded to ``mix``.
-
-        Returns:
-          z_slow: Updated slow latent.
-          z_fast: Updated fast latent.
-
-        """
-        return two_latent_refine(
-            mix,
-            input_emb,
-            z_slow,
-            z_fast,
-            cos_sin,
-            fast_cycles=self.config.fast_cycles,
-        )
-
-    @override
-    def forward(
-        self,
-        core: CoreFn,
-        input_emb: Tensor,
-        z_slow: Tensor,
-        z_fast: Tensor,
-        cos_sin: tuple[Tensor, Tensor] | None,
-        *,
-        collect_intermediates: bool = False,
-    ) -> ForwardOutput:
-        """Run every cycle, carrying gradient only through the last."""
-        all_logits: list[Tensor] = []
-        with torch.no_grad():
-            for _ in range(self.config.slow_cycles - 1):
-                out = core(
-                    input_emb.detach(),
-                    z_slow.detach(),
-                    z_fast.detach(),
-                    None
-                    if cos_sin is None
-                    else (cos_sin[0].detach(), cos_sin[1].detach()),
-                )
-                z_slow, z_fast = out.z_slow, out.z_fast
-                if collect_intermediates:
-                    all_logits.append(out.logits)
-        final = core(input_emb, z_slow, z_fast, cos_sin)
-        if collect_intermediates:
-            all_logits.append(final.logits.detach())
-        return ForwardOutput(
-            final.logits,
-            final.halt,
-            final.z_slow,
-            final.z_fast,
-            tuple(all_logits),
-        )
-
-
-class SudokuNet(nn.Module):
+class GridSolver(nn.Module):
     """Grid-puzzle solver over an injected embedding, block stack, and recurrence.
 
     See the module docstring for what each slot varies. Without a recurrence the
-    forward is one pass of the block stack; with one it is however many passes
-    that recurrence prescribes, and the caller carries ``z_slow`` / ``z_fast``
+    core refines the fast latent and then the slow latent; with one it is however
+    many passes that recurrence prescribes, and the caller carries ``z_slow`` / ``z_fast``
     between calls to build an adaptive-computation-time rollout.
     """
 
-    class Config(Fig["SudokuNet"]):
+    class Config(Fig["GridSolver"]):
         """Width, depth, and the three injected slots."""
 
         channels_in: int = 512
@@ -479,7 +252,8 @@ class SudokuNet(nn.Module):
         held the latent at 2.9 and the loss fell monotonically."""
 
         recurrence: RecurrenceConfig | None = None
-        """Latent-refinement schedule. ``None`` runs the stack exactly once."""
+        """Latent-refinement schedule. ``None`` refines fast, then slow, with two
+        sequential block-stack passes."""
 
         prefix: PrefixConfig | None = None
         """Optional module producing ``[B, P, C]`` tokens prepended to the grid.
@@ -538,7 +312,7 @@ class SudokuNet(nn.Module):
         """Compile the recurrence's hot loop; ``None`` runs eager.
 
         Only the TRAINING forward uses it: evaluation stays eager unless
-        :meth:`SudokuNet.eager` is told otherwise, because a compiled bfloat16
+        :meth:`GridSolver.eager` is told otherwise, because a compiled bfloat16
         autocast graph elides the casts autocast inserts and a long carried
         rollout compounds the difference."""
 
@@ -609,13 +383,6 @@ class SudokuNet(nn.Module):
         def cost(self, *, batch_size: int, dtype: torch.dtype | None) -> Cost:
             """Cost one complete invocation over the supplied puzzles.
 
-            The concrete ledger includes the latent sequence, every core pass,
-            both heads, and the embedding for each puzzle. One core pass runs
-            the stack ``fast_cycles + 1`` times over parameters owned once.
-            Every slow cycle runs the core forward and only the last runs
-            backward, so the primal is repeated ``slow_cycles`` times and the
-            adjoint once.
-
             Args:
               batch_size: Puzzles in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
@@ -624,88 +391,28 @@ class SudokuNet(nn.Module):
               cost: Whole-invocation FLOPs, logical bytes, and ownership.
 
             """
-            puzzles = batch_size
-            dt = dtype
-            grid_len = self.grid_len
-            latent = self.total_seq_len
-            slow_cycles, fast_cycles = _cycles(self.recurrence)
-            width = self.channels_in
-
-            over_rows = functools.partial(
-                cost,
-                seq_len=latent,
-                batch_size=puzzles,
-                dtype=dt,
+            config = self.copy_tree().finalize()
+            recurrence = config.recurrence
+            return _grid_solver_cost(
+                config,
+                batch_size=batch_size,
+                dtype=dtype,
+                outer_cycles=1 if recurrence is None else recurrence.slow_cycles,
+                forward_passes=2 if recurrence is None else recurrence.forward_passes,
+                grad_passes=2 if recurrence is None else recurrence.grad_passes,
+                forward_additions=(
+                    3 if recurrence is None else recurrence.forward_additions
+                ),
+                grad_additions=(3 if recurrence is None else recurrence.grad_additions),
+                halt_head_config=_halt_head(config),
+                latent_dtype=(
+                    config.dtype or config.dtype_latent_init or torch.float32
+                ),
             )
-            over_puzzles = functools.partial(
-                cost,
-                seq_len=1,
-                batch_size=puzzles,
-                dtype=dt,
-            )
-            stack = over_rows(self.block).tile(
-                self.num_layers,
-                copies=self.num_layers,
-            )
-            rows = latent * puzzles
-            # ``z_slow + input_emb``, one add per fast cycle, and the slow
-            # update: each an add forward and an accumulation back.
-            adds = elementwise_cost(
-                primal=(fast_cycles + 2) * width * rows,
-                adjoint=(fast_cycles + 2) * width * rows,
-                channels=(fast_cycles + 2) * width,
-                inputs=2,
-                rows=rows,
-                dtype=dt,
-            )
-            per_row = stack.tile(fast_cycles + 1) + adds + over_rows(self.head)
-            core = per_row + over_puzzles(_halt_head(self))
-            # Every slow cycle runs the core forward; only the last runs backward.
-            primal_only = core.only("primal")
-            total = (
-                cost(
-                    self.embedding,
-                    seq_len=grid_len,
-                    batch_size=puzzles,
-                    dtype=dt,
-                )
-                + core
-                + primal_only.tile(slow_cycles - 1)
-            )
-            if self.prefix is not None:
-                total += over_puzzles(self.prefix)
-                total += traffic(
-                    "primal",
-                    "selection",
-                    elements=2 * latent * width * puzzles,
-                    dtype=dt,
-                )
-            if self.recurrence is not None:
-                total += over_rows(self.recurrence)
-            return total
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        if config.vocab_size < 1:
-            raise ValueError("SudokuNet requires vocab_size from the dataset.")
-        if config.embedding.grid_len < 1:
-            raise ValueError(
-                "SudokuNet requires embedding grid_shape from the dataset.",
-            )
-        if config.rope is not None and not config.rope_grid_shape:
-            raise ValueError("SudokuNet requires rope_grid_shape from the dataset.")
-        if config.rope is not None and math.prod(config.rope_grid_shape) != (
-            config.embedding.grid_len
-        ):
-            raise ValueError(
-                f"rope_grid_shape {config.rope_grid_shape} must cover the "
-                f"{config.embedding.grid_len}-token grid.",
-            )
-        if config.block_checkpoint_fraction < 0 or config.block_checkpoint_fraction > 1:
-            raise ValueError(
-                "block_checkpoint_fraction must be in [0, 1], got "
-                f"{config.block_checkpoint_fraction}.",
-            )
+        _validate_grid_solver_config(config)
         self.config = config
         # Registered first, filled after the blocks: parameter ORDER follows
         # registration, and the reference TRM held its prefix parameters directly,
@@ -738,9 +445,7 @@ class SudokuNet(nn.Module):
         self.recurrence: Recurrence | None = (
             config.recurrence.make() if config.recurrence is not None else None
         )
-        self._dummy = nn.Buffer(torch.empty(0), persistent=True)
-        if config.dtype is not None:
-            self.to(dtype=config.dtype)
+        self._dummy = nn.Buffer(persistent=True)
         # A compiled callable, not a module: registering it would add
         # ``_orig_mod`` keys to the state dict.
         self._compiled_core: CoreFn | None = None
@@ -752,10 +457,38 @@ class SudokuNet(nn.Module):
                 self._compiled_core = compile_fn(self._core)
             else:
                 self._compiled_mix = compile_fn(self._mix_eager)
+        if config.dtype is not None:
+            self.to(dtype=config.dtype)
         logger.info(
             "model parameters: %.2fM",
-            sum(p.numel() for p in self.parameters()) / 1e6,
+            sum(parameter.numel() for parameter in self.parameters()) / 1e6,
         )
+
+    def reset_parameters(self) -> None:
+        """Reset children in source construction order, then restore source halt state."""
+        self.embedding.reset_parameters()
+        self.head.reset_parameters()
+        self.halt_head.reset_parameters()
+        with torch.no_grad():
+            self.halt_head.weight.zero_()
+            if self.halt_head.bias is None:
+                raise ValueError("Expected halt_head.bias to be present.")
+            self.halt_head.bias.fill_(self.config.halt_init_bias)
+        for block in self.reasoning:
+            if isinstance(block, HasResetParameters):
+                block.reset_parameters()
+        if isinstance(self.prefix, HasResetParameters):
+            self.prefix.reset_parameters()
+        if isinstance(self.rope, HasResetParameters):
+            self.rope.reset_parameters()
+        slow = _latent_init(self.config)
+        fast = _latent_init(self.config)
+        if self.config.dtype is not None:
+            slow = slow.to(dtype=self.config.dtype)
+            fast = fast.to(dtype=self.config.dtype)
+        with torch.no_grad():
+            self.slow_init.copy_(slow)
+            self.fast_init.copy_(fast)
 
     @property
     def device(self) -> torch.device:
@@ -810,7 +543,7 @@ class SudokuNet(nn.Module):
         z_fast: Tensor,
         cos_sin: tuple[Tensor, Tensor] | None = None,
     ) -> CoreOutput:
-        """Apply the block stack once, refining both latent states.
+        """Apply one core call, refining both latent states.
 
         Args:
           input_emb: ``[B, S, C]`` prefix-prepended input embedding.
@@ -848,7 +581,7 @@ class SudokuNet(nn.Module):
         z_fast: Tensor,
         cos_sin: tuple[Tensor, Tensor] | None = None,
     ) -> CoreOutput:
-        """Apply the block stack once, never compiled."""
+        """Refine both latent states, then read the grid and halt heads."""
         if self.recurrence is None:
             z_slow, z_fast = two_latent_refine(
                 self._mix,
@@ -999,37 +732,119 @@ class SudokuNet(nn.Module):
         return self.reasoning(z, cos_sin=cos_sin)
 
 
-def two_latent_refine(
-    mix: MixFn,
-    input_emb: Tensor,
-    z_slow: Tensor,
-    z_fast: Tensor,
-    cos_sin: tuple[Tensor, Tensor] | None,
+def _grid_solver_cost(
+    config: GridSolver.Config,
     *,
-    fast_cycles: int,
-) -> tuple[Tensor, Tensor]:
-    """Run the TRM update: ``fast_cycles`` fast refinements, then one slow.
+    batch_size: int,
+    dtype: torch.dtype | None,
+    outer_cycles: int,
+    forward_passes: int,
+    grad_passes: int,
+    forward_additions: int,
+    grad_additions: int,
+    halt_head_config: Linear.Config,
+    latent_dtype: torch.dtype,
+) -> Cost:
+    """Cost shared solver geometry with its executed phase counts."""
+    sequence = config.total_seq_len
+    rows = sequence * batch_size
+    stack = cost(
+        config.block,
+        seq_len=sequence,
+        batch_size=batch_size,
+        dtype=dtype,
+    ).tile(config.num_layers, copies=config.num_layers)
+    blocks = (
+        stack.only("primal").tile(outer_cycles * forward_passes)
+        + stack.only("adjoint").tile(grad_passes)
+        + Cost(
+            params=stack.params,
+            params_active=stack.params_active,
+        )
+    )
+    adds = elementwise_cost(
+        primal=outer_cycles * forward_additions * rows * config.channels_in,
+        adjoint=grad_additions * rows * config.channels_in,
+        channels=max(forward_additions, grad_additions) * config.channels_in,
+        inputs=2,
+        rows=rows,
+        dtype=dtype,
+    )
+    head = cost(
+        config.head,
+        seq_len=sequence,
+        batch_size=batch_size,
+        dtype=dtype,
+    )
+    halt = cost(
+        halt_head_config,
+        seq_len=1,
+        batch_size=batch_size,
+        dtype=dtype,
+    )
+    total = (
+        cost(
+            config.embedding,
+            seq_len=config.grid_len,
+            batch_size=batch_size,
+            dtype=dtype,
+        )
+        + blocks
+        + adds
+        + head.only("primal").tile(outer_cycles)
+        + head.only("adjoint")
+        + halt.only("primal").tile(outer_cycles)
+        + halt.only("adjoint")
+        + Cost(
+            params=head.params + halt.params,
+            params_active=head.params_active + halt.params_active,
+        )
+    )
+    if config.prefix is not None:
+        total += cost(
+            config.prefix,
+            seq_len=1,
+            batch_size=batch_size,
+            dtype=dtype,
+        )
+        total += traffic(
+            "primal",
+            "selection",
+            elements=2 * sequence * config.channels_in * batch_size,
+            dtype=dtype,
+        )
+    if config.recurrence is not None:
+        total += cost(
+            config.recurrence,
+            seq_len=sequence,
+            batch_size=batch_size,
+            dtype=dtype,
+        )
+    total += Cost(bytes_state=nbytes(2 * config.channels_in, latent_dtype))
+    if config.rope is not None:
+        total += cost(
+            config.rope,
+            seq_len=sequence,
+            batch_size=1,
+            dtype=dtype,
+        )
+        if isinstance(config.block, TransformerBlock.Config) and isinstance(
+            config.block.attn,
+            Attention.Config,
+        ):
+            rotated = rotation_cost(
+                config.rope,
+                rows=sequence * batch_size * config.num_layers,
+                dtype=dtype,
+                channels_head=config.block.attn.channels_head,
+                heads=(config.block.attn.num_heads + config.block.attn.num_heads_kv),
+            )
+            total += rotated.only("primal").tile(outer_cycles * forward_passes)
+            total += rotated.only("adjoint").tile(grad_passes)
+    return total
 
-    Args:
-      mix: One pass of the block stack.
-      input_emb: ``[B, S, C]`` input embedding.
-      z_slow: ``[B, S, C]`` slow latent.
-      z_fast: ``[B, S, C]`` fast latent.
-      cos_sin: Optional rotary pair forwarded to ``mix``.
-      fast_cycles: Fast refinements before the slow update.
 
-    Returns:
-      z_slow: Updated slow latent.
-      z_fast: Updated fast latent.
-
-    """
-    combined = z_slow + input_emb
-    for _ in range(fast_cycles):
-        z_fast = mix(z_fast + combined, cos_sin)
-    return mix(z_slow + z_fast, cos_sin), z_fast
-
-
-def _checkpointed_blocks(config: SudokuNet.Config) -> list[Makeable[TensorModule]]:
+def _checkpointed_blocks(config: GridSolver.Config) -> list[Makeable[TensorModule]]:
     """Copy the block config per layer, checkpointing an evenly spaced subset."""
     fraction = config.block_checkpoint_fraction
     count = math.ceil(config.num_layers * fraction) if fraction > 0 else 0
@@ -1055,7 +870,7 @@ class _CheckpointableConfig(Protocol):
     checkpoint: bool
 
 
-def _halt_head(config: SudokuNet.Config) -> Linear.Config:
+def _halt_head(config: GridSolver.Config) -> Linear.Config:
     """Configure the halt head: zero weights and a constant, strongly negative bias."""
     return Linear.Config(
         channels_in=config.channels_in,
@@ -1066,17 +881,10 @@ def _halt_head(config: SudokuNet.Config) -> Linear.Config:
     )
 
 
-# Without a recurrence the core runs once, its inner loop once: the plain model is a
-# single pass over the block stack. A recurrence declares both -- read from the
-# config so the core stays a plain method the recurrence can call, and so the same
-# numbers cost a forward before anything is built.
-def _cycles(recurrence: RecurrenceConfig | None) -> tuple[int, int]:
-    """Return ``(slow_cycles, fast_cycles)`` one forward runs."""
-    if recurrence is None:
-        return 1, 1
-    return recurrence.slow_cycles, recurrence.fast_cycles
-
-
+# Without a recurrence the core runs once and refines fast, then slow, with two
+# sequential stack passes. A recurrence declares its own refinement schedule -- read
+# from the config so the core stays a plain method the recurrence can call, and so
+# the same numbers cost a forward before anything is built.
 # Read from the config rather than by constructing the module: ``finalize`` runs during
 # ``pprint`` too, where building a large table would be both slow and surprising.
 def _count_prefix_tokens(prefix: PrefixConfig | None) -> int:
@@ -1084,9 +892,308 @@ def _count_prefix_tokens(prefix: PrefixConfig | None) -> int:
     return 0 if prefix is None else prefix.num_tokens
 
 
-def _latent_init(config: SudokuNet.Config) -> Tensor:
+def _latent_init(config: GridSolver.Config) -> Tensor:
     """Return a ``[1, C]`` starting latent drawn in ``dtype_latent_init``."""
     w = torch.empty(1, config.channels_in, dtype=config.dtype_latent_init)
     # Called directly: ``call_init`` would draw a bfloat16 latent in float32.
     config.init_latent(w)
     return w
+
+
+def _single_latent_embedding() -> GridEmbedding.Config:
+    config = GridEmbedding.Config()
+    config.embed_scale = 1.0
+    table = Embedding.Config()
+    table.init_weight = corrected_fan_in_normal
+    table.lookup_dtype = torch.bfloat16
+    config.token_table = table
+    return config
+
+
+def _single_latent_head() -> Linear.Config:
+    return Linear.Config(
+        init_weight=corrected_fan_in_normal,
+        linear_fn=cast_parameters_to_input,
+    )
+
+
+def _single_latent_halt_head() -> Linear.Config:
+    return Linear.Config(
+        channels_out=1,
+        bias=True,
+        init_weight=corrected_fan_in_normal,
+        init_bias=nn.init.zeros_,
+        linear_fn=cast_parameters_to_input,
+    )
+
+
+def _single_latent_block() -> TransformerBlock.Config:
+    block = TransformerBlock.Config(prenorm=False)
+    attention = Attention.Config(
+        channels_head=64,
+        init_weight=corrected_fan_in_normal,
+    )
+    attention.proj_qkv = Linear.Config(
+        bias=False,
+        init_weight=corrected_fan_in_normal,
+        linear_fn=cast_parameters_to_input,
+    )
+    attention.proj_out = Linear.Config(
+        bias=False,
+        init_weight=corrected_fan_in_normal,
+        linear_fn=cast_parameters_to_input,
+    )
+    block.attn = attention
+    ffn = SwiGLU.Config(
+        expansion=8 / 3,
+        round_to=256,
+        init_weight=corrected_fan_in_normal,
+        init_weight_out=corrected_fan_in_normal,
+    )
+    ffn.up_proj = Linear.Config(
+        bias=False,
+        init_weight=corrected_fan_in_normal,
+        linear_fn=cast_parameters_to_input,
+    )
+    ffn.down_proj = Linear.Config(
+        bias=False,
+        init_weight=corrected_fan_in_normal,
+        linear_fn=cast_parameters_to_input,
+    )
+    ffn.middle = SequenceConv1d.Config(
+        conv=Conv1d.Config(
+            kernel_size=2,
+            padding=1,
+            groups=-1,
+            bias=True,
+            dtype=torch.bfloat16,
+            init_bias=None,
+        ),
+    )
+    block.ffn = ffn
+    block.norm1 = RMSNorm.Config(eps=1e-5)
+    block.norm2 = RMSNorm.Config(eps=1e-5)
+    return block
+
+
+def _single_latent_recurrence() -> RecurrenceConfig:
+
+    return SingleLatentRecurrence.Config(
+        slow_cycles=1,
+        fast_cycles=12,
+        inner_grad_loops=6,
+    )
+
+
+class SingleLatentGridSolver(GridSolver):
+    """Grid solver specialization that carries one recurrent latent state."""
+
+    config: Config
+
+    class Config(Makes["SingleLatentGridSolver"], GridSolver.Config):
+        """Single-state architecture with injectable grid and memory children."""
+
+        embedding: GridConfig = field(default_factory=_single_latent_embedding)
+        """Grid embedding with source lookup dtype and embedding scale."""
+
+        head: Linear.Config = field(default_factory=_single_latent_head)
+        """Token readout with input-dtype parameter casts."""
+
+        halt_head: Linear.Config = field(default_factory=_single_latent_halt_head)
+        """Halt readout with the source one-logit initialization recipe."""
+
+        block: Makeable[TensorModule] = field(default_factory=_single_latent_block)
+        """Repeated post-norm token-mixing block and depthwise convolution."""
+
+        prefix: PrefixConfig | None = field(
+            default_factory=ComposedSparsePrefix.Config,
+        )
+        """Composed puzzle prefix; ``None`` disables task memory."""
+
+        recurrence: RecurrenceConfig | None = field(
+            default_factory=_single_latent_recurrence,
+        )
+        """Single-state recurrent schedule; may be replaced or disabled."""
+
+        rope: RoPE.Config | None = field(
+            default_factory=lambda: RoPE.Config(channels_head=-1),
+        )
+        """Shared rotary table for the injected block attention geometry."""
+
+        forward_dtype: torch.dtype = torch.bfloat16
+        """Dtype for initial latents; it does not set child compute dtypes.
+
+        The fast latent uses this dtype. The slow latent uses
+        ``dtype_latent_init`` when set, otherwise this dtype; ``dtype`` then casts
+        all stored parameters and buffers. For FP32 latents and storage, set
+        ``forward_dtype=torch.float32``, ``dtype_latent_init=torch.float32``, and
+        ``dtype=torch.float32``. Child dtypes are independent: FP32 source-style
+        settings include ``embedding.token_table.lookup_dtype=torch.float32``,
+        ``prefix.forward_dtype=torch.float32``, ``prefix.residual.dtype`` and
+        ``prefix.residual.dtype_scale`` set to ``torch.float32``, and
+        ``block.ffn.middle.conv.dtype=torch.float32``. Each applies only when that
+        child exists and has the named slot."""
+
+        @override
+        def finalize(self) -> Self:
+            if self.rope is not None and not self.rope_grid_shape:
+                self.rope_grid_shape = (self.embedding.grid_len,)
+            if (
+                self.rope is not None
+                and self.rope.channels_head == -1
+                and isinstance(self.block, TransformerBlock.Config)
+                and isinstance(self.block.attn, Attention.Config)
+            ):
+                self.rope.channels_head = self.block.attn.channels_head
+            if self.halt_head.channels_in == -1:
+                self.halt_head.channels_in = self.channels_in
+            if self.halt_head.channels_out == -1:
+                self.halt_head.channels_out = self.halt_outputs
+            return super().finalize()
+
+        @override
+        def cost(self, *, batch_size: int, dtype: torch.dtype | None) -> Cost:
+            """Cost one complete invocation over the supplied puzzles.
+
+            Args:
+              batch_size: Number of grid puzzles in the batch.
+              dtype: Activation dtype; ``None`` uses torch's default.
+
+            Returns:
+              cost: Whole-model cost for one invocation.
+
+            """
+            config = self.copy_tree().finalize()
+            recurrence = config.recurrence
+            return _grid_solver_cost(
+                config,
+                batch_size=batch_size,
+                dtype=dtype,
+                outer_cycles=1 if recurrence is None else recurrence.slow_cycles,
+                forward_passes=2 if recurrence is None else recurrence.forward_passes,
+                grad_passes=2 if recurrence is None else recurrence.grad_passes,
+                forward_additions=(
+                    3 if recurrence is None else recurrence.forward_additions
+                ),
+                grad_additions=(3 if recurrence is None else recurrence.grad_additions),
+                halt_head_config=config.halt_head,
+                latent_dtype=(
+                    config.dtype or config.dtype_latent_init or config.forward_dtype
+                ),
+            )
+
+    def __init__(self, config: Config) -> None:
+        nn.Module.__init__(self)
+        _validate_grid_solver_config(config)
+        self.config = config
+        self.embedding = config.embedding.make()
+        self.head = config.head.make()
+        self.halt_head = config.halt_head.make()
+        with torch.no_grad():
+            self.halt_head.weight.zero_()
+            if self.halt_head.bias is None:
+                raise ValueError("Expected halt_head.bias to be present.")
+            self.halt_head.bias.fill_(config.halt_init_bias)
+        self.prefix = config.prefix.make() if config.prefix is not None else None
+        self.rope = config.rope.make() if config.rope is not None else None
+        self.reasoning = Sequential.Config(
+            elements=_checkpointed_blocks(config),
+        ).make()
+        latent_dtype = (
+            config.forward_dtype
+            if config.dtype_latent_init is None
+            else config.dtype_latent_init
+        )
+        self.slow_init = nn.Buffer(torch.empty(config.channels_in, dtype=latent_dtype))
+        config.init_latent(self.slow_init)
+        self.fast_init = nn.Buffer(
+            torch.zeros(config.channels_in, dtype=config.forward_dtype),
+            persistent=False,
+        )
+        self.recurrence = (
+            config.recurrence.make() if config.recurrence is not None else None
+        )
+        self._dummy = nn.Buffer(persistent=False)
+        self._compiled_core: CoreFn | None = None
+        self._compiled_mix: MixFn | None = None
+        self.compiled = config.compile_core is not None
+        if config.compile_core is not None:
+            compile_fn = config.compile_core.make()
+            if config.compile_core.unit == "core":
+                self._compiled_core = compile_fn(self._core)
+            else:
+                self._compiled_mix = compile_fn(self._mix_eager)
+        if config.dtype is not None:
+            self.to(dtype=config.dtype)
+
+    @override
+    def reset_parameters(self) -> None:
+        """Reset source-owned children in their construction order."""
+        self.embedding.reset_parameters()
+        self.head.reset_parameters()
+        self.halt_head.reset_parameters()
+        with torch.no_grad():
+            self.halt_head.weight.zero_()
+            if self.halt_head.bias is None:
+                raise ValueError("Expected halt_head.bias to be present.")
+            self.halt_head.bias.fill_(self.config.halt_init_bias)
+        if isinstance(self.prefix, HasResetParameters):
+            self.prefix.reset_parameters()
+        if isinstance(self.rope, HasResetParameters):
+            self.rope.reset_parameters()
+        for block in self.reasoning:
+            if isinstance(block, HasResetParameters):
+                block.reset_parameters()
+        latent_dtype = (
+            self.config.forward_dtype
+            if self.config.dtype_latent_init is None
+            else self.config.dtype_latent_init
+        )
+        latent = torch.empty(self.config.channels_in, dtype=latent_dtype)
+        self.config.init_latent(latent)
+        if self.config.dtype is not None:
+            latent = latent.to(dtype=self.config.dtype)
+        with torch.no_grad():
+            self.slow_init.copy_(latent)
+            self.fast_init.zero_()
+
+    @override
+    def init_latents(self, batch_size: int) -> tuple[Tensor, Tensor]:
+        """Expand the one learned state and a zero fast-state placeholder."""
+        sequence = self.config.total_seq_len
+        slow = self.slow_init.expand(batch_size, sequence, -1).contiguous()
+        fast = self.fast_init.expand(batch_size, sequence, -1).contiguous()
+        return slow, fast
+
+    @override
+    def _embed(self, tokens: Tensor, prefix_kwargs: dict[str, object]) -> Tensor:
+        """Scale the complete prefix-plus-grid sequence at the model boundary."""
+        embedded = self.embedding(tokens)
+        if self.prefix is not None:
+            prefix = cast(Tensor, self.prefix(tokens.shape[0], **prefix_kwargs))
+            embedded = torch.cat([prefix.to(embedded.dtype), embedded], dim=1)
+        return self.config.channels_in**0.5 * embedded
+
+
+def _validate_grid_solver_config(config: GridSolver.Config) -> None:
+    """Validate geometry and checkpointing shared by both solver variants."""
+    if config.vocab_size < 1:
+        raise ValueError("GridSolver requires vocab_size from the dataset.")
+    if config.embedding.grid_len < 1:
+        raise ValueError(
+            "GridSolver requires embedding grid_shape from the dataset.",
+        )
+    if config.rope is not None and not config.rope_grid_shape:
+        raise ValueError("GridSolver requires rope_grid_shape from the dataset.")
+    if config.rope is not None and math.prod(config.rope_grid_shape) != (
+        config.embedding.grid_len
+    ):
+        raise ValueError(
+            f"rope_grid_shape {config.rope_grid_shape} must cover the "
+            f"{config.embedding.grid_len}-token grid.",
+        )
+    if config.block_checkpoint_fraction < 0 or config.block_checkpoint_fraction > 1:
+        raise ValueError(
+            "block_checkpoint_fraction must be in [0, 1], got "
+            f"{config.block_checkpoint_fraction}.",
+        )

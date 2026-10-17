@@ -33,10 +33,8 @@ import math
 
 from configgle import Makes, PartialConfig
 
-from priml.baselines.arcagi.loss import MeanOverBatch, StablemaxTokens
 from priml.baselines.arcagi.model import (
     ConvSwiGLU,
-    SingleLatentRecurrence,
     depthwise_shift,
 )
 from priml.baselines.maze.data import (
@@ -51,15 +49,17 @@ from priml.baselines.sudoku.act import (
     HaltTraining,
     SampledMinimum,
 )
-from priml.baselines.sudoku.embedding import GridEmbedding
-from priml.baselines.sudoku.model import CoreCompile, DeepRecurrence
-from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.baselines.sudoku.puzzle_data import PuzzleDataset
 from priml.baselines.sudoku.puzzle_spec import SudokuSpec
+from priml.loss.token import MeanOverBatch, StablemaxTokens
 from priml.model.attention.attention import Attention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, RoPEMixed
+from priml.model.grid_embedding import GridEmbedding
+from priml.model.grid_solver import CoreCompile
 from priml.model.init import corrected_fan_in_normal
 from priml.model.norm import RMSNorm
+from priml.model.prefix import SparsePuzzleEmbedding
+from priml.model.recurrence import DeepRecurrence, SingleLatentRecurrence
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.optimizers import AdamATan2, SignSGD

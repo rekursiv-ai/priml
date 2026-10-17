@@ -41,13 +41,19 @@ class BoundaryLossTrainStep(PooledActTrainStep):
     def _train_loss(
         self,
         logits: Tensor,
+        *,
         halt: Tensor,
+        labels: Tensor,
         active: Tensor,
     ) -> tuple[Tensor, dict[str, float | Tensor], _Correctness | None]:
-        loss, metrics, correctness = super()._train_loss(logits, halt, active)
+        loss, metrics, correctness = super()._train_loss(
+            logits,
+            halt=halt,
+            labels=labels,
+            active=active,
+        )
         if self.boundary is None:
             return loss, metrics, correctness
-        labels = self.pool.labels
         per_token = self.token_loss(
             logits,
             labels,

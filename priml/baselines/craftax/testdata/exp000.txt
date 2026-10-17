@@ -24,6 +24,7 @@ CraftaxTrainLoop(
         │   │       dtype=None,
         │   │       init_weight=priml.model.init.kaiming_uniform,
         │   │       init_bias=torch.nn.init.zeros_,
+        │   │       linear_fn=<built-in function linear>,
         │   │       shard=None
         │   │   ),
         │   │   block=MinGRUBlock.Config(
@@ -37,6 +38,7 @@ CraftaxTrainLoop(
         │   │           dtype=None,
         │   │           init_weight=priml.model.init.kaiming_uniform,
         │   │           init_bias=torch.nn.init.zeros_,
+        │   │           linear_fn=<built-in function linear>,
         │   │           shard=None
         │   │       ),
         │   │       scan=ExactScan.Config(block=256, num_warps=8),
@@ -54,6 +56,7 @@ CraftaxTrainLoop(
         │   │       dtype=None,
         │   │       init_weight=priml.model.init.kaiming_uniform,
         │   │       init_bias=torch.nn.init.zeros_,
+        │   │       linear_fn=<built-in function linear>,
         │   │       shard=None
         │   │   ),
         │   │   dtype=torch.bfloat16,
@@ -237,6 +240,7 @@ CraftaxTrainLoop(
         eval_only=False,
         restore_rng_state=True,
         seed=73,
+        model_torch_seed=None,
         num_steps_garbage_collect=inf,
         mesh_dim_model_seed='pp',
         mesh_dim_data_seed='dp',

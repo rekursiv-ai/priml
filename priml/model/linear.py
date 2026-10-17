@@ -10,6 +10,7 @@ from configgle import Fig
 from torch import Tensor, nn
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 from torch.distributed.tensor.parallel import ParallelStyle
+from torch.nn import functional
 
 import torch
 
@@ -17,6 +18,7 @@ from priml.cost import (
     Cost,
     matmul_cost,
 )
+from priml.math.custom_types import LinearFn
 from priml.model.custom_types import DepthIndex, ShardStyle
 from priml.model.init import InitFn, call_init, kaiming_uniform
 
@@ -52,8 +54,11 @@ class Linear(nn.Linear):
         init_weight: InitFn = kaiming_uniform
         """Weight initialization function."""
 
-        init_bias: InitFn = nn.init.zeros_
-        """Bias initialization function."""
+        init_bias: InitFn | None = nn.init.zeros_
+        """Bias initializer; ``None`` preserves torch's fan-in uniform draw."""
+
+        linear_fn: LinearFn = functional.linear
+        """Projection kernel, receiving input, weight, and optional bias."""
 
         shard: ShardStyle | None = None
         """Tensor-parallel shard style over the mesh tp dim; ``None`` replicates."""
@@ -99,7 +104,11 @@ class Linear(nn.Linear):
         self.depth_index = config.depth_index
         self._init_weight = config.init_weight
         self._init_bias = config.init_bias
-        self.shard = config.shard
+        self._init_dtype = (
+            config.dtype if config.dtype is not None else torch.get_default_dtype()
+        )
+        self.linear_fn = config.linear_fn
+        self.shard: ShardStyle | None = config.shard
         super().__init__(
             in_features=config.channels_in,
             out_features=config.channels_out,
@@ -111,13 +120,27 @@ class Linear(nn.Linear):
     @override
     def forward(self, input: Tensor, **kwargs: object) -> Tensor:
         del kwargs
-        return super().forward(input)
+        return self.linear_fn(input, self.weight, self.bias)
 
     @override
     def reset_parameters(self) -> None:
         call_init(self._init_weight, self.weight, depth_index=self.depth_index)
         if self.bias is not None:
-            call_init(self._init_bias, self.bias, depth_index=self.depth_index)
+            if self._init_bias is None:
+                fan_in = self.weight.shape[1]
+                bound = fan_in**-0.5
+                if self.bias.dtype is self._init_dtype:
+                    nn.init.uniform_(self.bias, -bound, bound)
+                else:
+                    initialized = torch.empty_like(
+                        self.bias,
+                        dtype=self._init_dtype,
+                    )
+                    nn.init.uniform_(initialized, -bound, bound)
+                    with torch.no_grad():
+                        self.bias.copy_(initialized)
+            else:
+                call_init(self._init_bias, self.bias, depth_index=self.depth_index)
 
 
 class EnsembleLinear(nn.Module):
@@ -190,7 +213,7 @@ class EnsembleLinear(nn.Module):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        self.shard = config.shard
+        self.shard: ShardStyle | None = config.shard
         self.weight = nn.Parameter(
             torch.empty(config.num_ensemble, config.channels_out, config.channels_in),
         )

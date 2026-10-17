@@ -47,6 +47,8 @@ SpeedrunTrainLoop(
         │               ns_steps=5,
         │               reference_numerics=False,
         │               adjust_lr_fn=priml.optimizers.muon.adjust_lr_original,
+        │               momentum_update_fn=None,
+        │               matrix_signum_fn=None,
         │               ensemble_dims=0
         │           )
         │       ],
@@ -86,7 +88,8 @@ SpeedrunTrainLoop(
         │       shadow_kind='param_dict',
         │       warmup_seed=False,
         │       decay_schedule=priml.train.ema.constant_decay,
-        │       select=priml.optimizers.parameter_filter.trainable
+        │       select=priml.optimizers.parameter_filter.trainable,
+        │       update_fn=None
         │   ),
         │   gradient_clip_norm=1.0,
         │   skip_step_on_nonfinite_grad=False,
@@ -201,6 +204,7 @@ SpeedrunTrainLoop(
         eval_only=False,
         restore_rng_state=True,
         seed=0,
+        model_torch_seed=None,
         num_steps_garbage_collect=inf,
         mesh_dim_model_seed='pp',
         mesh_dim_data_seed='dp',

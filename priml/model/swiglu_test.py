@@ -22,7 +22,10 @@ import pytest
 import torch
 
 from priml.cost import map_cost, set_cost
+from priml.math.linear import cast_parameters_to_input
+from priml.model.conv import Conv1d, SequenceConv1d
 from priml.model.init import kaiming_uniform, unit_fan_in_uniform
+from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import (
     SwiGLU,
@@ -125,6 +128,70 @@ def test_ffn_custom_hidden() -> None:
     m = SwiGLU.Config(channels_in=64, channels_hidden=128).make()
     # up_proj is fused: 2*128 when gated.
     assert m.up_proj.out_features == 256
+
+
+def test_swiglu_injects_projections_and_sequence_mixer() -> None:
+    config = SwiGLU.Config(
+        channels_in=3,
+        channels_out=4,
+        channels_hidden=5,
+        up_proj=Linear.Config(
+            3,
+            10,
+            bias=True,
+            linear_fn=cast_parameters_to_input,
+        ),
+        middle=SequenceConv1d.Config(
+            conv=Conv1d.Config(
+                5,
+                channels_out=5,
+                kernel_size=2,
+                padding=1,
+                groups=5,
+                bias=True,
+            ),
+        ),
+        down_proj=Linear.Config(
+            5,
+            4,
+            bias=True,
+            linear_fn=cast_parameters_to_input,
+        ),
+    )
+    module = config.make()
+    inputs = torch.randn(2, 7, 3)
+    assert module.middle is not None
+
+    gate, value = module.up_proj(inputs).chunk(2, dim=-1)
+    mixed = module.middle(module.act(gate) * value)
+    expected = module.down_proj(mixed)
+
+    assert torch.equal(module(inputs), expected)
+    assert list(module.state_dict()) == [
+        "up_proj.weight",
+        "up_proj.bias",
+        "middle.conv.weight",
+        "middle.conv.bias",
+        "down_proj.weight",
+        "down_proj.bias",
+    ]
+
+
+def test_swiglu_sequence_mixer_can_change_hidden_width() -> None:
+    """Keep the downstream projection connected after width changes."""
+    config = SwiGLU.Config(channels_in=2, channels_out=5, channels_hidden=3)
+    config.middle = SequenceConv1d.Config(
+        channels_out=4,
+        conv=Conv1d.Config(kernel_size=1, padding=0),
+    )
+    config.down_proj = Linear.Config(channels_in=4, channels_out=5)
+
+    module = config.make()
+    assert isinstance(module.middle, SequenceConv1d)
+    assert (module.middle.conv.in_channels, module.middle.conv.out_channels) == (3, 4)
+    assert isinstance(module.down_proj, Linear)
+    assert module.down_proj.in_features == 4
+    assert module(torch.randn(4, 3, 2)).shape == (4, 3, 5)
 
 
 def test_ffn_channels_infer() -> None:
@@ -608,6 +675,33 @@ def test_swiglu_cost_is_both_projections() -> None:
     assert cost["flops", "adjoint", "elementwise"].sum() == 3 * 7 * 32
     assert cost["bytes", "primal", "elementwise"].sum() == 3 * 4 * (2 + 3) * 32
     assert cost["bytes", "adjoint", "elementwise"].sum() == 3 * 4 * (3 + 6) * 32
+
+
+def test_swiglu_cost_includes_injected_projections_and_middle() -> None:
+    config = SwiGLU.Config(channels_in=4, channels_hidden=3, channels_out=5)
+    config.up_proj = Linear.Config(
+        channels_in=4,
+        channels_out=6,
+        bias=True,
+    )
+    config.middle = SequenceConv1d.Config(
+        conv=Conv1d.Config(
+            channels_in=3,
+            channels_out=3,
+            kernel_size=2,
+            padding=1,
+            bias=True,
+        ),
+    )
+    config.down_proj = Linear.Config(channels_in=3, channels_out=5, bias=True)
+
+    model_cost = config.finalize().cost(seq_len=4, batch_size=2, dtype=None)
+
+    expected_parameters = 6 * 4 + 6 + 3 * 3 * 2 + 3 + 5 * 3 + 5
+    assert model_cost.params == expected_parameters
+    assert model_cost["flops", "primal", "matmul"].sum() == (
+        2 * 8 * 4 * 6 + 2 * 2 * 3 * 3 * 2 * 5 + 2 * 8 * 3 * 5
+    )
 
 
 @set_cost(

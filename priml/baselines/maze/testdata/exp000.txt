@@ -5,7 +5,7 @@ MazeTrainLoop(
         working_dir=PosixPath('/opt/scratch/runs/maze/exp000'),
         doc='',
         step=BoundaryLossTrainStep.Config(
-        │   model=SudokuNet.Config(
+        │   model=GridSolver.Config(
         │   │   channels_in=512,
         │   │   num_layers=2,
         │   │   embedding=GridEmbedding.Config(
@@ -13,7 +13,9 @@ MazeTrainLoop(
         │   │       channels_out=512,
         │   │       grid_shape=(30, 30),
         │   │       channels=[],
-        │   │       init_weight=functools.partial(priml.model.init.fan_in_truncated_normal, variance_correction=True)
+        │   │       init_weight=functools.partial(priml.model.init.fan_in_truncated_normal, variance_correction=True),
+        │   │       token_table=None,
+        │   │       embed_scale=-1.0
         │   │   ),
         │   │   block=TransformerBlock.Config(
         │   │   │   channels_in=512,
@@ -32,6 +34,8 @@ MazeTrainLoop(
         │   │   │       share_qk_norm=True,
         │   │   │       norm_out=None,
         │   │   │       split_qkv_projection=False,
+        │   │   │       proj_qkv=None,
+        │   │   │       proj_out=None,
         │   │   │       init_weight=functools.partial(priml.model.init.fan_in_truncated_normal, variance_correction=True),
         │   │   │       depth_index=(),
         │   │   │       attn_kernel=SdpaFused.Config()
@@ -50,6 +54,9 @@ MazeTrainLoop(
         │   │   │       depth_index=(),
         │   │   │       init_weight=functools.partial(priml.model.init.fan_in_truncated_normal, variance_correction=True),
         │   │   │       init_weight_out=functools.partial(priml.model.init.fan_in_truncated_normal, variance_correction=True),
+        │   │   │       up_proj=None,
+        │   │   │       middle=None,
+        │   │   │       down_proj=None,
         │   │   │       shard='colwise'
         │   │   │   ),
         │   │   │   norm1=RMSNorm.Config(
@@ -95,6 +102,7 @@ MazeTrainLoop(
         │   │       dtype=None,
         │   │       init_weight=functools.partial(priml.model.init.fan_in_truncated_normal, variance_correction=True),
         │   │       init_bias=torch.nn.init.zeros_,
+        │   │       linear_fn=<built-in function linear>,
         │   │       shard=None
         │   │   ),
         │   │   init_latent=functools.partial(priml.model.init.truncated_normal, std=1.0, variance_correction=True),
@@ -143,7 +151,8 @@ MazeTrainLoop(
         │       shadow_kind='param_dict',
         │       warmup_seed=True,
         │       decay_schedule=priml.train.ema.constant_decay,
-        │       select=priml.optimizers.parameter_filter.trainable
+        │       select=priml.optimizers.parameter_filter.trainable,
+        │       update_fn=None
         │   ),
         │   gradient_clip_norm=inf,
         │   skip_step_on_nonfinite_grad=False,
@@ -168,9 +177,12 @@ MazeTrainLoop(
         │       grid_len=900,
         │       seq_len=916,
         │       channels_hidden=512,
+        │       steps_dtype=torch.int64,
         │       dtype=None
         │   ),
-        │   token_loss=StablemaxTokens.Config(),
+        │   token_loss=StablemaxTokens.Config(
+        │       log_normalizer=priml.math.loss.log_stablemax
+        │   ),
         │   reduction=MeanOverBatch.Config(batch_size=128),
         │   signals=None,
         │   ignore_label_id=0,
@@ -271,6 +283,7 @@ MazeTrainLoop(
         eval_only=False,
         restore_rng_state=True,
         seed=0,
+        model_torch_seed=None,
         num_steps_garbage_collect=inf,
         mesh_dim_model_seed='pp',
         mesh_dim_data_seed='dp',

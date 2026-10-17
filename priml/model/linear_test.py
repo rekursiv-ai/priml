@@ -12,6 +12,7 @@ import torch
 
 from priml.cost import Cost, matmul_cost
 from priml.model import linear
+from priml.model.init import kaiming_uniform
 from priml.model.linear import EnsembleLinear, Linear
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
@@ -42,6 +43,27 @@ def test_linear_bfb() -> None:
         build_input=lambda: torch.randn(2, 4, 3),
         seed=0,
     )
+
+
+def test_linear_injected_kernel_receives_parameters_and_input() -> None:
+    calls: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]] = []
+
+    def kernel(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        calls.append((input, weight, bias))
+        return torch.nn.functional.linear(input, weight, bias)
+
+    module = Linear.Config(3, 2, bias=True, linear_fn=kernel).make()
+    inputs = torch.randn(2, 3)
+
+    assert torch.equal(
+        module(inputs),
+        torch.nn.functional.linear(inputs, module.weight, module.bias),
+    )
+    assert calls == [(inputs, module.weight, module.bias)]
 
 
 def test_ensemble_linear_config_pprint() -> None:
@@ -77,6 +99,51 @@ def test_linear():
 def test_linear_bias():
     m = Linear.Config(32, 64, bias=True).make()
     assert m.bias is not None
+
+
+def test_linear_none_bias_initializer_uses_torch_fan_in_uniform() -> None:
+    torch.manual_seed(19)
+    expected = torch.nn.Linear(7, 5, bias=True)
+
+    torch.manual_seed(19)
+    actual = Linear.Config(
+        channels_in=7,
+        channels_out=5,
+        bias=True,
+        init_weight=kaiming_uniform,
+        init_bias=None,
+    ).make()
+
+    assert torch.equal(actual.weight, expected.weight)
+    assert actual.bias is not None
+    assert expected.bias is not None
+    assert torch.equal(actual.bias, expected.bias)
+
+
+def test_linear_reset_preserves_construction_dtype_bias_draw_after_cast() -> None:
+    """A moved module resets as though torch initialized before the dtype cast."""
+    config = Linear.Config(
+        channels_in=7,
+        channels_out=5,
+        bias=True,
+        init_weight=kaiming_uniform,
+        init_bias=None,
+    )
+    torch.manual_seed(19)
+    expected = config.make().to(torch.bfloat16)
+    expected_state = {
+        name: value.clone() for name, value in expected.state_dict().items()
+    }
+    expected_rng = torch.get_rng_state()
+
+    torch.manual_seed(19)
+    actual = config.make().to(torch.bfloat16)
+    torch.manual_seed(19)
+    actual.reset_parameters()
+
+    assert torch.get_rng_state().equal(expected_rng)
+    for name, value in actual.state_dict().items():
+        assert torch.equal(value, expected_state[name]), name
 
 
 def test_linear_channels_infer_from_out():

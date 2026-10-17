@@ -42,6 +42,8 @@ LatentRecursion.Config(
         │       share_qk_norm=True,
         │       norm_out=None,
         │       split_qkv_projection=False,
+        │       proj_qkv=None,
+        │       proj_out=None,
         │       init_weight=priml.baselines.sudoku.latent_recursion.truncated_normal_corrected,
         │       depth_index=(),
         │       attn_kernel=SdpaFused.Config()
@@ -67,6 +69,9 @@ LatentRecursion.Config(
         │       depth_index=(),
         │       init_weight=priml.baselines.sudoku.latent_recursion.truncated_normal_corrected,
         │       init_weight_out=priml.baselines.sudoku.latent_recursion.truncated_normal_corrected,
+        │       up_proj=None,
+        │       middle=None,
+        │       down_proj=None,
         │       shard='colwise'
         │   ),
         │   norm1=RMSNorm.Config(

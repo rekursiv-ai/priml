@@ -19,11 +19,14 @@ from priml.math.numeric import log_modulus
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from priml.math.custom_types import LogNormalizerFn
+
 
 __all__ = [
     "cross_entropy_logz",
     "cross_entropy_with_batched_smoothing",
     "log_stablemax",
+    "log_stablemax_via_probabilities",
     "stablemax_cross_entropy",
 ]
 
@@ -222,11 +225,33 @@ def log_stablemax(x: Tensor, dim: int = -1) -> Tensor:
     return torch.log_softmax(log_modulus(x), dim=dim)
 
 
+def log_stablemax_via_probabilities(x: Tensor, dim: int = -1) -> Tensor:
+    """Normalize stablemax values in probability space, then take their log.
+
+    Args:
+      x: Logits.
+      dim: Dimension to normalize over.
+
+    Returns:
+      logprobs: Log-probabilities after probability-space normalization.
+
+    """
+    negative = torch.where(x < 0, x, torch.zeros_like(x))
+    stable = torch.where(
+        x < 0,
+        1 / (1 - negative + 1e-30),
+        x + 1,
+    )
+    probabilities = stable / stable.sum(dim=dim, keepdim=True)
+    return probabilities.log()
+
+
 def stablemax_cross_entropy(
     logits: Tensor,
     labels: Tensor,
     ignore_index: int = -100,
     valid_mask: Tensor | None = None,
+    log_normalizer: LogNormalizerFn = log_stablemax,
 ) -> Tensor:
     """Per-token stablemax cross-entropy, in the dtype of ``logits``.
 
@@ -244,6 +269,7 @@ def stablemax_cross_entropy(
         ``ignore_index`` are masked out (zero loss contribution).
       ignore_index: Label value marking positions to ignore.
       valid_mask: Optional precomputed mask; same shape as labels.
+      log_normalizer: Log-probability normalization applied along the class axis.
 
     Returns:
       loss: Same shape as labels, dtype of ``logits``. A caller reducing over
@@ -253,7 +279,7 @@ def stablemax_cross_entropy(
 
     """
     class_dim = logits.ndim - 1
-    logprobs = log_stablemax(logits)
+    logprobs = log_normalizer(logits, -1)
     if valid_mask is None:
         valid_mask = labels != ignore_index
     transformed_labels = torch.where(valid_mask, labels, torch.zeros_like(labels))

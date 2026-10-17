@@ -31,6 +31,8 @@ from priml.math.basic import ceil_multiple
 from priml.math.custom_types import TensorFn
 from priml.model.custom_types import (
     ChannelsIn,
+    ChannelsOut,
+    DenseLinearProjection,
     DepthIndex,
     HasResetParameters,
     ShardStyle,
@@ -224,6 +226,15 @@ class SwiGLU(nn.Module):
         init_weight_out: InitFn = nn.init.zeros_
         """Weight init for ``down_proj``; zero keeps the residual stream unchanged."""
 
+        up_proj: Makeable[DenseLinearProjection] | None = None
+        """Optional input projection; its config owns dimensions and initialization."""
+
+        middle: Makeable[TensorModule] | None = None
+        """Optional mixer applied to the activated hidden sequence."""
+
+        down_proj: Makeable[DenseLinearProjection] | None = None
+        """Optional output projection; its config owns dimensions and initialization."""
+
         shard: ShardStyle | None = None
         """Tensor-parallel shard style over the mesh tp dim; ``None`` replicates."""
 
@@ -247,6 +258,29 @@ class SwiGLU(nn.Module):
             # so a width written afterwards never reaches pprint or a diff.
             if isinstance(self.norm, ChannelsIn) and self.norm.channels_in == -1:
                 self.norm.channels_in = self.channels_hidden
+            if isinstance(self.up_proj, ChannelsIn) and self.up_proj.channels_in == -1:
+                self.up_proj.channels_in = self.channels_in
+            if (
+                isinstance(self.up_proj, ChannelsOut)
+                and self.up_proj.channels_out == -1
+            ):
+                self.up_proj.channels_out = self.channels_hidden * (
+                    2 if self.gate else 1
+                )
+            if (
+                isinstance(self.down_proj, ChannelsIn)
+                and self.down_proj.channels_in == -1
+            ):
+                self.down_proj.channels_in = self.channels_hidden
+            if (
+                isinstance(self.down_proj, ChannelsOut)
+                and self.down_proj.channels_out == -1
+            ):
+                self.down_proj.channels_out = self.channels_out
+            if isinstance(self.middle, ChannelsIn) and self.middle.channels_in == -1:
+                self.middle.channels_in = self.channels_hidden
+            if isinstance(self.middle, ChannelsOut) and self.middle.channels_out == -1:
+                self.middle.channels_out = self.channels_hidden
             return super().finalize()
 
         def cost(
@@ -280,22 +314,40 @@ class SwiGLU(nn.Module):
             rows = seq_len * batch_size
             dt = resolve_dtype(dtype)
             up_copies = 2 if self.gate and self.split_gate_projection else 1
-            up = matmul_cost(
-                channels_in=self.channels_in,
-                channels_out=self.channels_hidden
-                * (2 if self.gate else 1)
-                // up_copies,
-                bias=self.bias,
-                rows=rows,
-                dtype=dt,
-            ).tile(up_copies, copies=up_copies)
-            down = matmul_cost(
-                channels_in=self.channels_hidden,
-                channels_out=self.channels_out,
-                bias=self.bias,
-                rows=rows,
-                dtype=dt,
-            )
+            if self.up_proj is None:
+                up = matmul_cost(
+                    channels_in=self.channels_in,
+                    channels_out=self.channels_hidden
+                    * (2 if self.gate else 1)
+                    // up_copies,
+                    bias=self.bias,
+                    rows=rows,
+                    dtype=dt,
+                ).tile(up_copies, copies=up_copies)
+            else:
+                up = cost(
+                    self.up_proj,
+                    seq_len=seq_len,
+                    batch_size=batch_size,
+                    dtype=dt,
+                    **kwargs,
+                )
+            if self.down_proj is None:
+                down = matmul_cost(
+                    channels_in=self.channels_hidden,
+                    channels_out=self.channels_out,
+                    bias=self.bias,
+                    rows=rows,
+                    dtype=dt,
+                )
+            else:
+                down = cost(
+                    self.down_proj,
+                    seq_len=seq_len,
+                    batch_size=batch_size,
+                    dtype=dt,
+                    **kwargs,
+                )
             # With a norm the branch is ``factor(g) * norm(g * x)``, so the
             # nonlinearity paid for is the factor alone; without one, the act.
             nonlinearity = FACTORS[self.act] if self.norm is not None else self.act
@@ -317,14 +369,21 @@ class SwiGLU(nn.Module):
                 adjoint_outputs=2 * products,
                 dtype=dt,
             )
-            if self.norm is None:
-                return up + down + scalar + act
-            return (
-                up
-                + down
-                + scalar
-                + act
-                + cost(
+            middle = (
+                Cost()
+                if self.middle is None
+                else cost(
+                    self.middle,
+                    seq_len=seq_len,
+                    batch_size=batch_size,
+                    dtype=dtype,
+                    **kwargs,
+                )
+            )
+            norm = (
+                Cost()
+                if self.norm is None
+                else cost(
                     self.norm,
                     seq_len=seq_len,
                     batch_size=batch_size,
@@ -332,6 +391,7 @@ class SwiGLU(nn.Module):
                     **kwargs,
                 )
             )
+            return up + down + scalar + act + middle + norm
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -345,19 +405,30 @@ class SwiGLU(nn.Module):
         self.shard = config.shard
 
         # Fused up_proj: output is 2*c_hidden when gated (gate + input in one matrix).
-        self.up_proj = Linear.Config(
-            channels_in=c_in,
-            channels_out=(c_h * 2) if config.gate else c_h,
-            bias=config.bias,
-            depth_index=config.depth_index,
-            init_weight=config.init_weight,
+        self.up_proj: DenseLinearProjection = (
+            config.up_proj
+            if config.up_proj is not None
+            else Linear.Config(
+                channels_in=c_in,
+                channels_out=(c_h * 2) if config.gate else c_h,
+                bias=config.bias,
+                depth_index=config.depth_index,
+                init_weight=config.init_weight,
+            )
         ).make()
-        self.down_proj = Linear.Config(
-            channels_in=c_h,
-            channels_out=c_out,
-            bias=config.bias,
-            depth_index=config.depth_index,
-            init_weight=config.init_weight_out,
+        self.middle: TensorModule | None = (
+            config.middle.make() if config.middle is not None else None
+        )
+        self.down_proj: DenseLinearProjection = (
+            config.down_proj
+            if config.down_proj is not None
+            else Linear.Config(
+                channels_in=c_h,
+                channels_out=c_out,
+                bias=config.bias,
+                depth_index=config.depth_index,
+                init_weight=config.init_weight_out,
+            )
         ).make()
         self.act: TensorFn = config.act
         if config.norm is None:
@@ -369,6 +440,8 @@ class SwiGLU(nn.Module):
     def reset_parameters(self) -> None:
         """Initialize every parameter in place."""
         self.up_proj.reset_parameters()
+        if self.middle is not None:
+            self.middle.reset_parameters()
         self.down_proj.reset_parameters()
         if isinstance(self.norm, HasResetParameters):
             self.norm.reset_parameters()
@@ -393,6 +466,8 @@ class SwiGLU(nn.Module):
         else:
             x = self.up_proj(x)
             x = self.act(x) if self.norm is None else self.act(x) * self.norm(x)
+        if self.middle is not None:
+            x = self.middle(x)
         return self.down_proj(x)
 
     def tensor_parallel_style(self) -> ParallelStyle:
@@ -416,6 +491,11 @@ class SwiGLU(nn.Module):
             raise NotImplementedError(
                 "SwiGLU tensor parallelism does not support a gate norm "
                 "(it normalizes over the sharded hidden dim).",
+            )
+        if self.middle is not None:
+            raise NotImplementedError(
+                "SwiGLU tensor parallelism does not support an injected middle "
+                "module (its sequence/channel layout is not sharded).",
             )
         return _SwiGLUParallel()
 

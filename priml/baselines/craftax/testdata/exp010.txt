@@ -20,6 +20,7 @@ CraftaxTrainLoop(
         │   │       dtype=None,
         │   │       init_weight=functools.partial(torch.nn.init.orthogonal_, gain=1.4142135623730951),
         │   │       init_bias=torch.nn.init.zeros_,
+        │   │       linear_fn=<built-in function linear>,
         │   │       shard=None
         │   │   ),
         │   │   proj_hidden=Linear.Config(
@@ -31,6 +32,7 @@ CraftaxTrainLoop(
         │   │       dtype=None,
         │   │       init_weight=functools.partial(torch.nn.init.orthogonal_, gain=1.4142135623730951),
         │   │       init_bias=torch.nn.init.zeros_,
+        │   │       linear_fn=<built-in function linear>,
         │   │       shard=None
         │   │   ),
         │   │   proj_policy=Linear.Config(
@@ -42,6 +44,7 @@ CraftaxTrainLoop(
         │   │       dtype=None,
         │   │       init_weight=functools.partial(torch.nn.init.orthogonal_, gain=0.01),
         │   │       init_bias=torch.nn.init.zeros_,
+        │   │       linear_fn=<built-in function linear>,
         │   │       shard=None
         │   │   ),
         │   │   proj_value=Linear.Config(
@@ -53,6 +56,7 @@ CraftaxTrainLoop(
         │   │       dtype=None,
         │   │       init_weight=functools.partial(torch.nn.init.orthogonal_, gain=1.0),
         │   │       init_bias=torch.nn.init.zeros_,
+        │   │       linear_fn=<built-in function linear>,
         │   │       shard=None
         │   │   ),
         │   │   dtype=torch.float32
@@ -218,6 +222,7 @@ CraftaxTrainLoop(
         eval_only=False,
         restore_rng_state=True,
         seed=42,
+        model_torch_seed=None,
         num_steps_garbage_collect=inf,
         mesh_dim_model_seed='pp',
         mesh_dim_data_seed='dp',

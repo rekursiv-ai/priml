@@ -8,6 +8,7 @@ Skip.Config(
             dtype=None,
             init_weight=priml.model.init.kaiming_uniform,
             init_bias=torch.nn.init.zeros_,
+            linear_fn=<built-in function linear>,
             shard=None
         )
     )

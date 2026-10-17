@@ -70,6 +70,9 @@ class Embedding(nn.Embedding):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
+        lookup_dtype: torch.dtype | None = None
+        """Optional compute dtype for gathered rows; the master table is unchanged."""
+
         shard: ShardStyle | None = None
         """Tensor-parallel shard style over the mesh tp dim; ``None`` replicates."""
 
@@ -141,6 +144,7 @@ class Embedding(nn.Embedding):
         self.shard = config.shard
         self.depth_index = config.depth_index
         self._init_weight = config.init_weight
+        self.lookup_dtype = config.lookup_dtype
         super().__init__(
             num_embeddings=config.channels_in,
             embedding_dim=config.channels_out,
@@ -159,6 +163,24 @@ class Embedding(nn.Embedding):
         if self.padding_idx is not None:
             with torch.no_grad():
                 self.weight[self.padding_idx].fill_(0)
+
+    @override
+    def forward(self, input: Tensor) -> Tensor:
+        """Gather rows, casting the lookup view when requested."""
+        weight = (
+            self.weight
+            if self.lookup_dtype is None
+            else self.weight.to(self.lookup_dtype)
+        )
+        return functional.embedding(
+            input,
+            weight,
+            self.padding_idx,
+            self.max_norm,
+            self.norm_type,
+            self.scale_grad_by_freq,
+            self.sparse,
+        )
 
 
 class MultiHotEmbedding(nn.Module):

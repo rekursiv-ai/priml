@@ -88,6 +88,9 @@ A function rather than a named schedule: the two shipped curves are one line
 each, and a recipe wanting a third writes it instead of editing this module.
 """
 
+type EMAUpdateFn = Callable[[Tensor, Tensor, float], None]
+"""Updates a shadow tensor from its live counterpart and effective decay."""
+
 
 def constant_decay(decay: float, step: int) -> float:
     """Hold ``decay`` flat for the whole run.
@@ -231,6 +234,10 @@ class EMA:
         A frozen tensor still drifts under the lerp, since
         ``p * d + p * (1 - d)`` rounds, so ``everything`` is not the default."""
 
+        update_fn: EMAUpdateFn | None = None
+        """Optional shadow-update expression. ``None`` retains the default
+        in-place multiply/add operation order."""
+
     def __init__(self, config: Config) -> None:
         """Initialize EMA.
 
@@ -259,6 +266,7 @@ class EMA:
         self.warmup_seed = config.warmup_seed
         self.decay_schedule = config.decay_schedule
         self.select = config.select
+        self.update_fn = config.update_fn
 
         self.shadow_model: nn.Module | None = None
         self.shadow_params: dict[str, Tensor] = {}
@@ -312,7 +320,7 @@ class EMA:
 
         """
         if not self._initialized:
-            self._lazy_initialize(model)
+            self.initialize(model)
 
         if self.global_step < self.update_after_step:
             self.global_step += 1
@@ -331,15 +339,42 @@ class EMA:
             else:
                 decay = self.effective_decay(self.local_step)
                 for name in self._tracked_names:
-                    self._shadow_param(name).mul_(decay).add_(
-                        live_params[name].data,
-                        alpha=1 - decay,
-                    )
+                    shadow = self._shadow_param(name)
+                    live = live_params[name].data
+                    if self.update_fn is None:
+                        shadow.mul_(decay).add_(live, alpha=1 - decay)
+                    else:
+                        self.update_fn(shadow, live, decay)
             if self.track_buffers:
                 self._copy_buffers(model)
 
         self.global_step += 1
         self.local_step += 1
+
+    def initialize(self, model: nn.Module, *, reset: bool = False) -> None:
+        """Seed the shadow from ``model`` without advancing the EMA schedule.
+
+        Repeated calls are no-ops after the first initialization unless
+        ``reset`` is true. Reset replaces shadow tensors without advancing the
+        EMA schedule, as needed after weights-only model loading.
+
+        Args:
+          model: Live model providing the initial parameters and structure.
+          reset: Replace an existing shadow while preserving both counters.
+
+        """
+        if reset:
+            self.shadow_model = None
+            self.shadow_params = {}
+            self._module_params = {}
+            self._shadow_buffers = {}
+            self._pending_state = None
+            self._tracked_names = set()
+            self._backup = {}
+            self._initialized = False
+            self._loaded_shadow = False
+        if not self._initialized:
+            self._lazy_initialize(model)
 
     @contextmanager
     def apply_to(self, model: nn.Module) -> Generator[None]:

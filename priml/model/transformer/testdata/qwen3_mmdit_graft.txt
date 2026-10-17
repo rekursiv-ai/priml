@@ -9,6 +9,7 @@ Qwen3MMDiTGraft.Config(
         │       padding_idx=None,
         │       device=None,
         │       dtype=None,
+        │       lookup_dtype=None,
         │       shard='vocab',
         │       depth_index=(),
         │       init_weight=functools.partial(torch.nn.init.normal_, std=0.02)
@@ -43,6 +44,8 @@ Qwen3MMDiTGraft.Config(
         │   │           share_qk_norm=False,
         │   │           norm_out=None,
         │   │           split_qkv_projection=False,
+        │   │           proj_qkv=None,
+        │   │           proj_out=None,
         │   │           init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
         │   │           depth_index=((0, 1),),
         │   │           attn_kernel=SdpaFused.Config()
@@ -61,6 +64,9 @@ Qwen3MMDiTGraft.Config(
         │   │           depth_index=((0, 1),),
         │   │           init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
         │   │           init_weight_out=functools.partial(torch.nn.init.normal_, std=0.02),
+        │   │           up_proj=None,
+        │   │           middle=None,
+        │   │           down_proj=None,
         │   │           shard='colwise'
         │   │       ),
         │   │       norm1=RMSNorm.Config(
@@ -105,6 +111,7 @@ Qwen3MMDiTGraft.Config(
         │               dtype=None,
         │               init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
         │               init_bias=torch.nn.init.zeros_,
+        │               linear_fn=<built-in function linear>,
         │               shard='vocab'
         │           )
         │       ],
@@ -129,6 +136,8 @@ Qwen3MMDiTGraft.Config(
         │           share_qk_norm=True,
         │           norm_out=None,
         │           split_qkv_projection=False,
+        │           proj_qkv=None,
+        │           proj_out=None,
         │           init_weight=priml.model.init.kaiming_uniform,
         │           depth_index=()
         │       ),
@@ -162,6 +171,9 @@ Qwen3MMDiTGraft.Config(
         │           depth_index=(),
         │           init_weight=priml.model.init.unit_fan_in_uniform,
         │           init_weight_out=torch.nn.init.zeros_,
+        │           up_proj=None,
+        │           middle=None,
+        │           down_proj=None,
         │           shard=None
         │       ),
         │       adaln=None,
@@ -178,52 +190,56 @@ Qwen3MMDiTGraft.Config(
         │       │   channels_out=8,
         │       │   num_streams=2,
         │       │   streams=[
-        │       │       AttentionProjections.Config(
-        │       │           channels_in=8,
-        │       │           channels_out=8,
-        │       │           num_heads=4,
-        │       │           channels_head=6,
-        │       │           num_heads_kv=2,
-        │       │           bias=False,
-        │       │           dropout=0.0,
-        │       │           causal=False,
-        │       │           rope=RoPE.Config(
-        │       │               channels_head=6,
-        │       │               reduction_mode='cat',
-        │       │               frequencies=HuggingFaceFrequencies.Config(base=1000000.0),
-        │       │               dtype=torch.float32
-        │       │           ),
-        │       │           norm_qk=RMSNorm.Config(
-        │       │               channels_in=6,
-        │       │               channels_out=6,
-        │       │               eps=1e-06,
-        │       │               elementwise_affine=True,
-        │       │               device=None,
-        │       │               dtype=None
-        │       │           ),
-        │       │           share_qk_norm=False,
-        │       │           norm_out=None,
-        │       │           split_qkv_projection=False,
-        │       │           init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
-        │       │           depth_index=((0, 1),)
-        │       │       ),
-        │       │       AttentionProjections.Config(
-        │       │           channels_in=8,
-        │       │           channels_out=8,
-        │       │           num_heads=4,
-        │       │           channels_head=6,
-        │       │           num_heads_kv=2,
-        │       │           bias=False,
-        │       │           dropout=0.0,
-        │       │           causal=False,
-        │       │           rope=None,
-        │       │           norm_qk=None,
-        │       │           share_qk_norm=True,
-        │       │           norm_out=None,
-        │       │           split_qkv_projection=False,
-        │       │           init_weight=priml.model.init.kaiming_uniform,
-        │       │           depth_index=((0, 1),)
-        │       │       )
+        │       │   │   AttentionProjections.Config(
+        │       │   │       channels_in=8,
+        │       │   │       channels_out=8,
+        │       │   │       num_heads=4,
+        │       │   │       channels_head=6,
+        │       │   │       num_heads_kv=2,
+        │       │   │       bias=False,
+        │       │   │       dropout=0.0,
+        │       │   │       causal=False,
+        │       │   │       rope=RoPE.Config(
+        │       │   │           channels_head=6,
+        │       │   │           reduction_mode='cat',
+        │       │   │           frequencies=HuggingFaceFrequencies.Config(base=1000000.0),
+        │       │   │           dtype=torch.float32
+        │       │   │       ),
+        │       │   │       norm_qk=RMSNorm.Config(
+        │       │   │           channels_in=6,
+        │       │   │           channels_out=6,
+        │       │   │           eps=1e-06,
+        │       │   │           elementwise_affine=True,
+        │       │   │           device=None,
+        │       │   │           dtype=None
+        │       │   │       ),
+        │       │   │       share_qk_norm=False,
+        │       │   │       norm_out=None,
+        │       │   │       split_qkv_projection=False,
+        │       │   │       proj_qkv=None,
+        │       │   │       proj_out=None,
+        │       │   │       init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
+        │       │   │       depth_index=((0, 1),)
+        │       │   │   ),
+        │       │   │   AttentionProjections.Config(
+        │       │   │       channels_in=8,
+        │       │   │       channels_out=8,
+        │       │   │       num_heads=4,
+        │       │   │       channels_head=6,
+        │       │   │       num_heads_kv=2,
+        │       │   │       bias=False,
+        │       │   │       dropout=0.0,
+        │       │   │       causal=False,
+        │       │   │       rope=None,
+        │       │   │       norm_qk=None,
+        │       │   │       share_qk_norm=True,
+        │       │   │       norm_out=None,
+        │       │   │       split_qkv_projection=False,
+        │       │   │       proj_qkv=None,
+        │       │   │       proj_out=None,
+        │       │   │       init_weight=priml.model.init.kaiming_uniform,
+        │       │   │       depth_index=((0, 1),)
+        │       │   │   )
         │       │   ],
         │       │   num_heads=4,
         │       │   channels_head=6,
@@ -268,6 +284,8 @@ Qwen3MMDiTGraft.Config(
         │       │           share_qk_norm=False,
         │       │           norm_out=None,
         │       │           split_qkv_projection=False,
+        │       │           proj_qkv=None,
+        │       │           proj_out=None,
         │       │           init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
         │       │           depth_index=((0, 1),)
         │       │       ),
@@ -301,6 +319,9 @@ Qwen3MMDiTGraft.Config(
         │       │           depth_index=((0, 1),),
         │       │           init_weight=functools.partial(torch.nn.init.normal_, std=0.02),
         │       │           init_weight_out=functools.partial(torch.nn.init.normal_, std=0.02),
+        │       │           up_proj=None,
+        │       │           middle=None,
+        │       │           down_proj=None,
         │       │           shard='colwise'
         │       │       ),
         │       │       adaln=None,
@@ -322,6 +343,8 @@ Qwen3MMDiTGraft.Config(
         │       │           share_qk_norm=True,
         │       │           norm_out=None,
         │       │           split_qkv_projection=False,
+        │       │           proj_qkv=None,
+        │       │           proj_out=None,
         │       │           init_weight=priml.model.init.kaiming_uniform,
         │       │           depth_index=((0, 1),)
         │       │       ),
@@ -355,6 +378,9 @@ Qwen3MMDiTGraft.Config(
         │       │           depth_index=((0, 1),),
         │       │           init_weight=priml.model.init.unit_fan_in_uniform,
         │       │           init_weight_out=torch.nn.init.zeros_,
+        │       │           up_proj=None,
+        │       │           middle=None,
+        │       │           down_proj=None,
         │       │           shard=None
         │       │       ),
         │       │       adaln=None,
@@ -376,6 +402,9 @@ Qwen3MMDiTGraft.Config(
         │           depth_index=(),
         │           init_weight=priml.model.init.unit_fan_in_uniform,
         │           init_weight_out=torch.nn.init.zeros_,
+        │           up_proj=None,
+        │           middle=None,
+        │           down_proj=None,
         │           shard=None
         │       ),
         │       depth_index=((0, 1),)

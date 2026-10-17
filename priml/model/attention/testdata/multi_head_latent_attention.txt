@@ -30,6 +30,7 @@ MultiHeadLatentAttention.Config(
             dtype=None,
             init_weight=priml.model.init.kaiming_uniform,
             init_bias=torch.nn.init.zeros_,
+            linear_fn=<built-in function linear>,
             shard=None
         ),
         proj_q_a=Linear.Config(
@@ -41,6 +42,7 @@ MultiHeadLatentAttention.Config(
             dtype=None,
             init_weight=priml.model.init.kaiming_uniform,
             init_bias=torch.nn.init.zeros_,
+            linear_fn=<built-in function linear>,
             shard=None
         ),
         proj_q_b=Linear.Config(
@@ -52,6 +54,7 @@ MultiHeadLatentAttention.Config(
             dtype=None,
             init_weight=priml.model.init.kaiming_uniform,
             init_bias=torch.nn.init.zeros_,
+            linear_fn=<built-in function linear>,
             shard=None
         ),
         proj_kv_a=Linear.Config(
@@ -63,6 +66,7 @@ MultiHeadLatentAttention.Config(
             dtype=None,
             init_weight=priml.model.init.kaiming_uniform,
             init_bias=torch.nn.init.zeros_,
+            linear_fn=<built-in function linear>,
             shard=None
         ),
         proj_kv_b=Linear.Config(
@@ -74,6 +78,7 @@ MultiHeadLatentAttention.Config(
             dtype=None,
             init_weight=priml.model.init.kaiming_uniform,
             init_bias=torch.nn.init.zeros_,
+            linear_fn=<built-in function linear>,
             shard=None
         ),
         proj_out=Linear.Config(
@@ -85,6 +90,7 @@ MultiHeadLatentAttention.Config(
             dtype=None,
             init_weight=priml.model.init.kaiming_uniform,
             init_bias=torch.nn.init.zeros_,
+            linear_fn=<built-in function linear>,
             shard=None
         ),
         norm_kv_lora=RMSNorm.Config(
