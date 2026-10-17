@@ -25,28 +25,52 @@ import traceback
 
 from configgle import PartialConfig
 from torch import Tensor, nn
+from torch._inductor import config as inductor_config
 
 import pytest
 import torch
 import torch.distributed as dist
 
 from priml.baselines.arcagi import experiments
+from priml.baselines.arcagi.charm_checkpoint import (
+    _target_key,
+    remap_charm_checkpoint,
+)
 from priml.baselines.arcagi.model import ConvSwiGLU, RotaryBlock
+from priml.baselines.arcagi.parquet_data import ArcInstanceMetadata
 from priml.baselines.arcagi.train_step import (
+    AfterOptimizerPoolTransition,
     ArcDataParallel,
+    BeforeBackwardPoolTransition,
     EvalSignals,
     PooledActTrainStep,
     _accuracy_metrics,
     _Correctness,
     _empty_eval,
+    apply_direct_schedule_to_body_and_sparse_optimizer_lrs,
 )
-from priml.baselines.sudoku.act import AtomicPool
+from priml.baselines.sudoku.act import (
+    AtomicPool,
+    GlobalSampledMinimum,
+    HaltTraining,
+    StreamingPool,
+)
+from priml.loss.act import ACTLoss
+from priml.math.schedules import cosine
 from priml.model.attention.attention import Attention
+from priml.model.conditioning import CategorySlotFiLM
+from priml.model.conv import SequenceConv1d
 from priml.model.grid_embedding import GridEmbedding
+from priml.model.grid_solver import SingleLatentGridSolver
 from priml.model.norm import RMSNorm
-from priml.model.prefix import SparsePuzzleEmbedding
-from priml.model.recurrence import DeepRecurrence
+from priml.model.prefix import ComposedSparsePrefix, SparsePuzzleEmbedding
+from priml.model.recurrence import DeepRecurrence, SingleLatentRecurrence
 from priml.model.swiglu import SwiGLU
+from priml.model.transformer.block import TransformerBlock
+from priml.optimizers.aux_adam import AuxAdam
+from priml.optimizers.composite import CompositeOptimizer
+from priml.optimizers.fused_adamw import FusedAdamW
+from priml.optimizers.muon import Muon, adjust_lr_match_rms_adamw
 from priml.runtime import MultiProcess
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import (
@@ -69,6 +93,7 @@ if TYPE_CHECKING:
 
     from priml.distributed.testing import WarmPoolGetter
     from priml.model.grid_solver import GridSolver
+    from priml.optimizers.sign_sgd import SignSGD
     from priml.train.custom_types import TrainStepOutput
 
 
@@ -95,6 +120,70 @@ RECIPES: Final = ("exp000", "exp001", "exp003", "exp005", "exp006")
 
 exp002 changes only an optimizer rate, exp004's step is exp005's, and the
 ARC-AGI-2 rungs run exp000's and exp005's steps; ``experiments_test`` pins those."""
+
+
+def test_pool_transition_can_advance_before_backward() -> None:
+    """Make source carry and halt state visible before backward begins."""
+    transition = BeforeBackwardPoolTransition.Config().make()
+    events: list[str] = []
+    advance = partial(events.append, "advance")
+
+    transition.before_backward(advance)
+    events.append("backward")
+    transition.after_optimizer(advance)
+
+    assert events == ["advance", "backward"]
+
+
+def test_pool_transition_default_advances_after_optimizer() -> None:
+    """Keep the existing pooled ACT side-effect boundary as the default."""
+    transition = AfterOptimizerPoolTransition.Config().make()
+    events: list[str] = []
+    advance = partial(events.append, "advance")
+
+    transition.before_backward(advance)
+    events.append("backward")
+    events.append("optimizer")
+    transition.after_optimizer(advance)
+
+    assert events == ["backward", "optimizer", "advance"]
+
+
+def test_pooled_step_maps_seated_ids_to_semantic_prefix_metadata() -> None:
+    """Resolve task and view metadata by the pool's seated instance ids."""
+    step = PortSubject("exp003").step
+    metadata = (
+        None,
+        ArcInstanceMetadata(
+            puzzle_name="task-a",
+            task_id=19,
+            dih_idx=5,
+            colorperm_slots=(0, 1, 2, 3, 4, 5, 6, 7, 8),
+        ),
+        ArcInstanceMetadata(
+            puzzle_name="task-b",
+            task_id=7,
+            dih_idx=3,
+            colorperm_slots=(8, 7, 6, 5, 4, 3, 2, 1, 0),
+        ),
+    )
+    step.bind_instance_metadata(metadata)
+
+    prefix = step._prefix_kwargs(torch.tensor([2, 1], dtype=torch.int64))
+
+    assert set(prefix) == {
+        "category_indices",
+        "augmentation_indices",
+        "slot_permutation",
+        "puzzle_identifiers",
+    }
+    assert torch.equal(prefix["category_indices"], torch.tensor([7, 19]))
+    assert torch.equal(prefix["augmentation_indices"], torch.tensor([3, 5]))
+    assert torch.equal(
+        prefix["slot_permutation"],
+        torch.tensor([[8, 7, 6, 5, 4, 3, 2, 1, 0], [0, 1, 2, 3, 4, 5, 6, 7, 8]]),
+    )
+    assert torch.equal(prefix["puzzle_identifiers"], torch.tensor([2, 1]))
 
 
 class Subject(Protocol):
@@ -601,6 +690,131 @@ def test_a_whole_model_compile_is_rejected() -> None:
         PooledActTrainStep(config.finalize())
 
 
+def test_pooled_step_rejects_gradient_accumulation_before_construction() -> None:
+    """Reject gradient accumulation before pooled step construction."""
+    config = port_config("exp000")
+    config.accumulate_grad_batches = 2
+
+    with pytest.raises(ValueError, match="accumulate_grad_batches"):
+        PooledActTrainStep(config.finalize())
+
+
+def test_pooled_step_rejects_nonfinite_gradient_skipping_before_construction() -> None:
+    """Reject non-finite gradient skipping before pooled step construction."""
+    config = port_config("exp000")
+    config.skip_step_on_nonfinite_grad = True
+
+    with pytest.raises(ValueError, match="skip_step_on_nonfinite_grad"):
+        PooledActTrainStep(config.finalize())
+
+
+def test_pooled_step_rejects_generic_lr_schedule_before_construction() -> None:
+    """Reject a generic learning-rate schedule before pooled step construction."""
+    config = port_config("exp000")
+    config.lr_schedule = PartialConfig(cosine)
+
+    with pytest.raises(ValueError, match="lr_schedule"):
+        PooledActTrainStep(config.finalize())
+
+
+def test_pooled_step_accepts_generic_train_step_defaults() -> None:
+    """Keep generic step defaults for released pooled recipes."""
+    step = PooledActTrainStep(port_config("exp000").finalize())
+
+    assert step.accumulate_grad_batches == 1
+    assert not step.skip_step_on_nonfinite_grad
+
+
+def test_pooled_step_propagates_the_precision_cast_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Set Inductor's process flag from the recipe before model construction."""
+    monkeypatch.setattr(inductor_config, "emulate_precision_casts", False)
+    config = port_config("exp005")
+    assert config.emulate_precision_casts is True
+
+    PooledActTrainStep(config.finalize())
+
+    assert inductor_config.emulate_precision_casts is True
+
+
+def test_pooled_step_places_the_act_pool_on_the_model_device() -> None:
+    """Move every ACT slot tensor with the model under a non-CPU strategy."""
+    config = port_config("exp000")
+    config.parallelism = NoParallel.Config(device="meta")
+    config.pool.halting = None
+    config.pool.feedback = None
+    step = PortSubject.from_config(config).step
+
+    pool = step.pool
+    tensors = (
+        pool.inputs,
+        pool.labels,
+        pool.z_slow,
+        pool.z_fast,
+        pool.steps,
+        pool.active,
+        pool.halted,
+        pool.puzzle_ids,
+        pool.feedback,
+    )
+    assert step.device == torch.device("meta")
+    assert all(tensor.device == step.device for tensor in tensors)
+
+
+def test_charm_train_step_runs_injected_reducer_and_reporter_in_order() -> None:
+    """Reduce gradients before stepping and report the returned metrics."""
+    events: list[str] = []
+
+    def reduce_gradients(model: nn.Module) -> None:
+        events.append("reduce")
+        assert any(parameter.grad is not None for parameter in model.parameters())
+
+    def report_metrics(metrics: Mapping[str, Tensor | float]) -> dict[str, float]:
+        del metrics
+        events.append("report")
+        return {"injected": 1.0}
+
+    def mark_optimizer_step(optimizer: object, args: object, kwargs: object) -> None:
+        del optimizer, args, kwargs
+        events.append("step")
+
+    config = port_config("exp009")
+    config.model.prefix = None
+    config.gradient_reduction = PartialConfig(reduce_gradients)
+    config.metric_reporter = PartialConfig(report_metrics)
+    step = PortSubject.from_config(config).step
+    assert isinstance(step.optimizer, CompositeOptimizer)
+
+    for optimizer in step.optimizer.optimizers:
+        optimizer.register_step_pre_hook(mark_optimizer_step)
+    result = step.train_step(**batches()[0])
+
+    assert events[0] == "reduce"
+    assert events[-1] == "report"
+    assert set(events[1:-1]) == {"step"}
+    assert result.get("metrics") == {"injected": 1.0}
+
+
+def test_pooled_step_initializes_ema_only_when_the_recipe_requests_it() -> None:
+    """Keep legacy EMA lazy and CHARM's initial shadow explicit."""
+    legacy = PortSubject("exp000").step
+    assert isinstance(legacy.ema, EMA)
+    assert legacy.ema.state_dict() == {"global_step": 0, "local_step": 0}
+
+    for recipe in ("exp009", "exp010"):
+        config = port_config(recipe)
+        assert config.ema_initialization is EMA.initialize
+        charm = PortSubject.from_config(config).step
+        assert isinstance(charm.ema, EMA)
+        shadow = charm.ema_shadow
+        assert shadow is not None
+        assert all(
+            torch.equal(shadow[name], parameter)
+            for name, parameter in charm.model.named_parameters()
+        )
+
+
 def shrink_model(model: GridSolver.Config) -> None:
     """Configure the compact model without changing recipe behavior."""
     model.channels_in = 4
@@ -746,6 +960,589 @@ def test_call_eval_returns_the_rollout_logits_eval_decodes() -> None:
         step.call_eval(batch["media"])
 
 
+def test_eval_loss_accepts_label_free_arc_batches() -> None:
+    """Evaluate source parquet rows without consulting their hidden targets."""
+    step = PortSubject("exp003").step
+    batch = {
+        "media": torch.tensor([[1, 2, 3], [3, 2, 1]], dtype=torch.int32),
+        "valid_count": 2,
+        "puzzle_identifiers": torch.tensor([0, 1], dtype=torch.int32),
+        "canonical_outputs": [None, None],
+    }
+
+    result = step.eval_loss(**batch)
+
+    assert "label" not in batch
+    assert result["model"].shape == (2, 4)
+    assert torch.equal(result["loss"], torch.zeros(1))
+    assert result.get("metrics", {}).get("q_continue_loss") == 0.0
+
+
+def test_sparse_optimizer_can_follow_the_step_learning_rate_schedule() -> None:
+    """Scale only opted-in sparse groups while retaining legacy defaults."""
+    config = port_config("exp000")
+    config.warmup_steps = 10
+    config.lr_step_offset = 1
+    config.lr_min_ratio = 1.0
+    config.optimizer_lr_policy = apply_direct_schedule_to_body_and_sparse_optimizer_lrs
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        torch.manual_seed(0)
+        step = PooledActTrainStep(config.finalize())
+        assert step.sparse_optimizer is not None
+        step._update({})
+        assert step.sparse_optimizer.param_groups[0]["lr"] == 1e-3
+
+        legacy_config = port_config("exp000")
+        legacy_config.warmup_steps = 10
+        legacy_config.lr_step_offset = 1
+        legacy_config.lr_min_ratio = 1.0
+        legacy_step = PooledActTrainStep(legacy_config.finalize())
+        assert legacy_step.sparse_optimizer is not None
+        legacy_step._update({})
+        assert legacy_step.sparse_optimizer.param_groups[0]["lr"] == 1e-2
+
+
+def test_three_step_source_golden_replays_through_the_shared_pooled_step() -> None:
+    """Replay the immutable released trace through the canonical pooled step."""
+    _replay_source_golden()
+
+
+def test_three_step_source_golden_rejects_a_perturbed_sparse_rate() -> None:
+    """Prove the source trajectory detects a changed live optimizer rate."""
+    with pytest.raises(AssertionError, match=r"loss step|final model|optimizer|EMA"):
+        _replay_source_golden(sparse_lr_multiplier=1.25)
+
+
+def test_adamw_candidates_differ_from_source_aux_adam_oracle() -> None:
+    """Candidate AdamW optimizers miss source AuxAdam's group step schedule."""
+    source_path = _CWD / "testdata" / "charm_optimizer.pt"
+    payload = cast(
+        dict[str, object],
+        torch.load(source_path, map_location="cpu", weights_only=True),
+    )
+    source_record = cast(dict[str, object], payload["muon_aux"])
+    source_parameters = cast(list[Tensor], source_record["parameters"])
+    source_state = cast(dict[str, object], source_record["state"])
+    source_groups = cast(list[dict[str, object]], source_state["param_groups"])
+    assert source_groups[1]["step"] == 3
+
+    candidates = (
+        torch.optim.AdamW(
+            [nn.Parameter(torch.tensor([0.5, -1.25]))],
+            lr=0.0007,
+            betas=(0.72, 0.91),
+            eps=1e-7,
+            weight_decay=0.13,
+        ),
+        FusedAdamW.Config(
+            lr=0.0007,
+            betas=(0.72, 0.91),
+            eps=1e-7,
+            weight_decay=0.13,
+            compile=False,
+        ).make()([nn.Parameter(torch.tensor([0.5, -1.25]))]),
+    )
+    for candidate in candidates:
+        parameter = cast(list[nn.Parameter], candidate.param_groups[0]["params"])[0]
+        with host_agnostic_numerics():
+            for gradient in (
+                torch.tensor([0.375, -0.625]),
+                None,
+                torch.tensor([1.125, -1.875]),
+            ):
+                parameter.grad = gradient
+                candidate.step()
+        candidate_state = cast(dict[str, object], candidate.state[parameter])
+        candidate_step = candidate_state["step"]
+        if isinstance(candidate_step, Tensor):
+            candidate_step = int(candidate_step.item())
+
+        assert candidate_step == 2
+        assert not torch.equal(parameter, source_parameters[1])
+
+
+def test_aux_adam_matches_source_group_step_and_moments() -> None:
+    """Match source state when one missing gradient still advances the group."""
+    oracle = _CWD / "testdata" / "charm_optimizer.pt"
+    record = cast(
+        dict[str, object],
+        torch.load(oracle, map_location="cpu", weights_only=True),
+    )["muon_aux"]
+    source = cast(dict[str, object], record)
+    expected_parameters = cast(list[Tensor], source["parameters"])
+    source_state = cast(dict[str, object], source["state"])
+    source_groups = cast(list[dict[str, object]], source_state["param_groups"])
+    source_parameter_ids = cast(list[int], source_groups[1]["params"])
+    source_states = cast(dict[int, dict[str, object]], source_state["state"])
+    parameter = nn.Parameter(torch.tensor([0.5, -1.25]))
+
+    with host_agnostic_numerics():
+        optimizer = AuxAdam.Config(
+            lr=0.0007,
+            betas=(0.72, 0.91),
+            eps=1e-7,
+            weight_decay=0.13,
+        ).make()([parameter])
+        for gradient in (
+            torch.tensor([0.375, -0.625]),
+            None,
+            torch.tensor([1.125, -1.875]),
+        ):
+            parameter.grad = gradient
+            optimizer.step()
+
+    actual_state = optimizer.state_dict()
+    actual_group = cast(list[dict[str, object]], actual_state["param_groups"])[0]
+    actual_parameter_id = cast(list[int], actual_group["params"])[0]
+    actual_states = cast(dict[int, dict[str, object]], actual_state["state"])
+    expected_state = source_states[source_parameter_ids[0]]
+    actual_parameter_state = actual_states[actual_parameter_id]
+
+    assert torch.equal(parameter, expected_parameters[1])
+    assert actual_group["step"] == source_groups[1]["step"] == 3
+    assert actual_parameter_state.keys() == expected_state.keys()
+    for name, expected in expected_state.items():
+        actual = actual_parameter_state[name]
+        if isinstance(expected, Tensor):
+            assert isinstance(actual, Tensor)
+            assert torch.equal(actual, expected)
+        else:
+            assert actual == expected
+
+
+def _replay_source_golden(*, sparse_lr_multiplier: float = 1.0) -> None:
+    """Replay the immutable three-update record, optionally perturbing sparse LR."""
+    expected = read_tensors(_CWD / "testdata" / "charm_train_step.pt")
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        torch.manual_seed(13)
+        step = PooledActTrainStep(_source_replay_config().finalize())
+        model = step.net
+        if not isinstance(model, SingleLatentGridSolver):
+            raise TypeError("The source replay requires SingleLatentGridSolver.")
+        table = step.puzzle_table
+        sparse_optimizer = step.sparse_optimizer
+        if table is None or sparse_optimizer is None:
+            raise TypeError("The source replay requires sparse prefix state.")
+        assert torch.equal(torch.random.get_rng_state(), expected["rng/init_state"])
+        sparse_group = sparse_optimizer.param_groups[0]
+        sparse_group["initial_lr"] = cast(float, sparse_group["lr"]) * (
+            sparse_lr_multiplier
+        )
+
+        initial = _record_namespace(expected, "init/model")
+        source_initial = {f"model.{name}": value for name, value in initial.items()}
+        mapped_initial = remap_charm_checkpoint(source_initial, model=model)
+        for name, value in model.state_dict().items():
+            assert torch.equal(value, mapped_initial[name]), f"initial model: {name}"
+
+        step.bind_instance_metadata(
+            (
+                None,
+                ArcInstanceMetadata(
+                    puzzle_name="one",
+                    task_id=0,
+                    dih_idx=1,
+                    colorperm_slots=(1, 0, 2, 3, 4, 5, 6, 7, 8),
+                ),
+                ArcInstanceMetadata(
+                    puzzle_name="two",
+                    task_id=1,
+                    dih_idx=2,
+                    colorperm_slots=tuple(reversed(range(9))),
+                ),
+            ),
+        )
+        batch = {
+            "media": torch.tensor([[0, 1, 2, 3], [3, 2, 1, 0]], dtype=torch.int32),
+            "label": torch.tensor([[1, 2, 3, 4], [4, 3, 2, 1]], dtype=torch.int32),
+            "valid_count": 2,
+            "puzzle_identifiers": torch.tensor([1, 2]),
+        }
+        for index, expected_loss in enumerate(expected["trace/losses"]):
+            result = step.train_step(**batch)
+            actual_loss = result["loss"].squeeze()
+            assert torch.equal(actual_loss, expected_loss / 2), f"loss step {index + 1}"
+
+        final = _record_namespace(expected, "final/model")
+        source_final = {f"model.{name}": value for name, value in final.items()}
+        mapped_final = remap_charm_checkpoint(source_final, model=model)
+        for name, value in model.state_dict().items():
+            assert torch.equal(value, mapped_final[name]), f"final model: {name}"
+
+        parameter_names = {
+            id(parameter): name for name, parameter in model.named_parameters()
+        }
+        parameter_names.update(
+            {id(buffer): name for name, buffer in model.named_buffers()},
+        )
+        dense = _normalize_source_optimizer(
+            _record_namespace(expected, "final/optimizer/dense"),
+        )
+        if not isinstance(step.optimizer, CompositeOptimizer):
+            raise TypeError("The source replay requires CompositeOptimizer.")
+        optimizer = step.optimizer
+        dense_actual = _normalize_native_optimizer(
+            _optimizer_snapshot(optimizer, parameter_names),
+            optimizer=optimizer,
+        )
+        _assert_source_optimizer_policy(optimizer=optimizer)
+        _assert_tensor_records_equal("dense optimizer", dense, dense_actual)
+        sparse = _normalize_source_optimizer(
+            _record_namespace(expected, "final/optimizer/sparse"),
+        )
+        _assert_source_sparse_optimizer_policy(
+            source=_record_namespace(expected, "final/optimizer/sparse"),
+            optimizer=sparse_optimizer,
+        )
+        _assert_tensor_records_equal(
+            "sparse optimizer",
+            sparse,
+            _optimizer_snapshot(sparse_optimizer, parameter_names),
+        )
+        for role, member in zip(("muon", "adam"), optimizer.optimizers, strict=True):
+            _assert_tensor_records_equal(
+                f"optimizer role {role}",
+                _source_parameter_role(expected, role),
+                _parameter_role_snapshot(member, parameter_names),
+            )
+
+        source_ema = _record_namespace(expected, "final/ema")
+        mapped_ema = remap_charm_checkpoint(
+            source_final,
+            model=model,
+            ema_state=source_ema,
+        )
+        if not isinstance(step.ema, EMA):
+            raise TypeError("The source replay config needs dense EMA.")
+        for name, value in step.ema.shadow_params.items():
+            assert torch.equal(value, mapped_ema[name]), f"EMA: {name}"
+        carry = _record_namespace(expected, "final/carry")
+        assert torch.equal(step.pool.z_slow, carry["current_hidden"])
+        assert torch.equal(step.pool.steps, carry["steps"])
+        assert torch.equal(step.pool.halted, carry["halted"])
+        assert torch.equal(step.pool.inputs, carry["inputs"].long())
+        assert torch.equal(step.pool.labels, carry["labels"].long())
+        assert torch.equal(step.pool.puzzle_ids, carry["puzzle_embed_idxs"].int())
+        assert torch.equal(torch.rand(8), expected["rng/final_next8"])
+
+
+def _source_replay_config() -> PooledActTrainStep.Config:
+    """Shrink exp009 to the immutable source oracle's nondegenerate geometry."""
+    step = experiments.exp009().step
+    step.total_train_steps = 1_600_000
+    step.warmup_steps = 2_000
+    step.lr_step_offset = 1
+    step.backward_loss_scale = 0.5
+    step.dtype_autocast = None
+    step.parallelism = NoParallel.Config(device="cpu")
+    model = cast(SingleLatentGridSolver.Config, step.model)
+    model.channels_in = 10
+    model.num_layers = 1
+    model.vocab_size = 5
+    model.halt_outputs = 1
+    model.compile_core = None
+    embedding = cast(GridEmbedding.Config, model.embedding)
+    embedding.grid_shape = (1, 4)
+    block = cast(TransformerBlock.Config, model.block)
+    attention = cast(Attention.Config, block.attn)
+    attention.num_heads = 1
+    attention.num_heads_kv = 1
+    attention.channels_head = 10
+    ffn = cast(SwiGLU.Config, block.ffn)
+    ffn.channels_hidden = 2
+    middle = cast(SequenceConv1d.Config, ffn.middle)
+    middle.conv.groups = 2
+    recurrence = cast(SingleLatentRecurrence.Config, model.recurrence)
+    recurrence.slow_cycles = 1
+    recurrence.fast_cycles = 2
+    recurrence.inner_grad_loops = 1
+    prefix = cast(ComposedSparsePrefix.Config, model.prefix)
+    prefix.channels_out = 10
+    prefix.num_tokens = 1
+    composer = cast(CategorySlotFiLM.Config, prefix.composition)
+    composer.num_categories = 2
+    composer.channels_out = 10
+    prefix.residual.num_puzzles = 3
+    prefix.residual.channels_out = 3
+    prefix.residual.num_tokens = 1
+    prefix.residual.batch_size = 2
+    pool = cast(AtomicPool.Config, step.pool)
+    pool.batch_size = 2
+    pool.max_steps = 3
+    pool.steps_dtype = torch.int32
+    pool.halting = HaltTraining.Config(
+        weight=0.5,
+        exploration=GlobalSampledMinimum.Config(prob=0.1),
+    )
+    return step
+
+
+def _record_namespace(
+    record: Mapping[str, Tensor],
+    prefix: str,
+) -> dict[str, Tensor]:
+    """Return one slash-delimited source record namespace."""
+    marker = f"{prefix}/"
+    return {
+        key.removeprefix(marker): value
+        for key, value in record.items()
+        if key.startswith(marker)
+    }
+
+
+def _source_parameter_name(source_name: str) -> str:
+    """Map a source optimizer identity through the strict checkpoint schema."""
+    source_name = source_name.removeprefix("model.inner.").removeprefix("inner.")
+    if source_name == "puzzle_emb.instance_residual_embed.local_weights":
+        return "prefix.residual.local_weights"
+    if source_name == "puzzle_emb.instance_residual_embed.local_ids":
+        return "prefix.residual.local_ids"
+    return _target_key(f"model.inner.{source_name}")
+
+
+def _normalize_source_optimizer(source: Mapping[str, Tensor]) -> dict[str, Tensor]:
+    """Rename source identities while preserving all comparable optimizer tensors."""
+    result: dict[str, Tensor] = {}
+    for name, value in source.items():
+        normalized_name = name
+        if normalized_name.startswith("group/1/adamw_"):
+            normalized_name = normalized_name.replace("group/1/adamw_", "group/1/", 1)
+        if normalized_name.endswith("/muon_buffer"):
+            normalized_name = (
+                normalized_name.removesuffix("muon_buffer") + "momentum_buffer"
+            )
+        if normalized_name == "group/0/world_size":
+            # Checked against native runtime size and aggregate_distributed
+            # by _assert_source_sparse_optimizer_policy.
+            continue
+        if normalized_name.endswith("/parameter_order"):
+            names = bytes(_integer_list(value.tolist())).decode().split("\0")
+            mapped = [_source_parameter_name(item) for item in names]
+            result[normalized_name] = torch.tensor(
+                list("\0".join(mapped).encode()),
+                dtype=torch.uint8,
+            )
+        elif normalized_name.startswith("state/"):
+            body = normalized_name.removeprefix("state/")
+            parameter, slot = body.rsplit("/", 1)
+            result[f"state/{_source_parameter_name(parameter)}/{slot}"] = value
+        else:
+            result[normalized_name] = value
+    return result
+
+
+def _normalize_native_optimizer(
+    native: Mapping[str, Tensor],
+    *,
+    optimizer: CompositeOptimizer,
+) -> dict[str, Tensor]:
+    """Map canonical optimizer state into the source replay's field names."""
+    result: dict[str, Tensor] = {}
+    for name, value in native.items():
+        if name.startswith("group/0/") and name.rsplit("/", maxsplit=1)[-1] in {
+            "ensemble_dims",
+            "eps",
+            "ns_coefficients",
+            "reference_numerics",
+        }:
+            continue
+        result[name] = value
+    muon_index = next(
+        (
+            index
+            for index, member in enumerate(optimizer.optimizers)
+            if isinstance(member, Muon)
+        ),
+        None,
+    )
+    if muon_index is None:
+        raise TypeError("The source replay requires a Muon member.")
+    muon = optimizer.optimizers[muon_index]
+    if not isinstance(muon, Muon):
+        raise TypeError("The source replay requires a Muon member.")
+    result["group/0/matched_adamw_rms"] = torch.tensor(
+        0.2 if muon.adjust_lr_fn is adjust_lr_match_rms_adamw else 0.0,
+        dtype=torch.float64,
+    )
+    for index, member in enumerate(optimizer.optimizers):
+        result[f"group/{index}/use_muon"] = torch.tensor(
+            isinstance(member, Muon),
+            dtype=torch.bool,
+        )
+    return result
+
+
+def _assert_source_optimizer_policy(*, optimizer: CompositeOptimizer) -> None:
+    """Check native-only Muon metadata that implements the source contract."""
+    muon = next(
+        (member for member in optimizer.optimizers if isinstance(member, Muon)),
+        None,
+    )
+    if muon is None:
+        raise TypeError("The source replay requires a Muon member.")
+    group = muon.param_groups[0]
+    assert group["momentum"] == 0.95
+    assert group["nesterov"] is True
+    assert group["weight_decay"] == 0.1
+    assert group["ensemble_dims"] == 0
+    assert group["eps"] == 1e-7
+    assert group["ns_coefficients"] == (3.4445, -4.775, 2.0315)
+    assert group["ns_steps"] == 5
+    assert group["reference_numerics"] is False
+    auxiliary = next(
+        member for member in optimizer.optimizers if not isinstance(member, Muon)
+    )
+    auxiliary_group = auxiliary.param_groups[0]
+    assert auxiliary_group["betas"] == (0.9, 0.95)
+    assert auxiliary_group["eps"] == 1e-8
+    assert auxiliary_group["weight_decay"] == 0.1
+
+
+def _assert_source_sparse_optimizer_policy(
+    *,
+    source: Mapping[str, Tensor],
+    optimizer: SignSGD,
+) -> None:
+    """Compare the stored gather world with native runtime gather behavior."""
+    source_world_size = source["group/0/world_size"]
+    native_world_size = (
+        dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
+    )
+    assert torch.equal(
+        source_world_size,
+        torch.tensor(native_world_size, dtype=source_world_size.dtype),
+    )
+    assert optimizer.aggregate_distributed is True
+
+
+def _optimizer_snapshot(
+    optimizer: torch.optim.Optimizer,
+    names_by_parameter: Mapping[int, str],
+) -> dict[str, Tensor]:
+    """Flatten each optimizer group, ordered identity, and complete state."""
+    if isinstance(optimizer, CompositeOptimizer):
+        composite_records: dict[str, Tensor] = {}
+        group_offset = 0
+        for member in optimizer.optimizers:
+            member_records = _optimizer_snapshot(member, names_by_parameter)
+            for member_name, value in member_records.items():
+                normalized_name = member_name
+                if member_name.startswith("group/"):
+                    _, index, suffix = member_name.split("/", maxsplit=2)
+                    normalized_name = f"group/{group_offset + int(index)}/{suffix}"
+                composite_records[normalized_name] = value
+            group_offset += len(member.param_groups)
+        return composite_records
+    state = cast(dict[str, object], optimizer.state_dict())
+    groups = cast(list[dict[str, object]], state["param_groups"])
+    all_state = cast(dict[int, dict[str, object]], state["state"])
+    actual_groups = [cast(dict[str, object], group) for group in optimizer.param_groups]
+    result: dict[str, Tensor] = {}
+    for index, (group, actual) in enumerate(zip(groups, actual_groups, strict=True)):
+        prefix = f"group/{index}"
+        ids = cast(list[int], group["params"])
+        parameters = cast(list[Tensor], actual["params"])
+        names = [names_by_parameter[id(parameter)] for parameter in parameters]
+        result[f"{prefix}/parameter_order"] = torch.tensor(
+            list("\0".join(names).encode()),
+            dtype=torch.uint8,
+        )
+        for name, value in group.items():
+            if name in {"params", "initial_lr", "sparse_embedding", "world_size"}:
+                continue
+            if isinstance(value, bool):
+                result[f"{prefix}/{name}"] = torch.tensor(value, dtype=torch.bool)
+            elif isinstance(value, (int, float)) or (
+                isinstance(value, tuple)
+                and all(
+                    isinstance(item, (int, float))
+                    for item in cast(tuple[object, ...], value)
+                )
+            ):
+                result[f"{prefix}/{name}"] = torch.tensor(value, dtype=torch.float64)
+        for parameter_id, parameter_name in zip(ids, names, strict=True):
+            for slot, value in all_state.get(parameter_id, {}).items():
+                key = f"state/{parameter_name}/{slot}"
+                if isinstance(value, Tensor):
+                    result[key] = value.detach().clone()
+                elif isinstance(value, (int, float)):
+                    result[key] = torch.tensor(value, dtype=torch.float64)
+    return result
+
+
+def _source_parameter_role(
+    source: Mapping[str, Tensor],
+    role: str,
+) -> dict[str, Tensor]:
+    """Normalize a source role's ordered identities and tensor layouts."""
+    prefix = f"optimizer/roles/{role}/"
+    names = bytes(_integer_list(source[f"{prefix}names"].tolist())).decode().split("\0")
+    mapped = [_source_parameter_name(name) for name in names]
+    return {
+        "names": torch.tensor(list("\0".join(mapped).encode()), dtype=torch.uint8),
+        "shapes": source[f"{prefix}shapes"],
+        "rank": source[f"{prefix}rank"],
+    }
+
+
+def _parameter_role_snapshot(
+    optimizer: torch.optim.Optimizer,
+    names_by_parameter: Mapping[int, str],
+) -> dict[str, Tensor]:
+    """Describe an optimizer member's parameter order, shape, and rank."""
+    parameters = [
+        parameter
+        for raw_group in optimizer.param_groups
+        for parameter in cast(
+            list[Tensor],
+            cast(dict[str, object], raw_group)["params"],
+        )
+    ]
+    names = [names_by_parameter[id(parameter)] for parameter in parameters]
+    return {
+        "names": torch.tensor(list("\0".join(names).encode()), dtype=torch.uint8),
+        "shapes": torch.tensor(
+            [axis for parameter in parameters for axis in parameter.shape],
+            dtype=torch.int64,
+        ),
+        "rank": torch.tensor([parameter.ndim for parameter in parameters]),
+    }
+
+
+def _assert_tensor_records_equal(
+    label: str,
+    expected: Mapping[str, Tensor],
+    actual: Mapping[str, Tensor],
+) -> None:
+    """Require exact key, shape, dtype, and value equality for a record group."""
+    differences: list[str] = []
+    for name in sorted(expected.keys() | actual.keys()):
+        wanted, found = expected.get(name), actual.get(name)
+        if wanted is None or found is None:
+            differences.append(f"{name}: missing={wanted is None}/{found is None}")
+        elif wanted.shape != found.shape or wanted.dtype != found.dtype:
+            differences.append(
+                f"{name}: expected={wanted.shape}/{wanted.dtype} "
+                f"actual={found.shape}/{found.dtype}",
+            )
+        elif not torch.equal(wanted, found):
+            detail = (
+                f" expected={wanted.tolist()} actual={found.tolist()}"
+                if wanted.numel() <= 4
+                else ""
+            )
+            differences.append(f"{name}: values differ{detail}")
+    assert not differences, f"{label}:\n" + "\n".join(differences)
+
+
+def _integer_list(values: list[object]) -> list[int]:
+    """Narrow values returned by tensor-list conversion to integers."""
+    result = [value for value in values if isinstance(value, int)]
+    if len(result) != len(values):
+        raise TypeError("Expected integer tensor records.")
+    return result
+
+
 def test_the_corruption_generator_round_trips_through_the_state_dict() -> None:
     torch.manual_seed(0)
     source = PortSubject("exp006").step
@@ -826,6 +1623,78 @@ def test_without_halt_training_the_loss_is_the_token_loss() -> None:
     assert "halted_frac" not in metrics
     lm_loss = torch.as_tensor(metrics["lm_loss"])
     assert torch.equal(result["loss"], lm_loss.reshape(1))
+
+
+def test_pooled_step_accepts_the_composable_act_objective() -> None:
+    """Use ACTLoss's summed objective through the shared pooled step."""
+    config = port_config("exp000")
+    config.objective = ACTLoss.Config(halt_weight=0.5)
+    step = PortSubject.from_config(config).step
+    logits = torch.tensor(
+        [
+            [[0.25, 1.0, -0.5], [1.5, -0.25, 0.75]],
+            [[0.5, -1.0, 1.25], [-0.75, 0.5, 0.25]],
+        ],
+        requires_grad=True,
+    )
+    labels = torch.tensor([[1, -100], [2, 0]])
+    halt = torch.tensor([0.25, -0.5], requires_grad=True)
+    active = torch.ones(2, dtype=torch.bool)
+    expected = ACTLoss.Config(halt_weight=0.5).make()(
+        logits=logits,
+        labels=labels,
+        halt_logits=halt,
+    )
+    step.pool.labels = labels
+
+    actual, metrics, correctness = step._train_loss(
+        logits,
+        halt=halt,
+        labels=labels,
+        active=active,
+    )
+
+    assert torch.equal(actual, expected.loss)
+    lm_loss = cast(Tensor, metrics["lm_loss"])
+    assert torch.equal(lm_loss, expected.lm_loss.detach())
+    assert correctness is not None
+    assert torch.equal(correctness.correct, expected.correct.float())
+
+
+def test_before_backward_streaming_transition_preserves_forward_values() -> None:
+    """A pre-backward transition can reseat slots without mutating saved inputs."""
+    config = port_config("exp000")
+    config.model.prefix = None
+    config.objective = ACTLoss.Config()
+    config.pool = StreamingPool.Config(batch_size=2, max_steps=1)
+    config.pool_transition = BeforeBackwardPoolTransition.Config()
+    step = PortSubject.from_config(config).step
+    media = torch.tensor(
+        [[2, 3, 0], [3, 2, 0], [2, 2, 0], [3, 3, 0]],
+    )
+    labels = torch.tensor(
+        [[3, 2, -100], [2, 3, -100], [3, 3, -100], [2, 2, -100]],
+    )
+
+    step.train_step(media=media, label=labels, valid_count=4)
+
+    assert torch.equal(step.pool.inputs, media[2:])
+    assert torch.equal(step.pool.labels, labels[2:])
+    assert step.pool.active.all()
+    next_media = torch.tensor([[3, 2, 0], [2, 3, 0]])
+    next_labels = torch.tensor([[2, 3, -100], [3, 2, -100]])
+    step.train_step(media=next_media, label=next_labels, valid_count=2)
+    assert step.global_step == 2
+
+
+def test_pooled_step_rejects_two_ignored_label_owners() -> None:
+    """Pool refill and ACT objective must share one ignored-label ID."""
+    config = port_config("exp000")
+    config.ignore_label_id = 0
+    config.objective = ACTLoss.Config()
+
+    with pytest.raises(ValueError, match=r"ignore_label_id.*ignore_index"):
+        PooledActTrainStep(config.finalize())
 
 
 def test_a_finite_clip_norm_bounds_the_body_update() -> None:

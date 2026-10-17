@@ -146,6 +146,20 @@ def test_prediction_crop_uses_its_own_shape() -> None:
     assert np.array_equal(restored, prediction)
 
 
+def test_single_grid_pack_reuses_canvas_eos_at_nonzero_origin() -> None:
+    """Pack one input without fabricating a paired label grid."""
+    spec = ArcSpec(max_grid=7)
+    augmentation = SpatialAugmentation.Config(spec=spec).make()
+    grid = np.array([[0, 1, 2], [3, 4, 5]], dtype=np.uint8)
+    tag = (1, 2, 1)
+
+    packed = augmentation.pack_one_at(grid, tag=tag)
+    paired_input, _ = augmentation.pack_at(grid, out=grid, tag=tag)
+
+    assert np.array_equal(packed, paired_input)
+    assert np.array_equal(crop_grid(packed, spec=spec, row=2, col=1), grid)
+
+
 def test_canonicalize_uses_configured_transform_separator() -> None:
     config = ColorDihedral.Config(separator="::", transforms=(1,))
     augmentation = config.make()

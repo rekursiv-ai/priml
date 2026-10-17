@@ -214,6 +214,7 @@ Arc1TrainLoop(
         │       weight_decay=0.1,
         │       aggregate_distributed=True
         │   ),
+        │   optimizer_lr_policy=priml.baselines.arcagi.train_step.scale_body_optimizer_lr,
         │   pool=AtomicPool.Config(
         │       batch_size=96,
         │       max_steps=16,
@@ -230,13 +231,20 @@ Arc1TrainLoop(
         │       steps_dtype=torch.int64,
         │       dtype=None
         │   ),
+        │   pool_transition=AfterOptimizerPoolTransition.Config(),
+        │   ema_initialization=None,
+        │   gradient_reduction=None,
+        │   metric_reporter=None,
         │   token_loss=StablemaxTokens.Config(
         │       log_normalizer=priml.math.loss.log_stablemax
         │   ),
+        │   objective=None,
         │   reduction=MeanOverBatch.Config(batch_size=96),
         │   signals=EvalSignals.Config(per_step=True, color_offset=2),
         │   ignore_label_id=-100,
         │   total_train_steps=388_670,
+        │   backward_loss_scale=1.0,
+        │   lr_step_offset=0,
         │   warmup_steps=2_000,
         │   lr_min_ratio=1.0,
         │   grad_clip_foreach=True,

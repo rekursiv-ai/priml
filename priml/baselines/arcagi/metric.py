@@ -18,7 +18,7 @@ thousands of 900-cell grids, and only equality between them matters.
 
 from __future__ import annotations
 
-from dataclasses import field
+from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 from typing import (
@@ -28,15 +28,19 @@ from typing import (
     NotRequired,
     Protocol,
     Self,
+    SupportsFloat,
+    SupportsIndex,
     TypedDict,
     cast,
     override,
 )
 
 import logging
+import operator
 import struct
 
 from configgle import Fig, Makeable
+from numpy.typing import NDArray
 from torch import Tensor
 from treekle import from_plain, json_loads
 
@@ -51,6 +55,7 @@ from priml.baselines.arcagi.augmentation import (
     grid_hash,
     untranslate_unscale,
 )
+from priml.baselines.arcagi.parquet import read_parquet_source
 from priml.baselines.arcagi.signal_dump import (
     SignalDumpPayload,
     SignalRow,
@@ -63,8 +68,6 @@ from priml.runtime import is_rank_zero
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
-
-    from numpy.typing import NDArray
 
 
 logger = logging.getLogger(__name__)
@@ -396,14 +399,7 @@ class CanonicalPassK:
                     max_q_of[h] = max(max_q_of.get(h, 0.0), q)
                 if not p_map:
                     continue
-                ranked = sorted(
-                    p_map.items(),
-                    key=lambda item: (
-                        len(item[1]),
-                        sum(item[1]),
-                    ),
-                    reverse=True,
-                )
+                ranked = _rank_votes(records)
                 for i, k in enumerate(pass_ks):
                     if any(h == label_h for h, _ in ranked[:k]):
                         per_test_correct[i] += 1
@@ -576,6 +572,440 @@ class CanonicalPassK:
         return merged
 
 
+class ParquetPassK:
+    """Score augmented ARC predictions against an ordered Parquet source."""
+
+    class Config(Fig["ParquetPassK"]):
+        """Evaluation source, packed canvas, pass budgets, and event window."""
+
+        base_dir: Path | str | None = None
+        """Resource root used to resolve a relative evaluation source."""
+
+        eval_source: Path | str = ""
+        """Ordered Parquet file supplying the evaluation pairs."""
+
+        canvas_size: int = 30
+        """Square token canvas side used to decode packed predictions."""
+
+        pass_ks: tuple[int, ...] = (1, 2, 5, 10, 100, 1000)
+        """Vote budgets reported as pass@K metrics."""
+
+        recent_window_size: int | None = None
+        """Maximum prior event ballots retained; None keeps all events."""
+
+        aggregated_voting: bool = True
+        """Whether ballots accumulate across evaluation events."""
+
+        @override
+        def finalize(self) -> Self:
+            """Resolve the evaluation path without reading its Parquet file."""
+            self.eval_source = resolve_working_dir(self.base_dir, self.eval_source)
+            return super().finalize()
+
+    class StateDict(TypedDict):
+        event_counter: int
+        active_event_id: int | None
+        events: dict[int, dict[tuple[str, str], list[_ParquetVoteState]]]
+        prediction_grids: dict[str, Tensor]
+        rank_states: list[_ParquetRankState]
+
+    def __init__(self, config: Config) -> None:
+        _validate_parquet_metric_config(config)
+        self.config = config
+        self._ground_truth: dict[str, tuple[_ParquetGroundTruth, ...]] | None = None
+        self._events: dict[int, dict[tuple[str, str], list[_ArcVote]]] = {}
+        self._prediction_grids: dict[str, NDArray[np.uint8]] = {}
+        self._restored_rank_states: list[_ParquetRankState] = []
+        self._event_counter = 0
+        self._active_event_id: int | None = None
+
+    def reset(self) -> None:
+        """Start a voting event and retain only the configured history window."""
+        if not self.config.aggregated_voting:
+            self._events.clear()
+            self._prediction_grids.clear()
+        event_id = self._event_counter
+        self._event_counter += 1
+        self._events[event_id] = {}
+        self._active_event_id = event_id
+        self._trim_history()
+
+    def update(self, logits: Tensor, **batch: object) -> None:
+        """Invert packed predictions and append votes for canonical inputs.
+
+        Args:
+          logits: Halt logits followed by CanvasEOS token grids.
+          **batch: Canonical names and inputs, view IDs, tags, and valid row count.
+
+        """
+        expected_width = 1 + self.config.canvas_size**2
+        if logits.ndim != 2 or logits.shape[1] != expected_width:
+            raise ValueError(
+                "ParquetPassK expects packed ARC model output shaped "
+                f"[batch, {expected_width}] (halt logit and CanvasEOS tokens).",
+            )
+        names = _parquet_batch_names(batch)
+        inputs = _parquet_batch_inputs(batch)
+        tags = _tensor_field(batch, name="spatial_tags")
+        dihedrals = _tensor_field(batch, name="dih_idxs")
+        color_slots = _tensor_field(batch, name="colorperm_slots")
+        valid_count = _valid_count(batch.get("valid_count"), batch_size=logits.shape[0])
+        if (
+            len(names) != valid_count
+            or len(inputs) != valid_count
+            or tags.shape != (logits.shape[0], 3)
+            or dihedrals.shape != (logits.shape[0],)
+            or color_slots.shape != (logits.shape[0], 9)
+        ):
+            raise ValueError("Canonical metadata must match packed batch size.")
+        if self._active_event_id is None:
+            self.reset()
+        assert isinstance(self._active_event_id, int)
+        event = self._events.setdefault(self._active_event_id, {})
+        confidences = torch.sigmoid(logits[:valid_count, 0].to(torch.float32))
+        tag_values = cast(
+            NDArray[np.int64],
+            tags[:valid_count].to(torch.int64).detach().cpu().numpy(),
+        )
+        dih_values = cast(
+            NDArray[np.int64],
+            dihedrals[:valid_count].to(torch.int64).detach().cpu().numpy(),
+        )
+        slot_values = cast(
+            NDArray[np.int64],
+            color_slots[:valid_count].to(torch.int64).detach().cpu().numpy(),
+        )
+        confidence_values = cast(
+            NDArray[np.float32],
+            confidences.detach().cpu().numpy(),
+        )
+        spec = ArcSpec(max_grid=self.config.canvas_size)
+        transform = ColorDihedral.Config().make()
+        for index in range(valid_count):
+            scale = operator.index(cast(SupportsIndex, tag_values[index, 0]))
+            row = operator.index(cast(SupportsIndex, tag_values[index, 1]))
+            col = operator.index(cast(SupportsIndex, tag_values[index, 2]))
+            if scale != 1:
+                raise ValueError(f"Unsupported online scale {scale}; expected 1.")
+            candidate = crop_grid(
+                logits[index, 1:].detach().to(torch.uint8).cpu().numpy(),
+                spec=spec,
+                row=row,
+                col=col,
+            )
+            slots = tuple(
+                operator.index(cast(SupportsIndex, slot_values[index, slot]))
+                for slot in range(9)
+            )
+            candidate = transform.inverse_explicit(
+                candidate,
+                tid=operator.index(cast(SupportsIndex, dih_values[index])),
+                colorperm_slots=slots,
+            )
+            name = names[index]
+            input_hash = grid_hash(inputs[index])
+            prediction_hash = grid_hash(candidate)
+            event.setdefault((name, input_hash), []).append(
+                _ArcVote(
+                    prediction_hash=prediction_hash,
+                    confidence=float(cast(SupportsFloat, confidence_values[index])),
+                ),
+            )
+            self._prediction_grids.setdefault(prediction_hash, candidate.copy())
+
+    def compute(self) -> dict[str, float]:
+        """Return source-compatible task-normalized pass@K scores.
+
+        Returns:
+          scores: Mean per-task pass@K over the full evaluation source.
+
+        """
+        events, _ = self._gather()
+        if events is None:
+            return {}
+        predictions = _merge_parquet_events(
+            events,
+            event_ids=self._effective_event_ids(events),
+        )
+        truth = self._ground_truth_pairs()
+        if not any(pair.has_output for pairs in truth.values() for pair in pairs):
+            return {}
+        scores = dict.fromkeys(self.config.pass_ks, 0.0)
+        task_count = 0
+        for puzzle_name, pairs in truth.items():
+            if not pairs:
+                continue
+            correct = dict.fromkeys(self.config.pass_ks, 0)
+            for pair in pairs:
+                if pair.output_hash is None:
+                    continue
+                ranked = _rank_votes(
+                    [
+                        (vote.prediction_hash, vote.confidence)
+                        for vote in predictions.get((puzzle_name, pair.input_hash), [])
+                    ],
+                )
+                for k in self.config.pass_ks:
+                    if any(
+                        prediction_hash == pair.output_hash
+                        for prediction_hash, _ in ranked[:k]
+                    ):
+                        correct[k] += 1
+            for k in self.config.pass_ks:
+                scores[k] += correct[k] / len(pairs)
+            task_count += 1
+        if task_count:
+            scores = {k: score / task_count for k, score in scores.items()}
+        return {f"pass@{k}": scores[k] for k in self.config.pass_ks}
+
+    def submission(
+        self,
+        *,
+        submission_k: int = 100,
+    ) -> dict[str, list[dict[str, list[list[int]]]]]:
+        """Return ranked source-schema attempts in canonical task/input order.
+
+        Args:
+          submission_k: Number of attempts emitted for each canonical test input.
+
+        Returns:
+          submission: Puzzle IDs mapped to ordered attempt dictionaries.
+
+        """
+        if submission_k < 1:
+            raise ValueError("submission_k must be positive.")
+        events, grids = self._gather()
+        if events is None:
+            return {}
+        predictions = _merge_parquet_events(
+            events,
+            event_ids=self._effective_event_ids(events),
+        )
+        submission: dict[str, list[dict[str, list[list[int]]]]] = {}
+        for puzzle_name, pairs in self._ground_truth_pairs().items():
+            attempts_for_task: list[dict[str, list[list[int]]]] = []
+            for pair in pairs:
+                ranked = _rank_votes(
+                    [
+                        (vote.prediction_hash, vote.confidence)
+                        for vote in predictions.get((puzzle_name, pair.input_hash), [])
+                    ],
+                )
+                attempts: list[list[list[int]]] = [
+                    _parquet_grid_to_lists(grids[grid_hash])
+                    for grid_hash, _ in ranked[:submission_k]
+                    if grid_hash in grids
+                ]
+                while len(attempts) < submission_k:
+                    attempts.append(attempts[0] if attempts else [[0]])
+                attempts_for_task.append(
+                    {
+                        f"attempt_{index + 1}": grid
+                        for index, grid in enumerate(attempts)
+                    },
+                )
+            submission[puzzle_name] = attempts_for_task
+        return submission
+
+    def state_dict(self) -> StateDict:
+        """Return the current ballots and rank-ordered checkpoint state.
+
+        Returns:
+          state: Local state and all gathered process-rank streams.
+
+        """
+        local_state = self._local_state_dict()
+        if dist.is_initialized():
+            gathered: list[object] = [object() for _ in range(dist.get_world_size())]
+            dist.all_gather_object(gathered, local_state)
+            current = cast(list[_ParquetRankState], cast(object, gathered))
+        else:
+            current = [local_state]
+        rank_states = _compose_parquet_rank_states(
+            self._restored_rank_states,
+            current=current,
+            recent_window_size=(
+                self.config.recent_window_size if self.config.aggregated_voting else 1
+            ),
+        )
+        return {**local_state, "rank_states": rank_states}
+
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
+        """Restore rank streams and prediction grids from a metric checkpoint.
+
+        Args:
+          state_dict: State returned by :meth:`state_dict`.
+
+        """
+        state = cast(ParquetPassK.StateDict, state_dict)
+        rank_states = state.get("rank_states")
+        if rank_states:
+            self._restored_rank_states = cast(
+                list[_ParquetRankState],
+                cast(object, rank_states),
+            )
+            self._events = {}
+            self._prediction_grids = {}
+            self._event_counter = max(
+                rank_state["event_counter"] for rank_state in rank_states
+            )
+            active = [
+                rank_state["active_event_id"]
+                for rank_state in rank_states
+                if rank_state["active_event_id"] is not None
+            ]
+            self._active_event_id = max(active) if active else None
+            return
+        self._restored_rank_states = []
+        self._event_counter = state["event_counter"]
+        self._active_event_id = state["active_event_id"]
+        self._events = {
+            event_id: {
+                key: [_ArcVote(**vote) for vote in votes]
+                for key, votes in event.items()
+            }
+            for event_id, event in state["events"].items()
+        }
+        self._prediction_grids = _parquet_grids_from_state(state["prediction_grids"])
+
+    def _ground_truth_pairs(self) -> dict[str, tuple[_ParquetGroundTruth, ...]]:
+        if self._ground_truth is None:
+            source = read_parquet_source(
+                Path(self.config.eval_source),
+                max_grid_size=self.config.canvas_size,
+            )
+            ground_truth: dict[str, tuple[_ParquetGroundTruth, ...]] = {}
+            for row_index, puzzle_name in enumerate(source.puzzle_names):
+                start = operator.index(
+                    cast(SupportsIndex, source.row_test_starts[row_index]),
+                )
+                count = operator.index(
+                    cast(SupportsIndex, source.row_test_counts[row_index]),
+                )
+                pairs: list[_ParquetGroundTruth] = []
+                for pair_index in range(start, start + count):
+                    input_grid = source.test_inputs.get(pair_index)
+                    if input_grid is None:
+                        raise ValueError("Expected input_grid is not None.")
+                    output_grid = source.test_outputs.get(pair_index)
+                    output_hash = None
+                    if output_grid is not None and max(output_grid.shape) <= 255:
+                        output_hash = grid_hash(output_grid)
+                    pairs.append(
+                        _ParquetGroundTruth(
+                            input_hash=grid_hash(input_grid),
+                            output_hash=output_hash,
+                            has_output=output_grid is not None,
+                        ),
+                    )
+                ground_truth[puzzle_name] = tuple(pairs)
+            self._ground_truth = ground_truth
+        return self._ground_truth
+
+    def _effective_event_ids(
+        self,
+        events: Mapping[int, object] | None = None,
+    ) -> list[int]:
+        event_ids = list(self._events if events is None else events)
+        if not self.config.aggregated_voting:
+            return event_ids[-1:]
+        window = self.config.recent_window_size
+        return event_ids if window is None else event_ids[-window:]
+
+    def _gather(
+        self,
+    ) -> tuple[
+        dict[int, dict[tuple[str, str], list[_ArcVote]]] | None,
+        dict[str, NDArray[np.uint8]],
+    ]:
+        local_state = self._local_state_dict()
+        if dist.is_initialized():
+            rank = dist.get_rank()
+            gathered: list[object] | None = (
+                [object() for _ in range(dist.get_world_size())] if rank == 0 else None
+            )
+            dist.gather_object(local_state, gathered, dst=0)
+            if rank != 0:
+                return None, {}
+            if gathered is None:
+                raise ValueError("Expected gathered rank states is not None.")
+            rank_states = _compose_parquet_rank_states(
+                self._restored_rank_states,
+                current=cast(list[_ParquetRankState], cast(object, gathered)),
+                recent_window_size=(
+                    self.config.recent_window_size
+                    if self.config.aggregated_voting
+                    else 1
+                ),
+            )
+        else:
+            rank_states = _compose_parquet_rank_states(
+                self._restored_rank_states,
+                current=[local_state],
+                recent_window_size=(
+                    self.config.recent_window_size
+                    if self.config.aggregated_voting
+                    else 1
+                ),
+            )
+        events: dict[int, dict[tuple[str, str], list[_ArcVote]]] = {}
+        grids: dict[str, NDArray[np.uint8]] = {}
+        for rank_state in rank_states:
+            for event_id, event in rank_state["events"].items():
+                destination = events.setdefault(event_id, {})
+                for key, votes in event.items():
+                    destination.setdefault(key, []).extend(
+                        _parquet_votes_from_state(votes),
+                    )
+            grids.update(_parquet_grids_from_state(rank_state["prediction_grids"]))
+        return events, grids
+
+    def _trim_history(self) -> None:
+        window = self.config.recent_window_size
+        if not self.config.aggregated_voting or window is None:
+            return
+        retained = set(list(self._events)[-window:])
+        self._events = {
+            event_id: event
+            for event_id, event in self._events.items()
+            if event_id in retained
+        }
+        referenced = {
+            vote.prediction_hash
+            for event in self._events.values()
+            for votes in event.values()
+            for vote in votes
+        }
+        self._prediction_grids = {
+            grid_hash: grid
+            for grid_hash, grid in self._prediction_grids.items()
+            if grid_hash in referenced
+        }
+
+    def _local_state_dict(self) -> _ParquetRankState:
+        return {
+            "event_counter": self._event_counter,
+            "active_event_id": self._active_event_id,
+            "events": {
+                event_id: {
+                    key: [
+                        {
+                            "prediction_hash": vote.prediction_hash,
+                            "confidence": vote.confidence,
+                        }
+                        for vote in votes
+                    ]
+                    for key, votes in event.items()
+                }
+                for event_id, event in self._events.items()
+            },
+            "prediction_grids": {
+                grid_hash: torch.from_numpy(grid.copy())
+                for grid_hash, grid in self._prediction_grids.items()
+            },
+        }
+
+
 def encode_preds(
     preds: Mapping[str, Mapping[str, Sequence[tuple[str, float]]]],
 ) -> bytes:
@@ -639,6 +1069,23 @@ def decode_preds(payload: bytes) -> _Preds:
 def _read_u32(payload: bytes, offset: int) -> tuple[int, int]:
     (value,) = struct.unpack_from("<I", payload, offset)
     return from_plain(value, int), offset + 4
+
+
+def _rank_votes(votes: Sequence[tuple[str, float]]) -> list[tuple[str, float]]:
+    """Rank grid ballots by count then confidence sum, preserving exact ties."""
+    totals: dict[str, tuple[int, float]] = {}
+    for prediction_hash, confidence in votes:
+        count, confidence_sum = totals.get(prediction_hash, (0, 0.0))
+        totals[prediction_hash] = (count + 1, confidence_sum + confidence)
+    ranked = sorted(
+        totals.items(),
+        key=lambda item: (item[1][0], item[1][1]),
+        reverse=True,
+    )
+    return [
+        (grid_hash, confidence_sum / count)
+        for grid_hash, (count, confidence_sum) in ranked
+    ]
 
 
 def _votes_times_mean_q(count: float, mean_q: float, max_q: float) -> float:
@@ -758,3 +1205,237 @@ def _hash_bytes(value: str) -> bytes:
     if len(value) != 64:
         raise ValueError("Expected len(value) == 64.")
     return bytes.fromhex(value)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ParquetGroundTruth:
+    input_hash: str
+    output_hash: str | None
+    has_output: bool
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ArcVote:
+    prediction_hash: str
+    confidence: float
+
+
+class _ParquetVoteState(TypedDict):
+    prediction_hash: str
+    confidence: float
+
+
+class _ParquetRankState(TypedDict):
+    event_counter: int
+    active_event_id: int | None
+    events: dict[int, dict[tuple[str, str], list[_ParquetVoteState]]]
+    prediction_grids: dict[str, Tensor]
+
+
+def _validate_parquet_metric_config(config: ParquetPassK.Config) -> None:
+    """Reject invalid voting controls before the metric reads its source."""
+    if config.canvas_size < 1:
+        raise ValueError("canvas_size must be positive.")
+    if not config.pass_ks or any(k < 1 for k in config.pass_ks):
+        raise ValueError("pass_ks must contain positive attempt budgets.")
+    if len(set(config.pass_ks)) != len(config.pass_ks):
+        raise ValueError("pass_ks values must be unique.")
+    if config.recent_window_size is not None and config.recent_window_size < 1:
+        raise ValueError("recent_window_size must be positive or None.")
+
+
+def _parquet_batch_names(batch: Mapping[str, object]) -> list[str]:
+    """Narrow the canonical puzzle names from one collated evaluation batch."""
+    value = batch.get("canonical_puzzle_names")
+    if not isinstance(value, list):
+        raise TypeError("ParquetPassK requires canonical_puzzle_names as list[str].")
+    names: list[str] = []
+    for name in cast(list[object], value):
+        if not isinstance(name, str):
+            raise TypeError(
+                "ParquetPassK requires canonical_puzzle_names as list[str].",
+            )
+        names.append(name)
+    return names
+
+
+def _parquet_batch_inputs(batch: Mapping[str, object]) -> list[NDArray[np.uint8]]:
+    """Narrow canonical ARC input arrays from one collated evaluation batch."""
+    value = batch.get("canonical_inputs")
+    if not isinstance(value, list):
+        raise TypeError("ParquetPassK requires canonical_inputs as a list of grids.")
+    inputs: list[NDArray[np.uint8]] = []
+    for grid in cast(list[object], value):
+        if not isinstance(grid, np.ndarray) or grid.ndim != 2:
+            raise TypeError(
+                "ParquetPassK canonical inputs must be two-dimensional arrays.",
+            )
+        if grid.dtype != np.uint8:
+            raise TypeError("ParquetPassK canonical inputs must have uint8 dtype.")
+        inputs.append(cast(NDArray[np.uint8], grid))
+    return inputs
+
+
+def _tensor_field(batch: Mapping[str, object], *, name: str) -> Tensor:
+    """Narrow one required tensor field from the metric batch."""
+    value = batch.get(name)
+    if not isinstance(value, Tensor):
+        raise TypeError(f"ParquetPassK batch field {name!r} must be a Tensor.")
+    return value
+
+
+def _valid_count(value: object, *, batch_size: int) -> int:
+    """Return the number of non-padding rows in a collated batch."""
+    if isinstance(value, Tensor):
+        if value.numel() != 1:
+            raise ValueError("valid_count must be a scalar or integer.")
+        if value.is_quantized:
+            raise TypeError("valid_count tensor must have integer dtype.")
+        try:
+            torch.iinfo(value.dtype)
+        except TypeError:
+            raise TypeError("valid_count tensor must have integer dtype.") from None
+        count = value.item()
+        assert isinstance(count, int)
+    elif isinstance(value, int) and not isinstance(value, bool):
+        count = value
+    else:
+        raise TypeError("ParquetPassK requires integer valid_count metadata.")
+    if count < 0 or count > batch_size:
+        raise ValueError(f"valid_count={count} is outside batch size {batch_size}.")
+    return count
+
+
+def _merge_parquet_events(
+    events: Mapping[int, Mapping[tuple[str, str], Sequence[_ArcVote]]],
+    *,
+    event_ids: Sequence[int],
+) -> dict[tuple[str, str], list[_ArcVote]]:
+    """Merge ballots in source event, rank, then row insertion order."""
+    merged: dict[tuple[str, str], list[_ArcVote]] = {}
+    for event_id in event_ids:
+        for key, votes in events[event_id].items():
+            merged.setdefault(key, []).extend(votes)
+    return merged
+
+
+def _compose_parquet_rank_states(
+    restored: Sequence[_ParquetRankState],
+    *,
+    current: Sequence[_ParquetRankState],
+    recent_window_size: int | None,
+) -> list[_ParquetRankState]:
+    """Append current rows to restored rank streams and retain their event window."""
+    if not restored:
+        rank_states = list(current)
+    elif len(restored) == len(current):
+        rank_states = [
+            _append_parquet_rank_state(previous, resumed=resumed)
+            for previous, resumed in zip(restored, current, strict=True)
+        ]
+    else:
+        rank_states = [*restored, *current]
+    if recent_window_size is None:
+        return rank_states
+    event_ids = sorted(
+        {event_id for rank_state in rank_states for event_id in rank_state["events"]},
+    )
+    retained = set(event_ids[-recent_window_size:])
+    return [
+        _trim_parquet_rank_state(rank_state, retained_event_ids=retained)
+        for rank_state in rank_states
+    ]
+
+
+def _append_parquet_rank_state(
+    previous: _ParquetRankState,
+    *,
+    resumed: _ParquetRankState,
+) -> _ParquetRankState:
+    """Append resumed event rows to one saved process-rank stream."""
+    events = {
+        event_id: {key: list(votes) for key, votes in event.items()}
+        for event_id, event in previous["events"].items()
+    }
+    for event_id, event in resumed["events"].items():
+        destination = events.setdefault(event_id, {})
+        for key, votes in event.items():
+            destination.setdefault(key, []).extend(votes)
+    active_event_id = resumed["active_event_id"]
+    if active_event_id is None:
+        active_event_id = previous["active_event_id"]
+    return {
+        "event_counter": max(previous["event_counter"], resumed["event_counter"]),
+        "active_event_id": active_event_id,
+        "events": events,
+        "prediction_grids": {
+            **previous["prediction_grids"],
+            **resumed["prediction_grids"],
+        },
+    }
+
+
+def _trim_parquet_rank_state(
+    rank_state: _ParquetRankState,
+    *,
+    retained_event_ids: set[int],
+) -> _ParquetRankState:
+    """Trim one rank's votes and candidate grids to retained events."""
+    events = {
+        event_id: event
+        for event_id, event in rank_state["events"].items()
+        if event_id in retained_event_ids
+    }
+    referenced = {
+        vote["prediction_hash"]
+        for event in events.values()
+        for votes in event.values()
+        for vote in votes
+    }
+    return {
+        "event_counter": rank_state["event_counter"],
+        "active_event_id": rank_state["active_event_id"],
+        "events": events,
+        "prediction_grids": {
+            name: grid
+            for name, grid in rank_state["prediction_grids"].items()
+            if name in referenced
+        },
+    }
+
+
+def _parquet_votes_from_state(
+    votes: Sequence[_ParquetVoteState],
+) -> list[_ArcVote]:
+    """Restore source-order votes from one checkpointed rank stream."""
+    return [
+        _ArcVote(
+            prediction_hash=vote["prediction_hash"],
+            confidence=vote["confidence"],
+        )
+        for vote in votes
+    ]
+
+
+def _parquet_grids_from_state(
+    grids: Mapping[str, Tensor],
+) -> dict[str, NDArray[np.uint8]]:
+    """Restore candidate tensors as owned CPU ARC arrays."""
+    return {
+        name: cast(
+            NDArray[np.uint8],
+            grid.detach().to(torch.uint8).cpu().numpy().copy(),
+        )
+        for name, grid in grids.items()
+    }
+
+
+def _parquet_grid_to_lists(grid: NDArray[np.uint8]) -> list[list[int]]:
+    """Convert a candidate array to source-compatible submission lists."""
+    return [
+        [
+            operator.index(cast(SupportsIndex, grid[row, col]))
+            for col in range(operator.index(cast(SupportsIndex, grid.shape[1])))
+        ]
+        for row in range(operator.index(cast(SupportsIndex, grid.shape[0])))
+    ]

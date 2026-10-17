@@ -4,17 +4,23 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Final, cast, override
+from typing import TYPE_CHECKING, Final, SupportsIndex, cast, override
 
 import json
 import logging
+import operator
+import re
 
+from numpy.typing import NDArray
+from pyarrow import parquet
 from torch import Tensor
 from treekle import json_loads
 
 import numpy as np
+import pyarrow as pa
 import pytest
 import torch
+import torch.distributed as dist
 
 from priml.baselines.arcagi import metric
 from priml.baselines.arcagi.augmentation import (
@@ -24,6 +30,7 @@ from priml.baselines.arcagi.augmentation import (
 )
 from priml.baselines.arcagi.metric import (
     CanonicalPassK,
+    ParquetPassK,
     PerOutputPass,
     StrictPass,
     TaskScore,
@@ -31,21 +38,29 @@ from priml.baselines.arcagi.metric import (
     _hash_bytes,
     _json_grid,
     _model_output_header_width,
+    _parquet_batch_inputs,
+    _parquet_batch_names,
+    _rank_votes,
     _read_u32,
     _shape,
+    _tensor_field,
     _uint8_rows,
+    _valid_count,
     _votes_times_max_q,
     _votes_times_mean_q,
     decode_preds,
     encode_preds,
 )
+from priml.baselines.arcagi.parquet_data import ArcParquetData, PairSource
 from priml.baselines.arcagi.signal_dump import (
     SignalDumpPayload,
 )
 from priml.data.color_dihedral import ColorDihedral
+from priml.train.checkpointer import SyncLocalStateDictStorer
 
 
 _CWD: Final = Path(__file__).resolve().parent
+
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -424,6 +439,13 @@ def test_canonical_construction_defers_reading_the_tree(tmp_path: Path) -> None:
     assert isinstance(logits, Tensor)
     metric.update(logits, **batch)
     assert metric.compute()["strict@1"] == 0.5
+
+
+def test_rank_votes_keeps_source_insertion_order_for_exact_ties() -> None:
+    """Rank by vote count and mean confidence while preserving exact ties."""
+    assert _rank_votes(
+        [("first", 0.1), ("second", 0.8), ("first", 0.9), ("second", 0.2)],
+    ) == [("first", 0.5), ("second", 0.5)]
 
 
 def _pass_at(scores: Mapping[str, object]) -> dict[str, object]:
@@ -1180,6 +1202,761 @@ def test_canonical_compute_continues_after_an_input_without_predictions(
         "[eval]   a pass@1=0.500",
         "[eval]   b pass@1=1.000",
     ]
+
+
+def test_parquet_metric_scores_full_task_denominators_and_stable_votes(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "eval.parquet"
+    _write_parquet_eval_source(source)
+    config = ParquetPassK.Config(
+        eval_source=source,
+        canvas_size=6,
+        pass_ks=(1, 2),
+        recent_window_size=2,
+    )
+    metric = config.make()
+    wrong = _parquet_packed(candidate=[[9]], q_logit=3.0)
+    correct_a = _parquet_packed(candidate=[[3, 4], [5, 6]], q_logit=-3.0)
+    correct_b = _parquet_packed(candidate=[[8]], q_logit=0.0)
+    metric.update(
+        torch.stack([wrong, correct_a, correct_b]),
+        **_parquet_batch(
+            [
+                ("task-a", [[1, 2]], wrong),
+                ("task-a", [[1, 2]], correct_a),
+                ("task-b", [[7]], correct_b),
+            ],
+        ),
+    )
+
+    result = metric.compute()
+
+    assert result == {"pass@1": 0.5, "pass@2": 0.75}
+    submission = metric.submission(submission_k=2)
+    assert submission["task-a"][0] == {
+        "attempt_1": [[9]],
+        "attempt_2": [[3, 4], [5, 6]],
+    }
+    assert submission["task-a"][1] == {
+        "attempt_1": [[0]],
+        "attempt_2": [[0]],
+    }
+    assert submission["task-b"][0] == {
+        "attempt_1": [[8]],
+        "attempt_2": [[8]],
+    }
+
+
+def test_metric_inverse_view_and_ignores_only_collate_padding(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "eval.parquet"
+    _write_parquet_eval_source(source)
+    metric = ParquetPassK.Config(
+        eval_source=source,
+        canvas_size=6,
+        pass_ks=(1,),
+    ).make()
+    color_slots = (0, 1, 3, 2, 4, 5, 6, 7, 8)
+    candidate = _parquet_packed(
+        candidate=[[3, 4], [5, 6]],
+        q_logit=1.25,
+        row=0,
+        col=1,
+        dih_idx=7,
+        colorperm_slots=color_slots,
+    )
+    padding = _parquet_packed(candidate=[[9]], q_logit=100.0)
+    batch = _parquet_batch([("task-a", [[1, 2]], candidate)], valid_count=1)
+    batch["spatial_tags"] = torch.tensor([[1, 0, 1], [1, 1, 1]])
+    batch["dih_idxs"] = torch.tensor([7, 0])
+    batch["colorperm_slots"] = torch.tensor([list(color_slots), list(range(9))])
+
+    metric.update(torch.stack([candidate, padding]), **batch)
+
+    assert metric.compute() == {"pass@1": 0.25}
+    assert metric.submission(submission_k=1)["task-a"][0]["attempt_1"] == [
+        [3, 4],
+        [5, 6],
+    ]
+
+
+@pytest.mark.parametrize("unsigned_count", [False, True])
+def test_parquet_metric_accepts_real_eval_dataloader_padded_tail(
+    tmp_path: Path,
+    unsigned_count: bool,
+) -> None:
+    source = tmp_path / "eval.parquet"
+    _write_parquet_eval_source(source)
+    dataset = ArcParquetData.Config(
+        train_sources=[PairSource.Config(path=source, pair_selection="both")],
+        eval_source=source,
+        canvas_size=6,
+        batch_size=1,
+        eval_batch_size=2,
+        num_workers=0,
+        rank=0,
+        world_size=1,
+    ).make()
+    metric = ParquetPassK.Config(
+        eval_source=source,
+        canvas_size=6,
+        pass_ks=(1,),
+    ).make()
+    batches = list(dataset.eval_dataloader())
+
+    assert [batch["valid_count"] for batch in batches] == [2, 1]
+    assert batches[-1]["media"].shape == (2, 36)
+    assert len(batches[-1]["canonical_puzzle_names"]) == 1
+    for batch in batches:
+        metric_batch: dict[str, object] = {**batch}
+        if unsigned_count:
+            metric_batch["valid_count"] = torch.tensor(
+                batch["valid_count"],
+                dtype=torch.uint16,
+            )
+        metric.update(torch.zeros((2, 37)), **metric_batch)
+
+    assert metric.compute() == {"pass@1": 0.0}
+
+
+def test_metric_weights_only_checkpoint_round_trip(tmp_path: Path) -> None:
+    source = tmp_path / "eval.parquet"
+    _write_parquet_eval_source(source)
+    config = ParquetPassK.Config(
+        eval_source=source,
+        canvas_size=6,
+        pass_ks=(1,),
+        recent_window_size=None,
+    )
+    metric = config.make()
+    candidate = _parquet_packed(candidate=[[3, 4], [5, 6]], q_logit=1.0)
+    metric.update(
+        candidate.unsqueeze(0),
+        **_parquet_batch([("task-a", [[1, 2]], candidate)]),
+    )
+    state = metric.state_dict()
+    storer = SyncLocalStateDictStorer()
+    checkpoint = tmp_path / "metric.pt"
+    storer.write(checkpoint, dict(state))
+
+    loaded = storer.read(checkpoint, dict(state))
+    restored = config.make()
+    restored.load_state_dict(loaded)
+
+    assert restored.compute() == metric.compute()
+    assert restored.submission(submission_k=1) == metric.submission(submission_k=1)
+    legacy_state = dict(state)
+    legacy_state.pop("rank_states")
+    legacy_restored = config.make()
+    stale_metric = config.make()
+    stale_candidate = _parquet_packed(candidate=[[9]], q_logit=0.0)
+    stale_metric.update(
+        stale_candidate.unsqueeze(0),
+        **_parquet_batch([("task-a", [[1, 2]], stale_candidate)]),
+    )
+    legacy_restored.load_state_dict(stale_metric.state_dict())
+    legacy_restored.load_state_dict(legacy_state)
+    assert legacy_restored.compute() == metric.compute()
+    assert legacy_restored.submission(submission_k=1) == metric.submission(
+        submission_k=1,
+    )
+    legacy_restored.update(
+        candidate.unsqueeze(0),
+        **_parquet_batch([("task-a", [[1, 2]], candidate)]),
+    )
+    assert legacy_restored.state_dict()["active_event_id"] == 0
+    legacy_restored.reset()
+    assert legacy_restored.state_dict()["event_counter"] == 2
+    assert legacy_restored.state_dict()["active_event_id"] == 1
+
+
+def test_metric_state_dict_captures_and_restores_every_rank_stream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persist both rank histories in the rank-zero plain checkpoint payload."""
+    source = tmp_path / "eval.parquet"
+    _write_parquet_eval_source(source)
+    config = ParquetPassK.Config(
+        eval_source=source,
+        canvas_size=6,
+        pass_ks=(1, 2),
+    )
+    wrong = _parquet_packed(candidate=[[9]], q_logit=0.0)
+    correct = _parquet_packed(candidate=[[3, 4], [5, 6]], q_logit=0.0)
+    batch = _parquet_batch([("task-a", [[1, 2]], wrong)])
+    local = config.make()
+    peer = config.make()
+    local.update(wrong.unsqueeze(0), **batch)
+    peer_batch = _parquet_batch([("task-a", [[1, 2]], correct)])
+    peer.update(correct.unsqueeze(0), **peer_batch)
+    peer_state = peer.state_dict()["rank_states"][0]
+
+    def gather(output: list[object], value: object) -> None:
+        output[:] = [value, peer_state]
+
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(dist, "all_gather_object", gather)
+    state = local.state_dict()
+
+    assert len(state["rank_states"]) == 2
+    restored = config.make()
+    restored.load_state_dict(state)
+    monkeypatch.setattr(dist, "is_initialized", lambda: False)
+
+    assert restored.compute() == {"pass@1": 0.0, "pass@2": 0.25}
+    empty_state = config.make().state_dict()
+    empty_restored = config.make()
+    empty_restored.load_state_dict(empty_state)
+    assert empty_restored.state_dict()["active_event_id"] is None
+
+
+def test_metric_reset_window_and_state_resume(tmp_path: Path) -> None:
+    source = tmp_path / "eval.parquet"
+    _write_parquet_eval_source(source)
+    config = ParquetPassK.Config(
+        eval_source=source,
+        canvas_size=6,
+        pass_ks=(1,),
+        recent_window_size=2,
+    )
+    metric = config.make()
+    correct = _parquet_packed(candidate=[[3, 4], [5, 6]], q_logit=0.0)
+    wrong = _parquet_packed(candidate=[[9]], q_logit=0.0)
+    batch = _parquet_batch([("task-a", [[1, 2]], correct)])
+    metric.update(correct.unsqueeze(0), **batch)
+    state = metric.state_dict()
+    restored = config.make()
+    restored.load_state_dict(state)
+    restored.reset()
+    restored.update(wrong.unsqueeze(0), **batch)
+
+    assert restored.compute() == {"pass@1": 0.25}
+    resumed = config.make()
+    resumed.load_state_dict(restored.state_dict())
+    assert resumed.compute() == restored.compute()
+    assert resumed.submission(submission_k=1) == restored.submission(submission_k=1)
+
+
+def test_metric_state_load_continues_the_active_event(tmp_path: Path) -> None:
+    source = tmp_path / "eval.parquet"
+    _write_parquet_eval_source(source)
+    config = ParquetPassK.Config(
+        eval_source=source,
+        canvas_size=6,
+        pass_ks=(1,),
+        recent_window_size=1,
+    )
+    correct = _parquet_packed(candidate=[[3, 4], [5, 6]], q_logit=0.0)
+    wrong = _parquet_packed(candidate=[[9]], q_logit=0.0)
+    batch = _parquet_batch([("task-a", [[1, 2]], correct)])
+    metric = config.make()
+    metric.update(correct.unsqueeze(0), **batch)
+    restored = config.make()
+    restored.load_state_dict(metric.state_dict())
+    restored.update(wrong.unsqueeze(0), **batch)
+
+    assert restored.submission(submission_k=1)["task-a"][0]["attempt_1"] == [
+        [3, 4],
+        [5, 6],
+    ]
+
+
+def test_metric_nonaggregated_voting_keeps_only_latest_event(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "eval.parquet"
+    _write_parquet_eval_source(source)
+    metric = ParquetPassK.Config(
+        eval_source=source,
+        canvas_size=6,
+        pass_ks=(1,),
+        aggregated_voting=False,
+    ).make()
+    correct = _parquet_packed(candidate=[[3, 4], [5, 6]], q_logit=0.0)
+    wrong = _parquet_packed(candidate=[[9]], q_logit=0.0)
+    batch = _parquet_batch([("task-a", [[1, 2]], correct)])
+    metric.update(correct.unsqueeze(0), **batch)
+    metric.reset()
+    metric.update(wrong.unsqueeze(0), **batch)
+
+    assert metric.compute() == {"pass@1": 0.0}
+
+
+def test_metric_aggregated_voting_keeps_votes_across_events(
+    tmp_path: Path,
+) -> None:
+    """Aggregated voting retains earlier ballots after a new event starts."""
+    source = tmp_path / "eval.parquet"
+    _write_parquet_eval_source(source)
+    metric = ParquetPassK.Config(
+        eval_source=source,
+        canvas_size=6,
+        pass_ks=(1,),
+        recent_window_size=None,
+    ).make()
+    correct = _parquet_packed(candidate=[[3, 4], [5, 6]], q_logit=0.0)
+    wrong = _parquet_packed(candidate=[[9]], q_logit=0.0)
+    batch = _parquet_batch([("task-a", [[1, 2]], correct)])
+    metric.update(correct.unsqueeze(0), **batch)
+
+    metric.reset()
+    metric.update(wrong.unsqueeze(0), **batch)
+
+    assert metric.compute() == {"pass@1": 0.25}
+
+
+def test_metric_unlabeled_outputs_and_empty_tasks_have_stable_denominator(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "eval.parquet"
+    _write_parquet_sparse_eval_source(source)
+    metric = ParquetPassK.Config(
+        eval_source=source,
+        canvas_size=6,
+        pass_ks=(1,),
+    ).make()
+
+    assert metric.compute() == {}
+    assert metric.submission(submission_k=1) == {
+        "task-unlabeled": [{"attempt_1": [[0]]}],
+        "task-empty": [],
+    }
+
+
+def test_metric_preserves_wide_target_denominator_without_hashing_it(
+    tmp_path: Path,
+) -> None:
+    """Keep byte-unrepresentable targets in denominators without inventing hashes."""
+    source = tmp_path / "wide.parquet"
+    _write_parquet_wide_output_source(source)
+    metric = ParquetPassK.Config(
+        eval_source=source,
+        canvas_size=30,
+        pass_ks=(1,),
+    ).make()
+
+    assert metric.compute() == {"pass@1": 0.0}
+    assert metric.submission(submission_k=1) == {
+        "task-wide-output": [{"attempt_1": [[0]]}],
+    }
+
+
+def test_metric_hashes_source_target_that_exceeds_canvas_width(
+    tmp_path: Path,
+) -> None:
+    """Hash source targets through byte width even when canvas cannot predict them."""
+    source = tmp_path / "canvas-wide.parquet"
+    _write_parquet_wide_output_source(source, width=31)
+    metric = ParquetPassK.Config(
+        eval_source=source,
+        canvas_size=30,
+        pass_ks=(1,),
+    ).make()
+
+    target = np.full((2, 31), 2, dtype=np.uint8)
+
+    assert metric._ground_truth_pairs()["task-wide-output"][0].output_hash == (
+        grid_hash(target)
+    )
+
+
+def test_metric_rejects_mismatched_batch_and_unsupported_scale(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "eval.parquet"
+    _write_parquet_eval_source(source)
+    metric = ParquetPassK.Config(eval_source=source, canvas_size=6).make()
+    packed = _parquet_packed(candidate=[[3]], q_logit=0.0)
+    batch = _parquet_batch([("task-a", [[1, 2]], packed)])
+    batch["canonical_puzzle_names"] = []
+
+    with pytest.raises(ValueError, match="metadata must match packed batch size"):
+        metric.update(packed.unsqueeze(0), **batch)
+
+    batch = _parquet_batch([("task-a", [[1, 2]], packed)])
+    batch["spatial_tags"] = torch.tensor([[2, 1, 1]])
+    with pytest.raises(ValueError, match="Unsupported online scale 2"):
+        metric.update(packed.unsqueeze(0), **batch)
+
+
+@pytest.mark.parametrize(
+    "valid_count",
+    [torch.tensor(1.9, device="meta"), torch.tensor(True, device="meta")],
+)
+def test_parquet_metric_rejects_noninteger_tensor_valid_count(
+    tmp_path: Path,
+    valid_count: Tensor,
+) -> None:
+    source = tmp_path / "eval.parquet"
+    _write_parquet_eval_source(source)
+    metric = ParquetPassK.Config(eval_source=source, canvas_size=6).make()
+    candidate = _parquet_packed(candidate=[[3]], q_logit=0.0)
+    batch = _parquet_batch(
+        [
+            ("task-a", [[1, 2]], candidate),
+            ("task-a", [[1, 2]], candidate),
+        ],
+    )
+    batch["canonical_puzzle_names"] = ["task-a"]
+    batch["canonical_inputs"] = [np.asarray([[1, 2]], dtype=np.uint8)]
+    batch["valid_count"] = valid_count
+
+    with pytest.raises(TypeError, match="valid_count tensor must have integer dtype"):
+        metric.update(torch.stack((candidate, candidate)), **batch)
+
+
+def test_parquet_metric_rejects_quantized_tensor_valid_count(tmp_path: Path) -> None:
+    source = tmp_path / "eval.parquet"
+    _write_parquet_eval_source(source)
+    metric = ParquetPassK.Config(eval_source=source, canvas_size=6).make()
+    candidate = _parquet_packed(candidate=[[3]], q_logit=0.0)
+    batch = _parquet_batch(
+        [
+            ("task-a", [[1, 2]], candidate),
+            ("task-a", [[1, 2]], candidate),
+        ],
+    )
+    batch["canonical_puzzle_names"] = ["task-a"]
+    batch["canonical_inputs"] = [np.asarray([[1, 2]], dtype=np.uint8)]
+    batch["valid_count"] = torch.quantize_per_tensor(
+        torch.tensor(1.0),
+        scale=1.0,
+        zero_point=0,
+        dtype=torch.qint8,
+    )
+
+    with pytest.raises(TypeError, match="valid_count tensor must have integer dtype"):
+        metric.update(torch.stack((candidate, candidate)), **batch)
+
+
+def test_metric_gather_preserves_rank_order_and_nonroot_returns_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "eval.parquet"
+    _write_parquet_eval_source(source)
+    metric = ParquetPassK.Config(eval_source=source, canvas_size=6).make()
+    candidate = _parquet_packed(candidate=[[3, 4], [5, 6]], q_logit=1.0)
+    metric.update(
+        candidate.unsqueeze(0),
+        **_parquet_batch([("task-a", [[1, 2]], candidate)]),
+    )
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(dist, "get_rank", lambda: 0)
+
+    def gather_same_rank_payload(
+        payload: object,
+        output: list[object] | None,
+        *,
+        dst: int,
+    ) -> None:
+        if output is None:
+            return
+        assert dst == 0
+        output[:] = [payload, payload]
+
+    monkeypatch.setattr(
+        dist,
+        "gather_object",
+        gather_same_rank_payload,
+    )
+    assert metric.submission(submission_k=1)["task-a"][0]["attempt_1"] == [
+        [3, 4],
+        [5, 6],
+    ]
+    monkeypatch.setattr(dist, "get_rank", lambda: 1)
+    assert metric.compute() == {}
+    assert metric.submission(submission_k=1) == {}
+
+
+def test_metric_rejects_malformed_packed_predictions(tmp_path: Path) -> None:
+    source = tmp_path / "eval.parquet"
+    _write_parquet_eval_source(source)
+    metric = ParquetPassK.Config(eval_source=source, canvas_size=6).make()
+    with pytest.raises(ValueError, match="packed ARC model output"):
+        metric.update(
+            torch.zeros((2, 3)),
+            **_parquet_batch([("task-a", [[1]], torch.zeros(4))]),
+        )
+
+
+@pytest.mark.parametrize("dih_idx", range(8))
+def test_metric_inverts_every_dihedral_view(tmp_path: Path, dih_idx: int) -> None:
+    source = tmp_path / "eval.parquet"
+    _write_parquet_eval_source(source)
+    metric = ParquetPassK.Config(
+        eval_source=source,
+        canvas_size=6,
+        pass_ks=(1,),
+    ).make()
+    candidate = _parquet_packed(
+        candidate=[[3, 4], [5, 6]],
+        q_logit=1.0,
+        row=1,
+        col=1,
+        dih_idx=dih_idx,
+    )
+    batch = _parquet_batch([("task-a", [[1, 2]], candidate)])
+    batch["dih_idxs"] = torch.tensor([dih_idx])
+    metric.update(candidate.unsqueeze(0), **batch)
+
+    assert metric.submission(submission_k=1)["task-a"][0]["attempt_1"] == [
+        [3, 4],
+        [5, 6],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("valid_count", "batch_size", "exception", "message"),
+    [
+        (
+            torch.tensor([0, 1]),
+            2,
+            ValueError,
+            "valid_count must be a scalar or integer.",
+        ),
+        (-1, 2, ValueError, "valid_count=-1 is outside batch size 2."),
+        (3, 2, ValueError, "valid_count=3 is outside batch size 2."),
+        ("1", 2, TypeError, "ParquetPassK requires integer valid_count metadata."),
+    ],
+)
+def test_metric_valid_count_rejects_invalid_values(
+    valid_count: object,
+    batch_size: int,
+    exception: type[Exception],
+    message: str,
+) -> None:
+
+    with pytest.raises(exception) as error:
+        _valid_count(valid_count, batch_size=batch_size)
+    assert str(error.value) == message
+
+
+@pytest.mark.parametrize(
+    ("valid_count", "batch_size"),
+    [
+        (0, 2),
+        (2, 2),
+        (torch.tensor(1), 2),
+        (torch.tensor(1, dtype=torch.uint16), 2),
+    ],
+)
+def test_metric_valid_count_accepts_padding_and_tensor_scalars(
+    valid_count: object,
+    batch_size: int,
+) -> None:
+
+    expected = (
+        int(valid_count.item())
+        if isinstance(valid_count, torch.Tensor)
+        else valid_count
+    )
+    assert _valid_count(valid_count, batch_size=batch_size) == expected
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        (ParquetPassK.Config(canvas_size=0), "canvas_size must be positive."),
+        (
+            ParquetPassK.Config(pass_ks=()),
+            "pass_ks must contain positive attempt budgets.",
+        ),
+        (
+            ParquetPassK.Config(pass_ks=(0,)),
+            "pass_ks must contain positive attempt budgets.",
+        ),
+        (ParquetPassK.Config(pass_ks=(1, 1)), "pass_ks values must be unique."),
+        (
+            ParquetPassK.Config(recent_window_size=0),
+            "recent_window_size must be positive or None.",
+        ),
+    ],
+)
+def test_metric_config_rejects_invalid_voting_controls(
+    config: ParquetPassK.Config,
+    message: str,
+) -> None:
+    """Permit invalid knobs to finalize but reject them in runtime construction."""
+    finalized = config.finalize()
+    with pytest.raises(ValueError, match=re.escape(message)) as error:
+        finalized.make()
+    assert str(error.value) == message
+
+
+def test_metric_config_accepts_single_cell_canvas(tmp_path: Path) -> None:
+    """Allow the smallest positive canvas size."""
+    source = tmp_path / "single-cell.parquet"
+    _write_parquet_eval_source(source)
+
+    metric = ParquetPassK.Config(eval_source=source, canvas_size=1).make()
+
+    assert metric.config.canvas_size == 1
+
+
+def test_metric_submission_rejects_zero_attempts(tmp_path: Path) -> None:
+    source = tmp_path / "eval.parquet"
+    _write_parquet_eval_source(source)
+    metric = ParquetPassK.Config(eval_source=source, canvas_size=6).make()
+
+    with pytest.raises(ValueError, match="submission_k must be positive"):
+        metric.submission(submission_k=0)
+
+
+def test_metric_rejects_malformed_canonical_metadata() -> None:
+    with pytest.raises(TypeError, match="canonical_puzzle_names"):
+        _parquet_batch_names({})
+    with pytest.raises(TypeError, match="canonical_puzzle_names"):
+        _parquet_batch_names({"canonical_puzzle_names": [1]})
+    with pytest.raises(TypeError, match="canonical_inputs"):
+        _parquet_batch_inputs({})
+    with pytest.raises(TypeError, match="two-dimensional"):
+        _parquet_batch_inputs({"canonical_inputs": [np.asarray([1], dtype=np.uint8)]})
+    with pytest.raises(TypeError, match="uint8 dtype"):
+        _parquet_batch_inputs({"canonical_inputs": [np.asarray([[1]], dtype=np.int64)]})
+    with pytest.raises(TypeError, match="must be a Tensor"):
+        _tensor_field({"field": 1}, name="field")
+
+
+def test_metric_rejects_malformed_view_and_grid_values() -> None:
+    grid = np.asarray([[1]], dtype=np.uint8)
+    with pytest.raises(ValueError, match="Invalid dihedral tid=8"):
+        ColorDihedral.Config().make().inverse_explicit(
+            grid,
+            tid=8,
+            colorperm_slots=tuple(range(9)),
+        )
+    with pytest.raises(ValueError, match=r"Expected grid.ndim == 2"):
+        grid_hash(np.asarray([1], dtype=np.uint8))
+
+
+def _write_parquet_eval_source(path: Path) -> None:
+    parquet.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "format_version": 2,
+                    "puzzle_id": "task-a",
+                    "train": [],
+                    "test": [
+                        {"input": [[1, 2]], "output": [[3, 4], [5, 6]]},
+                        {"input": [[5]], "output": [[6]]},
+                    ],
+                    "offline_augs": [""],
+                },
+                {
+                    "format_version": 2,
+                    "puzzle_id": "task-b",
+                    "train": [],
+                    "test": [{"input": [[7]], "output": [[8]]}],
+                    "offline_augs": [""],
+                },
+            ],
+        ),
+        path,
+    )
+
+
+def _parquet_packed(
+    *,
+    candidate: list[list[int]],
+    q_logit: float,
+    canvas_size: int = 6,
+    row: int = 1,
+    col: int = 1,
+    dih_idx: int = 0,
+    colorperm_slots: tuple[int, ...] = tuple(range(9)),
+) -> torch.Tensor:
+    viewed = (
+        ColorDihedral.Config()
+        .make()
+        .apply_explicit(
+            np.asarray(candidate, dtype=np.uint8),
+            tid=dih_idx,
+            colorperm_slots=colorperm_slots,
+        )
+    )
+    canvas = np.zeros((canvas_size, canvas_size), dtype=np.float32)
+    height = operator.index(cast(SupportsIndex, viewed.shape[0]))
+    width = operator.index(cast(SupportsIndex, viewed.shape[1]))
+    canvas[row : row + height, col : col + width] = viewed + 2
+    if col + width < canvas_size:
+        canvas[row : row + height, col + width] = 1
+    if row + height < canvas_size:
+        canvas[row + height, col : col + width] = 1
+    return torch.tensor([q_logit, *canvas.reshape(-1)], dtype=torch.float32)
+
+
+def _parquet_batch(
+    rows: list[tuple[str, list[list[int]], torch.Tensor]],
+    *,
+    valid_count: int | None = None,
+) -> dict[str, object]:
+    return {
+        "canonical_puzzle_names": [name for name, _, _ in rows],
+        "canonical_inputs": [
+            cast(NDArray[np.uint8], np.asarray(grid, dtype=np.uint8))
+            for _, grid, _ in rows
+        ],
+        "spatial_tags": torch.tensor([[1, 1, 1] for _ in rows]),
+        "dih_idxs": torch.zeros(len(rows), dtype=torch.int64),
+        "colorperm_slots": torch.tensor(
+            [list(range(9)) for _ in rows],
+            dtype=torch.int64,
+        ),
+        "valid_count": len(rows) if valid_count is None else valid_count,
+    }
+
+
+def _write_parquet_sparse_eval_source(path: Path) -> None:
+    parquet.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "format_version": 2,
+                    "puzzle_id": "task-unlabeled",
+                    "train": [],
+                    "test": [{"input": [[1]], "output": None}],
+                    "offline_augs": [""],
+                },
+                {
+                    "format_version": 2,
+                    "puzzle_id": "task-empty",
+                    "train": [],
+                    "test": [],
+                    "offline_augs": [""],
+                },
+            ],
+        ),
+        path,
+    )
+
+
+def _write_parquet_wide_output_source(path: Path, *, width: int = 256) -> None:
+    parquet.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "format_version": 2,
+                    "puzzle_id": "task-wide-output",
+                    "train": [],
+                    "test": [
+                        {
+                            "input": [[1]],
+                            "output": [[2] * width, [2] * width],
+                        },
+                    ],
+                    "offline_augs": [""],
+                },
+            ],
+        ),
+        path,
+    )
 
 
 if __name__ == "__main__":
