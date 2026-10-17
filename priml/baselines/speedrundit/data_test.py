@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
 import json
 import multiprocessing as mp
+import shutil
 
 from PIL import Image
 from torch.utils.data import DistributedSampler, RandomSampler, SequentialSampler
@@ -66,6 +67,7 @@ def test_reference_names_and_tensor_values(tmp_path: Path) -> None:
     _corpus(tmp_path, config=_source(tmp_path), count=10)
     dataset = _source(tmp_path).make()
     assert len(dataset) == 10
+    # ``INVAE.Config.latent_shape`` is square: (channels_latent, side, side).
     assert torch.equal(dataset[0]["latent"], torch.full((32, 2, 2), 5.0))
     assert dataset[0]["image"][0, 0, 0] == 5
     assert dataset[0]["label"] == 5
@@ -80,7 +82,10 @@ def test_two_files_of_one_pair_id_are_refused(tmp_path: Path) -> None:
     """Both namings map to one id; keeping either would silently drop the other."""
     _corpus(tmp_path, config=_source(tmp_path), count=2)
     latent_dir = tmp_path / "vae-in" / "00000"
-    np.save(latent_dir / "img00000000.npy", np.zeros((1, 32, 2, 2), np.float32))
+    _ = shutil.copyfile(
+        latent_dir / "img-latents-00000000.npy",
+        latent_dir / "img00000000.npy",
+    )
     with pytest.raises(ValueError, match=r"img00000000\.npy"):
         _ = _source(tmp_path).make()
 
@@ -180,6 +185,7 @@ def test_a_uint8_corpus_decodes_through_its_table(tmp_path: Path) -> None:
     source = _source(tmp_path)
     source.codec = ScalarTableCodec.Config(num_fit_images=1)
     codec = source.codec.make()
+    # The loader refuses any shape but ``INVAE.Config.latent_shape``, which is square.
     sample = torch.randn(4, 32, 2, 2, generator=torch.Generator().manual_seed(0))
     codec.fit(sample)
     latent_dir = tmp_path / "vae-in"

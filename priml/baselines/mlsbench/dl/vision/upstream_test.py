@@ -4,6 +4,9 @@ The script is a stand-in with the reference's interface and a different, tiny
 network. These tests pin what the runs observe of it: the recorded rates, the
 configurations, the losses and the batches. ``write_clone`` is shared with the
 capture's tests, which need the same clone.
+
+The script it stands in for, whose repository publishes no license:
+https://github.com/Imbernoulli/MLS-Bench/blob/80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c/harbor/tasks-docker/mls-bench__cv-classification-loss/tests/meta/pristine/pytorch-vision/custom_loss.py
 """
 
 from __future__ import annotations

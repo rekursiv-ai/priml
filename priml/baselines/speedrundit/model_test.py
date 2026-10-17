@@ -80,11 +80,12 @@ def test_every_trainable_parameter_receives_a_gradient(
     with torch.no_grad():
         for parameter in model.parameters():
             parameter.copy_(0.2 * torch.randn(parameter.shape, generator=generator))
+    # ``SpeedrunDiT.forward`` takes a square ``input_size`` grid.
     output = model(
-        torch.randn(2, 2, 4, 4, generator=generator),
-        t=torch.rand(2, generator=generator),
-        y=torch.tensor([0, 1]),
-        cls_token=torch.randn(2, 8, generator=generator),
+        torch.randn(3, 2, 4, 4, generator=generator),
+        t=torch.rand(3, generator=generator),
+        y=torch.tensor([0, 1, 2]),
+        cls_token=torch.randn(3, 8, generator=generator),
     )
     aligned = torch.stack([p.tokens.square().mean() for p in output.projections])
     loss = output.velocity.square().mean() + output.cls_velocity.square().mean()
@@ -162,6 +163,7 @@ def test_rope_leaves_cls_untouched_and_uses_original_positions() -> None:
 
 def test_training_routing_alignment_and_backward() -> None:
     model = tiny_model().train()
+    # ``SpeedrunDiT.forward`` takes a square ``input_size`` grid.
     image = torch.randn(3, 2, 4, 4)
     labels = torch.tensor([1, 2, 3])
     teacher = tuple(torch.randn(3, 17, 8) for _ in range(3))
@@ -195,11 +197,12 @@ def test_position_table_promotes_bfloat16_tokens_to_float32(
         torch.autocast("cpu", dtype=torch.bfloat16),
         pytest.raises(_StopForwardError) as stopped,
     ):
+        # ``SpeedrunDiT.forward`` takes a square ``input_size`` grid.
         model(
-            torch.randn(2, 2, 4, 4),
+            torch.randn(3, 2, 4, 4),
             t=torch.full((1,), 0.5),
             y=torch.tensor([1]),
-            cls_token=torch.randn(2, 8),
+            cls_token=torch.randn(3, 8),
             route_tokens=False,
         )
     assert stopped.value.tokens.dtype == torch.float32
@@ -237,6 +240,7 @@ def test_shift_and_sampler_return_expected_latent_shapes() -> None:
         torch.tensor([0.0, 1.0]),
     )
     model = tiny_model().eval()
+    # ``SpeedrunDiT.forward`` takes a square ``input_size`` grid.
     latents = torch.randn(3, 2, 4, 4)
     cls = torch.randn(3, 8)
     sampled, sampled_cls = sample_latents(
@@ -302,6 +306,7 @@ def test_forward_rejects_a_latent_of_the_wrong_shape() -> None:
 
 def test_forward_rejects_a_cls_token_of_the_wrong_width() -> None:
     with pytest.raises(ValueError, match=r"cls_token must have shape"):
+        # ``SpeedrunDiT.forward`` takes a square ``input_size`` grid.
         tiny_model()(
             torch.randn(3, 2, 4, 4),
             t=torch.rand(3),
@@ -321,6 +326,7 @@ def test_computed_rope_matches_the_reference_buffers() -> None:
     config.reference_rope = False
     computed = config.make().eval()
     computed.load_state_dict(reference.state_dict())
+    # ``SpeedrunDiT.forward`` takes a square ``input_size`` grid.
     args = (
         torch.randn(3, 2, 4, 4),
         torch.rand(3),
@@ -347,6 +353,7 @@ def test_training_path_drop_broadcasts_the_coin_across_ranks(
     with torch.no_grad():
         for parameter in model.parameters():
             parameter.copy_(0.2 * torch.randn(parameter.shape, generator=generator))
+    # ``SpeedrunDiT.forward`` takes a square ``input_size`` grid.
     args = (
         torch.randn(3, 2, 4, 4, generator=generator),
         torch.rand(3, generator=generator),
@@ -398,6 +405,7 @@ def _broadcast_from_rank_zero(tensor: Tensor, src: int, *, coin: float) -> None:
 
 def test_sampler_requires_two_steps() -> None:
     with pytest.raises(ValueError, match="at least two"):
+        # ``SpeedrunDiT.forward`` takes a square ``input_size`` grid.
         sample_latents(
             tiny_model(),
             latents=torch.randn(3, 2, 4, 4),
@@ -409,6 +417,7 @@ def test_sampler_requires_two_steps() -> None:
 
 def test_sampler_restores_training_mode_and_shifts_time() -> None:
     model = tiny_model().train()
+    # ``SpeedrunDiT.forward`` takes a square ``input_size`` grid.
     latents = torch.randn(3, 2, 4, 4)
     cls = torch.randn(3, 8)
     labels = torch.tensor([1, 2, 3])
@@ -437,7 +446,7 @@ def test_sampler_restores_training_mode_and_shifts_time() -> None:
 
 def test_zero_cls_guidance_keeps_conditional_cls_drift() -> None:
     model = _ConstantVelocityModel()
-    latents = torch.zeros(3, 2, 4, 4)
+    latents = torch.zeros(3, 2, 4, 5)
     cls = torch.zeros(3, 8)
     labels = torch.tensor([0, 1, 0])
     torch.manual_seed(7)

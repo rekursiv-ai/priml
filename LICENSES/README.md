@@ -29,3 +29,7 @@ names its file here.
 [karpathy/autoresearch](https://github.com/karpathy/autoresearch), which
 `baselines/nanochat` and `optimizers/fused_adamw.py` port, states "MIT" in its
 README and ships no license file, so there is no text to reproduce here.
+
+[Imbernoulli/MLS-Bench](https://github.com/Imbernoulli/MLS-Bench), whose tasks
+`baselines/mlsbench` re-implements at commit `80cf5c5`, publishes no license,
+so there is no text to reproduce here either.

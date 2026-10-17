@@ -144,7 +144,7 @@ def test_non_finite_samples_are_refused(bad: float) -> None:
 
 def test_samples_and_levels_must_be_nonempty_and_one_dimensional() -> None:
     with pytest.raises(ValueError, match="1-D"):
-        _ = lloyd_max(torch.zeros(2, 2), init=torch.zeros(2))
+        _ = lloyd_max(torch.zeros(2, 3), init=torch.zeros(2))
     with pytest.raises(ValueError, match="nonempty"):
         _ = lloyd_max(torch.zeros(0), init=torch.zeros(2))
     with pytest.raises(ValueError, match="nonempty 1-D"):

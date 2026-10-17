@@ -532,6 +532,7 @@ def test_a_fused_source_without_its_gate_is_refused() -> None:
     causal = config.make()
     assert causal.trigram_gate is None
     source = NgramSource(2, cast(HashedNgramTables, object()), [])
+    # Rotary factors by position and half-channel, one row broadcast over heads.
     cos_sin = (torch.ones(3, 1, 2), torch.zeros(3, 1, 2))
     with pytest.raises(ValueError, match="fused source 2 has no gate"):
         causal(torch.randn(2, 3, 16), cos_sin=cos_sin, fused_tables=[source])

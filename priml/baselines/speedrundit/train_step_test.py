@@ -76,6 +76,8 @@ def _small_step_config() -> SpeedrunTrainStep.Config:
 
 
 def _small_batch(step: SpeedrunTrainStep) -> dict[str, object]:
+    # ``DinoV2Teacher.forward`` takes square images and ``SpeedrunDiT.forward`` a
+    # square ``input_size`` latent grid.
     return step.preprocess_batch(
         {
             "image": torch.zeros(5, 3, 4, 4, dtype=torch.uint8),

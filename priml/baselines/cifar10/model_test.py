@@ -451,7 +451,7 @@ def test_resnet_takes_one_config_per_block_from_a_list() -> None:
     stages, per_stage = len(config.channels_hidden), config.blocks_per_stage
     config.block = [ResidualBlock.Config() for _ in range(stages * per_stage)]
     model = config.make()
-    assert model(torch.randn(2, 3, 8, 8)).shape == (2, 2)
+    assert model(torch.randn(2, 3, 8, 10)).shape == (2, 2)
 
 
 if __name__ == "__main__":

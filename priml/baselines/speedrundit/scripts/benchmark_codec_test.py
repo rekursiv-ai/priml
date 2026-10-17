@@ -58,7 +58,7 @@ def test_error_is_measured_after_normalization() -> None:
 
 
 def test_psnr_of_a_uniform_offset() -> None:
-    reference = torch.zeros(1, 3, 4, 4)
+    reference = torch.zeros(2, 3, 4, 5)
     assert benchmark_codec.psnr(reference, other=reference + 0.1) == pytest.approx(20.0)
     assert benchmark_codec.psnr(reference, other=reference) == math.inf
 
@@ -276,8 +276,9 @@ def test_every_candidate_builds() -> None:
 
 def _latents(images: int, *, seed: int) -> Tensor:
     generator = torch.Generator().manual_seed(seed)
+    # One scale per channel, broadcast over every image and grid cell.
     scale = torch.tensor([1.0, 30.0]).view(1, 2, 1, 1)
-    return torch.randn(images, 2, 4, 4, generator=generator) * scale
+    return torch.randn(images, 2, 4, 5, generator=generator) * scale
 
 
 if __name__ == "__main__":

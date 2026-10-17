@@ -110,14 +110,14 @@ def test_table_codec_stores_one_byte_per_scalar() -> None:
 def test_levels_themselves_decode_exactly() -> None:
     codec = _fitted(ScalarTableCodec.Config(), sample=_sample())
     levels = codec.table()["levels"]
-    latent = levels.T.reshape(NUM_LEVELS, 2, 1, 1)
+    latent = levels.reshape(2, 8, 32)
     assert torch.equal(codec.decode(codec.encode(latent)), latent)
 
 
 def test_a_value_on_a_threshold_takes_the_lower_level() -> None:
     codec = _fitted(ScalarTableCodec.Config(), sample=_sample())
-    latent = midpoints(codec.table()["levels"])[:, 7].reshape(1, 2, 1, 1)
-    assert codec.encode(latent).flatten().tolist() == [7, 7]
+    latent = _grid(midpoints(codec.table()["levels"])[:, 7])
+    assert torch.equal(codec.encode(latent), _grid(torch.tensor([7, 7]).byte()))
 
 
 @pytest.mark.parametrize(
@@ -138,12 +138,15 @@ def test_load_table_refuses_levels_it_cannot_code_with(levels: Tensor) -> None:
 @pytest.mark.parametrize("fit", [GaussianFit.Config(), LinearFit.Config(clip_sigmas=4)])
 def test_a_single_value_per_channel_cannot_fit_a_table(fit: Makeable[TableFit]) -> None:
     with pytest.raises(ValueError, match="two values per channel"):
-        ScalarTableCodec.Config(fit=fit).make().fit(torch.ones(1, 1, 1, 1))
+        # ``ScalarTableCodec.fit`` counts N * H * W values per channel, so one value
+        # needs all three at 1.
+        ScalarTableCodec.Config(fit=fit).make().fit(torch.ones(1, 3, 1, 1))
 
 
 @pytest.mark.parametrize("fit", [GaussianFit.Config(), LinearFit.Config(clip_sigmas=4)])
 def test_a_non_finite_sample_cannot_fit_a_table(fit: Makeable[TableFit]) -> None:
-    sample = torch.tensor([0.0, float("nan")]).reshape(2, 1, 1, 1)
+    sample = torch.arange(120.0).reshape(3, 2, 4, 5)
+    sample[1, 0, 2, 3] = float("nan")
     with pytest.raises(ValueError, match="finite"):
         ScalarTableCodec.Config(fit=fit).make().fit(sample)
 
@@ -156,19 +159,17 @@ def test_linear_fit_needs_a_positive_finite_clip(clip_sigmas: float) -> None:
 
 def test_values_beyond_the_outer_levels_saturate() -> None:
     codec = _fitted(ScalarTableCodec.Config(), sample=_sample())
-    latent = torch.tensor([1e3, -1e3]).reshape(1, 2, 1, 1)
-    assert codec.encode(latent).flatten().tolist() == [NUM_LEVELS - 1, 0]
+    latent = _grid(torch.tensor([1e3, -1e3]))
+    saturated = torch.tensor([NUM_LEVELS - 1, 0]).byte()
+    assert torch.equal(codec.encode(latent), _grid(saturated))
     assert bool(codec.saturated(latent).all())
 
 
 def test_decode_reads_each_channel_from_its_own_row() -> None:
     codec = _fitted(ScalarTableCodec.Config(), sample=_sample())
     levels = codec.table()["levels"]
-    stored = torch.full((1, 2, 1, 1), 100, dtype=torch.uint8)
-    assert codec.decode(stored).flatten().tolist() == [
-        levels[0, 100].item(),
-        levels[1, 100].item(),
-    ]
+    stored = _grid(torch.tensor([100, 100]).byte())
+    assert torch.equal(codec.decode(stored), _grid(levels[:, 100]))
 
 
 def test_per_channel_tables_beat_a_shared_table_when_scales_differ() -> None:
@@ -272,10 +273,16 @@ def test_entropy_of_uniform_indices_is_eight_bits() -> None:
 
 
 def _sample(*, scales: tuple[float, ...] = (1.0, 30.0), images: int = 64) -> Tensor:
-    """Return ``[images, C, 4, 4]`` normal latents, channel c scaled by scales[c]."""
+    """Return ``[images, C, 4, 5]`` normal latents, channel c scaled by scales[c]."""
     generator = torch.Generator().manual_seed(0)
-    noise = torch.randn(images, len(scales), 4, 4, generator=generator)
+    noise = torch.randn(images, len(scales), 4, 5, generator=generator)
+    # One scale per channel, broadcast over every image and grid cell.
     return noise * torch.tensor(scales).view(1, -1, 1, 1)
+
+
+def _grid(per_channel: Tensor) -> Tensor:
+    """Return ``[3, C, 4, 5]`` holding ``per_channel[c]`` at every cell of channel c."""
+    return per_channel[:, None, None].expand(3, -1, 4, 5).contiguous()
 
 
 def _fitted(config: ScalarTableCodec.Config, sample: Tensor) -> ScalarTableCodec:

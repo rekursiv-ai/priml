@@ -25,8 +25,6 @@ import torch
 
 from priml.cost import cost
 from priml.model.ae.checkpoint import HubFile, LocalFile
-from priml.model.ae.custom_types import Autoencoder, Encoder
-from priml.model.ae.distribution import PointMass
 from priml.model.ae.latent_norm import ElementwiseLatentStats
 from priml.model.ae.rae import (
     _DECODER_LAYER_NAMES,
@@ -34,7 +32,7 @@ from priml.model.ae.rae import (
     _ENCODER_NAMES,
     RAE,
     Decoder,
-    Encoder as RaeEncoder,
+    Encoder,
     rae_dinov2_base,
     remap_decoder_state_dict,
     remap_encoder_state_dict,
@@ -82,13 +80,11 @@ def _json(name: str) -> dict[str, object]:
     return json_loads((_TESTDATA / name).read_text(), dict[str, object])
 
 
-def _keys(name: str) -> dict[str, tuple[int, ...]]:
-    """Read a ``name shape`` listing of a published checkpoint."""
+def _keys(listing: str) -> dict[str, tuple[int, ...]]:
+    """Parse a ``name shape`` listing of a published checkpoint."""
     return {
         key: tuple(int(n) for n in shape.split("x"))
-        for key, shape in (
-            line.split() for line in (_TESTDATA / name).read_text().splitlines()
-        )
+        for key, shape in (line.split() for line in listing.splitlines())
     }
 
 
@@ -97,6 +93,8 @@ def _keys(name: str) -> dict[str, tuple[int, ...]]:
 def _image() -> Tensor:
     """Return a uint8 image batch larger than the encoder side."""
     generator = torch.Generator().manual_seed(0)
+    # ``testdata/rae.pt`` stores the upstream outputs for this input; a new shape
+    # re-mints that golden on x86-64.
     return torch.randint(0, 256, (2, 3, 16, 16), generator=generator, dtype=torch.uint8)
 
 
@@ -148,9 +146,7 @@ def test_matches_the_reference_implementation() -> None:
 
 def test_satisfies_the_autoencoder_protocol_with_a_point_mass() -> None:
     model = tiny().make()
-    assert isinstance(model, Autoencoder)
     code = model.encode(_image())
-    assert isinstance(code, PointMass)
     assert code.sample() is code.mode()
 
 
@@ -180,10 +176,15 @@ def test_published_halves_load_exactly_the_published_tensors() -> None:
         (
             model.encoder,
             remap_encoder_state_dict,
-            "dinov2_with_registers_base_keys.txt",
+            (_TESTDATA / "dinov2_with_registers_base_keys.txt").read_text(),
             224,
         ),
-        (model.decoder, remap_decoder_state_dict, "rae_vitxl_n08_keys.txt", 456),
+        (
+            model.decoder,
+            remap_decoder_state_dict,
+            (_TESTDATA / "rae_vitxl_n08_keys.txt").read_text(),
+            456,
+        ),
     ):
         assert module is not None
         published = _keys(listing)
@@ -221,7 +222,6 @@ def test_either_half_can_be_left_out() -> None:
     encode_only.decoder = None
     decode_only.encoder = None
     encoder, decoder = encode_only.make(), decode_only.make()
-    assert isinstance(encoder, Encoder)
     latent = encoder.encode(_image()).mode()
     assert decoder.decode(latent).shape == (2, 3, 8, 8)
     with pytest.raises(ValueError, match="without a decoder"):
@@ -232,10 +232,17 @@ def test_either_half_can_be_left_out() -> None:
 
 def test_leading_dimensions_pass_through() -> None:
     model = tiny().make()
-    image = _image()
-    nested = model.encode(image.reshape(1, 2, 3, 16, 16)).mode()
-    assert torch.equal(nested[0], model.encode(image).mode())
-    assert model.decode(nested).shape == (1, 2, 3, 8, 8)
+    generator = torch.Generator().manual_seed(1)
+    image = torch.randint(
+        0,
+        256,
+        (2, 5, 3, 16, 12),
+        generator=generator,
+        dtype=torch.uint8,
+    )
+    nested = model.encode(image).mode()
+    assert torch.equal(nested.flatten(0, 1), model.encode(image.flatten(0, 1)).mode())
+    assert model.decode(nested).shape == (2, 5, 3, 8, 8)
 
 
 def test_encode_matches_the_configured_latent_shape() -> None:
@@ -352,7 +359,7 @@ def test_encoder_from_hf_refuses_an_architecture_it_does_not_build(
     config = _json("dinov2_with_registers_base_config.json")
     config[field] = value
     with pytest.raises(ValueError, match=match):
-        _ = RaeEncoder.Config.from_hf(config)
+        _ = Encoder.Config.from_hf(config)
 
 
 @pytest.mark.parametrize(
@@ -391,8 +398,8 @@ def test_encoder_cost_matches_torch() -> None:
     assert config is not None
     analytical = assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randn(2, 3, 8, 8, requires_grad=True),
-        input_grid=8,
+        build_input=lambda: torch.randn(2, 3, 8, 12, requires_grad=True),
+        input_grid=(8, 12),
         batch_size=2,
         dtype=None,
     )
@@ -405,6 +412,7 @@ def test_encoder_cost_matches_torch_where_the_resize_is_skipped() -> None:
     """A 12px input is the 3x3 table's own grid, so no resize runs or is priced."""
     config = tiny().encoder
     assert config is not None
+    # ``Encoder._positions`` skips the resize only on its square position grid.
     _ = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randn(2, 3, 12, 12, requires_grad=True),

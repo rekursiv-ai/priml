@@ -23,7 +23,6 @@ import torch
 
 from priml.cost import cost
 from priml.model.ae.checkpoint import HubFile, LocalFile, UrlFile
-from priml.model.ae.custom_types import Autoencoder, Encoder
 from priml.model.ae.distribution import PointMass
 from priml.model.ae.latent_norm import ChannelLatentStats
 from priml.model.ae.vtp import (
@@ -154,7 +153,6 @@ def test_matches_the_reference_implementation() -> None:
 
 def test_satisfies_the_autoencoder_protocol_with_a_point_mass() -> None:
     model = tiny().make()
-    assert isinstance(model, Autoencoder)
     assert isinstance(model.encode(_image()), PointMass)
 
 
@@ -266,7 +264,6 @@ def test_either_half_can_be_left_out() -> None:
     encode_only.decoder = None
     decode_only.encoder = None
     encoder, decoder = encode_only.make(), decode_only.make()
-    assert isinstance(encoder, Encoder)
     latent = encoder.encode(_image()).mode()
     assert decoder.decode(latent).shape == (2, 3, 8, 12)
     with pytest.raises(ValueError, match="without a decoder"):
@@ -277,14 +274,22 @@ def test_either_half_can_be_left_out() -> None:
 
 def test_leading_dimensions_pass_through() -> None:
     model = tiny().make()
-    image = _image()
-    nested = model.encode(image.reshape(1, 2, 3, 8, 12)).mode()
-    assert torch.equal(nested[0], model.encode(image).mode())
-    assert model.decode(nested).shape == (1, 2, 3, 8, 12)
+    generator = torch.Generator().manual_seed(1)
+    image = torch.randint(
+        0,
+        256,
+        (2, 5, 3, 8, 12),
+        generator=generator,
+        dtype=torch.uint8,
+    )
+    nested = model.encode(image).mode()
+    assert torch.equal(nested.flatten(0, 1), model.encode(image.flatten(0, 1)).mode())
+    assert model.decode(nested).shape == (2, 5, 3, 8, 12)
 
 
 def test_encode_matches_the_configured_latent_shape() -> None:
     config = tiny()
+    # ``VTP.Config.latent_shape`` describes a square image of side ``image_size``.
     image = torch.zeros(2, 3, 8, 8, dtype=torch.uint8)
     latent = config.make().encode(image).mode()
     assert tuple(latent.shape[1:]) == config.latent_shape() == (4, 2, 2)
@@ -374,7 +379,7 @@ def test_rejects_an_image_size_off_the_patch_grid() -> None:
 
 def test_encode_refuses_a_float_image() -> None:
     with pytest.raises(TypeError, match="uint8"):
-        _ = tiny().make().encode(torch.rand(2, 3, 8, 8))
+        _ = tiny().make().encode(torch.rand(2, 3, 8, 12))
 
 
 @pytest.mark.parametrize(
@@ -443,6 +448,7 @@ def test_encoder_cost_matches_torch() -> None:
     """The math backend runs attention as ``bmm``, which ``FlopCounterMode`` counts."""
     config = tiny().encoder
     assert config is not None
+    # ``Encoder.Config.cost`` prices a square image of side ``input_grid``.
     with sdpa_kernel(SDPBackend.MATH):
         analytical = assert_cost_matches_torch(
             config,
@@ -457,12 +463,13 @@ def test_encoder_cost_matches_torch() -> None:
 def test_decoder_cost_matches_torch() -> None:
     config = tiny().decoder
     assert config is not None
+    # ``Decoder.Config.cost`` prices a square latent of side ``input_grid``.
     with sdpa_kernel(SDPBackend.MATH):
         analytical = assert_cost_matches_torch(
             config,
-            build_input=lambda: torch.randn(2, 4, 2, 2, requires_grad=True),
+            build_input=lambda: torch.randn(3, 4, 2, 2, requires_grad=True),
             input_grid=2,
-            batch_size=2,
+            batch_size=3,
             dtype=None,
         )
     assert analytical["flops", "adjoint", "matmul"].sum() > 0
@@ -470,6 +477,7 @@ def test_decoder_cost_matches_torch() -> None:
 
 def test_cost_is_one_frozen_round_trip() -> None:
     config = tiny()
+    # ``VTP.Config.cost`` prices a square image of side ``image_size``.
     with sdpa_kernel(SDPBackend.MATH):
         analytical = assert_cost_matches_torch(
             config,

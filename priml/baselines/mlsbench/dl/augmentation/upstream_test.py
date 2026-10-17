@@ -4,6 +4,9 @@ The stand-in has the script's interface with a tiny network. Its pristine
 ``build_train_transform`` is the real one; its baselines' edits each replace
 that one function with a different pipeline, so a capture can tell them apart.
 ``write_clone`` is shared with the capture's tests.
+
+The script it stands in for, whose repository publishes no license:
+https://github.com/Imbernoulli/MLS-Bench/blob/80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c/harbor/tasks-docker/mls-bench__cv-data-augmentation/tests/meta/pristine/pytorch-vision/custom_augment.py
 """
 
 from __future__ import annotations

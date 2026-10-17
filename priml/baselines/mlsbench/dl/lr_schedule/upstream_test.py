@@ -3,6 +3,9 @@
 The stand-in has the script's interface with a tiny network and a constant
 ``get_lr``; its baselines' edits replace that one function. ``write_clone`` is
 shared with the capture's tests.
+
+The script it stands in for, whose repository publishes no license:
+https://github.com/Imbernoulli/MLS-Bench/blob/80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c/harbor/tasks-docker/mls-bench__dl-lr-schedule/tests/meta/pristine/pytorch-vision/custom_schedule.py
 """
 
 from __future__ import annotations

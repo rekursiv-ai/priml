@@ -293,7 +293,7 @@ def test_lpips_cost_needs_an_image_size() -> None:
 
 
 def test_lpips_loss_refuses_a_batch_that_is_not_video(lpips_loss: LPIPSLoss) -> None:
-    image = torch.zeros(2, 3, 4, 4)
+    image = torch.zeros(2, 3, 4, 5)
     with pytest.raises(ValueError, match="5D"):
         _ = lpips_loss(image, x=image, xhat=image)
 

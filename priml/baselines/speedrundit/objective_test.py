@@ -212,7 +212,7 @@ def test_objective_builds_inputs_and_returns_each_loss_term(
     expected_cls = (output.cls_velocity - expected_cls_target).square().mean(dim=1)
     cfm_error = (output.velocity - torch.roll(expected_target, 1, 0)).square()
     if cfm_weighting == "linear":
-        cfm_error = cfm_error * time.reshape(2, 1, 1, 1)
+        cfm_error = cfm_error * time[latent_broadcast]
     expected_cfm = -cfm_error.mean()
     expected_loss = (
         expected_velocity

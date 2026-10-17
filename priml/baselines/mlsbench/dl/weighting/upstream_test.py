@@ -3,6 +3,9 @@
 The stand-in has the script's interface with a tiny network, the script's own
 long-tail cut and loaders, and uniform weights; its baselines' edits replace
 that one function. ``write_clone`` is shared with the capture's tests.
+
+The script it stands in for, whose repository publishes no license:
+https://github.com/Imbernoulli/MLS-Bench/blob/80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c/harbor/tasks-docker/mls-bench__cv-sample-weighting/tests/meta/pristine/pytorch-vision/custom_weighting.py
 """
 
 from __future__ import annotations
@@ -233,7 +236,7 @@ def test_the_real_cut_reads_torchvision_files(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     write_cifar100(tmp_path / "cifar")
-    # torchvision checks each file against the published checksums of the real
+    # Torchvision checks each file against the published checksums of the real
     # split, which six blank images cannot match.
     monkeypatch.setattr(cifar, "check_integrity", intact)
     pristine = scripts(tmp_path)["uniform"]

@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 )
 def test_every_stored_dtype_round_trips(tmp_path: Path, dtype: torch.dtype) -> None:
     """bfloat16 has no NumPy dtype and rides as its int16 bit pattern."""
-    stored = (torch.arange(24).reshape(1, 2, 3, 4) % 7).to(dtype)
+    stored = (torch.arange(120).reshape(2, 3, 4, 5) % 7).to(dtype)
     path = tmp_path / "latent.npy"
     save_stored(path, stored=stored)
     loaded = load_stored(path, dtype=dtype)
@@ -112,7 +112,10 @@ def test_interrupted_save_does_not_publish_partial_latent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "latent.npy"
-    monkeypatch.setattr("priml.baselines.speedrundit.corpus.np.save", _interrupted_save)
+    monkeypatch.setattr(
+        "priml.baselines.speedrundit.corpus.np.save",
+        _interrupted_save,
+    )
     with pytest.raises(OSError, match="interrupted"):
         save_stored(path, stored=torch.zeros(1))
     assert not any(tmp_path.iterdir())
@@ -175,7 +178,7 @@ def test_every_mismatched_identity_is_named(tmp_path: Path) -> None:
 
 def test_a_table_is_pinned_by_its_digest(tmp_path: Path) -> None:
     codec = ScalarTableCodec.Config().make()
-    codec.fit(torch.randn(8, 2, 2, 2, generator=torch.Generator().manual_seed(0)))
+    codec.fit(torch.randn(8, 2, 3, 5, generator=torch.Generator().manual_seed(0)))
     digest = save_table(tmp_path, codec=codec)
     restored = ScalarTableCodec.Config().make()
     assert load_table(tmp_path, codec=restored) == digest

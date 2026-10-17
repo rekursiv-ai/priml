@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 
 def _latent() -> Tensor:
-    return torch.randn(2, 3, 4, 4, generator=torch.Generator().manual_seed(0))
+    return torch.randn(2, 3, 4, 5, generator=torch.Generator().manual_seed(0))
 
 
 def _stats_file(tmp_path: Path, **stats: Tensor | None) -> LocalFile.Config:
@@ -34,6 +34,7 @@ def _stats_file(tmp_path: Path, **stats: Tensor | None) -> LocalFile.Config:
 
 
 def test_every_normalizer_satisfies_the_protocol(tmp_path: Path) -> None:
+    # ``ChannelLatentStats`` refuses statistics not shaped [1, C, 1, 1].
     stats = _stats_file(
         tmp_path,
         mean=torch.zeros(1, 3, 1, 1),
@@ -41,7 +42,7 @@ def test_every_normalizer_satisfies_the_protocol(tmp_path: Path) -> None:
     )
     assert isinstance(ScaleLatents.Config().make(), LatentNormalizer)
     assert isinstance(ChannelLatentStats.Config(stats=stats).make(), LatentNormalizer)
-    var = _stats_file(tmp_path, var=torch.ones(3, 4, 4))
+    var = _stats_file(tmp_path, var=torch.ones(3, 4, 5))
     assert isinstance(ElementwiseLatentStats.Config(stats=var).make(), LatentNormalizer)
 
 
@@ -78,8 +79,8 @@ def test_channel_stats_require_invertible_multiplier(
 
 def test_elementwise_stats_follow_rae_order(tmp_path: Path) -> None:
     """``(z - mean) / sqrt(var + eps)`` and ``z * sqrt(var + eps) + mean``."""
-    mean = torch.rand(3, 4, 4, generator=torch.Generator().manual_seed(1))
-    var = torch.rand(3, 4, 4, generator=torch.Generator().manual_seed(2)) + 0.1
+    mean = torch.rand(3, 4, 5, generator=torch.Generator().manual_seed(1))
+    var = torch.rand(3, 4, 5, generator=torch.Generator().manual_seed(2)) + 0.1
     config = ElementwiseLatentStats.Config(
         stats=_stats_file(tmp_path, mean=mean, var=var),
     )
@@ -91,7 +92,7 @@ def test_elementwise_stats_follow_rae_order(tmp_path: Path) -> None:
 
 def test_elementwise_stats_skip_a_missing_mean(tmp_path: Path) -> None:
     """RAE's 256px statistics carry no mean; the reference subtracts 0, exactly."""
-    var = torch.full((3, 4, 4), 4.0)
+    var = torch.full((3, 4, 5), 4.0)
     config = ElementwiseLatentStats.Config(
         stats=_stats_file(tmp_path, mean=None, var=var),
     )
@@ -107,7 +108,7 @@ def test_elementwise_stats_refuse_an_eps_outside_finite_nonnegatives(
     eps: float,
 ) -> None:
     config = ElementwiseLatentStats.Config(
-        stats=_stats_file(tmp_path, var=torch.ones(3, 4, 4)),
+        stats=_stats_file(tmp_path, var=torch.ones(3, 4, 5)),
         eps=eps,
     )
     with pytest.raises(ValueError, match="finite nonnegative eps"):
@@ -123,6 +124,7 @@ def test_elementwise_stats_refuse_a_missing_var(tmp_path: Path) -> None:
 
 def test_channel_stats_follow_lightningdit_order(tmp_path: Path) -> None:
     """``(z - mean) / std * m`` and ``z * std / m + mean``."""
+    # ``ChannelLatentStats`` refuses statistics not shaped [1, C, 1, 1].
     mean = torch.tensor([0.1, -0.2, 0.3]).view(1, 3, 1, 1)
     std = torch.tensor([0.08, 0.2, 0.13]).view(1, 3, 1, 1)
     config = ChannelLatentStats.Config(
@@ -157,11 +159,12 @@ def test_channel_stats_refuse_statistics_not_shaped_per_channel(
 
 
 def _elementwise(tmp_path: Path) -> LatentNormalizer:
-    stats = _stats_file(tmp_path, mean=torch.zeros(3, 4, 4), var=torch.ones(3, 4, 4))
+    stats = _stats_file(tmp_path, mean=torch.zeros(3, 4, 5), var=torch.ones(3, 4, 5))
     return ElementwiseLatentStats.Config(stats=stats).make()
 
 
 def _channel(tmp_path: Path) -> LatentNormalizer:
+    # ``ChannelLatentStats`` refuses statistics not shaped [1, C, 1, 1].
     stats = _stats_file(
         tmp_path,
         mean=torch.zeros(1, 3, 1, 1),

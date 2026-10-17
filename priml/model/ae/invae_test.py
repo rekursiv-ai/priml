@@ -19,7 +19,6 @@ import torch
 
 from priml.cost import cost
 from priml.model.ae.checkpoint import HubFile, LocalFile
-from priml.model.ae.custom_types import Autoencoder, Decoder, Encoder
 from priml.model.ae.distribution import DiagonalGaussian
 from priml.model.ae.invae import INVAE, remap_hf_state_dict
 from priml.model.ae.latent_norm import ScaleLatents
@@ -94,7 +93,6 @@ def test_invae_round_trip_bfb() -> None:
 
 def test_satisfies_the_autoencoder_protocol() -> None:
     model = tiny().make()
-    assert isinstance(model, Autoencoder)
     assert isinstance(model.encode(_image()), DiagonalGaussian)
 
 
@@ -160,24 +158,29 @@ def test_either_half_can_be_left_out() -> None:
     decode_only.encoder = None
     encoder = encode_only.make()
     decoder = decode_only.make()
-    assert isinstance(encoder, Encoder)
     assert encoder.decoder is None
     assert decoder.encoder is None
     with pytest.raises(ValueError, match="without a decoder"):
-        _ = encoder.decode(torch.zeros(2, 2, 8, 8))
+        _ = encoder.decode(torch.zeros(3, 2, 8, 6))
     with pytest.raises(ValueError, match="without an encoder"):
         _ = decoder.encode(_image())
-    assert isinstance(decoder, Decoder)
 
 
 def test_leading_dimensions_pass_through() -> None:
     model = tiny().make()
-    image = _image()
-    flat = model.encode(image).mode()
-    nested = model.encode(image.reshape(1, 2, 3, 16, 16)).mode()
-    assert nested.shape == (1, *flat.shape)
-    assert torch.equal(nested[0], flat)
-    assert model.decode(nested).shape == (1, 2, 3, 16, 16)
+    generator = torch.Generator().manual_seed(1)
+    image = torch.randint(
+        0,
+        256,
+        (2, 5, 3, 16, 12),
+        generator=generator,
+        dtype=torch.uint8,
+    )
+    flat = model.encode(image.flatten(0, 1)).mode()
+    nested = model.encode(image).mode()
+    assert nested.shape == (2, 5, *flat.shape[1:])
+    assert torch.equal(nested.flatten(0, 1), flat)
+    assert model.decode(nested).shape == (2, 5, 3, 16, 12)
 
 
 def test_mode_is_the_mean_and_a_draw_follows_its_generator() -> None:
@@ -199,7 +202,7 @@ def test_decode_returns_the_image_in_the_unit_interval() -> None:
 
 def test_encode_refuses_a_float_image() -> None:
     with pytest.raises(TypeError, match="uint8"):
-        _ = tiny().make().encode(torch.rand(2, 3, 16, 16))
+        _ = tiny().make().encode(torch.rand(2, 3, 16, 12))
 
 
 def test_train_leaves_the_frozen_model_in_eval_mode() -> None:

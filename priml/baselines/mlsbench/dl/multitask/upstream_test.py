@@ -4,6 +4,9 @@ The stand-in has the script's interface with a tiny two-head network and a
 summing ``MultiTaskLoss``; its baselines' edits replace that class. The
 ``pcgrad`` stand-in has the real edit's walk interface and finds no leaves.
 ``write_clone`` is shared with the capture's tests.
+
+The script it stands in for, whose repository publishes no license:
+https://github.com/Imbernoulli/MLS-Bench/blob/80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c/harbor/tasks-docker/mls-bench__cv-multitask-loss/tests/meta/pristine/pytorch-vision/custom_mtl.py
 """
 
 from __future__ import annotations
