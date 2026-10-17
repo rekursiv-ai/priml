@@ -15,17 +15,24 @@ per-task table sudoku has no use for. Two properties drive the rest:
   (pass@K) rather than any single pass.
 
 ``exp000`` reproduces the reference TRM recipe and is never edited: it is the
-number every other rung is measured against. Each later rung forks the best
-rung before it with one change, so the ladder is the path from the reference to
-the best recipe::
+number every other rung is measured against. The ladder through ``exp006``
+follows the best recipe at each step. CHARM's coupled source recipes branch
+from ``exp003``::
 
     exp000  reference TRM                                       46.0
       +-- exp001  Muon body + gate-normalized SwiGLU            58.125
             +-- exp002  Muon rate 0.01                          59.5
                   +-- exp003  URM: one latent, conv FFN         67.625
                         +-- exp004  shift conv, compiled eval   68.375
-                              +-- exp005  spatial aug + TTA     70.125
-                                    +-- exp006  QK-norm, repair 71.375
+                        |     +-- exp005  spatial aug + TTA     70.125
+                        |           +-- exp006  QK-norm, repair 71.375
+                        +-- exp009  CHARM source recipe, ARC1   TBD
+                              +-- exp010  CHARM source recipe, ARC2 TBD
+
+``exp009`` extends the URM-based ``exp003`` configuration with CHARM's gated
+ARC-AGI-1 source recipe. ``exp010`` extends ``exp009`` with its ARC-AGI-2 data,
+memory, and horizon changes. The source settings are coupled recipes, not
+one-axis ablations.
 
 ARC-AGI-1 numbers are pass@2 under rule B (tasks solved of the 400 public
 evaluation tasks), each on one 8xH100 node. ``exp007`` and ``exp008`` train
@@ -36,18 +43,27 @@ Prepare the data once, then launch (8 GPUs)::
 
     uv --quiet run --frozen python -m priml.baselines.arcagi.scripts.prepare_data --experiment exp006
     uv --quiet run --frozen python -m torch.distributed.run --standalone --nproc_per_node=8 -m priml priml.baselines.arcagi.experiments.exp006
+
+The native CHARM replications read the released parquet files beneath
+``/opt/scratch/datasets/charm-release-937316c8/data/augmented/v2``. Launch
+``exp009`` and ``exp010`` on eight GPUs with::
+
+    uv --quiet run --frozen python -m torch.distributed.run --standalone --nproc_per_node=8 -m priml priml.baselines.arcagi.experiments.exp009
+    uv --quiet run --frozen python -m torch.distributed.run --standalone --nproc_per_node=8 -m priml priml.baselines.arcagi.experiments.exp010
 """
 
 from __future__ import annotations
 
 from dataclasses import field
-from typing import TYPE_CHECKING, Final, Self, override
+from functools import partial
+from typing import TYPE_CHECKING, Final, Self, cast, override
 
 from configgle import Makes, PartialConfig
 
 from priml.baselines.arcagi.data import PuzzleData
 from priml.baselines.arcagi.metric import (
     CanonicalPassK,
+    ParquetPassK,
     PerOutputPass,
     StrictPass,
 )
@@ -57,48 +73,76 @@ from priml.baselines.arcagi.model import (
     RotaryBlock,
     depthwise_shift,
 )
+from priml.baselines.arcagi.parquet_data import ArcParquetData, PairSource
 from priml.baselines.arcagi.puzzle_data import Arc2PuzzleDataset
 from priml.baselines.arcagi.signal_dump import (
     SignalDumpTracker,
 )
 from priml.baselines.arcagi.train_step import (
     ArcDataParallel,
+    BeforeBackwardPoolTransition,
     EvalSignals,
     PooledActTrainStep,
+    apply_direct_schedule_to_body_and_sparse_optimizer_lrs,
 )
 from priml.baselines.sudoku.act import (
     AtomicPool,
     CellCorruption,
     FeedbackCarry,
+    GlobalSampledMinimum,
     HaltTraining,
     SampledMinimum,
 )
+from priml.loss.act import ACTLoss
 from priml.loss.token import MeanOverBatch, StablemaxTokens
+from priml.math.linear import cast_parameters_to_input
+from priml.math.loss import log_stablemax_via_probabilities
+from priml.math.numeric import matrix_signum_via_coefficients
 from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE
+from priml.model.conditioning import (
+    CategorySlotFiLM,
+    SigmoidResidualGate,
+)
+from priml.model.conv import SequenceConv1d
+from priml.model.embedding import Embedding
 from priml.model.grid_embedding import (
     GridEmbedding,
     PredictionFeedback,
 )
-from priml.model.grid_solver import CoreCompile, GridSolver
+from priml.model.grid_solver import (
+    CoreCompile,
+    GridSolver,
+    SingleLatentGridSolver,
+)
 from priml.model.init import corrected_fan_in_normal
+from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
-from priml.model.prefix import SparsePuzzleEmbedding
+from priml.model.prefix import ComposedSparsePrefix, SparsePuzzleEmbedding
 from priml.model.recurrence import DeepRecurrence, SingleLatentRecurrence
 from priml.model.swiglu import SwiGLU
-from priml.optimizers import AdamATan2
+from priml.model.transformer.block import TransformerBlock
+from priml.optimizers import AdamATan2, AuxAdam
 from priml.optimizers.composite import CompositeOptimizer
-from priml.optimizers.muon import Muon
+from priml.optimizers.muon import (
+    Muon,
+    adjust_lr_match_rms_adamw,
+    momentum_add_update,
+)
 from priml.optimizers.parameter_filter import complement, excluding, with_ndim
 from priml.runtime import MultiProcess, SingleProcess
 from priml.train.checkpointer import Checkpointer
 from priml.train.ema import EMA
-from priml.train.parallelism import NoParallel
+from priml.train.parallelism import ManualDataParallel, NoParallel, SumGradients
 from priml.train.tracker import FileTracker, TrackerList, WandbTracker
 from priml.train.train_loop import TrainLoop
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from torch import Tensor
+
     import torch
 else:
     from wrapt import lazy_import
@@ -117,6 +161,31 @@ must build with no data on disk, so ``finalize`` may not read the tree."""
 
 ARC2_NUM_PUZZLE_IDENTIFIERS: Final = 1_191_727
 """Distinct puzzle ids in ``arc2concept-aug-1000``: 1,191,726 puzzles plus blank."""
+
+_SOURCE_DEPTHWISE_KERNEL_2_BIAS_INIT: Final = partial(
+    torch.nn.init.uniform_,
+    a=-(2**-0.5),
+    b=2**-0.5,
+)
+"""Initialize the source's kernel-two depthwise bias in FP32 before casting."""
+
+_SOURCE_MATRIX_SIGNUM_FN: Final = partial(
+    matrix_signum_via_coefficients,
+    coefficients=(
+        (7.2086, -15.5131, 9.0178),
+        (3.9623, -2.5813, 0.4542),
+        (3.9466, -2.5765, 0.4544),
+        (3.8991, -2.5671, 0.4566),
+        (3.7186, -2.5308, 0.4653),
+        (3.1390, -2.3073, 0.4733),
+        (2.1715, -1.5246, 0.3885),
+        (1.8648, -1.2224, 0.3577),
+    ),
+    steps=5,
+    eps=1e-7,
+    compute_dtype=torch.float32,
+)
+"""The fixed source polynomial matrix sign for Muon."""
 
 ARC2_TOTAL_TRAIN_STEPS: Final = 541_580
 """The reference sample scale on ARC-AGI-2 -- 200,000 epochs of 1,280 groups at
@@ -177,6 +246,86 @@ class Arc2TrainLoop(
         if model.rope is not None:
             model.rope_grid_shape = spec.grid_shape
         return super().finalize()
+
+
+class CharmTrainLoop(TrainLoop):
+    """Training loop for the released ARC parquet recipes."""
+
+    class Config(
+        Makes["CharmTrainLoop"],
+        TrainLoop.Config[PooledActTrainStep.Config, ArcParquetData.Config],
+    ):
+        """Native CHARM step, source parquet mixture, and global batch."""
+
+        step: PooledActTrainStep.Config = field(
+            default_factory=PooledActTrainStep.Config,
+        )
+        """Pooled ACT step, source loss, optimizer, and EMA configuration."""
+
+        dataset: ArcParquetData.Config = field(default_factory=ArcParquetData.Config)
+        """Ordered official, re-ARC, concept, and evaluation parquet sources."""
+
+        global_batch_size: int = 768
+        """Source batch across data-parallel ranks; local batch is derived."""
+
+        mesh_dim_data_seed: str | None = None
+        """Keep CHARM's source post-model RNG stream without a data reseed."""
+
+        @override
+        def finalize(self) -> Self:
+            runtime = self.runtime
+            if isinstance(runtime, MultiProcess.Config):
+                dp_size = runtime.mesh_topology.get("dp", 0)
+            elif isinstance(runtime, SingleProcess.Config):
+                dp_size = 1
+            else:
+                dp_size = 0
+            if (
+                dp_size > 0
+                and self.global_batch_size > 0
+                and self.global_batch_size % dp_size == 0
+            ):
+                local_batch = self.global_batch_size // dp_size
+                self.dataset.batch_size = local_batch
+                self.dataset.eval_batch_size = local_batch
+                self.step.pool.batch_size = local_batch
+                prefix = self.step.model.prefix
+                if isinstance(prefix, ComposedSparsePrefix.Config):
+                    prefix.residual.batch_size = local_batch
+            cast(GridEmbedding.Config, self.step.model.embedding).grid_shape = (
+                self.dataset.canvas_size,
+                self.dataset.canvas_size,
+            )
+            for metric in self.metrics_eval.values():
+                if isinstance(metric, ParquetPassK.Config):
+                    metric.canvas_size = self.dataset.canvas_size
+            if self.dataset.base_dir is None:
+                self.dataset.base_dir = self.base_dir
+            for metric in self.metrics_eval.values():
+                if isinstance(metric, ParquetPassK.Config) and metric.base_dir is None:
+                    metric.base_dir = self.base_dir
+            return super().finalize()
+
+    def __init__(self, config: Config) -> None:
+        """Reject invalid scalar batch/runtime settings before runtime startup."""
+        if config.global_batch_size < 1:
+            raise ValueError("CHARM global_batch_size must be positive.")
+        runtime = config.runtime
+        if isinstance(runtime, MultiProcess.Config):
+            dp_size = runtime.mesh_topology.get("dp", 0)
+            if dp_size < 1:
+                raise ValueError(
+                    "CHARM requires an explicit positive data-parallel size.",
+                )
+        elif isinstance(runtime, SingleProcess.Config):
+            dp_size = 1
+        else:
+            raise TypeError("CHARM requires MultiProcess or SingleProcess runtime.")
+        if config.global_batch_size % dp_size:
+            raise ValueError(
+                "CHARM global_batch_size must be divisible by data-parallel size.",
+            )
+        super().__init__(config)
 
 
 def exp000() -> Arc1TrainLoop:
@@ -636,6 +785,263 @@ def exp008() -> Arc2TrainLoop:
     return cfg
 
 
+def exp009() -> CharmTrainLoop.Config:
+    """Train the complete gated CHARM recipe on ARC-AGI-1.
+
+    Fork exp003, retaining its shared URM tree and applying the CHARM source
+    changes to architecture, memory, optimizer, data mixture, and horizon.
+    Those settings form one published recipe rather than separate ablations.
+
+    Hypothesis:
+      Task-conditioned gated instance residuals improve ARC-AGI-1 reasoning
+      when trained with the released 100x re-ARC data mixture.
+
+    References:
+      https://arxiv.org/html/2609.33270
+      Source revision 728bf26903684ef5e8bcb476cb8e55e42cf35b9d.
+
+    Results:
+      TBD; this native recipe has not completed its replicated run.
+
+    """
+    cfg = CharmTrainLoop.Config().update(exp003(), skip_missing=True)
+    cfg.study_name = "arcagi-charm"
+    cfg.experiment_name = "exp009"
+    cfg.model_torch_seed = torch.manual_seed
+    cfg.mesh_dim_data_seed = None
+    cfg.dataset = ArcParquetData.Config()
+    cfg.global_batch_size = 768
+    runtime = cast(MultiProcess.Config, cfg.runtime)
+    runtime.mesh_topology = {"dp": 8, "pp": 1, "tp": 1}
+
+    tasks = 960
+    rows = 876_705
+    source_root = "/datasets/charm-release-937316c8/data/augmented/v2"
+    cfg.dataset.train_sources = [
+        PairSource.Config(
+            path=f"{source_root}/arc1_training_aug1000.parquet",
+            pair_selection="both",
+            multiplicity=1,
+        ),
+        PairSource.Config(
+            path=f"{source_root}/rearc_aug100.parquet",
+            pair_selection="both",
+            multiplicity=1,
+        ),
+        PairSource.Config(
+            path=f"{source_root}/concept_aug1000.parquet",
+            pair_selection="both",
+            multiplicity=2,
+        ),
+        PairSource.Config(
+            path=f"{source_root}/arc1_eval_aug1000.parquet",
+            pair_selection="train",
+            multiplicity=2,
+        ),
+    ]
+    cfg.dataset.eval_source = f"{source_root}/arc1_eval_aug1000.parquet"
+    cfg.dataset.canvas_size = 30
+    cfg.dataset.num_workers = 4
+    cfg.dataset.seed = 0
+    cfg.dataset.p_translate = 0.8
+    cfg.dataset.num_tasks = tasks
+    cfg.dataset.num_instances = rows - 1
+
+    step = cfg.step
+    step.total_train_steps = 1_600_000
+    step.lr_step_offset = 1
+    step.optimizer_lr_policy = apply_direct_schedule_to_body_and_sparse_optimizer_lrs
+    step.backward_loss_scale = 1.0 / cfg.global_batch_size
+    step.dtype_autocast = None
+    step.parallelism = ManualDataParallel.Config()
+    step.gradient_reduction = SumGradients.Config()
+    step.metric_reporter = PartialConfig(
+        _report_source_act_metrics,
+        global_batch_size=cfg.global_batch_size,
+    )
+    urm_model = step.model
+    model = SingleLatentGridSolver.Config()
+    source_rope = model.rope
+    source_block = cast(TransformerBlock.Config, model.block)
+    source_ffn = cast(SwiGLU.Config, source_block.ffn)
+    model.update(urm_model, skip_missing=True)
+    step.model = model
+    model.vocab_size = 12
+    model.halt_outputs = 1
+    model.head.linear_fn = cast_parameters_to_input
+    model.rope = source_rope
+    assert isinstance(model.compile_core, CoreCompile.Config)
+    model.compile_core.fullgraph = False
+
+    embedding = cast(GridEmbedding.Config, model.embedding)
+    embedding.grid_shape = (30, 30)
+    embedding.embed_scale = 1.0
+    embedding.token_table = Embedding.Config(
+        init_weight=corrected_fan_in_normal,
+        lookup_dtype=torch.bfloat16,
+    )
+    urm_block = cast(RotaryBlock.Config, model.block)
+    block = TransformerBlock.Config().update(urm_block, skip_missing=True)
+    model.block = block
+    attention = cast(Attention.Config, block.attn)
+    attention.num_heads_kv = 8
+    attention.proj_qkv = Linear.Config(
+        bias=False,
+        init_weight=corrected_fan_in_normal,
+        linear_fn=cast_parameters_to_input,
+    )
+    attention.proj_out = Linear.Config(
+        bias=False,
+        init_weight=corrected_fan_in_normal,
+        linear_fn=cast_parameters_to_input,
+    )
+    block.attn = attention
+    ffn = source_ffn
+    ffn.channels_hidden = 1_536
+    ffn.expansion = 4.0
+    assert isinstance(ffn.middle, SequenceConv1d.Config)
+    ffn.middle.conv.groups = 1_536
+    ffn.middle.conv.init_bias = _SOURCE_DEPTHWISE_KERNEL_2_BIAS_INIT
+    block.ffn = ffn
+    recurrence = cast(SingleLatentRecurrence.Config, model.recurrence)
+    recurrence.slow_cycles = 1
+    recurrence.fast_cycles = 12
+    recurrence.inner_grad_loops = 6
+    prefix = model.prefix = ComposedSparsePrefix.Config()
+    prefix.channels_out = 512
+    prefix.num_tokens = 16
+    prefix.composition = CategorySlotFiLM.Config(
+        num_categories=tasks,
+        num_augmentations=8,
+        num_slots=9,
+        channels_out=512,
+    )
+    prefix.residual.num_puzzles = rows
+    prefix.residual.channels_out = 32
+    prefix.residual.num_tokens = 1
+    prefix.residual.embed_scale = 1.0
+    prefix.residual_gate = SigmoidResidualGate.Config()
+
+    pool = cast(AtomicPool.Config, step.pool)
+    pool.steps_dtype = torch.int32
+    pool.dtype = torch.bfloat16
+    assert isinstance(pool.halting, HaltTraining.Config)
+    pool.halting.exploration = GlobalSampledMinimum.Config(prob=0.1)
+    step.pool_transition = BeforeBackwardPoolTransition.Config()
+    step.objective = ACTLoss.Config(
+        token_loss=StablemaxTokens.Config(
+            log_normalizer=log_stablemax_via_probabilities,
+        ),
+        halt_weight=0.5,
+    )
+    ema = cast(EMA.Config, step.ema)
+    ema.update_after_step = 0
+    ema.warmup_seed = False
+    ema.update_fn = _source_order_ema_update
+    step.ema_initialization = EMA.initialize
+    rank_two = with_ndim(Muon.eligible_tensor, 2)
+    optimizer = cast(CompositeOptimizer.Config, step.optimizer)
+    muon = cast(Muon.Config, optimizer.optimizers[1])
+    muon.lr = 1e-4
+    muon.weight_decay = 0.1
+    muon.momentum = 0.95
+    muon.ns_steps = 5
+    muon.adjust_lr_fn = adjust_lr_match_rms_adamw
+    muon.momentum_update_fn = momentum_add_update
+    muon.matrix_signum_fn = _SOURCE_MATRIX_SIGNUM_FN
+    optimizer.optimizers = [
+        muon,
+        AuxAdam.Config(
+            lr=1e-4,
+            betas=(0.9, 0.95),
+            eps=1e-8,
+            weight_decay=0.1,
+        ),
+    ]
+    optimizer.select = [rank_two, complement(rank_two)]
+
+    cfg.max_steps = step.total_train_steps
+    cfg.eval_warmup_batches = 0
+    checkpointer = cast(Checkpointer.Config, cfg.checkpointer)
+    checkpointer.save_every = 10_000
+    checkpointer.keep_last_n = -1
+    checkpointer.keep_every = 0
+    cfg.metrics_eval = {
+        "": ParquetPassK.Config(
+            eval_source=cfg.dataset.eval_source,
+            canvas_size=30,
+            pass_ks=(1, 2, 5, 10, 100, 1000),
+            aggregated_voting=True,
+        ),
+    }
+    tracker = cast(TrackerList.Config, cfg.tracker)
+    wandb = cast(WandbTracker.Config, tracker.trackers["wandb"])
+    wandb.project = "charm"
+    wandb.name = "arc-agi-1-charm-rearc100"
+    return cfg
+
+
+def exp010() -> CharmTrainLoop.Config:
+    """Train the complete ungated CHARM recipe on ARC-AGI-2.
+
+    Fork exp009's coupled source bundle, then apply the published ARC-AGI-2
+    differences: ungated residual, ARC2 data/task counts, and the 2.38M-step
+    horizon. These settings form one published recipe, not separate ablations.
+
+    Hypothesis:
+      The released ungated instance residual and 100x re-ARC mixture transfer
+      the CHARM recipe to ARC-AGI-2's larger task set.
+
+    References:
+      https://arxiv.org/html/2609.33270
+      Source revision 728bf26903684ef5e8bcb476cb8e55e42cf35b9d.
+
+    Results:
+      TBD; this native recipe has not completed its replicated run.
+
+    """
+    cfg = exp009()
+    cfg.experiment_name = "exp010"
+    source_root = "/datasets/charm-release-937316c8/data/augmented/v2"
+    cfg.dataset.train_sources = [
+        PairSource.Config(
+            path=f"{source_root}/arc2_training_aug1000.parquet",
+            pair_selection="both",
+            multiplicity=1,
+        ),
+        PairSource.Config(
+            path=f"{source_root}/rearc2_aug100.parquet",
+            pair_selection="both",
+            multiplicity=1,
+        ),
+        PairSource.Config(
+            path=f"{source_root}/concept_aug1000.parquet",
+            pair_selection="both",
+            multiplicity=2,
+        ),
+        PairSource.Config(
+            path=f"{source_root}/arc2_eval_aug1000.parquet",
+            pair_selection="train",
+            multiplicity=2,
+        ),
+    ]
+    cfg.dataset.eval_source = f"{source_root}/arc2_eval_aug1000.parquet"
+    cfg.dataset.num_tasks = 1_280
+    cfg.dataset.num_instances = 1_289_151 - 1
+    cfg.step.total_train_steps = 2_380_000
+    prefix = cast(ComposedSparsePrefix.Config, cfg.step.model.prefix)
+    cast(CategorySlotFiLM.Config, prefix.composition).num_categories = 1_280
+    prefix.residual.num_puzzles = 1_289_151
+    prefix.residual_gate = None
+    cfg.max_steps = cfg.step.total_train_steps
+    metric = cast(ParquetPassK.Config, cfg.metrics_eval[""])
+    metric.eval_source = cfg.dataset.eval_source
+    tracker = cast(TrackerList.Config, cfg.tracker)
+    wandb = cast(WandbTracker.Config, tracker.trackers["wandb"])
+    wandb.name = "arc-agi-2-charm-rearc2-100"
+    return cfg
+
+
 def exp_smoke() -> Arc1TrainLoop:
     """Fork exp000 for an unscored installation check.
 
@@ -685,3 +1091,46 @@ def exp_smoke() -> Arc1TrainLoop:
     cfg.checkpointer = None
     cfg.tracker = None
     return cfg
+
+
+def _source_order_ema_update(
+    shadow: torch.Tensor,
+    live: torch.Tensor,
+    decay: float,
+) -> None:
+    """Apply the released EMA expression without changing its operation order."""
+    shadow.copy_((1 - decay) * live + decay * shadow)
+
+
+def _report_source_act_metrics(
+    metrics: Mapping[str, Tensor | float],
+    *,
+    global_batch_size: int,
+) -> dict[str, float]:
+    """SUM source ACT metrics, then apply their source denominators."""
+    names = (
+        "accuracy",
+        "count",
+        "exact_accuracy",
+        "lm_loss",
+        "q_halt_accuracy",
+        "q_halt_loss",
+        "steps",
+    )
+    local = torch.stack([torch.as_tensor(metrics[name]) for name in names])
+    values = local.clone()
+    world_size = (
+        torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+    )
+    if world_size > 1:
+        torch.distributed.reduce(values, dst=0, op=torch.distributed.ReduceOp.SUM)
+        if torch.distributed.get_rank() != 0:
+            values = local
+    count = max(float(values[names.index("count")].item()), 1.0)
+    return {
+        name: float(
+            values[index].item()
+            / (global_batch_size if name.endswith("loss") else count),
+        )
+        for index, name in enumerate(names)
+    }

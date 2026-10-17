@@ -11,15 +11,18 @@ training -- so the ladder stays checkable on any machine.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
 import inspect
 import json
 
 from configgle import PartialConfig
+from pyarrow import parquet
 from treekle import from_plain, json_loads
 
 import numpy as np
+import pyarrow as pa
 import pytest
 import torch
 
@@ -31,6 +34,7 @@ from priml.baselines.arcagi.augmentation import (
 from priml.baselines.arcagi.data import PuzzleData
 from priml.baselines.arcagi.metric import (
     CanonicalPassK,
+    ParquetPassK,
     PerOutputPass,
     StrictPass,
 )
@@ -41,6 +45,7 @@ from priml.baselines.arcagi.model import (
     depthwise_conv,
     depthwise_shift,
 )
+from priml.baselines.arcagi.parquet_data import ArcParquetData, PairSource
 from priml.baselines.arcagi.signal_dump import (
     SignalDumpTracker,
 )
@@ -48,27 +53,43 @@ from priml.baselines.arcagi.train_step import (
     ArcDataParallel,
     EvalSignals,
     PooledActTrainStep,
+    apply_direct_schedule_to_body_and_sparse_optimizer_lrs,
 )
 from priml.baselines.arcagi.train_step_test import port_config
 from priml.baselines.sudoku.act import (
     AtomicPool,
     CellCorruption,
     FeedbackCarry,
+    GlobalSampledMinimum,
     HaltTraining,
     SampledMinimum,
 )
 from priml.data.color_dihedral import ColorDihedral
+from priml.loss.act import ACTLoss
 from priml.loss.token import MeanOverBatch, StablemaxTokens
+from priml.math.loss import log_stablemax_via_probabilities
 from priml.model.attention.attention import Attention
 from priml.model.attention.rope import RoPE
+from priml.model.conditioning import (
+    CategorySlotFiLM,
+    SigmoidResidualGate,
+)
+from priml.model.conv import SequenceConv1d
+from priml.model.embedding import Embedding
 from priml.model.grid_embedding import GridEmbedding, PredictionFeedback
-from priml.model.grid_solver import CoreCompile, GridSolver, lattice_positions
+from priml.model.grid_solver import (
+    CoreCompile,
+    GridSolver,
+    SingleLatentGridSolver,
+    lattice_positions,
+)
 from priml.model.init import corrected_fan_in_normal
 from priml.model.norm import RMSNorm
-from priml.model.prefix import SparsePuzzleEmbedding
+from priml.model.prefix import ComposedSparsePrefix, SparsePuzzleEmbedding
 from priml.model.recurrence import DeepRecurrence, SingleLatentRecurrence
 from priml.model.swiglu import SwiGLU
-from priml.optimizers import AdamATan2
+from priml.model.transformer.block import TransformerBlock
+from priml.optimizers import AdamATan2, AuxAdam, SignSGD
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.muon import Muon
 from priml.optimizers.parameter_filter import complement, excluding, with_ndim
@@ -82,7 +103,6 @@ from priml.train.tracker import FileTracker, TrackerList, WandbTracker
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 
 LADDER: Final[list[tuple[str, Callable[[], experiments.Arc1TrainLoop]]]] = [
@@ -102,14 +122,20 @@ ARC2: Final[list[tuple[str, Callable[[], experiments.Arc2TrainLoop]]]] = [
 ]
 """The ARC-AGI-2 rungs."""
 
+CHARM: Final[list[tuple[str, Callable[[], experiments.CharmTrainLoop.Config]]]] = [
+    ("exp009", experiments.exp009),
+    ("exp010", experiments.exp010),
+]
+"""Published CHARM source-recipe replications."""
+
 SMOKE: Final[list[tuple[str, Callable[[], experiments.Arc1TrainLoop]]]] = [
     ("exp_smoke", experiments.exp_smoke),
 ]
 
 
-def test_experiment_ladder_has_nine_rungs() -> None:
-    """Expose exactly the nine numbered experiment factories."""
-    expected = {f"exp{index:03d}" for index in range(9)}
+def test_experiment_ladder_has_eleven_rungs() -> None:
+    """Expose exactly the eleven numbered experiment factories."""
+    expected = {f"exp{index:03d}" for index in range(11)}
     assert expected == {
         name
         for name in vars(experiments)
@@ -119,20 +145,30 @@ def test_experiment_ladder_has_nine_rungs() -> None:
 
 @pytest.mark.parametrize(
     ("name", "factory"),
-    [*LADDER, *ARC2, *SMOKE],
-    ids=[n for n, _ in [*LADDER, *ARC2, *SMOKE]],
+    [*LADDER, *ARC2, *CHARM, *SMOKE],
+    ids=[n for n, _ in [*LADDER, *ARC2, *CHARM, *SMOKE]],
 )
 def test_every_experiment_finalizes(
     name: str,
-    factory: Callable[[], experiments.Arc1TrainLoop | experiments.Arc2TrainLoop],
+    factory: Callable[
+        [],
+        experiments.Arc1TrainLoop
+        | experiments.Arc2TrainLoop
+        | experiments.CharmTrainLoop.Config,
+    ],
 ) -> None:
     """Factories take no arguments and build with no data and no device."""
     assert not inspect.signature(factory).parameters
     config = factory().copy_tree().finalize()
     assert config.experiment_name == name
-    assert config.study_name == "arcagi"
+    expected_study = "arcagi-charm" if name in {"exp009", "exp010"} else "arcagi"
+    assert config.study_name == expected_study
     assert config.seed == 0
-    assert config.max_steps == config.step.total_train_steps
+    if name in {"exp009", "exp010"}:
+        assert config.max_steps == config.step.total_train_steps
+    else:
+        assert isinstance(config, experiments.Arc1TrainLoop | experiments.Arc2TrainLoop)
+        assert config.max_steps == config.step.total_train_steps
 
 
 @pytest.mark.parametrize(
@@ -147,14 +183,326 @@ def test_every_experiment_finalizes(
         ("exp006", experiments.exp006),
         ("exp007", experiments.exp007),
         ("exp008", experiments.exp008),
+        ("exp009", experiments.exp009),
+        ("exp010", experiments.exp010),
         ("exp_smoke", experiments.exp_smoke),
     ],
 )
 def test_experiment_matches_its_full_config_golden(
     name: str,
-    factory: Callable[[], experiments.Arc1TrainLoop | experiments.Arc2TrainLoop],
+    factory: Callable[
+        [],
+        experiments.Arc1TrainLoop
+        | experiments.Arc2TrainLoop
+        | experiments.CharmTrainLoop.Config,
+    ],
 ) -> None:
     assert_pprint_golden(test_file=__file__, name=name, config=factory())
+
+
+@pytest.mark.parametrize(("name", "factory"), CHARM, ids=[name for name, _ in CHARM])
+def test_published_charm_recipe_is_explicit_and_io_free(
+    name: str,
+    factory: Callable[[], experiments.CharmTrainLoop.Config],
+) -> None:
+    config = factory().copy_tree().finalize()
+
+    assert isinstance(config, experiments.CharmTrainLoop.Config)
+    assert config.study_name == "arcagi-charm"
+    assert config.experiment_name == name
+    assert config.seed == config.dataset.seed == 0
+    assert config.mesh_dim_data_seed is None
+    assert config.model_torch_seed is torch.manual_seed
+    assert config.max_steps == config.step.total_train_steps
+    assert config.global_batch_size == 768
+    assert config.dataset.batch_size == config.step.pool.batch_size == 96
+    assert config.dataset.eval_batch_size == 96
+    assert config.dataset.canvas_size == 30
+    assert config.dataset.num_workers == 4
+    assert config.dataset.p_translate == 0.8
+    assert config.step.warmup_steps == 2_000
+    assert config.step.lr_min_ratio == 1.0
+    assert (
+        config.step.optimizer_lr_policy
+        is apply_direct_schedule_to_body_and_sparse_optimizer_lrs
+    )
+    assert config.step.gradient_clip_norm == float("inf")
+    assert config.step.dtype_autocast is None
+    assert config.step.compile is None
+    assert config.step.total_train_steps == (
+        1_600_000 if name == "exp009" else 2_380_000
+    )
+    assert config.num_steps_eval == 10_000
+    assert config.eval_every_epoch is False
+    assert isinstance(config.runtime, MultiProcess.Config)
+    assert config.runtime.mesh_topology == {"dp": 8, "pp": 1, "tp": 1}
+    assert isinstance(config.checkpointer, Checkpointer.Config)
+    assert config.checkpointer.save_every == 10_000
+    assert set(config.metrics_eval) == {""}
+    assert isinstance(config.metrics_eval[""], ParquetPassK.Config)
+    assert config.metrics_eval[""].pass_ks == (1, 2, 5, 10, 100, 1000)
+    assert config.metrics_eval[""].recent_window_size is None
+    assert config.metrics_eval[""].aggregated_voting is True
+    assert (
+        Path(config.metrics_eval[""].eval_source).name
+        == (_charm_source_names(name)[-1])
+    )
+    step = config.step
+    assert isinstance(step, PooledActTrainStep.Config)
+    assert isinstance(config.dataset, ArcParquetData.Config)
+    assert all(
+        isinstance(source, PairSource.Config) for source in config.dataset.train_sources
+    )
+    assert isinstance(step.model, SingleLatentGridSolver.Config)
+    assert step.model.channels_in == 512
+    assert step.model.num_layers == 4
+    assert step.model.forward_dtype is torch.bfloat16
+    assert step.model.halt_outputs == 1
+    assert step.model.halt_init_bias == -5.0
+    assert step.model.vocab_size == 12
+    assert isinstance(step.model.embedding, GridEmbedding.Config)
+    assert step.model.embedding.grid_shape == (30, 30)
+    assert isinstance(step.model.compile_core, CoreCompile.Config)
+    assert step.model.compile_core.unit == "core"
+    assert step.model.compile_core.mode == "default"
+    assert step.model.compile_core.fullgraph is False
+    assert isinstance(step.model.block, TransformerBlock.Config)
+    assert isinstance(step.model.block.attn, Attention.Config)
+    assert step.model.block.attn.num_heads == 8
+    assert step.model.block.attn.channels_head == 64
+    assert step.model.block.attn.num_heads_kv == 8
+    assert isinstance(step.model.block.ffn, SwiGLU.Config)
+    assert isinstance(step.model.embedding.token_table, Embedding.Config)
+    assert step.model.embedding.embed_scale == 1.0
+    assert step.model.embedding.token_table.lookup_dtype is torch.bfloat16
+    assert isinstance(step.model.block.ffn.middle, SequenceConv1d.Config)
+    assert step.model.block.ffn.middle.conv.kernel_size == 2
+    assert step.model.block.ffn.middle.conv.groups == 1_536
+    assert step.model.block.ffn.expansion == 4.0
+    assert step.model.block.ffn.channels_hidden == 1_536
+    recurrence = step.model.recurrence
+    assert isinstance(recurrence, SingleLatentRecurrence.Config)
+    assert (
+        recurrence.slow_cycles,
+        recurrence.fast_cycles,
+        recurrence.inner_grad_loops,
+    ) == (1, 12, 6)
+    assert isinstance(step.pool, AtomicPool.Config)
+    assert step.pool.max_steps == 16
+    assert step.pool.steps_dtype is torch.int32
+    assert isinstance(step.pool.halting, HaltTraining.Config)
+    assert step.pool.halting.weight == 0.5
+    assert isinstance(step.pool.halting.exploration, GlobalSampledMinimum.Config)
+    assert isinstance(step.objective, ACTLoss.Config)
+    assert step.objective.halt_weight == 0.5
+    assert isinstance(step.objective.token_loss, StablemaxTokens.Config)
+    assert step.objective.token_loss.log_normalizer is log_stablemax_via_probabilities
+    assert isinstance(step.ema, EMA.Config)
+    assert step.ema.decay == 0.999
+    assert isinstance(step.sparse_optimizer, SignSGD.Config)
+    assert step.sparse_optimizer.lr == 1e-2
+    assert step.sparse_optimizer.weight_decay == 0.1
+    assert isinstance(step.optimizer, CompositeOptimizer.Config)
+    dense_optimizer, aux_adam_config = step.optimizer.optimizers
+    assert isinstance(dense_optimizer, Muon.Config)
+    assert isinstance(aux_adam_config, AuxAdam.Config)
+    assert dense_optimizer.lr == 1e-4
+    assert dense_optimizer.weight_decay == 0.1
+    assert dense_optimizer.momentum == 0.95
+    assert dense_optimizer.nesterov is True
+    assert dense_optimizer.ns_steps == 5
+    assert dense_optimizer.eps == 1e-7
+    assert aux_adam_config.lr == 1e-4
+    assert aux_adam_config.weight_decay == 0.1
+    assert aux_adam_config.betas == (0.9, 0.95)
+    assert aux_adam_config.eps == 1e-8
+
+    prefix = step.model.prefix
+    assert isinstance(prefix, ComposedSparsePrefix.Config)
+    assert prefix.channels_out == 512
+    assert prefix.num_tokens == 16
+    assert isinstance(prefix.composition, CategorySlotFiLM.Config)
+    assert isinstance(prefix.residual_gate, SigmoidResidualGate.Config) is (
+        name == "exp009"
+    )
+    assert prefix.composition.num_categories == _charm_tasks(name)
+    assert prefix.composition.num_augmentations == 8
+    assert prefix.composition.num_slots == 9
+    assert prefix.residual.num_puzzles == _charm_instance_rows(name)
+    assert prefix.residual.channels_out == 32
+    assert prefix.residual.num_tokens == 1
+    assert prefix.residual_projection.channels_in == 32
+    assert prefix.residual_projection.channels_out == 512
+    assert prefix.num_tokens == 16
+
+    assert config.dataset.num_tasks == _charm_tasks(name)
+    assert config.dataset.num_instances == _charm_instance_rows(name) - 1
+    sources = config.dataset.train_sources
+    assert [source.pair_selection for source in sources] == [
+        "both",
+        "both",
+        "both",
+        "train",
+    ]
+    assert [source.multiplicity for source in sources] == [1, 1, 2, 2]
+    assert [Path(source.path).name for source in sources] == _charm_source_names(name)
+    assert Path(config.dataset.eval_source).name == _charm_source_names(name)[-1]
+    assert isinstance(config.tracker, TrackerList.Config)
+    wandb = config.tracker.trackers["wandb"]
+    assert isinstance(wandb, WandbTracker.Config)
+    assert wandb.project == "charm"
+    assert wandb.name == (
+        "arc-agi-1-charm-rearc100" if name == "exp009" else "arc-agi-2-charm-rearc2-100"
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "factory", "budget"),
+    [
+        ("exp009", experiments.exp009, 1_600_000),
+        ("exp010", experiments.exp010, 2_380_000),
+    ],
+    ids=["arc1", "arc2"],
+)
+def test_charm_finalize_preserves_explicit_step_caps(
+    name: str,
+    factory: Callable[[], experiments.CharmTrainLoop.Config],
+    budget: int,
+) -> None:
+    """Keep an independent optimizer-step limit through recipe finalization."""
+    config = factory()
+    config.max_steps = 1
+    finalized = config.copy_tree().finalize()
+
+    assert finalized.experiment_name == name
+    assert finalized.max_steps == 1
+    assert finalized.step.total_train_steps == budget
+
+
+def test_published_charm_metric_retains_votes_across_eleven_events(
+    tmp_path: Path,
+) -> None:
+    """The source default keeps an early task vote beyond the tenth reset."""
+    source = tmp_path / "eval.parquet"
+    _write_two_task_eval_source(source)
+    config = ParquetPassK.Config(
+        eval_source=source,
+        canvas_size=6,
+        pass_ks=(1,),
+    )
+    assert config.recent_window_size is None
+    full_history = config.make()
+    bounded_history = config.copy_tree()
+    bounded_history.recent_window_size = 10
+    bounded = bounded_history.make()
+
+    for metric in (full_history, bounded):
+        for event in range(11):
+            metric.reset()
+            if event == 0:
+                name, input_grid, output_grid = "task-a", [[1]], [[2]]
+            else:
+                name, input_grid, output_grid = "task-b", [[3]], [[4]]
+            prediction = _packed_window_candidate(output_grid)
+            canonical_input = np.asarray(input_grid, dtype=np.uint8)
+            metric.update(
+                torch.stack((prediction, prediction)),
+                canonical_puzzle_names=[name, name],
+                canonical_inputs=[canonical_input, canonical_input],
+                spatial_tags=torch.tensor([[1, 1, 1], [1, 1, 1]]),
+                dih_idxs=torch.tensor([0, 0]),
+                colorperm_slots=torch.arange(9).repeat(2, 1),
+                valid_count=2,
+            )
+
+    assert full_history.compute() == {"pass@1": 1.0}
+    assert bounded.compute() == {"pass@1": 0.5}
+    assert list(full_history.state_dict()["events"]) == list(range(11))
+    assert list(bounded.state_dict()["events"]) == list(range(1, 11))
+
+
+def _charm_tasks(name: str) -> int:
+    return 960 if name == "exp009" else 1_280
+
+
+def _charm_instance_rows(name: str) -> int:
+    return 876_705 if name == "exp009" else 1_289_151
+
+
+def _charm_source_names(name: str) -> list[str]:
+    prefix = "arc1" if name == "exp009" else "arc2"
+    rearc = "rearc" if prefix == "arc1" else "rearc2"
+    return [
+        f"{prefix}_training_aug1000.parquet",
+        f"{rearc}_aug100.parquet",
+        "concept_aug1000.parquet",
+        f"{prefix}_eval_aug1000.parquet",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("dp_size", "local_batch"),
+    [(8, 96), (2, 384), (6, 128)],
+)
+def test_charm_global_batch_tracks_explicit_data_parallel_size(
+    dp_size: int,
+    local_batch: int,
+) -> None:
+    config = experiments.exp009()
+    assert isinstance(config.runtime, MultiProcess.Config)
+    config.runtime.mesh_topology["dp"] = dp_size
+
+    finalized = config.copy_tree().finalize()
+
+    assert finalized.global_batch_size == 768
+    assert finalized.dataset.batch_size == local_batch
+    assert finalized.dataset.eval_batch_size == local_batch
+    assert finalized.step.pool.batch_size == local_batch
+
+
+def test_charm_global_batch_requires_integral_per_rank_batches() -> None:
+    config = experiments.exp009()
+    config.global_batch_size = 770
+
+    finalized = config.finalize()
+    assert finalized.global_batch_size == 770
+    with pytest.raises(ValueError, match="divisible"):
+        finalized.make()
+
+
+def test_charm_release_paths_follow_the_loop_base_dir(tmp_path: Path) -> None:
+    config = experiments.exp009()
+    config.base_dir = tmp_path
+
+    finalized = config.copy_tree().finalize()
+
+    source_root = tmp_path / "datasets/charm-release-937316c8/data/augmented/v2"
+    assert [Path(source.path) for source in finalized.dataset.train_sources] == [
+        source_root / name for name in _charm_source_names("exp009")
+    ]
+    metric = finalized.metrics_eval[""]
+    assert isinstance(metric, ParquetPassK.Config)
+    assert Path(metric.eval_source) == source_root / (_charm_source_names("exp009")[-1])
+
+
+def test_charm_dataset_canvas_owns_model_pool_and_metric_geometry() -> None:
+    """A tiny declared canvas reaches every finalized CHARM geometry owner."""
+    config = experiments.exp009()
+    config.dataset.canvas_size = 2
+
+    finalized = config.copy_tree().finalize()
+
+    model = finalized.step.model
+    assert isinstance(model, SingleLatentGridSolver.Config)
+    assert isinstance(model.embedding, GridEmbedding.Config)
+    assert model.embedding.grid_shape == (2, 2)
+    assert model.grid_len == 4
+    assert model.rope_grid_shape == (4,)
+    assert model.total_seq_len == 20
+    assert finalized.step.pool.seq_len == 20
+    metric = finalized.metrics_eval[""]
+    assert isinstance(metric, ParquetPassK.Config)
+    assert metric.canvas_size == 2
 
 
 @pytest.mark.parametrize("factory", [f for _, f in LADDER], ids=[n for n, _ in LADDER])
@@ -471,6 +819,110 @@ def test_an_arcagi2_rung_finalizes_without_rope() -> None:
     assert config.finalize().step.model.rope is None
 
 
+def test_an_arcagi2_rung_derives_the_rotary_grid_from_its_dataset() -> None:
+    """Set the 2D RoPE lattice from the ARC-AGI-2 canvas."""
+    config = experiments.exp007()
+    config.step.model.rope = RoPE.Config(channels_head=[32, 32])
+
+    finalized = config.finalize()
+
+    assert finalized.step.model.rope_grid_shape == finalized.dataset.spec.grid_shape
+
+
+def test_charm_single_process_finalization_sets_local_batch_geometry() -> None:
+    """Use the full global batch locally when no data mesh exists."""
+    config = experiments.exp009()
+    config.runtime = SingleProcess.Config(device="cpu")
+    config.global_batch_size = 4
+
+    finalized = config.finalize()
+
+    assert finalized.dataset.batch_size == 4
+    assert finalized.dataset.eval_batch_size == 4
+    assert finalized.step.pool.batch_size == 4
+
+
+def test_charm_finalization_keeps_an_optional_prefix_disabled() -> None:
+    config = experiments.exp009()
+    assert isinstance(config.step.model, SingleLatentGridSolver.Config)
+    config.step.model.prefix = None
+
+    finalized = config.copy_tree().finalize()
+
+    assert finalized.step.model.prefix is None
+    assert finalized.dataset.batch_size == 96
+    assert finalized.dataset.eval_batch_size == 96
+    assert finalized.step.pool.batch_size == 96
+
+
+def test_charm_source_metrics_use_the_published_denominators() -> None:
+    metrics = {
+        "accuracy": 2.0,
+        "count": 4.0,
+        "exact_accuracy": 1.0,
+        "lm_loss": 8.0,
+        "q_halt_accuracy": 3.0,
+        "q_halt_loss": 12.0,
+        "steps": 20.0,
+    }
+
+    assert experiments._report_source_act_metrics(metrics, global_batch_size=4) == {
+        "accuracy": 0.5,
+        "count": 1.0,
+        "exact_accuracy": 0.25,
+        "lm_loss": 2.0,
+        "q_halt_accuracy": 0.75,
+        "q_halt_loss": 3.0,
+        "steps": 5.0,
+    }
+
+
+@pytest.mark.parametrize("factory", [experiments.exp009, experiments.exp010])
+def test_charm_finalized_prefix_trains_at_the_local_batch_size(
+    factory: Callable[[], experiments.CharmTrainLoop.Config],
+) -> None:
+    config = factory()
+    assert isinstance(config.step.model, SingleLatentGridSolver.Config)
+    assert isinstance(config.step.model.prefix, ComposedSparsePrefix.Config)
+    config.step.model.channels_in = 20
+    prefix = config.step.model.prefix
+    prefix.channels_out = 20
+    prefix.composition.channels_out = 20
+    prefix.residual.num_puzzles = 128
+    prefix.residual.channels_in = 2
+    prefix.residual.channels_out = 2
+
+    finalized = config.copy_tree().finalize()
+
+    assert finalized.dataset.batch_size == 96
+    assert finalized.dataset.eval_batch_size == 96
+    assert finalized.step.pool.batch_size == 96
+    assert isinstance(finalized.step.model.prefix, ComposedSparsePrefix.Config)
+    assert finalized.step.model.prefix.residual.batch_size == 96
+    prefix_module = finalized.step.model.prefix.make()
+    prefix_module.train()
+    batch_size = finalized.dataset.batch_size
+    category_indices = torch.arange(batch_size) % _charm_tasks(
+        finalized.experiment_name,
+    )
+    augmentation_indices = torch.arange(batch_size) % 8
+    slot_permutation = torch.remainder(
+        torch.arange(9) + torch.arange(batch_size).unsqueeze(1),
+        9,
+    )
+    puzzle_identifiers = torch.arange(1, batch_size + 1)
+
+    output = prefix_module(
+        batch_size,
+        category_indices=category_indices,
+        augmentation_indices=augmentation_indices,
+        slot_permutation=slot_permutation,
+        puzzle_identifiers=puzzle_identifiers,
+    )
+
+    assert output.shape == (96, 16, 20)
+
+
 def test_the_muon_recipe_filters_and_rates() -> None:
     optimizer = experiments.exp003().step.optimizer
     assert isinstance(optimizer, CompositeOptimizer.Config)
@@ -772,6 +1224,41 @@ def _rates(config: experiments.Arc1TrainLoop) -> list[float]:
     assert isinstance(muon2, Muon.Config)
     assert isinstance(muon3, Muon.Config)
     return [from_plain(cast(object, adamw.lr), float), muon2.lr, muon3.lr]
+
+
+def _write_two_task_eval_source(path: Path) -> None:
+    parquet.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "format_version": 2,
+                    "puzzle_id": "task-a",
+                    "train": [],
+                    "test": [{"input": [[1]], "output": [[2]]}],
+                    "offline_augs": [""],
+                },
+                {
+                    "format_version": 2,
+                    "puzzle_id": "task-b",
+                    "train": [],
+                    "test": [{"input": [[3]], "output": [[4]]}],
+                    "offline_augs": [""],
+                },
+            ],
+        ),
+        where=path,
+    )
+
+
+def _packed_window_candidate(grid: list[list[int]]) -> torch.Tensor:
+    canvas_size = 6
+    height = len(grid)
+    width = len(grid[0])
+    canvas = torch.zeros((canvas_size, canvas_size), dtype=torch.float32)
+    canvas[1 : 1 + height, 1 : 1 + width] = torch.tensor(grid) + 2
+    canvas[1 : 1 + height, 1 + width] = 1
+    canvas[1 + height, 1 : 1 + width] = 1
+    return torch.cat([torch.zeros(1), canvas.flatten()])
 
 
 if __name__ == "__main__":

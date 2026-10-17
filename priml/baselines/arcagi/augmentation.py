@@ -200,35 +200,56 @@ class SpatialAugmentation:
             raise ValueError(
                 f"grid shape exceeds max_grid={side}: inp={inp.shape}, out={out.shape}.",
             )
-        if scale != 1:
-            inp = cast(
-                np.ndarray[tuple[int, ...], np.dtype[np.uint8]],
-                scale_grid(inp, scale),
-            )
-            out = cast(
-                np.ndarray[tuple[int, ...], np.dtype[np.uint8]],
-                scale_grid(out, scale),
-            )
         if (
-            pad_r + max(inp.shape[0], out.shape[0]) > side
-            or pad_c + max(inp.shape[1], out.shape[1]) > side
+            pad_r + max(inp.shape[0], out.shape[0]) * scale > side
+            or pad_c + max(inp.shape[1], out.shape[1]) * scale > side
         ):
             raise ValueError(f"tag {tag} places the grid outside max_grid={side}.")
-        result: list[NDArray[np.uint8]] = []
-        for grid in (inp, out):
-            nrow, ncol = grid.shape
-            padded = np.pad(
-                grid + self.spec.vocab_color_offset,
-                ((pad_r, side - pad_r - nrow), (pad_c, side - pad_c - ncol)),
-                constant_values=self.spec.vocab_pad,
+        return [self.pack_one_at(grid, tag=tag) for grid in (inp, out)]
+
+    def pack_one_at(
+        self,
+        grid: np.ndarray[tuple[int, ...], np.dtype[np.uint8]],
+        *,
+        tag: tuple[int, int, int],
+    ) -> NDArray[np.uint8]:
+        """Pack one grid at a preselected CanvasEOS placement.
+
+        Args:
+          grid: Canonical grid whose colors are shifted into the token vocabulary.
+          tag: Scale, row offset, and column offset shared with its paired target.
+
+        Returns:
+          media: Flattened CanvasEOS token grid.
+
+        """
+        side = self.spec.max_grid
+        scale, pad_r, pad_c = tag
+        if scale < 1 or pad_r < 0 or pad_c < 0:
+            raise ValueError(f"tag needs scale >= 1 and offsets >= 0; got {tag}.")
+        if max(*grid.shape) > side:
+            raise ValueError(f"grid shape exceeds max_grid={side}: grid={grid.shape}.")
+        if scale != 1:
+            grid = cast(
+                np.ndarray[tuple[int, ...], np.dtype[np.uint8]],
+                scale_grid(grid, scale),
             )
-            eos_row, eos_col = pad_r + nrow, pad_c + ncol
-            if eos_row < side:
-                padded[eos_row, pad_c:eos_col] = self.spec.vocab_eos
-            if eos_col < side:
-                padded[pad_r:eos_row, eos_col] = self.spec.vocab_eos
-            result.append(padded.flatten())
-        return result
+        nrow, ncol = grid.shape
+        if nrow > side or ncol > side:
+            raise ValueError(f"tag {tag} places the grid outside max_grid={side}.")
+        if pad_r + nrow > side or pad_c + ncol > side:
+            raise ValueError(f"tag {tag} places the grid outside max_grid={side}.")
+        padded = np.pad(
+            grid + self.spec.vocab_color_offset,
+            ((pad_r, side - pad_r - nrow), (pad_c, side - pad_c - ncol)),
+            constant_values=self.spec.vocab_pad,
+        )
+        eos_row, eos_col = pad_r + nrow, pad_c + ncol
+        if eos_row < side:
+            padded[eos_row, pad_c:eos_col] = self.spec.vocab_eos
+        if eos_col < side:
+            padded[pad_r:eos_row, eos_col] = self.spec.vocab_eos
+        return padded.flatten()
 
 
 class ArcAugmentation:
@@ -449,31 +470,44 @@ def sample_scale_factor(
     return int(rng.choice(scales, p=np.array(weights) / sum(weights)))
 
 
-def crop_grid(flat: NDArray[np.uint8], *, spec: ArcSpec) -> NDArray[np.uint8]:
-    """Recover the largest top-left all-color rectangle from a flat token grid.
+def crop_grid(
+    flat: NDArray[np.uint8],
+    *,
+    spec: ArcSpec,
+    row: int = 0,
+    col: int = 0,
+) -> NDArray[np.uint8]:
+    """Recover the largest all-color rectangle from a token-grid origin.
 
     Args:
       flat: Square flat token grid; the side is inferred from its length.
       spec: Dataset token vocabulary.
+      row: First CanvasEOS row containing the grid.
+      col: First CanvasEOS column containing the grid.
 
     Returns:
       grid: Color grid with values 0..9.
 
     """
     side = square_side(len(flat), who="crop_grid")
+    if row < 0 or col < 0 or row >= side or col >= side:
+        raise ValueError(f"crop origin ({row}, {col}) is outside side {side}.")
     grid = flat.reshape(side, side)
     values = cast(list[int], flat.tolist())
-    max_area = max_nr = max_nc = 0
-    num_c = side
-    for num_r in range(1, side + 1):
-        row = values[(num_r - 1) * side : num_r * side]
-        for c in range(1, num_c + 1):
-            if row[c - 1] < spec.vocab_color_offset or row[c - 1] >= spec.vocab_size:
-                num_c = c - 1
+    max_area = max_height = max_width = 0
+    num_c = side - col
+    for height in range(1, side - row + 1):
+        row_values = values[(row + height - 1) * side + col : (row + height) * side]
+        for width in range(1, num_c + 1):
+            token = row_values[width - 1]
+            if token < spec.vocab_color_offset or token >= spec.vocab_size:
+                num_c = width - 1
                 break
-        if num_r * num_c > max_area:
-            max_area, max_nr, max_nc = num_r * num_c, num_r, num_c
-    return (grid[:max_nr, :max_nc] - spec.vocab_color_offset).astype(np.uint8)
+        if height * num_c > max_area:
+            max_area, max_height, max_width = height * num_c, height, num_c
+    return (
+        grid[row : row + max_height, col : col + max_width] - spec.vocab_color_offset
+    ).astype(np.uint8)
 
 
 def square_side(length: int, *, who: str) -> int:
