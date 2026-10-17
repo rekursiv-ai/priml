@@ -1,4 +1,4 @@
-"""Tests for the harness experiment configs and their pprint goldens."""
+"""Tests for the harness experiment configs and each task's exp000 pprint golden."""
 
 from __future__ import annotations
 
@@ -87,13 +87,6 @@ def test_nothing_trains_and_numbers_leave_through_a_file(
     assert cfg.study_name == "mlsbench"
 
 
-@pytest.mark.parametrize("factory", ALL, ids=[f.__name__ for f in ALL])
-def test_experiment_matches_its_golden_config(
-    factory: ExperimentFactory[MlsbenchEval],
-) -> None:
-    assert_pprint_golden(test_file=__file__, name=factory.__name__, config=factory())
-
-
 def test_smoke_uses_the_fake_executor() -> None:
     cfg = exp_smoke()
     assert isinstance(_suite(cfg).executor, FakeExecutor.Config)
@@ -178,15 +171,13 @@ def _generated() -> list[tuple[str, str, tuple[str, str, int]]]:
 GENERATED: Final = _generated()
 """(task module, function name, (task, baseline, seed)) for every generated experiment."""
 
-GOLDEN_DIR: Final = _THIS.with_name("testdata") / "tasks"
-
 
 @pytest.mark.parametrize(
     ("mod", "fn", "ident"),
     GENERATED,
     ids=[f"{f}.{n}" for f, n, _ in GENERATED],
 )
-def test_generated_experiment_round_trips_and_matches_its_golden(
+def test_generated_experiment_round_trips(
     mod: str,
     fn: str,
     ident: tuple[str, str, int],
@@ -200,23 +191,15 @@ def test_generated_experiment_round_trips_and_matches_its_golden(
     assert cfg.max_eval_time == REGISTRY[task].max_eval_time
     assert cfg.eval_only is True
     assert cfg.copy_tree().finalize() is not None
-    assert_pprint_golden(test_file=__file__, name=f"tasks/{mod}/{fn}", config=cfg)
 
 
-def test_every_experiment_has_a_golden_and_no_golden_is_orphaned() -> None:
-    want = {f"{f}/{n}.txt" for f, n, _ in GENERATED}
-    have = {str(p.relative_to(GOLDEN_DIR)) for p in GOLDEN_DIR.rglob("*.txt")}
-    assert have == want
-    assert not list(GOLDEN_DIR.parent.glob("task_*.txt")), "retired per-task goldens"
-
-
-def test_goldens_are_host_independent() -> None:
-    bad = ("/Users/", "/home/", "/private/", "/tmp/", "/var/folders")  # noqa: S108 -- host paths searched for, not written.
-    for p in GOLDEN_DIR.rglob("*.txt"):
-        text = p.read_text()
-        assert not any(b in text for b in bad), p
-        # Every resource path is the logical default beneath the default base_dir.
-        assert "mlsbench_root=PosixPath('/opt/scratch/mlsbench" in text, p
+@pytest.mark.parametrize("mod", tasks.task_modules())
+def test_each_tasks_exp000_matches_its_golden_config(mod: str) -> None:
+    assert_pprint_golden(
+        test_file=__file__,
+        name=f"tasks/{mod}/exp000",
+        config=tasks.resolve(f"{mod}.exp000")(),
+    )
 
 
 def test_other_baselines_of_a_task_differ_only_in_name() -> None:

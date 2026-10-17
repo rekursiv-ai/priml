@@ -1,77 +1,11 @@
-MlsbenchEval(
-        study_name='mlsbench',
-        experiment_name='exp_smoke',
-        base_dir='/opt/scratch',
-        working_dir=PosixPath('/opt/scratch/runs/mlsbench/exp_smoke'),
-        doc='',
-        step=NullStep.Config(),
-        dataset=SettingBatches.Config(
-            task='synth-three-setting',
-            mlsbench_root=PosixPath('/opt/scratch/mlsbench_smoke'),
-            settings=()
-        ),
-        metrics_train={},
-        metrics_eval={   '': MlsbenchSuite.Config(
-                task='synth-three-setting',
-                baseline='base_a',
-                edit_path='',
-                seed=42,
-                mlsbench_root=PosixPath('/opt/scratch/mlsbench_smoke'),
-                data_root=PosixPath('/opt/scratch/datasets/mlsbench'),
-                bundle='',
-                base_dir=PosixPath('/opt/scratch/runs/mlsbench/exp_smoke'),
-                working_dir=PosixPath('/opt/scratch/runs/mlsbench/exp_smoke/runs'),
-                executor=FakeExecutor.Config(
-                    outputs={   'set-a': 'accuracy=0.3220\navg_steps=256.0\n',
-                        'set-b': 'pass_at_1=0.3902\navg_steps=256.0\n',
-                        'set-c': 'gen_ppl=237.0499\n'
-                                 'mauve=0.1124\n'
-                                 'entropy=5.9261\n'
-                                 'rep2=0.0254\n'
-                                 'avg_steps=224.0\n'},
-                    outcomes={},
-                    seconds=0.0
-                )
-            )},
-        checkpointer=None,
-        profiler=None,
-        phase_timer=PhaseTimer.Config(
-            enabled=False,
-            torch_profile=False,
-            base_dir=PosixPath('/opt/scratch/runs/mlsbench/exp_smoke'),
-            working_dir=PosixPath('/opt/scratch/runs/mlsbench/exp_smoke/profiling'),
-            heartbeat_interval_sec=20.0,
-            fault_dump_interval_sec=40.0,
-            cuda_events=False
-        ),
-        tracker=FileTracker.Config(
-            base_dir=PosixPath('/opt/scratch/runs/mlsbench/exp_smoke'),
-            working_dir=PosixPath('/opt/scratch/runs/mlsbench/exp_smoke/metrics.json'),
-            capture_prefix='eval/'
-        ),
-        max_steps=inf,
-        max_epochs=inf,
-        max_time=inf,
-        max_time_kind='wall',
-        max_eval_time=inf,
-        eval_stop_on_time_limit=False,
-        num_steps_eval=1_000,
-        num_steps_log=10,
-        early_train_log_steps=100,
-        eval_every_epoch=True,
-        eval_extras_every_eval=False,
-        eval_warmup_batches=0,
-        eval_only=True,
-        restore_rng_state=True,
-        seed=None,
-        num_steps_garbage_collect=inf,
-        mesh_dim_model_seed='pp',
-        mesh_dim_data_seed='dp',
-        runtime=SingleProcess.Config(
-            device=None,
-            deterministic=False,
-            float32_matmul_precision=None
-        ),
-        mlsbench_root='/mlsbench_smoke',
-        data_root='/datasets/mlsbench'
-    )
+{
+  "eval/accuracy_set-a": 0.322,
+  "eval/avg_steps_set-a": 256.0,
+  "eval/avg_steps_set-b": 256.0,
+  "eval/avg_steps_set-c": 224.0,
+  "eval/entropy_set-c": 5.9261,
+  "eval/gen_ppl_set-c": 237.0499,
+  "eval/mauve_set-c": 0.1124,
+  "eval/pass_at_1_set-b": 0.3902,
+  "eval/rep2_set-c": 0.0254
+}

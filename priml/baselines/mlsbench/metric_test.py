@@ -43,6 +43,7 @@ from priml.baselines.mlsbench.testing import (
     default_config,
     leaderboard_csv,
 )
+from priml.testing.golden import assert_text_golden
 from priml.train.results import read_metrics
 
 
@@ -351,7 +352,12 @@ def test_smoke_experiment_runs_end_to_end(tmp_path: Path) -> None:
     cfg.base_dir = tmp_path / "out"
     cfg.make().run()
     metrics = read_metrics(tmp_path / "out/runs/mlsbench/exp_smoke/metrics.json")
-    assert metrics["eval/accuracy_set-a"] == 0.322
+    del metrics["eval/time"]  # Wall clock.
+    assert_text_golden(
+        test_file=__file__,
+        name="exp_smoke",
+        rendered=json.dumps(metrics, indent=2, sort_keys=True),
+    )
 
 
 def _bundled(

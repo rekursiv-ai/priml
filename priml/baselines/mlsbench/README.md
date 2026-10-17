@@ -178,8 +178,10 @@ uv --quiet run --frozen pytest priml/baselines/mlsbench
 ```
 
 These run on CPU in about 20 seconds with no clone, Docker or network.
-`testdata/tasks/` holds a pprint golden for every experiment's config. Regenerate
-the goldens only when a config change is intended:
+Each task's `exp000` has a pprint golden (`testdata/tasks/<task>/exp000.txt`);
+its other baselines and seeds derive from it. `testdata/exp_smoke.txt` freezes
+the metrics the smoke run writes, exactly.
+Regenerate the goldens only when a config change is intended:
 
 ```bash
 uv --quiet run --frozen pytest priml/baselines/mlsbench --regenerate-golden
