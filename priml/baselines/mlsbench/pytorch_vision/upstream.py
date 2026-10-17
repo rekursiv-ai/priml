@@ -58,6 +58,10 @@ VARIANTS: Final = {
 }
 """Maps each non-default loss of :data:`reference.LOSSES` to its edit file."""
 
+DATASETS: Final = {"cifar10": "CIFAR10", "cifar100": "CIFAR100"}
+"""The torchvision class each ``--dataset`` the loaders are run with reads."""
+
+
 type Batches = list[list[dict[str, Tensor]]]
 """Per pass, the batches of one loader in order."""
 
@@ -156,13 +160,22 @@ def load_script(path: Path) -> Upstream:
     return cast(Upstream, cast(object, _load_module(path)))
 
 
-def edited_script(root: Path, name: str, scratch: Path) -> Upstream:
+def edited_script(
+    root: Path,
+    name: str,
+    scratch: Path,
+    *,
+    pristine: Path = PRISTINE,
+    edits: Path = EDITS,
+) -> Upstream:
     """Apply a baseline's edit to the pristine script and import the result.
 
     Args:
       root: Clone of the benchmark.
-      name: The edit's file stem, under :data:`EDITS`.
+      name: The edit's file stem, under ``edits``.
       scratch: Directory the edited script is written to.
+      pristine: The task's unedited script, relative to the clone.
+      edits: The task's edit directory, relative to the clone.
 
     Returns:
       script: The pristine script with the edit's lines replaced.
@@ -170,10 +183,10 @@ def edited_script(root: Path, name: str, scratch: Path) -> Upstream:
     """
     ops = cast(
         list[dict[str, object]],
-        cast(object, vars(_load_module(root / EDITS / f"{name}.edit.py"))["OPS"]),
+        cast(object, vars(_load_module(root / edits / f"{name}.edit.py"))["OPS"]),
     )
     (op,) = ops
-    lines = (root / PRISTINE).read_text().splitlines(keepends=True)
+    lines = (root / pristine).read_text().splitlines(keepends=True)
     lines[cast(int, op["start_line"]) - 1 : cast(int, op["end_line"])] = [
         cast(str, op["content"]),
     ]
@@ -201,21 +214,30 @@ def hidden_accelerators() -> Generator[None]:
         yield
 
 
-def trace_main(script: Upstream) -> MainTrace:
-    """Run the reference's ``main`` for 200 epochs of ResNet-56 on CIFAR-100.
+def trace_main(
+    script: Upstream,
+    *,
+    arch: str = "resnet56",
+    dataset: str = "cifar100",
+    classes: int = 100,
+) -> MainTrace:
+    """Run the reference's ``main`` for 200 epochs of one setting.
 
     Only the data loaders and the two epoch functions are replaced.
 
     Args:
-      script: The pristine reference script.
+      script: A pytorch-vision task script, pristine or edited.
+      arch: The setting's ``--arch``.
+      dataset: The setting's ``--dataset``.
+      classes: What the replaced loaders report for ``dataset``.
 
     Returns:
       trace: What the replaced calls saw.
 
     """
     trace = MainTrace()
-    spy = _MainSpy(trace)
-    argv = ["custom_loss.py", "--arch", "resnet56", "--dataset", "cifar100"]
+    spy = _MainSpy(trace, classes=classes)
+    argv = ["script.py", "--arch", arch, "--dataset", dataset]
     argv += ["--epochs", "200", "--seed", str(reference.SEED)]
     printed = io.StringIO()
     with (
@@ -375,11 +397,16 @@ def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep
     return record, states
 
 
-def upstream_batches(script: Upstream) -> tuple[Batches, Batches]:
+def upstream_batches(
+    script: Upstream,
+    *,
+    dataset: str = "cifar100",
+) -> tuple[Batches, Batches]:
     """Run the reference's loaders, alternating training and test passes.
 
     Args:
       script: The pristine reference script.
+      dataset: The setting's ``--dataset``; its loaders read the synthetic split.
 
     Returns:
       passes: The training passes, then the test passes; the loaders use the
@@ -389,7 +416,11 @@ def upstream_batches(script: Upstream) -> tuple[Batches, Batches]:
     train: Batches = []
     evaluation: Batches = []
     with reference.seeded(reference.SEED):
-        train_loader, test_loader = _loaders(script, num_workers=4)
+        train_loader, test_loader = _loaders(
+            script,
+            num_workers=4,
+            dataset=dataset,
+        )
         for _ in range(reference.LOADER_PASSES):
             train.append([{"media": x, "label": y} for x, y in train_loader])
             evaluation.append([{"media": x, "label": y} for x, y in test_loader])
@@ -443,8 +474,9 @@ def upstream_sites(script: Upstream) -> dict[str, int]:
 class _MainSpy:
     """Stands in for the reference's heavy calls while its ``main`` runs."""
 
-    def __init__(self, trace: MainTrace) -> None:
+    def __init__(self, trace: MainTrace, *, classes: int) -> None:
         self.trace = trace
+        self.classes = classes
         self.scripted = iter(reference.SCRIPTED_CORRECT)
 
     def get_dataloaders(
@@ -454,32 +486,35 @@ class _MainSpy:
         batch_size: int = 0,
         num_workers: int = 0,
     ) -> tuple[list[object], list[object], int]:
-        """Return no data and the class count of CIFAR-100."""
+        """Return no data and the setting's class count."""
         del dataset, data_root, batch_size, num_workers
-        return [], [], 100
+        return [], [], self.classes
 
     def train_epoch(
         self,
         model: nn.Module,
         loader: object,
-        optimizer: torch.optim.Optimizer,
-        device: torch.device,
-        config: dict[str, int],
+        *rest: object,
     ) -> tuple[float, float]:
         """Record the state before the first epoch and the rate of every one.
+
+        The tasks' scripts order the remaining arguments differently, so the
+        optimizer and the loss configuration are found by type.
 
         Args:
           model: The network, initialized.
           loader: Unused.
-          optimizer: The optimizer whose rate and settings are recorded.
-          device: Unused.
-          config: What this epoch tells the loss.
+          *rest: The script's other arguments: the optimizer whose rate and
+            settings are recorded, and the dict told to the loss, if any.
 
         Returns:
           result: Zero loss and zero accuracy.
 
         """
-        del loader, device
+        del loader
+        (optimizer,) = (a for a in rest if isinstance(a, torch.optim.Optimizer))
+        configs = [cast(dict[str, int], a) for a in rest if isinstance(a, dict)]
+        config = configs[0] if configs else {}
         group = cast(dict[str, object], optimizer.param_groups[0])
         if not self.trace.rates:
             self.trace.state = {k: v.clone() for k, v in model.state_dict().items()}
@@ -487,20 +522,15 @@ class _MainSpy:
             self.trace.settings = {
                 name: float(cast(float, group[name]))
                 for name in reference.HYPERPARAMETERS
+                if name in group
             }
         self.trace.rates.append(from_plain(group["lr"], float))
         self.trace.configs.append(dict(config))
         return 0.0, 0.0
 
-    def evaluate(
-        self,
-        model: nn.Module,
-        loader: object,
-        device: torch.device,
-        config: dict[str, int],
-    ) -> tuple[float, float]:
-        """Report the next scripted accuracy."""
-        del model, loader, device, config
+    def evaluate(self, *args: object) -> tuple[float, float]:
+        """Report the next scripted accuracy, whatever the script passes."""
+        del args
         return 0.0, 100.0 * next(self.scripted) / reference.SCRIPTED_TOTAL
 
 
@@ -564,11 +594,13 @@ def _loaders(
     script: Upstream,
     *,
     num_workers: int,
+    dataset: str = "cifar100",
 ) -> tuple[DataLoader[tuple[Tensor, Tensor]], DataLoader[tuple[Tensor, Tensor]]]:
     """Build the reference's loaders over the synthetic split."""
-    with mock.patch.object(script.torchvision.datasets, "CIFAR100", _FakeCifar100):
+    name = DATASETS[dataset]
+    with mock.patch.object(script.torchvision.datasets, name, _FakeCifar100):
         train, test, _ = script.get_dataloaders(
-            "cifar100",
+            dataset,
             "unused",
             batch_size=reference.LOADER_BATCH,
             num_workers=num_workers,

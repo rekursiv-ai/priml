@@ -213,6 +213,30 @@ def test_main_is_traced_for_every_epoch(tmp_path: Path) -> None:
     assert trace.draws.shape == (8,)
 
 
+def test_main_is_traced_for_any_setting(tmp_path: Path) -> None:
+    trace = upstream.trace_main(
+        script(tmp_path),
+        arch="resnet20",
+        dataset="cifar10",
+        classes=10,
+    )
+    assert trace.configs[0] == {"num_classes": 10, "epoch": 0, "total_epochs": 200}
+
+
+def test_batches_of_cifar10_read_the_synthetic_split(tmp_path: Path) -> None:
+    root = tmp_path / "clone"
+    write_clone(root)
+    path = root / upstream.PRISTINE
+    path.write_text(SCRIPT.replace("datasets.CIFAR100(", "datasets.CIFAR10("))
+    train, evaluation = upstream.upstream_batches(
+        upstream.load_script(path),
+        dataset="cifar10",
+    )
+    assert len(train) == len(evaluation) == reference.LOADER_PASSES
+    labels = torch.cat([batch["label"] for batch in evaluation[0]])
+    assert labels.tolist() == list(range(reference.LOADER_IMAGES))
+
+
 def test_the_reported_accuracy_is_the_best_scripted_one(tmp_path: Path) -> None:
     trace = upstream.trace_main(script(tmp_path))
     best = 100.0 * max(reference.SCRIPTED_CORRECT) / reference.SCRIPTED_TOTAL

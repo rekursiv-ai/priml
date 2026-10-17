@@ -12,6 +12,7 @@ the order parameters are summed in, so reordering is not a refactor.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import KW_ONLY, field
 from typing import Self, cast, override
 
@@ -37,6 +38,33 @@ from priml.model.init import InitFn, call_init
 from priml.model.norm import BatchNorm2d
 from priml.model.pool import avg_pool_cost
 from priml.model.swiglu import relu
+
+
+class GlobalAvgPool(nn.Module):
+    """Average every channel over its whole spatial grid: ``(B, C, H, W) -> (B, C)``."""
+
+    class Config(Fig["GlobalAvgPool"]):
+        """No parameters; a config so the pool is a slot a fork can fill."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+        super().__init__()
+
+    @override
+    def forward(self, x: Tensor) -> Tensor:
+        return functional.adaptive_avg_pool2d(x, 1).flatten(1)
+
+
+type NormFn = Callable[[int], nn.Module]
+"""Builds a normalization layer for a channel count; a class such as ``nn.BatchNorm2d``."""
+
+type ModelInitFn = Callable[[nn.Module], object]
+"""Initializes a built network in place, from its whole structure."""
+
+
+def keep_initialization(model: nn.Module) -> None:
+    """Leave the network as the per-tensor initializers left it."""
+    del model
 
 
 def kaiming_normal_fan_out(w: Tensor) -> None:
@@ -78,6 +106,9 @@ class BasicBlock(nn.Module):
 
         activation: ActivationFn = relu
         """Activation after the first normalization and after the sum."""
+
+        norm: NormFn = nn.BatchNorm2d
+        """Builds each normalization: after each convolution and in the projection."""
 
         @override
         def finalize(self) -> Self:
@@ -177,7 +208,7 @@ class BasicBlock(nn.Module):
             padding=1,
             bias=False,
         )
-        self.norm1 = nn.BatchNorm2d(config.channels_out)
+        self.norm1 = config.norm(config.channels_out)
         self.conv2 = nn.Conv2d(
             config.channels_out,
             config.channels_out,
@@ -185,7 +216,10 @@ class BasicBlock(nn.Module):
             padding=1,
             bias=False,
         )
-        self.norm2 = nn.BatchNorm2d(config.channels_out)
+        self.norm2 = config.norm(config.channels_out)
+        # Before the shortcut, as upstream registers it: an activation with
+        # parameters draws its initialization in this position.
+        self.act = _activation(config.activation)
         self.shortcut = (
             nn.Sequential(
                 nn.Conv2d(
@@ -195,17 +229,16 @@ class BasicBlock(nn.Module):
                     stride=config.stride,
                     bias=False,
                 ),
-                nn.BatchNorm2d(config.channels_out),
+                config.norm(config.channels_out),
             )
             if config.stride != 1 or config.channels_in != config.channels_out
             else nn.Identity()
         )
-        self.act = _activation(config.activation)
 
     @override
     def forward(self, x: Tensor) -> Tensor:
-        h = self.act(self.norm1(self.conv1(x)))
-        return self.act(self.norm2(self.conv2(h)) + self.shortcut(x))
+        h = self.act(cast(Tensor, self.norm1(self.conv1(x))))
+        return self.act(cast(Tensor, self.norm2(self.conv2(h))) + self.shortcut(x))
 
 
 class ResNet(nn.Module):
@@ -231,11 +264,22 @@ class ResNet(nn.Module):
         blocks_per_stage: tuple[int, ...] = (3, 3, 3)
         """Blocks in each stage, one entry per entry of ``channels_hidden``."""
 
-        block: Makeable[nn.Module] = field(default_factory=BasicBlock.Config)
-        """Block template, copied per position and sized from the stage."""
+        block: Makeable[nn.Module] | list[Makeable[nn.Module]] = field(
+            default_factory=BasicBlock.Config,
+        )
+        """Block template copied per position, or one config per position in order.
+
+        Either way each is sized from its stage. A list gives a block its own
+        position-dependent values (stochastic depth's survival)."""
 
         activation: ActivationFn = relu
         """Activation of the stem and, pushed down, of every block."""
+
+        norm: NormFn = nn.BatchNorm2d
+        """Builds the stem's normalization and, pushed down, every block's."""
+
+        pool: Makeable[nn.Module] = field(default_factory=GlobalAvgPool.Config)
+        """Reduces the last stage's ``(B, C, H, W)`` to ``(B, C)`` for the head."""
 
         init_conv: InitFn = kaiming_normal_fan_out
         """Initializer for every convolution weight."""
@@ -245,6 +289,9 @@ class ResNet(nn.Module):
 
         init_bias: InitFn = nn.init.zeros_
         """Initializer for the classifier bias."""
+
+        init: ModelInitFn = keep_initialization
+        """Runs on the built network after the per-tensor initializers."""
 
         def cost(
             self,
@@ -320,7 +367,7 @@ class ResNet(nn.Module):
             padding=1,
             bias=False,
         )
-        self.norm = nn.BatchNorm2d(config.channels_hidden[0])
+        self.norm = config.norm(config.channels_hidden[0])
         self.act = _activation(config.activation)
         self.stages = nn.Sequential(
             *(
@@ -328,6 +375,9 @@ class ResNet(nn.Module):
                 for stage in _stages(config)
             ),
         )
+        # Registered between the stages and the head, as upstream's ``CustomPool``
+        # is: a pool with parameters draws its initialization in this position.
+        self.pool = config.pool.make()
         self.head = nn.Linear(config.channels_hidden[-1], config.channels_out)
         # Construction above already drew torch's default initialization for every
         # layer. Those draws are overwritten here but stay in the stream: skipping
@@ -338,6 +388,7 @@ class ResNet(nn.Module):
                 call_init(config.init_conv, module.weight)
         call_init(config.init_head, self.head.weight)
         call_init(config.init_bias, cast(Tensor, self.head.bias))
+        config.init(self)
 
     @override
     def forward(self, media: Tensor) -> Tensor:
@@ -350,8 +401,8 @@ class ResNet(nn.Module):
           logits: ``(B, channels_out)`` class scores.
 
         """
-        x = self.stages(self.act(self.norm(self.stem(media))))
-        return self.head(functional.adaptive_avg_pool2d(x, 1).flatten(1))
+        x = self.stages(self.act(cast(Tensor, self.norm(self.stem(media)))))
+        return self.head(self.pool(x))
 
 
 def _conv_cost(
@@ -416,6 +467,15 @@ def _stages(
     """Size one block config per position and pair it with its stride."""
     if min(config.blocks_per_stage) < 1:
         raise ValueError(f"Every stage needs a block; got {config.blocks_per_stage}.")
+    total = sum(config.blocks_per_stage)
+    templates = (
+        config.block if isinstance(config.block, list) else [config.block] * total
+    )
+    if len(templates) != total:
+        raise ValueError(
+            f"block lists {len(templates)} configs; blocks_per_stage needs {total}.",
+        )
+    configs = iter(templates)
     stages: list[list[tuple[Makeable[nn.Module], int]]] = []
     channels = config.channels_hidden[0]
     for index, (width, count) in enumerate(
@@ -423,7 +483,7 @@ def _stages(
     ):
         stage: list[tuple[Makeable[nn.Module], int]] = []
         for position in range(count):
-            block = copy_tree(config.block)
+            block = copy_tree(next(configs))
             propagate_attr(block, "channels_in", channels, protocol=ChannelsIn)
             propagate_attr(block, "channels_out", width, protocol=ChannelsOut)
             channels = width
@@ -432,6 +492,7 @@ def _stages(
             stride = 2 if index and not position else 1
             propagate_attr(block, "stride", stride)
             propagate_attr(block, "activation", config.activation)
+            propagate_attr(block, "norm", config.norm)
             stage.append((block, stride))
         stages.append(stage)
     return stages

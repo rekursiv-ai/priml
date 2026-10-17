@@ -1,0 +1,175 @@
+"""Tests for the ``dl-activation-function`` experiment chain.
+
+``exp000`` is pinned by its delta from the vision recipe and by its golden;
+each fork is checked as a delta, exactly which fields differ from ``exp000``,
+so "one slot per idea" is a property of the code.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Final, override
+
+import inspect
+
+from configgle import Fig
+from torch import Tensor, nn
+
+import pytest
+import torch
+
+from priml.baselines.mlsbench.activation import experiments
+from priml.baselines.mlsbench.activation.experiments import (
+    exp000,
+    exp001,
+    exp002,
+    exp003,
+)
+from priml.baselines.mlsbench.pytorch_vision import experiments as vision
+from priml.baselines.mlsbench.pytorch_vision.experiments_test import (
+    changed_fields,
+    shrink,
+)
+from priml.baselines.mlsbench.pytorch_vision.model import ResNet
+from priml.cost import cost
+from priml.testing.golden import assert_pprint_golden
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from priml.baselines.mlsbench.pytorch_vision.experiments import VisionTrainLoop
+    from priml.testing.experiments import ExperimentFactory
+
+ALL_EXPERIMENTS: Final[list[ExperimentFactory[VisionTrainLoop]]] = [
+    exp000,
+    exp001,
+    exp002,
+    exp003,
+]
+
+
+class Scaled(nn.Module):
+    """ReLU times a learned scalar: an activation with a parameter of its own."""
+
+    class Config(Fig["Scaled"]):
+        """No settings; a config so the activation is built once per use."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+        super().__init__()
+        self.scale = nn.Parameter(torch.ones(()))
+
+    @override
+    def forward(self, x: Tensor) -> Tensor:
+        return self.scale * torch.relu(x)
+
+
+def test_exp000_is_the_vision_recipe_at_resnet20_on_cifar10() -> None:
+    assert changed_fields(vision.exp000(), exp000()) == {
+        "study_name",
+        "step.model.channels_out",
+        "dataset.working_dir",
+        *(
+            f"{name}[{index}]"
+            for name in (
+                "step.model.blocks_per_stage",
+                "dataset.mean",
+                "dataset.std",
+            )
+            for index in range(3)
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [exp001, exp002, exp003],
+    ids=["exp001", "exp002", "exp003"],
+)
+def test_a_fork_changes_only_the_activation(
+    factory: ExperimentFactory[VisionTrainLoop],
+) -> None:
+    assert changed_fields(exp000(), factory()) == {
+        "experiment_name",
+        "step.model.activation",
+    }
+
+
+def test_every_activation_costs_through_the_network() -> None:
+    for factory in ALL_EXPERIMENTS:
+        model = factory().step.model
+        assert isinstance(model, ResNet.Config)
+        total = cost(model.copy_tree().finalize(), batch_size=2, dtype=None)
+        assert sum(total["flops"].cells.values()) > 0
+
+
+def test_one_activation_per_stem_and_per_block_as_the_script_builds_them() -> None:
+    config = exp000().step.model
+    assert isinstance(config, ResNet.Config)
+    config.activation = Scaled.Config()
+    model = config.make()
+    assert sum(isinstance(m, Scaled) for m in model.modules()) == 1 + 9
+    names = [name for name, _ in model.named_parameters()]
+    # The script registers each block's activation after its second norm and
+    # before the shortcut, and the stem's after the stem's norm.
+    assert names[:4] == ["stem.weight", "norm.weight", "norm.bias", "act.scale"]
+    first = [n.removeprefix("stages.1.0.") for n in names if "stages.1.0." in n]
+    assert first.index("act.scale") == first.index("norm2.bias") + 1
+    assert first.index("act.scale") < first.index("shortcut.0.weight")
+
+
+@pytest.mark.parametrize(
+    "factory",
+    ALL_EXPERIMENTS,
+    ids=[f.__name__ for f in ALL_EXPERIMENTS],
+)
+def test_experiment_trains_at_minimum_size(
+    factory: ExperimentFactory[VisionTrainLoop],
+    tmp_path: Path,
+) -> None:
+    generator = torch.Generator().manual_seed(0)
+    for split in ("train", "test"):
+        torch.save(
+            {
+                "media": torch.randint(0, 256, (8, 3, 8, 10), generator=generator).to(
+                    torch.uint8,
+                ),
+                "label": torch.randint(0, 10, (8,), generator=generator),
+            },
+            tmp_path / f"{split}.pt",
+        )
+    loop = shrink(factory(), directory=tmp_path).make()
+    loop.train()
+    assert loop.step.global_step == 2
+    assert factory().experiment_name == factory.__name__
+
+
+@pytest.mark.parametrize(
+    "factory",
+    ALL_EXPERIMENTS,
+    ids=[f.__name__ for f in ALL_EXPERIMENTS],
+)
+def test_every_experiment_states_its_hypothesis_sources_and_pending_results(
+    factory: ExperimentFactory[VisionTrainLoop],
+) -> None:
+    doc = inspect.getdoc(factory) or ""
+    assert "Hypothesis:" in doc
+    assert "References:" in doc
+    assert "80cf5c5cc8f70fb1b09f185e59ebf5eca04f610c" in doc
+    assert doc.rstrip().endswith("Results:\n  TBD.")
+    assert factory.__name__ in (inspect.getdoc(experiments) or "")
+
+
+def test_each_fork_names_its_parent_in_the_first_line() -> None:
+    for child in (exp001, exp002, exp003):
+        assert (inspect.getdoc(child) or "").startswith("exp000 + "), child.__name__
+
+
+def test_exp000_matches_its_golden_config() -> None:
+    assert_pprint_golden(test_file=__file__, name="exp000", config=exp000())
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)

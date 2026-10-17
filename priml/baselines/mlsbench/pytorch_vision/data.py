@@ -15,12 +15,21 @@ constructing a config never touches the network.
 
 from __future__ import annotations
 
+from dataclasses import field
 from pathlib import Path
-from typing import TYPE_CHECKING, NotRequired, Self, TypedDict, cast, override
+from typing import (
+    TYPE_CHECKING,
+    NotRequired,
+    Protocol,
+    Self,
+    TypedDict,
+    cast,
+    override,
+)
 
 import logging
 
-from configgle import Fig
+from configgle import Fig, Makeable, PartialConfig
 from torch import Tensor
 from torch.nn import functional
 
@@ -83,6 +92,15 @@ class Cifar100Data:
 
         std: tuple[float, float, float] = (0.2675, 0.2565, 0.2761)
         """Per-channel standard deviation divided out after centering."""
+
+        augment: Makeable[Augment] = field(
+            default_factory=lambda: PartialConfig(pad_crop_flip_normalize),
+        )
+        """Turns a batch of uint8 training images into normalized float images.
+
+        Called with the batch, its stream (one per reference loader worker),
+        and ``pad``, ``mean`` and ``std`` from this config, so a fork changes
+        only the augmentation and keeps the dataset's statistics."""
 
         @override
         def finalize(self) -> Self:
@@ -183,6 +201,48 @@ def normalize(images: Tensor, *, mean: Tensor, std: Tensor) -> Tensor:
 
     """
     return (images.float().div(255) - mean.view(-1, 1, 1)) / std.view(-1, 1, 1)
+
+
+class Augment(Protocol):
+    """Turns uint8 training images into normalized float images, drawing from ``stream``."""
+
+    def __call__(
+        self,
+        images: Tensor,
+        stream: torch.Generator,
+        /,
+        *,
+        pad: int,
+        mean: Tensor,
+        std: Tensor,
+    ) -> Tensor:
+        """Return ``(B, C, H, W)`` float32 images for ``(B, C, H, W)`` uint8 ``images``."""
+        raise NotImplementedError
+
+
+def pad_crop_flip_normalize(
+    images: Tensor,
+    stream: torch.Generator,
+    /,
+    *,
+    pad: int,
+    mean: Tensor,
+    std: Tensor,
+) -> Tensor:
+    """Pad, crop and mirror at random, then normalize: the reference's training pipeline.
+
+    Args:
+      images: ``(B, C, H, W)`` uint8 pixels.
+      stream: Generator the draws come from, advanced in place.
+      pad: Pixels of zeros added on every side before the crop.
+      mean: ``(C,)`` float32 channel means.
+      std: ``(C,)`` float32 channel standard deviations.
+
+    Returns:
+      media: ``(B, C, H, W)`` float32 images.
+
+    """
+    return normalize(pad_crop_flip(images, stream, pad=pad), mean=mean, std=std)
 
 
 def pad_crop_flip(images: Tensor, stream: torch.Generator, *, pad: int) -> Tensor:
@@ -291,6 +351,7 @@ class _TrainLoader:
         self.pad = config.translate_pad
         self.mean = torch.tensor(config.mean)
         self.std = torch.tensor(config.std)
+        self.augment = config.augment.make()
         self._order: Tensor | None = None
         self._streams: list[torch.Generator] = []
         self._next_batch = 0
@@ -315,13 +376,14 @@ class _TrainLoader:
                 continue
             index = order[start : start + self.batch_size]
             self._next_batch = batch_index + 1
-            images = pad_crop_flip(
-                self.media[index],
-                self._streams[batch_index % self.num_streams],
-                pad=self.pad,
-            )
             yield {
-                "media": normalize(images, mean=self.mean, std=self.std),
+                "media": self.augment(
+                    self.media[index],
+                    self._streams[batch_index % self.num_streams],
+                    pad=self.pad,
+                    mean=self.mean,
+                    std=self.std,
+                ),
                 "label": self.label[index],
             }
         self._order = None

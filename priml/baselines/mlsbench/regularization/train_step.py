@@ -1,0 +1,102 @@
+"""The vision training step with a regularization term added to the loss.
+
+The editable region of the ``dl-regularization`` script is a function of the
+network, the batch, the logits and the run's configuration, whose scalar is
+added to cross-entropy before every backward pass. It reads the network, which
+the vision step's ``loss`` slot never sees, so here it is a slot of its own on a
+subclass; the parent step is unchanged.
+"""
+
+from __future__ import annotations
+
+from dataclasses import field
+from typing import TYPE_CHECKING, Protocol, override
+
+from configgle import Makeable, PartialConfig
+from torch import Tensor
+
+from priml.baselines.mlsbench.pytorch_vision.train_step import (
+    LossContext,
+    VisionTrainStep,
+)
+from priml.baselines.mlsbench.regularization.regularizers import zero
+
+
+if TYPE_CHECKING:
+    from torch import nn
+
+    from priml.train.custom_types import TrainStepOutput
+
+
+class Regularizer(Protocol):
+    """Maps the network and one batch's forward to a scalar added to the loss."""
+
+    def __call__(
+        self,
+        model: nn.Module,
+        /,
+        *,
+        media: Tensor,
+        logits: Tensor,
+        label: Tensor,
+        context: LossContext,
+    ) -> Tensor:
+        """Return the regularization term for this update."""
+        raise NotImplementedError
+
+
+class RegularizedTrainStep(VisionTrainStep):
+    """The vision step, minimizing its loss plus a regularization term."""
+
+    class Config(VisionTrainStep.Config, kw_only=True):
+        """The vision step's slots and the regularizer."""
+
+        if TYPE_CHECKING:
+
+            @override
+            def make(self) -> RegularizedTrainStep:
+                """Build this step."""
+                ...
+
+        regularization: Makeable[Regularizer] = field(
+            default_factory=lambda: PartialConfig(zero),
+        )
+        """Scalar added to the loss of every update; zero adds nothing."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.regularization: Regularizer = config.regularization.make()
+
+    @override
+    def train_step(self, **batch: object) -> TrainStepOutput:
+        """Run one update on the loss plus the regularization term.
+
+        Args:
+          **batch: Preprocessed batch with ``media`` and ``label``.
+
+        Returns:
+          result: ``loss`` (the scalar minimized) and ``model`` (logits).
+
+        """
+        media = batch["media"]
+        assert isinstance(media, Tensor)
+        label = batch["label"]
+        assert isinstance(label, Tensor)
+        self._apply_schedule()
+        self.optimizer.zero_grad(set_to_none=True)
+        logits = self(media=media)
+        assert isinstance(logits, Tensor)
+        context = self._context(logits)
+        ce = self.loss(logits, label=label, context=context)["loss"]
+        reg = self.regularization(
+            self.model,
+            media=media,
+            logits=logits,
+            label=label,
+            context=context,
+        )
+        loss = ce + reg
+        loss.backward()
+        with self.timer_step:
+            self.optimizer.step()
+        return {"loss": loss.detach(), "model": logits.detach()}

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, ClassVar, Final, cast
 
 import logging
 
+from configgle import PartialConfig
 from torch import Tensor
 from torch.nn import functional
 from torchvision import datasets
@@ -169,6 +170,34 @@ def test_batches_follow_the_two_seeds_and_round_robin_streams(tmp_path: Path) ->
         )
         assert torch.equal(batch["media"], expected)
         assert torch.equal(batch["label"], chosen)
+
+
+def flipped(
+    images: Tensor,
+    stream: torch.Generator,
+    /,
+    *,
+    pad: int,
+    mean: Tensor,
+    std: Tensor,
+) -> Tensor:
+    """Mirror every image and normalize; draws nothing from ``stream``."""
+    del stream, pad
+    return normalize(images.flip(-1), mean=mean, std=std)
+
+
+def test_the_augment_slot_replaces_the_training_pipeline_only(tmp_path: Path) -> None:
+    media = write_split(tmp_path)
+    config = make_data(tmp_path).config
+    config.augment = PartialConfig(flipped)
+    data = config.make()
+    seed(0)
+    (first, *_) = list(data.train_dataloader())
+    mean, std = torch.tensor(config.mean), torch.tensor(config.std)
+    expected = normalize(media[first["label"]].flip(-1), mean=mean, std=std)
+    assert torch.equal(first["media"], expected)
+    (evaluated, *_) = list(data.eval_dataloader())
+    assert torch.equal(evaluated["media"], normalize(media[:2], mean=mean, std=std))
 
 
 def test_eval_pass_is_sequential_unaugmented_and_draws_one_unused_seed(

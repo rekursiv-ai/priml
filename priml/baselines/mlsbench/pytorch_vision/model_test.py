@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final, cast
 
-from configgle import InlineConfig
+from configgle import InlineConfig, Makeable
 from torch import Tensor, nn
 
 import pytest
@@ -65,7 +65,7 @@ def registered(prefix: str, *, projected: bool) -> list[str]:
 
 def stage_shapes(model: ResNet, media: Tensor) -> list[tuple[int, ...]]:
     """Return the shape each stage hands to the next."""
-    x = model.act(model.norm(model.stem(media)))
+    x = model.act(cast(Tensor, model.norm(model.stem(media))))
     shapes: list[tuple[int, ...]] = []
     for stage in model.stages:
         x = stage(x)
@@ -130,8 +130,9 @@ def test_layers_are_registered_in_the_reference_order() -> None:
 def test_default_initialization_is_he_normal_with_a_zero_head_bias() -> None:
     model = tiny().make()
     assert torch.eq(cast(Tensor, model.head.bias), 0).all()
-    assert torch.eq(model.norm.weight, 1).all()
-    assert torch.eq(model.norm.bias, 0).all()
+    norm = cast(nn.BatchNorm2d, model.norm)
+    assert torch.eq(norm.weight, 1).all()
+    assert torch.eq(norm.bias, 0).all()
     assert model.stem.weight.std() > 0
 
 
@@ -172,6 +173,59 @@ def test_a_stateful_activation_is_built_once_per_use() -> None:
     acts = [model.act, *(b.act for stage in blocks(model) for b in stage)]
     assert all(isinstance(act, nn.PReLU) for act in acts)
     assert len({id(act) for act in acts}) == len(acts)
+
+
+def test_the_norm_slot_reaches_the_stem_every_block_and_every_projection() -> None:
+    config = tiny()
+    config.norm = nn.InstanceNorm2d
+    model = config.make()
+    norms = [model.norm] + [
+        layer
+        for stage in blocks(model)
+        for b in stage
+        for layer in (b.norm1, b.norm2, *b.shortcut.children())
+        if not isinstance(layer, nn.Conv2d)
+    ]
+    assert len(norms) == 1 + 2 * 3 + 2
+    assert all(type(norm) is nn.InstanceNorm2d for norm in norms)
+
+
+def test_the_pool_slot_feeds_the_head_and_registers_before_it() -> None:
+    config = tiny()
+    config.pool = InlineConfig(nn.Sequential, nn.AdaptiveMaxPool2d(1), nn.Flatten())
+    model = config.make()
+    media = torch.randn(BATCH, 3, HEIGHT, WIDTH)
+    features = model.stages(model.act(cast(Tensor, model.norm(model.stem(media)))))
+    assert torch.equal(model(media), model.head(features.amax(dim=(-2, -1))))
+    assert list(dict(model.named_children())) == [
+        "stem",
+        "norm",
+        "stages",
+        "pool",
+        "head",
+    ]
+
+
+def test_the_init_hook_runs_after_the_per_tensor_initializers() -> None:
+    seen: list[Tensor] = []
+    config = tiny()
+    config.init_conv = nn.init.ones_
+    config.init = lambda model: seen.append(cast(ResNet, model).stem.weight.clone())
+    _ = config.make()
+    (stem,) = seen
+    assert torch.eq(stem, 1).all()
+
+
+def test_a_block_list_gives_each_position_its_own_config() -> None:
+    config = tiny()
+    marked: Makeable[nn.Module] = InlineConfig(nn.Identity)
+    config.block = [BasicBlock.Config(), marked, BasicBlock.Config()]
+    model = config.make()
+    kinds = [type(stage[0]) for stage in model.stages]
+    assert kinds == [BasicBlock, nn.Identity, BasicBlock]
+    config.block = [marked, marked]
+    with pytest.raises(ValueError, match="block lists 2 configs"):
+        config.make()
 
 
 def test_building_leaves_the_block_template_untouched() -> None:

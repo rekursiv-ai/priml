@@ -1,9 +1,8 @@
-"""MLS-Bench harness: score a code edit against a task's published leaderboard.
+"""MLS-Bench tasks, re-implemented as native priml baselines.
 
-A task is a directory of editable files, settings (scripts run in a pinned
-container) and a leaderboard. This package parses the task (:mod:`.task`),
-materializes a workspace with one edit applied and guards the edit surface
-(:mod:`.workspace`). Nothing from upstream is vendored: tasks are read from a
-clone at the logical path ``/mlsbench`` beneath ``base_dir`` (upstream pin
-``80cf5c5c``). Importing this package has no side effects.
+Each subpackage ports one upstream task: its editable function becomes a config
+slot, ``exp000`` is the pristine recipe end to end, and each idea is a fork
+that changes only that slot. A capture script proves every port bit for bit
+against the pristine upstream script (pinned commit ``80cf5c5c``). Nothing from
+upstream is vendored.
 """
