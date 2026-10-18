@@ -626,22 +626,6 @@ def resolve_rank(rank: int, num_replicas: int) -> tuple[int, int]:
     return rank, num_replicas
 
 
-# The builder writes int32; another builder may write narrower dtypes into the same
-# layout. Not checked at runtime: readers only index, and ``_collate`` casts each slice.
-def _load_int32(path: Path, *, mmap: bool = False) -> NDArray[np.int32]:
-    loaded = cast(object, np.load(path, mmap_mode="r" if mmap else None))
-    assert isinstance(loaded, np.ndarray)
-    return loaded
-
-
-def _last(values: NDArray[np.integer]) -> int:
-    return int(values[-1])  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
-
-
-def _at(values: NDArray[np.integer], index: int) -> int:
-    return int(values[index])  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
-
-
 class ParquetPair(TypedDict):
     """One ARC demonstration or test example."""
 
@@ -1829,8 +1813,8 @@ def _collate(
     task_ids = torch.zeros(batch_size, dtype=torch.int64)
     dih_ids = torch.zeros(batch_size, dtype=torch.int64)
     color_slots = torch.zeros((batch_size, 9), dtype=torch.int64)
-    color_slots[:, :] = torch.arange(9, dtype=torch.int64)
-    spatial = torch.tensor([1, 0, 0], dtype=torch.int64).expand(batch_size, 3).clone()
+    color_slots[:, :] = torch.arange(9)
+    spatial = torch.tensor([1, 0, 0]).expand(batch_size, 3).clone()
     for index, sample in enumerate(samples):
         media[index] = torch.from_numpy(sample["media"])
         if labels is not None:
@@ -1841,14 +1825,8 @@ def _collate(
         puzzle_ids[index] = sample["puzzle_identifiers"]
         task_ids[index] = sample["puzzle_idxs"]
         dih_ids[index] = sample["dih_idxs"]
-        color_slots[index] = torch.tensor(
-            sample["colorperm_slots"],
-            dtype=torch.int64,
-        )
-        spatial[index] = torch.tensor(
-            sample["spatial_tags"],
-            dtype=torch.int64,
-        )
+        color_slots[index] = torch.tensor(sample["colorperm_slots"])
+        spatial[index] = torch.tensor(sample["spatial_tags"])
     batch: ArcBatch = {
         "media": media,
         "puzzle_identifiers": puzzle_ids,
@@ -1952,3 +1930,19 @@ def _validate_runtime_config(config: ArcParquetData.Config) -> None:
         raise ValueError("num_tasks cannot be negative.")
     if config.num_instances is not None and config.num_instances < 0:
         raise ValueError("num_instances cannot be negative.")
+
+
+# The builder writes int32; another builder may write narrower dtypes into the same
+# layout. Not checked at runtime: readers only index, and ``_collate`` casts each slice.
+def _load_int32(path: Path, *, mmap: bool = False) -> NDArray[np.int32]:
+    loaded = cast(object, np.load(path, mmap_mode="r" if mmap else None))
+    assert isinstance(loaded, np.ndarray)
+    return loaded
+
+
+def _last(values: NDArray[np.integer]) -> int:
+    return int(values[-1])  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+
+
+def _at(values: NDArray[np.integer], index: int) -> int:
+    return int(values[index])  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.

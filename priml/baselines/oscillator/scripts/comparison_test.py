@@ -2,12 +2,12 @@
 
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Final, cast
 
 import argparse
 import re
 import shutil
-import subprocess
 
 from treekle import from_plain, json_loads
 
@@ -76,10 +76,12 @@ def test_every_case_seed_and_recipe_is_run_labelled_and_recorded(
 ) -> None:
     """The study itself is stubbed; this pins the loop around it."""
     calls: list[list[str]] = []
+    # Only the module's own reference: ``platform.platform()`` runs ``uname`` through
+    # the real ``subprocess`` on its first call on x86.
     monkeypatch.setattr(
-        subprocess,
-        "check_output",
-        partial(_record_git, calls=calls),
+        comparison,
+        "subprocess",
+        SimpleNamespace(check_output=partial(_record_git, calls=calls)),
     )
     monkeypatch.setattr(ForecastStudy, "run", _canned_run)
     directory = tmp_path / "run"

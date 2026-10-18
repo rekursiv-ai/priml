@@ -1497,10 +1497,100 @@ def _g00_puzzle_batches(
     )
 
 
-if __name__ == "__main__":
-    from priml.lib.testing.runner import test_main
-
-    test_main(__file__)
+def test_pair_view_collate_masks_labels_and_pads_every_field() -> None:
+    inputs = [np.zeros((2, 3), dtype=np.uint8), np.ones((2, 3), dtype=np.uint8)]
+    samples: list[arc_data.PairViewSample] = [
+        {
+            "media": np.arange(1, 10, dtype=np.int32),
+            "puzzle_identifiers": 5,
+            "puzzle_idxs": 6,
+            "dih_idxs": 7,
+            "colorperm_slots": tuple(range(8, -1, -1)),
+            "spatial_tags": (0, 2, 3),
+            "canonical_puzzle_name": "first",
+            "canonical_input": inputs[0],
+            "canonical_output": None,
+            "input_metadata": {"view": 0},
+            "label": np.array([0, 5, 0, 7, 1, 0, 2, 3, 4], dtype=np.int32),
+        },
+        {
+            "media": np.arange(10, 19, dtype=np.int32),
+            "puzzle_identifiers": 9,
+            "puzzle_idxs": 10,
+            "dih_idxs": 11,
+            "colorperm_slots": (1, 0, 2, 3, 4, 5, 6, 7, 8),
+            "spatial_tags": (1, 4, 5),
+            "canonical_puzzle_name": "second",
+            "canonical_input": inputs[1],
+            "canonical_output": inputs[0],
+            "input_metadata": {"view": 1},
+            "label": np.array([1, 0, 2, 0, 0, 3, 4, 5, 6], dtype=np.int32),
+        },
+    ]
+    batch = arc_data._collate(samples, batch_size=4, canvas_size=3, include_label=True)
+    assert set(batch) == {
+        "media",
+        "label",
+        "puzzle_identifiers",
+        "puzzle_idxs",
+        "dih_idxs",
+        "colorperm_slots",
+        "spatial_tags",
+        "valid_count",
+        "canonical_puzzle_names",
+        "canonical_inputs",
+        "canonical_outputs",
+        "input_metadata",
+    }
+    assert "label" in batch
+    assert batch["media"].dtype == batch["label"].dtype == torch.int32
+    assert batch["media"].tolist() == [
+        list(range(1, 10)),
+        list(range(10, 19)),
+        [0] * 9,
+        [0] * 9,
+    ]
+    assert batch["label"].tolist() == [
+        [-100, 5, -100, 7, 1, -100, 2, 3, 4],
+        [1, -100, 2, -100, -100, 3, 4, 5, 6],
+        [-100] * 9,
+        [-100] * 9,
+    ]
+    ids = ("puzzle_identifiers", "puzzle_idxs", "dih_idxs")
+    assert all(batch[name].dtype == torch.int64 for name in ids)
+    assert [batch[name].tolist() for name in ids] == [
+        [5, 9, 0, 0],
+        [6, 10, 0, 0],
+        [7, 11, 0, 0],
+    ]
+    assert batch["colorperm_slots"].dtype == batch["spatial_tags"].dtype == torch.int64
+    assert batch["colorperm_slots"].tolist() == [
+        list(range(8, -1, -1)),
+        [1, 0, 2, 3, 4, 5, 6, 7, 8],
+        list(range(9)),
+        list(range(9)),
+    ]
+    assert batch["spatial_tags"].tolist() == [
+        [0, 2, 3],
+        [1, 4, 5],
+        [1, 0, 0],
+        [1, 0, 0],
+    ]
+    assert batch["valid_count"] == 2
+    assert batch["canonical_puzzle_names"] == ["first", "second"]
+    assert batch["canonical_inputs"] == inputs
+    assert batch["canonical_outputs"] == [None, inputs[0]]
+    assert batch["input_metadata"] == [{"view": 0}, {"view": 1}]
+    del samples[0]["label"]
+    with pytest.raises(ValueError, match=r"^Training sample is missing its label\.$"):
+        arc_data._collate(samples, batch_size=4, canvas_size=3, include_label=True)
+    unlabelled = arc_data._collate(
+        samples,
+        batch_size=4,
+        canvas_size=3,
+        include_label=False,
+    )
+    assert "label" not in unlabelled
 
 
 def test_iter_parquet_rows_streams_typed_v2_rows(tmp_path: Path) -> None:
@@ -2675,3 +2765,9 @@ def _make_rank_data(path: Path, *, rank: int) -> ArcParquetData:
     cfg.seed = 17
     cfg.p_translate = 0.0
     return cfg.make()
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.runner import test_main
+
+    test_main(__file__)
