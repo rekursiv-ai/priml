@@ -96,8 +96,10 @@ class ForecastStudy:
         synthetic = self.data.windows(cfg.data.synthetic, simulator=self.data.cheap)
         _, scale = train.channel_stats()
         seed = make_seed() if cfg.seed is None else cfg.seed
+        # ``torch.manual_seed`` would also seed CUDA, which this CPU-only fork
+        # does not restore, so a study would reseed its caller's GPU stream.
         with torch.random.fork_rng(devices=[]):
-            torch.manual_seed(seed)
+            torch.default_generator.manual_seed(seed)
             method = cfg.method.make()
             training = method.fit(
                 train,
@@ -113,8 +115,8 @@ class ForecastStudy:
             test = self.data.windows(states, simulator=self.data.reference)
             predictions = {
                 "method": method.predict(test.media),
-                "cheap_simulator": self.data.cheap.forecast(
-                    test.media[:, -1],
+                "cheap_simulator": self.data.cheap.forecast_history(
+                    test.media,
                     steps=cfg.data.pred_len,
                 ),
                 "last_value": test.media[:, -1:].expand_as(test.label),

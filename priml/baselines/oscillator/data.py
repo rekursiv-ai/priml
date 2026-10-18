@@ -76,6 +76,10 @@ class Oscillator:
             frames.append(torch.stack((position, velocity), dim=-1))
         return torch.stack(frames, dim=1)
 
+    def forecast_history(self, media: Tensor, *, steps: int) -> Tensor:
+        """Forecast from observed histories; these dynamics need only the last state."""
+        return self.forecast(media[:, -1], steps=steps)
+
     def acceleration(self, position: Tensor, *, velocity: Tensor) -> Tensor:
         """Evaluate the force at the current state.
 
@@ -116,6 +120,10 @@ class InitialStates:
             raise ValueError("Initial-condition bounds must be finite.")
         if config.count <= 0 or low < 0 or low >= high or config.velocity < 0:
             raise ValueError("Invalid trajectory count or initial-condition bounds.")
+        # The CPU generator keeps 32 seed bits, so seeds 2**32 apart draw the
+        # same trajectories and would pass the separate-split check.
+        if config.seed < 0 or config.seed >= 2**32:
+            raise ValueError("Initial-condition seeds must lie in [0, 2**32).")
         self.config = config
 
     def sample(self) -> Tensor:
@@ -128,11 +136,10 @@ class InitialStates:
         generator = torch.Generator().manual_seed(self.config.seed)
         draws = torch.rand(self.config.count, 3, generator=generator)
         low, high = self.config.amplitude
-        position = (low + (high - low) * draws[:, 0]) * (
-            2 * (draws[:, 1] >= 0.5).float() - 1
-        )
+        magnitude = low + (high - low) * draws[:, 0]
+        position = torch.where(draws[:, 1] >= 0.5, magnitude, -magnitude)
         velocity = (2 * draws[:, 2] - 1) * self.config.velocity
-        return torch.stack((position, velocity), dim=-1)
+        return torch.column_stack((position, velocity))
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -141,6 +148,21 @@ class Windows:
 
     media: Tensor
     label: Tensor
+
+    def __post_init__(self) -> None:
+        """Reject windows that do not pair floating position/velocity sequences."""
+        for values in (self.media, self.label):
+            if (
+                values.ndim != 3
+                or values.shape[-1] != STATE_CHANNELS
+                or values.numel() == 0
+                or not values.is_floating_point()
+            ):
+                raise ValueError(
+                    "Expected nonempty floating position/velocity windows.",
+                )
+        if self.media.shape[0] != self.label.shape[0]:
+            raise ValueError("Histories and targets must pair by trajectory.")
 
     def channel_stats(self) -> tuple[Tensor, Tensor]:
         """Return per-channel statistics over every history and target cell.

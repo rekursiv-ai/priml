@@ -1,6 +1,7 @@
 """Check training budgets, normalization, and simulator correction."""
 
 from typing import TYPE_CHECKING
+from unittest import mock
 
 import dataclasses
 import math
@@ -228,11 +229,34 @@ def test_finalize_keeps_explicit_step_settings() -> None:
     assert cfg.copy_tree().finalize().step.model.channels == 3
 
 
-def test_update_budget_must_be_a_finite_count() -> None:
+@pytest.mark.parametrize("budget", [math.inf, 2.9])
+def test_update_budget_must_be_a_finite_whole_count(budget: float) -> None:
     cfg = DLinearForecast.Config()
-    cfg.step.train_budget_steps = math.inf
-    with pytest.raises(ValueError, match="finite update count"):
+    cfg.step.train_budget_steps = budget
+    with pytest.raises(ValueError, match="finite whole update count"):
         cfg.make()
+
+
+def test_training_batches_pass_through_the_step_preprocessor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = exp_smoke().copy_tree().finalize()
+    train, validation, synthetic, data = _splits(cfg.data)
+    method = cfg.method.make()
+    assert isinstance(method, DLinearForecast)
+    monkeypatch.setattr(method.step, "train_step", method.step.train_loss)
+    with mock.patch.object(
+        method.step,
+        "preprocess_batch",
+        wraps=method.step.preprocess_batch,
+    ) as preprocess:
+        method.fit(
+            train,
+            validation=validation,
+            synthetic=synthetic,
+            simulator=data.cheap,
+        )
+    assert preprocess.call_count == method.config.updates
 
 
 @pytest.mark.parametrize("pretrain_updates", [-1, 300])
@@ -286,6 +310,8 @@ def test_bad_development_data_cannot_produce_a_report(
             synthetic=synthetic,
             simulator=data.cheap,
         )
+    with pytest.raises(RuntimeError, match="before predicting"):
+        method.predict(validation.media)
 
 
 @pytest.mark.compute_training

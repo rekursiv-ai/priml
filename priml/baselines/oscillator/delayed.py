@@ -59,15 +59,17 @@ class Pulse:
           values: A (steps, 2) position/velocity history, zero outside the pulse.
 
         """
-        phase = (torch.arange(steps) - self.config.start) / self.config.width
-        active = (phase > 0) & (phase < 1)
+        phase = ((torch.arange(steps) - self.config.start) / self.config.width).clamp(
+            min=0,
+        )
+        active = phase < 1
         position = torch.where(active, torch.sin(math.pi * phase).square(), 0.0)
         velocity = torch.where(
             active,
             math.pi / (self.config.width * step_size) * torch.sin(2 * math.pi * phase),
             0.0,
         )
-        return torch.stack((position, velocity), dim=-1)
+        return torch.column_stack((position, velocity))
 
 
 class HistorySampler(Protocol):
@@ -196,6 +198,7 @@ class SignedHistory:
         """
         order = len(self.pulses)
         group_size = 1 << order
+        # The magnitudes reuse the split's bounds and seed; reject them as it would.
         states.make()
         if states.count % group_size or states.count <= 0:
             raise ValueError("The split needs complete interaction sign groups.")
@@ -235,7 +238,7 @@ class DelayedOscillator(Oscillator):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         if len(config.lags) < 2 or min(config.lags) < 1:
-            raise ValueError("Feedback lags must be positive.")
+            raise ValueError("Feedback needs at least two positive lags.")
         if not math.isfinite(config.gain) or config.gain < 0:
             raise ValueError("Feedback gain must be finite and nonnegative.")
         self.delay = config
@@ -257,19 +260,21 @@ class DelayedOscillator(Oscillator):
         length = max(self.delay.lags)
         return self.forecast_history(state[:, None].expand(-1, length, -1), steps=steps)
 
+    @override
     def forecast_history(self, media: Tensor, *, steps: int) -> Tensor:
         """Roll out using observed history, then previously predicted states.
 
         Args:
-          media: Finite floating histories shaped (trajectories, history, 2).
+          media: Floating histories shaped (trajectories, history, 2).
           steps: Future observations to produce.
 
         Returns:
           prediction: States shaped (trajectories, steps, 2). The delayed force
-            is held fixed within each observation interval.
+            is held fixed within each observation interval; nonfinite
+            histories propagate into the forecast.
 
         Raises:
-          ValueError: Shapes, horizon, values, or available history are invalid.
+          ValueError: Shapes, horizon, dtype, or available history are invalid.
 
         """
         if (
@@ -278,10 +283,9 @@ class DelayedOscillator(Oscillator):
             or media.shape[1] < max(self.delay.lags)
             or media.numel() == 0
             or not media.is_floating_point()
-            or not torch.isfinite(media).all()
             or steps <= 0
         ):
-            raise ValueError("Expected finite histories covering all feedback lags.")
+            raise ValueError("Expected floating histories covering all feedback lags.")
         history = list(media.unbind(dim=1))
         position, velocity = history[-1].unbind(dim=-1)
         delta = self.config.step_size / self.config.substeps
@@ -371,7 +375,7 @@ class DelayedData(ForecastData):
             delay = self.reference.delay
             if config.pred_len > min(delay.lags):
                 raise ValueError(
-                    "The paired diagnostic horizon must stay within all feedback lags.",
+                    "The delayed-response horizon must stay within all feedback lags.",
                 )
             spans = self.history.pulses
             if len(spans) != len(delay.lags):
@@ -419,11 +423,10 @@ class DelayedData(ForecastData):
             steps=self.config.seq_len,
             step_size=self.config.cheap.step_size,
         )
-        if isinstance(simulator, DelayedOscillator):
-            label = simulator.forecast_history(media, steps=self.config.pred_len)
-        else:
-            label = simulator.forecast(media[:, -1], steps=self.config.pred_len)
-        return Windows(media=media, label=label)
+        return Windows(
+            media=media,
+            label=simulator.forecast_history(media, steps=self.config.pred_len),
+        )
 
 
 class DelayedRecord(StudyRecord):

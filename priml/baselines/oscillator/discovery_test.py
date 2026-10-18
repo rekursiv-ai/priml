@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.oscillator.data import ForecastData, Windows
+from priml.baselines.oscillator.data import ForecastData, Oscillator, Windows
 from priml.baselines.oscillator.discovery import SparseSimulator, _ForceResiduals
 from priml.baselines.oscillator.experiments import exp005
 from priml.baselines.oscillator.forces import (
@@ -63,6 +63,22 @@ def test_selects_both_missing_forces_and_rejects_a_distractor() -> None:
     assert prediction.dtype == shifted.media.dtype
     torch.testing.assert_close(prediction, shifted.label, atol=1e-5, rtol=1e-5)
     assert data.cheap.config.cubic == 0
+
+
+def test_validation_windows_not_training_fit_choose_the_terms() -> None:
+    data = _data_config().make()
+    train = data.windows(data.config.train, simulator=data.reference)
+    # The cheap simulator generated these, so no added force can beat it here.
+    validation = data.windows(data.config.validation, simulator=data.cheap)
+    method = _method_config().make()
+    report = method.fit(
+        train,
+        validation=validation,
+        synthetic=train,
+        simulator=data.cheap,
+    )
+    assert report["fitted_forces"] == []
+    assert report["candidates_converged"] == 6
 
 
 def test_missing_term_leaves_error_on_larger_motion() -> None:
@@ -168,7 +184,8 @@ def test_invalid_candidates_fall_back_to_supplied_simulator(failure: str) -> Non
     report = method.fit(train, validation=train, synthetic=train, simulator=data.cheap)
     assert report["candidates_tried"] == 6
     assert report["candidates_converged"] == 0
-    assert report["training_evaluations"] == 6
+    # Each candidate's starting residuals are checked before its one search call.
+    assert report["training_evaluations"] == 12
     assert report["validation_evaluations"] == 1
     assert report["fitted_forces"] == []
 
@@ -188,29 +205,16 @@ def test_bad_configuration_is_rejected(bad: str) -> None:
         cfg.make()
 
 
-@pytest.mark.parametrize(
-    "bad",
-    ["nan", "empty", "channels", "count", "rank", "integer", "horizon"],
-)
-def test_invalid_windows_are_rejected(bad: str) -> None:
+@pytest.mark.parametrize("bad", ["nan", "horizon"])
+def test_invalid_validation_windows_are_rejected(bad: str) -> None:
     data = _data_config().make()
     train = data.windows(data.config.train, simulator=data.reference)
     media, label = train.media, train.label
     if bad == "nan":
         media = torch.full_like(media, float("nan"))
-    elif bad == "empty":
-        media = media[:0]
-    elif bad == "channels":
-        media = torch.cat((media, media), dim=-1)
-    elif bad == "count":
-        media = media[:2]
-    elif bad == "rank":
-        media = media[0]
-    elif bad == "integer":
-        media = media.long()
     else:
         label = label[:, :3]
-    with pytest.raises(ValueError, match=r"windows|trajectory|horizons"):
+    with pytest.raises(ValueError, match=r"finite validation|horizons"):
         _method_config().make().fit(
             train,
             validation=Windows(media=media, label=label),
@@ -250,19 +254,31 @@ def test_existing_corrections_are_preserved_without_mutation() -> None:
     assert cfg == original
 
 
-def test_overflowing_candidate_does_not_abort_the_search() -> None:
-    data_cfg = _data_config()
-    data_cfg.train.amplitude = (2.0, 3.0)
-    data = data_cfg.make()
-    train = data.windows(data_cfg.train, simulator=data.reference)
+@pytest.mark.parametrize("overflow", ["prediction", "scaling"])
+def test_overflowing_candidate_is_skipped_before_the_search(overflow: str) -> None:
+    if overflow == "prediction":
+        data_cfg = _data_config()
+        data_cfg.train.amplitude = (2.0, 3.0)
+        data = data_cfg.make()
+        train = data.windows(data_cfg.train, simulator=data.reference)
+        simulator, power = data.cheap, 10_000
+    else:
+        # 2**1023 is finite, but dividing by the floored 1e-6 scale overflows.
+        state = torch.tensor([[[2.0, 0.0]]], dtype=torch.float64)
+        train = Windows(media=state, label=state.clone())
+        simulator = Oscillator.Config(substeps=1, stiffness=1e-300, damping=0.0).make()
+        power = 1023
     cfg = _method_config()
-    cfg.terms = [PowerForce.Config(power=10_000)]
+    cfg.terms = [PowerForce.Config(power=power)]
     cfg.max_terms = 1
+    cfg.search = _ScriptedSearch.Config()
     method = cfg.make()
-    report = method.fit(train, validation=train, synthetic=train, simulator=data.cheap)
+    report = method.fit(train, validation=train, synthetic=train, simulator=simulator)
     assert report["candidates_tried"] == report["training_evaluations"] == 1
     assert report["candidates_converged"] == 0
     assert report["fitted_forces"] == []
+    assert isinstance(method.search, _ScriptedSearch)
+    assert method.search.residuals == []
 
 
 def test_nonfinite_validation_candidate_cannot_be_selected() -> None:

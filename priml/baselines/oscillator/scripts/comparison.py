@@ -9,9 +9,11 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 import argparse
 import hashlib
 import json
+import os
 import platform
 import shutil
 import subprocess
+import sys
 import time
 
 from configgle.launch import resolve_config
@@ -50,8 +52,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").strip())
     _add_arguments(parser)
     flags = cast(_Flags, parser.parse_args(argv))
-    if len(set(flags.data_seed_offsets)) != len(flags.data_seed_offsets):
-        parser.error("Data seed offsets must be unique.")
+    # Each combination names its own output files; a repeat would overwrite one.
+    for values in (
+        flags.experiments,
+        flags.seeds,
+        flags.data_seed_offsets,
+        flags.cases,
+    ):
+        if len(set(values)) != len(values):
+            parser.error(
+                "Experiments, seeds, data seed offsets, and cases must be unique.",
+            )
     git = shutil.which("git")
     if git is None:
         raise RuntimeError("Git is needed to record the code revision.")
@@ -123,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
                 str(path.relative_to(root)): hashlib.sha256(
                     path.read_bytes(),
                 ).hexdigest()
-                for path in sources
+                for path in sorted({*sources, *_imported_sources(_CWD.parents[2])})
             },
             "runs": records,
         },
@@ -159,7 +170,10 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         "--experiments",
         nargs="+",
         default=["exp000", "exp001", "exp002"],
-        help="Recipes from priml.baselines.oscillator.experiments; exp_smoke checks wiring.",
+        help=(
+            "Recipes from priml.baselines.oscillator.experiments; "
+            "exp_smoke checks wiring."
+        ),
     )
     parser.add_argument(
         "--seeds",
@@ -190,6 +204,21 @@ def _git(git: str, *args: str, cwd: Path) -> str:
         cwd=cwd,
         text=True,
     ).strip()
+
+
+def _imported_sources(package: Path) -> set[Path]:
+    """Return the file of each imported module under ``package``."""
+    # A string prefix test, not ``Path.is_relative_to``: thousands of modules
+    # are loaded, and building a path for each one cost ~40 ms per run.
+    prefix = f"{package}{os.sep}"
+    specs = (module.__spec__ for module in tuple(sys.modules.values()))
+    return {
+        Path(spec.origin)
+        for spec in specs
+        if spec is not None
+        and spec.origin is not None
+        and spec.origin.startswith(prefix)
+    }
 
 
 def _write_json(path: Path, value: object) -> None:

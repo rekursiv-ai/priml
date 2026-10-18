@@ -25,8 +25,9 @@ the cubic term from the reference too, making both simulators identical.
 Models see 24 observations and predict the next 12. The fixed reference budget
 contains 32 training trajectories and 16 validation trajectories, each 36 steps
 long. Validation counts toward the budget. All methods are given the same data;
-ridge and force calibration use the training part only. There are also 256 cheap training trajectories.
-These are supplied in a fixed batch; adaptive querying is not implemented yet.
+ridge and force calibration use the training part only. There are also 256 cheap
+training trajectories. These are supplied in a fixed batch; adaptive querying is
+not implemented yet.
 
 The evaluator creates two independent test sets after fitting. One uses the
 training range of initial displacements, from 0.2 to 1.5 in magnitude. The other
@@ -264,8 +265,9 @@ system was:
 | Cheap simulator | 0.006589 | 0.050387 |
 
 `exp005` selected the cubic restoring force and quadratic drag on all five
-samples, recovering coefficients near 0.4 and 0.35. It used 307--333 training
-residual evaluations and 22 validation batches per sample. In the matched
+samples, recovering coefficients near 0.4 and 0.35. It used 328--354 training
+residual evaluations, including one starting check per candidate, and 22
+validation batches per sample. In the matched
 control it selected no extra terms, keeping exact zero test error.
 
 Without the correct drag term, `exp006` selected cubic drag instead. Its shifted
@@ -414,6 +416,11 @@ uniform failures on every seed. The known-equation control recovered gain 2 to
 numerical precision. Memoryless methods cannot use the older cues and retain the
 zero-response forecast. The masked control confirms that the cues carry the
 information needed for the task.
+
+`exp028` and `exp029` are sensitive to floating-point differences between hosts.
+On an aarch64 Linux host with torch 2.11.0, the same command gave 0.75% / -0.27%
+and 54.50% / -17.17%, with `exp029` shifted skill from -158.88% to 67.15%.
+Every other row in these tables reproduced there to the printed precision.
 
 There are three independent data samples, each reused across three model seeds.
 Deterministic methods repeat across model seeds; the nine rows per method are

@@ -52,6 +52,7 @@ def test_smoke_run_writes_configs_records_and_provenance(
     hashes = from_plain(report["source_sha256"], dict[str, str])
     assert "priml/baselines/oscillator/scripts/comparison.py" in hashes
     assert "priml/baselines/etth1/model.py" in hashes
+    assert "priml/train/train_step.py" in hashes
     assert capsys.readouterr().out.splitlines() == [
         *(f"Finished {label}" for label in labels),
         str(directory / "comparison.json"),
@@ -107,7 +108,11 @@ def test_cli_defaults_name_the_pilot_recipes_and_seeds() -> None:
 
 
 @pytest.mark.compute_training
-def test_cli_can_run_only_the_requested_simulator_case(tmp_path: Path) -> None:
+def test_cli_can_run_only_the_requested_simulator_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(comparison, "_git", _fake_git)
     destination = tmp_path / "run"
     comparison.main(
         [
@@ -132,20 +137,32 @@ def test_cli_can_run_only_the_requested_simulator_case(tmp_path: Path) -> None:
     assert not (destination / "matched-exp_smoke-7.json").exists()
 
 
-def test_duplicate_data_offsets_fail_before_creating_output(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "repeated",
+    [
+        ["--experiments", "exp_smoke", "exp_smoke"],
+        ["--seeds", "7", "7"],
+        ["--data-seed-offsets", "0", "0"],
+        ["--cases", "matched", "matched"],
+    ],
+)
+def test_repeated_values_fail_before_creating_output(
+    tmp_path: Path,
+    repeated: list[str],
+) -> None:
     destination = tmp_path / "run"
     with pytest.raises(SystemExit) as result:
-        comparison.main(
-            ["--directory", str(destination), "--data-seed-offsets", "0", "0"],
-        )
+        comparison.main(["--directory", str(destination), *repeated])
     assert result.value.code == 2
     assert not destination.exists()
 
 
 @pytest.mark.compute_training
-def test_data_offsets_are_saved_and_keep_models_on_the_same_data(
+def test_data_offsets_are_saved_and_shift_every_split_seed(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(comparison, "_git", _fake_git)
     destination = tmp_path / "run"
     comparison.main(
         [

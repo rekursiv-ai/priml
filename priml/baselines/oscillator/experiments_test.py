@@ -1,6 +1,7 @@
 """Check that each oscillator experiment makes exactly its stated change."""
 
 from configgle import PartialConfig
+from configgle.launch import resolve_config
 
 import pytest
 import torch
@@ -9,7 +10,12 @@ from priml.baselines.etth1.experiments import exp000 as etth1_exp000
 from priml.baselines.oscillator import experiments
 from priml.baselines.oscillator.benchmark import ForecastStudy
 from priml.baselines.oscillator.calibration import CalibratedSimulator
-from priml.baselines.oscillator.delayed import DelayedData, SignedHistory
+from priml.baselines.oscillator.delayed import (
+    DelayedCalibration,
+    DelayedData,
+    DelayedOscillator,
+    SignedHistory,
+)
 from priml.baselines.oscillator.discovery import SparseSimulator
 from priml.baselines.oscillator.experiments import (
     exp000,
@@ -37,47 +43,16 @@ def test_config_is_printable_without_running_a_simulator() -> None:
     assert_pprint_golden(test_file=__file__, name="exp000", config=exp000())
 
 
-def test_only_experiments_name_a_run() -> None:
+def test_each_experiment_names_itself_and_pins_no_seed() -> None:
     assert ForecastStudy.Config().experiment_name == ""
-    assert exp000().experiment_name == "exp000"
-
-
-def test_no_experiment_pins_a_seed() -> None:
     assert ForecastStudy.Config().seed is None
-    for factory in (
-        exp000,
-        exp001,
-        exp002,
-        exp003,
-        exp004,
-        exp005,
-        exp006,
-        exp007,
-        exp008,
-        exp_smoke,
-        experiments.exp009,
-        experiments.exp010,
-        experiments.exp011,
-        experiments.exp012,
-        experiments.exp013,
-        experiments.exp014,
-        experiments.exp015,
-        experiments.exp016,
-        experiments.exp017,
-        experiments.exp018,
-        experiments.exp019,
-        experiments.exp020,
-        experiments.exp021,
-        experiments.exp022,
-        experiments.exp023,
-        experiments.exp024,
-        experiments.exp025,
-        experiments.exp026,
-        experiments.exp027,
-        experiments.exp028,
-        experiments.exp029,
-    ):
-        assert factory().seed is None
+    names = [name for name in vars(experiments) if name.startswith("exp")]
+    assert set(names) == {f"exp{index:03d}" for index in range(30)} | {"exp_smoke"}
+    for name in names:
+        cfg = resolve_config(f"{experiments.__name__}.{name}")
+        assert isinstance(cfg, ForecastStudy.Config)
+        assert cfg.experiment_name == name
+        assert cfg.seed is None
 
 
 def test_exp000_changes_only_the_starting_rate() -> None:
@@ -244,6 +219,17 @@ def test_four_way_task_changes_only_data_and_keeps_independent_tuple_counts() ->
     after.data = before.data
     after.experiment_name = before.experiment_name
     assert after == before
+
+
+@pytest.mark.parametrize("number", [15, 24])
+def test_known_equation_controls_use_the_task_lags_and_fit_the_gain(
+    number: int,
+) -> None:
+    cfg = {15: experiments.exp015, 24: experiments.exp024}[number]()
+    assert isinstance(cfg.method, DelayedCalibration.Config)
+    assert isinstance(cfg.data.reference, DelayedOscillator.Config)
+    assert cfg.method.simulator.lags == cfg.data.reference.lags
+    assert cfg.method.simulator.gain == 0
 
 
 def test_quartic_control_changes_only_the_kernel_degree() -> None:

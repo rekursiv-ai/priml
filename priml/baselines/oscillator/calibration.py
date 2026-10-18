@@ -84,21 +84,11 @@ class CalibratedSimulator:
             updates, so the shared update counts are zero.
 
         Raises:
-          ValueError: Training windows are empty, malformed, or nonfinite.
-          RuntimeError: The search does not converge to a finite fit.
+          RuntimeError: The search does not converge to a finite fit, which
+            includes nonfinite training windows.
 
         """
         del validation, synthetic
-        for values in (train.media, train.label):
-            if (
-                values.ndim != 3
-                or values.shape[-1] != STATE_CHANNELS
-                or values.numel() == 0
-                or not torch.isfinite(values).all()
-            ):
-                raise ValueError("Expected nonempty finite position/velocity windows.")
-        if train.media.shape[0] != train.label.shape[0]:
-            raise ValueError("Training histories and targets must pair by trajectory.")
         self.simulator = None
         values = torch.cat((train.media, train.label), dim=1).to(self.config.dtype)
         _, scale = train.channel_stats()
@@ -139,7 +129,7 @@ class CalibratedSimulator:
         """
         if self.simulator is None:
             raise RuntimeError("Fit the simulator before predicting.")
-        return self.simulator.forecast(media[:, -1], steps=self.horizon)
+        return self.simulator.forecast_history(media, steps=self.horizon)
 
 
 class _TransitionLoss:

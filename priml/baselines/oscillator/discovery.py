@@ -141,14 +141,12 @@ class SparseSimulator:
             Gradient-update counts stay zero because SciPy owns the fit.
 
         Raises:
-          ValueError: Windows are malformed or nonfinite, or the unchanged
-            simulator cannot produce finite validation forecasts.
+          ValueError: The horizons differ, or the unchanged simulator cannot
+            produce finite validation forecasts.
 
         """
         del synthetic
         self.simulator = None
-        _validate_windows(train)
-        _validate_windows(validation)
         if train.label.shape[1:] != validation.label.shape[1:]:
             raise ValueError("Training and validation horizons must match.")
         cfg = self.config
@@ -157,9 +155,14 @@ class SparseSimulator:
         values = torch.cat((train.media, train.label), dim=1).to(cfg.dtype)
         states = values[:, :-1].reshape(-1, STATE_CHANNELS)
         targets = values[:, 1:].reshape(-1, STATE_CHANNELS)
-        initial = validation.media[:, -1].to(cfg.dtype)
+        history = validation.media.to(cfg.dtype)
         best_simulator = simulator
-        best_loss = self._validation_loss(simulator, initial, validation, scale)
+        best_loss = self._validation_loss(
+            simulator,
+            history=history,
+            validation=validation,
+            scale=scale,
+        )
         if not math.isfinite(best_loss):
             raise ValueError(
                 "The supplied simulator must have a finite validation score.",
@@ -177,14 +180,13 @@ class SparseSimulator:
                     scale=scale.reshape(STATE_CHANNELS).to(cfg.dtype),
                 )
                 tried += 1
-                try:
-                    result = self.search(
-                        objective,
-                        np.full(size, cfg.initial_coefficient, dtype=np.float64),
-                    )
-                except FloatingPointError:
+                start = np.full(size, cfg.initial_coefficient, dtype=np.float64)
+                # SciPy differences its starting residuals before rejecting
+                # nonfinite ones, so an overflowing candidate is skipped here.
+                if not np.isfinite(objective(start)).all():
                     evaluations += objective.evaluations
                     continue
+                result = self.search(objective, start)
                 evaluations += objective.evaluations
                 coefficients = np.asarray(
                     cast("NDArray[np.float64]", result.x),
@@ -199,7 +201,12 @@ class SparseSimulator:
                 ):
                     continue
                 candidate = objective.simulator(coefficients)
-                loss = self._validation_loss(candidate, initial, validation, scale)
+                loss = self._validation_loss(
+                    candidate,
+                    history=history,
+                    validation=validation,
+                    scale=scale,
+                )
                 converged += 1
                 validations += 1
                 score = loss + cfg.complexity_penalty * size
@@ -239,16 +246,17 @@ class SparseSimulator:
         """
         if self.simulator is None:
             raise RuntimeError("Fit the simulator before predicting.")
-        return self.simulator.forecast(media[:, -1], steps=self.horizon)
+        return self.simulator.forecast_history(media, steps=self.horizon)
 
     def _validation_loss(
         self,
         simulator: Oscillator,
-        initial: Tensor,
+        *,
+        history: Tensor,
         validation: Windows,
         scale: Tensor,
     ) -> float:
-        prediction = simulator.forecast(initial, steps=self.horizon)
+        prediction = simulator.forecast_history(history, steps=self.horizon)
         return forecast_scores(
             prediction,
             target=validation.label,
@@ -299,20 +307,4 @@ class _ForceResiduals:
             term.coefficient = coefficient
         prediction = self.model.forecast(self.states, steps=1)[:, 0]
         self.evaluations += 1
-        if not torch.isfinite(prediction).all():
-            raise FloatingPointError("Candidate force overflowed on training states.")
         return ((prediction - self.targets) / self.scale).flatten().numpy()
-
-
-def _validate_windows(windows: Windows) -> None:
-    for values in (windows.media, windows.label):
-        if (
-            values.ndim != 3
-            or values.shape[-1] != STATE_CHANNELS
-            or values.numel() == 0
-            or not values.is_floating_point()
-            or not torch.isfinite(values).all()
-        ):
-            raise ValueError("Expected nonempty finite position/velocity windows.")
-    if windows.media.shape[0] != windows.label.shape[0]:
-        raise ValueError("Training histories and targets must pair by trajectory.")

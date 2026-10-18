@@ -1,5 +1,7 @@
 """Check the simulator equations and independent forecasting splits."""
 
+from unittest import mock
+
 import pytest
 import torch
 
@@ -17,7 +19,8 @@ def test_integrator_matches_one_explicit_update() -> None:
     cfg.cubic = 0.4
     # The simulator's state is always a position/velocity pair.
     initial = torch.tensor([[0.2, -0.1], [0.4, 0.3], [-0.8, 0.2]])
-    position, velocity = initial.unbind(dim=-1)
+    original = initial.clone()
+    position, velocity = original.unbind(dim=-1)
     expected_velocity = velocity + cfg.step_size * (
         -cfg.stiffness * position - cfg.damping * velocity - cfg.cubic * position.pow(3)
     )
@@ -28,7 +31,7 @@ def test_integrator_matches_one_explicit_update() -> None:
         actual[:, 0],
         torch.stack((expected_position, expected_velocity), dim=-1),
     )
-    assert torch.equal(initial[:, 0], position)
+    assert torch.equal(initial, original)
 
 
 def test_rollouts_continue_from_last_observation() -> None:
@@ -49,6 +52,16 @@ def test_sampling_is_repeatable_and_does_not_consume_global_rng() -> None:
     assert torch.equal(before, torch.get_rng_state())
     cfg.seed += 1
     assert not torch.equal(first, cfg.make().sample())
+
+
+def test_sampling_maps_uniform_draws_to_signed_bounded_states() -> None:
+    # Row 0 sits on the sign threshold; row 1 draws the amplitude's upper edge.
+    draws = torch.tensor([[0.25, 0.5, 0.0], [1.0, 0.25, 0.75]])
+    cfg = InitialStates.Config(count=2, amplitude=(0.2, 1.0), velocity=0.4)
+    with mock.patch.object(torch, "rand", return_value=draws) as rand:
+        states = cfg.make().sample()
+    assert rand.call_args.args == (2, 3)
+    torch.testing.assert_close(states, torch.tensor([[0.4, -0.4], [-1.0, 0.2]]))
 
 
 def test_forecasting_windows_share_no_trajectory_between_splits() -> None:
@@ -130,6 +143,33 @@ def test_amplitude_bounds_must_be_ordered_and_nonnegative() -> None:
         InitialStates.Config(amplitude=(-0.1, 1.0)).make()
     with pytest.raises(ValueError, match="Invalid"):
         InitialStates.Config(amplitude=(1.0, 1.0)).make()
+
+
+@pytest.mark.parametrize("bad", ["empty", "channels", "count", "rank", "integer"])
+def test_windows_must_pair_floating_state_sequences(bad: str) -> None:
+    media, label = torch.zeros(3, 4, 2), torch.zeros(3, 5, 2)
+    if bad == "empty":
+        media, label = media[:0], label[:0]
+    elif bad == "channels":
+        label = label[..., :1]
+    elif bad == "count":
+        label = label[:2]
+    elif bad == "rank":
+        media = media[0]
+    else:
+        media = media.long()
+    with pytest.raises(ValueError, match=r"windows|trajectory"):
+        Windows(media=media, label=label)
+
+
+def test_split_seeds_stay_within_the_generator_seed_range() -> None:
+    # The CPU generator keeps 32 seed bits: these two seeds draw identical states.
+    same = InitialStates.Config(seed=101 + 2**32, count=4)
+    with pytest.raises(ValueError, match="seeds"):
+        same.make()
+    with pytest.raises(ValueError, match="seeds"):
+        InitialStates.Config(seed=-1).make()
+    assert InitialStates.Config(seed=2**32 - 1, count=4).make().sample().shape == (4, 2)
 
 
 def test_channel_stats_use_histories_and_targets() -> None:

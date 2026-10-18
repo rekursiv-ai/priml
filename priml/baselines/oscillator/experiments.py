@@ -239,7 +239,7 @@ def exp009() -> DelayedStudy.Config:
     References:
       exp000 for the unchanged DLinear recipe and reference-data budget.
       https://proceedings.mlr.press/v235/toner24a.html for linear model classes.
-      https://doi.org/10.1038/s41467-022-29260-1 for related nonlinear memory tasks.
+      https://doi.org/10.1109/72.846741 for the NARMA delayed-memory benchmarks.
       This diagnostic uses prescribed histories, not the NARMA10 recurrence.
 
     Results:
@@ -368,7 +368,10 @@ def exp015() -> DelayedStudy.Config:
     """
     cfg = exp009()
     cfg.experiment_name = "exp015"
-    cfg.method = DelayedCalibration.Config()
+    assert isinstance(cfg.data.reference, DelayedOscillator.Config)
+    method = cfg.method = DelayedCalibration.Config()
+    method.simulator = cfg.data.reference.copy_tree()
+    method.simulator.gain = 0.0
     return cfg
 
 
@@ -654,7 +657,8 @@ def exp029() -> DelayedStudy.Config:
 
     Hypothesis:
       Composing nonlinear blocks can express the missing four-way interaction.
-      The first projection must start nonzero so the stack can receive gradients.
+      The first block's output projection must start nonzero so both blocks
+      receive gradients.
 
     References:
       exp025; exp028 for a separate capacity control using biases.

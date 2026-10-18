@@ -7,7 +7,6 @@ from typing import (
     TYPE_CHECKING,
     Protocol,
     TypedDict,
-    cast,
     runtime_checkable,
 )
 
@@ -113,7 +112,7 @@ class DLinearForecast:
         @property
         def seq_len(self) -> int:
             """Observed timesteps, read from and written to the model."""
-            return cast(int, self.step.model.seq_len)  # pyright: ignore[reportUnnecessaryCast] -- ty infers @Todo for a field read inside a Fig property.
+            return int(self.step.model.seq_len)
 
         @seq_len.setter
         def seq_len(self, value: int) -> None:
@@ -122,7 +121,7 @@ class DLinearForecast:
         @property
         def pred_len(self) -> int:
             """Forecast timesteps, read from and written to the model."""
-            return cast(int, self.step.model.pred_len)  # pyright: ignore[reportUnnecessaryCast] -- ty infers @Todo for a field read inside a Fig property.
+            return int(self.step.model.pred_len)
 
         @pred_len.setter
         def pred_len(self, value: int) -> None:
@@ -138,8 +137,9 @@ class DLinearForecast:
             self.step.train_budget_steps = value
 
     def __init__(self, config: Config) -> None:
-        if not math.isfinite(config.step.train_budget_steps):
-            raise ValueError("The step budget must be a finite update count.")
+        budget = config.step.train_budget_steps
+        if not math.isfinite(budget) or budget != int(budget):
+            raise ValueError("The step budget must be a finite whole update count.")
         if min(config.updates, config.batch_size, config.validation_every) <= 0:
             raise ValueError("Training counts must be positive.")
         if config.pretrain_updates < 0 or config.pretrain_updates >= config.updates:
@@ -201,8 +201,12 @@ class DLinearForecast:
                 generator=cheap_generator if pretraining else train_generator,
             )
             self.step.train_step(
-                media=(source.media[indices] - self.mean) / self.scale,
-                label=(source.label[indices] - self.mean) / self.scale,
+                **self.step.preprocess_batch(
+                    {
+                        "media": (source.media[indices] - self.mean) / self.scale,
+                        "label": (source.label[indices] - self.mean) / self.scale,
+                    },
+                ),
             )
             reference_updates = update + 1 - cfg.pretrain_updates
             if reference_updates > 0 and (
@@ -222,6 +226,7 @@ class DLinearForecast:
                         for key, value in self.step.model.state_dict().items()
                     }
         if not best_weights:
+            self.mean = self.scale = None
             raise ValueError("No finite validation checkpoint was found.")
         self.step.model.load_state_dict(best_weights)
         return {
@@ -248,9 +253,11 @@ class DLinearForecast:
             raise RuntimeError("Fit the model before predicting.")
         self.step.model.eval()
         with torch.no_grad():
-            prediction = self.step.net((media - self.mean) / self.scale)
+            prediction = self.step.net(
+                ((media - self.mean) / self.scale).to(self.step.device),
+            )
             assert isinstance(prediction, Tensor)
-            return prediction * self.scale + self.mean
+            return prediction.to(media.device) * self.scale + self.mean
 
 
 class RidgeCorrection:
@@ -301,8 +308,8 @@ class RidgeCorrection:
         targets = (
             (
                 train.label
-                - simulator.forecast(
-                    train.media[:, -1],
+                - simulator.forecast_history(
+                    train.media,
                     steps=self.horizon,
                 )
             )
@@ -343,8 +350,8 @@ class RidgeCorrection:
             media.flatten(start_dim=1).double() - self.feature_mean
         ) / self.feature_scale
         correction = (features @ self.weights + self.target_mean).to(media.dtype)
-        return self.simulator.forecast(
-            media[:, -1],
+        return self.simulator.forecast_history(
+            media,
             steps=self.horizon,
         ) + correction.reshape(
             media.shape[0],

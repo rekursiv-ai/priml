@@ -1,5 +1,7 @@
 """Check held-out evaluation and its scores."""
 
+from unittest import mock
+
 import math
 
 import pytest
@@ -42,6 +44,15 @@ def test_unseeded_run_records_the_seed_it_drew() -> None:
     assert drawn != cfg.make().run()["seed"]
     cfg.seed = drawn
     assert cfg.make().run()["seed"] == drawn
+
+
+def test_study_seed_leaves_gpu_generators_alone() -> None:
+    cfg = exp_smoke()
+    cfg.method = RidgeCorrection.Config()
+    cfg.seed = 7
+    with mock.patch.object(torch.cuda, "manual_seed_all") as seed_all:
+        cfg.make().run()
+    seed_all.assert_not_called()
 
 
 def test_run_record_matches_its_schema() -> None:

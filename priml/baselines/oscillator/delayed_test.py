@@ -5,7 +5,7 @@ from configgle import PartialConfig
 import pytest
 import torch
 
-from priml.baselines.oscillator.data import Oscillator, Windows
+from priml.baselines.oscillator.data import STATE_CHANNELS, Oscillator, Windows
 from priml.baselines.oscillator.delayed import (
     DelayedCalibration,
     DelayedData,
@@ -25,8 +25,8 @@ def test_quartets_share_the_last_state_but_have_opposite_responses() -> None:
     data = _data_config().make()
     before = torch.get_rng_state().clone()
     windows = data.windows(data.config.train, simulator=data.reference)
-    media = windows.media.reshape(2, 4, 12, 2)
-    label = windows.label.reshape(2, 4, 3, 2)
+    media = windows.media.reshape(2, 4, 12, STATE_CHANNELS)
+    label = windows.label.reshape(2, 4, 3, STATE_CHANNELS)
     assert torch.count_nonzero(media[:, :, -4:]) == 0
     assert torch.equal(media[:, 0] + media[:, 3], torch.zeros_like(media[:, 0]))
     assert torch.equal(media[:, 1] + media[:, 2], torch.zeros_like(media[:, 1]))
@@ -67,7 +67,7 @@ def test_best_affine_forecast_cannot_beat_the_zero_response() -> None:
     assert (prediction - target).square().mean() >= target.square().mean() - 1e-12
 
 
-def test_prescribed_velocity_is_the_derivative_of_the_pulse() -> None:
+def test_pulse_peaks_at_unit_height_and_its_analytic_peak_speed() -> None:
     cfg = Pulse.Config()
     cfg.width = 4
     values = cfg.make().sample(steps=7, step_size=0.2)
@@ -91,6 +91,23 @@ def test_history_sampling_is_reproducible_and_keeps_split_config() -> None:
         first,
         sampler.sample(states, steps=cfg.seq_len, step_size=cfg.cheap.step_size),
     )
+
+
+def test_first_pulse_height_and_later_peak_speed_follow_the_split_bounds() -> None:
+    cfg = _data_config()
+    media = cfg.history.make().sample(
+        cfg.shifted,
+        steps=cfg.seq_len,
+        step_size=cfg.cheap.step_size,
+    )
+    assert isinstance(cfg.history, PairedHistory.Config)
+    first, second = cfg.history.first, cfg.history.second
+    height = media[:, first.start + first.width // 2, 0].abs()
+    low, high = cfg.shifted.amplitude
+    assert ((height >= low) & (height <= high)).all()
+    speed = media[:, second.start : second.start + second.width, 1].abs()
+    assert speed.max() <= cfg.shifted.velocity
+    assert speed.max() > cfg.shifted.velocity / 2
 
 
 @pytest.mark.parametrize("width", [0, 2])
@@ -137,6 +154,20 @@ def test_task_rejects_delays_that_break_the_pairing(bad: str) -> None:
         match=r"within all feedback|different history|visible pulse",
     ):
         cfg.make()
+
+
+def test_delayed_force_reads_positions_at_the_configured_lags() -> None:
+    cfg = DelayedOscillator.Config(lags=[3, 2], substeps=1)
+    media = torch.tensor([[[0.6, 0.0], [0.5, 0.1], [0.3, -0.2]]])
+    position, velocity = media[:, -1].unbind(dim=-1)
+    force = cfg.gain * torch.tanh(media[:, -3, 0] * media[:, -2, 0])
+    acceleration = -cfg.stiffness * position - cfg.damping * velocity + force
+    next_velocity = velocity + cfg.step_size * acceleration
+    next_position = position + cfg.step_size * next_velocity
+    torch.testing.assert_close(
+        cfg.make().forecast_history(media, steps=1)[:, 0],
+        torch.stack((next_position, next_velocity), dim=-1),
+    )
 
 
 def test_history_rollout_uses_predictions_after_the_observed_delays() -> None:
@@ -189,7 +220,7 @@ def test_invalid_delay_settings_are_rejected(bad: str) -> None:
 
 @pytest.mark.parametrize(
     "bad",
-    ["short", "nan", "integer", "rank", "channels", "horizon"],
+    ["short", "integer", "rank", "channels", "horizon"],
 )
 def test_rollout_rejects_invalid_history(bad: str) -> None:
     cfg = DelayedOscillator.Config(lags=[4, 3])
@@ -197,8 +228,6 @@ def test_rollout_rejects_invalid_history(bad: str) -> None:
     steps = 3
     if bad == "short":
         media = media[:, :2]
-    elif bad == "nan":
-        media.fill_(float("nan"))
     elif bad == "integer":
         media = media.long()
     elif bad == "rank":
@@ -207,8 +236,23 @@ def test_rollout_rejects_invalid_history(bad: str) -> None:
         media = torch.cat((media, media), dim=-1)
     else:
         steps = 0
-    with pytest.raises(ValueError, match="finite histories"):
+    with pytest.raises(ValueError, match="floating histories"):
         cfg.make().forecast_history(media, steps=steps)
+
+
+def test_nonfinite_history_propagates_into_the_rollout() -> None:
+    media = torch.zeros(5, 6, 2)
+    media[0, -4, 0] = float("nan")
+    prediction = (
+        DelayedOscillator.Config(lags=[4, 3])
+        .make()
+        .forecast_history(
+            media,
+            steps=3,
+        )
+    )
+    assert torch.isnan(prediction[0]).all()
+    assert torch.equal(prediction[1:], torch.zeros_like(prediction[1:]))
 
 
 def test_skill_is_zero_for_linear_ridge_and_undefined_for_zero_targets() -> None:
@@ -221,6 +265,17 @@ def test_skill_is_zero_for_linear_ridge_and_undefined_for_zero_targets() -> None
     assert record["forecast_skill"]["shifted"] == pytest.approx(0, abs=1e-10)
     cfg.data.reference = cfg.data.cheap.copy_tree()
     assert cfg.make().run()["forecast_skill"] == {"familiar": None, "shifted": None}
+
+
+def test_a_delayed_cheap_simulator_forecasts_from_the_observed_history() -> None:
+    cfg = DelayedStudy.Config()
+    cfg.data = _data_config()
+    cfg.data.cheap = cfg.data.reference.copy_tree()
+    cfg.method = RidgeCorrection.Config()
+    cfg.seed = 7
+    scores = cfg.make().run()["scores"]
+    assert [split["cheap_simulator"]["mse"] for split in scores.values()] == [0, 0]
+    assert [split["method"]["mse"] for split in scores.values()] == [0, 0]
 
 
 def test_privileged_control_fits_gain_and_forecasts_unseen_magnitudes() -> None:
@@ -283,6 +338,7 @@ def test_test_changes_cannot_change_the_fitted_delay_gain() -> None:
     cfg.method = method
     before_rng = torch.get_rng_state().clone()
     first = cfg.make().run()
+    assert first["forecast_skill"]["familiar"] == pytest.approx(1, abs=1e-6)
     cfg.data.test.seed += 1000
     cfg.data.shifted.amplitude = (2.5, 3.0)
     second = cfg.make().run()
@@ -335,30 +391,34 @@ def test_fourth_order_kernel_and_known_equation_can_learn_the_four_way_response(
     )
 
 
-def test_four_way_response_is_orthogonal_to_every_quadratic_feature() -> None:
+def test_four_way_response_is_orthogonal_to_every_feature_below_degree_four() -> None:
     cfg = _four_way_config()
     data = cfg.make()
     windows = data.windows(cfg.train, simulator=data.reference)
-    history = windows.media.reshape(2, 16, 20, 2)
+    history = windows.media.reshape(2, 16, 20, STATE_CHANNELS)
     target = windows.label.flatten(start_dim=1).double()
     features = windows.media.flatten(start_dim=1).double()
     assert torch.count_nonzero(history[:, :, -4:]) == 0
     assert target.square().sum() > 0
-    products = (features[:, :, None] * features[:, None, :]).flatten(start_dim=1)
-    torch.testing.assert_close(
-        features.T @ target,
-        torch.zeros(features.shape[1], target.shape[1]),
-        atol=1e-8,
-        rtol=0,
-        check_dtype=False,
-    )
-    torch.testing.assert_close(
-        products.T @ target,
-        torch.zeros(products.shape[1], target.shape[1]),
-        atol=1e-8,
-        rtol=0,
-        check_dtype=False,
-    )
+    moments = {
+        "constant": target.sum(dim=0),
+        "linear": torch.einsum("ni,nt->it", features, target),
+        "quadratic": torch.einsum("ni,nj,nt->ijt", features, features, target),
+        "cubic": torch.einsum(
+            "ni,nj,nk,nt->ijkt",
+            features,
+            features,
+            features,
+            target,
+        ),
+    }
+    for moment in moments.values():
+        torch.testing.assert_close(
+            moment,
+            torch.zeros_like(moment),
+            atol=1e-8,
+            rtol=0,
+        )
     assert torch.equal(
         windows.media,
         data.windows(cfg.train, simulator=data.reference).media,

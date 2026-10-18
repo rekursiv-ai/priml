@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import field
 from typing import TYPE_CHECKING, override
+from unittest import mock
 
 from configgle import Makes
 from torch import Tensor
@@ -11,6 +12,7 @@ from torch import Tensor
 import pytest
 import torch
 
+from priml.baselines.oscillator.benchmark import ForecastStudy
 from priml.baselines.oscillator.data import Oscillator, Windows
 from priml.baselines.oscillator.experiments import exp014, exp029
 from priml.baselines.oscillator.nonlinear import (
@@ -61,6 +63,11 @@ def test_kernel_gram_is_symmetric_positive_and_degree_changes_features() -> None
     assert ((nonlinear @ directions) * directions).sum(dim=0).min() >= 0
     cfg.degree = 1
     assert not torch.equal(nonlinear, cfg.make()(values, values))
+    left, right = values[:2], values[2:5]
+    torch.testing.assert_close(
+        PolynomialKernel.Config(degree=3, offset=0.5).make()(left, right),
+        (0.5 + left @ right.T / values.shape[1]).pow(3),
+    )
 
 
 @pytest.mark.parametrize("bad", ["degree", "offset", "penalty"])
@@ -239,11 +246,52 @@ def test_history_mask_is_applied_consistently_and_does_not_mutate_inputs() -> No
         atol=1e-8,
         rtol=0,
     )
+    with mock.patch.object(
+        method.method,
+        "predict",
+        wraps=method.method.predict,
+    ) as predict:
+        method.predict(train.media)
+    received = predict.call_args.args[0]
+    assert isinstance(received, Tensor)
+    assert torch.equal(received, masked)
     cfg.visible_steps = train.media.shape[1] + 1
     assert torch.equal(cfg.make().mask(train.media), train.media)
     cfg.visible_steps = 0
     with pytest.raises(ValueError, match="positive"):
         cfg.make()
+
+
+def test_history_ablation_forwards_study_geometry_to_a_wrapped_network() -> None:
+    cfg = ForecastStudy.Config()
+    cfg.data.seq_len, cfg.data.pred_len = 5, 3
+    cfg.method = HistoryAblation.Config(method=NeuralForecast.Config())
+    wrapper = cfg.copy_tree().finalize().method
+    assert isinstance(wrapper, HistoryAblation.Config)
+    assert isinstance(wrapper.method, NeuralForecast.Config)
+    assert (wrapper.method.seq_len, wrapper.method.pred_len) == (5, 3)
+    # A wrapped method without a geometry is left untouched.
+    kernel = HistoryAblation.Config(seq_len=5, pred_len=3).finalize()
+    assert kernel.method == KernelCorrection.Config()
+
+
+@pytest.mark.compute_training
+def test_network_batches_pass_through_the_step_preprocessor() -> None:
+    method = _neural_config().make()
+    train = _windows()
+    with mock.patch.object(
+        method.step,
+        "preprocess_batch",
+        wraps=method.step.preprocess_batch,
+    ) as preprocess:
+        method.fit(
+            train,
+            validation=train,
+            synthetic=train,
+            simulator=Oscillator.Config().make(),
+        )
+    # Three training batches, then one validation forecast after each update.
+    assert preprocess.call_count == 6
 
 
 def test_neural_config_is_fully_printable() -> None:
@@ -326,7 +374,7 @@ def test_scripted_updates_restore_an_earlier_checkpoint_and_use_training_stats()
     train = _windows()
     report = method.fit(
         train,
-        validation=train,
+        validation=Windows(media=train.media * 3, label=train.label * 3),
         synthetic=train,
         simulator=Oscillator.Config().make(),
     )

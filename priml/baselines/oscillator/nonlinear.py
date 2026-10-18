@@ -14,7 +14,11 @@ from torch import Tensor, nn
 import torch
 
 from priml.baselines.oscillator.data import STATE_CHANNELS, Windows
-from priml.baselines.oscillator.train_step import FitReport, ForecastMethod
+from priml.baselines.oscillator.train_step import (
+    FitReport,
+    ForecastGeometry,
+    ForecastMethod,
+)
 from priml.cost import Cost, cost
 from priml.loss.simple_loss import SimpleLoss, mse
 from priml.model.custom_types import ChannelsIn, ChannelsOut, propagate_attr
@@ -35,7 +39,7 @@ class HistoryKernel(Protocol):
 
 
 class PolynomialKernel:
-    """Include pairwise history interactions through a polynomial kernel."""
+    """Include history interactions up to a set degree through a polynomial kernel."""
 
     class Config(Fig["PolynomialKernel"]):
         degree: int = 2
@@ -109,7 +113,7 @@ class KernelCorrection:
         self.scale = features.std(dim=0, correction=0).clamp_min(1e-6)
         self.features = (features - self.mean) / self.scale
         target = (
-            (train.label - simulator.forecast(train.media[:, -1], steps=self.horizon))
+            (train.label - simulator.forecast_history(train.media, steps=self.horizon))
             .flatten(start_dim=1)
             .double()
         )
@@ -122,7 +126,18 @@ class KernelCorrection:
         return {"updates": 0, "best_update": 0, "pretrain_updates": 0}
 
     def predict(self, media: Tensor) -> Tensor:
-        """Add the learned nonlinear correction to the supplied simulator."""
+        """Add the learned nonlinear correction to the supplied simulator.
+
+        Args:
+          media: Histories shaped (trajectories, seq_len, channels).
+
+        Returns:
+          prediction: Corrected forecasts in the input dtype.
+
+        Raises:
+          RuntimeError: ``fit`` has not run.
+
+        """
         if (
             self.simulator is None
             or self.features is None
@@ -136,8 +151,8 @@ class KernelCorrection:
         correction = (
             self.kernel(features, self.features) @ self.weights + self.target_mean
         )
-        return self.simulator.forecast(
-            media[:, -1],
+        return self.simulator.forecast_history(
+            media,
             steps=self.horizon,
         ) + correction.to(media.dtype).reshape(len(media), self.horizon, STATE_CHANNELS)
 
@@ -243,7 +258,7 @@ class NeuralForecast:
             default_factory=lambda: TrainStep.Config(
                 model=HistoryNetwork.Config(),
                 optimizer=PartialConfig(torch.optim.Adam, lr=1e-3),
-                loss=SimpleLoss.Config(loss_fn=mse, kwargs={"reduction": "none"}),
+                loss=SimpleLoss.Config(loss_fn=mse),
                 train_budget_steps=300,
                 compile=None,
             ),
@@ -344,8 +359,12 @@ class NeuralForecast:
                 generator=generator,
             )
             self.step.train_step(
-                media=(train.media[indices] - self.mean) / self.scale,
-                label=(train.label[indices] - self.mean) / self.scale,
+                **self.step.preprocess_batch(
+                    {
+                        "media": (train.media[indices] - self.mean) / self.scale,
+                        "label": (train.label[indices] - self.mean) / self.scale,
+                    },
+                ),
             )
             update = self.step.global_step
             if not self.step.accumulation_steps and (
@@ -372,12 +391,25 @@ class NeuralForecast:
         }
 
     def predict(self, media: Tensor) -> Tensor:
-        """Use the shared evaluation path, including EMA when configured."""
+        """Use the shared evaluation path, including EMA when configured.
+
+        Args:
+          media: Histories shaped (trajectories, seq_len, channels).
+
+        Returns:
+          prediction: Forecasts on the device of ``media``.
+
+        Raises:
+          RuntimeError: ``fit`` has not run.
+
+        """
         if self.mean is None or self.scale is None:
             raise RuntimeError("Fit the network before predicting.")
-        prediction = self.step.call_eval(media=(media - self.mean) / self.scale)
+        prediction = self.step.call_eval(
+            **self.step.preprocess_batch({"media": (media - self.mean) / self.scale}),
+        )
         assert isinstance(prediction, Tensor)
-        return prediction * self.scale + self.mean
+        return prediction.to(media.device) * self.scale + self.mean
 
 
 class HistoryAblation:
@@ -391,6 +423,28 @@ class HistoryAblation:
 
         visible_steps: int = 32
         """Newest observations retained; older entries are replaced by zero."""
+
+        seq_len: int = 96
+        """Observed timesteps, forwarded to a wrapped method with a geometry."""
+
+        pred_len: int = 48
+        """Future timesteps, forwarded to a wrapped method with a geometry."""
+
+        @override
+        def finalize(self) -> Self:
+            propagate_attr(
+                self.method,
+                "seq_len",
+                self.seq_len,
+                protocol=ForecastGeometry,
+            )
+            propagate_attr(
+                self.method,
+                "pred_len",
+                self.pred_len,
+                protocol=ForecastGeometry,
+            )
+            return super().finalize()
 
     def __init__(self, config: Config) -> None:
         if config.visible_steps <= 0:
@@ -412,7 +466,18 @@ class HistoryAblation:
         synthetic: Windows,
         simulator: Oscillator,
     ) -> FitReport:
-        """Fit the wrapped method after masking every supplied history."""
+        """Fit the wrapped method after masking every supplied history.
+
+        Args:
+          train: Reference windows; only their histories are masked.
+          validation: Model-selection windows, masked the same way.
+          synthetic: Cheap-simulator windows, masked the same way.
+          simulator: Passed through unchanged.
+
+        Returns:
+          report: The wrapped method's fit report.
+
+        """
         return self.method.fit(
             Windows(media=self.mask(train.media), label=train.label),
             validation=Windows(

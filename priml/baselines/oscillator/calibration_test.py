@@ -113,29 +113,18 @@ def test_search_budget_is_configurable_and_failure_is_reported() -> None:
         method.predict(train.media)
 
 
-@pytest.mark.parametrize("bad_input", ["nan", "empty", "channels", "count", "rank"])
-def test_bad_training_windows_fail(bad_input: str) -> None:
+def test_nonfinite_training_windows_fail_the_search() -> None:
     data = _data_config().make()
     train = data.windows(data.config.train, simulator=data.reference)
-    media, label = train.media, train.label
-    if bad_input == "nan":
-        label = torch.full_like(label, float("nan"))
-    elif bad_input == "empty":
-        media = media[:0]
-    elif bad_input == "channels":
-        label = label[..., :1]
-    elif bad_input == "count":
-        label = label[:2]
-    else:
-        media = media[0]
+    nonfinite = Windows(
+        media=train.media,
+        label=torch.full_like(train.label, float("nan")),
+    )
     method = CalibratedSimulator.Config().make()
-    with pytest.raises(ValueError, match=r"windows|trajectory"):
-        method.fit(
-            Windows(media=media, label=label),
-            validation=train,
-            synthetic=train,
-            simulator=data.cheap,
-        )
+    with pytest.raises(RuntimeError, match="finite converged"):
+        method.fit(nonfinite, validation=train, synthetic=train, simulator=data.cheap)
+    with pytest.raises(RuntimeError, match="Fit the simulator"):
+        method.predict(train.media)
 
 
 def test_predict_requires_a_fit() -> None:

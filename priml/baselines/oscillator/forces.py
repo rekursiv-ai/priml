@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import Protocol, override
+from typing import TYPE_CHECKING, Protocol, override
 
 import math
 
 from configgle import Fig, Makeable, Makes
-from torch import Tensor
 
 from priml.baselines.oscillator.data import Oscillator
+
+
+if TYPE_CHECKING:
+    from torch import Tensor
 
 
 class ForceTerm(Protocol):
