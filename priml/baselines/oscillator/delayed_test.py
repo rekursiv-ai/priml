@@ -311,6 +311,21 @@ def test_privileged_control_fits_gain_and_forecasts_unseen_magnitudes() -> None:
     assert cfg.reference == before
 
 
+def test_known_equation_keeps_an_exact_zero_gain_without_delayed_feedback() -> None:
+    cfg = _data_config()
+    cfg.reference = cfg.cheap.copy_tree()
+    data = cfg.make()
+    train = data.windows(cfg.train, simulator=data.reference)
+    method_cfg = DelayedCalibration.Config()
+    method_cfg.simulator.lags = [10, 6]
+    method = method_cfg.make()
+    report = method.fit(train, validation=train, synthetic=train, simulator=data.cheap)
+    # The bounded search never evaluates its endpoints, so only the explicit
+    # zero-gain candidate can return exactly zero.
+    assert report["fitted_gain"] == 0
+    assert torch.equal(method.predict(train.media), train.label)
+
+
 def test_failed_delayed_calibration_has_no_prediction_state() -> None:
     cfg = _data_config()
     data = cfg.make()

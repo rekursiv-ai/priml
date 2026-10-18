@@ -419,6 +419,23 @@ def test_scripted_updates_restore_an_earlier_checkpoint_and_use_training_stats()
         )
 
 
+def test_the_final_update_is_validated_off_the_interval() -> None:
+    cfg = _neural_config()
+    cfg.validation_every = 2
+    step = _ScriptedStep.Config()
+    step.update(cfg.step)
+    step.final_is_best = True
+    cfg.step = step
+    train = _windows()
+    report = cfg.make().fit(
+        train,
+        validation=train,
+        synthetic=train,
+        simulator=Oscillator.Config().make(),
+    )
+    assert report["best_update"] == report["updates"] == 3
+
+
 class _ScriptedStep(TrainStep):
     """Exercise checkpoint selection without an optimizer trajectory."""
 
@@ -426,9 +443,13 @@ class _ScriptedStep(TrainStep):
         model: HistoryNetwork.Config = field(default_factory=HistoryNetwork.Config)
         """Small network whose weights are supplied by the test."""
 
+        final_is_best: bool = False
+        """Give the final update the zero weights instead of the large ones."""
+
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         self.batches: list[tuple[Tensor, Tensor]] = []
+        self.final_is_best = config.final_is_best
 
     @override
     def train_step(self, **preprocessed_batch: object) -> TrainStepOutput:
@@ -437,7 +458,8 @@ class _ScriptedStep(TrainStep):
         assert isinstance(label, Tensor)
         self.batches.append((media.clone(), label.clone()))
         self.timer_step.global_count += 1
-        value = 100.0 if self.global_step == self.config.train_budget_steps else 0.0
+        final = self.global_step == self.config.train_budget_steps
+        value = 100.0 if final != self.final_is_best else 0.0
         with torch.no_grad():
             for parameter in self.model.parameters():
                 parameter.fill_(value)
