@@ -187,6 +187,22 @@ def test_bad_network_training_settings_are_rejected(bad: str) -> None:
         cfg.make()
 
 
+@pytest.mark.parametrize(
+    "control",
+    ["dtype_autocast", "train_budget_sec", "train_budget_epochs"],
+)
+def test_network_rejects_training_controls_it_cannot_honor(control: str) -> None:
+    cfg = _neural_config()
+    if control == "dtype_autocast":
+        cfg.step.dtype_autocast = torch.bfloat16
+    elif control == "train_budget_sec":
+        cfg.step.train_budget_sec = 1.0
+    else:
+        cfg.step.train_budget_epochs = 1.0
+    with pytest.raises(ValueError, match=control):
+        cfg.make()
+
+
 def test_network_rejects_wrong_geometry_and_prediction_before_fitting() -> None:
     method = _neural_config().make()
     train = _windows()

@@ -237,6 +237,17 @@ def test_update_budget_must_be_a_finite_whole_count(budget: float) -> None:
         cfg.make()
 
 
+@pytest.mark.parametrize("budget", ["train_budget_sec", "train_budget_epochs"])
+def test_time_and_epoch_budgets_are_rejected(budget: str) -> None:
+    cfg = DLinearForecast.Config()
+    if budget == "train_budget_sec":
+        cfg.step.train_budget_sec = 1.0
+    else:
+        cfg.step.train_budget_epochs = 1.0
+    with pytest.raises(ValueError, match=budget):
+        cfg.make()
+
+
 def test_training_batches_pass_through_the_step_preprocessor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

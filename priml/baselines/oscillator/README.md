@@ -344,7 +344,8 @@ The added methods use the same reference splits within each task:
   It trains through PRIML's shared `TrainStep`, with Adam at `1e-3`, 300 updates,
   batches of eight, and validation every 25 updates including the final update.
   The complete best training state is restored. Compilation is disabled for this
-  CPU comparison; the other supported training controls remain available.
+  CPU comparison. Accumulation, clipping, EMA, nonfinite-step skipping and device
+  placement remain available; autocast and time or epoch budgets are rejected.
 - `exp015` is a privileged learnability control. It receives the correct delay
   equation and lags, but fits the gain from training responses using a bounded
   search over 0--3. It does not discover that equation.

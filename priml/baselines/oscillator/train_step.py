@@ -144,6 +144,13 @@ class DLinearForecast:
             raise ValueError("Training counts must be positive.")
         if config.pretrain_updates < 0 or config.pretrain_updates >= config.updates:
             raise ValueError("Pretraining must leave at least one reference update.")
+        # ``fit`` counts updates itself, so time and epoch budgets would be ignored.
+        for name, value in (
+            ("train_budget_sec", config.step.train_budget_sec),
+            ("train_budget_epochs", config.step.train_budget_epochs),
+        ):
+            if value != math.inf:
+                raise ValueError(f"DLinear training does not support {name}.")
         self.config = config
         self.step = config.step.make()
         self.mean: Tensor | None = None

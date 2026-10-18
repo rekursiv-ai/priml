@@ -309,6 +309,16 @@ class NeuralForecast:
             )
         if min(config.batch_size, config.validation_every) <= 0:
             raise ValueError("Batch size and validation interval must be positive.")
+        # ``fit`` counts updates itself, so time and epoch budgets would be
+        # ignored; bf16 autocast fails in this float32 loss's backward pass.
+        unsupported = {
+            "dtype_autocast": config.step.dtype_autocast is not None,
+            "train_budget_sec": config.step.train_budget_sec != math.inf,
+            "train_budget_epochs": config.step.train_budget_epochs != math.inf,
+        }
+        for name, enabled in unsupported.items():
+            if enabled:
+                raise ValueError(f"The history network does not support {name}.")
         self.config = config
         self.step = config.step.make()
         self.mean: Tensor | None = None
