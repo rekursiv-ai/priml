@@ -30,11 +30,6 @@ names its file here.
 `baselines/nanochat` and `optimizers/fused_adamw.py` port, states "MIT" in its
 README and ships no license file, so there is no text to reproduce here.
 
-[water-vapor/charm](https://github.com/water-vapor/charm/tree/728bf26903684ef5e8bcb476cb8e55e42cf35b9d),
-whose model and training recipes `baselines/arcagi` re-implements at commit
-`728bf26903684ef5e8bcb476cb8e55e42cf35b9d`, publishes no license, so there is
-no license text to reproduce here.
-
 [Imbernoulli/MLS-Bench](https://github.com/Imbernoulli/MLS-Bench), whose tasks
 `baselines/mlsbench` re-implements at commit `80cf5c5`, publishes no license,
 so there is no text to reproduce here either.
