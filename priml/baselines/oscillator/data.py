@@ -70,15 +70,28 @@ class Oscillator:
         frames: list[Tensor] = []
         for _ in range(steps):
             for _ in range(self.config.substeps):
-                acceleration = (
-                    -self.config.stiffness * position
-                    - self.config.damping * velocity
-                    - self.config.cubic * position.pow(3)
-                )
+                acceleration = self.acceleration(position, velocity=velocity)
                 velocity = velocity + delta * acceleration
                 position = position + delta * velocity
             frames.append(torch.stack((position, velocity), dim=-1))
         return torch.stack(frames, dim=1)
+
+    def acceleration(self, position: Tensor, *, velocity: Tensor) -> Tensor:
+        """Evaluate the force at the current state.
+
+        Args:
+          position: Current displacement for each trajectory.
+          velocity: Current velocity with the same shape.
+
+        Returns:
+          acceleration: The restoring force and drag, with unit mass.
+
+        """
+        return (
+            -self.config.stiffness * position
+            - self.config.damping * velocity
+            - self.config.cubic * position.pow(3)
+        )
 
 
 class InitialStates:

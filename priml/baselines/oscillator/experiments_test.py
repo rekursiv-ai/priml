@@ -2,15 +2,32 @@
 
 from configgle import PartialConfig
 
+import pytest
 import torch
 
 from priml.baselines.etth1.experiments import exp000 as etth1_exp000
+from priml.baselines.oscillator import experiments
 from priml.baselines.oscillator.benchmark import ForecastStudy
+from priml.baselines.oscillator.calibration import CalibratedSimulator
+from priml.baselines.oscillator.delayed import DelayedData, SignedHistory
+from priml.baselines.oscillator.discovery import SparseSimulator
 from priml.baselines.oscillator.experiments import (
     exp000,
     exp001,
     exp002,
+    exp003,
+    exp004,
+    exp005,
+    exp006,
+    exp007,
+    exp008,
     exp_smoke,
+)
+from priml.baselines.oscillator.forces import CorrectedOscillator
+from priml.baselines.oscillator.nonlinear import (
+    KernelCorrection,
+    NeuralForecast,
+    PolynomialKernel,
 )
 from priml.baselines.oscillator.train_step import DLinearForecast, RidgeCorrection
 from priml.testing.golden import assert_pprint_golden
@@ -27,7 +44,39 @@ def test_only_experiments_name_a_run() -> None:
 
 def test_no_experiment_pins_a_seed() -> None:
     assert ForecastStudy.Config().seed is None
-    for factory in (exp000, exp001, exp002, exp_smoke):
+    for factory in (
+        exp000,
+        exp001,
+        exp002,
+        exp003,
+        exp004,
+        exp005,
+        exp006,
+        exp007,
+        exp008,
+        exp_smoke,
+        experiments.exp009,
+        experiments.exp010,
+        experiments.exp011,
+        experiments.exp012,
+        experiments.exp013,
+        experiments.exp014,
+        experiments.exp015,
+        experiments.exp016,
+        experiments.exp017,
+        experiments.exp018,
+        experiments.exp019,
+        experiments.exp020,
+        experiments.exp021,
+        experiments.exp022,
+        experiments.exp023,
+        experiments.exp024,
+        experiments.exp025,
+        experiments.exp026,
+        experiments.exp027,
+        experiments.exp028,
+        experiments.exp029,
+    ):
         assert factory().seed is None
 
 
@@ -59,6 +108,55 @@ def test_ridge_fork_changes_only_the_method() -> None:
     assert after == before
 
 
+def test_calibration_fork_changes_only_the_method() -> None:
+    before = exp002()
+    after = exp003()
+    assert after.method == CalibratedSimulator.Config()
+    after.method = before.method
+    after.experiment_name = before.experiment_name
+    assert after == before
+
+
+def test_drag_fork_changes_only_the_reference() -> None:
+    before = exp003()
+    after = exp004()
+    assert isinstance(after.data.reference, CorrectedOscillator.Config)
+    assert len(after.data.reference.corrections) == 1
+    assert after.data.reference.corrections[0].coefficient == 0.35
+    after.data.reference = before.data.reference
+    after.experiment_name = before.experiment_name
+    assert after == before
+
+
+@pytest.mark.parametrize("number", [5, 7, 8])
+def test_harder_controls_change_only_the_method(number: int) -> None:
+    before = exp004()
+    after = {5: exp005, 7: exp007, 8: exp008}[number]()
+    expected = {
+        5: SparseSimulator.Config(),
+        7: exp000().method,
+        8: RidgeCorrection.Config(),
+    }[number]
+    assert after.method == expected
+    after.method = before.method
+    after.experiment_name = before.experiment_name
+    assert after == before
+
+
+def test_ablation_removes_only_the_quadratic_drag_candidate() -> None:
+    before, after = exp005(), exp006()
+    assert isinstance(before.method, SparseSimulator.Config)
+    assert isinstance(after.method, SparseSimulator.Config)
+    assert [term.make().name for term in after.method.terms] == [
+        term.make().name
+        for term in before.method.terms
+        if term.make().name != "-velocity*abs(velocity)^1"
+    ]
+    after.method.terms = before.method.terms
+    after.experiment_name = before.experiment_name
+    assert after == before
+
+
 def test_smoke_shrinks_only_sizes() -> None:
     cfg = exp_smoke()
     base = exp000()
@@ -80,6 +178,96 @@ def test_new_geometry_does_not_change_etth1() -> None:
     assert old.step.model.seq_len == 336
     assert old.step.model.pred_len == 96
     assert old.step.model.channels == 7
+
+
+@pytest.mark.parametrize("number", [10, 11, 12, 13, 14, 15, 18, 20, 21, 22, 23, 24])
+def test_delayed_controls_change_only_the_method(number: int) -> None:
+    parents = {
+        10: (experiments.exp009, experiments.exp010),
+        11: (experiments.exp009, experiments.exp011),
+        12: (experiments.exp009, experiments.exp012),
+        13: (experiments.exp010, experiments.exp013),
+        14: (experiments.exp009, experiments.exp014),
+        15: (experiments.exp009, experiments.exp015),
+        18: (experiments.exp015, experiments.exp018),
+        20: (experiments.exp019, experiments.exp020),
+        21: (experiments.exp019, experiments.exp021),
+        22: (experiments.exp019, experiments.exp022),
+        23: (experiments.exp019, experiments.exp023),
+        24: (experiments.exp019, experiments.exp024),
+    }
+    parent, child = parents[number]
+    before, after = parent(), child()
+    assert after.method != before.method
+    after.method = before.method
+    after.experiment_name = before.experiment_name
+    assert after == before
+
+
+@pytest.mark.parametrize("number", [16, 25])
+def test_longer_training_fork_changes_only_update_budget(number: int) -> None:
+    parent, child = {
+        16: (experiments.exp014, experiments.exp016),
+        25: (experiments.exp023, experiments.exp025),
+    }[number]
+    before, after = parent(), child()
+    assert isinstance(before.method, NeuralForecast.Config)
+    assert isinstance(after.method, NeuralForecast.Config)
+    assert after.method.updates == before.method.updates * 10
+    after.method.updates = before.method.updates
+    after.experiment_name = before.experiment_name
+    assert after == before
+
+
+@pytest.mark.parametrize("number", [17, 27])
+def test_more_data_fork_changes_only_the_reference_sample_counts(number: int) -> None:
+    parent, child = {
+        17: (experiments.exp016, experiments.exp017),
+        27: (experiments.exp025, experiments.exp027),
+    }[number]
+    before, after = parent(), child()
+    assert after.data.train.count == before.data.train.count * 8
+    assert after.data.validation.count == before.data.validation.count * 8
+    after.data.train.count = before.data.train.count
+    after.data.validation.count = before.data.validation.count
+    after.experiment_name = before.experiment_name
+    assert after == before
+
+
+def test_four_way_task_changes_only_data_and_keeps_independent_tuple_counts() -> None:
+    before, after = experiments.exp009(), experiments.exp019()
+    assert isinstance(after.data, DelayedData.Config)
+    assert isinstance(after.data.history, SignedHistory.Config)
+    groups = 1 << len(after.data.history.pulses)
+    assert after.data.train.count // groups == before.data.train.count // 4
+    assert after.data.validation.count // groups == before.data.validation.count // 4
+    after.data = before.data
+    after.experiment_name = before.experiment_name
+    assert after == before
+
+
+def test_quartic_control_changes_only_the_kernel_degree() -> None:
+    before, after = experiments.exp021(), experiments.exp026()
+    assert isinstance(before.method, KernelCorrection.Config)
+    assert isinstance(after.method, KernelCorrection.Config)
+    assert isinstance(before.method.kernel, PolynomialKernel.Config)
+    assert isinstance(after.method.kernel, PolynomialKernel.Config)
+    assert after.method.kernel.degree == 4
+    after.method.kernel.degree = before.method.kernel.degree
+    after.experiment_name = before.experiment_name
+    assert after == before
+
+
+@pytest.mark.parametrize("number", [28, 29])
+def test_gate_capacity_controls_change_only_the_block(number: int) -> None:
+    before = experiments.exp025()
+    after = {28: experiments.exp028, 29: experiments.exp029}[number]()
+    assert isinstance(before.method, NeuralForecast.Config)
+    assert isinstance(after.method, NeuralForecast.Config)
+    assert after.method.step.model.block != before.method.step.model.block
+    after.method.step.model.block = before.method.step.model.block
+    after.experiment_name = before.experiment_name
+    assert after == before
 
 
 if __name__ == "__main__":

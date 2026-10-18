@@ -1,0 +1,80 @@
+ForecastStudy.Config(
+        experiment_name='exp005',
+        seed=None,
+        data=ForecastData.Config(
+        │   seq_len=24,
+        │   pred_len=12,
+        │   cheap=Oscillator.Config(
+        │       step_size=0.1,
+        │       substeps=4,
+        │       stiffness=1.0,
+        │       damping=0.15,
+        │       cubic=0.0
+        │   ),
+        │   reference=CorrectedOscillator.Config(
+        │       step_size=0.1,
+        │       substeps=4,
+        │       stiffness=1.0,
+        │       damping=0.15,
+        │       cubic=0.4,
+        │       corrections=[
+        │           WeightedForce.Config(
+        │               term=PowerForce.Config(axis=1, power=2),
+        │               coefficient=0.35
+        │           )
+        │       ]
+        │   ),
+        │   train=InitialStates.Config(
+        │       seed=101,
+        │       count=32,
+        │       amplitude=(0.2, 1.5),
+        │       velocity=0.5
+        │   ),
+        │   validation=InitialStates.Config(
+        │       seed=202,
+        │       count=16,
+        │       amplitude=(0.2, 1.5),
+        │       velocity=0.5
+        │   ),
+        │   synthetic=InitialStates.Config(
+        │       seed=303,
+        │       count=256,
+        │       amplitude=(0.2, 1.5),
+        │       velocity=0.5
+        │   ),
+        │   test=InitialStates.Config(
+        │       seed=404,
+        │       count=64,
+        │       amplitude=(0.2, 1.5),
+        │       velocity=0.5
+        │   ),
+        │   shifted=InitialStates.Config(
+        │       seed=505,
+        │       count=64,
+        │       amplitude=(1.5, 2.5),
+        │       velocity=0.5
+        │   )
+        ),
+        method=SparseSimulator.Config(
+            terms=[
+                PowerForce.Config(axis=0, power=1),
+                PowerForce.Config(axis=0, power=3),
+                PowerForce.Config(axis=0, power=5),
+                PowerForce.Config(axis=1, power=1),
+                PowerForce.Config(axis=1, power=2),
+                PowerForce.Config(axis=1, power=3)
+            ],
+            max_terms=2,
+            complexity_penalty=1e-06,
+            initial_coefficient=0.1,
+            search=PartialConfig(
+                scipy.optimize._lsq.least_squares.least_squares,
+                bounds=(0.0, 2.0),
+                max_nfev=40,
+                ftol=1e-09,
+                xtol=1e-09,
+                gtol=1e-09
+            ),
+            dtype=torch.float64
+        )
+    )

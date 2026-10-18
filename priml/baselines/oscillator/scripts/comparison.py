@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from itertools import product
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
@@ -49,6 +50,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").strip())
     _add_arguments(parser)
     flags = cast(_Flags, parser.parse_args(argv))
+    if len(set(flags.data_seed_offsets)) != len(flags.data_seed_offsets):
+        parser.error("Data seed offsets must be unique.")
     git = shutil.which("git")
     if git is None:
         raise RuntimeError("Git is needed to record the code revision.")
@@ -64,27 +67,40 @@ def main(argv: list[str] | None = None) -> int:
     # the repository root follows each layout; a fixed ``parents[3]`` fell one short.
     root = _CWD.parents[len(Path("priml/baselines/oscillator/scripts").parts) - 1]
     records: list[ComparisonRecord] = []
-    for matched in (True, False):
-        for seed in flags.seeds:
-            for recipe in recipes:
-                cfg = recipe.copy_tree()
-                cfg.seed = seed
-                if matched:
-                    cfg.data.reference = cfg.data.cheap.copy_tree()
-                case = "matched" if matched else "mismatched"
-                label = f"{case}-{cfg.experiment_name}-{seed}"
-                (directory / f"{label}.txt").write_text(
-                    cfg.pformat(hide_default_values=False) + "\n",
-                )
-                started = time.perf_counter()
-                record: ComparisonRecord = {
-                    **cfg.make().run(),
-                    "case": case,
-                    "elapsed_seconds": time.perf_counter() - started,
-                }
-                records.append(record)
-                _write_json(directory / f"{label}.json", record)
-                print(f"Finished {label}", flush=True)
+    for offset, case, seed, recipe in product(
+        flags.data_seed_offsets,
+        flags.cases,
+        flags.seeds,
+        recipes,
+    ):
+        cfg = recipe.copy_tree()
+        cfg.seed = seed
+        for stream in (
+            cfg.data.train,
+            cfg.data.validation,
+            cfg.data.synthetic,
+            cfg.data.test,
+            cfg.data.shifted,
+        ):
+            stream.seed += offset
+        if case == "matched":
+            cfg.data.reference = cfg.data.cheap.copy_tree()
+        label = f"{case}-{cfg.experiment_name}-{seed}"
+        if offset:
+            label += f"-data{offset}"
+        (directory / f"{label}.txt").write_text(
+            cfg.pformat(hide_default_values=False) + "\n",
+        )
+        started = time.perf_counter()
+        record: ComparisonRecord = {
+            **cfg.make().run(),
+            "case": case,
+            "data_seed_offset": offset,
+            "elapsed_seconds": time.perf_counter() - started,
+        }
+        records.append(record)
+        _write_json(directory / f"{label}.json", record)
+        print(f"Finished {label}", flush=True)
     sources = sorted(_CWD.parent.rglob("*.py"))
     sources.extend(
         root / "priml/baselines/etth1" / name for name in ("model.py", "train_step.py")
@@ -95,6 +111,8 @@ def main(argv: list[str] | None = None) -> int:
             "status": "preliminary synthetic pilot; no agent or real-data evaluation",
             "experiments": flags.experiments,
             "seeds": flags.seeds,
+            "data_seed_offsets": flags.data_seed_offsets,
+            "cases": flags.cases,
             "python": platform.python_version(),
             "torch": str(torch.__version__),
             "platform": platform.platform(),
@@ -118,6 +136,7 @@ class ComparisonRecord(StudyRecord):
     """One study run, labelled by simulator case and timed."""
 
     case: str
+    data_seed_offset: int
     elapsed_seconds: float
 
 
@@ -125,6 +144,8 @@ class _Flags(Protocol):
     directory: Path
     experiments: list[str]
     seeds: list[int]
+    data_seed_offsets: list[int]
+    cases: list[str]
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -146,6 +167,20 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=[2021, 2022, 2023],
         help="Model seeds applied to every recipe.",
+    )
+    parser.add_argument(
+        "--data-seed-offsets",
+        nargs="+",
+        type=int,
+        default=[0],
+        help="Offsets added to every split seed; recipes share data within each offset.",
+    )
+    parser.add_argument(
+        "--cases",
+        nargs="+",
+        choices=["matched", "mismatched"],
+        default=["matched", "mismatched"],
+        help="Simulator controls to run; the default keeps both.",
     )
 
 

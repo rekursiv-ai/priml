@@ -1,0 +1,108 @@
+DelayedStudy.Config(
+        experiment_name='exp014',
+        seed=None,
+        data=DelayedData.Config(
+        │   seq_len=96,
+        │   pred_len=48,
+        │   cheap=Oscillator.Config(
+        │       step_size=0.1,
+        │       substeps=4,
+        │       stiffness=1.0,
+        │       damping=0.15,
+        │       cubic=0.0
+        │   ),
+        │   reference=DelayedOscillator.Config(
+        │       step_size=0.1,
+        │       substeps=4,
+        │       stiffness=1.0,
+        │       damping=0.15,
+        │       cubic=0.0,
+        │       lags=[80, 48],
+        │       gain=2.0
+        │   ),
+        │   train=InitialStates.Config(
+        │       seed=101,
+        │       count=32,
+        │       amplitude=(0.2, 1.5),
+        │       velocity=2.0
+        │   ),
+        │   validation=InitialStates.Config(
+        │       seed=202,
+        │       count=16,
+        │       amplitude=(0.2, 1.5),
+        │       velocity=2.0
+        │   ),
+        │   synthetic=InitialStates.Config(
+        │       seed=303,
+        │       count=256,
+        │       amplitude=(0.2, 1.5),
+        │       velocity=2.0
+        │   ),
+        │   test=InitialStates.Config(
+        │       seed=404,
+        │       count=64,
+        │       amplitude=(0.2, 1.5),
+        │       velocity=2.0
+        │   ),
+        │   shifted=InitialStates.Config(
+        │       seed=505,
+        │       count=64,
+        │       amplitude=(1.5, 2.5),
+        │       velocity=2.0
+        │   ),
+        │   history=PairedHistory.Config(
+        │       first=Pulse.Config(start=0, width=32),
+        │       second=Pulse.Config(start=32, width=32)
+        │   )
+        ),
+        method=NeuralForecast.Config(
+        │   step=TrainStep.Config(
+        │       model=HistoryNetwork.Config(
+        │           seq_len=96,
+        │           pred_len=48,
+        │           block=SwiGLU.Config(
+        │               channels_in=192,
+        │               channels_out=96,
+        │               channels_hidden=64,
+        │               expansion=2.6666666666666665,
+        │               round_to=256,
+        │               gate=True,
+        │               bias=False,
+        │               split_gate_projection=False,
+        │               norm=None,
+        │               act=priml.model.swiglu.silu,
+        │               depth_index=(),
+        │               init_weight=priml.model.init.unit_fan_in_uniform,
+        │               init_weight_out=torch.nn.init.zeros_,
+        │               shard=None
+        │           )
+        │       ),
+        │       optimizer=PartialConfig(<class 'torch.optim.adam.Adam'>, lr=0.001),
+        │       loss=SimpleLoss.Config(
+        │           loss_fn=priml.loss.simple_loss.mse,
+        │           target_key='label',
+        │           kwargs={'reduction': 'none'},
+        │           channels_out=-1
+        │       ),
+        │       accumulate_grad_batches=1,
+        │       drop_partial_accumulation_on_epoch_end=True,
+        │       train_budget_steps=300,
+        │       train_budget_sec=inf,
+        │       train_budget_epochs=inf,
+        │       lr_schedule=PartialConfig(priml.math.schedules.constant),
+        │       parallelism=NoParallel.Config(device=None),
+        │       model_quantization=NoModelQuantization.Config(),
+        │       activation_memoization=DefaultActivationStorage.Config(),
+        │       compile=None,
+        │       ema=NoEMA.Config(),
+        │       gradient_clip_norm=inf,
+        │       skip_step_on_nonfinite_grad=False,
+        │       device_init='eager',
+        │       dtype_autocast=None,
+        │       autocast_cache_enabled=False
+        │   ),
+        │   batch_size=8,
+        │   validation_every=25,
+        │   sample_seed=606
+        )
+    )

@@ -102,6 +102,77 @@ def test_cli_defaults_name_the_pilot_recipes_and_seeds() -> None:
     flags = cast(comparison._Flags, parser.parse_args([]))
     assert flags.experiments == ["exp000", "exp001", "exp002"]
     assert flags.seeds == [2021, 2022, 2023]
+    assert flags.data_seed_offsets == [0]
+    assert flags.cases == ["matched", "mismatched"]
+
+
+@pytest.mark.compute_training
+def test_cli_can_run_only_the_requested_simulator_case(tmp_path: Path) -> None:
+    destination = tmp_path / "run"
+    comparison.main(
+        [
+            "--directory",
+            str(destination),
+            "--experiments",
+            "exp_smoke",
+            "--seeds",
+            "7",
+            "--cases",
+            "mismatched",
+        ],
+    )
+    report = json_loads(
+        (destination / "comparison.json").read_text(),
+        dict[str, object],
+    )
+    records = from_plain(report["runs"], list[dict[str, object]])
+    assert report["cases"] == ["mismatched"]
+    assert len(records) == 1
+    assert records[0]["case"] == "mismatched"
+    assert not (destination / "matched-exp_smoke-7.json").exists()
+
+
+def test_duplicate_data_offsets_fail_before_creating_output(tmp_path: Path) -> None:
+    destination = tmp_path / "run"
+    with pytest.raises(SystemExit) as result:
+        comparison.main(
+            ["--directory", str(destination), "--data-seed-offsets", "0", "0"],
+        )
+    assert result.value.code == 2
+    assert not destination.exists()
+
+
+@pytest.mark.compute_training
+def test_data_offsets_are_saved_and_keep_models_on_the_same_data(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "run"
+    comparison.main(
+        [
+            "--directory",
+            str(destination),
+            "--experiments",
+            "exp_smoke",
+            "--seeds",
+            "7",
+            "--data-seed-offsets",
+            "0",
+            "1000",
+        ],
+    )
+    report = json_loads(
+        (destination / "comparison.json").read_text(),
+        dict[str, object],
+    )
+    assert report["data_seed_offsets"] == [0, 1000]
+    records = from_plain(report["runs"], list[dict[str, object]])
+    assert [record["data_seed_offset"] for record in records] == [0, 0, 1000, 1000]
+    assert records[0]["training"] != records[2]["training"]
+    assert (destination / "matched-exp_smoke-7.json").exists()
+    assert (destination / "matched-exp_smoke-7-data1000.json").exists()
+    config = (destination / "matched-exp_smoke-7-data1000.txt").read_text()
+    for seed in (1101, 1202, 1303, 1404, 1505):
+        assert f"seed={seed:_}" in config
 
 
 def test_cli_help_and_unknown_flags() -> None:
