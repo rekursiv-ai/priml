@@ -43,6 +43,27 @@ def log_float32(values: NDArray[np.generic]) -> NDArray[np.float32]:
     ).reshape(values.shape)
 
 
+def log1p_float32(values: NDArray[np.generic]) -> NDArray[np.float32]:
+    """Evaluate binary32 log(1 + x) with scalar C99 rounding.
+
+    Args:
+      values: Binary32 operands of any shape, including strided and empty arrays.
+
+    Returns:
+      result: Binary32 C99 log1pf outputs with the original logical shape.
+
+    Raises:
+      ValueError: Operands do not have binary32 dtype.
+
+    """
+    if values.dtype != np.float32:
+        raise ValueError("Expected binary32 logarithm operands.")
+    return _kernel()(
+        cast("_Vector", values.ravel()),
+        logarithm=_libm().log1pf,
+    ).reshape(values.shape)
+
+
 @cache
 def _kernel() -> _LogarithmKernel:
     return cast("_LogarithmKernel", njit(cache=True)(_log_numba))
@@ -64,11 +85,15 @@ def _libm() -> _Libm:
     library = ctypes.CDLL(None)
     library.logf.restype = ctypes.c_float
     library.logf.argtypes = [ctypes.c_float]
+    library.log1pf.restype = ctypes.c_float
+    library.log1pf.argtypes = [ctypes.c_float]
     return cast("_Libm", library)
 
 
 class _Libm(Protocol):
     def logf(self, x: float, /) -> float: ...
+
+    def log1pf(self, x: float, /) -> float: ...
 
 
 class _LogarithmKernel(Protocol):

@@ -72,6 +72,54 @@ def test_natural_logarithm_rejects_non_binary32_metadata(
         logarithm.log_float32(np.ones(3, dtype=dtype))
 
 
+@pytest.mark.usefixtures("eager_kernel")
+@pytest.mark.parametrize("transpose", [False, True])
+def test_log1p_preserves_captured_scalar_rounding(transpose: bool) -> None:
+    # Scalar source captures from the CASMI and ROGII reference processes.
+    values = np.array(
+        [[0, 0.46771079301834106, 1e-30], [0.5, 0.9823818206787109, -0.0]],
+        dtype=np.float32,
+    )
+    expected = np.array(
+        [
+            [0, 0.38370388746261597, 1e-30],
+            [0.40546509623527527, 0.6842990517616272, -0.0],
+        ],
+        dtype=np.float32,
+    )
+    if transpose:
+        values, expected = values.T, expected.T
+    original = values.copy()
+    actual = logarithm.log1p_float32(values)
+    np.testing.assert_array_equal(actual.view(np.uint32), expected.view(np.uint32))
+    np.testing.assert_array_equal(values.view(np.uint32), original.view(np.uint32))
+    assert actual.dtype == np.float32
+    assert actual.shape == values.shape
+
+
+@pytest.mark.usefixtures("eager_kernel")
+@pytest.mark.parametrize("shape", [(), (0,), (2, 0, 3)])
+def test_log1p_preserves_scalar_and_empty_shapes(shape: tuple[int, ...]) -> None:
+    actual = logarithm.log1p_float32(np.zeros(shape, dtype=np.float32))
+    np.testing.assert_array_equal(actual, np.zeros(shape, dtype=np.float32))
+    assert actual.dtype == np.float32
+    assert actual.shape == shape
+
+
+@pytest.mark.usefixtures("eager_kernel")
+def test_log1p_propagates_domain_and_nonfinite_results() -> None:
+    values = np.array([-2, -1, np.inf, np.nan], dtype=np.float32)
+    expected = np.array([np.nan, -np.inf, np.inf, np.nan], dtype=np.float32)
+    np.testing.assert_array_equal(logarithm.log1p_float32(values), expected)
+
+
+@pytest.mark.usefixtures("eager_kernel")
+@pytest.mark.parametrize("dtype", [np.float64, np.int32])
+def test_log1p_rejects_non_binary32_metadata(dtype: type[np.generic]) -> None:
+    with pytest.raises(ValueError, match="binary32"):
+        logarithm.log1p_float32(np.ones(3, dtype=dtype))
+
+
 def _eager_compile(
     *,
     cache: bool,
