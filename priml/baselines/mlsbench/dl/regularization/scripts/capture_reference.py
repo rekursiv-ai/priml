@@ -37,9 +37,7 @@ from priml.baselines.mlsbench.dl.vision import (
     reference as vision,
     upstream as vision_upstream,
 )
-from priml.baselines.mlsbench.dl.vision.scripts import (
-    capture_reference as vision_capture,
-)
+from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.testing.golden import mismatches
 
 
@@ -63,7 +61,7 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    vision_capture.write_records(flags.out, {"reference.pt": captured.record})
+    capture_reference.write_records(flags.out, {"reference.pt": captured.record})
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
@@ -95,12 +93,15 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         )
         record["setting/batch_size"] = reference.setting_batch_size(argv)
         batches = vision_upstream.upstream_batches(scripts["zero"])
-        report += vision_capture.compare_wiring(trace)
-        report += vision_capture.compare_full_size(scripts["zero"], trace)
+        report += capture_reference.compare_wiring(trace)
+        report += capture_reference.compare_full_size(scripts["zero"], trace)
     port = reference.port_record() | {"setting/batch_size": reference.port_batch_size()}
     report += mismatches(record, port)
-    report += vision_capture.compare_lockstep(lockstep, run=reference.lockstep_record)
-    report += vision_capture.compare_loaders(batches, vision.loader_batches(scratch))
+    report += capture_reference.compare_lockstep(
+        lockstep,
+        run=reference.lockstep_record,
+    )
+    report += capture_reference.compare_loaders(batches, vision.loader_batches(scratch))
     return vision.Captured(record=record, sites={}, report=report)
 
 
@@ -109,6 +110,13 @@ def check_pristine(root: Path) -> list[str]:
 
     The port's ``exp000`` adds zero because the published body raises and its
     docstring names zero as "no regularization".
+
+    Args:
+      root: Clone of the benchmark.
+
+    Returns:
+      report: A line if the pristine regularizer returns, else nothing.
+
     """
     return [] if upstream.pristine_raises(root) else ["pristine: does not raise"]
 

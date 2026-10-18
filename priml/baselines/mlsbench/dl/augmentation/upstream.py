@@ -18,7 +18,6 @@ import functools
 
 from PIL import Image
 from torch.utils import data
-from torchvision.transforms import autoaugment
 
 import torch
 
@@ -30,6 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable
 
     from torch import Tensor, nn
+    from torchvision.transforms import autoaugment
 
     from priml.baselines.mlsbench.dl.vision.upstream import (
         Batches,
@@ -37,6 +37,11 @@ if TYPE_CHECKING:
         MainTrace,
         Upstream,
     )
+else:
+    from wrapt import lazy_import
+
+    autoaugment = lazy_import("torchvision.transforms.autoaugment")  # ~400 ms.
+
 
 PRISTINE: Final = Path(
     "harbor/tasks-docker/mls-bench__cv-data-augmentation/tests/meta/pristine"
@@ -268,6 +273,25 @@ class _ApplyOp(Protocol):
         raise NotImplementedError
 
 
+def census_gaps(counts: dict[str, int]) -> list[str]:
+    """Return every operation, and negated signed one, a census never saw.
+
+    Args:
+      counts: A census, keyed ``"<op><sign>"`` with the port's names.
+
+    Returns:
+      gaps: One key per operation and sign never reached.
+
+    """
+    wanted = [f"{op}+" for op in OPS.values()] + [f"{op}-" for op in SIGNED]
+    return [key for key in wanted if key not in counts]
+
+
+def _pil(image: Tensor) -> Image.Image:
+    """Return a ``(3, H, W)`` uint8 tensor as the RGB image a dataset yields."""
+    return Image.fromarray(image.permute(1, 2, 0).contiguous().numpy())
+
+
 class _OpSpy:
     """Calls ``_apply_op`` and tallies the operation by the sign of its magnitude."""
 
@@ -306,22 +330,3 @@ class _Recorded:
     def __len__(self) -> int:
         # A shuffling loader refuses an empty dataset when it is built.
         return 1
-
-
-def census_gaps(counts: dict[str, int]) -> list[str]:
-    """Return every operation, and negated signed one, a census never saw.
-
-    Args:
-      counts: A census, keyed ``"<op><sign>"`` with the port's names.
-
-    Returns:
-      gaps: One key per operation and sign never reached.
-
-    """
-    wanted = [f"{op}+" for op in OPS.values()] + [f"{op}-" for op in SIGNED]
-    return [key for key in wanted if key not in counts]
-
-
-def _pil(image: Tensor) -> Image.Image:
-    """Return a ``(3, H, W)`` uint8 tensor as the RGB image a dataset yields."""
-    return Image.fromarray(image.permute(1, 2, 0).contiguous().numpy())

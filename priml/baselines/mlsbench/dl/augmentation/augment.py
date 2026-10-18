@@ -273,7 +273,17 @@ def trivialaugment(image: Tensor, stream: torch.Generator, *, space: Space) -> T
 
 
 def randaugment_space(num_bins: int, *, height: int, width: int) -> Space:
-    """Return RandAugment's operations for an image of ``height`` by ``width``."""
+    """Return RandAugment's operations for an image of ``height`` by ``width``.
+
+    Args:
+      num_bins: How many magnitudes each ranged operation spans.
+      height: Image rows, which scale ``translate_y``'s range.
+      width: Image columns, which scale ``translate_x``'s range.
+
+    Returns:
+      space: Per operation its function, magnitudes and whether a coin negates it.
+
+    """
     return [
         (identity, torch.tensor(0.0), False),
         (shear_x, torch.linspace(0.0, 0.3, num_bins), True),
@@ -293,7 +303,15 @@ def randaugment_space(num_bins: int, *, height: int, width: int) -> Space:
 
 
 def trivialaugment_space(num_bins: int) -> Space:
-    """Return TrivialAugment Wide's operations, whose ranges ignore the image size."""
+    """Return TrivialAugment Wide's operations, whose ranges ignore the image size.
+
+    Args:
+      num_bins: How many magnitudes each ranged operation spans.
+
+    Returns:
+      space: Per operation its function, magnitudes and whether a coin negates it.
+
+    """
     return [
         (identity, torch.tensor(0.0), False),
         (shear_x, torch.linspace(0.0, 0.99, num_bins), True),
@@ -337,23 +355,33 @@ def shear_y(image: Tensor, magnitude: float) -> Tensor:
 
 
 def translate_x(image: Tensor, magnitude: float) -> Tensor:
-    """Shift right by ``magnitude`` pixels, truncated towards zero."""
-    height, width = image.shape[-2:]
-    center = [width * 0.5, height * 0.5]
-    return ops.affine(
-        image,
-        ops.inverse_affine(center, translate=[int(magnitude), 0], shear=[0.0, 0.0]),
-    )
+    """Shift right by ``magnitude`` pixels, truncated towards zero.
+
+    Args:
+      image: ``(3, H, W)`` uint8 pixels.
+      magnitude: Pixels to shift; negative shifts left.
+
+    Returns:
+      image: ``(3, H, W)`` uint8 pixels, shifted.
+
+    """
+    # torchvision's inverse map at zero shear, whose centre cancels exactly.
+    return ops.affine(image, [1.0, 0.0, -float(int(magnitude)), 0.0, 1.0, 0.0])
 
 
 def translate_y(image: Tensor, magnitude: float) -> Tensor:
-    """Shift down by ``magnitude`` pixels, truncated towards zero."""
-    height, width = image.shape[-2:]
-    center = [width * 0.5, height * 0.5]
-    return ops.affine(
-        image,
-        ops.inverse_affine(center, translate=[0, int(magnitude)], shear=[0.0, 0.0]),
-    )
+    """Shift down by ``magnitude`` pixels, truncated towards zero.
+
+    Args:
+      image: ``(3, H, W)`` uint8 pixels.
+      magnitude: Pixels to shift; negative shifts up.
+
+    Returns:
+      image: ``(3, H, W)`` uint8 pixels, shifted.
+
+    """
+    # torchvision's inverse map at zero shear, whose centre cancels exactly.
+    return ops.affine(image, [1.0, 0.0, 0.0, 0.0, 1.0, -float(int(magnitude))])
 
 
 def rotate(image: Tensor, magnitude: float) -> Tensor:
@@ -376,6 +404,14 @@ def contrast(image: Tensor, magnitude: float) -> Tensor:
 
     The mean is ``ImageStat``'s, a float quotient of integer totals, rounded
     half up to an integer.
+
+    Args:
+      image: ``(3, H, W)`` uint8 pixels.
+      magnitude: Blend factor less one; zero returns the image.
+
+    Returns:
+      image: ``(3, H, W)`` uint8 pixels, contrast adjusted.
+
     """
     luma = ops.grayscale(image)
     total = int(

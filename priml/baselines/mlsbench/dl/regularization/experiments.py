@@ -31,7 +31,7 @@ from priml.baselines.mlsbench.dl.regularization.regularizers import (
 from priml.baselines.mlsbench.dl.regularization.train_step import (
     RegularizedTrainStep,
 )
-from priml.baselines.mlsbench.dl.vision import experiments as vision
+from priml.baselines.mlsbench.dl.vision import experiments
 from priml.optimizers.parameter_filter import everything, excluding, with_ndim
 
 
@@ -64,7 +64,7 @@ def exp000() -> VisionTrainLoop:
       TBD.
 
     """
-    cfg = vision.exp000()
+    cfg = experiments.exp000()
     cfg.step = RegularizedTrainStep.Config().update(cfg.step)
     cfg.study_name = "dl_regularization"
     cfg.experiment_name = "exp000"

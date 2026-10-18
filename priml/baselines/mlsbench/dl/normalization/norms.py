@@ -41,8 +41,9 @@ class GroupNorm(nn.GroupNorm):
     def __init__(self, num_features: int) -> None:
         super().__init__(groups_for(num_features), num_features)
 
-    @staticmethod
+    @classmethod
     def cost(
+        cls,
         *,
         channels: int,
         seq_len: int,
@@ -97,8 +98,9 @@ class BatchInstanceNorm(nn.Module):
 
     """
 
-    @staticmethod
+    @classmethod
     def cost(
+        cls,
         *,
         channels: int,
         seq_len: int,
@@ -166,8 +168,9 @@ class SwitchableNorm(nn.Module):
 
     """
 
-    @staticmethod
+    @classmethod
     def cost(
+        cls,
         *,
         channels: int,
         seq_len: int,

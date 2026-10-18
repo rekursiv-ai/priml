@@ -71,7 +71,8 @@ def activation_record() -> dict[str, Tensor]:
         model = factory().step.model
         assert isinstance(model, ResNet.Config)
         activation = model.activation
-        assert not isinstance(activation, Makeable)
+        if isinstance(activation, Makeable):
+            raise TypeError("Expected not isinstance(activation, Makeable).")
         leaf = fixed_inputs().requires_grad_()
         with host_agnostic_numerics():
             value = activation(leaf)

@@ -37,7 +37,7 @@ from priml.baselines.mlsbench.dl.multitask.losses import (
 from priml.baselines.mlsbench.dl.multitask.metrics import HeadAccuracy
 from priml.baselines.mlsbench.dl.multitask.model import TwoHeadResNet
 from priml.baselines.mlsbench.dl.multitask.train_step import MultiTaskStep
-from priml.baselines.mlsbench.dl.vision import experiments as vision
+from priml.baselines.mlsbench.dl.vision import experiments
 from priml.baselines.mlsbench.dl.vision.model import ResNet
 from priml.train.train_loop import TrainLoop
 
@@ -58,7 +58,10 @@ class MultiTaskTrainLoop(
 
     @override
     def finalize(self) -> Self:
-        vision.check_reference_loop(self, budget_epochs=self.step.train_budget_epochs)
+        experiments.check_reference_loop(
+            self,
+            budget_epochs=self.step.train_budget_epochs,
+        )
         return super().finalize()
 
 
@@ -87,7 +90,7 @@ def exp000() -> MultiTaskTrainLoop:
       TBD.
 
     """
-    parent = vision.exp000()
+    parent = experiments.exp000()
     cfg = MultiTaskTrainLoop().update(parent, skip_missing=True)
     cfg.study_name = "cv_multitask_loss"
     cfg.experiment_name = "exp000"

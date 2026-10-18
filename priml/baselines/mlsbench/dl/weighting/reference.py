@@ -17,11 +17,10 @@ from torch import Tensor
 
 import torch
 
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference
 from priml.baselines.mlsbench.dl.vision.data import Cifar100Data, normalize
 from priml.baselines.mlsbench.dl.vision.train_step import (
     LossContext,
-    VisionTrainStep,
 )
 from priml.baselines.mlsbench.dl.weighting.data import (
     LongTailCifar100Data,
@@ -125,7 +124,7 @@ def weights_record() -> dict[str, Tensor]:
         :data:`FLAT_COUNTS`, and the loss on ``fixed_logits`` with its gradient.
 
     """
-    logits, label = vision.fixed_logits()
+    logits, label = reference.fixed_logits()
     record: dict[str, Tensor] = {}
     with host_agnostic_numerics():
         for name, factory in WEIGHTS.items():
@@ -157,7 +156,7 @@ def counts_record() -> tuple[dict[str, Tensor], Tensor]:
         balanced_label(),
         imbalance_ratio=RATIO,
         num_classes=CLASSES,
-        seed=vision.SEED,
+        seed=reference.SEED,
     )
     loss = _loss(exp000)
     loss.bind_class_counts(counts)
@@ -178,7 +177,7 @@ def subset_record() -> dict[str, Tensor]:
         label,
         imbalance_ratio=SPLIT_RATIO,
         num_classes=CLASSES,
-        seed=vision.SEED,
+        seed=reference.SEED,
     )
     return {"subset/indices": indices, "subset/counts": counts}
 
@@ -190,8 +189,8 @@ def draws_record() -> dict[str, Tensor]:
       record: The next eight draws.
 
     """
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
-        _ = vision.full_step(exp000)
+    with reference.seeded(reference.SEED), host_agnostic_numerics():
+        _ = reference.full_step(exp000)
         return {"draws/exp000": rng_fingerprint()}
 
 
@@ -215,19 +214,24 @@ def lockstep_record(
     losses: list[Tensor] = []
     logits: list[Tensor] = []
     probes: list[Tensor] = []
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
-        step = _tiny(WEIGHTS[name], epochs=vision.EPOCHS)
+    with reference.seeded(reference.SEED), host_agnostic_numerics():
+        step = reference.tiny_step(
+            WEIGHTS[name],
+            blocks=(1, 1, 1),
+            classes=reference.CLASSES,
+            epochs=reference.EPOCHS,
+        )
         assert isinstance(step.loss, ClassWeightedCrossEntropy)
         step.loss.bind_class_counts(torch.tensor(LOCKSTEP_COUNTS))
-        for index in range(vision.STEPS):
+        for index in range(reference.STEPS):
             step.timer_epoch.global_count = index
             result = step.train_step(
-                media=vision.fixed_media(index),
-                label=vision.fixed_label(index),
+                media=reference.fixed_media(index),
+                label=reference.fixed_label(index),
             )
             losses.append(result["loss"])
             logits.append(result["model"])
-            probe = step.call_eval(media=vision.fixed_media(vision.STEPS))
+            probe = step.call_eval(media=reference.fixed_media(reference.STEPS))
             assert isinstance(probe, Tensor)
             probes.append(probe)
             if states is not None:
@@ -259,12 +263,12 @@ def loader_batches(directory: Path) -> tuple[Batches, Batches]:
     config.base_dir = None
     config.working_dir = directory
     config.imbalance_ratio = SPLIT_RATIO
-    config.batch_size = config.eval_batch_size = vision.LOADER_BATCH
+    config.batch_size = config.eval_batch_size = reference.LOADER_BATCH
     train: Batches = []
     evaluation: Batches = []
-    with vision.seeded(vision.SEED):
+    with reference.seeded(reference.SEED):
         data = config.make()
-        for _ in range(vision.LOADER_PASSES):
+        for _ in range(reference.LOADER_PASSES):
             train.append(list(data.train_dataloader()))
             evaluation.append(list(data.eval_dataloader()))
     return train, evaluation
@@ -318,10 +322,10 @@ def port_record(directory: Path) -> dict[str, Tensor]:
         weights_record()
         | counts
         | subset_record()
-        | vision.schedule_record(exp000)
-        | vision.optimizer_record(exp000)
+        | reference.schedule_record(exp000)
+        | reference.optimizer_record(exp000)
         | draws_record()
-        | vision.best_record()
+        | reference.best_record()
         | decode_indices(train)
     )
     for name in WEIGHTS:
@@ -334,13 +338,3 @@ def _loss(factory: Callable[[], VisionTrainLoop]) -> ClassWeightedCrossEntropy:
     loss = factory().step.loss.make()
     assert isinstance(loss, ClassWeightedCrossEntropy)
     return loss
-
-
-def _tiny(factory: Callable[[], VisionTrainLoop], *, epochs: int) -> VisionTrainStep:
-    """Build ``factory``'s step at the shallowest depth with three classes."""
-    return vision.tiny_step(
-        factory,
-        blocks=(1, 1, 1),
-        classes=vision.CLASSES,
-        epochs=epochs,
-    )

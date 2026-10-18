@@ -36,9 +36,7 @@ from priml.baselines.mlsbench.dl.vision import (
     reference as vision,
     upstream as vision_upstream,
 )
-from priml.baselines.mlsbench.dl.vision.scripts import (
-    capture_reference as vision_capture,
-)
+from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.testing.golden import mismatches
 
 
@@ -66,7 +64,7 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    vision_capture.write_records(flags.out, {"reference.pt": captured.record})
+    capture_reference.write_records(flags.out, {"reference.pt": captured.record})
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
@@ -94,7 +92,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         record = upstream.upstream_record(traces, lockstep)
         record["draws/exp000"] = traces["constant"].draws
         batches = vision_upstream.upstream_batches(scripts["constant"])
-        report = vision_capture.compare_full_size(
+        report = capture_reference.compare_full_size(
             scripts["constant"],
             traces["constant"],
             exp000,
@@ -102,7 +100,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
     port = reference.port_record() | vision.draws_record(exp000)
     report += mismatches(record, port)
     report += compare_lockstep(lockstep)
-    report += vision_capture.compare_loaders(batches, vision.loader_batches(scratch))
+    report += capture_reference.compare_loaders(batches, vision.loader_batches(scratch))
     return vision.Captured(record=record, sites={}, report=report)
 
 
@@ -123,7 +121,7 @@ def compare_lockstep(lockstep: dict[str, vision_upstream.Lockstep]) -> list[str]
         for index, (want, got) in enumerate(zip(theirs, ours, strict=True), start=1):
             report += [
                 f"lockstep/{name}/{index}: {line}"
-                for line in vision_capture.compare_states(want, got)
+                for line in capture_reference.compare_states(want, got)
             ]
     return report
 

@@ -206,6 +206,13 @@ def setting_batch_size(argv: list[str]) -> Tensor:
     """Return the ``--batch-size`` the setting passes, once per loader.
 
     ``main`` hands it to ``get_dataloaders``, which builds both loaders with it.
+
+    Args:
+      argv: The setting's command line.
+
+    Returns:
+      sizes: ``(2,)`` the training then evaluation batch size.
+
     """
     size = int(argv[argv.index("--batch-size") + 1])
     return torch.tensor([size, size])

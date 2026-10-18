@@ -33,7 +33,7 @@ from priml.baselines.mlsbench.dl.multitask.experiments import (
 )
 from priml.baselines.mlsbench.dl.multitask.model import TwoHeadResNet
 from priml.baselines.mlsbench.dl.multitask.train_step import MultiTaskStep
-from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision import reference
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import joined, rng_fingerprint
 from priml.train.parallelism import NoParallel
@@ -245,7 +245,7 @@ def optimizer_record() -> dict[str, Tensor]:
         )
         if name == "sum":
             record["optimizer/settings"] = torch.tensor(
-                [float(cast(float, groups[0][k])) for k in vision.HYPERPARAMETERS],
+                [float(cast(float, groups[0][k])) for k in reference.HYPERPARAMETERS],
                 dtype=torch.float64,
             )
     return record
@@ -260,7 +260,7 @@ def draws_record() -> dict[str, Tensor]:
     """
     record: dict[str, Tensor] = {}
     for name, factory in COMBINATIONS.items():
-        with vision.seeded(vision.SEED), host_agnostic_numerics():
+        with reference.seeded(reference.SEED), host_agnostic_numerics():
             _ = full_step(factory)
             record[f"draws/{name}"] = rng_fingerprint()
     return record
@@ -283,18 +283,18 @@ def lockstep_record(
 
     """
     probes: list[Tensor] = []
-    with vision.seeded(vision.SEED), host_agnostic_numerics():
-        step = tiny_step(COMBINATIONS[name], epochs=vision.EPOCHS)
+    with reference.seeded(reference.SEED), host_agnostic_numerics():
+        step = tiny_step(COMBINATIONS[name], epochs=reference.EPOCHS)
         inner = step.mtl_loss
         spy = step.mtl_loss = CombinationSpy(inner, before_first=None)
-        for index in range(vision.STEPS):
+        for index in range(reference.STEPS):
             step.timer_epoch.global_count = index
             _ = step.train_step(
-                media=vision.fixed_media(index),
-                label=vision.fixed_label(index),
+                media=reference.fixed_media(index),
+                label=reference.fixed_label(index),
                 label_coarse=coarse_label(index),
             )
-            probe = step.call_eval(media=vision.fixed_media(vision.STEPS))
+            probe = step.call_eval(media=reference.fixed_media(reference.STEPS))
             assert isinstance(probe, tuple)
             probes.append(torch.cat(cast(tuple[Tensor, Tensor], probe), dim=-1))
             if states is not None:
@@ -346,17 +346,17 @@ def loader_batches(directory: Path) -> tuple[Batches, Batches]:
       passes: Per training pass the batches in order, then per evaluation pass.
 
     """
-    media, label = vision.synthetic_split()
+    media, label = reference.synthetic_split()
     for split in ("train", "test"):
         torch.save({"media": media, "label": label}, directory / f"{split}.pt")
     config = MultiTaskCifar100Data.Config()
     config.data.working_dir = directory
-    config.data.batch_size = config.data.eval_batch_size = vision.LOADER_BATCH
+    config.data.batch_size = config.data.eval_batch_size = reference.LOADER_BATCH
     train: Batches = []
     evaluation: Batches = []
-    with vision.seeded(vision.SEED):
+    with reference.seeded(reference.SEED):
         data = config.make()
-        for _ in range(vision.LOADER_PASSES):
+        for _ in range(reference.LOADER_PASSES):
             train.append(list(data.train_dataloader()))
             evaluation.append(list(data.eval_dataloader()))
     return train, evaluation
@@ -375,7 +375,7 @@ def port_record() -> dict[str, Tensor]:
         | schedule_record()
         | optimizer_record()
         | draws_record()
-        | vision.best_record()
+        | reference.best_record()
         | {"data/coarse_of_fine": torch.tensor(COARSE_OF_FINE)}
     )
     for name in COMBINATIONS:

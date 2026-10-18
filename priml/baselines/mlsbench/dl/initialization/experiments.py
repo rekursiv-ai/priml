@@ -28,7 +28,7 @@ from priml.baselines.mlsbench.dl.initialization.initializers import (
     orthogonal_relu,
     small_normal,
 )
-from priml.baselines.mlsbench.dl.vision import experiments as vision
+from priml.baselines.mlsbench.dl.vision import experiments
 from priml.baselines.mlsbench.dl.vision.model import (
     ResNet,
     kaiming_normal_fan_in,
@@ -63,7 +63,7 @@ def exp000() -> VisionTrainLoop:
       TBD.
 
     """
-    cfg = vision.exp000()
+    cfg = experiments.exp000()
     cfg.study_name = "dl_weight_initialization"
     cfg.experiment_name = "exp000"
     assert isinstance(cfg.step.model, ResNet.Config)

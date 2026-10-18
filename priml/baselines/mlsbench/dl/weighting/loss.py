@@ -13,16 +13,20 @@ from dataclasses import field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from configgle import Fig, Makeable, PartialConfig
-from torch.nn import functional
 
 from priml.baselines.mlsbench.dl.weighting.weights import ClassWeightFn, uniform
 
 
 if TYPE_CHECKING:
     from torch import Tensor
+    from torch.nn import functional
 
     from priml.baselines.mlsbench.dl.vision.train_step import LossContext
     from priml.loss.custom_types import LossOutput
+else:
+    from wrapt import lazy_import
+
+    functional = lazy_import("torch.nn.functional")  # ~1050 ms.
 
 
 @runtime_checkable

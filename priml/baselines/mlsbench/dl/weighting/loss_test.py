@@ -9,10 +9,7 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.vision.train_step import LossContext
-from priml.baselines.mlsbench.dl.weighting.loss import (
-    BindsClassCounts,
-    ClassWeightedCrossEntropy,
-)
+from priml.baselines.mlsbench.dl.weighting.loss import ClassWeightedCrossEntropy
 from priml.baselines.mlsbench.dl.weighting.weights import inverse_frequency
 
 
@@ -23,7 +20,6 @@ def test_the_loss_weighs_each_example_by_its_class() -> None:
     config = ClassWeightedCrossEntropy.Config()
     config.class_weight = PartialConfig(inverse_frequency)
     loss = config.make()
-    assert isinstance(loss, BindsClassCounts)
     counts = torch.tensor([4.0, 2.0, 1.0])
     loss.bind_class_counts(counts)
     logits = torch.arange(6.0).reshape(2, 3) / 4

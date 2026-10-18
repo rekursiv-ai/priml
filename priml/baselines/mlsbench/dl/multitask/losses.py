@@ -217,7 +217,8 @@ class DynamicWeightAverage(nn.Module):
     @override
     def set_extra_state(self, state: object) -> None:
         """Restore the previous step's losses from :meth:`get_extra_state`."""
-        assert state is None or isinstance(state, Tensor)
+        if state is not None and not isinstance(state, Tensor):
+            raise ValueError("Expected state is None or isinstance(state, Tensor).")
         self.prev_losses = state
 
 
@@ -321,18 +322,6 @@ class PCGrad(nn.Module):
         return surrogate
 
 
-def _combination_cost(*, params: int, dtype: torch.dtype | None) -> Cost:
-    """Cost combining two scalar losses, owning ``params`` trained parameters."""
-    return elementwise_cost(
-        primal=2,
-        adjoint=2,
-        channels=2,
-        params=params,
-        dtype=dtype,
-        inputs=2,
-    )
-
-
 def graph_leaves(loss: Tensor) -> list[Tensor]:
     """Return the leaves requiring grad reached by a depth-first walk of ``loss``'s graph.
 
@@ -388,4 +377,16 @@ def _flat_grad(loss: Tensor, params: list[Tensor]) -> Tensor:
             g.flatten() if g is not None else torch.zeros_like(p).flatten()
             for g, p in zip(grads, params, strict=True)
         ],
+    )
+
+
+def _combination_cost(*, params: int, dtype: torch.dtype | None) -> Cost:
+    """Cost combining two scalar losses, owning ``params`` trained parameters."""
+    return elementwise_cost(
+        primal=2,
+        adjoint=2,
+        channels=2,
+        params=params,
+        dtype=dtype,
+        inputs=2,
     )

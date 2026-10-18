@@ -41,9 +41,7 @@ from priml.baselines.mlsbench.dl.vision import (
     reference as vision,
     upstream as vision_upstream,
 )
-from priml.baselines.mlsbench.dl.vision.scripts import (
-    capture_reference as vision_capture,
-)
+from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import mismatches
 
@@ -72,7 +70,7 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    vision_capture.write_records(flags.out, {"reference.pt": captured.record})
+    capture_reference.write_records(flags.out, {"reference.pt": captured.record})
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
@@ -99,8 +97,11 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         batches = upstream.upstream_batches(scripts["sum"])
         report = compare_wiring(traces) + compare_full_size(scripts, traces["sum"])
     report += mismatches(record, reference.port_record())
-    report += vision_capture.compare_lockstep(lockstep, run=reference.lockstep_record)
-    report += vision_capture.compare_loaders(
+    report += capture_reference.compare_lockstep(
+        lockstep,
+        run=reference.lockstep_record,
+    )
+    report += capture_reference.compare_loaders(
         batches,
         reference.loader_batches(scratch),
     )
@@ -146,7 +147,7 @@ def compare_full_size(
         ours = reference.full_step(reference.COMBINATIONS["sum"]).model
         theirs = pristine.ResNet(pristine.BasicBlock, [9, 9, 9])
         theirs.load_state_dict(trace.state)
-        report = vision_capture.compare_states(trace.state, ours.state_dict())
+        report = capture_reference.compare_states(trace.state, ours.state_dict())
         media = vision.fixed_media(0)
         for mode in ("train", "eval"):
             getattr(ours, mode)()

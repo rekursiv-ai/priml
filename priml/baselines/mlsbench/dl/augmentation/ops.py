@@ -255,17 +255,15 @@ def _row(pixels: Tensor, weights: Tensor) -> Tensor:
     ] * weights[2]
 
 
+# The positions accumulate one step at a time in double precision, as the C loop does; a
+# product per pixel would round differently.
 def _scaled(
     a: list[float],
     *,
     height: int,
     width: int,
 ) -> tuple[Tensor, Tensor, Tensor]:
-    """Source rows, columns and validity of ``ImagingScaleAffine``.
-
-    The positions accumulate one step at a time in double precision, as the
-    C loop does; a product per pixel would round differently.
-    """
+    """Source rows, columns and validity of ``ImagingScaleAffine``."""
     columns = [0] * width
     first, stop = width, 0
     position = a[2] + a[0] * 0.5
@@ -299,11 +297,14 @@ def _fixed_point(
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Source rows, columns and validity of ``affine_fixed``, in 16.16 fixed point."""
     corners = ((0, 0), (width, height), (0, height), (width, 0))
-    assert all(
-        abs(x * a[0] + y * a[1] + a[2]) < 32_768.0
-        and abs(x * a[3] + y * a[4] + a[5]) < 32_768.0
-        for x, y in corners
-    ), "Pillow takes its floating-point path beyond 16.16 range."
+    if not all(
+        (
+            abs(x * a[0] + y * a[1] + a[2]) < 32768.0
+            and abs(x * a[3] + y * a[4] + a[5]) < 32768.0
+            for x, y in corners
+        ),
+    ):
+        raise ValueError("Pillow takes its floating-point path beyond 16.16 range.")
     a0, a1, a3, a4 = (_fix(a[i]) for i in (0, 1, 3, 4))
     a2 = _fix(a[2] + a[0] * 0.5 + a[1] * 0.5)
     a5 = _fix(a[5] + a[3] * 0.5 + a[4] * 0.5)

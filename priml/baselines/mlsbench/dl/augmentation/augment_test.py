@@ -10,7 +10,9 @@ from typing import TYPE_CHECKING, Final, cast
 
 from PIL import Image
 from torchvision import transforms
+from torchvision.transforms import functional
 
+import numpy as np
 import pytest
 import torch
 
@@ -167,6 +169,35 @@ def test_each_space_lists_torchvisions_operations_and_bins_in_order(
     ):
         assert signed == want_signed
         assert torch.equal(magnitudes, want)
+
+
+@pytest.mark.parametrize(
+    ("op", "magnitude", "shift"),
+    [
+        (augment.translate_x, 5.7, [5, 0]),
+        (augment.translate_x, -3.7, [-3, 0]),
+        (augment.translate_y, 4.7, [0, 4]),
+        (augment.translate_y, -6.7, [0, -6]),
+    ],
+    ids=["x", "-x", "y", "-y"],
+)
+def test_a_translation_matches_torchvisions_policy_operation(
+    op: Callable[[Tensor, float], Tensor],
+    magnitude: float,
+    shift: list[int],
+) -> None:
+    # 32 pixels a side, so a stray degree of shear moves the far rows and columns.
+    generator = torch.Generator().manual_seed(SEED)
+    image = torch.randint(0, 256, (3, 32, 32), generator=generator).to(torch.uint8)
+    theirs = cast("Callable[..., Image.Image]", functional.affine)(
+        Image.fromarray(image.permute(1, 2, 0).numpy()),
+        angle=0.0,
+        translate=shift,
+        scale=1.0,
+        shear=[0.0, 0.0],
+    )
+    want = torch.from_numpy(np.asarray(theirs).copy()).permute(2, 0, 1)
+    assert torch.equal(op(image, magnitude), want)
 
 
 def test_every_operation_of_both_spaces_runs_on_an_image() -> None:

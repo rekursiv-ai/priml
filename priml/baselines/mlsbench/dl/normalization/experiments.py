@@ -27,7 +27,7 @@ from priml.baselines.mlsbench.dl.normalization.norms import (
     GroupNorm,
     SwitchableNorm,
 )
-from priml.baselines.mlsbench.dl.vision import experiments as vision
+from priml.baselines.mlsbench.dl.vision import experiments
 from priml.baselines.mlsbench.dl.vision.model import ResNet
 
 
@@ -60,7 +60,7 @@ def exp000() -> VisionTrainLoop:
       TBD.
 
     """
-    cfg = vision.exp000()
+    cfg = experiments.exp000()
     cfg.study_name = "dl_normalization"
     cfg.experiment_name = "exp000"
     return cfg

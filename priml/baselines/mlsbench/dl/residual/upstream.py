@@ -210,19 +210,6 @@ def upstream_blocks(script: Upstream, name: str) -> dict[str, Tensor]:
     return record
 
 
-# The stochastic-depth block numbers itself from a class-wide counter that only
-# a 16-to-16-channel block resets, so a block built alone would otherwise take
-# its survival from every block built before it in this process.
-@contextmanager
-def _fresh_counter(block: object) -> Generator[None]:
-    """Start a block class's ``_block_counter`` at zero for the block, if it has one."""
-    if hasattr(block, "_block_counter"):
-        with mock.patch.object(block, "_block_counter", 0):
-            yield
-    else:
-        yield
-
-
 def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep:
     """Repeat ``main``'s epoch loop on the shallowest network for two epochs.
 
@@ -302,3 +289,16 @@ def upstream_record(
     for values, _ in lockstep.values():
         record |= values
     return record
+
+
+# The stochastic-depth block numbers itself from a class-wide counter that only
+# a 16-to-16-channel block resets, so a block built alone would otherwise take
+# its survival from every block built before it in this process.
+@contextmanager
+def _fresh_counter(block: object) -> Generator[None]:
+    """Start a block class's ``_block_counter`` at zero for the block, if it has one."""
+    if hasattr(block, "_block_counter"):
+        with mock.patch.object(block, "_block_counter", 0):
+            yield
+    else:
+        yield

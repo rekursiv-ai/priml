@@ -29,7 +29,7 @@ from priml.baselines.mlsbench.dl.lr_schedule.schedules import (
     one_cycle,
     warmup_cosine,
 )
-from priml.baselines.mlsbench.dl.vision import experiments as vision
+from priml.baselines.mlsbench.dl.vision import experiments
 
 
 if TYPE_CHECKING:
@@ -56,7 +56,7 @@ def exp000() -> VisionTrainLoop:
       TBD.
 
     """
-    cfg = vision.exp000()
+    cfg = experiments.exp000()
     cfg.study_name = "dl_lr_schedule"
     cfg.experiment_name = "exp000"
     cfg.step.schedule = PartialConfig(constant)

@@ -14,9 +14,7 @@ def metric(start: int, stop: int, key: str) -> HeadAccuracy:
     config.logits_start = start
     config.logits_stop = stop
     config.label_key = key
-    made = config.make()
-    assert isinstance(made, HeadAccuracy)
-    return made
+    return config.make()
 
 
 def test_each_head_reads_its_own_columns_and_labels() -> None:

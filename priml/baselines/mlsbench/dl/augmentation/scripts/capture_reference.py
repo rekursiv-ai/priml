@@ -41,9 +41,7 @@ from priml.baselines.mlsbench.dl.vision import (
     upstream as vision_upstream,
 )
 from priml.baselines.mlsbench.dl.vision.data import normalize
-from priml.baselines.mlsbench.dl.vision.scripts import (
-    capture_reference as vision_capture,
-)
+from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.testing.golden import mismatches
 
 
@@ -77,7 +75,7 @@ def main() -> int:
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
     try:
-        vision_capture.write_records(flags.out, {"reference.pt": captured.record})
+        capture_reference.write_records(flags.out, {"reference.pt": captured.record})
     except ValueError as error:
         print(error)
         return 1
@@ -106,7 +104,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         batches = {
             name: upstream.upstream_batches(script) for name, script in scripts.items()
         }
-        report = vision_capture.compare_full_size(scripts["pad_crop_flip"], trace)
+        report = capture_reference.compare_full_size(scripts["pad_crop_flip"], trace)
     pipelines, census, test = compare_pipelines(scripts)
     report += pipelines
     record = {
@@ -131,7 +129,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
     for name in scripts:
         report += [
             f"{name}: {line}"
-            for line in vision_capture.compare_loaders(
+            for line in capture_reference.compare_loaders(
                 batches[name],
                 reference.loader_batches(name, scratch),
             )
@@ -201,7 +199,7 @@ def compare_lockstep(lockstep: dict[str, Lockstep]) -> list[str]:
 
     """
     run = _Recorded()
-    report = vision_capture.compare_lockstep(lockstep, run=run)
+    report = capture_reference.compare_lockstep(lockstep, run=run)
     for name, (theirs, _) in lockstep.items():
         key = f"lockstep/{name}/media"
         report += mismatches({key: theirs[key]}, {key: run.record[key]})

@@ -36,9 +36,7 @@ from priml.baselines.mlsbench.dl.vision import (
     reference as vision,
     upstream as vision_upstream,
 )
-from priml.baselines.mlsbench.dl.vision.scripts import (
-    capture_reference as vision_capture,
-)
+from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.testing.golden import mismatches
 
 
@@ -62,7 +60,7 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    vision_capture.write_records(flags.out, {"reference.pt": captured.record})
+    capture_reference.write_records(flags.out, {"reference.pt": captured.record})
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
@@ -92,15 +90,18 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         report = [
             f"full/{name}: {line}"
             for name, factory in reference.NORMS.items()
-            for line in vision_capture.compare_full_size(
+            for line in capture_reference.compare_full_size(
                 scripts[name],
                 traces[name],
                 factory,
             )
         ]
     report += mismatches(record, reference.port_record())
-    report += vision_capture.compare_lockstep(lockstep, run=reference.lockstep_record)
-    report += vision_capture.compare_loaders(batches, vision.loader_batches(scratch))
+    report += capture_reference.compare_lockstep(
+        lockstep,
+        run=reference.lockstep_record,
+    )
+    report += capture_reference.compare_loaders(batches, vision.loader_batches(scratch))
     return vision.Captured(record=record, sites={}, report=report)
 
 

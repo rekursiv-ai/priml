@@ -33,17 +33,12 @@ from typing import TYPE_CHECKING, Protocol, cast
 import argparse
 import tempfile
 
-import torch
-
 from priml.baselines.mlsbench.dl.residual import reference, upstream
 from priml.baselines.mlsbench.dl.vision import (
     reference as vision,
     upstream as vision_upstream,
 )
-from priml.baselines.mlsbench.dl.vision.scripts import (
-    capture_reference as vision_capture,
-)
-from priml.baselines.mlsbench.dl.vision.train_step import VisionTrainStep
+from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import mismatches
 from priml.train.parallelism import NoParallel
@@ -51,6 +46,12 @@ from priml.train.parallelism import NoParallel
 
 if TYPE_CHECKING:
     from torch import Tensor
+
+    import torch
+else:
+    from wrapt import lazy_import
+
+    torch = lazy_import("torch")  # ~1050 ms.
 
 
 def main() -> int:
@@ -73,7 +74,7 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    vision_capture.write_records(flags.out, {"reference.pt": captured.record})
+    capture_reference.write_records(flags.out, {"reference.pt": captured.record})
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
@@ -100,12 +101,15 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         }
         record = upstream.upstream_record(scripts, traces, lockstep)
         batches = vision_upstream.upstream_batches(scripts["basic"])
-        report = vision_capture.compare_full_size(scripts["basic"], traces["basic"])
+        report = capture_reference.compare_full_size(scripts["basic"], traces["basic"])
         for name in upstream.EDITED:
             report += compare_full_network(scripts[name], name, traces[name])
     report += mismatches(record, reference.port_record())
-    report += vision_capture.compare_lockstep(lockstep, run=reference.lockstep_record)
-    report += vision_capture.compare_loaders(batches, vision.loader_batches(scratch))
+    report += capture_reference.compare_lockstep(
+        lockstep,
+        run=reference.lockstep_record,
+    )
+    report += capture_reference.compare_loaders(batches, vision.loader_batches(scratch))
     report += check_branches(record)
     return vision.Captured(record=record, sites={}, report=report)
 
@@ -160,10 +164,9 @@ def compare_full_network(
         # Built after the port, so a block that reads a class-wide counter in
         # its forward sees this network's count.
         theirs = task.ResNet(task.CustomBlock, [9, 9, 9], 100)
-    assert isinstance(step, VisionTrainStep)
     ours = step.model
     theirs.load_state_dict(trace.state)
-    report = vision_capture.compare_states(trace.state, ours.state_dict())
+    report = capture_reference.compare_states(trace.state, ours.state_dict())
     media = vision.fixed_media(0)
     for mode in ("train", "eval"):
         outputs: list[dict[str, Tensor]] = []

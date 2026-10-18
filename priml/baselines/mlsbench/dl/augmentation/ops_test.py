@@ -113,7 +113,7 @@ def test_a_quarter_turn_of_a_square_image_takes_pillows_transpose(angle: float) 
 
 
 def test_the_fixed_point_path_refuses_a_map_beyond_its_range() -> None:
-    with pytest.raises(AssertionError, match=r"16\.16"):
+    with pytest.raises(ValueError, match=r"16\.16"):
         ops.affine(image(), [1.0, 0.5, 40_000.0, 0.0, 1.0, 0.0])
 
 

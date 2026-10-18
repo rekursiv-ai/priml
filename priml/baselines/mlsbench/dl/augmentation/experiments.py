@@ -28,7 +28,7 @@ from priml.baselines.mlsbench.dl.augmentation.augment import (
     randaugment_normalize,
     trivialaugment_normalize,
 )
-from priml.baselines.mlsbench.dl.vision import experiments as vision
+from priml.baselines.mlsbench.dl.vision import experiments
 
 
 if TYPE_CHECKING:
@@ -57,7 +57,7 @@ def exp000() -> VisionTrainLoop:
       TBD.
 
     """
-    cfg = vision.exp000()
+    cfg = experiments.exp000()
     cfg.study_name = "cv_data_augmentation"
     return cfg
 

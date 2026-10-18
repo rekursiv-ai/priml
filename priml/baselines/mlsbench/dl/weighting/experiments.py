@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 
 from configgle import PartialConfig
 
-from priml.baselines.mlsbench.dl.vision import experiments as vision
+from priml.baselines.mlsbench.dl.vision import experiments
 from priml.baselines.mlsbench.dl.vision.model import ResNet
 from priml.baselines.mlsbench.dl.weighting.data import LongTailCifar100Data
 from priml.baselines.mlsbench.dl.weighting.loss import ClassWeightedCrossEntropy
@@ -64,7 +64,7 @@ def exp000() -> VisionTrainLoop:
       TBD.
 
     """
-    cfg = vision.exp000()
+    cfg = experiments.exp000()
     cfg.study_name = "cv_sample_weighting"
 
     assert isinstance(cfg.step.model, ResNet.Config)

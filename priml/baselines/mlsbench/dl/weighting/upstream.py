@@ -28,7 +28,7 @@ import torch
 
 from priml.baselines.mlsbench.dl.vision import (
     reference as vision,
-    upstream as vision_upstream,
+    upstream,
 )
 from priml.baselines.mlsbench.dl.weighting import reference
 from priml.testing.bfb import host_agnostic_numerics
@@ -123,7 +123,7 @@ class Script(Protocol):
 class Trace:
     """What the script's ``main`` did, as its replaced calls saw it."""
 
-    main: vision_upstream.MainTrace = field(default_factory=vision_upstream.MainTrace)
+    main: upstream.MainTrace = field(default_factory=upstream.MainTrace)
     """Rates, optimizer settings, initial state, draws and reported accuracy."""
 
     weight: Tensor = field(default_factory=lambda: torch.empty(0))
@@ -152,9 +152,9 @@ def variants(root: Path, scratch: Path) -> dict[str, Script]:
       scripts: ``uniform`` (the pristine script) and each of :data:`EDITED`.
 
     """
-    pristine = vision_upstream.load_script(root / PRISTINE)
+    pristine = upstream.load_script(root / PRISTINE)
     edited = {
-        name: vision_upstream.edited_script(
+        name: upstream.edited_script(
             root,
             name,
             scratch,
@@ -260,7 +260,7 @@ def upstream_lockstep(script: Script, name: str, trace: Trace) -> Lockstep:
         script.initialize_weights(model)
         counts = torch.tensor(reference.LOCKSTEP_COUNTS)
         weight = script.compute_class_weights(counts, len(counts), dict(CONFIG))
-        criterion = vision_upstream.CriterionSpy(nn.CrossEntropyLoss(weight=weight))
+        criterion = upstream.CriterionSpy(nn.CrossEntropyLoss(weight=weight))
         optimizer = torch.optim.SGD(
             model.parameters(),
             lr=settings["lr"],
@@ -416,7 +416,15 @@ class _MainSpy:
         self,
         get_dataloaders: Callable[..., tuple[DataLoader[object], object, int, Tensor]],
     ) -> Callable[..., tuple[DataLoader[object], object, int, Tensor]]:
-        """Return ``get_dataloaders``, recording the counts and kept positions."""
+        """Return ``get_dataloaders``, recording the counts and kept positions.
+
+        Args:
+          get_dataloaders: The script's loader builder.
+
+        Returns:
+          recorded: The builder, which also writes the trace's counts and indices.
+
+        """
 
         def recorded(
             *args: object,
@@ -513,7 +521,7 @@ def _datasets(
     dataset: type,
 ) -> contextlib.AbstractContextManager[object]:
     """Make the script's ``torchvision.datasets.CIFAR100`` read ``dataset``."""
-    vision_script = cast(vision_upstream.Upstream, cast(object, script))
+    vision_script = cast(upstream.Upstream, cast(object, script))
     return mock.patch.object(vision_script.torchvision.datasets, "CIFAR100", dataset)
 
 

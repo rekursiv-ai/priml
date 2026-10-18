@@ -96,8 +96,9 @@ refused there, never costed as some other layer."""
 class BatchNorm(nn.BatchNorm2d):
     """``nn.BatchNorm2d`` with the cost :data:`NormFn` asks of a builder."""
 
-    @staticmethod
+    @classmethod
     def cost(
+        cls,
         *,
         channels: int,
         seq_len: int,
@@ -525,7 +526,21 @@ def conv2d_cost(
     batch_size: int,
     dtype: torch.dtype | None,
 ) -> Cost:
-    """Cost one bias-free, same-padded convolution over a square grid."""
+    """Cost one bias-free, same-padded convolution over a square grid.
+
+    Args:
+      channels_in: Input channels.
+      channels_out: Output channels.
+      kernel_size: Side of the square kernel.
+      side: Side of the square input grid.
+      stride: Step of the kernel along each axis.
+      batch_size: Images per forward.
+      dtype: Element type of the weights and activations.
+
+    Returns:
+      cost: The convolution's parameters and work.
+
+    """
     return conv_cost(
         channels_in=channels_in,
         channels_out=channels_out,

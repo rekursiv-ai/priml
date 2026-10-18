@@ -20,10 +20,12 @@ from priml.baselines.mlsbench.dl.vision import reference as vision
 from priml.testing.golden import mismatches, read_tensors
 
 
+_CWD: Final = Path(__file__).resolve().parent
+
 if TYPE_CHECKING:
     from torch import Tensor
 
-_DATA: Final = Path(__file__).resolve().parent / "testdata"
+_DATA: Final = _CWD / "testdata"
 
 
 def stored(prefix: str) -> dict[str, Tensor]:

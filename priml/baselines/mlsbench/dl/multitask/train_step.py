@@ -62,7 +62,6 @@ class MultiTaskStep(VisionTrainStep):
         # Built before the base builds the network: none of this package's
         # combinations draws from the generator, and the optimizer needs it.
         mtl_loss = config.mtl_loss.make()
-        assert isinstance(mtl_loss, nn.Module)
         self.mtl_loss: nn.Module = mtl_loss
         self.optimized: Optimized
         """What the optimizer is built over; set by :meth:`build_optimizer`."""

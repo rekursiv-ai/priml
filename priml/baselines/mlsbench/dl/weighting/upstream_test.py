@@ -10,10 +10,12 @@ https://github.com/Imbernoulli/MLS-Bench/blob/80cf5c5cc8f70fb1b09f185e59ebf5eca0
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
+from unittest import mock
 
 import pickle
 
+from torch import nn
 from torchvision.datasets import cifar
 
 import numpy as np
@@ -25,9 +27,15 @@ from priml.baselines.mlsbench.dl.weighting import reference, upstream
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
     from pathlib import Path
 
+    from torch import Tensor
+
     import pytest
+
+SGD_SETTINGS: Final = ("lr", "momentum", "weight_decay")
+"""The optimizer settings ``main`` passes to SGD."""
 
 WEIGHTS: Final = (
     "def compute_class_weights(class_counts, num_classes, config):\n"
@@ -213,6 +221,59 @@ def test_lockstep_trains_with_the_weighted_criterion(tmp_path: Path) -> None:
     assert record["lockstep/uniform/probe"].shape == (vision.STEPS, 2, vision.CLASSES)
     assert len(states) == vision.STEPS
     assert not torch.equal(states[0]["fc.weight"], states[1]["fc.weight"])
+
+
+def test_lockstep_builds_weighs_and_steps_as_main_does(tmp_path: Path) -> None:
+    variants = scripts(tmp_path)
+    trace = upstream.trace_main(variants["uniform"])
+    script = variants["inverse_freq"]
+    seen: dict[str, object] = {}
+    build, weigh, train = (
+        script.ResNet,
+        script.compute_class_weights,
+        script.train_epoch,
+    )
+
+    def resnet(block: type[nn.Module], blocks: list[int], classes: int) -> nn.Module:
+        seen["resnet"] = (block, blocks, classes)
+        return build(block, blocks, classes)
+
+    def weights(counts: Tensor, classes: int, config: dict[str, object]) -> Tensor:
+        seen["config"] = config
+        return weigh(counts, classes, config)
+
+    def epoch(
+        model: nn.Module,
+        loader: Iterable[tuple[Tensor, Tensor]],
+        criterion: Callable[[Tensor, Tensor], Tensor],
+        optimizer: torch.optim.Optimizer,
+        device: torch.device,
+    ) -> tuple[float, float]:
+        group = cast("dict[str, float]", optimizer.param_groups[0])
+        seen.setdefault("settings", {k: group[k] for k in SGD_SETTINGS})
+        seen["device"] = device
+        return train(model, loader, criterion, optimizer, device)
+
+    with (
+        mock.patch.object(script, "ResNet", resnet),
+        mock.patch.object(script, "compute_class_weights", weights),
+        mock.patch.object(script, "train_epoch", epoch),
+    ):
+        record, _ = upstream.upstream_lockstep(script, "inverse_freq", trace)
+    assert seen["resnet"] == (script.BasicBlock, [1, 1, 1], vision.CLASSES)
+    assert seen["config"] == upstream.CONFIG
+    assert seen["settings"] == {k: trace.main.settings[k] for k in SGD_SETTINGS}
+    assert seen["device"] == torch.device("cpu")
+    counts = torch.tensor(reference.LOCKSTEP_COUNTS)
+    for index in range(vision.STEPS):
+        assert torch.equal(
+            record["lockstep/inverse_freq/loss"][index],
+            nn.functional.cross_entropy(
+                record["lockstep/inverse_freq/logits"][index],
+                vision.fixed_label(index),
+                weight=counts / counts.sum(),
+            ),
+        )
 
 
 def test_the_synthetic_cut_matches_the_port(tmp_path: Path) -> None:

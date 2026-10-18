@@ -673,7 +673,8 @@ class VTP(nn.Module):
         if config.encoder is not None:
             patch = config.encoder.patch_size
         else:
-            assert config.decoder is not None
+            if config.decoder is None:
+                raise ValueError("Expected config.decoder is not None.")
             patch = config.decoder.upscale_factor
         if config.image_size % patch:
             raise ValueError(

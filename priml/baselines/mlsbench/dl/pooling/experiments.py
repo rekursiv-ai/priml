@@ -26,7 +26,7 @@ from priml.baselines.mlsbench.dl.pooling.pools import (
     GeneralizedMeanPool,
     GlobalMaxPool,
 )
-from priml.baselines.mlsbench.dl.vision import experiments as vision
+from priml.baselines.mlsbench.dl.vision import experiments
 from priml.baselines.mlsbench.dl.vision.model import ResNet
 
 
@@ -58,7 +58,7 @@ def exp000() -> VisionTrainLoop:
       TBD.
 
     """
-    cfg = vision.exp000()
+    cfg = experiments.exp000()
     cfg.study_name = "cv_pooling_aggregation"
     cfg.experiment_name = "exp000"
     return cfg

@@ -36,9 +36,7 @@ from priml.baselines.mlsbench.dl.vision import (
     reference as vision,
     upstream as vision_upstream,
 )
-from priml.baselines.mlsbench.dl.vision.scripts import (
-    capture_reference as vision_capture,
-)
+from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import mismatches
 
@@ -67,7 +65,7 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    vision_capture.write_records(flags.out, {"reference.pt": captured.record})
+    capture_reference.write_records(flags.out, {"reference.pt": captured.record})
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
@@ -109,8 +107,11 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         ]
     report += mismatches(record, reference.port_record())
     report += compare_networks({name: state for name, (_, state) in networks.items()})
-    report += vision_capture.compare_lockstep(lockstep, run=reference.lockstep_record)
-    report += vision_capture.compare_loaders(batches, vision.loader_batches(scratch))
+    report += capture_reference.compare_lockstep(
+        lockstep,
+        run=reference.lockstep_record,
+    )
+    report += capture_reference.compare_loaders(batches, vision.loader_batches(scratch))
     return vision.Captured(record=record, sites={}, report=report)
 
 
@@ -134,7 +135,7 @@ def compare_full_size(
         ours = vision.full_step(reference.INITIALIZATIONS[name]).model
         theirs = script.ResNet(script.BasicBlock, [9, 9, 9], 100)
         theirs.load_state_dict(trace.state)
-        report = vision_capture.compare_states(trace.state, ours.state_dict())
+        report = capture_reference.compare_states(trace.state, ours.state_dict())
         media = vision.fixed_media(0)
         for mode in ("train", "eval"):
             ours.train(mode == "train")
@@ -162,7 +163,7 @@ def compare_networks(theirs: dict[str, dict[str, Tensor]]) -> list[str]:
         _ = reference.network_record(name, states=ours)
         report += [
             f"network/{name}/state: {line}"
-            for line in vision_capture.compare_states(want, ours[0])
+            for line in capture_reference.compare_states(want, ours[0])
         ]
     return report
 

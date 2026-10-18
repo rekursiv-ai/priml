@@ -72,7 +72,6 @@ def test_the_dataset_cuts_its_training_split_only(tmp_path: Path) -> None:
     config.working_dir = tmp_path
     config.imbalance_ratio = reference.SPLIT_RATIO
     data = config.make()
-    assert isinstance(data, LongTailCifar100Data)
     expected = reference.subset_record()
     assert torch.equal(data.class_counts, expected["subset/counts"])
     media, label = reference.long_tail_split()

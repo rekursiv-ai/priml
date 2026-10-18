@@ -38,9 +38,7 @@ from priml.baselines.mlsbench.dl.vision import (
     reference as vision,
     upstream as vision_upstream,
 )
-from priml.baselines.mlsbench.dl.vision.scripts import (
-    capture_reference as vision_capture,
-)
+from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
 from priml.baselines.mlsbench.dl.weighting import reference, upstream
 from priml.baselines.mlsbench.dl.weighting.data import long_tail_indices
 from priml.baselines.mlsbench.dl.weighting.experiments import exp000
@@ -68,7 +66,7 @@ def main() -> int:
         print("\n".join(captured.report))
         print(f"{len(captured.report)} mismatches; nothing written.")
         return 1
-    vision_capture.write_records(flags.out, {"reference.pt": captured.record})
+    capture_reference.write_records(flags.out, {"reference.pt": captured.record})
     print(f"0 mismatches; wrote {len(captured.record)} values to {flags.out}.")
     return 0
 
@@ -108,11 +106,14 @@ def capture(root: Path, scratch: Path, *, cifar100: Path | None) -> vision.Captu
     port = reference.port_record(scratch)
     report += mismatches(record, port)
     report += mismatches({"main/indices": trace.indices}, {"main/indices": indices})
-    report += vision_capture.compare_lockstep(
+    report += capture_reference.compare_lockstep(
         lockstep,
         run=reference.lockstep_record,
     )
-    report += vision_capture.compare_loaders(batches, reference.loader_batches(scratch))
+    report += capture_reference.compare_loaders(
+        batches,
+        reference.loader_batches(scratch),
+    )
     if cifar100 is not None:
         report += compare_real(pristine, cifar100)
     return vision.Captured(record=record, sites={}, report=report)
@@ -134,7 +135,7 @@ def compare_full_size(script: upstream.Script, trace: upstream.Trace) -> list[st
         ours = vision.full_step(exp000).model
         theirs = script.ResNet(script.BasicBlock, [5, 5, 5], reference.CLASSES)
         theirs.load_state_dict(state)
-        report = vision_capture.compare_states(state, ours.state_dict())
+        report = capture_reference.compare_states(state, ours.state_dict())
         media = vision.fixed_media(0)
         for mode in ("train", "eval"):
             ours.train(mode == "train")
