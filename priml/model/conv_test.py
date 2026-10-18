@@ -96,6 +96,22 @@ def test_conv3d_bfb() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("config", "grid"),
+    [
+        (Conv1d.Config(2, 3, kernel_size=2, stride=2, padding=0), (5,)),
+        (Conv2d.Config(2, 3, kernel_size=2, stride=2, padding=0), (5, 6)),
+        (Conv3d.Config(2, 3, kernel_size=2, stride=2, padding=0), (5, 6, 7)),
+    ],
+)
+def test_declared_output_grid_matches_convolution(
+    config: Conv1d.Config | Conv2d.Config | Conv3d.Config,
+    grid: tuple[int, ...],
+) -> None:
+    layer = config.make()
+    assert layer(torch.randn(4, 2, *grid)).shape[2:] == config.output_grid(grid)
+
+
 def test_conv1d():
     m = Conv1d.Config(3, channels_out=16).make()
     x = torch.randn(2, 3, 32)

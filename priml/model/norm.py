@@ -14,17 +14,21 @@ import torch
 from priml.cost import (
     Cost,
     elementwise_cost,
+    nbytes,
     reduction_cost,
     resolve_dtype,
     traffic,
 )
-from priml.model.custom_types import infer_same_width
+from priml.model.custom_types import (
+    PreservesGrid,
+    infer_same_width,
+)
 
 
 class RMSNorm(nn.Module):
     """Root Mean Square Layer Normalization."""
 
-    class Config(Fig["RMSNorm"], kw_only=False):
+    class Config(PreservesGrid, Fig["RMSNorm"], kw_only=False):
         channels_in: int = -1
         """Number of input channels (normalized shape)."""
 
@@ -269,7 +273,7 @@ class CenteredRMSNorm(nn.Module):
 class LayerNorm(nn.LayerNorm):
     """Layer Normalization."""
 
-    class Config(Fig["LayerNorm"], kw_only=False):
+    class Config(PreservesGrid, Fig["LayerNorm"], kw_only=False):
         channels_in: int = -1
         """Number of input channels (normalized shape)."""
 
@@ -342,7 +346,7 @@ class LayerNorm(nn.LayerNorm):
 class BatchNorm(nn.BatchNorm1d):
     """BatchNorm1d for (B, L, C) input."""
 
-    class Config(Fig["BatchNorm"], kw_only=False):
+    class Config(PreservesGrid, Fig["BatchNorm"], kw_only=False):
         channels_in: int = -1
         """Number of input channels."""
 
@@ -400,22 +404,26 @@ class BatchNorm(nn.BatchNorm1d):
             del kwargs
             rows = seq_len * batch_size
             dt = _dtype(self.dtype, dtype)
-            return _normalization_cost(
-                channels=self.channels_in,
-                groups=self.channels_in,
-                params=2 * self.channels_in if self.elementwise_affine else 0,
-                rows=rows,
-                dtype=dt,
-            ) + elementwise_cost(
-                primal=8 * self.channels_in,
-                adjoint=0,
-                channels=self.channels_in,
-                rows=1,
-                inputs=10,
-                outputs=8,
-                adjoint_inputs=0,
-                adjoint_outputs=0,
-                dtype=dt,
+            return (
+                Cost(bytes_state=nbytes(2 * self.channels_in, self.dtype) + 8)
+                + _normalization_cost(
+                    channels=self.channels_in,
+                    groups=self.channels_in,
+                    params=2 * self.channels_in if self.elementwise_affine else 0,
+                    rows=rows,
+                    dtype=dt,
+                )
+                + elementwise_cost(
+                    primal=8 * self.channels_in,
+                    adjoint=0,
+                    channels=self.channels_in,
+                    rows=1,
+                    inputs=10,
+                    outputs=8,
+                    adjoint_inputs=0,
+                    adjoint_outputs=0,
+                    dtype=dt,
+                )
             )
 
     def __init__(self, config: Config) -> None:
@@ -667,7 +675,7 @@ class BatchRenorm(nn.Module):
 class BatchNorm2d(nn.BatchNorm2d):
     """BatchNorm2d for (B, C, H, W) input."""
 
-    class Config(Fig["BatchNorm2d"], kw_only=False):
+    class Config(PreservesGrid, Fig["BatchNorm2d"], kw_only=False):
         channels_in: int = -1
         """Number of input channels."""
 
@@ -726,22 +734,26 @@ class BatchNorm2d(nn.BatchNorm2d):
             del kwargs
             rows = seq_len * batch_size
             dt = _dtype(self.dtype, dtype)
-            return _normalization_cost(
-                channels=self.channels_in,
-                groups=self.channels_in,
-                params=2 * self.channels_in if self.elementwise_affine else 0,
-                rows=rows,
-                dtype=dt,
-            ) + elementwise_cost(
-                primal=8 * self.channels_in,
-                adjoint=0,
-                channels=self.channels_in,
-                rows=1,
-                inputs=10,
-                outputs=8,
-                adjoint_inputs=0,
-                adjoint_outputs=0,
-                dtype=dt,
+            return (
+                Cost(bytes_state=nbytes(2 * self.channels_in, self.dtype) + 8)
+                + _normalization_cost(
+                    channels=self.channels_in,
+                    groups=self.channels_in,
+                    params=2 * self.channels_in if self.elementwise_affine else 0,
+                    rows=rows,
+                    dtype=dt,
+                )
+                + elementwise_cost(
+                    primal=8 * self.channels_in,
+                    adjoint=0,
+                    channels=self.channels_in,
+                    rows=1,
+                    inputs=10,
+                    outputs=8,
+                    adjoint_inputs=0,
+                    adjoint_outputs=0,
+                    dtype=dt,
+                )
             )
 
     def __init__(self, config: Config) -> None:
@@ -769,7 +781,7 @@ class GroupNorm2d(nn.GroupNorm):
     per-iteration activation distributions.
     """
 
-    class Config(Fig["GroupNorm2d"], kw_only=False):
+    class Config(PreservesGrid, Fig["GroupNorm2d"], kw_only=False):
         channels_in: int = -1
         """Number of input channels."""
 
@@ -850,7 +862,7 @@ class GroupNorm2d(nn.GroupNorm):
 class GroupNorm(nn.GroupNorm):
     """GroupNorm for (B, L, C) input."""
 
-    class Config(Fig["GroupNorm"], kw_only=False):
+    class Config(PreservesGrid, Fig["GroupNorm"], kw_only=False):
         channels_in: int = -1
         """Number of input channels."""
 

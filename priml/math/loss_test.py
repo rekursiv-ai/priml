@@ -13,11 +13,73 @@ import torch
 
 from priml.math.loss import (
     cross_entropy_logz,
+    cross_entropy_off_target,
     cross_entropy_with_batched_smoothing,
     log_stablemax,
     log_stablemax_via_probabilities,
     stablemax_cross_entropy,
 )
+
+
+@pytest.mark.parametrize("reduction", ["none", "mean", "sum"])
+def test_off_target_smoothing_preserves_dense_values_and_gradients(
+    reduction: Literal["none", "mean", "sum"],
+) -> None:
+    logits = torch.tensor(
+        [[2.0, -1.0, 0.5, 3.0], [-3.0, 4.0, 1.0, -2.0], [0.0, 0.0, 0.0, 0.0]],
+        requires_grad=True,
+    )
+    target = torch.tensor([0, 1, 3])
+    distribution = torch.tensor(
+        [[0.85, 0.05, 0.05, 0.05], [0.05, 0.85, 0.05, 0.05], [0.05, 0.05, 0.05, 0.85]],
+    )
+    expected = (-distribution * logits.log_softmax(-1)).sum(-1)
+    if reduction == "mean":
+        expected = expected.mean()
+    if reduction == "sum":
+        expected = expected.sum()
+    actual = cross_entropy_off_target(
+        logits,
+        target,
+        smoothing=0.15,
+        reduction=reduction,
+    )
+    assert torch.equal(actual, expected)
+    assert torch.equal(
+        torch.autograd.grad(actual.sum(), logits)[0],
+        torch.autograd.grad(expected.sum(), logits)[0],
+    )
+
+
+def test_off_target_default_and_standard_smoothing_are_distinct() -> None:
+    logits = torch.tensor([[2.0, -1.0, 0.5], [-3.0, 4.0, 1.0]])
+    target = torch.tensor([0, 1])
+    actual = cross_entropy_off_target(logits, target)
+    assert torch.equal(actual, cross_entropy_off_target(logits, target, smoothing=0.05))
+    assert not torch.equal(
+        actual,
+        nn.functional.cross_entropy(
+            logits,
+            target,
+            label_smoothing=0.05,
+            reduction="none",
+        ),
+    )
+
+
+@pytest.mark.parametrize("smoothing", [0.0, 1.0])
+def test_off_target_zero_mass_excludes_infinite_log_probabilities(
+    smoothing: float,
+) -> None:
+    # Binary off-target smoothing at either endpoint selects exactly one class.
+    logits = torch.tensor([[-math.inf, 0.0], [0.0, -math.inf]], requires_grad=True)
+    target = torch.tensor([1, 0]) if smoothing == 0 else torch.tensor([0, 1])
+    loss = cross_entropy_off_target(logits, target, smoothing=smoothing)
+    assert torch.equal(loss, torch.zeros(2))
+    assert torch.equal(
+        torch.autograd.grad(loss.sum(), logits)[0],
+        torch.zeros_like(logits),
+    )
 
 
 @pytest.mark.parametrize("weighted", [False, True])

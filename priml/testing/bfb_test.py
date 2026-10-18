@@ -4568,6 +4568,29 @@ def test_run_unfused_routes_convolution_bias_forms(
     assert seen == [bias]
 
 
+@pytest.mark.parametrize("training", [False, True])
+def test_legacy_batch_norm_keeps_complete_running_state(training: bool) -> None:
+    actual = nn.BatchNorm1d(3).train(training)
+    reference = nn.BatchNorm1d(3).double().train(training)
+    assert actual.running_mean is not None
+    assert actual.running_var is not None
+    with torch.no_grad():
+        actual.running_mean.copy_(torch.tensor([1.0, 2.0, 3.0]))
+        actual.running_var.copy_(torch.tensor([2.0, 3.0, 4.0]))
+    reference.load_state_dict(actual.state_dict())
+    versions = actual.running_mean._version, actual.running_var._version
+    value = (torch.arange(30.0).reshape(2, 3, 5) % 7) / 7
+    expected = reference(value.double())
+    with host_agnostic_numerics():
+        observed = actual(value)
+    assert tensor_bits_equal(observed, b=expected.float())
+    for name, tensor in actual.state_dict().items():
+        wanted = reference.state_dict()[name].to(tensor.dtype)
+        assert tensor_bits_equal(tensor, b=wanted), name
+    if not training:
+        assert (actual.running_mean._version, actual.running_var._version) == versions
+
+
 if __name__ == "__main__":
     from priml.lib.testing.runner import test_main
 

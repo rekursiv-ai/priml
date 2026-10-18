@@ -21,6 +21,8 @@ from priml.model.custom_types import (
     HasResetParameters,
     LatentAttentionKernel,
     LookupTable,
+    NonspatialGrid,
+    PreservesGrid,
     RotaryFactors,
     TensorModule,
     flatten_depth_index,
@@ -28,6 +30,7 @@ from priml.model.custom_types import (
     infer_same_width,
     is_cached_attention,
     propagate_attr,
+    validate_same_width,
 )
 from priml.model.moe import SoftmaxRouter
 from priml.model.norm import RMSNorm
@@ -320,6 +323,35 @@ class _FlattenDepthIndex(nn.Module):
                 for levels in depth_indices
             ],
         )
+
+
+@pytest.mark.parametrize("grid", [(), (3, 7)])
+def test_preserved_grid_contract_matches_the_requested_spatial_axes(
+    grid: tuple[int, ...],
+) -> None:
+    preserving = PreservesGrid()
+    assert preserving.output_grid(grid) == grid
+
+
+def test_nonspatial_grid_rejects_an_image_grid() -> None:
+    nonspatial = NonspatialGrid()
+    assert nonspatial.output_grid(()) == ()
+    with pytest.raises(TypeError, match="nonspatial feature vectors"):
+        nonspatial.output_grid((3, 7))
+
+
+@pytest.mark.parametrize("widths", [(-1, 8), (8, -1), (8, 8)])
+def test_constructor_width_validation_preserves_unresolved_or_equal_widths(
+    widths: tuple[int, int],
+) -> None:
+    config = _Widths(channels_in=widths[0], channels_out=widths[1])
+    validate_same_width(config)
+    assert (config.channels_in, config.channels_out) == widths
+
+
+def test_constructor_width_validation_rejects_a_preserving_projection() -> None:
+    with pytest.raises(ValueError, match="channels_in=4 must equal channels_out=8"):
+        validate_same_width(_Widths(channels_in=4, channels_out=8))
 
 
 if __name__ == "__main__":

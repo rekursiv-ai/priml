@@ -298,12 +298,27 @@ def test_a_constant_feature_stays_finite() -> None:
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
-    [("channels_in", 0), ("max_ratio", 0.5), ("max_drift", -1.0), ("momentum", 1.0)],
+    ("field", "value", "message"),
+    [
+        ("channels_in", 0, "^channels_in must be positive$"),
+        ("max_ratio", 0.5, "^max_ratio must be at least one$"),
+        ("max_drift", -1.0, "^max_drift must be non-negative$"),
+        ("momentum", 1.0, r"^momentum must be in \[0, 1\)$"),
+    ],
 )
-def test_an_invalid_setting_is_refused(field: str, value: float) -> None:
-    with pytest.raises(ValueError, match="must"):
+def test_an_invalid_setting_is_refused(
+    field: str,
+    value: float,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
         _norm(**{field: value})
+
+
+def test_batch_renorm_accepts_the_positive_width_and_zero_momentum_boundaries() -> None:
+    layer = BatchRenorm.Config(channels_in=1, momentum=0.0).make()
+    assert layer.config.channels_in == 1
+    assert layer.config.momentum == 0.0
 
 
 @pytest.mark.parametrize(
@@ -611,6 +626,9 @@ def test_norm_cost_splits_elementwise_from_row_sums(
         },
         params=params,
         params_active=params,
+        bytes_state=(2 * 8 * 4 + 8)
+        if isinstance(config, (BatchNorm.Config, BatchNorm2d.Config))
+        else 0,
     )
 
 

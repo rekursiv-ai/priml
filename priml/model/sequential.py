@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import KW_ONLY, field
 from typing import Self, cast, override
 
+import math
+
 from configgle import Fig, Makeable, Maker
 from torch import Tensor, nn
 
@@ -19,6 +21,7 @@ from priml.model.custom_types import (
     ChannelsOut,
     DepthIndex,
     HasDepthIndex,
+    HasOutputGrid,
     HasResetParameters,
     TensorModule,
 )
@@ -116,12 +119,31 @@ class Sequential(nn.Sequential):
                     self.channels_out = last.channels_out
             return super().finalize()
 
+        def output_grid(self, input_grid: tuple[int, ...]) -> tuple[int, ...]:
+            """Chain declared spatial transformations through the elements.
+
+            Args:
+                input_grid: Spatial extents entering the composition.
+
+            Returns:
+                output: Spatial extents leaving the final element.
+
+            """
+            assert isinstance(self.elements, list)
+            for element in self.elements:
+                if not isinstance(element, HasOutputGrid):
+                    raise TypeError("Sequential requires declared spatial geometry.")
+                input_grid = element.output_grid(input_grid)
+            return input_grid
+
         def cost(
             self,
             *,
             seq_len: int,
             batch_size: int,
             dtype: torch.dtype | None,
+            channels: int = -1,
+            input_grid: tuple[int, ...] | None = None,
             **kwargs: object,
         ) -> Cost:
             """Sum the finalized element list.
@@ -130,6 +152,8 @@ class Sequential(nn.Sequential):
               seq_len: Tokens per sequence.
               batch_size: Sequences per step.
               dtype: Activation dtype; ``None`` is torch's default.
+              channels: Fallback width for a composition without a sized input.
+              input_grid: Spatial extents, propagated through declared transforms.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
@@ -137,19 +161,31 @@ class Sequential(nn.Sequential):
 
             """
             assert isinstance(self.elements, list)
-            return sum(
-                (
-                    cost(
-                        element,
-                        seq_len=seq_len,
-                        batch_size=batch_size,
-                        dtype=dtype,
-                        **kwargs,
-                    )
-                    for element in self.elements
-                ),
-                Cost(),
-            )
+            channels = self.channels_in if self.channels_in != -1 else channels
+            total = Cost()
+            for element in self.elements:
+                next_grid = input_grid
+                if input_grid is not None:
+                    if not isinstance(element, HasOutputGrid):
+                        raise TypeError(
+                            "Sequential requires declared spatial geometry.",
+                        )
+                    next_grid = element.output_grid(input_grid)
+                spatial = {} if input_grid is None else {"input_grid": input_grid}
+                total += cost(
+                    element,
+                    seq_len=seq_len if input_grid is None else math.prod(input_grid),
+                    batch_size=batch_size,
+                    dtype=dtype,
+                    channels=channels,
+                    **spatial,
+                    **kwargs,
+                )
+                input_grid = next_grid
+                channels = (
+                    element.channels_out if isinstance(element, ChannelsOut) else -1
+                )
+            return total
 
     def __init__(self, config: Config) -> None:
         # ``finalize`` has already flattened ``elements`` (repeat expanded, depth

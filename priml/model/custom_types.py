@@ -45,6 +45,7 @@ __all__ = [
     "ForwardOutput",
     "HasAttention",
     "HasDepthIndex",
+    "HasOutputGrid",
     "HasResetParameters",
     "HeadGeometry",
     "LatentAttentionKernel",
@@ -52,7 +53,9 @@ __all__ = [
     "LinearProjection",
     "LookupTable",
     "MixFn",
+    "NonspatialGrid",
     "NumHeads",
+    "PreservesGrid",
     "RotaryConfig",
     "RotaryFactors",
     "ShardStyle",
@@ -64,6 +67,7 @@ __all__ = [
     "infer_same_width",
     "is_cached_attention",
     "propagate_attr",
+    "validate_same_width",
 ]
 
 
@@ -159,6 +163,41 @@ A bare ``nn.Module`` is deliberately not an arm: ``Module.__call__`` is untyped,
 so a Module is not statically a :data:`TensorFn` and admitting it would make
 every ``self.act(x)`` infer ``Any``. Pass a Module through a ``Makeable``.
 """
+
+
+class PreservesGrid:
+    """Declare a shape-preserving configuration's spatial geometry."""
+
+    __slots__ = ()
+
+    def output_grid(self, input_grid: tuple[int, ...], /) -> tuple[int, ...]:
+        """Preserve the supplied spatial extents."""
+        return input_grid
+
+
+class NonspatialGrid:
+    """Declare an operation on feature vectors without spatial axes."""
+
+    __slots__ = ()
+
+    def output_grid(self, input_grid: tuple[int, ...], /) -> tuple[int, ...]:
+        """Require a vector input with no spatial extents."""
+        if input_grid:
+            raise TypeError("This operation requires nonspatial feature vectors.")
+        return ()
+
+
+@runtime_checkable
+class HasOutputGrid(Protocol):
+    """Declares how a configured module transforms its spatial extents.
+
+    Spatial transformations implement this contract so compositions can pass
+    the executed grid to the next child without inspecting concrete types.
+    """
+
+    def output_grid(self, input_grid: tuple[int, ...], /) -> tuple[int, ...]:
+        """Return the spatial extents produced from the supplied input grid."""
+        ...
 
 
 @runtime_checkable
@@ -642,6 +681,27 @@ def infer_same_width(config: ChannelsInOut) -> None:
     if config.channels_out == -1:
         config.channels_out = config.channels_in
     if config.channels_in != config.channels_out:
+        raise ValueError(
+            f"channels_in={config.channels_in} must equal "
+            f"channels_out={config.channels_out}.",
+        )
+
+
+def validate_same_width(config: ChannelsInOut) -> None:
+    """Reject unequal explicit widths when constructing a preserving module.
+
+    Args:
+      config: The finalized configuration, or a directly supplied constructor
+        configuration whose unused output width may still be unspecified.
+
+    Raises:
+      ValueError: Both widths are explicit and differ.
+
+    """
+    if (
+        -1 not in (config.channels_in, config.channels_out)
+        and config.channels_in != config.channels_out
+    ):
         raise ValueError(
             f"channels_in={config.channels_in} must equal "
             f"channels_out={config.channels_out}.",

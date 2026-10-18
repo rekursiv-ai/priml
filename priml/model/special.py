@@ -49,6 +49,18 @@ class Identity(nn.Identity):
             infer_same_width(self)
             return super().finalize()
 
+        def output_grid(self, input_grid: tuple[int, ...]) -> tuple[int, ...]:
+            """Preserve the supplied spatial extents.
+
+            Args:
+                input_grid: Spatial extents entering the identity.
+
+            Returns:
+                output: The same spatial extents.
+
+            """
+            return input_grid
+
         def cost(
             self,
             *,

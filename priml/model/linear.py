@@ -19,7 +19,7 @@ from priml.cost import (
     matmul_cost,
 )
 from priml.math.custom_types import LinearFn
-from priml.model.custom_types import DepthIndex, ShardStyle
+from priml.model.custom_types import DepthIndex, NonspatialGrid, ShardStyle
 from priml.model.init import InitFn, call_init, kaiming_uniform
 
 
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 class Linear(nn.Linear):
     """Linear layer with configurable init and depth-aware scaling."""
 
-    class Config(Fig["Linear"], kw_only=False):
+    class Config(NonspatialGrid, Fig["Linear"], kw_only=False):
         channels_in: int = -1
         """Number of input features (-1 to infer from channels_out)."""
 

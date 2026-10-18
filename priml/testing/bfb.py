@@ -1489,6 +1489,22 @@ class _Float64Compute(TorchDispatchMode):
         result = _one_term_mm(func, args=up_args)
         if result is None:
             result = _run_unfused(func, up_args, up_kwargs)
+        # The legacy batch-norm schema omits its running-buffer mutations.
+        if (
+            func.namespace == "aten"
+            and _op_name(func) == "native_batch_norm"
+            and _argument(args, kwargs=kwargs, index=5, name="training") is True
+        ):
+            for index, name in ((3, "running_mean"), (4, "running_var")):
+                _copy_back(
+                    _argument(args, kwargs=kwargs, index=index, name=name),
+                    computed=_argument(
+                        up_args,
+                        kwargs=up_kwargs,
+                        index=index,
+                        name=name,
+                    ),
+                )
         if _writes(func):
             # In-place / ``out=`` / foreach op: it mutated the float64 copies, not
             # the caller's originals. Narrow each back and return the originals
@@ -1503,6 +1519,16 @@ class _Float64Compute(TorchDispatchMode):
                 target=target,
             )
         return _downcast_result(result, args, kwargs, target)
+
+
+def _argument(
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+    *,
+    index: int,
+    name: str,
+) -> object:
+    return args[index] if index < len(args) else kwargs.get(name)
 
 
 def _module_device(module: nn.Module) -> str:

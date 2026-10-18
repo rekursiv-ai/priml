@@ -5,10 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
+import pytest
 import torch
 
 from priml.cost import Cost, cost
 from priml.model.attention.attention import Attention
+from priml.model.conv import Conv2d
+from priml.model.convnext import ConvNeXt
 from priml.model.init import mup_output
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
@@ -22,6 +25,29 @@ from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent
+
+
+def test_spatial_cost_accounts_for_a_global_pool_before_an_affine() -> None:
+    config = Sequential.Config(
+        channels_in=3,
+        channels_out=7,
+        elements=[
+            ConvNeXt.Config(
+                channels_in=3,
+                channels_hidden=(5,),
+                blocks_per_stage=(1,),
+            ),
+            Linear.Config(5, 7),
+        ],
+    )
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(2, 3, 12, 20, requires_grad=True),
+        seq_len=12 * 20,
+        input_grid=(12, 20),
+        batch_size=2,
+        dtype=torch.float32,
+    )
 
 
 def test_sequential_config_pprint() -> None:
@@ -231,6 +257,22 @@ def test_sequential_cost_matches_torch() -> None:
         dtype=None,
     )
     assert analytical["flops", "primal", "matmul"].sum() == 3 * 2 * 2 * 4 * 4
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_spatial_cost_advances_through_every_projection(nested: bool) -> None:
+    first = Conv2d.Config(channels_out=5, kernel_size=2, stride=2, padding=0)
+    second = Conv2d.Config(channels_out=7, kernel_size=2, stride=2, padding=0)
+    tail = Sequential.Config(elements=[second]) if nested else second
+    config = Sequential.Config(channels_in=3, elements=[first, tail])
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(2, 3, 12, 20, requires_grad=True),
+        input_grid=(12, 20),
+        seq_len=12 * 20,
+        batch_size=2,
+        dtype=torch.float32,
+    )
 
 
 if __name__ == "__main__":

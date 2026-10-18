@@ -79,6 +79,24 @@ class Conv1d(nn.Conv1d):
                 self.groups = self.channels_in
             return super().finalize()
 
+        def output_grid(self, input_grid: tuple[int, ...]) -> tuple[int, ...]:
+            """Return the configured convolution's output extents.
+
+            Args:
+                input_grid: Spatial extents entering the convolution.
+
+            Returns:
+                output: Spatial extents produced by the convolution.
+
+            """
+            return conv_output_grid(
+                input_grid,
+                kernel_size=self.kernel_size,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
+            )
+
         def cost(
             self,
             *,
@@ -335,6 +353,24 @@ class Conv2d(nn.Conv2d):
                 self.channels_out = self.channels_in
             return super().finalize()
 
+        def output_grid(self, input_grid: tuple[int, ...]) -> tuple[int, ...]:
+            """Return the configured convolution's output extents.
+
+            Args:
+                input_grid: Spatial extents entering the convolution.
+
+            Returns:
+                output: Spatial extents produced by the convolution.
+
+            """
+            return conv_output_grid(
+                input_grid,
+                kernel_size=self.kernel_size,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
+            )
+
         def cost(
             self,
             *,
@@ -454,6 +490,24 @@ class Conv3d(nn.Conv3d):
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
             return super().finalize()
+
+        def output_grid(self, input_grid: tuple[int, ...]) -> tuple[int, ...]:
+            """Return the configured convolution's output extents.
+
+            Args:
+                input_grid: Spatial extents entering the convolution.
+
+            Returns:
+                output: Spatial extents produced by the convolution.
+
+            """
+            return conv_output_grid(
+                input_grid,
+                kernel_size=self.kernel_size,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
+            )
 
         def cost(
             self,

@@ -576,6 +576,17 @@ class Attention(AttentionProjections):
         super().__init__(config)
         self.attn_kernel = config.attn_kernel.make()
 
+    @classmethod
+    def rotate(
+        cls,
+        q: Tensor,
+        k: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """Apply rotary arithmetic; a specialized attention may preserve other rounding."""
+        return RoPE.rotate(q, k, cos, sin)
+
     def assert_tensor_parallel_compatible(self) -> None:
         """Reject the fused flash kernel when this block is sharded.
 
@@ -773,13 +784,13 @@ class Attention(AttentionProjections):
 
         if cos_sin is not None:
             cos, sin = cos_sin
-            q, k = RoPE.rotate(q, k, cos, sin)
+            q, k = self.rotate(q, k, cos, sin)
         elif self.rope is not None:
             if positions is None:
                 offset = kv_cache.seen if kv_cache is not None else 0
                 positions = torch.arange(offset, offset + S, device=x.device)
             cos, sin = self.rope(positions)
-            q, k = RoPE.rotate(q, k, cos, sin)
+            q, k = self.rotate(q, k, cos, sin)
 
         # The cache stores [..., H, S, D]; the kernels take [..., S, H, D].
         q, k, v = (t.movedim(-3, -2) for t in (q, k, v))
