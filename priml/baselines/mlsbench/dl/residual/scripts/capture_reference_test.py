@@ -7,22 +7,37 @@ the port: the schedule and the optimizer.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Final
 
 import sys
 
 import pytest
 import torch
 
+from priml.baselines.mlsbench.dl.residual import reference as residual
 from priml.baselines.mlsbench.dl.residual.scripts import capture_reference
 from priml.baselines.mlsbench.dl.residual.upstream_test import write_clone
-from priml.baselines.mlsbench.dl.vision import reference
+from priml.baselines.mlsbench.dl.vision import reference, upstream
+from priml.baselines.mlsbench.dl.vision.model import ResNet
+from priml.baselines.mlsbench.dl.vision.scripts import (
+    capture_reference as vision_capture,
+)
 from priml.testing.golden import read_tensors
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
+
+    from torch import Tensor
+
+    from priml.baselines.mlsbench.dl.vision.experiments import VisionTrainLoop
+    from priml.baselines.mlsbench.dl.vision.upstream import Batches
+
+
+_CWD: Final = Path(__file__).resolve().parent
+
+_DATA: Final = _CWD.parent / "testdata"
 
 
 def returning[T](value: T) -> Callable[..., T]:
@@ -32,6 +47,77 @@ def returning[T](value: T) -> Callable[..., T]:
         return value
 
     return call
+
+
+def passes(fill: float) -> tuple[Batches, Batches]:
+    """Return one training and one test pass of a single ``(2, 3)`` batch."""
+    batch = {"media": torch.full((2, 3), fill), "label": torch.arange(2)}
+    return [[batch]], [[batch]]
+
+
+def port_lockstep(
+    name: str,
+    *,
+    states: list[dict[str, Tensor]],
+) -> dict[str, Tensor]:
+    """Stand in for the port's lockstep: one tensor per state."""
+    states += [{"w": torch.zeros(2)} for _ in range(reference.STEPS)]
+    return {f"lockstep/{name}/loss": torch.zeros(2)}
+
+
+def shallow(factory: Callable[[], VisionTrainLoop]) -> Callable[[], VisionTrainLoop]:
+    """Return ``factory`` with one block per stage, in place of ResNet-56."""
+
+    def build() -> VisionTrainLoop:
+        config = factory()
+        assert isinstance(config.step.model, ResNet.Config)
+        config.step.model.blocks_per_stage = (1, 1, 1)
+        return config
+
+    return build
+
+
+def test_capture_assembles_both_sides_into_one_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The port-side runs are tested in ``reference_test``; here they are stand-ins."""
+    root = tmp_path / "clone"
+    write_clone(root)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    stored = read_tensors(_DATA / "reference.pt")
+    monkeypatch.setattr(residual, "port_record", returning(stored))
+    monkeypatch.setattr(residual, "lockstep_record", port_lockstep)
+    monkeypatch.setattr(
+        residual,
+        "VARIANTS",
+        {name: shallow(factory) for name, factory in residual.VARIANTS.items()},
+    )
+    monkeypatch.setattr(reference, "loader_batches", returning(passes(1.0)))
+    monkeypatch.setattr(upstream, "upstream_batches", returning(passes(0.0)))
+    monkeypatch.setattr(
+        vision_capture,
+        "compare_full_size",
+        returning(["full size differs"]),
+    )
+    report = capture_reference.capture(root, scratch).report
+    assert report[0] == "full size differs"
+    assert {"block/basic/identity/train", "draws/basic"} <= {
+        line.split(":")[0] for line in report
+    }
+    shared = ("schedule/lr", "optimizer/settings")
+    assert not any(line.startswith(shared) for line in report)
+    for name in ("pre_activation", "gated_residual", "stochastic_depth"):
+        assert any(line.startswith(f"full/{name}: state: ") for line in report)
+        for mode in ("train", "eval"):
+            assert any(
+                line.startswith(f"full/{name}: forward/{mode}: ") for line in report
+            )
+        assert any(line.startswith(f"lockstep/{name}/1: state: ") for line in report)
+    assert not any(line.startswith("full/basic: ") for line in report)
+    assert "loader/train/0: 0/media: 6/6 differ" in report
+    assert "block/stochastic_depth: the draws reach only one branch" not in report
 
 
 @pytest.mark.compute_training

@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from functools import partial
 from pathlib import Path
+from typing import Self
 
 import math
 import sys
@@ -139,6 +140,62 @@ def test_timing_reads_evaluations_update_times_and_throughput() -> None:
     assert timing["tok_per_sec_mean"] is None
     assert timing["gpu_mem_max_gb"] == 90.0
     assert timing["runtime_seconds"] == 200.0
+
+
+def test_wandb_reads_return_every_row_and_the_logged_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows: list[dict[str, object]] = [
+        {"_step": 1, "train/loss": 3.0},
+        {"_step": 2, "val/bpb": 0.5},
+        {"_step": 3, "train/loss": 2.0},
+    ]
+    api = _FakeApi(rows)
+    monkeypatch.setattr(curves, "wandb", _FakeWandb(api))
+    assert curves.run_history("team/proj", "abc") == rows
+    assert curves._logged_loss("team/proj", "abc") == {1: 3.0, 3: 2.0}
+    assert api.paths == ["team/proj/abc", "team/proj/abc"]
+
+
+class _FakeRun:
+    """Stand in for a W&B run whose history is fixed rows."""
+
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self._rows = rows
+
+    def scan_history(
+        self,
+        *,
+        keys: list[str] | None = None,
+        page_size: int = 1_000,
+    ) -> list[dict[str, object]]:
+        del page_size
+        if keys is None:
+            return self._rows
+        return [{k: r[k] for k in keys if k in r} for r in self._rows]
+
+
+class _FakeApi:
+    """Stand in for ``wandb.Api``, recording each run path it opens."""
+
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self._rows = rows
+        self.paths: list[str] = []
+
+    def __call__(self, *, timeout: int = 19) -> Self:
+        del timeout
+        return self
+
+    def run(self, path: str) -> _FakeRun:
+        self.paths.append(path)
+        return _FakeRun(self._rows)
+
+
+class _FakeWandb:
+    """Stand in for the ``wandb`` module, as much as ``curves`` reads."""
+
+    def __init__(self, api: _FakeApi) -> None:
+        self.Api = api
 
 
 def _val(*, board: float, hud: float) -> dict[str, PlainTree]:

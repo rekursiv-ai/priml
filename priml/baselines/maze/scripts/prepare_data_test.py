@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final
 
 import hashlib
+import sys
 
 from treekle import json_loads
 
@@ -170,6 +171,23 @@ def test_a_fetched_csv_with_the_wrong_digest_is_rejected(
     with pytest.raises(RuntimeError, match="the cached copy is corrupt"):
         prepare_data.prepare(tmp_path / "maze")
     assert not (tmp_path / "maze" / ORIGINAL).exists()
+
+
+def test_main_prepares_the_directory_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared: list[Path | str] = []
+
+    def prepare(directory: Path | str) -> Path:
+        prepared.append(directory)
+        return tmp_path
+
+    monkeypatch.setattr(prepare_data, "prepare", prepare)
+    destination = str(tmp_path / "maze")
+    monkeypatch.setattr(sys, "argv", ["prepare_data", "--directory", destination])
+    assert prepare_data.main() == 0
+    assert prepared == [destination]
 
 
 def test_main_help_works_without_a_module_docstring(

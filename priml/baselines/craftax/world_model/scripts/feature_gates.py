@@ -415,11 +415,13 @@ def main() -> int:
     ).repeat(flags.replicate, 1, 1)
     head = reference.action_head.weight
     split = min((s.steps[0] for s in spans if not s.starts_episode), default=0)
+    # A run without a re-prefill is before one throughout.
+    before = split or got.shape[1]
     g2a = {
         "all": compare(got.flatten(0, 1), want.flatten(0, 1), head),
         "before_reprefill": compare(
-            got[:, :split].flatten(0, 1),
-            want[:, :split].flatten(0, 1),
+            got[:, :before].flatten(0, 1),
+            want[:, :before].flatten(0, 1),
             head,
         ),
     }

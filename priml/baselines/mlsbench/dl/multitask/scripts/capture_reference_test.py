@@ -7,14 +7,18 @@ nothing it shares with the port: the superclass-free schedule and optimizer.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Final
 
 import sys
 
 import pytest
 import torch
 
-from priml.baselines.mlsbench.dl.multitask import upstream
+from priml.baselines.mlsbench.dl.multitask import (
+    reference as multitask,
+    upstream,
+)
 from priml.baselines.mlsbench.dl.multitask.scripts import capture_reference
 from priml.baselines.mlsbench.dl.multitask.upstream_test import write_clone
 from priml.baselines.mlsbench.dl.vision import reference
@@ -23,7 +27,18 @@ from priml.testing.golden import read_tensors
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
+
+    from torch import Tensor
+
+    from priml.baselines.mlsbench.dl.multitask.experiments import (
+        MultiTaskTrainLoop,
+    )
+    from priml.baselines.mlsbench.dl.multitask.train_step import MultiTaskStep
+
+
+_CWD: Final = Path(__file__).resolve().parent
+
+_DATA: Final = _CWD.parent / "testdata"
 
 
 def returning[T](value: T) -> Callable[..., T]:
@@ -33,6 +48,60 @@ def returning[T](value: T) -> Callable[..., T]:
         return value
 
     return call
+
+
+def passes(fill: float) -> tuple[multitask.Batches, multitask.Batches]:
+    """Return one training and one test pass of a single ``(2, 3)`` batch."""
+    batch = {"media": torch.full((2, 3), fill), "label": torch.arange(2)}
+    return [[batch]], [[batch]]
+
+
+def port_lockstep(
+    name: str,
+    *,
+    states: list[dict[str, Tensor]],
+) -> dict[str, Tensor]:
+    """Stand in for the port's lockstep: one tensor per state."""
+    states += [{"w": torch.zeros(2)} for _ in range(reference.STEPS)]
+    return {f"lockstep/{name}/loss": torch.zeros(2)}
+
+
+def shallow(factory: Callable[[], MultiTaskTrainLoop]) -> MultiTaskStep:
+    """Build ``factory``'s step one block per stage, in place of the full network."""
+    return multitask.tiny_step(factory, epochs=reference.EPOCHS)
+
+
+def test_capture_assembles_both_sides_into_one_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The port-side runs are tested in ``reference_test``; here they are stand-ins."""
+    root = tmp_path / "clone"
+    write_clone(root)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    stored = read_tensors(_DATA / "reference.pt")
+    monkeypatch.setattr(multitask, "port_record", returning(stored))
+    monkeypatch.setattr(multitask, "lockstep_record", port_lockstep)
+    monkeypatch.setattr(multitask, "loader_batches", returning(passes(1.0)))
+    monkeypatch.setattr(multitask, "full_step", shallow)
+    monkeypatch.setattr(upstream, "upstream_batches", returning(passes(0.0)))
+    captured = capture_reference.capture(root, scratch)
+    report = captured.report
+    assert {"combination/dwa/value", "data/coarse_of_fine", "draws/sum"} <= {
+        line.split(":")[0] for line in report
+    }
+    assert captured.record.keys() == stored.keys()
+    assert not any(line.startswith(("main/", "schedule/lr")) for line in report)
+    (state,) = (line for line in report if line.startswith("state: "))
+    assert state.endswith("tensors against 6")
+    for mode in ("train", "eval"):
+        assert any(line.startswith(f"forward/{mode}/0: ") for line in report)
+        assert any(line.startswith(f"forward/{mode}/1: ") for line in report)
+    for name in ("sum", *upstream.EDITED):
+        assert any(line.startswith(f"lockstep/{name}/1: state: ") for line in report)
+    assert "loader/train/0: 0/media: 6/6 differ" in report
+    assert "loader/test/0: 0/media: 6/6 differ" in report
 
 
 @pytest.mark.compute_training

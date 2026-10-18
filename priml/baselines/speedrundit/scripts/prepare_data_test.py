@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import field
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Final, cast, override
 from unittest.mock import Mock
 
@@ -540,6 +541,93 @@ def test_main_refuses_a_corpus_directory_over_its_source(
         _ = prepare_data.main()
     prepare.assert_not_called()
     assert list(raw.iterdir()) == []
+
+
+def test_main_records_a_receipt_without_encoding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    called: list[tuple[Path, Path | None]] = []
+
+    def fake(
+        config: PairedImageLatentDataset.Config,
+        imagenet: Path | None = None,
+    ) -> int:
+        called.append((Path(config.working_dir), imagenet))
+        return 5
+
+    prepare = Mock()
+    monkeypatch.setattr(prepare_data, "record_receipt", fake)
+    monkeypatch.setattr(prepare_data, "prepare", prepare)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["prepare_data", "--receipt-only", "--directory", str(tmp_path / "c")],
+    )
+    assert prepare_data.main() == 0
+    assert called == [(tmp_path / "c", None)]
+    assert capsys.readouterr().out == "5\n"
+    prepare.assert_not_called()
+
+
+def test_receipt_only_needs_the_latent_directory(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="vae-in does not exist"):
+        prepare_data.record_receipt(_source(tmp_path))
+
+
+def test_a_source_without_training_images_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "raw" / "train").mkdir(parents=True)
+    with pytest.raises(ValueError, match="holds no training images"):
+        prepare_data.prepare(_source(tmp_path), imagenet=tmp_path / "raw")
+
+
+@pytest.mark.parametrize(
+    ("sample", "message"),
+    [
+        ({"label": "n00000000", "file_path": "a.JPEG"}, "integer ImageNet label"),
+        ({"label": 3, "file_path": None}, "ImageNet file path"),
+    ],
+)
+def test_records_refuse_an_untyped_label_or_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sample: dict[str, object],
+    message: str,
+) -> None:
+    monkeypatch.setattr(
+        prepare_data,
+        "ExtractedImageNetSource",
+        SimpleNamespace(Config=partial(_FakeSourceConfig, sample=sample)),
+    )
+    with pytest.raises(TypeError, match=message):
+        prepare_data.records(tmp_path)
+
+
+class _FakeSourceConfig:
+    """Builds a source yielding one fixed sample."""
+
+    def __init__(self, *, sample: dict[str, object], **_: object) -> None:
+        self.sample = sample
+
+    def make(self) -> list[dict[str, object]]:
+        return [self.sample]
+
+
+def test_a_stored_crop_of_the_wrong_size_is_refused(tmp_path: Path) -> None:
+    stored = tmp_path / "images" / "00000" / "img00000000.png"
+    stored.parent.mkdir(parents=True)
+    Image.new("RGB", (_SIZE, _SIZE + 1)).save(stored)
+    record = prepare_data.Record(source="unused.JPEG", label=0, stem="00000000")
+    with pytest.raises(ValueError, match=rf"autoencoder needs {_SIZE}x{_SIZE}"):
+        list(prepare_data.batches([record], root=tmp_path, size=_SIZE, batch_size=2))
+
+
+def test_an_empty_error_tally_reports_nothing_measured() -> None:
+    assert prepare_data._ErrorTally().summary() == {
+        "mse": None,
+        "max_abs": None,
+        "saturated_fraction": None,
+    }
 
 
 def test_main_help_keeps_every_description_line(

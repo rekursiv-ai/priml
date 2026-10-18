@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
-from typing import Final, Self
+from typing import ClassVar, Final, Self
 from urllib import request
 
 import csv
@@ -188,7 +190,10 @@ def test_extreme_overlap_join(tmp_path: Path) -> None:
     train_csv = tmp_path / "train.csv"
     test_csv = tmp_path / "test.csv"
     _write_extreme_csv(train_csv, (("cat_a", PUZZLE_A),))
-    _write_extreme_csv(test_csv, (("cat_a", PUZZLE_B), ("other", PUZZLE_B)))
+    _write_extreme_csv(
+        test_csv,
+        (("cat_a", PUZZLE_B), ("other", PUZZLE_B), ("cat_a", PUZZLE_B)),
+    )
     dataset_dir = tmp_path / "dataset"
     report = build_dataset(
         dataset_dir,
@@ -206,12 +211,12 @@ def test_extreme_overlap_join(tmp_path: Path) -> None:
             in_extreme_test=1,
             in_neither=1,
             derived_in_extreme_train=1,
-            derived_in_extreme_test=1,
+            derived_in_extreme_test=2,
         ),
     )
     card = (dataset_dir / "README.md").read_text()
     assert "## Overlap with sudoku-extreme" in card
-    assert "| cat_a | 3 | 1 | 1 | 1 | 1 | 1 |" in card
+    assert "| cat_a | 3 | 1 | 1 | 1 | 1 | 2 |" in card
     overlap = from_plain(
         json_loads(
             (dataset_dir / "manifest.json").read_text(),
@@ -220,7 +225,7 @@ def test_extreme_overlap_join(tmp_path: Path) -> None:
         list[dict[str, object]],
     )
     assert overlap[0]["in_neither"] == 1
-    assert overlap[0]["derived_in_extreme_test"] == 1
+    assert overlap[0]["derived_in_extreme_test"] == 2
     with pytest.raises(ValueError, match="come together"):
         build_dataset(
             dataset_dir,
@@ -385,6 +390,173 @@ def test_download_pins_the_archive_digest(monkeypatch: pytest.MonkeyPatch) -> No
     # Pinned to a commit, never a moving branch.
     assert opened == [build_hard_catalogs.TDOKU_DATA_URL] * 2
     assert "/a05701253ed175e2859063dec3cf01a7f5b9c6a7/" in opened[0]
+
+
+def test_enumeration_reports_a_cell_with_no_candidates_unsatisfiable() -> None:
+    # Row 0 holds 1..8 and column 8 holds a 9: no given conflicts, but the
+    # last cell of row 0 has no candidate left.
+    stuck = parse_puzzle_line("12345678." + "." * 8 + "9" + "." * 63)
+    assert enumerate_completions(stuck).status == "unsatisfiable"
+
+
+def test_enumeration_refuses_a_completion_the_validator_rejects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(build_hard_catalogs, "is_valid_completion", _reject)
+    with pytest.raises(AssertionError, match="failed the validator"):
+        enumerate_completions(parse_puzzle_line(PUZZLE_A))
+
+
+def test_validator_rejects_a_negative_puzzle_token() -> None:
+    # A token above 10 also fails the givens check; only a negative one
+    # reaches the range check alone.
+    solution = parse_puzzle_line(SOLVED)
+    assert not is_valid_completion(solution, (-1, *solution[1:]))
+
+
+def test_build_refuses_a_label_the_validator_rejects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(build_hard_catalogs, "_labels", _swapped_labels)
+    with pytest.raises(ValueError, match="fails the independent validator"):
+        build_dataset(
+            tmp_path / "dataset",
+            archive=None,
+            catalogs=(_spec("cat_a", (PUZZLE_A,)),),
+            workers=1,
+        )
+
+
+def test_build_refuses_conflicting_labels_for_a_duplicate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(build_hard_catalogs, "_labels", _labels_by_catalog)
+    with pytest.raises(ValueError, match="conflicting labels"):
+        build_dataset(
+            tmp_path / "dataset",
+            archive=None,
+            catalogs=(_spec("cat_a", (IMPROPER,)), _spec("cat_b", (IMPROPER,))),
+            workers=1,
+        )
+
+
+def test_parallel_labels_match_serial_labels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(build_hard_catalogs, "ProcessPoolExecutor", _RecordingPool)
+    _RecordingPool.max_workers.clear()
+    catalogs = (_spec("cat_a", (PUZZLE_A, PUZZLE_B, PUZZLE_C)),)
+    parallel = build_dataset(tmp_path / "parallel", archive=None, catalogs=catalogs)
+    serial = build_dataset(
+        tmp_path / "serial",
+        archive=None,
+        catalogs=catalogs,
+        workers=1,
+    )
+    assert _RecordingPool.max_workers == [8]
+    assert parallel.row_count == serial.row_count == 3
+    assert (tmp_path / "parallel" / "test.csv").read_text() == (
+        tmp_path / "serial" / "test.csv"
+    ).read_text()
+
+
+@pytest.mark.parametrize("skip", [True, False])
+def test_main_builds_into_the_flagged_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    skip: bool,
+) -> None:
+    archive = _archive(f"{PUZZLE_A}\n")
+    calls: list[tuple[Path, dict[str, object]]] = []
+    monkeypatch.setattr(build_hard_catalogs, "download_tdoku_archive", lambda: archive)
+    monkeypatch.setattr(
+        build_hard_catalogs,
+        "extreme_csv",
+        partial(_under, tmp_path),
+    )
+    monkeypatch.setattr(
+        build_hard_catalogs,
+        "build_dataset",
+        partial(_record_build, calls=calls),
+    )
+    argv = ["build_hard_catalogs.py", "--dataset-dir", str(tmp_path / "ds")]
+    argv += ["--workers", "3", *(["--skip-extreme-overlap"] if skip else [])]
+    monkeypatch.setattr("sys.argv", argv)
+
+    assert build_hard_catalogs.main() == 0
+    assert calls == [
+        (
+            tmp_path / "ds",
+            {
+                "archive": archive,
+                "workers": 3,
+                "extreme_train_csv": None if skip else tmp_path / "train.csv",
+                "extreme_test_csv": None if skip else tmp_path / "test.csv",
+            },
+        ),
+    ]
+
+
+def _under(root: Path, name: str) -> Path:
+    return root / name
+
+
+def _record_build(
+    dataset_dir: Path,
+    *,
+    calls: list[tuple[Path, dict[str, object]]],
+    **kwargs: object,
+) -> None:
+    calls.append((dataset_dir, kwargs))
+
+
+IMPROPER: Final = "".join("." if c in "12" else c for c in SOLVED)
+
+SWAPPED: Final = SOLVED.translate(str.maketrans("12", "21"))
+"""SOLVED with digits 1 and 2 exchanged: a second completion of IMPROPER."""
+
+
+def _reject(grid: object, puzzle: object) -> bool:
+    del grid, puzzle
+    return False
+
+
+def _swapped_labels(
+    spec: CatalogSpec,
+    puzzles: tuple[tuple[int, ...], ...],
+    *,
+    workers: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Label every puzzle with SOLVED's first two cells exchanged (invalid)."""
+    del spec, workers
+    solution = parse_puzzle_line(SOLVED)
+    return tuple((solution[1], solution[0], *solution[2:]) for _ in puzzles)
+
+
+def _labels_by_catalog(
+    spec: CatalogSpec,
+    puzzles: tuple[tuple[int, ...], ...],
+    *,
+    workers: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Label with SOLVED in ``cat_a`` and its 1<->2 swap elsewhere."""
+    del workers
+    grid = SOLVED if spec.source_name == "cat_a" else SWAPPED
+    return tuple(parse_puzzle_line(grid) for _ in puzzles)
+
+
+class _RecordingPool(ThreadPoolExecutor):
+    """In-process stand-in for ProcessPoolExecutor recording its pool size."""
+
+    max_workers: ClassVar[list[int | None]] = []
+
+    def __init__(self, max_workers: int | None = None) -> None:
+        _RecordingPool.max_workers.append(max_workers)
+        super().__init__(max_workers=max_workers)
 
 
 def test_extreme_csv_pins_the_revision_and_the_digest(

@@ -471,7 +471,7 @@ def _lpips_distance(
     reference: Tensor,
     other: Tensor,
     *,
-    network: lpips.LPIPS,
+    network: Callable[[Tensor, Tensor], Tensor],
     device: str,
     batch_size: int,
 ) -> float:

@@ -8,13 +8,18 @@ optimizer.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Final
 
 import sys
 
 import pytest
 import torch
 
+from priml.baselines.mlsbench.dl.augmentation import (
+    reference as augmentation,
+    upstream,
+)
 from priml.baselines.mlsbench.dl.augmentation.scripts import capture_reference
 from priml.baselines.mlsbench.dl.augmentation.upstream_test import write_clone
 from priml.baselines.mlsbench.dl.vision import reference
@@ -26,7 +31,15 @@ from priml.testing.golden import read_tensors
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
+
+    from torch import Tensor
+
+    from priml.baselines.mlsbench.dl.vision.upstream import Batches
+
+
+_CWD: Final = Path(__file__).resolve().parent
+
+_DATA: Final = _CWD.parent / "testdata"
 
 
 def returning[T](value: T) -> Callable[..., T]:
@@ -36,6 +49,76 @@ def returning[T](value: T) -> Callable[..., T]:
         return value
 
     return call
+
+
+def passes(fill: float) -> tuple[Batches, Batches]:
+    """Return one training and one test pass of a single ``(2, 3)`` batch."""
+    batch = {"media": torch.full((2, 3), fill), "label": torch.arange(2)}
+    return [[batch]], [[batch]]
+
+
+def port_lockstep(
+    name: str,
+    *,
+    states: list[dict[str, Tensor]] | None = None,
+) -> dict[str, Tensor]:
+    """Stand in for the port's lockstep: one tensor per state, zero media."""
+    if states is not None:
+        states += [{"w": torch.zeros(2)} for _ in range(reference.STEPS)]
+    return {
+        f"lockstep/{name}/media": torch.zeros(2),
+        f"lockstep/{name}/loss": torch.zeros(2),
+    }
+
+
+def test_capture_assembles_both_sides_into_one_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The port-side runs are tested in ``reference_test``; here they are stand-ins."""
+    root = tmp_path / "clone"
+    write_clone(root)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    stored = read_tensors(_DATA / "reference.pt")
+    monkeypatch.setattr(
+        augmentation,
+        "pipeline_images",
+        returning(augmentation.pipeline_images(2)),
+    )
+    monkeypatch.setattr(augmentation, "port_record", returning(stored))
+    monkeypatch.setattr(augmentation, "lockstep_record", port_lockstep)
+    monkeypatch.setattr(augmentation, "loader_batches", returning(passes(1.0)))
+    monkeypatch.setattr(upstream, "upstream_batches", returning(passes(0.0)))
+    monkeypatch.setattr(
+        vision_capture,
+        "compare_full_size",
+        returning(["full size differs"]),
+    )
+    captured = capture_reference.capture(root, scratch)
+    assert captured.record.keys() == stored.keys()
+    report = captured.report
+    assert report[0] == "full size differs"
+    names = ("pad_crop_flip", *upstream.EDITED)
+    for name in names:
+        assert f"lockstep/{name}/1: state: 1 tensors against" in "\n".join(report)
+        assert any(line.startswith(f"lockstep/{name}/media: ") for line in report)
+        assert f"{name}: loader/train/0: 0/media: 6/6 differ" in report
+        assert f"{name}: loader/test/0: 0/media: 6/6 differ" in report
+    # The stand-in's policies are not torchvision's, so it reaches no operation,
+    # and two images are too few for the port to reach every one.
+    census = {line.rsplit(": ", 1)[0] for line in report if "never reached" in line}
+    policies = capture_reference.POLICIES
+    assert census == {
+        f"{side} {name}" for side in ("reference", "port") for name in policies
+    }
+    assert "reference randaugment: posterize+ never reached" in report
+    assert [line for line in report if line.endswith("operation counts differ")] == [
+        f"{name}: operation counts differ" for name in policies
+    ]
+    assert any(line.startswith("pipeline/randaugment: ") for line in report)
+    shared = ("pipeline/test", "pipeline/pad_crop_flip")
+    assert not any(line.startswith(shared) for line in report)
 
 
 @pytest.mark.compute_training

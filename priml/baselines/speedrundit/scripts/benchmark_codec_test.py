@@ -3,15 +3,26 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import TYPE_CHECKING
+from pathlib import Path
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, override
 
+import argparse
 import math
+
+from torch import nn
+from treekle import from_plain
 
 import pytest
 import torch
 
 from priml.baselines.speedrundit.corpus import CorpusMismatchError
-from priml.baselines.speedrundit.latent_codec import FloatCodec, ScalarTableCodec
+from priml.baselines.speedrundit.latent_codec import (
+    FloatCodec,
+    LinearFit,
+    ScalarTableCodec,
+    ScaleGroups,
+)
 from priml.baselines.speedrundit.scripts import benchmark_codec, prepare_data
 from priml.baselines.speedrundit.scripts.prepare_data_test import (
     _imagenet,
@@ -22,7 +33,6 @@ from priml.model.ae.latent_norm import ScaleLatents
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from pathlib import Path
 
     from torch import Tensor
 
@@ -88,6 +98,154 @@ def test_evaluate_scores_images_when_given_a_decoder() -> None:
         decode=lambda latents: latents.sigmoid(),
     )
     assert report["float32"]["image_psnr_db"] == math.inf
+
+
+def test_evaluate_scores_perception_between_the_two_decodings() -> None:
+    pairs: list[tuple[Tensor, Tensor]] = []
+    report = benchmark_codec.evaluate(
+        {"float16": FloatCodec.Config(dtype=torch.float16)},
+        fit_sample=_latents(8, seed=0),
+        eval_sample=_latents(4, seed=1),
+        normalizer=ScaleLatents.Config().make(),
+        decode=torch.sigmoid,
+        perceptual=partial(_mean_gap, pairs=pairs),
+    )
+    [(reference, images)] = pairs
+    assert torch.equal(reference, _latents(4, seed=1).sigmoid())
+    assert report["float16"]["image_lpips"] == float((images - reference).abs().mean())
+    assert report["float16"]["image_lpips"] > 0
+
+
+def _mean_gap(
+    reference: Tensor,
+    other: Tensor,
+    *,
+    pairs: list[tuple[Tensor, Tensor]],
+) -> float:
+    pairs.append((reference, other))
+    return float((other - reference).abs().mean())
+
+
+def test_lpips_distance_rescales_to_signed_range_and_averages_every_batch() -> None:
+    seen: list[tuple[Tensor, Tensor]] = []
+    reference = torch.linspace(0, 1, 5 * 3 * 2 * 4).view(5, 3, 2, 4)
+    other = reference.flip(0)
+    distance = benchmark_codec._lpips_distance(
+        reference,
+        other,
+        network=partial(_first_pixel_gap, seen=seen),
+        device="cpu",
+        batch_size=2,
+    )
+    assert [left.shape[0] for left, _ in seen] == [2, 2, 1]
+    assert min(float(left.min()) for left, _ in seen) == -1
+    assert max(float(left.max()) for left, _ in seen) == 1
+    gaps = (other - reference)[:, 0, 0, 0] * 2
+    assert distance == pytest.approx(float(gaps.double().mean()))
+
+
+def _first_pixel_gap(
+    left: Tensor,
+    right: Tensor,
+    *,
+    seen: list[tuple[Tensor, Tensor]],
+) -> Tensor:
+    seen.append((left, right))
+    return (right - left)[:, :1, :1, :1]
+
+
+def test_run_decodes_images_and_scores_them_with_alexnet_lpips(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        benchmark_codec,
+        "dataset_config",
+        partial(_config, _source(tmp_path)),
+    )
+    monkeypatch.setattr(
+        benchmark_codec,
+        "candidates",
+        _float32_only,
+    )
+    monkeypatch.setattr(
+        benchmark_codec,
+        "lpips",
+        SimpleNamespace(LPIPS=partial(_FakeLpips, built=built)),
+    )
+    report = benchmark_codec.run(
+        "test",
+        imagenet=_imagenet(tmp_path, count=3),
+        num_fit_images=1,
+        num_eval_images=2,
+        device="cpu",
+        batch_size=2,
+        decode_images=True,
+    )
+    assert built == [{"net": "alex", "verbose": False}]
+    codecs = from_plain(report["codecs"], dict[str, dict[str, float]])
+    assert codecs["float32"]["image_psnr_db"] == math.inf
+    assert codecs["float32"]["image_lpips"] == 0.0
+
+
+def _float32_only() -> dict[str, FloatCodec.Config]:
+    return {"float32": FloatCodec.Config()}
+
+
+class _FakeLpips(nn.Module):
+    """Mean absolute pixel gap per image, recording how it was built."""
+
+    def __init__(self, *, built: list[dict[str, object]], **options: object) -> None:
+        super().__init__()
+        built.append(options)
+
+    @override
+    def forward(self, left: Tensor, right: Tensor) -> Tensor:
+        return (right - left).abs().mean(dim=(1, 2, 3), keepdim=True)
+
+
+def test_main_writes_the_report_where_output_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(benchmark_codec, "run", partial(_fake_run, calls=calls))
+    raw, corpus = tmp_path / "raw", tmp_path / "corpus"
+    output = tmp_path / "out" / "report.json"
+    output.parent.mkdir()
+    argv = ["benchmark_codec", "--source", str(raw), "--directory", str(corpus)]
+    flags = ["--fit-images", "3", "--eval-images", "2", "--device", "cpu", "--decode"]
+    monkeypatch.setattr("sys.argv", [*argv, *flags, "--output", str(output)])
+    assert benchmark_codec.main() == 0
+    assert output.read_text(encoding="utf-8") == '{\n  "codecs": {}\n}\n'
+    assert calls == [
+        (
+            ("exp003",),
+            {
+                "imagenet": raw,
+                "num_fit_images": 3,
+                "num_eval_images": 2,
+                "device": "cpu",
+                "batch_size": 64,
+                "decode_images": True,
+                "directory": corpus,
+            },
+        ),
+    ]
+    monkeypatch.setattr("sys.argv", [*argv, *flags])
+    assert benchmark_codec.main() == 0
+    assert capsys.readouterr().out == '{\n  "codecs": {}\n}\n'
+
+
+def _fake_run(
+    *args: object,
+    calls: list[tuple[tuple[object, ...], dict[str, object]]],
+    **kwargs: object,
+) -> dict[str, object]:
+    calls.append((args, kwargs))
+    return {"codecs": {}}
 
 
 def test_fit_stability_reports_each_size() -> None:
@@ -267,11 +425,69 @@ def test_output_inside_an_input_is_refused(
     assert not target.exists()
 
 
+def test_flags_default_to_the_recipe_and_require_a_source() -> None:
+    parser = argparse.ArgumentParser()
+    benchmark_codec._add_arguments(parser)
+    flags = parser.parse_args(["--source", "raw"])
+    assert vars(flags) == {
+        "experiment": "exp003",
+        "source": Path("raw"),
+        "directory": None,
+        "output": None,
+        "fit_images": 4_096,
+        "eval_images": 1_000,
+        "device": "cuda",
+        "batch_size": 64,
+        "decode": False,
+    }
+    typed = parser.parse_args(
+        [
+            *("--source", "raw", "--directory", "corpus", "--output", "out.json"),
+            *("--fit-images", "3", "--eval-images", "2", "--batch-size", "5"),
+        ],
+    )
+    assert {
+        name: vars(typed)[name]
+        for name in ("directory", "output", "fit_images", "eval_images", "batch_size")
+    } == {
+        "directory": Path("corpus"),
+        "output": Path("out.json"),
+        "fit_images": 3,
+        "eval_images": 2,
+        "batch_size": 5,
+    }
+    with pytest.raises(SystemExit):
+        parser.parse_args([])
+
+
 def test_every_candidate_builds() -> None:
     names = benchmark_codec.candidates()
-    assert {"float32", "bfloat16", "float16", "uint8_lloyd_max"} <= names.keys()
+    assert list(names) == [
+        "float32",
+        "bfloat16",
+        "float16",
+        "uint8_linear_minmax",
+        "uint8_linear_4sigma",
+        "uint8_quantile",
+        "uint8_gaussian",
+        "uint8_lloyd_max",
+        "uint8_lloyd_max_32groups",
+        "uint8_lloyd_max_shared",
+    ]
     for config in names.values():
         _ = config.make()
+
+
+def test_candidate_names_state_their_parameters() -> None:
+    names = benchmark_codec.candidates()
+    clip = names["uint8_linear_4sigma"]
+    groups = names["uint8_lloyd_max_32groups"]
+    assert isinstance(clip, ScalarTableCodec.Config)
+    assert isinstance(clip.fit, LinearFit.Config)
+    assert clip.fit.clip_sigmas == 4.0
+    assert isinstance(groups, ScalarTableCodec.Config)
+    assert isinstance(groups.groups, ScaleGroups.Config)
+    assert groups.groups.num_groups == 32
 
 
 def _latents(images: int, *, seed: int) -> Tensor:

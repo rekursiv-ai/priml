@@ -701,8 +701,6 @@ class _Enumerator:
 
     def _search(self, position: int) -> None:
         """Depth-first fewest-candidates search with ascending digits."""
-        if len(self.solutions) >= 2:
-            return
         if position == len(self.empties):
             self.solutions.append(tuple(digit + 2 for digit in self.board))
             return
@@ -857,7 +855,9 @@ def _questions_and_tags(csv_path: Path) -> tuple[set[str], dict[str, int]]:
     """Load a sudoku-extreme CSV's question set and source-tag histogram."""
     questions: set[str] = set()
     tags: dict[str, int] = {}
+    # pragma: no mutate start -- 81-cell questions hold no newline to translate.
     with csv_path.open(newline="") as stream:
+        # pragma: no mutate end
         reader = csv.reader(stream)
         header = next(reader)
         question_column = header.index("question")

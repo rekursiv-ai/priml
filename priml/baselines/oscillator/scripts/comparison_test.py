@@ -1,17 +1,20 @@
 """Check the comparison CLI's outputs, refusals, and flags."""
 
+from functools import partial
 from pathlib import Path
 from typing import Final, cast
 
 import argparse
 import re
 import shutil
+import subprocess
 
 from treekle import from_plain, json_loads
 
 import pytest
 
 from priml.baselines.oscillator import experiments
+from priml.baselines.oscillator.benchmark import ForecastStudy
 from priml.baselines.oscillator.scripts import comparison
 from priml.baselines.oscillator.train_step import RidgeCorrection
 
@@ -64,6 +67,63 @@ def test_git_reports_the_checkout_revision() -> None:
     assert git is not None
     head = comparison._git(git, "rev-parse", "HEAD", cwd=_CWD)
     assert re.fullmatch(r"[0-9a-f]{40}", head)
+
+
+def test_every_case_seed_and_recipe_is_run_labelled_and_recorded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The study itself is stubbed; this pins the loop around it."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        subprocess,
+        "check_output",
+        partial(_record_git, calls=calls),
+    )
+    monkeypatch.setattr(ForecastStudy, "run", _canned_run)
+    directory = tmp_path / "run"
+    argv = ["--directory", str(directory), "--experiments", "exp_smoke", "exp000"]
+    assert comparison.main([*argv, "--seeds", "7", "8"]) == 0
+    report = json_loads(
+        (directory / "comparison.json").read_text(),
+        dict[str, object],
+    )
+    runs = from_plain(report["runs"], list[dict[str, object]])
+    assert [(run["case"], run["experiment"], run["seed"]) for run in runs] == [
+        (case, name, seed)
+        for case in ("matched", "mismatched")
+        for seed in (7, 8)
+        for name in ("exp_smoke", "exp000")
+    ]
+    assert all(run["reference_cubic"] == 0.0 for run in runs[:4])
+    assert all(run["reference_cubic"] == 0.4 for run in runs[4:])
+    assert report["git_head"] == "rev-parse HEAD"
+    assert [call[1:] for call in calls] == [
+        ["rev-parse", "HEAD"],
+        ["status", "--short"],
+    ]
+    assert "seed=8," in (directory / "mismatched-exp000-8.txt").read_text()
+
+
+def _record_git(
+    command: list[str],
+    *,
+    cwd: Path,
+    text: bool,
+    calls: list[list[str]],
+) -> str:
+    assert text
+    assert (cwd / "priml/baselines/oscillator/scripts/comparison.py").is_file()
+    calls.append(command)
+    return f" {' '.join(command[1:])}\n"
+
+
+def _canned_run(study: ForecastStudy) -> dict[str, object]:
+    return {
+        "experiment": study.config.experiment_name,
+        "seed": study.config.seed,
+        "reference_cubic": study.config.data.reference.cubic,
+    }
 
 
 def test_cli_refuses_to_overwrite_a_run(tmp_path: Path) -> None:

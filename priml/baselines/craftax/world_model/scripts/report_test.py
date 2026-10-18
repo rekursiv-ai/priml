@@ -1,6 +1,7 @@
 """Check the report: the in-loop metric, the summary of every step, and the driver."""
 
 from collections.abc import Callable, Sequence
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -31,6 +32,7 @@ from priml.baselines.craftax.world_model.model import WorldModel
 from priml.baselines.craftax.world_model.schema import craftax_schema
 from priml.baselines.craftax.world_model.scripts import (
     baselines,
+    curves,
     data_eval,
     dream,
     engine_checks,
@@ -364,6 +366,88 @@ def test_a_failed_child_is_named_and_the_summary_still_written(
     assert summary["criterion_4_engine_checks"] == {"s0": False}
     report_md = (output / "report.md").read_text()
     assert "| 4. s0 passes the engine checks | FAIL |" in report_md
+
+
+def test_main_reports_wandb_runs_and_names_a_crashed_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    checkpoint = _checkpoint(tmp_path, monkeypatch)
+    monkeypatch.setattr(report, "_child", _crashing)
+    projects: list[tuple[str, str]] = []
+    monkeypatch.setattr(curves, "run_history", partial(_history, projects=projects))
+    output = tmp_path / "report"
+    _argv(
+        monkeypatch,
+        checkpoint,
+        *("--skip", "baselines", "--skip", "tiles", "--skip", "matrix"),
+        *("--skip", "dreams", "--wandb-runs", "abc", "--output", str(output)),
+        root=tmp_path,
+    )
+    assert report.main() == 1
+    assert projects == [("craftax-world-model", "abc")]
+    assert "Failed: s0 engine_checks.py." in capsys.readouterr().out
+    wandb = json_loads((output / "wandb-report.json").read_text(), dict[str, object])
+    assert wandb["project"] == "craftax-world-model"
+    checks = (output / "engine-checks-s0.json").read_text()
+    assert json_loads(checks, dict[str, object]) == {
+        "all_passed": False,
+        "exit_status": 3,
+    }
+    summary = json_loads((output / "summary.json").read_text(), report.Summary)
+    assert summary["training"]["abc"]["last_logged_step"] == 2
+    assert summary["criterion_4_engine_checks"] == {"s0": False}
+
+
+def test_child_runs_the_sibling_script_and_returns_its_status(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    commands: list[list[str]] = []
+    monkeypatch.setattr(report, "subprocess", _FakeSubprocess(commands, status=3))
+    status = report._child("dream.py", ["c.pt", "--rows", "2"], name="s0", clock=0.0)
+    assert status == 3
+    script = str(Path(report.__file__).resolve().with_name("dream.py"))
+    assert commands == [[sys.executable, script, "c.pt", "--rows", "2"]]
+    assert "s0: dream.py (exit 3) done" in capsys.readouterr().out
+
+
+class _Completed:
+    """Stand in for ``subprocess.CompletedProcess``."""
+
+    def __init__(self, returncode: int) -> None:
+        self.returncode = returncode
+
+
+class _FakeSubprocess:
+    """Stand in for ``subprocess``, recording each command it runs."""
+
+    def __init__(self, commands: list[list[str]], *, status: int) -> None:
+        self._commands = commands
+        self._status = status
+
+    def run(self, command: list[str], *, check: bool) -> _Completed:
+        assert not check
+        self._commands.append(command)
+        return _Completed(self._status)
+
+
+def _crashing(script: str, arguments: Sequence[str], *, name: str, clock: float) -> int:
+    """Stand in for ``report._child``: every child crashes before writing."""
+    del script, arguments, name, clock
+    return 3
+
+
+def _history(
+    project: str,
+    run: str,
+    *,
+    projects: list[tuple[str, str]],
+) -> list[dict[str, object]]:
+    """Stand in for ``curves.run_history`` with two finite updates."""
+    projects.append((project, run))
+    return [{"_step": 1, "train/loss": 2.0}, {"_step": 2, "train/loss": 1.0}]
 
 
 def _recording(calls: list[tuple[str, list[str]]]) -> Callable[..., int]:
