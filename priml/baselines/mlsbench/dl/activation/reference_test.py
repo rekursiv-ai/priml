@@ -7,7 +7,10 @@ edit produced, written by ``scripts/capture_reference.py``. Equality is exact.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+from configgle import InlineConfig
+from torch import nn
 
 import pytest
 import torch
@@ -15,7 +18,12 @@ import torch
 from priml.baselines.mlsbench.dl.activation import reference
 from priml.baselines.mlsbench.dl.activation.experiments import exp000
 from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision.model import ResNet
 from priml.testing.golden import mismatches, read_tensors
+
+
+if TYPE_CHECKING:
+    from priml.baselines.mlsbench.dl.vision.experiments import VisionTrainLoop
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -42,6 +50,17 @@ def test_every_activation_and_its_gradient_match_the_script() -> None:
     expected = stored("activation/")
     assert {k.split("/")[1] for k in expected} == set(reference.ACTIVATIONS)
     assert_exact(expected, reference.activation_record())
+
+
+def test_the_record_refuses_an_activation_it_would_have_to_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(reference, "ACTIVATIONS", {"prelu": _stateful})
+    with pytest.raises(
+        TypeError,
+        match=r"^Expected not isinstance\(activation, Makeable\)\.$",
+    ):
+        _ = reference.activation_record()
 
 
 def test_the_learning_rate_of_all_200_epochs_matches_the_script() -> None:
@@ -75,6 +94,14 @@ def test_the_golden_bites_on_one_ulp() -> None:
 
 def test_the_golden_fits_the_ceiling() -> None:
     assert (_DATA / "reference.pt").stat().st_size <= 32_768
+
+
+def _stateful() -> VisionTrainLoop:
+    """Return ``exp000`` with an activation the network has to build."""
+    cfg = exp000()
+    assert isinstance(cfg.step.model, ResNet.Config)
+    cfg.step.model.activation = InlineConfig(nn.PReLU)
+    return cfg
 
 
 if __name__ == "__main__":

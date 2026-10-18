@@ -9,12 +9,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
+from torch import Tensor, nn
+
 import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.regularization import reference
 from priml.baselines.mlsbench.dl.regularization.experiments import exp000
 from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision.train_step import LossContext
 from priml.testing.golden import mismatches, read_tensors
 
 
@@ -40,6 +43,26 @@ def assert_exact(
 
 def test_every_regularizer_and_its_gradients_match_the_script() -> None:
     assert_exact(stored("regularizer/"), reference.regularizer_record())
+
+
+def test_a_port_call_hands_on_every_input_and_states_its_context() -> None:
+    seen = _Seen()
+    model = nn.Identity()
+    media, logits, label = torch.zeros(2, 3), torch.ones(2, 4), torch.tensor([0, 3])
+    term = reference._PortCall(seen)(
+        model,
+        media=media,
+        logits=logits,
+        label=label,
+        config={"num_classes": 4, "epoch": 3, "total_epochs": 5},
+    )
+    assert torch.equal(term, torch.tensor(8.0))
+    [(got_model, got_media, got_logits, got_label, context)] = seen.calls
+    assert got_model is model
+    assert got_media is media
+    assert got_logits is logits
+    assert got_label is label
+    assert context == LossContext(num_classes=4, epoch=3, total_epochs=5)
 
 
 def test_the_schedule_and_optimizer_match_the_setting() -> None:
@@ -75,6 +98,26 @@ def test_the_golden_bites_on_one_ulp() -> None:
     value[1] = torch.nextafter(value[1], torch.tensor(0.0))
     port = {key: reference.regularizer_record()[key]}
     assert [line.split(":")[0] for line in mismatches({key: value}, port)] == [key]
+
+
+class _Seen:
+    """A regularizer that keeps what each call handed it."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[nn.Module, Tensor, Tensor, Tensor, LossContext]] = []
+
+    def __call__(
+        self,
+        model: nn.Module,
+        /,
+        *,
+        media: Tensor,
+        logits: Tensor,
+        label: Tensor,
+        context: LossContext,
+    ) -> Tensor:
+        self.calls.append((model, media, logits, label, context))
+        return logits.sum()
 
 
 if __name__ == "__main__":

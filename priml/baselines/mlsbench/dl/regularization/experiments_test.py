@@ -96,6 +96,24 @@ def test_a_fork_changes_only_the_regularizer(
 
 
 @pytest.mark.parametrize(
+    ("factory", "settings"),
+    [
+        (exp001, {"block_size": 3, "strength": 1e-4, "delay": 0.2}),
+        (exp002, {"beta": 0.1, "eps": 1e-8}),
+        (exp003, {"strength": 1e-4}),
+    ],
+    ids=["exp001", "exp002", "exp003"],
+)
+def test_a_fork_takes_its_baselines_settings(
+    factory: ExperimentFactory[VisionTrainLoop],
+    settings: dict[str, float],
+) -> None:
+    step = factory().step
+    assert isinstance(step, RegularizedTrainStep.Config)
+    assert {name: getattr(step.regularization, name) for name in settings} == settings
+
+
+@pytest.mark.parametrize(
     "factory",
     ALL_EXPERIMENTS,
     ids=[f.__name__ for f in ALL_EXPERIMENTS],
