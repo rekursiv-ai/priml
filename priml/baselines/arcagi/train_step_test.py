@@ -1005,7 +1005,7 @@ def test_three_step_source_golden_rejects_extra_persistent_model_state(
     def read_with_extra_model_key(path: Path) -> dict[str, Tensor]:
         records = dict(original_read_tensors(path))
         records["init/model/inner.layers.99.mlp.down_proj.weight"] = torch.zeros(
-            (1, 1),
+            (2, 3),
         )
         return records
 

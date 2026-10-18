@@ -690,8 +690,8 @@ class TrainLoop:
         """Score the loaded checkpoint with one eval, then return."""
         if self.step.global_step == 0:
             logger.warning(
-                "eval_only at global_step=0: no checkpoint was loaded "
-                "(resume found none). Evaluating the freshly-initialized model.",
+                "eval_only at global_step=0: no training progress was restored. "
+                "Evaluating current model weights.",
             )
         self._maybe_eval(is_final=True, force=True)
 

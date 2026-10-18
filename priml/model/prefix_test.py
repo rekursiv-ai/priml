@@ -445,6 +445,8 @@ def test_composed_prefix_matches_nonzero_closed_form_and_gradients(
         composition.augmentation_embed.weight.copy_(
             torch.arange(168, dtype=torch.float32).reshape(8, 21) / 32,
         )
+        # CategorySlotFiLM.__init__ keeps the released slot-table head axis at one;
+        # adding heads would change the checkpoint parameter shape.
         composition.slot_base.copy_(torch.arange(3).reshape(1, 3) / 8)
         composition.slot_embeddings.copy_(torch.arange(18).reshape(1, 9, 2) / 8)
         composition.film_gamma.weight.copy_(
@@ -463,6 +465,8 @@ def test_composed_prefix_matches_nonzero_closed_form_and_gradients(
         )
         if module.residual_gate is not None:
             assert isinstance(module.residual_gate, SigmoidResidualGate)
+            # SigmoidResidualGate.__init__ uses the released task-to-gate layout;
+            # a rectangular matrix would change the checkpoint weight shape.
             module.residual_gate.linear.weight.copy_(
                 torch.arange(441, dtype=torch.float32).reshape(21, 21) / 50_000_000,
             )
@@ -487,6 +491,8 @@ def test_composed_prefix_matches_nonzero_closed_form_and_gradients(
     puzzle = composition.category_embed(inputs["category_indices"])
     dih = composition.augmentation_embed(inputs["augmentation_indices"])
     slots = composition.slot_embeddings.expand(3, -1, -1, -1)
+    # CategorySlotFiLM.forward mirrors the released single-head slot layout;
+    # widening this gather would test a different stored-state geometry.
     indices = (
         inputs["slot_permutation"]
         .unsqueeze(1)

@@ -4759,11 +4759,30 @@ def test_eval_time_limit_is_rank_agreed(monkeypatch: pytest.MonkeyPatch) -> None
     loop = config.make()
     broadcasts = _distributed_flag_broadcast(monkeypatch, rank_zero_verdict=None)
     try:
-        clock.now = 0.5
-        assert not loop._eval_time_limit_reached(0.0)
-        clock.now = 2.0
-        assert loop._eval_time_limit_reached(0.0)
-        assert broadcasts == [0.0, 1.0]
+        with torch.device("meta"):
+            clock.now = 10.5
+            assert not loop._eval_time_limit_reached(10.0)
+            clock.now = 11.0
+            assert not loop._eval_time_limit_reached(10.0)
+            clock.now = 12.0
+            assert loop._eval_time_limit_reached(10.0)
+        assert broadcasts == [0.0, 0.0, 1.0]
+    finally:
+        loop._destroy_runtime_once()
+
+
+def test_eval_time_limit_excludes_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Allow evaluation through its exact deadline and stop after it."""
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "perf_counter", clock)
+    config = _make_step_logging_loop_config()
+    config.max_eval_time = 1.0
+    loop = config.make()
+    try:
+        clock.now = 11.0
+        assert not loop._eval_time_limit_reached(10.0)
+        clock.now = 11.001
+        assert loop._eval_time_limit_reached(10.0)
     finally:
         loop._destroy_runtime_once()
 
@@ -4810,8 +4829,8 @@ def test_eval_only_without_a_checkpoint_warns_and_scores_fresh_weights(
     ]
     assert warnings == [
         (
-            "eval_only at global_step=0: no checkpoint was loaded "
-            "(resume found none). Evaluating the freshly-initialized model."
+            "eval_only at global_step=0: no training progress was restored. "
+            "Evaluating current model weights."
         ),
     ]
     assert tracker.metrics_by_step[0][0]["eval/score"] == 0.8

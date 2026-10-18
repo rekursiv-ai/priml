@@ -24,6 +24,7 @@ see [Reproduce](#reproduce) for the steps and
   - [References](#references)
 - [CHARM validation](#charm-validation)
 - [Evaluation](#evaluation)
+  - [Load a checkpoint](#load-a-checkpoint)
 - [Tests](#tests)
 - [Files](#files)
 
@@ -239,6 +240,42 @@ views. It retains ballots across evaluation events, ranks canonical
 predictions by vote count and mean halt confidence, and averages per-output
 success within each puzzle, then across puzzles.
 
+### Load a checkpoint
+
+`eval006`, `eval009`, and `eval010` use their training recipe's model,
+dataset, and metrics with `TrainLoop.eval_only`. They import saved model
+weights, EMA parameters, and saved progress. The training recipe's native
+EMA selection and warmup rules choose evaluation weights; live buffers such
+as the sparse task table are retained. The optimizer starts fresh. Native
+training resume continues to use `Checkpointer` and the complete run state.
+
+Pass the checkpoint path explicitly for every evaluation recipe; none has a
+saved-run default. Evaluate an `exp006` checkpoint on eight GPUs:
+
+```bash
+uv --quiet run --frozen python -m torch.distributed.run --standalone --nproc_per_node=8 -m priml priml.baselines.arcagi.experiments.eval006 --override step.checkpoint.path=/path/to/checkpoint.pt
+```
+
+The loader accepts current native checkpoints, model-only exports, and the
+historical ARC model/EMA names. Set `step.checkpoint.sha256` to verify an
+archive's expected digest. Output goes to
+`/opt/scratch/runs/arcagi/eval006/metrics.json`; set `experiment_name` for a
+separate evaluation directory.
+
+To score the final released CHARM checkpoints, download steps 1,590,000 and
+2,380,000 from the pinned data/checkpoint release linked above. Pass their
+local paths and, optionally, the released file digests:
+
+```bash
+uv --quiet run --frozen python -m torch.distributed.run --standalone --nproc_per_node=8 -m priml priml.baselines.arcagi.experiments.eval009 --override step.checkpoint.path=/path/to/step_1590000.pt --override step.checkpoint.sha256=7c680e42d2a3c231179a160a361b4b735dbec5b196d447a315516f0c3f4308e9
+uv --quiet run --frozen python -m torch.distributed.run --standalone --nproc_per_node=8 -m priml priml.baselines.arcagi.experiments.eval010 --override step.checkpoint.path=/path/to/step_2380000.pt --override step.checkpoint.sha256=db5eaaf7ceb85f9a488502258d0c4468316040ab6658b6ad158a6534ea04b9b6
+```
+
+Each command scores one checkpoint. The accumulated results in
+[CHARM validation](#charm-validation) pool nine or ten checkpoints. The
+import reads weights with `weights_only=True` and a scoped NumPy allowlist
+for the released RNG envelope.
+
 ## Tests
 
 ```bash
@@ -272,6 +309,7 @@ reference step, kept to replay its single- and two-rank trajectories.
 | `../../model/grid_solver.py`, `../../model/recurrence.py` | Shared grid solver and recurrent schedules |
 | `../../model/grid_embedding.py`, `../../model/prefix.py`, `../../model/conditioning.py` | Grid embedding, sparse prefixes, and task/augmentation composition |
 | `train_step.py` | ACT training step, evaluation signals, data parallelism |
+| `checkpoint.py` | Strict native and released checkpoint imports for evaluation |
 | `../../loss/act.py`, `../../loss/token.py` | ACT objective, token losses, and batch reductions |
 | `data.py`, `puzzle_data.py` | Prepared arrays, v2 Parquet schema, and ordered pair/view indexing |
 | `augmentation.py` | ARC views and CanvasEOS packing |

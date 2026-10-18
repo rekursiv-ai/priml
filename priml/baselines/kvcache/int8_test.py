@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
 
 _NUM_HEADS: Final = 3
+_CHANNELS_HEAD_CACHE: Final = 4
 _CODE_MAX: Final = 127.0
 
 
@@ -72,8 +73,8 @@ def test_int8_cache_counts_its_scales_inside_the_cache_tensors() -> None:
 
 def test_update_stays_within_half_a_quantization_step() -> None:
     cache = _cache()
-    k = torch.randn(2, _NUM_HEADS, 5, CHANNELS_HEAD) * 3.0
-    v = torch.randn(2, _NUM_HEADS, 5, CHANNELS_HEAD) * 0.5
+    k = torch.randn(2, _NUM_HEADS, 5, _CHANNELS_HEAD_CACHE) * 3.0
+    v = torch.randn(2, _NUM_HEADS, 5, _CHANNELS_HEAD_CACHE) * 0.5
 
     k_all, v_all = cache.update(k, v)
 
@@ -90,8 +91,8 @@ def test_update_stays_within_half_a_quantization_step() -> None:
 
 def test_update_answers_in_the_incoming_dtype() -> None:
     cache = _cache()
-    k = torch.randn(2, _NUM_HEADS, 3, CHANNELS_HEAD, dtype=torch.bfloat16)
-    v = torch.randn(2, _NUM_HEADS, 3, CHANNELS_HEAD, dtype=torch.bfloat16)
+    k = torch.randn(2, _NUM_HEADS, 5, _CHANNELS_HEAD_CACHE, dtype=torch.bfloat16)
+    v = torch.randn(2, _NUM_HEADS, 5, _CHANNELS_HEAD_CACHE, dtype=torch.bfloat16)
 
     k_all, v_all = cache.update(k, v)
 
@@ -105,11 +106,13 @@ def test_scale_unpacking_handles_every_row_alignment(
     channels: int,
     length: int,
 ) -> None:
+    # Singleton axes expose _dequantized's invalid scale strides under plain clone.
     cache = Int8KVCache(
         k=torch.zeros(1, 1, 2, channels + SCALE_COLUMNS, dtype=torch.int8),
         v=torch.zeros(1, 1, 2, channels + SCALE_COLUMNS, dtype=torch.int8),
         length=0,
     )
+    # Length 0/1 exposes _dequantized's empty/singleton dtype-view stride failure.
     incoming = torch.ones(1, 1, length, channels)
 
     k_all, v_all = cache.update(incoming, incoming)
@@ -127,7 +130,11 @@ def test_dequantization_preserves_the_inputs_dynamic_range(
     value: float,
 ) -> None:
     cache = _cache()
-    incoming = torch.full((2, _NUM_HEADS, 2, CHANNELS_HEAD), value, dtype=dtype)
+    incoming = torch.full(
+        (2, _NUM_HEADS, 5, _CHANNELS_HEAD_CACHE),
+        fill_value=value,
+        dtype=dtype,
+    )
 
     k_all, v_all = cache.update(incoming, incoming)
 
@@ -136,16 +143,17 @@ def test_dequantization_preserves_the_inputs_dynamic_range(
 
 
 def test_channel_broadcasting_matches_the_float_cache_after_eviction() -> None:
-    cache = _cache(max_seq=2)
+    cache = _cache(max_seq=6)
     control = KVCache.alloc(
         batch=2,
         num_heads=_NUM_HEADS,
-        max_seq=2,
-        channels_head=CHANNELS_HEAD,
+        max_seq=6,
+        channels_head=_CHANNELS_HEAD_CACHE,
     )
-    initial = torch.ones(2, _NUM_HEADS, 2, CHANNELS_HEAD)
-    keys = torch.full((2, _NUM_HEADS, 1, CHANNELS_HEAD), 2.0)
-    values = torch.full((2, _NUM_HEADS, 1, 1), 3.0)
+    initial = torch.ones(2, _NUM_HEADS, 6, _CHANNELS_HEAD_CACHE)
+    keys = torch.full((2, _NUM_HEADS, 5, _CHANNELS_HEAD_CACHE), fill_value=2.0)
+    # A singleton channel exercises Int8KVCache.update's expansion after eviction.
+    values = torch.full((2, _NUM_HEADS, 5, 1), fill_value=3.0)
     cache.update(initial, initial)
     control.update(initial, initial)
 
@@ -157,7 +165,7 @@ def test_channel_broadcasting_matches_the_float_cache_after_eviction() -> None:
     assert (cache.length, cache.seen) == (control.length, control.seen)
 
 
-@pytest.mark.parametrize("batch", [2, (2, 1)])
+@pytest.mark.parametrize("batch", [2, (2, 4)])
 def test_alloc_builds_packed_storage_with_independent_key_and_value_widths(
     batch: int | tuple[int, ...],
 ) -> None:
@@ -165,19 +173,19 @@ def test_alloc_builds_packed_storage_with_independent_key_and_value_widths(
         batch=batch,
         num_heads=_NUM_HEADS,
         max_seq=5,
-        channels_head=5,
-        channels_v_head=3,
+        channels_head=6,
+        channels_v_head=7,
         dtype=torch.float64,
     )
     batch_shape = (batch,) if isinstance(batch, int) else batch
     assert isinstance(cache, Int8KVCache)
     assert cache.k.dtype is torch.int8
     assert cache.v.dtype is torch.int8
-    assert cache.k.shape == (*batch_shape, _NUM_HEADS, 5, 5 + SCALE_COLUMNS)
-    assert cache.v.shape == (*batch_shape, _NUM_HEADS, 5, 3 + SCALE_COLUMNS)
+    assert cache.k.shape == (*batch_shape, _NUM_HEADS, 5, 6 + SCALE_COLUMNS)
+    assert cache.v.shape == (*batch_shape, _NUM_HEADS, 5, 7 + SCALE_COLUMNS)
     assert (cache.length, cache.seen) == (0, 0)
-    keys = torch.ones(*batch_shape, _NUM_HEADS, 1, 5)
-    values = torch.ones(*batch_shape, _NUM_HEADS, 1, 3)
+    keys = torch.ones(*batch_shape, _NUM_HEADS, 5, 6)
+    values = torch.ones(*batch_shape, _NUM_HEADS, 5, 7)
 
     k_all, v_all = cache.update(keys, values)
 
@@ -187,7 +195,7 @@ def test_alloc_builds_packed_storage_with_independent_key_and_value_widths(
 
 def test_quantization_keeps_nan_visible_to_attention() -> None:
     cache = _cache()
-    incoming = torch.ones(2, _NUM_HEADS, 2, CHANNELS_HEAD)
+    incoming = torch.ones(2, _NUM_HEADS, 5, _CHANNELS_HEAD_CACHE)
     incoming[..., 0] = torch.nan
 
     k_all, v_all = cache.update(incoming, incoming)
@@ -197,33 +205,33 @@ def test_quantization_keeps_nan_visible_to_attention() -> None:
 
 
 def test_fifo_shift_keeps_codes_and_scales_aligned() -> None:
-    cache = _cache(max_seq=4)
-    first = torch.randn(2, _NUM_HEADS, 4, CHANNELS_HEAD)
+    cache = _cache(max_seq=6)
+    first = torch.randn(2, _NUM_HEADS, 6, _CHANNELS_HEAD_CACHE)
     cache.update(first, first)
-    more = torch.randn(2, _NUM_HEADS, 2, CHANNELS_HEAD)
+    more = torch.randn(2, _NUM_HEADS, 5, _CHANNELS_HEAD_CACHE)
 
     k_all, _ = cache.update(more, more)
 
-    expected = torch.cat((first[..., 2:, :], more), dim=-2)
+    expected = torch.cat((first[..., more.shape[-2] :, :], more), dim=-2)
     scale = expected.abs().amax(dim=-1, keepdim=True) / _CODE_MAX
     assert torch.all((k_all - expected).abs() <= scale * 0.51)
-    assert cache.length == 4
-    assert cache.seen == 6
+    assert cache.length == first.shape[-2]
+    assert cache.seen == first.shape[-2] + more.shape[-2]
 
 
 def test_progress_matches_the_float_cache_on_the_same_writes() -> None:
     control = KVCache.alloc(
         batch=2,
         num_heads=_NUM_HEADS,
-        max_seq=4,
-        channels_head=CHANNELS_HEAD,
+        max_seq=6,
+        channels_head=_CHANNELS_HEAD_CACHE,
         dtype=torch.float32,
     )
-    cache = _cache(max_seq=4)
+    cache = _cache(max_seq=6)
     writes = [
-        torch.randn(2, _NUM_HEADS, 3, CHANNELS_HEAD),
-        torch.randn(2, _NUM_HEADS, 3, CHANNELS_HEAD),
-        torch.randn(2, _NUM_HEADS, 2, CHANNELS_HEAD),
+        torch.randn(2, _NUM_HEADS, 5, _CHANNELS_HEAD_CACHE),
+        torch.randn(2, _NUM_HEADS, 5, _CHANNELS_HEAD_CACHE),
+        torch.randn(2, _NUM_HEADS, 6, _CHANNELS_HEAD_CACHE),
     ]
     for incoming in writes:
         control.update(incoming, incoming)
@@ -236,7 +244,7 @@ def test_progress_matches_the_float_cache_on_the_same_writes() -> None:
 
 def test_a_zero_row_dequantizes_to_zero() -> None:
     cache = _cache()
-    zeros = torch.zeros(2, _NUM_HEADS, 2, CHANNELS_HEAD)
+    zeros = torch.zeros(2, _NUM_HEADS, 5, _CHANNELS_HEAD_CACHE)
 
     k_all, v_all = cache.update(zeros, zeros)
 
@@ -323,40 +331,42 @@ def test_layer_allocator_preserves_asymmetric_latent_cache_widths() -> None:
     cfg.depth_index = ((0, 1),)
     model = cfg.make()
 
-    caches = int8_layer_cache(model, batch=1, max_seq=4)
+    caches = int8_layer_cache(model, batch=4, max_seq=5)
     state = caches[cfg.depth_index]
     assert isinstance(state, Int8KVCache)
-    assert state.k.shape == (1, 1, 4, cfg.kv_lora_rank + SCALE_COLUMNS)
-    assert state.v.shape == (1, 1, 4, cfg.channels_qk_rope_head + SCALE_COLUMNS)
-    output = model(torch.ones(1, 1, cfg.channels_in), cache=caches)
+    # MultiHeadLatentAttention.alloc_kv_cache fixes one head to avoid latent copies.
+    assert state.k.shape == (4, 1, 5, cfg.kv_lora_rank + SCALE_COLUMNS)
+    assert state.v.shape == (4, 1, 5, cfg.channels_qk_rope_head + SCALE_COLUMNS)
+    output = model(torch.ones(4, 5, cfg.channels_in), cache=caches)
 
-    assert output.shape == (1, 1, cfg.channels_in)
+    assert output.shape == (4, 5, cfg.channels_in)
     assert torch.isfinite(output).all()
-    assert state.length == 1
+    assert state.length == 5
 
 
 @pytest.mark.parametrize("failure", ["length", "capacity", "shape"])
 def test_rejected_updates_preserve_storage_and_progress(failure: str) -> None:
-    cache = _cache(max_seq=2)
-    initial = torch.ones(2, _NUM_HEADS, 2, CHANNELS_HEAD)
+    cache = _cache(max_seq=6)
+    initial = torch.ones(2, _NUM_HEADS, 6, _CHANNELS_HEAD_CACHE)
     cache.update(initial, initial)
     keys_before = cache.k.clone()
     values_before = cache.v.clone()
-    keys = torch.ones(2, _NUM_HEADS, 1, CHANNELS_HEAD)
+    keys = torch.ones(2, _NUM_HEADS, 5, _CHANNELS_HEAD_CACHE)
     values = keys
     if failure == "length":
         values = initial
     elif failure == "capacity":
-        keys = values = torch.ones(2, _NUM_HEADS, 3, CHANNELS_HEAD)
+        keys = values = torch.ones(2, _NUM_HEADS, 7, _CHANNELS_HEAD_CACHE)
     else:
-        values = torch.ones(2, _NUM_HEADS + 1, 1, CHANNELS_HEAD)
+        # The head mismatch must fail before Int8KVCache.update evicts stored rows.
+        values = torch.ones(2, _NUM_HEADS + 1, 5, _CHANNELS_HEAD_CACHE)
 
     with pytest.raises(ValueError, match=r"keys and|capacity|Cannot write"):
         cache.update(keys, values)
 
     torch.testing.assert_close(cache.k, keys_before, rtol=0, atol=0)
     torch.testing.assert_close(cache.v, values_before, rtol=0, atol=0)
-    assert (cache.length, cache.seen) == (2, 2)
+    assert (cache.length, cache.seen) == (initial.shape[-2], initial.shape[-2])
 
 
 def test_update_refuses_a_width_the_cache_cannot_hold() -> None:
@@ -364,8 +374,8 @@ def test_update_refuses_a_width_the_cache_cannot_hold() -> None:
     too_wide = torch.zeros(
         2,
         _NUM_HEADS,
-        2,
-        CHANNELS_HEAD + SCALE_COLUMNS + 1,
+        5,
+        _CHANNELS_HEAD_CACHE + SCALE_COLUMNS + 1,
     )
 
     with pytest.raises(ValueError, match="Cannot write"):
@@ -402,15 +412,15 @@ def test_the_prompt_the_end_to_end_run_feeds_is_still_exp000s() -> None:
     assert torch.equal(report.tokens[:, :PROMPT_LEN], _prompt())
 
 
-def _cache(*, batch: int = 2, max_seq: int = 8) -> Int8KVCache:
+def _cache(*, batch: int = 2, max_seq: int = 5) -> Int8KVCache:
     """Build a tiny int8 cache directly from the documented layout."""
     return Int8KVCache(
         k=torch.zeros(
-            (batch, _NUM_HEADS, max_seq, CHANNELS_HEAD + SCALE_COLUMNS),
+            (batch, _NUM_HEADS, max_seq, _CHANNELS_HEAD_CACHE + SCALE_COLUMNS),
             dtype=torch.int8,
         ),
         v=torch.zeros(
-            (batch, _NUM_HEADS, max_seq, CHANNELS_HEAD + SCALE_COLUMNS),
+            (batch, _NUM_HEADS, max_seq, _CHANNELS_HEAD_CACHE + SCALE_COLUMNS),
             dtype=torch.int8,
         ),
         length=0,

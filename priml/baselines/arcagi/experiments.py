@@ -60,6 +60,7 @@ from typing import TYPE_CHECKING, Final, Self, cast, override
 
 from configgle import Makes, PartialConfig
 
+from priml.baselines.arcagi.checkpoint import CheckpointActTrainStep
 from priml.baselines.arcagi.data import ArcParquetData, PairSource, PuzzleData
 from priml.baselines.arcagi.metric import (
     CanonicalPassK,
@@ -1046,6 +1047,57 @@ def exp010() -> CharmTrainLoop.Config:
     tracker = cast(TrackerList.Config, cfg.tracker)
     wandb = cast(WandbTracker.Config, tracker.trackers["wandb"])
     wandb.name = "arc-agi-2-charm-rearc2-100"
+    return cfg
+
+
+def eval006() -> Arc1TrainLoop:
+    """Evaluate saved exp006 weights through the native ARC loop.
+
+    Returns:
+      config: The exp006 recipe with checkpoint evaluation enabled.
+
+    """
+    cfg = exp006()
+    cfg.experiment_name = "eval006"
+    cfg.step = CheckpointActTrainStep.Config().update(cfg.step)
+    cfg.eval_only = True
+    cfg.eval_warmup_batches = 0
+    cfg.checkpointer = None
+    cfg.tracker = FileTracker.Config()
+    return cfg
+
+
+def eval009() -> CharmTrainLoop.Config:
+    """Evaluate saved exp009 weights through the native ARC loop.
+
+    Returns:
+      config: The exp009 recipe with checkpoint evaluation enabled.
+
+    """
+    cfg = exp009()
+    cfg.experiment_name = "eval009"
+    cfg.step = step = CheckpointActTrainStep.Config().update(cfg.step)
+    step.ema_initialization = None
+    cfg.eval_only = True
+    cfg.checkpointer = None
+    cfg.tracker = FileTracker.Config()
+    return cfg
+
+
+def eval010() -> CharmTrainLoop.Config:
+    """Evaluate saved exp010 weights through the native ARC loop.
+
+    Returns:
+      config: The exp010 recipe with checkpoint evaluation enabled.
+
+    """
+    cfg = exp010()
+    cfg.experiment_name = "eval010"
+    cfg.step = step = CheckpointActTrainStep.Config().update(cfg.step)
+    step.ema_initialization = None
+    cfg.eval_only = True
+    cfg.checkpointer = None
+    cfg.tracker = FileTracker.Config()
     return cfg
 
 
