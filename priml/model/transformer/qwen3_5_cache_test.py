@@ -439,7 +439,7 @@ def _delta_layer(
     [
         _delta_layer(recurrent_state=torch.zeros(2, 5, 6, 7, dtype=torch.float64)),
         _delta_layer(conv_state=torch.zeros(2, 3, 4, dtype=torch.int64)),
-        _delta_layer(conv_state=torch.zeros(3, 3, 4)),
+        _delta_layer(conv_state=torch.zeros(5, 3, 4)),
         _delta_layer(conv_state=torch.zeros(2, 3)),
         _delta_layer(recurrent_state=torch.zeros(2, 5, 6)),
         _delta_layer(conv_state=torch.zeros(2, 3, 4, device="meta")),

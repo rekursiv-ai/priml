@@ -78,15 +78,20 @@ class Int8KVCache(KVCache):
 
         """
         del dtype
+        channels_v = channels_head if channels_v_head is None else channels_v_head
+        for name, channels in (
+            ("channels_head", channels_head),
+            ("channels_v_head", channels_v),
+        ):
+            # The scale columns would turn a negative width into a positive one.
+            if channels < 0:
+                raise ValueError(f"{name} must be non-negative; got {channels}.")
         return super().alloc(
             batch=batch,
             num_heads=num_heads,
             max_seq=max_seq,
             channels_head=channels_head + SCALE_COLUMNS,
-            channels_v_head=(
-                channels_head if channels_v_head is None else channels_v_head
-            )
-            + SCALE_COLUMNS,
+            channels_v_head=channels_v + SCALE_COLUMNS,
             device=device,
             dtype=torch.int8,
         )
@@ -148,7 +153,9 @@ class Int8KVCache(KVCache):
                     f"Cannot write {tuple(new.shape)} into the cache's "
                     f"{tuple(slot)} slot.",
                 )
-            packed.append(_quantize(new.expand(slot)))
+            # Moved here, before eviction, so a value that cannot reach the
+            # cache's device fails with the cache untouched.
+            packed.append(_quantize(new.expand(slot)).to(store.device))
         overflow = self.length + s - self.max_seq
         if overflow > 0:
             keep = self.length - overflow
@@ -215,8 +222,14 @@ def int8_layer_cache(
 
 def _quantize(x: Tensor) -> Tensor:
     """Pack a float row as int8 codes followed by its float32 scale."""
-    values = x.to(dtype=torch.promote_types(x.dtype, torch.float32))
-    scale = values.abs().amax(dim=-1, keepdim=True).div(_CODE_MAX)
+    values = x.to(dtype=_working_dtype(x.dtype))
+    # A zero-width row (MLA without a rotary key) has no peak to reduce.
+    peak = (
+        values.abs().amax(dim=-1, keepdim=True)
+        if values.shape[-1]
+        else values.new_zeros((*values.shape[:-1], 1))
+    )
+    scale = peak.div(_CODE_MAX)
     scale = torch.where(scale == 0, torch.ones_like(scale), scale)
     codes = torch.round(values.div(scale)).clamp_(-_CODE_MAX, _CODE_MAX)
     codes = codes.to(torch.int8)
@@ -233,4 +246,12 @@ def _dequantized(store: Tensor, *, end: int, dtype: torch.dtype) -> Tensor:
         .clone(memory_format=torch.contiguous_format)
         .view(torch.float32)
     )
-    return (codes.to(torch.promote_types(dtype, torch.float32)) * scale).to(dtype)
+    return (codes.to(_working_dtype(dtype)) * scale).to(dtype)
+
+
+# Every dtype narrower than float32 promotes to it; float8 cannot be asked.
+def _working_dtype(dtype: torch.dtype) -> torch.dtype:
+    """Return ``dtype`` or float32, whichever is wider."""
+    if dtype.itemsize < torch.float32.itemsize:
+        return torch.float32
+    return torch.promote_types(dtype, torch.float32)

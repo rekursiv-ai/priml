@@ -141,9 +141,11 @@ def test_channel_stats_follow_lightningdit_order(tmp_path: Path) -> None:
     ("mean", "std"),
     [
         (torch.zeros(3), torch.ones(3)),
+        # ChannelLatentStats.__init__ accepts only [1, C, 1, 1]. Each row keeps the
+        # leading 1 and breaks one other part: the std, the spatial axes, the rank.
         (torch.zeros(1, 3, 1, 1), torch.ones(3)),
-        (torch.zeros(1, 3, 4, 1), torch.ones(1, 3, 4, 1)),
-        (torch.zeros(1, 1, 3, 1, 1), torch.ones(1, 1, 3, 1, 1)),
+        (torch.zeros(1, 3, 4, 5), torch.ones(1, 3, 4, 5)),
+        (torch.zeros(1, 3, 1, 1, 1), torch.ones(1, 3, 1, 1, 1)),
     ],
     ids=["bare", "mismatched", "spatial", "five-axis"],
 )

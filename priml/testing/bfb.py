@@ -1302,6 +1302,8 @@ def _run_unfused(
         bias = args[2] if len(args) > 2 else kwargs.get("bias")
         if isinstance(bias, Tensor):
             return _unfused_convolution(func, args, kwargs, bias=bias)
+    if name == "native_group_norm" and not kwargs:
+        return _unfused_group_norm(args)
     if _op_name(func) in _UNFUSED_OPS and _scales_or_fuses(func, args, kwargs):
         return decomposition_table[func](*args, **kwargs)
     return func(*args, **kwargs)
@@ -1330,6 +1332,32 @@ def _unfused_convolution(
             "convolution bias must be one-dimensional with one value per output channel",
         )
     return result.add_(bias.reshape(-1, *((1,) * (result.ndim - 2))))
+
+
+def _unfused_group_norm(
+    args: tuple[object, ...],
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Return ``native_group_norm(*args)`` with a correctly rounded group mean."""
+    # The native kernel merges Welford moments in a host-dependent order. A group
+    # mean that lands exactly on a float32 rounding tie then comes out one float64
+    # ULP either side of it, and the float32 round flips. A sum then a division is
+    # correctly rounded on every host, so the tie reaches the float32 round intact.
+    input, weight, bias, batch, channels, _, groups, eps = cast(
+        "tuple[Tensor, Tensor | None, Tensor | None, int, int, int, int, float]",
+        args,
+    )
+    grouped = input.reshape(batch, groups, -1)
+    count = grouped.shape[-1]
+    mean = grouped.sum(-1, keepdim=True) / count
+    centered = grouped - mean
+    rstd = torch.rsqrt((centered * centered).sum(-1, keepdim=True) / count + eps)
+    out = (centered * rstd).reshape(input.shape)
+    shape = (1, channels, *((1,) * (input.ndim - 2)))
+    if weight is not None:
+        out = out * weight.reshape(shape)
+    if bias is not None:
+        out = out + bias.reshape(shape)
+    return out, mean.reshape(batch, groups), rstd.reshape(batch, groups)
 
 
 @out_wrapper(exact_dtype=True)

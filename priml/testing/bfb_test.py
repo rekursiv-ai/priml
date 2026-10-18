@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -4134,6 +4135,57 @@ def test_run_unfused_baddbmm_unfuses_scaled_batch_products() -> None:
         )
     assert result.dtype == torch.float32
     assert torch.equal(result, expected.float())
+
+
+# Each group holds 12 values whose exact mean is a float32 rounding tie. Measured
+# with the native float64 kernel rounded to float32, aarch64 against x86:
+# _TIE_BOTH lands the odd neighbour on both hosts, _TIE_ARM only on aarch64, where
+# the mean sits one float64 ULP below the tie.
+_TIE_BOTH: Final = (
+    -0.09439866989850998,
+    -1.1718482971191406,
+    0.5430768132209778,
+    0.9965471029281616,
+    -1.1115485429763794,
+    0.9152421355247498,
+    -0.12606847286224365,
+    -0.9289997220039368,
+    0.9347452521324158,
+    0.8599561452865601,
+    -0.5317060947418213,
+    0.43889227509498596,
+)
+_TIE_ARM: Final = (
+    0.6705913543701172,
+    -0.5496454238891602,
+    0.22522342205047607,
+    0.4019509553909302,
+    1.1187483072280884,
+    0.5364733934402466,
+    -0.9023729562759399,
+    -2.0565788745880127,
+    0.22155703604221344,
+    -0.14344988763332367,
+    -1.573001742362976,
+    -0.6825683116912842,
+)
+
+
+@pytest.mark.parametrize("values", [_TIE_BOTH, _TIE_ARM], ids=["both", "arm"])
+def test_group_norm_mean_rounds_a_float32_tie_to_even(
+    values: tuple[float, ...],
+) -> None:
+    # One group as the MLS-Bench lockstep fed it to native_group_norm: the native
+    # kernel's Welford order, and so its wrong rounding, depends on this layout.
+    group = torch.tensor(values).reshape(1, 2, 6)
+    exact = sum(Fraction(value) for value in values) / 12
+    expected = torch.tensor(float(exact), dtype=torch.float64).float()
+    with host_agnostic_numerics():
+        _, mean, _ = torch.native_group_norm(group, None, None, 1, 2, 6, 1, 1e-5)
+    # The exact mean is the midpoint of two float32s; ties-to-even picks one.
+    assert float(exact) not in {float(mean), float(expected)}
+    assert expected.view(torch.int32).item() % 2 == 0
+    assert mean.item() == expected.item()
 
 
 @pytest.mark.parametrize(

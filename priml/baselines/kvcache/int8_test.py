@@ -344,7 +344,85 @@ def test_layer_allocator_preserves_asymmetric_latent_cache_widths() -> None:
     assert state.length == 5
 
 
-@pytest.mark.parametrize("failure", ["length", "capacity", "shape"])
+def test_layer_allocator_matches_the_float_allocator_without_a_rotary_key() -> None:
+    cfg = MultiHeadLatentAttention.Config()
+    cfg.channels_in = 8
+    cfg.num_heads = 2
+    cfg.channels_qk_nope_head = 4
+    cfg.channels_qk_rope_head = 0
+    cfg.channels_v_head = 4
+    cfg.kv_lora_rank = 3
+    cfg.depth_index = ((0, 1),)
+    model = cfg.make()
+    x = torch.ones(4, 5, cfg.channels_in)
+    floats = alloc_layer_cache(model, batch=4, max_seq=5)
+    packed = int8_layer_cache(model, batch=4, max_seq=5)
+
+    expected = model(x, cache=floats)
+    actual = model(x, cache=packed)
+
+    float_state = floats[cfg.depth_index]
+    state = packed[cfg.depth_index]
+    assert isinstance(float_state, KVCache)
+    assert isinstance(state, Int8KVCache)
+    assert state.v.shape == (4, 1, 5, SCALE_COLUMNS)
+    assert actual.shape == expected.shape
+    assert state.length == float_state.length == 5
+
+
+@pytest.mark.parametrize(
+    ("channels_head", "channels_v_head"),
+    [(-1, 2), (2, -1), (-1, None)],
+)
+def test_alloc_rejects_a_negative_width_as_the_float_cache_does(
+    channels_head: int,
+    channels_v_head: int | None,
+) -> None:
+    with pytest.raises(RuntimeError, match="non-negative"):
+        KVCache.alloc(
+            batch=2,
+            num_heads=_NUM_HEADS,
+            max_seq=5,
+            channels_head=channels_head,
+            channels_v_head=channels_v_head,
+        )
+
+    with pytest.raises(ValueError, match="non-negative"):
+        Int8KVCache.alloc(
+            batch=2,
+            num_heads=_NUM_HEADS,
+            max_seq=5,
+            channels_head=channels_head,
+            channels_v_head=channels_v_head,
+        )
+
+
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+def test_update_quantizes_float8_inputs_and_answers_in_float8(
+    dtype: torch.dtype,
+) -> None:
+    incoming = torch.randn(2, _NUM_HEADS, 5, _CHANNELS_HEAD_CACHE).to(dtype)
+    wide = incoming.to(torch.float32)
+
+    k_all, v_all = _cache().update(incoming, incoming)
+    expected, _ = _cache().update(wide, wide)
+
+    assert k_all.dtype is v_all.dtype is dtype
+    torch.testing.assert_close(
+        k_all.float(),
+        expected.to(dtype).float(),
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        v_all.float(),
+        expected.to(dtype).float(),
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize("failure", ["length", "capacity", "shape", "copy"])
 def test_rejected_updates_preserve_storage_and_progress(failure: str) -> None:
     cache = _cache(max_seq=6)
     initial = torch.ones(2, _NUM_HEADS, 6, _CHANNELS_HEAD_CACHE)
@@ -357,11 +435,17 @@ def test_rejected_updates_preserve_storage_and_progress(failure: str) -> None:
         values = initial
     elif failure == "capacity":
         keys = values = torch.ones(2, _NUM_HEADS, 7, _CHANNELS_HEAD_CACHE)
+    elif failure == "copy":
+        # Right shape, but the values cannot be read: the keys would write first.
+        values = torch.empty_like(keys, device="meta")
     else:
         # The head mismatch must fail before Int8KVCache.update evicts stored rows.
         values = torch.ones(2, _NUM_HEADS + 1, 5, _CHANNELS_HEAD_CACHE)
 
-    with pytest.raises(ValueError, match=r"keys and|capacity|Cannot write"):
+    with pytest.raises(
+        (ValueError, NotImplementedError),
+        match=r"keys and|capacity|Cannot write|meta",
+    ):
         cache.update(keys, values)
 
     torch.testing.assert_close(cache.k, keys_before, rtol=0, atol=0)

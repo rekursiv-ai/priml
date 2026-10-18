@@ -65,8 +65,9 @@ class KVCache:
         """Pre-allocate an empty cache.
 
         ``channels_v_head`` defaults to ``channels_head`` (symmetric K/V,
-        standard MHA/GQA). MLA needs independent dims (K concatenates
-        qk_nope + qk_rope; V uses a separate channels_v_head).
+        standard MHA/GQA). MLA needs independent dims: it caches the
+        compressed latent as K (``kv_lora_rank`` channels) and the rotary key
+        as V (``qk_rope`` channels), both with one head.
 
         Args:
           batch: Batch size (int) or shape tuple for multi-batch dims.
@@ -144,8 +145,9 @@ class KVCache:
                 f"Update length {s} exceeds cache capacity {self.max_seq}.",
             )
         overflow = self.length + s - self.max_seq
-        # Checked before eviction moves anything; a failed write would otherwise
-        # leave the cache shifted.
+        # Every fallible step runs before eviction moves anything, so a failed
+        # write leaves the cache as it was.
+        staged: list[Tensor] = []
         for new, store in ((k, self.k), (v, self.v)):
             slot = store[..., :s, :].shape
             try:
@@ -157,14 +159,17 @@ class KVCache:
                     f"Cannot write {tuple(new.shape)} into the cache's "
                     f"{tuple(slot)} slot.",
                 )
+            # The copy also detaches ``new`` from the cache, which eviction
+            # would overwrite when ``new`` is a view of it.
+            staged.append(store.new_empty(slot).copy_(new))
         if overflow > 0:
             keep = self.length - overflow
             self.k[..., :keep, :] = self.k[..., overflow : self.length, :].clone()
             self.v[..., :keep, :] = self.v[..., overflow : self.length, :].clone()
             self.length = keep
         end = self.length + s
-        self.k[..., self.length : end, :] = k
-        self.v[..., self.length : end, :] = v
+        self.k[..., self.length : end, :] = staged[0]
+        self.v[..., self.length : end, :] = staged[1]
         self.length = end
         self.seen += s
         return self.k[..., :end, :], self.v[..., :end, :]

@@ -242,6 +242,8 @@ class DecodeBenchmark:
             raise ValueError(
                 f"num_warmup must be non-negative; got {config.num_warmup}.",
             )
+        if config.prompt_len < 1:
+            raise ValueError(f"prompt_len must be positive; got {config.prompt_len}.")
         if not config.prompts:
             raise ValueError("prompts must name at least one prompt.")
         rows = [list(p.encode()) for p in config.prompts]

@@ -92,7 +92,7 @@ def test_two_files_of_one_pair_id_are_refused(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "array",
-    [np.ones((3, 3, 4), np.float32), np.ones((1, 3, 4), np.uint8)],
+    [np.ones((3, 4, 5), np.float32), np.ones((2, 4, 5), np.uint8)],
 )
 def test_an_image_that_is_not_three_channel_uint8_is_refused(
     tmp_path: Path,

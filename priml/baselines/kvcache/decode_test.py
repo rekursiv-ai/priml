@@ -188,6 +188,8 @@ def test_report_rates_count_decode_steps_only() -> None:
             "Prompt 0 has 6 bytes, shorter than prompt_len=7",
         ),
         (partial(DecodeBenchmark.Config.update, prompts=[]), "prompts"),
+        (partial(DecodeBenchmark.Config.update, prompt_len=0), "prompt_len"),
+        (partial(DecodeBenchmark.Config.update, prompt_len=-1), "prompt_len"),
     ],
 )
 def test_rejects_an_unmeasurable_config(
