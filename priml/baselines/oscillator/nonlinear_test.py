@@ -20,6 +20,7 @@ from priml.baselines.oscillator.nonlinear import (
     NeuralForecast,
     PolynomialKernel,
 )
+from priml.cost import cost
 from priml.model.init import unit_fan_in_uniform
 from priml.model.sequential import Sequential
 from priml.model.swiglu import SwiGLU
@@ -94,6 +95,39 @@ def test_network_geometry_reaches_the_injected_block() -> None:
     cfg.seq_len = 0
     with pytest.raises(ValueError, match="positive"):
         cfg.make()
+
+
+@pytest.mark.parametrize("composed", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_network_costs_one_flattened_history_per_trajectory(
+    composed: bool,
+    dtype: torch.dtype,
+) -> None:
+    cfg = _neural_config().step.model.copy_tree()
+    if composed:
+        cfg.block = Sequential.Config(
+            elements=[
+                SwiGLU.Config(channels_hidden=5, channels_out=7),
+                SwiGLU.Config(channels_hidden=4),
+            ],
+        )
+    else:
+        assert isinstance(cfg.block, SwiGLU.Config)
+        cfg.block.bias = True
+    cfg = cfg.finalize()
+    counted = cost(cfg, seq_len=3, batch_size=2, dtype=dtype)
+    assert counted == cost(cfg.block, seq_len=1, batch_size=2, dtype=dtype)
+    assert counted.params == sum(
+        parameter.numel() for parameter in cfg.make().parameters()
+    )
+    assert counted.params > 0
+    single = cost(cfg, seq_len=3, batch_size=1, dtype=dtype)
+    assert counted.params == single.params
+    assert counted["primal", "flops", "matmul", dtype] == (
+        2 * single["primal", "flops", "matmul", dtype]
+    )
+    with pytest.raises(ValueError, match="geometry"):
+        cost(cfg, seq_len=5, batch_size=2, dtype=dtype)
 
 
 @pytest.mark.compute_training

@@ -15,6 +15,7 @@ import torch
 
 from priml.baselines.oscillator.data import STATE_CHANNELS, Windows
 from priml.baselines.oscillator.train_step import FitReport, ForecastMethod
+from priml.cost import Cost, cost
 from priml.loss.simple_loss import SimpleLoss, mse
 from priml.model.custom_types import ChannelsIn, ChannelsOut, propagate_attr
 from priml.model.swiglu import SwiGLU
@@ -171,6 +172,39 @@ class HistoryNetwork(nn.Module):
                 protocol=ChannelsOut,
             )
             return super().finalize()
+
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
+            """Cost one flattened history per trajectory through the chosen block.
+
+            Args:
+              seq_len: Observed timesteps; must match the model's history.
+              batch_size: Trajectories per batch.
+              dtype: Activation dtype; ``None`` uses torch's default.
+              **kwargs: Forwarded to the block's cost.
+
+            Returns:
+              cost: Block operations and parameters; reshaping uses no arithmetic.
+
+            Raises:
+              ValueError: The supplied history length does not match the model.
+
+            """
+            if seq_len != self.seq_len:
+                raise ValueError("Cost history length must match the model geometry.")
+            return cost(
+                self.block,
+                seq_len=1,
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()

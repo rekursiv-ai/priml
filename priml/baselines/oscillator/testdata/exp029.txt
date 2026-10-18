@@ -62,48 +62,54 @@ DelayedStudy.Config(
         method=NeuralForecast.Config(
         │   step=TrainStep.Config(
         │   │   model=HistoryNetwork.Config(
-        │   │       seq_len=160,
-        │   │       pred_len=48,
-        │   │       block=Sequential.Config(
-        │   │           channels_in=320,
-        │   │           channels_out=96,
-        │   │           elements=[
-        │   │               SwiGLU.Config(
-        │   │                   channels_in=320,
-        │   │                   channels_out=64,
-        │   │                   channels_hidden=64,
-        │   │                   expansion=2.6666666666666665,
-        │   │                   round_to=256,
-        │   │                   gate=True,
-        │   │                   bias=False,
-        │   │                   split_gate_projection=False,
-        │   │                   norm=None,
-        │   │                   act=priml.model.swiglu.silu,
-        │   │                   depth_index=(),
-        │   │                   init_weight=priml.model.init.unit_fan_in_uniform,
-        │   │                   init_weight_out=priml.model.init.unit_fan_in_uniform,
-        │   │                   shard=None
-        │   │               ),
-        │   │               SwiGLU.Config(
-        │   │                   channels_in=64,
-        │   │                   channels_out=96,
-        │   │                   channels_hidden=64,
-        │   │                   expansion=2.6666666666666665,
-        │   │                   round_to=256,
-        │   │                   gate=True,
-        │   │                   bias=False,
-        │   │                   split_gate_projection=False,
-        │   │                   norm=None,
-        │   │                   act=priml.model.swiglu.silu,
-        │   │                   depth_index=(),
-        │   │                   init_weight=priml.model.init.unit_fan_in_uniform,
-        │   │                   init_weight_out=torch.nn.init.zeros_,
-        │   │                   shard=None
-        │   │               )
-        │   │           ],
-        │   │           repeat=1,
-        │   │           depth_index=()
-        │   │       )
+        │   │   │   seq_len=160,
+        │   │   │   pred_len=48,
+        │   │   │   block=Sequential.Config(
+        │   │   │       channels_in=320,
+        │   │   │       channels_out=96,
+        │   │   │       elements=[
+        │   │   │           SwiGLU.Config(
+        │   │   │               channels_in=320,
+        │   │   │               channels_out=64,
+        │   │   │               channels_hidden=64,
+        │   │   │               expansion=2.6666666666666665,
+        │   │   │               round_to=256,
+        │   │   │               gate=True,
+        │   │   │               bias=False,
+        │   │   │               split_gate_projection=False,
+        │   │   │               norm=None,
+        │   │   │               act=priml.model.swiglu.silu,
+        │   │   │               depth_index=(),
+        │   │   │               init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │               init_weight_out=priml.model.init.unit_fan_in_uniform,
+        │   │   │               up_proj=None,
+        │   │   │               middle=None,
+        │   │   │               down_proj=None,
+        │   │   │               shard=None
+        │   │   │           ),
+        │   │   │           SwiGLU.Config(
+        │   │   │               channels_in=64,
+        │   │   │               channels_out=96,
+        │   │   │               channels_hidden=64,
+        │   │   │               expansion=2.6666666666666665,
+        │   │   │               round_to=256,
+        │   │   │               gate=True,
+        │   │   │               bias=False,
+        │   │   │               split_gate_projection=False,
+        │   │   │               norm=None,
+        │   │   │               act=priml.model.swiglu.silu,
+        │   │   │               depth_index=(),
+        │   │   │               init_weight=priml.model.init.unit_fan_in_uniform,
+        │   │   │               init_weight_out=torch.nn.init.zeros_,
+        │   │   │               up_proj=None,
+        │   │   │               middle=None,
+        │   │   │               down_proj=None,
+        │   │   │               shard=None
+        │   │   │           )
+        │   │   │       ],
+        │   │   │       repeat=1,
+        │   │   │       depth_index=()
+        │   │   │   )
         │   │   ),
         │   │   optimizer=PartialConfig(<class 'torch.optim.adam.Adam'>, lr=0.001),
         │   │   loss=SimpleLoss.Config(
