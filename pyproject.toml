@@ -23,6 +23,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+    # Prefer https://awesome-python.com deps over alternatives.
     "treekle>=0.2.0",
     # torch
     "torch==2.11.0",
@@ -292,6 +293,8 @@ omit = [
     "*/typings/*",
     "*/tools/*",
     "*/scripts/*",
+    "*/testdata/*",
+    "*/__main__.py",
 ]
 
 [tool.coverage.report]
@@ -342,12 +345,14 @@ select = ["ALL"]
 
 extend-safe-fixes = [
     "C4",     # Collection and comprehension rewrites.
+    "D301",   # Use `r"""` if any backslashes in a docstring.
     "E711",   # Compare to None with identity.
     "E712",   # Compare booleans by truthiness.
     "E731",   # Do not assign a `lambda` expression, use a `def`.
     "F401",   # Remove unused imports.
     "F601",   # Remove overwritten dictionary entries.
     "F841",   # Remove unused local bindings.
+    "ISC004", # Unparenthesized implicit string concatenation in collection.
     "PT006",  # Use tuple for pytest.mark.parametrize names.
     "PT007",  # Use tuple/list consistently for pytest values.
     "PT018",  # Split composite assertions.
@@ -414,8 +419,6 @@ ignore = [
     "S101",    # Use of `assert` detected.
     "TRY003",  # Raise vanilla args.
     "TRY300",  # Try consider else.
-    # Extra.
-    "TC002",   # Typing-only third-party import. (Export strips runtime uses, leaving type-only imports.)
     # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 ]
 
@@ -709,6 +712,9 @@ skip = "htmlcov,.doctrees,*.pyc,*.ico,*.png,*.jpg,*.PNG,*.inv,*.dot,*.css,*.egg-
 # names, not prose; skipping them stops `-w` rewriting ``SimPy`` -> ``simply``.
 ignore-regex = '(?:https?://[^\s)>\]]+|`[^`\n]+`|\b\w*[a-z][A-Z]\w*\b)'
 ignore-multiline-regex = '(?m)^[ \t]*```.*?^[ \t]*```'
+
+[tool.jupytext]
+formats = "ipynb,py:percent"
 
 [tool.uv]
 package = true
