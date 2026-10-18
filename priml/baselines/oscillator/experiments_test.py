@@ -14,6 +14,7 @@ from priml.baselines.oscillator.delayed import (
     DelayedCalibration,
     DelayedData,
     DelayedOscillator,
+    DelayedStudy,
     SignedHistory,
 )
 from priml.baselines.oscillator.discovery import SparseSimulator
@@ -31,11 +32,15 @@ from priml.baselines.oscillator.experiments import (
 )
 from priml.baselines.oscillator.forces import CorrectedOscillator
 from priml.baselines.oscillator.nonlinear import (
+    HistoryAblation,
     KernelCorrection,
     NeuralForecast,
     PolynomialKernel,
 )
 from priml.baselines.oscillator.train_step import DLinearForecast, RidgeCorrection
+from priml.model.init import unit_fan_in_uniform
+from priml.model.sequential import Sequential
+from priml.model.swiglu import SwiGLU
 from priml.testing.golden import assert_pprint_golden
 
 
@@ -171,9 +176,26 @@ def test_delayed_controls_change_only_the_method(number: int) -> None:
         23: (experiments.exp019, experiments.exp023),
         24: (experiments.exp019, experiments.exp024),
     }
+    expected = {
+        10: RidgeCorrection.Config(),
+        11: CalibratedSimulator.Config(),
+        12: SparseSimulator.Config(),
+        13: KernelCorrection.Config(),
+        14: NeuralForecast.Config(),
+        15: _known_equation(experiments.exp009()),
+        18: HistoryAblation.Config(
+            method=_known_equation(experiments.exp009()),
+            visible_steps=32,
+        ),
+        20: RidgeCorrection.Config(),
+        21: KernelCorrection.Config(),
+        22: SparseSimulator.Config(),
+        23: NeuralForecast.Config(),
+        24: _known_equation(experiments.exp019()),
+    }[number]
     parent, child = parents[number]
     before, after = parent(), child()
-    assert after.method != before.method
+    assert after.method == expected
     after.method = before.method
     after.experiment_name = before.experiment_name
     assert after == before
@@ -221,17 +243,6 @@ def test_four_way_task_changes_only_data_and_keeps_independent_tuple_counts() ->
     assert after == before
 
 
-@pytest.mark.parametrize("number", [15, 24])
-def test_known_equation_controls_use_the_task_lags_and_fit_the_gain(
-    number: int,
-) -> None:
-    cfg = {15: experiments.exp015, 24: experiments.exp024}[number]()
-    assert isinstance(cfg.method, DelayedCalibration.Config)
-    assert isinstance(cfg.data.reference, DelayedOscillator.Config)
-    assert cfg.method.simulator.lags == cfg.data.reference.lags
-    assert cfg.method.simulator.gain == 0
-
-
 def test_quartic_control_changes_only_the_kernel_degree() -> None:
     before, after = experiments.exp021(), experiments.exp026()
     assert isinstance(before.method, KernelCorrection.Config)
@@ -250,10 +261,34 @@ def test_gate_capacity_controls_change_only_the_block(number: int) -> None:
     after = {28: experiments.exp028, 29: experiments.exp029}[number]()
     assert isinstance(before.method, NeuralForecast.Config)
     assert isinstance(after.method, NeuralForecast.Config)
-    assert after.method.step.model.block != before.method.step.model.block
+    biased = before.method.step.model.block.copy_tree()
+    assert isinstance(biased, SwiGLU.Config)
+    biased.bias = True
+    expected = {
+        28: biased,
+        29: Sequential.Config(
+            elements=[
+                SwiGLU.Config(
+                    channels_hidden=64,
+                    channels_out=64,
+                    init_weight_out=unit_fan_in_uniform,
+                ),
+                SwiGLU.Config(channels_hidden=64),
+            ],
+        ),
+    }[number]
+    assert after.method.step.model.block == expected
     after.method.step.model.block = before.method.step.model.block
     after.experiment_name = before.experiment_name
     assert after == before
+
+
+def _known_equation(task: DelayedStudy.Config) -> DelayedCalibration.Config:
+    """Return the privileged control fitted to ``task``'s own delay equation."""
+    assert isinstance(task.data.reference, DelayedOscillator.Config)
+    simulator = task.data.reference.copy_tree()
+    simulator.gain = 0.0
+    return DelayedCalibration.Config(simulator=simulator)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 import argparse
 import hashlib
 import json
-import os
 import platform
 import shutil
 import subprocess
@@ -26,6 +25,8 @@ from priml.paths import validated_output_path
 
 if TYPE_CHECKING:
     import torch
+
+    from priml.baselines.oscillator.data import ForecastData, InitialStates
 else:
     from wrapt import lazy_import
 
@@ -73,10 +74,20 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(recipe, ForecastStudy.Config):
             raise TypeError(f"{name} does not build an oscillator study.")
         recipes.append(recipe)
+        # Offsets k * 101 apart would hand one offset's split to another one.
+        split_seeds = [
+            stream.seed + offset
+            for offset in flags.data_seed_offsets
+            for stream in _splits(recipe.data)
+        ]
+        if len(set(split_seeds)) != len(split_seeds):
+            parser.error("Data seed offsets must not give one split another's seed.")
     directory.mkdir(mode=0o755, parents=True, exist_ok=False)
     # The export drops the monorepo prefix from this path literal, so the depth to
     # the repository root follows each layout; a fixed ``parents[3]`` fell one short.
     root = _CWD.parents[len(Path("priml/baselines/oscillator/scripts").parts) - 1]
+    # The same layouts differ in the package name, as with the root above.
+    package = experiments.__name__.removesuffix(".baselines.oscillator.experiments")
     records: list[ComparisonRecord] = []
     for offset, case, seed, recipe in product(
         flags.data_seed_offsets,
@@ -86,13 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     ):
         cfg = recipe.copy_tree()
         cfg.seed = seed
-        for stream in (
-            cfg.data.train,
-            cfg.data.validation,
-            cfg.data.synthetic,
-            cfg.data.test,
-            cfg.data.shifted,
-        ):
+        for stream in _splits(cfg.data):
             stream.seed += offset
         if case == "matched":
             cfg.data.reference = cfg.data.cheap.copy_tree()
@@ -134,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
                 str(path.relative_to(root)): hashlib.sha256(
                     path.read_bytes(),
                 ).hexdigest()
-                for path in sorted({*sources, *_imported_sources(_CWD.parents[2])})
+                for path in sorted({*sources, *_imported_sources(package)})
             },
             "runs": records,
         },
@@ -163,7 +168,7 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--directory",
         type=Path,
-        default=Path("/opt/scratch/runs/oscillator/pilot"),
+        default=Path("/opt/scratch/artifacts/oscillator/pilot"),
         help="New run directory; an existing one is never overwritten.",
     )
     parser.add_argument(
@@ -206,18 +211,18 @@ def _git(git: str, *args: str, cwd: Path) -> str:
     ).strip()
 
 
-def _imported_sources(package: Path) -> set[Path]:
-    """Return the file of each imported module under ``package``."""
-    # A string prefix test, not ``Path.is_relative_to``: thousands of modules
-    # are loaded, and building a path for each one cost ~40 ms per run.
-    prefix = f"{package}{os.sep}"
-    specs = (module.__spec__ for module in tuple(sys.modules.values()))
+def _splits(data: ForecastData.Config) -> tuple[InitialStates.Config, ...]:
+    return (data.train, data.validation, data.synthetic, data.test, data.shifted)
+
+
+def _imported_sources(package: str) -> set[Path]:
+    """Return the file of each imported submodule of the ``package`` namespace."""
+    # Match names before touching entries: Python 3.12 keeps non-module objects
+    # such as ``typing.io`` in sys.modules, and they have no ``__spec__``.
     return {
-        Path(spec.origin)
-        for spec in specs
-        if spec is not None
-        and spec.origin is not None
-        and spec.origin.startswith(prefix)
+        Path(module.__file__).resolve()
+        for name, module in tuple(sys.modules.items())
+        if name.startswith(f"{package}.") and module.__file__ is not None
     }
 
 

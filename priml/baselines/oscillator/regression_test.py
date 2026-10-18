@@ -13,7 +13,10 @@ import torch
 from priml.baselines.etth1.testing import update_record
 from priml.baselines.oscillator.benchmark import ForecastStudy
 from priml.baselines.oscillator.experiments import exp_smoke
+from priml.baselines.oscillator.nonlinear import HistoryNetwork, NeuralForecast
 from priml.baselines.oscillator.train_step import DLinearForecast
+from priml.model.init import unit_fan_in_uniform
+from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import (
     assert_tensor_golden,
@@ -70,6 +73,19 @@ def test_fit_matches_golden(
     assert path.stat().st_size <= MAX_GOLDEN_BYTES
 
 
+def test_network_model_matches_golden() -> None:
+    path = _CWD / "testdata" / "network_model.pt"
+    assert_tensor_golden(path, _network_model_record())
+    assert path.stat().st_size <= MAX_GOLDEN_BYTES
+
+
+@pytest.mark.compute_training
+def test_network_fit_matches_golden(monkeypatch: pytest.MonkeyPatch) -> None:
+    path = _CWD / "testdata" / "network_fit.pt"
+    assert_tensor_golden(path, _fit_record(_network_config(), monkeypatch=monkeypatch))
+    assert path.stat().st_size <= MAX_GOLDEN_BYTES
+
+
 @pytest.mark.compute_training
 def test_fit_golden_detects_changed_recipe(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = exp_smoke()
@@ -102,6 +118,39 @@ def _model_record() -> dict[str, Tensor]:
         }
 
 
+def _network_model_record() -> dict[str, Tensor]:
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        cfg = _network_config().finalize()
+        torch.manual_seed(GOLDEN_SEED)
+        assert isinstance(cfg.method, NeuralForecast.Config)
+        method = cfg.method.make()
+        data = cfg.data.make()
+        train = data.windows(cfg.data.train, simulator=data.reference)
+        assert isinstance(method.step.model, HistoryNetwork)
+        with torch.no_grad():
+            output = method.step.model(train.media)
+        return {
+            **{
+                f"initial/{key}": value.detach().clone()
+                for key, value in method.step.model.state_dict().items()
+            },
+            "output": output.detach().clone().float(),
+            "rng": rng_fingerprint(),
+        }
+
+
+def _network_config() -> ForecastStudy.Config:
+    cfg = exp_smoke()
+    method = NeuralForecast.Config()
+    method.updates, method.batch_size, method.validation_every = 2, 4, 1
+    assert isinstance(method.step.model.block, SwiGLU.Config)
+    method.step.model.block.channels_hidden = 6
+    # The default zero output projection would make the pinned forward all zeros.
+    method.step.model.block.init_weight_out = unit_fan_in_uniform
+    cfg.method = method
+    return cfg
+
+
 def _fit_record(
     cfg: ForecastStudy.Config,
     *,
@@ -110,7 +159,7 @@ def _fit_record(
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         cfg = cfg.finalize()
         torch.manual_seed(GOLDEN_SEED)
-        assert isinstance(cfg.method, DLinearForecast.Config)
+        assert isinstance(cfg.method, DLinearForecast.Config | NeuralForecast.Config)
         method = cfg.method.make()
         data = cfg.data.make()
         record = {
@@ -130,7 +179,7 @@ def _fit_record(
             method.step.model,
             optimizer=method.step.optimizer,
             output=last_output["model"],
-            loss=last_output["loss"],
+            loss=last_output["loss"].mean(),
         )
         record.update(
             {
@@ -141,9 +190,12 @@ def _fit_record(
         )
         assert method.mean is not None
         assert method.scale is not None
-        # DLinearForecast.fit keeps singleton axes for channel scaling.
+        # Both trained forecasters keep singleton axes for channel scaling.
         record.update(mean=method.mean.clone(), scale=method.scale.clone())
-        record["losses"] = torch.cat([output["loss"] for output in recorded.outputs])
+        # The network's SimpleLoss keeps per-cell losses; one mean per update.
+        record["losses"] = torch.stack(
+            [output["loss"].mean() for output in recorded.outputs],
+        )
         record.update(
             {f"report/{key}": torch.tensor(value) for key, value in report.items()},
         )

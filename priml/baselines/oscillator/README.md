@@ -70,7 +70,7 @@ pilot needs no downloaded dataset, API key, or GPU. Choose an unused output path
 ```sh
 OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 MKL_CBWR=COMPATIBLE \
   uv --quiet run --frozen python -m priml.baselines.oscillator.scripts.compare \
-  --directory /opt/scratch/runs/oscillator/pilot
+  --directory /opt/scratch/artifacts/oscillator/pilot
 ```
 
 The default run compares the three recipes on matched and mismatched simulators,
@@ -159,7 +159,7 @@ Run the existing controls and the new method together:
 OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 MKL_CBWR=COMPATIBLE \
   uv --quiet run --frozen python -m priml.baselines.oscillator.scripts.compare \
   --experiments exp000 exp001 exp002 exp003 --seeds 2021 2022 2023 \
-  --directory /opt/scratch/runs/oscillator/calibration
+  --directory /opt/scratch/artifacts/oscillator/calibration
 ```
 
 The October 17, 2026 CPU run used the original data splits and all four recipes,
@@ -242,7 +242,7 @@ OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 MKL_CBWR=COMPATIBLE \
   uv --quiet run --frozen python -m priml.baselines.oscillator.scripts.compare \
   --experiments exp004 exp005 exp006 exp007 exp008 --seeds 2021 \
   --data-seed-offsets 0 1000 2000 3000 4000 \
-  --directory /opt/scratch/runs/oscillator/force-discovery
+  --directory /opt/scratch/artifacts/oscillator/force-discovery
 ```
 
 Each offset changes every data-split seed while keeping the splits separate.
@@ -436,7 +436,7 @@ OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 MKL_CBWR=COMPATIBLE \
   --experiments exp009 exp010 exp011 exp012 exp013 exp014 exp015 exp016 exp017 \
     exp018 exp019 exp020 exp021 exp022 exp023 exp024 exp025 exp026 exp027 exp028 exp029 \
   --cases mismatched --seeds 2021 2022 2023 --data-seed-offsets 3000 4000 5000 \
-  --directory /opt/scratch/runs/oscillator/delayed-audit
+  --directory /opt/scratch/artifacts/oscillator/delayed-audit
 ```
 
 These are fixed pulse shapes and a deliberately balanced synthetic task. The

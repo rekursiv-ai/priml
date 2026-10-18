@@ -143,6 +143,8 @@ def test_cli_can_run_only_the_requested_simulator_case(
         ["--experiments", "exp_smoke", "exp_smoke"],
         ["--seeds", "7", "7"],
         ["--data-seed-offsets", "0", "0"],
+        # Offset 101 gives its train split offset 0's validation seed, 202.
+        ["--data-seed-offsets", "0", "101"],
         ["--cases", "matched", "matched"],
     ],
 )
