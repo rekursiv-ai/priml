@@ -175,7 +175,7 @@ packages = ["priml"]
 # documented API), etth1/testing.py (scripts/reference.py imports it), and
 # craftax/world_model/testing.py (scripts/feature_gates.py imports it).
 # kernel_cache.py warms only the test environments, so it goes with them.
-exclude = ["**/*_test.py", "**/conftest.py", "priml/lib/testing/**", "priml/testing/experiments.py", "priml/testing/fixtures.py", "priml/testing/policy_gradient.py", "priml/testing/qwen3_5.py", "priml/distributed/testing.py", "priml/baselines/convextok/testing.py", "priml/baselines/craftax/testing.py", "priml/baselines/craftax/kernel_cache.py", "priml/baselines/craftax/game/testing.py", "priml/baselines/craftax/ghosts/testing.py", "priml/baselines/craftax/world_model/scripts/testing.py", "priml/baselines/craftax/world_model/viewer/testing.py", "priml/baselines/sudoku/testing.py", "priml/baselines/tmax/scripts/testing.py"]
+exclude = ["**/*_test.py", "**/conftest.py", "priml/lib/testing/**", "priml/testing/experiments.py", "priml/testing/fixtures.py", "priml/testing/policy_gradient.py", "priml/testing/qwen3_5.py", "priml/testing/triton_interpreter.py", "priml/distributed/testing.py", "priml/baselines/convextok/testing.py", "priml/baselines/craftax/testing.py", "priml/baselines/craftax/kernel_cache.py", "priml/baselines/craftax/game/testing.py", "priml/baselines/craftax/ghosts/testing.py", "priml/baselines/craftax/world_model/scripts/testing.py", "priml/baselines/craftax/world_model/viewer/testing.py", "priml/baselines/sudoku/testing.py", "priml/baselines/tmax/scripts/testing.py"]
 artifacts = ["priml/py.typed"]
 
 [tool.hatch.build.targets.sdist]
