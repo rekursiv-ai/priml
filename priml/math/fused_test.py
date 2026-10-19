@@ -11,7 +11,7 @@ import math
 import pytest
 import torch
 
-from priml.math.fused import _two_sum, fma32
+from priml.math.fused import _two_sum, fma32, fma64
 from priml.testing.bfb import host_agnostic_numerics
 
 
@@ -125,6 +125,38 @@ def test_two_sum_retains_the_complete_roundoff_with_either_larger_operand() -> N
     expected_residual = torch.tensor([1, 1, -1, -1, 2**-80, 0, -1], dtype=torch.float64)
     assert torch.equal(total, expected_total)
     assert torch.equal(residual, expected_residual)
+
+
+def test_binary64_fma_rounds_once_instead_of_rounding_the_product() -> None:
+    x, y, addend = 1 + 2**-27, 1 - 2**-27, -1.0
+    assert x * y + addend == 0.0
+    assert fma64(x, y=y, addend=addend) == -(2**-54)
+
+
+@pytest.mark.parametrize(
+    ("x", "y", "addend", "expected"),
+    [
+        (2**-1022, 2**-52, 0.0, 2**-1074),
+        (2**-1074, 0.5, 2**-1074, 2 * 2**-1074),
+        (float.fromhex("0x1.fffffffffffffp+1023"), 2.0, -math.inf, -math.inf),
+        (-0.0, 2.0, -0.0, -0.0),
+        (math.inf, 2.0, 1.0, math.inf),
+    ],
+)
+def test_binary64_fma_preserves_tails_and_special_values(
+    x: float,
+    y: float,
+    addend: float,
+    expected: float,
+) -> None:
+    actual = fma64(x, y=y, addend=addend)
+    assert float(actual).hex() == float(expected).hex()
+
+
+def test_binary64_fma_propagates_invalid_and_nan_operands() -> None:
+    assert math.isnan(fma64(0.0, y=math.inf, addend=1.0))
+    assert math.isnan(fma64(math.inf, y=1.0, addend=-math.inf))
+    assert math.isnan(fma64(math.nan, y=1.0, addend=0.0))
 
 
 @cache

@@ -15,6 +15,7 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     parallelize_module,
 )
+from torch.nn import functional
 
 import torch
 
@@ -46,6 +47,20 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from torch.distributed.device_mesh import DeviceMesh
+
+
+@set_cost(map_cost(primal=5, adjoint=11))
+def gelu(x: Tensor) -> Tensor:
+    """Apply exact GELU with its complete elementwise cost.
+
+    Args:
+      x: Pre-activation values, any shape.
+
+    Returns:
+      activated: ``x * (1 + erf(x / sqrt(2))) / 2``, elementwise.
+
+    """
+    return functional.gelu(x)
 
 
 @set_cost(map_cost(primal=1, adjoint=1))

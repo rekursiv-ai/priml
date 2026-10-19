@@ -101,15 +101,23 @@ def test_linear_bias():
     assert m.bias is not None
 
 
-def test_linear_none_bias_initializer_uses_torch_fan_in_uniform() -> None:
+@pytest.mark.parametrize("channels_in", [7, 352])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_linear_none_bias_initializer_uses_torch_fan_in_uniform(
+    channels_in: int,
+    dtype: torch.dtype,
+) -> None:
+    # At fan-in 352, torch's reciprocal square root differs from pow(-0.5).
     torch.manual_seed(19)
-    expected = torch.nn.Linear(7, 5, bias=True)
+    expected = torch.nn.Linear(channels_in, 5, bias=True, dtype=dtype)
+    expected_rng = torch.get_rng_state()
 
     torch.manual_seed(19)
     actual = Linear.Config(
-        channels_in=7,
+        channels_in=channels_in,
         channels_out=5,
         bias=True,
+        dtype=dtype,
         init_weight=kaiming_uniform,
         init_bias=None,
     ).make()
@@ -118,6 +126,7 @@ def test_linear_none_bias_initializer_uses_torch_fan_in_uniform() -> None:
     assert actual.bias is not None
     assert expected.bias is not None
     assert torch.equal(actual.bias, expected.bias)
+    assert torch.equal(torch.get_rng_state(), expected_rng)
 
 
 def test_linear_reset_preserves_construction_dtype_bias_draw_after_cast() -> None:
@@ -144,6 +153,20 @@ def test_linear_reset_preserves_construction_dtype_bias_draw_after_cast() -> Non
     assert torch.get_rng_state().equal(expected_rng)
     for name, value in actual.state_dict().items():
         assert torch.equal(value, expected_state[name]), name
+
+
+def test_zero_fan_in_bias_matches_torch_and_retains_rng() -> None:
+    torch.manual_seed(19)
+    with pytest.warns(UserWarning, match="zero-element"):
+        expected = torch.nn.Linear(0, 3)
+    expected_rng = torch.get_rng_state()
+    torch.manual_seed(19)
+    with pytest.warns(UserWarning, match="zero-element"):
+        actual = Linear.Config(0, 3, bias=True, init_bias=None).make()
+    assert actual.bias is not None
+    assert expected.bias is not None
+    assert torch.equal(actual.bias, expected.bias)
+    assert torch.equal(torch.get_rng_state(), expected_rng)
 
 
 def test_linear_channels_infer_from_out():

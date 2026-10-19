@@ -9,7 +9,7 @@ import math
 import numpy as np
 import pytest
 
-from priml.math import logarithm
+from priml.data.processors import logarithm
 
 
 if TYPE_CHECKING:
@@ -72,7 +72,7 @@ def test_natural_logarithm_propagates_domain_and_nonfinite_results() -> None:
 def test_natural_logarithm_rejects_non_binary32_metadata(
     dtype: type[np.generic],
 ) -> None:
-    with pytest.raises(ValueError, match="binary32"):
+    with pytest.raises(ValueError, match=r"^Expected binary32 logarithm operands\.$"):
         logarithm.log_float32(np.ones(3, dtype=dtype))
 
 
@@ -159,8 +159,28 @@ def test_log1p_propagates_domain_and_nonfinite_results() -> None:
 @pytest.mark.usefixtures("eager_kernel")
 @pytest.mark.parametrize("dtype", [np.float64, np.int32])
 def test_log1p_rejects_non_binary32_metadata(dtype: type[np.generic]) -> None:
-    with pytest.raises(ValueError, match="binary32"):
+    with pytest.raises(ValueError, match=r"^Expected binary32 logarithm operands\.$"):
         logarithm.log1p_float32(np.ones(3, dtype=dtype))
+
+
+@pytest.mark.compute_large_fixture
+def test_compiled_logarithms_preserve_captured_scalar_rounding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logarithm._kernel.cache_clear()
+    logarithm._log1p_kernel.cache_clear()
+    try:
+        for transpose in (False, True):
+            test_natural_logarithm_preserves_source_scalar_rounding(transpose)
+            test_log1p_preserves_captured_scalar_rounding(transpose)
+        with monkeypatch.context() as mutation:
+            mutation.setattr(logarithm, "_log1pf", _identity_log1pf)
+            logarithm._log1p_kernel.cache_clear()
+            with pytest.raises(AssertionError):
+                test_log1p_preserves_captured_scalar_rounding(False)
+    finally:
+        logarithm._kernel.cache_clear()
+        logarithm._log1p_kernel.cache_clear()
 
 
 class _CorrectlyRounded:
@@ -173,6 +193,10 @@ class _CorrectlyRounded:
     @classmethod
     def log1pf(cls, x: float, /) -> float:
         return float(np.float32(math.log1p(x)))
+
+
+def _identity_log1pf(x: np.float32) -> np.float32:
+    return x
 
 
 def _eager_compile(

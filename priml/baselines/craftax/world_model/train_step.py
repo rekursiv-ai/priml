@@ -49,6 +49,7 @@ from priml.math import schedules
 from priml.math.schedules import Schedule
 from priml.model.attention.attention import Attention
 from priml.optimizers import CompositeOptimizer, FusedAdamW, Muon
+from priml.optimizers.lr_schedule import AbsoluteRateSchedule
 from priml.optimizers.muon import adjust_lr_match_rms_adamw
 from priml.optimizers.parameter_filter import complement, excluding, matching
 from priml.train.custom_types import TrainStepOutput
@@ -174,7 +175,7 @@ class WorldModelTrainStep(TrainStep):
         )
         """Builds the optimizer from the model."""
 
-        lr_schedule: Makeable[Schedule[float]] = field(
+        lr_schedule: Makeable[Schedule[float] | AbsoluteRateSchedule] = field(
             default_factory=lambda: PartialConfig(wsd, warmup=0.1, decay=0.1),
         )
         """Warmup-stable-decay over ``train_budget_steps``."""

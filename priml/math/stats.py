@@ -460,6 +460,111 @@ def ema_update(current: float, new_value: float, alpha: float = 0.3) -> float:
     return alpha * new_value + (1 - alpha) * current
 
 
+def average_ranks(x: Tensorable, *, descending: bool = False) -> Tensor:
+    """Return zero-based binary64 ranks, averaging equal values.
+
+    Args:
+      x: Ordered numeric values in one vector; NaNs are outside this contract.
+      descending: Give the largest value the smallest rank.
+
+    Returns:
+      ranks: Complete ranks in the original input order, on the input device.
+
+    """
+    values = convert_to_tensor(x)
+    if values.numel() == 0:
+        return values.double()
+    order = values.argsort(descending=descending)
+    ordered = values[order]
+    starts = torch.cat(
+        (order.new_zeros(1), (ordered[1:] != ordered[:-1]).nonzero().flatten() + 1),
+    )
+    ends = torch.cat((starts[1:], order.new_full((1,), len(values))))
+    ranks = torch.empty_like(values, dtype=torch.float64)
+    ranks[order] = torch.repeat_interleave(
+        (starts + ends - 1).double() / 2,
+        ends - starts,
+    )
+    return ranks
+
+
+def ordinal_ranks(x: Tensorable, *, order: Tensor | None = None) -> Tensor:
+    """Return zero-based ranks using a supplied complete sort permutation.
+
+    Args:
+      x: Numeric values in one vector.
+      order: Complete sorted row indices, including the caller's tie policy.
+        None uses Torch's ascending argsort.
+
+    Returns:
+      ranks: Binary64 ordinal ranks in the original row order.
+
+    """
+    values = convert_to_tensor(x)
+    permutation = values.argsort() if order is None else order
+    return permutation.argsort().double()
+
+
+def spearman(x: Tensorable, y: Tensorable) -> Tensor:
+    """Return binary64 centered-dot correlation of average ranks.
+
+    Args:
+      x: First complete numeric vector without NaNs.
+      y: Paired values of the same length.
+
+    Returns:
+      correlation: Scalar binary64 correlation; NaN for fewer than two rows
+        or a constant input. Direction and percentile normalization stay with
+        the caller.
+
+    """
+    first, second = average_ranks(x), average_ranks(y)
+    if first.numel() < 2:
+        return first.new_full((), torch.nan)
+    first, second = first - first.mean(), second - second.mean()
+    return first @ second / (first.norm() * second.norm())
+
+
+def binary_roc_auc(labels: Tensorable, scores: Tensorable) -> Tensor:
+    """Integrate a complete tie-aware ROC curve in binary64.
+
+    Args:
+      labels: Binary membership vector in observation order.
+      scores: Corresponding finite confidence scores, without a sigmoid.
+
+    Returns:
+      area: Binary64 trapezoid area after dropping collinear thresholds;
+        NaN for an empty or single-class input.
+
+    """
+    membership, values = convert_to_tensor(labels), convert_to_tensor(scores)
+    if values.numel() == 0:
+        return values.new_full((), torch.nan, dtype=torch.float64)
+    order = values.argsort(descending=True)
+    ordered = values[order]
+    ends = torch.cat(
+        (
+            (ordered[1:] != ordered[:-1]).nonzero().flatten(),
+            order.new_full((1,), len(order) - 1),
+        ),
+    )
+    true_count = membership[order].cumsum(0, dtype=torch.float64)[ends]
+    false_count = ends + 1 - true_count
+    if ends.numel() > 2:
+        corners = torch.cat(
+            (
+                ends.new_ones(1, dtype=torch.bool),
+                (false_count.diff(n=2) != 0) | (true_count.diff(n=2) != 0),
+                ends.new_ones(1, dtype=torch.bool),
+            ),
+        )
+        true_count, false_count = true_count[corners], false_count[corners]
+    positives = membership.sum(dtype=torch.float64)
+    tpr = torch.cat((true_count.new_zeros(1), true_count)) / positives
+    fpr = torch.cat((false_count.new_zeros(1), false_count)) / (len(values) - positives)
+    return torch.trapezoid(tpr, x=fpr)
+
+
 class SlidingWindow:
     """Sliding window for computing throughput and other rates.
 

@@ -17,24 +17,204 @@ from priml.cost import (
     cost,
     elementwise_cost,
     matmul_cost,
+    traffic,
 )
+from priml.math.custom_types import TensorFn
 from priml.model.custom_types import (
+    PreservesGrid,
     TensorModule,
     WeightedTensorModule,
     has_weight,
     infer_same_width,
+    validate_same_width,
 )
 from priml.model.passthrough import (
     PassthroughAttribute,
     ReadPassthroughMixin,
     ReadWritePassthroughMixin,
 )
+from priml.model.swiglu import silu
+
+
+class Dropout(nn.Dropout):
+    """Apply native elementwise dropout with explicit training cost."""
+
+    class Config(PreservesGrid, Fig["Dropout"], kw_only=False):
+        channels_in: int = -1
+        """Width entering dropout, or supplied on the cost bus."""
+
+        channels_out: int = -1
+        """Width preserved by dropout."""
+
+        _: KW_ONLY
+
+        p: float = 0.5
+        """Probability of zeroing each element during training."""
+
+        inplace: bool = False
+        """Update the input in place using the native Torch primitive."""
+
+        @override
+        def finalize(self) -> Self:
+            infer_same_width(self)
+            return super().finalize()
+
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            channels: int = -1,
+            training: bool = True,
+            **kwargs: object,
+        ) -> Cost:
+            """Count native mask scaling and forward/backward products.
+
+            Args:
+              seq_len: Positions per example.
+              batch_size: Examples per invocation.
+              dtype: Activation dtype.
+              channels: Width when not configured on this leaf.
+              training: Cost training; evaluation is an identity.
+              **kwargs: Unused outer metadata.
+
+            Returns:
+              execution: Whole-invocation arithmetic and logical traffic.
+
+            """
+            del kwargs
+            width = self.channels_in if self.channels_in != -1 else channels
+            elements = width * seq_len * batch_size
+            return dropout_cost(
+                self.p,
+                elements=elements,
+                masks=elements,
+                dtype=dtype,
+                training=training,
+            )
+
+    def __init__(self, config: Config) -> None:
+        validate_same_width(config)
+        super().__init__(p=config.p, inplace=config.inplace)
+
+    def reset_parameters(self) -> None:
+        """Retain the stateless dropout operation."""
+
+    @override
+    def forward(self, input: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
+        return super().forward(input)
+
+
+def dropout_cost(
+    probability: float,
+    *,
+    elements: int,
+    masks: int,
+    dtype: torch.dtype | None,
+    training: bool = True,
+) -> Cost:
+    """Cost native dropout with one independent sample per mask element.
+
+    Bernoulli sampling writes each mask; scaling reads/writes it, then products
+    read it. Sampling itself has no assigned FLOPs. A channel mask is scaled
+    once per channel, while its forward and backward products visit every value.
+
+    Args:
+      probability: Probability of zeroing an activation.
+      elements: Complete input element count.
+      masks: Independent mask elements; may broadcast across input positions.
+      dtype: Activation and scaled-mask dtype.
+      training: Cost training; evaluation is an identity.
+
+    Returns:
+      execution: Mask scaling, products, and logical operand traffic.
+
+    """
+    if probability == 0 or not training:
+        return Cost()
+    if probability == 1:
+        masks = 0
+    return traffic(
+        "primal",
+        "elementwise",
+        elements=2 * elements + 4 * masks,
+        flops=elements + masks,
+        dtype=dtype,
+    ) + traffic(
+        "adjoint",
+        "elementwise",
+        elements=2 * elements + masks,
+        flops=elements,
+        dtype=dtype,
+    )
+
+
+class Activation(nn.Module):
+    """Apply an injected cost-bearing tensor function without changing its primitive."""
+
+    class Config(PreservesGrid, Fig["Activation"], kw_only=False):
+        channels_in: int = -1
+        """Width entering the activation, or supplied on the cost bus."""
+
+        channels_out: int = -1
+        """Width preserved by the activation."""
+
+        _: KW_ONLY
+
+        act: TensorFn = silu
+        """Injected activation carrying its own cost through set_cost."""
+
+        @override
+        def finalize(self) -> Self:
+            infer_same_width(self)
+            return super().finalize()
+
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            channels: int = -1,
+            **kwargs: object,
+        ) -> Cost:
+            """Delegate the whole activation geometry to its own cost.
+
+            Args:
+              seq_len: Positions per example.
+              batch_size: Examples per invocation.
+              dtype: Activation dtype.
+              channels: Width when not configured on this leaf.
+              **kwargs: Unused outer metadata.
+
+            Returns:
+              execution: Complete activation cost, owning no parameters.
+
+            """
+            del kwargs
+            width = self.channels_in if self.channels_in != -1 else channels
+            return cost(self.act, channels=width * seq_len * batch_size, dtype=dtype)
+
+    def __init__(self, config: Config) -> None:
+        validate_same_width(config)
+        super().__init__()
+        self.act = config.act
+
+    def reset_parameters(self) -> None:
+        """Retain the stateless activation."""
+
+    @override
+    def forward(self, x: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
+        return self.act(x)
 
 
 class Identity(nn.Identity):
     """Identity that returns only the first positional argument."""
 
-    class Config(Fig["Identity"], kw_only=False):
+    class Config(PreservesGrid, Fig["Identity"], kw_only=False):
         channels_in: int = -1
         """Input channel width."""
 
@@ -48,18 +228,6 @@ class Identity(nn.Identity):
             """Fill and validate the preserved channel width."""
             infer_same_width(self)
             return super().finalize()
-
-        def output_grid(self, input_grid: tuple[int, ...]) -> tuple[int, ...]:
-            """Preserve the supplied spatial extents.
-
-            Args:
-                input_grid: Spatial extents entering the identity.
-
-            Returns:
-                output: The same spatial extents.
-
-            """
-            return input_grid
 
         def cost(
             self,

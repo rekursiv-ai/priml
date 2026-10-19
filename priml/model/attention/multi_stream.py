@@ -33,6 +33,7 @@ from priml.model.custom_types import (
     HasResetParameters,
     LayerCache,
     RotaryConfig,
+    RotaryRotation,
     TensorModule,
     infer_same_width,
 )
@@ -607,9 +608,16 @@ class MultiStreamAttention(nn.Module):
                 rope = stream.rope
             elif si in self.ropes:
                 rope = self.ropes[si]
+            rotate = (
+                stream.rotate
+                if stream is not None
+                else rope.rotate
+                if isinstance(rope, RotaryRotation)
+                else RoPE.rotate
+            )
             if cs_i is not None:
                 cos, sin = cs_i
-                q, k = RoPE.rotate(q, k, cos, sin)
+                q, k = rotate(q, k, cos, sin)
             elif rope is not None:
                 p = pos_list[i]
                 if p is None:
@@ -617,7 +625,7 @@ class MultiStreamAttention(nn.Module):
                     offset = c_i.seen if c_i is not None else 0
                     p = torch.arange(offset, offset + S, device=x.device)
                 cos, sin = rope(p)
-                q, k = RoPE.rotate(q, k, cos, sin)
+                q, k = rotate(q, k, cos, sin)
 
             # The cache stores [..., H, S, hd]; the kernels take [..., S, H, hd].
             q, k, v = (t.movedim(-3, -2) for t in (q, k, v))

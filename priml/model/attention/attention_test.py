@@ -6,8 +6,9 @@ from functools import partial
 from pathlib import Path
 from typing import Final, cast, override
 
-from configgle import Fig, PartialConfig
+from configgle import Fig, Makes, PartialConfig
 from torch import Tensor, nn
+from treekle import from_plain, to_plain
 
 import pytest
 import torch
@@ -76,6 +77,150 @@ def test_self_attention_config_pprint() -> None:
         name="self_attention",
         config=config,
     )
+
+
+class _OwnedRotary(RoPE):
+    """A factor provider with observably different rotation arithmetic."""
+
+    class Config(Makes["_OwnedRotary"], RoPE.Config):
+        """Keep the standard factor geometry."""
+
+    @classmethod
+    @override
+    def _rotate(cls, x: Tensor, cos: Tensor, sin: Tensor, interleave: bool) -> Tensor:
+        del cos, sin, interleave
+        return x * 2
+
+
+@pytest.mark.parametrize("supplied", [False, True])
+def test_owned_rotary_controls_outputs_and_gradients(supplied: bool) -> None:
+    config = Attention.Config(
+        channels_in=7,
+        num_heads=4,
+        num_heads_kv=2,
+        channels_head=6,
+        rope=_OwnedRotary.Config(6),
+        attn_kernel=SdpaNaive.Config(),
+    )
+    module = config.make()
+    x = torch.randn(2, 3, 7, requires_grad=True)
+    assert module.rope is not None
+    factors = module.rope(torch.arange(3))
+    actual = module(x, cos_sin=factors if supplied else None)
+    q, k, v = (
+        value.contiguous() for value in module.proj_qkv(x).split([4, 2, 2], dim=-2)
+    )
+    q, k = _OwnedRotary.rotate(q, k, *factors)
+    k, v = (value.repeat_interleave(2, dim=-2) for value in (k, v))
+    expected = module.proj_out(module.attn_kernel(q, k, v).flatten(-2))
+    assert torch.equal(actual, expected)
+    variables = (x, *module.parameters())
+    actual_grads = torch.autograd.grad(actual.sum(), variables, retain_graph=True)
+    expected_grads = torch.autograd.grad(expected.sum(), variables)
+    assert all(
+        torch.equal(actual_grad, expected_grad)
+        for actual_grad, expected_grad in zip(actual_grads, expected_grads, strict=True)
+    )
+
+
+def _fallback_rotation(
+    q: Tensor,
+    k: Tensor,
+    cos: Tensor,
+    sin: Tensor,
+) -> tuple[Tensor, Tensor]:
+    del cos, sin
+    return q * 3, k * 4
+
+
+@pytest.mark.parametrize("custom", [False, True])
+def test_rotation_fallback_roundtrips_as_a_visible_config_field(custom: bool) -> None:
+    config = Attention.Config()
+    config.channels_in = 7
+    config.num_heads = 2
+    config.channels_head = 6
+    if custom:
+        config.rotate = _fallback_rotation
+    restored = from_plain(to_plain(config), Attention.Config, allow_imports=True)
+    assert isinstance(restored, Attention.Config)
+    assert restored.rotate == config.rotate
+    assert restored.make().rotate == (
+        RoPE.rotate if config.rotate is None else config.rotate
+    )
+    assert "rotate=" in restored.pformat(hide_default_values=False)
+
+
+def _unrotated(
+    q: Tensor,
+    k: Tensor,
+    cos: Tensor,
+    sin: Tensor,
+) -> tuple[Tensor, Tensor]:
+    del cos, sin
+    return q, k
+
+
+@pytest.mark.parametrize("internal_factors", [False, True])
+def test_specialized_rotation_runs_for_internal_and_external_factors(
+    internal_factors: bool,
+) -> None:
+    config = Attention.Config()
+    config.channels_in = 7
+    config.num_heads = 4
+    config.num_heads_kv = 2
+    config.channels_head = 6
+    config.attn_kernel = SdpaNaive.Config()
+    ordinary = config.make().eval()
+    specialized = config.copy_tree()
+    specialized.rotate = _unrotated
+    rope = RoPE.Config()
+    rope.channels_head = 6
+    if internal_factors:
+        specialized.rope = rope
+    model = specialized.make().eval()
+    model.load_state_dict(ordinary.state_dict())
+    media = torch.arange(105).reshape(3, 5, 7).float() / 11
+    factors = None if internal_factors else rope.make()(torch.arange(5))
+    assert torch.equal(model(media, cos_sin=factors), ordinary(media))
+
+
+@pytest.mark.parametrize("learned", [False, True])
+@pytest.mark.parametrize("custom", [False, True])
+def test_factor_only_and_external_rotaries_use_configured_fallback(
+    learned: bool,
+    custom: bool,
+) -> None:
+    def kernel(q: Tensor, k: Tensor, v: Tensor, **kwargs: object) -> Tensor:
+        del v, kwargs
+        return q + k
+
+    config = Attention.Config(
+        channels_in=7,
+        num_heads=2,
+        channels_head=6,
+        attn_kernel=PartialConfig(kernel),
+    )
+    if learned:
+        config.rope = _LearnedRotary.Config(channels_head=3)
+    if custom:
+        config.rotate = _fallback_rotation
+    module = config.make()
+    x = torch.randn(2, 5, 7)
+    positions = torch.arange(5).unsqueeze(-1)
+    factors = (
+        module.rope(positions)
+        if module.rope is not None
+        else RoPE.Config(6).make()(positions)
+    )
+    actual = module(x, positions=positions, cos_sin=None if learned else factors)
+    q, k, _ = (
+        value.contiguous() for value in module.proj_qkv(x).split([2, 2, 2], dim=-2)
+    )
+    rotation = RoPE.rotate if config.rotate is None else config.rotate
+    q, k = rotation(q, k, *factors)
+    expected = module.proj_out((q + k).flatten(-2))
+    assert torch.equal(actual, expected)
+    assert module.rotate == rotation
 
 
 def test_self_attention_registers_a_custom_rope() -> None:

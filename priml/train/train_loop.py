@@ -292,8 +292,22 @@ class TrainLoop:
                 metric.base_dir = self.base_dir if shared else self.working_dir
             return super().finalize()
 
-    def __init__(self, config: Config) -> None:
+    def __init__(
+        self,
+        config: Config,
+        *,
+        step: TrainStepProtocol | None = None,
+        dataset: DatasetProtocol | None = None,
+    ) -> None:
         """Initialize training job.
+
+        Args:
+          config: Declarative recipe for this loop and its children.
+          step: Optional constructed step. The loop binds its timers, warms its
+            evaluation path, restores checkpoints, and closes it as usual.
+          dataset: Optional constructed dataset. The loop binds it to the step,
+            shares its epoch timer, and closes it as usual. Supplied children
+            are used directly; their configured factories are not called.
 
         Raises:
           ValueError: If ``config`` is a training run (not ``eval_only``) with no
@@ -366,7 +380,7 @@ class TrainLoop:
                 self.phase_timer.phase("model_init"),
                 torch.device(self.runtime.device),
             ):
-                self.step = config.step.make()
+                self.step = config.step.make() if step is None else step
             if isinstance(self.step, Closeable):
                 self._close_step = self.step.close
             if isinstance(self.step, _HasTimer):
@@ -405,7 +419,7 @@ class TrainLoop:
                 self.phase_timer.phase("data_load"),
                 torch.device(device or self.runtime.device),
             ):
-                self.dataset = config.dataset.make()
+                self.dataset = config.dataset.make() if dataset is None else dataset
             if isinstance(self.dataset, Closeable):
                 self._close_dataset = self.dataset.close
             _bind_dataset_step(self.dataset, self.step)

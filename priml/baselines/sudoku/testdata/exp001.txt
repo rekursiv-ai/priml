@@ -38,6 +38,7 @@ SudokuTrainLoop(
         │   │   │       dropout=0.0,
         │   │   │       causal=False,
         │   │   │       rope=None,
+        │   │   │       rotate=None,
         │   │   │       norm_qk=None,
         │   │   │       share_qk_norm=True,
         │   │   │       norm_out=None,
@@ -166,7 +167,8 @@ SudokuTrainLoop(
         │       warmup_seed=True,
         │       decay_schedule=priml.train.ema.constant_decay,
         │       select=priml.optimizers.parameter_filter.trainable,
-        │       update_fn=None
+        │       update_fn=None,
+        │       buffer_update_fn=priml.train.ema.copy_buffers
         │   ),
         │   gradient_clip_norm=1.0,
         │   skip_step_on_nonfinite_grad=False,

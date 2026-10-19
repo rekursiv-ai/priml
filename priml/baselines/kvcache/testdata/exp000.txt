@@ -33,6 +33,7 @@ DecodeBenchmark.Config(
         │   │               frequencies=HuggingFaceFrequencies.Config(base=10000.0),
         │   │               dtype=torch.float32
         │   │           ),
+        │   │           rotate=None,
         │   │           norm_qk=None,
         │   │           share_qk_norm=True,
         │   │           norm_out=None,
@@ -100,6 +101,7 @@ DecodeBenchmark.Config(
         │   │               frequencies=HuggingFaceFrequencies.Config(base=10000.0),
         │   │               dtype=torch.float32
         │   │           ),
+        │   │           rotate=None,
         │   │           norm_qk=None,
         │   │           share_qk_norm=True,
         │   │           norm_out=None,
@@ -167,6 +169,7 @@ DecodeBenchmark.Config(
         │   │               frequencies=HuggingFaceFrequencies.Config(base=10000.0),
         │   │               dtype=torch.float32
         │   │           ),
+        │   │           rotate=None,
         │   │           norm_qk=None,
         │   │           share_qk_norm=True,
         │   │           norm_out=None,
@@ -234,6 +237,7 @@ DecodeBenchmark.Config(
         │   │               frequencies=HuggingFaceFrequencies.Config(base=10000.0),
         │   │               dtype=torch.float32
         │   │           ),
+        │   │           rotate=None,
         │   │           norm_qk=None,
         │   │           share_qk_norm=True,
         │   │           norm_out=None,
@@ -301,6 +305,7 @@ DecodeBenchmark.Config(
         │   │               frequencies=HuggingFaceFrequencies.Config(base=10000.0),
         │   │               dtype=torch.float32
         │   │           ),
+        │   │           rotate=None,
         │   │           norm_qk=None,
         │   │           share_qk_norm=True,
         │   │           norm_out=None,
@@ -368,6 +373,7 @@ DecodeBenchmark.Config(
         │   │               frequencies=HuggingFaceFrequencies.Config(base=10000.0),
         │   │               dtype=torch.float32
         │   │           ),
+        │   │           rotate=None,
         │   │           norm_qk=None,
         │   │           share_qk_norm=True,
         │   │           norm_out=None,
@@ -435,6 +441,7 @@ DecodeBenchmark.Config(
         │   │               frequencies=HuggingFaceFrequencies.Config(base=10000.0),
         │   │               dtype=torch.float32
         │   │           ),
+        │   │           rotate=None,
         │   │           norm_qk=None,
         │   │           share_qk_norm=True,
         │   │           norm_out=None,
@@ -502,6 +509,7 @@ DecodeBenchmark.Config(
         │   │               frequencies=HuggingFaceFrequencies.Config(base=10000.0),
         │   │               dtype=torch.float32
         │   │           ),
+        │   │           rotate=None,
         │   │           norm_qk=None,
         │   │           share_qk_norm=True,
         │   │           norm_out=None,

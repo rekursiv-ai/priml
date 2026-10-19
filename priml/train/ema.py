@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict, cast
 
 import copy
+import math
 
 from configgle import Fig
 from torch import Tensor
@@ -90,6 +91,60 @@ each, and a recipe wanting a third writes it instead of editing this module.
 
 type EMAUpdateFn = Callable[[Tensor, Tensor, float], None]
 """Updates a shadow tensor from its live counterpart and effective decay."""
+
+
+type BufferUpdateFn = Callable[[Mapping[str, Tensor], nn.Module, float], None]
+"""Updates named shadow buffers from the live module and effective decay."""
+
+
+def copy_buffers(shadow: Mapping[str, Tensor], model: nn.Module, decay: float) -> None:
+    """Copy every matching named buffer; averaging decay does not apply.
+
+    Args:
+      shadow: Name-keyed buffers owned by the EMA shadow.
+      model: Live model supplying the buffers.
+      decay: Effective parameter decay; unused by this copy policy.
+
+    """
+    del decay
+    live = dict(model.named_buffers())
+    for name, buffer in shadow.items():
+        if name in live:
+            buffer.copy_(live[name].detach())
+
+
+def average_floating_state(shadow: Tensor, live: Tensor, decay: float) -> None:
+    """Average real floating state; copy integer and complex state verbatim.
+
+    Args:
+      shadow: Shadow tensor, mutated in the caller's no-grad context.
+      live: Corresponding current state tensor.
+      decay: Fraction of the previous floating state retained.
+
+    """
+    if shadow.is_floating_point():
+        shadow.mul_(decay).add_(live, alpha=1 - decay)
+    else:
+        shadow.copy_(live)
+
+
+def average_persistent_buffers(
+    shadow: Mapping[str, Tensor],
+    model: nn.Module,
+    decay: float,
+) -> None:
+    """Average persistent floating buffers while preserving transient snapshots.
+
+    Args:
+      shadow: Name-keyed buffers owned by the EMA shadow.
+      model: Live model whose state dict defines persistence.
+      decay: Fraction of the previous floating buffer retained.
+
+    """
+    live = model.state_dict()
+    for name, buffer in shadow.items():
+        if name in live:
+            average_floating_state(buffer, live[name].detach(), decay)
 
 
 def constant_decay(decay: float, step: int) -> float:
@@ -238,6 +293,10 @@ class EMA:
         """Optional shadow-update expression. ``None`` retains the default
         in-place multiply/add operation order."""
 
+        buffer_update_fn: BufferUpdateFn = copy_buffers
+        """Buffer policy; default copies all named buffers. Use
+        ``average_persistent_buffers`` to average persistent floating state."""
+
     def __init__(self, config: Config) -> None:
         """Initialize EMA.
 
@@ -245,7 +304,7 @@ class EMA:
           config: EMA configuration.
 
         """
-        if config.decay < 0 or config.decay > 1:
+        if not math.isfinite(config.decay) or config.decay < 0 or config.decay > 1:
             raise ValueError(
                 f"decay must be in [0, 1], got {config.decay}",
             )
@@ -267,6 +326,7 @@ class EMA:
         self.decay_schedule = config.decay_schedule
         self.select = config.select
         self.update_fn = config.update_fn
+        self.buffer_update_fn = config.buffer_update_fn
 
         self.shadow_model: nn.Module | None = None
         self.shadow_params: dict[str, Tensor] = {}
@@ -299,7 +359,7 @@ class EMA:
         decay = self.decay_schedule(self.decay, step)
         # Used directly as a lerp coefficient: outside [0, 1] it extrapolates
         # rather than averages.
-        if decay < 0 or decay > 1:
+        if not math.isfinite(decay) or decay < 0 or decay > 1:
             raise ValueError(
                 f"decay_schedule returned {decay} at step {step}; the "
                 "effective decay must lie in [0, 1].",
@@ -333,6 +393,7 @@ class EMA:
         at_boundary = self.global_step == self.update_after_step
         with torch.no_grad():
             live_params = dict(model.named_parameters())
+            decay = self.decay
             if self.warmup_seed and at_boundary:
                 for name in self._tracked_names:
                     self._shadow_param(name).copy_(live_params[name].data)
@@ -346,7 +407,7 @@ class EMA:
                     else:
                         self.update_fn(shadow, live, decay)
             if self.track_buffers:
-                self._copy_buffers(model)
+                self._copy_buffers(model, decay=decay)
 
         self.global_step += 1
         self.local_step += 1
@@ -364,17 +425,9 @@ class EMA:
 
         """
         if reset:
-            self.shadow_model = None
-            self.shadow_params = {}
-            self._module_params = {}
-            self._shadow_buffers = {}
             self._pending_state = None
-            self._tracked_names = set()
-            self._backup = {}
-            self._initialized = False
-            self._loaded_shadow = False
-        if not self._initialized:
-            self._lazy_initialize(model)
+        if reset or not self._initialized:
+            self._lazy_initialize(model, reset=reset)
 
     @contextmanager
     def apply_to(self, model: nn.Module) -> Generator[None]:
@@ -525,7 +578,7 @@ class EMA:
             return self._module_params[name].data
         return self.shadow_params[name]
 
-    def _lazy_initialize(self, model: nn.Module) -> None:
+    def _lazy_initialize(self, model: nn.Module, *, reset: bool = False) -> None:
         self._tracked_names = {
             name for name, param in model.named_parameters() if self.select(name, param)
         }
@@ -534,7 +587,7 @@ class EMA:
             self.shadow_model.eval()
             self.shadow_model.requires_grad_(False)
             self._module_params = dict(self.shadow_model.named_parameters())
-        elif self._loaded_shadow:
+        elif self._loaded_shadow and not reset:
             # A shadow already loaded from a checkpoint before init: keep its
             # values (and tracked-name set) rather than re-cloning live weights
             # over the restored moving average -- but re-device each tensor to
@@ -561,10 +614,11 @@ class EMA:
                 for name, param in model.named_parameters()
                 if name in self._tracked_names
             }
-            if self.track_buffers:
-                self._shadow_buffers = {
-                    name: buf.detach().clone() for name, buf in model.named_buffers()
-                }
+            self._shadow_buffers = (
+                {name: buf.detach().clone() for name, buf in model.named_buffers()}
+                if self.track_buffers
+                else {}
+            )
         # Pre-allocate backup buffers for ``apply_to`` so eval-time memory
         # is constant.
         self._backup = {
@@ -585,16 +639,13 @@ class EMA:
             raise ValueError("Expected self.shadow_model is not None.")
         self.shadow_model.load_state_dict(pending)
 
-    def _copy_buffers(self, model: nn.Module) -> None:
-        live_buffers = dict(model.named_buffers())
-        if self.shadow_model is not None:
-            for name, buf in self.shadow_model.named_buffers():
-                if name in live_buffers:
-                    buf.data.copy_(live_buffers[name].data)
-            return
-        for name, buf in self._shadow_buffers.items():
-            if name in live_buffers:
-                buf.copy_(live_buffers[name].data)
+    def _copy_buffers(self, model: nn.Module, *, decay: float) -> None:
+        buffers = (
+            dict(self.shadow_model.named_buffers())
+            if self.shadow_model is not None
+            else self._shadow_buffers
+        )
+        self.buffer_update_fn(buffers, model, decay)
 
 
 class _StateDict(OrderedDict[str, Tensor]):

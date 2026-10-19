@@ -21,7 +21,7 @@ from treekle import from_plain, to_plain
 import pytest
 import torch
 
-from priml.cost import map_cost, set_cost
+from priml.cost import cost, map_cost, set_cost
 from priml.math.linear import cast_parameters_to_input
 from priml.model.conv import Conv1d, SequenceConv1d
 from priml.model.init import kaiming_uniform, unit_fan_in_uniform
@@ -30,6 +30,7 @@ from priml.model.norm import RMSNorm
 from priml.model.swiglu import (
     SwiGLU,
     SwiGLUReluSquared,
+    gelu,
     relu,
     relu_squared,
     shifted_relu_squared,
@@ -45,11 +46,55 @@ from priml.testing.golden import assert_pprint_golden
 _CWD: Final = Path(__file__).resolve().parent
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_exact_gelu_keeps_native_values_gradients_and_attached_cost(
+    dtype: torch.dtype,
+) -> None:
+    value = torch.tensor([-12.0, -3.0, -0.125, -0.0, 0.125, 2.0, 11.0], dtype=dtype)
+    left, right = value.clone().requires_grad_(), value.clone().requires_grad_()
+    got, want = gelu(left), nn.functional.gelu(right)
+    assert got.dtype == want.dtype
+    assert torch.equal(got, want)
+    assert torch.equal(
+        torch.autograd.grad(got.sum(), left)[0],
+        torch.autograd.grad(want.sum(), right)[0],
+    )
+    execution = cost(gelu, channels=value.numel(), dtype=dtype)
+    assert execution["flops", "primal"].sum() == 5 * value.numel()
+    assert execution["flops", "adjoint"].sum() == 11 * value.numel()
+    assert from_plain(to_plain(gelu), object, allow_imports=True) is gelu
+
+
 def test_costed_activation_round_trips_as_an_imported_function() -> None:
     encoded = to_plain(silu)
     decoded = from_plain(encoded, object, allow_imports=True)
 
     assert decoded is silu
+
+
+def test_projection_slots_infer_each_boundary_and_middle_width() -> None:
+    config = SwiGLU.Config(channels_in=3, channels_out=4, channels_hidden=5)
+    config.up_proj = Linear.Config()
+    config.down_proj = Linear.Config()
+    config.middle = RMSNorm.Config()
+    resolved = config.finalized()
+    assert isinstance(resolved.up_proj, Linear.Config)
+    assert isinstance(resolved.down_proj, Linear.Config)
+    assert isinstance(resolved.middle, RMSNorm.Config)
+    assert (resolved.up_proj.channels_in, resolved.up_proj.channels_out) == (3, 10)
+    assert (resolved.down_proj.channels_in, resolved.down_proj.channels_out) == (5, 4)
+    assert resolved.middle.channels_in == resolved.middle.channels_out == 5
+    with pytest.raises(NotImplementedError, match="injected middle"):
+        config.make().tensor_parallel_style()
+
+
+def test_shifted_squared_relu_preserves_complete_values_and_gradients() -> None:
+    value = torch.tensor([-3.0, 0.5, 0.75, 2.0], requires_grad=True)
+    actual = shifted_relu_squared(value, threshold=0.75)
+    assert torch.equal(actual, torch.tensor([0.0, 0.0, 0.0, 1.25**2]))
+    actual.sum().backward()
+    assert value.grad is not None
+    assert torch.equal(value.grad, torch.tensor([0.0, 0.0, 0.0, 2 * 1.25]))
 
 
 @pytest.mark.parametrize("config_type", [SwiGLU.Config, SwiGLUReluSquared.Config])

@@ -42,7 +42,12 @@ from priml.loss.simple_loss import SimpleLoss
 from priml.math.distributed import collective_device
 from priml.math.schedules import Schedule, constant
 from priml.model.special import Identity
-from priml.optimizers.lr import apply_lr_scale, remember_initial_lrs
+from priml.optimizers.lr import (
+    apply_lr_scale,
+    apply_lr_schedule,
+    remember_initial_lrs,
+)
+from priml.optimizers.lr_schedule import AbsoluteRateSchedule
 from priml.runtime import global_device_mesh
 from priml.timer import CheckpointableStepTimer
 from priml.train.activation import DefaultActivationStorage
@@ -57,6 +62,7 @@ from priml.train.custom_types import (
     TrainStepOutput,
 )
 from priml.train.ema import NoEMA
+from priml.train.grad_clip import total_grad_norm
 from priml.train.parallelism import NoParallel
 from priml.train.quantization import NoModelQuantization
 
@@ -184,10 +190,10 @@ class TrainStep:
         have. Counted by the dataset, which owns the only boundary that can
         say a pass ended."""
 
-        lr_schedule: Makeable[Schedule[float]] = field(
+        lr_schedule: Makeable[Schedule[float] | AbsoluteRateSchedule] = field(
             default_factory=lambda: PartialConfig(constant),
         )
-        """Maps the learning schedule's progress to a rate multiplier.
+        """Maps progress to a multiplier, or an integer clock to absolute rates.
 
         A plain function, not a ``torch.optim.lr_scheduler``: those hold the
         optimizer and mutate its groups from a counter they own, so their state
@@ -196,7 +202,10 @@ class TrainStep:
         cannot. :mod:`priml.math.schedules` carries the usual curves.
 
         The multiplier scales each group's ``initial_lr``, so a recipe running
-        several rates at once keeps their ratios."""
+        several rates at once keeps their ratios. An ``AbsoluteRateSchedule``
+        instead computes each full rate from that initial value and the
+        caller's integer clock, preserving recurrence rounding without owning
+        an optimizer or a second clock."""
 
         parallelism: Makeable[ParallelStrategyProtocol] = field(
             default_factory=NoParallel.Config,
@@ -275,12 +284,24 @@ class TrainStep:
     def __init__[ModelConfigT: Makeable[nn.Module]](
         self,
         config: Config[ModelConfigT],
+        *,
+        model: nn.Module | None = None,
     ) -> None:
+        """Build the configured model, or prepare an already constructed model.
+
+        Args:
+          config: Declarative training recipe, including the model architecture.
+          model: Optional runtime model. It follows the same quantization,
+            placement, and activation-storage lifecycle as a configured model;
+            eager parameters are preserved and meta parameters are materialized
+            by the parallel strategy.
+
+        """
         self.config = config
 
-        if config.gradient_clip_norm <= 0:
+        if math.isnan(config.gradient_clip_norm) or config.gradient_clip_norm < 0:
             raise ValueError(
-                f"gradient_clip_norm must be positive, got {config.gradient_clip_norm}",
+                f"gradient_clip_norm must be nonnegative, got {config.gradient_clip_norm}",
             )
         if config.accumulate_grad_batches <= 0:
             raise ValueError(
@@ -341,11 +362,12 @@ class TrainStep:
                 f"{config.device_init!r}. It names how storage is allocated, "
                 "not where -- set the device on ``parallelism``.",
             )
-        if config.device_init == "eager":
-            model = self.config.model.make()
-        else:
-            with torch.device("meta"):
+        if model is None:
+            if config.device_init == "eager":
                 model = self.config.model.make()
+            else:
+                with torch.device("meta"):
+                    model = self.config.model.make()
 
         # Quantization rewrites modules BEFORE the parallel strategy so the
         # strategy shards/materializes the final module graph.
@@ -368,7 +390,9 @@ class TrainStep:
         # the recipe was tuned at rather than compounding on the last step's.
         remember_initial_lrs([self.optimizer])
 
-        self.lr_schedule: Schedule[float] = self.config.lr_schedule.make()
+        self.lr_schedule: Schedule[float] | AbsoluteRateSchedule = (
+            self.config.lr_schedule.make()
+        )
 
         self.ema: EMAProtocol = self.config.ema.make()
 
@@ -585,10 +609,14 @@ class TrainStep:
         # counter incremented at the end instead would leave the schedule
         # reading a progress one step stale.
         with self.timer_step:
-            self.last_grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(),
-                self.gradient_clip_norm,
-                foreach=True,
+            self.last_grad_norm = (
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    self.gradient_clip_norm,
+                    foreach=True,
+                )
+                if math.isfinite(self.gradient_clip_norm)
+                else total_grad_norm(self.model.parameters())
             )
             # Still inside the tally: the skipped update counts toward
             # ``global_step`` so the schedule and stop conditions see it.
@@ -610,26 +638,58 @@ class TrainStep:
             # would take effect a step late and the first update would land at
             # the unscheduled rate.
             self.apply_learning_rate()
-            if closure is not None and getattr(
-                self.optimizer,
-                "requires_closure",
-                False,
-            ):
-                self.optimizer.step(closure)
-            else:
-                self.optimizer.step()
+            updated = self.optimizer_step(closure)
             self.optimizer.zero_grad(set_to_none=True)
-            self.ema(self.model)
+            if updated:
+                self.ema(self.model)
 
-    def apply_learning_rate(self) -> None:
+    def optimizer_step(
+        self,
+        closure: Callable[[], Tensor | float] | None = None,
+    ) -> bool:
+        """Apply the optimizer and report whether it changed the model.
+
+        A mixed-precision subclass unscales before :meth:`step` and overrides
+        this operation to drive its scaler. Returning false still clears
+        gradients and counts the attempt, while leaving the EMA unchanged.
+
+        Args:
+          closure: Loss recomputation for an optimizer requiring a closure.
+
+        Returns:
+          updated: Whether the optimizer performed an update.
+
+        """
+        if closure is not None and getattr(self.optimizer, "requires_closure", False):
+            self.optimizer.step(closure)
+        else:
+            self.optimizer.step()
+        return True
+
+    def apply_learning_rate(self, *, schedule_step: int | None = None) -> None:
         """Scale every group's rate by the schedule at the current progress.
 
         Each group is scaled from its own ``initial_lr``, never from its
         current one: a recipe running several rates at once (a token table at
         0.6 beside an unembedding at 0.004) keeps their ratios, and repeated
-        application cannot compound.
+        application cannot compound. Absolute-rate schedules use the optimizer
+        attempt count by default; a recipe may supply its completed epoch or
+        successful-update count instead.
+
+        Args:
+          schedule_step: Integer clock for an absolute-rate schedule. Multiplier
+            schedules continue to use ``progress_learning_schedule``.
+
         """
-        multiplier = self.lr_schedule(self.progress_learning_schedule)
+        schedule = self.lr_schedule
+        if isinstance(schedule, AbsoluteRateSchedule):
+            index = self.global_step if schedule_step is None else schedule_step
+            apply_lr_schedule(
+                [self.optimizer],
+                lambda initial_lr: schedule.learning_rate(initial_lr, step=index),
+            )
+            return
+        multiplier = schedule(self.progress_learning_schedule)
         assert isinstance(multiplier, (int, float))
         apply_lr_scale([self.optimizer], multiplier)
 

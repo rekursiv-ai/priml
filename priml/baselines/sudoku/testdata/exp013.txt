@@ -180,6 +180,7 @@ FittedSieve.Config(
         │   │   │       dropout=0.0,
         │   │   │       causal=False,
         │   │   │       rope=None,
+        │   │   │       rotate=None,
         │   │   │       norm_qk=RMSNorm.Config(
         │   │   │           channels_in=64,
         │   │   │           channels_out=64,
@@ -346,6 +347,7 @@ FittedSieve.Config(
         │   │   │       dropout=0.0,
         │   │   │       causal=False,
         │   │   │       rope=None,
+        │   │   │       rotate=None,
         │   │   │       norm_qk=RMSNorm.Config(
         │   │   │           channels_in=64,
         │   │   │           channels_out=64,

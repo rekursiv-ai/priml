@@ -33,6 +33,7 @@ MMDiTGraft.Config(
         │   │               frequencies=HuggingFaceFrequencies.Config(base=1000000.0),
         │   │               dtype=torch.float32
         │   │           ),
+        │   │           rotate=None,
         │   │           norm_qk=RMSNorm.Config(
         │   │               channels_in=6,
         │   │               channels_out=6,
@@ -132,6 +133,7 @@ MMDiTGraft.Config(
         │           dropout=0.0,
         │           causal=False,
         │           rope=None,
+        │           rotate=None,
         │           norm_qk=None,
         │           share_qk_norm=True,
         │           norm_out=None,
@@ -220,6 +222,7 @@ MMDiTGraft.Config(
         │       │   │           frequencies=HuggingFaceFrequencies.Config(base=1000000.0),
         │       │   │           dtype=torch.float32
         │       │   │       ),
+        │       │   │       rotate=None,
         │       │   │       norm_qk=RMSNorm.Config(
         │       │   │           channels_in=6,
         │       │   │           channels_out=6,
@@ -246,6 +249,7 @@ MMDiTGraft.Config(
         │       │   │       dropout=0.0,
         │       │   │       causal=False,
         │       │   │       rope=None,
+        │       │   │       rotate=None,
         │       │   │       norm_qk=None,
         │       │   │       share_qk_norm=True,
         │       │   │       norm_out=None,
@@ -288,6 +292,7 @@ MMDiTGraft.Config(
         │       │               frequencies=HuggingFaceFrequencies.Config(base=1000000.0),
         │       │               dtype=torch.float32
         │       │           ),
+        │       │           rotate=None,
         │       │           norm_qk=RMSNorm.Config(
         │       │               channels_in=6,
         │       │               channels_out=6,
@@ -354,6 +359,7 @@ MMDiTGraft.Config(
         │       │           dropout=0.0,
         │       │           causal=False,
         │       │           rope=None,
+        │       │           rotate=None,
         │       │           norm_qk=None,
         │       │           share_qk_norm=True,
         │       │           norm_out=None,

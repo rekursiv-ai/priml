@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import KW_ONLY
 from typing import Self, override
 
-from configgle import Fig
+from configgle import Fig, Makes
 from torch import Tensor, nn
 from torch.nn import functional
 
@@ -341,6 +341,21 @@ class LayerNorm(nn.LayerNorm):
     def forward(self, input: Tensor, **kwargs: object) -> Tensor:
         del kwargs
         return super().forward(input)
+
+
+class LayerNorm2d(LayerNorm):
+    """Normalize the channel axis of an NCHW tensor."""
+
+    class Config(Makes["LayerNorm2d"], LayerNorm.Config):
+        eps: float = 1e-6
+        """Epsilon added to the channel variance."""
+
+        elementwise_affine: bool = True
+        """Learn a channel scale and bias."""
+
+    @override
+    def forward(self, input: Tensor, **kwargs: object) -> Tensor:
+        return super().forward(input.permute(0, 2, 3, 1), **kwargs).permute(0, 3, 1, 2)
 
 
 class BatchNorm(nn.BatchNorm1d):

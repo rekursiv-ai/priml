@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import fields
 from pathlib import Path
 from typing import Final
 
 import warnings
 
 from torch.nn import functional
+from treekle import from_plain, to_plain
 
 import pytest
 import torch
@@ -22,8 +24,9 @@ from priml.model.convnext import (
     ConvNeXtStem,
 )
 from priml.model.linear import Linear
-from priml.model.norm import BatchNorm, BatchNorm2d, LayerNorm
+from priml.model.norm import BatchNorm, BatchNorm2d, LayerNorm, LayerNorm2d
 from priml.model.sequential import Sequential
+from priml.model.special import Identity
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.cost import assert_cost_matches_torch
@@ -31,6 +34,211 @@ from priml.testing.golden import read_tensors
 
 
 _CWD: Final = Path(__file__).resolve().parent
+
+
+def _binary64_drop_path(maximum: float, count: int) -> tuple[float, ...]:
+    return tuple(maximum * index / max(count - 1.0, 1.0) for index in range(count))
+
+
+def test_injected_schedule_round_trips_in_the_printed_configuration() -> None:
+    config = ConvNeXt.Config(channels_hidden=(3, 4), blocks_per_stage=(2, 3))
+    config.drop_path_schedule = _binary64_drop_path
+    restored = from_plain(to_plain(config), ConvNeXt.Config, allow_imports=True)
+    assert restored.drop_path_schedule is _binary64_drop_path
+    assert "_binary64_drop_path" in restored.pformat(hide_default_values=False)
+    assert restored.block_counts() == (2, 3)
+
+
+def test_tiny_default_and_direct_downsampler_fields() -> None:
+    config = ConvNeXt.Config()
+    assert config.blocks_per_stage == (3, 3, 9, 3)
+    assert isinstance(config.stage, ConvNeXtStage.Config)
+    names = {entry.name for entry in fields(config.stage)}
+    assert not names & {"stride", "norm", "proj_in"}
+    assert isinstance(config.stage.downsample, Sequential.Config)
+    config.channels_hidden = (3, 4)
+    config.blocks_per_stage = (2, 3)
+    resolved = config.finalized()
+    assert isinstance(resolved.stage, list)
+    assert isinstance(resolved.stage[0].downsample, Identity.Config)
+    assert isinstance(resolved.stage[1].downsample, Sequential.Config)
+    assert resolved.feature_grid((24, 40)) == (3, 5)
+
+
+@pytest.mark.parametrize(
+    ("factory", "output_grid"),
+    [
+        (ConvNeXtStem.Config, (4, 7)),
+        (ConvNeXtBlock.Config, (16, 28)),
+        (ConvNeXtStage.Config, (8, 14)),
+    ],
+)
+@pytest.mark.parametrize(("channels_in", "channels_out"), [(-1, 5), (3, -1)])
+def test_components_infer_either_missing_width_before_execution(
+    factory: type[ConvNeXtStem.Config | ConvNeXtBlock.Config | ConvNeXtStage.Config],
+    output_grid: tuple[int, int],
+    channels_in: int,
+    channels_out: int,
+) -> None:
+    config = factory()
+    config.channels_in = channels_in
+    config.channels_out = channels_out
+    width = max(channels_in, channels_out)
+    finalized = config.finalized()
+    assert finalized.channels_in == finalized.channels_out == width
+    assert finalized.make()(torch.zeros(2, width, 16, 28)).shape == (
+        2,
+        width,
+        *output_grid,
+    )
+
+
+def test_explicit_stages_keep_first_downsample_and_child_initializers() -> None:
+    config = ConvNeXt.Config(channels_hidden=(3, 4), blocks_per_stage=(7, 8))
+    config.stage = [
+        ConvNeXtStage.Config(
+            downsample=Conv2d.Config(
+                kernel_size=3,
+                stride=2,
+                padding=1,
+                init_weight=torch.nn.init.ones_,
+            ),
+            blocks_per_stage=2,
+        ),
+        ConvNeXtStage.Config(
+            downsample=Conv2d.Config(kernel_size=3, stride=3, padding=1),
+            block=[ConvNeXtBlock.Config(drop_path=0.375)],
+        ),
+    ]
+    config.drop_path = 0.2
+    resolved = config.finalized()
+    assert isinstance(resolved.stage, list)
+    first = resolved.stage[0]
+    assert isinstance(first.downsample, Conv2d.Config)
+    assert first.downsample.stride == 2
+    assert first.downsample.init_weight is torch.nn.init.ones_
+    assert config.block_counts() == (2, 1)
+    assert isinstance(first.block, list)
+    assert (
+        tuple(block.drop_path for block in first.block)
+        == tuple(
+            float(rate) for rate in torch.linspace(0, 0.2, 3, dtype=torch.float32)
+        )[:2]
+    )
+    assert isinstance(resolved.stage[1].block, list)
+    assert resolved.stage[1].block[0].drop_path == 0.375
+    assert resolved.feature_grid((48, 80)) == (2, 4)
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(2, 3, 48, 80, requires_grad=True),
+        input_grid=(48, 80),
+        batch_size=2,
+        dtype=torch.float32,
+    )
+
+
+def test_injected_schedule_preserves_binary64_rate_bits_and_explicit_blocks() -> None:
+    config = ConvNeXt.Config(channels_hidden=(3, 4), blocks_per_stage=(2, 3))
+    config.drop_path = 0.1
+    config.drop_path_schedule = _binary64_drop_path
+    resolved = config.finalized()
+    assert isinstance(resolved.stage, list)
+    actual = tuple(
+        block.drop_path
+        for stage in resolved.stage
+        if isinstance(stage.block, list)
+        for block in stage.block
+    )
+    expected = tuple(0.1 * index / max(5 - 1.0, 1.0) for index in range(5))
+    assert actual == expected
+    assert actual != tuple(
+        float(value) for value in torch.linspace(0, 0.1, 5, dtype=torch.float32)
+    )
+    assert isinstance(config.stage, ConvNeXtStage.Config)
+    config.stage.block = [ConvNeXtBlock.Config(drop_path=0.375)]
+    resolved = config.finalized()
+    assert isinstance(resolved.stage, list)
+    assert all(
+        block.drop_path == 0.375
+        for stage in resolved.stage
+        if isinstance(stage.block, list)
+        for block in stage.block
+    )
+
+
+def _empty_drop_path(maximum: float, count: int) -> tuple[float, ...]:
+    del maximum, count
+    return ()
+
+
+def test_schedule_cardinality_is_checked_before_parameter_allocation() -> None:
+    config = ConvNeXt.Config(channels_hidden=(3, 4), blocks_per_stage=(2, 3))
+    config.drop_path_schedule = _empty_drop_path
+    allocations: list[torch.Tensor] = []
+    config.stem.conv.init_weight = allocations.append
+    with pytest.raises(ValueError, match="one rate per block"):
+        config.make()
+    assert allocations == []
+
+
+def test_template_and_declared_stages_keep_all_initial_state_draws_and_gradients() -> (
+    None
+):
+    config = ConvNeXt.Config(channels_hidden=(3, 4), blocks_per_stage=(2, 3))
+    config.drop_path = 0.1
+    explicit = config.copy_tree()
+    assert isinstance(config.stage, ConvNeXtStage.Config)
+    first, second = explicit.stage = [
+        config.stage.copy_tree(),
+        config.stage.copy_tree(),
+    ]
+    first.downsample = Identity.Config()
+    first.blocks_per_stage, second.blocks_per_stage = config.blocks_per_stage
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(29)
+        model = config.make()
+        after = torch.get_rng_state()
+        torch.manual_seed(29)
+        reference = explicit.make()
+        assert torch.equal(torch.get_rng_state(), after)
+        assert list(model.state_dict()) == list(reference.state_dict())
+        assert "stages.1.downsample.0.weight" in model.state_dict()
+        assert "stages.1.downsample.1.weight" in model.state_dict()
+        for name, value in model.state_dict().items():
+            assert torch.equal(value, reference.state_dict()[name])
+        value = (
+            torch.arange(2 * 3 * 16 * 24, dtype=torch.float32).reshape(2, 3, 16, 24)
+            / 101
+        )
+        left, right = value.clone().requires_grad_(), value.clone().requires_grad_()
+        torch.manual_seed(31)
+        actual = model(left)
+        actual.square().sum().backward()
+        after = torch.get_rng_state()
+        torch.manual_seed(31)
+        expected = reference(right)
+        expected.square().sum().backward()
+        assert torch.equal(torch.get_rng_state(), after)
+        assert torch.equal(actual, expected)
+        assert left.grad is not None
+        assert right.grad is not None
+        assert torch.equal(left.grad, right.grad)
+        for first_parameter, second_parameter in zip(
+            model.parameters(),
+            reference.parameters(),
+            strict=True,
+        ):
+            assert first_parameter.grad is not None
+            assert second_parameter.grad is not None
+            assert torch.equal(first_parameter.grad, second_parameter.grad)
+        torch.manual_seed(37)
+        model.reset_parameters()
+        after = torch.get_rng_state()
+        torch.manual_seed(37)
+        reference.reset_parameters()
+        assert torch.equal(torch.get_rng_state(), after)
+        for name, value in model.state_dict().items():
+            assert torch.equal(value, reference.state_dict()[name])
 
 
 @pytest.mark.parametrize("component", ["stem", "block", "stage", "head", "network"])
@@ -218,7 +426,7 @@ def test_explicit_stage_cardinality_fails_before_stem_allocation(
 
 
 @pytest.mark.parametrize("counts", [(1, 1, 1, 1), (2, 1, 1, 1)])
-def test_explicit_block_geometry_owns_the_complete_drop_path_schedule(
+def test_explicit_block_geometry_preserves_individual_drop_path_edits(
     counts: tuple[int, ...],
 ) -> None:
     config = ConvNeXt.Config()
@@ -226,26 +434,29 @@ def test_explicit_block_geometry_owns_the_complete_drop_path_schedule(
     config.blocks_per_stage = (1, 1, 1, 1)
     config.drop_path = 0.9
     config.stage = [
-        ConvNeXtStage.Config(block=[ConvNeXtBlock.Config() for _ in range(count)])
-        for count in counts
+        ConvNeXtStage.Config(
+            downsample=Identity.Config()
+            if index == 0
+            else Sequential.Config(
+                elements=[
+                    LayerNorm2d.Config(),
+                    Conv2d.Config(kernel_size=2, stride=2, padding=0, bias=True),
+                ],
+            ),
+            block=[
+                ConvNeXtBlock.Config(drop_path=0.125 * offset)
+                for offset in range(count)
+            ],
+        )
+        for index, count in enumerate(counts)
     ]
     if counts[0] == 1:
         config.blocks_per_stage = (3, 3, 27, 3)
     model = config.make()
     assert [len(stage.blocks) for stage in model.stages] == list(counts)
     actual = tuple(block.drop_path for stage in model.stages for block in stage.blocks)
-    expected = tuple(
-        float(rate)
-        for rate in torch.linspace(
-            0,
-            config.drop_path,
-            sum(counts),
-            dtype=torch.float32,
-        )
-    )
+    expected = tuple(0.125 * offset for count in counts for offset in range(count))
     assert actual == expected
-    assert config.drop_path_rates() == expected
-    assert config.finalized().drop_path_rates() == expected
 
 
 def test_nested_downsampling_declares_the_executed_grid_and_cost() -> None:
@@ -274,15 +485,14 @@ def test_nested_downsampling_declares_the_executed_grid_and_cost() -> None:
     )
 
 
-def test_explicit_template_blocks_report_the_repeated_stage_schedule() -> None:
+def test_explicit_template_blocks_preserve_the_repeated_probability() -> None:
     config = ConvNeXt.Config()
     config.channels_hidden = (2, 3)
     config.blocks_per_stage = (3, 3)
     config.drop_path = 0.9
     assert isinstance(config.stage, ConvNeXtStage.Config)
-    config.stage.block = [ConvNeXtBlock.Config()]
-    expected = (0.0, float(torch.tensor(0.9, dtype=torch.float32)))
-    assert config.drop_path_rates() == expected
+    config.stage.block = [ConvNeXtBlock.Config(drop_path=0.375)]
+    expected = (0.375, 0.375)
     model = config.make()
     assert (
         tuple(block.drop_path for stage in model.stages for block in stage.blocks)
@@ -321,7 +531,10 @@ def test_drop_path_schedule_fixes_float32_independently_of_ambient_dtype() -> No
     try:
         for dtype in (torch.float32, torch.float64):
             torch.set_default_dtype(dtype)
-            assert config.drop_path_rates() == expected
+            assert (
+                config.drop_path_schedule(config.drop_path, sum(config.block_counts()))
+                == expected
+            )
     finally:
         torch.set_default_dtype(original)
 
@@ -388,8 +601,7 @@ def test_nan_stochastic_depth_fails_before_branch_allocation() -> None:
 
 def test_unfinalized_stage_is_rejected() -> None:
     with pytest.raises(
-        ValueError,
-        match=r"^Expected config.downsample is not None[.]$",
+        AssertionError,
     ):
         ConvNeXtStage(ConvNeXtStage.Config())
 

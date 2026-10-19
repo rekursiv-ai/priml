@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import field
 from pathlib import Path
-from typing import Final, override
+from typing import TYPE_CHECKING, Final, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
+from torch.utils._python_dispatch import TorchDispatchMode
 
 import pytest
 import torch
 
-from priml.cost import Cost
+from priml.cost import Cost, cost
 from priml.model.attention.attention import Attention
 from priml.model.attention.gated_delta_net import GatedDeltaNet
 from priml.model.attention.mla import MultiHeadLatentAttention
@@ -40,7 +42,15 @@ from priml.model.norm import (
     LayerNorm,
     RMSNorm,
 )
-from priml.model.special import Identity, Skip, TiedLinear
+from priml.model.special import (
+    Activation,
+    Dropout,
+    Identity,
+    Skip,
+    TiedLinear,
+    dropout_cost,
+)
+from priml.model.swiglu import relu, silu
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.mmdit import MMDiTBlock
 from priml.testing.bfb import assert_bfb_against_golden
@@ -48,7 +58,193 @@ from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.golden import assert_pprint_golden
 
 
+if TYPE_CHECKING:
+    from torch._ops import OpOverload
+
+    from priml.math.custom_types import TensorFn
+
+
 _CWD: Final = Path(__file__).resolve().parent
+
+
+@pytest.mark.parametrize("probability", [0.0, 0.25, 1.0])
+@pytest.mark.parametrize("training", [False, True])
+def test_dropout_matches_torch_values_gradients_and_next_draw(
+    probability: float,
+    training: bool,
+) -> None:
+    config = Dropout.Config()
+    config.p = probability
+    config.channels_out = 3
+    native = config.make().train(training)
+    reference = nn.Dropout(probability).train(training)
+    source = torch.arange(2 * 3 * 4, dtype=torch.float64).reshape(2, 3, 4) / 17
+    left, right = source.clone().requires_grad_(), source.clone().requires_grad_()
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(17)
+        expected = reference(left)
+        expected.square().sum().backward()
+        after = torch.get_rng_state()
+        torch.manual_seed(17)
+        actual = native(right, ignored=True)
+        actual.square().sum().backward()
+        assert actual.dtype == expected.dtype
+        assert right.grad is not None
+        assert left.grad is not None
+        assert torch.equal(actual, expected)
+        assert torch.equal(right.grad, left.grad)
+        assert torch.equal(torch.get_rng_state(), after)
+    assert native.state_dict() == {}
+    native.reset_parameters()
+    finalized = config.copy_tree().finalize()
+    assert finalized.channels_in == finalized.channels_out == 3
+    assert finalized.output_grid((4, 5)) == (4, 5)
+
+
+def test_dropout_cost_distinguishes_channel_masks_and_disabled_modes() -> None:
+    dtype = torch.float64
+    per_element = dropout_cost(0.25, elements=24, masks=24, dtype=dtype)
+    per_channel = dropout_cost(0.25, elements=24, masks=6, dtype=dtype)
+    assert per_element["flops", "primal"].sum() == 48
+    assert per_channel["flops", "primal"].sum() == 30
+    assert per_channel["flops", "adjoint"].sum() == 24
+    assert per_channel["bytes", "primal"].sum() == 8 * (2 * 24 + 4 * 6)
+    assert per_channel["bytes", "adjoint"].sum() == 8 * (2 * 24 + 6)
+    assert dropout_cost(0.0, elements=24, masks=24, dtype=dtype) == Cost()
+    assert (
+        dropout_cost(0.25, elements=24, masks=24, dtype=dtype, training=False) == Cost()
+    )
+    zeros = dropout_cost(1.0, elements=24, masks=24, dtype=dtype)
+    assert zeros["flops", "primal"].sum() == zeros["flops", "adjoint"].sum() == 24
+    config = Dropout.Config()
+    config.channels_in = 3
+    config.p = 0.25
+    assert config.cost(seq_len=4, batch_size=2, dtype=dtype) == per_element
+    config.channels_in = -1
+    assert config.cost(channels=3, seq_len=4, batch_size=2, dtype=dtype) == per_element
+
+
+def test_inplace_dropout_preserves_storage_and_complete_gradient() -> None:
+    config = Dropout.Config()
+    config.inplace = True
+    config.p = 0.25
+    native = config.make()
+    reference = nn.Dropout(0.25, inplace=True)
+    left = torch.arange(24, dtype=torch.float64).reshape(2, 3, 4).requires_grad_()
+    right = left.detach().clone().requires_grad_()
+    first, second = left * 1, right * 1
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(23)
+        actual = native(first)
+        torch.manual_seed(23)
+        expected = reference(second)
+    assert actual.data_ptr() == first.data_ptr()
+    assert expected.data_ptr() == second.data_ptr()
+    assert actual.dtype == expected.dtype
+    assert torch.equal(actual, expected)
+    assert torch.equal(
+        torch.autograd.grad(actual.sum(), left)[0],
+        torch.autograd.grad(expected.sum(), right)[0],
+    )
+
+
+@pytest.mark.parametrize("width", [0, -2])
+def test_dropout_rejects_inconsistent_widths(width: int) -> None:
+    config = Dropout.Config()
+    config.channels_in, config.channels_out = 3, width
+    with pytest.raises(ValueError, match="must equal"):
+        config.make()
+
+
+@pytest.mark.parametrize("function", [relu, silu])
+def test_activation_uses_its_injected_function_and_cost(function: TensorFn) -> None:
+    config = Activation.Config()
+    config.channels_in = 3
+    config.act = function
+    native = config.make()
+    value = torch.arange(24, dtype=torch.float64).reshape(2, 4, 3) / 7 - 1
+    left, right = value.clone().requires_grad_(), value.clone().requires_grad_()
+    actual, expected = native(left, ignored=True), function(right)
+    assert actual.dtype == expected.dtype
+    assert torch.equal(actual, expected)
+    assert torch.equal(
+        torch.autograd.grad(actual.sum(), left)[0],
+        torch.autograd.grad(expected.sum(), right)[0],
+    )
+    assert config.cost(seq_len=4, batch_size=2, dtype=torch.float64) == cost(
+        function,
+        channels=24,
+        dtype=torch.float64,
+    )
+    assert native.state_dict() == {}
+    native.reset_parameters()
+    assert config.copy_tree().finalize().output_grid((4, 5)) == (4, 5)
+
+
+def test_activation_rejects_an_uncosted_function() -> None:
+    config = Activation.Config()
+    config.act = torch.neg
+    with pytest.raises(TypeError, match="has no cost"):
+        config.cost(channels=3, seq_len=4, batch_size=2, dtype=torch.float32)
+
+
+class _MaskTrace(TorchDispatchMode):
+    def __init__(self) -> None:
+        super().__init__()
+        self.elements: defaultdict[str, list[int]] = defaultdict(list)
+
+    @override
+    def __torch_dispatch__(
+        self,
+        func: OpOverload[..., object],
+        types: tuple[type, ...],
+        args: tuple[object, ...] = (),
+        kwargs: dict[str, object] | None = None,
+    ) -> object:
+        del types
+        output = func(*args, **(kwargs or {}))
+        if isinstance(output, Tensor):
+            self.elements[str(func)].append(output.numel())
+        return output
+
+
+@pytest.mark.parametrize("channelwise", [False, True])
+def test_torch_dropout_scales_each_mask_then_multiplies_values_and_gradients(
+    channelwise: bool,
+) -> None:
+    value = torch.ones(2, 3, 4, 5, requires_grad=True)
+    with torch.random.fork_rng(devices=[]), _MaskTrace() as trace:
+        output = (
+            nn.functional.dropout2d(value, p=0.25)
+            if channelwise
+            else nn.functional.dropout(value, p=0.25)
+        )
+        output.backward(torch.ones_like(output))
+    masks = 6 if channelwise else 120
+    assert trace.elements["aten.bernoulli_.float"] == [masks]
+    assert trace.elements["aten.div_.Scalar"] == [masks]
+    assert trace.elements["aten.mul.Tensor"] == [120, 120]
+
+
+@pytest.mark.parametrize("probability", [0.0, 1.0])
+@pytest.mark.parametrize("training", [False, True])
+def test_dropout_disabled_and_constant_zero_modes_draw_no_mask(
+    probability: float,
+    training: bool,
+) -> None:
+    value = torch.ones(2, 3, 4, 5, requires_grad=True)
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(19)
+        before = torch.get_rng_state()
+        with _MaskTrace() as trace:
+            nn.functional.dropout(
+                value,
+                p=probability,
+                training=training,
+            ).sum().backward()
+        assert not trace.elements["aten.bernoulli_.float"]
+        assert not trace.elements["aten.div_.Scalar"]
+        assert torch.equal(torch.get_rng_state(), before)
 
 
 def test_identity_config_pprint() -> None:
@@ -236,7 +432,7 @@ def test_skip_reset():
 
 
 def test_skip_requires_inner():
-    with pytest.raises(ValueError, match="inner"):
+    with pytest.raises(ValueError, match=r"^Must specify `inner`\.$"):
         Skip.Config().make()
 
 

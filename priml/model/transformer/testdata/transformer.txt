@@ -27,6 +27,7 @@ Transformer.Config(
         │           dropout=0.0,
         │           causal=True,
         │           rope=None,
+        │           rotate=None,
         │           norm_qk=None,
         │           share_qk_norm=True,
         │           norm_out=None,

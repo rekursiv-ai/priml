@@ -17,10 +17,12 @@ from priml.model.conv import (
     Conv1d,
     Conv2d,
     Conv3d,
+    ConvTranspose2d,
     SequenceConv1d,
     conv_cost,
     conv_output_grid,
 )
+from priml.model.init import kaiming_uniform
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import (
     _convolution_backward_flops,
@@ -31,6 +33,215 @@ from priml.testing.golden import assert_pprint_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_transpose_constructor_matches_torch_weight_layout_bias_and_rng(
+    dtype: torch.dtype,
+) -> None:
+    # ConvTranspose2d's transposed weight layout gives this grouped fan-in352.
+    config = ConvTranspose2d.Config(6, 176, kernel_size=2, groups=2, dtype=dtype)
+    config.init_bias = None
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(19)
+        expected = torch.nn.ConvTranspose2d(6, 176, 2, stride=2, groups=2, dtype=dtype)
+        after = torch.get_rng_state()
+        torch.manual_seed(19)
+        actual = config.make()
+        assert list(actual.state_dict()) == ["weight", "bias"]
+        assert actual.weight.shape == (6, 88, 2, 2)
+        assert actual.bias is not None
+        assert expected.bias is not None
+        assert torch.equal(actual.weight, expected.weight)
+        assert torch.equal(actual.bias, expected.bias)
+        assert torch.equal(torch.get_rng_state(), after)
+        torch.manual_seed(23)
+        expected.reset_parameters()
+        after = torch.get_rng_state()
+        torch.manual_seed(23)
+        actual.reset_parameters()
+        assert torch.equal(actual.weight, expected.weight)
+        assert torch.equal(actual.bias, expected.bias)
+        assert torch.equal(torch.get_rng_state(), after)
+
+
+@pytest.mark.parametrize("groups", [1, 2])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_transpose_complete_outputs_and_gradients_follow_torch_geometry(
+    groups: int,
+    dtype: torch.dtype,
+) -> None:
+    config = ConvTranspose2d.Config(4, 6)
+    config.kernel_size = (2, 3)
+    config.stride = (2, 3)
+    config.padding = (1, 2)
+    config.dilation = (2, 1)
+    config.output_padding = (1, 2)
+    config.groups = groups
+    config.dtype = dtype
+    actual = config.make()
+    expected = torch.nn.ConvTranspose2d(
+        4,
+        6,
+        (2, 3),
+        (2, 3),
+        (1, 2),
+        (1, 2),
+        groups,
+        True,
+        (2, 1),
+        dtype=dtype,
+    )
+    expected.load_state_dict(actual.state_dict())
+    value = torch.arange(2 * 4 * 3 * 5, dtype=dtype).reshape(2, 4, 3, 5) / 37 - 1
+    left, right = value.clone().requires_grad_(), value.clone().requires_grad_()
+    got, want = actual(left, ignored=True), expected(right)
+    assert got.dtype == want.dtype
+    assert torch.equal(got, want)
+    assert config.output_grid((3, 5)) == got.shape[-2:]
+    got.square().sum().backward()
+    want.square().sum().backward()
+    assert left.grad is not None
+    assert right.grad is not None
+    assert torch.equal(left.grad, right.grad)
+    for first, second in zip(actual.parameters(), expected.parameters(), strict=True):
+        assert first.grad is not None
+        assert second.grad is not None
+        assert torch.equal(first.grad, second.grad)
+    assert torch.equal(
+        actual(left.detach(), output_size=list(want.shape)),
+        want.detach(),
+    )
+
+
+def test_transpose_injected_initializers_keep_depth_and_weight_then_bias_order() -> (
+    None
+):
+    config = ConvTranspose2d.Config(channels_out=3)
+    config.init_weight = torch.nn.init.ones_
+    config.init_bias = torch.nn.init.zeros_
+    native = config.make()
+    assert native.in_channels == native.out_channels == 3
+    assert torch.equal(native.weight, torch.ones_like(native.weight))
+    assert native.bias is not None
+    assert torch.equal(native.bias, torch.zeros_like(native.bias))
+    config.channels_in = 2
+    config.depth_index = ((3, 4),)
+    config.init_weight = kaiming_uniform
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(17)
+        native = config.make()
+        after = torch.get_rng_state()
+        torch.manual_seed(17)
+        weight = torch.empty_like(native.weight)
+        kaiming_uniform(weight, depth_index=config.depth_index)
+        assert torch.equal(native.weight, weight)
+        assert torch.equal(torch.get_rng_state(), after)
+
+    calls: list[torch.Tensor] = []
+    config.init_weight = calls.append
+    config.init_bias = calls.append
+    native = config.make()
+    assert calls[0] is native.weight
+    assert calls[1] is native.bias
+    assert len(calls) == 2
+
+
+def test_transpose_bias_free_leaf_infers_output_width_and_costs_scalar_grid() -> None:
+    config = ConvTranspose2d.Config(channels_in=3, bias=False)
+    resolved = config.finalized()
+    assert resolved.channels_out == 3
+    native = config.make()
+    assert native.bias is None
+    assert list(native.state_dict()) == ["weight"]
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(2, 3, 4, 5, requires_grad=True),
+        input_grid=(4, 5),
+        batch_size=2,
+        dtype=torch.float32,
+    )
+    assert analytical.params == 3 * 3 * 4
+    assert resolved.cost(
+        input_grid=4,
+        batch_size=2,
+        dtype=torch.float32,
+    ) == resolved.cost(
+        input_grid=(4, 4),
+        batch_size=2,
+        dtype=torch.float32,
+    )
+
+
+def test_transpose_zero_output_fan_in_preserves_native_empty_draws() -> None:
+    config = ConvTranspose2d.Config(3, 0, init_bias=None)
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(13)
+        with pytest.warns(UserWarning, match="zero-element"):
+            native = config.make()
+        after = torch.get_rng_state()
+        torch.manual_seed(13)
+        with pytest.warns(UserWarning, match="zero-element"):
+            reference = torch.nn.ConvTranspose2d(3, 0, 2, stride=2)
+        assert torch.equal(torch.get_rng_state(), after)
+        assert native.bias is not None
+        assert reference.bias is not None
+        assert torch.equal(native.bias, reference.bias)
+
+
+@pytest.mark.parametrize("gradient_mask", range(8))
+@pytest.mark.parametrize("groups", [1, 2])
+def test_transpose_cost_matches_complete_native_dispatch(
+    gradient_mask: int,
+    groups: int,
+) -> None:
+    input_grad, weight_grad, bias_grad = (
+        bool(gradient_mask & (1 << index)) for index in range(3)
+    )
+    config = ConvTranspose2d.Config(4, 6)
+    config.kernel_size = (2, 3)
+    config.stride = (2, 3)
+    config.padding = (1, 2)
+    config.output_padding = (1, 2)
+    config.dilation = (2, 1)
+    config.groups = groups
+    config.dtype = torch.float64
+    module = config.make()
+    module.weight.requires_grad_(weight_grad)
+    assert module.bias is not None
+    module.bias.requires_grad_(bias_grad)
+    value = torch.randn(2, 4, 3, 5, dtype=torch.float64, requires_grad=input_grad)
+    moved = _TrafficMode()
+    with (
+        FlopCounterMode(
+            display=False,
+            custom_mapping={
+                torch.ops.aten.convolution_backward: _convolution_backward_flops,
+            },
+        ) as counter,
+        moved,
+    ):
+        output = module(value)
+        if output.requires_grad:
+            output.sum().backward()
+    analytical = config.cost(
+        input_grid=(3, 5),
+        batch_size=2,
+        dtype=torch.float32,
+        input_grad=input_grad,
+        weight_grad=weight_grad,
+        bias_grad=bias_grad,
+    )
+    assert analytical.params == sum(
+        parameter.numel() for parameter in module.parameters()
+    )
+    assert analytical["flops", "matmul"].sum() == counter.get_total_flops()
+    assert analytical["bytes", "matmul"].sum() == moved.bytes["matmul"]
+    rows = output.shape[0] * math.prod(output.shape[2:])
+    assert analytical["flops", "primal", "elementwise"].sum() == rows * 6
+    assert analytical["flops", "adjoint", "reduction"].sum() == (
+        6 * (rows - 1) if bias_grad else 0
+    )
 
 
 @set_cost(map_cost(primal=1, adjoint=1))
@@ -401,6 +612,67 @@ def test_conv_reset_draws_the_bias_with_its_own_initializer(
     assert module.bias is not None
     assert torch.equal(module.bias, torch.ones(3))
     assert module.weight.ndim == ndim + 2
+
+
+@pytest.mark.parametrize(
+    ("config_type", "reference_type", "ndim"),
+    [
+        (Conv1d.Config, torch.nn.Conv1d, 1),
+        (Conv2d.Config, torch.nn.Conv2d, 2),
+        (Conv3d.Config, torch.nn.Conv3d, 3),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_none_bias_initializer_matches_complete_torch_construction(
+    config_type: type[Conv1d.Config | Conv2d.Config | Conv3d.Config],
+    reference_type: type[torch.nn.Conv1d | torch.nn.Conv2d | torch.nn.Conv3d],
+    ndim: int,
+    dtype: torch.dtype,
+) -> None:
+    # A scalar ConvNd kernel repeats its axes; grouped fan-in 352 exposes rounding.
+    channels_in = 2 * 352 // (1 << ndim)
+    torch.manual_seed(19)
+    expected = reference_type(
+        channels_in,
+        6,
+        kernel_size=2,
+        groups=2,
+        bias=True,
+        dtype=dtype,
+    )
+    expected_rng = torch.get_rng_state()
+    config = config_type(
+        channels_in,
+        6,
+        kernel_size=2,
+        groups=2,
+        bias=True,
+        dtype=dtype,
+    )
+    config.init_bias = None
+    torch.manual_seed(19)
+    actual = config.make()
+    assert torch.equal(actual.weight, expected.weight)
+    assert actual.bias is not None
+    assert expected.bias is not None
+    assert torch.equal(actual.bias, expected.bias)
+    assert torch.equal(torch.get_rng_state(), expected_rng)
+
+
+@pytest.mark.parametrize("config_type", [Conv1d.Config, Conv2d.Config, Conv3d.Config])
+def test_zero_fan_in_reset_preserves_allocated_bias_and_rng(
+    config_type: type[Conv1d.Config | Conv2d.Config | Conv3d.Config],
+) -> None:
+    with pytest.warns(UserWarning, match="zero-element"):
+        module = config_type(0, 3, bias=True, init_bias=None).make()
+    assert module.bias is not None
+    with torch.no_grad():
+        module.bias.fill_(0.375)
+    before = torch.get_rng_state()
+    with pytest.warns(UserWarning, match="zero-element"):
+        module.reset_parameters()
+    assert torch.equal(module.bias, torch.full((3,), 0.375))
+    assert torch.equal(torch.get_rng_state(), before)
 
 
 @pytest.mark.parametrize(

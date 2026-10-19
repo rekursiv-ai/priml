@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import KW_ONLY, field
 from typing import TYPE_CHECKING, Self, override
 
 import math
 
-from configgle import Fig, Makeable, Makes
+from configgle import Fig, Makeable
 from torch import Tensor, nn
-from torch.nn import functional
 
 import torch
 
-from priml.cost import Cost, cost, elementwise_cost, map_cost, set_cost
+from priml.cost import Cost, cost, elementwise_cost
 from priml.model.conv import Conv2d, conv_cost
 from priml.model.custom_types import (
     ChannelsIn,
@@ -24,44 +24,28 @@ from priml.model.custom_types import (
     validate_same_width,
 )
 from priml.model.init import kaiming_uniform
-from priml.model.norm import LayerNorm
+from priml.model.norm import LayerNorm, LayerNorm2d
 from priml.model.pool import avg_pool_cost
 from priml.model.sequential import Sequential
 from priml.model.special import Identity
-from priml.model.swiglu import SwiGLU
+from priml.model.state_dict import validate_state_dict
+from priml.model.swiglu import SwiGLU, gelu
 
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
 
-@set_cost(map_cost(primal=5, adjoint=11))
-def gelu(x: Tensor) -> Tensor:
-    """Apply exact GELU with its complete elementwise cost.
-
-    Args:
-      x: Pre-activation values, any shape.
-
-    Returns:
-      activated: ``x * (1 + erf(x / sqrt(2))) / 2``, elementwise.
-
-    """
-    return functional.gelu(x)
+type DropPathSchedule = Callable[[float, int], tuple[float, ...]]
+"""Map the maximum probability and total block count to flat ordered rates."""
 
 
-class LayerNorm2d(LayerNorm):
-    """Normalize the channel axis of an NCHW tensor."""
-
-    class Config(Makes["LayerNorm2d"], LayerNorm.Config):
-        eps: float = 1e-6
-        """Epsilon added to the channel variance."""
-
-        elementwise_affine: bool = True
-        """Learn a channel scale and bias."""
-
-    @override
-    def forward(self, input: Tensor, **kwargs: object) -> Tensor:
-        return super().forward(input.permute(0, 2, 3, 1), **kwargs).permute(0, 3, 1, 2)
+def linear_drop_path(maximum: float, count: int) -> tuple[float, ...]:
+    """Return CPU float32 linspace rates, independent of the ambient dtype."""
+    return tuple(
+        float(rate)
+        for rate in torch.linspace(0, maximum, count, device="cpu", dtype=torch.float32)
+    )
 
 
 class ConvNeXtStem(nn.Module):
@@ -361,7 +345,7 @@ class ConvNeXtBlock(nn.Module):
 
 
 class ConvNeXtStage(nn.Module):
-    """Optional norm-and-convolution downsampling followed by residual blocks."""
+    """Configured spatial downsampling followed by residual blocks."""
 
     class Config(Fig["ConvNeXtStage"]):
         channels_in: int = -1
@@ -375,24 +359,15 @@ class ConvNeXtStage(nn.Module):
         blocks_per_stage: int = 2
         """Number of residual blocks when block is a template."""
 
-        stride: int = 2
-        """Stride of the optional downsampling projection."""
-
-        norm: Makeable[TensorModule] = field(default_factory=LayerNorm2d.Config)
-        """Channel normalization before downsampling."""
-
-        proj_in: Conv2d.Config = field(
-            default_factory=lambda: Conv2d.Config(
-                kernel_size=2,
-                stride=2,
-                padding=0,
-                bias=True,
+        downsample: Makeable[TensorModule] = field(
+            default_factory=lambda: Sequential.Config(
+                elements=[
+                    LayerNorm2d.Config(),
+                    Conv2d.Config(kernel_size=2, stride=2, padding=0, bias=True),
+                ],
             ),
         )
-        """Downsampling convolution and its initialization."""
-
-        downsample: Makeable[TensorModule] | None = None
-        """Explicit downsampling composition; None derives it from widths and stride."""
+        """Executed downsampling composition; use Identity for a preserving stage."""
 
         block: ConvNeXtBlock.Config | list[ConvNeXtBlock.Config] = field(
             default_factory=ConvNeXtBlock.Config,
@@ -405,22 +380,6 @@ class ConvNeXtStage(nn.Module):
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
-            if self.downsample is None:
-                if self.channels_in == self.channels_out and self.stride == 1:
-                    self.downsample = Identity.Config()
-                else:
-                    propagate_attr(
-                        self.norm,
-                        name="channels_in",
-                        value=self.channels_in,
-                        protocol=ChannelsIn,
-                    )
-                    self.proj_in.channels_in = self.channels_in
-                    self.proj_in.channels_out = self.channels_out
-                    self.proj_in.stride = self.stride
-                    self.downsample = Sequential.Config(
-                        elements=[self.norm, self.proj_in],
-                    )
             propagate_attr(
                 self.downsample,
                 name="channels_in",
@@ -485,8 +444,6 @@ class ConvNeXtStage(nn.Module):
 
             """
             del kwargs
-            if self.downsample is None:
-                raise ValueError("Expected self.downsample is not None.")
             assert isinstance(self.block, list)
             total = cost(
                 self.downsample,
@@ -506,8 +463,6 @@ class ConvNeXtStage(nn.Module):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        if config.downsample is None:
-            raise ValueError("Expected config.downsample is not None.")
         assert isinstance(config.block, list)
         self.downsample = config.downsample.make()
         self.blocks = nn.Sequential(*(block.make() for block in config.block))
@@ -627,8 +582,8 @@ class ConvNeXt(nn.Module):
         channels_hidden: tuple[int, ...] = (96, 192, 384, 768)
         """Spatial feature width in each stage."""
 
-        blocks_per_stage: tuple[int, ...] = (3, 3, 27, 3)
-        """Residual block count in each stage."""
+        blocks_per_stage: tuple[int, ...] = (3, 3, 9, 3)
+        """Template block counts; defaults to the standard ConvNeXt Tiny depths."""
 
         stem: ConvNeXtStem.Config = field(default_factory=ConvNeXtStem.Config)
         """Patch projection and normalization."""
@@ -636,13 +591,24 @@ class ConvNeXt(nn.Module):
         stage: ConvNeXtStage.Config | list[ConvNeXtStage.Config] = field(
             default_factory=ConvNeXtStage.Config,
         )
-        """Stage template or explicit stage configurations."""
+        """Stage template or explicit stages; only templates skip first downsampling.
+
+        A template's first copy receives Identity. Explicit stages own every
+        downsample and their block counts, including the first stage.
+        """
 
         head: Makeable[TensorModule] = field(default_factory=ConvNeXtHead.Config)
         """Postpool normalization and output projection."""
 
         drop_path: float = 0.0
         """Maximum residual dropout, linearly increasing across all blocks."""
+
+        drop_path_schedule: DropPathSchedule = linear_drop_path
+        """Rates in complete block order; applied only to block templates.
+
+        Explicit block lists retain each block's probability. Their positions
+        still occupy the schedule, so mixed templates keep absolute depth.
+        """
 
         def block_counts(self) -> tuple[int, ...]:
             """Return realized residual-block counts from the configured stages.
@@ -658,56 +624,60 @@ class ConvNeXt(nn.Module):
             )
             return tuple(
                 len(stage.block) if isinstance(stage.block, list) else count
-                for stage, count in zip(stages, self.blocks_per_stage, strict=False)
-            )
-
-        def drop_path_rates(self) -> tuple[float, ...]:
-            """Return the selected per-block stochastic-depth schedule.
-
-            Returns:
-                rates: CPU float32 linspace values in flat block order.
-
-            """
-            return tuple(
-                float(rate)
-                for rate in torch.linspace(
-                    0,
-                    self.drop_path,
-                    sum(self.block_counts()),
-                    device="cpu",
-                    dtype=torch.float32,
+                for stage, count in zip(
+                    stages,
+                    [stage.blocks_per_stage for stage in stages]
+                    if isinstance(self.stage, list)
+                    else self.blocks_per_stage,
+                    strict=True,
                 )
             )
 
         @override
         def finalize(self) -> Self:
+            templated_stages = isinstance(self.stage, ConvNeXtStage.Config)
+            if (
+                templated_stages
+                and len(self.blocks_per_stage) != len(self.channels_hidden)
+            ) or (
+                isinstance(self.stage, list)
+                and len(self.stage) != len(self.channels_hidden)
+            ):
+                raise ValueError("ConvNeXt width and block stage counts must match.")
             self.stem.channels_in = self.channels_in
             self.stem.channels_out = self.channels_hidden[0]
+            counts = self.block_counts()
+            rates = self.drop_path_schedule(self.drop_path, sum(counts))
+            if len(rates) != sum(counts):
+                raise ValueError("drop_path_schedule must return one rate per block.")
             stages = (
                 self.stage
                 if isinstance(self.stage, list)
                 else [self.stage.copy_tree() for _ in self.channels_hidden]
             )
-            expanded_blocks: list[list[ConvNeXtBlock.Config]] = []
+            offset = 0
             for index, (stage, channels, count) in enumerate(
                 zip(
                     stages,
                     self.channels_hidden,
-                    self.blocks_per_stage,
-                    strict=False,
+                    counts,
+                    strict=True,
                 ),
             ):
                 stage.channels_in = self.channels_hidden[max(0, index - 1)]
                 stage.channels_out = channels
-                stage.stride = 1 if index == 0 else 2
+                if templated_stages and index == 0:
+                    stage.downsample = Identity.Config()
                 if not isinstance(stage.block, list):
                     stage.block = [stage.block.copy_tree() for _ in range(count)]
-                expanded_blocks.append(stage.block)
+                    for block, rate in zip(
+                        stage.block,
+                        rates[offset : offset + count],
+                        strict=True,
+                    ):
+                        block.drop_path = rate
+                offset += count
             self.stage = stages
-            rates = iter(self.drop_path_rates())
-            for blocks in expanded_blocks:
-                for block in blocks:
-                    block.drop_path = next(rates)
             propagate_attr(
                 self.head,
                 name="channels_in",
@@ -755,8 +725,6 @@ class ConvNeXt(nn.Module):
                     batch_size=batch_size,
                     dtype=dtype,
                 )
-                if stage.downsample is None:
-                    raise ValueError("Expected stage.downsample is not None.")
                 grid = stage.output_grid(grid)
             return total + cost(
                 self.head,
@@ -779,8 +747,6 @@ class ConvNeXt(nn.Module):
             assert isinstance(self.stage, list)
             grid = self.stem.output_grid(input_grid)
             for stage in self.stage:
-                if stage.downsample is None:
-                    raise ValueError("Expected stage.downsample is not None.")
                 grid = stage.output_grid(grid)
             return grid
 
@@ -804,7 +770,7 @@ class ConvNeXt(nn.Module):
     def __init__(self, config: Config) -> None:
         assert isinstance(config.stage, list)
         stages = len(config.channels_hidden)
-        if len(config.stage) != stages or len(config.blocks_per_stage) != stages:
+        if len(config.stage) != stages:
             raise ValueError("ConvNeXt width and block stage counts must match.")
         super().__init__()
         self.stem = config.stem.make()
@@ -857,19 +823,7 @@ class ConvNeXt(nn.Module):
             if target in mapped:
                 raise ValueError(f"Checkpoint keys collide at {target}.")
             mapped[target] = value
-        expected = self.state_dict()
-        if mapped.keys() != expected.keys():
-            raise ValueError(
-                "Checkpoint tensor names do not match ConvNeXt: "
-                f"missing={sorted(expected.keys() - mapped.keys())}; "
-                f"unexpected={sorted(mapped.keys() - expected.keys())}.",
-            )
-        for name, value in mapped.items():
-            if (
-                value.shape != expected[name].shape
-                or value.dtype != expected[name].dtype
-            ):
-                raise ValueError(f"Checkpoint tensor shape or dtype differs: {name}.")
+        validate_state_dict(mapped, expected=self.state_dict())
         self.load_state_dict(mapped, strict=True)
 
     @override

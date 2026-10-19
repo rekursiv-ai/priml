@@ -58,6 +58,7 @@ __all__ = [
     "PreservesGrid",
     "RotaryConfig",
     "RotaryFactors",
+    "RotaryRotation",
     "ShardStyle",
     "Shardable",
     "TensorModule",
@@ -322,6 +323,21 @@ class RotaryFactors(Protocol):
 
     def __call__(self, positions: Tensor, /) -> tuple[Tensor, Tensor]:
         """Apply to the input."""
+        ...
+
+
+@runtime_checkable
+class RotaryRotation(Protocol):
+    """Optional rotary capability owning the arithmetic applied to its factors."""
+
+    def rotate(
+        self,
+        q: Tensor,
+        k: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """Rotate queries and keys with the supplied factors."""
         ...
 
 

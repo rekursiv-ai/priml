@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast, overload, override
+from typing import TYPE_CHECKING, Final, Literal, Protocol, cast, overload, override
 
 import functools
 import math
 import tempfile
 
-from configgle import Fig, MutableNamespace, PartialConfig
+from configgle import Fig, InlineConfig, Makes, MutableNamespace, PartialConfig
 from torch import Tensor, nn
+from treekle import from_plain
 
 import pytest
 import torch
@@ -18,6 +19,10 @@ import torch.distributed as dist
 
 from priml import runtime
 from priml.metrics.binary_accuracy import BinaryAccuracy
+from priml.model.linear import Linear
+from priml.optimizers.lr import learning_rate
+from priml.optimizers.lr_schedule import RecursiveCosine
+from priml.testing.golden import tensor_bits_equal
 from priml.timer import CheckpointableStepTimer
 from priml.train.ema import EMA
 from priml.train.parallelism import NoParallel
@@ -31,6 +36,10 @@ if TYPE_CHECKING:
 
     from priml.distributed.testing import WarmPoolGetter
     from priml.loss.custom_types import LossOutput
+    from priml.train.custom_types import (
+        ActivationMemoizationProtocol,
+        ModelQuantizationProtocol,
+    )
 
 
 class _LogitsOutput(Protocol):
@@ -61,6 +70,221 @@ class _LinearModel(nn.Module):
         # Owner resets what it constructs: ``materialize`` allocates empty
         # storage and calls this once, so a child left out stays uninitialized.
         self.linear.reset_parameters()
+
+
+@pytest.mark.parametrize("device_init", ["eager", "meta"])
+def test_supplied_model_keeps_state_and_uses_the_placement_pipeline(
+    device_init: Literal["eager", "meta"],
+) -> None:
+    model = nn.Linear(3, 2)
+    model.register_buffer("receipt", torch.tensor([7, 11]))
+    expected = {name: value.clone() for name, value in model.state_dict().items()}
+    events: list[tuple[str, nn.Module]] = []
+    wrapped: nn.Sequential[nn.Module] = nn.Sequential(model)
+
+    def quantization() -> ModelQuantizationProtocol:
+        def wrap(model: nn.Module) -> nn.Module:
+            events.append(("quantization", model))
+            return wrapped
+
+        return wrap
+
+    def activation() -> ActivationMemoizationProtocol:
+        def bind(model: nn.Module) -> None:
+            events.append(("activation", model))
+
+        return bind
+
+    config = TrainStep.Config(
+        model=_LinearModel.Config(in_features=99, out_features=99),
+    )
+    config.device_init = device_init
+    config.compile = None
+    config.parallelism = NoParallel.Config(device="cpu")
+    config.model_quantization = InlineConfig(quantization)
+    config.activation_memoization = InlineConfig(activation)
+    rng_before = torch.get_rng_state().clone()
+
+    step = TrainStep(config, model=model)
+
+    assert events == [("quantization", model), ("activation", step.model)]
+    assert step.model is wrapped
+    assert wrapped[0] is model
+    assert all(value.device.type == "cpu" for value in step.model.state_dict().values())
+    for name, value in model.state_dict().items():
+        assert tensor_bits_equal(value, expected[name])
+    parameters = list(model.parameters())
+    optimized = cast("list[Tensor]", step.optimizer.param_groups[0]["params"])
+    assert len(optimized) == len(parameters)
+    assert all(
+        actual is expected_parameter
+        for actual, expected_parameter in zip(
+            optimized,
+            parameters,
+            strict=True,
+        )
+    )
+    assert torch.equal(torch.get_rng_state(), rng_before)
+
+
+def test_supplied_meta_model_is_materialized_by_parallelism() -> None:
+    with torch.device("meta"):
+        model = _LinearModel(3, 2)
+    config = TrainStep.Config(
+        model=_LinearModel.Config(in_features=99, out_features=99),
+    )
+    config.compile = None
+    config.parallelism = NoParallel.Config(device="cpu")
+    torch.manual_seed(81)
+    expected = _LinearModel(3, 2)
+    expected_rng = torch.get_rng_state().clone()
+    torch.manual_seed(81)
+
+    step = TrainStep(config, model=model)
+
+    assert step.model is model
+    assert torch.equal(torch.get_rng_state(), expected_rng)
+    for name, value in model.state_dict().items():
+        assert value.device.type == "cpu"
+        assert tensor_bits_equal(value, expected.state_dict()[name])
+
+
+@pytest.mark.parametrize(
+    ("dtype", "gradient"),
+    [(torch.float32, 1e20), (torch.float64, 1e200)],
+)
+def test_disabled_clipping_preserves_finite_gradients_when_the_norm_overflows(
+    dtype: torch.dtype,
+    gradient: float,
+) -> None:
+    config = TrainStep.Config(model=Linear.Config(3, 2, bias=True, dtype=dtype))
+    config.compile = None
+    config.optimizer = PartialConfig(torch.optim.SGD, lr=0.1)
+    config.gradient_clip_norm = math.inf
+    config.skip_step_on_nonfinite_grad = False
+    step = config.make()
+    before = [parameter.detach().clone() for parameter in step.model.parameters()]
+    for parameter in step.model.parameters():
+        parameter.grad = torch.full_like(parameter, gradient)
+
+    step.step()
+
+    assert step.last_grad_norm is not None
+    assert step.last_grad_norm.isinf()
+    for old, parameter in zip(before, step.model.parameters(), strict=True):
+        expected = old.add(torch.full_like(old, gradient), alpha=-0.1)
+        assert tensor_bits_equal(parameter, expected)
+        assert parameter.grad is None
+    assert step.global_step == 1
+
+
+def test_train_step_accepts_absolute_schedule_and_explicit_clock() -> None:
+    config = TrainStep.Config(model=Linear.Config(3, 2))
+    config.compile = None
+    config.optimizer = PartialConfig(torch.optim.SGD, lr=0.0002)
+    schedule = config.lr_schedule = RecursiveCosine.Config()
+    schedule.T_max = 3
+    schedule.eta_min = 5e-7
+    step = config.make()
+
+    step.apply_learning_rate(schedule_step=2)
+    assert float(learning_rate(step.optimizer)).hex() == "0x1.a6937d1fe64f8p-15"
+    step.apply_learning_rate(schedule_step=2)
+    assert float(learning_rate(step.optimizer)).hex() == "0x1.a6937d1fe64f8p-15"
+    step.apply_learning_rate()
+    assert learning_rate(step.optimizer) == 0.0002
+
+
+def test_module_optimizer_builder_and_positional_forward() -> None:
+    config = TrainStep.Config(model=Linear.Config(3, 4))
+    config.compile = None
+    config.optimizer = PartialConfig(_model_optimizer)
+    step = config.make()
+    parameters = list(step.model.parameters())
+    assert step.optimizer.param_groups[0]["params"][0] is parameters[0]
+    assert learning_rate(step.optimizer) == 0.02
+    media = torch.arange(6).float().reshape(2, 3)
+    model = step.model
+    assert isinstance(model, Linear)
+    expected = model.forward(media)
+    step.model.eval()
+    actual = step(media)
+    assert isinstance(actual, Tensor)
+    assert torch.equal(actual, expected)
+    assert step.model.training
+
+
+def _model_optimizer(model: nn.Module) -> torch.optim.SGD:
+    return torch.optim.SGD(model.parameters(), lr=0.02)
+
+
+class _DeclinedStep(TrainStep):
+    class Config(Makes["_DeclinedStep"], TrainStep.Config):
+        pass
+
+    @override
+    def optimizer_step(
+        self,
+        closure: Callable[[], Tensor | float] | None = None,
+    ) -> bool:
+        del closure
+        return False
+
+
+def test_declined_update_still_clips_zeros_and_counts_attempt() -> None:
+    config = _DeclinedStep.Config(model=Linear.Config(3, 2))
+    config.compile = None
+    config.gradient_clip_norm = 0.5
+    config.ema = EMA.Config()
+    step = config.make()
+    before = {name: value.clone() for name, value in step.model.state_dict().items()}
+    for parameter in step.model.parameters():
+        parameter.grad = torch.ones_like(parameter)
+
+    step.step()
+
+    for name, value in step.model.state_dict().items():
+        assert torch.equal(value, before[name])
+    assert all(parameter.grad is None for parameter in step.model.parameters())
+    assert step.last_grad_norm is not None
+    assert torch.equal(step.last_grad_norm, torch.linalg.vector_norm(torch.ones(2, 3)))
+    assert step.global_step == 1
+    assert step.ema.state_dict() == {"global_step": 0, "local_step": 0}
+
+
+def test_zero_gradient_clip_matches_native_adamw_update() -> None:
+    config = TrainStep.Config(model=Linear.Config(3, 2))
+    config.compile = None
+    config.gradient_clip_norm = 0
+    config.optimizer = PartialConfig(torch.optim.AdamW, lr=0.002, weight_decay=0.03)
+    step = config.make()
+    model = step.model
+    assert isinstance(model, Linear)
+    reference = nn.Parameter(model.weight.detach().clone())
+    optimizer = torch.optim.AdamW([reference], lr=0.002, weight_decay=0.03)
+    model.weight.grad = torch.ones_like(model.weight)
+    reference.grad = torch.ones_like(reference)
+    torch.nn.utils.clip_grad_norm_([reference], 0, foreach=True)
+    optimizer.step()
+
+    step.step()
+
+    assert tensor_bits_equal(model.weight, reference)
+    actual_state = from_plain(
+        step.optimizer.state_dict()["state"],
+        dict[int, dict[str, Tensor]],
+    )
+    expected_state = from_plain(
+        cast(object, optimizer.state_dict()["state"]),
+        dict[int, dict[str, Tensor]],
+    )
+    assert actual_state.keys() == expected_state.keys()
+    for parameter, state in expected_state.items():
+        assert actual_state[parameter].keys() == state.keys()
+        for key, value in state.items():
+            assert tensor_bits_equal(actual_state[parameter][key], value)
+    assert model.weight.grad is None
+    assert step.global_step == 1
 
 
 def test_trainable_logistic_regression():
@@ -695,7 +919,8 @@ def _linear_step(**overrides: object) -> TrainStep:
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("gradient_clip_norm", 0.0, "gradient_clip_norm must be positive"),
+        ("gradient_clip_norm", -1.0, "gradient_clip_norm must be nonnegative"),
+        ("gradient_clip_norm", math.nan, "gradient_clip_norm must be nonnegative"),
         ("accumulate_grad_batches", 0, "accumulate_grad_batches must be positive"),
         ("train_budget_steps", 0.0, "train_budget_steps must be positive"),
         ("train_budget_sec", -1.0, "train_budget_sec must be positive"),

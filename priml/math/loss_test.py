@@ -51,11 +51,17 @@ def test_off_target_smoothing_preserves_dense_values_and_gradients(
     )
 
 
-def test_off_target_default_and_standard_smoothing_are_distinct() -> None:
+def test_off_target_default_has_no_smoothing() -> None:
     logits = torch.tensor([[2.0, -1.0, 0.5], [-3.0, 4.0, 1.0]])
     target = torch.tensor([0, 1])
     actual = cross_entropy_off_target(logits, target)
-    assert torch.equal(actual, cross_entropy_off_target(logits, target, smoothing=0.05))
+    assert torch.equal(actual, cross_entropy_off_target(logits, target, smoothing=0.0))
+
+
+def test_off_target_and_standard_smoothing_are_distinct() -> None:
+    logits = torch.tensor([[2.0, -1.0, 0.5], [-3.0, 4.0, 1.0]])
+    target = torch.tensor([0, 1])
+    actual = cross_entropy_off_target(logits, target, smoothing=0.05)
     assert not torch.equal(
         actual,
         nn.functional.cross_entropy(

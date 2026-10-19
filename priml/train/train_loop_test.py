@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         CheckpointerProtocol,
         TrackerProtocol,
         TrainStepOutput,
+        TrainStepProtocol,
     )
 
 from configgle import Fig, InlineConfig, Makeable, Makes, PartialConfig
@@ -4491,6 +4492,85 @@ class _ClosingDataset(_ScopedEvalDataset):
         _ClosingDataset.closes_total += 1
         if self._events is not None:
             self._events.append("dataset_close")
+
+
+class _BoundClosingDataset(_ClosingDataset):
+    """An owned dataset that receives the loop's actual step."""
+
+    class Config(_ClosingDataset.Config):
+        @override
+        def make(self) -> _BoundClosingDataset:
+            return _BoundClosingDataset(self.finalized())
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.bound_step: TrainStepProtocol | None = None
+
+    def bind_step(self, step: TrainStepProtocol) -> None:
+        """Record the step that produces this dataset's observations."""
+        self.bound_step = step
+
+
+@pytest.mark.parametrize(
+    ("supply_step", "supply_dataset"),
+    [(True, True), (True, False), (False, True)],
+)
+def test_supplied_children_keep_state_and_receive_the_normal_lifecycle(
+    tmp_path: Path,
+    *,
+    supply_step: bool,
+    supply_dataset: bool,
+) -> None:
+    config = _closing_loop_config(str(tmp_path))
+    config.dataset = _BoundClosingDataset.Config()
+    config.phase_timer = PhaseTimer.Config(enabled=True)
+    config.eval_warmup_batches = 1
+    step_config = config.step
+    assert isinstance(step_config, _ClosingStep.Config)
+    step = step_config.make() if supply_step else None
+    if step is not None:
+        step.timer_step.global_count = 7
+    dataset = _BoundClosingDataset.Config().make() if supply_dataset else None
+    if dataset is not None:
+        dataset.timer_epoch.global_count = 3
+
+    loop = TrainLoop(config, step=step, dataset=dataset)
+    try:
+        actual_step = loop.step
+        actual_dataset = loop.dataset
+        assert isinstance(actual_step, _ClosingStep)
+        assert isinstance(actual_dataset, _BoundClosingDataset)
+        if step is not None:
+            assert actual_step is step
+            assert actual_step.global_step == 7
+        if dataset is not None:
+            assert actual_dataset is dataset
+            assert actual_dataset.timer_epoch.global_count == 3
+        assert actual_dataset.bound_step is actual_step
+        assert actual_step.timer is loop.phase_timer
+        assert actual_step.timer_epoch is actual_dataset.timer_epoch
+        assert actual_dataset.eval_scopes == ["bounded"]
+        assert actual_step.timer_eval.global_count == 1
+        assert {"model_init", "data_load"} <= loop.phase_timer.summary().keys()
+    finally:
+        loop.close()
+    assert actual_step.closes == 1
+    assert actual_dataset.closes == 1
+
+
+def test_constructor_failure_closes_supplied_children(tmp_path: Path) -> None:
+    config = _closing_loop_config(str(tmp_path))
+    step_config = config.step
+    assert isinstance(step_config, _ClosingStep.Config)
+    step = step_config.make()
+    dataset = _BoundClosingDataset.Config().make()
+    config.checkpointer = InlineConfig(_raise_after_dataset_build)
+
+    with pytest.raises(RuntimeError, match="after dataset construction"):
+        TrainLoop(config, step=step, dataset=dataset)
+
+    assert step.closes == 1
+    assert dataset.closes == 1
 
 
 def _closing_loop_config(

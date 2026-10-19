@@ -32,6 +32,7 @@ Qwen3.Config(
         │               frequencies=HuggingFaceFrequencies.Config(base=1000000.0),
         │               dtype=torch.float32
         │           ),
+        │           rotate=None,
         │           norm_qk=RMSNorm.Config(
         │               channels_in=6,
         │               channels_out=6,

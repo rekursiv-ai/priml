@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, Self, override
+from typing import TYPE_CHECKING, Protocol, Self, cast, override
 
 import contextlib
 import fcntl
 import functools
+import math
 import subprocess
 import sys
 import textwrap
@@ -15,13 +16,18 @@ import threading
 import zlib
 
 from configgle.fig import Fig, Maker
+from torch import nn
 from treekle import ReadError
 
 import pytest
 import torch
 
+from priml.model.linear import Linear
 from priml.testing import golden, regenerate
 from priml.testing.golden import (
+    NativeDraws,
+    PinnedDropout,
+    PinnedRandom,
     assert_pprint_golden,
     assert_tensor_golden,
     assert_tensor_golden_part,
@@ -398,11 +404,48 @@ def test_read_tensors_rejects_a_foreign_file(tmp_path: Path) -> None:
         read_tensors(tmp_path / "g.pt")
 
 
+@pytest.mark.parametrize("invalid_utf8", [False, True])
+def test_read_tensors_wraps_a_corrupt_compressed_index(
+    tmp_path: Path,
+    invalid_utf8: bool,
+) -> None:
+    index = (
+        torch.frombuffer(bytearray(zlib.compress(b"\xff")), dtype=torch.uint8)
+        if invalid_utf8
+        else torch.arange(3)
+    )
+    path = tmp_path / "foreign.pt"
+    torch.save({"index": index}, path)
+    with pytest.raises(TypeError, match=r"foreign\.pt is not a tensor golden"):
+        read_tensors(path)
+
+
 def test_read_tensors_rejects_a_non_tensor_value(tmp_path: Path) -> None:
     index = torch.frombuffer(bytearray(zlib.compress(b"")), dtype=torch.uint8)
     torch.save({"index": index, "a": 1}, tmp_path / "g.pt")
     with pytest.raises(TypeError):
         read_tensors(tmp_path / "g.pt")
+
+
+@pytest.mark.parametrize(
+    "index",
+    [b"bad", b"x\tmissing\t2", b"x\tfloat32\ts", b"x\tfloat32\t2"],
+)
+def test_malformed_tensor_indices_keep_the_format_error_and_file_path(
+    tmp_path: Path,
+    index: bytes,
+) -> None:
+    path = tmp_path / "foreign.pt"
+    packed = {
+        "index": torch.frombuffer(bytearray(zlib.compress(index)), dtype=torch.uint8),
+        "float32": torch.ones(1),
+    }
+    torch.save(packed, path)
+    with pytest.raises(TypeError, match="invalid tensor index") as error:
+        golden.unpack(packed)
+    assert isinstance(error.value.__cause__, (ValueError, KeyError, RuntimeError))
+    with pytest.raises(TypeError, match=r"foreign\.pt is not a tensor golden"):
+        read_tensors(path)
 
 
 @pytest.mark.parametrize(
@@ -520,6 +563,60 @@ def test_mismatches_compares_signed_zeros_and_nan_payloads_by_bits() -> None:
     ]
     nan = torch.tensor([float("nan")])
     assert not mismatches({"x": nan}, {"x": nan.clone()})
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.float16, torch.bfloat16, torch.float32, torch.float64],
+)
+def test_mismatches_reports_one_ulp_without_downcasting(dtype: torch.dtype) -> None:
+    want = torch.tensor([1.0, -1.0, 0.0], dtype=dtype)
+    got = torch.nextafter(want, torch.full_like(want, math.inf))
+    assert mismatches({"x": want}, {"x": got}, ulps=True) == [
+        "x: 3/3 differ; max_ulp=1",
+    ]
+
+
+def test_mismatches_binary64_distance_does_not_overflow_signed_int64() -> None:
+    maximum = torch.finfo(torch.float64).max
+    want = torch.tensor([-maximum], dtype=torch.float64)
+    got = -want
+    assert mismatches({"x": want}, {"x": got}, ulps=True) == [
+        f"x: 1/1 differ; max_ulp={2 * 0x7FEFFFFFFFFFFFFF}",
+    ]
+
+
+def test_mismatches_reports_nan_payload_changes_without_numeric_distance() -> None:
+    want = torch.tensor([0x7FF8000000000001], dtype=torch.int64).view(torch.float64)
+    got = torch.tensor([0x7FF8000000000002], dtype=torch.int64).view(torch.float64)
+    assert mismatches({"x": want}, {"x": got}, ulps=True) == [
+        "x: 1/1 differ; max_ulp=nan",
+    ]
+    assert mismatches({"x": want}, {"x": got}) == ["x: 1/1 differ"]
+    assert not mismatches({"x": want}, {"x": want.clone()}, ulps=True)
+
+
+def test_ulp_diagnostics_preserve_signed_zero_and_metadata_mismatches() -> None:
+    want = {"x": torch.tensor([0.0])}
+    assert mismatches(want, {"x": torch.tensor([-0.0])}, ulps=True) == [
+        "x: 1/1 differ; max_ulp=0",
+    ]
+    assert mismatches(want, {}, ulps=True) == ["missing x"]
+    assert mismatches({}, want, ulps=True) == ["unexpected x"]
+    assert mismatches(want, {"x": want["x"].double()}, ulps=True) == [
+        "x: torch.float64[1] vs torch.float32[1]",
+    ]
+    assert mismatches(want, {"x": want["x"].reshape(())}, ulps=True) == [
+        "x: torch.float32[] vs torch.float32[1]",
+    ]
+
+
+def test_ulp_diagnostics_report_unsupported_float_formats_without_coercion() -> None:
+    want = torch.tensor([1.0], dtype=torch.float8_e4m3fn)
+    got = torch.tensor([2.0], dtype=torch.float8_e4m3fn)
+    assert mismatches({"x": want}, {"x": got}, ulps=True) == [
+        "x: 1/1 differ; max_ulp=n/a",
+    ]
 
 
 def test_mismatches_counts_elements_with_multiple_different_bytes() -> None:
@@ -750,6 +847,20 @@ def test_put_steps_stores_uniform_and_ragged_values_without_skipping() -> None:
     assert torch.equal(output["step/2/b"], torch.tensor([6, 7]))
 
 
+@pytest.mark.parametrize("existing", [False, True])
+def test_put_steps_rejects_collisions_before_extending_output(existing: bool) -> None:
+    original = torch.tensor([19, 23])
+    output = {"step/1/x" if existing else "untouched": original}
+    records = [
+        {"x": torch.tensor([1, 2]), "1/x": torch.tensor([6, 7, 8, 9])},
+        {"x": torch.tensor([3, 4, 5]), "1/x": torch.tensor([10, 11, 12, 13])},
+    ]
+    with pytest.raises(ValueError, match="Duplicate golden key"):
+        put_steps(output, "step", records)
+    assert list(output) == ["step/1/x" if existing else "untouched"]
+    assert next(iter(output.values())) is original
+
+
 def test_read_tensors_requests_weights_only_loading(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -878,6 +989,316 @@ def test_read_tensors_wraps_invalid_pack_error_with_path(
         match=r"^.*foreign\.pt is not a tensor golden written by write_tensors\.$",
     ):
         read_tensors(path)
+
+
+def test_pinned_random_preserves_draw_order_counters_and_global_rng() -> None:
+    before = torch.get_rng_state()
+    with PinnedRandom() as pins:
+        uniform = torch.empty(2, 3).uniform_(-2, 3)
+        bernoulli = torch.empty(5).bernoulli_(0.05)
+        integer = torch.empty((), dtype=torch.int64).random_()
+        permutation = torch.randperm(7)
+    assert torch.equal(uniform, (torch.arange(6).reshape(2, 3) + 1) / 97 * 5 - 2)
+    assert torch.equal(bernoulli, torch.tensor([1.0, 1.0, 1.0, 0.0, 0.0]))
+    assert integer == 3
+    assert torch.equal(permutation, torch.arange(7).roll(4))
+    assert sum(pins.calls.values()) == 4
+    assert len(pins.calls) == 4
+    assert all(key.endswith("/factory") for key in pins.calls)
+    assert torch.equal(before, torch.get_rng_state())
+
+
+def test_pinned_random_records_model_initializer_sites() -> None:
+    with PinnedRandom() as pins:
+        nn.Linear(2, 3)
+    assert sum(pins.calls.values()) == 2
+    assert all("/linear.py:" in key for key in pins.calls)
+
+
+def test_pinned_random_preserves_distinct_direct_call_sites() -> None:
+    with PinnedRandom() as pins:
+        torch.empty(2).uniform_()
+        torch.empty(3).uniform_()
+    assert sum(pins.calls.values()) == sum(pins.site_calls.values()) == 2
+    assert len(pins.calls) == 1
+    assert len(pins.site_calls) == 2
+
+
+def test_pinned_random_preserves_directories_for_matching_basenames() -> None:
+    with PinnedRandom() as pins:
+        nn.Linear(3, 4)
+        Linear.Config(3, 4, bias=True, init_bias=None).make()
+    assert sum(pins.site_calls.values()) == sum(pins.calls.values()) == 4
+    assert any("/torch/nn/modules/linear.py:" in site for site in pins.site_calls)
+    assert any("/priml/model/linear.py:" in site for site in pins.site_calls)
+
+
+def test_pinned_random_rejects_unrecognized_stochastic_draws() -> None:
+    with (
+        PinnedRandom(),
+        pytest.raises(AssertionError, match="Unpinned random primitive"),
+    ):
+        torch.randn(2, 3)
+
+
+def test_pinned_random_accepts_empty_permutations() -> None:
+    with PinnedRandom():
+        actual = torch.randperm(0)
+    assert actual.shape == (0,)
+    assert actual.dtype == torch.int64
+
+
+@pytest.mark.parametrize("bounds", [(0, 1), (-3, -1), (4, 5)])
+def test_pinned_random_keeps_integer_draws_inside_the_bounds(
+    bounds: tuple[int, int],
+) -> None:
+    low, high = bounds
+    with PinnedRandom():
+        actual = torch.empty(2, 3, dtype=torch.int64).random_(low, high)
+    assert bool(((actual >= low) & (actual < high)).all())
+
+
+@pytest.mark.parametrize("dtype", [torch.int8, torch.int64, torch.float32, torch.bool])
+def test_pinned_random_default_integer_draw_preserves_counter_values(
+    dtype: torch.dtype,
+) -> None:
+    with PinnedRandom():
+        actual = torch.empty(2, 3, dtype=dtype).random_()
+    assert torch.equal(actual, torch.ones(2, 3, dtype=dtype))
+
+
+def test_pinned_random_one_sided_integer_draws_and_invalid_bounds() -> None:
+    with PinnedRandom():
+        assert torch.empty((), dtype=torch.int64).random_(1) == 0
+        assert torch.empty((), dtype=torch.int64).random_(4, None) == 6
+        with pytest.raises(ValueError, match="upper bound"):
+            torch.empty((), dtype=torch.int64).random_(1, 1)
+
+
+@pytest.mark.parametrize("count", [0, 7])
+def test_pinned_random_populates_permutation_output_storage(count: int) -> None:
+    output = torch.full((count,), -1, dtype=torch.int32)
+    with PinnedRandom():
+        actual = torch.randperm(count, out=output)
+    assert actual.data_ptr() == output.data_ptr()
+    assert actual.dtype == torch.int32
+    assert torch.equal(output.sort().values, torch.arange(count, dtype=torch.int32))
+
+
+def test_pinned_random_evaluation_and_training_composite_dropout() -> None:
+    value = torch.ones(2, 3)
+    with PinnedRandom() as pins:
+        actual = pins.__torch_dispatch__(
+            torch.ops.aten.dropout.default,
+            (torch.Tensor,),
+            (value, 0.25, False),
+        )
+        assert isinstance(actual, torch.Tensor)
+        assert torch.equal(actual, value)
+        with pytest.raises(AssertionError, match="Unpinned random primitive"):
+            pins.__torch_dispatch__(
+                torch.ops.aten.dropout.default,
+                (torch.Tensor,),
+                (value, 0.25, True),
+            )
+    assert not pins.calls
+
+
+def test_native_draws_captures_before_states_and_complete_outputs() -> None:
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(42)
+        before = torch.get_rng_state()
+        with NativeDraws() as record:
+            uniform = torch.rand(2, 3)
+            between = torch.get_rng_state()
+            normal = torch.randn(5)
+        assert [name for name, _ in record.draws] == [
+            "aten.rand.default",
+            "aten.randn.default",
+        ]
+        assert torch.equal(record.draws[0][1]["torch"], before)
+        assert torch.equal(record.draws[1][1]["torch"], between)
+        assert torch.equal(record.outputs["draw/1/0"], uniform)
+        assert torch.equal(record.outputs["draw/2/0"], normal)
+        uniform.zero_()
+        assert bool(record.outputs["draw/1/0"].any())
+
+
+def test_native_draws_captures_every_native_dropout_output() -> None:
+    with torch.random.fork_rng(devices=[]), NativeDraws() as record:
+        output, mask = cast(
+            "tuple[torch.Tensor, torch.Tensor]",
+            torch.ops.aten.native_dropout.default(torch.ones(2, 3), 0.25, True),
+        )
+    assert len(record.draws) == 1
+    assert torch.equal(record.outputs["draw/1/0"], output)
+    assert torch.equal(record.outputs["draw/1/1"], mask)
+
+
+def test_native_draws_captures_explicit_and_global_generator_states() -> None:
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(11)
+        generator = torch.Generator().manual_seed(31)
+        explicit_before = generator.get_state()
+        global_before = torch.get_rng_state()
+        with NativeDraws() as record:
+            output = torch.rand(2, 3, generator=generator)
+        assert torch.equal(record.draws[0][1]["torch"], global_before)
+        device, state = record.generator_states[1]
+        assert device == generator.device
+        assert torch.equal(state, explicit_before)
+        replay = torch.rand(
+            2,
+            3,
+            generator=torch.Generator(device=device).set_state(state),
+        )
+        assert torch.equal(replay, output)
+        assert torch.equal(record.outputs["draw/1/0"], output)
+
+
+def test_evaluation_dropout_has_no_native_draw_receipt() -> None:
+    model = nn.Dropout(0.25).eval()
+    value = torch.ones(2, 3)
+    before = torch.get_rng_state()
+    with torch.inference_mode(), NativeDraws() as record:
+        actual = model(value)
+    assert torch.equal(actual, value)
+    assert torch.equal(torch.get_rng_state(), before)
+    assert not record.draws
+    assert not record.outputs
+
+
+def test_native_evaluation_dropout_has_no_random_receipt() -> None:
+    value = torch.ones(2, 3)
+    before = torch.get_rng_state()
+    with NativeDraws() as record:
+        output, mask = cast(
+            "tuple[torch.Tensor, torch.Tensor]",
+            torch.ops.aten.native_dropout.default(value, 0.25, False),
+        )
+    assert torch.equal(output, value)
+    assert bool(mask.all())
+    assert torch.equal(torch.get_rng_state(), before)
+    assert not record.draws
+    assert not record.outputs
+    assert not record.generator_states
+
+
+@pytest.mark.parametrize("pin_all", [False, True])
+def test_native_evaluation_dropout_passes_both_pin_modes(pin_all: bool) -> None:
+    value = torch.ones(2, 3)
+    before = torch.get_rng_state()
+    mode = PinnedRandom() if pin_all else PinnedDropout(nn.Identity())
+    with mode as pins:
+        output, mask = cast(
+            "tuple[torch.Tensor, torch.Tensor]",
+            torch.ops.aten.native_dropout.default(value, 0.25, False),
+        )
+    assert torch.equal(output, value)
+    assert bool(mask.all())
+    assert torch.equal(torch.get_rng_state(), before)
+    assert not pins.calls
+    if isinstance(pins, PinnedRandom):
+        assert not pins.site_calls
+    else:
+        assert not pins.sites
+
+
+@pytest.mark.parametrize("probability", [0.0, 1.0])
+@pytest.mark.parametrize("observer", [NativeDraws, PinnedRandom])
+def test_composite_dropout_endpoints_leave_no_draw_receipts(
+    probability: float,
+    observer: type[NativeDraws | PinnedRandom],
+) -> None:
+    model = nn.Dropout(probability).train()
+    value = torch.ones(2, 3)
+    before = torch.get_rng_state()
+    with torch.inference_mode(), observer() as record:
+        output = model(value)
+    assert torch.equal(output, value * (1 - probability))
+    assert torch.equal(torch.get_rng_state(), before)
+    if isinstance(record, NativeDraws):
+        assert not record.draws
+        assert not record.outputs
+    else:
+        assert not record.calls
+        assert not record.site_calls
+
+
+@pytest.mark.parametrize("probability", [0.0, 1.0])
+def test_composite_dropout_endpoints_pass_dropout_pins(probability: float) -> None:
+    model = nn.Dropout(probability).train()
+    value = torch.ones(2, 3)
+    before = torch.get_rng_state()
+    with torch.inference_mode(), PinnedDropout(model) as pins:
+        output = model(value)
+    assert torch.equal(output, value * (1 - probability))
+    assert torch.equal(torch.get_rng_state(), before)
+    assert pins.calls == 0
+    assert not pins.sites
+
+
+@pytest.mark.parametrize("probability", [0.0, 1.0])
+def test_native_training_dropout_endpoints_still_consume_a_draw(
+    probability: float,
+) -> None:
+    with torch.random.fork_rng(devices=[]):
+        before = torch.get_rng_state()
+        with NativeDraws() as record:
+            output, mask = cast(
+                "tuple[torch.Tensor, torch.Tensor]",
+                torch.ops.aten.native_dropout.default(
+                    torch.ones(2, 3),
+                    probability,
+                    True,
+                ),
+            )
+        assert not torch.equal(torch.get_rng_state(), before)
+        assert len(record.draws) == 1
+        assert torch.equal(record.outputs["draw/1/0"], output)
+        assert torch.equal(record.outputs["draw/1/1"], mask)
+
+
+def test_pinned_dropout_preserves_offset_sites_and_native_rng() -> None:
+    model = nn.Sequential(nn.Dropout(0.25), nn.Dropout(0.5))
+    before = torch.get_rng_state()
+    with PinnedDropout(model, draw_offset=2) as pins:
+        actual = model(torch.ones(4, 5))
+    first = ((torch.arange(20) + 14) % 20).reshape(4, 5) / 20 < 0.75
+    second = ((torch.arange(20) + 21) % 20).reshape(4, 5) / 20 < 0.5
+    assert torch.equal(actual, first.float().div_(0.75) * second.float().div_(0.5))
+    assert pins.calls == 2
+    assert pins.sites == ["0", "1"]
+    assert torch.equal(torch.get_rng_state(), before)
+
+
+def test_pinned_dropout_accepts_evaluation_in_inference_mode() -> None:
+    model = nn.Dropout(0.25).eval()
+    value = torch.ones(2, 3)
+    before = torch.get_rng_state()
+    with torch.inference_mode(), PinnedDropout(model) as pins:
+        actual = model(value)
+    assert torch.equal(actual, value)
+    assert torch.equal(torch.get_rng_state(), before)
+    assert pins.calls == 0
+    assert not pins.sites
+
+
+def test_pinned_dropout_passes_deterministic_ops_and_rejects_other_random_ops() -> None:
+    with PinnedDropout(nn.Identity()) as pins:
+        assert torch.equal(torch.arange(3) + 1, torch.tensor([1, 2, 3]))
+        with pytest.raises(ValueError, match="rand"):
+            torch.rand(2, 3)
+    assert pins.calls == 0
+    assert pins.sites == []
+
+
+def test_pinned_dropout_handles_default_probability_at_a_functional_site() -> None:
+    with PinnedDropout(nn.Identity()) as pins:
+        actual = torch.empty(2, 3).bernoulli_()
+    assert torch.equal(actual, torch.ones(2, 3))
+    assert pins.calls == 1
+    assert pins.sites == ["functional"]
 
 
 if __name__ == "__main__":

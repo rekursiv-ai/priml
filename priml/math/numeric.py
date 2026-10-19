@@ -540,6 +540,27 @@ def log_cumsum_exp(x: Tensorable, dim: int = -1) -> Tensor:
     return torch.logcumsumexp(x, dim=dim)
 
 
+def fixed_pairwise_sum(values: Tensor) -> Tensor:
+    """Reduce the final axis using the same adjacent-pair tree on every host.
+
+    Args:
+      values: Nonempty final axis of terms in the required summation order.
+
+    Returns:
+      result: Sum with an unchanged odd tail appended at each tree level.
+
+    """
+    while values.shape[-1] > 1:
+        end = 2 * (values.shape[-1] // 2)
+        pairs = values[..., :end:2] + values[..., 1:end:2]
+        values = (
+            torch.cat((pairs, values[..., -1:]), dim=-1)
+            if end != values.shape[-1]
+            else pairs
+        )
+    return values[..., 0]
+
+
 def kahan_sum(x: Tensorable, dim: int | None = None, keepdim: bool = False) -> Tensor:
     """Compensated summation (Kahan–Babuška–Neumaier) for FP accuracy.
 

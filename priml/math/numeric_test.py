@@ -11,6 +11,7 @@ import torch
 from priml.math.numeric import (
     _kbn_step,
     custom_grad,
+    fixed_pairwise_sum,
     kahan_sum,
     l2norm,
     log1mexp,
@@ -50,6 +51,30 @@ from priml.math.numeric import (
     ste_clamp,
     ste_round,
 )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64, torch.int64])
+@pytest.mark.parametrize("length", [1, 2, 3, 5, 6, 9])
+def test_fixed_pairwise_sum_retains_dtype_shape_and_every_odd_tail(
+    dtype: torch.dtype,
+    length: int,
+) -> None:
+    # A unit reduction axis is the fixed_pairwise_sum identity boundary.
+    values = torch.arange(2 * 3 * length, dtype=dtype).reshape(2, 3, length)
+    actual = fixed_pairwise_sum(values)
+    assert actual.shape == (2, 3)
+    assert actual.dtype == dtype
+    assert torch.equal(actual, values.sum(dim=-1))
+
+
+def test_fixed_pairwise_sum_preserves_cancellation_and_strided_gradients() -> None:
+    terms = torch.tensor([2.0**53, 1.0, 1.0, -(2.0**53), 0.0]).double()
+    values = terms.expand(2, 3, 5).transpose(0, 1).requires_grad_()
+    result = fixed_pairwise_sum(values)
+    assert torch.equal(result, torch.ones(3, 2).double())
+    result.sum().backward()
+    assert values.grad is not None
+    assert torch.equal(values.grad, torch.ones_like(values))
 
 
 def test_log_arctan_exp_no_nan_inf():

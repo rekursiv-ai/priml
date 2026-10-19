@@ -15,6 +15,8 @@ import torch
 from priml.math.stats import (
     SlidingWindow,
     _householder_qr,
+    average_ranks,
+    binary_roc_auc,
     cov,
     ema_update,
     entropy_logits,
@@ -22,11 +24,13 @@ from priml.math.stats import (
     entropy_probs,
     holm,
     jsd,
+    ordinal_ranks,
     pca,
     pca_eigh,
     pca_power,
     pca_svd,
     quantile_normalize,
+    spearman,
     total_variation,
 )
 
@@ -48,6 +52,69 @@ def _power_input() -> Tensor:
             [-1.0, -2.0],
         ],
     )
+
+
+@pytest.mark.parametrize("descending", [False, True])
+def test_average_ranks_preserve_equal_groups_and_original_row_order(
+    descending: bool,
+) -> None:
+    values = torch.tensor([4, 1, 1, 1, 3, 3, 5])
+    expected = torch.tensor([5, 1, 1, 1, 3.5, 3.5, 6], dtype=torch.float64)
+    if descending:
+        expected = len(values) - 1 - expected
+    actual = average_ranks(values, descending=descending)
+    assert actual.dtype == torch.float64
+    assert torch.equal(actual, expected)
+
+
+def test_ordinal_ranks_honor_external_quicksort_tie_order() -> None:
+    values = torch.tensor([3.0, 1.0, 1.0, 5.0, 4.0])
+    order = torch.tensor([2, 1, 0, 4, 3])
+    assert torch.equal(
+        ordinal_ranks(values, order=order),
+        torch.tensor([2, 1, 0, 4, 3], dtype=torch.float64),
+    )
+    assert torch.equal(ordinal_ranks(values), values.argsort().argsort().double())
+
+
+@pytest.mark.parametrize("count", [0, 1])
+def test_rank_empty_and_single_value_contracts(count: int) -> None:
+    # Rank and correlation definitions include empty and singleton vectors.
+    values = torch.zeros(count)
+    assert torch.equal(average_ranks(values), torch.zeros(count, dtype=torch.float64))
+    assert torch.equal(ordinal_ranks(values), torch.zeros(count, dtype=torch.float64))
+    assert spearman(values, values).isnan()
+
+
+@pytest.mark.parametrize("count", [2, 7])
+def test_spearman_keeps_complete_pairwise_rank_and_centered_dot_bits(
+    count: int,
+) -> None:
+    left = torch.tensor([4.0, 1.0, 1.0, 1.0, 3.0, 3.0, 5.0])[:count]
+    right = torch.tensor([8.0, 2.0, 6.0, 6.0, 6.0, 1.0, 7.0])[:count]
+    ranks = [
+        (values[None, :] < values[:, None]).sum(1)
+        + ((values[None, :] == values[:, None]).sum(1, dtype=torch.float64) - 1) / 2
+        for values in (left, right)
+    ]
+    first, second = [rank - rank.mean() for rank in ranks]
+    expected = first @ second / (first.norm() * second.norm())
+    actual = spearman(left, right)
+    assert actual.dtype == torch.float64
+    assert torch.equal(actual, expected)
+    assert spearman(torch.ones(3), torch.arange(3)).isnan()
+
+
+def test_binary_auc_counts_ties_and_drops_collinear_thresholds() -> None:
+    labels = torch.tensor([False, False, True, True])
+    scores = torch.tensor([0.2, 0.5, 0.5, 0.3], dtype=torch.float64)
+    assert binary_roc_auc(labels, scores).item() == 0.625
+    assert binary_roc_auc(labels, torch.arange(4)).item() == 1.0
+    assert binary_roc_auc(labels, -torch.arange(4)).item() == 0.0
+    assert binary_roc_auc(labels, torch.zeros(4)).item() == 0.5
+    assert binary_roc_auc(torch.zeros(4, dtype=torch.bool), scores).isnan()
+    assert binary_roc_auc(torch.ones(4, dtype=torch.bool), scores).isnan()
+    assert binary_roc_auc(torch.empty(0), torch.empty(0)).isnan()
 
 
 def test_cov_matches_torch():

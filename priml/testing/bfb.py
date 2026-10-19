@@ -138,6 +138,7 @@ from treekle import from_plain
 
 import torch
 
+from priml.math.numeric import fixed_pairwise_sum
 from priml.testing import regenerate
 from priml.testing.golden import pack, tensor_bits_equal, unpack
 
@@ -1267,6 +1268,8 @@ def _run_unfused(
         return func(*args, **kwargs)
     name = _op_name(func)
     base = name.removesuffix("_")
+    if str(func) == "aten.convolution_backward.default":
+        return _pairwise_convolution_backward(func, args, kwargs)
     if base in {"addmm", "baddbmm", "addbmm", "addmv", "_addmm_activation"}:
         matrix_names = (
             ("mat", "vec")
@@ -1319,6 +1322,52 @@ def _run_unfused(
     if _op_name(func) in _UNFUSED_OPS and _scales_or_fuses(func, args, kwargs):
         return decomposition_table[func](*args, **kwargs)
     return func(*args, **kwargs)
+
+
+def _pairwise_convolution_backward(
+    func: OpOverload[..., object],
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+) -> object:
+    """Fix the reduction tree of CPU float64 non-transposed 2D weight gradients."""
+    grad, media, weight = cast(tuple[Tensor, Tensor, Tensor], args[:3])
+    mask = cast(
+        list[bool],
+        kwargs["output_mask"] if "output_mask" in kwargs else args[10],
+    )
+    # The native weight kernel validates grad_output geometry even when no
+    # other gradient is requested. Preserve those checks before replacing it.
+    outputs = cast(
+        tuple[Tensor | None, Tensor | None, Tensor | None],
+        func(*args, **kwargs),
+    )
+    if (
+        media.device.type != "cpu"
+        or media.dtype != torch.float64
+        or media.ndim != 4
+        or media.numel() == 0
+        or args[7]
+        or not mask[1]
+    ):
+        return outputs
+    stride, padding, dilation = (
+        tuple(value) * 2 if len(value) == 1 else tuple(value)
+        for value in cast(tuple[list[int], list[int], list[int]], args[4:7])
+    )
+    groups = cast(int, args[9])
+    patches = torch.nn.functional.unfold(
+        media,
+        kernel_size=weight.shape[-2:],
+        dilation=dilation,
+        padding=padding,
+        stride=stride,
+    )
+    batch, _, locations = patches.shape
+    patches = patches.reshape(batch, groups, -1, locations).permute(1, 2, 0, 3)
+    grad = grad.reshape(batch, groups, -1, locations).permute(1, 2, 0, 3)
+    terms = (grad[:, :, None] * patches[:, None]).flatten(-2)
+    gradient = fixed_pairwise_sum(terms).reshape(weight.shape)
+    return outputs[0], gradient, outputs[2]
 
 
 def _unfused_convolution(

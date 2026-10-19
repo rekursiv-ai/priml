@@ -5,10 +5,10 @@ from __future__ import annotations
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final, cast, override
 from unittest.mock import Mock
 
-from configgle import PartialConfig
+from configgle import Makes, PartialConfig
 from torch import Tensor, nn
 
 import pytest
@@ -571,6 +571,109 @@ def test_multi_stream_internal_rope():
     y0, y1 = m([x0, x1])
     assert y0.shape == (2, 8, 64)
     assert y1.shape == (2, 12, 64)
+
+
+class _OwnedRotary(RoPE):
+    """Keep factors standard while rotating at a different scale."""
+
+    class Config(Makes["_OwnedRotary"], RoPE.Config):
+        """Use standard factor geometry."""
+
+    @classmethod
+    @override
+    def _rotate(cls, x: Tensor, cos: Tensor, sin: Tensor, interleave: bool) -> Tensor:
+        del cos, sin, interleave
+        return x * 2
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("supplied", [False, True])
+def test_each_stream_uses_its_owned_rotation(explicit: bool, supplied: bool) -> None:
+    def kernel(q: Tensor, k: Tensor, v: Tensor, **kwargs: object) -> Tensor:
+        del v, kwargs
+        return q + k.mean(dim=-3, keepdim=True)
+
+    config = MultiStreamAttention.Config(
+        channels_in=7,
+        num_heads=2,
+        channels_head=6,
+        attn_kernel=PartialConfig(kernel),
+    )
+    rotaries = [_OwnedRotary.Config(6), RoPE.Config(6)]
+    if explicit:
+        config.streams = [AttentionProjections.Config(rope=rope) for rope in rotaries]
+    else:
+        config.rope = [*rotaries]
+    module = config.make()
+    xs = [torch.randn(2, length, 7, requires_grad=True) for length in (3, 5)]
+    factors = [
+        rope.make()(torch.arange(x.shape[-2]))
+        for rope, x in zip(rotaries, xs, strict=True)
+    ]
+    actual = module(xs, cos_sin=factors if supplied else None)
+    queries: list[Tensor] = []
+    keys: list[Tensor] = []
+    for index, x in enumerate(xs):
+        projection = (
+            module.streams[index].proj_qkv if explicit else module.proj_qkvs[index]
+        )
+        q, k, _ = (
+            value.contiguous() for value in projection(x).split([2, 2, 2], dim=-2)
+        )
+        rotation = _OwnedRotary.rotate if index == 0 else RoPE.rotate
+        q, k = rotation(q, k, *factors[index])
+        queries.append(q)
+        keys.append(k.movedim(-3, -2))
+    joint_keys = torch.cat(keys, dim=-2).movedim(-3, -2)
+    expected = tuple(
+        (module.streams[index].proj_out if explicit else module.proj_outs[index])(
+            (query + joint_keys.mean(dim=-3, keepdim=True)).flatten(-2),
+        )
+        for index, query in enumerate(queries)
+    )
+    assert all(torch.equal(a, b) for a, b in zip(actual, expected, strict=True))
+
+    variables = (*xs, *module.parameters())
+    actual_grads = torch.autograd.grad(
+        tuple(output.sum() for output in actual),
+        variables,
+        retain_graph=True,
+    )
+    expected_grads = torch.autograd.grad(
+        tuple(output.sum() for output in expected),
+        variables,
+    )
+    assert all(
+        torch.equal(a, b) for a, b in zip(actual_grads, expected_grads, strict=True)
+    )
+
+
+def test_explicit_stream_uses_its_fallback_for_external_factors() -> None:
+    def rotate(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor) -> tuple[Tensor, Tensor]:
+        del cos, sin
+        return q * 3, k * 4
+
+    def kernel(q: Tensor, k: Tensor, v: Tensor, **kwargs: object) -> Tensor:
+        del k, v, kwargs
+        return q
+
+    stream = AttentionProjections.Config()
+    stream.rotate = rotate
+    stream.rope = RoPE.Config(6)
+    config = MultiStreamAttention.Config(
+        channels_in=7,
+        num_heads=2,
+        channels_head=6,
+        streams=[stream],
+        attn_kernel=PartialConfig(kernel),
+    )
+    module = config.make()
+    x = torch.randn(2, 5, 7)
+    factors = RoPE.Config(6).make()(torch.arange(5))
+    actual = module([x], cos_sin=[factors])[0]
+    q = module.streams[0].proj_qkv(x).split([2, 2, 2], dim=-2)[0]
+    expected = module.streams[0].proj_out((q * 3).flatten(-2))
+    assert torch.equal(actual, expected)
 
 
 def test_internal_rope_positions_use_input_device(

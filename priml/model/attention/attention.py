@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import KW_ONLY, field, replace
 from typing import Self, override
 
@@ -30,6 +31,7 @@ from priml.model.custom_types import (
     LayerCache,
     LinearProjection,
     RotaryConfig,
+    RotaryRotation,
     TensorModule,
     infer_same_width,
 )
@@ -78,6 +80,11 @@ class AttentionProjections(nn.Module):
 
         rope: RotaryConfig | None = None
         """Rotary position embedding (None = no positional encoding)."""
+
+        rotate: (
+            Callable[[Tensor, Tensor, Tensor, Tensor], tuple[Tensor, Tensor]] | None
+        ) = None
+        """Override rotation; otherwise use the owned rotary's method, then RoPE.rotate."""
 
         norm_qk: Makeable[TensorModule] | None = None
         """Optional norm applied to Q and K before attention."""
@@ -376,6 +383,12 @@ class AttentionProjections(nn.Module):
             config.norm_out.make() if config.norm_out else None
         )
         self.rope = config.rope.make() if config.rope else None
+        if config.rotate is not None:
+            self.rotate = config.rotate
+        elif isinstance(self.rope, RotaryRotation):
+            self.rotate = self.rope.rotate
+        else:
+            self.rotate = RoPE.rotate
 
     def split_qkv(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """Project Q/K/V separately while reusing the fused parameter layout.
@@ -575,17 +588,6 @@ class Attention(AttentionProjections):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         self.attn_kernel = config.attn_kernel.make()
-
-    @classmethod
-    def rotate(
-        cls,
-        q: Tensor,
-        k: Tensor,
-        cos: Tensor,
-        sin: Tensor,
-    ) -> tuple[Tensor, Tensor]:
-        """Apply rotary arithmetic; a specialized attention may preserve other rounding."""
-        return RoPE.rotate(q, k, cos, sin)
 
     def assert_tensor_parallel_compatible(self) -> None:
         """Reject the fused flash kernel when this block is sharded.

@@ -4,28 +4,39 @@ A tensor golden is a flat name-to-tensor dict saved with plain ``torch.save``.
 Its size is dominated by per-storage archive overhead, not by the bytes of its
 small tensors, so :func:`write_tensors` packs every tensor of one dtype into
 one storage and :func:`put_steps` stacks per-step values under one key.
+
+Replay contexts observe native draws or pin explicit test streams. The broad
+sampler stream and dropout-only stream retain distinct formulas and counters.
+Production training uses native samplers.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import contextmanager
 from difflib import unified_diff
+from functools import cache
 from pathlib import Path
 from re import Pattern
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final, cast, override
 
 import fcntl
+import inspect
 import math
 import os
 import re
 import tempfile
+import traceback
 import zlib
 
 from torch import Tensor
+from torch._C import Tag
+from torch.utils._python_dispatch import TorchDispatchMode
 from treekle import from_plain
 
 import torch
 
+from priml.math.seed import get_rng_state
 from priml.testing import regenerate
 
 
@@ -33,9 +44,220 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable, Mapping
 
     from configgle.fig import Maker
+    from torch import nn
+    from torch._ops import OpOverload
+
+    from priml.math.seed import RngState
 
 
 _INDEX: Final = "index"
+_THIS: Final = Path(__file__).resolve()
+
+
+class NativeDraws(TorchDispatchMode):
+    """Observe complete native sampler outputs and pre-draw generator states."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.draws: list[tuple[str, RngState]] = []
+        self.outputs: dict[str, Tensor] = {}
+        self.generator_states: dict[int, tuple[torch.device, Tensor]] = {}
+        """Explicit generator devices/states before draws, indexed from one."""
+
+    @override
+    def __torch_dispatch__(
+        self,
+        func: OpOverload[..., object],
+        types: tuple[type, ...],
+        args: tuple[object, ...] = (),
+        kwargs: dict[str, object] | None = None,
+    ) -> object:
+        del types
+        stochastic = _is_stochastic(func, args)
+        if stochastic:
+            self.draws.append((str(func), get_rng_state()))
+            generator = (kwargs or {}).get("generator")
+            if isinstance(generator, torch.Generator):
+                self.generator_states[len(self.draws)] = (
+                    generator.device,
+                    generator.get_state().clone(),
+                )
+        output = func(*args, **(kwargs or {}))
+        if stochastic:
+            leaves = (
+                (output,)
+                if isinstance(output, Tensor)
+                else cast(tuple[Tensor, ...], output)
+            )
+            for index, tensor in enumerate(leaves):
+                self.outputs[f"draw/{len(self.draws)}/{index}"] = (
+                    tensor.detach().cpu().clone()
+                )
+        return output
+
+
+class PinnedRandom(TorchDispatchMode):
+    """Pin ATen samplers while retaining init, dropout, and DataLoader algorithms."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: Counter[str] = Counter()
+        """Legacy receipt keys; numerical offsets depend only on the total."""
+        self.site_calls: Counter[str] = Counter()
+        """Directory-preserving call-site counts for coverage assertions."""
+
+    @override
+    def __torch_dispatch__(
+        self,
+        func: OpOverload[..., object],
+        types: tuple[type, ...],
+        args: tuple[object, ...] = (),
+        kwargs: dict[str, object] | None = None,
+    ) -> object:
+        del types
+        kwargs = kwargs or {}
+        if not _is_stochastic(func, args):
+            return func(*args, **kwargs)
+        kind = _primitive_kind(func)
+        if kind == "dropout":
+            raise AssertionError(f"Unpinned random primitive: {func}.")
+        frame_info = None
+        caller = None
+        for frame, line in traceback.walk_stack(None):
+            path = Path(frame.f_code.co_filename).resolve()
+            if (
+                caller is None
+                and path != _THIS
+                and not path.is_relative_to(Path(torch.__file__).resolve().parent)
+            ):
+                caller = (frame, line)
+            if frame.f_code.co_name in (
+                "reset_parameters",
+                "forward",
+                "__iter__",
+                "_get_iterator",
+            ):
+                frame_info = (frame, line)
+                break
+        site = (
+            "factory"
+            if frame_info is None
+            else f"{Path(frame_info[0].f_code.co_filename).name}:{frame_info[1]}"
+        )
+        self.calls[f"{func}/{site}"] += 1
+        location = frame_info or caller
+        if location is None:
+            raise ValueError("Cannot identify the random primitive's caller.")
+        site_frame, site_line = location
+        site_path = Path(site_frame.f_code.co_filename).resolve()
+        self.site_calls[f"{func}/{site_path}:{site_line}"] += 1
+        offset = sum(self.calls.values())
+        if kind == "randperm":
+            count = cast(int, args[0])
+            output = kwargs.get("out")
+            dtype = (
+                output.dtype
+                if isinstance(output, Tensor)
+                else kwargs.get("dtype", torch.int64)
+            )
+            device = (
+                output.device
+                if isinstance(output, Tensor)
+                else kwargs.get("device", "cpu")
+            )
+            values = torch.arange(
+                count,
+                dtype=cast(torch.dtype, dtype),
+                device=cast(torch.device, device),
+            ).roll(offset % count if count else 0)
+            if isinstance(output, Tensor):
+                return output.resize_(count).copy_(values)
+            return values
+        tensor = args[0]
+        assert isinstance(tensor, Tensor)
+        if kind == "random_":
+            low = cast(int, args[1]) if len(args) > 2 else 0
+            high = args[2] if len(args) > 2 else (args[1] if len(args) > 1 else None)
+            if high is None:
+                if tensor.dtype == torch.bool:
+                    high = 2
+                elif tensor.is_floating_point():
+                    high = int(2 / torch.finfo(tensor.dtype).eps) + 1
+                else:
+                    high = torch.iinfo(tensor.dtype).max + 1
+            assert isinstance(high, int)
+            if high <= low:
+                raise ValueError(
+                    "Integer draw upper bound must exceed its lower bound.",
+                )
+            return tensor.fill_(low + offset % (high - low))
+        values = (
+            (
+                torch.arange(tensor.numel(), device=tensor.device).reshape(tensor.shape)
+                + offset
+            )
+            % 97
+        ).to(tensor.dtype) / 97
+        if kind == "bernoulli_":
+            probability = cast(float, args[1]) if len(args) > 1 else 0.5
+            return tensor.copy_(values < probability)
+        low = cast(float, args[1]) if len(args) > 1 else 0.0
+        high = cast(float, args[2]) if len(args) > 2 else 1.0
+        return tensor.copy_(values * (high - low) + low)
+
+
+class PinnedDropout(TorchDispatchMode):
+    """Supply fixed Bernoulli inputs while observing every stochastic call site.
+
+    Args:
+      model: Model whose module names identify dropout call sites.
+      draw_offset: Number of prior draws in the dropout-only stream.
+
+    """
+
+    def __init__(self, model: nn.Module, *, draw_offset: int = 0) -> None:
+        super().__init__()
+        self.calls = 0
+        self.draw_offset = draw_offset
+        self.sites: list[str] = []
+        self.names = {id(module): name for name, module in model.named_modules()}
+
+    @override
+    def __torch_dispatch__(
+        self,
+        func: OpOverload[..., object],
+        types: tuple[type, ...],
+        args: tuple[object, ...] = (),
+        kwargs: dict[str, object] | None = None,
+    ) -> object:
+        del types
+        if not _is_stochastic(func, args):
+            return func(*args, **(kwargs or {}))
+        if func is not torch.ops.aten.bernoulli_.float:
+            raise ValueError(func)
+        self.calls += 1
+        frame = inspect.currentframe()
+        site = "functional"
+        while frame is not None:
+            module = frame.f_locals.get("self")
+            if id(module) in self.names:
+                site = self.names[id(module)]
+                break
+            frame = frame.f_back
+        del frame
+        self.sites.append(site)
+        output = args[0]
+        assert isinstance(output, Tensor)
+        # ATen omits the schema's default p=0.5 from positional arguments.
+        probability = cast(float, args[1]) if len(args) > 1 else 0.5
+        uniform = (
+            (
+                torch.arange(output.numel(), device=output.device)
+                + 7 * (self.calls - 1 + self.draw_offset)
+            )
+            % 20
+        ).reshape(output.shape) / 20
+        return output.copy_((uniform < probability).to(dtype=output.dtype))
 
 
 def assert_pprint_golden(
@@ -216,34 +438,47 @@ def unpack(packed: object) -> dict[str, Tensor]:
 
     """
     payload = from_plain(packed, dict[str, Tensor])
-    if _INDEX not in payload or len(payload) != len(
-        from_plain(packed, dict[str, Tensor]),
-    ):
+    if _INDEX not in payload:
         raise TypeError("Not a record written by pack.")
-    index = zlib.decompress(payload.pop(_INDEX).numpy().tobytes()).decode()
+    try:
+        index = zlib.decompress(payload.pop(_INDEX).numpy().tobytes()).decode()
+    except (zlib.error, UnicodeDecodeError) as error:
+        raise TypeError(
+            "Not a record written by pack: invalid compressed index.",
+        ) from error
     offsets = dict.fromkeys(payload, 0)
     record: dict[str, Tensor] = {}
-    for line in index.split("\n") if index else []:
-        key, dtype, shape = line.split("\t")
-        sizes = [int(size) for size in shape.split(",")] if shape else []
-        start = offsets[dtype]
-        offsets[dtype] = start + math.prod(sizes)
-        record[key] = payload[dtype][start : offsets[dtype]].reshape(sizes)
+    try:
+        for line in index.split("\n") if index else []:
+            key, dtype, shape = line.split("\t")
+            sizes = [int(size) for size in shape.split(",")] if shape else []
+            start = offsets[dtype]
+            offsets[dtype] = start + math.prod(sizes)
+            record[key] = payload[dtype][start : offsets[dtype]].reshape(sizes)
+    except (ValueError, KeyError, RuntimeError) as error:
+        raise TypeError(
+            "Not a record written by pack: invalid tensor index.",
+        ) from error
     return record
 
 
 def mismatches(
     expected: Mapping[str, Tensor],
     actual: Mapping[str, Tensor],
+    *,
+    ulps: bool = False,
 ) -> list[str]:
     """Return every key whose presence, dtype, shape, or bits differ.
 
     Args:
       expected: Reference record.
       actual: Candidate record.
+      ulps: Include ULP diagnostics for real floating tensors.
 
     Returns:
-      report: One line per mismatch, all of them.
+      report: One line per mismatch, all of them. Optional ULP distances never
+        narrow the dtype. Signed zeros remain bit mismatches at zero ULP;
+        NaNs report no numeric distance.
 
     """
     report = [f"missing {k}" for k in sorted(expected.keys() - actual.keys())]
@@ -263,7 +498,14 @@ def mismatches(
                 )
                 .any(dim=1)
             )
-            report.append(f"{key}: {different.sum().item()}/{want.numel()} differ")
+            diagnostic = (
+                f"; max_ulp={_max_ulp(want, got)}"
+                if ulps and want.is_floating_point()
+                else ""
+            )
+            report.append(
+                f"{key}: {different.sum().item()}/{want.numel()} differ{diagnostic}",
+            )
     return report
 
 
@@ -375,9 +617,9 @@ def stored(value: Tensor) -> Tensor:
       value: A recorded tensor.
 
     Returns:
-      copy: The same values; a non-scalar int32, int64, or float32 tensor of
-        whole numbers in [0, 256) -- token grids, counters -- narrowed to uint8,
-        which holds them exactly. Anything else, including a float ``-0.0``,
+      copy: The same values; an int32, int64, or float32 tensor with more than
+        one element narrows to uint8 when every value is a whole number in
+        [0, 256). Anything else, including a float ``-0.0``,
         keeps its dtype, so no bit is lost, and a value that stops being whole
         changes the stored dtype, which a comparison reports.
 
@@ -407,16 +649,27 @@ def put_steps(
     A quantity missing from some step, or changing shape or dtype, is stored
     per step under ``prefix/<step>/<key>`` (1-based) instead.
 
+    Raises:
+      ValueError: Generated keys collide with each other or with ``out``.
+        The original output remains unchanged.
+
     """
+    entries: list[tuple[str, Tensor]] = []
     for key in sorted({key for record in records for key in record}):
         values = [record[key] for record in records if key in record]
         uniform = len({(value.shape, value.dtype) for value in values}) == 1
         if len(values) == len(records) and uniform:
-            out[f"{prefix}/{key}"] = stored(torch.stack(values))
+            entries.append((f"{prefix}/{key}", stored(torch.stack(values))))
             continue
         for index, record in enumerate(records, start=1):
             if key in record:
-                out[f"{prefix}/{index}/{key}"] = stored(record[key])
+                entries.append((f"{prefix}/{index}/{key}", stored(record[key])))
+    pending: dict[str, Tensor] = {}
+    for key, value in entries:
+        if key in out or key in pending:
+            raise ValueError(f"Duplicate golden key: {key!r}.")
+        pending[key] = value
+    out.update(pending)
 
 
 def rng_fingerprint() -> Tensor:
@@ -454,9 +707,55 @@ def joined(tensors: Iterable[Tensor]) -> Tensor:
     return torch.cat(parts) if parts else torch.zeros(0)
 
 
+def _is_stochastic(func: OpOverload[..., object], args: tuple[object, ...]) -> bool:
+    if func is torch.ops.aten.dropout.default and (
+        args[2] is False or args[1] in (0, 1)
+    ):
+        return False
+    if func is torch.ops.aten.native_dropout.default and args[2] is False:
+        return False
+    return Tag.nondeterministic_seeded in func.tags
+
+
+@cache
+def _primitive_kind(func: OpOverload[..., object]) -> str:
+    """Classify seeded ATen metadata without caching any draw or argument."""
+    name = str(func)
+    if name == "aten.dropout.default":
+        return "dropout"
+    for token in ("uniform_", "bernoulli_", "randperm", "random_"):
+        if token in name:
+            return token
+    raise AssertionError(f"Unpinned random primitive: {name}.")
+
+
 def _part_lock() -> Path:
     """Return the file every :func:`assert_tensor_golden_part` call locks."""
     return Path(tempfile.gettempdir()) / f"{__name__}.lock"
+
+
+def _max_ulp(a: Tensor, b: Tensor) -> int | str:
+    kind = {
+        torch.float64: torch.int64,
+        torch.float32: torch.int32,
+        torch.float16: torch.int16,
+        torch.bfloat16: torch.int16,
+    }.get(a.dtype)
+    if kind is None:
+        return "n/a"
+    if bool(a.isnan().any() or b.isnan().any()):
+        return "nan"
+    # Python integers avoid overflow for opposite-sign binary64 endpoints.
+    left = from_plain(_tensor_bytes(a).view(kind).tolist(), list[int])
+    right = from_plain(_tensor_bytes(b).view(kind).tolist(), list[int])
+    floor = torch.iinfo(kind).min
+    return max(
+        (
+            abs((floor - x if x < 0 else x) - (floor - y if y < 0 else y))
+            for x, y in zip(left, right, strict=True)
+        ),
+        default=0,
+    )
 
 
 def _tensor_bytes(value: Tensor) -> Tensor:

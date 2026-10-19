@@ -128,7 +128,7 @@ class Linear(nn.Linear):
         if self.bias is not None:
             if self._init_bias is None:
                 fan_in = self.weight.shape[1]
-                bound = fan_in**-0.5
+                bound = 1 / fan_in**0.5 if fan_in else 0
                 if self.bias.dtype is self._init_dtype:
                     nn.init.uniform_(self.bias, -bound, bound)
                 else:

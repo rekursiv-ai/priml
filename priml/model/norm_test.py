@@ -22,6 +22,7 @@ from priml.model.norm import (
     GroupNorm,
     GroupNorm2d,
     LayerNorm,
+    LayerNorm2d,
     RMSNorm,
 )
 from priml.testing.bfb import assert_bfb_against_golden
@@ -34,6 +35,59 @@ def _config_id(value: object) -> str | None:
 
 
 _CWD: Final = Path(__file__).resolve().parent
+
+
+@pytest.mark.parametrize("affine", [False, True])
+def test_channel_norm_preserves_exact_nchw_permutation_and_complete_gradients(
+    affine: bool,
+) -> None:
+    config = LayerNorm2d.Config(channels_in=3, dtype=torch.float64)
+    assert config.eps == 1e-6
+    assert config.elementwise_affine
+    config.elementwise_affine = affine
+    native = config.make()
+    expected = torch.nn.LayerNorm(
+        3,
+        eps=1e-6,
+        elementwise_affine=affine,
+        dtype=torch.float64,
+    )
+    assert list(native.state_dict()) == list(expected.state_dict())
+    before = torch.get_rng_state()
+    native.reset_parameters()
+    assert torch.equal(torch.get_rng_state(), before)
+    value = torch.arange(2 * 3 * 4 * 5, dtype=torch.float64).reshape(2, 3, 4, 5) / 31
+    left, right = value.clone().requires_grad_(), value.clone().requires_grad_()
+    got = native(left, ignored=True)
+    want = expected(right.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+    assert got.dtype == want.dtype
+    assert torch.equal(got, want)
+    got.square().sum().backward()
+    want.square().sum().backward()
+    assert left.grad is not None
+    assert right.grad is not None
+    assert torch.equal(left.grad, right.grad)
+    for first, second in zip(native.parameters(), expected.parameters(), strict=True):
+        assert first.grad is not None
+        assert second.grad is not None
+        assert torch.equal(first.grad, second.grad)
+    assert config.finalized().output_grid((4, 5)) == (4, 5)
+    assert cost(
+        config.finalized(),
+        seq_len=20,
+        batch_size=2,
+        dtype=torch.float64,
+    ) == cost(
+        LayerNorm.Config(
+            3,
+            eps=1e-6,
+            elementwise_affine=affine,
+            dtype=torch.float64,
+        ).finalized(),
+        seq_len=20,
+        batch_size=2,
+        dtype=torch.float64,
+    )
 
 
 def test_rmsnorm():
@@ -212,6 +266,47 @@ def test_after_warmup_the_correction_engages() -> None:
     # A batch far from the running estimate, so the correction has work to do.
     batch = torch.randn(64, 4) * 4.0 + 2.0
     assert not torch.allclose(warm(batch), cold(batch), atol=1e-3)
+
+
+def test_warm_correction_clips_both_ratio_bounds_and_signed_drift_exactly() -> None:
+    config = BatchRenorm.Config(channels_in=6, warmup_steps=0, eps=0.125)
+    config.max_ratio = 3.0
+    config.max_drift = 1.75
+    layer = config.make().double()
+    with torch.no_grad():
+        layer.running_mean.copy_(torch.tensor([0.5, 2.0, -1.0, 3.0, 0.125, -3.0]))
+        layer.running_var.copy_(torch.tensor([1.0, 4.0, 9.0, 16.0, 25.0, 36.0]))
+    mean = torch.tensor(
+        [2.0, -3.0, 100.0, -100.0, 0.5, 10.0],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    variance = torch.tensor(
+        [0.01, 0.01, 10_000.0, 10_000.0, 16.0, 49.0],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    deviation = (variance + 0.125).sqrt()
+    running_deviation = (layer.running_var + 0.125).sqrt()
+    ratio = (deviation / running_deviation).detach().clamp(1 / 3, 3)
+    drift = (
+        ((mean - layer.running_mean) / running_deviation).detach().clamp(-1.75, 1.75)
+    )
+    expected = mean - drift * deviation / ratio, variance / ratio.square()
+    actual = layer._corrected(mean, variance)
+    for got, want in zip(actual, expected, strict=True):
+        assert torch.equal(got, want)
+    actual_grad = torch.autograd.grad(
+        actual[0].sum() + actual[1].sum(),
+        (mean, variance),
+        retain_graph=True,
+    )
+    expected_grad = torch.autograd.grad(
+        expected[0].sum() + expected[1].sum(),
+        (mean, variance),
+    )
+    for got, want in zip(actual_grad, expected_grad, strict=True):
+        assert torch.equal(got, want)
 
 
 def test_the_correction_is_bounded() -> None:

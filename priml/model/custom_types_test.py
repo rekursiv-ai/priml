@@ -24,6 +24,7 @@ from priml.model.custom_types import (
     NonspatialGrid,
     PreservesGrid,
     RotaryFactors,
+    RotaryRotation,
     TensorModule,
     flatten_depth_index,
     has_weight,
@@ -225,6 +226,10 @@ class _RotaryStub:
     __call__ = RotaryFactors.__call__
 
 
+class _RotationStub:
+    rotate = RotaryRotation.rotate
+
+
 class _LookupStub:
     weight = torch.zeros(1)
     __call__ = TensorModule.__call__
@@ -252,6 +257,9 @@ def test_protocol_stub_bodies_are_inert() -> None:
     assert module.reset_parameters() is None
     rotary: RotaryFactors = _RotaryStub()
     assert rotary(x) is None
+    rotation: RotaryRotation = _RotationStub()
+    assert not isinstance(rotary, RotaryRotation)
+    assert rotation.rotate(x, x, x, x) is None
     assert has_weight(_LookupStub())
     assert _LookupStub().to(dtype=torch.float32) is None
 

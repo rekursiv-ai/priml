@@ -2,13 +2,37 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from functools import cache
+from typing import TYPE_CHECKING, cast
+
+import ctypes
 
 import torch
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from torch import Tensor
+
+
+def fma64(x: float, *, y: float, addend: float) -> float:
+    """Return a scalar binary64 product plus addend with one C99 rounding.
+
+    Use the host C arithmetic API because Python 3.12 has no ``math.fma``.
+    The host's IEEE handling of signed zeros, subnormals, infinities, and
+    NaNs is retained.
+
+    Args:
+      x: First binary64 multiplicand.
+      y: Second binary64 multiplicand.
+      addend: Binary64 addend.
+
+    Returns:
+      result: Host binary64 fused multiply-add.
+
+    """
+    return _host_fma()(x, y, addend)
 
 
 @torch.no_grad()
@@ -52,6 +76,14 @@ def fma32(x: Tensor, *, y: Tensor, addend: Tensor) -> Tensor:
     midpoint = torch.where(rounded.isinf(), overflow_midpoint, midpoint)
     crossed = torch.sign(residual) == direction
     return torch.where((total == midpoint) & crossed, neighbor, rounded)
+
+
+@cache
+def _host_fma() -> Callable[[float, float, float], float]:
+    library = ctypes.CDLL(None)
+    library.fma.restype = ctypes.c_double
+    library.fma.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_double]
+    return cast("Callable[[float, float, float], float]", library.fma)
 
 
 def _two_sum(x: Tensor, *, y: Tensor) -> tuple[Tensor, Tensor]:

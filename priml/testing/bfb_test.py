@@ -4591,6 +4591,249 @@ def test_legacy_batch_norm_keeps_complete_running_state(training: bool) -> None:
         assert (actual.running_mean._version, actual.running_var._version) == versions
 
 
+def test_convolution_weight_gradient_keeps_cancellation_terms() -> None:
+    terms = torch.tensor(
+        [2.0**53, 1.0, 1.0, -(2.0**53), 0.0],
+        dtype=torch.float64,
+    )
+    media = torch.zeros(2, 3, 4, 5, dtype=torch.float64)
+    media[0, :, 0] = terms
+    # A pointwise convolution has unit kernel axes by definition.
+    weight = torch.ones(6, 3, 1, 1, dtype=torch.float64, requires_grad=True)
+    with host_agnostic_numerics():
+        torch.nn.functional.conv2d(media, weight).sum().backward()
+    assert weight.grad is not None
+    assert torch.equal(weight.grad, torch.ones_like(weight))
+
+
+@pytest.mark.parametrize("groups", [1, 3])
+def test_widened_convolution_keeps_every_weight_gradient(groups: int) -> None:
+    media = torch.ones(2, 3, 5, 8)
+    # Depthwise groups leave one input channel in each weight group.
+    weight = torch.ones(12, 3 // groups, 2, 4, requires_grad=True)
+    with host_agnostic_numerics():
+        torch.nn.functional.conv2d(media, weight, groups=groups).sum().backward()
+    assert weight.grad is not None
+    assert weight.grad.dtype == torch.float32
+    assert torch.equal(weight.grad, torch.full_like(weight, 2 * 4 * 5))
+
+
+@pytest.mark.parametrize("keyword_mask", [False, True])
+@pytest.mark.parametrize("mask", [(True, True, True), (False, True, False)])
+def test_convolution_backward_preserves_native_requests_and_other_outputs(
+    keyword_mask: bool,
+    mask: tuple[bool, bool, bool],
+) -> None:
+    operation = cast(
+        "OpOverload[..., object]",
+        torch.ops.aten.convolution_backward.default,
+    )
+    weight = torch.ones(5, 3, 2, 4, dtype=torch.float64)
+    arguments: tuple[object, ...] = (
+        torch.ones(2, 5, 3, 4, dtype=torch.float64),
+        torch.ones(2, 3, 4, 7, dtype=torch.float64),
+        weight,
+        [5],
+        [1, 1],
+        [0, 0],
+        [1, 1],
+        False,
+        [0, 0],
+        1,
+    )
+    expected = cast(
+        tuple[Tensor | None, Tensor | None, Tensor | None],
+        operation(*arguments, output_mask=mask),
+    )
+    with (
+        BackwardRequests() as requests,
+        host_agnostic_numerics(),
+    ):
+        actual = cast(
+            tuple[Tensor | None, Tensor | None, Tensor | None],
+            operation(*arguments, output_mask=mask)
+            if keyword_mask
+            else operation(*arguments, mask),
+        )
+    assert requests.masks == [mask]
+    assert actual[1] is not None
+    assert torch.equal(actual[1], torch.full_like(weight, 2 * 3 * 4))
+    for index in (0, 2):
+        want, got = expected[index], actual[index]
+        if want is None:
+            assert got is None
+        else:
+            assert got is not None
+            assert torch.equal(want, got)
+
+
+@pytest.mark.parametrize("transposed", [False, True])
+@pytest.mark.parametrize("dimensions", [1, 2, 3])
+def test_convolution_backward_replaces_only_the_2d_weight_reduction(
+    transposed: bool,
+    dimensions: int,
+) -> None:
+    source = torch.ones(2, 3, *((5,) * dimensions), requires_grad=True)
+    # Convolution kernels preserve the channel contract across spatial ranks.
+    weights = torch.ones(
+        *((3, 4) if transposed else (4, 3)),
+        *((2,) * dimensions),
+        requires_grad=True,
+    )
+    arguments: tuple[object, ...] = (
+        source,
+        weights,
+        None,
+        [1] * dimensions,
+        [0] * dimensions,
+        [1] * dimensions,
+        transposed,
+        [0] * dimensions,
+        1,
+    )
+    operation = cast("OpOverload[..., object]", torch.ops.aten.convolution.default)
+    with BackwardRequests() as requests, host_agnostic_numerics():
+        output = operation(*arguments)
+        assert isinstance(output, Tensor)
+        output.sum().backward()
+    assert source.grad is not None
+    assert weights.grad is not None
+    assert requests.masks == [(True, True, False)]
+
+
+def test_weightless_adjoint_retains_the_default_path() -> None:
+    media = torch.ones(2, 3, 4, 6, requires_grad=True)
+    with (
+        BackwardRequests() as requests,
+        host_agnostic_numerics(),
+    ):
+        # conv2d uses unit kernel axes for the pointwise adjoint dispatch case.
+        torch.nn.functional.conv2d(media, torch.ones(5, 3, 1, 1)).sum().backward()
+    assert requests.masks == [(True, False, False)]
+    assert media.grad is not None
+    assert torch.equal(media.grad, torch.full_like(media, 5))
+
+
+def test_empty_convolution_batch_retains_zero_weight_gradients() -> None:
+    # The empty batch is convolution_backward's valid degenerate boundary.
+    media = torch.ones(0, 3, 4, 5)
+    weight = torch.ones(6, 3, 2, 4, requires_grad=True)
+    with host_agnostic_numerics():
+        torch.nn.functional.conv2d(media, weight).sum().backward()
+    assert weight.grad is not None
+    assert torch.equal(weight.grad, torch.zeros_like(weight))
+
+
+def test_convolution_weight_gradient_rejects_equal_area_wrong_spatial_axes() -> None:
+    operation = cast(
+        "OpOverload[..., object]",
+        torch.ops.aten.convolution_backward.default,
+    )
+    with host_agnostic_numerics(), pytest.raises(RuntimeError, match="size"):
+        _ = operation(
+            torch.ones(8, 5, 2, 6, dtype=torch.float64),
+            torch.ones(8, 3, 4, 7, dtype=torch.float64),
+            torch.ones(5, 3, 2, 4, dtype=torch.float64),
+            [5],
+            [1, 1],
+            [0, 0],
+            [1, 1],
+            False,
+            [0, 0],
+            1,
+            [False, True, False],
+        )
+
+
+@pytest.mark.parametrize("singleton", [4, 5, 6])
+def test_convolution_backward_expands_singleton_spatial_arguments(
+    singleton: int,
+) -> None:
+    operation = cast(
+        "OpOverload[..., object]",
+        torch.ops.aten.convolution_backward.default,
+    )
+    # Native convolution_backward expands one spatial value across both axes.
+    weight = torch.ones(6, 3, 2, 4, dtype=torch.float64)
+    arguments: list[object] = [
+        torch.ones(2, 6, 3, 4, dtype=torch.float64),
+        torch.ones(2, 3, 4, 7, dtype=torch.float64),
+        weight,
+        [6],
+        [1, 1],
+        [0, 0],
+        [1, 1],
+        False,
+        [0, 0],
+        1,
+        [False, True, False],
+    ]
+    arguments[singleton] = [0] if singleton == 5 else [1]
+    with host_agnostic_numerics():
+        gradients = cast(
+            tuple[Tensor | None, Tensor, Tensor | None],
+            operation(*arguments),
+        )
+    assert torch.equal(gradients[1], torch.full_like(weight, 2 * 3 * 4))
+
+
+def test_convolution_backward_out_preserves_complete_gradients_and_buffers() -> None:
+    operation = cast("OpOverload[..., object]", torch.ops.aten.convolution_backward.out)
+    media = torch.ones(2, 3, 4, 7, dtype=torch.float64)
+    weight = torch.ones(6, 3, 2, 4, dtype=torch.float64)
+    inputs: tuple[object, ...] = (
+        torch.ones(2, 6, 3, 4, dtype=torch.float64),
+        media,
+        weight,
+        [6],
+        [1, 1],
+        [0, 0],
+        [1, 1],
+        False,
+        [0, 0],
+        1,
+        [True, True, True],
+    )
+    expected = (
+        torch.empty_like(media),
+        torch.empty_like(weight),
+        torch.empty(6, dtype=torch.float64),
+    )
+    _ = operation(*inputs, out0=expected[0], out1=expected[1], out2=expected[2])
+    buffers = tuple(torch.empty_like(value) for value in expected)
+    with host_agnostic_numerics():
+        actual = cast(
+            tuple[Tensor, Tensor, Tensor],
+            operation(*inputs, out0=buffers[0], out1=buffers[1], out2=buffers[2]),
+        )
+    for got, buffer, want in zip(actual, buffers, expected, strict=True):
+        assert got is buffer
+        assert tensor_bits_equal(got, b=want)
+
+
+class BackwardRequests(TorchDispatchMode):
+    """Observe the masks reaching the native convolution backend."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.masks: list[tuple[bool, ...]] = []
+
+    @override
+    def __torch_dispatch__(
+        self,
+        func: OpOverload[..., object],
+        types: tuple[type, ...],
+        args: tuple[object, ...] = (),
+        kwargs: dict[str, object] | None = None,
+    ) -> object:
+        del types
+        kwargs = kwargs or {}
+        if str(func) == "aten.convolution_backward.default":
+            mask = args[10] if len(args) > 10 else kwargs["output_mask"]
+            self.masks.append(tuple(cast(list[bool], mask)))
+        return func(*args, **kwargs)
+
+
 if __name__ == "__main__":
     from priml.lib.testing.runner import test_main
 

@@ -156,8 +156,9 @@ class Conv1d(nn.Conv1d):
         if self.bias is not None:
             if self._init_bias is None:
                 fan_in = self.weight.shape[1] * math.prod(self.weight.shape[2:])
-                bound = fan_in**-0.5
-                nn.init.uniform_(self.bias, -bound, bound)
+                if fan_in:
+                    bound = 1 / fan_in**0.5
+                    nn.init.uniform_(self.bias, -bound, bound)
             else:
                 call_init(self._init_bias, self.bias, depth_index=self.depth_index)
 
@@ -342,8 +343,8 @@ class Conv2d(nn.Conv2d):
         init_weight: InitFn = kaiming_uniform
         """Weight initialization function."""
 
-        init_bias: InitFn = nn.init.zeros_
-        """Bias initialization function."""
+        init_bias: InitFn | None = nn.init.zeros_
+        """Bias initializer; ``None`` preserves torch's fan-in uniform draw."""
 
         @override
         def finalize(self) -> Self:
@@ -430,12 +431,184 @@ class Conv2d(nn.Conv2d):
     def reset_parameters(self) -> None:
         call_init(self._init_weight, self.weight, depth_index=self.depth_index)
         if self.bias is not None:
-            call_init(self._init_bias, self.bias, depth_index=self.depth_index)
+            if self._init_bias is None:
+                fan_in = self.weight.shape[1] * math.prod(self.weight.shape[2:])
+                if fan_in:
+                    bound = 1 / fan_in**0.5
+                    nn.init.uniform_(self.bias, -bound, bound)
+            else:
+                call_init(self._init_bias, self.bias, depth_index=self.depth_index)
 
     @override
     def forward(self, input: Tensor, **kwargs: object) -> Tensor:
         del kwargs
         return super().forward(input)
+
+
+class ConvTranspose2d(nn.ConvTranspose2d):
+    """Transposed convolution with native weight layout and configurable init."""
+
+    class Config(Fig["ConvTranspose2d"], kw_only=False):
+        channels_in: int = -1
+        """Input map width; -1 infers from channels_out."""
+
+        channels_out: int = -1
+        """Output map width; -1 infers from channels_in."""
+
+        _: KW_ONLY
+
+        kernel_size: int | tuple[int, int] = 2
+        """Spatial kernel extents."""
+
+        stride: int | tuple[int, int] = 2
+        """Spatial upsampling stride."""
+
+        padding: int | tuple[int, int] = 0
+        """Implicit padding removed from each side of the output."""
+
+        output_padding: int | tuple[int, int] = 0
+        """Extra output extent on the trailing side of each axis."""
+
+        dilation: int | tuple[int, int] = 1
+        """Spacing between kernel elements."""
+
+        groups: int = 1
+        """Blocked input/output channel connections."""
+
+        bias: bool = True
+        """Own an output-channel bias."""
+
+        depth_index: DepthIndex = ()
+        """Block position supplied to depth-aware initializers."""
+
+        device: torch.device | str | None = None
+        """Device for parameter allocation."""
+
+        dtype: torch.dtype | None = None
+        """Parameter dtype."""
+
+        init_weight: InitFn = kaiming_uniform
+        """Initializer of the input-by-output-channel weight tensor."""
+
+        init_bias: InitFn | None = nn.init.zeros_
+        """Bias initializer; None uses Torch's transposed-weight fan-in draw."""
+
+        @override
+        def finalize(self) -> Self:
+            if self.channels_in == -1:
+                self.channels_in = self.channels_out
+            if self.channels_out == -1:
+                self.channels_out = self.channels_in
+            return super().finalize()
+
+        def output_grid(self, input_grid: tuple[int, ...]) -> tuple[int, ...]:
+            """Return extents from configured padding, output padding and dilation.
+
+            Args:
+              input_grid: Spatial extents before transposed convolution.
+
+            Returns:
+              output: Configured upsampled spatial extents.
+
+            """
+            return conv_output_grid(
+                input_grid,
+                kernel_size=self.kernel_size,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
+                transposed=True,
+                output_padding=self.output_padding,
+            )
+
+        def cost(
+            self,
+            *,
+            input_grid: int | tuple[int, ...],
+            batch_size: int,
+            dtype: torch.dtype | None,
+            input_grad: bool = True,
+            weight_grad: bool = True,
+            bias_grad: bool = True,
+            **kwargs: object,
+        ) -> Cost:
+            """Count native transposed products at input positions and output bias.
+
+            Args:
+              input_grid: Spatial input extents; a scalar broadcasts to both axes.
+              batch_size: Images per invocation.
+              dtype: Operand dtype when the layer has no configured dtype.
+              input_grad: Compute the input gradient.
+              weight_grad: Compute the weight gradient.
+              bias_grad: Compute a gradient for an owned bias.
+              **kwargs: Unused outer metadata.
+
+            Returns:
+              execution: Complete logical arithmetic, traffic and owned parameters.
+
+            """
+            del kwargs
+            return conv_cost(
+                channels_in=self.channels_in,
+                channels_out=self.channels_out,
+                kernel_size=self.kernel_size,
+                ndim=2,
+                groups=self.groups,
+                bias=self.bias,
+                input_grid=(input_grid,) * 2
+                if isinstance(input_grid, int)
+                else input_grid,
+                batch_size=batch_size,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
+                dtype=self.dtype if self.dtype is not None else dtype,
+                input_grad=input_grad,
+                weight_grad=weight_grad,
+                bias_grad=bias_grad,
+                transposed=True,
+                output_padding=self.output_padding,
+            )
+
+    def __init__(self, config: Config) -> None:
+        self.depth_index = config.depth_index
+        self._init_weight = config.init_weight
+        self._init_bias = config.init_bias
+        super().__init__(
+            in_channels=config.channels_in,
+            out_channels=config.channels_out,
+            kernel_size=config.kernel_size,
+            stride=config.stride,
+            padding=config.padding,
+            output_padding=config.output_padding,
+            groups=config.groups,
+            bias=config.bias,
+            dilation=config.dilation,
+            device=config.device,
+            dtype=config.dtype,
+        )
+
+    @override
+    def reset_parameters(self) -> None:
+        call_init(self._init_weight, self.weight, depth_index=self.depth_index)
+        if self.bias is not None:
+            if self._init_bias is None:
+                fan_in = self.weight.shape[1] * math.prod(self.weight.shape[2:])
+                if fan_in:
+                    bound = 1 / fan_in**0.5
+                    nn.init.uniform_(self.bias, -bound, bound)
+            else:
+                call_init(self._init_bias, self.bias, depth_index=self.depth_index)
+
+    @override
+    def forward(
+        self,
+        input: Tensor,
+        output_size: list[int] | None = None,
+        **kwargs: object,
+    ) -> Tensor:
+        del kwargs
+        return super().forward(input, output_size=output_size)
 
 
 class Conv3d(nn.Conv3d):
@@ -480,8 +653,8 @@ class Conv3d(nn.Conv3d):
         init_weight: InitFn = kaiming_uniform
         """Weight initialization function."""
 
-        init_bias: InitFn = nn.init.zeros_
-        """Bias initialization function."""
+        init_bias: InitFn | None = nn.init.zeros_
+        """Bias initializer; ``None`` preserves torch's fan-in uniform draw."""
 
         @override
         def finalize(self) -> Self:
@@ -568,7 +741,13 @@ class Conv3d(nn.Conv3d):
     def reset_parameters(self) -> None:
         call_init(self._init_weight, self.weight, depth_index=self.depth_index)
         if self.bias is not None:
-            call_init(self._init_bias, self.bias, depth_index=self.depth_index)
+            if self._init_bias is None:
+                fan_in = self.weight.shape[1] * math.prod(self.weight.shape[2:])
+                if fan_in:
+                    bound = 1 / fan_in**0.5
+                    nn.init.uniform_(self.bias, -bound, bound)
+            else:
+                call_init(self._init_bias, self.bias, depth_index=self.depth_index)
 
     @override
     def forward(self, input: Tensor, **kwargs: object) -> Tensor:
@@ -583,6 +762,8 @@ def conv_output_grid(
     stride: int | tuple[int, ...],
     padding: int | str | tuple[int, ...],
     dilation: int | tuple[int, ...],
+    transposed: bool = False,
+    output_padding: int | tuple[int, ...] = 0,
 ) -> tuple[int, ...]:
     """Return the per-axis output grid torch's convolution writes.
 
@@ -595,6 +776,8 @@ def conv_output_grid(
       stride: Window step, scalar or per axis.
       padding: ``"same"``, ``"valid"``, an int, or one per axis.
       dilation: Kernel spacing, scalar or per axis.
+      transposed: Scatter input-position products into an upsampled grid.
+      output_padding: Trailing extent added by a transposed convolution.
 
     Returns:
       grid: Per-axis output extents.
@@ -610,14 +793,18 @@ def conv_output_grid(
     steps = stride if isinstance(stride, tuple) else (stride,) * ndim
     spacings = dilation if isinstance(dilation, tuple) else (dilation,) * ndim
     pads = pad_value if isinstance(pad_value, tuple) else (pad_value,) * ndim
+    extra = (
+        output_padding
+        if isinstance(output_padding, tuple)
+        else (output_padding,) * ndim
+    )
     return tuple(
-        (size + 2 * pad - spacing * (tap - 1) - 1) // step + 1
-        for size, pad, spacing, tap, step in zip(
-            input_grid,
-            pads,
-            spacings,
-            taps,
-            steps,
+        (size - 1) * step - 2 * pad + spacing * (tap - 1) + tail + 1
+        if transposed
+        else (size + 2 * pad - spacing * (tap - 1) - 1) // step + 1
+        for (size, pad, spacing, tap, step), tail in zip(
+            zip(input_grid, pads, spacings, taps, steps, strict=True),
+            extra,
             strict=True,
         )
     )
@@ -640,6 +827,8 @@ def conv_cost(
     input_grad: bool = True,
     weight_grad: bool = True,
     bias_grad: bool = True,
+    transposed: bool = False,
+    output_padding: int | tuple[int, ...] = 0,
 ) -> Cost:
     """Cost one complete convolution invocation and its dense dot products.
 
@@ -668,6 +857,8 @@ def conv_cost(
       input_grad: Compute the input gradient.
       weight_grad: Compute the weight gradient.
       bias_grad: Compute a gradient for an owned bias.
+      transposed: Count products at input rather than output positions.
+      output_padding: Extra trailing extent of the transposed output grid.
 
     Returns:
       cost: Integer FLOPs and operand bytes for the invocation, plus parameters.
@@ -683,9 +874,12 @@ def conv_cost(
         stride=stride,
         padding=padding,
         dilation=dilation,
+        transposed=transposed,
+        output_padding=output_padding,
     )
     rows = batch_size * math.prod(output_grid)
     input_rows = batch_size * math.prod(input_grid)
+    product_rows = input_rows if transposed else rows
     _validate_row_count(rows)
     _validate_row_count(input_rows)
     taps = math.prod(
@@ -699,8 +893,8 @@ def conv_cost(
     backward = channels_out * rows + gradients * (inputs + weights) if gradients else 0
     return Cost(
         cells={
-            ("flops", "primal", "matmul", dt): 2 * rows * weights,
-            ("flops", "adjoint", "matmul", dt): 2 * rows * weights * gradients,
+            ("flops", "primal", "matmul", dt): 2 * product_rows * weights,
+            ("flops", "adjoint", "matmul", dt): 2 * product_rows * weights * gradients,
             ("bytes", "primal", "matmul", dt): nbytes(
                 inputs + weights + rows * channels_out,
                 dt,

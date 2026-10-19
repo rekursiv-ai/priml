@@ -36,7 +36,7 @@ def cross_entropy_off_target(
     input: Tensor,
     target: Tensor,
     *,
-    smoothing: float = 0.05,
+    smoothing: float = 0.0,
     reduction: Literal["none", "mean", "sum"] = "none",
 ) -> Tensor:
     """Cross entropy allocating smoothing mass only to incorrect classes.

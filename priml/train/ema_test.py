@@ -5,7 +5,9 @@ Default) and parameter-only (TRM-style) shadows.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
+
+import math
 
 from torch import Tensor, nn
 from torch.distributed.device_mesh import init_device_mesh
@@ -17,6 +19,7 @@ import torch.distributed as dist
 
 from priml.optimizers.parameter_filter import complement, everything, matching
 from priml.runtime import best_device
+from priml.train import ema as ema_module
 from priml.train.ema import (
     EMA,
     NoEMA,
@@ -110,10 +113,13 @@ def test_ema_initialize_seeds_before_first_optimizer_update() -> None:
     torch.testing.assert_close(shadow.bias, torch.full_like(model.bias, 5.0))
 
 
-def test_ema_initialize_can_reseed_loaded_model_weights() -> None:
+@pytest.mark.parametrize("shadow_kind", ["module", "param_dict"])
+def test_ema_initialize_can_reseed_loaded_model_weights(
+    shadow_kind: Literal["module", "param_dict"],
+) -> None:
     """An explicit reseed replaces stale shadows without advancing counters."""
     model = nn.Linear(2, 3)
-    ema = EMA.Config(decay=0.25).make()
+    ema = EMA.Config(decay=0.25, shadow_kind=shadow_kind).make()
     ema.initialize(model)
     ema.global_step = 7
     ema.local_step = 5
@@ -124,13 +130,37 @@ def test_ema_initialize_can_reseed_loaded_model_weights() -> None:
 
     ema.initialize(model, reset=True)
 
-    assert ema.shadow_model is not None
-    shadow = cast(nn.Linear, ema.shadow_model)
-    assert shadow.bias is not None
-    assert model.bias is not None
-    assert torch.equal(shadow.weight, model.weight)
-    assert torch.equal(shadow.bias, model.bias)
+    state = ema.state_dict()
+    shadow = state.get("shadow_model", state.get("shadow_params"))
+    assert shadow is not None
+    assert shadow.keys() == model.state_dict().keys()
+    for name, value in model.state_dict().items():
+        assert torch.equal(shadow[name], value)
     assert (ema.global_step, ema.local_step) == (7, 5)
+
+
+@pytest.mark.parametrize("shadow_kind", ["module", "param_dict"])
+def test_ema_reset_before_first_update_discards_restored_state(
+    shadow_kind: Literal["module", "param_dict"],
+) -> None:
+    model = nn.Linear(2, 3)
+    config = EMA.Config()
+    config.shadow_kind = shadow_kind
+    source = config.make()
+    source.initialize(model)
+    restored = config.make()
+    restored.load_state_dict(source.state_dict())
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.add_(4)
+    restored.initialize(model, reset=True)
+    state = restored.state_dict()
+    shadow = state.get("shadow_model", state.get("shadow_params"))
+    assert shadow is not None
+    assert shadow.keys() == model.state_dict().keys()
+    for name, value in model.state_dict().items():
+        assert torch.equal(shadow[name], value)
+    assert (restored.global_step, restored.local_step) == (0, 0)
 
 
 def _source_order_update(shadow: Tensor, live: Tensor, decay: float) -> None:
@@ -192,6 +222,53 @@ def test_ema_copies_buffers_when_track_buffers_true() -> None:
         ema.shadow_model.running_mean,
         torch.full_like(model.running_mean, 0.5),
     )
+
+
+@pytest.mark.parametrize(("decay", "delta"), [(0.0, 6), (0.5, 3.875), (1.0, 0)])
+def test_persistent_state_policy_averages_float_state_and_copies_integers(
+    decay: float,
+    delta: float,
+) -> None:
+    model = nn.Sequential(nn.Linear(2, 3), nn.BatchNorm1d(3))
+    model.register_parameter(
+        "discrete",
+        nn.Parameter(torch.arange(4), requires_grad=False),
+    )
+    model[0].register_buffer("derived", torch.arange(5).float(), persistent=False)
+    model[0].requires_grad_(False)
+    with torch.no_grad():
+        for value in model.state_dict().values():
+            if value.is_floating_point():
+                value.copy_(torch.arange(value.numel()).reshape(value.shape) / 8)
+    initial = {name: value.clone() for name, value in model.state_dict().items()}
+    config = EMA.Config()
+    config.decay = decay
+    config.select = everything
+    config.update_fn = ema_module.average_floating_state
+    config.buffer_update_fn = ema_module.average_persistent_buffers
+    ema = config.make()
+    ema.initialize(model)
+    shadow = ema.shadow_model
+    assert shadow is not None
+    assert shadow is not model
+    assert not shadow.training
+    assert all(not parameter.requires_grad for parameter in shadow.parameters())
+    assert any(parameter.requires_grad for parameter in model.parameters())
+    for step in range(1, 4):
+        with torch.no_grad():
+            for value in model.state_dict().values():
+                value.add_(step)
+            model.get_buffer("0.derived").add_(step)
+        ema(model)
+    for name, value in shadow.state_dict().items():
+        assert torch.equal(
+            value,
+            initial[name] + (delta if value.is_floating_point() else 6),
+        )
+    assert torch.equal(shadow.get_buffer("0.derived"), torch.arange(5).float())
+    assert torch.equal(model.get_buffer("0.derived"), torch.arange(5).float() + 6)
+    assert model.training
+    assert (ema.global_step, ema.local_step) == (3, 3)
 
 
 # -- TRM-style: parameter-only shadow -----------------------------------------
@@ -1026,7 +1103,7 @@ def test_ema_param_dict_refuses_a_pending_module_checkpoint() -> None:
         dst(nn.Linear(2, 3))
 
 
-@pytest.mark.parametrize("decay", [-0.1, 1.5])
+@pytest.mark.parametrize("decay", [-0.1, 1.5, math.nan, math.inf, -math.inf])
 def test_ema_rejects_out_of_range_decay(decay: float) -> None:
     """#343: decay must lie in [0, 1]; an out-of-range lerp coefficient is a bug."""
     with pytest.raises(ValueError, match="decay"):
@@ -1044,6 +1121,18 @@ def test_ema_rejects_negative_update_after_step() -> None:
     """#343: update_after_step is a warmup length and must be non-negative."""
     with pytest.raises(ValueError, match="update_after_step"):
         EMA.Config(update_after_step=-1).make()
+
+
+def _nonfinite_decay(decay: float, step: int) -> float:
+    del decay, step
+    return math.nan
+
+
+def test_ema_rejects_nonfinite_effective_decay() -> None:
+    config = EMA.Config()
+    config.decay_schedule = _nonfinite_decay
+    with pytest.raises(ValueError, match="decay_schedule"):
+        config.make().effective_decay(0)
 
 
 if __name__ == "__main__":
