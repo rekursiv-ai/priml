@@ -12,6 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+import functools
+
 import pytest
 import torch
 
@@ -183,11 +185,11 @@ def test_the_record_joins_every_component(
 
 
 def test_the_port_reaches_the_drivers_random_call_sites(tmp_path: Path) -> None:
-    sides = vision_capture_reference.parse_sites(
-        (_DATA / "reference_sites.txt").read_text(),
+    vision_capture_reference.assert_sites_reached(
+        _DATA,
+        port=functools.partial(capture_reference.port_sites, tmp_path),
+        check=capture_reference.check_sites,
     )
-    assert capture_reference.check_sites(sides["reference"], sides["port"]) == []
-    assert capture_reference.port_sites(tmp_path) == sides["port"]
 
 
 def test_the_captured_golden_fits_the_size_ceiling() -> None:

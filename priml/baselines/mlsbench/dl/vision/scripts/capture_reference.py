@@ -406,23 +406,75 @@ def write_sites(out: Path, sites: Mapping[str, Mapping[str, int]]) -> None:
     (out / "reference_sites.txt").write_text("\n".join(lines) + "\n")
 
 
-# Callers read the file themselves: ``export_config_test`` finds which test owns
-# a ``testdata`` text file by its literal ``read_text`` call.
-def parse_sites(text: str) -> dict[str, dict[str, int]]:
-    """Parse the ``reference_sites.txt`` text :func:`write_sites` wrote.
+def check_sites(
+    upstream_sites: dict[str, int],
+    port_sites: dict[str, int],
+) -> list[str]:
+    """Report every required random call site that a run did not reach.
 
     Args:
-      text: The file's contents.
+      upstream_sites: The reference's draw counts.
+      port_sites: The port's draw counts.
+
+    Returns:
+      report: One line per required site a side never drew from.
+
+    """
+    return [
+        f"{side}: random call site {site} was never reached"
+        for side, counts, required in (
+            ("reference", upstream_sites, REQUIRED_UPSTREAM),
+            ("port", port_sites, REQUIRED_PORT),
+        )
+        for site in required
+        if not any(key.startswith(site) and count for key, count in counts.items())
+    ]
+
+
+def read_sites(directory: Path) -> dict[str, dict[str, int]]:
+    """Read the ``reference_sites.txt`` :func:`write_sites` wrote into ``directory``.
+
+    Args:
+      directory: The ``testdata`` directory.
 
     Returns:
       sites: Side to its draw counts.
 
     """
     sites: dict[str, dict[str, int]] = {}
-    for line in text.splitlines():
+    for line in (directory / "reference_sites.txt").read_text().splitlines():
         side, key, count = line.split()
         sites.setdefault(side, {})[key] = int(count)
     return sites
+
+
+def assert_sites_reached(
+    directory: Path,
+    *,
+    port: Callable[[], dict[str, int]],
+    check: Callable[[dict[str, int], dict[str, int]], list[str]] = check_sites,
+) -> None:
+    """Require both stored sides to reach every site, and the port to replay its side.
+
+    Args:
+      directory: The ``testdata`` directory holding ``reference_sites.txt``.
+      port: Runs the port and returns its draw counts.
+      check: The task's ``check_sites``, over the reference's and the port's.
+
+    Raises:
+      AssertionError: A stored side misses a required site, or the port's
+        draws differ from its stored side.
+
+    """
+    sides = read_sites(directory)
+    report = check(sides["reference"], sides["port"])
+    if report:
+        raise AssertionError("\n".join(report))
+    drawn = port()
+    if drawn != sides["port"]:
+        raise AssertionError(
+            f"the port replays {drawn}, not its stored {sides['port']}",
+        )
 
 
 def write_records(out: Path, files: Mapping[str, Mapping[str, Tensor]]) -> None:
@@ -451,31 +503,6 @@ def write_records(out: Path, files: Mapping[str, Mapping[str, Tensor]]) -> None:
     out.mkdir(parents=True, exist_ok=True)
     for name, data in encoded.items():
         (out / name).write_bytes(data)
-
-
-def check_sites(
-    upstream_sites: dict[str, int],
-    port_sites: dict[str, int],
-) -> list[str]:
-    """Report every required random call site that a run did not reach.
-
-    Args:
-      upstream_sites: The reference's draw counts.
-      port_sites: The port's draw counts.
-
-    Returns:
-      report: One line per required site a side never drew from.
-
-    """
-    return [
-        f"{side}: random call site {site} was never reached"
-        for side, counts, required in (
-            ("reference", upstream_sites, REQUIRED_UPSTREAM),
-            ("port", port_sites, REQUIRED_PORT),
-        )
-        for site in required
-        if not any(key.startswith(site) and count for key, count in counts.items())
-    ]
 
 
 def compare_wiring(trace: MainTrace, *, classes: int = 100) -> list[str]:

@@ -11,13 +11,13 @@ re-implemented. The data pipeline runs through the script's own
 
 from __future__ import annotations
 
-from argparse import Namespace
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 from unittest import mock
 
 import contextlib
 import io
+import sys
 
 from PIL import Image
 from torch import Tensor, nn
@@ -37,6 +37,7 @@ from priml.testing.golden import rng_fingerprint
 
 
 if TYPE_CHECKING:
+    from argparse import Namespace
     from collections.abc import Callable, Iterator
     from types import ModuleType
 
@@ -128,6 +129,9 @@ class Script(Protocol):
 
     def train(self, args: Namespace) -> None:
         """Run the whole training of one setting."""
+
+    def main(self) -> None:
+        """Parse the command line and train."""
 
 
 def variants(root: Path, scratch: Path) -> dict[str, Script]:
@@ -401,13 +405,35 @@ class Run:
         return loss
 
 
+def script_arguments(script: Script, argv: list[str]) -> Namespace:
+    """Parse ``argv`` with the script's own ``main``, without training.
+
+    Args:
+      script: A variant of the script.
+      argv: Command-line arguments after the program name.
+
+    Returns:
+      args: What ``main`` hands ``train``, every flag not in ``argv`` at its
+        default.
+
+    """
+    parsed: list[Namespace] = []
+    with (
+        mock.patch.object(sys, "argv", ["script", *argv]),
+        mock.patch.object(script, "train", parsed.append),
+    ):
+        script.main()
+    (args,) = parsed
+    return args
+
+
 def run_train(
     script: Script,
     name: str = "exp000",
     *,
     epochs: int,
     scripted: bool,
-    warmup: int,
+    warmup: int | None = None,
 ) -> Run:
     """Call the script's ``train`` for ``epochs`` at one setting's arguments.
 
@@ -416,24 +442,24 @@ def run_train(
       name: A key of :data:`SETTINGS`, whose ``--lr`` and names are passed.
       epochs: The ``--epochs``.
       scripted: Report scripted accuracies instead of evaluating.
-      warmup: The ``--warmup_epochs``.
+      warmup: The ``--warmup-epochs``; None leaves the script's default.
 
     Returns:
       run: What the replaced pieces saw.
 
     """
     model_name, dataset, lr = SETTINGS[name]
-    args = Namespace(
-        model=model_name,
-        dataset=dataset,
-        batch_size=128,
-        epochs=epochs,
-        lr=lr,
-        weight_decay=5e-4,
-        warmup_epochs=warmup,
-        compress_ratio=COMPRESS_RATIO,
-        seed=vision_reference.SEED,
-    )
+    argv = [
+        f"--model={model_name}",
+        f"--dataset={dataset}",
+        f"--epochs={epochs}",
+        f"--lr={lr}",
+        f"--compress-ratio={COMPRESS_RATIO}",
+        f"--seed={vision_reference.SEED}",
+    ]
+    if warmup is not None:
+        argv.append(f"--warmup-epochs={warmup}")
+    args = script_arguments(script, argv)
     run = Run(script, scripted=scripted)
     printed = io.StringIO()
     with (
@@ -495,8 +521,7 @@ def upstream_trace(
     """
     record: dict[str, Tensor] = {}
     for name in SETTINGS:
-        warmup = reference.warmup_epochs(reference.SETTINGS[name])
-        run = run_train(script, name, epochs=epochs, scripted=True, warmup=warmup)
+        run = run_train(script, name, epochs=epochs, scripted=True)
         record[f"schedule/{name}"] = torch.tensor(run.rates, dtype=torch.float64)
         record[f"optimizer/{name}"] = torch.tensor(
             [run.settings[key] for key in reference.SGD_SETTINGS],
@@ -543,14 +568,14 @@ def upstream_batches(
     script: Script,
     dataset: str,
     *,
-    num_workers: int = 2,
+    num_workers: int | None = None,
 ) -> tuple[Batches, Batches]:
     """Run the script's loaders over the synthetic split, alternating the splits.
 
     Args:
       script: The pristine script.
       dataset: The setting's ``--dataset``.
-      num_workers: Loader workers; the script's own two by default.
+      num_workers: Loader workers; None takes the script's own default.
 
     Returns:
       passes: The training passes, then the test passes.
@@ -562,7 +587,12 @@ def upstream_batches(
         vision_reference.seeded(vision_reference.SEED),
         vision_reference.script_workers(),
     ):
-        train_loader, test_loader = loaders(script, dataset, num_workers=num_workers)
+        workers = (
+            upstream.default_workers(script.get_dataloaders)
+            if num_workers is None
+            else num_workers
+        )
+        train_loader, test_loader = loaders(script, dataset, num_workers=workers)
         for _ in range(vision_reference.LOADER_PASSES):
             train.append([{"media": x, "label": y} for x, y in train_loader])
             evaluation.append([{"media": x, "label": y} for x, y in test_loader])

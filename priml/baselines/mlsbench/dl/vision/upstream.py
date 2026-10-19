@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 from unittest import mock
 
 import contextlib
+import inspect
 import io
 import multiprocessing
 import sys
@@ -556,18 +557,35 @@ def upstream_network(script: Upstream) -> dict[str, Tensor]:
     }
 
 
+def default_workers(get_dataloaders: Callable[..., object]) -> int:
+    """Return the ``num_workers`` a script's ``get_dataloaders`` uses by default.
+
+    Each worker seeds its own transforms, so the draws a pass makes depend on
+    the count; it is read from the script, never restated.
+
+    Args:
+      get_dataloaders: The script's loader factory.
+
+    Returns:
+      workers: Its ``num_workers`` default.
+
+    """
+    parameter = inspect.signature(get_dataloaders).parameters["num_workers"]
+    return from_plain(cast(object, parameter.default), int)
+
+
 def upstream_batches(
     script: Upstream,
     *,
     dataset: str = "cifar100",
-    num_workers: int = 4,
+    num_workers: int | None = None,
 ) -> tuple[Batches, Batches]:
     """Run the reference's loaders, alternating training and test passes.
 
     Args:
       script: The pristine reference script.
       dataset: The setting's ``--dataset``; its loaders read the synthetic split.
-      num_workers: Loader workers; the reference's four by default, whose
+      num_workers: Loader workers; None takes the script's own default, whose
         seeds the draws depend on.
 
     Returns:
@@ -583,7 +601,11 @@ def upstream_batches(
     ):
         train_loader, test_loader = _loaders(
             script,
-            num_workers=num_workers,
+            num_workers=(
+                default_workers(script.get_dataloaders)
+                if num_workers is None
+                else num_workers
+            ),
             dataset=dataset,
         )
         for _ in range(reference.LOADER_PASSES):

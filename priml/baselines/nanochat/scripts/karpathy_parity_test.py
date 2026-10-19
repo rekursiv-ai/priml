@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 from torch import Tensor
-from torch._dynamo.eval_frame import DisableContext, OptimizedModule
 from torch.nn.attention import SDPBackend
 
 import pytest
@@ -770,7 +769,7 @@ def test_their_compiled_model_is_compared_eager() -> None:
     inductor's fused reductions rather than the port.
     """
     model = torch.nn.Linear(2, 3)
-    wrapped = OptimizedModule(model, DisableContext())
+    wrapped = torch.compile(model, backend="eager")
     assert karpathy_parity._eager(wrapped) is model
     assert karpathy_parity._eager(model) is model
 

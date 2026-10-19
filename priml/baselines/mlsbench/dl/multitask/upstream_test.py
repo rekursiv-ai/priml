@@ -507,7 +507,7 @@ class _LoaderCalls:
         data_root: str,
         *,
         batch_size: int,
-        num_workers: int,
+        num_workers: int = 4,
     ) -> tuple[list[object], list[object]]:
         """Note the patched ``DataLoader`` and ``num_workers``; build no loader."""
         del data_root, batch_size

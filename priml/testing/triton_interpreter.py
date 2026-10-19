@@ -4,17 +4,20 @@ Triton's interpreter rewrites ``triton.language`` in place. A device-function
 call patches the language modules and never restores them, and interpreting a
 library function executes interpreter code in that library's globals. Any of
 it left behind makes every later GPU compile in the process fail, so
-:func:`triton_interpreter` restores all of it on exit.
+:func:`triton_interpreter` snapshots every module it or the interpreter can set
+attributes on, its own runtime hooks included, and restores them on exit.
 """
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from functools import partial
 from typing import TYPE_CHECKING, Protocol, cast
 
+import importlib
 import inspect
 import os
+import pkgutil
 import sys
 
 from triton.runtime import interpreter, jit
@@ -37,7 +40,10 @@ def triton_interpreter(*caches: _Cache) -> Generator[None]:
     """Interpret every Triton launch inside the block on the CPU.
 
     A kernel jitted outside the block compiles and one jitted inside interprets,
-    so each cache of jitted kernels is cleared on entry and on exit.
+    so each cache of jitted kernels is cleared on entry and on exit. Every
+    ``triton.language`` submodule is imported first, so the snapshot taken before
+    any patch covers each module the interpreter can touch; whatever step fails,
+    the steps before it are undone.
 
     Args:
       caches: The ``functools.cache`` factories that jit the kernels under test.
@@ -46,33 +52,28 @@ def triton_interpreter(*caches: _Cache) -> Generator[None]:
       none: Control, with ``TRITON_INTERPRET`` set and the interpreter patched.
 
     """
-    for cache in caches:
-        cache.cache_clear()
-    saved = {id(owner): (owner, dict(vars(owner))) for owner in _patched_owners()}
-    interpret = os.environ.get("TRITON_INTERPRET")
-    os.environ["TRITON_INTERPRET"] = "1"
-    normalize = jit._normalize_ty  # noqa: SLF001 -- Triton has no public hook for it.
-    patch_tensor = interpreter._patch_lang_tensor  # noqa: SLF001 -- Likewise.
-    jit._normalize_ty = partial(_normalize_bare_constexpr, normalize=normalize)  # noqa: SLF001 -- Likewise.
-    interpreter._patch_lang_tensor = partial(_patch_scalar_index, patch=patch_tensor)  # noqa: SLF001 -- Likewise.
-    # Triton jitted its library functions at import, compiled-mode, which the
-    # interpreter refuses to call.
-    for module in (triton.language, triton.language.standard):
-        for name, value in inspect.getmembers(module, is_jit):
-            setattr(module, name, interpreter.InterpretedFunction(value.fn))
-    try:
-        yield
-    finally:
-        jit._normalize_ty = normalize  # noqa: SLF001 -- Triton has no public hook for it.
-        interpreter._patch_lang_tensor = patch_tensor  # noqa: SLF001 -- Likewise.
-        if interpret is None:
-            del os.environ["TRITON_INTERPRET"]
-        else:
-            os.environ["TRITON_INTERPRET"] = interpret
-        for owner, attributes in saved.values():
-            _restore(owner, attributes)
+    with ExitStack() as undo:
         for cache in caches:
             cache.cache_clear()
+            undo.callback(cache.cache_clear)
+        for module in pkgutil.walk_packages(
+            triton.language.__path__,
+            "triton.language.",
+        ):
+            importlib.import_module(module.name)
+        for owner in _patched_owners():
+            undo.callback(_restore, owner, dict(cast("dict[str, object]", vars(owner))))
+        undo.enter_context(_interpret_flag())
+        jit._normalize_ty = partial(  # noqa: SLF001 -- Triton has no public hook for it.
+            _normalize_bare_constexpr,
+            normalize=jit._normalize_ty,  # noqa: SLF001 -- Likewise.
+        )
+        interpreter._patch_lang_tensor = partial(  # noqa: SLF001 -- Likewise.
+            _patch_scalar_index,
+            patch=interpreter._patch_lang_tensor,  # noqa: SLF001 -- Likewise.
+        )
+        _jit_library()
+        yield
 
 
 def is_jit(value: object) -> TypeIs[jit.JITFunction[..., object]]:
@@ -108,6 +109,29 @@ def _scalar_index(tensor: _InterpretedTensor) -> int:
     return int(tensor.handle.data.item())
 
 
+@contextmanager
+def _interpret_flag() -> Generator[None]:
+    """Set ``TRITON_INTERPRET`` for the block and put the caller's value back."""
+    interpret = os.environ.get("TRITON_INTERPRET")
+    os.environ["TRITON_INTERPRET"] = "1"
+    try:
+        yield
+    finally:
+        if interpret is None:
+            del os.environ["TRITON_INTERPRET"]
+        else:
+            os.environ["TRITON_INTERPRET"] = interpret
+
+
+# Triton jitted its library functions at import, compiled-mode, which the interpreter
+# refuses to call.
+def _jit_library() -> None:
+    """Rebind each jitted library function as an interpreted one."""
+    for module in (triton.language, triton.language.standard):
+        for name, value in inspect.getmembers(module, is_jit):
+            setattr(module, name, interpreter.InterpretedFunction(value.fn))
+
+
 class _Cache(Protocol):
     def cache_clear(self) -> None: ...
 
@@ -126,6 +150,7 @@ class _InterpretedTensor(Protocol):
 
 def _patched_owners() -> list[object]:
     """Every module and class the interpreter or this context sets attributes on."""
+    hooks: list[object] = [jit, interpreter]
     modules: list[ModuleType] = [
         module
         for name, module in list(sys.modules.items())
@@ -137,7 +162,7 @@ def _patched_owners() -> list[object]:
         for value in cast("dict[str, object]", vars(module)).values()
         if isinstance(value, type) and value.__module__.startswith("triton.language")
     }
-    return [*modules, *classes.values()]
+    return [*hooks, *modules, *classes.values()]
 
 
 def _restore(owner: object, attributes: dict[str, object]) -> None:

@@ -452,14 +452,14 @@ def upstream_setting(
 def upstream_batches(
     script: Script,
     *,
-    num_workers: int = 4,
+    num_workers: int | None = None,
 ) -> tuple[reference.Batches, reference.Batches]:
     """Run the script's loaders over the synthetic split, alternating the splits.
 
     Args:
       script: The pristine script.
-      num_workers: Loader workers; the script's four by default, whose seeds
-        the draws depend on.
+      num_workers: Loader workers; None takes the script's own default, whose
+        seeds the draws depend on.
 
     Returns:
       passes: The training passes, then the test passes.
@@ -479,7 +479,11 @@ def upstream_batches(
         train_loader, test_loader = script.get_dataloaders(
             "unused",
             batch_size=vision_reference.LOADER_BATCH,
-            num_workers=num_workers,
+            num_workers=(
+                upstream.default_workers(script.get_dataloaders)
+                if num_workers is None
+                else num_workers
+            ),
         )
         for _ in range(vision_reference.LOADER_PASSES):
             train.append([_batch(*b) for b in train_loader])

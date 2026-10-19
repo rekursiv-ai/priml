@@ -245,9 +245,7 @@ def test_each_full_network_initializes_and_runs_as_the_driver(setting: str) -> N
 
 
 def test_the_port_reaches_the_same_random_call_sites(tmp_path: Path) -> None:
-    expected = capture_reference.parse_sites(
-        (_DATA / "reference_sites.txt").read_text(),
-    )["port"]
+    expected = capture_reference.read_sites(_DATA)["port"]
     assert expected
     assert reference.draw_sites(tmp_path) == expected
 

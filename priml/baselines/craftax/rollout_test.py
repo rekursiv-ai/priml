@@ -496,10 +496,11 @@ def test_the_interpreted_sampler_draws_as_the_torch_sampler(
 
     Agent 0's last action is masked, so a fall-through snaps; 5 agents leave
     a block of 8 three dead lanes. The agents start at draws 0 through 4, so
-    one launch reads each stream at a different offset and advances it.
+    one launch reads each stream at a different offset and advances it. The
+    interpreter unrolls one step per action, so 7 actions keep it fast.
     """
     monkeypatch.setattr(rollout_module, "_require_cuda", _accept_any_device)
-    decoded, mask, draws = _portable_draw_inputs(5)
+    decoded, mask, draws = _portable_draw_inputs(5, actions=7)
     assert draws.unique().numel() == 5
     config = PhiloxSampler.Config()
     config.block = 8
@@ -2134,13 +2135,21 @@ def _assert_rounded_once(exact: Sampled, rounded: Sampled) -> None:
     assert not torch.equal(exact.logprobs, rounded.logprobs.float())
 
 
-def _portable_draw_inputs(agents: int) -> tuple[Tensor, Tensor, Tensor]:
+def _portable_draw_inputs(
+    agents: int,
+    actions: int = 43,
+) -> tuple[Tensor, Tensor, Tensor]:
     """Draw bf16 logits and value, a mask with every seventh last action masked, counts."""
     generator = torch.Generator().manual_seed(0)
-    decoded = portable_uniform(agents, 44, bound=4.0, generator=generator).bfloat16()
-    mask = (torch.rand(agents, 43, generator=generator) > 0.3).bfloat16()
+    decoded = portable_uniform(
+        agents,
+        actions + 1,
+        bound=4.0,
+        generator=generator,
+    ).bfloat16()
+    mask = (torch.rand(agents, actions, generator=generator) > 0.3).bfloat16()
     mask[:, 5] = 1
-    mask[::7, 42] = 0
+    mask[::7, actions - 1] = 0
     return decoded, mask, torch.arange(agents) % 5
 
 

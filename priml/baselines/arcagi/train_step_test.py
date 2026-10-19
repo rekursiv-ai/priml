@@ -774,10 +774,12 @@ def test_charm_train_step_runs_injected_reducer_and_reporter_in_order() -> None:
     assert isinstance(block.ffn.middle, SequenceConv1d.Config)
     block.ffn.channels_hidden = 2
     block.ffn.middle.conv.groups = 2
+    # The order of calls is under test, not the recipe's bf16 convolution, which
+    # oneDNN cannot differentiate on every CPU.
+    block.ffn.middle.conv.dtype = torch.float32
     config.gradient_reduction = PartialConfig(reduce_gradients)
     config.metric_reporter = PartialConfig(report_metrics)
-    # A bf16 convolution has no oneDNN backward on some CPUs; float64 does.
-    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+    with torch.random.fork_rng(devices=[]):
         step = PortSubject.from_config(config).step
         assert isinstance(step.optimizer, CompositeOptimizer)
         for optimizer in step.optimizer.optimizers:
@@ -810,7 +812,12 @@ def test_pooled_step_initializes_ema_only_when_the_recipe_requests_it() -> None:
 
 
 def shrink_model(model: GridSolver.Config) -> None:
-    """Configure the compact model without changing recipe behavior."""
+    """Shrink every width and count to its smallest legal size; keep each recipe's layers.
+
+    Args:
+      model: A recipe's solver config, edited in place.
+
+    """
     model.channels_in = 4
     model.vocab_size = 4
     model.num_layers = 1
@@ -834,16 +841,23 @@ def shrink_model(model: GridSolver.Config) -> None:
         model.prefix.num_puzzles = 2
         model.prefix.num_tokens = 2
         model.prefix.batch_size = 2
-    if isinstance(model.prefix, ComposedSparsePrefix.Config):
-        # One channel per slot and the base, as CategorySlotFiLM requires.
-        model.prefix.channels_out = 10
-        model.prefix.num_tokens = 1
-        assert isinstance(model.prefix.composition, CategorySlotFiLM.Config)
-        model.prefix.composition.num_categories = 2
-        model.prefix.composition.channels_out = 10
-        model.prefix.residual.num_puzzles = 3
-        model.prefix.residual.channels_out = 3
-        model.prefix.residual.batch_size = 2
+    shrink_prefix(model)
+
+
+def shrink_prefix(model: GridSolver.Config) -> None:
+    """Shrink a composed puzzle prefix to two categories and three puzzles."""
+    if not isinstance(model.prefix, ComposedSparsePrefix.Config):
+        return
+    # One channel per slot and the base, as CategorySlotFiLM requires.
+    model.prefix.channels_out = 10
+    model.prefix.num_tokens = 1
+    assert isinstance(model.prefix.composition, CategorySlotFiLM.Config)
+    model.prefix.composition.num_categories = 2
+    model.prefix.composition.channels_out = 10
+    model.prefix.residual.num_puzzles = 3
+    model.prefix.residual.channels_out = 3
+    model.prefix.residual.num_tokens = 1
+    model.prefix.residual.batch_size = 2
 
 
 def _evaluate(
@@ -1226,16 +1240,7 @@ def _source_replay_config() -> PooledActTrainStep.Config:
     recurrence.slow_cycles = 1
     recurrence.fast_cycles = 2
     recurrence.inner_grad_loops = 1
-    prefix = cast(ComposedSparsePrefix.Config, model.prefix)
-    prefix.channels_out = 10
-    prefix.num_tokens = 1
-    composer = cast(CategorySlotFiLM.Config, prefix.composition)
-    composer.num_categories = 2
-    composer.channels_out = 10
-    prefix.residual.num_puzzles = 3
-    prefix.residual.channels_out = 3
-    prefix.residual.num_tokens = 1
-    prefix.residual.batch_size = 2
+    shrink_prefix(model)
     pool = cast(AtomicPool.Config, step.pool)
     pool.batch_size = 2
     pool.max_steps = 3

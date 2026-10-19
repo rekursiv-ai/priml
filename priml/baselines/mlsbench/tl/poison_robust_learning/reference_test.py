@@ -11,6 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
+import functools
+
 import pytest
 import torch
 
@@ -104,28 +106,25 @@ def test_a_lockstep_run_hands_back_its_states_and_evaluated_images(
 
 
 def test_the_port_reaches_the_drivers_random_call_sites(tmp_path: Path) -> None:
-    assert_sites_reached(_DATA, tmp_path)
+    vision_capture_reference.assert_sites_reached(
+        _DATA,
+        port=functools.partial(capture_reference.port_sites, tmp_path),
+        check=capture_reference.check_sites,
+    )
 
 
 def test_a_stored_driver_side_missing_a_required_site_fails(tmp_path: Path) -> None:
-    sites = vision_capture_reference.parse_sites(
-        (_DATA / "reference_sites.txt").read_text(),
-    )
+    sites = vision_capture_reference.read_sites(_DATA)
     sites["reference"] = {
         k: v for k, v in sites["reference"].items() if "run_poison_robust.py" not in k
     }
     vision_capture_reference.write_sites(tmp_path, sites)
     with pytest.raises(AssertionError, match="run_poison_robust"):
-        assert_sites_reached(tmp_path, tmp_path / "scratch")
-
-
-def assert_sites_reached(data: Path, scratch: Path) -> None:
-    """Require both stored sides to reach every site, and the port's to replay."""
-    sides = vision_capture_reference.parse_sites(
-        (data / "reference_sites.txt").read_text(),
-    )
-    assert capture_reference.check_sites(sides["reference"], sides["port"]) == []
-    assert capture_reference.port_sites(scratch) == sides["port"]
+        vision_capture_reference.assert_sites_reached(
+            tmp_path,
+            port=dict,
+            check=capture_reference.check_sites,
+        )
 
 
 def test_the_port_record_is_every_record_and_lockstep_run(

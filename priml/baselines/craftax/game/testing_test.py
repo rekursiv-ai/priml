@@ -184,12 +184,11 @@ def test_a_generated_small_world_is_marked_by_one_draw_of_its_stream() -> None:
 
 def test_kernel_assembly_reads_every_compiled_overload_with_its_wrappers() -> None:
     @jit
-    def twice(x: np.ndarray) -> np.ndarray:
+    def twice(x: float) -> float:
         return x * 2
 
-    values = np.arange(4, dtype=np.float32)
-    twice(values)
-    twice(values.astype(np.int32))
+    twice(1)
+    twice(1.5)
     assembly = kernel_assembly(twice)
     assert assembly.count(".file") == len(twice.signatures) == 2
     assert "cpython" in assembly

@@ -338,6 +338,12 @@ def _mint_then_signal(path: Path, done: threading.Event) -> None:
     done.set()
 
 
+def _lock_twice(directory: Path, done: threading.Event) -> None:
+    """Hold ``directory``'s lock, take it again inside, then set ``done``."""
+    with golden.locked_directory(directory), golden.locked_directory(directory):
+        done.set()
+
+
 def _torn_save(obj: object, f: Path) -> None:
     """Write a truncated file where ``torch.save`` was asked to, then fail."""
     del obj
@@ -364,6 +370,26 @@ def test_write_tensors_round_trips_every_key(tmp_path: Path) -> None:
         assert loaded[key].dtype == value.dtype
         assert loaded[key].shape == value.shape
         assert torch.equal(loaded[key], value)
+
+
+def test_concurrent_writers_in_one_process_never_share_a_staged_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "g.pt"
+    staged: list[str] = []
+    save = torch.save
+
+    def recording(obj: object, f: str | Path) -> None:
+        staged.append(str(f))
+        save(obj, f)
+
+    monkeypatch.setattr(torch, "save", recording)
+    write_tensors(path, {"a": torch.tensor([1.0])})
+    write_tensors(path, {"a": torch.tensor([2.0])})
+    assert len(set(staged)) == 2
+    assert torch.equal(read_tensors(path)["a"], torch.tensor([2.0]))
+    assert [p.name for p in tmp_path.iterdir()] == ["g.pt"]
 
 
 def test_write_tensors_overhead_does_not_grow_with_key_count(tmp_path: Path) -> None:
@@ -756,6 +782,29 @@ def test_a_directory_lock_leaves_no_file_another_user_could_own(tmp_path: Path) 
     with golden.locked_directory(tmp_path):
         assert list(tmp_path.iterdir()) == []
     assert list(tmp_path.iterdir()) == []
+
+
+def test_a_directory_lock_held_again_by_its_holder_does_not_deadlock(
+    tmp_path: Path,
+) -> None:
+    done = threading.Event()
+    nested = threading.Thread(target=_lock_twice, args=(tmp_path, done), daemon=True)
+    nested.start()
+    nested.join(timeout=2)
+    assert done.is_set()
+
+
+def test_a_directory_lock_still_excludes_another_thread_while_nested(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "g.pt"
+    done = threading.Event()
+    writer = threading.Thread(target=_mint_then_signal, args=(path, done), daemon=True)
+    with golden.locked_directory(tmp_path), golden.locked_directory(tmp_path):
+        writer.start()
+        assert not done.wait(0.05)
+    writer.join(timeout=5)
+    assert done.is_set()
 
 
 def test_a_directory_lock_excludes_a_second_holder(tmp_path: Path) -> None:

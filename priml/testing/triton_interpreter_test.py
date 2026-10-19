@@ -10,11 +10,16 @@ import os
 import sys
 
 from triton import language
+from triton.runtime import (
+    interpreter as triton_runtime_interpreter,
+    jit as triton_jit,
+)
 
 import pytest
 import torch
 import triton
 
+from priml.testing import triton_interpreter as triton_interpreter_module
 from priml.testing.triton_interpreter import (
     _is_submodule,
     _normalize_bare_constexpr,
@@ -95,6 +100,39 @@ def test_an_interpreted_scalar_bounds_a_runtime_loop() -> None:
     assert out.tolist() == [3.0]
 
 
+def test_a_failure_while_patching_undoes_what_was_already_patched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalize = triton_jit._normalize_ty
+    monkeypatch.setattr(triton_interpreter_module, "_jit_library", _fail)
+    with pytest.raises(RuntimeError, match="patching"), triton_interpreter():
+        pass
+    assert triton_jit._normalize_ty is normalize
+    assert "TRITON_INTERPRET" not in os.environ
+
+
+def test_every_language_submodule_is_loaded_before_the_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extra = sys.modules["triton.language.extra"]
+    monkeypatch.delattr(extra, "libdevice", raising=False)
+    monkeypatch.delitem(sys.modules, "triton.language.extra.libdevice", raising=False)
+    with triton_interpreter():
+        assert "triton.language.extra.libdevice" in sys.modules
+
+
+def test_the_runtime_hooks_are_restored_like_any_other_attribute() -> None:
+    before = dict(vars(triton_jit)), dict(vars(triton_runtime_interpreter))
+    with triton_interpreter():
+        cast("dict[str, object]", vars(triton_jit))["leaked"] = 1
+        cast("dict[str, object]", vars(triton_runtime_interpreter))["leaked"] = 1
+    after = dict(vars(triton_jit)), dict(vars(triton_runtime_interpreter))
+    assert [sorted(set(a) ^ set(b)) for a, b in zip(before, after, strict=True)] == [
+        [],
+        [],
+    ]
+
+
 @pytest.mark.parametrize(
     ("annotation", "expected"),
     [
@@ -137,6 +175,10 @@ def _loop_kernel(
     for index in range(language.load(stop_ptr)):
         acc += language.load(values_ptr + index)
     language.store(out_ptr, acc)
+
+
+def _fail() -> None:
+    raise RuntimeError("patching")
 
 
 def _language_modules() -> list[tuple[str, ModuleType]]:

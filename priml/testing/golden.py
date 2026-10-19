@@ -25,6 +25,8 @@ import inspect
 import math
 import os
 import re
+import tempfile
+import threading
 import traceback
 import zlib
 
@@ -357,15 +359,22 @@ def assert_text_golden(*, test_file: str, name: str, rendered: str) -> None:
 def write_tensors(path: Path, record: Mapping[str, Tensor]) -> None:
     """Save a flat name-to-tensor record as one flat tensor per dtype and an index.
 
-    The file is written beside ``path`` and renamed over it, so a failed write
-    leaves the previous golden whole.
+    The file is written to a uniquely named file beside ``path`` and renamed over
+    it, so a failed write leaves the previous golden whole and concurrent writers
+    never share a staged file.
 
     Args:
       path: Destination ``.pt``.
       record: Flat name-to-tensor record.
 
     """
-    staged = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with tempfile.NamedTemporaryFile(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        staged = Path(handle.name)
     try:
         torch.save(pack(record), staged)
         staged.replace(path)
@@ -612,19 +621,43 @@ def assert_tensor_golden_part(
 def locked_directory(directory: Path) -> Generator[None]:
     """Hold an exclusive lock on ``directory`` for the block, across processes.
 
+    The holder may take it again inside the block: a regeneration that holds a
+    golden directory's lock mints parts into it under that same lock.
+
     Args:
-      directory: An existing directory, typically a golden's.
+      directory: An existing directory, typically a golden's; it is not created.
 
     Yields:
       nothing: Control, with the lock held.
 
     """
-    descriptor = os.open(directory, os.O_RDONLY)
+    key = directory.resolve()
+    held = _held_directories.paths
+    if key in held:
+        yield
+        return
+    descriptor = os.open(key, os.O_RDONLY)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
-        yield
+        held.add(key)
+        try:
+            yield
+        finally:
+            held.discard(key)
     finally:
         os.close(descriptor)
+
+
+class _HeldDirectories(threading.local):
+    """The directories this thread holds :func:`locked_directory` on."""
+
+    def __init__(self) -> None:
+        self.paths: set[Path] = set()
+
+
+# ``flock`` locks per open file, so a second descriptor in the same thread would wait
+# on the first forever; each thread's held directories are taken only once.
+_held_directories: Final = _HeldDirectories()
 
 
 def stored(value: Tensor) -> Tensor:

@@ -14,10 +14,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
-import functools
-
-from configgle import PartialConfig
-
+import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.vision import reference as vision_reference
@@ -28,17 +25,11 @@ from priml.baselines.mlsbench.opt.gradient_compression import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
     from torch import Tensor
     from torch.utils.data import DataLoader
 
-    import pytest
-
-    from priml.baselines.mlsbench.opt.gradient_compression.train_loop import (
-        CompressionTrainLoop,
-    )
 
 COMPRESSOR: Final = """\
 class Compressor:
@@ -57,6 +48,7 @@ SCRIPT: Final = (
     '''\
 """A stand-in for the optimization-gradient-compression script."""
 
+import argparse
 import math
 
 import torch
@@ -161,6 +153,20 @@ def train(args):
     test_acc, test_loss = evaluate(model, test_loader, None)
     best_acc = max(best_acc, test_acc)
     print(f"TEST_METRICS test_acc={test_acc:.2f} best_acc={best_acc:.2f}")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model', type=str, default='resnet20')
+    parser.add_argument('--dataset', type=str, default='cifar10')
+    parser.add_argument('--batch-size', type=int, default=128)
+    parser.add_argument('--epochs', type=int, default=200)
+    parser.add_argument('--lr', type=float, default=0.1)
+    parser.add_argument('--weight-decay', type=float, default=5e-4)
+    parser.add_argument('--warmup-epochs', type=int, default=WARMUP)
+    parser.add_argument('--compress-ratio', type=float, default=0.01)
+    parser.add_argument('--seed', type=int, default=42)
+    train(parser.parse_args())
 """
 )
 """A stand-in for the ``optimization-gradient-compression`` script."""
@@ -183,16 +189,17 @@ CLASSES: Final = {
 """The class each baseline's edit puts in place of the compressor."""
 
 
-def write_clone(root: Path) -> None:
+def write_clone(root: Path, *, warmup: int = 5) -> None:
     """Write the stand-in script and the three baselines' edits under ``root``.
 
     Args:
       root: Directory to hold the clone.
+      warmup: The stand-in's ``--warmup-epochs`` default.
 
     """
     script = root / upstream.PRISTINE
     script.parent.mkdir(parents=True)
-    script.write_text(SCRIPT)
+    script.write_text(SCRIPT.replace("default=WARMUP", f"default={warmup}"))
     edits = root / upstream.EDITS
     edits.mkdir(parents=True)
     first = SCRIPT[: SCRIPT.index(COMPRESSOR)].count("\n") + 1
@@ -270,41 +277,16 @@ def test_the_trace_sees_the_schedule_cadence_and_best_accuracy(tmp_path: Path) -
     assert record["optimizer/exp000"].shape == (len(reference.SGD_SETTINGS),)
 
 
-def test_the_trace_hands_the_driver_each_settings_own_warmup(
+@pytest.mark.parametrize("warmup", [5, 3])
+def test_the_trace_runs_at_the_scripts_own_argument_defaults(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    warmup: int,
 ) -> None:
-    warmups: list[int] = []
-    monkeypatch.setattr(
-        upstream,
-        "run_train",
-        functools.partial(_record_warmup, warmups=warmups, run=upstream.run_train),
-    )
-    monkeypatch.setitem(reference.SETTINGS, "exp004", _three_warmup_epochs)
-    upstream.upstream_trace(scripts(tmp_path)["none"], epochs=6)
-    assert warmups == [5, 3, 5]
-
-
-def _three_warmup_epochs() -> CompressionTrainLoop.Config:
-    config = reference.SETTINGS["exp000"]()
-    schedule = config.step.schedule
-    assert isinstance(schedule, PartialConfig)
-    schedule.warmup_epochs = 3
-    return config
-
-
-def _record_warmup(
-    script: upstream.Script,
-    name: str,
-    *,
-    warmups: list[int],
-    run: Callable[..., upstream.Run],
-    **kwargs: object,
-) -> upstream.Run:
-    warmup = kwargs["warmup"]
-    assert isinstance(warmup, int)
-    warmups.append(warmup)
-    return run(script, name, **kwargs)
+    root = tmp_path / "clone"
+    write_clone(root, warmup=warmup)
+    script = upstream.variants(root, tmp_path)["none"]
+    record = upstream.upstream_trace(script, epochs=12)
+    assert record["schedule/exp000"][0].item() == 0.1 / (warmup + 1)
 
 
 def test_metrics_run_the_scripts_evaluate(tmp_path: Path) -> None:

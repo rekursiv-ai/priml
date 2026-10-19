@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 from unittest import mock
 
 import functools
+import inspect
+import types
 
 from torch.utils.data import DataLoader
 from torchvision.transforms.functional import pil_to_tensor
@@ -31,7 +33,7 @@ from priml.baselines.mlsbench.dl.vision.data import (
     normalize,
 )
 from priml.baselines.mlsbench.dl.vision.model import ResNet
-from priml.testing.golden import read_tensors
+from priml.testing.golden import mismatches, read_tensors, write_tensors
 
 
 if TYPE_CHECKING:
@@ -312,6 +314,76 @@ class StoredPart:
         return {k: v for k, v in self.golden.items() if k.startswith(prefix)}
 
 
+def assert_port_record_joins(
+    port: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    parts: Mapping[ModuleType, Mapping[str, str]],
+    *args: object,
+) -> None:
+    """Require ``port.port_record`` to return exactly its stored golden.
+
+    Each named part is answered from the golden by :class:`StoredPart`, so
+    the check is that ``port_record`` calls every part, for every name, and
+    adds nothing the golden lacks.
+
+    Args:
+      port: The task's ``reference`` module.
+      monkeypatch: The test's.
+      parts: Per module, each record function's name and its golden prefix.
+      args: Passed to ``port_record``.
+
+    """
+    golden = stored_record(port)
+    for module, prefixes in parts.items():
+        for name, prefix in prefixes.items():
+            monkeypatch.setattr(module, name, StoredPart(golden, prefix))
+    record = cast("Callable[..., dict[str, Tensor]]", port.port_record)(*args)
+    assert mismatches(golden, record) == []
+
+
+def test_a_port_record_missing_a_stored_part_is_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    golden = {"draws/a": torch.zeros(1), "lockstep/x/loss": torch.ones(1)}
+    port = types.ModuleType("port")
+    port.__file__ = str(tmp_path / "reference.py")
+    (tmp_path / "testdata").mkdir()
+    write_tensors(tmp_path / "testdata" / "reference.pt", golden)
+    names = vars(port)
+    names["draws_record"] = dict
+    names["lockstep_record"] = dict
+    names["port_record"] = functools.partial(
+        _joined,
+        names,
+        ("draws_record", ()),
+        ("lockstep_record", ("x",)),
+    )
+    assert_port_record_joins(
+        port,
+        monkeypatch,
+        {port: {"draws_record": "draws/", "lockstep_record": "lockstep/{}/"}},
+    )
+    names["port_record"] = functools.partial(_joined, names, ("draws_record", ()))
+    with pytest.raises(AssertionError, match="lockstep/x/loss"):
+        assert_port_record_joins(
+            port,
+            monkeypatch,
+            {port: {"draws_record": "draws/", "lockstep_record": "lockstep/{}/"}},
+        )
+
+
+def _joined(
+    names: Mapping[str, object],
+    *calls: tuple[str, tuple[object, ...]],
+) -> dict[str, Tensor]:
+    """Call each named record function of a fake port and join their records."""
+    record: dict[str, Tensor] = {}
+    for name, args in calls:
+        record |= cast("Callable[..., dict[str, Tensor]]", names[name])(*args)
+    return record
+
+
 def stand_in_port(port: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     """Answer a task's port-side runs from its stored record, for a capture test.
 
@@ -541,10 +613,28 @@ def test_batches_alternate_training_and_test_passes(tmp_path: Path) -> None:
         assert torch.equal(torch.cat([batch["media"] for batch in testing]), images)
 
 
-def test_batches_come_from_the_scripts_four_worker_loaders(tmp_path: Path) -> None:
-    # The reference's own count: each worker seeds its own transforms, so the
-    # crops a pass draws depend on it.
-    assert requested_workers(upstream.upstream_batches, tmp_path) == [4]
+@pytest.mark.parametrize("workers", [4, 3])
+def test_batches_come_from_loaders_with_the_scripts_own_worker_count(
+    tmp_path: Path,
+    workers: int,
+) -> None:
+    # Each worker seeds its own transforms, so the crops a pass draws depend on
+    # the count, which is the script's ``get_dataloaders`` default.
+    pristine = script(tmp_path)
+    recording = RecordingLoaders(pristine)
+    vars(recording)["__signature__"] = inspect.signature(
+        pristine.get_dataloaders,
+    ).replace(
+        parameters=[
+            parameter.replace(default=workers) if name == "num_workers" else parameter
+            for name, parameter in inspect.signature(
+                pristine.get_dataloaders,
+            ).parameters.items()
+        ],
+    )
+    with mock.patch.object(pristine, "get_dataloaders", recording):
+        _ = upstream.upstream_batches(pristine)
+    assert recording.workers == [workers]
 
 
 def test_draws_are_counted_with_the_loaders_in_this_process(tmp_path: Path) -> None:

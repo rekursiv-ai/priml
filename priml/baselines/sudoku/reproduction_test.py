@@ -816,8 +816,8 @@ def _refill_generators(state: dict[str, dict[str, object]], *, seed: int) -> Non
 # index. The last segment names the leaf: ``=tensor``, or the Python value it was
 # (``=int`` and ``=str`` as decimal or UTF-8 bytes, since numpy's PCG64 words are
 # 128-bit; ``=float``, ``=bool``, ``=none``; ``=dict``, ``=list``, ``=tuple`` for an
-# empty one). Step timers hold wall time, so they are zeroed: a resumed segment
-# only adds to them.
+# empty one). A float under a key ending ``_sec`` is wall time, so it is zeroed: a
+# resumed segment only adds to it.
 def _tensors(node: object, *, prefix: str) -> dict[str, Tensor]:
     """Flatten a checkpoint into tensors keyed by their path under ``prefix``."""
     segments = _segments(node)
@@ -828,7 +828,7 @@ def _tensors(node: object, *, prefix: str) -> dict[str, Tensor]:
             for key, value in _tensors(child, prefix=f"{prefix}{segment}/").items()
         }
     return {
-        f"{prefix}={_kind(node)}": _leaf(node, zeroed=prefix.endswith("kglobal_sec/")),
+        f"{prefix}={_kind(node)}": _leaf(node, zeroed=prefix.endswith("_sec/")),
     }
 
 
@@ -836,20 +836,21 @@ def _segments(node: object) -> list[tuple[str, object]]:
     """Name each child of a container by its path segment; a leaf has none."""
     if isinstance(node, dict):
         children = cast("dict[object, object]", node).items()
-        return [
-            (
-                f"i{name}"
-                if isinstance(name, int)
-                else f"k{quote(str(name), safe='')}",
-                child,
-            )
-            for name, child in children
-        ]
+        return [(_key_segment(name), child) for name, child in children]
     if isinstance(node, list | tuple):
         tag = "t" if isinstance(node, tuple) else "l"
         items = cast("list[object]", node)
         return [(f"{tag}{index}", child) for index, child in enumerate(items)]
     return []
+
+
+def _key_segment(name: object) -> str:
+    """Name one dict key as a path segment: ``i`` and an int, or ``k`` and a string."""
+    if isinstance(name, bool) or not isinstance(name, int | str):
+        raise TypeError(
+            f"A checkpoint key of type {type(name).__name__} has no encoding.",
+        )
+    return f"i{name}" if isinstance(name, int) else f"k{quote(name, safe='')}"
 
 
 def _kind(node: object) -> str:
@@ -942,6 +943,20 @@ def _shard(out: Path, *, prefix: str) -> dict[str, Tensor]:
 )
 def test_a_checkpoint_round_trips_through_tensors(node: dict[object, object]) -> None:
     assert _state(_tensors(node, prefix="p/"), prefix="p/") == node
+
+
+def test_every_seconds_leaf_is_zeroed_whatever_timer_holds_it() -> None:
+    node = {"timer_step": {"global_sec": 2.5}, "timer_eval": {"epoch_sec": 1.5, "n": 3}}
+    record = _tensors(node, prefix="p/")
+    seconds = [key for key in record if "_sec/" in key]
+    assert len(seconds) == 2
+    assert all(record[key].item() == 0.0 for key in seconds)
+    assert record["p/ktimer_eval/kn/=int"].tolist() == list(b"3")
+
+
+def test_a_key_that_is_neither_text_nor_an_int_has_no_encoding() -> None:
+    with pytest.raises(TypeError, match="float"):
+        _tensors({1.5: 0}, prefix="p/")
 
 
 def test_a_segment_state_holds_no_host_cuda_generators() -> None:

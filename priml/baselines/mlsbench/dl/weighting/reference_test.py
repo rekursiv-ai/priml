@@ -14,7 +14,9 @@ import torch
 
 from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
-from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
+from priml.baselines.mlsbench.dl.vision.upstream_test import (
+    assert_port_record_joins,
+)
 from priml.baselines.mlsbench.dl.weighting import reference
 from priml.baselines.mlsbench.dl.weighting.experiments import exp000
 from priml.testing.golden import mismatches, read_tensors
@@ -111,14 +113,14 @@ def test_the_port_record_joins_every_part_the_golden_holds(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    golden = stored("")
-    monkeypatch.setattr(
+    assert_port_record_joins(
         reference,
-        "lockstep_record",
-        StoredPart(golden, "lockstep/{}/"),
+        monkeypatch,
+        {
+            reference: {"lockstep_record": "lockstep/{}/", "draws_record": "draws/"},
+        },
+        tmp_path,
     )
-    monkeypatch.setattr(reference, "draws_record", StoredPart(golden, "draws/"))
-    assert_exact(golden, reference.port_record(tmp_path))
 
 
 def stored_settings(prefix: str) -> dict[str, torch.Tensor]:

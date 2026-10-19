@@ -606,10 +606,40 @@ def test_the_full_size_comparison_names_a_network_that_has_another_shape(
 def test_the_sites_file_reads_back_as_written(tmp_path: Path) -> None:
     sites = {"reference": {"a@b.py:c": 2, "d@e.py:f": 1}, "port": {"a@b.py:c": 3}}
     capture_reference.write_sites(tmp_path, sites)
-    assert (
-        capture_reference.parse_sites((tmp_path / "reference_sites.txt").read_text())
-        == sites
+    assert capture_reference.read_sites(tmp_path) == sites
+
+
+def test_sites_are_reached_when_both_sides_reach_them_and_the_port_replays(
+    tmp_path: Path,
+) -> None:
+    sites = {"reference": {"draw@a.py:f": 1}, "port": {"draw@b.py:g": 2}}
+    capture_reference.write_sites(tmp_path, sites)
+    capture_reference.assert_sites_reached(
+        tmp_path,
+        port=lambda: {"draw@b.py:g": 2},
+        check=_both_reached,
     )
+    with pytest.raises(AssertionError, match="unreached"):
+        capture_reference.assert_sites_reached(
+            tmp_path,
+            port=lambda: {"draw@b.py:g": 2},
+            check=_never_reached,
+        )
+    with pytest.raises(AssertionError, match="replays"):
+        capture_reference.assert_sites_reached(
+            tmp_path,
+            port=lambda: {"draw@b.py:g": 3},
+            check=_both_reached,
+        )
+
+
+def _both_reached(upstream: dict[str, int], port: dict[str, int]) -> list[str]:
+    return [] if upstream and port else ["unreached"]
+
+
+def _never_reached(upstream: dict[str, int], port: dict[str, int]) -> list[str]:
+    del upstream, port
+    return ["unreached"]
 
 
 def test_a_score_in_both_sets_of_an_auc_is_reported() -> None:

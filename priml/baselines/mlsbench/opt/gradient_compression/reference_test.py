@@ -9,6 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+import functools
+
 import pytest
 import torch
 
@@ -105,11 +107,11 @@ def test_three_updates_with_each_compressor_match_the_script(name: str) -> None:
 
 
 def test_the_port_reaches_the_same_random_call_sites(tmp_path: Path) -> None:
-    sides = vision_capture_reference.parse_sites(
-        (_DATA / "reference_sites.txt").read_text(),
+    vision_capture_reference.assert_sites_reached(
+        _DATA,
+        port=functools.partial(reference.draw_sites, tmp_path),
+        check=capture_reference.check_sites,
     )
-    assert capture_reference.check_sites(sides["reference"], sides["port"]) == []
-    assert reference.draw_sites(tmp_path) == sides["port"]
 
 
 def test_the_golden_bites_on_one_ulp_of_a_residual() -> None:

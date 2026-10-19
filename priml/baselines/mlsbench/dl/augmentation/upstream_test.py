@@ -248,8 +248,8 @@ def test_loaders_fork_their_workers_and_read_the_settings_dataset(
     script = cast("vision_upstream.Upstream", object())
     assert upstream.upstream_batches(script, dataset="fmnist") == ([], [])
     upstream.upstream_batches(script, num_workers=0)
-    (loader, dataset, four), (_, default, zero) = calls.seen
-    assert (dataset, default, four, zero) == ("fmnist", "cifar100", 4, 0)
+    (loader, dataset, unset), (_, default, zero) = calls.seen
+    assert (dataset, default, unset, zero) == ("fmnist", "cifar100", None, 0)
     assert isinstance(loader, vision_upstream.ForkedLoader)
     assert loader.loader is original
     assert data.DataLoader is original
@@ -274,14 +274,14 @@ class _LoaderCalls:
     """Stands in for the vision loaders; keeps the loader class, dataset and workers."""
 
     def __init__(self) -> None:
-        self.seen: list[tuple[object, str, int]] = []
+        self.seen: list[tuple[object, str, int | None]] = []
 
     def __call__(
         self,
         script: object,
         *,
         dataset: str,
-        num_workers: int,
+        num_workers: int | None,
     ) -> tuple[Batches, Batches]:
         del script
         self.seen.append((data.DataLoader, dataset, num_workers))

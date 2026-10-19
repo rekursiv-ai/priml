@@ -89,15 +89,13 @@ def test_the_loader_shuffles_and_augments_like_the_reference(tmp_path: Path) -> 
 
 
 def test_the_port_reaches_the_same_random_call_sites(tmp_path: Path) -> None:
-    expected = capture_reference.parse_sites(
-        (_DATA / "reference_sites.txt").read_text(),
-    )["port"]
+    expected = capture_reference.read_sites(_DATA)["port"]
     assert expected
     assert reference.draw_sites(tmp_path) == expected
 
 
 def test_the_reference_reached_its_random_call_sites() -> None:
-    sides = capture_reference.parse_sites((_DATA / "reference_sites.txt").read_text())
+    sides = capture_reference.read_sites(_DATA)
     assert sides.keys() == {"reference", "port", "reference-fmnist", "port-fmnist"}
     assert capture_reference.check_sites(sides["reference"], sides["port"]) == []
     assert (
@@ -358,9 +356,7 @@ def test_the_fmnist_pipelines_match_the_reference_on_fixed_images() -> None:
 
 
 def test_the_fmnist_path_reaches_the_same_random_call_sites(tmp_path: Path) -> None:
-    expected = capture_reference.parse_sites(
-        (_DATA / "reference_sites.txt").read_text(),
-    )["port-fmnist"]
+    expected = capture_reference.read_sites(_DATA)["port-fmnist"]
     assert expected
     assert reference.fmnist_draw_sites(tmp_path) == expected
 

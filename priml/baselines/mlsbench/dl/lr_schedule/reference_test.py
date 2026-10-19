@@ -16,7 +16,10 @@ from priml.baselines.mlsbench.dl.lr_schedule import reference
 from priml.baselines.mlsbench.dl.lr_schedule.experiments import exp000
 from priml.baselines.mlsbench.dl.vision import reference as vision_reference
 from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
-from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
+from priml.baselines.mlsbench.dl.vision.upstream_test import (
+    StoredPart,
+    assert_port_record_joins,
+)
 from priml.testing.golden import mismatches, read_tensors
 
 
@@ -172,14 +175,14 @@ def test_the_golden_bites_on_one_ulp() -> None:
 def test_the_port_record_joins_every_part_the_golden_holds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    golden = stored("")
-    monkeypatch.setattr(
+    assert_port_record_joins(
         reference,
-        "lockstep_record",
-        StoredPart(golden, "lockstep/{}/"),
+        monkeypatch,
+        {
+            reference: {"lockstep_record": "lockstep/{}/"},
+            vision_reference: {"draws_record": "draws/"},
+        },
     )
-    monkeypatch.setattr(vision_reference, "draws_record", StoredPart(golden, "draws/"))
-    assert_exact(golden, reference.port_record())
 
 
 if __name__ == "__main__":

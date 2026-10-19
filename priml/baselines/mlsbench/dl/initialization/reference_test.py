@@ -14,7 +14,9 @@ import torch
 
 from priml.baselines.mlsbench.dl.initialization import reference
 from priml.baselines.mlsbench.dl.vision import reference as vision_reference
-from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
+from priml.baselines.mlsbench.dl.vision.upstream_test import (
+    assert_port_record_joins,
+)
 from priml.testing.golden import mismatches, read_tensors
 
 
@@ -211,15 +213,17 @@ def test_the_golden_bites_on_one_ulp() -> None:
 def test_the_port_record_joins_every_part_the_golden_holds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    golden = stored("")
-    monkeypatch.setattr(
+    assert_port_record_joins(
         reference,
-        "lockstep_record",
-        StoredPart(golden, "lockstep/{}/"),
+        monkeypatch,
+        {
+            reference: {
+                "lockstep_record": "lockstep/{}/",
+                "draws_record": "draws/",
+                "network_record": "network/{}/",
+            },
+        },
     )
-    monkeypatch.setattr(reference, "draws_record", StoredPart(golden, "draws/"))
-    monkeypatch.setattr(reference, "network_record", StoredPart(golden, "network/{}/"))
-    assert_exact(golden, reference.port_record())
 
 
 if __name__ == "__main__":

@@ -192,15 +192,15 @@ def upstream_batches(
     script: Upstream,
     *,
     dataset: str = "cifar100",
-    num_workers: int = 4,
+    num_workers: int | None = None,
 ) -> tuple[Batches, Batches]:
     """Run the script's loaders, alternating the splits; workers are forked.
 
     Args:
       script: A variant of the script.
       dataset: The setting's ``--dataset``.
-      num_workers: Loader workers; the script's four by default, whose seeds
-        the draws depend on.
+      num_workers: Loader workers; None takes the script's own default, whose
+        seeds the draws depend on.
 
     Returns:
       passes: The training passes, then the test passes.
