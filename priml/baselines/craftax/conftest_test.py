@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, cast
 
+import subprocess
+
 import pytest
 
 from priml.baselines.craftax import conftest
@@ -157,6 +159,70 @@ def test_an_xdist_controller_compiles_at_startup_for_its_workers(
     conftest.pytest_sessionstart(worker)
     conftest.pytest_collection_finish(worker)
     assert compiled == [controller.config]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Reporter:
+    """A terminal reporter that keeps each line written."""
+
+    lines: list[str] = field(default_factory=list[str])
+
+    def write_line(self, line: str, **markup: bool) -> None:
+        del markup
+        self.lines.append(line)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _CompileConfig:
+    """What ``_compile`` reads of a config: one option and the reporter."""
+
+    collect_only: bool
+    reporter: _Reporter = field(default_factory=_Reporter)
+    rootpath: Path = _CWD
+
+    def getoption(self, name: str) -> object:
+        assert name == "collectonly"
+        return self.collect_only
+
+    @property
+    def pluginmanager(self) -> _CompileConfig:
+        return self
+
+    def get_plugin(self, name: str) -> object:
+        assert name == "terminalreporter"
+        return self.reporter
+
+
+def test_a_collect_only_run_compiles_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    runs: list[list[str]] = []
+
+    def run(args: list[str], **_: object) -> None:
+        runs.append(args)
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    conftest._compile(cast("conftest._Config", _CompileConfig(collect_only=True)))
+
+    assert runs == []
+
+
+@pytest.mark.parametrize(("returncode", "warned"), [(1, True), (0, False)])
+def test_a_failed_compile_is_reported_not_raised(
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    warned: bool,
+) -> None:
+    def run(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, returncode, "", "boom")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(pytest, "TerminalReporter", _Reporter)
+    config = _CompileConfig(collect_only=False)
+
+    conftest._compile(cast("conftest._Config", config))
+
+    assert bool(config.reporter.lines) is warned
+    assert all(line.endswith("boom") for line in config.reporter.lines)
 
 
 if __name__ == "__main__":
