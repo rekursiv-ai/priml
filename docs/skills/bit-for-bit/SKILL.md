@@ -48,7 +48,8 @@ whole-program rollout until step 5 is green.
    recurse until each mismatch is pinned to one function's own code.
    For each pair, run many random
    inputs times several pinned values, with the reference under the same
-   compilation and backend it uses in production (jit, GPU). Compare every
+   compilation and kernels it uses in production (jit, GPU kernels) --
+   production's code paths, not production's sizes. Compare every
    output field with exact equality. Collect ALL mismatches into one
    report (function, field, count, first example). Do not stop at the
    first.
@@ -57,8 +58,9 @@ whole-program rollout until step 5 is green.
    call site in both codebases was reached, and that inputs drive every
    branch (each side of every `where`/`select`/`cond`) at least once. An
    unreached site or branch is untested.
-5. **Integrate.** Only then run whole-step or rollout lockstep with pins,
-   comparing full state after every step.
+5. **Integrate.** Only then run a few whole steps of a tiny
+   configuration in lockstep with pins, comparing full state after every
+   step.
 6. **Fix every divergence in the port, then repeat from step 3.** No
    separate approval is needed; the task is not done while any mismatch
    remains. For each bug, add exactly one reference-free native test:
@@ -67,6 +69,15 @@ whole-program rollout until step 5 is green.
 
 Writing the harness, adapters, and tests is not "modifying code" in the
 sense of the debugging rules below; start them immediately.
+
+Additional rules:
+
+- **Always prefer torch over numpy.**
+- **Use tiny networks.** Tests are meant to run fast on CPU and hermetic.
+  They should cover as much as possible, e.g., a few steps of the full
+  training loop, but limit the size of activations to a few neurons.
+- **Read other bit-for-bit examples in priml/baselines.**
+  They provide a useful template to copy.
 
 Statistical or distributional tests are not bit-for-bit. They miss any
 bug that preserves rates. Keep them only as a supplement.
@@ -177,7 +188,8 @@ A golden runs on any CPU: the float64 upcast, not a fixed set of ATen
 kernels, decides its bits. Each golden runs once, in the pre-push tier that
 holds it, on the runner's native x86 kernels; add no per-ISA lane. A golden
 keyed on host, vendor, or GPU model skips everywhere it was not minted, so it
-tests nothing there; do not write one.
+tests nothing there; do not write one. A skip on libc, platform or GPU name
+is the same defect.
 Put everything that computes -- model construction included, since
 initializers draw through ISA-dependent kernels -- inside
 `host_agnostic_numerics()`. A stack the upcast cannot reach (JAX/XLA, a
@@ -382,6 +394,7 @@ with a unit test.
 2. Write a comparison script that runs **both codepaths unmodified**.
 3. Save checkpoints outside the checkout, under the repository's configured
    artifact directory. Discover its location from the project instructions.
+   They serve this bisection only; no test ever reads them.
 4. Find the first divergence point. Only **then** read code to
    understand why.
 
