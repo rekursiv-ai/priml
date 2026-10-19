@@ -147,7 +147,12 @@ def port_record() -> dict[str, Tensor]:
       record: The union of the records above, keyed as the stored golden is.
 
     """
-    record = schedule_record() | optimizer_record() | reference.best_record()
+    record = (
+        schedule_record()
+        | optimizer_record()
+        | reference.best_record()
+        | reference.draws_record(exp000)
+    )
     for name in SCHEDULES:
         record |= lockstep_record(name)
     return record

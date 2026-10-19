@@ -17,6 +17,7 @@ import torch
 from priml.baselines.mlsbench.dl.multitask import reference
 from priml.baselines.mlsbench.dl.multitask.data import COARSE_OF_FINE
 from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
 from priml.testing.golden import mismatches, read_tensors
 
 
@@ -80,9 +81,33 @@ def test_the_loader_batches_carry_superclasses(tmp_path: Path) -> None:
         assert batch["label_coarse"].tolist() == expected
 
 
-def test_the_full_networks_match_the_script() -> None:
+def test_the_full_optimizers_match_the_script() -> None:
     assert_exact(stored("optimizer/"), reference.optimizer_record())
-    assert_exact(stored("draws/"), reference.draws_record())
+
+
+def test_the_golden_holds_the_draws_of_every_full_network() -> None:
+    assert set(stored("draws/")) == {f"draws/{name}" for name in reference.COMBINATIONS}
+
+
+@pytest.mark.parametrize("name", list(reference.COMBINATIONS))
+def test_each_full_network_leaves_the_generator_where_the_script_does(
+    name: str,
+) -> None:
+    key = f"draws/{name}"
+    assert_exact({key: stored(key)[key]}, reference.draws_record([name]))
+
+
+def test_the_port_record_joins_every_part_the_golden_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    golden = stored("")
+    monkeypatch.setattr(
+        reference,
+        "lockstep_record",
+        StoredPart(golden, "lockstep/{}/"),
+    )
+    monkeypatch.setattr(reference, "draws_record", StoredPart(golden, "draws/"))
+    assert_exact(golden, reference.port_record())
 
 
 if __name__ == "__main__":

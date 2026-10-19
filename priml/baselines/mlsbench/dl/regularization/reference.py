@@ -237,6 +237,7 @@ def port_record() -> dict[str, Tensor]:
         | reference.optimizer_record(exp000)
         | draws_record()
         | reference.best_record()
+        | {"setting/batch_size": port_batch_size()}
     )
     for name in REGULARIZERS:
         record |= lockstep_record(name)

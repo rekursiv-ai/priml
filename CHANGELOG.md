@@ -96,6 +96,16 @@ All notable priml changes are documented here. This project follows
 - The filter combinators `matching`, `excluding`, `complement` and
   `with_ndim` equal only instances of the same class, and their fields cannot
   be reassigned, so a filter used as a dict key keeps its hash.
+- priml declares `triton` (Linux), `pillow` and `tqdm`, which it imports and
+  used to receive only through torch, torchvision and lpips. The `cuda` extra
+  installs `flash-attn-4` and `flash-linear-attention`.
+- `Flash4Attention` and `Flash4Varlen` raise `Flash4UnavailableError` naming
+  `priml[cuda]` when FlashAttention 4 is not installed, instead of
+  `ModuleNotFoundError`.
+- The wheel no longer ships test support no shipped module imports:
+  `priml.lib.testing`, `priml.distributed.testing`,
+  `priml.testing.{experiments,fixtures,policy_gradient,qwen3_5}`, and the
+  `testing` modules of the convextok, craftax, sudoku and tmax baselines.
 
 ### Fixed
 

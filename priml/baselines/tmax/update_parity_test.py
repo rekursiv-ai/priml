@@ -84,18 +84,20 @@ def _state(record: dict[str, Tensor], prefix: str) -> dict[str, Tensor]:
     }
 
 
-def test_five_updates_match_the_pinned_upstream_record() -> None:
-    """Every loss, the first gradient, and the final weights match upstream."""
+def test_the_record_masks_some_but_not_all_response_tokens() -> None:
+    """The record is evidence only if the trust region did something."""
     record = read_tensors(_TESTDATA / "update_parity.pt")
     rows = _batch(record)
-    initial = _state(record, "state/initial/")
-    # The record is evidence only if the trust region did something: the
-    # minting script refuses to write a record whose first update masks
-    # nothing or everything.
     kept = float(record["fixture/kept_tokens"])
     response_tokens = float(sum(row["response_mask"][1:].sum() for row in rows))
     assert 0.0 < kept < response_tokens
 
+
+def test_the_first_gradient_matches_the_pinned_upstream_record() -> None:
+    """The first loss and its whole gradient match upstream."""
+    record = read_tensors(_TESTDATA / "update_parity.pt")
+    rows = _batch(record)
+    initial = _state(record, "state/initial/")
     with host_agnostic_numerics():
         # The objective's gradient at the initialized policy, whole, before any
         # clipping or AdamW arithmetic has touched it.
@@ -113,6 +115,13 @@ def test_five_updates_match_the_pinned_upstream_record() -> None:
                 atol=0.0,
             )
 
+
+def test_five_updates_match_the_pinned_upstream_record() -> None:
+    """Every loss, gradient norm, and the final weights match upstream."""
+    record = read_tensors(_TESTDATA / "update_parity.pt")
+    rows = _batch(record)
+    initial = _state(record, "state/initial/")
+    with host_agnostic_numerics():
         step = _step()
         step.model.load_state_dict(initial)
         for update in range(UPDATES):

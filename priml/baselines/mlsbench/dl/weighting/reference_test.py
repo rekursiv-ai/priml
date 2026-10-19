@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
 from priml.baselines.mlsbench.dl.weighting import reference
 from priml.baselines.mlsbench.dl.weighting.experiments import exp000
 from priml.testing.golden import mismatches, read_tensors
@@ -75,7 +76,12 @@ def test_the_loader_yields_the_scripts_images_in_its_order(tmp_path: Path) -> No
 
 @pytest.mark.parametrize("name", list(reference.WEIGHTS))
 def test_two_updates_with_each_weighting_match_the_script(name: str) -> None:
-    assert_exact(stored(f"lockstep/{name}/"), reference.lockstep_record(name))
+    states: list[dict[str, torch.Tensor]] = []
+    assert_exact(
+        stored(f"lockstep/{name}/"),
+        reference.lockstep_record(name, states=states),
+    )
+    assert len(states) == vision.STEPS
 
 
 def test_the_golden_bites_on_one_ulp() -> None:
@@ -91,6 +97,20 @@ def test_the_golden_bites_on_one_ulp() -> None:
         line.split(":")[0]
         for line in mismatches({"weights/effective_number": weight}, port)
     ] == ["weights/effective_number"]
+
+
+def test_the_port_record_joins_every_part_the_golden_holds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    golden = stored("")
+    monkeypatch.setattr(
+        reference,
+        "lockstep_record",
+        StoredPart(golden, "lockstep/{}/"),
+    )
+    monkeypatch.setattr(reference, "draws_record", StoredPart(golden, "draws/"))
+    assert_exact(golden, reference.port_record(tmp_path))
 
 
 if __name__ == "__main__":

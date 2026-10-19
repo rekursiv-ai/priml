@@ -59,8 +59,16 @@ def test_the_schedule_optimizer_and_accuracy_match_the_script() -> None:
     )
 
 
-def test_each_full_network_leaves_the_generator_where_the_script_does() -> None:
-    assert_exact(stored("draws/"), reference.draws_record())
+def test_the_golden_holds_the_draws_of_every_full_network() -> None:
+    assert set(stored("draws/")) == {f"draws/{name}" for name in reference.VARIANTS}
+
+
+@pytest.mark.parametrize("name", list(reference.VARIANTS))
+def test_each_full_network_leaves_the_generator_where_the_script_does(
+    name: str,
+) -> None:
+    key = f"draws/{name}"
+    assert_exact({key: stored(key)[key]}, reference.draws_record([name]))
 
 
 @pytest.mark.parametrize("name", list(reference.VARIANTS))

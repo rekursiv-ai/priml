@@ -365,15 +365,20 @@ def upstream_record(
     return record
 
 
-def upstream_batches(script: Script) -> tuple[reference.Batches, reference.Batches]:
+def upstream_batches(
+    script: Script,
+    *,
+    num_workers: int = 4,
+) -> tuple[reference.Batches, reference.Batches]:
     """Run the script's loaders over the synthetic split, alternating the splits.
 
     Args:
       script: The pristine script.
+      num_workers: Loader workers; the script's four by default, whose seeds
+        the draws depend on.
 
     Returns:
-      passes: The training passes, then the test passes; the loaders use the
-        script's four worker processes.
+      passes: The training passes, then the test passes.
 
     """
     train: reference.Batches = []
@@ -381,7 +386,11 @@ def upstream_batches(script: Script) -> tuple[reference.Batches, reference.Batch
     # The script's dataset class lives in a module imported from a file, which a
     # forkserver worker cannot import by name; a forked worker inherits it. The
     # start method changes no draw: each worker's seed comes from the parent.
-    forked = functools.partial(data.DataLoader, multiprocessing_context="fork")
+    forked = (
+        functools.partial(data.DataLoader, multiprocessing_context="fork")
+        if num_workers
+        else data.DataLoader
+    )
     with (
         vision.seeded(vision.SEED),
         vision.script_workers(),
@@ -391,7 +400,7 @@ def upstream_batches(script: Script) -> tuple[reference.Batches, reference.Batch
         train_loader, test_loader = script.get_dataloaders(
             "unused",
             batch_size=vision.LOADER_BATCH,
-            num_workers=4,
+            num_workers=num_workers,
         )
         for _ in range(vision.LOADER_PASSES):
             train.append([_batch(*b) for b in train_loader])

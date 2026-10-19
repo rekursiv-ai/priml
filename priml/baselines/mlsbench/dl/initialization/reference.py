@@ -10,7 +10,7 @@ only how the network is initialized.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Final, cast
 
 from torch import Tensor
@@ -82,15 +82,19 @@ def recipe_record() -> dict[str, Tensor]:
     }
 
 
-def draws_record() -> dict[str, Tensor]:
+def draws_record(names: Iterable[str]) -> dict[str, Tensor]:
     """Return where the generator stands after building each full network.
+
+    Args:
+      names: Keys of :data:`INITIALIZATIONS` to build.
 
     Returns:
       record: ``draws/<name>``, the next eight draws, per initialization.
 
     """
     record: dict[str, Tensor] = {}
-    for name, factory in INITIALIZATIONS.items():
+    for name in names:
+        factory = INITIALIZATIONS[name]
         with reference.seeded(reference.SEED), host_agnostic_numerics():
             _ = reference.full_step(factory)
             record[f"draws/{name}"] = rng_fingerprint()
@@ -187,7 +191,7 @@ def port_record() -> dict[str, Tensor]:
       record: The union of the records above, keyed as the stored golden is.
 
     """
-    record = recipe_record() | draws_record()
+    record = recipe_record() | draws_record(INITIALIZATIONS)
     for name in INITIALIZATIONS:
         record |= network_record(name) | lockstep_record(name)
     return record

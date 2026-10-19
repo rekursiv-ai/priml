@@ -13,7 +13,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final, cast
 
+import functools
+
 from PIL import Image
+from torch.utils import data
 from torchvision.transforms import autoaugment
 
 import torch
@@ -28,6 +31,10 @@ from priml.baselines.mlsbench.dl.vision.upstream_test import SCRIPT as LOSS_SCRI
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import pytest
+
+    from priml.baselines.mlsbench.dl.vision.upstream import Batches, Upstream
 
 TRANSFORM: Final = """\
 def build_train_transform(config):
@@ -186,10 +193,28 @@ def test_the_census_counts_torchvisions_operations_by_sign() -> None:
 
 
 def test_loaders_alternate_training_and_test_passes(tmp_path: Path) -> None:
-    train, evaluation = upstream.upstream_batches(scripts(tmp_path)["cutout"])
+    train, evaluation = upstream.upstream_batches(
+        scripts(tmp_path)["cutout"],
+        num_workers=0,
+    )
     assert len(train) == len(evaluation) == reference.LOADER_PASSES
     labels = torch.cat([batch["label"] for batch in train[0]])
     assert labels.sort().values.tolist() == list(range(reference.LOADER_IMAGES))
+
+
+def test_loader_workers_are_forked_and_none_runs_in_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _LoaderCalls()
+    monkeypatch.setattr(vision_upstream, "upstream_batches", calls)
+    unpatched = data.DataLoader
+    stand_in = cast("Upstream", object())
+    upstream.upstream_batches(stand_in)
+    upstream.upstream_batches(stand_in, num_workers=0)
+    (forked, four), (plain, zero) = calls.seen
+    assert isinstance(forked, functools.partial)
+    assert forked.keywords == {"multiprocessing_context": "fork"}
+    assert (four, plain, zero) == (4, unpatched, 0)
 
 
 def test_lockstep_trains_on_the_augmented_batch(tmp_path: Path) -> None:
@@ -205,6 +230,18 @@ def test_lockstep_trains_on_the_augmented_batch(tmp_path: Path) -> None:
     )
     assert len(states) == reference.STEPS
     assert not torch.equal(states[0]["fc.weight"], states[1]["fc.weight"])
+
+
+class _LoaderCalls:
+    """Stands in for the vision loaders; keeps the loader class and worker count."""
+
+    def __init__(self) -> None:
+        self.seen: list[tuple[object, int]] = []
+
+    def __call__(self, script: object, *, num_workers: int) -> tuple[Batches, Batches]:
+        del script
+        self.seen.append((data.DataLoader, num_workers))
+        return [], []
 
 
 if __name__ == "__main__":

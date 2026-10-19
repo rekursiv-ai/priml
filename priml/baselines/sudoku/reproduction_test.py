@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
+from urllib.parse import quote, unquote
 
+import fcntl
+import functools
 import json
 import logging
+import random
 import re
+import sys
+import tempfile
 
 from configgle import Fig
 from torch import Tensor
 from torch._inductor import config as inductor_config
 from treekle import ReadError, json_loads
 
+import numpy as np
 import pytest
 import torch
 
@@ -28,26 +36,38 @@ from priml.baselines.sudoku.reproduction import (
     _run_training,
     _screen_pass,
 )
+from priml.baselines.sudoku.runner import load_eval_weights
 from priml.baselines.sudoku.search import HpsSearch
 from priml.baselines.sudoku.sieve import SieveEval
 from priml.baselines.sudoku.testing import (
+    FIXTURES,
     Harness,
-    load_golden,
     metric_tensors,
     replay,
+    shrink_newton_schulz,
     weight_tensors,
     write_dataset,
 )
 from priml.baselines.sudoku.train_loop import SudokuTrainLoop
 from priml.baselines.sudoku.verifier import VerifierAcceptor
 from priml.baselines.sudoku.views import NINE_VIEWS
-from priml.testing.golden import mismatches
+from priml.testing import regenerate
+from priml.testing.golden import (
+    assert_tensor_golden_part,
+    mismatches,
+    read_tensors,
+    write_tensors,
+)
 from priml.train.tracker import WandbTracker
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
-    from pathlib import Path
+
+    from numpy.lib.npyio import NpzFile
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 class _ProtocolConfig(Protocol):
@@ -61,7 +81,7 @@ _PipelineConfig = Reproduction.Config
 
 
 def _pipeline(h: Harness, name: str) -> _PipelineConfig:
-    """Return a 3-step pipeline with 2-step evaluation segments."""
+    """Return a 2-step pipeline of 1-step segments: the second resumes the first."""
     cfg = Reproduction.Config()
     cfg.study_name = "sudoku"
     cfg.experiment_name = name
@@ -71,16 +91,17 @@ def _pipeline(h: Harness, name: str) -> _PipelineConfig:
     generator.step.model = h.model()
     generator.step.dtype_autocast = None
     generator.step.pool.max_steps = 2
+    shrink_newton_schulz(generator)
     generator.dataset.working_dir = h.data
     generator.dataset.batch_size = 2
     generator.dataset.eval_num_instances = None
     # The recipe augments; the segments draw from the dedicated seeded stream.
     generator.dataset.augment_digits_only = False
-    generator.max_steps = 3
+    generator.max_steps = 2
     generator.eval_warmup_batches = 0
     cfg.generator = generator
     cfg.generator_name = f"{name}_generator"
-    cfg.eval_every_steps = 2
+    cfg.eval_every_steps = 1
     cfg.dev_screen_count = 2
     # A two-step model never reaches the recipe's 0.98 gate; opening it makes
     # every boundary run its dev screen.
@@ -97,46 +118,20 @@ def _full_eval_defaults(h: Harness, full_eval: _ProtocolConfig) -> None:
     full_eval.evaluation_count = 2
 
 
-def _run_pipeline(h: Harness, config: _PipelineConfig) -> dict[str, Tensor]:
-    """Run a pipeline; record its dumps, metrics, and final generator weights."""
-    config.make().run()
-    out = h.dumps(config.experiment_name)
-    metrics = cast(
-        "dict[str, object]",
-        json.loads(
-            (h.scratch / "runs" / config.experiment_name / "metrics.json").read_text(),
-        ),
-    )
-    out |= metric_tensors(metrics)
-    generator = config.generator_name
-    state = cast(
-        "dict[str, dict[str, dict[str, Tensor]]]",
-        torch.load(
-            h.scratch
-            / "runs"
-            / config.generator.study_name
-            / generator
-            / "checkpoints"
-            / f"step_{int(config.generator.max_steps):08d}.pt",
-            weights_only=True,
-        ),
-    )
-    return out | weight_tensors(generator, state["step"]["model"])
-
-
-def _record_repro_lock(h: Harness) -> dict[str, Tensor]:
+def _record_repro_lock(h: Harness) -> _PipelineConfig:
     cfg = _pipeline(h, "repro_lock")
     lock = AgreementLockEval.Config()
     _full_eval_defaults(h, lock)
     lock.members = nine_view_members("template.pt")[:2]
     cfg.full_eval = lock
-    return _run_pipeline(h, cfg)
+    return cfg
 
 
-def _record_repro_sieve(h: Harness) -> dict[str, Tensor]:
-    # The frozen source is an input, not the run under test: the generator this
-    # pipeline trains is its own. ``gen_a`` is the same recipe at the same seed.
-    source = Harness(h.scratch, train=False).generator("gen_a", seed=0)
+def _record_repro_sieve(h: Harness) -> _PipelineConfig:
+    # The frozen source is an input, not the run under test: the stored ``gen_a``
+    # fixture, whose shard the harvest stage must reproduce. The generator this
+    # pipeline trains is its own, at the pipeline's shorter size.
+    source = h.generator("gen_a", seed=0)
     cfg = _pipeline(h, "repro_sieve")
     cfg.screen = "committee"
     cfg.harvest_source_checkpoint = source
@@ -173,17 +168,7 @@ def _record_repro_sieve(h: Harness) -> dict[str, Tensor]:
     # instead drives the pipeline's committee screens and the sieve's lock.
     acceptor.threshold = -1e9
     cfg.full_eval = sieve
-    out = _run_pipeline(h, cfg)
-    for name in cfg.verifier_names:
-        state = cast(
-            "dict[str, dict[str, dict[str, Tensor]]]",
-            torch.load(
-                h.scratch / "runs" / name / "checkpoints" / "step_00000003.pt",
-                weights_only=True,
-            ),
-        )
-        out |= weight_tensors(name, state["step"]["model"])
-    return out
+    return cfg
 
 
 def _reproduction_config(tmp_path: Path) -> Reproduction.Config:
@@ -574,24 +559,481 @@ def test_run_training_skips_or_refuses_existing_segment_checkpoints(
     assert _run_training(cfg) == (0.0, False)
 
 
-_RECORDERS: Final[dict[str, Callable[[Harness], dict[str, Tensor]]]] = {
+_RECORDERS: Final[dict[str, Callable[[Harness], Reproduction.Config]]] = {
     "exp008": _record_repro_sieve,
     "exp012": _record_repro_lock,
 }
 
 
-@pytest.mark.parametrize("case", _RECORDERS)
-def test_golden_replays_bit_for_bit(
+_STAGES: Final[dict[str, tuple[str, ...]]] = {
+    "exp008": ("harvest", "verifier", "screen_1", "screen_2", "full_2", "run"),
+    "exp012": ("train_1", "train_2", "gate_1", "screen_1", "screen_2", "full_2", "run"),
+}
+"""Each pipeline's stages, each replayed alone on what the stage before it froze.
+
+``train_1`` freezes its whole checkpoint, which ``train_2`` resumes. Both
+pipelines train the same generator, so only exp012 replays it, and every
+evaluation reads its boundary eval weights from ``exp012.pt``. ``run``
+drives the staged body over all of them, each evaluation's result stubbed with
+what its own case froze, so it checks the orchestration alone.
+"""
+
+_TRAINED: Final = _CWD / "testdata" / "exp012.pt"
+"""The golden holding the pipelines' trained boundary checkpoints."""
+
+
+# Every stage reads only files: the stored generator and verifier fixtures, the
+# stored shard, or the boundary checkpoints the golden froze, written where the
+# stage before it would have left them.
+def _stage_record(
+    h: Harness,
     case: str,
+    stage: str,
+    golden: Mapping[str, Tensor],
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, Tensor]:
+    """Run one stage of ``case``'s pipeline on stored inputs; return its record."""
+    # Inputs, not the stage under test: read from the store even under
+    # ``--regenerate-b4b``, so a re-mint changes only this stage's part.
+    inputs = Harness(h.scratch, train=True, known=read_tensors(FIXTURES))
+    repro = _RECORDERS[case](inputs).make()
+    if stage == "harvest":
+        return _harvest_stage(inputs, repro)
+    harvest = repro.config.harvest.copy_tree()
+    harvest.harvest_source_checkpoint = repro.config.harvest_source_checkpoint
+    harvest_dir = inputs._stored_harvest(harvest)
+    if stage == "verifier":
+        return _verifier_stage(inputs, repro, harvest_dir)
+    _write_committee(inputs, repro)
+    if stage.startswith("train_"):
+        return _train_stage(repro, stage, golden)
+    _write_boundaries(repro, golden if case == "exp012" else read_tensors(_TRAINED))
+    if stage == "run":
+        # Stage 0 reuses the stored corpus and committee, and every segment
+        # finds its boundary checkpoint, so each runs for real and skips.
+        stub = _FrozenEvaluations(golden)
+        monkeypatch.setattr(repro, "_det_gate", stub.det_gate)
+        monkeypatch.setattr(repro, "_dev_screen", stub.dev_screen)
+        monkeypatch.setattr(repro, "_full_eval", stub.full_eval)
+        repro.run()
+        metrics = json_loads(repro._metrics_path().read_text(), dict[str, object])
+        return {f"{stage}/{k}": v for k, v in metric_tensors(metrics).items()}
+    # The evaluation writes the dumps, so they are read only after it runs.
+    record = _evaluation_stage(repro, stage)
+    dumps = inputs.dumps(repro.config.experiment_name)
+    return record | {f"{stage}/{k}": v for k, v in dumps.items()}
+
+
+def _harvest_stage(h: Harness, repro: Reproduction) -> dict[str, Tensor]:
+    """Harvest, require the shard the fixtures froze, and record its rows."""
+    harvested, _ = repro._run_harvest()
+    shard = _shard(harvested, prefix="harvest/")
+    stored = {k: v for k, v in h.fixtures.items() if k.startswith("harvest/")}
+    report = mismatches(stored, shard)
+    assert not report, report
+    return {"harvest/rows": torch.tensor(len(shard["harvest/original"]))}
+
+
+# Each member's fit is the stored fixture's recipe at its seed, which ``testing_test``
+# pins bit for bit; this pins the pipeline's recipe to it.
+def _verifier_stage(
+    h: Harness,
+    repro: Reproduction,
+    harvest_dir: Path,
+) -> dict[str, Tensor]:
+    """Fit committee member 0 and require the stored member's weights."""
+    repro._verifier_fit(0, harvest_dir)
+    weights = load_eval_weights(repro._verifier_checkpoint_path(0))
+    report = mismatches(h._stored("verifier_s0/"), weights)
+    assert not report, report
+    return {"verifier/members": torch.tensor(len(repro.config.verifier_names))}
+
+
+def _write_committee(h: Harness, repro: Reproduction) -> None:
+    """Write the stored committee where a committee screen reads it."""
+    if repro.config.screen != "committee":
+        return
+    for index in range(len(repro.config.verifier_names)):
+        path = repro._verifier_checkpoint_path(index)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"model": h._stored(f"verifier_s{index}/")}, path)
+
+
+def _boundaries(repro: Reproduction) -> tuple[int, int]:
+    """Return the pipeline's two segment boundaries."""
+    return repro.config.eval_every_steps, int(repro.config.generator.max_steps)
+
+
+def _train_stage(
+    repro: Reproduction,
+    stage: str,
+    golden: Mapping[str, Tensor],
+) -> dict[str, Tensor]:
+    """Train one segment, resuming the first's frozen state; record what it wrote."""
+    first, _ = _boundaries(repro)
+    boundary = int(stage.removeprefix("train_"))
+    if boundary != first:
+        prefix = f"train_{first}/state/"
+        if not any(key.startswith(prefix) for key in golden):
+            raise ValueError(
+                f"{stage} resumes {prefix}, which the golden does not hold; "
+                f"mint train_{first} first.",
+            )
+        state = cast("dict[str, dict[str, object]]", _state(golden, prefix=prefix))
+        _refill_generators(state, seed=0)
+        path = repro._checkpoint_path(first)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(state, path)
+    repro._train_segment(boundary)
+    return _segment_record(repro, stage)
+
+
+def _segment_record(repro: Reproduction, stage: str) -> dict[str, Tensor]:
+    """Record the eval weights a segment wrote, and its whole state if one follows."""
+    boundary = int(stage.removeprefix("train_"))
+    path = repro._checkpoint_path(boundary)
+    out = weight_tensors(f"{stage}/eval", load_eval_weights(path))
+    if boundary != _boundaries(repro)[-1]:
+        state = cast(
+            "dict[str, dict[str, object]]",
+            torch.load(path, weights_only=True),
+        )
+        _drop_generators(state)
+        out |= _tensors(state, prefix=f"{stage}/state/")
+    return out
+
+
+def _write_boundaries(repro: Reproduction, trained: Mapping[str, Tensor]) -> None:
+    """Write each boundary's frozen eval weights where an evaluation loads them."""
+    for boundary in _boundaries(repro):
+        path = repro._checkpoint_path(boundary)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        model = _golden_part(trained, f"train_{boundary}/eval/")
+        torch.save({"step": {"model": model}}, path)
+
+
+def _evaluation_stage(repro: Reproduction, stage: str) -> dict[str, Tensor]:
+    """Run one gate, dev screen or full evaluation; record its result."""
+    kind, _, at = stage.partition("_")
+    step = int(at)
+    if kind == "gate":
+        exact, of, _ = repro._det_gate(step)
+        return {f"{stage}/exact": torch.tensor(exact), f"{stage}/of": torch.tensor(of)}
+    if kind == "screen":
+        exact, of, false_accepts, _ = repro._dev_screen(step)
+        out = {f"{stage}/exact": torch.tensor(exact), f"{stage}/of": torch.tensor(of)}
+        if false_accepts is not None:
+            out[f"{stage}/false_accepts"] = torch.tensor(false_accepts)
+        return out
+    metrics, _ = repro._full_eval(step)
+    return {f"{stage}/{k}": v for k, v in metric_tensors(metrics).items()}
+
+
+class _FrozenEvaluations:
+    """Each evaluation the staged body calls, answered with what its case froze."""
+
+    def __init__(self, golden: Mapping[str, Tensor]) -> None:
+        self.golden = golden
+
+    def det_gate(self, step: int) -> tuple[int, int, float]:
+        """Return the frozen gate result at ``step``."""
+        return self._int(f"gate_{step}/exact"), self._int(f"gate_{step}/of"), 1.0
+
+    def dev_screen(self, step: int) -> tuple[int, int, int | None, float]:
+        """Return the frozen dev screen at ``step``."""
+        prefix = f"screen_{step}/"
+        accepts = f"{prefix}false_accepts"
+        false_accepts = self._int(accepts) if accepts in self.golden else None
+        return self._int(f"{prefix}exact"), self._int(f"{prefix}of"), false_accepts, 1.0
+
+    def full_eval(self, step: int) -> tuple[dict[str, object], float]:
+        """Return the frozen full-set metrics at ``step``."""
+        prefix = f"full_{step}/metrics/"
+        metrics: dict[str, object] = {
+            key.removeprefix(prefix): value.item()
+            for key, value in self.golden.items()
+            if key.startswith(prefix)
+        }
+        if f"{prefix}eval/locked_total" in self.golden:
+            metrics["eval/rounds"] = []
+        return metrics, 1.0
+
+    def _int(self, key: str) -> int:
+        return int(self.golden[key].item())
+
+
+_GENERATORS: Final = (
+    ("rng", "python"),
+    ("rng", "torch"),
+    ("step", "halt_rng"),
+    ("step", "corruption_rng"),
+)
+"""The checkpoint's generator states, 21 KB of Mersenne words between them.
+
+None of them is read by this recipe's second segment -- the segment reseeds its
+draws -- so the stage stores the training state without them and refills them
+from a fixed seed. A fixed segment schedule replays exactly, but is not one
+uninterrupted run: a resume starts the next epoch's shuffle. So
+``train_2``'s golden is what two fresh segments write, which
+``test_the_frozen_segments_are_what_two_fresh_segments_write`` pins.
+``test_the_refilled_generators_are_never_read`` fails the day a segment starts
+reading one of them.
+"""
+
+
+def _drop_generators(state: dict[str, dict[str, object]]) -> None:
+    """Remove each of :data:`_GENERATORS` from a checkpoint, in place."""
+    for group, name in _GENERATORS:
+        del state[group][name]
+
+
+def _refill_generators(state: dict[str, dict[str, object]], *, seed: int) -> None:
+    """Put a fresh generator state seeded ``seed`` at each of :data:`_GENERATORS`."""
+    torch_state = torch.Generator().manual_seed(seed).get_state()
+    stand_in = random.Random(seed)  # noqa: S311 -- A fixed state, not a secret.
+    python_state = stand_in.getstate()
+    for group, name in _GENERATORS:
+        state[group][name] = python_state if name == "python" else torch_state
+
+
+# A checkpoint as tensors keyed by path. Each segment names one step down: ``k``
+# and a quoted string key, ``i`` and an int key, ``l`` or ``t`` and a list or tuple
+# index. The last segment names the leaf: ``=tensor``, or the Python value it was
+# (``=int`` and ``=str`` as decimal or UTF-8 bytes, since numpy's PCG64 words are
+# 128-bit; ``=float``, ``=bool``, ``=none``; ``=dict``, ``=list``, ``=tuple`` for an
+# empty one). Step timers hold wall time, so they are zeroed: a resumed segment
+# only adds to them.
+def _tensors(node: object, *, prefix: str) -> dict[str, Tensor]:
+    """Flatten a checkpoint into tensors keyed by their path under ``prefix``."""
+    segments = _segments(node)
+    if segments:
+        return {
+            key: value
+            for segment, child in segments
+            for key, value in _tensors(child, prefix=f"{prefix}{segment}/").items()
+        }
+    return {
+        f"{prefix}={_kind(node)}": _leaf(node, zeroed=prefix.endswith("kglobal_sec/")),
+    }
+
+
+def _segments(node: object) -> list[tuple[str, object]]:
+    """Name each child of a container by its path segment; a leaf has none."""
+    if isinstance(node, dict):
+        children = cast("dict[object, object]", node).items()
+        return [
+            (
+                f"i{name}"
+                if isinstance(name, int)
+                else f"k{quote(str(name), safe='')}",
+                child,
+            )
+            for name, child in children
+        ]
+    if isinstance(node, list | tuple):
+        tag = "t" if isinstance(node, tuple) else "l"
+        items = cast("list[object]", node)
+        return [(f"{tag}{index}", child) for index, child in enumerate(items)]
+    return []
+
+
+def _kind(node: object) -> str:
+    """Name a leaf's type as its last path segment does."""
+    if isinstance(node, Tensor):
+        return "tensor"
+    if node is None:
+        return "none"
+    return type(node).__name__
+
+
+def _leaf(node: object, *, zeroed: bool) -> Tensor:
+    """Encode one leaf as a tensor :func:`_value` decodes."""
+    if isinstance(node, Tensor):
+        return node.detach().clone()
+    if isinstance(node, bool):
+        return torch.tensor(node)
+    if isinstance(node, str | int):
+        return torch.tensor(list(str(node).encode()), dtype=torch.uint8)
+    if isinstance(node, float):
+        return torch.tensor(0.0 if zeroed else node, dtype=torch.float64)
+    if node is None or node in ({}, [], ()):
+        return torch.zeros(0)
+    raise TypeError(f"A checkpoint leaf of type {type(node).__name__} has no encoding.")
+
+
+def _state(golden: Mapping[str, Tensor], *, prefix: str) -> object:
+    """Invert :func:`_tensors` for the keys under ``prefix``."""
+    root: dict[str, object] = {}
+    for key, value in golden.items():
+        if key.startswith(prefix):
+            *parents, leaf = key.removeprefix(prefix).split("/")
+            node = root
+            for segment in parents:
+                node = cast("dict[str, object]", node.setdefault(segment, {}))
+            node[leaf] = value
+    return _built(root)
+
+
+def _built(node: dict[str, object]) -> object:
+    """Rebuild the value one path node of :func:`_state` holds."""
+    [first, *_] = node
+    if first.startswith("="):
+        return _value(first.removeprefix("="), cast("Tensor", node[first]))
+    children = {k: _built(cast("dict[str, object]", v)) for k, v in node.items()}
+    if first[0] in "lt":
+        items = [children[k] for k in sorted(children, key=lambda k: int(k[1:]))]
+        return tuple(items) if first[0] == "t" else items
+    return {
+        int(k[1:]) if k[0] == "i" else unquote(k[1:]): value
+        for k, value in children.items()
+    }
+
+
+def _value(kind: str, value: Tensor) -> object:
+    """Decode one leaf :func:`_leaf` encoded as ``kind``."""
+    if kind in {"str", "int"}:
+        text = value.numpy().tobytes().decode()
+        return int(text) if kind == "int" else text
+    if kind in {"bool", "float"}:
+        return bool(value.item()) if kind == "bool" else float(value.item())
+    empty: dict[str, object] = {"none": None, "dict": {}, "list": [], "tuple": ()}
+    return value if kind == "tensor" else empty[kind]
+
+
+def _golden_part(golden: Mapping[str, Tensor], prefix: str) -> dict[str, Tensor]:
+    """Return the golden's tensors under ``prefix``, the prefix removed."""
+    return {
+        k.removeprefix(prefix): v for k, v in golden.items() if k.startswith(prefix)
+    }
+
+
+def _shard(out: Path, *, prefix: str) -> dict[str, Tensor]:
+    """Every array of a harvest's one shard, keyed under ``prefix``."""
+    with cast("NpzFile", np.load(out / "shard-00000.npz")) as shard:
+        return {
+            f"{prefix}{key}": torch.from_numpy(np.array(shard[key]))
+            for key in shard.files
+        }
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        {"a": [], "b": ()},
+        {"7": 1, 7: 2},
+        {"a#b": 1, "c:d": "x", "e/f": None},
+        {"seq": (1, [2.5, True]), "big": 2**127, "neg": -1, "empty": {}},
+    ],
+)
+def test_a_checkpoint_round_trips_through_tensors(node: dict[object, object]) -> None:
+    assert _state(_tensors(node, prefix="p/"), prefix="p/") == node
+
+
+def test_a_resumed_segment_needs_the_first_frozen(tmp_path: Path) -> None:
+    write_dataset(tmp_path / "data")
+    h = Harness(tmp_path, train=True, known=read_tensors(FIXTURES))
+    repro = _RECORDERS["exp012"](h).make()
+    with pytest.raises(ValueError, match=r"^train_2 resumes train_1/state/, "):
+        _train_stage(repro, "train_2", {})
+
+
+def test_the_frozen_segments_are_what_two_fresh_segments_write(tmp_path: Path) -> None:
+    """``train_2`` replays ``train_1``'s real checkpoint, not only the frozen one."""
+    puzzle_data.dihedral_indices.cache_clear()
+    golden = read_tensors(_TRAINED)
+    record = replay(_fresh_segments, tmp_path, train=False)
+    for stage in ("train_1/", "train_2/"):
+        part = {k: v for k, v in golden.items() if k.startswith(stage)}
+        assert mismatches(part, {k: v for k, v in record.items() if k in part}) == []
+
+
+@pytest.mark.parametrize("seed", [1, 7])
+def test_the_refilled_generators_are_never_read(
+    seed: int,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The runner reproduces the frozen evaluation with zero mismatches."""
+    puzzle_data.dihedral_indices.cache_clear()
+    golden = read_tensors(_TRAINED)
+    refill = functools.partial(_refill_generators, seed=seed)
+    monkeypatch.setattr(sys.modules[__name__], "_refill_generators", refill)
+    record = replay(
+        lambda h: _stage_record(h, "exp012", "train_2", golden, monkeypatch),
+        tmp_path,
+        train=False,
+    )
+    part = {k: v for k, v in golden.items() if k.startswith("train_2/")}
+    assert mismatches(part, record) == []
+
+
+def _fresh_segments(h: Harness) -> dict[str, Tensor]:
+    """Train both segments from empty files and record each as its stage does."""
+    inputs = Harness(h.scratch, train=True, known=read_tensors(FIXTURES))
+    repro = _RECORDERS["exp012"](inputs).make()
+    first = _train_stage(repro, "train_1", {})
+    repro._train_segment(2)
+    return first | _segment_record(repro, "train_2")
+
+
+@pytest.mark.parametrize(
+    ("case", "stage"),
+    [(case, stage) for case, stages in _STAGES.items() for stage in stages],
+)
+def test_a_pipeline_stage_replays_bit_for_bit(
+    case: str,
+    stage: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each stage reproduces its part of the frozen pipeline with zero mismatches."""
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path / "torchinductor"))
     monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton"))
+    golden_path = _CWD / "testdata" / f"{case}.pt"
+    if regenerate.b4b():
+        _regenerate_pipeline(tmp_path / "regenerate", monkeypatch)
+    golden = read_tensors(golden_path)
+    record = _replay_stage(case, stage, golden, tmp_path / "replay", monkeypatch)
+    assert_tensor_golden_part(golden_path, f"{stage}/", record)
+
+
+@pytest.mark.parametrize("case", list(_STAGES))
+def test_a_pipeline_golden_holds_exactly_its_stages(case: str) -> None:
+    golden = read_tensors(_CWD / "testdata" / f"{case}.pt")
+    assert {key.split("/", 1)[0] for key in golden} == set(_STAGES[case])
+
+
+def _replay_stage(
+    case: str,
+    stage: str,
+    golden: Mapping[str, Tensor],
+    scratch: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, Tensor]:
+    """Replay one stage of ``case`` in ``scratch``; return its record."""
     puzzle_data.dihedral_indices.cache_clear()
-    report = mismatches(load_golden(case), replay(_RECORDERS[case], tmp_path))
-    assert not report, f"{len(report)} mismatches:\n" + "\n".join(report)
+    return replay(
+        lambda h: _stage_record(h, case, stage, golden, monkeypatch),
+        scratch,
+        train=False,
+    )
+
+
+# Every stage reads what the stages before it froze, and exp008's evaluations
+# read exp012's trained boundaries, so a regeneration re-mints both pipelines
+# whole and in order, then rewrites each file: no stage is minted from a stale
+# input, and a stage no longer in ``_STAGES`` is dropped. The lock serializes
+# xdist workers; each re-mints the same bits.
+def _regenerate_pipeline(scratch: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-mint every stage of both pipelines in order and rewrite their goldens."""
+    lock_path = Path(tempfile.gettempdir()) / f"{__name__}.lock"
+    with lock_path.open("a") as lock, regenerate.suppressed():
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        for case in ("exp012", "exp008"):
+            golden: dict[str, Tensor] = {}
+            for stage in _STAGES[case]:
+                where = scratch / case / stage
+                golden |= _replay_stage(case, stage, golden, where, monkeypatch)
+            write_tensors(_CWD / "testdata" / f"{case}.pt", golden)
 
 
 if __name__ == "__main__":

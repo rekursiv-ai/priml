@@ -1,21 +1,21 @@
 """Test support shared by the evaluation runners' tests: fixtures and tiny configs.
 
-The runner goldens in ``testdata/`` replay frozen evaluation trajectories.
-Every case runs one real runner end to end at tiny size on CPU. The pipeline
-cases (exp008, exp012) train their generators and verifiers inside the case,
-segmented, screened, and triggered as the recipes do. The evaluation cases
-read those same trained fixtures from ``testdata/fixtures.pt``: training is
-the pipelines' code path, so re-running it per evaluation case covers no new
-line and costs most of the case's time. Each records every array its runner
-writes, its numeric metrics, and the trained weights, compared with
-``torch.equal``.
+The runner goldens in ``testdata/`` replay frozen evaluation trajectories at
+tiny size on CPU. The evaluation cases read their trained generators,
+verifiers and harvest shard from ``testdata/fixtures.pt``, and
+``testing_test`` retrains each fixture alone against its stored bits. The
+pipeline cases (exp008, exp012) replay one stage at a time, each on the files
+the stage before it froze, so no stage trains anything but itself. Each case
+records every array its runner writes, its numeric metrics, and its trained
+weights, compared bit for bit.
 
 Only goldens covering a code path no other test reaches are kept: the
 pipelines (``exp008``, ``exp012``), the staircase sieve (exp011), HPS (exp007),
-the agreement lock, and the denoising fit. Most were recorded from the
-reference implementation this baseline was ported from; ``staircase`` and
-``denoising_fit`` are snapshots of this port, minted after the pieces they
-compose matched the reference bit for bit.
+the agreement lock, and the denoising fit. HPS and the agreement lock were
+recorded from the reference implementation this baseline was ported from; the
+others are snapshots of this port, minted after the pieces they compose matched
+the reference bit for bit. The pipelines run one Newton-Schulz iteration, so
+their numerics are this port's at that size, not the recipe's.
 
 A test that needs the dataset fixture, a tiny generator, or a runner configured
 for it imports it from here rather than from another test module.
@@ -42,6 +42,8 @@ from priml.baselines.sudoku.search import HpsSearch
 from priml.baselines.sudoku.verifier import SudokuVerifier
 from priml.baselines.sudoku.verifier_fit import VerifierFit, VerifierLoss
 from priml.model.swiglu import SwiGLU
+from priml.optimizers.composite import CompositeOptimizer
+from priml.optimizers.muon import Muon
 from priml.paths import resolve_working_dir
 from priml.runtime import SingleProcess
 from priml.testing import regenerate
@@ -61,6 +63,17 @@ _CWD: Final = Path(__file__).resolve().parent
 
 FIXTURES: Final = _CWD / "testdata" / "fixtures.pt"
 """The evaluation goldens' trained generators, verifiers, and harvest shard."""
+
+FIXTURE_GROUPS: Final = (
+    "gen_a",
+    "gen_b",
+    "gen_hypotheses",
+    "harvest",
+    "verifier_s0",
+    "verifier_s1",
+    "verifier_s2",
+)
+"""Every fixture :data:`FIXTURES` stores, by its key prefix."""
 
 
 def write_dataset(root: Path) -> Path:
@@ -118,35 +131,45 @@ def replay(
         return {k: stored(v) for k, v in record(harness).items()}
 
 
-def mint_fixtures(
-    recorders: Mapping[str, Callable[[Harness], dict[str, Tensor]]],
+def train_fixture(
+    group: str,
     scratch: Path,
+    *,
+    known: Mapping[str, Tensor],
 ) -> dict[str, Tensor]:
-    """Train every fixture ``recorders`` reads and return them, as stored.
+    """Train the fixture ``group`` alone, writing the ones it reads from ``known``.
+
+    Each fixture trains from its own seed, so training one alone gives the bits
+    it has inside the goldens that read it.
 
     Args:
-      recorders: The goldens that read :data:`FIXTURES`.
+      group: One of :data:`FIXTURE_GROUPS`.
       scratch: Empty directory owned by this call.
+      known: Stored fixtures; every one but ``group`` is written, not trained.
 
     Returns:
-      fixtures: The trained weights and harvest shard, keyed as stored.
+      fixture: ``group``'s tensors, keyed and narrowed as stored.
 
     """
-    trained: dict[str, Tensor] = {}
-    for case, record in recorders.items():
-        harness_dir = scratch / case
-        write_dataset(harness_dir / "data")
-        with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
-            torch.manual_seed(0)
-            # A fixture an earlier case trained is read back, not retrained:
-            # every case trains it from the same seed, so the bits agree.
-            harness = Harness(harness_dir, train=True, known=trained)
-            record(harness)
-        trained |= harness.trained
+    write_dataset(scratch / "data")
+    others = {k: v for k, v in known.items() if not k.startswith(f"{group}/")}
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        torch.manual_seed(0)
+        harness = Harness(scratch, train=True, known=others)
+        if group == "gen_b":
+            harness.generator("gen_b", seed=1)
+        elif group == "gen_hypotheses":
+            harness.hypothesis_generator("gen_hypotheses", seed=0)
+        else:
+            gen_a = harness.generator("gen_a", seed=0)
+            if group != "gen_a":
+                harness.harvest(gen_a)
+            if group.startswith("verifier_s"):
+                harness.verifier(int(group.removeprefix("verifier_s")))
     # The shard is replayed as written, dtypes and all, so it is never narrowed.
     return {
         k: v.detach().clone() if k.startswith("harvest/") else stored(v)
-        for k, v in trained.items()
+        for k, v in harness.trained.items()
     }
 
 
@@ -167,6 +190,24 @@ def metric_tensors(values: Mapping[str, object]) -> dict[str, Tensor]:
         for key, value in values.items()
         if isinstance(value, int | float) and "seconds" not in key
     }
+
+
+def shrink_newton_schulz(cfg: SudokuTrainLoop) -> None:
+    """Run each Muon member's orthogonalization for one iteration, not the recipe's.
+
+    One iteration runs every line of the update at a third of the ops, but
+    orthogonalizes less, so the update differs: use it only in snapshot goldens,
+    never in one recorded from the reference.
+
+    Args:
+      cfg: A recipe whose optimizer holds Muon members.
+
+    """
+    optimizer = cfg.step.optimizer
+    assert isinstance(optimizer, CompositeOptimizer.Config)
+    for member in optimizer.optimizers:
+        if isinstance(member, Muon.Config):
+            member.ns_steps = 1
 
 
 def tiny_recursion_config() -> LatentRecursion.Config:
@@ -268,17 +309,16 @@ class Harness:
         less and divides by a zero perpendicular norm there.
 
         Returns:
-          config: The three-hypothesis staircase generator.
+          config: The two-hypothesis staircase generator.
 
         """
         cfg = HypothesisRecursion.Config().update(self.model())
         cfg.channels_in = 12
-        cfg.num_hypotheses = 3
-        if cfg.block is None:
-            raise ValueError("Expected cfg.block is not None.")
-        assert isinstance(cfg.block.ffn, SwiGLU.Config)
-        cfg.block.ffn.round_to = 4
-        cfg.block.ffn.channels_hidden = 4
+        block = cfg.block = recipe_block()
+        assert isinstance(block.ffn, SwiGLU.Config)
+        block.ffn.expansion = 1
+        block.ffn.round_to = 4
+        block.ffn.channels_hidden = 4
         return cfg
 
     def hypothesis_generator(self, name: str, seed: int) -> str:
@@ -295,6 +335,7 @@ class Harness:
         cfg = self._recipe(name, seed=seed)
         cfg.step.model = self.hypothesis_model()
         cfg.step.routing = WinnerRecompute.Config()
+        shrink_newton_schulz(cfg)
         cfg.dataset.batch_size = 3
         logical = f"/runs/{cfg.study_name}/{name}/checkpoints/step_00000003.pt"
         self._checkpoint(name, self.scratch / logical.removeprefix("/"), recipe=cfg)

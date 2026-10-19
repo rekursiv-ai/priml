@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import math
+
 import numpy as np
 import pytest
 
@@ -16,11 +18,13 @@ if TYPE_CHECKING:
 
 @pytest.fixture
 def eager_kernel(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Execute the same C99 calls without compiling ordinary unit tests."""
+    """Execute the same scalar code without compiling ordinary unit tests."""
     logarithm._kernel.cache_clear()
+    logarithm._log1p_kernel.cache_clear()
     monkeypatch.setattr(logarithm, "njit", _eager_compile)
     yield
     logarithm._kernel.cache_clear()
+    logarithm._log1p_kernel.cache_clear()
 
 
 @pytest.mark.usefixtures("eager_kernel")
@@ -98,6 +102,45 @@ def test_log1p_preserves_captured_scalar_rounding(transpose: bool) -> None:
 
 
 @pytest.mark.usefixtures("eager_kernel")
+def test_log1p_does_not_depend_on_the_hosts_libm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Glibc 2.43 rounds log1pf(0.46771079) correctly, one ulp above the capture.
+    monkeypatch.setattr(logarithm, "_libm", lambda: _CorrectlyRounded)
+    values = np.array([0.46771079301834106], dtype=np.float32)
+    expected = np.array([1_053_062_358], dtype=np.uint32)
+    np.testing.assert_array_equal(
+        logarithm.log1p_float32(values).view(np.uint32),
+        expected,
+    )
+
+
+@pytest.mark.usefixtures("eager_kernel")
+@pytest.mark.parametrize(
+    "x",
+    [
+        *(x / 4 for x in range(-3, 256, 4)),
+        -0.999,
+        -0.75,
+        -0.9998779296875,
+        2.0**30 - 1,
+        2.0**30,
+        2.0**-20,
+        1e-9,
+        -1e-9,
+        0.41,
+        -0.29,
+        1e20,
+        3e38,
+    ],
+)
+def test_log1p_is_within_one_ulp_of_the_exact_value(x: float) -> None:
+    exact = np.array([math.log1p(float(np.float32(x)))], dtype=np.float32)
+    got = logarithm.log1p_float32(np.array([x], dtype=np.float32))
+    assert abs(int(got.view(np.int32).sum()) - int(exact.view(np.int32).sum())) <= 1
+
+
+@pytest.mark.usefixtures("eager_kernel")
 @pytest.mark.parametrize("shape", [(), (0,), (2, 0, 3)])
 def test_log1p_preserves_scalar_and_empty_shapes(shape: tuple[int, ...]) -> None:
     actual = logarithm.log1p_float32(np.zeros(shape, dtype=np.float32))
@@ -118,6 +161,18 @@ def test_log1p_propagates_domain_and_nonfinite_results() -> None:
 def test_log1p_rejects_non_binary32_metadata(dtype: type[np.generic]) -> None:
     with pytest.raises(ValueError, match="binary32"):
         logarithm.log1p_float32(np.ones(3, dtype=dtype))
+
+
+class _CorrectlyRounded:
+    """A host libm whose log1pf rounds correctly, as glibc 2.43's does."""
+
+    @classmethod
+    def logf(cls, x: float, /) -> float:
+        return float(np.float32(math.log(x)))
+
+    @classmethod
+    def log1pf(cls, x: float, /) -> float:
+        return float(np.float32(math.log1p(x)))
 
 
 def _eager_compile(

@@ -180,22 +180,30 @@ def op_census() -> Generator[dict[str, int]]:
         yield counts
 
 
-def upstream_batches(script: Upstream) -> tuple[Batches, Batches]:
-    """Run the script's loaders with four forked workers, alternating the splits.
+def upstream_batches(
+    script: Upstream,
+    *,
+    num_workers: int = 4,
+) -> tuple[Batches, Batches]:
+    """Run the script's loaders, alternating the splits; workers are forked.
 
     Args:
       script: A variant of the script.
+      num_workers: Loader workers; the script's four by default, whose seeds
+        the draws depend on.
 
     Returns:
       passes: The training passes, then the test passes.
 
     """
+    if not num_workers:
+        return upstream.upstream_batches(script, num_workers=0)
     # The Cutout edit defines its transform class inside a function, which a
     # forkserver worker cannot unpickle; a forked worker inherits it. The start
     # method changes no draw: each worker's seed comes from the parent.
     forked = functools.partial(data.DataLoader, multiprocessing_context="fork")
     with mock.patch.object(data, "DataLoader", forked):
-        return upstream.upstream_batches(script)
+        return upstream.upstream_batches(script, num_workers=num_workers)
 
 
 def upstream_lockstep(script: Upstream, name: str, trace: MainTrace) -> Lockstep:

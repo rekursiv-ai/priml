@@ -17,6 +17,7 @@ import torch
 from priml.baselines.mlsbench.dl.augmentation import reference
 from priml.baselines.mlsbench.dl.augmentation.experiments import exp000
 from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
 from priml.testing.golden import mismatches, read_tensors
 
 
@@ -86,8 +87,22 @@ def test_the_stored_lockstep_omits_only_the_batches_and_can_keep_states() -> Non
     assert not torch.equal(states[0]["head.weight"], states[1]["head.weight"])
 
 
-def test_the_whole_port_record_matches_the_golden() -> None:
-    assert_exact(stored(""), reference.port_record())
+def test_the_whole_port_record_holds_every_part_the_golden_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    golden = stored("")
+    lockstep = golden | {
+        f"lockstep/{n}/media": torch.zeros(1) for n in reference.AUGMENTS
+    }
+    monkeypatch.setattr(reference, "pipeline_record", StoredPart(golden, "augment/{}/"))
+    monkeypatch.setattr(
+        reference,
+        "lockstep_record",
+        StoredPart(lockstep, "lockstep/{}/"),
+    )
+    monkeypatch.setattr(reference, "test_record", StoredPart(golden, "augment/test/"))
+    monkeypatch.setattr(vision, "draws_record", StoredPart(golden, "draws/"))
+    assert_exact(golden, reference.port_record())
 
 
 def test_loaders_run_each_augmentation_over_the_synthetic_split(

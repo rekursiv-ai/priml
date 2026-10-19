@@ -43,8 +43,7 @@ from treekle import from_plain
 
 from priml.cost import Cost, matmul_cost
 from priml.data.dummy import DummyDataset
-from priml.distributed.testing import WorkerPool
-from priml.math.seed import RngState, get_rng_state, salt
+from priml.math.seed import RngState, get_rng_state, salt, set_seed_local
 from priml.metrics.binary_accuracy import BinaryAccuracy
 from priml.metrics.topk import TopK
 from priml.metrics.utilization import Utilization
@@ -4290,9 +4289,11 @@ def test_a_mesh_salts_model_seed_and_optionally_reseeds_data(
     assert seeded == expected
 
 
-def _check_source_torch_seeded_loop_by_rank(mesh: DeviceMesh) -> None:
-    """Build a real loop and compare each rank's model and following draw."""
-    rank = torch.distributed.get_rank()
+@pytest.mark.parametrize("rank", [0, 1])
+def test_model_torch_seed_matches_source_seed_and_keeps_each_rank_stream(
+    rank: int,
+) -> None:
+    """Each rank of a process group seeds its model with seed plus global rank."""
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(13 + rank)
         expected = _LinearModel(2, 3).state_dict()
@@ -4315,23 +4316,31 @@ def _check_source_torch_seeded_loop_by_rank(mesh: DeviceMesh) -> None:
     config.model_torch_seed = torch.manual_seed
     config.runtime = SingleProcess.Config(device="cpu")
 
-    with pytest.MonkeyPatch.context() as patcher:
-        patcher.setattr(train_loop, "global_device_mesh", lambda: mesh)
+    def set_seed_distributed(
+        seed: int,
+        *,
+        mesh: _MeshAxis,
+        salt_by_rank: bool,
+    ) -> tuple[int, int]:
+        del mesh, salt_by_rank
+        return seed, set_seed_local(seed + 1000)
+
+    with torch.random.fork_rng(devices=[]), pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(train_loop, "global_device_mesh", _SeedMesh)
+        patcher.setattr(train_loop, "set_seed_distributed", set_seed_distributed)
         patcher.setattr(train_loop, "runtime_initialized", lambda: True)
+        patcher.setattr(torch.distributed, "is_initialized", lambda: True)
+        patcher.setattr(torch.distributed, "get_rank", lambda: rank)
+        patcher.setattr(torch.distributed, "barrier", lambda: None)
         loop = config.make()
-    try:
-        assert isinstance(loop.step, TrainStep)
-        for name, expected_value in expected.items():
-            assert torch.equal(loop.step.model.state_dict()[name], expected_value)
-        assert torch.equal(torch.rand(4), expected_next)
-    finally:
-        loop.close()
-
-
-def test_model_torch_seed_matches_source_seed_and_keeps_each_rank_stream() -> None:
-    """Each Gloo rank uses seed plus global rank at actual loop startup."""
-    with WorkerPool.Config(mesh_dims={"dp": 2, "pp": 1}).make() as workers:
-        workers(_check_source_torch_seeded_loop_by_rank)
+        patcher.undo()
+        try:
+            assert isinstance(loop.step, TrainStep)
+            for name, expected_value in expected.items():
+                assert torch.equal(loop.step.model.state_dict()[name], expected_value)
+            assert torch.equal(torch.rand(4), expected_next)
+        finally:
+            loop.close()
 
 
 def test_model_torch_seed_uses_rank_zero_without_process_group() -> None:

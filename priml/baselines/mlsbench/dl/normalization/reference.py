@@ -32,7 +32,7 @@ from priml.testing.bfb import host_agnostic_numerics
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from torch import nn
 
@@ -80,16 +80,19 @@ def norm_record() -> dict[str, Tensor]:
     return record
 
 
-def draws_record() -> dict[str, Tensor]:
+def draws_record(names: Iterable[str]) -> dict[str, Tensor]:
     """Return where the generator stands after building each full network.
+
+    Args:
+      names: Keys of :data:`NORMS` to build.
 
     Returns:
       record: ``draws/<name>``, keyed as :data:`NORMS`, the next eight draws.
 
     """
     return {
-        f"draws/{name}": next(iter(reference.draws_record(factory).values()))
-        for name, factory in NORMS.items()
+        f"draws/{name}": next(iter(reference.draws_record(NORMS[name]).values()))
+        for name in names
     }
 
 
@@ -154,7 +157,7 @@ def port_record() -> dict[str, Tensor]:
         norm_record()
         | reference.schedule_record(exp000)
         | reference.optimizer_record(exp000)
-        | draws_record()
+        | draws_record(NORMS)
         | reference.best_record()
     )
     for name in NORMS:

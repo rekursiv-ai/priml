@@ -445,7 +445,13 @@ def _flash4_grad(
 @functools.cache
 def _interface() -> "_Flash4Interface":
     """Import FA4's CuTe interface and check its entry points and this device."""
-    module = importlib.import_module("flash_attn.cute.interface")
+    try:
+        module = importlib.import_module("flash_attn.cute.interface")
+    except ImportError as error:
+        raise Flash4UnavailableError(
+            "FlashAttention 4 is not installed; install priml[cuda] or inject a "
+            "portable kernel such as SdpaFused or SdpaVarlen instead.",
+        ) from error
     if not isinstance(module, _Flash4Interface):
         raise TypeError(
             "FA4 must provide flash_attn_func, flash_attn_varlen_func and "

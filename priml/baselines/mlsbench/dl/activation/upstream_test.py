@@ -16,7 +16,10 @@ import torch
 
 from priml.baselines.mlsbench.dl.activation import reference, upstream
 from priml.baselines.mlsbench.dl.vision import reference as vision
-from priml.baselines.mlsbench.dl.vision.upstream_test import SCRIPT as LOSS_SCRIPT
+from priml.baselines.mlsbench.dl.vision.upstream_test import (
+    SCRIPT as LOSS_SCRIPT,
+    stored_record,
+)
 
 
 if TYPE_CHECKING:
@@ -139,7 +142,7 @@ def test_the_record_holds_every_key_the_golden_does(tmp_path: Path) -> None:
         for name, script in variants.items()
     }
     record = upstream.upstream_record(variants, trace, lockstep)
-    assert record.keys() == reference.port_record().keys()
+    assert record.keys() == stored_record(reference).keys()
 
 
 if __name__ == "__main__":

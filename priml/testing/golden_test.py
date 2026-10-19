@@ -5,9 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, Self, override
 
+import contextlib
+import fcntl
+import functools
 import subprocess
 import sys
 import textwrap
+import threading
 import zlib
 
 from configgle.fig import Fig, Maker
@@ -20,6 +24,7 @@ from priml.testing import golden, regenerate
 from priml.testing.golden import (
     assert_pprint_golden,
     assert_tensor_golden,
+    assert_tensor_golden_part,
     assert_text_golden,
     expect_golden_mismatch,
     joined,
@@ -314,6 +319,20 @@ def test_assert_text_golden_fails_a_changed_render_as_an_assertion(
     )
 
 
+def _mint_then_signal(path: Path, done: threading.Event) -> None:
+    """Mint a golden part, then set ``done``."""
+    with contextlib.suppress(AssertionError):
+        assert_tensor_golden_part(path, "a/", {"a/x": torch.tensor([1.0])})
+    done.set()
+
+
+def _torn_save(obj: object, f: Path) -> None:
+    """Write a truncated file where ``torch.save`` was asked to, then fail."""
+    del obj
+    Path(f).write_bytes(b"torn")
+    raise OSError("torn")
+
+
 def _record() -> dict[str, Tensor]:
     generator = torch.Generator().manual_seed(0)
     return {
@@ -548,6 +567,72 @@ def test_assert_tensor_golden_mints_missing_then_compares(
     regenerate.override(monkeypatch, b4b=True)
     assert_tensor_golden(path, changed)
     assert torch.equal(read_tensors(path)["d"], changed["d"])
+
+
+def test_a_golden_part_is_minted_once_then_replayed_and_regenerated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing part mints and fails; a stored one replays; a regen keeps the rest."""
+    path = tmp_path / "nested" / "testdata" / "golden.pt"
+    first = {"a/x": torch.tensor([1.0, 2.0]), "a/z": torch.tensor([0])}
+    with pytest.raises(AssertionError, match=r"^Missing golden part a/ minted in "):
+        assert_tensor_golden_part(path, "a/", first)
+    assert_tensor_golden_part(path, "a/", first)
+    with pytest.raises(AssertionError, match=r"^Missing golden part b/"):
+        assert_tensor_golden_part(path, "b/", {"b/y": torch.tensor([3])})
+    assert read_tensors(path).keys() == {"a/x", "a/z", "b/y"}
+    changed = {"a/x": torch.tensor([1.0, 5.0]), "a/z": torch.tensor([1])}
+    report = r"^2 mismatches:\na/x: 1/2 differ\na/z: 1/1 differ$"
+    with pytest.raises(AssertionError, match=report):
+        assert_tensor_golden_part(path, "a/", changed)
+    with pytest.raises(ValueError, match=r"^Golden part a/ holds keys outside it"):
+        assert_tensor_golden_part(path, "a/", {"b/y": torch.tensor([3])})
+    regenerate.override(monkeypatch, b4b=True)
+    assert_tensor_golden_part(path, "a/", changed)
+    record = read_tensors(path)
+    assert record.keys() == {"a/x", "a/z", "b/y"}
+    assert torch.equal(record["a/x"], changed["a/x"])
+    assert torch.equal(record["b/y"], torch.tensor([3]))
+
+
+@pytest.mark.parametrize("part", [False, True])
+def test_a_failed_rewrite_leaves_the_golden_as_it_was(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    part: bool,
+) -> None:
+    path = tmp_path / "g.pt"
+    write_tensors(path, {"a/x": torch.tensor([1.0])})
+    monkeypatch.setattr(torch, "save", _torn_save)
+    regenerate.override(monkeypatch, b4b=True)
+    rewrite = (
+        functools.partial(assert_tensor_golden_part, path, "a/")
+        if part
+        else functools.partial(assert_tensor_golden, path)
+    )
+    with pytest.raises(OSError, match=r"^torn$"):
+        rewrite({"a/x": torch.tensor([2.0])})
+    monkeypatch.undo()
+    assert torch.equal(read_tensors(path)["a/x"], torch.tensor([1.0]))
+    assert [p.name for p in tmp_path.iterdir()] == ["g.pt"]
+
+
+def test_a_golden_part_waits_for_the_lock_another_writer_holds(tmp_path: Path) -> None:
+    path = tmp_path / "g.pt"
+    done = threading.Event()
+    writer = threading.Thread(
+        target=_mint_then_signal,
+        args=(path, done),
+        daemon=True,
+    )
+    with golden._part_lock().open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        writer.start()
+        assert not done.wait(0.05)
+    writer.join(timeout=5)
+    assert done.is_set()
+    assert read_tensors(path).keys() == {"a/x"}
 
 
 def test_expect_golden_mismatch_blocks_regeneration(

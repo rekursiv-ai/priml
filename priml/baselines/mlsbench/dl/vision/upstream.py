@@ -315,16 +315,18 @@ def upstream_batches(
     script: Upstream,
     *,
     dataset: str = "cifar100",
+    num_workers: int = 4,
 ) -> tuple[Batches, Batches]:
     """Run the reference's loaders, alternating training and test passes.
 
     Args:
       script: The pristine reference script.
       dataset: The setting's ``--dataset``; its loaders read the synthetic split.
+      num_workers: Loader workers; the reference's four by default, whose
+        seeds the draws depend on.
 
     Returns:
-      passes: The training passes, then the test passes; the loaders use the
-        reference's four worker processes.
+      passes: The training passes, then the test passes.
 
     """
     train: Batches = []
@@ -332,7 +334,7 @@ def upstream_batches(
     with reference.seeded(reference.SEED), reference.script_workers():
         train_loader, test_loader = _loaders(
             script,
-            num_workers=4,
+            num_workers=num_workers,
             dataset=dataset,
         )
         for _ in range(reference.LOADER_PASSES):

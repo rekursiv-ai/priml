@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 from unittest import mock
 
+import functools
+
 import torch
 
 from priml.baselines.mlsbench.dl.vision import reference, upstream
@@ -23,14 +25,21 @@ from priml.baselines.mlsbench.dl.vision.data import (
     Cifar100Data,
     normalize,
 )
+from priml.baselines.mlsbench.dl.vision.model import ResNet
 from priml.testing.golden import read_tensors
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
+    from types import ModuleType
 
     from torch import Tensor
     from torch.utils.data import DataLoader
+
+    import pytest
+
+    from priml.baselines.mlsbench.dl.vision.experiments import VisionTrainLoop
+    from priml.baselines.mlsbench.dl.vision.train_step import VisionTrainStep
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -145,6 +154,76 @@ def write_clone(root: Path) -> None:
     script = root / upstream.PRISTINE
     script.parent.mkdir(parents=True)
     script.write_text(SCRIPT)
+
+
+def stored_record(port: ModuleType) -> dict[str, Tensor]:
+    """Read the golden a task's ``reference_test`` replays its port against.
+
+    Args:
+      port: The task's ``reference`` module.
+
+    Returns:
+      record: ``testdata/reference.pt`` beside it.
+
+    """
+    assert isinstance(port.__file__, str)
+    return read_tensors(Path(port.__file__).parent / "testdata" / "reference.pt")
+
+
+class StoredPart:
+    """A port-side run answered from a golden: its keys under one prefix.
+
+    ``prefix`` is formatted with the run's positional arguments, so
+    ``"lockstep/{}/"`` answers ``lockstep_record(name)``. With ``count``, a
+    ``states`` list the caller passes receives that many placeholder states.
+    """
+
+    def __init__(
+        self,
+        golden: Mapping[str, Tensor],
+        prefix: str,
+        *,
+        count: int = 0,
+    ) -> None:
+        self.golden = golden
+        self.prefix = prefix
+        self.count = count
+
+    def __call__(
+        self,
+        *args: object,
+        states: list[dict[str, Tensor]] | None = None,
+    ) -> dict[str, Tensor]:
+        """Return the golden's keys under the formatted prefix."""
+        if states is not None:
+            states += [{"stored": torch.zeros(1)} for _ in range(self.count)]
+        prefix = self.prefix.format(*args)
+        return {k: v for k, v in self.golden.items() if k.startswith(prefix)}
+
+
+def stand_in_port(port: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer a task's port-side runs from its stored record, for a capture test.
+
+    Each task's ``reference_test`` pins those runs against the record, so a
+    capture test of a stand-in clone checks only what the capture compares:
+    ``port_record`` returns the record, a lockstep or network run its stored
+    values and placeholder states, and the full-size network is built at one
+    block per stage, which names the stand-in's other shape as nine blocks do.
+
+    Args:
+      port: The task's ``reference`` module.
+      monkeypatch: The test's.
+
+    """
+    stored = stored_record(port)
+    lockstep = StoredPart(stored, "lockstep/{}/", count=reference.STEPS)
+    monkeypatch.setattr(port, "port_record", lambda: dict(stored))
+    monkeypatch.setattr(port, "lockstep_record", lockstep)
+    if hasattr(port, "network_record"):
+        network = StoredPart(stored, "network/{}/", count=1)
+        monkeypatch.setattr(port, "network_record", network)
+    shallow = functools.partial(_shallow_step, full_step=reference.full_step)
+    monkeypatch.setattr(reference, "full_step", shallow)
 
 
 def clone(tmp_path: Path) -> Path:
@@ -382,6 +461,23 @@ def test_the_criterion_spy_is_cross_entropy_and_keeps_what_it_saw() -> None:
     assert torch.equal(weighted(logits, targets), loss)
     assert [x.shape for x in spy.logits] == [logits.shape]
     assert spy.losses[0].requires_grad is False
+
+
+def _shallow_step(
+    factory: Callable[[], VisionTrainLoop],
+    *,
+    full_step: Callable[[Callable[[], VisionTrainLoop]], VisionTrainStep],
+) -> VisionTrainStep:
+    """Build ``factory``'s full-size step at one block per stage."""
+    return full_step(functools.partial(_shallow, factory))
+
+
+def _shallow(factory: Callable[[], VisionTrainLoop]) -> VisionTrainLoop:
+    """Return ``factory``'s experiment at one block per stage."""
+    config = factory()
+    assert isinstance(config.step.model, ResNet.Config)
+    config.step.model.blocks_per_stage = (1, 1, 1)
+    return config
 
 
 if __name__ == "__main__":

@@ -22,7 +22,10 @@ import numpy as np
 import torch
 
 from priml.baselines.mlsbench.dl.vision import reference as vision
-from priml.baselines.mlsbench.dl.vision.upstream_test import SCRIPT as LOSS_SCRIPT
+from priml.baselines.mlsbench.dl.vision.upstream_test import (
+    SCRIPT as LOSS_SCRIPT,
+    stored_record,
+)
 from priml.baselines.mlsbench.dl.weighting import reference, upstream
 
 
@@ -323,7 +326,7 @@ def test_the_record_holds_every_key_the_port_gives(tmp_path: Path) -> None:
         upstream.upstream_subset(pristine),
         batches[0],
     )
-    assert record.keys() == reference.port_record(tmp_path).keys()
+    assert record.keys() == stored_record(reference).keys()
 
 
 if __name__ == "__main__":

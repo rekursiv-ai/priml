@@ -76,7 +76,8 @@ def test_fa4_is_imported_when_a_kernel_is_built(
     monkeypatch.setitem(sys.modules, "flash_attn.cute.interface", None)
     flash4._interface.cache_clear()
     assert type(config).__qualname__.split(".")[0] in config.pformat()
-    with pytest.raises(ModuleNotFoundError):
+    # The extra that installs FA4 is named, so a wheel install can act on it.
+    with pytest.raises(Flash4UnavailableError, match=r"priml\[cuda\]"):
         config.make()
     flash4._interface.cache_clear()
 
@@ -129,6 +130,22 @@ def test_dense_windows_and_gradients_reach_fa4(
         (None, None) if history is None else (history, 0),
         (history, 0),
     ]
+
+
+def test_an_fa4_returning_no_lse_is_refused(
+    fake_flash4: _FakeInterface,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backward needs the lse, so a forward that drops it cannot train."""
+
+    def _no_lse(q: Tensor, *args: object, **kwargs: object) -> tuple[Tensor, None]:
+        del args, kwargs
+        return q, None
+
+    monkeypatch.setattr(fake_flash4, "flash_attn_func", _no_lse)
+    q, k, v = (torch.randn(2, 5, 3, 8) for _ in range(3))
+    with pytest.raises(ValueError, match="FA4 returns lse"):
+        Flash4Attention.Config().make()(q, k, v)
 
 
 def test_dense_hands_its_scale_to_both_directions(fake_flash4: _FakeInterface) -> None:

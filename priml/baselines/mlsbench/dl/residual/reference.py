@@ -39,7 +39,7 @@ from priml.train.parallelism import NoParallel
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from torch import nn
 
@@ -102,8 +102,11 @@ def block_record() -> dict[str, Tensor]:
     return record
 
 
-def draws_record() -> dict[str, Tensor]:
+def draws_record(names: Iterable[str]) -> dict[str, Tensor]:
     """Return where the generator stands after building each full network.
+
+    Args:
+      names: Keys of :data:`VARIANTS` to build.
 
     Returns:
       record: ``draws/<name>``, the next eight draws after ResNet-56 with
@@ -111,7 +114,7 @@ def draws_record() -> dict[str, Tensor]:
 
     """
     record: dict[str, Tensor] = {}
-    for name in VARIANTS:
+    for name in names:
         config = VARIANTS[name]().step
         config.parallelism = NoParallel.Config(device="cpu")
         with reference.seeded(reference.SEED), host_agnostic_numerics():
@@ -182,7 +185,7 @@ def port_record() -> dict[str, Tensor]:
         | reference.schedule_record()
         | reference.optimizer_record()
         | reference.best_record()
-        | draws_record()
+        | draws_record(VARIANTS)
     )
     for name in VARIANTS:
         record |= lockstep_record(name)

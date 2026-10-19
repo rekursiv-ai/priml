@@ -13,9 +13,11 @@ import sys
 
 import torch
 
+from priml.baselines.mlsbench.dl.activation import reference as task
 from priml.baselines.mlsbench.dl.activation.scripts import capture_reference
 from priml.baselines.mlsbench.dl.activation.upstream_test import write_clone
 from priml.baselines.mlsbench.dl.vision import reference
+from priml.baselines.mlsbench.dl.vision.upstream_test import stand_in_port
 from priml.testing.golden import read_tensors
 
 
@@ -35,7 +37,11 @@ def returning[T](value: T) -> Callable[..., T]:
     return call
 
 
-def test_capture_names_what_the_stand_in_does_differently(tmp_path: Path) -> None:
+def test_capture_names_what_the_stand_in_does_differently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stand_in_port(task, monkeypatch)
     root = tmp_path / "clone"
     write_clone(root)
     scratch = tmp_path / "scratch"

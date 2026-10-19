@@ -97,7 +97,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
             traces["constant"],
             exp000,
         )
-    port = reference.port_record() | vision.draws_record(exp000)
+    port = reference.port_record()
     report += mismatches(record, port)
     report += compare_lockstep(lockstep)
     report += capture_reference.compare_loaders(batches, vision.loader_batches(scratch))

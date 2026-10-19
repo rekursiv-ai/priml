@@ -11,7 +11,7 @@ the optimizer over the network and the combination.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Final, cast, override
 
 from torch import Tensor, nn
@@ -251,15 +251,19 @@ def optimizer_record() -> dict[str, Tensor]:
     return record
 
 
-def draws_record() -> dict[str, Tensor]:
+def draws_record(names: Iterable[str]) -> dict[str, Tensor]:
     """Return where the generator stands after building each full experiment.
+
+    Args:
+      names: Keys of :data:`COMBINATIONS` to build.
 
     Returns:
       record: ``draws/<name>``, the next eight draws.
 
     """
     record: dict[str, Tensor] = {}
-    for name, factory in COMBINATIONS.items():
+    for name in names:
+        factory = COMBINATIONS[name]
         with reference.seeded(reference.SEED), host_agnostic_numerics():
             _ = full_step(factory)
             record[f"draws/{name}"] = rng_fingerprint()
@@ -374,7 +378,7 @@ def port_record() -> dict[str, Tensor]:
         combination_record()
         | schedule_record()
         | optimizer_record()
-        | draws_record()
+        | draws_record(COMBINATIONS)
         | reference.best_record()
         | {"data/coarse_of_fine": torch.tensor(COARSE_OF_FINE)}
     )

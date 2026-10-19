@@ -30,7 +30,7 @@ from priml.testing.golden import rng_fingerprint
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from torch import nn
 
@@ -66,8 +66,11 @@ def pool_record() -> dict[str, Tensor]:
     return record
 
 
-def draws_record() -> dict[str, Tensor]:
+def draws_record(names: Iterable[str]) -> dict[str, Tensor]:
     """Return where the generator stands after building each full network.
+
+    Args:
+      names: Keys of :data:`POOLS` to build.
 
     Returns:
       record: ``draws/<name>``, the next eight draws after ResNet-56 with
@@ -75,7 +78,8 @@ def draws_record() -> dict[str, Tensor]:
 
     """
     record: dict[str, Tensor] = {}
-    for name, factory in POOLS.items():
+    for name in names:
+        factory = POOLS[name]
         with reference.seeded(reference.SEED), host_agnostic_numerics():
             _ = reference.full_step(factory)
             record[f"draws/{name}"] = rng_fingerprint()
@@ -144,7 +148,7 @@ def port_record() -> dict[str, Tensor]:
         | reference.schedule_record()
         | reference.optimizer_record()
         | reference.best_record()
-        | draws_record()
+        | draws_record(POOLS)
     )
     for name in POOLS:
         record |= lockstep_record(name)

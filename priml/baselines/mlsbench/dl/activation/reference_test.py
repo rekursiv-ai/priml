@@ -19,6 +19,7 @@ from priml.baselines.mlsbench.dl.activation import reference
 from priml.baselines.mlsbench.dl.activation.experiments import exp000
 from priml.baselines.mlsbench.dl.vision import reference as vision
 from priml.baselines.mlsbench.dl.vision.model import ResNet
+from priml.baselines.mlsbench.dl.vision.upstream_test import StoredPart
 from priml.testing.golden import mismatches, read_tensors
 
 
@@ -81,7 +82,12 @@ def test_the_resnet20_leaves_the_generator_where_the_script_does() -> None:
 
 @pytest.mark.parametrize("name", list(reference.ACTIVATIONS))
 def test_two_updates_with_each_activation_match_the_script(name: str) -> None:
-    assert_exact(stored(f"lockstep/{name}/"), reference.lockstep_record(name))
+    states: list[dict[str, torch.Tensor]] = []
+    assert_exact(
+        stored(f"lockstep/{name}/"),
+        reference.lockstep_record(name, states=states),
+    )
+    assert len(states) == vision.STEPS
 
 
 def test_the_golden_bites_on_one_ulp() -> None:
@@ -102,6 +108,19 @@ def _stateful() -> VisionTrainLoop:
     assert isinstance(cfg.step.model, ResNet.Config)
     cfg.step.model.activation = InlineConfig(nn.PReLU)
     return cfg
+
+
+def test_the_port_record_joins_every_part_the_golden_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    golden = stored("")
+    monkeypatch.setattr(
+        reference,
+        "lockstep_record",
+        StoredPart(golden, "lockstep/{}/"),
+    )
+    monkeypatch.setattr(reference, "draws_record", StoredPart(golden, "draws/"))
+    assert_exact(golden, reference.port_record())
 
 
 if __name__ == "__main__":

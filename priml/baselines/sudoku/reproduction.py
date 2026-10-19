@@ -799,8 +799,9 @@ def _generator_segment(
     halting = cfg.step.pool.halting
     if halting is not None:
         halting.seed = 0  # Explicit pin (the recipe's default).
-    # A dedicated augmentation stream seeded like the loop: a resumed segment
-    # then draws exactly what one uninterrupted run would have.
+    # A dedicated augmentation stream seeded like the loop, restarted by every
+    # segment: a fixed segment schedule then replays exactly. It is not one
+    # uninterrupted run -- a resume begins the next epoch's shuffle.
     cfg.dataset.augment_seed = cfg.seed
     cfg.dataset.seed = 0  # Explicit pin (the recipe's train-shuffle stream).
     checkpointer = cfg.checkpointer

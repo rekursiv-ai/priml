@@ -764,14 +764,21 @@ def test_charm_train_step_runs_injected_reducer_and_reporter_in_order() -> None:
 
     config = port_config("exp009")
     config.model.prefix = None
+    block = config.model.block
+    assert isinstance(block, TransformerBlock.Config)
+    assert isinstance(block.ffn, SwiGLU.Config)
+    assert isinstance(block.ffn.middle, SequenceConv1d.Config)
+    block.ffn.channels_hidden = 2
+    block.ffn.middle.conv.groups = 2
     config.gradient_reduction = PartialConfig(reduce_gradients)
     config.metric_reporter = PartialConfig(report_metrics)
-    step = PortSubject.from_config(config).step
-    assert isinstance(step.optimizer, CompositeOptimizer)
-
-    for optimizer in step.optimizer.optimizers:
-        optimizer.register_step_pre_hook(mark_optimizer_step)
-    result = step.train_step(**batches()[0])
+    # A bf16 convolution has no oneDNN backward on some CPUs; float64 does.
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        step = PortSubject.from_config(config).step
+        assert isinstance(step.optimizer, CompositeOptimizer)
+        for optimizer in step.optimizer.optimizers:
+            optimizer.register_step_pre_hook(mark_optimizer_step)
+        result = step.train_step(**batches()[0])
 
     assert events[0] == "reduce"
     assert events[-1] == "report"
@@ -823,6 +830,16 @@ def shrink_model(model: GridSolver.Config) -> None:
         model.prefix.num_puzzles = 2
         model.prefix.num_tokens = 2
         model.prefix.batch_size = 2
+    if isinstance(model.prefix, ComposedSparsePrefix.Config):
+        # One channel per slot and the base, as CategorySlotFiLM requires.
+        model.prefix.channels_out = 10
+        model.prefix.num_tokens = 1
+        assert isinstance(model.prefix.composition, CategorySlotFiLM.Config)
+        model.prefix.composition.num_categories = 2
+        model.prefix.composition.channels_out = 10
+        model.prefix.residual.num_puzzles = 3
+        model.prefix.residual.channels_out = 3
+        model.prefix.residual.batch_size = 2
 
 
 def _evaluate(

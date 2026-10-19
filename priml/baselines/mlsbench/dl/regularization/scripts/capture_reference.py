@@ -95,7 +95,7 @@ def capture(root: Path, scratch: Path) -> vision.Captured:
         batches = vision_upstream.upstream_batches(scripts["zero"])
         report += capture_reference.compare_wiring(trace)
         report += capture_reference.compare_full_size(scripts["zero"], trace)
-    port = reference.port_record() | {"setting/batch_size": reference.port_batch_size()}
+    port = reference.port_record()
     report += mismatches(record, port)
     report += capture_reference.compare_lockstep(
         lockstep,

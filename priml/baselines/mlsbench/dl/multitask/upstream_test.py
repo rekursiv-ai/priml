@@ -12,17 +12,24 @@ https://github.com/Imbernoulli/MLS-Bench/blob/80cf5c5cc8f70fb1b09f185e59ebf5eca0
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final, cast
+from unittest import mock
+
+import functools
 
 from torch import Tensor
+from torch.utils import data
 
 import torch
 
 from priml.baselines.mlsbench.dl.multitask import reference, upstream
 from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision.upstream_test import stored_record
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+
 
 SCRIPT: Final = '''\
 """A stand-in for the cv-multitask-loss script."""
@@ -296,7 +303,7 @@ def test_the_record_holds_every_key_the_port_writes(tmp_path: Path) -> None:
         for name, s in variants.items()
     }
     record = upstream.upstream_record(variants, traces, lockstep)
-    port = {k for k in reference.port_record() if not k.startswith("lockstep/")}
+    port = {k for k in stored_record(reference) if not k.startswith("lockstep/")}
     assert {k for k in record if not k.startswith("lockstep/")} == port
     assert record["data/coarse_of_fine"].tolist()[:3] == [0, 1, 2]
 
@@ -313,11 +320,46 @@ def test_the_synthetic_split_serves_pixels_and_labels() -> None:
     assert (size.tolist(), label) == ([32, 32], 3)
 
 
+def test_loader_workers_are_forked_and_none_runs_in_process(tmp_path: Path) -> None:
+    script = scripts(tmp_path)["sum"]
+    calls = _LoaderCalls(script.get_dataloaders)
+    with mock.patch.object(script, "get_dataloaders", calls):
+        upstream.upstream_batches(script)
+        upstream.upstream_batches(script, num_workers=0)
+    (forked, four), (plain, zero) = calls.seen
+    assert isinstance(forked, functools.partial)
+    assert forked.keywords == {"multiprocessing_context": "fork"}
+    assert (four, plain, zero) == (4, data.DataLoader, 0)
+
+
 def test_batches_carry_the_superclass_of_each_label(tmp_path: Path) -> None:
-    train, evaluation = upstream.upstream_batches(scripts(tmp_path)["sum"])
+    train, evaluation = upstream.upstream_batches(
+        scripts(tmp_path)["sum"],
+        num_workers=0,
+    )
     assert len(train) == len(evaluation) == vision.LOADER_PASSES
     for batch in train[0] + evaluation[0]:
         assert torch.equal(batch["label_coarse"], batch["label"] % 20)
+
+
+class _LoaderCalls:
+    """Forwards to a script's loaders; keeps the loader class and worker count."""
+
+    def __init__(self, get_dataloaders: Callable[..., object]) -> None:
+        self.get_dataloaders = get_dataloaders
+        self.seen: list[tuple[object, int]] = []
+
+    def __call__(
+        self,
+        data_root: str,
+        *,
+        batch_size: int,
+        num_workers: int,
+    ) -> tuple[list[object], list[object]]:
+        """Note the patched ``DataLoader`` and ``num_workers``; build no loader."""
+        del data_root, batch_size
+        self.seen.append((data.DataLoader, num_workers))
+        return [], []
 
 
 if __name__ == "__main__":

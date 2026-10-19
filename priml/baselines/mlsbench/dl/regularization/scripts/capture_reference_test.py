@@ -17,6 +17,7 @@ from priml.baselines.mlsbench.dl.regularization import reference, upstream
 from priml.baselines.mlsbench.dl.regularization.scripts import capture_reference
 from priml.baselines.mlsbench.dl.regularization.upstream_test import write_clone
 from priml.baselines.mlsbench.dl.vision import reference as vision
+from priml.baselines.mlsbench.dl.vision.upstream_test import stand_in_port
 from priml.testing.golden import read_tensors
 
 
@@ -36,7 +37,11 @@ def returning[T](value: T) -> Callable[..., T]:
     return call
 
 
-def test_capture_names_what_the_stand_in_does_differently(tmp_path: Path) -> None:
+def test_capture_names_what_the_stand_in_does_differently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stand_in_port(reference, monkeypatch)
     root = tmp_path / "clone"
     write_clone(root)
     scratch = tmp_path / "scratch"

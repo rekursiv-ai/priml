@@ -14,8 +14,11 @@ from pathlib import Path
 from re import Pattern
 from typing import TYPE_CHECKING, Final, cast
 
+import fcntl
 import math
+import os
 import re
+import tempfile
 import zlib
 
 from torch import Tensor
@@ -133,12 +136,20 @@ def assert_text_golden(*, test_file: str, name: str, rendered: str) -> None:
 def write_tensors(path: Path, record: Mapping[str, Tensor]) -> None:
     """Save a flat name-to-tensor record as one flat tensor per dtype and an index.
 
+    The file is written beside ``path`` and renamed over it, so a failed write
+    leaves the previous golden whole.
+
     Args:
       path: Destination ``.pt``.
       record: Flat name-to-tensor record.
 
     """
-    torch.save(pack(record), path)
+    staged = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        torch.save(pack(record), staged)
+        staged.replace(path)
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 def read_tensors(path: Path) -> dict[str, Tensor]:
@@ -311,6 +322,52 @@ def assert_tensor_golden(path: Path, record: Mapping[str, Tensor]) -> None:
         raise AssertionError(f"{len(report)} mismatches:\n" + "\n".join(report))
 
 
+def assert_tensor_golden_part(
+    path: Path,
+    prefix: str,
+    record: Mapping[str, Tensor],
+) -> None:
+    """Require ``record`` to equal the keys under ``prefix`` of the golden at ``path``.
+
+    One golden file holds several tests' records, each under its own prefix, so
+    each test replays only its part. A missing part is written and the call
+    fails; ``--regenerate-b4b`` rewrites the part and keeps the others. Every
+    read and write holds an exclusive lock on the file, so concurrent tests of
+    one golden never see a partial write or drop each other's parts.
+
+    Args:
+      path: The ``.pt`` golden.
+      prefix: The part's key prefix, ending in ``/``.
+      record: The part; every key starts with ``prefix``.
+
+    Raises:
+      ValueError: A key of ``record`` lies outside ``prefix``.
+      AssertionError: The part was missing, or ``record`` differs from it.
+
+    """
+    outside = [key for key in record if not key.startswith(prefix)]
+    if outside:
+        raise ValueError(f"Golden part {prefix} holds keys outside it: {outside}.")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # ``write_tensors`` renames a new file over ``path``, so a lock on ``path``
+    # would guard the replaced inode; one fixed lock outside the checkout
+    # serializes every part writer and leaves testdata clean.
+    with _part_lock().open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        current = read_tensors(path) if path.is_file() else {}
+        part = {k: v for k, v in current.items() if k.startswith(prefix)}
+        missing = not part
+        if missing or regenerate.b4b():
+            kept = {k: v for k, v in current.items() if not k.startswith(prefix)}
+            write_tensors(path, kept | dict(record))
+            part = dict(record)
+    if missing:
+        raise AssertionError(f"Missing golden part {prefix} minted in {path}; rerun.")
+    report = mismatches(part, record)
+    if report:
+        raise AssertionError(f"{len(report)} mismatches:\n" + "\n".join(report))
+
+
 def stored(value: Tensor) -> Tensor:
     """Return a detached copy of ``value``, small whole numbers as bytes.
 
@@ -395,6 +452,11 @@ def joined(tensors: Iterable[Tensor]) -> Tensor:
     """
     parts = [t.detach().reshape(-1) for t in tensors]
     return torch.cat(parts) if parts else torch.zeros(0)
+
+
+def _part_lock() -> Path:
+    """Return the file every :func:`assert_tensor_golden_part` call locks."""
+    return Path(tempfile.gettempdir()) / f"{__name__}.lock"
 
 
 def _tensor_bytes(value: Tensor) -> Tensor:
