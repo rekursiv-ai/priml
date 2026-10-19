@@ -74,9 +74,10 @@ def test_a_feature_is_refused_by_both_forwards() -> None:
         model.forward_fused(observations, state, None, features=feature)
     with pytest.raises(ValueError, match="reads no feature"):
         model.forward_sequence(
-            observations.reshape(5, 1, 6),
+            # One observation over a window of 3 steps: a time axis of 1, expanded.
+            observations.reshape(5, 1, 6).expand(5, 3, 6),
             state,
-            torch.zeros(5, 1),
+            torch.zeros(5, 3),
             features=feature,
         )
 

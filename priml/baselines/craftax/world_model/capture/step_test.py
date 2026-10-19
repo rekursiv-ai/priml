@@ -62,6 +62,7 @@ def _rows(*, recording: bool = True, chunk: int = _CHUNK) -> Rows:
         state_bytes=states.view(np.uint8).reshape(1, -1),
         rngs=np.ones(1, np.uint32),
         stats=new_stats(1),
+        # One row, and ``step``'s ``Rows.actions`` is ``[N, 1]`` by contract.
         actions=np.zeros((1, 1), np.float32),
         masks=np.ones((1, ATN_DIM), np.uint8),
         observations=np.zeros((1, OBS_SIZE), np.float32),
