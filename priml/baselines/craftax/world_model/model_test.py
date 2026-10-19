@@ -950,7 +950,6 @@ def test_the_action_rows_cost_priml_float32_summed_cross_entropy() -> None:
         simple_loss.cross_entropy,
         dtype=torch.float32,
         channels_out=43,
-        weighted=False,
         rescale=0,
     )
     default = torch.get_default_dtype()

@@ -288,8 +288,17 @@ def test_the_stock_losses_are_torch_functionals_that_cost_themselves() -> None:
         cross_entropy(logits, label),
         functional.cross_entropy(logits, label),
     )
-    costed = cost(mse, dtype=None, channels_out=-1, weighted=False, rescale=0)
+    costed = cost(mse, dtype=None, channels_out=-1, rescale=0)
     assert costed["flops", "primal", "elementwise", torch.float32] == 2
+    # A weight changes no cross-entropy or regression cost, so it is optional.
+    for loss in (cross_entropy, mse):
+        assert cost(loss, dtype=None, channels_out=3, rescale=0) == cost(
+            loss,
+            dtype=None,
+            channels_out=3,
+            weighted=True,
+            rescale=0,
+        )
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])

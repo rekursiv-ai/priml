@@ -1580,7 +1580,6 @@ def _cross_entropy_rows(*, rows: int, classes: int) -> Cost:
         simple_loss.cross_entropy,
         dtype=torch.float32,
         channels_out=classes,
-        weighted=False,
         rescale=0,
     ).tile(rows)
 

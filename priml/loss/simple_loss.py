@@ -67,7 +67,7 @@ def _cross_entropy_cost(
     *,
     dtype: torch.dtype | None,
     channels_out: int,
-    weighted: bool,
+    weighted: bool = False,
     rescale: int,
 ) -> Cost:
     del weighted
@@ -113,7 +113,7 @@ def _regression_cost(
     *,
     dtype: torch.dtype | None,
     channels_out: int,
-    weighted: bool,
+    weighted: bool = False,
     rescale: int,
 ) -> Cost:
     del channels_out, weighted
