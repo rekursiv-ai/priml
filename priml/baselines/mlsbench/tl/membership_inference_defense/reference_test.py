@@ -55,10 +55,13 @@ def test_every_defense_and_its_gradient_match_the_driver() -> None:
     assert_exact(expected, reference.defense_record())
 
 
-def test_the_attack_matches_the_driver_on_tied_scores() -> None:
+def test_the_attack_matches_the_driver_on_scores_tied_within_each_half() -> None:
     expected = stored("attack/")
-    member = set(expected["attack/scores/member"].tolist())
-    assert member & set(expected["attack/scores/nonmember"].tolist())
+    member = expected["attack/scores/member"]
+    nonmember = expected["attack/scores/nonmember"]
+    assert member.unique().numel() < member.numel()
+    assert nonmember.unique().numel() < nonmember.numel()
+    assert not set(member.tolist()) & set(nonmember.tolist())
     assert_exact(expected, reference.attack_record())
 
 
@@ -85,8 +88,8 @@ def test_the_rates_optimizer_and_split_match_the_driver() -> None:
     [
         "exp000",
         # Full-size VGG-16-BN and MobileNetV2 forwards take about a second.
-        pytest.param("exp005", marks=pytest.mark.slow),
-        pytest.param("exp010", marks=pytest.mark.slow),
+        pytest.param("exp005", marks=pytest.mark.compute_large_fixture),
+        pytest.param("exp010", marks=pytest.mark.compute_large_fixture),
     ],
 )
 def test_each_settings_network_initializes_and_runs_as_the_driver(key: str) -> None:

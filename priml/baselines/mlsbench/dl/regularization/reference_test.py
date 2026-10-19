@@ -162,7 +162,7 @@ def test_each_regularizer_on_each_settings_network_matches_the_script(
     assert_exact(expected, {k: v for k, v in record.items() if k in expected})
 
 
-@pytest.mark.slow
+@pytest.mark.compute_large_fixture
 @pytest.mark.parametrize(
     "key",
     [

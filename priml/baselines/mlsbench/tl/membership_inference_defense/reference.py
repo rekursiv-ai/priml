@@ -144,19 +144,18 @@ def attack_logits() -> dict[str, tuple[Tensor, Tensor]]:
     Returns:
       logits: Per split of :data:`SPLITS`, ``(N, 4)`` logits in multiples of
         a quarter or an eighth, and ``(N,)`` labels. Many rows share their
-        largest probability, within a split and, since the last 40
-        non-members repeat members, across the two halves, where the AUC's
-        ranking of ties decides its value.
+        largest probability within a half, but no score is in both: NumPy's
+        unstable sort orders a tie across the halves by the host's SIMD
+        kernel, so such a tie would make the AUC the host's.
 
     """
     member = ((torch.arange(600) * 13 % 29 - 14) / 4).reshape(150, 4)
-    own = ((torch.arange(680) * 11 % 23 - 11) / 8).reshape(170, 4)
-    nonmember = torch.cat([own, member[:40]])
+    nonmember = ((torch.arange(680) * 11 % 23 - 11) / 8).reshape(170, 4)
     test = ((torch.arange(36) * 5 % 17 - 8) / 4).reshape(9, 4)
     return {
         "test": (test, torch.arange(9) % 4),
         "member": (member, torch.arange(150) % 4),
-        "nonmember": (nonmember, torch.arange(210) * 3 % 4),
+        "nonmember": (nonmember, torch.arange(170) * 3 % 4),
     }
 
 

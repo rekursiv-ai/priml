@@ -59,7 +59,30 @@ def test_every_defense_scores_as_the_drivers_variant_does() -> None:
 
 def test_every_defense_filters_mains_features_as_the_driver_does() -> None:
     inputs = stored(f"main/{reference.FIRST}/")
-    assert_exact(stored("filter/"), reference.filter_record(inputs))
+    expected = stored("filter/")
+    actual = reference.filter_record(inputs)
+    # Which of the images tied at the cut are removed is NumPy's unstable
+    # sort's choice, made by the host's SIMD kernel, so the images kept are
+    # compared by their scores: exact where the cut is untied.
+    for name in reference.VARIANTS:
+        scores = expected[f"filter/{name}/scores"]
+        want, got = (r.pop(f"filter/{name}/kept") for r in (expected, actual))
+        assert torch.equal(scores[want].sort().values, scores[got].sort().values)
+    # A trained network's features span every direction, so these defenses'
+    # SVD and norms round by the host's OpenBLAS kernel, the driver's too: the
+    # capture compares their scores live, and the defense test pins them on
+    # features whose SVD and norms are exact.
+    for name in ("spectral_signature", "activation_clustering"):
+        for record in (expected, actual):
+            del record[f"filter/{name}/scores"]
+    assert_exact(expected, actual)
+
+
+def test_activation_clusterings_cut_falls_among_tied_scores() -> None:
+    record = stored("filter/activation_clustering/")
+    scores = record["filter/activation_clustering/scores"]
+    removed = reference.MAIN_IMAGES - len(record["filter/activation_clustering/kept"])
+    assert (scores == scores.max()).sum() > removed
 
 
 def test_two_updates_match_the_drivers_train_epoch() -> None:
@@ -154,7 +177,7 @@ def test_the_poisoned_loaders_shuffle_augment_and_trigger_as_the_driver(
     )
 
 
-@pytest.mark.slow
+@pytest.mark.compute_large_fixture
 @pytest.mark.parametrize("setting", list(reference.SETTINGS))
 def test_each_full_network_initializes_and_runs_as_the_driver(setting: str) -> None:
     spec = reference.SETTINGS[setting]

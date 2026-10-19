@@ -68,7 +68,7 @@ def test_each_setting_schedule_and_optimizer_match_the_script(name: str) -> None
     )
 
 
-@pytest.mark.slow
+@pytest.mark.compute_large_fixture
 @pytest.mark.parametrize("name", list(reference.SETTINGS))
 def test_each_setting_network_matches_the_script(name: str) -> None:
     assert_exact(

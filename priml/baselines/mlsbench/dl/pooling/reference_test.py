@@ -96,7 +96,7 @@ def test_the_settings_golden_holds_every_pools_fork() -> None:
     assert any(k.startswith("settings/mobilenetv2-fmnist/loader/") for k in keys)
 
 
-@pytest.mark.slow
+@pytest.mark.compute_large_fixture
 def test_every_setting_fork_builds_and_runs_like_the_script(tmp_path: Path) -> None:
     assert_exact(
         {k: v for k, v in stored_settings().items() if "/lockstep/" not in k},

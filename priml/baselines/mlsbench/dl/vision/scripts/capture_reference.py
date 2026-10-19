@@ -524,14 +524,21 @@ def compare_lockstep(
       run: The task's port-side lockstep run.
 
     Returns:
-      report: One line per tensor that differs after any update.
+      report: One line per variant whose runs made another number of
+        updates, and per tensor that differs after any update both made.
 
     """
     report: list[str] = []
     for name, (_, theirs) in lockstep.items():
         ours: list[dict[str, Tensor]] = []
         _ = run(name, states=ours)
-        for index, (want, got) in enumerate(zip(theirs, ours, strict=True), start=1):
+        if len(ours) != len(theirs):
+            report.append(
+                f"lockstep/{name}: {len(ours)} updates against {len(theirs)}",
+            )
+        # Not strict: a count mismatch is reported above, and the updates both
+        # runs made are still compared.
+        for index, (want, got) in enumerate(zip(theirs, ours, strict=False), start=1):
             report += [
                 f"lockstep/{name}/{index}: {line}" for line in compare_states(want, got)
             ]

@@ -36,7 +36,8 @@ def features() -> NDArray[np.float32]:
 def logits() -> NDArray[np.float32]:
     """Return ``(8, 3)`` logits whose rows' top probabilities all differ."""
     steps = np.arange(24)
-    return ((steps * 7 % 11) / 4 + steps / 64).reshape(8, 3).astype(np.float32)
+    # A linear ramp would shift rows by a constant, which softmax ignores.
+    return ((steps * 7 % 11) / 4 + steps**2 / 64).reshape(8, 3).astype(np.float32)
 
 
 def fitted(defense: BackdoorDefense) -> BackdoorDefense:

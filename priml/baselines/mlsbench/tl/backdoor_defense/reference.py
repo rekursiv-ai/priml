@@ -202,7 +202,12 @@ def defense_inputs() -> tuple[
     """Return 13 images' features, logits and labels for the defenses.
 
     Class 0 has six images, class 1 four, class 2 two and class 3 one, so the
-    small-class branches are reached. Every value is a multiple of one eighth.
+    small-class branches are reached; classes 0 and 1 each have one outlier.
+    Each class's features vary along one axis, so its top singular vector is
+    that axis and its norms are exact: an SVD or norm of features that span
+    more directions rounds differently under each OpenBLAS kernel, as the
+    driver's own does. Features are eighths, logits multiples of 1/256 whose
+    rows' top probabilities differ.
 
     Returns:
       features: ``(13, 3)`` float32.
@@ -210,8 +215,29 @@ def defense_inputs() -> tuple[
       labels: ``(13,)`` int64.
 
     """
-    features = (np.arange(13 * 3) * 17 % 41 - 13).reshape(13, 3) / 8
-    logits = (np.arange(13 * 4) * 23 % 53 - 26).reshape(13, 4) / 8
+    features = (
+        np.array(
+            [
+                [6, 16, -8],
+                [-16, 7, 24],
+                [7, 16, -8],
+                [24, -8, 15],
+                [9, 16, -8],
+                [-16, 9, 24],
+                [17, 16, -8],
+                [0, 24, 8],
+                [-16, 15, 24],
+                [10, 16, -8],
+                [24, -8, 18],
+                [-16, 6, 24],
+                [5, 16, -8],
+            ],
+        )
+        / 8
+    )
+    steps = np.arange(13 * 4)
+    # A ramp linear in the step would shift rows by a constant, which softmax ignores.
+    logits = ((steps * 23 % 53 - 26) / 8 + steps**2 / 256).reshape(13, 4)
     labels = np.array([0, 1, 0, 2, 0, 1, 0, 3, 1, 0, 2, 1, 0], dtype=np.int64)
     return features.astype(np.float32), logits.astype(np.float32), labels
 

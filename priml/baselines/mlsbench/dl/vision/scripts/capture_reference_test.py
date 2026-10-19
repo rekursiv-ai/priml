@@ -582,6 +582,11 @@ def test_a_lockstep_comparison_runs_the_port_it_is_given() -> None:
     report = capture_reference.compare_lockstep({"x": ({}, [state])}, run=run)
     assert calls == ["x"]
     assert report == ["lockstep/x/1: w: 2/2 differ"]
+    report = capture_reference.compare_lockstep({"x": ({}, [state] * 3)}, run=run)
+    assert report == [
+        "lockstep/x: 1 updates against 3",
+        "lockstep/x/1: w: 2/2 differ",
+    ]
 
 
 def test_the_full_size_comparison_names_a_network_that_has_another_shape(

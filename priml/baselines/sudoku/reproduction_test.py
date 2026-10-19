@@ -797,6 +797,10 @@ def _drop_generators(state: dict[str, dict[str, object]]) -> None:
     """Remove each of :data:`_GENERATORS` from a checkpoint, in place."""
     for group, name in _GENERATORS:
         del state[group][name]
+    # A process that initialized CUDA also saves its device generators; the
+    # recipe runs on the CPU, so they are host state, not the run's.
+    state["rng"].pop("cuda", None)
+    state["rng"].pop("cuda_uuids", None)
 
 
 def _refill_generators(state: dict[str, dict[str, object]], *, seed: int) -> None:
@@ -939,6 +943,15 @@ def _shard(out: Path, *, prefix: str) -> dict[str, Tensor]:
 )
 def test_a_checkpoint_round_trips_through_tensors(node: dict[object, object]) -> None:
     assert _state(_tensors(node, prefix="p/"), prefix="p/") == node
+
+
+def test_a_segment_state_holds_no_host_cuda_generators() -> None:
+    state: dict[str, dict[str, object]] = {
+        "rng": {"python": 0, "torch": 1, "cuda": [2], "cuda_uuids": ["GPU-0"]},
+        "step": {"halt_rng": 3, "corruption_rng": 4, "model": 5},
+    }
+    _drop_generators(state)
+    assert state == {"rng": {}, "step": {"model": 5}}
 
 
 def test_a_resumed_segment_needs_the_first_frozen(tmp_path: Path) -> None:

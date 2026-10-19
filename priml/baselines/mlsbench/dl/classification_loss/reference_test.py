@@ -72,7 +72,7 @@ def test_every_loss_matches_the_script_at_each_settings_class_count() -> None:
     assert_exact(expected, reference.setting_loss_record())
 
 
-@pytest.mark.slow
+@pytest.mark.compute_large_fixture
 def test_every_setting_fork_builds_and_runs_like_the_script(tmp_path: Path) -> None:
     expected = {
         k: v

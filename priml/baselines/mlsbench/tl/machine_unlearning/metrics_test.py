@@ -30,10 +30,11 @@ def test_auc_is_one_when_every_member_outscores_every_nonmember() -> None:
 
 
 def test_auc_breaks_ties_by_the_sort_order_not_by_averaging() -> None:
-    # Ranks of [3, 3 | 3]: argsort puts the members first, so the tied
-    # non-member ranks above both; averaging would give 0.5.
-    assert auc_from_scores(scores(3, 3), scores(3)) == 0.0
-    assert auc_from_scores(scores(5, 3, 7, 3, 6), scores(2, 3, 7, 1)) == 0.75
+    # Which of a tied pair argsort ranks first is the host's SIMD kernel's
+    # choice, but one of them wins it outright; averaging would give 0.5.
+    assert auc_from_scores(scores(3), scores(3)) in {0.0, 1.0}
+    # Ties within a set leave its rank sum alone: 16 of 20 pairs won.
+    assert auc_from_scores(scores(5, 3, 7, 3, 6), scores(2, 4, 4, 1)) == 16 / 20
 
 
 def test_auc_of_an_empty_set_divides_by_one() -> None:

@@ -15,8 +15,11 @@ import pytest
 import torch
 
 from priml.baselines.mlsbench.dl.vision import reference as vision
-from priml.baselines.mlsbench.dl.vision.scripts import capture_reference
+from priml.baselines.mlsbench.dl.vision.scripts.capture_reference import CEILING
 from priml.baselines.mlsbench.tl.poison_robust_learning import reference
+from priml.baselines.mlsbench.tl.poison_robust_learning.scripts import (
+    capture_reference,
+)
 from priml.testing.golden import mismatches, read_tensors
 
 
@@ -126,8 +129,17 @@ def test_the_port_record_is_every_record_and_lockstep_run(
     }
 
 
+def test_the_port_reaches_the_drivers_random_call_sites(tmp_path: Path) -> None:
+    sides: dict[str, dict[str, int]] = {"reference": {}, "port": {}}
+    for line in (_DATA / "reference_sites.txt").read_text().splitlines():
+        side, key, count = line.split()
+        sides[side][key] = int(count)
+    assert capture_reference.check_sites(sides["reference"], sides["port"]) == []
+    assert capture_reference.port_sites(tmp_path) == sides["port"]
+
+
 def test_the_golden_fits_the_size_ceiling() -> None:
-    assert (_DATA / "reference.pt").stat().st_size <= capture_reference.CEILING
+    assert (_DATA / "reference.pt").stat().st_size <= CEILING
 
 
 def test_the_golden_bites_on_one_ulp_of_the_ports_gradient() -> None:

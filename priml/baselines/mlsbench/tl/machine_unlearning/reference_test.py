@@ -60,7 +60,10 @@ def test_the_evaluation_and_auc_match_the_harness() -> None:
         "resnet20-cifar10-class0",
         "mobilenetv2-fmnist-class0",
         # Full-width VGG-16 takes half a second on one CPU thread.
-        pytest.param("vgg16bn-cifar100-class0", marks=pytest.mark.slow),
+        pytest.param(
+            "vgg16bn-cifar100-class0",
+            marks=pytest.mark.compute_large_fixture,
+        ),
     ],
 )
 def test_each_settings_network_initializes_and_runs_like_the_harness(key: str) -> None:
@@ -95,7 +98,7 @@ def test_three_updates_of_each_method_match_the_harness(name: str) -> None:
         # recorded optimizer. The rest repeat those paths at half a second each.
         "scrub",
         *(
-            pytest.param(name, marks=pytest.mark.slow)
+            pytest.param(name, marks=pytest.mark.compute_training)
             for name in reference.VARIANTS
             if name != "scrub"
         ),

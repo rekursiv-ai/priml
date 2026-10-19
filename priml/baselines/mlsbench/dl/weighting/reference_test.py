@@ -173,7 +173,7 @@ def test_the_cifar10_loader_yields_the_scripts_images_in_its_order(
     "name",
     [
         "resnet32-cifar10lt",
-        pytest.param("vgg16bn-cifar100lt", marks=pytest.mark.slow),
+        pytest.param("vgg16bn-cifar100lt", marks=pytest.mark.compute_training),
     ],
 )
 def test_each_settings_full_network_and_recipe_match_the_script(name: str) -> None:

@@ -136,7 +136,7 @@ def test_the_settings_port_record_joins_every_part_the_golden_holds(
     assert_exact(golden, reference.settings_port_record())
 
 
-@pytest.mark.slow
+@pytest.mark.compute_large_fixture
 def test_every_setting_fork_builds_and_runs_like_the_script(tmp_path: Path) -> None:
     expected = {
         k: v

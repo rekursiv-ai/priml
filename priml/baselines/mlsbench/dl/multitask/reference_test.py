@@ -145,7 +145,7 @@ def test_two_updates_at_each_setting_match_the_script(key: str) -> None:
     "setting",
     [
         "resnet20-cifar100mt",
-        pytest.param("vgg16bn-cifar100mt", marks=pytest.mark.slow),
+        pytest.param("vgg16bn-cifar100mt", marks=pytest.mark.compute_training),
     ],
 )
 def test_each_settings_full_networks_and_recipe_match_the_script(

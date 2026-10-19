@@ -478,7 +478,10 @@ def evaluation_batches() -> list[tuple[Tensor, Tensor]]:
 
 
 def fixed_scores() -> tuple[NDArray[np.float32], NDArray[np.float32]]:
-    """Return member and non-member scores, eighths with ties within and across sets.
+    """Return member and non-member scores, eighths with ties within each set.
+
+    No score is in both sets: NumPy's unstable sort orders a tie across them
+    by the host's SIMD kernel, so such a tie would make the AUC the host's.
 
     Returns:
       member: Five float32 scores.
@@ -488,7 +491,7 @@ def fixed_scores() -> tuple[NDArray[np.float32], NDArray[np.float32]]:
     eighth = np.float32(1 / 8)
     return (
         np.array([5, 3, 7, 3, 6], dtype=np.float32) * eighth,
-        np.array([2, 3, 7, 1], dtype=np.float32) * eighth,
+        np.array([2, 4, 4, 1], dtype=np.float32) * eighth,
     )
 
 

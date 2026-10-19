@@ -15,6 +15,7 @@ from unittest import mock
 
 import functools
 import inspect
+import traceback
 
 
 if TYPE_CHECKING:
@@ -95,15 +96,16 @@ class _Counted:
         """Count the call, then make it."""
         # The caller is the nearest frame outside this file and outside any
         # trampoline a mutation tester wraps around ``__call__``. Walking the
-        # live frames reads no source, unlike ``traceback.extract_stack``.
-        frame = inspect.currentframe()
-        while frame is not None and (
-            frame.f_code.co_filename == __file__
-            or Path(frame.f_code.co_filename).name == "trampoline.py"
-        ):
-            frame = frame.f_back
-        if frame is None:
-            raise ValueError("Expected frame is not None.")
+        # live frames reads no source, unlike ``traceback.extract_stack``. The
+        # walk starts at this frame because ``walk_stack(None)`` starts at a
+        # different one per version: its caller on 3.14, but four frames up on
+        # 3.12, the export's floor, where every key named the caller's caller.
+        frame = next(
+            frame
+            for frame, _ in traceback.walk_stack(inspect.currentframe())
+            if frame.f_code.co_filename != __file__
+            and Path(frame.f_code.co_filename).name != "trampoline.py"
+        )
         file = "/".join(Path(frame.f_code.co_filename).parts[-2:])
         key = f"{self.api}@{file}:{frame.f_code.co_name}"
         self.counts[key] = self.counts.get(key, 0) + 1

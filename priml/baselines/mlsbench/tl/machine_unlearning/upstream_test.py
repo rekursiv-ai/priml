@@ -318,7 +318,7 @@ def test_evaluation_scores_the_fixed_network_and_scores(tmp_path: Path) -> None:
     assert record.keys() == reference.evaluation_record().keys()
     assert record["evaluation/confidence"].shape == (4,)
     assert record["evaluation/empty_confidence"].dtype == torch.float64
-    # The stand-in's AUC compares mean scores: eighths 24/5 against 13/4.
+    # The stand-in's AUC compares mean scores: eighths 24/5 against 11/4.
     assert float(record["evaluation/auc"]) == 1.0
 
 
