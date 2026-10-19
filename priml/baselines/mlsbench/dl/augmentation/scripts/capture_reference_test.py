@@ -103,7 +103,7 @@ def test_capture_assembles_both_sides_into_one_report(
         "compare_full_size",
         returning(["full size differs"]),
     )
-    # The other settings' path runs for real in the compute_training test below.
+    # The real ``capture_settings`` trains every setting; its own test below covers it.
     settings = {"settings/x": torch.zeros(2)}
     monkeypatch.setattr(
         capture_reference,
