@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import field
+from dataclasses import KW_ONLY, field
 from typing import Self, override
 
 from configgle import Fig, Makeable
@@ -37,6 +37,8 @@ class PatchSequence(nn.Module):
 
         channels_out: int = -1
         """Flattened forecast values, supplied by HistoryNetwork."""
+
+        _: KW_ONLY
 
         patch_size: int = 4
         """Consecutive timesteps placed in each token."""
@@ -167,6 +169,8 @@ class RecurrentSequence(nn.Module):
 
         channels_out: int = -1
         """Sequence output width; defaults to the input width."""
+
+        _: KW_ONLY
 
         block: MinGRU.Config = field(
             default_factory=lambda: MinGRU.Config(num_layers=2),
