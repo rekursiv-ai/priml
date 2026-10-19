@@ -306,6 +306,12 @@ def interpreted_kernels(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
                 name,
                 interpreter.InterpretedFunction(value.fn),
             )
+    # Each library call patches ``triton.language.core``'s builtins and never
+    # restores them (``InterpretedFunction.__call__``), so a kernel compiled
+    # after this test would trace the interpreter's builtins and fail.
+    members: dict[str, object] = dict(vars(triton.language.core))
+    for name, value in members.items():
+        monkeypatch.setattr(triton.language.core, name, value)
     compat._sum_squares_kernels.cache_clear()
     compat._ordered_sum_kernel.cache_clear()
     try:

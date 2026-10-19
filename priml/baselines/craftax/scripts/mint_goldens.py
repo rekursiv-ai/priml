@@ -4,8 +4,9 @@ None of them comes from the port: a numpy transcription of glibc's ``rand_r``
 (``stdlib/rand_r.c``), the live libc's ``rand_r`` through ``ctypes``, and the
 light level composed from the platform libm's ``cosf``, ``powf`` and ``fmodf``.
 The tests compare the kernels with them live, on every host. Each reference is
-anchored in turn, in ``mint_goldens_test.py``: the transcription to the live libc
-where it is glibc, and both references to PufferLib's own values on any host
+anchored in turn: the transcription to the live glibc when PufferLib's
+parity references are captured on a glibc host, and both references to
+PufferLib's own values on any host, in ``mint_goldens_test.py``
 (``SEED_73_DRAWS``, ``LIGHT_ANCHORS``), so an error a reference shares with the
 kernel it checks still fails.
 

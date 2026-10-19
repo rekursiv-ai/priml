@@ -6,7 +6,8 @@ The fourth, Gumbel-max frequencies, lives with ``gumbel_max`` in priml's
 
 from collections.abc import Callable, Generator
 from functools import partial
-from typing import cast
+from pathlib import Path
+from typing import Final, cast
 
 import contextlib
 import dataclasses
@@ -16,6 +17,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
+from priml.baselines.craftax.testing import fill_portable
 from priml.baselines.craftax.world_model.attention import VarlenAttention
 from priml.baselines.craftax.world_model.batch import (
     Kind,
@@ -50,6 +52,11 @@ from priml.baselines.craftax.world_model.testing import (
 from priml.model.attention.attention import Attention
 from priml.model.attention.kernel import SdpaNaive, SdpaVarlen
 from priml.model.transformer.block import TransformerBlock
+from priml.testing.bfb import host_agnostic_numerics
+from priml.testing.golden import assert_tensor_golden
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 @pytest.mark.parametrize("untied_output", [False, True])
@@ -102,6 +109,38 @@ def test_teacher_forced_log_probs_match_training_forward(untied_output: bool) ->
     # The terminal job's frame slots are skipped, not scored.
     assert bool((decisions[1].job.logp[0, 2:] == 0).all())
     assert bool(engine.state.needs_start[0])
+
+
+def test_the_engine_matches_its_golden() -> None:
+    """A tiny model's first free-running decision in two rows, frozen.
+
+    The engine this one was ported from matched it bit for bit on a trained
+    checkpoint (a check retired with its full-size fixture). The golden holds
+    the port's own values from portable weights, computed in float64, so they
+    hold on every host: the start and act jobs' tokens and log-probabilities,
+    and the actions.
+    """
+    with host_agnostic_numerics():
+        model = tiny_model(small_schema())
+        fill_portable(model, seed=73)
+        engine = Engine(
+            model,
+            rows=2,
+            t_max=16,
+            generator=torch.Generator().manual_seed(5),
+        )
+        start, decision = engine.step(engine.control())
+    assert_tensor_golden(
+        _CWD / "testdata" / "engine_tiny.pt",
+        {
+            "start/tokens": start.job.tokens,
+            "start/logp": start.job.logp,
+            "actions": decision.action,
+            "action_logp": decision.action_logp,
+            "tokens": decision.job.tokens,
+            "logp": decision.job.logp,
+        },
+    )
 
 
 @pytest.mark.parametrize("t_max", [4, 10])

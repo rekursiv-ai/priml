@@ -2,18 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
-
-import platform
+from typing import cast
 
 import numpy as np
-import pytest
 
 from priml.baselines.craftax.scripts import mint_goldens
-
-
-if TYPE_CHECKING:
-    from numpy.typing import NDArray
 
 
 def test_the_transcription_draws_pufferlibs_first_draws_from_73() -> None:
@@ -22,14 +15,11 @@ def test_the_transcription_draws_pufferlibs_first_draws_from_73() -> None:
     assert draws.tolist() == [list(expected)]
 
 
-def test_the_transcription_is_the_live_glibc() -> None:
-    if platform.libc_ver()[0] != "glibc":
-        pytest.skip("rand_r differs between libcs; the reference is glibc's")
-    seeds = (0, 1, 73, 511, 2_047)
-    expected = mint_goldens.glibc_rand_r(np.array(seeds, np.uint32), 64)
-    for row, seed in enumerate(seeds):
-        draws = cast("NDArray[np.int32]", expected[row])
-        assert np.array_equal(mint_goldens.libc_rand_r(seed, 64), draws), seed
+def test_the_live_libc_draws_count_values_from_its_seed() -> None:
+    # Which libc's stream it is, the parity capture checks on glibc.
+    draws = mint_goldens.libc_rand_r(73, 4)
+    assert (draws.dtype, draws.shape) == (np.int32, (4,))
+    assert np.array_equal(draws, mint_goldens.libc_rand_r(73, 4))
 
 
 def test_the_libm_light_level_is_pufferlibs_at_the_anchors() -> None:

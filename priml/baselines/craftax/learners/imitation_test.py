@@ -9,6 +9,7 @@ replayed and held to the eager epoch bit for bit.
 from __future__ import annotations
 
 from functools import partial
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Final,
@@ -34,6 +35,7 @@ from priml.baselines.craftax.model import MinGRUPolicy
 from priml.baselines.craftax.rollout import PhiloxSampler
 from priml.baselines.craftax.testing import (
     packed_observations,
+    portable_uniform,
     sole_feature_policy,
     tiny_board_policy,
     tiny_train_step,
@@ -46,6 +48,8 @@ from priml.baselines.craftax.train_step import (
 from priml.loss.policy_gradient_kernel import TritonPPO
 from priml.model.min_gru import TritonScan
 from priml.optimizers.fused_muon import FusedMuon
+from priml.testing.bfb import host_agnostic_numerics
+from priml.testing.golden import assert_tensor_golden
 
 
 if TYPE_CHECKING:
@@ -53,6 +57,8 @@ if TYPE_CHECKING:
 
     from priml.baselines.craftax.model import Policy
 
+
+_CWD: Final = Path(__file__).resolve().parent
 
 AGENTS: Final = 5
 HORIZON: Final = 4
@@ -378,6 +384,56 @@ def test_a_resumed_run_with_imitation_equals_an_uninterrupted_one() -> None:
     assert float(expected[-1][-1]) > 0
 
 
+def test_the_imitation_matches_its_golden() -> None:
+    """Three epochs of branches scored from a table of logits, frozen.
+
+    The recipe runs' ``CombatAuxiliary`` matched this path bit for bit, from
+    which carry each branch replays to its loss and the gradient at the
+    logits (a check retired with its full-size fixture).
+    The golden holds the port's own float32 values, computed in float64, so
+    they hold on every host. Masks drop some actions the rollout did not take.
+    """
+    generator = torch.Generator().manual_seed(5)
+    policy = _TablePolicy(
+        portable_uniform(
+            AGENTS,
+            HORIZON,
+            NUM_ACTIONS + 1,
+            bound=4.0,
+            generator=generator,
+        ),
+    )
+    imitation = _imitation(rows=4, capacity=3)
+    rollouts = [
+        _rollout(
+            epoch=1,
+            starts=(0, 1, 2, 3),
+            terminals=((0, 2), (1, 0)),
+            illegal=((3, 1),),
+        ),
+        _rollout(epoch=2, starts=(0, 2), terminals=((2, 1),)),
+        _rollout(epoch=3),
+    ]
+    losses: list[Tensor] = []
+    gradients: list[Tensor] = []
+    with host_agnostic_numerics():
+        for rollout in rollouts:
+            legal = torch.rand(rollout.action_mask.shape, generator=generator) < 0.7
+            legal.scatter_(-1, rollout.actions.long()[..., None], value=True)
+            rollout.action_mask.mul_(legal)
+            imitation.ingest(rollout)
+            loss, _ = imitation.loss(policy)
+            loss.backward()
+            assert policy.table.grad is not None
+            losses.append(loss.detach())
+            gradients.append(policy.table.grad.clone())
+            policy.table.grad = None
+    assert_tensor_golden(
+        _CWD / "testdata" / "imitation_tiny.pt",
+        {"loss": torch.stack(losses), "gradient": torch.stack(gradients)},
+    )
+
+
 @pytest.mark.gpu_triton
 def test_the_captured_learner_epoch_with_imitation_equals_the_eager_one() -> None:
     """Five epochs of the production kernels: the first eager, the rest replayed.
@@ -474,6 +530,29 @@ class _RecordingPolicy(nn.Module):
     @override
     def forward(self, observations: Tensor) -> Tensor:
         return self.row.expand(observations.shape[0], -1)
+
+
+class _TablePolicy(_RecordingPolicy):
+    """Score a window from its row's table of logits, one per step."""
+
+    def __init__(self, table: Tensor) -> None:
+        super().__init__()
+        self.table = nn.Parameter(table)
+
+    @override
+    def forward_sequence(
+        self,
+        observations: Tensor,
+        state: Tensor,
+        episode_start: Tensor,
+        *,
+        actions: Tensor | None = None,
+        features: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Score a window: the table of the row the observations name."""
+        del episode_start, actions, features
+        rows = observations[:, 0, 0].long() % 10
+        return self.table[rows], state, self.table.new_zeros(())
 
 
 class _SumAuxiliary:

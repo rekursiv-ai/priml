@@ -381,10 +381,12 @@ The port was checked against fixtures PufferLib (pin `6ffa5b10`) minted, byte
 for byte, with no tolerance. `exp000` selects the kernel classes of
 `lib/compat.py`, which round as PufferLib's kernels do, and keeps PufferLib's
 bf16 carry, outputs and stored rollouts; the defaults use Triton's standard
-arithmetic and fp32. The fixtures are not distributed, so the suite that
-reads them lives beside them; it builds PufferLib's seed-73 init, which the
-full runs below start from, from PufferLib's source at the pin. The goldens
-in `testdata/` run with this package's tests.
+arithmetic and fp32. The fixtures were full size and are not distributed,
+and the checks that read them were retired once they passed. What runs now
+is a capture at test size, kept outside this package, that builds PufferLib
+from its source at the pin and holds the environment, the learning rate and
+four epochs of `exp000`'s step to it bit for bit in replayed goldens. The
+goldens in `testdata/` run with this package's tests.
 
 | What | Checked |
 |---|---|

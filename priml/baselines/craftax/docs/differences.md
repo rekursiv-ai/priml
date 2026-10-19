@@ -14,9 +14,9 @@ PufferLib's behaviour, so exp000's bits do not move.
   `tests/craftax_parity.py`.
 - **JAX**: `craftax/...` of the `craftax` 1.6.1 package (PyPI).
 - **port**: `priml/baselines/craftax/{env.py,game/}` in this tree.
-- **parity**: the port's parity suite, which reads fixtures that are not
-  distributed and so is kept beside them, outside this package. Its checks are
-  named below: the original-setup test (the port on JAX's own states, one
+- **parity**: the port's parity checks against fixtures that are not
+  distributed, retired from the tree once they passed. They are named below
+  by what they checked: the original-setup test (the port on JAX's own states, one
   transition at a time), the world-generation test, the trajectory test
   (random play, compared in distribution), the lockstep diff test and the
   undefined-spawn test.

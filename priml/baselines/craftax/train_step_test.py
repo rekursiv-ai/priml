@@ -48,14 +48,11 @@ from priml.baselines.craftax.testing import (
     FakeEnv,
     assert_golden,
     digest,
-    forward_parameters,
     fp32,
     host_agnostic_pipeline,
     optimizer_state,
     packed_observations,
     portable_checkpoint,
-    portable_uniform,
-    read_golden,
     require_cuda,
     smoke_feature,
     tiny_env,
@@ -99,7 +96,7 @@ from priml.baselines.craftax.world_model.testing import (
 from priml.loss.policy_gradient import TorchPPO
 from priml.loss.policy_gradient_kernel import TritonPPO
 from priml.model.linear import Linear
-from priml.optimizers.fused_muon import FusedMuon, clip_coefficient
+from priml.optimizers.fused_muon import FusedMuon
 
 
 if TYPE_CHECKING:
@@ -2100,36 +2097,21 @@ class _FakeCuda:
 
 
 @pytest.mark.gpu_triton
-def test_exp000s_kernels_match_their_tiny_golden_on_the_gpu(
-    tmp_path: Path,
-) -> None:
-    """exp000's step at test size from portable seed-73 masters, frozen on the GPU.
-
-    exp000's CUDA kernels throughout: the exact scan, sampler, learning rule
-    and Muon, the rollout's step graphs and the env's ``nogil`` loop. Epoch 1
-    learns eagerly, epochs 2 and 3 capture each slot's learner epoch, and
-    epoch 4 replays one.
-    """
-    require_cuda()
-    lines = _train_out(_from_portable_masters(tiny_exp000_step(), tmp_path))
-    assert_golden(test_file=__file__, name="train_step_exp000_tiny", lines=lines)
-
-
-@pytest.mark.gpu_triton
-def test_a_checkpoint_loaded_after_the_capture_trains_as_the_golden(
+def test_a_checkpoint_loaded_after_the_capture_trains_as_the_uninterrupted_run(
     tmp_path: Path,
 ) -> None:
     """Epoch 2's checkpoint, loaded into the step that went on to epoch 4, then 3 and 4.
 
-    By epoch 4 both slots' learner epochs are captured graphs, and the load
-    puts new tensors in the optimizer's state; epochs 3 and 4 must still be
-    the uninterrupted golden's.
+    exp000's step at test size from portable seed-73 masters, whose epochs the
+    craftax parity golden holds against PufferLib. By epoch 4 both slots'
+    learner epochs are captured graphs, and the load puts new tensors in the
+    optimizer's state; epochs 3 and 4 must still be the uninterrupted run's.
     """
     require_cuda()
-    golden = read_golden(test_file=__file__, name="train_step_exp000_tiny")
+    uninterrupted = _train_out(_from_portable_masters(tiny_exp000_step(), tmp_path))
     step = _from_portable_masters(tiny_exp000_step(), tmp_path)
     lines = _reloaded_epochs(step, tmp_path / "checkpoint.pt")
-    assert lines == _after_epoch_2(golden)
+    assert lines == _after_epoch_2(uninterrupted)
 
 
 def test_exp009s_epoch_matches_its_golden() -> None:
@@ -2151,54 +2133,6 @@ def test_exp009s_epoch_matches_its_golden() -> None:
         name="train_step_exp009_tiny",
         lines=lines,
     )
-
-
-@pytest.mark.gpu_triton
-def test_exp000s_muon_matches_its_tiny_golden_on_the_gpu(
-    tmp_path: Path,
-) -> None:
-    """exp000's optimizer over its policy at test size, from portable seed-73 masters.
-
-    Three steps of the fused kernels with the rate as a device tensor, as the
-    learner runs them; the first and last are clipped, the second is not.
-    """
-    require_cuda()
-    config = tiny_exp000_step()
-    assert isinstance(config.model, MinGRUPolicy.Config)
-    model = config.model.make().cuda()
-    optimizer = config.optimizer.make()(model.parameters())
-    assert isinstance(optimizer, FusedMuon)
-    load_masters(
-        model,
-        optimizer,
-        portable_checkpoint(config.model, tmp_path / "masters.pt", seed=73),
-    )
-    for group in optimizer.param_groups:
-        group["lr"] = torch.tensor(group["lr"], dtype=torch.float32, device="cuda")
-    gradients = _gradients(model, scales=(2**-5, 2**-9, 2**-5))
-    lines = _muon_entries(model, optimizer, gradients)
-    assert_golden(test_file=__file__, name="muon_exp000_tiny", lines=lines)
-
-
-def test_exp000s_learning_rates_match_their_golden() -> None:
-    """The fp32 cosine at every one of exp000's 6,663 epoch boundaries, frozen.
-
-    ``cos`` comes from the platform's libm in double, rounded once to fp32:
-    macOS's and glibc 2.35's and 2.39's land on the same rates, so one golden
-    holds on each.
-    """
-    rates = np.array(
-        [
-            cosine_annealing_fp32(0.00472887093, 0.0, epoch, 6662)
-            for epoch in range(6663)
-        ],
-        dtype=np.float32,
-    )
-    lines = [f"rates {digest(rates)}"]
-    lines += [
-        f"epoch {epoch} {fp32(rates.item(epoch))}" for epoch in (0, 1, 5, 3331, 6661)
-    ]
-    assert_golden(test_file=__file__, name="muon_exp000_rates", lines=lines)
 
 
 # The step loads them as exp000 does, from its ``checkpoint``.
@@ -2256,9 +2190,9 @@ def _epochs(step: CraftaxTrainStep) -> list[str]:
     return lines
 
 
-def _after_epoch_2(golden: list[str]) -> list[str]:
-    """Return the golden's lines of the epochs after the second."""
-    return [line for line in golden if int(line.split()[1]) > 2]
+def _after_epoch_2(lines: list[str]) -> list[str]:
+    """Return a run's lines of the epochs after the second."""
+    return [line for line in lines if int(line.split()[1]) > 2]
 
 
 def _epoch_entries(step: CraftaxTrainStep, result: TrainStepOutput) -> list[str]:
@@ -2278,62 +2212,6 @@ def _epoch_entries(step: CraftaxTrainStep, result: TrainStepOutput) -> list[str]
             "master_weight",
         ).items()
     ]
-
-
-def _gradients(
-    model: nn.Module,
-    *,
-    scales: tuple[float, ...],
-) -> list[dict[str, Tensor]]:
-    """Draw one portable bf16 gradient per parameter per step, ``U(+-scale)``."""
-    generator = torch.Generator().manual_seed(1)
-    return [
-        {
-            name: portable_uniform(
-                *parameter.shape,
-                bound=scale,
-                generator=generator,
-            ).bfloat16()
-            for name, parameter in forward_parameters(model)
-        }
-        for scale in scales
-    ]
-
-
-def _muon_entries(
-    model: MinGRUPolicy,
-    optimizer: FusedMuon,
-    gradients: list[dict[str, Tensor]],
-) -> list[str]:
-    """Step once per gradient set; digest the clip, masters, momentum and parameters."""
-    names = {id(parameter): name for name, parameter in model.named_parameters()}
-    # The optimizer's order, which exp000's global norm reduces over.
-    order = [
-        names[id(parameter)]
-        for group in optimizer.param_groups
-        for parameter in cast("list[Tensor]", group["params"])
-    ]
-    lines: list[str] = []
-    for index, step in enumerate(gradients):
-        for name, parameter in model.named_parameters():
-            parameter.grad = step[name].to(parameter.device)
-        device = next(model.parameters()).device
-        clip = clip_coefficient(
-            optimizer.norm([step[name].to(device) for name in order]),
-            optimizer.max_grad_norm,
-        )
-        lines += [f"step {index} clip {fp32(clip)}"]
-        optimizer.step()
-        for key in ("master_weight", "momentum_buffer"):
-            lines += [
-                f"step {index} {key} {name} {digest(value)}"
-                for name, value in optimizer_state(model, optimizer, key).items()
-            ]
-        lines += [
-            f"step {index} parameter {name} {digest(parameter)}"
-            for name, parameter in forward_parameters(model)
-        ]
-    return lines
 
 
 if __name__ == "__main__":

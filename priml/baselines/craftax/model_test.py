@@ -50,10 +50,8 @@ from priml.baselines.craftax.testing import (
     multi_hot_embedding,
     packed_observations,
     portable_uniform,
-    require_cuda,
     sole_feature_policy,
     tiny_board_policy,
-    tiny_exp000_step,
     tiny_policy,
 )
 from priml.model.embedding import MultiHotEmbedding
@@ -448,33 +446,6 @@ def test_the_tiny_policy_matches_its_golden() -> None:
             steps=4,
         )
     assert_golden(test_file=__file__, name="model_tiny", lines=lines)
-
-
-@pytest.mark.gpu_triton
-def test_exp000s_policy_matches_its_golden_on_the_gpu() -> None:
-    """exp000's policy at test size -- bf16 with a bf16 carry, the exact scan -- frozen.
-
-    From portable seed-73 weights, three rows of four steps: the rollout's
-    step over all four, the window forward, and the backward from fixed
-    gradients.
-    """
-    require_cuda()
-    config = tiny_exp000_step().model
-    assert isinstance(config, MinGRUPolicy.Config)
-    model = config.make()
-    fill_portable(model, seed=73)
-    model.cuda()
-    observations = packed_observations(config, batch=3, time=4, seed=1)
-    starts, grad_logits, grad_values = _backward_inputs(3, 4, scale=2**-6)
-    lines = _policy_entries(
-        model,
-        observations.cuda(),
-        starts.cuda(),
-        grad_logits.cuda(),
-        grad_values.cuda(),
-        steps=4,
-    )
-    assert_golden(test_file=__file__, name="model_exp000_tiny", lines=lines)
 
 
 def test_without_the_new_slots_the_policy_builds_what_it_built() -> None:

@@ -16,7 +16,6 @@ import hashlib
 import math
 import platform
 import re
-import sys
 import threading
 import time
 
@@ -1053,8 +1052,9 @@ def test_the_environments_play_their_golden(
     First, on every host, what only the compiled code shows: the worlds it
     generated are well formed, and the step's kernels, linked as they run,
     compute in float32 with no fused multiply-add, either of which changes
-    bits that the C computes in plain float32. The golden itself is glibc
-    x86-64's: macOS's libm rounds apart from glibc's in the last bit.
+    bits that the C computes in plain float32. The golden holds on glibc
+    x86-64 and on macOS arm64 alike: the 32 steps end long before step 127,
+    the first daylight the two libms round apart.
     """
     config = CraftaxEnv.Config()
     config.num_envs = 4
@@ -1098,8 +1098,6 @@ def test_the_environments_play_their_golden(
         _assert_the_pool_is_worlds_generated_one_at_a_time(env.pool)
         kernels.append(build_pool_numba)
     _assert_float32_without_fused_multiply_adds(*kernels)
-    if sys.platform != "linux" or platform.machine() != "x86_64":
-        pytest.skip("the golden is glibc x86-64's; this host's libm rounds apart")
     assert_golden(test_file=__file__, name=f"env_{name}", lines=lines)
 
 

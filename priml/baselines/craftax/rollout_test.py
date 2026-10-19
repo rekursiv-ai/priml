@@ -79,9 +79,7 @@ from priml.baselines.craftax.testing import (
     fill_portable,
     host_agnostic_pipeline,
     portable_uniform,
-    require_cuda,
     smoke_feature,
-    tiny_exp000_step,
     tiny_policy,
     tiny_train_step,
 )
@@ -654,6 +652,12 @@ def interpreted_kernels(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
                 name,
                 interpreter.InterpretedFunction(value.fn),
             )
+    # Each library call patches ``triton.language.core``'s builtins and never
+    # restores them (``InterpretedFunction.__call__``), so a kernel compiled
+    # after this test would trace the interpreter's builtins and fail.
+    members: dict[str, object] = dict(vars(triton.language.core))
+    for name, value in members.items():
+        monkeypatch.setattr(triton.language.core, name, value)
     _kernels.cache_clear()
     _sample_kernel.cache_clear()
     try:
@@ -1018,20 +1022,6 @@ def test_the_tiny_pipelines_first_two_rollouts_match_their_golden() -> None:
     with host_agnostic_pipeline():
         lines = _rollout_entries(config, device=torch.device("cpu"))
     assert_golden(test_file=__file__, name="rollout_tiny", lines=lines)
-
-
-@pytest.mark.gpu_triton
-def test_exp000s_first_two_rollouts_match_their_golden() -> None:
-    """exp000's boot rollout and the next at test size, from portable weights, frozen.
-
-    exp000's kernels on the tiny pipeline's environments: its policy (the
-    exact scan, a bf16 carry), its exact Philox sampler (seed 73) and its bf16
-    storage, in captured step graphs that the env's ``nogil`` loop launches,
-    for two horizons of 8.
-    """
-    require_cuda()
-    lines = _rollout_entries(tiny_exp000_step(), device=torch.device("cuda"))
-    assert_golden(test_file=__file__, name="rollout_exp000_tiny", lines=lines)
 
 
 def _rollout_entries(
