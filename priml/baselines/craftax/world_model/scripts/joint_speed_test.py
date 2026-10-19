@@ -35,6 +35,7 @@ from priml.baselines.craftax.world_model.scripts.joint_speed import (
     _rollout,
     synthetic_contexts,
 )
+from priml.baselines.craftax.world_model.scripts.testing import Clock, CpuTorch
 from priml.baselines.craftax.world_model.testing import (
     random_contexts,
     small_schema,
@@ -47,8 +48,6 @@ from priml.model.transformer.block import TransformerBlock
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from torch import Tensor
 
     from priml.baselines.craftax.experiments import CraftaxTrainLoop
@@ -197,7 +196,7 @@ def test_the_joint_world_model_copies_the_feature_source_for_the_replay(
     *,
     compiled: bool,
 ) -> None:
-    fake = _CpuTorch()
+    fake = CpuTorch()
     monkeypatch.setattr(joint_speed, "torch", fake)
     monkeypatch.setattr(joint_speed, "InitialWeights", _TwentyLayers)
     monkeypatch.setattr(joint_speed, "Flash4Varlen", SdpaVarlen)
@@ -223,10 +222,10 @@ def test_main_times_each_epoch_and_reports_its_windows(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    fake = _CpuTorch()
+    fake = CpuTorch()
     monkeypatch.setattr(joint_speed, "torch", fake)
     # Epochs of 1.0 s and 0.5 s: the rate is the faster one's.
-    monkeypatch.setattr(joint_speed, "time", _ScriptedClock([0.0, 1.0, 2.0, 2.5]))
+    monkeypatch.setattr(joint_speed, "time", Clock([0.0, 1.0, 2.0, 2.5]))
     monkeypatch.setattr(joint_speed, "exp003", _tiny_exp003)
     drawn: list[tuple[str, int, int]] = []
     monkeypatch.setattr(
@@ -341,92 +340,6 @@ def _contexts(*, horizon: int) -> Contexts:
         counts=torch.tensor((0, 1)),
         seed=1,
     )
-
-
-class _ScriptedClock:
-    """A ``time`` module whose ``perf_counter`` reads ``readings`` in order."""
-
-    def __init__(self, readings: list[float]) -> None:
-        self.readings = readings
-
-    def perf_counter(self) -> float:
-        """Return the next reading."""
-        return self.readings.pop(0)
-
-
-class _FakeCuda:
-    """The ``torch.cuda`` calls ``main`` makes, recorded on the CPU."""
-
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    def synchronize(self, device: torch.device) -> None:
-        """Record the wait."""
-        assert device == torch.device("cpu")
-        self.calls.append("synchronize")
-
-    def memory_allocated(self, device: torch.device) -> int:
-        """Return 3 GiB resident."""
-        del device
-        self.calls.append("memory_allocated")
-        return 3 << 30
-
-    def reset_peak_memory_stats(self, device: torch.device) -> None:
-        """Record the reset."""
-        del device
-        self.calls.append("reset_peak_memory_stats")
-
-    def max_memory_allocated(self, device: torch.device) -> int:
-        """Return a 5 GiB peak."""
-        del device
-        return 5 << 30
-
-    def max_memory_reserved(self, device: torch.device) -> int:
-        """Return 6 GiB reserved."""
-        del device
-        return 6 << 30
-
-    def get_device_name(self, device: torch.device) -> str:
-        """Name the device."""
-        del device
-        return "Fake H200"
-
-
-class _CpuTorch:
-    """The script's ``torch`` on the CPU: CUDA faked, ``compile`` recorded."""
-
-    def __init__(self) -> None:
-        self.cuda = _FakeCuda()
-        self.compiled: list[dict[str, object]] = []
-        # The rest of torch the script reads, as torch's own.
-        self.compiler, self.optim, self.Generator = (
-            torch.compiler,
-            torch.optim,
-            torch.Generator,
-        )
-        self.arange, self.randint, self.where = torch.arange, torch.randint, torch.where
-        self.full, self.zeros, self.zeros_like = (
-            torch.full,
-            torch.zeros,
-            torch.zeros_like,
-        )
-        self.ones, self.ones_like, self.stack = torch.ones, torch.ones_like, torch.stack
-        self.rand, self.randn = torch.rand, torch.randn
-        self.bool, self.uint8, self.int16 = torch.bool, torch.uint8, torch.int16
-
-    def device(self, kind: str) -> torch.device:
-        """Return the CPU for the script's ``cuda``."""
-        assert kind == "cuda"
-        return torch.device("cpu")
-
-    def compile(
-        self,
-        function: Callable[..., object],
-        **options: object,
-    ) -> Callable[..., object]:
-        """Record the options and return ``function`` itself."""
-        self.compiled.append(options)
-        return function
 
 
 class _TwentyLayers:

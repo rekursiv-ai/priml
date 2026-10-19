@@ -1,17 +1,17 @@
 """Check the feature gates script on the CPU: its history, reference, graph and report.
 
-The script's CUDA calls run through ``_CpuTorch``, a stand-in for its ``torch``
+The script's CUDA calls run through ``CpuTorch``, a stand-in for its ``torch``
 whose graphs re-run the captured engine call on replay, so every graphed step
 is the eager step it captured.
 """
 
 from __future__ import annotations
 
-from contextlib import contextmanager, nullcontext
 from functools import partial, partialmethod
 from typing import TYPE_CHECKING
 
 import copy
+import itertools
 import sys
 
 from treekle import from_plain, json_loads
@@ -53,10 +53,15 @@ from priml.baselines.craftax.world_model.scripts.feature_gates import (
     time_step,
     validation_prefixes,
 )
+from priml.baselines.craftax.world_model.scripts.testing import (
+    Clock,
+    CpuTorch,
+    FakeCuda,
+)
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from torch import Tensor
@@ -137,7 +142,7 @@ def test_a_graphed_step_replays_the_eager_step_exactly(
     source: WorldModelFeature,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake = _CpuTorch.install(monkeypatch)
+    fake = _install(monkeypatch)
     rows, steps = 3, 10
     cells, aux, actions = _frames(rows, steps)
     runs: list[Tensor] = []
@@ -163,7 +168,7 @@ def test_a_graphed_step_replays_the_eager_step_exactly(
 def test_a_graphed_step_captures_each_new_plan_on_first_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake = _CpuTorch.install(monkeypatch)
+    fake = _install(monkeypatch)
     config = _sliding_config()
     sliding = config.history
     assert isinstance(sliding, Sliding.Config)
@@ -263,8 +268,8 @@ def test_time_step_divides_the_replays_and_shares_the_reprefill(
     source: WorldModelFeature,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake = _CpuTorch.install(monkeypatch)
-    monkeypatch.setattr(feature_gates, "time", _Clock(0.5))
+    fake = _install(monkeypatch)
+    monkeypatch.setattr(feature_gates, "time", Clock(itertools.count(0.0, 0.5)))
     reprefills: list[int] = []
     original = FeatureEngine._reprefill
     monkeypatch.setattr(
@@ -294,7 +299,7 @@ def test_main_writes_every_gate_and_exits_as_they_pass(
     monkeypatch: pytest.MonkeyPatch,
     attention: str,
 ) -> None:
-    fake = _CpuTorch.install(monkeypatch)
+    fake = _install(monkeypatch)
     monkeypatch.setitem(
         sys.modules,
         "flash_attn.cute.interface",
@@ -353,7 +358,7 @@ def test_main_exits_1_when_a_gate_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _CpuTorch.install(monkeypatch)
+    _install(monkeypatch)
     loads: list[tuple[str, Path, list[str]]] = []
     for module in (feature, feature_gates):
         monkeypatch.setattr(module, "load_world_model", partial(_load, loads))
@@ -387,148 +392,20 @@ def source() -> WorldModelFeature:
     return _make_source(layers=2)
 
 
-class _FakeStream:
-    """A CUDA stream on the CPU, which runs in program order."""
-
-    def wait_stream(self, stream: _FakeStream) -> None:
-        """Order nothing."""
-        del stream
-
-
-class _FakeGraph:
-    """A CUDA graph whose replay re-runs the engine call captured into it."""
-
-    def __init__(self, cuda: _FakeCuda) -> None:
-        self.cuda = cuda
-        self.body: Callable[[], object] | None = None
-
-    def replay(self) -> None:
-        """Count the replay, then run the captured call."""
-        assert self.body is not None, "A graph replayed with nothing captured."
-        self.cuda.replays += 1
-        self.body()
-
-
-class _FakeEvent:
-    """A timing event that reads the replays since its start: 0.25 ms apiece."""
-
-    def __init__(self, cuda: _FakeCuda, *, enable_timing: bool) -> None:
-        assert enable_timing
-        self.cuda = cuda
-        self.replays = -1
-
-    def record(self) -> None:
-        """Note the replays so far."""
-        self.replays = self.cuda.replays
-
-    def elapsed_time(self, end: _FakeEvent) -> float:
-        """Return 0.25 ms per replay between this record and ``end``'s."""
-        assert 0 <= self.replays <= end.replays
-        return 0.25 * (end.replays - self.replays)
-
-
-class _FakeCuda:
-    """The ``torch.cuda`` calls the script makes, on the CPU."""
-
-    def __init__(self) -> None:
-        self.graphs: list[_FakeGraph] = []
-        self.capturing: _FakeGraph | None = None
-        self.replays = 0
-        # torch.cuda's class names, bound to this fake's factories.
-        self.CUDAGraph = self.new_graph
-        self.Stream = _FakeStream
-        self.Event = self.new_event
-
-    def new_graph(self) -> _FakeGraph:
-        """Return a new graph."""
-        self.graphs.append(_FakeGraph(self))
-        return self.graphs[-1]
-
-    def new_event(self, *, enable_timing: bool) -> _FakeEvent:
-        """Return a timing event."""
-        return _FakeEvent(self, enable_timing=enable_timing)
-
-    def current_stream(self) -> _FakeStream:
-        """Return the main stream."""
-        return _FakeStream()
-
-    def stream(self, stream: _FakeStream) -> nullcontext[None]:
-        """Enter ``stream``: nothing to do on the CPU."""
-        del stream
-        return nullcontext()
-
-    @contextmanager
-    def graph(self, graph: _FakeGraph, *, stream: _FakeStream) -> Generator[None]:
-        """Capture the engine call made inside into ``graph``."""
-        del stream
-        self.capturing = graph
-        yield
-        self.capturing = None
-        assert graph.body is not None, "The capture made no engine call."
-
-    def synchronize(self) -> None:
-        """Wait for nothing: the CPU is done."""
-
-
-class _CpuTorch:
-    """The script's ``torch`` on the CPU: CUDA faked, ``compile`` the identity."""
-
-    def __init__(self) -> None:
-        self.cuda = _FakeCuda()
-        self.compiled: list[dict[str, object]] = []
-        # The rest of torch the script reads, as torch's own.
-        self.no_grad = torch.no_grad
-        self.full, self.tensor, self.zeros = torch.full, torch.tensor, torch.zeros
-        self.zeros_like, self.stack, self.randn = (
-            torch.zeros_like,
-            torch.stack,
-            torch.randn,
-        )
-        self.Generator = torch.Generator
-        self.nan, self.bool, self.int32 = torch.nan, torch.bool, torch.int32
-
-    @classmethod
-    def install(cls, monkeypatch: pytest.MonkeyPatch) -> _CpuTorch:
-        """Swap the script's ``torch`` for one, recording engine calls; return it."""
-        fake = cls()
-        monkeypatch.setattr(feature_gates, "torch", fake)
-        monkeypatch.setattr(
-            FeatureEngine,
-            "__call__",
-            partialmethod(
-                _recorded_call,
-                cuda=fake.cuda,
-                original=FeatureEngine.__call__,
-            ),
-        )
-        return fake
-
-    def device(self, kind: str) -> torch.device:
-        """Return the CPU for the script's ``cuda``."""
-        assert kind == "cuda"
-        return torch.device("cpu")
-
-    def compile(
-        self,
-        function: Callable[..., object],
-        **options: object,
-    ) -> Callable[..., object]:
-        """Record the options and return ``function`` itself."""
-        self.compiled.append(options)
-        return function
-
-
-class _Clock:
-    """A ``time`` module whose clock advances ``step`` seconds a read."""
-
-    def __init__(self, step: float) -> None:
-        self.step = step
-        self.now = 0.0
-
-    def perf_counter(self) -> float:
-        """Return the clock, then advance it."""
-        self.now += self.step
-        return self.now - self.step
+def _install(monkeypatch: pytest.MonkeyPatch) -> CpuTorch:
+    """Swap the script's ``torch`` for a ``CpuTorch``, recording engine calls."""
+    fake = CpuTorch()
+    monkeypatch.setattr(feature_gates, "torch", fake)
+    monkeypatch.setattr(
+        FeatureEngine,
+        "__call__",
+        partialmethod(
+            _recorded_call,
+            cuda=fake.cuda,
+            original=FeatureEngine.__call__,
+        ),
+    )
+    return fake
 
 
 def _recorded_call(
@@ -537,7 +414,7 @@ def _recorded_call(
     terminals: Tensor,
     previous_action: Tensor,
     *,
-    cuda: _FakeCuda,
+    cuda: FakeCuda,
     original: Callable[[FeatureEngine, Tensor, Tensor, Tensor], Tensor],
 ) -> Tensor:
     """Run the engine's step; during a capture, also keep it as the graph's body."""

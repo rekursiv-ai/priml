@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import NoReturn, cast, overload
+from typing import cast
 
 import dataclasses
 import importlib
@@ -18,7 +18,7 @@ from treekle import json_loads
 import numpy as np
 import pytest
 
-from priml.baselines.tmax.scripts import custom_types, runner, upstream
+from priml.baselines.tmax.scripts import custom_types, runner, testing, upstream
 from priml.baselines.tmax.scripts.rollout_writer import RolloutWriter
 from priml.baselines.tmax.scripts.runner import (
     CollectionSession,
@@ -34,84 +34,24 @@ from priml.baselines.tmax.scripts.runner import (
     serialize_rollout_records,
     vllm_weight_name_mapper,
 )
-
-
-def _unused(*_args: object, **_kwargs: object) -> NoReturn:
-    raise AssertionError("This test does not reach this upstream call.")
-
-
-def _same(ref: object) -> object:
-    return ref
-
-
-@dataclass(kw_only=True, slots=True)
-class _RuntimeContext:
-    runtime_env: Mapping[str, object]
-
-
-@dataclass(kw_only=True, slots=True)
-class _FakeRay:
-    """A Ray driver whose cluster state each test sets directly."""
-
-    initialized: bool = True
-    runtime_env: Mapping[str, object] = field(
-        default_factory=dict[str, object],
-    )
-    live_nodes: list[Mapping[str, object]] = field(default_factory=list)
-    tasks: Callable[[object], custom_types.RemoteFunction] = _unused
-    resolve: Callable[[object], object] = _same
-    init_calls: list[Mapping[str, object]] = field(default_factory=list)
-    events: list[str] = field(default_factory=list)
-
-    @property
-    def _private(self) -> custom_types.RayPrivate:
-        return _unused()
-
-    def is_initialized(self) -> bool:
-        return self.initialized
-
-    def init(self, *, runtime_env: Mapping[str, object]) -> None:
-        self.init_calls.append(runtime_env)
-        self.initialized = True
-
-    def shutdown(self) -> None:
-        self.events.append("shutdown")
-        self.initialized = False
-
-    def nodes(self) -> list[Mapping[str, object]]:
-        return self.live_nodes
-
-    def get_runtime_context(self) -> object:
-        return _RuntimeContext(runtime_env=self.runtime_env)
-
-    def remote(self, target: object, /) -> custom_types.RemoteFunction:
-        return self.tasks(target)
-
-    @overload
-    def get(self, refs: list[object], /) -> list[object]: ...
-    @overload
-    def get(self, refs: object, /) -> object: ...
-    def get(self, refs: object, /) -> object:
-        if isinstance(refs, list):
-            return [self.resolve(ref) for ref in cast("list[object]", refs)]
-        return self.resolve(refs)
+from priml.baselines.tmax.scripts.testing import FakeLoader, FakeRay, unused
 
 
 @dataclass(kw_only=True, slots=True)
 class _FakeModelDims:
     def from_hf_config(self, model_name_or_path: str, /) -> object:
-        return _unused(model_name_or_path)
+        return unused(model_name_or_path)
 
 
 @dataclass(kw_only=True, slots=True)
 class _FakeUpstream:
     """One stand-in for every open-instruct module the driver reads."""
 
-    StreamingDataLoaderConfig: Callable[[], custom_types.StreamingConfig] = _unused
-    VLLMConfig: Callable[[], custom_types.VLLMConfig] = _unused
-    HFDataLoader: Callable[..., custom_types.PromptLoader] = _unused
+    StreamingDataLoaderConfig: Callable[[], custom_types.StreamingConfig] = unused
+    VLLMConfig: Callable[[], custom_types.VLLMConfig] = unused
+    HFDataLoader: Callable[..., custom_types.PromptLoader] = unused
     single_example_collator: object = None
-    add_prompt_to_generator: Callable[..., object] = _unused
+    add_prompt_to_generator: Callable[..., object] = unused
     accumulate_inference_batches: Callable[
         ...,
         tuple[
@@ -120,67 +60,28 @@ class _FakeUpstream:
             object,
             object,
         ],
-    ] = _unused
-    compute_group_advantages: Callable[..., custom_types.FloatArray] = _unused
-    TokenizerConfig: Callable[..., object] = _unused
-    EnvsConfig: Callable[..., custom_types.EnvsConfig] = _unused
-    make_tokenizer: Callable[[object, object], object] = _unused
+    ] = unused
+    compute_group_advantages: Callable[..., custom_types.FloatArray] = unused
+    TokenizerConfig: Callable[..., object] = unused
+    EnvsConfig: Callable[..., custom_types.EnvsConfig] = unused
+    make_tokenizer: Callable[[object, object], object] = unused
     initialize_tools_and_envs: Callable[
         ...,
         tuple[dict[str, object], object, list[str]],
-    ] = _unused
-    setup_datasets: Callable[..., tuple[object, object]] = _unused
-    build_base_env_config: Callable[[object, object], object] = _unused
-    GRPOExperimentConfig: Callable[[], custom_types.GRPOArgs] = _unused
-    RewardConfig: Callable[..., object] = _unused
-    build_all_verifiers: Callable[[object, object], object] = _unused
-    ModelConfig: Callable[..., object] = _unused
+    ] = unused
+    setup_datasets: Callable[..., tuple[object, object]] = unused
+    build_base_env_config: Callable[[object, object], object] = unused
+    GRPOExperimentConfig: Callable[[], custom_types.GRPOArgs] = unused
+    RewardConfig: Callable[..., object] = unused
+    build_all_verifiers: Callable[[object, object], object] = unused
+    ModelConfig: Callable[..., object] = unused
     ModelDims: _FakeModelDims = field(default_factory=_FakeModelDims)
-    SamplingConfig: Callable[..., object] = _unused
-    create_vllm_engines: Callable[..., list[custom_types.Engine]] = _unused
-    Queue: Callable[..., object] = _unused
+    SamplingConfig: Callable[..., object] = unused
+    create_vllm_engines: Callable[..., list[custom_types.Engine]] = unused
+    Queue: Callable[..., object] = unused
 
     def find_free_port(self) -> int:
-        return _unused()
-
-
-class _FakeLoader:
-    """A prompt loader over a fixed list of examples."""
-
-    def __init__(self, examples: Iterable[object] = (), *, epoch: int = 0) -> None:
-        self._examples: Iterator[object] = iter(examples)
-        self._epoch = epoch
-
-    def __next__(self) -> object:
-        return next(self._examples)
-
-    def state_dict(self) -> Mapping[str, object]:
-        return {}
-
-    def load_state_dict(self, state: Mapping[str, object], /) -> None:
-        del state
-
-
-def _session(
-    api: UpstreamApi,
-    *,
-    loader: _FakeLoader | None = None,
-) -> CollectionSession:
-    return CollectionSession(
-        api=api,
-        tokenizer=None,
-        dataset=None,
-        iter_dataloader=loader or _FakeLoader(),
-        inference_queue=None,
-        prompt_queue=None,
-        generation_config=None,
-        base_env_config=None,
-        model_dims=None,
-        engines=[],
-        pools={},
-        started_ray=False,
-        actor_manager=cast("custom_types.ActorManagerHandle", object()),
-    )
+        return unused()
 
 
 def test_upstream_import_enables_released_reset_handling(
@@ -228,7 +129,7 @@ def test_ray_init_forwards_only_the_runtime_allowlist(
 ) -> None:
     # Ray workers get the allowlist only; ambient credentials never travel.
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "do-not-forward")
-    ray = _FakeRay(initialized=False)
+    ray = FakeRay(initialized=False)
     assert runner._initialize_ray(RunnerConfig(), ray)
     assert ray.init_calls == [{"env_vars": RayRuntimePolicy().env_vars()}]
     assert "AWS_SECRET_ACCESS_KEY" not in cast(
@@ -239,7 +140,7 @@ def test_ray_init_forwards_only_the_runtime_allowlist(
 
 def test_existing_ray_requires_a_matching_runtime_policy() -> None:
     # An already-running Ray job must carry the same runtime policy.
-    ray = _FakeRay(runtime_env={"env_vars": RayRuntimePolicy().env_vars()})
+    ray = FakeRay(runtime_env={"env_vars": RayRuntimePolicy().env_vars()})
     assert not runner._initialize_ray(RunnerConfig(), ray)
     ray.runtime_env = {}
     with pytest.raises(RuntimeError, match="already initialized"):
@@ -267,7 +168,7 @@ class _InventoryProbe:
     """The checkpoint-inventory task; ``options`` pins it to one node."""
 
     def remote(self, *_args: object, **_kwargs: object) -> object:
-        return _unused()
+        return unused()
 
     def options(self, **kwargs: object) -> _PinnedProbe:
         resources = cast("dict[str, float]", kwargs["resources"])
@@ -282,9 +183,9 @@ def _probe_task(target: object) -> custom_types.RemoteFunction:
 def _probe_ray(
     nodes: list[Mapping[str, object]],
     inventory_on: Callable[[str], object],
-) -> _FakeRay:
+) -> FakeRay:
     """Build a cluster whose node ``n`` reports ``inventory_on(n)``."""
-    return _FakeRay(
+    return FakeRay(
         live_nodes=nodes,
         tasks=_probe_task,
         resolve=lambda ref: inventory_on(cast("_NodeRef", ref).node),
@@ -409,24 +310,14 @@ class _RlUtils:
 
 def _api(
     *,
-    ray: _FakeRay | None = None,
+    ray: FakeRay | None = None,
     upstream_modules: _FakeUpstream | None = None,
 ) -> UpstreamApi:
-    """Build an upstream-shaped fake without importing Ray."""
-    fake = upstream_modules or _FakeUpstream()
-    return UpstreamApi(
-        ray=ray or _FakeRay(),
-        ray_queue=fake,
-        data_loader=fake,
-        dataset_transformation=fake,
-        environments_utils=fake,
-        grpo_fast=fake,
-        grpo_utils=fake,
-        ground_truth_utils=fake,
-        model_utils=fake,
+    """Bind one ``_FakeUpstream`` and the released request-info reader."""
+    return testing.upstream_api(
+        upstream_modules or _FakeUpstream(),
+        ray=ray,
         rl_utils=_RlUtils(),
-        utils=fake,
-        vllm_utils=fake,
     )
 
 
@@ -507,7 +398,7 @@ def test_serialization_refuses_missing_behavior_logprobs() -> None:
 
 def test_mocked_orchestration_collects_and_shards_updates(tmp_path: Path) -> None:
     # The fixed-corpus loop collects each update and appends its shard.
-    session = _session(_api())
+    session = testing.session(_api())
     calls: list[int] = []
 
     def collect(
@@ -569,7 +460,7 @@ def test_fixed_collection_recovers_an_incomplete_final_update(
         num_prompts=1,
         samples_per_prompt=2,
     )
-    run_updates(config, _session(_api()), collect_update=collect)
+    run_updates(config, testing.session(_api()), collect_update=collect)
 
     assert calls == [1]
     records = [
@@ -884,13 +775,13 @@ def test_prime_prompts_fills_the_configured_inflight_window() -> None:
             ),
         )
 
-    session = _session(
+    session = testing.session(
         _api(
             upstream_modules=_FakeUpstream(
                 add_prompt_to_generator=add_prompt_to_generator,
             ),
         ),
-        loader=_FakeLoader({"index": index} for index in range(6)),
+        loader=FakeLoader({"index": index} for index in range(6)),
     )
     session.prompt_queue = prompt_queue
     session.generation_config = generation_config
@@ -915,9 +806,9 @@ def test_run_primes_collects_and_closes_its_ray_runtime(
 ) -> None:
     events: list[str] = []
     paths = [tmp_path / "rollouts.jsonl"]
-    ray = _FakeRay(events=events)
+    ray = FakeRay(events=events)
     api = _api(ray=ray)
-    session = _session(api)
+    session = testing.session(api)
     session.started_ray = True
 
     def build(config: RunnerConfig, api: UpstreamApi) -> CollectionSession:
@@ -1039,7 +930,7 @@ def test_session_failure_only_shuts_down_owned_ray(
     dataset.write_text("rows", encoding="utf-8")
     tasks = tmp_path / "tasks"
     tasks.mkdir()
-    ray = _FakeRay(
+    ray = FakeRay(
         initialized=already_initialized,
         runtime_env={"env_vars": RayRuntimePolicy().env_vars()},
     )
@@ -1092,7 +983,7 @@ def test_collection_reports_to_the_session_actor_manager() -> None:
             compute_group_advantages=compute_group_advantages,
         ),
     )
-    session = _session(api)
+    session = testing.session(api)
     records = records_for_update(
         session,
         RunnerConfig(num_prompts=1, samples_per_prompt=2),
@@ -1122,48 +1013,8 @@ class _Remote:
         return self
 
 
-@dataclass(kw_only=True, slots=True)
-class _BuildRay:
-    """A Ray driver for session construction: no nodes are probed."""
-
-    initialized: bool = False
-    runtime_env: Mapping[str, object] = field(default_factory=dict[str, object])
-    events: list[str] = field(default_factory=list)
-    live_nodes: list[Mapping[str, object]] = field(
-        default_factory=list[Mapping[str, object]],
-    )
-    context: object = field(default_factory=object)
-
-    @property
-    def _private(self) -> custom_types.RayPrivate:
-        return _unused()
-
-    def is_initialized(self) -> bool:
-        return self.initialized
-
-    def init(self, *, runtime_env: Mapping[str, object]) -> None:
-        del runtime_env
-        self.initialized = True
-
-    def shutdown(self) -> None:
-        self.events.append("shutdown")
-        self.initialized = False
-
-    def nodes(self) -> list[Mapping[str, object]]:
-        return self.live_nodes
-
-    def get_runtime_context(self) -> object:
-        return self.context
-
-    def remote(self, target: object, /) -> custom_types.RemoteFunction:
-        return _Remote(value=("actor", target))
-
-    @overload
-    def get(self, refs: list[object], /) -> list[object]: ...
-    @overload
-    def get(self, refs: object, /) -> object: ...
-    def get(self, refs: object, /) -> object:
-        return refs
+def _actor_task(target: object) -> custom_types.RemoteFunction:
+    return _Remote(value=("actor", target))
 
 
 @dataclass(kw_only=True, slots=True)
@@ -1177,19 +1028,6 @@ class _Envs:
     pass_tools_to_chat_template: bool = True
     tool_call_names: object = ("bash",)
     tool_parser_type: str = "vllm_qwen3_xml"
-
-
-class _Loader:
-    _epoch: int = 0
-
-    def __next__(self) -> object:
-        return {}
-
-    def state_dict(self) -> Mapping[str, object]:
-        return {}
-
-    def load_state_dict(self, state: Mapping[str, object], /) -> None:
-        del state
 
 
 @dataclass(kw_only=True, slots=True)
@@ -1260,33 +1098,9 @@ class _BuildUpstream:
         self.calls["engines"] = (args, kwargs)
         return ["engine"]
 
-    def HFDataLoader(self, **kwargs: object) -> _Loader:  # noqa: N802 -- Upstream's class name.
+    def HFDataLoader(self, **kwargs: object) -> FakeLoader:  # noqa: N802 -- Upstream's class name.
         self.calls["HFDataLoader"] = kwargs
-        return _Loader()
-
-
-def _build_api(
-    fake: _BuildUpstream,
-    ray: _BuildRay,
-    *,
-    actor_manager: custom_types.ActorManagerModule | None,
-) -> UpstreamApi:
-    module = cast("object", fake)
-    return UpstreamApi(
-        ray=ray,
-        ray_queue=cast("custom_types.RayQueue", module),
-        data_loader=cast("custom_types.DataLoaderModule", module),
-        dataset_transformation=cast("custom_types.DatasetTransformationModule", module),
-        environments_utils=cast("custom_types.EnvironmentsUtilsModule", module),
-        grpo_fast=cast("custom_types.GrpoFastModule", module),
-        grpo_utils=cast("custom_types.GrpoUtilsModule", module),
-        ground_truth_utils=cast("custom_types.GroundTruthUtilsModule", module),
-        model_utils=cast("custom_types.ModelUtilsModule", module),
-        rl_utils=cast("custom_types.RlUtilsModule", module),
-        utils=cast("custom_types.UtilsModule", module),
-        vllm_utils=cast("custom_types.VllmUtilsModule", module),
-        actor_manager=actor_manager,
-    )
+        return FakeLoader()
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -1316,13 +1130,16 @@ def test_build_session_wires_upstream_with_the_released_settings(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runner, "_require_checkpoint_on_ray_nodes", _unused_ok)
+    monkeypatch.setattr(runner, "_require_checkpoint_on_ray_nodes", _skip_probe)
     fake = _BuildUpstream()
-    ray = _BuildRay()
     config = _staged(tmp_path)
     session = build_session(
         config,
-        _build_api(fake, ray, actor_manager=_actor_module()),
+        testing.upstream_api(
+            fake,
+            ray=FakeRay(initialized=False, tasks=_actor_task),
+            actor_manager=_actor_module(),
+        ),
     )
 
     assert session.started_ray
@@ -1341,7 +1158,7 @@ def test_build_session_wires_upstream_with_the_released_settings(
     assert loader["work_dir"] == str(output_dir / "data-loader")
 
 
-def _unused_ok(*_args: object) -> None:
+def _skip_probe(*_args: object) -> None:
     return None
 
 
@@ -1349,12 +1166,12 @@ def test_build_session_requires_the_actor_manager_module(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runner, "_require_checkpoint_on_ray_nodes", _unused_ok)
-    ray = _BuildRay()
+    monkeypatch.setattr(runner, "_require_checkpoint_on_ray_nodes", _skip_probe)
+    ray = FakeRay(initialized=False, tasks=_actor_task)
     with pytest.raises(RuntimeError, match="does not expose ActorManager"):
         build_session(
             _staged(tmp_path),
-            _build_api(_BuildUpstream(), ray, actor_manager=None),
+            testing.upstream_api(_BuildUpstream(), ray=ray),
         )
     assert ray.events == ["shutdown"]
 
@@ -1365,12 +1182,15 @@ def test_build_session_requires_the_task_data(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="task data are missing"):
         build_session(
             config,
-            _build_api(_BuildUpstream(), _BuildRay(), actor_manager=None),
+            testing.upstream_api(
+                _BuildUpstream(),
+                ray=FakeRay(initialized=False, tasks=_actor_task),
+            ),
         )
 
 
 def test_a_ray_context_without_a_runtime_env_reads_as_empty() -> None:
-    assert runner._initialized_runtime_env(_BuildRay(initialized=True)) == {}
+    assert runner._initialized_runtime_env(FakeRay(context=object())) == {}
 
 
 @dataclass(kw_only=True, slots=True)
@@ -1389,24 +1209,24 @@ def test_a_ray_context_exposing_get_runtime_env_is_read(
     value: object,
     expected: dict[str, object],
 ) -> None:
-    ray = _BuildRay(initialized=True, context=_GetterContext(value=value))
+    ray = FakeRay(context=_GetterContext(value=value))
     assert runner._initialized_runtime_env(ray) == expected
 
 
 def test_a_checkpoint_missing_on_the_driver_is_refused(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="missing or empty on the driver"):
-        runner._require_checkpoint_on_ray_nodes(tmp_path / "absent", _BuildRay())
+        runner._require_checkpoint_on_ray_nodes(tmp_path / "absent", FakeRay())
 
 
 def test_a_cluster_without_live_nodes_is_refused(tmp_path: Path) -> None:
     (tmp_path / "config.json").write_text("{}", encoding="utf-8")
     with pytest.raises(RuntimeError, match="no live inference nodes"):
-        runner._require_checkpoint_on_ray_nodes(tmp_path, _BuildRay())
+        runner._require_checkpoint_on_ray_nodes(tmp_path, FakeRay())
 
 
 def test_a_node_without_an_address_is_refused(tmp_path: Path) -> None:
     (tmp_path / "config.json").write_text("{}", encoding="utf-8")
-    ray = _BuildRay(live_nodes=[{"Alive": True}])
+    ray = FakeRay(live_nodes=[{"Alive": True}], tasks=_actor_task)
     with pytest.raises(RuntimeError, match="no NodeManagerAddress"):
         runner._require_checkpoint_on_ray_nodes(tmp_path, ray)
 
@@ -1477,36 +1297,7 @@ def test_upstream_import_binds_vllms_weight_transfer_engine(
 
 
 def test_collection_refuses_an_empty_retained_batch() -> None:
-    fake = cast("object", _NoRollouts())
-    api = _build_api(_BuildUpstream(), _BuildRay(), actor_manager=None)
-    session = CollectionSession(
-        api=UpstreamApi(
-            ray=api.ray,
-            ray_queue=api.ray_queue,
-            data_loader=cast("custom_types.DataLoaderModule", fake),
-            dataset_transformation=api.dataset_transformation,
-            environments_utils=api.environments_utils,
-            grpo_fast=api.grpo_fast,
-            grpo_utils=api.grpo_utils,
-            ground_truth_utils=api.ground_truth_utils,
-            model_utils=api.model_utils,
-            rl_utils=api.rl_utils,
-            utils=api.utils,
-            vllm_utils=api.vllm_utils,
-        ),
-        tokenizer=None,
-        dataset=None,
-        iter_dataloader=_Loader(),
-        inference_queue=None,
-        prompt_queue=None,
-        generation_config=None,
-        base_env_config=None,
-        model_dims=None,
-        engines=[],
-        pools={},
-        started_ray=False,
-        actor_manager=cast("custom_types.ActorManagerHandle", object()),
-    )
+    session = testing.session(testing.upstream_api(_NoRollouts()))
     with pytest.raises(RuntimeError, match="no retained rollouts at training step 3"):
         collect_update(session, RunnerConfig(), 3, max_result_age_steps=None)
 

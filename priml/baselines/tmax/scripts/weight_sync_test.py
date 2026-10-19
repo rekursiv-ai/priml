@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NoReturn, cast, overload
+from typing import NoReturn, cast
 
 from torch import Tensor
 
@@ -16,48 +16,8 @@ from priml.baselines.tmax.scripts.runner import (
     UpstreamApi,
     vllm_weight_name_mapper,
 )
+from priml.baselines.tmax.scripts.testing import session, unused, upstream_api
 from priml.baselines.tmax.scripts.weight_sync import WeightSync
-
-
-if TYPE_CHECKING:
-    from priml.baselines.tmax.scripts import custom_types
-
-
-def _unused(*_args: object, **_kwargs: object) -> NoReturn:
-    raise AssertionError("This test does not reach this upstream call.")
-
-
-class _Ray:
-    """A Ray driver whose ``get`` returns each reference unchanged."""
-
-    @property
-    def _private(self) -> custom_types.RayPrivate:
-        return _unused()
-
-    def is_initialized(self) -> bool:
-        return True
-
-    def init(self, *, runtime_env: Mapping[str, object]) -> object:
-        return _unused(runtime_env)
-
-    def shutdown(self) -> None:
-        _unused()
-
-    def nodes(self) -> list[Mapping[str, object]]:
-        return _unused()
-
-    def get_runtime_context(self) -> object:
-        return _unused()
-
-    def remote(self, target: object, /) -> custom_types.RemoteFunction:
-        return _unused(target)
-
-    @overload
-    def get(self, refs: list[object], /) -> list[object]: ...
-    @overload
-    def get(self, refs: object, /) -> object: ...
-    def get(self, refs: object, /) -> object:
-        return refs
 
 
 class _Rpc:
@@ -164,31 +124,9 @@ class _FakeTransferNccl:
     NCCLTrainerSendWeightsArgs: Callable[..., object] = _init_request
 
 
-def _api(
-    *,
-    weight_transfer: tuple[_FakeTransferBase, _FakeTransferNccl] | None = None,
-) -> UpstreamApi:
-    """Build the upstream surface ``WeightSync`` touches: Ray and the transfer."""
-    module = object()
-    return UpstreamApi(
-        ray=_Ray(),
-        ray_queue=cast("custom_types.RayQueue", module),
-        data_loader=cast("custom_types.DataLoaderModule", module),
-        dataset_transformation=cast("custom_types.DatasetTransformationModule", module),
-        environments_utils=cast("custom_types.EnvironmentsUtilsModule", module),
-        grpo_fast=cast("custom_types.GrpoFastModule", module),
-        grpo_utils=cast("custom_types.GrpoUtilsModule", module),
-        ground_truth_utils=cast("custom_types.GroundTruthUtilsModule", module),
-        model_utils=cast("custom_types.ModelUtilsModule", module),
-        rl_utils=cast("custom_types.RlUtilsModule", module),
-        utils=cast("custom_types.UtilsModule", module),
-        vllm_utils=cast("custom_types.VllmUtilsModule", module),
-        weight_transfer=weight_transfer,
-    )
-
-
 def _sync_api(sent: list[tuple[str, torch.Tensor]]) -> UpstreamApi:
-    return _api(
+    return upstream_api(
+        object(),
         weight_transfer=(
             _FakeTransferBase(),
             _FakeTransferNccl(NCCLWeightTransferEngine=_FakeTransferEngine(sent=sent)),
@@ -197,22 +135,7 @@ def _sync_api(sent: list[tuple[str, torch.Tensor]]) -> UpstreamApi:
 
 
 def _sync_session(engines: list[_Engine], api: UpstreamApi) -> CollectionSession:
-    loader = cast("custom_types.PromptLoader", object())
-    return CollectionSession(
-        api=api,
-        tokenizer=None,
-        dataset=None,
-        iter_dataloader=loader,
-        inference_queue=None,
-        prompt_queue=None,
-        generation_config=None,
-        base_env_config=None,
-        model_dims=None,
-        engines=list(engines),
-        pools={},
-        started_ray=False,
-        actor_manager=_ActorManager(),
-    )
+    return session(api, engines=engines, actor_manager=_ActorManager())
 
 
 def test_weight_sync_maps_names_for_metadata_and_tensors_alike() -> None:
@@ -337,7 +260,7 @@ def test_weight_sync_cleanup_wake_failure_keeps_the_primary_error() -> None:
     engine.update_weights = _Rpc(_raise_primary)
     sync = WeightSync(_sync_session([engine], _sync_api([])), tensor_parallel_size=1)
     sync.initialize(node_ip="127.0.0.1", port=29_500)
-    engine.wake_up = _Rpc(_unused)
+    engine.wake_up = _Rpc(unused)
     with pytest.raises(RuntimeError, match="primary"):
         sync([("weight", torch.zeros(2))], model_step=1)
 
@@ -349,7 +272,10 @@ def test_weight_sync_requires_initialization() -> None:
 
 
 def test_weight_sync_cannot_initialize_without_a_transfer_engine() -> None:
-    sync = WeightSync(_sync_session([_Engine()], _api()), tensor_parallel_size=1)
+    sync = WeightSync(
+        _sync_session([_Engine()], upstream_api(object())),
+        tensor_parallel_size=1,
+    )
     with pytest.raises(RuntimeError, match="no weight-transfer engine"):
         sync.initialize(node_ip="127.0.0.1", port=29_500)
 
